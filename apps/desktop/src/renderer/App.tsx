@@ -73,6 +73,7 @@ import {
   type ComposerBehavior,
   type ConversationInspectorView,
   type ConversationItemView,
+  mergeConversationItemGroups,
 } from "./conversation/index.js";
 import type {
   CapabilityView,
@@ -81,6 +82,7 @@ import type {
   TimelineItem,
   WorkspaceMode,
 } from "./model.js";
+import { ProviderPage } from "./ProviderPage.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
@@ -153,7 +155,7 @@ function AppStateRouter() {
         <Route path="automations" element={<AutomationsPage />} />
         <Route path="skills" element={<CapabilityPage kind="skills" />} />
         <Route path="mcp" element={<CapabilityPage kind="mcp" />} />
-        <Route path="providers" element={<CapabilityPage kind="providers" />} />
+        <Route path="providers" element={<ProviderPageRoute />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFound />} />
@@ -376,19 +378,23 @@ function AppShell() {
           </div>
         </div>
       </aside>
-      <div className="workspace-frame">
-        <header className="titlebar">
-          <div>
-            <span className="titlebar__context">{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
-            <h1>{pageTitle}</h1>
-          </div>
-          <div className="titlebar__actions">
-            {preview && <PreviewBadge />}
-            <Link className="button button--primary" to="/task/new">
-              <Plus aria-hidden="true" size={16} /> 新任务
-            </Link>
-          </div>
-        </header>
+      <div
+        className={`workspace-frame ${conversationRoute ? "workspace-frame--conversation" : ""}`}
+      >
+        {!conversationRoute && (
+          <header className="titlebar">
+            <div>
+              <span className="titlebar__context">{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
+              <h1>{pageTitle}</h1>
+            </div>
+            <div className="titlebar__actions">
+              {preview && <PreviewBadge />}
+              <Link className="button button--primary" to="/task/new">
+                <Plus aria-hidden="true" size={16} /> 新任务
+              </Link>
+            </div>
+          </header>
+        )}
         {message && (
           <div className="toast" role="status">
             {message}
@@ -467,7 +473,7 @@ function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined 
       <p>
         {protectedMode
           ? "Pico 可以隔离并行任务，并在确认后合并它们的更改。"
-          : "Pico 可以直接读写文件并运行并行子代理；只有分支、提交和独立合并需要 Git。"}
+          : "Pico 可以直接读写文件并运行并行分析子代理；可写子代理的隔离、分支和独立合并目前需要 Git。"}
       </p>
       {!protectedMode && (
         <small>版本保护是一项进阶能力，由 Git 提供；不了解它也不影响现在开始。</small>
@@ -488,7 +494,7 @@ function HomePage() {
         {data.workspaceMode === "folder" && (
           <div className="workspace-mode-notice" role="note">
             <WorkspaceModeBadge mode={data.workspaceMode} />
-            <span>共享文件夹支持对话、工具和并行子代理；Git 只用于分支与独立合并。</span>
+            <span>共享文件夹支持对话、工具和并行分析；可写子代理的隔离与合并目前需要 Git。</span>
           </div>
         )}
         <TaskComposer compact />
@@ -599,7 +605,7 @@ function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
 
 function ConversationPage() {
   const { sessionId } = useParams();
-  const { data, actions, busy } = useRuntime();
+  const { data, actions, busy, preview } = useRuntime();
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
@@ -697,7 +703,7 @@ function ConversationPage() {
       conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
         ? [conversation.goalItem]
         : [];
-    return [...persisted, ...goal, ...live, ...decisions, ...changes];
+    return mergeConversationItemGroups(persisted, goal, live, decisions, changes);
   }, [
     activeRun,
     data.approvals,
@@ -829,7 +835,6 @@ function ConversationPage() {
       header={
         <div className="conversation-session-header">
           <div>
-            <span className="eyebrow">{sessionId ? "会话" : "新会话"}</span>
             {editingTitle && sessionId ? (
               <form
                 className="conversation-title-editor"
@@ -863,10 +868,11 @@ function ConversationPage() {
                 </Button>
               </form>
             ) : (
-              <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
+              <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h1>
             )}
           </div>
           <div className="conversation-session-header__meta">
+            {preview && <PreviewBadge />}
             {conversation?.usage && (
               <span>
                 {formatCompact(
@@ -1587,7 +1593,11 @@ function AutomationsPage() {
   );
 }
 
-function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" | "providers" }) {
+function ProviderPageRoute() {
+  return <ProviderPage runtime={useRuntime()} />;
+}
+
+function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
   const { data } = useRuntime();
   const config = {
     skills: {
@@ -1607,15 +1617,6 @@ function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" | "providers
       items: data.mcpServers,
       notice: data.notices.mcp,
       empty: "没有发现 MCP 服务",
-    },
-    providers: {
-      title: "模型 Providers",
-      eyebrow: "推理能力",
-      detail: "选择任务使用的模型。密钥只保存在系统安全存储中。",
-      icon: BrainCircuit,
-      items: data.providers,
-      notice: data.notices.providers,
-      empty: "没有可用的 Provider",
     },
   }[kind];
   return (
@@ -1639,11 +1640,6 @@ function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" | "providers
           emptyDetail="当前 Runtime 没有返回任何配置；Pico 不会填充示例项。"
         />
       </section>
-      {kind === "providers" && (
-        <InlineNotice tone="neutral">
-          登录同步尚未开放。Provider 配置仅存放在当前设备。
-        </InlineNotice>
-      )}
       {kind === "skills" && (
         <InlineNotice tone="neutral">
           公开 Plugin Runtime 尚未开放；这里只显示 Runtime 已加载的 Skills。
@@ -1821,7 +1817,7 @@ function SettingsPage() {
             detail={
               data.workspaceMode === "git"
                 ? "已启用并行任务隔离与变更合并"
-                : "对话、工具和并行子代理可用；分支、提交和独立合并不可用"
+                : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
             }
           >
             <WorkspaceModeBadge mode={data.workspaceMode} />

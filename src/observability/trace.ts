@@ -93,6 +93,7 @@ export class Span {
  */
 export interface TracerOptions {
   now?: () => number;
+  picoHome?: string;
 }
 
 export class Tracer {
@@ -145,7 +146,13 @@ export class Tracer {
     if (!this.rootSpan) {
       throw new Error("Tracer has no root span.");
     }
-    return exportTraceToFile(this.rootSpan, workDir, sessionId, this.options.now?.());
+    return exportTraceToFile(
+      this.rootSpan,
+      workDir,
+      sessionId,
+      this.options.now?.(),
+      this.options.picoHome,
+    );
   }
 
   /** Reset internal state. Used by tests. */
@@ -161,8 +168,9 @@ export function exportTraceToFile(
   workDir: string,
   sessionId: string,
   timestamp: number = Date.now(),
+  picoHome?: string,
 ): string {
-  const traceDir = resolvePicoPaths(workDir).workspace.traces;
+  const traceDir = resolvePicoPaths(workDir, { picoHome }).workspace.traces;
   mkdirSync(traceDir, { recursive: true, mode: 0o700 });
   chmodSync(traceDir, 0o700);
   const filename = `trace_${sanitizeFilePart(sessionId)}_${timestamp}.json`;

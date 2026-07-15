@@ -1,4 +1,6 @@
+import { join } from "node:path";
 import { WorkspaceTaskRuntime, type WorkspaceRunContext } from "../runtime/workspace-runtime.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   createRuntimeEvent,
   isJsonObject,
@@ -48,6 +50,7 @@ export interface StartDaemonRunInput {
 
 export interface WorkspaceRuntimeServiceOptions {
   execute: DaemonRunExecutor;
+  env?: Readonly<Record<string, string | undefined>>;
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
   maxRetainedEvents?: number;
@@ -67,16 +70,23 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly eventStores = new Map<string, RuntimeStore>();
   private readonly maxRetainedEvents: number;
   private readonly registrationStore: WorkspaceRegistrationStore;
+  private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.maxRetainedEvents = Math.max(1, options.maxRetainedEvents ?? 2_000);
-    this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
+    this.picoHome = resolvePicoHome({ env: options.env });
+    this.registrationStore =
+      options.registrationStore ??
+      new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.registry = new WorkspaceRuntimeRegistry({
       create: async (workspacePath) => {
         this.eventStore(workspacePath);
         const runtime = await (options.createWorkspaceRuntime?.(workspacePath) ??
-          WorkspaceTaskRuntime.create({ workDir: workspacePath }));
+          WorkspaceTaskRuntime.create({
+            workDir: workspacePath,
+            taskHostRuntimeOptions: { picoHome: this.picoHome },
+          }));
         this.unsubscribers.set(
           workspacePath,
           runtime.subscribe((event) => {
@@ -105,7 +115,9 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return {
         pong: true,
         protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        picoHome: this.picoHome,
         capabilities: [
+          "shared-config-v1",
           "session-conversation-v1",
           "session-management-v1",
           "session-settings-v1",
@@ -250,8 +262,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           .map(runtimeEventFromLedger),
       );
     }
-    // Event IDs are random. Timestamp plus ID gives a deterministic cross-workspace
-    // presentation order; callers needing a resumable cursor use workspacePath.
+    // A single workspace ledger is already in durable rowid order. Preserve it: random
+    // event IDs are not a valid causal tie-breaker for start/finish events in the same ms.
+    if (paths.length === 1) {
+      return cursor.limit === undefined ? events : events.slice(0, cursor.limit);
+    }
+    // Cross-workspace replay has no shared durable sequence yet. Timestamp plus ID only
+    // provides deterministic presentation order; resumable callers scope to a workspace.
     const sorted = events.sort(
       (left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId),
     );
@@ -284,11 +301,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   async close(): Promise<void> {
+    // Runtime.close() publishes terminal cancellation events. Keep both the runtime
+    // subscriptions and durable ledgers alive until those events have been recorded.
+    await this.registry.close();
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.listeners.clear();
     this.registrationChanged = undefined;
-    await this.registry.close();
     for (const store of this.eventStores.values()) store.close();
     this.eventStores.clear();
   }
@@ -326,7 +345,11 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private eventStore(workspacePath: string): RuntimeStore {
     const store = this.eventStores.get(workspacePath);
     if (store) return store;
-    const created = new RuntimeStore({ workDir: workspacePath, now: this.options.now });
+    const created = new RuntimeStore({
+      workDir: workspacePath,
+      picoHome: this.picoHome,
+      now: this.options.now,
+    });
     this.eventStores.set(workspacePath, created);
     return created;
   }

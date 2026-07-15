@@ -59,9 +59,10 @@ describe("Desktop Transcript durable projection integration", () => {
       entryEvent(5, "run", {
         kind: "run-boundary",
         runId: "run-1",
-        status: "succeeded",
+        status: "failed",
         startedAt: 10,
         finishedAt: 20,
+        error: "模型路由缺少凭证",
       }),
       {
         eventId: "transcript-event-6",
@@ -122,6 +123,10 @@ describe("Desktop Transcript durable projection integration", () => {
     expect(page.items.find((item) => item.kind === "subagent")).toMatchObject({
       state: "completed",
       data: { activityId: "activity-1" },
+    });
+    expect(page.items.find((item) => item.kind === "runBoundary")).toMatchObject({
+      status: "failed",
+      error: "模型路由缺少凭证",
     });
     expect(JSON.stringify(page.items)).not.toContain("SECRET_SYSTEM_INJECTION");
     expect(JSON.stringify(page.items)).not.toContain("SECRET_RAW_TOOL_RESULT");

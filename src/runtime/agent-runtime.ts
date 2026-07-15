@@ -227,6 +227,8 @@ export interface RuntimeHost {
 
 export interface RunAgentCliDependencies extends RuntimeHost {
   env?: RunAgentEnv;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  picoHome?: string;
   provider?: LLMProvider;
   providerFactory?: RunAgentProviderFactory;
   /** 前台宿主持有的完整可信模型目录；子代理不得自行读取 endpoint 或凭证。 */
@@ -282,6 +284,9 @@ export async function executeAgentRuntime(
   dependencies: RunAgentCliDependencies = {},
 ): Promise<RunAgentCliResult> {
   dependencies.signal?.throwIfAborted();
+  const runtimeEnv: RunAgentEnv = dependencies.picoHome
+    ? { ...(dependencies.env ?? process.env), PICO_HOME: dependencies.picoHome }
+    : (dependencies.env ?? process.env);
   const resumeExistingSession = dependencies.resumeExistingSession === true;
   let prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
@@ -299,16 +304,21 @@ export async function executeAgentRuntime(
     options.sessionSelection ??
     (await resolveCliSession({
       workDir,
+      ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
       ...(options.session ? { session: options.session } : {}),
       ...(options.continueSession ? { continueSession: true } : {}),
       ...(options.resumeSession ? { resumeSession: options.resumeSession } : {}),
       ...(options.forkSession ? { forkSession: options.forkSession } : {}),
     }));
-  const defaultConfigModel =
-    options.model ?? (dependencies.env ?? process.env).LLM_MODEL ?? defaultModel(kind);
-  const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir);
+  const defaultConfigModel = options.model ?? runtimeEnv.LLM_MODEL ?? defaultModel(kind);
+  const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir, {
+    picoHome: dependencies.picoHome,
+  });
   const targetPublished = await stat(
-    join(resolvePicoPaths(workDir).workspace.sessions, `${sessionSelection.sessionId}.jsonl`),
+    join(
+      resolvePicoPaths(workDir, { picoHome: dependencies.picoHome }).workspace.sessions,
+      `${sessionSelection.sessionId}.jsonl`,
+    ),
   ).then(
     (info) => info.isFile(),
     () => false,
@@ -320,16 +330,20 @@ export async function executeAgentRuntime(
     sessionSelection.mode === "fork" &&
     sessionSelection.sourceSessionId
   ) {
-    await new SessionForkService({ workDir }).fork({
+    await new SessionForkService({ workDir, picoHome: dependencies.picoHome }).fork({
       sourceSessionId: sessionSelection.sourceSessionId,
       targetSessionId: sessionSelection.sessionId,
       targetMode: options.planMode === true ? "plan" : DEFAULT_INTERACTION_MODE,
     });
   }
   const session = resumeExistingSession
-    ? globalSessionManager.get(sessionSelection.sessionId, workDir)
+    ? globalSessionManager.get(sessionSelection.sessionId, workDir, {
+        picoHome: dependencies.picoHome,
+      })
     : (existingSession ??
-      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir)));
+      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir, {
+        picoHome: dependencies.picoHome,
+      })));
   if (!session) {
     throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
   }
@@ -363,8 +377,7 @@ export async function executeAgentRuntime(
         ],
   );
   setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
-  const traceEnabled =
-    options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
+  const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
   const effectiveOptions: RunAgentCliOptions = {
     ...options,
     ...(backgroundApiKey !== undefined ? { apiKey: backgroundApiKey } : {}),
@@ -383,7 +396,7 @@ export async function executeAgentRuntime(
   };
   const providerConfig = resolveProviderConfig(
     effectiveOptions,
-    dependencies.env ?? process.env,
+    runtimeEnv,
     dependencies.provider !== undefined,
   );
   const ownsRuntimeState = dependencies.runtimeState === undefined;
@@ -396,7 +409,11 @@ export async function executeAgentRuntime(
   const pluginSnapshot = backgroundPolicy
     ? undefined
     : (dependencies.pluginSnapshot ??
-      (await loadPluginRuntimeSnapshot({ workDir, env: dependencies.env ?? process.env })));
+      (await loadPluginRuntimeSnapshot({
+        workDir,
+        env: runtimeEnv,
+        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
+      })));
   const ownsPluginSnapshot =
     pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
   const skillLoaderFactory = (root: string): SkillLoader =>
@@ -406,7 +423,8 @@ export async function executeAgentRuntime(
         claudeCompatibility.enabled && claudeCompatibility.projectResources,
       includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
       ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
-      env: dependencies.env ?? process.env,
+      env: runtimeEnv,
+      ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
     });
 
   try {
@@ -416,6 +434,8 @@ export async function executeAgentRuntime(
         workDir,
         sessionId: session.id,
         session,
+        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
+        env: runtimeEnv,
         ...(dependencies.toolDisclosure !== undefined
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
@@ -444,7 +464,7 @@ export async function executeAgentRuntime(
     }
     if (!runtimeState.taskHostRuntime) {
       try {
-        ownedUsageStore = new RuntimeStore({ workDir });
+        ownedUsageStore = new RuntimeStore({ workDir, picoHome: dependencies.picoHome });
       } catch (error) {
         logger.error(
           { workDir, error: error instanceof Error ? error.message : String(error) },
@@ -676,7 +696,7 @@ export async function executeAgentRuntime(
         registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
       }
     }
-    const artifactRuntime = buildArtifactRuntime(workDir, session.id);
+    const artifactRuntime = buildArtifactRuntime(workDir, session.id, dependencies.picoHome);
     // Inject steer text into the session-scoped queue before the next provider turn.
     const steerQueue = runtimeState.steerQueue;
     if (options.steer) {
@@ -711,7 +731,7 @@ export async function executeAgentRuntime(
     };
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-    const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
+    const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions);
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
     dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
@@ -746,7 +766,7 @@ export async function executeAgentRuntime(
       observationProcessor: artifactRuntime.observationProcessor,
       subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
       reporter,
-      tracer: traceEnabled ? new Tracer() : undefined,
+      tracer: traceEnabled ? new Tracer({ picoHome: dependencies.picoHome }) : undefined,
       steerQueue,
       ...(dependencies.waitAtSafeBoundary
         ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }
@@ -794,7 +814,8 @@ export async function executeAgentRuntime(
           claudeCompatibility.enabled && claudeCompatibility.projectResources,
         includeClaudeUserResources:
           claudeCompatibility.enabled && claudeCompatibility.userResources,
-        env: dependencies.env ?? process.env,
+        env: runtimeEnv,
+        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
       }),
       delegationManager,
       workspaceRoots,
@@ -967,7 +988,9 @@ export async function executeAgentRuntime(
         finalMessage: findFinalMessage(messages),
         usage: snapshotUsage(session),
         messages,
-        ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+        ...(traceEnabled
+          ? { tracePath: await findTracePath(workDir, session.id, dependencies.picoHome) }
+          : {}),
       };
 
       dependencies.onEvent?.({
@@ -1134,7 +1157,11 @@ async function prepareBackgroundExecution(
   return prepareBackgroundYoloPolicy({
     workDir,
     policy: execution.policy,
-    trustStore: dependencies.backgroundTrustStore ?? new WorkspaceTrustStore(),
+    trustStore:
+      dependencies.backgroundTrustStore ??
+      new WorkspaceTrustStore({
+        ...(dependencies.picoHome ? { userStateDirectory: dependencies.picoHome } : {}),
+      }),
   });
 }
 
@@ -1332,6 +1359,7 @@ async function loadProfiles(
     includeClaudeProjectResources: boolean;
     includeClaudeUserResources: boolean;
     env: Readonly<Record<string, string | undefined>>;
+    picoHome?: string;
   },
 ): Promise<AgentProfile[]> {
   try {
@@ -1480,12 +1508,13 @@ function loadAuxProvider(
 function buildArtifactRuntime(
   workDir: string,
   sessionId: string,
+  picoHome?: string,
 ): {
   observationProcessor: ToolObservationProcessor;
   subagentReportArtifactWriter: SubagentReportArtifactWriter;
 } {
   const store = new ToolResultArtifactStore({
-    baseDir: resolvePicoPaths(workDir).workspace.artifacts,
+    baseDir: resolvePicoPaths(workDir, { picoHome }).workspace.artifacts,
   });
   const subagentReportArtifactWriter: SubagentReportArtifactWriter = async (input) => {
     const meta = await store.write({
@@ -1934,8 +1963,12 @@ function isTruthyEnv(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "on";
 }
 
-async function findTracePath(workDir: string, sessionId: string): Promise<string | undefined> {
-  const traceDir = resolvePicoPaths(workDir).workspace.traces;
+async function findTracePath(
+  workDir: string,
+  sessionId: string,
+  picoHome?: string,
+): Promise<string | undefined> {
+  const traceDir = resolvePicoPaths(workDir, { picoHome }).workspace.traces;
   let files: string[];
 
   try {

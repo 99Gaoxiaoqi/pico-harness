@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
@@ -38,6 +36,56 @@ export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
 export type RuntimeProviderKind = "openai" | "claude" | "gemini";
+export type RuntimeConfigSource =
+  | "user"
+  | "project"
+  | "project-legacy"
+  | "environment"
+  | "session"
+  | "cli";
+export type RuntimeCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
+export type RuntimeCredentialSource = "keychain" | "environment" | "none";
+
+export type RuntimeProviderInput = JsonObject & {
+  readonly id: string;
+  readonly protocol: RuntimeProviderKind;
+  readonly baseURL: string;
+  readonly apiKeyEnv: string;
+  readonly models: readonly string[];
+  readonly discoverModels: boolean;
+  readonly modelCapabilities?: JsonObject;
+};
+
+export type RuntimeProviderProfile = RuntimeProviderInput & {
+  readonly origin: Extract<RuntimeConfigSource, "user" | "project-legacy" | "environment">;
+  readonly fingerprint: string;
+  readonly credentialStatus: RuntimeCredentialStatus;
+  readonly credentialSource: RuntimeCredentialSource;
+  /** A durable system credential exists even when an environment variable currently takes precedence. */
+  readonly storedCredentialPresent: boolean;
+};
+
+export type RuntimeUserDefaults = JsonObject & {
+  readonly modelRouteId?: string;
+  readonly mode?: RuntimeInteractionMode;
+  readonly thinkingEffort?: string;
+};
+
+export type RuntimeUserConfig = JsonObject & {
+  readonly version: 1;
+  readonly defaults: RuntimeUserDefaults;
+  readonly providers: readonly RuntimeProviderInput[];
+};
+
+export type RuntimeEffectiveConfig = JsonObject & {
+  readonly defaultModelRouteId?: string;
+  readonly providers: readonly RuntimeProviderProfile[];
+  readonly sources: JsonObject;
+  readonly revisions: {
+    readonly user: string;
+    readonly project: string;
+  };
+};
 
 export type RuntimeSessionSettings = {
   readonly sessionId: SessionId;
@@ -166,6 +214,8 @@ export type RuntimeConversationItem = (
       readonly status: RuntimeRunStatus;
       readonly startedAt: number;
       readonly finishedAt?: number;
+      /** Terminal Run failure reason. Running boundaries never carry this field. */
+      readonly error?: string;
     })
   | (JsonObject & {
       readonly id: string;
@@ -271,6 +321,8 @@ export type RuntimeMethodMap = {
       readonly pong: true;
       readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
       readonly capabilities: readonly string[];
+      /** Canonical state root used by this daemon. Omitted by legacy runtimes. */
+      readonly picoHome?: string;
     };
   };
   readonly "workspace.init": {
@@ -512,6 +564,37 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & { readonly jobId: JobId; readonly limit?: number };
     readonly result: { readonly runs: readonly RuntimeRun[] };
   };
+  /**
+   * Trusted TUI-to-daemon boundary. These methods are intentionally absent from
+   * the Desktop preload allowlist: the daemon re-resolves Provider authority and
+   * background policy before mutating the durable Cron ledger or credential vault.
+   */
+  readonly "automation.credential.import": {
+    readonly params: WorkspaceParams & {
+      readonly modelRouteId: string;
+      readonly expectedCredentialRef: string;
+      readonly secret: string;
+    };
+    readonly result: {
+      readonly imported: true;
+      readonly credentialRef: string;
+    };
+  };
+  readonly "automation.create": {
+    readonly params: WorkspaceParams & {
+      readonly name?: string;
+      readonly prompt: string;
+      readonly schedule: string;
+      readonly timeZone?: string;
+      readonly modelRouteId: string;
+      readonly expectedCredentialRef: string;
+      readonly allowedTools: readonly string[];
+      readonly toolNetworkPolicy: "allow" | "disabled" | "allowlist";
+      readonly allowedToolNetworkHosts?: readonly string[];
+      readonly enabled?: boolean;
+    };
+    readonly result: { readonly job: RuntimeJob };
+  };
   readonly "config.get": {
     readonly params: WorkspaceParams;
     readonly result: { readonly config: JsonObject; readonly version: number };
@@ -526,6 +609,95 @@ export type RuntimeMethodMap = {
   readonly "config.providers": {
     readonly params: WorkspaceParams;
     readonly result: { readonly providers: readonly JsonObject[] };
+  };
+  readonly "config.user.get": {
+    readonly params: EmptyParams;
+    readonly result: { readonly config: RuntimeUserConfig; readonly revision: string };
+  };
+  readonly "config.user.update": {
+    readonly params: {
+      readonly defaults: RuntimeUserDefaults;
+      readonly expectedRevision: string;
+    };
+    readonly result: { readonly config: RuntimeUserConfig; readonly revision: string };
+  };
+  readonly "config.effective.get": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly config: RuntimeEffectiveConfig };
+  };
+  readonly "provider.list": {
+    readonly params: EmptyParams;
+    readonly result: {
+      readonly providers: readonly RuntimeProviderProfile[];
+      readonly revision: string;
+    };
+  };
+  readonly "provider.upsert": {
+    readonly params: {
+      readonly provider: RuntimeProviderInput;
+      readonly expectedRevision: string;
+    };
+    readonly result: {
+      readonly provider: RuntimeProviderProfile;
+      readonly revision: string;
+    };
+  };
+  /**
+   * Trusted local-host import used by TUI. The secret is write-only and never
+   * appears in the result, events, or persisted user configuration.
+   */
+  readonly "provider.importEnvironment": {
+    readonly params: {
+      readonly provider: RuntimeProviderInput;
+      readonly defaultModel: string;
+      readonly secret: string;
+      readonly expectedRevision: string;
+    };
+    readonly result: {
+      readonly provider: RuntimeProviderProfile;
+      readonly revision: string;
+    };
+  };
+  readonly "provider.delete": {
+    readonly params: { readonly providerId: string; readonly expectedRevision: string };
+    readonly result: { readonly deleted: true; readonly revision: string };
+  };
+  readonly "provider.credential.status": {
+    readonly params: { readonly providerId: string };
+    readonly result: {
+      readonly providerId: string;
+      readonly status: RuntimeCredentialStatus;
+      readonly source: RuntimeCredentialSource;
+      readonly storedCredentialPresent: boolean;
+      readonly providerFingerprint: string;
+    };
+  };
+  readonly "provider.credential.set": {
+    readonly params: {
+      readonly providerId: string;
+      readonly secret: string;
+      readonly expectedProviderFingerprint: string;
+    };
+    readonly result: {
+      readonly providerId: string;
+      readonly status: "ready";
+      readonly source: "keychain";
+      readonly storedCredentialPresent: true;
+      readonly providerFingerprint: string;
+    };
+  };
+  readonly "provider.credential.delete": {
+    readonly params: {
+      readonly providerId: string;
+      readonly expectedProviderFingerprint: string;
+    };
+    readonly result: {
+      readonly providerId: string;
+      readonly status: "missing";
+      readonly source: "none";
+      readonly storedCredentialPresent: false;
+      readonly providerFingerprint: string;
+    };
   };
   readonly "catalog.agents": {
     readonly params: WorkspaceParams;
@@ -632,9 +804,21 @@ export const RUNTIME_METHODS = [
   "jobs.setEnabled",
   "jobs.runNow",
   "jobs.history",
+  "automation.credential.import",
+  "automation.create",
   "config.get",
   "config.update",
   "config.providers",
+  "config.user.get",
+  "config.user.update",
+  "config.effective.get",
+  "provider.list",
+  "provider.upsert",
+  "provider.importEnvironment",
+  "provider.delete",
+  "provider.credential.status",
+  "provider.credential.set",
+  "provider.credential.delete",
   "catalog.agents",
   "catalog.skills",
   "config.skills",
@@ -697,7 +881,13 @@ export type RuntimeEventMap = {
   };
   readonly "job.updated": { readonly job: RuntimeJob };
   readonly "job.runFinished": { readonly jobId: JobId; readonly run: RuntimeRun };
-  readonly "config.updated": { readonly version: number };
+  readonly "config.updated": {
+    /** Legacy project-config version retained for older clients. */
+    readonly version?: number;
+    readonly scope?: "user" | "project";
+    readonly revision?: string;
+    readonly providerIds?: readonly string[];
+  };
   readonly "usage.updated": { readonly usage: JsonObject };
   readonly "runtime.error": {
     readonly code: RuntimeErrorCode;
@@ -856,7 +1046,7 @@ export function createRuntimeRequest(method: RuntimeMethod, params: JsonValue): 
   return {
     kind: "request",
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-    requestId: randomUUID(),
+    requestId: globalThis.crypto.randomUUID(),
     method,
     params: checkedParams,
   } as RuntimeRequest;
@@ -874,7 +1064,7 @@ export function createRuntimeEvent<Topic extends string>(
 ): RuntimeEvent<Topic> {
   return {
     ...input,
-    eventId: input.eventId ?? randomUUID(),
+    eventId: input.eventId ?? globalThis.crypto.randomUUID(),
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
   };
 }
@@ -926,7 +1116,10 @@ export class RuntimeFrameDecoder {
   private pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 
   push(chunk: Buffer): RuntimeMessage[] {
-    this.pending = this.pending.byteLength === 0 ? chunk : Buffer.concat([this.pending, chunk]);
+    this.pending =
+      this.pending.byteLength === 0
+        ? detachedBufferCopy(chunk)
+        : Buffer.concat([this.pending, chunk]);
     const messages: RuntimeMessage[] = [];
     while (this.pending.byteLength >= 4) {
       const length = this.pending.readUInt32BE(0);
@@ -935,11 +1128,21 @@ export class RuntimeFrameDecoder {
       }
       if (this.pending.byteLength < 4 + length) break;
       const raw = this.pending.subarray(4, 4 + length).toString("utf8");
-      this.pending = this.pending.subarray(4 + length);
+      const remainder = this.pending.subarray(4 + length);
+      // A zero-length subarray still retains the consumed frame's backing memory. Credential
+      // writes are intentionally write-only, so release consumed bytes immediately and copy
+      // only an actual fragmented remainder into an independent allocation.
+      this.pending = remainder.byteLength === 0 ? Buffer.alloc(0) : detachedBufferCopy(remainder);
       messages.push(parseRuntimeMessage(raw));
     }
     return messages;
   }
+}
+
+function detachedBufferCopy(source: Buffer): Buffer<ArrayBuffer> {
+  const copy = Buffer.alloc(source.byteLength);
+  source.copy(copy);
+  return copy;
 }
 
 export function parseRuntimeMessage(raw: string): RuntimeMessage {
@@ -1060,6 +1263,377 @@ export function parseRuntimeParams<Method extends RuntimeMethod>(
   return input as RuntimeParams<Method>;
 }
 
+type RuntimeParamRule = (value: unknown, path: string) => void;
+type RuntimeParamShape = Readonly<Record<string, RuntimeParamRule>>;
+type RuntimeParamValidator = (value: Record<string, unknown>) => void;
+
+const stringParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "string") throw invalidParams(`${path} 必须是字符串`);
+};
+const booleanParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "boolean") throw invalidParams(`${path} 必须是布尔值`);
+};
+const finiteNumberParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw invalidParams(`${path} 必须是有限数字`);
+  }
+};
+const jsonObjectParam: RuntimeParamRule = (value, path) => {
+  if (!isJsonObject(value) || !isJsonValue(value)) {
+    throw invalidParams(`${path} 必须是 JSON 对象`);
+  }
+};
+const jsonValueParam: RuntimeParamRule = (value, path) => {
+  if (!isJsonValue(value)) throw invalidParams(`${path} 必须是 JSON 值`);
+};
+const stringArrayParam: RuntimeParamRule = (value, path) => {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw invalidParams(`${path} 必须是字符串数组`);
+  }
+};
+
+function oneOfParam<const Values extends readonly string[]>(values: Values): RuntimeParamRule {
+  const allowed = new Set<string>(values);
+  return (value, path) => {
+    if (typeof value !== "string" || !allowed.has(value)) {
+      throw invalidParams(`${path} 必须是 ${values.join(" | ")} 之一`);
+    }
+  };
+}
+
+function exactParamShape(
+  required: RuntimeParamShape,
+  optional: RuntimeParamShape = {},
+): RuntimeParamValidator {
+  const allowed = new Set([...Object.keys(required), ...Object.keys(optional)]);
+  return (value) => {
+    for (const key of Object.keys(value)) {
+      if (!allowed.has(key)) throw invalidParams(`params 不允许字段 ${key}`);
+    }
+    for (const [key, rule] of Object.entries(required)) {
+      if (!Object.hasOwn(value, key)) throw invalidParams(`params.${key} 为必填字段`);
+      rule(value[key], `params.${key}`);
+    }
+    for (const [key, rule] of Object.entries(optional)) {
+      if (Object.hasOwn(value, key)) rule(value[key], `params.${key}`);
+    }
+  };
+}
+
+function assertNestedShape(
+  value: unknown,
+  path: string,
+  required: RuntimeParamShape,
+  optional: RuntimeParamShape = {},
+): void {
+  if (!isJsonObject(value) || !isJsonValue(value)) {
+    throw invalidParams(`${path} 必须是 JSON 对象`);
+  }
+  const allowed = new Set([...Object.keys(required), ...Object.keys(optional)]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw invalidParams(`${path} 不允许字段 ${key}`);
+  }
+  for (const [key, rule] of Object.entries(required)) {
+    if (!Object.hasOwn(value, key)) throw invalidParams(`${path}.${key} 为必填字段`);
+    rule(value[key], `${path}.${key}`);
+  }
+  for (const [key, rule] of Object.entries(optional)) {
+    if (Object.hasOwn(value, key)) rule(value[key], `${path}.${key}`);
+  }
+}
+
+const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as const);
+const providerProtocolParam = oneOfParam(["openai", "claude", "gemini"] as const);
+const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
+
+const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidParams(`${path} 必须是用户输入对象`);
+  if (value["kind"] === "skill") {
+    assertNestedShape(
+      value,
+      path,
+      { kind: oneOfParam(["skill"]), name: stringParam },
+      {
+        args: stringParam,
+      },
+    );
+    return;
+  }
+  if (value["kind"] === "agent") {
+    assertNestedShape(value, path, {
+      kind: oneOfParam(["agent"]),
+      name: stringParam,
+      task: stringParam,
+    });
+    return;
+  }
+  assertNestedShape(value, path, { text: stringParam }, { kind: oneOfParam(["text"]) });
+};
+
+const runtimeProviderParam: RuntimeParamRule = (value, path) => {
+  assertNestedShape(
+    value,
+    path,
+    {
+      id: stringParam,
+      protocol: providerProtocolParam,
+      baseURL: stringParam,
+      apiKeyEnv: stringParam,
+      models: stringArrayParam,
+      discoverModels: booleanParam,
+    },
+    { modelCapabilities: jsonObjectParam },
+  );
+};
+
+const runtimeUserDefaultsParam: RuntimeParamRule = (value, path) => {
+  assertNestedShape(
+    value,
+    path,
+    {},
+    {
+      modelRouteId: stringParam,
+      mode: interactionModeParam,
+      thinkingEffort: stringParam,
+    },
+  );
+};
+
+const noParams = exactParamShape({});
+const workspaceParams = exactParamShape({ workspacePath: stringParam });
+const workspaceSessionParams = exactParamShape({
+  workspacePath: stringParam,
+  sessionId: stringParam,
+});
+const workspaceRunParams = exactParamShape({ workspacePath: stringParam, runId: stringParam });
+const workspaceJobParams = exactParamShape({ workspacePath: stringParam, jobId: stringParam });
+
+const STRICT_RUNTIME_PARAM_VALIDATORS = {
+  "runtime.ping": noParams,
+  "workspace.init": workspaceParams,
+  "diagnostics.run": workspaceParams,
+  "diagnostics.resources": workspaceParams,
+  "session.list": exactParamShape(
+    { workspacePath: stringParam },
+    { includeArchived: booleanParam },
+  ),
+  "session.get": workspaceSessionParams,
+  "session.create": exactParamShape({ workspacePath: stringParam }, { title: stringParam }),
+  "session.archive": workspaceSessionParams,
+  "session.restore": workspaceSessionParams,
+  "session.rename": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    title: stringParam,
+  }),
+  "session.fork": workspaceSessionParams,
+  "session.compact": workspaceSessionParams,
+  "session.settings.get": workspaceSessionParams,
+  "session.settings.update": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam },
+    {
+      modelRouteId: stringParam,
+      mode: interactionModeParam,
+      permissions: interactionModeParam,
+      thinkingEffort: stringParam,
+    },
+  ),
+  "goal.get": workspaceSessionParams,
+  "session.send": exactParamShape(
+    { workspacePath: stringParam, input: runtimeUserInputParam, idempotencyKey: stringParam },
+    {
+      sessionId: stringParam,
+      behavior: sessionBehaviorParam,
+      expectedRunId: stringParam,
+    },
+  ),
+  "session.transcript": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam },
+    { before: stringParam, limit: finiteNumberParam, expectedRevision: stringParam },
+  ),
+  "run.start": exactParamShape(
+    { workspacePath: stringParam, prompt: stringParam },
+    { sessionId: stringParam, idempotencyKey: stringParam },
+  ),
+  "run.cancel": exactParamShape(
+    { workspacePath: stringParam, runId: stringParam },
+    { reason: stringParam },
+  ),
+  "run.pause": workspaceRunParams,
+  "run.resume": workspaceRunParams,
+  "run.steer": exactParamShape({
+    workspacePath: stringParam,
+    runId: stringParam,
+    message: stringParam,
+  }),
+  "runs.list": exactParamShape({ workspacePath: stringParam }, { sessionId: stringParam }),
+  "approval.respond": exactParamShape(
+    {
+      workspacePath: stringParam,
+      approvalId: stringParam,
+      decision: oneOfParam(["allow_once", "allow_session", "deny"]),
+    },
+    { reason: stringParam, idempotencyKey: stringParam },
+  ),
+  "prompt.respond": exactParamShape(
+    { workspacePath: stringParam, promptId: stringParam, answer: jsonValueParam },
+    { idempotencyKey: stringParam },
+  ),
+  "changes.list": workspaceRunParams,
+  "changes.diff": exactParamShape({
+    workspacePath: stringParam,
+    runId: stringParam,
+    path: stringParam,
+  }),
+  "changes.review": exactParamShape(
+    {
+      workspacePath: stringParam,
+      runId: stringParam,
+      decision: oneOfParam(["approve", "request_changes"]),
+      expectedFingerprint: stringParam,
+    },
+    { message: stringParam },
+  ),
+  "changes.apply": exactParamShape({
+    workspacePath: stringParam,
+    runId: stringParam,
+    expectedFingerprint: stringParam,
+  }),
+  "rewind.list": workspaceSessionParams,
+  "rewind.preview": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    checkpointId: stringParam,
+  }),
+  "rewind.apply": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    checkpointId: stringParam,
+    expectedFingerprint: stringParam,
+  }),
+  "jobs.list": workspaceParams,
+  "jobs.create": exactParamShape(
+    {
+      workspacePath: stringParam,
+      name: stringParam,
+      prompt: stringParam,
+      schedule: stringParam,
+    },
+    { enabled: booleanParam },
+  ),
+  "jobs.update": exactParamShape(
+    { workspacePath: stringParam, jobId: stringParam },
+    { name: stringParam, prompt: stringParam, schedule: stringParam },
+  ),
+  "jobs.delete": workspaceJobParams,
+  "jobs.setEnabled": exactParamShape({
+    workspacePath: stringParam,
+    jobId: stringParam,
+    enabled: booleanParam,
+  }),
+  "jobs.runNow": workspaceJobParams,
+  "jobs.history": exactParamShape(
+    { workspacePath: stringParam, jobId: stringParam },
+    { limit: finiteNumberParam },
+  ),
+  "automation.credential.import": exactParamShape({
+    workspacePath: stringParam,
+    modelRouteId: stringParam,
+    expectedCredentialRef: stringParam,
+    secret: stringParam,
+  }),
+  "automation.create": exactParamShape(
+    {
+      workspacePath: stringParam,
+      prompt: stringParam,
+      schedule: stringParam,
+      modelRouteId: stringParam,
+      expectedCredentialRef: stringParam,
+      allowedTools: stringArrayParam,
+      toolNetworkPolicy: oneOfParam(["allow", "disabled", "allowlist"]),
+    },
+    {
+      name: stringParam,
+      timeZone: stringParam,
+      allowedToolNetworkHosts: stringArrayParam,
+      enabled: booleanParam,
+    },
+  ),
+  "config.get": workspaceParams,
+  "config.update": exactParamShape({
+    workspacePath: stringParam,
+    patch: jsonObjectParam,
+    expectedVersion: finiteNumberParam,
+  }),
+  "config.providers": workspaceParams,
+  "config.user.get": noParams,
+  "config.user.update": exactParamShape({
+    defaults: runtimeUserDefaultsParam,
+    expectedRevision: stringParam,
+  }),
+  "config.effective.get": workspaceParams,
+  "provider.list": noParams,
+  "provider.upsert": exactParamShape({
+    provider: runtimeProviderParam,
+    expectedRevision: stringParam,
+  }),
+  "provider.importEnvironment": exactParamShape({
+    provider: runtimeProviderParam,
+    defaultModel: stringParam,
+    secret: stringParam,
+    expectedRevision: stringParam,
+  }),
+  "provider.delete": exactParamShape({ providerId: stringParam, expectedRevision: stringParam }),
+  "provider.credential.status": exactParamShape({ providerId: stringParam }),
+  "provider.credential.set": exactParamShape({
+    providerId: stringParam,
+    secret: stringParam,
+    expectedProviderFingerprint: stringParam,
+  }),
+  "provider.credential.delete": exactParamShape({
+    providerId: stringParam,
+    expectedProviderFingerprint: stringParam,
+  }),
+  "catalog.agents": workspaceParams,
+  "catalog.skills": workspaceParams,
+  "config.skills": workspaceParams,
+  "config.mcpServers": workspaceParams,
+  "usage.get": exactParamShape(
+    { workspacePath: stringParam },
+    { sessionId: stringParam, from: finiteNumberParam, to: finiteNumberParam },
+  ),
+  "workspace.register": workspaceParams,
+  "workspace.unregister": workspaceParams,
+  "workspace.status": workspaceParams,
+  "workspace.list": noParams,
+  "workspace.trust": exactParamShape({
+    workspacePath: stringParam,
+    trusted: booleanParam,
+  }),
+  "workspace.trustStatus": workspaceParams,
+  "events.replay": exactParamShape(
+    {},
+    { workspacePath: stringParam, afterEventId: stringParam, limit: finiteNumberParam },
+  ),
+  "events.subscribe": exactParamShape(
+    {},
+    { workspacePath: stringParam, afterEventId: stringParam },
+  ),
+} satisfies Readonly<Record<RuntimeMethod, RuntimeParamValidator>>;
+
+/**
+ * Applies the exact, method-specific request contract used at privileged UI boundaries.
+ * Unlike the transport parser, this rejects unknown keys and validates nested request objects.
+ */
+export function parseStrictRuntimeParams<Method extends RuntimeMethod>(
+  method: Method,
+  input: unknown,
+): RuntimeParams<Method> {
+  const params = parseRuntimeParams(method, input);
+  STRICT_RUNTIME_PARAM_VALIDATORS[method](params);
+  return params;
+}
+
 export function isRuntimeErrorCode(value: unknown): value is RuntimeErrorCode {
   return (
     typeof value === "string" &&
@@ -1082,4 +1656,8 @@ export function isJsonValue(value: unknown): value is JsonValue {
 
 function protocolError(code: RuntimeErrorCode, message: string): RuntimeProtocolError {
   return new RuntimeProtocolError(code, message);
+}
+
+function invalidParams(message: string): RuntimeProtocolError {
+  return protocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }

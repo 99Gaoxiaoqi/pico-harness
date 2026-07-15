@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -156,6 +156,279 @@ describe("LocalDaemonHost integration", () => {
     }
   });
 
+  it("生产 Desktop 以 host env 的 PICO_HOME 统一落盘，不跟随 process env", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-home-context-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const hostPicoHome = join(root, "host-pico-home");
+    const processPicoHome = join(root, "process-pico-home");
+    await mkdir(workspace);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "home-context-test",
+    });
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = processPicoHome;
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: hostPicoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new TaskStateAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      env: {
+        PICO_HOME: hostPicoHome,
+        LLM_BASE_URL: "https://home-context.example.test/v1",
+        LLM_API_KEY: "home-context-secret",
+        LLM_MODEL: "context-model",
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      await host.start();
+      const client = new LocalRuntimeClient(endpoint);
+      try {
+        await expect(
+          client.request("workspace.register", { workspacePath: workspace }),
+        ).resolves.toEqual(expect.objectContaining({ registered: true }));
+        const created = (await client.request("session.create", {
+          workspacePath: workspace,
+          title: "Host-owned state",
+        })) as { session: { sessionId: string } };
+        sessionId = created.session.sessionId;
+        const started = (await client.request("run.start", {
+          workspacePath: workspace,
+          sessionId,
+          prompt: "persist task state",
+        })) as { runId: string };
+        await expect
+          .poll(async () => {
+            const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+              runs: Array<{ runId: string; status: string }>;
+            };
+            return listed.runs.find((run) => run.runId === started.runId)?.status;
+          })
+          .toBe("succeeded");
+        const activeSession = globalSessionManager.get(sessionId, workspace, {
+          picoHome: hostPicoHome,
+        });
+        if (!activeSession) throw new Error("Host-owned session is not active");
+        activeSession.sessionSummaryStore.save(
+          sessionId,
+          "host-owned summary",
+          activeSession.length,
+        );
+        await expect(client.request("session.list", { workspacePath: workspace })).resolves.toEqual(
+          {
+            sessions: expect.arrayContaining([
+              expect.objectContaining({ sessionId, title: "Host-owned state" }),
+            ]),
+          },
+        );
+      } finally {
+        client.close();
+        await host.stop();
+        if (sessionId) {
+          await globalSessionManager
+            .delete(sessionId, workspace, { picoHome: hostPicoHome })
+            ?.close();
+        }
+      }
+    } finally {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
+    if (!sessionId) throw new Error("Desktop session was not created");
+
+    const hostPaths = resolvePicoPaths(workspace, { picoHome: hostPicoHome });
+    await expect(stat(join(hostPaths.workspace.sessions, `${sessionId}.jsonl`))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(hostPaths.workspace.root, "sessions.db"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(readdir(hostPaths.workspace.summaries)).resolves.toEqual([
+      expect.stringMatching(/\.json$/u),
+    ]);
+    await expect(stat(hostPaths.workspace.runtimeDatabase)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(hostPaths.workspace.tasks, "state.json"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(hostPaths.home.daemonWorkspaces)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(
+      stat(resolvePicoPaths(workspace, { picoHome: processPicoHome }).workspace.root),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("生产 Desktop 将 partial host env 与 process PICO_HOME 合成后贯穿 session.send", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-partial-env-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const picoHome = join(root, "process-pico-home");
+    await mkdir(workspace);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "partial-env-home-test",
+    });
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = picoHome;
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new TaskStateAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      env: {
+        LLM_BASE_URL: "https://partial-env.example.test/v1",
+        LLM_API_KEY: "partial-env-secret",
+        LLM_MODEL: "partial-env-model",
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      await host.start();
+      const client = new LocalRuntimeClient(endpoint);
+      try {
+        await expect(client.request("runtime.ping", {})).resolves.toEqual(
+          expect.objectContaining({ picoHome }),
+        );
+        const sent = (await client.request("session.send", {
+          workspacePath: workspace,
+          input: { text: "persist partial-env task state" },
+          idempotencyKey: "partial-env-first-send",
+        })) as {
+          session: { sessionId: string };
+          run?: { runId: string };
+        };
+        sessionId = sent.session.sessionId;
+        if (!sent.run) throw new Error("session.send did not start its first Run");
+        await expect
+          .poll(async () => {
+            const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+              runs: Array<{ runId: string; status: string }>;
+            };
+            return listed.runs.find((run) => run.runId === sent.run?.runId)?.status;
+          })
+          .toBe("succeeded");
+      } finally {
+        client.close();
+        await host.stop();
+        if (sessionId) {
+          await globalSessionManager.delete(sessionId, workspace, { picoHome })?.close();
+        }
+      }
+    } finally {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
+    if (!sessionId) throw new Error("Desktop session was not created");
+
+    const paths = resolvePicoPaths(workspace, { picoHome });
+    await expect(stat(join(paths.workspace.sessions, `${sessionId}.jsonl`))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(paths.workspace.runtimeDatabase)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(paths.workspace.tasks, "state.json"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+  });
+
+  it("生产桌面 Run 兼容 TUI 的旧版环境变量模型路由", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-legacy-model-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const runtimeStateRoot = resolvePicoPaths(workspace).workspace.root;
+    cleanups.push(() => rm(runtimeStateRoot, { recursive: true, force: true }));
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "legacy-model-test",
+    });
+    const agentRuntime = new CapturingActivationAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+      env: {
+        LLM_BASE_URL: "https://legacy-provider.example.test/v1",
+        LLM_API_KEY: "legacy-test-secret",
+        LLM_MODEL: "glm-5.2",
+      },
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    let sessionId: string | undefined;
+    try {
+      const started = (await client.request("run.start", {
+        workspacePath: workspace,
+        prompt: "你好",
+      })) as { runId: string };
+      await expect
+        .poll(async () => {
+          const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+            runs: Array<{ runId: string; status: string }>;
+          };
+          return listed.runs.find((run) => run.runId === started.runId)?.status;
+        })
+        .toBe("succeeded");
+
+      expect(agentRuntime.requests).toHaveLength(1);
+      expect(agentRuntime.requests[0]).toMatchObject({
+        provider: "openai",
+        baseURL: "https://legacy-provider.example.test/v1",
+        apiKey: "legacy-test-secret",
+        model: "glm-5.2",
+        modelRouteId: "legacy/glm-5.2",
+      });
+      sessionId = agentRuntime.requests[0]?.session;
+    } finally {
+      client.close();
+      await host.stop();
+      if (sessionId) globalSessionManager.delete(sessionId, workspace);
+    }
+  });
+
   it("受信任桌面 Run 使用真实交互边界并幂等接收审批与 Ask User", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-desktop-run-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -301,6 +574,14 @@ describe("LocalDaemonHost integration", () => {
       );
       expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_RAW_TOOL_RESULT");
       expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+      expect(
+        timelineEvents.every((event) => {
+          const item = (event.payload as { item?: { eventType?: string } }).item;
+          return !["run.started", "run.finished", "run.interrupted"].includes(
+            item?.eventType ?? "",
+          );
+        }),
+      ).toBe(true);
 
       const transcript = (await client.request("session.transcript", {
         workspacePath: workspace,
@@ -718,6 +999,8 @@ class AvailableCredentialVault implements CredentialVault {
     return true;
   }
 
+  async delete(): Promise<void> {}
+
   async resolve(_ref: CredentialRef): Promise<string> {
     return "desktop-test-secret";
   }
@@ -826,6 +1109,33 @@ class CapturingActivationAgentRuntime extends AgentRuntime {
       workDir: options.dir ?? process.cwd(),
       finalMessage: "activation complete",
       usage: { promptTokens: 5, completionTokens: 2, costCNY: 0.001 },
+      messages: [],
+    };
+  }
+}
+
+class TaskStateAgentRuntime extends AgentRuntime {
+  override async execute(
+    options: RunAgentCliOptions,
+    dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    const sessionId = options.session ?? "home-context-session";
+    const workDir = options.dir ?? process.cwd();
+    if (!dependencies.picoHome || dependencies.env?.PICO_HOME !== dependencies.picoHome) {
+      throw new Error("production host did not propagate its PICO_HOME environment");
+    }
+    if (!dependencies.runtimeState?.taskHostRuntime) {
+      throw new Error("home context test requires a Git task host");
+    }
+    dependencies.runtimeState.taskRegistry.create("local_bash", {
+      description: "persist host-owned task state",
+    });
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir,
+      finalMessage: "task state persisted",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
       messages: [],
     };
   }

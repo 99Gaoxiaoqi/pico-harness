@@ -50,9 +50,12 @@ describe("DesktopRuntimeService integration", () => {
   });
 
   it("仅在信任工作区安全初始化入口文件，并提供只诊断不修复的 Doctor 结果", async () => {
+    const diagnosticPicoHome = await mkdtemp(join(tmpdir(), "pico-desktop-diagnostics-home-"));
+    cleanups.push(diagnosticPicoHome);
     const fixture = await createFixture(undefined, {
       env: {
         ...process.env,
+        PICO_HOME: diagnosticPicoHome,
         LLM_PROVIDER: "openai",
         LLM_MODEL: "gpt-test",
         LLM_API_KEY: "test-only",
@@ -94,6 +97,10 @@ describe("DesktopRuntimeService integration", () => {
     });
 
     await mkdir(join(fixture.workspace, ".pico", "skills", "review"), { recursive: true });
+    const diagnosticPaths = resolvePicoPaths(fixture.workspace, { picoHome: diagnosticPicoHome });
+    await mkdir(diagnosticPaths.workspace.sessions, { recursive: true });
+    await writeFile(join(diagnosticPaths.workspace.sessions, "broken.jsonl"), "{broken\n");
+    await writeFile(join(diagnosticPaths.workspace.root, "session-catalog-health.json"), "{broken");
     const diagnostics = await fixture.service.handle(
       createRuntimeRequest("diagnostics.run", { workspacePath: fixture.workspace }),
     );
@@ -101,17 +108,19 @@ describe("DesktopRuntimeService integration", () => {
       workspacePath: fixture.canonicalWorkspace,
       checks: expect.arrayContaining([
         expect.objectContaining({ id: "cwd", status: "ok" }),
-        expect.objectContaining({ id: "session-catalog" }),
-        expect.objectContaining({ id: "storage" }),
+        expect.objectContaining({ id: "session-catalog", status: "warning" }),
+        expect.objectContaining({ id: "storage", status: "error" }),
       ]),
       output: expect.stringContaining(`CWD: ${fixture.canonicalWorkspace} (ok)`),
     });
+    expect((diagnostics as { output: string }).output).toContain(diagnosticPaths.workspace.root);
 
     const resources = await fixture.service.handle(
       createRuntimeRequest("diagnostics.resources", { workspacePath: fixture.workspace }),
     );
     expect(resources).toMatchObject({
       workDir: fixture.canonicalWorkspace,
+      picoHome: diagnosticPicoHome,
       entries: expect.arrayContaining([
         expect.objectContaining({
           kind: "skills",
@@ -182,6 +191,17 @@ describe("DesktopRuntimeService integration", () => {
             transport: "http",
             url: "https://mcp.example.test",
             headers: { Authorization: "Bearer never-expose" },
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(fixture.workspace, ".pico", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          native: {
+            transport: "http",
+            url: "https://native-mcp.example.test",
           },
         },
       }),
@@ -259,7 +279,7 @@ describe("DesktopRuntimeService integration", () => {
     );
     expect(mcp).toMatchObject({
       servers: [
-        { name: "local", transport: "http", status: "pending", toolCount: 0, toolNames: [] },
+        { name: "native", transport: "http", status: "pending", toolCount: 0, toolNames: [] },
       ],
     });
     expect(JSON.stringify(mcp)).not.toContain("never-expose");
@@ -491,6 +511,17 @@ describe("DesktopRuntimeService integration", () => {
       ),
     ).resolves.toEqual(first);
 
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          input: { text: "同一个 key 不能换成另一条消息" },
+          behavior: "auto",
+          idempotencyKey: "send-first",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+
     const firstPage = await fixture.service.handle(
       createRuntimeRequest("session.transcript", {
         workspacePath: fixture.workspace,
@@ -581,6 +612,106 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("首次发送在 Run 同步启动失败后持久复用同一 Session", async () => {
+    const fixture = await createFixture(undefined, {
+      createSessionId: () => "desktop-retry-session",
+    });
+    vi.spyOn(fixture.runtime, "startForegroundRun").mockRejectedValueOnce(
+      new Error("Run 启动前置检查失败"),
+    );
+    const request = createRuntimeRequest("session.send", {
+      workspacePath: fixture.workspace,
+      input: { text: "不要重复创建会话" },
+      behavior: "auto",
+      idempotencyKey: "retry-same-first-send",
+    });
+
+    await expect(fixture.service.handle(request)).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: "Run 启动前置检查失败",
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.list", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toMatchObject({
+      sessions: [{ sessionId: "desktop-retry-session" }],
+    });
+    await expect(
+      fixture.conversationState.getFirstSendClaim(
+        fixture.canonicalWorkspace,
+        "retry-same-first-send",
+      ),
+    ).resolves.toMatchObject({ sessionId: "desktop-retry-session" });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          sessionId: "different-session",
+          input: { text: "不要重复创建会话" },
+          behavior: "auto",
+          idempotencyKey: "retry-same-first-send",
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("desktop-retry-session"),
+    });
+    await fixture.service.close();
+
+    const restartedRuntime = new WorkspaceRuntimeService({
+      registrationStore: fixture.registration,
+      execute: async ({ sessionId, context }) => {
+        if (sessionId) context.bindSession(sessionId);
+        return sessionId ? { sessionId } : undefined;
+      },
+    });
+    const restartedService = new DesktopRuntimeService({
+      runtimeService: restartedRuntime,
+      registrationStore: fixture.registration,
+      trustStore: fixture.trust,
+      sessionStateStore: fixture.sessionState,
+      conversationStateStore: fixture.conversationState,
+      createSessionId: () => "must-not-create-a-second-session",
+    });
+    const retried = (await restartedService.handle(request)) as {
+      session: { sessionId: string };
+      run: { runId: string };
+    };
+    expect(retried.session.sessionId).toBe("desktop-retry-session");
+    managedSessions.push({
+      sessionId: retried.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    const workspaceRuntime = await restartedRuntime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(retried.run.runId);
+    const transcript = (await restartedService.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: retried.session.sessionId,
+      }),
+    )) as { items: Array<{ kind: string; content?: string }> };
+    expect(
+      transcript.items.filter(
+        (item) => item.kind === "userMessage" && item.content === "不要重复创建会话",
+      ),
+    ).toHaveLength(1);
+    await expect(
+      restartedService.handle(
+        createRuntimeRequest("session.list", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toMatchObject({
+      sessions: [{ sessionId: "desktop-retry-session" }],
+    });
+    await expect(
+      fixture.conversationState.getFirstSendClaim(
+        fixture.canonicalWorkspace,
+        "retry-same-first-send",
+      ),
+    ).resolves.toBeUndefined();
+    await restartedService.close();
+  });
+
   it("工作区已有活动 Run 时首次发送不创建空 Session", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -613,6 +744,86 @@ describe("DesktopRuntimeService integration", () => {
     const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
     await workspaceRuntime.waitForRun(existing.runId);
     await fixture.service.close();
+  });
+
+  it("失败 Run 将真实原因持久化到会话 Transcript", async () => {
+    const fixture = await createFixture(async () => {
+      throw new Error("模型路由缺少凭证");
+    });
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+
+    const sent = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "你好" },
+        idempotencyKey: "failed-run-reason",
+      }),
+    )) as { session: { sessionId: string }; run: { runId: string } };
+    managedSessions.push({
+      sessionId: sent.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(sent.run.runId);
+
+    const transcript = (await fixture.service.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: sent.session.sessionId,
+      }),
+    )) as {
+      activeRun?: unknown;
+      items: Array<{ kind: string; status?: string; error?: string }>;
+    };
+    expect(transcript).not.toHaveProperty("activeRun");
+    expect(transcript.items.filter((item) => item.kind === "runBoundary")).toEqual([
+      expect.objectContaining({ status: "running" }),
+      expect.objectContaining({ status: "failed", error: "模型路由缺少凭证" }),
+    ]);
+    await fixture.service.close();
+  });
+
+  it("关闭 Desktop Runtime 时持久化活动 Run 的取消边界", async () => {
+    let executionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      executionStarted = resolve;
+    });
+    const fixture = await createFixture(async ({ context }) => {
+      executionStarted();
+      await new Promise<never>((_resolve, reject) => {
+        const rejectOnAbort = () => reject(context.signal.reason ?? new Error("runtime closed"));
+        if (context.signal.aborted) {
+          rejectOnAbort();
+          return;
+        }
+        context.signal.addEventListener("abort", rejectOnAbort, { once: true });
+      });
+    });
+
+    const sent = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "执行一个长任务" },
+        idempotencyKey: "close-active-run",
+      }),
+    )) as { session: { sessionId: string } };
+    managedSessions.push({
+      sessionId: sent.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    await started;
+
+    await fixture.service.close();
+
+    const sessionLog = await readFile(
+      join(
+        resolvePicoPaths(fixture.workspace).workspace.sessions,
+        `${sent.session.sessionId}.jsonl`,
+      ),
+      "utf8",
+    );
+    expect(sessionLog).toContain('"kind":"run-boundary"');
+    expect(sessionLog).toContain('"status":"cancelled"');
   });
 
   it("显式中断会清空当前 Session 的持久化 Queue", async () => {
@@ -1176,6 +1387,7 @@ describe("DesktopRuntimeService integration", () => {
       fixture.canonicalWorkspace,
     );
     const automations = new DesktopAutomationService({
+      validateSecurity: async () => undefined,
       prepareSecurity: async () => ({
         credentialRef,
         policySnapshot: {

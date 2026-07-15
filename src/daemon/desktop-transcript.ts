@@ -229,6 +229,7 @@ function projectStructuredItems(snapshot: SessionHydrationSnapshot): OrderedConv
             status: entry.status,
             startedAt: entry.startedAt,
             ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
+            ...(entry.error ? { error: entry.error } : {}),
           }),
         );
         break;
@@ -469,7 +470,13 @@ function truncateConversationItem(
         ...metadata,
       };
     case "runBoundary":
-      return { ...item, id, runId: text(item.runId) ?? "", ...metadata };
+      return {
+        ...item,
+        id,
+        runId: text(item.runId) ?? "",
+        ...(item.error === undefined ? {} : { error: text(item.error) ?? "" }),
+        ...metadata,
+      };
     case "approval":
     case "prompt":
     case "changes":
