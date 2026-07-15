@@ -129,6 +129,69 @@ describe("effective model runtime integration", () => {
     expect(JSON.stringify(compact)).not.toContain("vault-only-secret");
   });
 
+  it("在下一安全边界重新解析 config 与 Keychain，不复用旧 secret", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-effective-reload-work-"));
+    const picoHome = await mkdtemp(join(tmpdir(), "pico-effective-reload-home-"));
+    const store = new UserConfigStore({ picoHome });
+    await writeUserConfig(store, userProviderConfig());
+    const vault = new MemoryCredentialVault();
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    await vault.put(ref, "first-keychain-secret");
+
+    const first = await loadEffectiveModelRuntime({
+      workDir,
+      projectTrusted: true,
+      legacyProvider: "openai",
+      legacyModel: "fallback",
+      env: {},
+      userConfigStore: store,
+      credentialVault: vault,
+    });
+    expect(first.router.providerConfig("shared/user-model").config.apiKey).toBe(
+      "first-keychain-secret",
+    );
+
+    const current = await store.read();
+    await store.write(
+      {
+        ...current.config,
+        defaults: { ...current.config.defaults, modelRouteId: "shared/model-b" },
+        providers: {
+          ...current.config.providers,
+          shared: {
+            ...current.config.providers.shared!,
+            models: ["user-model", "model-b"],
+          },
+        },
+      },
+      { expectedRevision: current.revision },
+    );
+    await vault.put(ref, "rotated-keychain-secret");
+
+    const refreshed = await loadEffectiveModelRuntime({
+      workDir,
+      projectTrusted: true,
+      legacyProvider: "openai",
+      legacyModel: "fallback",
+      env: {},
+      userConfigStore: store,
+      credentialVault: vault,
+    });
+    expect(refreshed.config.defaultModelRouteId).toBe("shared/model-b");
+    expect(refreshed.router.routes.map((route) => route.id)).toEqual([
+      "shared/user-model",
+      "shared/model-b",
+    ]);
+    expect(refreshed.router.providerConfig("shared/model-b").config.apiKey).toBe(
+      "rotated-keychain-secret",
+    );
+    expect(JSON.stringify(refreshed.config)).not.toContain("rotated-keychain-secret");
+  });
+
   it("uses the v2 credential for OpenAI model discovery", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-effective-discovery-work-"));
     const picoHome = await mkdtemp(join(tmpdir(), "pico-effective-discovery-home-"));
