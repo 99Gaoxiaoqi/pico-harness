@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
 import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
@@ -98,6 +99,75 @@ describe("RuntimeEventStore", () => {
     expect(retried).toEqual({ ...committed, inserted: false });
     expect(await restarted.getHeadCursor("session-a")).toEqual(committed.cursor);
   });
+
+  it("rolls back every event when a later exact-once comparison conflicts", async () => {
+    const store = new RuntimeEventStore({ databasePath: join(baseDir, "runtime.sqlite") });
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
+    const original = messageEvent("event-a", "run-a", "original");
+    await store.append(original);
+
+    const rewind = historyRewoundEvent("replacement:rewind", "session-history");
+    const conflicting = messageEvent("event-a", "session-history", "replacement");
+    await expect(store.appendBatch([rewind, conflicting])).rejects.toBeInstanceOf(
+      RuntimeEventStoreIntegrityError,
+    );
+
+    await expect(store.readSession("session-a")).resolves.toEqual([original]);
+    expect(await store.readSessionManifest("session-a")).toEqual(
+      expect.objectContaining({ activeBranchId: "main" }),
+    );
+  });
+
+  it("rolls back a history replacement when SQLite fails after the rewind insert", async () => {
+    const databasePath = join(baseDir, "runtime.sqlite");
+    const store = new RuntimeEventStore({ databasePath });
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
+    const original = messageEvent("event-a", "run-a", "original");
+    await store.append(original);
+
+    const database = new Database(databasePath);
+    try {
+      database.exec(`CREATE TRIGGER fail_replacement_message
+        BEFORE INSERT ON agent_runtime_events
+        WHEN NEW.event_id = 'replacement:message:0'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected replacement failure');
+        END;`);
+    } finally {
+      database.close();
+    }
+
+    const rewind = historyRewoundEvent("replacement:rewind", "session-history");
+    const replacement = messageEvent("replacement:message:0", "session-history", "replacement");
+    await expect(store.appendBatch([rewind, replacement])).rejects.toThrow(
+      "injected replacement failure",
+    );
+
+    const events = await store.readSession("session-a");
+    expect(events).toEqual([original]);
+    expect(materializeRuntimeHistory(events)).toEqual([original.data.message]);
+    expect(await store.readSessionManifest("session-a")).toEqual(
+      expect.objectContaining({ activeBranchId: "main" }),
+    );
+  });
+
+  it("retries an already committed batch exactly once per event", async () => {
+    const store = new RuntimeEventStore({ databasePath: join(baseDir, "runtime.sqlite") });
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
+    const batch = [
+      historyRewoundEvent("replacement:rewind", "session-history"),
+      messageEvent("replacement:message:0", "session-history", "replacement"),
+    ] as const;
+
+    expect((await store.appendBatch(batch)).map(({ inserted }) => inserted)).toEqual([true, true]);
+    expect((await store.appendBatch(batch)).map(({ inserted }) => inserted)).toEqual([
+      false,
+      false,
+    ]);
+    expect(materializeRuntimeHistory(await store.readSession("session-a"))).toEqual([
+      batch[1].data.message,
+    ]);
+  });
 });
 
 function messageEvent(
@@ -124,7 +194,7 @@ function messageEvent(
 function historyRewoundEvent(
   eventId: string,
   runId: string,
-  throughEventId: string,
+  throughEventId?: string,
   at = "2026-07-15T00:00:00.000Z",
 ): RuntimeEvent {
   return {
@@ -138,6 +208,6 @@ function historyRewoundEvent(
     partial: false,
     visibility: "model",
     kind: "history.rewound",
-    data: { branchId: "main", throughEventId },
+    data: { branchId: eventId, ...(throughEventId ? { throughEventId } : {}) },
   };
 }

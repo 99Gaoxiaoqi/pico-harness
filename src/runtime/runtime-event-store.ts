@@ -149,65 +149,32 @@ export class RuntimeEventStore {
   }
 
   async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
-    assertRuntimeEvent(event);
-    const { event: canonicalEvent, encoded } = canonicalizeRuntimeEvent(event);
+    const results = await this.appendBatch([event]);
+    return results[0]!;
+  }
+
+  /**
+   * Atomically appends an ordered group of facts. Every exact-once comparison,
+   * insert, and active-branch update shares one IMMEDIATE transaction, so a
+   * conflict or storage failure cannot expose a partially committed transition.
+   */
+  async appendBatch(
+    events: readonly RuntimeEvent[],
+  ): Promise<readonly RuntimeEventStoreAppendResult[]> {
+    const canonicalEvents = events.map((event) => {
+      assertRuntimeEvent(event);
+      return canonicalizeRuntimeEvent(event);
+    });
+    if (canonicalEvents.length === 0) return [];
+
     const db = this.openDatabase();
     try {
       return db
-        .transaction(() => {
-          const session = this.requireSession(db, canonicalEvent.sessionId);
-          if (
-            canonicalEvent.kind === "run.started" &&
-            canonicalizeWorkspacePath(canonicalEvent.data.workDir) !== session.work_dir
-          ) {
-            throw new RuntimeEventStoreIntegrityError(
-              `Runtime event workspace does not match session ${canonicalEvent.sessionId}`,
-            );
-          }
-
-          const existing = db
-            .prepare(
-              `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-             FROM agent_runtime_events
-             WHERE session_id = ? AND event_id = ?`,
-            )
-            .get(canonicalEvent.sessionId, canonicalEvent.eventId) as EventRow | undefined;
-          if (existing) {
-            const stored = decodeEventRow(existing, canonicalEvent.sessionId);
-            if (!isDeepStrictEqual(stored.event, canonicalEvent)) {
-              throw new RuntimeEventStoreIntegrityError(
-                `Runtime event ID ${canonicalEvent.eventId} is already bound to another payload`,
-              );
-            }
-            return this.appendResult(db, stored.sequence, stored.event, false);
-          }
-
-          const inserted = db
-            .prepare(
-              `INSERT INTO agent_runtime_events
-               (session_id, run_id, event_id, kind, at, event_json)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              canonicalEvent.sessionId,
-              canonicalEvent.runId,
-              canonicalEvent.eventId,
-              canonicalEvent.kind,
-              canonicalEvent.at,
-              encoded,
-            );
-          const sequence = Number(inserted.lastInsertRowid);
-          if (!Number.isSafeInteger(sequence) || sequence < 1) {
-            throw new RuntimeEventStoreIntegrityError("Runtime event sequence is invalid");
-          }
-          if (canonicalEvent.kind === "history.rewound") {
-            db.prepare("UPDATE agent_sessions SET active_branch_id = ? WHERE session_id = ?").run(
-              canonicalEvent.data.branchId,
-              canonicalEvent.sessionId,
-            );
-          }
-          return this.appendResult(db, sequence, canonicalEvent, true);
-        })
+        .transaction(() =>
+          canonicalEvents.map(({ event: canonicalEvent, encoded }) =>
+            this.appendCanonicalEvent(db, canonicalEvent, encoded),
+          ),
+        )
         .immediate();
     } finally {
       db.close();
@@ -341,6 +308,65 @@ export class RuntimeEventStore {
       },
       committedAt: event.at,
     };
+  }
+
+  private appendCanonicalEvent(
+    db: Database.Database,
+    canonicalEvent: RuntimeEvent,
+    encoded: string,
+  ): RuntimeEventStoreAppendResult {
+    const session = this.requireSession(db, canonicalEvent.sessionId);
+    if (
+      canonicalEvent.kind === "run.started" &&
+      canonicalizeWorkspacePath(canonicalEvent.data.workDir) !== session.work_dir
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime event workspace does not match session ${canonicalEvent.sessionId}`,
+      );
+    }
+
+    const existing = db
+      .prepare(
+        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+         FROM agent_runtime_events
+         WHERE session_id = ? AND event_id = ?`,
+      )
+      .get(canonicalEvent.sessionId, canonicalEvent.eventId) as EventRow | undefined;
+    if (existing) {
+      const stored = decodeEventRow(existing, canonicalEvent.sessionId);
+      if (!isDeepStrictEqual(stored.event, canonicalEvent)) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime event ID ${canonicalEvent.eventId} is already bound to another payload`,
+        );
+      }
+      return this.appendResult(db, stored.sequence, stored.event, false);
+    }
+
+    const inserted = db
+      .prepare(
+        `INSERT INTO agent_runtime_events
+         (session_id, run_id, event_id, kind, at, event_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        canonicalEvent.sessionId,
+        canonicalEvent.runId,
+        canonicalEvent.eventId,
+        canonicalEvent.kind,
+        canonicalEvent.at,
+        encoded,
+      );
+    const sequence = Number(inserted.lastInsertRowid);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw new RuntimeEventStoreIntegrityError("Runtime event sequence is invalid");
+    }
+    if (canonicalEvent.kind === "history.rewound") {
+      db.prepare("UPDATE agent_sessions SET active_branch_id = ? WHERE session_id = ?").run(
+        canonicalEvent.data.branchId,
+        canonicalEvent.sessionId,
+      );
+    }
+    return this.appendResult(db, sequence, canonicalEvent, true);
   }
 
   private selectSession(db: Database.Database, sessionId: string): SessionRow | undefined {
