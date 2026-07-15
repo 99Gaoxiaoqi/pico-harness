@@ -1,12 +1,12 @@
 import { realpathSync } from "node:fs";
-import { stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoConfig } from "../input/pico-config.js";
+import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
 import {
   assertCredentialRefMatchesModelRoute,
   credentialRefForModelRoute,
@@ -32,7 +32,7 @@ import {
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
-import type { LocalDaemonEndpoint } from "./endpoint.js";
+import { resolveLocalDaemonEndpoint, type LocalDaemonEndpoint } from "./endpoint.js";
 import {
   createRuntimeEvent,
   isJsonObject,
@@ -75,6 +75,7 @@ export function createProductionLocalDaemonHost(
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   const service = new WorkspaceRuntimeService({
     registrationStore,
+    env,
     execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, execution, context }) => {
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
@@ -358,7 +359,7 @@ export function createProductionLocalDaemonHost(
     service: desktopService,
     cronRuntimeFactory,
     registrationStore,
-    ...(options.endpoint ? { endpoint: options.endpoint } : {}),
+    endpoint: options.endpoint ?? resolveLocalDaemonEndpoint({ env }),
   });
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
   return host;
@@ -537,13 +538,8 @@ function resolveDesktopRequestedModel(
 async function existingMcpConfig(
   workspacePath: string,
 ): Promise<{ readonly mcpConfigPath?: string }> {
-  const mcpConfigPath = join(workspacePath, ".claw", "mcp.json");
-  try {
-    if ((await stat(mcpConfigPath)).isFile()) return { mcpConfigPath };
-  } catch (error) {
-    if (!isNodeCode(error, "ENOENT")) throw error;
-  }
-  return {};
+  const resolution = await resolveProjectMcpConfigPath(workspacePath);
+  return resolution.exists ? { mcpConfigPath: resolution.path } : {};
 }
 
 function publishTimelineEvent(
@@ -815,8 +811,4 @@ function jsonObject(value: unknown): JsonObject {
 
 function firstString(...values: readonly unknown[]): string | undefined {
   return values.find((value): value is string => typeof value === "string" && value.length > 0);
-}
-
-function isNodeCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
 }
