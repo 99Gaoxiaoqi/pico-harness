@@ -1063,7 +1063,10 @@ export class RuntimeFrameDecoder {
   private pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 
   push(chunk: Buffer): RuntimeMessage[] {
-    this.pending = this.pending.byteLength === 0 ? chunk : Buffer.concat([this.pending, chunk]);
+    this.pending =
+      this.pending.byteLength === 0
+        ? detachedBufferCopy(chunk)
+        : Buffer.concat([this.pending, chunk]);
     const messages: RuntimeMessage[] = [];
     while (this.pending.byteLength >= 4) {
       const length = this.pending.readUInt32BE(0);
@@ -1072,11 +1075,21 @@ export class RuntimeFrameDecoder {
       }
       if (this.pending.byteLength < 4 + length) break;
       const raw = this.pending.subarray(4, 4 + length).toString("utf8");
-      this.pending = this.pending.subarray(4 + length);
+      const remainder = this.pending.subarray(4 + length);
+      // A zero-length subarray still retains the consumed frame's backing memory. Credential
+      // writes are intentionally write-only, so release consumed bytes immediately and copy
+      // only an actual fragmented remainder into an independent allocation.
+      this.pending = remainder.byteLength === 0 ? Buffer.alloc(0) : detachedBufferCopy(remainder);
       messages.push(parseRuntimeMessage(raw));
     }
     return messages;
   }
+}
+
+function detachedBufferCopy(source: Buffer): Buffer<ArrayBuffer> {
+  const copy = Buffer.alloc(source.byteLength);
+  source.copy(copy);
+  return copy;
 }
 
 export function parseRuntimeMessage(raw: string): RuntimeMessage {

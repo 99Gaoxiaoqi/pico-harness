@@ -383,16 +383,20 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
       return normalized;
     } catch (error) {
       if (error instanceof CredentialNotFoundError) throw error;
-      throw new CredentialNotFoundError(ref);
+      if (isMacKeychainItemNotFound(error)) throw new CredentialNotFoundError(ref);
+      throw error;
     }
   }
 
   async has(ref: CredentialRef): Promise<boolean> {
+    parseAnyCredentialRef(ref);
     try {
-      await this.resolve(ref);
+      // Deliberately omit `-w`: status/list operations must not read plaintext credentials
+      // into daemon memory merely to determine whether a Keychain item exists.
+      await this.runner.run(["find-generic-password", "-a", ref, "-s", KEYCHAIN_SERVICE]);
       return true;
     } catch (error) {
-      if (error instanceof CredentialNotFoundError) return false;
+      if (isMacKeychainItemNotFound(error)) return false;
       throw error;
     }
   }
@@ -450,12 +454,25 @@ class MacSecurityCommandRunner implements SecurityCommandRunner {
       child.once("error", reject);
       child.once("close", (code) => {
         if (code === 0) resolve(stdout);
-        else
-          reject(
-            new Error(`macOS Keychain 命令失败（exit ${code ?? "unknown"}）：${stderr.trim()}`),
-          );
+        else reject(new MacSecurityCommandError(code, stderr));
       });
       childStdin.end(stdin);
     });
   }
+}
+
+class MacSecurityCommandError extends Error {
+  constructor(
+    readonly exitCode: number | null,
+    readonly stderr: string,
+  ) {
+    super(`macOS Keychain 命令失败（exit ${exitCode ?? "unknown"}）：${stderr.trim()}`);
+    this.name = "MacSecurityCommandError";
+  }
+}
+
+function isMacKeychainItemNotFound(error: unknown): boolean {
+  if (error instanceof MacSecurityCommandError && error.exitCode === 44) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:-25300|could not be found|item[^\n]*not found)/iu.test(message);
 }

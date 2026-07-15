@@ -1,9 +1,12 @@
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveDaemonEndpoint } from "../../apps/desktop/src/main/runtime-client-adapter.js";
-import { resolveLocalDaemonEndpoint } from "../../src/daemon/endpoint.js";
+import {
+  prepareLocalDaemonEndpoint,
+  resolveLocalDaemonEndpoint,
+} from "../../src/daemon/endpoint.js";
 
 describe("local Runtime daemon endpoint namespace", () => {
   const cleanups: string[] = [];
@@ -35,5 +38,37 @@ describe("local Runtime daemon endpoint namespace", () => {
     expect(alias).toEqual(first);
     expect(second.address).not.toBe(first.address);
     expect(second.authTokenPath).not.toBe(first.authTokenPath);
+  });
+
+  it("keeps an injected shared runtime root untouched and secures only its Pico child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-shared-root-"));
+    cleanups.push(root);
+    await chmod(root, 0o755);
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: root,
+      userIdentity: "shared-root-user",
+      picoHome: join(root, "home"),
+    });
+
+    await prepareLocalDaemonEndpoint(endpoint);
+
+    expect((await stat(root)).mode & 0o777).toBe(0o755);
+    expect((await stat(dirname(endpoint.address))).mode & 0o777).toBe(0o700);
+    expect(dirname(endpoint.address)).not.toBe(root);
+  });
+
+  it("rejects a pre-existing symlink in place of the Pico-private runtime directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-symlink-root-"));
+    cleanups.push(root);
+    const target = join(root, "attacker-controlled");
+    await mkdir(target);
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: root,
+      userIdentity: "symlink-user",
+      picoHome: join(root, "home"),
+    });
+    await symlink(target, dirname(endpoint.address), "dir");
+
+    await expect(prepareLocalDaemonEndpoint(endpoint)).rejects.toThrow(/Runtime 目录/u);
   });
 });
