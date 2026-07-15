@@ -3009,6 +3009,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       {
         sessionId: session.id,
         cwd: workspacePath,
+        picoHome: this.picoHome,
         provider: defaults.provider,
         model: defaults.model,
         ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),

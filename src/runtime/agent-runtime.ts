@@ -22,12 +22,7 @@ import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
-import {
-  createProvider,
-  createRawProvider,
-  getCredentialPool,
-  type ProviderKind,
-} from "../provider/factory.js";
+import { createProvider, createRawProvider, type ProviderKind } from "../provider/factory.js";
 import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
@@ -35,6 +30,7 @@ import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
 import type { CredentialRef, CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
+import { CredentialPool } from "../provider/credential-pool.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
@@ -404,6 +400,7 @@ export async function executeAgentRuntime(
         ? { forkFrom: sessionSelection.sourceSessionId }
         : {}),
       cwd: workDir,
+      picoHome: session.picoHome,
       provider: kind,
       ...(backgroundPolicy ? { mode: "yolo" as const } : {}),
       model: defaultConfigModel,
@@ -445,6 +442,10 @@ export async function executeAgentRuntime(
     runtimeEnv,
     dependencies.provider !== undefined,
   );
+  const credentialPool =
+    effectiveOptions.apiKey === undefined && dependencies.provider === undefined
+      ? createRuntimeCredentialPool(runtimeEnv)
+      : undefined;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let cleanupRuntimeState: SessionRuntime | undefined;
   let ownedUsageStore: RuntimeStore | undefined;
@@ -546,7 +547,6 @@ export async function executeAgentRuntime(
     };
     // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
     // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
-    const credentialPool = effectiveOptions.apiKey === undefined ? getCredentialPool() : undefined;
     let currentConfig: ProviderConfig = providerConfig;
     if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
@@ -857,6 +857,7 @@ export async function executeAgentRuntime(
           settings,
           workspaceRoots,
           runtimeState.hookService,
+          session.picoHome,
         ),
       );
     }
@@ -1634,6 +1635,7 @@ export function buildApprovalMiddleware(
   settings?: Pick<SessionSettings, "sessionId" | "mode"> &
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
+  picoHome?: string,
 ): MiddlewareFunc {
   const safety = buildForegroundSafetyMiddleware(workDir, settings, workspaceRoots);
   const permission = buildPermissionMiddleware(
@@ -1643,6 +1645,8 @@ export function buildApprovalMiddleware(
     approvalManager,
     settings,
     workspaceRoots,
+    undefined,
+    picoHome,
   );
   return async (call, context) => {
     const safetyResult = await safety(call);
@@ -1685,6 +1689,7 @@ export function buildPermissionMiddleware(
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
   hookService?: HookService,
+  picoHome?: string,
 ): MiddlewareFunc {
   return async (call, context) => {
     const mode = settings?.mode ?? "default";
@@ -1713,12 +1718,14 @@ export function buildPermissionMiddleware(
       call,
       workDir,
       workspaceRoots,
+      picoHome,
     );
     const hasExplicitSafetyGrant = globalSessionPermissionGrants.allowsSafetyOverride(
       sessionId,
       call,
       workDir,
       workspaceRoots,
+      picoHome,
     );
 
     if (
@@ -1813,6 +1820,7 @@ export function buildPermissionMiddleware(
         workDir,
         settings: settings as PermissionRuntimeSettings,
         workspaceRoots,
+        picoHome,
       });
       if (safetyPath !== undefined && externalScope?.type === "directories") {
         await applySessionPermissionScope(
@@ -1822,6 +1830,7 @@ export function buildPermissionMiddleware(
             workDir,
             settings: settings as PermissionRuntimeSettings,
             workspaceRoots,
+            picoHome,
           },
         );
       }
@@ -2008,6 +2017,14 @@ function firstApiKey(value: string | undefined): string | undefined {
     ?.split(",")
     .map((key) => key.trim())
     .find(Boolean);
+}
+
+/** @internal Pure runtime-env boundary used by executeAgentRuntime. */
+export function createRuntimeCredentialPool(env: RunAgentEnv): CredentialPool | undefined {
+  const keys = env.LLM_API_KEYS?.split(",")
+    .map((key) => key.trim())
+    .filter(Boolean);
+  return keys && keys.length > 1 ? new CredentialPool(keys) : undefined;
 }
 
 async function resolveWorkDir(dir: string | undefined): Promise<string> {

@@ -71,7 +71,7 @@ export async function resolveCliSession(
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
     await assertRuntimeSessionExists(options.workDir, sessionId, "resume", true, options.picoHome);
-    return rememberSelection({ mode: "resume", sessionId }, options.workDir);
+    return rememberSelection({ mode: "resume", sessionId }, options.workDir, options.picoHome);
   }
 
   if (options.session) {
@@ -82,7 +82,11 @@ export async function resolveCliSession(
       false,
       options.picoHome,
     );
-    return rememberSelection({ mode: "resume", sessionId: options.session }, options.workDir);
+    return rememberSelection(
+      { mode: "resume", sessionId: options.session },
+      options.workDir,
+      options.picoHome,
+    );
   }
 
   if (options.forkSession) {
@@ -100,17 +104,26 @@ export async function resolveCliSession(
         sourceSessionId: options.forkSession,
       },
       options.workDir,
+      options.picoHome,
     );
   }
 
   if (options.continueSession) {
     const latest = await findLatestSessionId(options.workDir, options.picoHome);
     if (latest) {
-      return rememberSelection({ mode: "continue", sessionId: latest }, options.workDir);
+      return rememberSelection(
+        { mode: "continue", sessionId: latest },
+        options.workDir,
+        options.picoHome,
+      );
     }
   }
 
-  return rememberSelection({ mode: "new", sessionId: createCliSessionId() }, options.workDir);
+  return rememberSelection(
+    { mode: "new", sessionId: createCliSessionId() },
+    options.workDir,
+    options.picoHome,
+  );
 }
 
 export function createCliSessionId(): string {
@@ -289,7 +302,11 @@ function createRuntimeEventStore(workDir: string, picoHome?: string): RuntimeEve
   });
 }
 
-function rememberSelection(selection: CliSessionSelection, workDir: string): CliSessionSelection {
-  rememberResolvedCliSession(selection, workDir);
+function rememberSelection(
+  selection: CliSessionSelection,
+  workDir: string,
+  picoHome?: string,
+): CliSessionSelection {
+  rememberResolvedCliSession(selection, workDir, picoHome);
   return selection;
 }
