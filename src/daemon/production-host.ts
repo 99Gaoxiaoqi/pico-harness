@@ -40,7 +40,7 @@ import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import { resolveLocalDaemonEndpoint, type LocalDaemonEndpoint } from "./endpoint.js";
 import {
-  createRuntimeEvent,
+  createRuntimeNotification,
   isJsonObject,
   isJsonValue,
   RUNTIME_ERROR_CODES,
@@ -680,8 +680,8 @@ function publishTimelineEvent(
   // WorkspaceRuntime is the sole lifecycle authority. Reporter lifecycle callbacks
   // would otherwise create a second, contradictory started/finished status stream.
   if (["run.started", "run.finished", "run.interrupted"].includes(event.type)) return;
-  service.publishDesktopEvent(
-    createRuntimeEvent({
+  service.publishDesktopNotification(
+    createRuntimeNotification({
       topic: "run.timeline",
       scope: {
         workspacePath,
@@ -807,8 +807,8 @@ function publishInteractionEvent(
       interactionKey(interaction.workspacePath, event.notice.taskId),
       interaction,
     );
-    service.publishDesktopEvent(
-      createRuntimeEvent({
+    service.publishDesktopNotification(
+      createRuntimeNotification({
         topic: "approval.requested",
         scope,
         resourceVersion: nextResourceVersion(),
@@ -833,8 +833,8 @@ function publishInteractionEvent(
     const key = interactionKey(interaction.workspacePath, event.taskId);
     pendingApprovals.delete(key);
     rememberResolved(resolvedApprovals, key, interaction);
-    service.publishDesktopEvent(
-      createRuntimeEvent({
+    service.publishDesktopNotification(
+      createRuntimeNotification({
         topic: "approval.resolved",
         scope,
         resourceVersion: nextResourceVersion(),
@@ -857,8 +857,8 @@ function publishInteractionEvent(
       interactionKey(interaction.workspacePath, event.request.requestId),
       interaction,
     );
-    service.publishDesktopEvent(
-      createRuntimeEvent({
+    service.publishDesktopNotification(
+      createRuntimeNotification({
         topic: "prompt.requested",
         scope,
         resourceVersion: nextResourceVersion(),
@@ -883,8 +883,8 @@ function publishInteractionEvent(
   const key = interactionKey(interaction.workspacePath, event.requestId);
   pendingPrompts.delete(key);
   rememberResolved(resolvedPrompts, key, interaction);
-  service.publishDesktopEvent(
-    createRuntimeEvent({
+  service.publishDesktopNotification(
+    createRuntimeNotification({
       topic: "prompt.resolved",
       scope,
       resourceVersion: nextResourceVersion(),

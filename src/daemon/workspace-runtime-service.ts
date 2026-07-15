@@ -6,7 +6,7 @@ import {
   type WorkspaceRunSnapshot,
 } from "../runtime/workspace-runtime.js";
 import {
-  createRuntimeEvent,
+  createRuntimeNotification,
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   DESKTOP_RUNTIME_SCHEMA_REVISION,
   isJsonObject,
@@ -14,11 +14,11 @@ import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonValue,
-  type RuntimeEvent,
+  type RuntimeNotification,
   type RuntimeRequest,
   type WorkspaceStatusResult,
 } from "./protocol.js";
-import type { LocalRuntimeService, RuntimeEventCursor } from "./service.js";
+import type { LocalRuntimeService, RuntimeNotificationCursor } from "./service.js";
 import {
   RuntimeConflictError,
   RuntimeStore,
@@ -75,8 +75,8 @@ export interface WorkspaceRuntimeServiceOptions {
  */
 export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly registry: WorkspaceRuntimeRegistry<WorkspaceTaskRuntime>;
-  private readonly events: RuntimeEvent[] = [];
-  private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly events: RuntimeNotification[] = [];
+  private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
   private readonly unsubscribers = new Map<string, () => void>();
   private readonly eventStores = new Map<string, RuntimeStore>();
   private readonly maxRetainedEvents: number;
@@ -105,7 +105,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
               this.eventStore(event.workspace).upsertDaemonRun(daemonRunRecord(event.run));
             }
             this.publish(
-              createRuntimeEvent({
+              createRuntimeNotification({
                 topic: event.type,
                 scope: {
                   workspacePath: event.workspace,
@@ -150,7 +150,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const runtime = await this.getRuntime(workspacePath);
       const registered = await this.registrationStore.register(runtime.workspace);
       this.publish(
-        createRuntimeEvent({
+        createRuntimeNotification({
           topic: "workspace.registered",
           scope: { workspacePath: registered },
           resourceVersion: 1,
@@ -165,7 +165,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const workspacePath = requiredString(params, "workspacePath");
       const registered = await this.registrationStore.unregister(workspacePath);
       this.publish(
-        createRuntimeEvent({
+        createRuntimeNotification({
           topic: "workspace.unregistered",
           scope: { workspacePath: registered },
           resourceVersion: 1,
@@ -315,11 +315,11 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     }
   }
 
-  async replayEvents(cursor: RuntimeEventCursor): Promise<readonly RuntimeEvent[]> {
+  async replayEvents(cursor: RuntimeNotificationCursor): Promise<readonly RuntimeNotification[]> {
     const paths = cursor.workspacePath
       ? [await canonicalizeWorkspacePath(cursor.workspacePath)]
       : await this.knownWorkspacePaths();
-    const events: RuntimeEvent[] = [];
+    const events: RuntimeNotification[] = [];
     for (const workspacePath of paths) {
       const store = this.eventStore(workspacePath);
       events.push(
@@ -329,7 +329,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
             workspacePath,
             limit: cursor.limit ?? 10_000,
           })
-          .map(runtimeEventFromLedger),
+          .map(runtimeNotificationFromLedger),
       );
     }
     // A single workspace ledger is already in durable rowid order. Preserve it: random
@@ -345,7 +345,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     return cursor.limit === undefined ? sorted : sorted.slice(0, cursor.limit);
   }
 
-  subscribe(listener: (event: RuntimeEvent) => void): () => void {
+  subscribe(listener: (notification: RuntimeNotification) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -393,8 +393,8 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   /** Persists and broadcasts events projected by non-Run desktop adapters. */
-  publishDesktopEvent(event: RuntimeEvent): void {
-    this.publish(event);
+  publishDesktopNotification(notification: RuntimeNotification): void {
+    this.publish(notification);
   }
 
   async close(): Promise<void> {
@@ -409,22 +409,22 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     this.eventStores.clear();
   }
 
-  private publish(event: RuntimeEvent): void {
-    this.eventStore(event.scope.workspacePath).appendRuntimeEvent({
-      eventId: event.eventId,
-      topic: event.topic,
-      workspacePath: event.scope.workspacePath,
-      createdAt: event.at,
+  private publish(notification: RuntimeNotification): void {
+    this.eventStore(notification.scope.workspacePath).appendRuntimeEvent({
+      eventId: notification.eventId,
+      topic: notification.topic,
+      workspacePath: notification.scope.workspacePath,
+      createdAt: notification.at,
       payload: {
-        scope: event.scope,
-        resourceVersion: event.resourceVersion,
-        payload: event.payload,
+        scope: notification.scope,
+        resourceVersion: notification.resourceVersion,
+        payload: notification.payload,
       },
     });
-    this.events.push(event);
+    this.events.push(notification);
     if (this.events.length > this.maxRetainedEvents)
       this.events.splice(0, this.events.length - this.maxRetainedEvents);
-    for (const listener of this.listeners) listener(event);
+    for (const listener of this.listeners) listener(notification);
   }
 
   private async getRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime> {
@@ -589,7 +589,7 @@ function workspaceRunSnapshot(run: DaemonRunRecord): WorkspaceRunSnapshot {
   };
 }
 
-function runtimeEventFromLedger(event: RuntimeEventRecord): RuntimeEvent {
+function runtimeNotificationFromLedger(event: RuntimeEventRecord): RuntimeNotification {
   const envelope = event.payload;
   const scopeValue = envelope?.["scope"];
   const scope = isScope(scopeValue) ? scopeValue : { workspacePath: event.workspacePath };
@@ -607,7 +607,7 @@ function runtimeEventFromLedger(event: RuntimeEventRecord): RuntimeEvent {
   };
 }
 
-function isScope(value: unknown): value is RuntimeEvent["scope"] {
+function isScope(value: unknown): value is RuntimeNotification["scope"] {
   if (!isRecord(value) || typeof value["workspacePath"] !== "string") return false;
   return ["sessionId", "runId", "jobId"].every(
     (key) => value[key] === undefined || typeof value[key] === "string",

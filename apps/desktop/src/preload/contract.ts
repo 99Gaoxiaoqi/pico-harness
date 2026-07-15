@@ -1,7 +1,7 @@
 import {
   DESKTOP_RUNTIME_METHODS,
   type DesktopRuntimeMethod,
-  type RuntimeEvent,
+  type RuntimeNotification,
   type RuntimeParams,
   type RuntimeResult,
 } from "@pico/protocol";
@@ -38,7 +38,7 @@ export type DesktopRuntimeApi = {
   ) => Promise<DesktopResult<RuntimeResult<Method>>>;
 };
 
-export interface RuntimeEventSubscription {
+export interface RuntimeNotificationSubscription {
   readonly ready: Promise<DesktopResult<RuntimeResult<"events.subscribe">>>;
   dispose(): void;
 }
@@ -48,8 +48,8 @@ export interface DesktopBridge {
   readonly events: {
     subscribe(
       params: RuntimeParams<"events.subscribe">,
-      listener: (event: RuntimeEvent) => void,
-    ): RuntimeEventSubscription;
+      listener: (notification: RuntimeNotification) => void,
+    ): RuntimeNotificationSubscription;
   };
   readonly platform: {
     chooseWorkspace(): Promise<DesktopResult<string | undefined>>;
