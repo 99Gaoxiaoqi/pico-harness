@@ -785,6 +785,8 @@ class AvailableCredentialVault implements CredentialVault {
     return true;
   }
 
+  async delete(): Promise<void> {}
+
   async resolve(_ref: CredentialRef): Promise<string> {
     return "desktop-test-secret";
   }
