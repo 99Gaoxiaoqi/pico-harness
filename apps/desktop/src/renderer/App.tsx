@@ -73,6 +73,7 @@ import {
   type ComposerBehavior,
   type ConversationInspectorView,
   type ConversationItemView,
+  mergeConversationItemGroups,
 } from "./conversation/index.js";
 import type {
   CapabilityView,
@@ -376,19 +377,23 @@ function AppShell() {
           </div>
         </div>
       </aside>
-      <div className="workspace-frame">
-        <header className="titlebar">
-          <div>
-            <span className="titlebar__context">{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
-            <h1>{pageTitle}</h1>
-          </div>
-          <div className="titlebar__actions">
-            {preview && <PreviewBadge />}
-            <Link className="button button--primary" to="/task/new">
-              <Plus aria-hidden="true" size={16} /> 新任务
-            </Link>
-          </div>
-        </header>
+      <div
+        className={`workspace-frame ${conversationRoute ? "workspace-frame--conversation" : ""}`}
+      >
+        {!conversationRoute && (
+          <header className="titlebar">
+            <div>
+              <span className="titlebar__context">{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
+              <h1>{pageTitle}</h1>
+            </div>
+            <div className="titlebar__actions">
+              {preview && <PreviewBadge />}
+              <Link className="button button--primary" to="/task/new">
+                <Plus aria-hidden="true" size={16} /> 新任务
+              </Link>
+            </div>
+          </header>
+        )}
         {message && (
           <div className="toast" role="status">
             {message}
@@ -599,7 +604,7 @@ function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
 
 function ConversationPage() {
   const { sessionId } = useParams();
-  const { data, actions, busy } = useRuntime();
+  const { data, actions, busy, preview } = useRuntime();
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
@@ -697,7 +702,7 @@ function ConversationPage() {
       conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
         ? [conversation.goalItem]
         : [];
-    return [...persisted, ...goal, ...live, ...decisions, ...changes];
+    return mergeConversationItemGroups(persisted, goal, live, decisions, changes);
   }, [
     activeRun,
     data.approvals,
@@ -829,7 +834,6 @@ function ConversationPage() {
       header={
         <div className="conversation-session-header">
           <div>
-            <span className="eyebrow">{sessionId ? "会话" : "新会话"}</span>
             {editingTitle && sessionId ? (
               <form
                 className="conversation-title-editor"
@@ -863,10 +867,11 @@ function ConversationPage() {
                 </Button>
               </form>
             ) : (
-              <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
+              <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h1>
             )}
           </div>
           <div className="conversation-session-header__meta">
+            {preview && <PreviewBadge />}
             {conversation?.usage && (
               <span>
                 {formatCompact(

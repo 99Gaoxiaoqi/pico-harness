@@ -19,6 +19,7 @@ import type {
   ConversationProgressState,
   RunBoundaryItemView,
 } from "./types.js";
+import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 
 export interface ConversationTranscriptProps {
   readonly items: readonly ConversationItemView[];
@@ -47,16 +48,23 @@ function StateIcon({ state }: { readonly state: ConversationProgressState }) {
 
 function RunBoundary({ item }: { readonly item: RunBoundaryItemView }) {
   const labels: Readonly<Record<RunBoundaryItemView["status"], string>> = {
-    started: "开始运行",
+    started: "",
     completed: "运行完成",
-    interrupted: "运行已中断",
+    interrupted: "运行已停止",
     failed: "运行失败",
   };
+  const Icon =
+    item.status === "failed" ? AlertCircle : item.status === "completed" ? Check : Circle;
   return (
     <div className="conversation-run-boundary" data-status={item.status}>
-      <span>{item.duration ?? labels[item.status]}</span>
-      <span className="conversation-run-boundary__line" aria-hidden="true" />
-      <span className="conversation-run-boundary__label">{item.label}</span>
+      <span className="conversation-run-boundary__summary">
+        <Icon aria-hidden="true" />
+        {labels[item.status]}
+      </span>
+      {item.duration && (
+        <span className="conversation-run-boundary__duration">{item.duration}</span>
+      )}
+      {item.detail && <span className="conversation-run-boundary__detail">{item.detail}</span>}
     </div>
   );
 }
@@ -252,7 +260,11 @@ export function ConversationTranscript({
   renderText = (text) => <p>{text}</p>,
   renderItem,
 }: ConversationTranscriptProps) {
-  if (items.length === 0) {
+  const visibleItems = mergeConversationItemGroups(items).filter(
+    (item) => item.kind !== "runBoundary" || item.status !== "started",
+  );
+
+  if (visibleItems.length === 0) {
     return (
       <section
         className="conversation-transcript conversation-transcript--empty"
@@ -276,10 +288,14 @@ export function ConversationTranscript({
       aria-live="polite"
       aria-relevant="additions text"
     >
-      {items.map((item) => {
+      {visibleItems.map((item) => {
         const fallback = renderDefaultItem(item, renderText, onOpenItem);
         return (
-          <li className="conversation-transcript__item" data-kind={item.kind} key={item.id}>
+          <li
+            className="conversation-transcript__item"
+            data-kind={item.kind}
+            key={conversationItemKey(item)}
+          >
             {renderItem ? renderItem(item, fallback) : fallback}
             {item.truncated && (
               <p className="conversation-truncated-notice" role="note">
