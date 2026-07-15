@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   build: {
-    sourcemap: true,
+    sourcemap: false,
     rollupOptions: {
       external: ["electron"],
       output: { entryFileNames: "preload.cjs", format: "cjs" },

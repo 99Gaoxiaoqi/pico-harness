@@ -1,6 +1,9 @@
 name: Desktop macOS Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -39,6 +42,29 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      - name: Validate release version and update URLs
+        id: release
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./apps/desktop/package.json').version")"
+          REQUESTED_VERSION="${REQUESTED_VERSION#v}"
+          test "$REQUESTED_VERSION" = "$PACKAGE_VERSION" || {
+            echo "Release version $REQUESTED_VERSION does not match @pico/desktop@$PACKAGE_VERSION" >&2
+            exit 1
+          }
+          node -e '
+            for (const name of ["PICO_UPDATE_BASE_URL", "PICO_UPDATE_FEED_URL"]) {
+              const value = process.env[name];
+              if (!value) throw new Error(`${name} is required for a release`);
+              const url = new URL(value);
+              if (url.protocol !== "https:") throw new Error(`${name} must use HTTPS`);
+            }
+          '
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run desktop:typecheck
       - run: npm run lint
@@ -55,6 +81,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pico-macos-${{ matrix.arch }}-${{ inputs.version }}
+          name: pico-macos-${{ matrix.arch }}-${{ steps.release.outputs.version }}
           path: apps/desktop/out/make/**
           if-no-files-found: error

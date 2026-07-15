@@ -3,22 +3,16 @@ import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { VitePlugin } from "@electron-forge/plugin-vite";
 import type { ForgeConfig } from "@electron-forge/shared-types";
-import { chmod, cp, mkdir, readdir, rm } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const macSigningIdentity = process.env.PICO_MAC_SIGN_IDENTITY;
 const appleId = process.env.PICO_APPLE_ID;
 const appleIdPassword = process.env.PICO_APPLE_ID_PASSWORD;
 const appleTeamId = process.env.PICO_APPLE_TEAM_ID;
-const updateBaseUrl = process.env.PICO_UPDATE_BASE_URL?.replace(/\/$/u, "");
+const updateBaseUrl = readOptionalHttpsUrl("PICO_UPDATE_BASE_URL");
 const workspaceRoot = resolve(import.meta.dirname, "../..");
-const nativeRuntimePackages = [
-  "better-sqlite3",
-  "bindings",
-  "file-uri-to-path",
-  "node-pty",
-  "node-addon-api",
-] as const;
+const nativeRuntimePackages = ["better-sqlite3", "bindings", "file-uri-to-path"] as const;
 
 const macNotarization =
   appleId && appleIdPassword && appleTeamId
@@ -29,10 +23,7 @@ const config = {
   packagerConfig: {
     appBundleId: "com.pico.harness",
     appCategoryType: "public.app-category.developer-tools",
-    asar: {
-      unpack: "**/*.node",
-      unpackDir: "**/node_modules/node-pty",
-    },
+    asar: { unpack: "**/*.node" },
     executableName: "Pico",
     name: "Pico",
     osxSign: macSigningIdentity ? { identity: macSigningIdentity } : undefined,
@@ -46,23 +37,6 @@ const config = {
         await cp(join(workspaceRoot, "node_modules", packageName), join(target, packageName), {
           recursive: true,
         });
-      }
-    },
-    packageAfterPrune: async (_forgeConfig, buildPath, _electronVersion, platform, arch) => {
-      const nodePtyRoot = join(buildPath, "node_modules", "node-pty");
-      await Promise.all([
-        rm(join(nodePtyRoot, "build"), { recursive: true, force: true }),
-        rm(join(nodePtyRoot, "bin"), { recursive: true, force: true }),
-      ]);
-      const targetPrebuild = `${platform}-${arch}`;
-      const prebuildsRoot = join(nodePtyRoot, "prebuilds");
-      for (const entry of await readdir(prebuildsRoot, { withFileTypes: true })) {
-        if (entry.isDirectory() && entry.name !== targetPrebuild) {
-          await rm(join(prebuildsRoot, entry.name), { recursive: true, force: true });
-        }
-      }
-      if (platform !== "win32") {
-        await chmod(join(prebuildsRoot, targetPrebuild, "spawn-helper"), 0o755);
       }
     },
   },
@@ -115,3 +89,16 @@ const config = {
 } satisfies ForgeConfig;
 
 export default config;
+
+function readOptionalHttpsUrl(name: string): string | undefined {
+  const value = process.env[name];
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") throw new Error("must use HTTPS");
+    return url.toString().replace(/\/$/u, "");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${name} must be a valid HTTPS URL: ${reason}`, { cause: error });
+  }
+}
