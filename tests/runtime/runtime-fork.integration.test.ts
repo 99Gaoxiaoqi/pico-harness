@@ -175,7 +175,7 @@ describe("runtime session fork", () => {
     await target.close();
   });
 
-  it("repairs a dangling source tool call before freezing a strictly materializable fork", async () => {
+  it("repairs a terminal source with a dangling tool call before freezing a fork", async () => {
     const store = new RuntimeEventStore({
       databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
     });
@@ -198,6 +198,7 @@ describe("runtime session fork", () => {
       },
       "dangling-source-assistant",
     );
+    await dangling.finish("failed", "injected failure after a partial observation batch");
 
     await expect(
       new SessionForkService({ workDir, sessionManager: sessions }).fork({
@@ -208,7 +209,7 @@ describe("runtime session fork", () => {
     ).resolves.toMatchObject({ operation: { state: "completed" } });
 
     const sourceEvents = await store.readSession(source.id);
-    expect(sourceEvents.some((event) => event.kind === "run.terminal")).toBe(true);
+    expect(sourceEvents.filter((event) => event.kind === "run.terminal")).toHaveLength(1);
     expect(() => materializeRuntimeHistory(sourceEvents)).not.toThrow();
     const targetEvents = await store.readSession("repaired-target");
     const targetHistory = materializeRuntimeHistory(targetEvents);
