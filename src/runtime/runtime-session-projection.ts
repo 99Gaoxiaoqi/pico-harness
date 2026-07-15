@@ -11,6 +11,21 @@ import {
   type RuntimeMessageCommittedEvent,
 } from "./runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+
+export interface SequencedRuntimeEvent {
+  readonly sequence: number;
+  readonly event: RuntimeEvent;
+}
+
+export interface RuntimeSessionSequencedMessageEntry extends RuntimeHistoryProjectionEntry {
+  readonly sequence: number;
+}
+
+export interface RuntimeSessionTranscriptEventEntry {
+  readonly sequence: number;
+  readonly event: TranscriptEvent;
+}
 
 export function projectRuntimeSessionMessages(events: readonly RuntimeEvent[]): Message[] {
   return projectRuntimeSessionMessageEntries(events).map(({ message }) => message);
@@ -26,6 +41,32 @@ export function projectRuntimeSessionMessageEntries(
   return projectMessageEvents(events).map((event) => ({
     eventId: event.eventId,
     message: structuredClone(event.data.message),
+  }));
+}
+
+export function projectRuntimeSessionSequencedMessageEntries(
+  entries: readonly SequencedRuntimeEvent[],
+): RuntimeSessionSequencedMessageEntry[] {
+  return projectBranchEventIndexes(
+    entries.map(({ event }) => event),
+    (event): event is RuntimeMessageCommittedEvent => runtimeEventHasModelMessage(event),
+  ).map(({ eventIndex, event }) => ({
+    eventId: event.eventId,
+    message: structuredClone(event.data.message),
+    sequence: entries[eventIndex]!.sequence,
+  }));
+}
+
+export function projectRuntimeSessionTranscriptEventEntries(
+  entries: readonly SequencedRuntimeEvent[],
+): RuntimeSessionTranscriptEventEntry[] {
+  return projectBranchEventIndexes(
+    entries.map(({ event }) => event),
+    (event): event is Extract<RuntimeEvent, { kind: "transcript.event.recorded" }> =>
+      event.kind === "transcript.event.recorded",
+  ).map(({ eventIndex, event }) => ({
+    sequence: entries[eventIndex]!.sequence,
+    event: structuredClone(event.data.event),
   }));
 }
 
@@ -84,10 +125,19 @@ export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): Ses
 }
 
 function projectMessageEvents(events: readonly RuntimeEvent[]): RuntimeMessageCommittedEvent[] {
+  return projectBranchEventIndexes(events, (event): event is RuntimeMessageCommittedEvent =>
+    runtimeEventHasModelMessage(event),
+  ).map(({ event }) => event);
+}
+
+function projectBranchEventIndexes<Event extends RuntimeEvent>(
+  events: readonly RuntimeEvent[],
+  select: (event: RuntimeEvent) => event is Event,
+): Array<{ readonly eventIndex: number; readonly event: Event }> {
   const eventIndexes = new Map<string, number>();
   const projected: Array<{
     readonly eventIndex: number;
-    readonly event: RuntimeMessageCommittedEvent;
+    readonly event: Event;
   }> = [];
   for (const [eventIndex, event] of events.entries()) {
     if (eventIndexes.has(event.eventId)) {
@@ -108,12 +158,12 @@ function projectMessageEvents(events: readonly RuntimeEvent[]): RuntimeMessageCo
         );
         if (firstRemoved !== -1) projected.splice(firstRemoved);
       }
-    } else if (runtimeEventHasModelMessage(event)) {
+    } else if (select(event)) {
       projected.push({ eventIndex, event: structuredClone(event) });
     }
     eventIndexes.set(event.eventId, eventIndex);
   }
-  return projected.map(({ event }) => event);
+  return projected;
 }
 
 function mergeUsage(

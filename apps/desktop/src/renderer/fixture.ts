@@ -52,6 +52,8 @@ export const previewData: AppData = {
       detail: "复现冲突 · 收窄写入边界 · 增加集成验证",
       state: "done",
       at: now - 412_000,
+      sessionId: "session-atlas",
+      runId: "run-atlas",
     },
     {
       id: "tl-agent",
@@ -60,6 +62,8 @@ export const previewData: AppData = {
       detail: "已定位 3 个调用点，未发现 Schema 变更。",
       state: "active",
       at: now - 242_000,
+      sessionId: "session-atlas",
+      runId: "run-atlas",
     },
     {
       id: "tl-tool",
@@ -68,8 +72,45 @@ export const previewData: AppData = {
       detail: "npm test -- sync-conflict.integration.test.ts",
       state: "waiting",
       at: now - 12_000,
+      sessionId: "session-atlas",
+      runId: "run-atlas",
     },
   ],
+  conversations: {
+    "session-atlas": {
+      sessionId: "session-atlas",
+      revision: "preview.1",
+      queuedCount: 0,
+      settings: {
+        modelRouteId: "openai/gpt-5.4",
+        model: "gpt-5.4",
+        mode: "default",
+        thinkingEffort: "high",
+        reasoningLevels: ["off", "low", "medium", "high"],
+      },
+      items: [
+        {
+          id: "preview-user",
+          kind: "userMessage",
+          text: "修复同步冲突，并为关键失败路径补一条集成测试。",
+          at: now - 428_000,
+        },
+        {
+          id: "preview-boundary",
+          kind: "runBoundary",
+          status: "started",
+          label: "Pico 开始处理",
+          at: now - 427_000,
+        },
+        {
+          id: "preview-assistant",
+          kind: "assistantMessage",
+          text: "我会先复现冲突，再收窄写入边界并补充回归验证。",
+          at: now - 410_000,
+        },
+      ],
+    },
+  },
   approvals: [
     {
       id: "approval-test",
@@ -173,6 +214,64 @@ export const previewData: AppData = {
       description: "在设备上运行，不发送项目内容。",
       state: "disabled",
       meta: "未配置",
+    },
+  ],
+  providerConfig: {
+    supported: true,
+    writable: true,
+    revision: "preview-provider-revision",
+    defaultModelRouteId: "openai/gpt-5.4",
+    userDefaults: {
+      modelRouteId: "openai/gpt-5.4",
+      mode: "default",
+      thinkingEffort: "high",
+    },
+    providers: [
+      {
+        id: "openai",
+        protocol: "openai",
+        baseURL: "https://api.openai.com/v1",
+        apiKeyEnv: "OPENAI_API_KEY",
+        models: ["gpt-5.4", "gpt-5.4-mini"],
+        discoverModels: true,
+        origin: "user",
+        fingerprint: "preview-openai-fingerprint",
+        credentialStatus: "ready",
+        credentialSource: "keychain",
+        storedCredentialPresent: true,
+      },
+      {
+        id: "local",
+        protocol: "openai",
+        baseURL: "http://127.0.0.1:11434/v1",
+        apiKeyEnv: "LOCAL_LLM_API_KEY",
+        models: ["qwen3-coder"],
+        discoverModels: false,
+        origin: "project-legacy",
+        fingerprint: "preview-local-fingerprint",
+        credentialStatus: "missing",
+        credentialSource: "none",
+        storedCredentialPresent: false,
+      },
+    ],
+  },
+  modelRoutes: [
+    { id: "openai/gpt-5.4", label: "gpt-5.4" },
+    { id: "openai/gpt-5.4-mini", label: "gpt-5.4 mini" },
+  ],
+  catalogAgents: [
+    {
+      name: "explore",
+      description: "只读探索代码库并返回聚焦结论。",
+      source: "builtin",
+      tools: ["read_file", "grep", "glob"],
+    },
+  ],
+  catalogSkills: [
+    {
+      name: "code-review",
+      description: "审查正确性、安全边界和回归风险。",
+      allowedTools: ["read_file", "grep"],
     },
   ],
   usage: {

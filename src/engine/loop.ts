@@ -417,6 +417,7 @@ async function commitFileJournal(
       journal,
       messageId,
       session.id,
+      session.fileHistoryBaseDir,
     );
     if (commit.incomplete) {
       logger.warn({ warnings: commit.warnings }, "[FileHistory] 本轮文件 journal 覆盖不完整");
@@ -1157,14 +1158,20 @@ export class AgentEngine implements AgentRunner {
     execute: () => Promise<Message[]>,
     signal?: AbortSignal,
   ): Promise<Message[]> {
+    const runtimeStore = session.runtimeEventStore;
     await RuntimeRun.reconcileIncompleteRuns({
       sessionId: session.id,
       workDir: session.workDir,
+      ...(runtimeStore ? { store: runtimeStore } : {}),
     });
-    await RuntimeRun.repairSessionProjection(session, { workDir: session.workDir });
+    await RuntimeRun.repairSessionProjection(session, {
+      workDir: session.workDir,
+      ...(runtimeStore ? { store: runtimeStore } : {}),
+    });
     const runtimeRun = await RuntimeRun.start({
       sessionId: session.id,
       workDir: session.workDir,
+      ...(runtimeStore ? { store: runtimeStore } : {}),
     });
     return runtimeRun.run(execute, signal);
   }
@@ -1271,6 +1278,7 @@ export class AgentEngine implements AgentRunner {
                 resolvedPath,
                 currentMessageId,
                 session.id,
+                session.fileHistoryBaseDir,
               );
             }
           } catch {
@@ -1707,9 +1715,15 @@ export class AgentEngine implements AgentRunner {
                     journalRoots,
                     session.id,
                     signal,
+                    session.fileHistoryBaseDir,
                   );
                 } else {
-                  turnFileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
+                  turnFileJournal = await fileHistoryBeginJournal(
+                    journalRoots,
+                    session.id,
+                    signal,
+                    session.fileHistoryBaseDir,
+                  );
                 }
                 const activeJournal = runFileJournal ?? turnFileJournal;
                 activeFileJournal = activeJournal;
@@ -1896,7 +1910,7 @@ export class AgentEngine implements AgentRunner {
               session.fileHistory,
               currentMessageId,
               session.id,
-              undefined,
+              session.fileHistoryBaseDir,
               session.length,
             ).catch((err) => logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"));
           }
@@ -1920,7 +1934,13 @@ export class AgentEngine implements AgentRunner {
       activeFileJournal = undefined;
       rootSpan?.end();
       if (rootSpan) {
-        const tracePath = exportTraceToFile(rootSpan, session.workDir, session.id);
+        const tracePath = exportTraceToFile(
+          rootSpan,
+          session.workDir,
+          session.id,
+          undefined,
+          session.picoHome,
+        );
         logger.info({ tracePath }, `[Tracing] 执行回放链路已保存: ${tracePath}`);
       }
     }

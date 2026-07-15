@@ -48,6 +48,26 @@ describe("SessionManager LRU 驱逐", () => {
     expect(mgr.size).toBe(2);
   });
 
+  it("同 sessionId 和 workDir 但不同 PICO_HOME 仍严格隔离", async () => {
+    const mgr = makeMgr({ maxSessions: 10, ttlMs: 60_000 });
+    const picoHomeA = join(workDir, "home-a");
+    const picoHomeB = join(workDir, "home-b");
+    const sessionA = await mgr.getOrCreate("same-id", workDir, {
+      persistence: false,
+      picoHome: picoHomeA,
+    });
+    const sessionB = await mgr.getOrCreate("same-id", workDir, {
+      persistence: false,
+      picoHome: picoHomeB,
+    });
+
+    expect(sessionB).not.toBe(sessionA);
+    expect(mgr.get("same-id", workDir, { picoHome: picoHomeA })).toBe(sessionA);
+    expect(mgr.get("same-id", workDir, { picoHome: picoHomeB })).toBe(sessionB);
+    expect(mgr.get("same-id", workDir)).toBeUndefined();
+    expect(mgr.size).toBe(2);
+  });
+
   it("超出 maxSessions 时驱逐最旧(首个插入)", async () => {
     const mgr = makeMgr({ maxSessions: 2, ttlMs: 60_000 });
     await mgr.getOrCreate("s1", workDir, { persistence: false });

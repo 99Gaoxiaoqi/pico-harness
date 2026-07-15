@@ -41,8 +41,13 @@ export interface CliSessionSummary {
   forkEventId?: string;
 }
 
+export interface ListCliSessionSummariesOptions {
+  picoHome?: string;
+}
+
 export interface ResolveCliSessionOptions {
   workDir: string;
+  picoHome?: string;
   session?: string;
   continueSession?: boolean;
   resumeSession?: string;
@@ -65,17 +70,29 @@ export async function resolveCliSession(
 
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
-    await assertRuntimeSessionExists(options.workDir, sessionId, "resume", true);
+    await assertRuntimeSessionExists(options.workDir, sessionId, "resume", true, options.picoHome);
     return rememberSelection({ mode: "resume", sessionId }, options.workDir);
   }
 
   if (options.session) {
-    await assertRuntimeSessionExists(options.workDir, options.session, "resume", false);
+    await assertRuntimeSessionExists(
+      options.workDir,
+      options.session,
+      "resume",
+      false,
+      options.picoHome,
+    );
     return rememberSelection({ mode: "resume", sessionId: options.session }, options.workDir);
   }
 
   if (options.forkSession) {
-    await assertRuntimeSessionExists(options.workDir, options.forkSession, "fork", true);
+    await assertRuntimeSessionExists(
+      options.workDir,
+      options.forkSession,
+      "fork",
+      true,
+      options.picoHome,
+    );
     return rememberSelection(
       {
         mode: "fork",
@@ -87,7 +104,7 @@ export async function resolveCliSession(
   }
 
   if (options.continueSession) {
-    const latest = await findLatestSessionId(options.workDir);
+    const latest = await findLatestSessionId(options.workDir, options.picoHome);
     if (latest) {
       return rememberSelection({ mode: "continue", sessionId: latest }, options.workDir);
     }
@@ -100,9 +117,12 @@ export function createCliSessionId(): string {
   return `cli-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
-export async function listCliSessionSummaries(workDir: string): Promise<CliSessionSummary[]> {
-  const runtimeEventStore = createRuntimeEventStore(workDir);
-  const forkTargets = await indexForkTargetOperations(workDir);
+export async function listCliSessionSummaries(
+  workDir: string,
+  options: ListCliSessionSummariesOptions = {},
+): Promise<CliSessionSummary[]> {
+  const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
+  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
   const sequenced = await Promise.all(
     (await runtimeEventStore.listSessionManifests()).map(async (manifest) => {
       const entries = await runtimeEventStore.readSessionEntries(manifest.sessionId);
@@ -178,8 +198,11 @@ function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
   }
 }
 
-async function findLatestSessionId(workDir: string): Promise<string | undefined> {
-  return (await listCliSessionSummaries(workDir))[0]?.id;
+async function findLatestSessionId(
+  workDir: string,
+  picoHome?: string,
+): Promise<string | undefined> {
+  return (await listCliSessionSummaries(workDir, { picoHome }))[0]?.id;
 }
 
 function compactSessionText(value: string | undefined): string | undefined {
@@ -193,24 +216,26 @@ async function assertRuntimeSessionExists(
   sessionId: string,
   action: "resume" | "fork",
   required: boolean,
+  picoHome?: string,
 ): Promise<void> {
   const prefix = action === "fork" ? "无法 fork" : "无法恢复";
-  const store = createRuntimeEventStore(workDir);
+  const store = createRuntimeEventStore(workDir, picoHome);
   const manifest = await store.readSessionManifest(sessionId);
   if (!manifest) {
     if (!required) return;
     throw new Error(`${prefix} session ${sessionId}: runtime.sqlite 中不存在`);
   }
   const entries = await store.readSessionEntries(sessionId);
-  const forkTargets = await indexForkTargetOperations(workDir);
+  const forkTargets = await indexForkTargetOperations(workDir, picoHome);
   if (isPublishedRuntimeSession(sessionId, entries, forkTargets)) return;
   throw new Error(`${prefix} session ${sessionId}: fork 尚未完成发布`);
 }
 
 async function indexForkTargetOperations(
   workDir: string,
+  picoHome?: string,
 ): Promise<ReadonlyMap<string, ForkTargetOperations>> {
-  const operations = await new StorageOperationJournal({ workDir }).list();
+  const operations = await new StorageOperationJournal({ workDir, picoHome }).list();
   const targets = new Map<string, ForkTargetOperations>();
   for (const operation of operations) {
     if (operation.kind !== "fork" || operation.state === "aborted") continue;
@@ -250,13 +275,17 @@ function isPublishedRuntimeSession(
 }
 
 /** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */
-export async function removeCliSessionFile(workDir: string, sessionId: string): Promise<void> {
-  await createRuntimeEventStore(workDir).deleteSession(sessionId);
+export async function removeCliSessionFile(
+  workDir: string,
+  sessionId: string,
+  options: { readonly picoHome?: string } = {},
+): Promise<void> {
+  await createRuntimeEventStore(workDir, options.picoHome).deleteSession(sessionId);
 }
 
-function createRuntimeEventStore(workDir: string): RuntimeEventStore {
+function createRuntimeEventStore(workDir: string, picoHome?: string): RuntimeEventStore {
   return new RuntimeEventStore({
-    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
   });
 }
 

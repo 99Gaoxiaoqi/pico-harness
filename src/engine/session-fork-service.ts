@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../paths/pico-paths.js";
 import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import {
@@ -60,6 +60,7 @@ export interface SessionForkServiceHooks {
 
 export interface SessionForkServiceOptions {
   readonly workDir: string;
+  readonly picoHome?: string;
   readonly sessionManager?: SessionManager;
   readonly journal?: StorageOperationJournal;
   readonly runtimeStore?: RuntimeEventStore;
@@ -136,6 +137,8 @@ interface ForkSidecarsBundle {
 export class SessionForkService {
   readonly workDir: string;
   readonly journal: StorageOperationJournal;
+  private readonly picoHome: string;
+  private readonly workspacePaths: PicoWorkspacePaths;
   private readonly sessionManager: SessionManager;
   private readonly runtimeStore: RuntimeEventStore;
   private readonly fileHistoryBaseDir: string;
@@ -147,16 +150,22 @@ export class SessionForkService {
 
   constructor(options: SessionForkServiceOptions) {
     this.workDir = resolve(options.workDir);
+    this.picoHome = resolvePicoHome({ picoHome: options.picoHome });
+    const paths = resolvePicoPaths(this.workDir, { picoHome: this.picoHome });
+    this.workspacePaths = paths.workspace;
     this.sessionManager = options.sessionManager ?? globalSessionManager;
-    this.journal = options.journal ?? new StorageOperationJournal({ workDir: this.workDir });
-    const workspacePaths = resolvePicoPaths(this.workDir).workspace;
+    this.journal =
+      options.journal ??
+      new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
     this.runtimeStore =
       options.runtimeStore ??
-      new RuntimeEventStore({ databasePath: workspacePaths.runtimeDatabase });
-    this.fileHistoryBaseDir = options.fileHistoryBaseDir ?? fileHistoryDefaultBaseDir();
+      new RuntimeEventStore({ databasePath: this.workspacePaths.runtimeDatabase });
+    this.fileHistoryBaseDir =
+      options.fileHistoryBaseDir ??
+      (options.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir());
     this.summaryIndexPath =
-      options.summaryIndexPath ?? join(workspacePaths.memory, "summaries.json");
-    this.artifactBaseDir = options.artifactBaseDir ?? workspacePaths.artifacts;
+      options.summaryIndexPath ?? join(this.workspacePaths.memory, "summaries.json");
+    this.artifactBaseDir = options.artifactBaseDir ?? this.workspacePaths.artifacts;
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
     this.coordinator = new ForkOperationCoordinator({
@@ -173,6 +182,7 @@ export class SessionForkService {
     }
     const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
       persistence: true,
+      picoHome: this.picoHome,
     });
     const sourceRuntimeStore = source.runtimeEventStore;
     if (!sourceRuntimeStore) {
@@ -192,10 +202,7 @@ export class SessionForkService {
       materializeRuntimeHistory(await sourceRuntimeStore.readSession(source.id));
       const snapshot = await source.readDurableForkSnapshot();
       const operationId = this.createOperationId();
-      const stagingDirectory = join(
-        resolvePicoPaths(this.workDir).workspace.forkStaging,
-        operationId,
-      );
+      const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
       const frozen = createFrozenForkBundle(operationId, input, snapshot);
 
       // 必须先冻结 payload 再创建 journal。这样 journal 一旦可见，reconcile
@@ -511,14 +518,15 @@ export class SessionForkService {
 
 export async function reconcileUnfinishedSessionForks(
   workDir: string,
-  options: ForkReconciliationOptions = {},
+  options: ForkReconciliationOptions & { readonly picoHome?: string } = {},
 ): Promise<ForkReconciliationResult[]> {
-  return new SessionForkService({ workDir }).reconcileUnfinished(options);
+  const { picoHome, ...reconciliation } = options;
+  return new SessionForkService({ workDir, picoHome }).reconcileUnfinished(reconciliation);
 }
 
 export async function reconcileUnfinishedSessionForksOrThrow(
   workDir: string,
-  options: ForkReconciliationOptions = {},
+  options: ForkReconciliationOptions & { readonly picoHome?: string } = {},
 ): Promise<void> {
   const results = await reconcileUnfinishedSessionForks(workDir, options);
   const blocked = results.filter(

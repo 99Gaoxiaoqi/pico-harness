@@ -109,6 +109,65 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("reports the daemon PICO_HOME in the runtime handshake", async () => {
+    const root = await temporaryRoot();
+    const picoHome = join(root, "custom-pico-home");
+    const service = new WorkspaceRuntimeService({
+      env: { PICO_HOME: picoHome },
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+      execute: async () => undefined,
+    });
+    try {
+      await expect(service.handle(createRuntimeRequest("runtime.ping", {}))).resolves.toMatchObject(
+        {
+          pong: true,
+          picoHome,
+          capabilities: expect.arrayContaining(["shared-config-v1"]),
+        },
+      );
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("filters replayed and live events by the subscribed workspace cursor", async () => {
+    const root = await temporaryRoot();
+    const firstWorkspace = join(root, "workspace-a");
+    const secondWorkspace = join(root, "workspace-b");
+    await Promise.all([mkdir(firstWorkspace), mkdir(secondWorkspace)]);
+    const canonicalFirst = await realpath(firstWorkspace);
+    const canonicalSecond = await realpath(secondWorkspace);
+    const service = new FixtureRuntimeService(canonicalFirst);
+    service.emit("run.started", { runId: "run-b-1" }, canonicalSecond);
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "test-user",
+    });
+    const daemon = new LocalRuntimeDaemon({ endpoint, service });
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      await daemon.start();
+      const received: RuntimeEvent[] = [];
+      const replayed = await client.subscribe(
+        (event) => received.push(event),
+        undefined,
+        firstWorkspace,
+      );
+      expect(replayed).toEqual([
+        expect.objectContaining({ scope: { workspacePath: canonicalFirst } }),
+      ]);
+
+      service.emit("run.updated", { runId: "run-b-2" }, canonicalSecond);
+      const expected = service.emit("run.updated", { runId: "run-a-2" }, canonicalFirst);
+      await waitFor(() => received.length === 1);
+
+      expect(received).toEqual([expected]);
+    } finally {
+      client.close();
+      await daemon.stop();
+    }
+  });
+
   it("canonicalizes workspaces so aliases share one runtime while distinct workspaces stay isolated", async () => {
     const root = await temporaryRoot();
     const firstPath = join(root, "first");
@@ -280,6 +339,43 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("preserves durable event order when workspace events share a timestamp", async () => {
+    const root = await temporaryRoot();
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const canonicalWorkspace = await realpath(workspace);
+    const service = new WorkspaceRuntimeService({ execute: async () => undefined });
+    try {
+      service.publishDesktopEvent(
+        createRuntimeEvent({
+          eventId: "z-started",
+          topic: "run.started",
+          scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          resourceVersion: 1,
+          at: 1_000,
+          payload: { runId: "run-1" },
+        }),
+      );
+      service.publishDesktopEvent(
+        createRuntimeEvent({
+          eventId: "a-finished",
+          topic: "run.finished",
+          scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          resourceVersion: 2,
+          at: 1_000,
+          payload: { runId: "run-1" },
+        }),
+      );
+
+      await expect(service.replayEvents({ workspacePath: workspace })).resolves.toMatchObject([
+        { eventId: "z-started", topic: "run.started" },
+        { eventId: "a-finished", topic: "run.finished" },
+      ]);
+    } finally {
+      await service.close();
+    }
+  });
+
   async function temporaryRoot(): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-ipc-"));
     cleanup.push(root);
@@ -359,13 +455,12 @@ class FixtureRuntimeService implements LocalRuntimeService {
     afterEventId?: string;
     workspacePath?: string;
   }): Promise<readonly RuntimeEvent[]> {
-    const scoped = (events: readonly RuntimeEvent[]) =>
-      cursor.workspacePath
-        ? events.filter((event) => event.scope.workspacePath === cursor.workspacePath)
-        : events;
-    if (!cursor.afterEventId) return scoped(this.events);
-    const index = this.events.findIndex((event) => event.eventId === cursor.afterEventId);
-    return index < 0 ? [] : scoped(this.events.slice(index + 1));
+    const events = cursor.workspacePath
+      ? this.events.filter((event) => event.scope.workspacePath === cursor.workspacePath)
+      : this.events;
+    if (!cursor.afterEventId) return events;
+    const index = events.findIndex((event) => event.eventId === cursor.afterEventId);
+    return index < 0 ? [] : events.slice(index + 1);
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {

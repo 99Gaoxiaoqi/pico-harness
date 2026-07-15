@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import { CommandRegistry } from "../../src/input/command-registry.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import { processUserInput } from "../../src/input/process-user-input.js";
 import type { SlashCommand } from "../../src/input/types.js";
 import { globalApprovalManager } from "../../src/approval/manager.js";
 import { runAgentFromCli } from "../../src/cli/run-agent.js";
@@ -37,6 +38,7 @@ import {
   handleTuiRunningInputSubmission,
   coordinateTuiStartupSettings,
   resolveTuiStartupModelRoute,
+  resolveTuiStartupSettingDefaults,
   resolveTuiPromptModelRoute,
 } from "../../src/tui/repl.js";
 import { ModelRouter, type ModelRoute } from "../../src/provider/model-router.js";
@@ -142,6 +144,16 @@ describe("TUI input routing", () => {
     expect(explicit).toMatchObject({ thinkingEffort: "off", thinkingEffortExplicit: true });
     expect(coordinateTuiStartupSettings(restored, router, route)).toBe("high");
     expect(restored).toMatchObject({ thinkingEffort: "high", thinkingEffortExplicit: true });
+  });
+
+  it("新 TUI Session 应用 effective mode/thinking，显式 CLI thinking 优先", () => {
+    expect(resolveTuiStartupSettingDefaults({ mode: "plan", thinkingEffort: "high" })).toEqual({
+      mode: "plan",
+      thinkingEffort: "high",
+    });
+    expect(
+      resolveTuiStartupSettingDefaults({ mode: "plan", thinkingEffort: "high" }, "off"),
+    ).toEqual({ mode: "plan", thinkingEffort: "off" });
   });
 
   it("Markdown command 模型只覆盖本轮，未知路由失败且不改写 Session", () => {
@@ -262,6 +274,49 @@ describe("TUI input routing", () => {
     dispatchModelSelectorSelection("kimi-k2.5", onSubmit);
 
     expect(onSubmit).toHaveBeenCalledWith("/model kimi-k2.5");
+  });
+
+  it("App/TUI 配置变更后 /model 在空闲边界刷新路由目录", async () => {
+    const initial = testRoute("shared/model-a");
+    const added = testRoute("shared/model-b");
+    const initialRouter = new ModelRouter([initial], { TEST_API_KEY: "test-key" }, initial.id);
+    const refreshedRouter = new ModelRouter(
+      [initial, added],
+      { TEST_API_KEY: "test-key" },
+      initial.id,
+    );
+    const refresh = vi.fn(async () => refreshedRouter);
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: initial.model,
+      modelRouteId: initial.id,
+      modelRouter: initialRouter,
+      modelRouterProvider: refresh,
+      sessionId: "tui-live-model-catalog",
+    });
+
+    const opened = await processUserInput("/model", { registry });
+    expect(opened.type).toBe("local-command");
+    if (opened.type !== "local-command") return;
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(
+      resolveLocalTuiCommandUiEffect(opened.result, {
+        models: [{ id: initial.id, name: initial.model }],
+      }),
+    ).toMatchObject({
+      kind: "dialog",
+      models: [
+        { id: initial.id, name: initial.model },
+        { id: added.id, name: added.model },
+      ],
+    });
+
+    const selected = await processUserInput(`/model ${added.id}`, { registry });
+    expect(selected).toMatchObject({
+      type: "local-command",
+      result: { data: { ok: true, modelRouteId: added.id } },
+    });
   });
 
   it("/model with an explicit argument does not open the selector", () => {

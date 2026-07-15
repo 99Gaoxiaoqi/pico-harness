@@ -1,5 +1,9 @@
 import type { Message, Usage } from "../schema/message.js";
 import {
+  assertTranscriptEvent,
+  type TranscriptEvent,
+} from "../presentation/transcript-event-store.js";
+import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
   type SessionRuntimeStatePatch,
@@ -158,6 +162,14 @@ export interface RuntimeSessionStateCommittedEvent extends RuntimeEventBase {
   };
 }
 
+/** UI-neutral structured transcript fact persisted in the canonical Session ledger. */
+export interface RuntimeTranscriptEventRecordedEvent extends RuntimeEventBase {
+  readonly kind: "transcript.event.recorded";
+  readonly data: {
+    readonly event: TranscriptEvent;
+  };
+}
+
 export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
   readonly kind: "run.terminal";
   readonly data: {
@@ -179,6 +191,7 @@ export type RuntimeEvent =
   | RuntimeHistoryRewoundEvent
   | RuntimeSessionForkedEvent
   | RuntimeSessionStateCommittedEvent
+  | RuntimeTranscriptEventRecordedEvent
   | RuntimeRunTerminalEvent;
 
 export const RUNTIME_EVENT_KINDS = [
@@ -193,6 +206,7 @@ export const RUNTIME_EVENT_KINDS = [
   "history.rewound",
   "session.forked",
   "session.state.committed",
+  "transcript.event.recorded",
   "run.terminal",
 ] as const satisfies readonly RuntimeEvent["kind"][];
 
@@ -387,6 +401,15 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       return;
     }
+    case "transcript.event.recorded":
+      try {
+        assertTranscriptEvent(value["data"]["event"]);
+      } catch (error) {
+        throw new RuntimeEventIntegrityError(
+          `Runtime transcript event is invalid: ${errorMessage(error)}`,
+        );
+      }
+      return;
     case "run.terminal":
       if (!isTerminalStatus(value["data"]["status"])) {
         throw new RuntimeEventIntegrityError("Runtime terminal status is invalid");

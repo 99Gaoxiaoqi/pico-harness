@@ -12,6 +12,7 @@ import {
   MAX_RUNTIME_FRAME_BYTES,
   parseRuntimeMessage,
   parseRuntimeParams,
+  parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RUNTIME_METHODS,
   RuntimeFrameDecoder,
@@ -52,7 +53,18 @@ describe("desktop runtime protocol contract", () => {
     expect(RUNTIME_METHODS).toEqual(
       expect.arrayContaining([
         "runtime.ping",
+        "workspace.init",
+        "diagnostics.run",
+        "diagnostics.resources",
         "session.list",
+        "session.rename",
+        "session.fork",
+        "session.compact",
+        "session.settings.get",
+        "session.settings.update",
+        "goal.get",
+        "session.send",
+        "session.transcript",
         "run.start",
         "run.pause",
         "run.resume",
@@ -66,6 +78,18 @@ describe("desktop runtime protocol contract", () => {
         "jobs.list",
         "jobs.create",
         "config.get",
+        "config.user.get",
+        "config.user.update",
+        "config.effective.get",
+        "provider.list",
+        "provider.upsert",
+        "provider.importEnvironment",
+        "provider.delete",
+        "provider.credential.status",
+        "provider.credential.set",
+        "provider.credential.delete",
+        "catalog.agents",
+        "catalog.skills",
         "usage.get",
         "workspace.register",
         "workspace.status",
@@ -107,6 +131,77 @@ describe("desktop runtime protocol contract", () => {
     );
   });
 
+  it("validates exact method params at privileged UI boundaries", () => {
+    expect(parseRuntimeParams("runtime.ping", { probe: true })).toEqual({ probe: true });
+    expectProtocolError(
+      () => parseStrictRuntimeParams("runtime.ping", { probe: true }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+    expectProtocolError(
+      () =>
+        parseStrictRuntimeParams("session.rename", {
+          workspacePath: "/tmp",
+          sessionId: "session-1",
+          title: "renamed",
+          extra: true,
+        }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+    expectProtocolError(
+      () =>
+        parseStrictRuntimeParams("session.send", {
+          workspacePath: "/tmp",
+          input: { kind: "text", text: "hello", injected: true },
+          idempotencyKey: "send-1",
+        }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+    expect(
+      parseStrictRuntimeParams("provider.upsert", {
+        provider: {
+          id: "local",
+          protocol: "openai",
+          baseURL: "https://example.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+          models: ["coder"],
+          discoverModels: false,
+        },
+        expectedRevision: "revision",
+      }),
+    ).toMatchObject({ provider: { id: "local" } });
+    expect(
+      parseStrictRuntimeParams("provider.importEnvironment", {
+        provider: {
+          id: "local",
+          protocol: "openai",
+          baseURL: "https://example.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+          models: ["coder"],
+          discoverModels: false,
+        },
+        defaultModel: "coder",
+        secret: "write-only-secret",
+        expectedRevision: "revision",
+      }),
+    ).toMatchObject({ provider: { id: "local" }, defaultModel: "coder" });
+  });
+
+  it("keeps provider credentials write-only at the protocol result boundary", () => {
+    const request = createTypedRuntimeRequest("provider.credential.set", {
+      providerId: "openai",
+      secret: "local-test-secret",
+      expectedProviderFingerprint: "f".repeat(64),
+    });
+
+    expect(request.params.secret).toBe("local-test-secret");
+    expectTypeOf<RuntimeResult<"provider.credential.set">>().not.toHaveProperty("secret");
+    expectTypeOf<RuntimeResult<"provider.credential.status">>().not.toHaveProperty("secret");
+    expectTypeOf<RuntimeResult<"provider.importEnvironment">>().not.toHaveProperty("secret");
+    expectTypeOf<
+      RuntimeResult<"provider.credential.status">["storedCredentialPresent"]
+    >().toEqualTypeOf<boolean>();
+  });
+
   it("decodes fragmented frames and rejects frames beyond 1 MB", () => {
     const request = createRuntimeRequest("runtime.ping", { probe: true });
     const frame = encodeRuntimeFrame(request);
@@ -129,10 +224,44 @@ describe("desktop runtime protocol contract", () => {
     );
   });
 
+  it("releases consumed credential frames and detaches a fragmented remainder", () => {
+    const decoder = new RuntimeFrameDecoder();
+    const credential = encodeRuntimeFrame(
+      createTypedRuntimeRequest("provider.credential.set", {
+        providerId: "openai",
+        secret: "sentinel-local-secret",
+        expectedProviderFingerprint: "f".repeat(64),
+      }),
+    );
+    const next = encodeRuntimeFrame(createRuntimeRequest("runtime.ping", {}));
+    const combined = Buffer.concat([credential, next.subarray(0, 3)]);
+
+    expect(decoder.push(combined)).toHaveLength(1);
+    const fragmented = decoderPending(decoder);
+    expect(fragmented).toEqual(next.subarray(0, 3));
+    expect(fragmented.buffer).not.toBe(combined.buffer);
+    combined.fill(0);
+    expect(decoder.push(next.subarray(3))).toHaveLength(1);
+
+    const empty = decoderPending(decoder);
+    expect(empty.byteLength).toBe(0);
+    expect(empty.buffer).not.toBe(next.buffer);
+  });
+
   it("exposes method and event maps for end-to-end type inference", () => {
     type StartParams = RuntimeParams<"run.start">;
     type StartResult = RuntimeResult<"run.start">;
     type ApprovalPayload = RuntimeEventMap["approval.requested"];
+    type SessionSendParams = RuntimeParams<"session.send">;
+    type TranscriptResult = RuntimeResult<"session.transcript">;
+    type CompactResult = RuntimeResult<"session.compact">;
+    type SettingsUpdate = RuntimeParams<"session.settings.update">;
+    type SettingsResult = RuntimeResult<"session.settings.get">;
+    type GoalResult = RuntimeResult<"goal.get">;
+    type AgentCatalogResult = RuntimeResult<"catalog.agents">;
+    type WorkspaceInitResult = RuntimeResult<"workspace.init">;
+    type DiagnosticsResult = RuntimeResult<"diagnostics.run">;
+    type ResourceDiagnosticsResult = RuntimeResult<"diagnostics.resources">;
 
     expectTypeOf<StartParams>().toMatchTypeOf<{
       workspacePath: string;
@@ -140,6 +269,37 @@ describe("desktop runtime protocol contract", () => {
     }>();
     expectTypeOf<StartResult["runId"]>().toMatchTypeOf<string>();
     expectTypeOf<ApprovalPayload["request"]>().toMatchTypeOf<Record<string, unknown>>();
+    expectTypeOf<SessionSendParams["behavior"]>().toEqualTypeOf<
+      "auto" | "steer" | "queue" | "replace" | undefined
+    >();
+    expectTypeOf<TranscriptResult["revision"]>().toEqualTypeOf<string>();
+    expectTypeOf<CompactResult["compacted"]>().toEqualTypeOf<true>();
+    expectTypeOf<SettingsUpdate["permissions"]>().toEqualTypeOf<
+      "default" | "plan" | "auto" | "yolo" | undefined
+    >();
+    expectTypeOf<SettingsResult["settings"]["permissions"]>().toEqualTypeOf<
+      SettingsResult["settings"]["mode"]
+    >();
+    expectTypeOf<GoalResult["goal"]>().toMatchTypeOf<{
+      readonly activeGoalId: string | null;
+    } | null>();
+    expectTypeOf<SessionSendParams["input"]>().toMatchTypeOf<
+      | { kind?: "text"; text: string }
+      | { kind: "skill"; name: string; args?: string }
+      | { kind: "agent"; name: string; task: string }
+    >();
+    expectTypeOf<AgentCatalogResult["agents"][number]["tools"]>().toEqualTypeOf<
+      readonly string[]
+    >();
+    expectTypeOf<WorkspaceInitResult["files"][number]["status"]>().toEqualTypeOf<
+      "created" | "existing"
+    >();
+    expectTypeOf<DiagnosticsResult["checks"][number]["status"]>().toEqualTypeOf<
+      "ok" | "warning" | "error" | "unavailable"
+    >();
+    expectTypeOf<ResourceDiagnosticsResult["entries"][number]["origin"]>().toEqualTypeOf<
+      "claude-compat" | "legacy" | "pico-native" | "runtime-state"
+    >();
     expectTypeOf<keyof RuntimeMethodMap>().toEqualTypeOf<(typeof RUNTIME_METHODS)[number]>();
 
     const request = createTypedRuntimeRequest("run.start", {
@@ -150,6 +310,10 @@ describe("desktop runtime protocol contract", () => {
     expect(request.params.prompt).toBe("fix tests");
   });
 });
+
+function decoderPending(decoder: RuntimeFrameDecoder): Buffer {
+  return (decoder as unknown as { readonly pending: Buffer }).pending;
+}
 
 function requestJson(method: string, params: unknown): string {
   return JSON.stringify({

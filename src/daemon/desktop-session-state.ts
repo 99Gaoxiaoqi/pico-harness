@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 const DESKTOP_SESSION_STATE_VERSION = 1 as const;
@@ -20,6 +20,8 @@ interface DesktopSessionStateFile {
 
 export interface DesktopSessionStateStoreOptions {
   readonly filePath?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly picoHome?: string;
   readonly now?: () => number;
 }
 
@@ -33,7 +35,13 @@ export class DesktopSessionStateStore {
   private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: DesktopSessionStateStoreOptions = {}) {
-    this.filePath = options.filePath ?? join(homedir(), ".pico", "desktop", "session-state.json");
+    this.filePath =
+      options.filePath ??
+      join(
+        resolvePicoHome({ env: options.env, picoHome: options.picoHome }),
+        "desktop",
+        "session-state.json",
+      );
     this.now = options.now ?? Date.now;
   }
 

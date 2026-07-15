@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { tmpdir } from "node:os";
 import {
+  assertCredentialRefMatchesProvider,
   assertCredentialRefMatchesModelRoute,
   CredentialVaultUnavailableError,
   MacOsKeychainCredentialVault,
   createPlatformCredentialVault,
+  credentialRefForProvider,
   credentialRefForModelRoute,
+  importProviderCredential,
+  parseAnyCredentialRef,
+  parseCredentialRef,
+  parseProviderCredentialRef,
 } from "../../src/provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 
@@ -29,6 +35,66 @@ describe("Provider credential vault integration", () => {
     expect(ref).not.toContain("vault-secret");
   });
 
+  it("使用固定 argv 删除 macOS Keychain 凭证，不把 secret 或 stdin 传给删除命令", async () => {
+    const calls: Array<{ args: readonly string[]; stdin?: string }> = [];
+    const vault = new MacOsKeychainCredentialVault({
+      run: async (args, stdin) => {
+        calls.push({ args, ...(stdin !== undefined ? { stdin } : {}) });
+        return "";
+      },
+    });
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example/v1",
+    });
+
+    await vault.delete(ref);
+
+    expect(calls).toEqual([
+      {
+        args: ["delete-generic-password", "-a", ref, "-s", "dev.pico.runtime.provider"],
+      },
+    ]);
+    expect(calls[0]?.args.join(" ")).not.toContain("vault-secret");
+  });
+
+  it("检查凭证存在性时不使用 -w 读取明文，且只将 item-not-found 映射为 false", async () => {
+    const calls: string[][] = [];
+    let outcome: "found" | "missing" | "denied" = "found";
+    const vault = new MacOsKeychainCredentialVault({
+      run: async (args) => {
+        calls.push([...args]);
+        if (outcome === "missing") {
+          throw new Error("The specified item could not be found in the keychain.");
+        }
+        if (outcome === "denied") throw new Error("User interaction is not allowed");
+        return "keychain metadata only";
+      },
+    });
+    const ref = credentialRefForProvider({
+      providerId: "status-only",
+      protocol: "openai",
+      baseURL: "https://provider.example/v1",
+    });
+
+    await expect(vault.has(ref)).resolves.toBe(true);
+    expect(calls[0]).toEqual([
+      "find-generic-password",
+      "-a",
+      ref,
+      "-s",
+      "dev.pico.runtime.provider",
+    ]);
+    expect(calls[0]).not.toContain("-w");
+
+    outcome = "missing";
+    await expect(vault.has(ref)).resolves.toBe(false);
+    outcome = "denied";
+    await expect(vault.has(ref)).rejects.toThrow("User interaction is not allowed");
+    await expect(vault.resolve(ref)).rejects.toThrow("User interaction is not allowed");
+  });
+
   it("未验证的平台明确诊断并 fail-closed，不回退到文件或进程环境", async () => {
     const vault = createPlatformCredentialVault("linux");
     const ref = credentialRefForModelRoute(
@@ -41,6 +107,19 @@ describe("Provider credential vault integration", () => {
     await expect(vault.put(ref, "must-not-persist")).rejects.toBeInstanceOf(
       CredentialVaultUnavailableError,
     );
+    await expect(vault.delete(ref)).rejects.toBeInstanceOf(CredentialVaultUnavailableError);
+  });
+
+  it("macOS 通用 security CLI 默认 fail-closed，仅显式不安全开发开关可启用", async () => {
+    const production = createPlatformCredentialVault("darwin", {});
+    expect(production.capability()).toMatchObject({ available: false, backend: "unavailable" });
+    expect(production.capability().diagnostic).toContain("Agent Shell");
+
+    const development = createPlatformCredentialVault("darwin", {
+      PICO_UNSAFE_KEYCHAIN_CLI: "1",
+    });
+    expect(development.capability()).toMatchObject({ available: true, backend: "macos-keychain" });
+    expect(development.capability().diagnostic).toContain("不安全开发模式");
   });
 
   it("把凭证引用绑定到工作区和 Provider 端点，配置漂移时 fail-closed", () => {
@@ -63,6 +142,94 @@ describe("Provider credential vault integration", () => {
         workspace,
       ),
     ).toThrow(/不匹配/u);
+  });
+
+  it("保留 v1 解析契约，并由通用解析器显式区分 v1 和 v2", () => {
+    const route = modelRoute("provider/model", "https://provider.example/v1");
+    const legacyRef = credentialRefForModelRoute(route, process.cwd());
+    const providerRef = credentialRefForProvider({
+      providerId: "provider",
+      protocol: "openai",
+      baseURL: route.baseURL,
+    });
+
+    expect(parseCredentialRef(legacyRef).modelRouteId).toBe("provider/model");
+    expect(parseAnyCredentialRef(legacyRef)).toMatchObject({
+      version: "v1",
+      modelRouteId: "provider/model",
+    });
+    expect(parseAnyCredentialRef(providerRef)).toMatchObject({
+      version: "v2",
+      providerId: "provider",
+      protocol: "openai",
+      credentialSlot: "api-key",
+    });
+    expect(() => parseCredentialRef(providerRef)).toThrow(/v1/u);
+  });
+
+  it("将 v2 凭证绑定到 Provider、协议、规范化 Endpoint 和 slot，不绑定工作区或模型", () => {
+    const identity = {
+      providerId: "shared-provider",
+      protocol: "openai" as const,
+      baseURL: " HTTPS://Provider.Example:443/v1/ ",
+      credentialSlot: "api-key",
+    };
+    const ref = credentialRefForProvider(identity);
+    const canonicalRef = credentialRefForProvider({
+      ...identity,
+      baseURL: "https://provider.example/v1",
+    });
+
+    expect(ref).toBe(canonicalRef);
+    expect(ref).not.toContain(identity.baseURL.trim());
+    expect(parseProviderCredentialRef(ref)).toMatchObject({
+      providerId: "shared-provider",
+      protocol: "openai",
+      credentialSlot: "api-key",
+    });
+    expect(() => assertCredentialRefMatchesProvider(ref, identity)).not.toThrow();
+    expect(() =>
+      assertCredentialRefMatchesProvider(ref, {
+        ...identity,
+        baseURL: "https://attacker.example/v1",
+      }),
+    ).toThrow(/Endpoint/u);
+    expect(() =>
+      assertCredentialRefMatchesProvider(ref, { ...identity, credentialSlot: "oauth-token" }),
+    ).toThrow(/slot/u);
+    expect(() =>
+      assertCredentialRefMatchesProvider(ref, { ...identity, protocol: "claude" }),
+    ).toThrow(/协议/u);
+  });
+
+  it("导入 v2 凭证时只把 secret 交给 Vault，返回可共享的 Provider 引用", async () => {
+    const calls: Array<{ ref: string; secret: string }> = [];
+    const vault = new MacOsKeychainCredentialVault({
+      run: async (args, stdin) => {
+        if (args[0] === "add-generic-password") {
+          calls.push({ ref: args[3] ?? "", secret: stdin ?? "" });
+        }
+        return "";
+      },
+    });
+
+    const ref = await importProviderCredential({
+      provider: {
+        providerId: "shared-provider",
+        protocol: "gemini",
+        baseURL: "https://generativelanguage.googleapis.com/v1beta",
+        credentialSlot: "api-key",
+      },
+      secret: "imported-secret",
+      vault,
+    });
+
+    expect(parseProviderCredentialRef(ref)).toMatchObject({
+      providerId: "shared-provider",
+      protocol: "gemini",
+    });
+    expect(ref).not.toContain("imported-secret");
+    expect(calls).toEqual([{ ref, secret: "imported-secret\nimported-secret\n" }]);
   });
 });
 
