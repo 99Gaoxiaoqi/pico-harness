@@ -106,11 +106,13 @@ export class LocalRuntimeClient implements RuntimeClient {
     readonly dispose: () => void;
   }> {
     this.assertOpen();
+    const workspacePath = await realpath(params.workspacePath);
+    this.assertOpen();
     const subscription = new RuntimeSubscription({
       connection: this.createConnection(),
       params: {
         ...params,
-        workspacePath: await realpath(params.workspacePath),
+        workspacePath,
       },
       listener,
       reconnectDelayMs: this.reconnectDelayMs,
