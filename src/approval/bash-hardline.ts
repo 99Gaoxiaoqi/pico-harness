@@ -6,6 +6,7 @@ interface ShellWord {
   readonly dynamic: boolean;
   readonly quotedOrEscaped: boolean;
   readonly unquotedExpansion: boolean;
+  readonly outputRedirection: boolean;
 }
 
 interface ParsedShell {
@@ -41,6 +42,8 @@ function isHardlineBashCommandAtDepth(command: string, depth: number): boolean {
 }
 
 function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boolean {
+  if (hasDestructiveOutputRedirection(words)) return true;
+
   const executableIndex = findExecutableIndex(words);
   if (executableIndex < 0) return false;
 
@@ -53,6 +56,10 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   if (executable === "git" && isDestructiveGitInvocation(args)) return true;
   if (executable === "git-push" && isDestructiveGitPushInvocation(args)) return true;
   if (executable === "env" && hasEnvSplitString(args)) return true;
+  if (POWER_COMMANDS.has(executable)) return true;
+  if (POWER_MANAGERS.has(executable) && isPowerManagerInvocation(executable, args)) return true;
+  if (executable === "wipefs" && isDestructiveWipefsInvocation(args)) return true;
+  if (PERMISSION_COMMANDS.has(executable) && isProtectedMutationInvocation(args)) return true;
 
   if (SHELL_COMMANDS.has(executable)) {
     const commandIndex = args.findIndex(
@@ -100,19 +107,13 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
       return true;
     }
     const dynamicExecutableIndex = args.findIndex((word) => word.dynamic);
-    if (
-      dynamicExecutableIndex >= 0 &&
-      isDestructiveRmInvocation(args.slice(dynamicExecutableIndex + 1), false)
-    ) {
+    if (dynamicExecutableIndex === 0) {
       return true;
     }
   }
 
-  // 无法静态确认的可执行文件若携带已知破坏性参数，按 fail-closed 处理。
-  return (
-    words[executableIndex]!.dynamic &&
-    (isDestructiveRmInvocation(args, false) || isDestructiveGitInvocation(args))
-  );
+  // 可执行文件本身来自 shell 展开时无法证明不会落到系统级破坏命令。
+  return words[executableIndex]!.dynamic;
 }
 
 function isDestructiveRmInvocation(
@@ -158,6 +159,11 @@ function isDestructiveRmInvocation(
 
 function isDestructiveFindInvocation(args: readonly ShellWord[]): boolean {
   if (!args.some((word) => word.value === "-delete")) return false;
+  if (
+    args.some((word) => word.value === "-files0-from" || word.value.startsWith("-files0-from="))
+  ) {
+    return true;
+  }
 
   const roots: ShellWord[] = [];
   let optionsEnded = false;
@@ -191,23 +197,28 @@ function isFindExpressionStart(value: string): boolean {
 }
 
 function isMkfsExecutable(executable: string): boolean {
-  return /^mkfs(?:\.[a-z0-9_-]+)?$/iu.test(executable);
+  return (
+    /^mkfs(?:\.[a-z0-9_-]+)?$/iu.test(executable) ||
+    /^(?:mke2fs|mkdosfs|newfs(?:_[a-z0-9_-]+)?)$/iu.test(executable)
+  );
 }
 
 function isStructuredHardlineExecutable(executable: string): boolean {
   return (
     isMkfsExecutable(executable) ||
     executable === "dd" ||
+    executable === "env" ||
     executable === "git" ||
-    executable === "git-push"
+    executable === "git-push" ||
+    executable === "wipefs" ||
+    POWER_COMMANDS.has(executable) ||
+    POWER_MANAGERS.has(executable) ||
+    PERMISSION_COMMANDS.has(executable)
   );
 }
 
 function isDestructiveMkfsInvocation(args: readonly ShellWord[]): boolean {
-  return args.some(
-    (word) =>
-      word.dynamic || isDeviceTarget(word.value) || isPotentiallyProtectedAbsoluteExpansion(word),
-  );
+  return args.some((word) => isProtectedMutationTarget(word));
 }
 
 function isDestructiveDdInvocation(args: readonly ShellWord[]): boolean {
@@ -215,20 +226,18 @@ function isDestructiveDdInvocation(args: readonly ShellWord[]): boolean {
     if (word.dynamic) return true;
     const output = word.value.match(/^of=(.*)$/su)?.[1];
     if (output === undefined) return false;
-    return (
-      isDeviceTarget(output) || isPotentiallyProtectedAbsoluteExpansion({ ...word, value: output })
-    );
+    const outputTarget = { ...word, value: output };
+    return isProtectedMutationTarget(outputTarget);
   });
-}
-
-function isDeviceTarget(target: string): boolean {
-  const normalized = normalizeSlashPath(target.replaceAll("\\", "/"));
-  return normalized === "/dev" || normalized.startsWith("/dev/");
 }
 
 function isDestructiveGitInvocation(args: readonly ShellWord[]): boolean {
   const subcommandIndex = findGitSubcommandIndex(args);
-  if (subcommandIndex < 0 || args[subcommandIndex]!.value !== "push") return false;
+  if (subcommandIndex < 0) return false;
+  if (args[subcommandIndex]!.dynamic) {
+    return isDestructiveGitPushInvocation(args.slice(subcommandIndex + 1));
+  }
+  if (args[subcommandIndex]!.value !== "push") return false;
   return isDestructiveGitPushInvocation(args.slice(subcommandIndex + 1));
 }
 
@@ -254,9 +263,9 @@ function isDestructiveGitPushInvocation(args: readonly ShellWord[]): boolean {
       word.dynamic ||
       matchesLongOption(value, "--force") ||
       matchesLongOption(value, "--force-with-lease") ||
-      value === "--delete" ||
-      value === "--mirror" ||
-      value === "--prune" ||
+      matchesLongOption(value, "--delete") ||
+      matchesLongOption(value, "--mirror") ||
+      matchesLongOption(value, "--prune") ||
       /^-[^-]*f/u.test(value) ||
       /^-[^-]*d/u.test(value) ||
       ((value.startsWith("+") || value.startsWith(":")) && value.length > 1)
@@ -270,6 +279,63 @@ function hasEnvSplitString(args: readonly ShellWord[]): boolean {
     if (value === "--") return false;
     if (/^-[^-]*S/u.test(value)) return true;
     if (value === "--split-string" || value.startsWith("--split-string=")) return true;
+  }
+  return false;
+}
+
+function isPowerManagerInvocation(executable: string, args: readonly ShellWord[]): boolean {
+  if (executable === "init" || executable === "telinit") {
+    return args.some((word) => word.dynamic || word.value === "0" || word.value === "6");
+  }
+  return args.some((word) => word.dynamic || POWER_ACTIONS.has(word.value.toLowerCase()));
+}
+
+function isDestructiveWipefsInvocation(args: readonly ShellWord[]): boolean {
+  const destructive = args.some((word) => {
+    const value = word.value;
+    return (
+      word.dynamic ||
+      value === "--all" ||
+      value === "--offset" ||
+      value.startsWith("--offset=") ||
+      (/^-[^-]/u.test(value) && /[ao]/u.test(value.slice(1)))
+    );
+  });
+  return destructive && args.some((word) => isProtectedMutationTarget(word));
+}
+
+function isProtectedMutationInvocation(args: readonly ShellWord[]): boolean {
+  return args.some((word) => isProtectedMutationTarget(word));
+}
+
+function isProtectedMutationTarget(target: ShellWord): boolean {
+  return (
+    target.dynamic ||
+    isProtectedRmTarget(target.value) ||
+    isPotentiallyProtectedAbsoluteExpansion(target)
+  );
+}
+
+function hasDestructiveOutputRedirection(words: readonly ShellWord[]): boolean {
+  for (let index = 0; index < words.length; index++) {
+    const redirection = words[index]!;
+    if (!redirection.outputRedirection) continue;
+
+    const match = redirection.value.match(/^(?:\d+|\{[^}]+\}|&)?(?:>\||>>?)(.*)$/su);
+    if (!match) continue;
+    let attachedTarget = match[1] ?? "";
+    let target: ShellWord | undefined;
+
+    if (attachedTarget === "" || attachedTarget === "&") {
+      target = words[index + 1];
+    } else if (/^&(?:\d+|-)$/u.test(attachedTarget)) {
+      continue;
+    } else {
+      if (attachedTarget.startsWith("&")) attachedTarget = attachedTarget.slice(1);
+      target = { ...redirection, value: attachedTarget, outputRedirection: false };
+    }
+
+    if (target && isProtectedMutationTarget(target)) return true;
   }
   return false;
 }
@@ -422,7 +488,7 @@ function hasRecursiveAndForceFlags(words: readonly ShellWord[]): boolean {
 
 function matchesLongOption(
   value: string,
-  canonical: "--recursive" | "--force" | "--force-with-lease",
+  canonical: "--delete" | "--force" | "--force-with-lease" | "--mirror" | "--prune" | "--recursive",
 ): boolean {
   const optionName = value.split("=", 1)[0]!;
   return optionName.length > 2 && canonical.startsWith(optionName);
@@ -436,17 +502,19 @@ function parseShell(command: string): ParsedShell {
   let dynamic = false;
   let quotedOrEscaped = false;
   let unquotedExpansion = false;
+  let outputRedirection = false;
   let tokenStarted = false;
   let quote: "single" | "double" | undefined;
   let ambiguous = false;
 
   const finishWord = (): void => {
     if (!tokenStarted) return;
-    words.push({ value, dynamic, quotedOrEscaped, unquotedExpansion });
+    words.push({ value, dynamic, quotedOrEscaped, unquotedExpansion, outputRedirection });
     value = "";
     dynamic = false;
     quotedOrEscaped = false;
     unquotedExpansion = false;
+    outputRedirection = false;
     tokenStarted = false;
   };
   const finishCommand = (): void => {
@@ -553,6 +621,29 @@ function parseShell(command: string): ParsedShell {
       while (index + 1 < command.length && command[index + 1] !== "\n") index++;
       continue;
     }
+    if (char === "&" && next === ">") {
+      if (tokenStarted) finishWord();
+      value = "&";
+      outputRedirection = true;
+      tokenStarted = true;
+      continue;
+    }
+    if (char === ">") {
+      if (outputRedirection && outputRedirectionHasTarget(value)) {
+        finishWord();
+      } else if (!outputRedirection && tokenStarted && !canPrefixOutputRedirection(value)) {
+        finishWord();
+      }
+      outputRedirection = true;
+      value += char;
+      tokenStarted = true;
+      continue;
+    }
+    if (outputRedirection && value.endsWith(">") && (char === "&" || char === "|")) {
+      value += char;
+      tokenStarted = true;
+      continue;
+    }
     if (char === ";" || char === "\n" || char === "|" || char === "&") {
       finishCommand();
       continue;
@@ -584,6 +675,15 @@ function parseShell(command: string): ParsedShell {
   if (quote !== undefined) ambiguous = true;
   finishCommand();
   return { commands, nestedCommands, ambiguous };
+}
+
+function canPrefixOutputRedirection(value: string): boolean {
+  return /^(?:\d+|\{[^}]+\})$/u.test(value);
+}
+
+function outputRedirectionHasTarget(value: string): boolean {
+  const target = value.match(/^(?:\d+|\{[^}]+\}|&)?(?:>\||>>?)(.*)$/su)?.[1];
+  return target !== undefined && target !== "" && target !== "&";
 }
 
 function isStandaloneGroupingBrace(command: string, index: number): boolean {
@@ -707,6 +807,23 @@ const RM_FORWARDING_COMMANDS: ReadonlySet<string> = new Set([
 
 const FIND_PRE_PATH_OPTIONS: ReadonlySet<string> = new Set(["-H", "-L", "-P"]);
 
+const POWER_COMMANDS: ReadonlySet<string> = new Set([
+  "halt",
+  "halt.exe",
+  "poweroff",
+  "poweroff.exe",
+  "reboot",
+  "reboot.exe",
+  "shutdown",
+  "shutdown.exe",
+]);
+
+const POWER_MANAGERS: ReadonlySet<string> = new Set(["init", "loginctl", "systemctl", "telinit"]);
+
+const POWER_ACTIONS: ReadonlySet<string> = new Set(["halt", "poweroff", "reboot"]);
+
+const PERMISSION_COMMANDS: ReadonlySet<string> = new Set(["chgrp", "chmod", "chown"]);
+
 const GIT_GLOBAL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
   "-C",
   "-c",
@@ -738,8 +855,4 @@ const CRITICAL_POSIX_ROOTS: readonly string[] = [
   "/var",
 ];
 
-const OTHER_HARDLINE_PATTERNS: readonly RegExp[] = [
-  /:\(\)\s*\{/u,
-  /\bshutdown\b/iu,
-  /\breboot\b/iu,
-];
+const OTHER_HARDLINE_PATTERNS: readonly RegExp[] = [/:\(\)\s*\{/u];
