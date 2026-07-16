@@ -1,9 +1,89 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { isHardlineBashCommand } from "../../src/approval/bash-hardline.js";
 import { isHardlineCommand } from "../../src/approval/manager.js";
 import { buildForegroundSafetyMiddleware } from "../../src/runtime/agent-runtime.js";
 import { evaluateYoloToolCall } from "../../src/safety/yolo-sandbox.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
+
+test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
+  const dangerous = [
+    "rm -rf /etc{,}",
+    "rm -rf /u?r",
+    "rm -rf /u[s]r",
+    "rm -rf /et*",
+    'rm -rf "/e"t*',
+    "rm -rf {/etc,./tmp}",
+    "rm -rf /tmp/../et*",
+    "rm -rf ./../etc",
+    "rm -rf C:/Temp/../../Wind*",
+    "rm -rf /home",
+    "rm -rf /Users",
+    "rm -rf C:/Users",
+    "rm -rf /c/Users",
+    'set -- -rf /etc; rm "$@"',
+    "opts=-rf; target=/etc; rm $opts $target",
+    "rm --recurs --forc /etc",
+    "rm -r ~",
+    "rm -r /etc",
+    "rm -f ~/.bashrc",
+    "rm /etc/passwd",
+    'find "$HOME" -delete',
+    "find /etc -delete",
+    "find ./../etc -delete",
+    'find "$ROOT" -delete',
+    "find /et* -delete",
+    "sudo find /etc -delete",
+    "mkfs.ext4 -F /dev/sda",
+    "mkfs -t ext4 /dev/sda",
+    "mkfs.ext4 /d?v/sda",
+    "mkfs.ext4 /de[v]/sda",
+    "mkfs.ext4 /de{v,ad}/sda",
+    "sudo mkfs.xfs -f /dev/sdb",
+    "dd of=/dev/sda if=/dev/zero",
+    "dd if=/dev/zero status=progress of=/dev/sda",
+    "dd if=/dev/zero of=/d?v/sda",
+    "sudo dd if=/dev/zero of=/dev/disk0",
+    "git push origin main --force",
+    "git push --force origin main",
+    "git push origin +HEAD:main",
+    "git -C . push --force origin main",
+    "sudo git -C . push origin +HEAD:main",
+    "FORCE=--force; git push origin main $FORCE",
+    "git push origin main $(printf -- --force)",
+    "git push --force-with-lease origin main",
+  ];
+
+  for (const command of dangerous) {
+    assert.equal(isHardlineBashCommand(command), true, command);
+  }
+
+  const ordinary = [
+    "rm -rf ./dist*",
+    "rm -rf packages/{generated,cache}",
+    'rm -rf "/et*"',
+    "rm -rf /et\\*",
+    "rm -rf /tmp/pico-*",
+    "rm -r ./dist",
+    "rm -f ./config.json",
+    "rm ./generated.txt",
+    "find . -delete",
+    "find /tmp/pico-cache -delete",
+    "find /Users/alice/project -delete",
+    'find . -name "$PATTERN" -delete',
+    "mkfs.ext4 ./disk.img",
+    "dd if=/dev/zero of=./disk.img",
+    "git push origin main",
+    "git -C . push origin feature",
+    'printf "%s\\n" "mkfs.ext4 -F /dev/sda"',
+    'printf "%s\\n" "dd of=/dev/sda if=/dev/zero"',
+    'printf "%s\\n" "git push origin main --force"',
+  ];
+
+  for (const command of ordinary) {
+    assert.equal(isHardlineBashCommand(command), false, command);
+  }
+});
 
 test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", async () => {
   const workDir = process.cwd();
