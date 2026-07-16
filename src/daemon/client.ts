@@ -157,11 +157,16 @@ interface RuntimeSubscriptionOptions {
   readonly onDispose: () => void;
 }
 
+interface RuntimeReplayCycle {
+  /** Complete replay identity set for this cycle; independent from the long-lived 10k LRU. */
+  readonly replayedEventIds: Set<string>;
+  readonly pendingLiveEvents: RuntimeNotification[];
+}
+
 class RuntimeSubscription {
   private readonly seenEventIds = new Set<string>();
-  private readonly pendingLiveEvents: RuntimeNotification[] = [];
+  private replayCycle?: RuntimeReplayCycle;
   private lastEventId?: string;
-  private bufferingLiveEvents = false;
   private reconnectTimer?: NodeJS.Timeout;
   private reconnectAttempt = 0;
   private disposed = false;
@@ -182,7 +187,7 @@ class RuntimeSubscription {
     this.disposed = true;
     this.cancelReconnect();
     this.options.connection.close();
-    this.pendingLiveEvents.length = 0;
+    this.discardReplayCycle();
     this.options.onDispose();
   }
 
@@ -192,7 +197,8 @@ class RuntimeSubscription {
     if (this.disposed) {
       throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "Runtime 事件订阅已关闭", true);
     }
-    this.bufferingLiveEvents = true;
+    const replayCycle = this.beginReplayCycle();
+    let replayComplete = false;
     try {
       const firstPage = await this.options.connection.request("events.subscribe", {
         workspacePath: this.options.params.workspacePath,
@@ -204,6 +210,9 @@ class RuntimeSubscription {
       const highWatermarkEventId = firstPage.highWatermarkEventId;
       while (true) {
         for (const event of page.events) {
+          const replayedInCycle = replayCycle.replayedEventIds.has(event.eventId);
+          if (this.matchesWorkspace(event)) replayCycle.replayedEventIds.add(event.eventId);
+          if (replayedInCycle) continue;
           if (!this.acceptEvent(event)) continue;
           if (!deliverReplay && first) events.push(event);
           else this.notify(event);
@@ -228,6 +237,7 @@ class RuntimeSubscription {
         first = false;
       }
       this.reconnectAttempt = 0;
+      replayComplete = true;
       return {
         subscribed: true,
         events,
@@ -236,15 +246,14 @@ class RuntimeSubscription {
         ...(highWatermarkEventId ? { highWatermarkEventId } : {}),
       };
     } finally {
-      this.bufferingLiveEvents = false;
-      for (const event of this.pendingLiveEvents.splice(0)) this.deliverLiveEvent(event);
+      this.finishReplayCycle(replayCycle, replayComplete);
     }
   }
 
   private handleEvent(event: RuntimeNotification): void {
     if (this.disposed || !this.matchesWorkspace(event)) return;
-    if (this.bufferingLiveEvents) {
-      this.pendingLiveEvents.push(event);
+    if (this.replayCycle) {
+      this.replayCycle.pendingLiveEvents.push(event);
       return;
     }
     this.deliverLiveEvent(event);
@@ -272,6 +281,45 @@ class RuntimeSubscription {
     } catch {
       // A renderer listener cannot break the authenticated transport or replay cursor.
     }
+  }
+
+  private beginReplayCycle(): RuntimeReplayCycle {
+    if (this.replayCycle) {
+      throw this.invalidReplayPage("Runtime 回放周期发生重叠");
+    }
+    const replayCycle: RuntimeReplayCycle = {
+      replayedEventIds: new Set<string>(),
+      pendingLiveEvents: [],
+    };
+    this.replayCycle = replayCycle;
+    return replayCycle;
+  }
+
+  private finishReplayCycle(replayCycle: RuntimeReplayCycle, replayComplete: boolean): void {
+    if (this.replayCycle !== replayCycle) {
+      replayCycle.pendingLiveEvents.length = 0;
+      replayCycle.replayedEventIds.clear();
+      return;
+    }
+    this.replayCycle = undefined;
+    const pendingLiveEvents = replayComplete ? replayCycle.pendingLiveEvents.splice(0) : [];
+    replayCycle.pendingLiveEvents.length = 0;
+    if (replayComplete && !this.disposed) {
+      for (const event of pendingLiveEvents) {
+        if (replayCycle.replayedEventIds.has(event.eventId)) continue;
+        replayCycle.replayedEventIds.add(event.eventId);
+        this.deliverLiveEvent(event);
+      }
+    }
+    replayCycle.replayedEventIds.clear();
+  }
+
+  private discardReplayCycle(): void {
+    const replayCycle = this.replayCycle;
+    this.replayCycle = undefined;
+    if (!replayCycle) return;
+    replayCycle.pendingLiveEvents.length = 0;
+    replayCycle.replayedEventIds.clear();
   }
 
   private rememberEventId(eventId: string): boolean {
