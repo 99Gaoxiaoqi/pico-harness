@@ -7,6 +7,18 @@ import { loadPicoProjectConfig } from "../../src/input/pico-config.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 
+function streamResponse(chunks: Uint8Array[]): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
 test("OpenAI stream requests and consumes the terminal Usage-only chunk", async (context) => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;
@@ -81,6 +93,106 @@ test("OpenAI-compatible routes omit stream_options unless explicitly enabled", a
   assert.equal(response.content, "OK");
   assert.equal(response.usage?.promptTokens, 3);
   assert.equal(response.usage?.completionTokens, 1);
+});
+
+test("OpenAI stream accepts CRLF, bare CR, and SSE fields across chunk boundaries", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  const splitCharacter = encoder.encode("你");
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async () =>
+    streamResponse([
+      encoder.encode(": heartbeat\r"),
+      encoder.encode("\nevent: message\r"),
+      encoder.encode('\ndata:{"choices":[{"delta":\r'),
+      encoder.encode('\ndata:{"content":"'),
+      splitCharacter.slice(0, 1),
+      splitCharacter.slice(1),
+      encoder.encode('"}}]}\r'),
+      encoder.encode("\n\r"),
+      encoder.encode("\n"),
+      encoder.encode('data: {"choices":[{"delta":{"content":"好"}}]}\r'),
+      encoder.encode("\rdata: [DONE]\r"),
+      encoder.encode("\n\r"),
+      encoder.encode("\n"),
+    ]);
+
+  const deltas: string[] = [];
+  const response = await new OpenAIProvider({
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "test-key",
+    model: "test-model",
+  }).generateStream([{ role: "user", content: "test" }], [], (delta) => deltas.push(delta));
+
+  assert.deepEqual(deltas, ["你", "好"]);
+  assert.equal(response.content, "你好");
+});
+
+test("OpenAI stream consumes the final event at EOF without a trailing blank line", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  const emoji = encoder.encode("🙂");
+  const firstChunk = {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_1",
+              function: { name: "lookup", arguments: '{"q":' },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  const finalChunk = {
+    choices: [
+      {
+        delta: {
+          content: "🙂",
+          tool_calls: [{ index: 0, function: { arguments: '"x"}' } }],
+        },
+      },
+    ],
+    usage: { prompt_tokens: 8, completion_tokens: 2 },
+  };
+  const finalJson = JSON.stringify(finalChunk);
+  const emojiIndex = finalJson.indexOf("🙂");
+  assert.notEqual(emojiIndex, -1);
+
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async () =>
+    streamResponse([
+      encoder.encode(`data:${JSON.stringify(firstChunk)}\n\n`),
+      encoder.encode(`data: ${finalJson.slice(0, emojiIndex)}`),
+      emoji.slice(0, 2),
+      emoji.slice(2),
+      encoder.encode(finalJson.slice(emojiIndex + 2)),
+    ]);
+
+  const deltas: string[] = [];
+  const response = await new OpenAIProvider({
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "test-key",
+    model: "test-model",
+  }).generateStream([{ role: "user", content: "test" }], [], (delta) => deltas.push(delta));
+
+  assert.deepEqual(deltas, ["🙂"]);
+  assert.equal(response.content, "🙂");
+  assert.deepEqual(response.toolCalls, [{ id: "call_1", name: "lookup", arguments: '{"q":"x"}' }]);
+  assert.deepEqual(response.usage, {
+    promptTokens: 8,
+    completionTokens: 2,
+    cacheReadTokens: 0,
+    reasoningTokens: 0,
+    reportedFields: ["prompt", "completion"],
+  });
 });
 
 test("streamUsage route capability is parsed and rejects non-boolean values", async (context) => {

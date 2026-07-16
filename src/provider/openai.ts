@@ -42,6 +42,98 @@ interface OpenAIChatResponse {
   };
 }
 
+/**
+ * Incrementally consume SSE data fields without assuming a specific line ending.
+ * A false return from onData stops the stream (used by OpenAI's [DONE] sentinel).
+ */
+async function consumeSseDataStream(
+  stream: NonNullable<Response["body"]>,
+  onData: (data: string) => boolean,
+): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const dataLines: string[] = [];
+  let buffer = "";
+  let keepReading = true;
+  let reachedEof = false;
+
+  const dispatchEvent = (): void => {
+    if (dataLines.length === 0) return;
+    const data = dataLines.join("\n");
+    dataLines.length = 0;
+    keepReading = onData(data);
+  };
+
+  const consumeLine = (line: string): void => {
+    if (line.length === 0) {
+      dispatchEvent();
+      return;
+    }
+    if (line.startsWith(":")) return;
+
+    const colonIndex = line.indexOf(":");
+    const field = colonIndex === -1 ? line : line.slice(0, colonIndex);
+    if (field !== "data") return;
+
+    let value = colonIndex === -1 ? "" : line.slice(colonIndex + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    dataLines.push(value);
+  };
+
+  const consumeBufferedLines = (atEof: boolean): void => {
+    let lineStart = 0;
+    let cursor = 0;
+
+    while (keepReading && cursor < buffer.length) {
+      const character = buffer[cursor];
+      if (character !== "\n" && character !== "\r") {
+        cursor += 1;
+        continue;
+      }
+
+      let delimiterLength = 1;
+      if (character === "\r") {
+        // A trailing CR may be the first half of CRLF in the next network chunk.
+        if (cursor + 1 === buffer.length && !atEof) break;
+        if (buffer[cursor + 1] === "\n") delimiterLength = 2;
+      }
+
+      consumeLine(buffer.slice(lineStart, cursor));
+      cursor += delimiterLength;
+      lineStart = cursor;
+    }
+
+    buffer = buffer.slice(lineStart);
+    if (!atEof || !keepReading) return;
+
+    if (buffer.length > 0) {
+      consumeLine(buffer);
+      buffer = "";
+    }
+    if (keepReading) dispatchEvent();
+  };
+
+  try {
+    while (keepReading) {
+      const { done, value } = await reader.read();
+      if (done) {
+        reachedEof = true;
+        buffer += decoder.decode();
+        consumeBufferedLines(true);
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      consumeBufferedLines(false);
+    }
+  } finally {
+    if (!reachedEof) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+}
+
 /** OpenAI 兼容协议适配器 */
 export class OpenAIProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
@@ -321,105 +413,83 @@ export class OpenAIProvider implements LLMProvider {
     >();
     let usage: Usage | undefined;
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+    await consumeSseDataStream(resp.body, (data) => {
+      if (data === "[DONE]") return false;
 
-    readLoop: for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // SSE 以 \n\n 分隔事件
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? ""; // 最后一个可能不完整,留到下次
-
-      for (const event of events) {
-        const lines = event.split("\n");
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6);
-          if (data === "[DONE]") {
-            await reader.cancel().catch(() => undefined);
-            break readLoop;
-          }
-
-          try {
-            const chunk = JSON.parse(data) as {
-              choices?: {
-                delta?: {
-                  content?: string;
-                  tool_calls?: Array<{
-                    index: number;
-                    id?: string;
-                    function?: { name?: string; arguments?: string };
-                  }>;
-                };
-                finish_reason?: string;
-              }[];
-              usage?: {
-                prompt_tokens?: number;
-                completion_tokens?: number;
-                prompt_tokens_details?: { cached_tokens?: number };
-                completion_tokens_details?: { reasoning_tokens?: number };
-              };
+      try {
+        const chunk = JSON.parse(data) as {
+          choices?: {
+            delta?: {
+              content?: string;
+              tool_calls?: Array<{
+                index: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
             };
+            finish_reason?: string;
+          }[];
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+            completion_tokens_details?: { reasoning_tokens?: number };
+          };
+        };
 
-            // OpenAI 兼容 Provider 通常用 choices 为空的最后一个 chunk 上报 Usage。
-            // 必须先消费 Usage，再判断是否存在内容 delta。
-            if (chunk.usage) {
-              usage = {
-                promptTokens: chunk.usage.prompt_tokens ?? 0,
-                completionTokens: chunk.usage.completion_tokens ?? 0,
-                cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
-                reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
-                reportedFields: [
-                  ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
-                  ...(typeof chunk.usage.completion_tokens === "number"
-                    ? (["completion"] as const)
-                    : []),
-                  ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
-                    ? (["cacheRead"] as const)
-                    : []),
-                  ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
-                    ? (["reasoning"] as const)
-                    : []),
-                ],
-              };
+        // OpenAI 兼容 Provider 通常用 choices 为空的最后一个 chunk 上报 Usage。
+        // 必须先消费 Usage，再判断是否存在内容 delta。
+        if (chunk.usage) {
+          usage = {
+            promptTokens: chunk.usage.prompt_tokens ?? 0,
+            completionTokens: chunk.usage.completion_tokens ?? 0,
+            cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
+            reportedFields: [
+              ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
+              ...(typeof chunk.usage.completion_tokens === "number"
+                ? (["completion"] as const)
+                : []),
+              ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
+                ? (["cacheRead"] as const)
+                : []),
+              ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
+                ? (["reasoning"] as const)
+                : []),
+            ],
+          };
+        }
+
+        const delta = chunk.choices?.[0]?.delta;
+        if (!delta) return true;
+
+        // 文本 delta
+        if (delta.content) {
+          fullContent += delta.content;
+          onDelta(delta.content);
+        }
+
+        // 工具调用 delta(分片累积)
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const existing = toolCallAccumulator.get(tc.index) ?? { arguments: "" };
+            if (tc.id) {
+              existing.id = tc.id;
             }
-
-            const delta = chunk.choices?.[0]?.delta;
-            if (!delta) continue;
-
-            // 文本 delta
-            if (delta.content) {
-              fullContent += delta.content;
-              onDelta(delta.content);
+            if (tc.function?.name) {
+              existing.name = tc.function.name;
             }
-
-            // 工具调用 delta(分片累积)
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const existing = toolCallAccumulator.get(tc.index) ?? { arguments: "" };
-                if (tc.id) {
-                  existing.id = tc.id;
-                }
-                if (tc.function?.name) {
-                  existing.name = tc.function.name;
-                }
-                if (tc.function?.arguments) {
-                  existing.arguments += tc.function.arguments;
-                }
-                toolCallAccumulator.set(tc.index, existing);
-              }
+            if (tc.function?.arguments) {
+              existing.arguments += tc.function.arguments;
             }
-          } catch {
-            // 跳过无法解析的行
+            toolCallAccumulator.set(tc.index, existing);
           }
         }
+      } catch {
+        // 跳过无法解析的事件
       }
-    }
+      return true;
+    });
 
     const toolCalls: ToolCall[] = [];
     for (const [index, tc] of toolCallAccumulator) {
