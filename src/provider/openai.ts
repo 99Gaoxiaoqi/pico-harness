@@ -518,15 +518,17 @@ export class OpenAIProvider implements LLMProvider {
     return reasoningEffort === undefined ? body : { ...body, reasoning_effort: reasoningEffort };
   }
 
-  /** Reasoning patches are configurable, so restore the preflight output-budget invariant last. */
+  /** Canonical routes restore the output budget last; legacy direct calls cannot safely guess the field. */
   private finalizeRequestBody(body: Record<string, unknown>): Record<string, unknown> {
     const requestBody = { ...this.applyThinkingLevel(body) };
-    const outputTokenField = this.config.capabilities?.outputTokenField ?? "max_tokens";
+    const capabilities = this.config.capabilities;
+    if (!capabilities) return requestBody;
+
+    const outputTokenField = capabilities.outputTokenField;
     const alternateField =
       outputTokenField === "max_tokens" ? "max_completion_tokens" : "max_tokens";
     delete requestBody[alternateField];
-    requestBody[outputTokenField] =
-      this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens;
+    requestBody[outputTokenField] = capabilities.maxOutputTokens;
     return requestBody;
   }
 }
