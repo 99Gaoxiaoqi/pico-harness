@@ -35,7 +35,7 @@ npx tsx --env-file=/path/to/pico-harness/.env \
 PICO_TRACE=1 pico
 ```
 
-开启后，每次请求都会把 span tree 写到当前项目的 `.claw/traces/trace_<session>_<timestamp>.json`。TUI 会在本轮结束后追加一条 system message，直接显示保存路径；程序化调用仍可从 `runAgentFromCli()` 的 `result.tracePath` 读取同一路径。
+开启后，每次请求都会把 span tree 写到当前项目的 `.claw/traces/trace_<session>_<timestamp>.json`。TUI 会在本轮结束后追加一条 system message，直接显示保存路径；内部 Runtime 调用可从 `executeAgentRuntime()` 的 `result.tracePath` 读取同一路径。
 
 ## Session 启动语义
 

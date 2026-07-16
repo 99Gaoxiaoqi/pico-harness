@@ -62,7 +62,7 @@ npm run desktop:dev
 
 ### 当前范围
 
-- `src/cli/run-agent.ts` 中的 `runAgentFromCli` 是 TUI 内部装配函数，不是可支持的 one-shot/headless CLI 入口。
+- `src/runtime/agent-runtime.ts` 中的 `executeAgentRuntime` 是 TUI 与 daemon 共用的 Runtime 入口，不是可支持的 one-shot/headless CLI 外壳。
 - `/rewind` 按用户消息列出提示词、时间和该轮文件变化；恢复后切换有效对话分支，并把原提示词放回输入框。旧事件仍保留在追加式账本中；`/snapshots` 保留为诊断入口。
 - 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作/可写委派守卫和显式 Hook deny。需要逐次确认高风险操作时使用 `/mode default`。
 - `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。

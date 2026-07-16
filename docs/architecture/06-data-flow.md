@@ -210,7 +210,7 @@ InputBox.onSubmit("你好")
 ReplApp.handleSubmit:
   ├─ guard.tryStart() → generation=1 (并发防护)
   ├─ reporter.pushUserMessage("你好") → entries.push({kind:"user"}) → emit
-  └─ runAgentFromCli({prompt:"你好", reporter})  // TUI 内部装配，非公开 CLI
+  └─ executeAgentRuntime({prompt:"你好", reporter})  // 共享 Runtime 入口，非公开 CLI
       │
       ▼ engine 事件流
       ├─ onStart → spinnerMode="requesting" → emit → App 重渲染
