@@ -60,14 +60,6 @@ export function safeResolve(workDir: string, path: string): string {
   return fullPath;
 }
 
-/**
- * 只读工具使用的路径解析。
- * 保留给旧调用方的同步 helper;所有路径都必须留在 workDir 内。
- */
-export function resolveReadablePath(workDir: string, path: string): string {
-  return safeResolve(workDir, path);
-}
-
 function workspaceRootsFrom(input: string | WorkspaceRoots): WorkspaceRoots {
   return typeof input === "string" ? WorkspaceRoots.createSync(input) : input;
 }
@@ -420,42 +412,7 @@ function truncateToolOutput(output: string, limit: number): string {
 }
 
 // ==========================================
-// 内置工具 1:EchoTool (验证用,第 04 讲遗留)
-// ==========================================
-export class EchoTool implements BaseTool {
-  readonly readOnly = true;
-  name(): string {
-    return "echo";
-  }
-  /** 原样回显,无任何副作用 —— 不与任何工具冲突 */
-  accesses(_args?: string): ToolAccesses {
-    return ToolAccesses.none();
-  }
-  definition(): ToolDefinition {
-    return {
-      name: "echo",
-      description: "原样回显输入的文本。用于验证工具调用链路是否打通。",
-      inputSchema: {
-        type: "object",
-        properties: { text: { type: "string", description: "要回显的文本" } },
-        required: ["text"],
-      },
-    };
-  }
-  async execute(args: string): Promise<string> {
-    let text: string;
-    try {
-      const input = JSON.parse(args) as { text?: string };
-      text = input.text ?? "";
-    } catch {
-      throw new Error("参数解析失败: 期望 JSON 含 text 字段");
-    }
-    return `echo: ${text}`;
-  }
-}
-
-// ==========================================
-// 内置工具 2:ReadFileTool (第 05 讲核心)
+// ReadFileTool (第 05 讲核心)
 // 防御底线:WorkDir 边界限制 + 路径穿越防护 + 行分页保护
 // ==========================================
 
