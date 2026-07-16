@@ -1,9 +1,7 @@
 import { execFile } from "node:child_process";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { logger } from "../observability/logger.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { TaskRegistry, type TaskSnapshot } from "./task-registry.js";
-import { TaskStore } from "./task-store.js";
 import { JobService } from "./job-service.js";
 import {
   materializeRuntimeTaskSnapshot,
@@ -34,7 +32,6 @@ export interface TaskHostRuntimeOptions {
 /** TUI-lifetime owner for durable task state and isolated worktree execution. */
 export class TaskHostRuntime {
   readonly taskRegistry: TaskRegistry;
-  readonly taskStore: TaskStore;
   readonly supervisor: WorktreeSupervisor;
   readonly mergeQueue: WorktreeMergeQueue;
   readonly jobService: JobService;
@@ -48,7 +45,6 @@ export class TaskHostRuntime {
     repoRoot: string,
     targetBranch: string,
     jobService: JobService,
-    picoHome: string | undefined,
     runtimeMirrorOptions: RuntimeTaskMirrorOptions = {},
     reconcileIntervalMs = 5_000,
   ) {
@@ -56,9 +52,6 @@ export class TaskHostRuntime {
     this.targetBranch = targetBranch;
     this.jobService = jobService;
     this.taskRegistry = new TaskRegistry();
-    this.taskStore = new TaskStore({
-      filePath: join(resolvePicoPaths(repoRoot, { picoHome }).workspace.tasks, "state.json"),
-    });
     this.jobService.reconcileExpiredJobs();
     this.taskRegistry.hydrate(materializeRuntimeTaskSnapshots(this.jobService), {
       preserveNonTerminal: true,
@@ -68,8 +61,6 @@ export class TaskHostRuntime {
       this.jobService,
       runtimeMirrorOptions,
     );
-    // SQLite 先接收 Registry 变更，TaskStore 只在其后写兼容快照。
-    this.taskStore.bind(this.taskRegistry);
     this.mergeQueue = new WorktreeMergeQueue();
     this.supervisor = new WorktreeSupervisor({
       taskRegistry: this.taskRegistry,
@@ -122,7 +113,6 @@ export class TaskHostRuntime {
       repoRoot,
       targetBranch,
       service,
-      options.picoHome,
       options.runtimeMirror ?? {},
       options.reconcileIntervalMs ?? 5_000,
     );
@@ -179,7 +169,7 @@ export class TaskHostRuntime {
     await this.supervisor.cleanup(taskId, { merged: true });
   }
 
-  /** SQLite 先收口，再幂等刷新进程内视图与 legacy TaskStore 投影。 */
+  /** SQLite 先收口，再幂等刷新进程内 TaskRegistry 视图。 */
   private reconcileRuntimeAuthority(): void {
     this.jobService.reconcileExpiredJobs();
     for (const snapshot of materializeRuntimeTaskSnapshots(this.jobService)) {
@@ -305,7 +295,6 @@ export class TaskHostRuntime {
       running.map((task) => this.supervisor.stop(task.taskId, "TUI closed")),
     );
     await this.mergeQueue.waitForIdle();
-    this.taskStore.close();
     this.runtimeMirror.close();
     this.jobService.close();
   }

@@ -130,8 +130,8 @@ export class RuntimeTaskMirror {
           : {}),
       });
     } catch (error) {
-      // SQLite 是权威控制面：不允许 Registry/TaskStore 在持久化失败后
-      // 继续装作成功。让同步调用方看到失败，同时保留诊断日志。
+      // SQLite 是权威控制面：不允许 Registry 在持久化失败后继续装作成功。
+      // 让同步调用方看到失败，同时保留诊断日志。
       logger.error(
         { taskId: snapshot.taskId, status: snapshot.status, error: String(error) },
         "[runtime-store] 同步 TaskRegistry 状态失败",
