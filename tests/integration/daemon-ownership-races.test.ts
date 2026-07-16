@@ -212,6 +212,61 @@ test("Daemon stop is bounded during an active Cron tick and releases its lock af
   await candidate.stop();
 });
 
+test("Cron runtime automatically reconciles a workspace re-registered while its old fence drains", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-reregister-"));
+  const workspace = join(root, "workspace");
+  const endpoint = testEndpoint(root);
+  const lockPath = join(root, "runtime.lock");
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  const releaseOldRuntime = deferred();
+  await mkdir(workspace, { recursive: true });
+  const canonical = await registrationStore.register(workspace);
+
+  let oldOwnershipPending = true;
+  let createCount = 0;
+  let replacementStarts = 0;
+  const host = new LocalDaemonHost({
+    endpoint,
+    registrationStore,
+    service: testService(),
+    cronRuntimeFactory: {
+      create: async () => {
+        createCount++;
+        if (createCount === 1) {
+          return testCronRuntime({
+            hasPendingOwnership: () => oldOwnershipPending,
+            waitForOwnershipRelease: () => releaseOldRuntime.promise,
+          });
+        }
+        return testCronRuntime({ start: () => replacementStarts++ });
+      },
+    },
+    lockOptions: testLockOptions(lockPath),
+  });
+  context.after(async () => {
+    oldOwnershipPending = false;
+    releaseOldRuntime.resolve();
+    await Promise.allSettled([host.stop()]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  await registrationStore.unregister(workspace);
+  await host.refreshRegisteredWorkspaces();
+  assert.deepEqual(host.registeredWorkspaces, []);
+
+  await registrationStore.register(workspace);
+  await assert.rejects(host.refreshRegisteredWorkspaces(), /Cron runtime 仍在关闭/u);
+  assert.deepEqual(await registrationStore.list(), [canonical]);
+  assert.deepEqual(host.registeredWorkspaces, []);
+
+  oldOwnershipPending = false;
+  releaseOldRuntime.resolve();
+  await waitUntilAsync(async () => host.registeredWorkspaces.includes(canonical));
+  assert.equal(createCount, 2);
+  assert.equal(replacementStarts, 1);
+});
+
 function testEndpoint(root: string): LocalDaemonEndpoint {
   return {
     transport: "unix",
