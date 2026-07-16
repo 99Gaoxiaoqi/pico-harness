@@ -29,11 +29,12 @@ import { createSessionIdentity, type SessionIdentity } from "./session-identity.
 import type { GoalManager } from "./goal-manager.js";
 import {
   normalizeSessionRuntimeStatePatch,
+  normalizeSessionRuntimeStateWritePatch,
   SESSION_RUNTIME_STATE_VERSION,
   type PersistedSessionSettings,
   type SessionHydrationSnapshot,
   type SessionRuntimePersistence,
-  type SessionRuntimeStatePatch,
+  type SessionRuntimeStateWritePatch,
   type SessionRuntimeStateSnapshot,
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
@@ -649,14 +650,14 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     if (reported.has("cacheRead")) this.totalCacheReadReports++;
     if (reported.has("cacheWrite")) this.totalCacheWriteReports++;
     if (reported.has("reasoning")) this.totalReasoningReports++;
-    this.updateRuntimeState({ usage: this.getUsageSnapshot() });
+    this.updatedAt = new Date();
   }
 
   /** Record a completed provider call whose response did not include usage metadata. */
   recordMissingUsage(): void {
     this.assertWritable();
     this.totalProviderCalls++;
-    this.updateRuntimeState({ usage: this.getUsageSnapshot() });
+    this.updatedAt = new Date();
   }
 
   /** 返回与内部状态隔离的运行态快照，供启动恢复和 TUI 状态水合。 */
@@ -671,16 +672,15 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   }
 
   /** 更新一个完整 section，内存立即生效，然后追加 session.state.committed。 */
-  updateRuntimeState(patch: SessionRuntimeStatePatch): void {
+  updateRuntimeState(patch: SessionRuntimeStateWritePatch): void {
     this.assertWritable();
-    const normalized = normalizeSessionRuntimeStatePatch(patch);
+    const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) {
       logger.warn("[session] 忽略无效的 runtime_state 更新");
       return;
     }
     if (normalized.settings) this.persistedSettings = normalized.settings;
     if (normalized.goal) this.persistedGoal = normalized.goal;
-    if (normalized.usage) this.restoreUsage(normalized.usage);
     this.updatedAt = new Date();
 
     if (this.store) {
@@ -1519,7 +1519,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       mode,
       operation.target.prePlanMode,
     );
-    const patch: SessionRuntimeStatePatch = { settings };
+    const patch: SessionRuntimeStateWritePatch = { settings };
     if (this.store) {
       await this.commitRuntimeStateOnce(patch, `rewind:${operation.operationId}:runtime`);
     }
@@ -1528,7 +1528,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   }
 
   private commitRuntimeStateOnce(
-    patch: SessionRuntimeStatePatch,
+    patch: SessionRuntimeStateWritePatch,
     eventId: string,
   ): Promise<CommitReceipt> {
     return this.enqueuePersistence("runtime state", async (store) => {

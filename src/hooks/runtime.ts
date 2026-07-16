@@ -259,7 +259,10 @@ function errorMessage(error: unknown): string {
 }
 
 export type HookRuntimeBinding = Partial<
-  Pick<HookHandlerExecutorOptions, "provider" | "mcpInvoker" | "agentVerifier" | "onAsyncRewake">
+  Pick<
+    HookHandlerExecutorOptions,
+    "provider" | "mcpInvoker" | "agentVerifier" | "modelRuntime" | "onAsyncRewake"
+  >
 >;
 
 export type HookRuntimeSnapshot = LoadHookSnapshotResult;

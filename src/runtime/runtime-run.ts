@@ -123,6 +123,7 @@ export interface RuntimeModelCallSettledOptions {
   readonly latencyMs: number;
   readonly usage?: RuntimeModelCallSettledEvent["data"]["usage"];
   readonly costCNY?: number;
+  readonly costStatus?: RuntimeModelCallSettledEvent["data"]["costStatus"];
   readonly error?: string;
 }
 
@@ -237,9 +238,7 @@ export class RuntimeRun {
     return RuntimeRun.startInternal(options);
   }
 
-  private static async startInternal(
-    options: RuntimeRunConstructionOptions,
-  ): Promise<RuntimeRun> {
+  private static async startInternal(options: RuntimeRunConstructionOptions): Promise<RuntimeRun> {
     const store =
       options.store ??
       new RuntimeEventStore({
