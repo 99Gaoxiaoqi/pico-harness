@@ -89,6 +89,12 @@ export async function createSessionHookRuntime(
     sessionId: options.sessionId,
     executor,
     snapshot: initial.snapshot,
+    revalidateExecutableTrust: async (entry) =>
+      (await trustStore.status({
+        workspace: options.workDir,
+        source: entry.source,
+        handler: entry.handler,
+      })) === "active",
     decisionProviders: [decisionProvider],
   });
   const reloader = new HookConfigReloader({

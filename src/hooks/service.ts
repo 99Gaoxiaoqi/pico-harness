@@ -35,6 +35,8 @@ export interface HookServiceOptions {
   workDir: string;
   sessionId: string;
   executor: HookExecutor;
+  /** 执行前重新验证可执行 Hook 的当前信任指纹；false/异常均 fail-closed 跳过。 */
+  revalidateExecutableTrust?: (entry: ResolvedHookHandler) => boolean | Promise<boolean>;
   snapshot?: HookSnapshot;
   concurrency?: number;
   agentConcurrency?: number;
@@ -110,12 +112,49 @@ export class HookService {
       .filter((entry) => conditionMatches(entry.groupCondition, payload))
       .filter((entry) => conditionMatches(entry.handler.if, payload));
     const handlers = deduplicate(candidates);
-    if (handlers.length === 0) return aggregateHookOutputs(providerOutputs);
+    const trustChecks = await Promise.all(
+      handlers.map(async (entry) => {
+        if (!isExecutable(entry.handler) || !this.options.revalidateExecutableTrust) {
+          return { entry, allowed: true } as const;
+        }
+        try {
+          return {
+            entry,
+            allowed: await this.options.revalidateExecutableTrust(entry),
+          } as const;
+        } catch (error) {
+          return { entry, allowed: false, error } as const;
+        }
+      }),
+    );
+    const trustDiagnostics: HookDiagnostic[] = trustChecks.flatMap((check) =>
+      check.allowed
+        ? []
+        : [
+            {
+              handlerId: check.entry.id,
+              source: check.entry.source,
+              level: "warn" as const,
+              message:
+                "error" in check
+                  ? `handler 执行前信任复核失败，已跳过: ${formatError(check.error)}`
+                  : "handler 执行前信任已失效，已跳过",
+            },
+          ],
+    );
+    const authorizedHandlers = trustChecks
+      .filter((check) => check.allowed)
+      .map((check) => check.entry);
+    const trustOutputs: HookOutput[] =
+      trustDiagnostics.length > 0 ? [{ decision: "allow", diagnostics: trustDiagnostics }] : [];
+    if (authorizedHandlers.length === 0) {
+      return aggregateHookOutputs([...providerOutputs, ...trustOutputs]);
+    }
 
     const input = makeInput(this.options.sessionId, this.options.workDir, event, payload);
     return await this.hookScope.run(true, async () => {
       const results = await runLimited(
-        handlers,
+        authorizedHandlers,
         this.concurrency,
         this.agentConcurrency,
         context.signal,
@@ -138,7 +177,7 @@ export class HookService {
           }
         },
       );
-      return aggregateHookOutputs([...providerOutputs, ...results]);
+      return aggregateHookOutputs([...providerOutputs, ...trustOutputs, ...results]);
     });
   }
 }
