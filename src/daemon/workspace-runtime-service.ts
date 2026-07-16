@@ -61,8 +61,6 @@ export interface StartDaemonRunInput {
   readonly sessionId?: string;
   readonly execution?: DaemonRunExecution;
   readonly idempotencyKey?: string;
-  /** Trusted in-process admission check, evaluated synchronously at the actual start boundary. */
-  readonly assertCanStart?: () => void;
 }
 
 export interface WorkspaceRuntimeServiceOptions {
@@ -277,7 +275,6 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   async startForegroundRun(input: StartDaemonRunInput): Promise<JsonValue> {
     const runtime = await this.getRuntime(input.workspacePath);
     const start = () => {
-      input.assertCanStart?.();
       const run = runtime.startRun(
         { description: input.prompt, ...(input.sessionId ? { sessionId: input.sessionId } : {}) },
         (context) =>
