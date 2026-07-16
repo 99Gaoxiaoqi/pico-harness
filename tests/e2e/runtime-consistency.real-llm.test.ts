@@ -84,7 +84,7 @@ test(
     context.after(() => cleanupSandbox(sandbox));
     await writePromptDenyHook(sandbox.workDir);
 
-    let outcome: "succeeded" | "hook-denied" = "succeeded";
+    let outcome: "completed" | "hook-denied" = "completed";
     try {
       await new AgentRuntime().execute(
         runtimeRequest(sandbox, model, "Reply with PICO_MAIN_SHOULD_NOT_RUN.", "new"),
@@ -101,10 +101,10 @@ test(
     assertSucceededPurpose(events, "hook");
     const purposes = modelPurposes(events);
     assert.ok(purposes.includes("hook"));
-    if (outcome === "succeeded") assertSucceededPurpose(events, "main");
+    if (outcome === "completed") assertSucceededPurpose(events, "main");
     assert.equal(
       events.find((event) => event.kind === "run.terminal")?.data.status,
-      outcome === "succeeded" ? "succeeded" : "failed",
+      outcome === "completed" ? "completed" : "failed",
     );
     assertNoUsageStateWrites(events);
   },
