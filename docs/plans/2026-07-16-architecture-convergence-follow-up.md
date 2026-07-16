@@ -35,11 +35,11 @@
 
 ## 第二部分：事件通道与背压
 
-- [ ] replay 按字节预算分页，并以稳定 cursor/high-watermark 衔接 live 事件。
-- [ ] 客户端补齐完整 backlog 后再释放 live buffer，不丢失超过单页的事件。
-- [ ] 从 durable timeline 移除 `assistant.delta`、`assistant.message` 和 `tool.output`。
-- [ ] 为 Renderer timeline 和事件去重状态设置明确上限。
-- [ ] 删除 `WorkspaceRuntimeService` 中无读取者的进程内事件缓存。
+- [x] replay 按字节预算分页，并以稳定 cursor/high-watermark 衔接 live 事件。✔️
+- [x] 客户端补齐完整 backlog 后再释放 live buffer，不丢失超过单页的事件。✔️
+- [x] 从 durable timeline 移除 `assistant.delta`、`assistant.message` 和 `tool.output`。✔️
+- [x] 为 Renderer timeline 和事件去重状态设置明确上限。✔️
+- [x] 删除 `WorkspaceRuntimeService` 中无读取者的进程内事件缓存。✔️
 
 ### 验收
 
@@ -47,19 +47,31 @@
 - replay 与 live 交界处不丢失、不重复交付。
 - SQLite 不再为逐 token delta 和 stdout/stderr chunk 持续增长。
 
+### 完成记录
+
+- 提交：`65ab866 fix(事件通道): 收敛分页回放与持久事件`。
+- 验证：真实 socket + SQLite smoke 覆盖 10,050 条 durable backlog、24 页回放及 1 条并发 live event，共 10,051 条无丢失无重复；全部响应通过 1 MiB 帧编码，跨 workspace cursor 被拒绝。
+- 说明：high-watermark 在首个订阅页冻结；后续页只追到该边界，live event 在 client buffer 中等待 replay 补齐。Desktop 不再复制存储高频文本流。
+
 ## 第三部分：状态权威与运行时边界
 
-- [ ] 将 `TaskStore` 改为一次性 legacy migration，停止 JSON 持续双写和反向导入。
-- [ ] 为长生命周期 `SessionRuntime` 增加 Session pin/release，TTL/LRU 不驱逐活跃宿主。
-- [ ] 在 `AgentRuntime` 入口冻结唯一 `picoHome/runtimeEnv` 并显式传播。
-- [ ] 为 RuntimeEvent 投影提供真正的 existing/read-only 打开路径。
-- [ ] 将跨 Home 的进程内 RuntimeRun 串行 key 纳入数据库路径。
+- [x] 将 `TaskStore` 改为一次性 legacy migration，停止 JSON 持续双写和反向导入。✔️
+- [x] 为长生命周期 `SessionRuntime` 增加 Session pin/release，TTL/LRU 不驱逐活跃宿主。✔️
+- [x] 在 `AgentRuntime` 入口冻结唯一 `picoHome/runtimeEnv` 并显式传播。✔️
+- [x] 为 RuntimeEvent 投影提供真正的 existing/read-only 打开路径。✔️
+- [x] 将跨 Home 的进程内 RuntimeRun 串行 key 纳入数据库路径。✔️
 
 ### 验收
 
 - SQLite 是 Task 的唯一持久控制面；旧 JSON 只迁移一次。
 - 相同 cwd/sessionId、不同 `PICO_HOME` 的 Session、队列和数据库完全隔离。
 - Transcript 等只读查询不创建数据库、不执行 schema 写事务。
+
+### 完成记录
+
+- 提交：`dbbbad1 refactor(storage): 增加运行时事件只读投影入口`；`909a6cf refactor(tasks): 统一任务持久化权威`；`ebbc656 refactor(runtime): 收紧会话生命周期与状态根边界`。
+- 验证：Task legacy queued/running/terminal、重复迁移和崩溃重试 smoke；Session pin/release 的 TTL/LRU smoke；同 cwd/sessionId 跨 Home 的环境、队列和 RuntimeEvent 隔离 smoke；只读 projection smoke 验证数据库 mtime/size 不变且缺失路径不被创建。
+- 说明：TaskRegistry 继续作为进程内执行视图；live RuntimeRun 的 write guard 已改为必填，detached 写入只保留 fork 内部窄入口。
 
 ## 第四部分：未接入代码退出
 
