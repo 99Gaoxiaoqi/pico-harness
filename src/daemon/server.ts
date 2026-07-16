@@ -5,11 +5,13 @@ import {
   createRuntimeError,
   encodeRuntimeFrame,
   type RuntimeNotification,
+  type RuntimeNotificationPage,
   RuntimeFrameDecoder,
   RuntimeProtocolError,
   type RuntimeRequest,
   type RuntimeResponse,
   type JsonValue,
+  type JsonObject,
   serializeRuntimeNotification,
   parseStrictRuntimeParams,
   isJsonObject,
@@ -164,30 +166,24 @@ export class LocalRuntimeDaemon {
         params: parseStrictRuntimeParams(request.method, request.params),
       } as RuntimeRequest;
       if (validatedRequest.method === "events.replay") {
-        const events = await this.options.service.replayEvents(readCursor(validatedRequest.params));
-        this.write(socket, success(request, { events: events.map(serializeRuntimeNotification) }));
+        const page = await this.options.service.replayEvents(readCursor(validatedRequest.params));
+        this.write(socket, success(request, serializeReplayPage(page)));
         return;
       }
       if (validatedRequest.method === "events.subscribe") {
         const cursor = readCursor(validatedRequest.params);
-        if (!cursor.workspacePath) {
-          throw new RuntimeProtocolError(
-            "INVALID_PARAMS",
-            "events.subscribe 必须绑定 workspacePath",
-          );
-        }
         const workspacePath = await canonicalizeWorkspacePath(cursor.workspacePath);
         const scopedCursor = { ...cursor, workspacePath };
         const dispose = this.options.service.subscribe((event) => {
           if (event.scope.workspacePath === workspacePath) this.writeEvent(socket, event);
         });
         setSubscription(dispose);
-        const events = await this.options.service.replayEvents(scopedCursor);
+        const page = await this.options.service.replayEvents(scopedCursor);
         this.write(
           socket,
           success(request, {
             subscribed: true,
-            events: events.map(serializeRuntimeNotification),
+            ...serializeReplayPage(page),
           }),
         );
         return;
@@ -216,6 +212,15 @@ function success(request: RuntimeRequest, result: JsonValue): RuntimeResponse {
   return { kind: "response", protocolVersion: 1, requestId: request.requestId, ok: true, result };
 }
 
+function serializeReplayPage(page: RuntimeNotificationPage): JsonObject {
+  return {
+    events: page.events.map(serializeRuntimeNotification),
+    hasMore: page.hasMore,
+    ...(page.nextAfterEventId ? { nextAfterEventId: page.nextAfterEventId } : {}),
+    ...(page.highWatermarkEventId ? { highWatermarkEventId: page.highWatermarkEventId } : {}),
+  };
+}
+
 function readCursor(params: import("./protocol.js").JsonValue): RuntimeNotificationCursor {
   if (!isJsonObject(params)) {
     throw new RuntimeProtocolError("事件 cursor 必须是对象");
@@ -225,8 +230,12 @@ function readCursor(params: import("./protocol.js").JsonValue): RuntimeNotificat
     throw new RuntimeProtocolError("afterEventId 必须是字符串");
   }
   const workspacePath = params.workspacePath;
-  if (workspacePath !== undefined && typeof workspacePath !== "string") {
-    throw new RuntimeProtocolError("workspacePath 必须是字符串");
+  if (typeof workspacePath !== "string" || !workspacePath) {
+    throw new RuntimeProtocolError("INVALID_PARAMS", "workspacePath 必须是非空字符串");
+  }
+  const highWatermarkEventId = params.highWatermarkEventId;
+  if (highWatermarkEventId !== undefined && typeof highWatermarkEventId !== "string") {
+    throw new RuntimeProtocolError("INVALID_PARAMS", "highWatermarkEventId 必须是字符串");
   }
   const limit = params.limit;
   if (
@@ -237,7 +246,8 @@ function readCursor(params: import("./protocol.js").JsonValue): RuntimeNotificat
   }
   return {
     ...(afterEventId === undefined ? {} : { afterEventId }),
-    ...(workspacePath === undefined ? {} : { workspacePath }),
+    workspacePath,
+    ...(highWatermarkEventId === undefined ? {} : { highWatermarkEventId }),
     ...(limit === undefined ? {} : { limit }),
   };
 }

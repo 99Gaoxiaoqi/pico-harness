@@ -99,6 +99,7 @@ import {
   type JsonValue,
   type JsonObject,
   type RuntimeNotification,
+  type RuntimeNotificationPage,
   type RuntimeRequest,
   type RuntimeProviderInput,
   type RuntimeUserInput,
@@ -474,7 +475,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
-  replayEvents(cursor: RuntimeNotificationCursor): Promise<readonly RuntimeNotification[]> {
+  replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
     return this.options.runtimeService.replayEvents(cursor);
   }
 

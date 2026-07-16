@@ -194,18 +194,47 @@ class RuntimeSubscription {
     }
     this.bufferingLiveEvents = true;
     try {
-      const replay = await this.options.connection.request("events.subscribe", {
+      const firstPage = await this.options.connection.request("events.subscribe", {
         workspacePath: this.options.params.workspacePath,
         ...(this.lastEventId ? { afterEventId: this.lastEventId } : {}),
       });
       const events: RuntimeNotification[] = [];
-      for (const event of replay.events) {
-        if (!this.acceptEvent(event)) continue;
-        events.push(event);
-        if (deliverReplay) this.notify(event);
+      let page: RuntimeResult<"events.replay"> = firstPage;
+      let first = true;
+      const highWatermarkEventId = firstPage.highWatermarkEventId;
+      while (true) {
+        for (const event of page.events) {
+          if (!this.acceptEvent(event)) continue;
+          if (!deliverReplay && first) events.push(event);
+          else this.notify(event);
+        }
+        if (!page.hasMore) break;
+        const nextAfterEventId = page.nextAfterEventId;
+        if (!nextAfterEventId || !highWatermarkEventId) {
+          throw this.invalidReplayPage("Runtime 回放页缺少 next cursor 或 high-watermark");
+        }
+        const nextPage = await this.options.connection.request("events.replay", {
+          workspacePath: this.options.params.workspacePath,
+          afterEventId: nextAfterEventId,
+          highWatermarkEventId,
+        });
+        if (nextPage.highWatermarkEventId !== highWatermarkEventId) {
+          throw this.invalidReplayPage("Runtime 回放页 high-watermark 发生变化");
+        }
+        if (nextPage.hasMore && nextPage.nextAfterEventId === nextAfterEventId) {
+          throw this.invalidReplayPage("Runtime 回放 cursor 未向前推进");
+        }
+        page = nextPage;
+        first = false;
       }
       this.reconnectAttempt = 0;
-      return { subscribed: true, events };
+      return {
+        subscribed: true,
+        events,
+        hasMore: false,
+        ...(page.nextAfterEventId ? { nextAfterEventId: page.nextAfterEventId } : {}),
+        ...(highWatermarkEventId ? { highWatermarkEventId } : {}),
+      };
     } finally {
       this.bufferingLiveEvents = false;
       for (const event of this.pendingLiveEvents.splice(0)) this.deliverLiveEvent(event);
@@ -253,6 +282,10 @@ class RuntimeSubscription {
       if (oldest !== undefined) this.seenEventIds.delete(oldest);
     }
     return true;
+  }
+
+  private invalidReplayPage(message: string): RuntimeClientError {
+    return new RuntimeClientError("RUNTIME_INVALID_RESPONSE", message, true);
   }
 
   private scheduleReconnect(): void {

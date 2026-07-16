@@ -1269,19 +1269,44 @@ export class RuntimeStore {
   }
 
   listRuntimeEvents(
-    input: { afterEventId?: string; workspacePath?: string; limit?: number } = {},
+    input: {
+      afterEventId?: string;
+      throughEventId?: string;
+      workspacePath?: string;
+      limit?: number;
+    } = {},
   ): RuntimeEventRecord[] {
     const clauses: string[] = [];
     const params: Array<string | number> = [];
     if (input.afterEventId !== undefined) {
-      const cursor = this.db
-        .prepare("SELECT rowid AS row_id FROM runtime_events WHERE event_id = ?")
-        .get(input.afterEventId) as { row_id: number } | undefined;
+      const cursor = input.workspacePath
+        ? (this.db
+            .prepare(
+              "SELECT rowid AS row_id FROM runtime_events WHERE event_id = ? AND workspace_path = ?",
+            )
+            .get(input.afterEventId, input.workspacePath) as { row_id: number } | undefined)
+        : (this.db
+            .prepare("SELECT rowid AS row_id FROM runtime_events WHERE event_id = ?")
+            .get(input.afterEventId) as { row_id: number } | undefined);
       // Event IDs are random, so their lexical order is not a valid replay cursor.
       // SQLite rowid preserves this ledger's append order within one database.
       if (!cursor) return [];
       clauses.push("rowid > ?");
       params.push(cursor.row_id);
+    }
+    if (input.throughEventId !== undefined) {
+      const highWatermark = input.workspacePath
+        ? (this.db
+            .prepare(
+              "SELECT rowid AS row_id FROM runtime_events WHERE event_id = ? AND workspace_path = ?",
+            )
+            .get(input.throughEventId, input.workspacePath) as { row_id: number } | undefined)
+        : (this.db
+            .prepare("SELECT rowid AS row_id FROM runtime_events WHERE event_id = ?")
+            .get(input.throughEventId) as { row_id: number } | undefined);
+      if (!highWatermark) return [];
+      clauses.push("rowid <= ?");
+      params.push(highWatermark.row_id);
     }
     if (input.workspacePath !== undefined) {
       clauses.push("workspace_path = ?");
@@ -1295,6 +1320,19 @@ export class RuntimeStore {
         .prepare(`SELECT * FROM runtime_events${where} ORDER BY rowid LIMIT ?`)
         .all(...params) as RuntimeEventRow[]
     ).map(mapRuntimeEvent);
+  }
+
+  getRuntimeEventHighWatermark(workspacePath?: string): RuntimeEventRecord | undefined {
+    const row = workspacePath
+      ? (this.db
+          .prepare(
+            "SELECT * FROM runtime_events WHERE workspace_path = ? ORDER BY rowid DESC LIMIT 1",
+          )
+          .get(workspacePath) as RuntimeEventRow | undefined)
+      : (this.db.prepare("SELECT * FROM runtime_events ORDER BY rowid DESC LIMIT 1").get() as
+          | RuntimeEventRow
+          | undefined);
+    return row ? mapRuntimeEvent(row) : undefined;
   }
 
   /**

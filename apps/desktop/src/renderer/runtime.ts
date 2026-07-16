@@ -41,6 +41,8 @@ import type {
 import { conversationItemKey } from "./conversation/items.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
+const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
+const MAX_RENDERER_TIMELINE_ITEMS = 2_000;
 
 function getBridge(): DesktopBridge | undefined {
   return window.pico;
@@ -1144,13 +1146,20 @@ export function useRuntimeStore(): RuntimeStore {
     if (preview || connection.kind !== "ready" || !data.workspacePath) return;
     const bridge = getBridge();
     if (!bridge) return;
+    seenEventIdsRef.current.clear();
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
       const scope = event.scope;
       const scopedWorkspacePath = stringValue(scope.workspacePath);
       if (scopedWorkspacePath && scopedWorkspacePath !== dataRef.current.workspacePath) return;
       const eventId = stringValue(event.eventId);
       if (eventId && seenEventIdsRef.current.has(eventId)) return;
-      if (eventId) seenEventIdsRef.current.add(eventId);
+      if (eventId) {
+        seenEventIdsRef.current.add(eventId);
+        if (seenEventIdsRef.current.size > MAX_RENDERER_SEEN_EVENT_IDS) {
+          const oldest = seenEventIdsRef.current.values().next().value;
+          if (oldest !== undefined) seenEventIdsRef.current.delete(oldest);
+        }
+      }
       const payload = isRecord(event.payload) ? event.payload : {};
       const topic = stringValue(event.topic);
       if (topic === "approval.requested") {
@@ -1229,8 +1238,8 @@ export function useRuntimeStore(): RuntimeStore {
               sessionId: stringValue(scope.sessionId) || undefined,
               runId: stringValue(scope.runId ?? payload.runId) || undefined,
               eventType: stringValue(item.eventType) || undefined,
-            },
-          ],
+            } satisfies AppData["timeline"][number],
+          ].slice(-MAX_RENDERER_TIMELINE_ITEMS),
         }));
       } else if (topic === "config.updated") {
         const workspace = dataRef.current.workspacePath;
@@ -2052,7 +2061,7 @@ function createPreviewBridge(): DesktopBridge {
     ) as DesktopBridge["runtime"],
     events: {
       subscribe: () => ({
-        ready: success({ subscribed: true, events: [] }),
+        ready: success({ subscribed: true, events: [], hasMore: false }),
         dispose: () => undefined,
       }),
     },
