@@ -290,7 +290,7 @@ function buildSubagentSafetyMiddleware(
 
     if (
       mode === "worker" &&
-      (isHardlineCommand(call.name, call.arguments) ||
+      (isHardlineCommand(call.name, call.arguments, config.workDir) ||
         isDangerousCommand(call.name, call.arguments))
     ) {
       return {

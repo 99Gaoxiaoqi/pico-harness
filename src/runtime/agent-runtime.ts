@@ -1584,7 +1584,7 @@ export function buildForegroundSafetyMiddleware(
         reason: planModeDenial,
       };
     }
-    if (isHardlineCommand(call.name, call.arguments)) {
+    if (isHardlineCommand(call.name, call.arguments, workDir)) {
       return {
         allowed: false,
         reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",

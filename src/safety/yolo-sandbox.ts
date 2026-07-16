@@ -65,7 +65,7 @@ export function evaluateYoloToolCall(
   workspaceRoots: WorkspaceRoots,
   config: Partial<YoloSandboxConfig> = {},
 ): SandboxDecision {
-  if (isHardlineCommand(call.name, call.arguments)) {
+  if (isHardlineCommand(call.name, call.arguments, workDir)) {
     return denied("workspace_write_denied", "Hardline 高危命令不可通过 YOLO 绕过。");
   }
 

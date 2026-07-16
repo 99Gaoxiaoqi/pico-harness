@@ -283,7 +283,7 @@ function validateBackgroundToolCall(
       reason: `[background:tool_denied] 工具 ${call.name} 尚未支持继承后台安全策略。`,
     };
   }
-  if (isHardlineCommand(call.name, call.arguments)) {
+  if (isHardlineCommand(call.name, call.arguments, policy.workspacePath)) {
     return {
       allowed: false,
       reason: "[background:hardline_denied] Hardline 高危命令不可由后台 YOLO 绕过。",

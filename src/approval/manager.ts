@@ -360,11 +360,11 @@ export function isDangerousCommand(toolName: string, args: string): boolean {
   return false;
 }
 
-export function isHardlineCommand(toolName: string, args: string): boolean {
+export function isHardlineCommand(toolName: string, args: string, workDir?: string): boolean {
   if (toolName !== "bash") return false;
   const command = parseBashCommand(args);
   // Bash 参数无法确定解析时不得继续到 shell。
-  return command === undefined || isHardlineBashCommand(command);
+  return command === undefined || isHardlineBashCommand(command, workDir);
 }
 
 function buildApprovalPreview(toolName: string, args: string, diff?: string): ApprovalPreview {
