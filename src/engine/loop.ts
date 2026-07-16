@@ -1116,6 +1116,7 @@ export class AgentEngine implements AgentRunner {
       sessionId: session.id,
       workDir: session.workDir,
       ...(runtimeStore ? { store: runtimeStore } : {}),
+      writeGuard: session,
     });
     return runtimeRun.run(execute, signal);
   }
@@ -2373,6 +2374,7 @@ export class AgentEngine implements AgentRunner {
       parentRunId: parentRun.runId,
       ...(currentRuntimeToolCallId() ? { parentToolCallId: currentRuntimeToolCallId() } : {}),
       store: parentRun.store,
+      ...(parentRun.runtimeEventWriteGuard ? { writeGuard: parentRun.runtimeEventWriteGuard } : {}),
     });
     return childRun.run(async () => {
       const result = await runAttributed();

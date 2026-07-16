@@ -75,7 +75,11 @@ import {
   type RewindWorkspaceTarget,
 } from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
-import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
+import {
+  currentRuntimeRun,
+  RuntimeRun,
+  type RuntimeEventWriteGuard,
+} from "../runtime/runtime-run.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   runtimeEventHasModelMessage,
@@ -192,7 +196,7 @@ export interface DurableTuiRewindHandoff {
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供模型投影副本。
  */
-export class Session implements SessionRuntimePersistence {
+export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuard {
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
   readonly id: string;
   /** 该会话绑定的物理工作区 */
@@ -1993,6 +1997,20 @@ export class Session implements SessionRuntimePersistence {
     return this.store;
   }
 
+  /** RuntimeRun's only authority over Session ownership; the lease itself stays private here. */
+  async assertRuntimeEventWriteAllowed(): Promise<void> {
+    this.assertWritable();
+    let ownership: OwnerLease;
+    try {
+      ownership = await this.ensureRuntimeOwnership();
+      await ownership.assertOwnership();
+    } catch (error) {
+      this.markWriteUncertain("Runtime Session owner lease validation failed", error);
+      throw this.persistenceFailure ?? error;
+    }
+    this.assertWritable();
+  }
+
   /** Append one structured transcript fact to the same canonical RuntimeEvent ledger. */
   async recordTranscriptEvent(
     event: TranscriptEvent,
@@ -2030,12 +2048,9 @@ export class Session implements SessionRuntimePersistence {
 
     const operation = this.persistenceTail.then(() =>
       this.runWithWriteAdmission(async () => {
-        this.assertWritable();
-        const ownership = await this.ensureRuntimeOwnership();
-        await ownership.assertOwnership();
-        this.assertWritable();
+        await this.assertRuntimeEventWriteAllowed();
         const result = await write(store);
-        await ownership.assertOwnership();
+        await this.assertRuntimeEventWriteAllowed();
         return result;
       }),
     );

@@ -56,6 +56,13 @@ export interface RuntimeRunStartOptions {
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
   readonly store?: RuntimeEventStore;
+  /** Present only for a run owned by one live Session. Detached recovery/fork flows omit it. */
+  readonly writeGuard?: RuntimeEventWriteGuard;
+}
+
+/** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
+export interface RuntimeEventWriteGuard {
+  assertRuntimeEventWriteAllowed(): Promise<void>;
 }
 
 export interface ReconcileRuntimeRunsOptions {
@@ -191,6 +198,7 @@ export class RuntimeRun {
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
   private readonly terminalEventId?: string;
+  private readonly writeGuard?: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
   private turnId: string;
@@ -214,6 +222,7 @@ export class RuntimeRun {
     this.now = options.now ?? (() => new Date());
     this.runStartedEventId = options.runStartedEventId;
     this.terminalEventId = options.terminalEventId;
+    this.writeGuard = options.writeGuard;
     this.parentRefs = compactRefs({
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
@@ -228,12 +237,14 @@ export class RuntimeRun {
       new RuntimeEventStore({
         databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
       });
-    await store.initializeSession({
-      sessionId: options.sessionId,
-      workDir: options.workDir,
-      ...(options.now ? { now: options.now } : {}),
-    });
     const run = new RuntimeRun(options.sessionId, options.workDir, { ...options, store });
+    await run.writeCanonicalEvent(() =>
+      store.initializeSession({
+        sessionId: options.sessionId,
+        workDir: options.workDir,
+        ...(options.now ? { now: options.now } : {}),
+      }),
+    );
     await run.recordRunStarted();
     return run;
   }
@@ -458,6 +469,7 @@ export class RuntimeRun {
       sessionId: options.session.id,
       workDir: options.workDir,
       store,
+      writeGuard: options.session,
     });
     await run.run(async () => {
       for (const message of history) {
@@ -520,6 +532,7 @@ export class RuntimeRun {
       sessionId: session.id,
       workDir: session.workDir,
       store,
+      writeGuard: session,
     });
     await run.run(() => run.commitMessages(session, messages));
     return true;
@@ -548,7 +561,11 @@ export class RuntimeRun {
         ) {
           throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
         }
-        const persisted = await store.append(existing.event);
+        const persisted = await writeWithRuntimeEventGuard(
+          session,
+          () => store.append(existing.event),
+          `Runtime external message ${eventId}`,
+        );
         await session.commitRuntimeProjectionBatch([persisted]);
         return runtimeCommitReceipt(persisted);
       }
@@ -556,6 +573,7 @@ export class RuntimeRun {
         sessionId: session.id,
         workDir: session.workDir,
         store,
+        writeGuard: session,
       });
       return run.run(() => run.commitMessageOnce(session, eventId, canonicalMessage));
     });
@@ -576,6 +594,11 @@ export class RuntimeRun {
     }
     const sessionStore = session.runtimeEventStore;
     return sessionStore !== undefined && sessionStore.databasePath === this.store.databasePath;
+  }
+
+  /** Allows a nested live run to inherit the same narrow Session write capability. */
+  get runtimeEventWriteGuard(): RuntimeEventWriteGuard | undefined {
+    return this.writeGuard;
   }
 
   async readModelHistoryEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
@@ -624,7 +647,7 @@ export class RuntimeRun {
     const events = messages.map((message) =>
       this.messageCommittedEvent(createRuntimeEventId("message"), message),
     );
-    const persisted = await this.store.appendBatch(events);
+    const persisted = await this.appendBatch(events);
     await session.commitRuntimeProjectionBatch(persisted);
   }
 
@@ -636,7 +659,7 @@ export class RuntimeRun {
     this.assertSession(session);
     this.assertOpen();
     const event = this.messageCommittedEvent(eventId, message);
-    const persisted = await this.store.append(event);
+    const persisted = await this.append(event);
     await session.commitRuntimeProjectionBatch([persisted]);
     return runtimeCommitReceipt(persisted);
   }
@@ -649,7 +672,7 @@ export class RuntimeRun {
     this.assertOpen();
     const message = canonicalizeRuntimeMessage(stripMessageUsage(source));
     const refs = this.messageRefs(message);
-    await this.store.append({
+    await this.append({
       ...this.base(eventId),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
@@ -662,7 +685,7 @@ export class RuntimeRun {
     this.assertOpen();
     const canonicalMessage = canonicalizeRuntimeMessage(message);
     const refs = this.messageRefs(canonicalMessage);
-    await this.store.append({
+    await this.append({
       ...this.base(createRuntimeEventId("bootstrap-message")),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
@@ -675,7 +698,7 @@ export class RuntimeRun {
     this.assertOpen();
     const canonicalMessage = canonicalizeRuntimeMessage(message);
     const refs = this.messageRefs(canonicalMessage);
-    await this.store.append({
+    await this.append({
       ...this.base(createRuntimeEventId("transcript-message"), true, "transcript"),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
@@ -698,7 +721,7 @@ export class RuntimeRun {
         argumentsHash: createHash("sha256").update(argumentsJson).digest("hex"),
       },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   registerToolEvidence(toolCallId: string, evidence: RuntimeEvidenceReference): void {
@@ -717,7 +740,7 @@ export class RuntimeRun {
       kind: "approval.requested",
       data: { approvalId, toolName },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   async recordApprovalSettled(
@@ -730,12 +753,12 @@ export class RuntimeRun {
       kind: "approval.settled",
       data: { approvalId, decision },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   async recordModelCallStarted(options: RuntimeModelCallStartedOptions): Promise<void> {
     this.assertOpen();
-    await this.store.append({
+    await this.append({
       ...this.base(createRuntimeEventId("model-call-started"), true, "internal"),
       refs: this.refs({ providerCallId: options.providerCallId }),
       kind: "model.call.started",
@@ -745,7 +768,7 @@ export class RuntimeRun {
 
   async recordModelCallSettled(options: RuntimeModelCallSettledOptions): Promise<void> {
     this.assertOpen();
-    await this.store.append({
+    await this.append({
       ...this.base(createRuntimeEventId("model-call-settled"), true, "internal"),
       refs: this.refs({ providerCallId: options.providerCallId }),
       kind: "model.call.settled",
@@ -766,7 +789,7 @@ export class RuntimeRun {
         summary: structuredClone(options.summary),
       },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   async recordHistoryRewound(branchId: string, throughEventId?: string): Promise<void> {
@@ -776,7 +799,7 @@ export class RuntimeRun {
       kind: "history.rewound",
       data: { branchId, ...(throughEventId ? { throughEventId } : {}) },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   async recordSessionForked(
@@ -795,7 +818,7 @@ export class RuntimeRun {
         ...(completion ?? {}),
       },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   async finish(status: RuntimeTerminalStatus, reason?: string): Promise<void> {
@@ -811,7 +834,7 @@ export class RuntimeRun {
         data: { status, ...(reason ? { reason } : {}) },
       };
       if (!this.terminal) {
-        await this.store.append(terminal);
+        await this.append(terminal);
         this.terminal = terminal;
       }
     })();
@@ -828,7 +851,7 @@ export class RuntimeRun {
       kind: "run.started",
       data: { workDir: this.workDir },
     };
-    await this.store.append(event);
+    await this.append(event);
   }
 
   private base(
@@ -879,6 +902,21 @@ export class RuntimeRun {
     };
   }
 
+  private append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
+    return this.writeCanonicalEvent(() => this.store.append(event));
+  }
+
+  private appendBatch(
+    events: readonly RuntimeEvent[],
+  ): Promise<readonly RuntimeEventStoreAppendResult[]> {
+    return this.writeCanonicalEvent(() => this.store.appendBatch(events));
+  }
+
+  /** Checks the live Session lease on both sides of every canonical write attempt. */
+  private writeCanonicalEvent<Result>(write: () => Promise<Result>): Promise<Result> {
+    return writeWithRuntimeEventGuard(this.writeGuard, write, `Runtime run ${this.runId}`);
+  }
+
   private assertSession(session: Session): void {
     if (!this.claimsSession(session)) {
       throw new Error(
@@ -892,6 +930,33 @@ export class RuntimeRun {
       throw new Error(`Runtime run ${this.runId} is already terminal`);
     }
   }
+}
+
+async function writeWithRuntimeEventGuard<Result>(
+  guard: RuntimeEventWriteGuard | undefined,
+  write: () => Promise<Result>,
+  operation: string,
+): Promise<Result> {
+  if (!guard) return write();
+
+  await guard.assertRuntimeEventWriteAllowed();
+  let result: Result;
+  try {
+    result = await write();
+  } catch (writeError) {
+    try {
+      await guard.assertRuntimeEventWriteAllowed();
+    } catch (guardError) {
+      throw new AggregateError(
+        [writeError, guardError],
+        `${operation} write failed after its Session lease became invalid`,
+        { cause: guardError },
+      );
+    }
+    throw writeError;
+  }
+  await guard.assertRuntimeEventWriteAllowed();
+  return result;
 }
 
 function findDanglingRuntimeToolCalls(events: readonly RuntimeEvent[]): PendingRuntimeToolCall[] {
