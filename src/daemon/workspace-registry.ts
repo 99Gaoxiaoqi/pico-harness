@@ -5,6 +5,10 @@ import { resolve } from "node:path";
 export interface WorkspaceRuntime {
   readonly workspacePath: string;
   close?(): Promise<void> | void;
+  /** Whether bounded close returned while this runtime still owns live execution resources. */
+  hasPendingOwnership?(): boolean;
+  /** Settles only when those resources are safe for a replacement daemon to own. */
+  waitForOwnershipRelease?(): Promise<void>;
 }
 
 export interface WorkspaceRuntimeFactory<T extends WorkspaceRuntime> {
@@ -14,34 +18,86 @@ export interface WorkspaceRuntimeFactory<T extends WorkspaceRuntime> {
 /** Owns one runtime per canonical Git worktree or physical folder. */
 export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
   private readonly runtimes = new Map<string, Promise<T>>();
+  private lifecycleState: "open" | "closing" | "closed" = "open";
+  private closePromise?: Promise<void>;
+  private ownershipReleasePending = false;
+  private ownershipReleasePromise: Promise<void> = Promise.resolve();
 
   constructor(private readonly factory: WorkspaceRuntimeFactory<T>) {}
 
   async get(workspacePath: string): Promise<T> {
+    this.assertOpen();
     const canonicalPath = await canonicalizeWorkspacePath(workspacePath);
+    this.assertOpen();
     let runtime = this.runtimes.get(canonicalPath);
     if (!runtime) {
-      runtime = this.factory.create(canonicalPath);
+      runtime = Promise.resolve().then(() => {
+        this.assertOpen();
+        return this.factory.create(canonicalPath);
+      });
       this.runtimes.set(canonicalPath, runtime);
-      try {
-        await runtime;
-      } catch (error) {
-        this.runtimes.delete(canonicalPath);
-        throw error;
-      }
     }
-    return runtime;
+    try {
+      const resolved = await runtime;
+      this.assertOpen();
+      return resolved;
+    } catch (error) {
+      if (this.runtimes.get(canonicalPath) === runtime) this.runtimes.delete(canonicalPath);
+      throw error;
+    }
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.lifecycleState = "closing";
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
-    await Promise.all(
-      runtimes.map(async (runtime) => {
-        const resolved = await runtime;
-        await resolved.close?.();
-      }),
+    this.closePromise = this.closeRuntimes(runtimes).finally(() => {
+      this.lifecycleState = "closed";
+    });
+    return this.closePromise;
+  }
+
+  private async closeRuntimes(runtimes: readonly Promise<T>[]): Promise<void> {
+    const resolutions = await Promise.allSettled(runtimes);
+    const resolved = resolutions.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
     );
+    const closes = await Promise.allSettled(resolved.map(async (runtime) => runtime.close?.()));
+    const closeFailure = closes.find((result) => result.status === "rejected");
+    this.ownershipReleasePending =
+      closeFailure !== undefined || resolved.some((runtime) => runtime.hasPendingOwnership?.());
+    const ownershipRelease = Promise.all(
+      resolved.map(async (runtime) => runtime.waitForOwnershipRelease?.()),
+    ).then(() => {
+      if (closeFailure?.status === "rejected") throw closeFailure.reason;
+    });
+    this.ownershipReleasePromise = ownershipRelease;
+    ownershipRelease.then(
+      () => {
+        this.ownershipReleasePending = false;
+      },
+      () => undefined,
+    );
+    void ownershipRelease.catch(() => undefined);
+
+    const resolutionFailure = resolutions.find((result) => result.status === "rejected");
+    if (resolutionFailure?.status === "rejected") throw resolutionFailure.reason;
+    if (closeFailure?.status === "rejected") throw closeFailure.reason;
+  }
+
+  hasPendingOwnership(): boolean {
+    return this.ownershipReleasePending;
+  }
+
+  waitForOwnershipRelease(): Promise<void> {
+    return this.ownershipReleasePromise;
+  }
+
+  private assertOpen(): void {
+    if (this.lifecycleState !== "open") {
+      throw new Error("Workspace Runtime registry 正在关闭");
+    }
   }
 }
 

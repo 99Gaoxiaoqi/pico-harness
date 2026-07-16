@@ -105,7 +105,11 @@ import {
   type RuntimeProviderInput,
   type RuntimeUserInput,
 } from "./protocol.js";
-import type { DisposableLocalRuntimeService, RuntimeNotificationCursor } from "./service.js";
+import type {
+  DisposableLocalRuntimeService,
+  RuntimeNotificationCursor,
+  ShutdownOwnershipFence,
+} from "./service.js";
 import {
   DesktopSessionStateStore,
   type LegacyDesktopSessionTitleMetadata,
@@ -521,6 +525,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.lifecycleState = "closing";
     this.closePromise = this.closeOnce();
     return this.closePromise;
+  }
+
+  shutdownOwnershipFence(): ShutdownOwnershipFence {
+    return this.options.runtimeService.shutdownOwnershipFence();
   }
 
   private async closeOnce(): Promise<void> {

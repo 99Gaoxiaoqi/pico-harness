@@ -137,6 +137,8 @@ export class WorkspaceTaskRuntime {
   private eventSequence = 0;
   private closed = false;
   private closePromise?: Promise<void>;
+  private ownershipReleasePending = false;
+  private ownershipReleasePromise: Promise<void> = Promise.resolve();
 
   /** Compatibility name used by the daemon's generic canonical-workspace registry. */
   get workspacePath(): string {
@@ -225,17 +227,22 @@ export class WorkspaceTaskRuntime {
       promise: Promise.resolve(),
     };
     this.runs.set(runId, record);
+    let admitted = false;
+    record.promise = Promise.resolve().then(() => {
+      if (!admitted) return;
+      return this.executeRun(record, executor);
+    });
     try {
       this.publish({
         type: "run.started",
         resourceVersion: record.snapshot.version,
         run: cloneRun(record.snapshot),
       });
+      admitted = true;
     } catch (error) {
       this.runs.delete(runId);
       throw error;
     }
-    record.promise = Promise.resolve().then(() => this.executeRun(record, executor));
     return cloneRun(record.snapshot);
   }
 
@@ -363,37 +370,75 @@ export class WorkspaceTaskRuntime {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
-    this.closePromise = this.performClose();
-    return this.closePromise;
+    let resolveClose: () => void = () => undefined;
+    let rejectClose: (reason: unknown) => void = () => undefined;
+    const closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    this.closePromise = closePromise;
+    void this.performClose().then(resolveClose, rejectClose);
+    return closePromise;
+  }
+
+  /** True only when close returned before an executor and its owned resources fully drained. */
+  hasPendingOwnership(): boolean {
+    return this.ownershipReleasePending;
+  }
+
+  /** Resolves after every admitted executor and the TaskHostRuntime it may reference are closed. */
+  waitForOwnershipRelease(): Promise<void> {
+    return this.ownershipReleasePromise;
   }
 
   private async performClose(): Promise<void> {
     this.unsubscribeTaskRegistry();
     const records = [...this.runs.values()];
-    try {
+    for (const record of records) {
+      if (!isTerminalRunStatus(record.snapshot.status)) this.cancelDuringClose(record);
+    }
+    const executorDrain = Promise.allSettled(records.map((record) => record.promise)).then(
+      () => undefined,
+    );
+    const drained = await settleWithinDeadline([executorDrain], this.closeDrainTimeoutMs);
+    if (!drained) {
       for (const record of records) {
-        if (!isTerminalRunStatus(record.snapshot.status)) this.cancelDuringClose(record);
-      }
-      const drained = await settleWithinDeadline(
-        records.map((record) => record.promise),
-        this.closeDrainTimeoutMs,
-      );
-      if (!drained) {
-        for (const record of records) {
-          if (!isTerminalRunStatus(record.snapshot.status)) {
-            this.finishRun(
-              record,
-              "cancelled",
-              undefined,
-              "workspace runtime close drain deadline exceeded",
-            );
-          }
+        if (!isTerminalRunStatus(record.snapshot.status)) {
+          this.finishRun(
+            record,
+            "cancelled",
+            undefined,
+            "workspace runtime close drain deadline exceeded",
+          );
         }
       }
-      await this.taskHostRuntime?.close();
-    } finally {
-      this.subscribers.clear();
     }
+
+    const releaseOwnership = async (): Promise<void> => {
+      await executorDrain;
+      try {
+        await this.taskHostRuntime?.close();
+      } finally {
+        this.subscribers.clear();
+      }
+    };
+    if (drained) {
+      await releaseOwnership();
+      return;
+    }
+
+    this.ownershipReleasePending = true;
+    const ownershipRelease = releaseOwnership();
+    this.ownershipReleasePromise = ownershipRelease;
+    ownershipRelease.then(
+      () => {
+        this.ownershipReleasePending = false;
+      },
+      () => undefined,
+    );
+    // The daemon host observes the original promise and retains its singleton lock on rejection.
+    // This local branch prevents an unhandled rejection when the runtime is used without a host.
+    void ownershipRelease.catch(() => undefined);
   }
 
   private async executeRun(
