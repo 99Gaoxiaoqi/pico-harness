@@ -22,6 +22,7 @@
 - [x] 统一 Usage 事实源：新用量只由 `model.call.settled` 推导，旧 usage patch 仅作为 legacy prefix，补齐 Desktop compact 与 Hook 的 RuntimeRun 边界。✔️
 - [x] 执行风险匹配验证：受影响 lint、核心/Desktop typecheck、build、storage check 及临时 SQLite/行为 smoke。✔️
 - [x] 聚焦复审最终差异，确认未恢复 fallback、未新增第二事实源，且未触碰用户已有未跟踪文件。✔️
+- [x] 合并后三路 review 收尾：移除模型 Hook 直接执行 fallback，持久化 Run 动态绑定，缩小事务失败边界，并用 in-flight drain/queue admission lease 封闭停机竞态。✔️
 
 ## 完成标记
 
@@ -40,6 +41,6 @@
 
 ## 完成记录
 
-- 实现提交：`da48d7a`、`c75924b`、`2a1820b`、`c9ba64c`、`ce04bbf`、`5fb00bb`、`885b9ed`。
-- 最终独立复审确认：queued Run 准入、事务后通知、两阶段关闭和 rollout-aware Usage 均无新的合并阻断。
+- 实现提交：`da48d7a`、`c75924b`、`2a1820b`、`c9ba64c`、`ce04bbf`、`5fb00bb`、`885b9ed`、`ed5e383`、`e16b490`、`5ea4973`。
+- 最终独立复审覆盖：queued Run 准入、全局请求 drain、事务后通知、动态 Run 绑定、两阶段关闭、Hook RuntimeRun 和 rollout-aware Usage。
 - 本轮未恢复已删除的测试代码，未修改明确保留的 GC/retention 模块，也未纳入用户的其他未跟踪文件。
