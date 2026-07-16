@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { RepoMapService } from "../../src/code-intelligence/repo-map.js";
 import { expandMentionsToPrompt } from "../../src/input/context-attachments.js";
 
@@ -117,55 +117,29 @@ test("directory attachments sample only the configured entry limit without claim
 });
 
 test(
-  "directory attachments stay bound to the verified handle after the path is replaced",
-  { skip: process.platform === "win32" ? "requires POSIX directory replacement" : false },
+  "Linux directory attachments stay bound to the verified handle after replacement",
+  { skip: process.platform !== "linux" ? "requires Linux procfs descriptor binding" : false },
   async (context) => {
-    const fixture = await createFixture("directory-replacement");
-    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const { attachment } = await replaceDirectoryAfterVerification(context);
 
-    const target = join(fixture.workspace, "victim");
-    const holding = join(fixture.workspace, "victim-original");
-    const safeEntry = join(target, "VISIBLE_SAFE_ENTRY");
-    await mkdir(target);
-    await writeFile(safeEntry, "safe\n");
-    await writeFile(join(fixture.outside, DIRECTORY_SECRET_MARKER), "secret\n");
+    assert.doesNotMatch(attachment?.content ?? "", SAFE_DIRECTORY_LISTING_UNAVAILABLE);
+    assert.match(attachment?.content ?? "", /VISIBLE_SAFE_ENTRY/u);
+  },
+);
 
-    const probe = await open(safeEntry, "r");
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as object;
-    const originalStat = Reflect.get(fileHandlePrototype, "stat") as (
-      this: FileHandle,
-    ) => Promise<Stats>;
-    await probe.close();
+test(
+  "directory attachments fail closed after replacement without descriptor binding",
+  {
+    skip:
+      process.platform === "linux" || process.platform === "win32"
+        ? "covered by Linux binding or Windows path semantics"
+        : false,
+  },
+  async (context) => {
+    const { attachment } = await replaceDirectoryAfterVerification(context);
 
-    let swapped = false;
-    const patchedStat = async function (this: FileHandle): Promise<Stats> {
-      const info = await originalStat.call(this);
-      if (!swapped && info.isDirectory()) {
-        await rename(target, holding);
-        await symlink(fixture.outside, target, "dir");
-        swapped = true;
-      }
-      return info;
-    };
-    assert.equal(Reflect.set(fileHandlePrototype, "stat", patchedStat), true);
-
-    let expanded;
-    try {
-      expanded = await expandMentionsToPrompt("inspect @victim", { cwd: fixture.workspace });
-    } finally {
-      Reflect.set(fileHandlePrototype, "stat", originalStat);
-    }
-
-    const attachment = expanded.attachments[0];
-    assert.equal(swapped, true);
-    assert.equal(attachment?.type, "directory");
-    assert.doesNotMatch(attachment?.content ?? "", new RegExp(DIRECTORY_SECRET_MARKER, "u"));
-    assert.doesNotMatch(expanded.prompt, new RegExp(DIRECTORY_SECRET_MARKER, "u"));
-    if (SAFE_DIRECTORY_LISTING_UNAVAILABLE.test(attachment?.content ?? "")) {
-      assert.equal(attachment?.truncated, true);
-    } else {
-      assert.match(attachment?.content ?? "", /VISIBLE_SAFE_ENTRY/u);
-    }
+    assert.match(attachment?.content ?? "", SAFE_DIRECTORY_LISTING_UNAVAILABLE);
+    assert.equal(attachment?.truncated, true);
   },
 );
 
@@ -201,6 +175,51 @@ test("RepoMap rejects external symlinks and accepts ordinary and dot-prefixed fi
     ["dotPrefixedSymbol"],
   );
 });
+
+async function replaceDirectoryAfterVerification(context: TestContext) {
+  const fixture = await createFixture("directory-replacement");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+
+  const target = join(fixture.workspace, "victim");
+  const holding = join(fixture.workspace, "victim-original");
+  const safeEntry = join(target, "VISIBLE_SAFE_ENTRY");
+  await mkdir(target);
+  await writeFile(safeEntry, "safe\n");
+  await writeFile(join(fixture.outside, DIRECTORY_SECRET_MARKER), "secret\n");
+
+  const probe = await open(safeEntry, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as object;
+  const originalStat = Reflect.get(fileHandlePrototype, "stat") as (
+    this: FileHandle,
+  ) => Promise<Stats>;
+  await probe.close();
+
+  let swapped = false;
+  const patchedStat = async function (this: FileHandle): Promise<Stats> {
+    const info = await originalStat.call(this);
+    if (!swapped && info.isDirectory()) {
+      await rename(target, holding);
+      await symlink(fixture.outside, target, "dir");
+      swapped = true;
+    }
+    return info;
+  };
+  assert.equal(Reflect.set(fileHandlePrototype, "stat", patchedStat), true);
+
+  let expanded;
+  try {
+    expanded = await expandMentionsToPrompt("inspect @victim", { cwd: fixture.workspace });
+  } finally {
+    Reflect.set(fileHandlePrototype, "stat", originalStat);
+  }
+
+  const attachment = expanded.attachments[0];
+  assert.equal(swapped, true);
+  assert.equal(attachment?.type, "directory");
+  assert.doesNotMatch(attachment?.content ?? "", new RegExp(DIRECTORY_SECRET_MARKER, "u"));
+  assert.doesNotMatch(expanded.prompt, new RegExp(DIRECTORY_SECRET_MARKER, "u"));
+  return { attachment };
+}
 
 async function createFixture(label: string): Promise<{
   root: string;

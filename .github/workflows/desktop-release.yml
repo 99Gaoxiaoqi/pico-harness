@@ -64,7 +64,7 @@ jobs:
           echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Audit full dependency tree
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=low
 
       - name: Verify native SQLite capabilities
         run: npm run check:storage

@@ -46,7 +46,7 @@ jobs:
       - run: npm ci
 
       - name: Audit full dependency tree
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=low
 
       - name: Verify native SQLite capabilities
         run: npm run check:storage
@@ -63,6 +63,11 @@ jobs:
       - name: Run deterministic integration suite
         if: runner.os == 'macOS'
         run: npm run test:integration
+
+      - name: Run Windows Hook security integration subset
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        run: npm run test:integration:windows
 
       - name: Package unsigned desktop smoke build
         run: npm run desktop:package

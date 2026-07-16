@@ -24,11 +24,16 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      - name: Install filesystem metadata tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin
+
       - name: Install dependencies
         run: npm ci
 
       - name: Audit full dependency tree
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=low
 
       - name: Verify native SQLite capabilities
         run: npm run check:storage
