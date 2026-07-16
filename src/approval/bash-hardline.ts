@@ -158,13 +158,10 @@ function isDestructiveRmInvocation(
 }
 
 function isDestructiveFindInvocation(args: readonly ShellWord[]): boolean {
-  if (!args.some((word) => word.value === "-delete")) return false;
-  if (
-    args.some((word) => word.value === "-files0-from" || word.value.startsWith("-files0-from="))
-  ) {
-    return true;
-  }
-
+  const hasDelete = args.some((word) => word.value === "-delete");
+  const hasExternalRoots = args.some(
+    (word) => word.value === "-files0-from" || word.value.startsWith("-files0-from="),
+  );
   const roots: ShellWord[] = [];
   let optionsEnded = false;
   for (let index = 0; index < args.length; index++) {
@@ -184,12 +181,27 @@ function isDestructiveFindInvocation(args: readonly ShellWord[]): boolean {
     roots.push(word);
   }
 
-  return roots.some(
-    (root) =>
-      root.dynamic ||
-      isProtectedRmTarget(root.value) ||
-      isPotentiallyProtectedAbsoluteExpansion(root),
-  );
+  const hasProtectedRoot =
+    hasExternalRoots ||
+    roots.some(
+      (root) =>
+        root.dynamic ||
+        isProtectedRmTarget(root.value) ||
+        isPotentiallyProtectedAbsoluteExpansion(root),
+    );
+  if (!hasProtectedRoot) return false;
+  return hasDelete || hasFindDestructiveExecutor(args);
+}
+
+function hasFindDestructiveExecutor(args: readonly ShellWord[]): boolean {
+  for (let index = 0; index < args.length; index++) {
+    if (!FIND_EXEC_ACTIONS.has(args[index]!.value)) continue;
+    const executable = args[index + 1];
+    if (!executable) continue;
+    if (executable.dynamic) return true;
+    if (FIND_DESTRUCTIVE_EXECUTABLES.has(commandBasename(executable.value))) return true;
+  }
+  return false;
 }
 
 function isFindExpressionStart(value: string): boolean {
@@ -806,6 +818,16 @@ const RM_FORWARDING_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 const FIND_PRE_PATH_OPTIONS: ReadonlySet<string> = new Set(["-H", "-L", "-P"]);
+
+const FIND_EXEC_ACTIONS: ReadonlySet<string> = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+
+const FIND_DESTRUCTIVE_EXECUTABLES: ReadonlySet<string> = new Set([
+  "rm",
+  "rmdir",
+  "shred",
+  "truncate",
+  "unlink",
+]);
 
 const POWER_COMMANDS: ReadonlySet<string> = new Set([
   "halt",
