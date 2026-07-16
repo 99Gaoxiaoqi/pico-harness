@@ -674,9 +674,20 @@ function publishTimelineEvent(
   event: DesktopReporterEvent,
   nextResourceVersion: () => number,
 ): void {
-  // WorkspaceRuntime is the sole lifecycle authority. Reporter lifecycle callbacks
-  // would otherwise create a second, contradictory started/finished status stream.
-  if (["run.started", "run.finished", "run.interrupted"].includes(event.type)) return;
+  // WorkspaceRuntime is the sole lifecycle authority. Stream chunks and final assistant/tool
+  // bodies already belong to the canonical transcript; without a separate bounded live channel,
+  // duplicating them into the durable timeline only creates an unbounded second event stream.
+  if (
+    [
+      "run.started",
+      "run.finished",
+      "run.interrupted",
+      "assistant.delta",
+      "assistant.message",
+      "tool.output",
+    ].includes(event.type)
+  )
+    return;
   service.publishDesktopNotification(
     createRuntimeNotification({
       topic: "run.timeline",
@@ -707,7 +718,6 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
   const detail = firstString(
     safePayload["content"],
     safePayload["resultSummary"],
-    safePayload["outputSummary"],
     safePayload["currentAction"],
     safePayload["summary"],
   );
@@ -740,19 +750,6 @@ function safeTimelinePayload(
         : {}),
     };
   }
-  if (type === "tool.output") {
-    const outputBytes =
-      typeof payload["chunk"] === "string" ? Buffer.byteLength(payload["chunk"], "utf8") : 0;
-    return {
-      toolName: payload["toolName"],
-      stream: payload["stream"],
-      outputBytes,
-      outputSummary: `${String(payload["stream"] ?? "output")} · ${outputBytes} bytes`,
-      ...(typeof payload["providerCallId"] === "string"
-        ? { providerCallId: payload["providerCallId"] }
-        : {}),
-    };
-  }
   if (type === "subagent.trace" && payload["type"] === "tool.completed") {
     const resultBytes =
       typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
@@ -772,7 +769,6 @@ function safeTimelinePayload(
 
 function timelineTitle(type: string, payload: Readonly<Record<string, unknown>>): string {
   if (type === "assistant.thinking") return "Pico 正在推理";
-  if (type === "assistant.message") return "Pico 已回复";
   if (type === "tool.started") return `开始 ${firstString(payload["toolName"]) ?? "工具"}`;
   if (type === "tool.completed") return `完成 ${firstString(payload["toolName"]) ?? "工具"}`;
   if (type === "subagent.activity") {

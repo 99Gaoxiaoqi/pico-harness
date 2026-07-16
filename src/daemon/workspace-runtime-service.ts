@@ -11,10 +11,13 @@ import {
   DESKTOP_RUNTIME_SCHEMA_REVISION,
   isJsonObject,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
+  MAX_RUNTIME_FRAME_BYTES,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
+  serializeRuntimeNotification,
   type JsonValue,
   type RuntimeNotification,
+  type RuntimeNotificationPage,
   type RuntimeRequest,
   type WorkspaceStatusResult,
 } from "./protocol.js";
@@ -64,9 +67,15 @@ export interface WorkspaceRuntimeServiceOptions {
   env?: Readonly<Record<string, string | undefined>>;
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
-  maxRetainedEvents?: number;
   registrationStore?: WorkspaceRegistrationStore;
 }
+
+const DEFAULT_REPLAY_EVENT_LIMIT = 1_000;
+// Keep one query slot for hasMore detection; the public request limit remains 10_000.
+const MAX_REPLAY_EVENT_LIMIT = 9_999;
+const MAX_REPLAY_QUERY_LIMIT = 10_000;
+const REPLAY_RESPONSE_METADATA_RESERVE_BYTES = 64 * 1024;
+const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADATA_RESERVE_BYTES;
 
 /**
  * Concrete daemon-facing owner for workspace Runs. It has no TUI dependency and is
@@ -75,17 +84,14 @@ export interface WorkspaceRuntimeServiceOptions {
  */
 export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly registry: WorkspaceRuntimeRegistry<WorkspaceTaskRuntime>;
-  private readonly events: RuntimeNotification[] = [];
   private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
   private readonly unsubscribers = new Map<string, () => void>();
   private readonly eventStores = new Map<string, RuntimeStore>();
-  private readonly maxRetainedEvents: number;
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
-    this.maxRetainedEvents = Math.max(1, options.maxRetainedEvents ?? 2_000);
     this.picoHome = resolvePicoHome({ env: options.env });
     this.registrationStore =
       options.registrationStore ??
@@ -315,34 +321,58 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     }
   }
 
-  async replayEvents(cursor: RuntimeNotificationCursor): Promise<readonly RuntimeNotification[]> {
-    const paths = cursor.workspacePath
-      ? [await canonicalizeWorkspacePath(cursor.workspacePath)]
-      : await this.knownWorkspacePaths();
-    const events: RuntimeNotification[] = [];
-    for (const workspacePath of paths) {
-      const store = this.eventStore(workspacePath);
-      events.push(
-        ...store
-          .listRuntimeEvents({
-            ...(cursor.afterEventId ? { afterEventId: cursor.afterEventId } : {}),
-            workspacePath,
-            limit: cursor.limit ?? 10_000,
-          })
-          .map(runtimeNotificationFromLedger),
-      );
+  async replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
+    const workspacePath = await canonicalizeWorkspacePath(cursor.workspacePath);
+    const store = this.eventStore(workspacePath);
+    const highWatermarkEventId =
+      cursor.highWatermarkEventId ?? store.getRuntimeEventHighWatermark(workspacePath)?.eventId;
+    if (!highWatermarkEventId) {
+      return {
+        events: [],
+        hasMore: false,
+        ...(cursor.afterEventId ? { nextAfterEventId: cursor.afterEventId } : {}),
+      };
     }
-    // A single workspace ledger is already in durable rowid order. Preserve it: random
-    // event IDs are not a valid causal tie-breaker for start/finish events in the same ms.
-    if (paths.length === 1) {
-      return cursor.limit === undefined ? events : events.slice(0, cursor.limit);
-    }
-    // Cross-workspace replay has no shared durable sequence yet. Timestamp plus ID only
-    // provides deterministic presentation order; resumable callers scope to a workspace.
-    const sorted = events.sort(
-      (left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId),
+
+    const eventLimit = Math.max(
+      1,
+      Math.min(cursor.limit ?? DEFAULT_REPLAY_EVENT_LIMIT, MAX_REPLAY_EVENT_LIMIT),
     );
-    return cursor.limit === undefined ? sorted : sorted.slice(0, cursor.limit);
+    const candidates = store
+      .listRuntimeEvents({
+        ...(cursor.afterEventId ? { afterEventId: cursor.afterEventId } : {}),
+        throughEventId: highWatermarkEventId,
+        workspacePath,
+        limit: Math.min(eventLimit + 1, MAX_REPLAY_QUERY_LIMIT),
+      })
+      .map(runtimeNotificationFromLedger);
+    const events: RuntimeNotification[] = [];
+    let eventsBytes = 2;
+    for (const event of candidates.slice(0, eventLimit)) {
+      const eventBytes = Buffer.byteLength(
+        JSON.stringify(serializeRuntimeNotification(event)),
+        "utf8",
+      );
+      const nextBytes = eventsBytes + (events.length === 0 ? 0 : 1) + eventBytes;
+      if (nextBytes > MAX_REPLAY_EVENTS_BYTES) {
+        if (events.length === 0) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+            `Runtime 事件 ${event.eventId} 无法放入单个 IPC 回放页`,
+          );
+        }
+        break;
+      }
+      events.push(event);
+      eventsBytes = nextBytes;
+    }
+    const nextAfterEventId = events.at(-1)?.eventId ?? cursor.afterEventId;
+    return {
+      events,
+      hasMore: events.length < candidates.length,
+      ...(nextAfterEventId ? { nextAfterEventId } : {}),
+      highWatermarkEventId,
+    };
   }
 
   subscribe(listener: (notification: RuntimeNotification) => void): () => void {
@@ -421,9 +451,6 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         payload: notification.payload,
       },
     });
-    this.events.push(notification);
-    if (this.events.length > this.maxRetainedEvents)
-      this.events.splice(0, this.events.length - this.maxRetainedEvents);
     for (const listener of this.listeners) listener(notification);
   }
 
@@ -453,11 +480,6 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     );
     this.eventStores.set(workspacePath, created);
     return created;
-  }
-
-  private async knownWorkspacePaths(): Promise<string[]> {
-    const registered = await this.registrationStore.list();
-    return [...new Set([...registered, ...this.eventStores.keys()])];
   }
 }
 

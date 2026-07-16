@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 1;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v1";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 2;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v2";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 
 export type JsonScalar = boolean | null | number | string;
@@ -756,18 +756,17 @@ export type RuntimeMethodMap = {
     readonly result: { readonly workspacePath: string; readonly trusted: boolean };
   };
   readonly "events.replay": {
-    readonly params: {
-      readonly workspacePath?: string;
+    readonly params: WorkspaceParams & {
       readonly afterEventId?: string;
+      readonly highWatermarkEventId?: string;
       readonly limit?: number;
     };
-    readonly result: { readonly events: readonly RuntimeNotification[] };
+    readonly result: RuntimeNotificationPage;
   };
   readonly "events.subscribe": {
     readonly params: WorkspaceParams & { readonly afterEventId?: string };
-    readonly result: {
+    readonly result: RuntimeNotificationPage & {
       readonly subscribed: true;
-      readonly events: readonly RuntimeNotification[];
     };
   };
 };
@@ -996,6 +995,16 @@ export interface RuntimeNotification<Topic extends string = string> {
   resourceVersion: number;
   at: number;
   payload: NotificationPayload<Topic>;
+}
+
+export interface RuntimeNotificationPage {
+  readonly events: readonly RuntimeNotification[];
+  /** True when another byte-bounded page remains before the captured high-watermark. */
+  readonly hasMore: boolean;
+  /** Exclusive cursor for the next page. Present whenever this page advanced the cursor. */
+  readonly nextAfterEventId?: string;
+  /** Fixed upper bound captured by the first page so live appends cannot move the replay target. */
+  readonly highWatermarkEventId?: string;
 }
 
 export type TypedRuntimeNotification = {
@@ -1699,8 +1708,12 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   }),
   "workspace.trustStatus": workspaceParams,
   "events.replay": exactParamShape(
-    {},
-    { workspacePath: stringParam, afterEventId: stringParam, limit: finiteNumberParam },
+    { workspacePath: stringParam },
+    {
+      afterEventId: stringParam,
+      highWatermarkEventId: stringParam,
+      limit: finiteNumberParam,
+    },
   ),
   "events.subscribe": exactParamShape(
     { workspacePath: stringParam },
@@ -1982,11 +1995,18 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     truncated: resultBoolean,
     fingerprint: resultString,
   }),
-  "events.replay": resultShape({ events: resultArray(runtimeNotificationResult) }),
-  "events.subscribe": resultShape({
-    subscribed: resultOneOf([true]),
-    events: resultArray(runtimeNotificationResult),
-  }),
+  "events.replay": resultShape(
+    { events: resultArray(runtimeNotificationResult), hasMore: resultBoolean },
+    { nextAfterEventId: resultString, highWatermarkEventId: resultString },
+  ),
+  "events.subscribe": resultShape(
+    {
+      subscribed: resultOneOf([true]),
+      events: resultArray(runtimeNotificationResult),
+      hasMore: resultBoolean,
+    },
+    { nextAfterEventId: resultString, highWatermarkEventId: resultString },
+  ),
 };
 
 /**

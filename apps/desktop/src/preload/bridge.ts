@@ -20,6 +20,8 @@ interface RuntimeInvocationEnvelope {
   readonly params: unknown;
 }
 
+const MAX_PRELOAD_SEEN_EVENT_IDS = 10_000;
+
 export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
   const runtimeEntries = DESKTOP_RUNTIME_METHODS.map((method) => [
     method,
@@ -68,6 +70,10 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           if (disposed) return;
           if (seenEventIds.has(event.eventId)) return;
           seenEventIds.add(event.eventId);
+          if (seenEventIds.size > MAX_PRELOAD_SEEN_EVENT_IDS) {
+            const oldest = seenEventIds.values().next().value;
+            if (oldest !== undefined) seenEventIds.delete(oldest);
+          }
           listener(event);
         };
         const onEvent = (_electronEvent: unknown, envelope: unknown) => {
