@@ -29,9 +29,9 @@ export async function resolveReferencedScripts(
 ): Promise<ReferencedScriptResolution> {
   if (handler.type !== "command") return { paths: [], watchPaths: [], packageScripts: [] };
   const tokens = commandTokens(handler);
-  assertSafePackageShell(handler, tokens);
+  const packageTokens = packageInvocationTokens(handler, tokens);
   const paths = [...referencedPathCandidates(tokens, workspace)];
-  const invocation = packageRunInvocation(tokens);
+  const invocation = packageTokens ? packageRunInvocation(packageTokens) : undefined;
   const packageScripts: ReferencedPackageScript[] = [];
   if (invocation) {
     const resolved = await resolvePackageScript(invocation, workspace);
@@ -316,15 +316,139 @@ function assertNoUnsupportedPackageSelectors(
   }
 }
 
-function assertSafePackageShell(
+function packageInvocationTokens(
   handler: Extract<HookHandler, { type: "command" }>,
   tokens: readonly string[],
-): void {
-  if (handler.args !== undefined) return;
-  const manager = packageManager(tokens[0] ?? "");
-  if (manager && hasShellControlSyntax(handler.command)) {
+): readonly string[] | undefined {
+  const commandText =
+    handler.args === undefined ? handler.command : [handler.command, ...handler.args].join(" ");
+  const manager = referencedPackageManager(commandText);
+  if (!manager) return undefined;
+
+  const unwrapped = unwrapPackageInvocation(tokens, manager);
+  if (handler.args === undefined && hasShellControlSyntax(handler.command)) {
     throw unsupportedPackageInvocation(manager, "shell 组合可能执行未绑定的间接脚本");
   }
+  if (unwrapped) return unwrapped;
+
+  const firstCommand = tokens.find((token) => !isEnvironmentAssignment(token));
+  if (firstCommand && INDIRECT_EXECUTION_WRAPPERS.has(executableName(firstCommand))) {
+    throw unsupportedPackageInvocation(
+      manager,
+      `无法完整解析包装器 ${executableName(firstCommand)}`,
+    );
+  }
+  return undefined;
+}
+
+function unwrapPackageInvocation(
+  tokens: readonly string[],
+  manager: PackageManager,
+): readonly string[] | undefined {
+  let index = skipEnvironmentAssignments(tokens, 0);
+  while (index < tokens.length) {
+    const executable = tokens[index];
+    if (!executable) return undefined;
+    if (packageManager(executable)) return tokens.slice(index);
+
+    const name = executableName(executable);
+    if (name === "env") {
+      index = consumeEnvWrapper(tokens, index + 1, manager);
+      index = skipEnvironmentAssignments(tokens, index);
+      continue;
+    }
+    if (name === "command") {
+      index = consumeCommandWrapper(tokens, index + 1, manager);
+      if (index < 0) return undefined;
+      continue;
+    }
+    if (name === "exec") {
+      index += 1;
+      if (tokens[index] === "--") index += 1;
+      if (tokens[index]?.startsWith("-")) {
+        throw unsupportedPackageInvocation(manager, `无法安全解析 exec 选项 ${tokens[index]}`);
+      }
+      continue;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function consumeEnvWrapper(
+  tokens: readonly string[],
+  startIndex: number,
+  manager: PackageManager,
+): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (!token) return index;
+    if (token === "--") return index + 1;
+    if (isEnvironmentAssignment(token)) return index;
+    if (!token.startsWith("-")) return index;
+    if (
+      token === "-i" ||
+      token === "--ignore-environment" ||
+      token === "-0" ||
+      token === "--null"
+    ) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--unset=")) {
+      index += 1;
+      continue;
+    }
+    if (token === "-u" || token === "--unset") {
+      if (!tokens[index + 1]) {
+        throw unsupportedPackageInvocation(manager, `${token} 缺少环境变量名`);
+      }
+      index += 2;
+      continue;
+    }
+    throw unsupportedPackageInvocation(manager, `无法安全解析 env 选项 ${token}`);
+  }
+  return index;
+}
+
+function consumeCommandWrapper(
+  tokens: readonly string[],
+  startIndex: number,
+  manager: PackageManager,
+): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === "--") return index + 1;
+    if (token === "-p") {
+      index += 1;
+      continue;
+    }
+    if (token === "-v" || token === "-V") return -1;
+    if (token?.startsWith("-")) {
+      throw unsupportedPackageInvocation(manager, `无法安全解析 command 选项 ${token}`);
+    }
+    return index;
+  }
+  return index;
+}
+
+function skipEnvironmentAssignments(tokens: readonly string[], startIndex: number): number {
+  let index = startIndex;
+  while (isEnvironmentAssignment(tokens[index] ?? "")) index += 1;
+  return index;
+}
+
+function isEnvironmentAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(token);
+}
+
+function referencedPackageManager(command: string): PackageManager | undefined {
+  const match = command.match(/\b(npm|pnpm|yarn|bun)(?:\.cmd)?\b/iu)?.[1]?.toLowerCase();
+  return match === "npm" || match === "pnpm" || match === "yarn" || match === "bun"
+    ? match
+    : undefined;
 }
 
 function hasShellControlSyntax(command: string): boolean {
@@ -384,6 +508,10 @@ const PNPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
 
 const TERMINAL_PACKAGE_OPTIONS = wordSet("-h --help -v --version --revision");
 
+const INDIRECT_EXECUTION_WRAPPERS = wordSet(
+  "bash sh zsh dash ksh fish cmd powershell pwsh sudo doas nohup nice time timeout xargs eval source . setsid chroot script",
+);
+
 const PACKAGE_FLAG_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {
   npm: wordSet(
     "-s --silent --if-present --ignore-scripts --foreground-scripts --color --no-color --json --timing",
@@ -433,10 +561,14 @@ function wordSet(words: string): ReadonlySet<string> {
 }
 
 function packageManager(executable: string): PackageManager | undefined {
-  const name = basename(executable)
-    .toLowerCase()
-    .replace(/\.cmd$/u, "");
+  const name = executableName(executable);
   return name === "npm" || name === "pnpm" || name === "yarn" || name === "bun" ? name : undefined;
+}
+
+function executableName(executable: string): string {
+  return basename(executable)
+    .toLowerCase()
+    .replace(/\.(?:cmd|exe)$/u, "");
 }
 
 function commandTokens(handler: Extract<HookHandler, { type: "command" }>): readonly string[] {
