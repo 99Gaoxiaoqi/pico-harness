@@ -5,6 +5,7 @@ interface ShellWord {
   readonly value: string;
   readonly dynamic: boolean;
   readonly quotedOrEscaped: boolean;
+  readonly unquotedExpansion: boolean;
 }
 
 interface ParsedShell {
@@ -46,6 +47,11 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   const executable = commandBasename(words[executableIndex]!.value);
   const args = words.slice(executableIndex + 1);
   if (executable === "rm") return isDestructiveRmInvocation(args, false);
+  if (executable === "find" && isDestructiveFindInvocation(args)) return true;
+  if (isMkfsExecutable(executable) && isDestructiveMkfsInvocation(args)) return true;
+  if (executable === "dd" && isDestructiveDdInvocation(args)) return true;
+  if (executable === "git" && isDestructiveGitInvocation(args)) return true;
+  if (executable === "git-push" && isDestructiveGitPushInvocation(args)) return true;
 
   if (SHELL_COMMANDS.has(executable)) {
     const commandIndex = args.findIndex(
@@ -68,6 +74,19 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
     if (rmIndex >= 0) {
       const dynamicTarget = executable === "find" || executable === "xargs";
       return isDestructiveRmInvocation(args.slice(rmIndex + 1), dynamicTarget);
+    }
+    const findIndex = args.findIndex((word) => commandBasename(word.value) === "find");
+    if (findIndex >= 0 && isDestructiveFindInvocation(args.slice(findIndex + 1))) {
+      return true;
+    }
+    const structuredHardlineIndex = args.findIndex((word) =>
+      isStructuredHardlineExecutable(commandBasename(word.value)),
+    );
+    if (
+      structuredHardlineIndex >= 0 &&
+      isHardlineCommandWords(args.slice(structuredHardlineIndex), depth)
+    ) {
+      return true;
     }
     const nestedExecutableIndex = args.findIndex((word) => {
       const candidate = commandBasename(word.value);
@@ -110,8 +129,8 @@ function isDestructiveRmInvocation(
       continue;
     }
     if (!optionsEnded && value.startsWith("--")) {
-      if (value === "--recursive") recursive = true;
-      if (value === "--force") force = true;
+      if (matchesLongOption(value, "--recursive")) recursive = true;
+      if (matchesLongOption(value, "--force")) force = true;
       continue;
     }
     if (!optionsEnded && /^-[^-]/u.test(value)) {
@@ -124,12 +143,117 @@ function isDestructiveRmInvocation(
   }
 
   const hasProtectedTarget = targets.some((target) => isProtectedRmTarget(target.value));
-  if (!recursive || !force) return hasDynamicArgument && hasProtectedTarget;
+  // rm 的动态参数可能同时改写选项与目标，无法静态证明安全时直接 fail-closed。
+  if (hasDynamicArgument || hasProtectedTarget) return true;
+  if (!recursive || !force) return false;
   if (hasImplicitDynamicTarget && targets.length === 0) return true;
   return targets.some(
-    (target) =>
-      target.dynamic || isDynamicRmTarget(target.value) || isProtectedRmTarget(target.value),
+    (target) => isDynamicRmTarget(target.value) || isPotentiallyProtectedAbsoluteExpansion(target),
   );
+}
+
+function isDestructiveFindInvocation(args: readonly ShellWord[]): boolean {
+  if (!args.some((word) => word.value === "-delete")) return false;
+
+  const roots: ShellWord[] = [];
+  let optionsEnded = false;
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (!optionsEnded && value === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && FIND_PRE_PATH_OPTIONS.has(value)) continue;
+    if (!optionsEnded && value === "-D") {
+      index++;
+      continue;
+    }
+    if (!optionsEnded && /^-O\d+$/u.test(value)) continue;
+    if (!optionsEnded && isFindExpressionStart(value)) break;
+    roots.push(word);
+  }
+
+  return roots.some(
+    (root) =>
+      root.dynamic ||
+      isProtectedRmTarget(root.value) ||
+      isPotentiallyProtectedAbsoluteExpansion(root),
+  );
+}
+
+function isFindExpressionStart(value: string): boolean {
+  return value === "!" || value === "(" || value === ")" || value.startsWith("-");
+}
+
+function isMkfsExecutable(executable: string): boolean {
+  return /^mkfs(?:\.[a-z0-9_-]+)?$/iu.test(executable);
+}
+
+function isStructuredHardlineExecutable(executable: string): boolean {
+  return (
+    isMkfsExecutable(executable) ||
+    executable === "dd" ||
+    executable === "git" ||
+    executable === "git-push"
+  );
+}
+
+function isDestructiveMkfsInvocation(args: readonly ShellWord[]): boolean {
+  return args.some(
+    (word) =>
+      word.dynamic || isDeviceTarget(word.value) || isPotentiallyProtectedAbsoluteExpansion(word),
+  );
+}
+
+function isDestructiveDdInvocation(args: readonly ShellWord[]): boolean {
+  return args.some((word) => {
+    if (word.dynamic) return true;
+    const output = word.value.match(/^of=(.*)$/su)?.[1];
+    if (output === undefined) return false;
+    return (
+      isDeviceTarget(output) || isPotentiallyProtectedAbsoluteExpansion({ ...word, value: output })
+    );
+  });
+}
+
+function isDeviceTarget(target: string): boolean {
+  const normalized = normalizeSlashPath(target.replaceAll("\\", "/"));
+  return normalized === "/dev" || normalized.startsWith("/dev/");
+}
+
+function isDestructiveGitInvocation(args: readonly ShellWord[]): boolean {
+  const subcommandIndex = findGitSubcommandIndex(args);
+  if (subcommandIndex < 0 || args[subcommandIndex]!.value !== "push") return false;
+  return isDestructiveGitPushInvocation(args.slice(subcommandIndex + 1));
+}
+
+function findGitSubcommandIndex(args: readonly ShellWord[]): number {
+  for (let index = 0; index < args.length; index++) {
+    const value = args[index]!.value;
+    if (value === "--") return index + 1 < args.length ? index + 1 : -1;
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(value)) {
+      index++;
+      continue;
+    }
+    if (/^-(?:C|c).+/u.test(value) || /^--[^=]+=/u.test(value)) continue;
+    if (value.startsWith("-")) continue;
+    return index;
+  }
+  return -1;
+}
+
+function isDestructiveGitPushInvocation(args: readonly ShellWord[]): boolean {
+  return args.some((word) => {
+    const value = word.value;
+    return (
+      word.dynamic ||
+      matchesLongOption(value, "--force") ||
+      matchesLongOption(value, "--force-with-lease") ||
+      /^-[^-]*f/u.test(value) ||
+      (value.startsWith("+") && value.length > 1)
+    );
+  });
 }
 
 function isProtectedRmTarget(target: string): boolean {
@@ -138,13 +262,19 @@ function isProtectedRmTarget(target: string): boolean {
   if (isHomeExpression(target)) return true;
 
   const slashPath = target.replaceAll("\\", "/");
-  if (/^[A-Za-z]:\/(?:[*.?{[]|$)/u.test(slashPath)) return true;
-  if (/^[A-Za-z]:\/(?:Windows|Program Files(?: \(x86\))?|ProgramData)(?:\/|$)/iu.test(slashPath)) {
+  const normalizedTarget = normalizeSlashPath(slashPath);
+  if (normalizedTarget === ".." || normalizedTarget.startsWith("../")) return true;
+  if (/^[A-Za-z]:\/$/u.test(normalizedTarget)) return true;
+  if (/^[A-Za-z]:\/(?:[*.?{[]|$)/u.test(normalizedTarget)) return true;
+  if (
+    /^[A-Za-z]:\/(?:Windows|Program Files(?: \(x86\))?|ProgramData)(?:\/|$)/iu.test(
+      normalizedTarget,
+    )
+  ) {
     return true;
   }
 
-  const normalizedTarget = posix.normalize(slashPath);
-  const normalizedHome = posix.normalize(homedir().replaceAll("\\", "/"));
+  const normalizedHome = normalizeSlashPath(homedir().replaceAll("\\", "/"));
   const caseInsensitiveHome = /^[A-Za-z]:\//u.test(normalizedTarget);
   const comparableTarget = caseInsensitiveHome ? normalizedTarget.toLowerCase() : normalizedTarget;
   const comparableHome = caseInsensitiveHome ? normalizedHome.toLowerCase() : normalizedHome;
@@ -154,6 +284,7 @@ function isProtectedRmTarget(target: string): boolean {
   ) {
     return true;
   }
+  if (isAbsoluteUserRoot(normalizedTarget)) return true;
   if (isAbsoluteUserProfileTarget(normalizedTarget)) return true;
 
   if (!slashPath.startsWith("/")) return false;
@@ -171,14 +302,68 @@ function isProtectedRmTarget(target: string): boolean {
   return CRITICAL_POSIX_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`));
 }
 
+function normalizeSlashPath(target: string): string {
+  const drive = target.match(/^([A-Za-z]):(\/.*)$/u);
+  if (!drive) return posix.normalize(target);
+  return `${drive[1]!.toUpperCase()}:${posix.normalize(drive[2]!)}`;
+}
+
+function isAbsoluteUserRoot(target: string): boolean {
+  return (
+    /^\/(?:home|Users)$/iu.test(target) ||
+    /^[A-Za-z]:\/Users$/iu.test(target) ||
+    /^\/[A-Za-z]\/Users$/iu.test(target)
+  );
+}
+
+function isPotentiallyProtectedAbsoluteExpansion(target: ShellWord): boolean {
+  if (!target.unquotedExpansion) return false;
+
+  const slashPath = target.value.replaceAll("\\", "/");
+  const normalized = normalizeSlashPath(slashPath);
+  const expansionIndex = normalized.search(/[?*[{~$]/u);
+  if (expansionIndex >= 0 && expansionTouchesAbsoluteRootComponent(normalized, expansionIndex)) {
+    return true;
+  }
+  return braceMayProduceAbsoluteTarget(slashPath);
+}
+
+function expansionTouchesAbsoluteRootComponent(target: string, expansionIndex: number): boolean {
+  if (target.startsWith("/")) {
+    const componentEnd = target.indexOf("/", 1);
+    return componentEnd < 0 || expansionIndex < componentEnd;
+  }
+  if (/^[A-Za-z]:\//u.test(target)) {
+    const componentEnd = target.indexOf("/", 3);
+    return componentEnd < 0 || expansionIndex < componentEnd;
+  }
+  return false;
+}
+
+function braceMayProduceAbsoluteTarget(target: string): boolean {
+  if (!target.includes("{")) return false;
+  if (/(?:^|[,{])\/(?:[^}]*)/u.test(target)) return true;
+  if (/(?:^|[,{])[A-Za-z]:\//u.test(target)) return true;
+
+  const closingBrace = target.indexOf("}");
+  if (!target.startsWith("{") || closingBrace < 0 || target[closingBrace + 1] !== "/") {
+    return false;
+  }
+  return target
+    .slice(1, closingBrace)
+    .split(",")
+    .some((alternative) => alternative.length === 0);
+}
+
 function isDynamicRmTarget(target: string): boolean {
   return target === "{}" || target === "{+}";
 }
 
 function isHomeExpression(target: string): boolean {
-  if (/^~(?:[^/]*)(?:\/?|\/(?:[*.?{[]).*)$/u.test(target)) return true;
-  return /^(?:\$HOME|\$\{HOME\}|\$USERPROFILE|\$\{USERPROFILE\}|%USERPROFILE%)(?:\/?|\/(?:[*.?{[]).*)$/iu.test(
-    target,
+  const slashPath = target.replaceAll("\\", "/");
+  if (/^~[^/]*(?:\/.*)?$/u.test(slashPath)) return true;
+  return /^(?:\$HOME|\$\{HOME\}|\$USERPROFILE|\$\{USERPROFILE\}|%USERPROFILE%)(?:\/.*)?$/iu.test(
+    slashPath,
   );
 }
 
@@ -206,8 +391,8 @@ function hasRecursiveAndForceFlags(words: readonly ShellWord[]): boolean {
   let recursive = false;
   let force = false;
   for (const word of words) {
-    if (word.value === "--recursive") recursive = true;
-    if (word.value === "--force") force = true;
+    if (matchesLongOption(word.value, "--recursive")) recursive = true;
+    if (matchesLongOption(word.value, "--force")) force = true;
     if (/^-[^-]/u.test(word.value)) {
       const flags = word.value.slice(1);
       if (/[rR]/u.test(flags)) recursive = true;
@@ -217,6 +402,14 @@ function hasRecursiveAndForceFlags(words: readonly ShellWord[]): boolean {
   return recursive && force;
 }
 
+function matchesLongOption(
+  value: string,
+  canonical: "--recursive" | "--force" | "--force-with-lease",
+): boolean {
+  const optionName = value.split("=", 1)[0]!;
+  return optionName.length > 2 && canonical.startsWith(optionName);
+}
+
 function parseShell(command: string): ParsedShell {
   const commands: ShellWord[][] = [];
   const nestedCommands: string[] = [];
@@ -224,16 +417,18 @@ function parseShell(command: string): ParsedShell {
   let value = "";
   let dynamic = false;
   let quotedOrEscaped = false;
+  let unquotedExpansion = false;
   let tokenStarted = false;
   let quote: "single" | "double" | undefined;
   let ambiguous = false;
 
   const finishWord = (): void => {
     if (!tokenStarted) return;
-    words.push({ value, dynamic, quotedOrEscaped });
+    words.push({ value, dynamic, quotedOrEscaped, unquotedExpansion });
     value = "";
     dynamic = false;
     quotedOrEscaped = false;
+    unquotedExpansion = false;
     tokenStarted = false;
   };
   const finishCommand = (): void => {
@@ -258,6 +453,7 @@ function parseShell(command: string): ParsedShell {
       nestedCommands.push(substitution.content);
       value += "__dynamic__";
       dynamic = true;
+      if (quote !== "double") unquotedExpansion = true;
       tokenStarted = true;
       index = substitution.endIndex;
       if (!substitution.closed) ambiguous = true;
@@ -269,6 +465,7 @@ function parseShell(command: string): ParsedShell {
       nestedCommands.push(substitution.content);
       value += "__dynamic__";
       dynamic = true;
+      if (quote !== "double") unquotedExpansion = true;
       tokenStarted = true;
       index = substitution.endIndex;
       if (!substitution.closed) ambiguous = true;
@@ -328,6 +525,7 @@ function parseShell(command: string): ParsedShell {
     }
     if (char === "$" || char === "~") {
       if (char === "$") dynamic = true;
+      unquotedExpansion = true;
       value += char;
       tokenStarted = true;
       continue;
@@ -342,16 +540,24 @@ function parseShell(command: string): ParsedShell {
       continue;
     }
     if (char === "(" || char === ")") {
+      if (tokenStarted) ambiguous = true;
       finishCommand();
       continue;
     }
-    if ((char === "{" || char === "}") && !tokenStarted) {
+    if (
+      (char === "{" || char === "}") &&
+      !tokenStarted &&
+      isStandaloneGroupingBrace(command, index)
+    ) {
       finishCommand();
       continue;
     }
     if (/\s/u.test(char)) {
       finishWord();
       continue;
+    }
+    if (char === "*" || char === "?" || char === "[" || char === "{" || char === "}") {
+      unquotedExpansion = true;
     }
     value += char;
     tokenStarted = true;
@@ -360,6 +566,14 @@ function parseShell(command: string): ParsedShell {
   if (quote !== undefined) ambiguous = true;
   finishCommand();
   return { commands, nestedCommands, ambiguous };
+}
+
+function isStandaloneGroupingBrace(command: string, index: number): boolean {
+  const previous = command[index - 1];
+  const next = command[index + 1];
+  const isBoundary = (char: string | undefined): boolean =>
+    char === undefined || /[\s;&|()]/u.test(char);
+  return isBoundary(previous) && isBoundary(next);
 }
 
 function readDollarSubstitution(
@@ -473,6 +687,19 @@ const RM_FORWARDING_COMMANDS: ReadonlySet<string> = new Set([
   "xargs",
 ]);
 
+const FIND_PRE_PATH_OPTIONS: ReadonlySet<string> = new Set(["-H", "-L", "-P"]);
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-C",
+  "-c",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--super-prefix",
+  "--work-tree",
+]);
+
 const CRITICAL_POSIX_ROOTS: readonly string[] = [
   "/applications",
   "/bin",
@@ -494,10 +721,7 @@ const CRITICAL_POSIX_ROOTS: readonly string[] = [
 ];
 
 const OTHER_HARDLINE_PATTERNS: readonly RegExp[] = [
-  /\bmkfs(?:\.[a-z0-9]+)?\s+\/dev\//iu,
-  /\bdd\s+if=.*\bof=\/dev\//iu,
   /:\(\)\s*\{/u,
   /\bshutdown\b/iu,
   /\breboot\b/iu,
-  /\bgit\s+push\s+(?:-f|--force)\s+.*\b(?:main|master)\b/iu,
 ];
