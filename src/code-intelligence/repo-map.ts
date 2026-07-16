@@ -1,6 +1,7 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { open, readdir, type FileHandle } from "node:fs/promises";
 import path from "node:path";
-import type { Dirent } from "node:fs";
+import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type {
   CodeCall,
   CodeDiagnostic,
@@ -75,14 +76,19 @@ export interface RepoMapSnapshot {
 /** 无 LSP 时的确定性静态后端：按需分批索引，不在 TUI 启动时全仓扫描。 */
 export class RepoMapService implements CodeIntelligenceService {
   readonly backend = "repo-map" as const;
+  private readonly rootDir: string;
+  private readonly workspaceRoots: WorkspaceRoots;
   private discoveredFiles: readonly string[] | undefined;
   private nextFileIndex = 0;
   private readonly indexedFiles = new Map<string, IndexedFile>();
 
   constructor(
-    private readonly rootDir: string,
+    rootDir: string,
     private readonly scanBatchSize = DEFAULT_SCAN_BATCH,
-  ) {}
+  ) {
+    this.workspaceRoots = WorkspaceRoots.createSync(rootDir);
+    this.rootDir = this.workspaceRoots.list()[0] ?? path.resolve(rootDir);
+  }
 
   async definitions(
     query: PositionQuery,
@@ -225,7 +231,7 @@ export class RepoMapService implements CodeIntelligenceService {
   private async discoverFiles(): Promise<void> {
     if (this.discoveredFiles) return;
     const output: string[] = [];
-    await collectSourceFiles(this.rootDir, this.rootDir, output);
+    await collectSourceFiles(this.workspaceRoots, this.rootDir, this.rootDir, output);
     output.sort();
     this.discoveredFiles = output;
   }
@@ -236,13 +242,23 @@ export class RepoMapService implements CodeIntelligenceService {
 
   private async indexFile(filePath: string, signal?: AbortSignal): Promise<IndexedFile> {
     throwIfAborted(signal);
-    const absolutePath = this.safePath(filePath);
+    const absolutePath = await this.workspaceRoots.assertAllowed(filePath);
     const cached = this.indexedFiles.get(absolutePath);
-    const info = await stat(absolutePath);
-    if (!info.isFile() || info.size > MAX_SOURCE_BYTES) {
-      throw new Error(`Repo Map 跳过超过 ${MAX_SOURCE_BYTES} 字节的文件: ${filePath}`);
+    const handle = await open(
+      absolutePath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    let text: string;
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`Repo Map 只能索引普通文件: ${filePath}`);
+      if (info.size > MAX_SOURCE_BYTES) {
+        throw new Error(`Repo Map 跳过超过 ${MAX_SOURCE_BYTES} 字节的文件: ${filePath}`);
+      }
+      text = await readBoundedUtf8(handle, MAX_SOURCE_BYTES, filePath);
+    } finally {
+      await handle.close();
     }
-    const text = await readFile(absolutePath, "utf8");
     if (cached?.text === text) return cached;
     const lines = text.split(/\r?\n/);
     const symbols = parseSymbols(absolutePath, lines);
@@ -299,35 +315,60 @@ export class RepoMapService implements CodeIntelligenceService {
     }
     return calls.slice(0, DEFAULT_RESULT_LIMIT);
   }
-
-  private safePath(filePath: string): string {
-    const absolutePath = path.resolve(this.rootDir, filePath);
-    const relativePath = path.relative(this.rootDir, absolutePath);
-    if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-      throw new Error(`Repo Map 路径越出工作区: ${filePath}`);
-    }
-    return absolutePath;
-  }
 }
 
-async function collectSourceFiles(rootDir: string, dir: string, output: string[]): Promise<void> {
+async function collectSourceFiles(
+  workspaceRoots: WorkspaceRoots,
+  rootDir: string,
+  dir: string,
+  output: string[],
+): Promise<void> {
+  let physicalDirectory: string;
+  try {
+    physicalDirectory = await workspaceRoots.assertAllowed(dir);
+  } catch {
+    return;
+  }
   let entries: Dirent[];
   try {
-    entries = await readdir(dir, { withFileTypes: true });
+    entries = await readdir(physicalDirectory, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (!IGNORED_DIRECTORIES.has(entry.name)) {
-        await collectSourceFiles(rootDir, path.join(dir, entry.name), output);
+        await collectSourceFiles(
+          workspaceRoots,
+          rootDir,
+          path.join(physicalDirectory, entry.name),
+          output,
+        );
       }
       continue;
     }
     if (!entry.isFile() || !SUPPORTED_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
       continue;
-    output.push(path.relative(rootDir, path.join(dir, entry.name)));
+    output.push(path.relative(rootDir, path.join(physicalDirectory, entry.name)));
   }
+}
+
+async function readBoundedUtf8(
+  handle: FileHandle,
+  maxBytes: number,
+  filePath: string,
+): Promise<string> {
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset > maxBytes) {
+    throw new Error(`Repo Map 跳过超过 ${maxBytes} 字节的文件: ${filePath}`);
+  }
+  return buffer.subarray(0, offset).toString("utf8");
 }
 
 function parseSymbols(filePath: string, lines: readonly string[]): IndexedSymbol[] {
