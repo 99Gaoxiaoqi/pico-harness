@@ -527,7 +527,7 @@ test("relative executable paths and spawn use the same workspace file", async (c
   context.after(async () => await executor.dispose());
   const output = await executeStopHook(executor, fixture, handler, "relative-executable");
 
-  assert.equal(output.additionalContext, "workspace");
+  assert.equal(output.additionalContext, "workspace", JSON.stringify(output));
 });
 
 test("PATH resolution matches spawn when a differently-cased key is also present", async (context) => {
@@ -558,7 +558,50 @@ test("PATH resolution matches spawn when a differently-cased key is also present
   context.after(async () => await executor.dispose());
   const output = await executeStopHook(executor, fixture, handler, "path-case");
 
-  assert.equal(output.additionalContext, "right");
+  assert.equal(output.additionalContext, "right", JSON.stringify(output));
+});
+
+test("command hooks accept valid output when the child closes stdin early", async (context) => {
+  const fixture = await createFixture(context);
+  const scriptPath = join(fixture.workspace, "close-stdin.cjs");
+  await writeFile(
+    scriptPath,
+    [
+      'const fs = require("node:fs");',
+      "fs.closeSync(0);",
+      'process.stdout.write(JSON.stringify({ additionalContext: "stdin-closed" }));',
+      "setTimeout(() => undefined, 100);",
+      "",
+    ].join("\n"),
+  );
+  const handler = {
+    type: "command",
+    command: process.execPath,
+    args: ["./close-stdin.cjs"],
+  } as const;
+  await fixture.store.trust(fixture.subject(handler));
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  context.after(async () => await executor.dispose());
+
+  const output = await executor.execute(
+    {
+      id: "stdin-closed",
+      event: "Stop",
+      source: fixture.source,
+      order: 0,
+      handler,
+      trusted: true,
+    },
+    {
+      session_id: "stdin-closed",
+      cwd: fixture.workspace,
+      hook_event_name: "Stop",
+      payload: { reason: "x".repeat(2 * 1024 * 1024) },
+    },
+    {},
+  );
+
+  assert.equal(output.additionalContext, "stdin-closed", JSON.stringify(output));
 });
 
 test("unknown external command wrappers cannot establish trust", async (context) => {
