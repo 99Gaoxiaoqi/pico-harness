@@ -30,6 +30,7 @@ import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookService } from "../hooks/service.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
+import { isHardlineBashCommand } from "../approval/bash-hardline.js";
 import {
   buildSandboxSpawnPlan,
   evaluateSandboxCommand,
@@ -883,6 +884,9 @@ export class BashTool implements BaseTool {
   }
 
   private buildSandboxPlan(command: string): SandboxSpawnPlan | undefined {
+    if (isHardlineBashCommand(command)) {
+      throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
+    }
     const sandbox = this.options.sandbox;
     if (!sandbox) return undefined;
     const roots = sandbox.workspaceRoots.list();

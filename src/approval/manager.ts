@@ -15,6 +15,7 @@
 // 清理内存资源,防止挂死泄漏。
 
 import { logger } from "../observability/logger.js";
+import { isHardlineBashCommand } from "./bash-hardline.js";
 import type { PermissionSessionScope } from "./session-permissions.js";
 
 /** 审批结果包 */
@@ -290,7 +291,7 @@ Agent 试图执行以下动作:
 export const globalApprovalManager = new ApprovalManager();
 
 /**
- * 高危命令检测:正则黑名单。
+ * 高危命令检测：普通危险操作使用保守正则，hardline Bash 使用结构化判定。
  * 纯读取工具默认 YOLO 放行;bash/write_file/edit_file 命中危险模式则需审批。
  *
  * 【架构师注】本实现为硬编码演示。生产环境应改造为支持外部配置
@@ -336,17 +337,6 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bcat\s+.*\s*>\s*\/(etc|usr|bin|boot|sys|proc)\b/i,
 ];
 
-const HARDLINE_PATTERNS: RegExp[] = [
-  /\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+\/(?:["'\s}]|$)/i,
-  /\brm\s+-[a-z]*f[a-z]*r[a-z]*\s+\/(?:["'\s}]|$)/i,
-  /\bmkfs(\.[a-z0-9]+)?\s+\/dev\//i,
-  /\bdd\s+if=.*\bof=\/dev\//i,
-  /:\(\)\s*\{/,
-  /\bshutdown\b/i,
-  /\breboot\b/i,
-  /\bgit\s+push\s+(-f|--force)\s+.*\b(main|master)\b/i,
-];
-
 const BASH_WRITE_REDIRECT_RE = /\d*>>?\s*(?!&)([^\s|;&]+)/u;
 const BASH_WRITE_INTENT_PATTERNS: RegExp[] = [
   BASH_WRITE_REDIRECT_RE,
@@ -371,10 +361,10 @@ export function isDangerousCommand(toolName: string, args: string): boolean {
 }
 
 export function isHardlineCommand(toolName: string, args: string): boolean {
-  if (toolName !== "bash") {
-    return false;
-  }
-  return HARDLINE_PATTERNS.some((pattern) => pattern.test(args));
+  if (toolName !== "bash") return false;
+  const command = parseBashCommand(args);
+  // Bash 参数无法确定解析时不得继续到 shell。
+  return command === undefined || isHardlineBashCommand(command);
 }
 
 function buildApprovalPreview(toolName: string, args: string, diff?: string): ApprovalPreview {
