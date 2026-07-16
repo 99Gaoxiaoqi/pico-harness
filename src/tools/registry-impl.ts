@@ -3,7 +3,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { mkdir, open, stat, type FileHandle } from "node:fs/promises";
+import { access, mkdir, open } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type {
   BaseTool,
@@ -30,6 +30,11 @@ import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookService } from "../hooks/service.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
+import {
+  captureAtomicFilePrecondition,
+  readBoundedFileSnapshot,
+  writeAtomicWorkspaceFile,
+} from "./atomic-workspace-file.js";
 import { isHardlineBashCommand } from "../approval/bash-hardline.js";
 import {
   buildSandboxSpawnPlan,
@@ -63,6 +68,22 @@ export function safeResolve(workDir: string, path: string): string {
 
 function workspaceRootsFrom(input: string | WorkspaceRoots): WorkspaceRoots {
   return typeof input === "string" ? WorkspaceRoots.createSync(input) : input;
+}
+
+function assertSameResolvedTarget(
+  roots: WorkspaceRoots,
+  requestedPath: string,
+  expectedPath: string,
+): void {
+  let currentPath: string;
+  try {
+    currentPath = roots.resolveUnchecked(requestedPath);
+  } catch (error) {
+    throw new Error(`写入前无法重新验证目标路径: ${requestedPath}`, { cause: error });
+  }
+  if (currentPath !== expectedPath) {
+    throw new Error(`写入过程中目标路径已改变: ${requestedPath}`);
+  }
 }
 
 function exactPathSideEffects(args: string): ToolFileSideEffects {
@@ -713,25 +734,15 @@ export class WriteFileTool implements BaseTool {
     await mkdir(dirname(initialPath), { recursive: true });
     const fullPath = await this.roots.assertAllowed(path);
 
-    // 检查是新建还是覆盖
-    let isNewFile = false;
-    try {
-      await stat(fullPath);
-    } catch {
-      isNewFile = true; // 文件不存在 → 新建
-    }
-
-    // O_NOFOLLOW 拒绝在最后一次校验后被替换的文件符号链接。
-    const handle = await open(
-      fullPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NO_FOLLOW_FLAG,
-      0o666,
-    );
-    try {
-      await writeAllAtStart(handle, content);
-    } finally {
-      await handle.close();
-    }
+    const precondition = await captureAtomicFilePrecondition(fullPath);
+    const isNewFile = precondition.kind === "missing";
+    if (!isNewFile) await access(fullPath, constants.W_OK);
+    await writeAtomicWorkspaceFile({
+      targetPath: fullPath,
+      content,
+      precondition,
+      revalidateTarget: () => assertSameResolvedTarget(this.roots, path, fullPath),
+    });
 
     const action = isNewFile ? "新建" : "覆盖";
     const sizeInfo = `(${content.length} 字符)`;
@@ -1470,27 +1481,28 @@ export class EditFileTool implements BaseTool {
     }
 
     const fullPath = await this.roots.assertAllowed(path);
-    const handle = await open(fullPath, constants.O_RDWR | NO_FOLLOW_FLAG);
+    const snapshot = await readBoundedFileSnapshot(fullPath, READ_FILE_MAX_BYTES, path);
+    await access(fullPath, constants.W_OK);
+    const modelView = toModelTextView(snapshot.content);
+    const content = modelView.text;
+    let replacement: { content: string; level: number };
     try {
-      // 在同一个已校验的文件描述符上完成读改写，避免路径在读后写前被换目标。
-      const raw = await handle.readFile("utf8");
-      const modelView = toModelTextView(raw);
-      const content = modelView.text;
-      const { content: newContent, level } = fuzzyReplace(content, oldText, newText, replaceAll);
-
-      await writeAllAtStart(handle, materializeModelText(newContent, modelView.lineEndingStyle));
-
-      // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
-      const diffPreview = generateSimpleDiff(oldText, newText);
-      const allNote = replaceAll ? ", 全部替换" : "";
-      return `✅ 成功修改文件: ${path} (匹配级别 L${level}${allNote})\n\n${diffPreview}`;
+      replacement = fuzzyReplace(content, oldText, newText, replaceAll);
     } catch (err) {
-      // 重新读取仅用于生成匹配失败提示，不再打开路径。
-      const current = await readOpenFileFromStart(handle).catch(() => "");
-      throw this.enrichNotFoundError(err, toModelTextView(current).text, oldText);
-    } finally {
-      await handle.close();
+      throw this.enrichNotFoundError(err, content, oldText);
     }
+
+    await writeAtomicWorkspaceFile({
+      targetPath: fullPath,
+      content: materializeModelText(replacement.content, modelView.lineEndingStyle),
+      precondition: snapshot.precondition,
+      revalidateTarget: () => assertSameResolvedTarget(this.roots, path, fullPath),
+    });
+
+    // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
+    const diffPreview = generateSimpleDiff(oldText, newText);
+    const allNote = replaceAll ? ", 全部替换" : "";
+    return `✅ 成功修改文件: ${path} (匹配级别 L${replacement.level}${allNote})\n\n${diffPreview}`;
   }
 
   /**
@@ -1509,30 +1521,6 @@ export class EditFileTool implements BaseTool {
     }
     return new Error(`${errMsg}${formatCandidateHint(hints)}`);
   }
-}
-
-async function readOpenFileFromStart(handle: FileHandle): Promise<string> {
-  const info = await handle.stat();
-  if (info.size > Number.MAX_SAFE_INTEGER) throw new Error("文件过大，无法读取");
-  const buffer = Buffer.alloc(Number(info.size));
-  let offset = 0;
-  while (offset < buffer.length) {
-    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
-    if (bytesRead === 0) break;
-    offset += bytesRead;
-  }
-  return buffer.subarray(0, offset).toString("utf8");
-}
-
-async function writeAllAtStart(handle: FileHandle, content: string): Promise<void> {
-  const buffer = Buffer.from(content, "utf8");
-  let offset = 0;
-  while (offset < buffer.length) {
-    const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset, offset);
-    if (bytesWritten === 0) throw new Error("文件写入未取得进展");
-    offset += bytesWritten;
-  }
-  await handle.truncate(buffer.length);
 }
 
 // ==========================================
