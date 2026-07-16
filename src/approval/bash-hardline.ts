@@ -439,13 +439,20 @@ function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocation
   let interactive = false;
   let login = false;
   let noExec = false;
+  let hasCommandString = false;
   for (let index = 0; index < args.length; index++) {
     const word = args[index]!;
     const value = word.value;
     if (word.dynamic) {
       return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: true };
     }
-    if (value === "--" || value === "-") break;
+    if (value === "--" || value === "-") {
+      if (!hasCommandString) break;
+      if (index + 1 >= args.length) {
+        return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: true };
+      }
+      return { commandIndex: index, startupFile, interactive, login, noExec, ambiguous: false };
+    }
     if (isBashStartupFileOption(value)) {
       startupFile = true;
       if (!value.includes("=")) index++;
@@ -456,11 +463,22 @@ function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocation
       continue;
     }
     if (value.startsWith("--")) continue;
-    if (!/^[-+][^-]/u.test(value)) break;
+    if (!/^[-+][^-]/u.test(value)) {
+      if (hasCommandString) {
+        return {
+          commandIndex: index - 1,
+          startupFile,
+          interactive,
+          login,
+          noExec,
+          ambiguous: false,
+        };
+      }
+      break;
+    }
 
     const enablesOption = value[0] === "-";
     const cluster = value.slice(1);
-    let hasCommandString = false;
     for (let optionIndex = 0; optionIndex < cluster.length; optionIndex++) {
       const option = cluster[optionIndex]!;
       if (option === "o" || option === "O") {
@@ -469,7 +487,18 @@ function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocation
           if (index + 1 >= args.length) {
             return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: true };
           }
-          optionName = args[++index]!.value;
+          const optionValue = args[++index]!;
+          if (optionValue.dynamic) {
+            return {
+              commandIndex: -1,
+              startupFile,
+              interactive,
+              login,
+              noExec,
+              ambiguous: true,
+            };
+          }
+          optionName = optionValue.value;
         } else {
           optionName = cluster.slice(optionIndex + 1);
         }
@@ -481,9 +510,9 @@ function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocation
       if (option === "l") login = enablesOption;
       if (enablesOption && option === "c") hasCommandString = true;
     }
-    if (hasCommandString) {
-      return { commandIndex: index, startupFile, interactive, login, noExec, ambiguous: false };
-    }
+  }
+  if (hasCommandString) {
+    return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: true };
   }
   return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: false };
 }
