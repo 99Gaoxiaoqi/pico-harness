@@ -1368,14 +1368,25 @@ export class RuntimeStore {
    *
    * 事件账本与 Cron 共用同一个 append-only 表：这样 daemon 重启后，客户端仍可
    * 用 eventId 拉回 Run、工作区登记和 Cron 的完整可见历史，而不依赖进程内缓存。
+   * 携带 Run 投影时，投影与事件在同一 SQLite transaction 中提交。
    */
   appendRuntimeEvent(
     input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
       eventId?: string;
       createdAt?: number;
     },
+    projection?: { daemonRun: DaemonRunRecord },
   ): RuntimeEventRecord {
-    return this.insertRuntimeEvent(input);
+    if (projection && projection.daemonRun.workspacePath !== input.workspacePath) {
+      throw new RuntimeConflictError(
+        `Run ${projection.daemonRun.runId} 的工作区与事件工作区不一致`,
+      );
+    }
+    const append = this.db.transaction(() => {
+      if (projection) this.persistDaemonRun(projection.daemonRun);
+      return this.insertRuntimeEvent(input);
+    });
+    return append();
   }
 
   executeIdempotentDaemonCommand<Result extends Record<string, unknown>>(
@@ -1455,48 +1466,7 @@ export class RuntimeStore {
   }
 
   upsertDaemonRun(input: DaemonRunRecord): DaemonRunRecord {
-    const persist = this.db.transaction(() => {
-      const existing = this.db
-        .prepare("SELECT * FROM daemon_runs WHERE run_id = ?")
-        .get(input.runId) as DaemonRunRow | undefined;
-      if (existing && existing.workspace_path !== input.workspacePath) {
-        throw new RuntimeConflictError(`Run ID ${input.runId} 已属于其他工作区`);
-      }
-      this.db
-        .prepare(
-          `INSERT INTO daemon_runs (
-             run_id, workspace_path, session_id, checkpoint_id, description, status,
-             started_at, updated_at, finished_at, error, result_json, version
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(run_id) DO UPDATE SET
-             session_id = excluded.session_id,
-             checkpoint_id = excluded.checkpoint_id,
-             description = excluded.description,
-             status = excluded.status,
-             started_at = excluded.started_at,
-             updated_at = excluded.updated_at,
-             finished_at = excluded.finished_at,
-             error = excluded.error,
-             result_json = excluded.result_json,
-             version = excluded.version
-           WHERE excluded.version >= daemon_runs.version`,
-        )
-        .run(
-          input.runId,
-          input.workspacePath,
-          input.sessionId ?? null,
-          input.checkpointId ?? null,
-          input.description,
-          input.status,
-          input.startedAt,
-          input.updatedAt,
-          input.finishedAt ?? null,
-          input.error ?? null,
-          stringifyJson(input.result),
-          input.version,
-        );
-      return this.getDaemonRun(input.workspacePath, input.runId)!;
-    });
+    const persist = this.db.transaction(() => this.persistDaemonRun(input));
     return persist();
   }
 
@@ -2148,6 +2118,49 @@ export class RuntimeStore {
     const run = this.getCronRun(cronRunId);
     if (!run) throw new Error(`未知 Cron Run: ${cronRunId}`);
     return run;
+  }
+
+  private persistDaemonRun(input: DaemonRunRecord): DaemonRunRecord {
+    const existing = this.db
+      .prepare("SELECT * FROM daemon_runs WHERE run_id = ?")
+      .get(input.runId) as DaemonRunRow | undefined;
+    if (existing && existing.workspace_path !== input.workspacePath) {
+      throw new RuntimeConflictError(`Run ID ${input.runId} 已属于其他工作区`);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO daemon_runs (
+           run_id, workspace_path, session_id, checkpoint_id, description, status,
+           started_at, updated_at, finished_at, error, result_json, version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET
+           session_id = excluded.session_id,
+           checkpoint_id = excluded.checkpoint_id,
+           description = excluded.description,
+           status = excluded.status,
+           started_at = excluded.started_at,
+           updated_at = excluded.updated_at,
+           finished_at = excluded.finished_at,
+           error = excluded.error,
+           result_json = excluded.result_json,
+           version = excluded.version
+         WHERE excluded.version >= daemon_runs.version`,
+      )
+      .run(
+        input.runId,
+        input.workspacePath,
+        input.sessionId ?? null,
+        input.checkpointId ?? null,
+        input.description,
+        input.status,
+        input.startedAt,
+        input.updatedAt,
+        input.finishedAt ?? null,
+        input.error ?? null,
+        stringifyJson(input.result),
+        input.version,
+      );
+    return this.getDaemonRun(input.workspacePath, input.runId)!;
   }
 
   private insertRuntimeEvent(

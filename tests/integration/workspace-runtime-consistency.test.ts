@@ -1,15 +1,190 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  canonicalizeWorkspacePath,
   createRuntimeRequest,
+  WorkspaceRegistrationStore,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+
+test("linked Git worktree keeps its own canonical Runtime identity", async (context) => {
+  const fixture = await createFixture("linked-worktree-identity");
+  const linkedWorktree = join(fixture.root, "linked-worktree");
+  const linkedChild = join(linkedWorktree, "packages", "app");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  await runGit(["init", "--quiet", "--initial-branch=main"], fixture.workspace);
+  await runGit(
+    [
+      "-c",
+      "user.name=Pico Test",
+      "-c",
+      "user.email=pico@example.invalid",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "baseline",
+    ],
+    fixture.workspace,
+  );
+  await runGit(
+    ["worktree", "add", "--quiet", "-b", "linked-test", linkedWorktree],
+    fixture.workspace,
+  );
+  await mkdir(linkedChild, { recursive: true });
+
+  const mainIdentity = await canonicalizeWorkspacePath(fixture.workspace);
+  const linkedIdentity = await canonicalizeWorkspacePath(linkedChild);
+  assert.equal(mainIdentity, await realpath(fixture.workspace));
+  assert.equal(linkedIdentity, await realpath(linkedWorktree));
+  assert.notEqual(linkedIdentity, mainIdentity);
+});
+
+test(
+  "Git root and child paths share one Runtime identity and durable event ledger",
+  { timeout: 15_000 },
+  async (context) => {
+    const fixture = await createFixture("git-identity");
+    const childWorkspace = join(fixture.workspace, "packages", "app");
+    await mkdir(childWorkspace, { recursive: true });
+    await runGit(["init", "--quiet", "--initial-branch=main"], fixture.workspace);
+    const canonicalWorkspace = await realpath(fixture.workspace);
+    const registrationStore = new WorkspaceRegistrationStore(
+      join(fixture.picoHome, "registrations.json"),
+    );
+    const services: WorkspaceRuntimeService[] = [];
+    const createService = (): WorkspaceRuntimeService => {
+      const service = new WorkspaceRuntimeService({
+        env: { PICO_HOME: fixture.picoHome },
+        registrationStore,
+        execute: async () => ({ shared: true }),
+      });
+      services.push(service);
+      return service;
+    };
+    const service = createService();
+    context.after(async () => {
+      await Promise.allSettled(services.map((candidate) => candidate.close()));
+      await rm(fixture.root, { recursive: true, force: true });
+    });
+
+    const rootRuntime = await service.getWorkspaceRuntime(fixture.workspace);
+    const childRuntime = await service.getWorkspaceRuntime(childWorkspace);
+    assert.strictEqual(childRuntime, rootRuntime);
+    assert.equal(rootRuntime.workspace, canonicalWorkspace);
+
+    const registered = asRecord(
+      await service.handle(
+        createRuntimeRequest("workspace.register", { workspacePath: childWorkspace }),
+      ),
+    );
+    assert.equal(registered["workspacePath"], canonicalWorkspace);
+    assert.deepEqual(await registrationStore.list(), [canonicalWorkspace]);
+
+    const request = {
+      workspacePath: fixture.workspace,
+      prompt: "shared Git identity",
+      idempotencyKey: "git-root-and-child",
+    } as const;
+    const started = asRun(await service.startForegroundRun(request));
+    await rootRuntime.waitForRun(started.runId);
+    const replayed = asRun(
+      await service.startForegroundRun({ ...request, workspacePath: childWorkspace }),
+    );
+    assert.equal(replayed.runId, started.runId);
+
+    const rootPage = await service.replayEvents({ workspacePath: fixture.workspace });
+    const childPage = await service.replayEvents({ workspacePath: childWorkspace });
+    assert.deepEqual(
+      childPage.events.map((event) => event.eventId),
+      rootPage.events.map((event) => event.eventId),
+    );
+    assert.ok(rootPage.events.some((event) => event.topic === "run.finished"));
+    assert.ok(rootPage.events.every((event) => event.scope.workspacePath === canonicalWorkspace));
+
+    const unregistered = asRecord(
+      await service.handle(
+        createRuntimeRequest("workspace.unregister", { workspacePath: childWorkspace }),
+      ),
+    );
+    assert.equal(unregistered["workspacePath"], canonicalWorkspace);
+    assert.deepEqual(await registrationStore.list(), []);
+    const beforeRestart = await service.replayEvents({ workspacePath: childWorkspace });
+
+    await service.close();
+    const restarted = createService();
+    const afterRestart = await restarted.replayEvents({ workspacePath: childWorkspace });
+    assert.deepEqual(
+      afterRestart.events.map((event) => event.eventId),
+      beforeRestart.events.map((event) => event.eventId),
+    );
+  },
+);
+
+test("Run projection and Runtime event roll back together when event append fails", async (context) => {
+  const fixture = await createFixture("atomic-run-event");
+  const canonicalWorkspace = await realpath(fixture.workspace);
+  const store = new RuntimeStore({
+    workDir: canonicalWorkspace,
+    picoHome: fixture.picoHome,
+    now: () => 2_000,
+  });
+  context.after(async () => {
+    store.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  const running = {
+    runId: "run-atomic",
+    workspacePath: canonicalWorkspace,
+    description: "atomic projection",
+    status: "running" as const,
+    startedAt: 1_000,
+    updatedAt: 1_000,
+    version: 1,
+  };
+  store.upsertDaemonRun(running);
+  store.appendRuntimeEvent({
+    eventId: "duplicate-event",
+    topic: "test.seed",
+    workspacePath: canonicalWorkspace,
+    createdAt: 1_500,
+  });
+
+  assert.throws(
+    () =>
+      store.appendRuntimeEvent(
+        {
+          eventId: "duplicate-event",
+          topic: "run.finished",
+          workspacePath: canonicalWorkspace,
+          createdAt: 2_000,
+        },
+        {
+          daemonRun: {
+            ...running,
+            status: "succeeded",
+            updatedAt: 2_000,
+            finishedAt: 2_000,
+            version: 2,
+          },
+        },
+      ),
+    /UNIQUE constraint failed/u,
+  );
+
+  assert.deepEqual(store.getDaemonRun(canonicalWorkspace, running.runId), running);
+  assert.deepEqual(
+    store.listRuntimeEvents({ workspacePath: canonicalWorkspace }).map((event) => event.topic),
+    ["test.seed"],
+  );
+});
 
 test(
   "run.start idempotency survives restart and rejects a changed request",
@@ -260,5 +435,17 @@ async function rejectWhenAborted(signal: AbortSignal): Promise<never> {
     const fail = () => reject(signal.reason ?? new Error("runtime closed"));
     if (signal.aborted) fail();
     else signal.addEventListener("abort", fail, { once: true });
+  });
+}
+
+function runGit(args: readonly string[], cwd: string): Promise<void> {
+  return new Promise((resolveRun, reject) => {
+    execFile("git", [...args], { cwd, encoding: "utf8" }, (error, _stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolveRun();
+    });
   });
 }
