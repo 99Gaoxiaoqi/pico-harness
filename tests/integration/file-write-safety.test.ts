@@ -154,7 +154,7 @@ test(
 );
 
 test(
-  "write_file and edit_file preserve Linux POSIX ACLs and extended attributes",
+  "write_file and edit_file preserve Linux ACLs/xattrs without reviving capabilities",
   { skip: process.platform !== "linux" },
   async (context) => {
     const fixture = await createFixture("linux-extended-metadata");
@@ -200,6 +200,34 @@ test(
     );
     assert.equal(await readFile(targetPath, "utf8"), "gamma\n");
     await assertMetadata();
+
+    await setCapability();
+    await new WriteFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: "metadata.txt", content: "" }),
+    );
+    assert.equal(await readFile(targetPath, "utf8"), "");
+    await assertMetadata();
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "write_file overwrites a Linux write-only file without requiring content read access",
+  { skip: process.platform !== "linux" },
+  async (context) => {
+    const fixture = await createFixture("linux-write-only");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "write-only.txt");
+    await writeFile(targetPath, "old-content\n");
+    await chmod(targetPath, 0o200);
+
+    await new WriteFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: "write-only.txt", content: "replacement\n" }),
+    );
+
+    assert.equal((await stat(targetPath)).mode & 0o777, 0o200);
+    await chmod(targetPath, 0o600);
+    assert.equal(await readFile(targetPath, "utf8"), "replacement\n");
     await assertNoTemporaryFiles(fixture.workspace);
   },
 );
