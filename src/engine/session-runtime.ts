@@ -55,6 +55,13 @@ export interface SessionRuntimeStatePatch {
   usage?: SessionUsageSnapshot;
 }
 
+/** 新写入只允许设置与 Goal；usage 仅供 decoder 读取旧累计快照。 */
+export interface SessionRuntimeStateWritePatch {
+  settings?: PersistedSessionSettings;
+  goal?: GoalManagerSnapshot;
+  usage?: never;
+}
+
 export interface SessionRuntimeStateSnapshot {
   stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
   settings?: PersistedSessionSettings;
@@ -86,7 +93,7 @@ export interface SessionHydrationSnapshot {
 /** 避免 input 层反向依赖 Session 具体类。 */
 export interface SessionRuntimePersistence {
   getRuntimeStateSnapshot(): SessionRuntimeStateSnapshot;
-  updateRuntimeState(patch: SessionRuntimeStatePatch): void;
+  updateRuntimeState(patch: SessionRuntimeStateWritePatch): void;
 }
 
 export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
@@ -139,6 +146,19 @@ export function normalizeSessionRuntimeStatePatch(
   }
 
   return sections > 0 ? patch : undefined;
+}
+
+/** Writer boundary: old usage sections remain decodable but cannot be appended again. */
+export function normalizeSessionRuntimeStateWritePatch(
+  value: unknown,
+): SessionRuntimeStateWritePatch | undefined {
+  if (!isRecord(value) || "usage" in value) return undefined;
+  const patch = normalizeSessionRuntimeStatePatch(value);
+  if (!patch) return undefined;
+  return {
+    ...(patch.settings ? { settings: patch.settings } : {}),
+    ...(patch.goal ? { goal: patch.goal } : {}),
+  };
 }
 
 /** runtime_state 中 Goal section 的唯一入口校验。 */

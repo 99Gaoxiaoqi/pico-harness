@@ -149,7 +149,12 @@ export class ToolGuardrailController {
     if (result.isError) {
       return this.recordFailure(toolCall);
     }
-    this.exactFailures.delete(this.exactKey(toolCall));
+    const exactKey = this.exactKey(toolCall);
+    const toolKey = this.toolKey(toolCall.name);
+    this.exactFailures.delete(exactKey);
+    this.sameToolFailures.delete(toolKey);
+    this.blockedReasons.delete(exactKey);
+    this.blockedReasons.delete(toolKey);
     return opts.readOnly ? this.recordNoProgress(toolCall, result) : null;
   }
 

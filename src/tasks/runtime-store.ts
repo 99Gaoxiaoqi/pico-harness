@@ -51,6 +51,7 @@ import {
 const DEFAULT_LEASE_TTL_MS = 30_000;
 const LEGACY_TASK_STORE_SNAPSHOT_SUFFIX = ".migrating-v1";
 const LEGACY_TASK_STORE_ARCHIVE_SUFFIX = ".migrated-v1";
+const DAEMON_RUN_RECOVERY_EVENT_PREFIX = "daemon-run-recovery:";
 
 export class RuntimeConflictError extends Error {
   constructor(message: string) {
@@ -1346,6 +1347,22 @@ export class RuntimeStore {
     return row ? mapRuntimeEvent(row) : undefined;
   }
 
+  listDaemonRunRecoveryEvents(workspacePath: string): RuntimeEventRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM runtime_events
+           WHERE workspace_path = ? AND substr(event_id, 1, ?) = ?
+           ORDER BY rowid`,
+        )
+        .all(
+          workspacePath,
+          DAEMON_RUN_RECOVERY_EVENT_PREFIX.length,
+          DAEMON_RUN_RECOVERY_EVENT_PREFIX,
+        ) as RuntimeEventRow[]
+    ).map(mapRuntimeEvent);
+  }
+
   /**
    * 供 Runtime/IPC 写入非 Cron 生命周期事件。
    *
@@ -1522,22 +1539,31 @@ export class RuntimeStore {
       );
       const rows = this.db
         .prepare(
-          `SELECT run_id FROM daemon_runs
+          `SELECT * FROM daemon_runs
            WHERE workspace_path = ? AND status IN (${sqlValues(activeStatuses)})`,
         )
-        .all(workspacePath) as Array<{ run_id: string }>;
+        .all(workspacePath) as DaemonRunRow[];
       if (rows.length === 0) return [];
       const now = this.now();
-      this.db
-        .prepare(
-          `UPDATE daemon_runs
-           SET status = 'failed', error = ?, updated_at = ?, finished_at = ?, version = version + 1
-           WHERE workspace_path = ? AND status IN (${sqlValues(activeStatuses)})`,
-        )
-        .run(reason, now, now, workspacePath);
-      return rows.map((row) => this.getDaemonRun(workspacePath, row.run_id)!);
+      const recoveredRuns: DaemonRunRecord[] = [];
+      const update = this.db.prepare(
+        `UPDATE daemon_runs
+         SET status = 'failed', error = ?, updated_at = ?, finished_at = ?, version = version + 1
+         WHERE workspace_path = ? AND run_id = ? AND version = ?
+           AND status IN (${sqlValues(activeStatuses)})`,
+      );
+      for (const row of rows) {
+        const result = update.run(reason, now, now, workspacePath, row.run_id, row.version);
+        if (result.changes !== 1) {
+          throw new RuntimeConflictError(`Run ${row.run_id} 的崩溃恢复 CAS 失败`);
+        }
+        const recovered = this.getDaemonRun(workspacePath, row.run_id)!;
+        recoveredRuns.push(recovered);
+        this.insertRuntimeEvent(daemonRunRecoveryEvent(recovered));
+      }
+      return recoveredRuns;
     });
-    return recover();
+    return recover.immediate();
   }
 
   insertCommand(input: {
@@ -2414,6 +2440,40 @@ function mapDaemonRun(row: DaemonRunRow): DaemonRunRecord {
     result: parseJsonRecord(row.result_json),
     version: row.version,
   });
+}
+
+function daemonRunRecoveryEvent(run: DaemonRunRecord): RuntimeEventRecord {
+  const eventId = `${DAEMON_RUN_RECOVERY_EVENT_PREFIX}${createHash("sha256")
+    .update(`${run.workspacePath}\0${run.runId}\0${run.version}`)
+    .digest("hex")}`;
+  const runtimeRun = compact({
+    runId: run.runId,
+    workspacePath: run.workspacePath,
+    sessionId: run.sessionId,
+    description: run.description,
+    status: run.status,
+    startedAt: run.startedAt,
+    updatedAt: run.updatedAt,
+    finishedAt: run.finishedAt,
+    error: run.error,
+    result: run.result,
+    version: run.version,
+  });
+  return {
+    eventId,
+    topic: "run.finished",
+    workspacePath: run.workspacePath,
+    payload: {
+      scope: compact({
+        workspacePath: run.workspacePath,
+        sessionId: run.sessionId,
+        runId: run.runId,
+      }),
+      resourceVersion: run.version,
+      payload: { run: runtimeRun },
+    },
+    createdAt: run.finishedAt ?? run.updatedAt,
+  };
 }
 
 function parseYoloPolicySnapshot(value: string): YoloPolicySnapshot {

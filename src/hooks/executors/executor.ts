@@ -46,11 +46,17 @@ export interface HookAgentVerifier {
   verify(request: HookAgentVerifierRequest): Promise<unknown>;
 }
 
+/** Host capability for enclosing a complete model-backed Hook handler in its canonical run. */
+export interface HookModelRuntime {
+  run<Result>(execute: () => Promise<Result>, signal: AbortSignal): Promise<Result>;
+}
+
 export interface HookHandlerExecutorOptions {
   workDir: string;
   provider?: LLMProvider;
   mcpInvoker?: ConnectedMcpToolInvoker;
   agentVerifier?: HookAgentVerifier;
+  modelRuntime?: HookModelRuntime;
   fetch?: typeof globalThis.fetch;
   env?: Readonly<NodeJS.ProcessEnv>;
   onAsyncRewake?: (handler: ResolvedHookHandler, output: HookOutput) => void | Promise<void>;
@@ -69,7 +75,7 @@ export class DefaultHookExecutor implements HookExecutor {
     dependencies: Partial<
       Pick<
         HookHandlerExecutorOptions,
-        "provider" | "mcpInvoker" | "agentVerifier" | "onAsyncRewake"
+        "provider" | "mcpInvoker" | "agentVerifier" | "modelRuntime" | "onAsyncRewake"
       >
     >,
   ): void {
@@ -244,21 +250,24 @@ export class DefaultHookExecutor implements HookExecutor {
     input: HookInput,
     parentSignal?: AbortSignal,
   ): Promise<HookOutput> {
-    if (!this.options.provider) return failOpen(resolved, "prompt handler 未配置 Provider");
+    const provider = this.options.provider;
+    if (!provider) return failOpen(resolved, "prompt handler 未配置 Provider");
     const signal = handlerSignal(parentSignal, timeoutMs(handler));
-    const messages: Message[] = [
-      {
-        role: "system",
-        content:
-          '你是 Pico Hook 判定器。只输出单个 JSON 对象：{"ok":boolean,"reason":string}，不要 Markdown。',
-      },
-      { role: "user", content: `${handler.prompt}\n\nHook input:\n${JSON.stringify(input)}` },
-    ];
-    const response = await this.options.provider.generate(messages, [], {
-      signal,
-      purpose: "hook",
-    });
-    return parseVerifierOutput(response.content, resolved, "prompt handler 模型输出非法");
+    return this.runModelHandler(async () => {
+      const messages: Message[] = [
+        {
+          role: "system",
+          content:
+            '你是 Pico Hook 判定器。只输出单个 JSON 对象：{"ok":boolean,"reason":string}，不要 Markdown。',
+        },
+        { role: "user", content: `${handler.prompt}\n\nHook input:\n${JSON.stringify(input)}` },
+      ];
+      const response = await provider.generate(messages, [], {
+        signal,
+        purpose: "hook",
+      });
+      return parseVerifierOutput(response.content, resolved, "prompt handler 模型输出非法");
+    }, signal);
   }
 
   private async executeAgent(
@@ -267,18 +276,28 @@ export class DefaultHookExecutor implements HookExecutor {
     input: HookInput,
     parentSignal?: AbortSignal,
   ): Promise<HookOutput> {
-    if (!this.options.agentVerifier) return failOpen(resolved, "agent handler 未配置只读 verifier");
+    const agentVerifier = this.options.agentVerifier;
+    if (!agentVerifier) return failOpen(resolved, "agent handler 未配置只读 verifier");
     const signal = handlerSignal(parentSignal, timeoutMs(handler));
-    const raw = await this.options.agentVerifier.verify({
-      prompt: handler.prompt,
-      input,
-      ...(handler.model ? { model: handler.model } : {}),
-      maxTurns: boundedInteger(handler.maxTurns, 50, 1, 50),
-      readonlyToolsOnly: true,
-      suppressHooks: true,
-      signal,
-    });
-    return parseVerifierOutput(raw, resolved, "agent handler 结构化输出非法");
+    return this.runModelHandler(async () => {
+      const raw = await agentVerifier.verify({
+        prompt: handler.prompt,
+        input,
+        ...(handler.model ? { model: handler.model } : {}),
+        maxTurns: boundedInteger(handler.maxTurns, 50, 1, 50),
+        readonlyToolsOnly: true,
+        suppressHooks: true,
+        signal,
+      });
+      return parseVerifierOutput(raw, resolved, "agent handler 结构化输出非法");
+    }, signal);
+  }
+
+  private runModelHandler<Result>(
+    execute: () => Promise<Result>,
+    signal: AbortSignal,
+  ): Promise<Result> {
+    return this.options.modelRuntime?.run(execute, signal) ?? execute();
   }
 }
 

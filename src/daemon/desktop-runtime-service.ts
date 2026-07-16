@@ -81,6 +81,7 @@ import {
   RuntimeEventStoreIntegrityError,
   type RuntimeEventStoreEntry,
 } from "../runtime/runtime-event-store.js";
+import { RuntimeRun } from "../runtime/runtime-run.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -232,6 +233,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private userConfigWatchTimer?: NodeJS.Timeout;
   private observedUserConfig?: UserConfigSnapshot;
   private userConfigWatchClosed = false;
+  private lifecycleState: "open" | "closing" | "closed" = "open";
+  private closePromise?: Promise<void>;
+  private queuedInputDispatchTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
@@ -282,18 +286,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
       }
       if (event.topic !== "run.finished") return;
-      void this.transcriptPersistenceTail
-        .then(
-          () => this.consumeNextQueued(event.scope.workspacePath, sessionId),
-          () => this.consumeNextQueued(event.scope.workspacePath, sessionId),
-        )
-        .catch((error: unknown) =>
-          this.publishConversationFailure(event.scope.workspacePath, error),
-        );
+      if (this.lifecycleState !== "open") return;
+      const transcriptReady = this.transcriptPersistenceTail;
+      const dispatch = async () => {
+        await transcriptReady.catch(() => undefined);
+        if (this.lifecycleState !== "open") return;
+        await this.consumeNextQueued(event.scope.workspacePath, sessionId);
+      };
+      const queued = this.queuedInputDispatchTail.then(dispatch, dispatch);
+      this.queuedInputDispatchTail = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      void queued.catch((error: unknown) => {
+        if (this.lifecycleState === "open") {
+          this.publishConversationFailure(event.scope.workspacePath, error);
+        }
+      });
     });
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
+    this.assertAcceptingRequests();
     switch (request.method) {
       case "workspace.init":
         return this.initializeWorkspace(request.params.workspacePath);
@@ -483,17 +497,35 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.options.runtimeService.subscribe(listener);
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.lifecycleState = "closing";
+    this.closePromise = this.closeOnce();
+    return this.closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     this.userConfigWatchClosed = true;
     if (this.userConfigWatchTimer) clearTimeout(this.userConfigWatchTimer);
     unwatchFile(this.userConfigStore.filePath, this.userConfigWatchListener);
     await this.userConfigWatchReady.catch(() => undefined);
     await this.userConfigWatchTail.catch(() => undefined);
+    await this.providerDependencyTail.catch(() => undefined);
+    await Promise.allSettled([...this.pendingSends.values()].map(({ promise }) => promise));
+    await this.queuedInputDispatchTail.catch(() => undefined);
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
-    // Keep the projection subscriber alive until those events are durably appended.
-    await this.options.runtimeService.close();
-    await this.transcriptPersistenceTail.catch(() => undefined);
-    this.unsubscribeRuntimeEvents();
+    // Keep the projection subscriber and RuntimeStore alive until those events are projected.
+    try {
+      await this.options.runtimeService.closeRuntimes();
+      await this.transcriptPersistenceTail.catch(() => undefined);
+    } finally {
+      this.unsubscribeRuntimeEvents();
+      try {
+        await this.options.runtimeService.close();
+      } finally {
+        this.lifecycleState = "closed";
+      }
+    }
   }
 
   private async listWorkspaces(): Promise<JsonValue> {
@@ -629,8 +661,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, result.message);
         }
       }
-      // Persist a zero-usage runtime snapshot so every surface discovers the new ledger session.
-      session.updateRuntimeState({ usage: session.getRuntimeStateSnapshot().usage });
+      // recover() 已初始化 durable manifest；Usage 只由 model.call.settled 持久化。
       await session.flushPersistence();
     } finally {
       await session.close();
@@ -846,6 +877,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         now: this.now,
       });
       try {
+        const runtimeEventStore = session.runtimeEventStore;
+        if (!runtimeEventStore) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "当前会话没有 durable RuntimeEvent store，无法压缩",
+          );
+        }
+        await RuntimeRun.reconcileIncompleteRuns({
+          sessionId: session.id,
+          workDir: session.workDir,
+          store: runtimeEventStore,
+          writeGuard: session,
+        });
+        await RuntimeRun.repairSessionProjection(session, {
+          workDir: session.workDir,
+          store: runtimeEventStore,
+        });
         ensureSessionUsageBaseline(ledger, session);
         const provider = new CostTracker(
           rawProvider,
@@ -868,21 +916,30 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const historyTokens = estimateMessagesTokens(session.getHistory());
         const profile = resolveProviderProfile(active.provider, active.config.model);
         const budget = createContextBudget(profile);
-        const compacted = await new FullCompactor({ provider }).compact(session, {
-          inputBudgetTokens: budget.inputBudgetTokens,
-          targetRetainedTokens: Math.max(
-            1,
-            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
-          ),
-          trigger: "manual",
+        const runtimeRun = await RuntimeRun.start({
+          sessionId: session.id,
+          workDir: session.workDir,
+          store: runtimeEventStore,
+          writeGuard: session,
         });
-        if (!compacted) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
-          );
-        }
-        await session.flushPersistence();
+        await runtimeRun.run(async () => {
+          const result = await new FullCompactor({ provider }).compact(session, {
+            inputBudgetTokens: budget.inputBudgetTokens,
+            targetRetainedTokens: Math.max(
+              1,
+              Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
+            ),
+            trigger: "manual",
+          });
+          if (!result) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
+            );
+          }
+          await session.flushPersistence();
+          return true;
+        });
         return { beforeMessageCount, afterMessageCount: session.length };
       } finally {
         ledger.close();
@@ -1101,7 +1158,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       sessionId,
       params.input,
       initialResolution,
-      params.idempotencyKey,
+      {
+        inputKey: params.idempotencyKey,
+        runStartKey: desktopRunStartIdempotencyKey("send", params.idempotencyKey),
+      },
     );
     return { session: sessionRecord, run, disposition: "started" };
   }
@@ -1263,8 +1323,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     sessionId: string,
     input: RuntimeUserInput,
-    resolvedInput?: ResolvedRuntimeUserInput,
-    inputIdempotencyKey?: string,
+    resolvedInput: ResolvedRuntimeUserInput | undefined,
+    identity: {
+      readonly inputKey: string;
+      readonly runStartKey: string;
+    },
+    assertCanStart?: () => void,
   ): Promise<JsonObject> {
     try {
       const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
@@ -1280,7 +1344,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         sessionId,
         resolved.prompt,
         runtimeInputDisplay(input),
-        inputIdempotencyKey ?? `run:${createHash("sha256").update(resolved.prompt).digest("hex")}`,
+        identity.inputKey,
       );
       return requireJsonRecord(
         await this.options.runtimeService.startForegroundRun({
@@ -1288,6 +1352,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           sessionId,
           prompt: resolved.prompt,
           execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
+          idempotencyKey: identity.runStartKey,
+          ...(assertCanStart ? { assertCanStart } : {}),
         }),
         "run.start result",
       );
@@ -1341,10 +1407,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
+    if (this.lifecycleState !== "open") return;
     const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
     if (!next) return;
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
-    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, next.queueId);
+    if (this.lifecycleState !== "open") return;
+    await this.startSessionRun(
+      workspacePath,
+      sessionId,
+      next.input,
+      undefined,
+      {
+        inputKey: next.queueId,
+        runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
+      },
+      () => this.assertAcceptingRequests(),
+    );
     await this.conversationStateStore.removeQueued(next.queueId);
   }
 
@@ -2263,6 +2341,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return queued;
   }
 
+  private assertAcceptingRequests(): void {
+    if (this.lifecycleState === "open") return;
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      this.lifecycleState === "closing" ? "Runtime daemon 正在关闭" : "Runtime daemon 已关闭",
+    );
+  }
+
   private assertProviderFingerprint(expected: unknown, actual: string): void {
     const normalized = requireSha256(expected, "expectedProviderFingerprint");
     if (normalized !== actual) {
@@ -2902,6 +2988,11 @@ function firstSendRequestFingerprint(params: {
       }),
     )
     .digest("hex");
+}
+
+function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): string {
+  const digest = createHash("sha256").update(key).digest("hex");
+  return `desktop-${source}-run:${digest}`;
 }
 
 interface RuntimeTitleVersion {

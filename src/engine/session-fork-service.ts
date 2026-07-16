@@ -36,6 +36,7 @@ import type {
   PersistedInteractionMode,
   PersistedSessionSettings,
   SessionRuntimeStatePatch,
+  SessionRuntimeStateWritePatch,
 } from "./session-runtime.js";
 import { normalizeSessionRuntimeStatePatch } from "./session-runtime.js";
 import {
@@ -576,7 +577,7 @@ function filteredRuntimePatch(
   frozen: FrozenForkBundle,
   targetMode: PersistedInteractionMode,
   forkCreatedAt: string,
-): SessionRuntimeStatePatch | undefined {
+): SessionRuntimeStateWritePatch | undefined {
   const settings = frozen.settings
     ? filterForkSettings(frozen.settings, frozen.sourceSessionId, targetMode, frozen.sourceTitle)
     : undefined;

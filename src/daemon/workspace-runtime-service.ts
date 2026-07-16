@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   WorkspaceTaskRuntime,
@@ -60,6 +61,8 @@ export interface StartDaemonRunInput {
   readonly sessionId?: string;
   readonly execution?: DaemonRunExecution;
   readonly idempotencyKey?: string;
+  /** Trusted in-process admission check, evaluated synchronously at the actual start boundary. */
+  readonly assertCanStart?: () => void;
 }
 
 export interface WorkspaceRuntimeServiceOptions {
@@ -90,6 +93,10 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
+  private deferredNotifications?: RuntimeNotification[];
+  private lifecycleState: "open" | "closing_runtimes" | "runtimes_closed" | "closed" = "open";
+  private runtimeClosePromise?: Promise<void>;
+  private closePromise?: Promise<void>;
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.picoHome = resolvePicoHome({ env: options.env });
@@ -270,6 +277,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   async startForegroundRun(input: StartDaemonRunInput): Promise<JsonValue> {
     const runtime = await this.getRuntime(input.workspacePath);
     const start = () => {
+      input.assertCanStart?.();
       const run = runtime.startRun(
         { description: input.prompt, ...(input.sessionId ? { sessionId: input.sessionId } : {}) },
         (context) =>
@@ -297,6 +305,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
             workspacePath: runtime.workspace,
             prompt: input.prompt,
             ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+            ...(input.execution ? { execution: input.execution } : {}),
           },
         },
         () => {
@@ -406,9 +415,9 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
     try {
-      return this.eventStore(canonical).executeIdempotentDaemonCommand(
-        { ...input, idempotencyKey },
-        execute,
+      const store = this.eventStore(canonical);
+      return this.withDeferredNotifications(() =>
+        store.executeIdempotentDaemonCommand({ ...input, idempotencyKey }, execute),
       );
     } catch (error) {
       if (error instanceof RuntimeConflictError) {
@@ -427,16 +436,35 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     this.publish(notification);
   }
 
-  async close(): Promise<void> {
+  closeRuntimes(): Promise<void> {
+    if (this.runtimeClosePromise) return this.runtimeClosePromise;
+    this.lifecycleState = "closing_runtimes";
+    this.registrationChanged = undefined;
+    this.runtimeClosePromise = this.registry.close().then(() => {
+      this.lifecycleState = "runtimes_closed";
+    });
+    return this.runtimeClosePromise;
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.closeOnce();
+    return this.closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     // Runtime.close() publishes terminal cancellation events. Keep both the runtime
     // subscriptions and durable ledgers alive until those events have been recorded.
-    this.registrationChanged = undefined;
-    await this.registry.close();
-    for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
-    this.unsubscribers.clear();
-    this.listeners.clear();
-    for (const store of this.eventStores.values()) store.close();
-    this.eventStores.clear();
+    try {
+      await this.closeRuntimes();
+    } finally {
+      for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
+      this.unsubscribers.clear();
+      this.listeners.clear();
+      for (const store of this.eventStores.values()) store.close();
+      this.eventStores.clear();
+      this.lifecycleState = "closed";
+    }
   }
 
   private publish(notification: RuntimeNotification): void {
@@ -451,10 +479,30 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         payload: notification.payload,
       },
     });
-    for (const listener of this.listeners) listener(notification);
+    if (this.deferredNotifications) {
+      this.deferredNotifications.push(notification);
+      return;
+    }
+    this.notifyPersisted(notification);
+  }
+
+  private notifyPersisted(notification: RuntimeNotification): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(notification);
+      } catch (error) {
+        logger.warn(
+          { error, eventId: notification.eventId, topic: notification.topic },
+          "Runtime notification listener failed after durable commit",
+        );
+      }
+    }
   }
 
   private async getRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime> {
+    if (this.lifecycleState !== "open") {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Workspace Runtime 正在关闭");
+    }
     try {
       return await this.registry.get(workspacePath);
     } catch (error) {
@@ -469,17 +517,53 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private eventStore(workspacePath: string): RuntimeStore {
     const store = this.eventStores.get(workspacePath);
     if (store) return store;
+    if (this.lifecycleState !== "open") {
+      throw new Error("Workspace Runtime 已关闭，不能重新打开 RuntimeStore");
+    }
     const created = new RuntimeStore({
       workDir: workspacePath,
       picoHome: this.picoHome,
       now: this.options.now,
     });
-    created.recoverInterruptedDaemonRuns(
-      workspacePath,
-      "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
-    );
+    try {
+      created.recoverInterruptedDaemonRuns(
+        workspacePath,
+        "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
+      );
+    } catch (error) {
+      created.close();
+      throw error;
+    }
     this.eventStores.set(workspacePath, created);
+    // Recovery events are deterministic and Transcript ingestion is idempotent. Catch up the
+    // complete workspace recovery stream once per service lifetime so a prior commit-before-notify
+    // crash cannot strand either the terminal projection or a durable queued input.
+    for (const event of created.listDaemonRunRecoveryEvents(workspacePath)) {
+      this.notifyPersisted(runtimeNotificationFromLedger(event));
+    }
     return created;
+  }
+
+  private withDeferredNotifications<Result>(execute: () => Result): Result {
+    const parent = this.deferredNotifications;
+    const notifications = parent ?? [];
+    const checkpoint = notifications.length;
+    if (!parent) this.deferredNotifications = notifications;
+
+    let result: Result;
+    try {
+      result = execute();
+    } catch (error) {
+      notifications.length = checkpoint;
+      throw error;
+    } finally {
+      if (!parent) this.deferredNotifications = undefined;
+    }
+
+    if (!parent) {
+      for (const notification of notifications) this.notifyPersisted(notification);
+    }
+    return result;
   }
 }
 
