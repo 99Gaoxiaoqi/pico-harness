@@ -66,22 +66,6 @@ export interface LoadHookSnapshotResult {
   watchedPaths: readonly string[];
 }
 
-/**
- * legacy 兼容入口：只读取 `.claw/settings.json#hooks`，timeout 保持毫秒语义。
- * 新前台运行时应改用 loadHookSnapshot。
- */
-export async function loadHooksConfig(workDir: string): Promise<HooksConfig | undefined> {
-  const loaded = await loadSource({
-    kind: "legacy",
-    path: join(workDir, ".claw", "settings.json"),
-    format: "legacy",
-  });
-  if (loaded.status === "invalid") {
-    logger.warn({ path: loaded.source.path, error: loaded.error }, "legacy hooks 配置无效");
-  }
-  return loaded.config;
-}
-
 export function defaultHookConfigSources(
   workDir: string,
   userHome?: string,

@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isHardlineCommand } from "../approval/manager.js";
 import { normalizeCanonicalHooksConfig } from "../hooks/config.js";
-import { matcherMatches } from "../hooks/runner.js";
 import { HookTrustStore } from "../hooks/trust/store.js";
 import type {
   HookHandler,
@@ -587,6 +586,17 @@ export interface StrictHookResult {
   decision: "allow" | "deny";
   reason?: string;
   modifiedInput?: unknown;
+}
+
+function matcherMatches(group: HookMatcherGroup, toolName: string): boolean {
+  const matcher = group.matcher;
+  if (matcher === undefined || matcher === "" || matcher === "*") return true;
+  if (/^[A-Za-z0-9_|]+$/.test(matcher)) return matcher.split("|").includes(toolName);
+  try {
+    return new RegExp(matcher).test(toolName);
+  } catch {
+    return false;
+  }
 }
 
 export class StrictBackgroundHookRunner {
