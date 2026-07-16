@@ -5,10 +5,10 @@ import { basename, dirname, resolve, sep } from "node:path";
 import {
   loadHookSnapshot,
   parentDirectories,
-  resolveReferencedScriptCandidates,
   type LoadHookSnapshotOptions,
   type LoadHookSnapshotResult,
 } from "../config.js";
+import { resolveReferencedScripts } from "./referenced-scripts.js";
 import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
 
 export interface HookConfigChangeContext {
@@ -171,7 +171,8 @@ export class HookConfigReloader {
     const exactPaths = new Set(result.watchedPaths.map((path) => resolve(path)));
     for (const eventHandlers of Object.values(result.snapshot.handlers)) {
       for (const entry of eventHandlers) {
-        for (const path of resolveReferencedScriptCandidates(entry.handler, this.options.workDir)) {
+        const references = await resolveReferencedScripts(entry.handler, this.options.workDir);
+        for (const path of references.watchPaths) {
           exactPaths.add(resolve(path));
         }
       }

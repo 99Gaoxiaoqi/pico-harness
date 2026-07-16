@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, join, normalize, resolve } from "node:path";
 import { resolvePicoHome } from "../../paths/pico-paths.js";
+import { resolveReferencedScripts } from "../config/referenced-scripts.js";
 import type { HookHandler, HookSource, ResolvedHookHandler } from "../types.js";
 import {
   assertRegularNonSymlink,
@@ -126,22 +127,20 @@ async function hashReferencedScripts(
   workspace: string,
 ): Promise<Readonly<Record<string, string>>> {
   if (handler.type !== "command") return {};
-  const candidates = handler.args
-    ? [handler.command, ...handler.args]
-    : (handler.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []).map((part) =>
-        part.replace(/^(['"])(.*)\1$/, "$2"),
-      );
-  const paths = candidates
-    .filter(
-      (value) =>
-        value.startsWith("/") ||
-        value.startsWith("./") ||
-        value.startsWith("../") ||
-        /\.(?:sh|bash|zsh|js|mjs|cjs|ts|py|rb|pl)$/.test(value),
-    )
-    .map((value) => resolve(workspace, value));
+  const references = await resolveReferencedScripts(handler, workspace);
   const hashes: Record<string, string> = {};
-  for (const candidate of [...new Set(paths)]) {
+  for (const packageScript of references.packageScripts) {
+    const key = `package-script:${packageScript.canonicalManifestPath}#${encodeURIComponent(
+      packageScript.manager,
+    )}:${encodeURIComponent(packageScript.scriptName)}`;
+    hashes[key] = hash(
+      stableStringify({
+        state: packageScript.state,
+        definitions: packageScript.definitions,
+      }),
+    );
+  }
+  for (const candidate of references.paths) {
     try {
       const stat = await lstat(candidate);
       if (stat.isSymbolicLink()) {

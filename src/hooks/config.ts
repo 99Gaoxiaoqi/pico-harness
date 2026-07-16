@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { access, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { dirname, join, normalize, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { emptyHookSnapshot } from "./service.js";
@@ -629,49 +629,11 @@ async function canonicalPath(path: string): Promise<string> {
   }
 }
 
-export function resolveReferencedScriptCandidates(
-  handler: HookHandler,
-  workspace: string,
-): readonly string[] {
-  if (handler.type !== "command") return [];
-  const tokens = handler.args ? [handler.command, ...handler.args] : shellWords(handler.command);
-  return [...new Set(tokens.filter(looksLikePath).map((token) => resolve(workspace, token)))];
-}
-
-function shellWords(command: string): string[] {
-  return (
-    command
-      .match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
-      ?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) ?? []
-  );
-}
-
-function looksLikePath(value: string): boolean {
-  return (
-    isAbsolute(value) ||
-    value.startsWith("./") ||
-    value.startsWith("../") ||
-    /\.(?:sh|bash|zsh|js|mjs|cjs|ts|py|rb|pl)$/.test(value)
-  );
-}
-
-export async function existingReferencedScripts(
-  handler: HookHandler,
-  workspace: string,
-): Promise<readonly string[]> {
-  const paths = resolveReferencedScriptCandidates(handler, workspace);
-  const existing: string[] = [];
-  for (const path of paths) {
-    if (
-      await access(path).then(
-        () => true,
-        () => false,
-      )
-    )
-      existing.push(await canonicalPath(path));
-  }
-  return existing;
-}
+export {
+  existingReferencedScripts,
+  resolveReferencedScriptCandidates,
+  resolveReferencedScripts,
+} from "./config/referenced-scripts.js";
 
 export function stableStringify(input: unknown): string {
   return JSON.stringify(sortValue(input));
