@@ -103,6 +103,24 @@ test("legacy child registrations migrate to the Git identity and remain removabl
   );
   assert.equal(unregistered["workspacePath"], canonicalWorkspace);
   assert.deepEqual(await registrationStore.list(), []);
+
+  const removedWorkspace = join(fixture.root, "removed-workspace");
+  await mkdir(removedWorkspace);
+  await registrationStore.register(removedWorkspace);
+  await rm(removedWorkspace, { recursive: true });
+  const removed = asRecord(
+    await service.handle(
+      createRuntimeRequest("workspace.unregister", { workspacePath: removedWorkspace }),
+    ),
+  );
+  assert.equal(removed["workspacePath"], removedWorkspace);
+  assert.deepEqual(await registrationStore.list(), []);
+
+  const prunedWorkspace = join(fixture.root, "pruned-workspace");
+  await mkdir(prunedWorkspace);
+  await registrationStore.register(prunedWorkspace);
+  await rm(prunedWorkspace, { recursive: true });
+  assert.deepEqual(await registrationStore.list(), [], "读取登记时应清理已不存在的陈旧路径");
 });
 
 test(

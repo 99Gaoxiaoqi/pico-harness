@@ -2202,8 +2202,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async unregisterWorkspace(workspacePath: string): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
-    await this.assertNoActiveRuns([canonical], "注销工作区");
+    let workspaceExists = true;
+    const canonical = await canonicalizeWorkspacePath(workspacePath).catch((error: unknown) => {
+      if (!isNodeCode(error, "ENOENT")) throw error;
+      workspaceExists = false;
+      return resolve(workspacePath);
+    });
+    if (workspaceExists) await this.assertNoActiveRuns([canonical], "注销工作区");
     const activeAutomationRuns = this.options.automations?.activeRunReferences([canonical]) ?? [];
     if (activeAutomationRuns.length > 0) {
       throw new RuntimeProtocolError(
