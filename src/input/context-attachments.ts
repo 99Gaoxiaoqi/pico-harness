@@ -1,4 +1,4 @@
-import { constants, type Stats } from "node:fs";
+import { constants, type Dir, type Stats } from "node:fs";
 import { open, opendir, type FileHandle } from "node:fs/promises";
 import { relative } from "node:path";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
@@ -43,6 +43,9 @@ const DEFAULT_LIMITS: AttachmentLimits = {
   maxFileBytes: 20 * 1024,
   maxDirectoryEntries: 100,
 };
+
+const SAFE_DIRECTORY_LISTING_UNAVAILABLE =
+  "... (当前运行时无法安全绑定已校验目录句柄，未列出目录项)";
 
 export async function expandMentionsToPrompt(
   prompt: string,
@@ -114,20 +117,25 @@ async function resolvePathAttachment(
   const physicalRoot = workspaceRoots.list()[0] ?? fullPath;
   const reference = toReference(physicalRoot, fullPath);
   let handle: FileHandle;
-  let info: Stats;
   try {
     handle = await open(
       fullPath,
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
     );
-    info = await handle.stat();
   } catch (error) {
     return missingAttachment(reference, `File not found: ${reference}\n${errorMessage(error)}`);
   }
 
   try {
+    let info: Stats;
+    try {
+      info = await handle.stat();
+    } catch (error) {
+      return missingAttachment(reference, `File not found: ${reference}\n${errorMessage(error)}`);
+    }
+
     if (info.isDirectory()) {
-      return await readDirectoryAttachment(fullPath, reference, limits);
+      return await readDirectoryAttachment(handle, info, reference, limits);
     }
     if (info.isFile()) {
       return await readFileAttachment(handle, reference, mention, limits, info.size);
@@ -210,11 +218,21 @@ async function readBounded(
 }
 
 async function readDirectoryAttachment(
-  fullPath: string,
+  handle: FileHandle,
+  expectedInfo: Stats,
   reference: string,
   limits: AttachmentLimits,
 ): Promise<ContextAttachment> {
-  const directory = await opendir(fullPath);
+  const directory = await openDirectoryFromVerifiedHandle(handle, expectedInfo);
+  if (!directory) {
+    return {
+      type: "directory",
+      reference,
+      content: SAFE_DIRECTORY_LISTING_UNAVAILABLE,
+      truncated: true,
+    };
+  }
+
   const sampledNames: string[] = [];
   try {
     while (sampledNames.length <= limits.maxDirectoryEntries) {
@@ -238,6 +256,41 @@ async function readDirectoryAttachment(
     content,
     truncated,
   };
+}
+
+async function openDirectoryFromVerifiedHandle(
+  handle: FileHandle,
+  expectedInfo: Stats,
+): Promise<Dir | undefined> {
+  if (process.platform !== "linux") return undefined;
+
+  // Node 没有公开的 fdopendir/openat API；Linux procfs 的 magic link 绑定的是
+  // 已打开的文件描述符，而不是会被替换的原工作区路径。能力不可用时由调用方 fail-closed。
+  const descriptorPath = `/proc/self/fd/${handle.fd}`;
+  let verifier: FileHandle | undefined;
+  try {
+    verifier = await open(
+      descriptorPath,
+      constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    const reboundInfo = await verifier.stat();
+    if (!isSameDirectory(expectedInfo, reboundInfo)) return undefined;
+    return await opendir(descriptorPath);
+  } catch {
+    return undefined;
+  } finally {
+    await verifier?.close();
+  }
+}
+
+function isSameDirectory(expected: Stats, actual: Stats): boolean {
+  return (
+    expected.isDirectory() &&
+    actual.isDirectory() &&
+    expected.ino !== 0 &&
+    expected.dev === actual.dev &&
+    expected.ino === actual.ino
+  );
 }
 
 async function resolveNamedAttachment(
