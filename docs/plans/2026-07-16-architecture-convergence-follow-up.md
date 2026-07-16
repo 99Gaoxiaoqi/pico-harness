@@ -15,10 +15,10 @@
 
 ## 第一部分：安全与宿主生命周期
 
-- [ ] 删除前台 legacy `HookRunner` fallback，只保留受信任的 canonical HookService。
-- [ ] 将 macOS user daemon 的 service label 与 `PICO_HOME` 状态根绑定，并显式传递环境。
-- [ ] daemon Server 在 dispatch 前统一执行严格方法参数校验。
-- [ ] Desktop daemon 启动、失败和退出共用同一生命周期协调器。
+- [x] 删除前台 legacy `HookRunner` fallback，只保留受信任的 canonical HookService。✔️
+- [x] 将 macOS user daemon 的 service label 与 `PICO_HOME` 状态根绑定，并显式传递环境。✔️
+- [x] daemon Server 在 dispatch 前统一执行严格方法参数校验。✔️
+- [x] Desktop daemon 启动、失败和退出共用同一生命周期协调器。✔️
 
 ### 验收
 
@@ -26,6 +26,12 @@
 - 两个不同 `PICO_HOME` 生成不同 daemon label、plist 和 endpoint，且环境指向各自状态根。
 - 畸形但已认证的参数必须在 service dispatch 前被拒绝。
 - daemon 启动中退出或启动后失败都必须完成 owned resource 清理；external daemon 不得被误停。
+
+### 完成记录
+
+- 提交：`363d597 refactor(hooks): 删除前台旧 HookRunner 回退路径`；`d888217 fix(daemon): 隔离状态根并收紧请求校验`；`58b9fa9 fix(桌面端): 收敛守护进程启动退出生命周期`。
+- 验证：Node 22.23.0 下 `npm run lint`、`npm run typecheck`、`npm run build`、`npm run desktop:typecheck`；子任务 smoke 覆盖 legacy Hook trust、跨 Home service/endpoint、真实 IPC 非法参数拒绝和 Desktop 启停竞态。
+- 说明：canonical Hook loader 继续兼容 `.claw` source，但所有 executable 必须通过统一 trust；external daemon 不纳入 Desktop ownership。
 
 ## 第二部分：事件通道与背压
 
