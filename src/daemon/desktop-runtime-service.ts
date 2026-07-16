@@ -1328,6 +1328,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       readonly inputKey: string;
       readonly runStartKey: string;
     },
+    assertCanStart?: () => void,
   ): Promise<JsonObject> {
     try {
       const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
@@ -1352,6 +1353,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           prompt: resolved.prompt,
           execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
           idempotencyKey: identity.runStartKey,
+          ...(assertCanStart ? { assertCanStart } : {}),
         }),
         "run.start result",
       );
@@ -1410,10 +1412,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (!next) return;
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
     if (this.lifecycleState !== "open") return;
-    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, {
-      inputKey: next.queueId,
-      runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
-    });
+    await this.startSessionRun(
+      workspacePath,
+      sessionId,
+      next.input,
+      undefined,
+      {
+        inputKey: next.queueId,
+        runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
+      },
+      () => this.assertAcceptingRequests(),
+    );
     await this.conversationStateStore.removeQueued(next.queueId);
   }
 
