@@ -63,10 +63,26 @@ TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配
 
 ## 验证
 
+默认门禁全部是本地确定性检查，不访问真实模型：
+
 ```bash
+npm ci
+npm audit --audit-level=high
+npm run lint
+npm run format
 npm run typecheck
-npm run test -- tests/tui/repl-input-routing.test.tsx tests/tui/app.test.tsx
-npm run smoke:tui
+npm run desktop:typecheck
+npm run test:integration
+npm run check:storage
+npm run build
+npm pack --dry-run
+npm run desktop:package
 ```
 
-`smoke:tui` 会先构建可发布产物，再在真实 PTY 中启动 `pico`，提交一条输入并验证它向本地 fake OpenAI 端点发起请求；不需要密钥或外网。
+`test:integration` 覆盖 Runtime、daemon、持久化和安全边界的本地集成路径；`check:storage` 单独验证 Node 22.12+ ABI、`better-sqlite3` 与 SQLite 事务/WAL 能力。`build` 和 `npm pack --dry-run` 检查 CLI 可发布产物，`desktop:package` 生成当前平台的未签名 Desktop smoke 包；它不替代安装、签名或公证验证。
+
+真实模型闭环需要可用的 Provider 配置、凭证与网络，只在受控环境执行，不在无凭证 CI 中强制运行：
+
+```bash
+npm run test:llm-e2e
+```

@@ -65,10 +65,29 @@ jobs:
           '
           echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
 
-      - run: npm audit --omit=dev --audit-level=high
-      - run: npm run desktop:typecheck
-      - run: npm run lint
-      - run: npm run desktop:make -- --arch=${{ matrix.arch }}
+      - name: Audit full dependency tree
+        run: npm audit --audit-level=high
+
+      - name: Verify native SQLite capabilities
+        run: npm run check:storage
+
+      - name: Typecheck runtime packages
+        run: npm run typecheck
+
+      - name: Typecheck desktop packages
+        run: npm run desktop:typecheck
+
+      - name: Lint repository and desktop packages
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format
+
+      - name: Run deterministic integration suite
+        run: npm run test:integration
+
+      - name: Build signed desktop artifacts
+        run: npm run desktop:make -- --arch=${{ matrix.arch }}
 
       - name: Verify signature and notarization ticket
         shell: bash

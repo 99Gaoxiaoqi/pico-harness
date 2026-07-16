@@ -7,6 +7,7 @@ on:
       - "apps/desktop/**"
       - "packages/protocol/**"
       - "src/**"
+      - "tests/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/desktop.yml"
@@ -15,6 +16,7 @@ on:
       - "apps/desktop/**"
       - "packages/protocol/**"
       - "src/**"
+      - "tests/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/desktop.yml"
@@ -41,14 +43,24 @@ jobs:
 
       - run: npm ci
 
-      - name: Production dependency audit
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit full dependency tree
+        run: npm audit --audit-level=high
+
+      - name: Verify native SQLite capabilities
+        run: npm run check:storage
+
+      - name: Typecheck runtime packages
+        run: npm run typecheck
 
       - name: Typecheck desktop packages
         run: npm run desktop:typecheck
 
       - name: Lint repository and desktop packages
         run: npm run lint
+
+      - name: Run deterministic integration suite
+        if: runner.os == 'macOS'
+        run: npm run test:integration
 
       - name: Package unsigned desktop smoke build
         run: npm run desktop:package
