@@ -423,6 +423,37 @@ test(
 );
 
 test(
+  "Linux missing-file revalidation never observes a widened content temp",
+  { skip: process.platform !== "linux" },
+  async (context) => {
+    const fixture = await createFixture("linux-new-file-final-revalidation");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "created.txt");
+    let observedPrivateStage = false;
+
+    await writeAtomicWorkspaceFile({
+      targetPath,
+      content: "created privately\n",
+      precondition: { kind: "missing" },
+      revalidateTarget: async () => {
+        const temporaryName = (await readdir(fixture.workspace)).find((entry) =>
+          entry.startsWith(TEMPORARY_FILE_PREFIX),
+        );
+        if (!temporaryName) return;
+        const temporaryMode = (await stat(join(fixture.workspace, temporaryName))).mode & 0o777;
+        assert.equal(temporaryMode, 0o600, "Linux 业务路径复核不能发生在内容临时文件已放宽之后");
+        observedPrivateStage = true;
+      },
+    });
+
+    assert.equal(observedPrivateStage, true);
+    assert.equal(await readFile(targetPath, "utf8"), "created privately\n");
+    assert.equal((await stat(targetPath)).mode & 0o777, 0o666 & ~process.umask());
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
   "Linux ACL-denied readers never observe a wider temporary mode",
   {
     skip:
