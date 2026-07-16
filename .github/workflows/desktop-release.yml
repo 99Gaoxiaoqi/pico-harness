@@ -26,15 +26,13 @@ jobs:
             runner: '["self-hosted", "macOS", "X64", "pico-signing"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     env:
-      PICO_MAC_SIGN_IDENTITY: ${{ secrets.PICO_MAC_SIGN_IDENTITY }}
-      PICO_APPLE_ID: ${{ secrets.PICO_APPLE_ID }}
-      PICO_APPLE_ID_PASSWORD: ${{ secrets.PICO_APPLE_ID_PASSWORD }}
-      PICO_APPLE_TEAM_ID: ${{ secrets.PICO_APPLE_TEAM_ID }}
       PICO_UPDATE_BASE_URL: ${{ vars.PICO_UPDATE_BASE_URL }}
       PICO_UPDATE_FEED_URL: ${{ vars.PICO_UPDATE_FEED_URL }}
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v6
         with:
@@ -87,6 +85,11 @@ jobs:
         run: npm run test:integration
 
       - name: Build signed desktop artifacts
+        env:
+          PICO_MAC_SIGN_IDENTITY: ${{ secrets.PICO_MAC_SIGN_IDENTITY }}
+          PICO_APPLE_ID: ${{ secrets.PICO_APPLE_ID }}
+          PICO_APPLE_ID_PASSWORD: ${{ secrets.PICO_APPLE_ID_PASSWORD }}
+          PICO_APPLE_TEAM_ID: ${{ secrets.PICO_APPLE_TEAM_ID }}
         run: npm run desktop:make -- --arch=${{ matrix.arch }}
 
       - name: Verify signature and notarization ticket
