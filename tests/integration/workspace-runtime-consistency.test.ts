@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -45,6 +45,64 @@ test("linked Git worktree keeps its own canonical Runtime identity", async (cont
   assert.equal(mainIdentity, await realpath(fixture.workspace));
   assert.equal(linkedIdentity, await realpath(linkedWorktree));
   assert.notEqual(linkedIdentity, mainIdentity);
+});
+
+test("Git discovery ignores inherited repository-selection environment", async (context) => {
+  const fixture = await createFixture("git-environment-isolation");
+  const ordinaryWorkspace = join(fixture.root, "ordinary-workspace");
+  await mkdir(ordinaryWorkspace, { recursive: true });
+  await runGit(["init", "--quiet", "--initial-branch=main"], fixture.workspace);
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+
+  const previousGitDir = process.env.GIT_DIR;
+  const previousGitWorkTree = process.env.GIT_WORK_TREE;
+  process.env.GIT_DIR = join(fixture.workspace, ".git");
+  process.env.GIT_WORK_TREE = fixture.workspace;
+  try {
+    assert.equal(
+      await canonicalizeWorkspacePath(ordinaryWorkspace),
+      await realpath(ordinaryWorkspace),
+    );
+    assert.equal(
+      await canonicalizeWorkspacePath(fixture.workspace),
+      await realpath(fixture.workspace),
+    );
+  } finally {
+    restoreEnvironment("GIT_DIR", previousGitDir);
+    restoreEnvironment("GIT_WORK_TREE", previousGitWorkTree);
+  }
+});
+
+test("legacy child registrations migrate to the Git identity and remain removable", async (context) => {
+  const fixture = await createFixture("legacy-registration-migration");
+  const childWorkspace = join(fixture.workspace, "packages", "app");
+  const registrationPath = join(fixture.picoHome, "registrations.json");
+  await mkdir(childWorkspace, { recursive: true });
+  await runGit(["init", "--quiet", "--initial-branch=main"], fixture.workspace);
+  const canonicalWorkspace = await realpath(fixture.workspace);
+  const legacyChild = await realpath(childWorkspace);
+  const registrationStore = new WorkspaceRegistrationStore(registrationPath);
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  context.after(async () => {
+    await service.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  await writeRegistrationFixture(registrationPath, [legacyChild, canonicalWorkspace]);
+  assert.deepEqual(await registrationStore.list(), [canonicalWorkspace]);
+
+  await writeRegistrationFixture(registrationPath, [legacyChild]);
+  const unregistered = asRecord(
+    await service.handle(
+      createRuntimeRequest("workspace.unregister", { workspacePath: childWorkspace }),
+    ),
+  );
+  assert.equal(unregistered["workspacePath"], canonicalWorkspace);
+  assert.deepEqual(await registrationStore.list(), []);
 });
 
 test(
@@ -420,6 +478,18 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
   return value;
+}
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+async function writeRegistrationFixture(
+  path: string,
+  workspaces: readonly string[],
+): Promise<void> {
+  await writeFile(path, `${JSON.stringify({ version: 1, workspaces }, null, 2)}\n`);
 }
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
