@@ -402,7 +402,10 @@ function startCommand(
     };
     child.stdout?.on("data", (chunk: Buffer) => append(chunk, "stdout"));
     child.stderr?.on("data", (chunk: Buffer) => append(chunk, "stderr"));
-    child.stdin?.once("error", requestTermination);
+    const handleStdinError = (err: unknown) => {
+      if (!isClosedStdinError(err)) requestTermination(err);
+    };
+    child.stdin?.once("error", handleStdinError);
     child.once("close", (code) => {
       if (settled) return;
       if (terminationRequested) {
@@ -436,12 +439,17 @@ function startCommand(
     try {
       child.stdin?.end(JSON.stringify(input));
     } catch (err) {
-      requestTermination(err);
+      handleStdinError(err);
     }
   });
   // async handler 的 completion 也必须有默认 rejection observer，避免后台 unhandled rejection。
   completion.catch(() => undefined);
   return { started, completion };
+}
+
+function isClosedStdinError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EPIPE" || code === "ECONNRESET" || code === "ERR_STREAM_DESTROYED";
 }
 
 function interpretCommandExit(
