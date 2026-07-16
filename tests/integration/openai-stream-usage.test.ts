@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadPicoProjectConfig } from "../../src/input/pico-config.js";
+import { createProvider } from "../../src/provider/factory.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 
@@ -18,6 +19,46 @@ function streamResponse(chunks: Uint8Array[]): Response {
     { status: 200, headers: { "content-type": "text/event-stream" } },
   );
 }
+
+test("OpenAI requests enforce the configured output-token limit", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Record<string, unknown>[] = [];
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requestBodies.push(body);
+    if (body["stream"] === true) {
+      return streamResponse([
+        new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'),
+        new TextEncoder().encode("data: [DONE]\n\n"),
+      ]);
+    }
+    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+  };
+
+  const capabilities = resolveModelRouteCapabilities("openai", "capped-model", {
+    output: 1234,
+  });
+  const provider = createProvider("openai", {
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "test-key",
+    model: "capped-model",
+    routeId: "test/capped-model",
+    capabilities,
+  });
+
+  await provider.generate([{ role: "user", content: "test" }], []);
+  assert.ok(provider.generateStream);
+  await provider.generateStream([{ role: "user", content: "test" }], [], () => undefined);
+
+  assert.equal(requestBodies.length, 2);
+  for (const body of requestBodies) {
+    assert.equal(body["max_tokens"], 1234);
+    assert.equal(Object.hasOwn(body, "max_completion_tokens"), false);
+  }
+});
 
 test("OpenAI stream requests and consumes the terminal Usage-only chunk", async (context) => {
   const originalFetch = globalThis.fetch;
@@ -90,6 +131,7 @@ test("OpenAI-compatible routes omit stream_options unless explicitly enabled", a
   }).generateStream([{ role: "user", content: "test" }], [], () => undefined);
 
   assert.equal(Object.hasOwn(requestBody ?? {}, "stream_options"), false);
+  assert.equal(requestBody?.["max_tokens"], 4096);
   assert.equal(response.content, "OK");
   assert.equal(response.usage?.promptTokens, 3);
   assert.equal(response.usage?.completionTokens, 1);
