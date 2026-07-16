@@ -171,9 +171,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return { workspacePath: registered, registered: true };
     }
     if (request.method === "workspace.unregister") {
-      const workspacePath = await canonicalizeWorkspacePath(
-        requiredString(params, "workspacePath"),
-      );
+      const workspacePath = requiredString(params, "workspacePath");
       const registered = await this.registrationStore.unregister(workspacePath);
       this.publish(
         createRuntimeNotification({

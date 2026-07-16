@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 
@@ -21,7 +21,7 @@ export class WorkspaceRegistrationStore {
     let workspaces: readonly string[] = [];
     await this.mutate(async () => {
       const state = await this.read();
-      workspaces = await normalizeWorkspacePaths(state.workspaces);
+      workspaces = await normalizeWorkspacePaths(state.workspaces, true);
       if (!samePaths(state.workspaces, workspaces)) {
         await this.write({ version: VERSION, workspaces });
       }
@@ -43,7 +43,10 @@ export class WorkspaceRegistrationStore {
   }
 
   async unregister(workspacePath: string): Promise<string> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await canonicalizeWorkspacePath(workspacePath).catch((error: unknown) => {
+      if (isErrno(error, "ENOENT")) return resolve(workspacePath);
+      throw error;
+    });
     await this.mutate(async () => {
       const state = await this.read();
       const normalized = await normalizeWorkspacePaths(state.workspaces);
@@ -101,11 +104,20 @@ export class WorkspaceRegistrationStore {
   }
 }
 
-async function normalizeWorkspacePaths(paths: readonly string[]): Promise<string[]> {
+async function normalizeWorkspacePaths(
+  paths: readonly string[],
+  dropMissing = false,
+): Promise<string[]> {
   const normalized = await Promise.all(
-    paths.map(async (path) => await canonicalizeWorkspacePath(path).catch(() => path)),
+    paths.map(
+      async (path) =>
+        await canonicalizeWorkspacePath(path).catch((error: unknown) => {
+          if (dropMissing && isErrno(error, "ENOENT")) return undefined;
+          return path;
+        }),
+    ),
   );
-  return [...new Set(normalized)].sort();
+  return [...new Set(normalized.filter((path): path is string => path !== undefined))].sort();
 }
 
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
