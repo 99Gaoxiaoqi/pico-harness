@@ -12,8 +12,21 @@ interface ShellWord {
 
 interface ParsedShell {
   readonly commands: readonly (readonly ShellWord[])[];
-  readonly nestedCommands: readonly string[];
+  readonly commandContexts: readonly ShellCommandContext[];
+  readonly nestedCommands: readonly NestedShellCommand[];
   readonly ambiguous: boolean;
+}
+
+interface ShellCommandContext {
+  readonly subshellDepth: number;
+  readonly subshellPath: readonly number[];
+  readonly conditionallyExecuted: boolean;
+  readonly isolatedCwd: boolean;
+}
+
+interface NestedShellCommand {
+  readonly content: string;
+  readonly commandIndex: number;
 }
 
 /**
@@ -35,19 +48,43 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
   if (depth >= MAX_NESTED_COMMAND_DEPTH && parsed.nestedCommands.length > 0) {
     return true;
   }
-  if (
-    parsed.nestedCommands.some((nested) =>
-      isHardlineBashCommandAtDepth(nested, depth + 1, initialCwd),
-    )
-  ) {
-    return true;
-  }
-
-  let cwd = initialCwd;
-  for (const words of parsed.commands) {
+  const cwdBySubshellDepth = [initialCwd];
+  let previousSubshellPath: readonly number[] = [];
+  for (let commandIndex = 0; commandIndex < parsed.commands.length; commandIndex++) {
+    const context = parsed.commandContexts[commandIndex]!;
+    let sharedSubshellDepth = 0;
+    while (
+      sharedSubshellDepth < previousSubshellPath.length &&
+      sharedSubshellDepth < context.subshellPath.length &&
+      previousSubshellPath[sharedSubshellDepth] === context.subshellPath[sharedSubshellDepth]
+    ) {
+      sharedSubshellDepth++;
+    }
+    cwdBySubshellDepth.length = sharedSubshellDepth + 1;
+    for (
+      let depthIndex = sharedSubshellDepth + 1;
+      depthIndex <= context.subshellDepth;
+      depthIndex++
+    ) {
+      cwdBySubshellDepth[depthIndex] = cwdBySubshellDepth[depthIndex - 1]!;
+    }
+    const cwd = cwdBySubshellDepth[context.subshellDepth]!;
+    for (const nested of parsed.nestedCommands) {
+      if (nested.commandIndex !== commandIndex) continue;
+      if (isHardlineBashCommandAtDepth(nested.content, depth + 1, cwd)) return true;
+    }
+    const words = parsed.commands[commandIndex]!;
     const contextualWords = words.map((word) => ({ ...word, cwd }));
     if (isHardlineCommandWords(contextualWords, depth)) return true;
-    cwd = nextShellCwd(contextualWords, cwd) ?? cwd;
+    const nextCwd = nextShellCwd(contextualWords, cwd);
+    if (nextCwd !== undefined && context.isolatedCwd) return true;
+    if (nextCwd !== undefined) {
+      cwdBySubshellDepth[context.subshellDepth] =
+        context.conditionallyExecuted || hasComplexCwdControlPrefix(contextualWords)
+          ? UNKNOWN_SHELL_CWD
+          : nextCwd;
+    }
+    previousSubshellPath = context.subshellPath;
   }
 
   return parsed.ambiguous && hasAmbiguousDestructiveRmShape(parsed.commands);
@@ -607,8 +644,13 @@ function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string |
 
   let optionsEnded = false;
   let target: ShellWord | undefined;
-  for (const word of effectiveWords.slice(executableIndex + 1)) {
-    if (word.outputRedirection) continue;
+  const args = effectiveWords.slice(executableIndex + 1);
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    if (word.outputRedirection) {
+      if (!outputRedirectionHasTarget(word.value)) index++;
+      continue;
+    }
     if (!optionsEnded && word.value === "--") {
       optionsEnded = true;
       continue;
@@ -618,7 +660,13 @@ function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string |
     break;
   }
 
-  if (!target || target.dynamic || target.unquotedExpansion || target.value === "-") {
+  if (
+    !target ||
+    target.dynamic ||
+    target.unquotedExpansion ||
+    target.value === "-" ||
+    (executable === "pushd" && /^[+-]\d+$/u.test(target.value))
+  ) {
     return UNKNOWN_SHELL_CWD;
   }
   const slashPath = target.value.replaceAll("\\", "/");
@@ -635,6 +683,14 @@ function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string |
     return normalizeSlashPath(slashPath);
   }
   return resolveAgainstCwd(currentCwd, slashPath);
+}
+
+function hasComplexCwdControlPrefix(words: readonly ShellWord[]): boolean {
+  const executableIndex = findExecutableIndex(words);
+  if (executableIndex <= 0) return false;
+  return words
+    .slice(0, executableIndex)
+    .some((word) => SHELL_CONTROL_PREFIXES.has(word.value.toLowerCase()));
 }
 
 function finalStaticShellCwd(command: string, initialCwd: string): string {
@@ -1096,7 +1152,11 @@ function findMatchingLongOption(
 
 function parseShell(command: string): ParsedShell {
   const commands: ShellWord[][] = [];
-  const nestedCommands: string[] = [];
+  const commandContexts: ShellCommandContext[] = [];
+  const nestedCommands: NestedShellCommand[] = [];
+  const conditionalScopes: boolean[] = [];
+  const braceGroupStarts: number[] = [];
+  const subshellPath: number[] = [];
   let words: ShellWord[] = [];
   let value = "";
   let dynamic = false;
@@ -1107,6 +1167,11 @@ function parseShell(command: string): ParsedShell {
   let tokenStarted = false;
   let quote: "single" | "double" | undefined;
   let ambiguous = false;
+  let subshellDepth = 0;
+  let nextSubshellId = 1;
+  let pendingConditional = false;
+  let pendingPipeline = false;
+  let lastClosedBraceRange: { start: number; end: number } | undefined;
 
   const finishWord = (): void => {
     if (!tokenStarted) return;
@@ -1122,8 +1187,24 @@ function parseShell(command: string): ParsedShell {
   };
   const finishCommand = (): void => {
     finishWord();
-    if (words.length > 0) commands.push(words);
+    if (words.length > 0) {
+      commands.push(words);
+      commandContexts.push({
+        subshellDepth,
+        subshellPath: [...subshellPath],
+        conditionallyExecuted: pendingConditional || conditionalScopes.some(Boolean),
+        isolatedCwd: pendingPipeline,
+      });
+    }
     words = [];
+  };
+  const markIsolated = (start: number, end: number): void => {
+    for (let contextIndex = start; contextIndex < end; contextIndex++) {
+      commandContexts[contextIndex] = {
+        ...commandContexts[contextIndex]!,
+        isolatedCwd: true,
+      };
+    }
   };
 
   for (let index = 0; index < command.length; index++) {
@@ -1139,7 +1220,7 @@ function parseShell(command: string): ParsedShell {
 
     if (char === "`") {
       const substitution = readBacktickSubstitution(command, index + 1);
-      nestedCommands.push(substitution.content);
+      nestedCommands.push({ content: substitution.content, commandIndex: commands.length });
       value += "__dynamic__";
       dynamic = true;
       if (quote !== "double") unquotedExpansion = true;
@@ -1151,7 +1232,7 @@ function parseShell(command: string): ParsedShell {
 
     if (char === "$" && next === "(") {
       const substitution = readDollarSubstitution(command, index + 2);
-      nestedCommands.push(substitution.content);
+      nestedCommands.push({ content: substitution.content, commandIndex: commands.length });
       value += "__dynamic__";
       dynamic = true;
       if (quote !== "double") unquotedExpansion = true;
@@ -1262,13 +1343,65 @@ function parseShell(command: string): ParsedShell {
       tokenStarted = true;
       continue;
     }
-    if (char === ";" || char === "\n" || char === "|" || char === "&") {
+    if ((char === "&" && next === "&") || (char === "|" && next === "|")) {
       finishCommand();
+      pendingConditional = true;
+      pendingPipeline = false;
+      lastClosedBraceRange = undefined;
+      index++;
       continue;
     }
-    if (char === "(" || char === ")") {
+    if (char === "|") {
+      finishCommand();
+      const previousIndex = commandContexts.length - 1;
+      const conditional = commandContexts[previousIndex]?.conditionallyExecuted ?? false;
+      if (lastClosedBraceRange) {
+        markIsolated(lastClosedBraceRange.start, lastClosedBraceRange.end);
+      } else if (previousIndex >= 0) {
+        markIsolated(previousIndex, previousIndex + 1);
+      }
+      pendingConditional = conditional;
+      pendingPipeline = true;
+      lastClosedBraceRange = undefined;
+      if (next === "&") index++;
+      continue;
+    }
+    if (char === "&") {
+      finishCommand();
+      const previousIndex = commandContexts.length - 1;
+      if (lastClosedBraceRange) {
+        markIsolated(lastClosedBraceRange.start, lastClosedBraceRange.end);
+      } else if (previousIndex >= 0) {
+        markIsolated(previousIndex, previousIndex + 1);
+      }
+      pendingConditional = false;
+      pendingPipeline = false;
+      lastClosedBraceRange = undefined;
+      continue;
+    }
+    if (char === ";" || char === "\n") {
+      finishCommand();
+      pendingConditional = false;
+      pendingPipeline = false;
+      lastClosedBraceRange = undefined;
+      continue;
+    }
+    if (char === "(") {
       if (tokenStarted) ambiguous = true;
       finishCommand();
+      conditionalScopes.push(pendingConditional || conditionalScopes.some(Boolean));
+      subshellDepth++;
+      subshellPath.push(nextSubshellId++);
+      lastClosedBraceRange = undefined;
+      continue;
+    }
+    if (char === ")") {
+      if (tokenStarted) ambiguous = true;
+      finishCommand();
+      subshellDepth = Math.max(0, subshellDepth - 1);
+      subshellPath.pop();
+      conditionalScopes.pop();
+      lastClosedBraceRange = undefined;
       continue;
     }
     if (
@@ -1277,6 +1410,15 @@ function parseShell(command: string): ParsedShell {
       isStandaloneGroupingBrace(command, index)
     ) {
       finishCommand();
+      if (char === "{") {
+        braceGroupStarts.push(commandContexts.length);
+        conditionalScopes.push(pendingConditional || conditionalScopes.some(Boolean));
+        lastClosedBraceRange = undefined;
+      } else {
+        const start = braceGroupStarts.pop() ?? commandContexts.length;
+        conditionalScopes.pop();
+        lastClosedBraceRange = { start, end: commandContexts.length };
+      }
       continue;
     }
     if (/\s/u.test(char)) {
@@ -1292,7 +1434,7 @@ function parseShell(command: string): ParsedShell {
 
   if (quote !== undefined) ambiguous = true;
   finishCommand();
-  return { commands, nestedCommands, ambiguous };
+  return { commands, commandContexts, nestedCommands, ambiguous };
 }
 
 function canPrefixOutputRedirection(value: string): boolean {
