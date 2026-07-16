@@ -108,6 +108,8 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
 
   const executable = commandBasename(words[executableIndex]!.value);
   const args = words.slice(executableIndex + 1);
+  if (SHELL_SOURCE_COMMANDS.has(executable)) return true;
+  if (hasLegacyLiteralHardlinePayload(executable, args)) return true;
   if (executable === "rm") return isDestructiveRmInvocation(args, false);
   if (executable === "find" && isDestructiveFindInvocation(args)) return true;
   if (isMkfsExecutable(executable) && isDestructiveMkfsInvocation(args)) return true;
@@ -128,9 +130,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   }
 
   if (SHELL_COMMANDS.has(executable)) {
-    const commandIndex = args.findIndex(
-      (word) => word.value === "-c" || /^-[^-]*c/u.test(word.value),
-    );
+    const commandIndex = findShellCommandOptionIndex(args);
     if (commandIndex >= 0) {
       const nested = args[commandIndex + 1];
       if (!nested || nested.dynamic || depth >= MAX_NESTED_COMMAND_DEPTH) return true;
@@ -140,6 +140,9 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
         words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD,
       );
     }
+    // Without a static -c payload the shell reads code from stdin or a script file. The pure
+    // classifier cannot bind those bytes, so this bypass-immune boundary must fail closed.
+    return !isShellDisplayOnlyInvocation(args);
   }
 
   if (executable === "eval") {
@@ -202,6 +205,69 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
 
   // 可执行文件本身来自 shell 展开时无法证明不会落到系统级破坏命令。
   return words[executableIndex]!.dynamic;
+}
+
+/** Preserve the legacy literal deny floor for known inline-code interpreter modes. */
+function hasLegacyLiteralHardlinePayload(executable: string, args: readonly ShellWord[]): boolean {
+  if (!hasInlineCodeMode(executable, args)) return false;
+  const payload = args.map((word) => word.value).join(" ");
+  return LEGACY_LITERAL_HARDLINE_PATTERNS.some((pattern) => pattern.test(payload));
+}
+
+function hasInlineCodeMode(executable: string, args: readonly ShellWord[]): boolean {
+  if (/^python(?:\d+(?:\.\d+)*)?$/u.test(executable)) {
+    return hasInlineCodeOptionBeforeEntry(args, (value) => value === "-c" || /^-c.+/su.test(value));
+  }
+  if (executable === "node" || executable === "nodejs") {
+    return hasInlineCodeOptionBeforeEntry(
+      args,
+      (value) =>
+        value === "-e" ||
+        value === "--eval" ||
+        /^-e.+/su.test(value) ||
+        value.startsWith("--eval="),
+    );
+  }
+  if (executable === "perl" || executable === "ruby") {
+    return hasInlineCodeOptionBeforeEntry(args, (value) => /^-[^-]*e/su.test(value));
+  }
+  return false;
+}
+
+function hasInlineCodeOptionBeforeEntry(
+  args: readonly ShellWord[],
+  isInlineOption: (value: string) => boolean,
+): boolean {
+  for (const word of args) {
+    if (word.dynamic || word.value === "--") return false;
+    if (isInlineOption(word.value)) return true;
+    if (!word.value.startsWith("-") && !word.value.startsWith("+")) return false;
+  }
+  return false;
+}
+
+function findShellCommandOptionIndex(args: readonly ShellWord[]): number {
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (word.dynamic || value === "--") return -1;
+    if (value === "-c" || /^-[^-]*c/u.test(value)) return index;
+    if (SHELL_OPTIONS_WITH_VALUE.has(value)) {
+      index++;
+      continue;
+    }
+    if (/^(?:--(?:init-file|rcfile)=|[-+]O.+|[-+]o.+)/u.test(value)) continue;
+    if (!value.startsWith("-") && !value.startsWith("+")) return -1;
+  }
+  return -1;
+}
+
+function isShellDisplayOnlyInvocation(args: readonly ShellWord[]): boolean {
+  return (
+    args.length === 1 &&
+    !args[0]!.dynamic &&
+    (args[0]!.value === "--help" || args[0]!.value === "--version")
+  );
 }
 
 function isDestructiveRmInvocation(
@@ -1562,7 +1628,18 @@ const SAFE_WORKSPACE_CWD = "/tmp/.pico-workspace";
 
 const UNKNOWN_SHELL_CWD = "/etc/.pico-unknown-cwd";
 
-const SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "dash", "ksh", "sh", "zsh"]);
+const SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "dash", "fish", "ksh", "sh", "zsh"]);
+
+const SHELL_SOURCE_COMMANDS: ReadonlySet<string> = new Set([".", "source"]);
+
+const SHELL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "+O",
+  "+o",
+  "-O",
+  "-o",
+  "--init-file",
+  "--rcfile",
+]);
 
 const CWD_FORWARDERS: ReadonlySet<string> = new Set(["builtin", "command", "time"]);
 
@@ -1783,3 +1860,14 @@ const CRITICAL_POSIX_ROOTS: readonly string[] = [
 const TEMP_ROOTS: readonly string[] = ["/private/tmp", "/tmp"];
 
 const OTHER_HARDLINE_PATTERNS: readonly RegExp[] = [/:\(\)\s*\{/u];
+
+const LEGACY_LITERAL_HARDLINE_PATTERNS: readonly RegExp[] = [
+  /\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+\/(?:["'\s}]|$)/iu,
+  /\brm\s+-[a-z]*f[a-z]*r[a-z]*\s+\/(?:["'\s}]|$)/iu,
+  /\bmkfs(?:\.[a-z0-9]+)?\s+\/dev\//iu,
+  /\bdd\s+if=.*\bof=\/dev\//iu,
+  /:\(\)\s*\{/u,
+  /\bshutdown\b/iu,
+  /\breboot\b/iu,
+  /\bgit\s+push\s+(?:-f|--force)\s+.*\b(?:main|master)\b/iu,
+];
