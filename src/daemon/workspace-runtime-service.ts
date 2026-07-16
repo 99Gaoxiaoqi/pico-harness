@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   WorkspaceTaskRuntime,
@@ -454,13 +455,16 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private async closeOnce(): Promise<void> {
     // Runtime.close() publishes terminal cancellation events. Keep both the runtime
     // subscriptions and durable ledgers alive until those events have been recorded.
-    await this.closeRuntimes();
-    for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
-    this.unsubscribers.clear();
-    this.listeners.clear();
-    for (const store of this.eventStores.values()) store.close();
-    this.eventStores.clear();
-    this.lifecycleState = "closed";
+    try {
+      await this.closeRuntimes();
+    } finally {
+      for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
+      this.unsubscribers.clear();
+      this.listeners.clear();
+      for (const store of this.eventStores.values()) store.close();
+      this.eventStores.clear();
+      this.lifecycleState = "closed";
+    }
   }
 
   private publish(notification: RuntimeNotification): void {
@@ -483,7 +487,16 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   private notifyPersisted(notification: RuntimeNotification): void {
-    for (const listener of this.listeners) listener(notification);
+    for (const listener of this.listeners) {
+      try {
+        listener(notification);
+      } catch (error) {
+        logger.warn(
+          { error, eventId: notification.eventId, topic: notification.topic },
+          "Runtime notification listener failed after durable commit",
+        );
+      }
+    }
   }
 
   private async getRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime> {
