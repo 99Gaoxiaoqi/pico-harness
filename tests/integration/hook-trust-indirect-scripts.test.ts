@@ -1,398 +1,125 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { resolveReferencedScripts } from "../../src/hooks/config/referenced-scripts.js";
+import { resolveCommandHookInvocation } from "../../src/hooks/config/referenced-scripts.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/executor.js";
 import { HookTrustStore, type HookTrustSubject } from "../../src/hooks/trust/store.js";
+import type { CommandHookHandler } from "../../src/hooks/types.js";
 
-const execFileAsync = promisify(execFile);
-
-test("package script definition changes invalidate Hook trust", async (context) => {
-  const fixture = await createFixture(context);
-  await writePackageScript(fixture.workspace, "node safe.js");
-  await writeFile(join(fixture.workspace, "safe.js"), "export const value = 'safe';\n");
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writePackageScript(fixture.workspace, "node changed.js");
-  await writeFile(join(fixture.workspace, "changed.js"), "export const value = 'changed';\n");
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("direct file changes behind a package script invalidate Hook trust", async (context) => {
-  const fixture = await createFixture(context);
-  const scriptPath = join(fixture.workspace, "safe.js");
-  await writePackageScript(fixture.workspace, "node safe.js");
-  await writeFile(scriptPath, "export const value = 'safe';\n");
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writeFile(scriptPath, "export const value = 'changed';\n");
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("unchanged package script definition and bytes keep Hook trust active", async (context) => {
-  const fixture = await createFixture(context);
-  await writePackageScript(fixture.workspace, "node safe.js");
-  await writeFile(join(fixture.workspace, "safe.js"), "export const value = 'safe';\n");
-  const trusted = await fixture.store.trust(fixture.packageSubject);
-
-  const unchanged = await fixture.store.fingerprint(fixture.packageSubject);
-
-  assert.equal(unchanged.id, trusted.id);
-  assert.equal(await fixture.store.status(fixture.packageSubject), "active");
-  assert.ok(Object.keys(unchanged.scriptHashes).some((path) => path.endsWith("/safe.js")));
-  assert.ok(Object.keys(unchanged.scriptHashes).some((path) => path.startsWith("package-script:")));
-});
-
-test("ordinary directly referenced scripts preserve byte-bound trust", async (context) => {
+test("ordinary executable scripts remain byte-bound", async (context) => {
   const fixture = await createFixture(context);
   const scriptPath = join(fixture.workspace, "check.sh");
-  const subject: HookTrustSubject = {
-    ...fixture.packageSubject,
-    handler: { type: "command", command: "./check.sh", args: [] },
-  };
-  await writeFile(scriptPath, "#!/bin/sh\nexit 0\n");
+  const subject = fixture.subject({ type: "command", command: "./check.sh", args: [] });
+  await writeExecutable(scriptPath, '#!/bin/sh\nprintf \'{"additionalContext":"A"}\\n\'\n');
   await fixture.store.trust(subject);
   assert.equal(await fixture.store.status(subject), "active");
 
-  await writeFile(scriptPath, "#!/bin/sh\nexit 2\n");
+  await writeExecutable(scriptPath, '#!/bin/sh\nprintf \'{"additionalContext":"B"}\\n\'\n');
 
   assert.equal(await fixture.store.status(subject), "pending");
 });
 
-for (const command of [
-  "npm run inner",
-  "npm run -- inner",
-  "npm run-script -- inner",
-  "npm rum inner",
-  "npm urn inner",
-  "pnpm run inner",
-  "pnpm run-script -- inner",
-  "yarn inner",
-  "yarn run -- inner",
-  "bun run inner",
-  "bun run -- inner",
-] as const) {
-  test(`${command} recursively binds the called package script`, async (context) => {
-    const fixture = await createFixture(context, { type: "command", command: "npm test" });
-    await writePackageScripts(fixture.workspace, {
-      test: command,
-      inner: "node safe.cjs",
-    });
-    await fixture.store.trust(fixture.packageSubject);
-
-    await writePackageScripts(fixture.workspace, {
-      test: command,
-      inner: "node changed.cjs",
-    });
-
-    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-  });
-}
-
-test("nested package lifecycle and direct file bytes remain trust-bound", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm test" });
-  const scripts = {
-    test: "npm run inner",
-    preinner: "node pre.cjs",
-    inner: "node inner.cjs",
-    postinner: "node post.cjs",
-  };
-  await writePackageScripts(fixture.workspace, scripts);
-  await writeFile(join(fixture.workspace, "pre.cjs"), "export const value = 'pre';\n");
-  await writeFile(join(fixture.workspace, "inner.cjs"), "export const value = 'inner';\n");
-  await writeFile(join(fixture.workspace, "post.cjs"), "export const value = 'post';\n");
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writePackageScripts(fixture.workspace, {
-    ...scripts,
-    postinner: "node changed-post.cjs",
-  });
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-
-  await writePackageScripts(fixture.workspace, scripts);
-  await fixture.store.trust(fixture.packageSubject);
-  await writeFile(join(fixture.workspace, "inner.cjs"), "export const value = 'changed';\n");
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("multiple static nested package calls are all trust-bound", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm test" });
-  await writePackageScripts(fixture.workspace, {
-    test: "npm run first && pnpm run second",
-    first: "node first.cjs",
-    second: "node second.cjs",
-  });
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writePackageScripts(fixture.workspace, {
-    test: "npm run first && pnpm run second",
-    first: "node first.cjs",
-    second: "node changed-second.cjs",
-  });
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("nested npm restart binds its stop-start fallback lifecycle", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm test" });
-  const scripts = {
-    test: "npm restart",
-    stop: "node stop.cjs",
-    start: "node start.cjs",
-    poststart: "node poststart.cjs",
-  };
-  await writePackageScripts(fixture.workspace, scripts);
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writePackageScripts(fixture.workspace, {
-    ...scripts,
-    poststart: "node changed-poststart.cjs",
-  });
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("static nested package-script cycles are deduplicated and remain trust-bound", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm test" });
-  await writePackageScripts(fixture.workspace, {
-    test: "npm run inner",
-    inner: "npm test",
-  });
-  await fixture.store.trust(fixture.packageSubject);
-  assert.equal(await fixture.store.status(fixture.packageSubject), "active");
-
-  await writePackageScripts(fixture.workspace, {
-    test: "npm run inner",
-    inner: "node changed.cjs && npm test",
-  });
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("nested package-script depth overflow fails closed", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm test" });
-  const scripts: Record<string, string> = { test: "npm run level0" };
-  for (let index = 0; index <= 32; index++) {
-    scripts[`level${index}`] = index === 32 ? "node terminal.cjs" : `npm run level${index + 1}`;
-  }
-  await writePackageScripts(fixture.workspace, scripts);
-
-  await assert.rejects(fixture.store.trust(fixture.packageSubject), /超过 32 层/u);
-});
-
-for (const definition of [
-  'npm run "$TARGET"',
-  "cd packages/app && npm run inner",
-  "command -- cd packages/app && npm run inner",
-  "builtin cd packages/app && npm run inner",
-  "eval 'cd packages/app' && npm run inner",
-  "npm --workspace child run inner",
-  "npm --prefix child run inner",
-  "pnpm --filter child run inner",
-  "yarn --cwd child run inner",
-  "bun --cwd child run inner",
-  "npm_config_workspace=child npm run inner",
-  "HOME=packages/app npm run inner",
-  "NPM_CONFIG_USERCONFIG=packages/app/.npmrc npm run inner",
-  "export npm_config_prefix=packages/app; npm run inner",
-  "echo 'npm run inner' | sh",
-  'printf "npm run inner\\n" | bash',
-  "command -v npm | sh",
-  "$PM run inner",
-  "$PM inner",
-  '"$PM" run inner',
-  'command "$PM" run inner',
-  'PM=npm; "$PM" run inner',
-] as const) {
-  test(`nested dynamic or cross-workspace call fails closed: ${definition}`, async (context) => {
-    const fixture = await createFixture(context, { type: "command", command: "npm test" });
-    await writePackageScripts(fixture.workspace, {
-      test: definition,
-      inner: "node inner.cjs",
-    });
-
-    await assert.rejects(
-      fixture.store.trust(fixture.packageSubject),
-      /(?:不支持为该 .* Hook 建立间接脚本信任|动态 package-manager Hook)/u,
-    );
-  });
-}
-
-const selectorEnvironmentScenarios: readonly {
-  readonly label: string;
-  readonly handler: HookTrustSubject["handler"];
-}[] = [
-  {
-    label: "inline workspace selector environment",
-    handler: { type: "command", command: "npm_config_workspace=child npm run test" },
-  },
-  {
-    label: "env wrapper prefix selector",
-    handler: { type: "command", command: "env npm_config_prefix=child npm run test" },
-  },
-  {
-    label: "handler.env workspace selector",
-    handler: {
-      type: "command",
-      command: "npm run test",
-      env: { NPM_CONFIG_WORKSPACES: "true" },
-    },
-  },
-  {
-    label: "inline HOME config-source selector",
-    handler: { type: "command", command: "HOME=child npm run test" },
-  },
-  {
-    label: "handler.env HOME config-source selector",
-    handler: { type: "command", command: "npm run test", env: { HOME: "child" } },
-  },
-];
-
-for (const scenario of selectorEnvironmentScenarios) {
-  test(`${scenario.label} fails closed`, async (context) => {
-    const fixture = await createFixture(context, scenario.handler);
-    await writePackageScripts(fixture.workspace, { test: "node test.cjs" });
-
-    await assert.rejects(
-      fixture.store.trust(fixture.packageSubject),
-      /环境变量 .* package\.json 目标/u,
-    );
+for (const handler of [
+  { type: "command", command: "npm run test" },
+  { type: "command", command: "npm", args: ["exec", "tool"] },
+  { type: "command", command: "npm view package" },
+  { type: "command", command: "pnpm test" },
+  { type: "command", command: "yarn node ./tool.js" },
+  { type: "command", command: "bun ./tool.ts" },
+  { type: "command", command: "npx tool" },
+  { type: "command", command: "pnpx tool" },
+  { type: "command", command: "bunx tool" },
+  { type: "command", command: "corepack yarn test" },
+  { type: "command", command: process.execPath, args: ["--run", "test"] },
+  { type: "command", command: `${process.execPath} --run=test` },
+] as const satisfies readonly CommandHookHandler[]) {
+  test(`${handler.command} package execution cannot be trusted`, async (context) => {
+    const fixture = await createFixture(context);
+    await assert.rejects(fixture.store.trust(fixture.subject(handler)), /无法建立完整静态信任/u);
     assert.deepEqual(await fixture.store.list(), []);
   });
 }
 
-test("project npmrc retargeting is observed by npm and rejected by trust status", async (context) => {
-  const fixture = await createFixture(context);
-  const child = join(fixture.workspace, "child");
-  await mkdir(child, { recursive: true });
-  await writeFile(
-    join(fixture.workspace, "package.json"),
-    `${JSON.stringify(
-      {
-        private: true,
-        workspaces: ["child"],
-        scripts: { pretool: "echo ROOT" },
-      },
-      null,
-      2,
-    )}\n`,
-  );
-  await writeFile(
-    join(child, "package.json"),
-    `${JSON.stringify(
-      {
-        name: "child",
-        version: "1.0.0",
-        scripts: { pretool: "echo CHILD" },
-      },
-      null,
-      2,
-    )}\n`,
-  );
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writeFile(join(fixture.workspace, ".npmrc"), "workspace=child\n");
-  const { stdout } = await execFileAsync("npm", ["run", "pretool"], {
-    cwd: fixture.workspace,
-    env: { PATH: process.env.PATH, HOME: fixture.home },
+for (const command of [
+  "echo safe && ./other.sh",
+  "echo $HOME",
+  "./scripts/*.sh",
+  "env node ./main.js",
+  "sh -c 'node ./main.js'",
+] as const) {
+  test(`${command} dynamic shell form fails closed`, () => {
+    assert.throws(
+      () => resolveCommandHookInvocation({ type: "command", command }),
+      /无法建立完整静态信任/u,
+    );
   });
+}
 
-  assert.match(stdout, /CHILD/u);
+test("package runners reached through Node or an executable alias fail closed", async (context) => {
+  const fixture = await createFixture(context);
+  const runnerPath = join(fixture.workspace, "npm-cli.js");
+  const aliasPath = join(fixture.workspace, "pico-runner-alias");
+  await writeExecutable(runnerPath, "#!/usr/bin/env node\nprocess.stdout.write('runner');\n");
+  await symlink(runnerPath, aliasPath);
+
   await assert.rejects(
-    fixture.store.status(fixture.packageSubject),
-    /package-manager 配置 .*\.npmrc 通过 workspace 改变 package\.json 目标/u,
+    fixture.store.trust(
+      fixture.subject({ type: "command", command: process.execPath, args: [runnerPath, "run"] }),
+    ),
+    /package-manager\/runner/u,
+  );
+  await assert.rejects(
+    fixture.store.trust(fixture.subject({ type: "command", command: aliasPath, args: ["run"] })),
+    /package-manager\/runner/u,
   );
 });
 
-for (const source of [
-  {
-    label: "ancestor",
-    path: (fixture: Fixture) => join(fixture.root, ".npmrc"),
-    config: "workspaces=true\n",
-  },
-  {
-    label: "user",
-    path: (fixture: Fixture) => join(fixture.home, ".npmrc"),
-    config: "workspaces\n",
-  },
-] as const) {
-  test(`${source.label} npmrc workspace selector fails closed`, async (context) => {
-    const fixture = await createFixture(context);
-    await writePackageScripts(fixture.workspace, { pretool: "node root.cjs" });
-    await writeFile(source.path(fixture), source.config);
-
-    await assert.rejects(
-      fixture.store.trust(fixture.packageSubject),
-      /package-manager 配置 .*\.npmrc 通过 workspaces 改变 package\.json 目标/u,
-    );
-  });
-}
-
-test("benign npmrc bytes remain trust-bound", async (context) => {
+test("inherited runtime loader variables are stripped before command execution", async (context) => {
   const fixture = await createFixture(context);
-  await writePackageScripts(fixture.workspace, { pretool: "node root.cjs" });
-  const configPath = join(fixture.workspace, ".npmrc");
-  await writeFile(configPath, "engine-strict=true\n");
-  await fixture.store.trust(fixture.packageSubject);
-  assert.equal(await fixture.store.status(fixture.packageSubject), "active");
-
-  await writeFile(configPath, "engine-strict=false\n");
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-for (const selector of [
-  { name: "npm_config_workspace", value: "child" },
-  { name: "NPM_CONFIG_USERCONFIG", value: "custom.npmrc" },
-  { name: "npm_config_globalconfig", value: "global.npmrc" },
-] as const) {
-  test(`inherited ${selector.name} selector fails closed`, async (context) => {
-    const fixture = await createFixture(context);
-    await writePackageScripts(fixture.workspace, { pretool: "node root.cjs" });
-    const store = new HookTrustStore({
-      picoHome: join(fixture.root, `pico-${selector.name.toLowerCase()}`),
-      env: { HOME: fixture.home, [selector.name]: selector.value },
-    });
-
-    await assert.rejects(
-      store.trust(fixture.packageSubject),
-      /继承环境变量 .* package\.json 目标/u,
-    );
-  });
-}
-
-test("inherited selector environment is removed before package invocation execution", async (context) => {
-  const fixture = await createFixture(context);
-  const fakeNpm = join(fixture.workspace, "npm");
-  await writeFile(
-    fakeNpm,
-    '#!/bin/sh\nprintf \'{"additionalContext":"%s:%s"}\\n\' "${npm_config_workspace-unset}" "${KEEP-unset}"\n',
+  const scriptPath = join(fixture.workspace, "environment.sh");
+  const preloadPath = join(fixture.workspace, "preload.sh");
+  const markerPath = join(fixture.root, "preloaded.txt");
+  await writeExecutable(
+    scriptPath,
+    [
+      "#!/bin/sh",
+      'printf \'{"additionalContext":"%s:%s:%s:%s"}\\n\' "${BASH_ENV-unset}" "${ENV-unset}" "${NODE_OPTIONS-unset}" "${KEEP-unset}"',
+      "",
+    ].join("\n"),
   );
-  await chmod(fakeNpm, 0o755);
-  const handler = { type: "command", command: fakeNpm, args: ["--version"] } as const;
+  await writeFile(preloadPath, `printf injected > ${JSON.stringify(markerPath)}\n`);
+  const handler = {
+    type: "command",
+    command: scriptPath,
+    args: [],
+    env: { KEEP: "preserved" },
+  } as const;
   const executor = new DefaultHookExecutor({
     workDir: fixture.workspace,
-    env: { PATH: process.env.PATH, npm_config_workspace: "child", KEEP: "preserved" },
+    env: {
+      PATH: process.env.PATH,
+      BASH_ENV: preloadPath,
+      ENV: preloadPath,
+      NODE_OPTIONS: `--require=${preloadPath}`,
+      LD_PRELOAD: join(fixture.workspace, "missing.so"),
+      DYLD_INSERT_LIBRARIES: join(fixture.workspace, "missing.dylib"),
+    },
   });
   context.after(async () => await executor.dispose());
 
   const output = await executor.execute(
     {
-      id: "selector-environment",
+      id: "environment-sanitization",
       event: "Stop",
-      source: fixture.packageSubject.source,
+      source: fixture.source,
       order: 0,
       handler,
       trusted: true,
     },
     {
-      session_id: "selector-environment",
+      session_id: "environment-sanitization",
       cwd: fixture.workspace,
       hook_event_name: "Stop",
       payload: { reason: "test" },
@@ -400,305 +127,191 @@ test("inherited selector environment is removed before package invocation execut
     {},
   );
 
-  assert.equal(output.additionalContext, "unset:preserved");
+  assert.equal(output.additionalContext, "unset:unset:unset:preserved");
+  assert.equal(await exists(markerPath), false);
 });
 
-for (const scenario of [
-  { command: "npm test", scriptName: "test" },
-  { command: "npm --silent start", scriptName: "start" },
-  { command: "npm stop -- --signal=TERM", scriptName: "stop" },
+for (const name of [
+  "PATH",
+  "PATHEXT",
+  "BASH_ENV",
+  "ENV",
+  "ZDOTDIR",
+  "NODE_OPTIONS",
+  "LD_PRELOAD",
+  "DYLD_INSERT_LIBRARIES",
+  "PYTHONPATH",
+  "RUBYOPT",
+  "PERL5OPT",
+  "JAVA_TOOL_OPTIONS",
 ] as const) {
-  test(`${scenario.command} binds the complete npm lifecycle`, async (context) => {
-    const fixture = await createFixture(context, {
+  test(`handler.env ${name} fails closed`, async (context) => {
+    const fixture = await createFixture(context);
+    const handler = {
       type: "command",
-      command: scenario.command,
-    });
-    await writePackageScripts(fixture.workspace, {
-      [`pre${scenario.scriptName}`]: "node before.js",
-      [scenario.scriptName]: "node main.js",
-      [`post${scenario.scriptName}`]: "node after.js",
-    });
-    await fixture.store.trust(fixture.packageSubject);
-
-    await writePackageScripts(fixture.workspace, {
-      [`pre${scenario.scriptName}`]: "node before.js",
-      [scenario.scriptName]: "node main.js",
-      [`post${scenario.scriptName}`]: "node changed.js",
-    });
-
-    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-  });
-}
-
-for (const scenario of [
-  {
-    label: "leading environment assignment",
-    handler: { type: "command", command: "NODE_ENV=test npm test" },
-  },
-  { label: "env wrapper", handler: { type: "command", command: "env npm test" } },
-  {
-    label: "env assignment and package option",
-    handler: { type: "command", command: "env NODE_ENV=test npm --silent test" },
-  },
-  { label: "command wrapper", handler: { type: "command", command: "command npm test" } },
-  { label: "exec wrapper", handler: { type: "command", command: "exec npm test" } },
-  {
-    label: "no-shell env wrapper",
-    handler: { type: "command", command: "env", args: ["NODE_ENV=test", "npm", "test"] },
-  },
-] as const) {
-  test(`${scenario.label} still binds the package script`, async (context) => {
-    const fixture = await createFixture(context, scenario.handler);
-    await writePackageScripts(fixture.workspace, { test: "node test.js" });
-    await fixture.store.trust(fixture.packageSubject);
-
-    await writePackageScripts(fixture.workspace, { test: "node changed.js" });
-
-    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-  });
-}
-
-test("npm start binds its default server.js when the start script is absent", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm start" });
-  const serverPath = join(fixture.workspace, "server.js");
-  await writePackageScripts(fixture.workspace, {});
-  const resolution = await resolveReferencedScripts(
-    fixture.packageSubject.handler,
-    fixture.workspace,
-  );
-  assert.ok(resolution.paths.includes(serverPath));
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writeFile(serverPath, "export const value = 'created';\n");
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-
-  await fixture.store.trust(fixture.packageSubject);
-  await writeFile(serverPath, "export const value = 'changed';\n");
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-for (const command of ["npm --loglevel error restart", "npm run restart"] as const) {
-  test(`${command} binds stop/start fallback lifecycles when restart is absent`, async (context) => {
-    const fixture = await createFixture(context, { type: "command", command });
-    const scripts = {
-      prerestart: "node pre-restart.js",
-      prestop: "node pre-stop.js",
-      stop: "node stop.js",
-      poststop: "node post-stop.js",
-      prestart: "node pre-start.js",
-      start: "node start.js",
-      poststart: "node post-start.js",
-      postrestart: "node post-restart.js",
-    };
-    await writePackageScripts(fixture.workspace, scripts);
-    await fixture.store.trust(fixture.packageSubject);
-
-    await writePackageScripts(fixture.workspace, { ...scripts, poststop: "node changed.js" });
-
-    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-  });
-}
-
-test("npm run restart binds the default server.js in its fallback", async (context) => {
-  const fixture = await createFixture(context, { type: "command", command: "npm run restart" });
-  const serverPath = join(fixture.workspace, "server.js");
-  await writePackageScripts(fixture.workspace, {});
-  const resolution = await resolveReferencedScripts(
-    fixture.packageSubject.handler,
-    fixture.workspace,
-  );
-  assert.ok(resolution.paths.includes(serverPath));
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writeFile(serverPath, "export const value = 'created';\n");
-
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-test("npm restart with an explicit restart script ignores the stop/start fallback", async (context) => {
-  const fixture = await createFixture(context, {
-    type: "command",
-    command: "npm restart",
-  });
-  const scripts = {
-    prerestart: "node pre-restart.js",
-    restart: "node restart.js",
-    postrestart: "node post-restart.js",
-    start: "node start.js",
-    stop: "node stop.js",
-  };
-  await writePackageScripts(fixture.workspace, scripts);
-  await fixture.store.trust(fixture.packageSubject);
-
-  await writePackageScripts(fixture.workspace, { ...scripts, start: "node changed-start.js" });
-  assert.equal(await fixture.store.status(fixture.packageSubject), "active");
-
-  await writePackageScripts(fixture.workspace, {
-    ...scripts,
-    restart: "node changed-restart.js",
-    start: "node changed-start.js",
-  });
-  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-});
-
-for (const scenario of [
-  { label: "yarn direct shorthand", command: "yarn test" },
-  { label: "yarn leading option", command: "yarn --silent test --watch" },
-  { label: "pnpm direct shorthand", command: "pnpm test -- --runInBand" },
-  { label: "pnpm test alias", command: "pnpm t" },
-  { label: "pnpm valued leading option", command: "pnpm --reporter silent test" },
-  { label: "bun direct shorthand", command: "bun test --watch" },
-  { label: "bun leading option", command: "bun --silent test" },
-  { label: "npm explicit run option", command: "npm run --if-present test" },
-  { label: "yarn explicit run option", command: "yarn run --silent test" },
-  { label: "pnpm explicit run option", command: "pnpm run --if-present test" },
-  { label: "bun explicit run option", command: "bun run --if-present test" },
-] as const) {
-  test(`${scenario.label} invalidates trust when the script changes`, async (context) => {
-    const fixture = await createFixture(context, {
-      type: "command",
-      command: scenario.command,
-    });
-    await writePackageScripts(fixture.workspace, {
-      pretest: "node before.js",
-      test: "node test.js",
-      posttest: "node after.js",
-    });
-    await fixture.store.trust(fixture.packageSubject);
-
-    await writePackageScripts(fixture.workspace, {
-      pretest: "node before.js",
-      test: "node changed.js",
-      posttest: "node after.js",
-    });
-
-    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
-  });
-}
-
-for (const command of [
-  "npm view pico-harness",
-  "yarn config get registry",
-  "pnpm --silent list",
-  "bun info react",
-] as const) {
-  test(`${command} is not mistaken for a direct package script`, async (context) => {
-    const fixture = await createFixture(context, { type: "command", command });
-    await writePackageScripts(fixture.workspace, {
-      view: "node unexpected.js",
-      config: "node unexpected.js",
-      list: "node unexpected.js",
-      info: "node unexpected.js",
-    });
-
-    const resolution = await resolveReferencedScripts(
-      fixture.packageSubject.handler,
-      fixture.workspace,
-    );
-
-    assert.deepEqual(resolution.packageScripts, []);
-  });
-}
-
-for (const command of [
-  "npm --workspace child run test",
-  "pnpm --filter child test",
-  "yarn --cwd child test",
-  "bun --cwd child test",
-  "npm test && npm run deploy",
-  "echo safe && npm test",
-  "sh -c 'npm test'",
-  "sudo npm test",
-  "env -S 'npm test'",
-  "stdbuf -oL npm test",
-  "corepack yarn test",
-  "ionice npm test",
-] as const) {
-  test(`${command} fails closed instead of receiving partial trust`, async (context) => {
-    const fixture = await createFixture(context, { type: "command", command });
-    await writePackageScripts(fixture.workspace, { test: "node test.js" });
-
+      command: process.execPath,
+      args: ["--version"],
+      env: { [name]: "./injected" },
+    } as const;
     await assert.rejects(
-      fixture.store.trust(fixture.packageSubject),
-      /\u4e0d\u652f\u6301\u4e3a\u8be5 .* Hook \u5efa\u7acb\u95f4\u63a5\u811a\u672c\u4fe1\u4efb/u,
+      fixture.store.trust(fixture.subject(handler)),
+      new RegExp(`不允许覆盖 ${name}`, "u"),
     );
-    assert.deepEqual(await fixture.store.list(), []);
   });
 }
 
-test("shell composition on an ordinary non-package command keeps direct-path behavior", async (context) => {
-  const fixture = await createFixture(context, {
-    type: "command",
-    command: "echo safe && echo done",
-  });
+test("the executable selected from host PATH is version-bound", async (context) => {
+  const fixture = await createFixture(context);
+  const executablePath = join(fixture.workspace, "pico-hook-runner");
+  const environment = { PATH: `${fixture.workspace}${delimiter}${process.env.PATH ?? ""}` };
+  const store = new HookTrustStore({ picoHome: fixture.picoHome, env: environment });
+  const subject = fixture.subject({ type: "command", command: "pico-hook-runner", args: [] });
+  await writeExecutable(executablePath, '#!/bin/sh\nprintf \'{"additionalContext":"A"}\\n\'\n');
+  await store.trust(subject);
+  assert.equal(await store.status(subject), "active");
 
-  const resolution = await resolveReferencedScripts(
-    fixture.packageSubject.handler,
-    fixture.workspace,
-  );
+  await writeExecutable(executablePath, '#!/bin/sh\nprintf \'{"additionalContext":"B"}\\n\'\n');
 
-  assert.deepEqual(resolution.packageScripts, []);
+  assert.equal(await store.status(subject), "pending");
 });
 
-for (const command of ["echo npm test", "command -v npm"] as const) {
-  test(`${command} does not claim package-script execution`, async (context) => {
-    const fixture = await createFixture(context, { type: "command", command });
+test("Node extensionless entry files are byte-bound", async (context) => {
+  const fixture = await createFixture(context);
+  const entryPath = join(fixture.workspace, "hook");
+  const subject = fixture.subject({ type: "command", command: process.execPath, args: ["hook"] });
+  await writeFile(entryPath, "process.stdout.write('A');\n");
+  await fixture.store.trust(subject);
 
-    const resolution = await resolveReferencedScripts(
-      fixture.packageSubject.handler,
-      fixture.workspace,
-    );
+  await writeFile(entryPath, "process.stdout.write('B');\n");
 
-    assert.deepEqual(resolution.packageScripts, []);
+  assert.equal(await fixture.store.status(subject), "pending");
+});
+
+test("Node directory entries fail closed", async (context) => {
+  const fixture = await createFixture(context);
+  await mkdir(join(fixture.workspace, "entry"));
+  await writeFile(
+    join(fixture.workspace, "entry", "package.json"),
+    `${JSON.stringify({ main: "main.cjs" })}\n`,
+  );
+  await writeFile(join(fixture.workspace, "entry", "main.cjs"), "process.stdout.write('A');\n");
+
+  await assert.rejects(
+    fixture.store.trust(
+      fixture.subject({ type: "command", command: process.execPath, args: ["./entry"] }),
+    ),
+    /不允许使用目录入口/u,
+  );
+});
+
+for (const scenario of [
+  { label: "attached require", args: ["--require=./preload.cjs", "./main.cjs"] },
+  { label: "separate require", args: ["--require", "./preload.cjs", "./main.cjs"] },
+  { label: "attached import", args: ["--import=./preload.mjs", "./main.cjs"] },
+  { label: "attached loader", args: ["--loader=./preload.mjs", "./main.cjs"] },
+  {
+    label: "attached experimental loader",
+    args: ["--experimental-loader=./preload.mjs", "./main.cjs"],
+  },
+] as const) {
+  test(`Node ${scenario.label} bytes are trust-bound`, async (context) => {
+    const fixture = await createFixture(context);
+    await writeFile(join(fixture.workspace, "main.cjs"), "process.stdout.write('main');\n");
+    await writeFile(join(fixture.workspace, "preload.cjs"), "globalThis.marker = 'A';\n");
+    await writeFile(join(fixture.workspace, "preload.mjs"), "globalThis.marker = 'A';\n");
+    const subject = fixture.subject({
+      type: "command",
+      command: process.execPath,
+      args: scenario.args,
+    });
+    await fixture.store.trust(subject);
+
+    const preload = scenario.args.some((value) => value.includes("preload.mjs"))
+      ? "preload.mjs"
+      : "preload.cjs";
+    await writeFile(join(fixture.workspace, preload), "globalThis.marker = 'B';\n");
+
+    assert.equal(await fixture.store.status(subject), "pending");
   });
 }
+
+for (const args of [
+  ["--require=unbound-package", "./main.cjs"],
+  ["--import", "unbound-package", "./main.cjs"],
+  ["--env-file=./runtime.env", "./main.cjs"],
+  ["--test", "./main.cjs"],
+] as const) {
+  test(`Node unsupported option ${args[0]} fails closed`, async (context) => {
+    const fixture = await createFixture(context);
+    await writeFile(join(fixture.workspace, "main.cjs"), "process.stdout.write('main');\n");
+    await writeFile(join(fixture.workspace, "runtime.env"), "NODE_OPTIONS=--require=./other.cjs\n");
+    await assert.rejects(
+      fixture.store.trust(fixture.subject({ type: "command", command: process.execPath, args })),
+      /无法建立完整静态信任/u,
+    );
+  });
+}
+
+test("Node ordinary entry keeps trust until its bytes change", async (context) => {
+  const fixture = await createFixture(context);
+  const entryPath = join(fixture.workspace, "main.cjs");
+  const subject = fixture.subject({
+    type: "command",
+    command: process.execPath,
+    args: ["./main.cjs", "ordinary-argument"],
+  });
+  await writeFile(entryPath, "process.stdout.write('A');\n");
+  await fixture.store.trust(subject);
+  assert.equal(await fixture.store.status(subject), "active");
+
+  await writeFile(entryPath, "process.stdout.write('B');\n");
+
+  assert.equal(await fixture.store.status(subject), "pending");
+});
 
 interface Fixture {
   readonly root: string;
   readonly workspace: string;
-  readonly home: string;
   readonly picoHome: string;
+  readonly source: HookTrustSubject["source"];
   readonly store: HookTrustStore;
-  readonly packageSubject: HookTrustSubject;
+  subject(handler: CommandHookHandler): HookTrustSubject;
 }
 
-async function createFixture(
-  context: {
-    after: (callback: () => Promise<void>) => void;
-  },
-  handler: HookTrustSubject["handler"] = { type: "command", command: "npm run pretool" },
-): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "pico-hook-indirect-trust-"));
+async function createFixture(context: {
+  after: (callback: () => Promise<void>) => void;
+}): Promise<Fixture> {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-static-trust-"));
   const workspace = join(root, "workspace");
-  const home = join(root, "home");
   const picoHome = join(root, "pico-home");
   await mkdir(join(workspace, ".pico"), { recursive: true });
-  await mkdir(home, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
   context.after(() => rm(root, { recursive: true, force: true }));
+  const source = {
+    kind: "project",
+    path: join(workspace, ".pico", "hooks.json"),
+    version: 1,
+  } as const;
   return {
     root,
     workspace,
-    home,
     picoHome,
-    store: new HookTrustStore({ picoHome, env: { HOME: home } }),
-    packageSubject: {
-      workspace,
-      source: { kind: "project", path: join(workspace, ".pico", "hooks.json"), version: 1 },
-      handler,
+    source,
+    store: new HookTrustStore({ picoHome }),
+    subject(handler) {
+      return { workspace, source, handler };
     },
   };
 }
 
-async function writePackageScript(workspace: string, definition: string): Promise<void> {
-  await writePackageScripts(workspace, { pretool: definition });
+async function writeExecutable(path: string, content: string): Promise<void> {
+  await writeFile(path, content);
+  await chmod(path, 0o755);
 }
 
-async function writePackageScripts(
-  workspace: string,
-  scripts: Readonly<Record<string, string>>,
-): Promise<void> {
-  await writeFile(
-    join(workspace, "package.json"),
-    `${JSON.stringify({ private: true, scripts }, null, 2)}\n`,
+async function exists(path: string): Promise<boolean> {
+  return await access(path).then(
+    () => true,
+    () => false,
   );
 }

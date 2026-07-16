@@ -17,7 +17,10 @@ import type {
   ResolvedHookHandler,
 } from "../types.js";
 import type { HookExecutor } from "../service.js";
-import { sanitizePackageInvocationEnvironment } from "../config/referenced-scripts.js";
+import {
+  resolveCommandHookInvocation,
+  sanitizeCommandHookEnvironment,
+} from "../config/referenced-scripts.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -318,18 +321,17 @@ function startCommand(
   signal: AbortSignal,
 ): RunningCommand {
   let child: ChildProcess;
-  const spawnOptions: SpawnOptions = {
-    cwd,
-    env: sanitizePackageInvocationEnvironment(handler, baseEnv),
-    windowsHide: true,
-    detached: process.platform !== "win32",
-    stdio: ["pipe", "pipe", "pipe"],
-  };
   try {
-    child =
-      handler.args === undefined
-        ? spawn(handler.command, { ...spawnOptions, shell: true })
-        : spawn(handler.command, [...handler.args], { ...spawnOptions, shell: false });
+    const invocation = resolveCommandHookInvocation(handler);
+    const spawnOptions: SpawnOptions = {
+      cwd,
+      env: sanitizeCommandHookEnvironment(handler, baseEnv),
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: false,
+    };
+    child = spawn(invocation.command, [...invocation.args], spawnOptions);
   } catch (err) {
     const rejected = Promise.reject(err);
     rejected.catch(() => undefined);

@@ -11,6 +11,7 @@ import {
 } from "./secure-file.js";
 
 const STORE_VERSION = 1;
+const MAX_HASHED_HOOK_SCRIPT_BYTES = 16 * 1024 * 1024;
 
 export type HookTrustStatus = "active" | "pending";
 
@@ -42,7 +43,7 @@ export interface HookTrustStoreOptions {
   /** Host-owned Pico state root. Takes precedence over the legacy userHome seam. */
   picoHome?: string;
   filePath?: string;
-  /** Environment inherited by command Hooks; package target selectors are fail-closed. */
+  /** Host environment shared by trust resolution and command execution. */
   env?: Readonly<NodeJS.ProcessEnv>;
 }
 
@@ -134,14 +135,19 @@ async function hashReferencedScripts(
   if (handler.type !== "command") return {};
   const references = await resolveReferencedScripts(handler, workspace, environment);
   const hashes: Record<string, string> = {};
-  for (const packageScript of references.packageScripts) {
-    const key = `package-script:${packageScript.canonicalManifestPath}#${encodeURIComponent(
-      packageScript.manager,
-    )}:${encodeURIComponent(packageScript.scriptName)}`;
-    hashes[key] = hash(
+  for (const executable of references.executablePaths) {
+    const info = await lstat(executable, { bigint: true });
+    if (!info.isFile()) throw new Error(`Hook 可执行文件不是普通文件: ${executable}`);
+    hashes[`executable:${executable}`] = hash(
       stableStringify({
-        state: packageScript.state,
-        definitions: packageScript.definitions,
+        dev: info.dev.toString(),
+        ino: info.ino.toString(),
+        mode: info.mode.toString(),
+        uid: info.uid.toString(),
+        gid: info.gid.toString(),
+        size: info.size.toString(),
+        mtimeNs: info.mtimeNs.toString(),
+        ctimeNs: info.ctimeNs.toString(),
       }),
     );
   }
@@ -150,18 +156,34 @@ async function hashReferencedScripts(
       const stat = await lstat(candidate);
       if (stat.isSymbolicLink()) {
         const target = await realpath(candidate);
-        hashes[target] = hash(await readFile(target));
+        hashes[target] = await hashScriptFile(target);
       } else if (stat.isFile()) {
         const target = await realpath(candidate);
-        hashes[target] = hash(await readFile(target));
+        hashes[target] = await hashScriptFile(target);
+      } else {
+        throw new Error(`Hook 引用路径不是普通文件: ${candidate}`);
       }
     } catch (error) {
-      if (!isErrno(error, "ENOENT")) throw error;
+      if (isErrno(error, "ENOENT")) {
+        throw new Error(`Hook 引用文件不存在: ${candidate}`, { cause: error });
+      }
+      throw error;
     }
   }
   return Object.fromEntries(
     Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)),
   );
+}
+
+async function hashScriptFile(path: string): Promise<string> {
+  const info = await lstat(path);
+  if (!info.isFile()) throw new Error(`Hook 引用路径不是普通文件: ${path}`);
+  if (info.size > MAX_HASHED_HOOK_SCRIPT_BYTES) {
+    throw new Error(
+      `Hook 引用文件超过 ${MAX_HASHED_HOOK_SCRIPT_BYTES} 字节，无法建立信任: ${path}`,
+    );
+  }
+  return hash(await readFile(path));
 }
 
 function parseRecord(input: unknown): HookTrustRecord {
