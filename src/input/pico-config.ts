@@ -405,6 +405,18 @@ function parseModelCapabilities(
     result[key] = candidate;
   }
 
+  const outputTokenField = value["outputTokenField"];
+  if (outputTokenField !== undefined) {
+    if (outputTokenField !== "max_tokens" && outputTokenField !== "max_completion_tokens") {
+      throw configError(
+        configPath,
+        `${field}.outputTokenField`,
+        "must be max_tokens or max_completion_tokens",
+      );
+    }
+    result.outputTokenField = outputTokenField;
+  }
+
   const reasoning = value["reasoning"];
   if (reasoning !== undefined) {
     result.reasoning = parseModelReasoning(reasoning, configPath, `${field}.reasoning`);

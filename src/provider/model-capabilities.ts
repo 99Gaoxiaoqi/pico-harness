@@ -17,6 +17,7 @@ export interface ModelPrice {
 
 export type CapabilitySupport = boolean | "unknown";
 export type CapabilityValueSource = "config" | "profile_default";
+export type OpenAIOutputTokenField = "max_tokens" | "max_completion_tokens";
 
 /**
  * Provider route metadata used before a request is sent. Values are concrete so
@@ -27,6 +28,8 @@ export interface ModelRouteCapabilities {
   contextSource: CapabilityValueSource;
   maxOutputTokens: number;
   outputSource: CapabilityValueSource;
+  /** OpenAI-compatible request field used to enforce maxOutputTokens on the wire. */
+  outputTokenField: OpenAIOutputTokenField;
   vision: CapabilitySupport;
   reasoning: CapabilitySupport;
   /** Model-specific reasoning levels and protocol request patches. */
@@ -42,6 +45,8 @@ export interface ModelRouteCapabilities {
 export interface ModelCapabilityConfig {
   context?: number;
   output?: number;
+  /** Defaults to max_tokens for broad OpenAI-compatible endpoint support. */
+  outputTokenField?: OpenAIOutputTokenField;
   vision?: boolean;
   reasoning?: ModelReasoningCapabilityInput;
   toolCall?: boolean;
@@ -64,6 +69,7 @@ export function resolveModelRouteCapabilities(
     contextSource: override?.context === undefined ? "profile_default" : "config",
     maxOutputTokens: override?.output ?? profile.maxOutputTokens,
     outputSource: override?.output === undefined ? "profile_default" : "config",
+    outputTokenField: override?.outputTokenField ?? "max_tokens",
     // Adapter support does not prove a custom endpoint/model supports the feature.
     vision: override?.vision ?? "unknown",
     reasoning: reasoningProfile.enabled,

@@ -60,6 +60,34 @@ test("OpenAI requests enforce the configured output-token limit", async (context
   }
 });
 
+test("OpenAI routes can select max_completion_tokens explicitly", async (context) => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | undefined;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+  };
+
+  const provider = createProvider("openai", {
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "test-key",
+    model: "reasoning-model",
+    routeId: "test/reasoning-model",
+    capabilities: resolveModelRouteCapabilities("openai", "reasoning-model", {
+      output: 2048,
+      outputTokenField: "max_completion_tokens",
+    }),
+  });
+
+  await provider.generate([{ role: "user", content: "test" }], []);
+
+  assert.equal(requestBody?.["max_completion_tokens"], 2048);
+  assert.equal(Object.hasOwn(requestBody ?? {}, "max_tokens"), false);
+});
+
 test("OpenAI stream requests and consumes the terminal Usage-only chunk", async (context) => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;
@@ -237,13 +265,13 @@ test("OpenAI stream consumes the final event at EOF without a trailing blank lin
   });
 });
 
-test("streamUsage route capability is parsed and rejects non-boolean values", async (context) => {
+test("OpenAI wire capabilities are parsed and reject invalid values", async (context) => {
   const workDir = await mkdtemp(join(tmpdir(), "pico-stream-usage-config-"));
   const configPath = join(workDir, ".pico", "config.json");
   await mkdir(join(workDir, ".pico"), { recursive: true });
   context.after(() => rm(workDir, { recursive: true, force: true }));
 
-  const config = (streamUsage: unknown): string =>
+  const config = (capabilities: Record<string, unknown>): string =>
     JSON.stringify({
       version: 1,
       model: "test/coder",
@@ -253,15 +281,29 @@ test("streamUsage route capability is parsed and rejects non-boolean values", as
           baseURL: "https://provider.invalid/v1",
           apiKeyEnv: "PICO_TEST_TOKEN",
           discoverModels: false,
-          models: { coder: { streamUsage } },
+          models: { coder: capabilities },
         },
       },
     });
 
-  await writeFile(configPath, config(true), "utf8");
+  await writeFile(
+    configPath,
+    config({ streamUsage: true, outputTokenField: "max_completion_tokens" }),
+    "utf8",
+  );
   const parsed = await loadPicoProjectConfig(workDir);
   assert.equal(parsed.providers.test?.modelCapabilities?.coder?.streamUsage, true);
+  assert.equal(
+    parsed.providers.test?.modelCapabilities?.coder?.outputTokenField,
+    "max_completion_tokens",
+  );
 
-  await writeFile(configPath, config("yes"), "utf8");
+  await writeFile(configPath, config({ streamUsage: "yes" }), "utf8");
   await assert.rejects(loadPicoProjectConfig(workDir), /streamUsage.*must be a boolean/u);
+
+  await writeFile(configPath, config({ outputTokenField: "automatic" }), "utf8");
+  await assert.rejects(
+    loadPicoProjectConfig(workDir),
+    /outputTokenField.*must be max_tokens or max_completion_tokens/u,
+  );
 });
