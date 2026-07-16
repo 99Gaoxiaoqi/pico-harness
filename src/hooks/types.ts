@@ -64,7 +64,7 @@ interface HookHandlerBase {
 export interface CommandHookHandler extends HookHandlerBase {
   type: "command";
   command: string;
-  /** 存在时使用无 shell 的 exec form；缺省时使用兼容的 shell form。 */
+  /** 存在时直接使用 exec form；缺省时只解析静态参数，不启用 Shell。 */
   args?: readonly string[];
   async?: boolean;
   asyncRewake?: boolean;
