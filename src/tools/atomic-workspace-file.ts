@@ -213,9 +213,19 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     if (input.precondition.kind === "file") {
       await preserveOwnership(handle, input.precondition.version, temporaryPath);
     }
-    // 只发布普通 rwx 位。覆盖时不复活 setuid/setgid/sticky；新建时保持 0666 + umask。
-    await handle.chmod(publishedPermissionMode);
-    await finalizeLinuxExtendedMetadata(handle, linuxMetadataSource, temporaryPath);
+    // Linux 仍在 0600 时先移除临时 inode 的继承 ACL；源 ACL 存在时由单次
+    // setxattr 原子建立最终 ACL/mode，避免先恢复宽 mode 再补拒绝 ACL 的暴露窗口。
+    if (linuxMetadataSource) {
+      await finalizeLinuxExtendedMetadata(handle, linuxMetadataSource, temporaryPath);
+      if (linuxMetadataSource.attributes.has(LINUX_POSIX_ACL_ATTRIBUTE)) {
+        await assertPublishedPermissionMode(handle, publishedPermissionMode, temporaryPath);
+      } else {
+        await handle.chmod(publishedPermissionMode);
+      }
+    } else {
+      // 只发布普通 rwx 位。覆盖时不复活 setuid/setgid/sticky；新建时保持 0666 + umask。
+      await handle.chmod(publishedPermissionMode);
+    }
     await handle.sync();
     const beforeMetadataVerification = await handle.stat({ bigint: true });
     await assertMacExtendedMetadataPreserved(temporaryPath, macMetadata);
@@ -364,6 +374,17 @@ async function finalizeLinuxExtendedMetadata(
       expectedAcl,
       temporaryPath,
     );
+  }
+}
+
+async function assertPublishedPermissionMode(
+  handle: FileHandle,
+  expectedMode: number,
+  temporaryPath: string,
+): Promise<void> {
+  const info = await handle.stat({ bigint: true });
+  if (Number(info.mode & 0o777n) !== expectedMode) {
+    throw new Error(`Linux ACL 未能原子建立目标权限，已拒绝覆盖: ${temporaryPath}`);
   }
 }
 
