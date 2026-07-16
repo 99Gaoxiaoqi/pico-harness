@@ -52,6 +52,15 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "FORCE=--force; git push origin main $FORCE",
     "git push origin main $(printf -- --force)",
     "git push --force-with-lease origin main",
+    'cmd=git; "$cmd" push --force origin main',
+    "$(printf git) push --force origin main",
+    "env -S 'git push --force origin main'",
+    "env --split-string='git push --force origin main'",
+    "git push origin --delete main",
+    "git push origin -d main",
+    "git push origin :main",
+    "git push --mirror origin",
+    "git push --prune origin",
   ];
 
   for (const command of dangerous) {
@@ -75,6 +84,7 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "dd if=/dev/zero of=./disk.img",
     "git push origin main",
     "git -C . push origin feature",
+    "env git push origin main",
     'printf "%s\\n" "mkfs.ext4 -F /dev/sda"',
     'printf "%s\\n" "dd of=/dev/sda if=/dev/zero"',
     'printf "%s\\n" "git push origin main --force"',
