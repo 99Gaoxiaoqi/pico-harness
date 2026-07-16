@@ -154,10 +154,7 @@ export function createProductionLocalDaemonHost(
         persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
       ).level;
       const runtimeState = await createSessionRuntime({
-        workDir: workspacePath,
-        sessionId: targetSessionId,
         session,
-        picoHome,
         env,
         ...(workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }

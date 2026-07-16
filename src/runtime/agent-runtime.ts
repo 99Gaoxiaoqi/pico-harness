@@ -330,6 +330,7 @@ export async function executeAgentRuntime(
   if (resumeExistingSession && dependencies.runtimeState === undefined) {
     throw new Error("resumeExistingSession requires an existing runtimeState.");
   }
+  dependencies.runtimeState?.assertCompatible(session);
   const settings = getOrCreateSessionSettings(
     {
       sessionId: sessionSelection.sessionId,
@@ -417,11 +418,8 @@ export async function executeAgentRuntime(
     const runtimeState =
       dependencies.runtimeState ??
       (await createSessionRuntime({
-        workDir,
-        sessionId: session.id,
         session,
         env: runtimeEnv,
-        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
         ...(dependencies.toolDisclosure !== undefined
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
@@ -440,7 +438,6 @@ export async function executeAgentRuntime(
           : {}),
       }));
     cleanupRuntimeState = runtimeState;
-    runtimeState.assertCompatible(workDir, session.id);
     if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
     if (
       dependencies.toolDisclosure !== undefined &&
