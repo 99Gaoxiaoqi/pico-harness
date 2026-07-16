@@ -76,7 +76,11 @@ import {
   type ProviderOperationRecord,
 } from "../provider/provider-operation-journal.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
-import { RuntimeEventStore, type RuntimeEventStoreEntry } from "../runtime/runtime-event-store.js";
+import {
+  RuntimeEventStore,
+  RuntimeEventStoreIntegrityError,
+  type RuntimeEventStoreEntry,
+} from "../runtime/runtime-event-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -1137,6 +1141,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${params.sessionId} 不存在于工作区 ${canonical}`,
+      );
+    }
+    if (projection.manifest.workDir !== canonical) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${params.sessionId} belongs to another workspace`,
       );
     }
     const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);

@@ -56,6 +56,7 @@ export interface DesktopBeforeQuitEvent {
 export function createDesktopDaemonShutdownFence(
   daemon: Pick<DesktopDaemonController, "ownsProcess" | "stop">,
   quit: () => void,
+  onStopError: (error: unknown) => void,
 ): (event: DesktopBeforeQuitEvent) => void {
   let stoppingPromise: Promise<void> | undefined;
   let stopped = false;
@@ -64,6 +65,13 @@ export function createDesktopDaemonShutdownFence(
     stopped = true;
     quit();
   };
+  const finishAfterStopError = (error: unknown): void => {
+    try {
+      onStopError(error);
+    } finally {
+      finishQuit();
+    }
+  };
 
   return (event) => {
     if (stopped) return;
@@ -71,6 +79,6 @@ export function createDesktopDaemonShutdownFence(
     event.preventDefault();
     if (stoppingPromise) return;
     stoppingPromise = daemon.stop();
-    void stoppingPromise.then(finishQuit, finishQuit);
+    void stoppingPromise.then(finishQuit, finishAfterStopError);
   };
 }

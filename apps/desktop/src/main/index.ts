@@ -15,7 +15,11 @@ let disposeUpdater: (() => void) | undefined;
 const runtime = new LocalDaemonRuntimeClientAdapter();
 const daemon = new DesktopDaemonController();
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
-const stopOwnedDaemonBeforeQuit = createDesktopDaemonShutdownFence(daemon, () => app.quit());
+const stopOwnedDaemonBeforeQuit = createDesktopDaemonShutdownFence(
+  daemon,
+  () => app.quit(),
+  (error) => console.error("Pico desktop daemon failed to stop cleanly", error),
+);
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
