@@ -1,5 +1,5 @@
 // TUI REPL entrypoint: wires ink rendering, TuiReporter, local commands, and
-// per-turn calls into runAgentFromCli.
+// per-turn calls into executeAgentRuntime.
 //
 // Each user prompt builds a fresh engine around the same session and reporter.
 // QueryGuard prevents overlapping submissions from racing cleanup state.
@@ -31,12 +31,12 @@ import {
   type RunningInputIntent,
   type RunningInputQueueSnapshot,
 } from "./running-input-queue.js";
-import type {
-  RunAgentCliDependencies,
-  RunAgentCliOptions,
-  RunAgentCliResult,
-} from "../cli/run-agent.js";
-import { runAgentFromCli } from "../cli/run-agent.js";
+import {
+  executeAgentRuntime,
+  type RunAgentCliDependencies,
+  type RunAgentCliOptions,
+  type RunAgentCliResult,
+} from "../runtime/agent-runtime.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
@@ -131,11 +131,11 @@ import {
   type ApprovalPanelAction,
 } from "./approval-panel.js";
 import {
-  createTuiRuntimeState,
+  createSessionRuntime as createTuiRuntimeState,
   DelegationWakeCoordinator,
   HookRewakeCoordinator,
-  type TuiRuntimeState,
-} from "./runtime-state.js";
+  type SessionRuntime as TuiRuntimeState,
+} from "../runtime/session-runtime.js";
 import { createTuiTerminalGridSession } from "./terminal-grid.js";
 import { hydrateTuiReporter } from "./session-hydration.js";
 import { projectTuiEntriesForRendering } from "./tui-event-store.js";
@@ -911,7 +911,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       opts.thinkingEffort,
     );
     // 第二轮开始读取会话已持久化的模型选择，与完整 TUI 的 bundle 装配保持一致。
-    // fork 首轮由 runAgentFromCli 先执行 Saga，此时目标会话尚不可安全预创建。
+    // fork 首轮由 executeAgentRuntime 先执行 Saga，此时目标会话尚不可安全预创建。
     if (selection.mode !== "fork") {
       const session =
         globalSessionManager.get(selection.sessionId, opts.workDir) ??
@@ -995,7 +995,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
         const activeRoute = await resolveActiveRoute();
         const abortController = new AbortController();
         activeAbortController = abortController;
-        const result = await runAgentFromCli(
+        const result = await executeAgentRuntime(
           {
             prompt: rawInput,
             dir: opts.workDir,
@@ -1005,7 +1005,6 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
             model: activeRoute.config.model,
             modelRouteId: activeRoute.route.id,
             modelCapabilities: activeRoute.route.capabilities,
-            allowModelFallback: false,
             ...(activeRoute.config.thinkingEffort !== undefined
               ? { thinkingEffort: activeRoute.config.thinkingEffort }
               : {}),
@@ -2059,7 +2058,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               model: activeRoute.config.model,
               modelRouteId: activeRoute.route.id,
               modelCapabilities: activeRoute.route.capabilities,
-              allowModelFallback: false,
               ...(runOptions?.allowedTools === undefined
                 ? {}
                 : { allowedTools: [...runOptions.allowedTools] }),
@@ -2581,7 +2579,7 @@ export async function runTuiAgentPrompt(
       ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
       ...(deps.resumeExistingSession ? { resumeExistingSession: true } : {}),
     };
-    const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, runDependencies);
+    const result = await (deps.runAgent ?? executeAgentRuntime)(cliOpts, runDependencies);
     if (result.tracePath) {
       deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
     }

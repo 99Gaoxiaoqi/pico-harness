@@ -4,7 +4,6 @@ export type AssistantContentMode = "empty_string" | "null_when_empty";
 export interface ProviderProfile {
   protocol: ProviderProtocol;
   model: string;
-  fallbackModel?: string;
   assistantContent: AssistantContentMode;
   contextWindowTokens: number;
   maxOutputTokens: number;
@@ -48,7 +47,6 @@ const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
 
 const MODEL_PROFILES: Record<string, Partial<ProviderProfile>> = {
   "glm-5.2": {
-    fallbackModel: "kimi-k2.5",
     assistantContent: "null_when_empty",
     supportsReasoningContent: true,
     supportsThinkingControl: true,

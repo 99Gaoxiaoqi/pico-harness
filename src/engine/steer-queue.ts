@@ -8,7 +8,7 @@
 //   - A 点(provider 调用前):peek 当前 steer,临时拼进 compactedContext 末尾,
 //     本轮模型立即看到(不落 session)。让 host 插的话尽快生效。
 //   - C 点(工具结果 append 后):drain 队列,把每条 steer 落成一条 user 消息,
-//     写进 session。下一轮 getWorkingMemory 自动浮现,永久可见。
+//     写进 session。下一轮 getModelContext 请求投影自动浮现,永久可见。
 //
 // 极简:数组 + push/peek/drain,无并发原语(session.serialize 保证 per-session
 // 串行,host 在 run 期间 push 不需要锁)。
@@ -32,7 +32,7 @@ export class SteerQueue {
 
   /**
    * 取出并清空整个队列。C 点用它在工具结果落地后把所有 steer 写进 session,
-   * 下一轮 getWorkingMemory 自动浮现。返回的顺序即 push 顺序(FIFO)。
+   * 下一轮 getModelContext 请求投影自动浮现。返回的顺序即 push 顺序(FIFO)。
    */
   drain(): string[] {
     const r = this.queue;

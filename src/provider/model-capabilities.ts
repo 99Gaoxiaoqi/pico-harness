@@ -34,7 +34,6 @@ export interface ModelRouteCapabilities {
   toolCall: CapabilitySupport;
   cache: CapabilitySupport;
   price: ModelPrice;
-  fallbackModel?: string;
 }
 
 /** User-configurable route capability overrides. Omitted fields keep legacy profile defaults. */
@@ -46,8 +45,6 @@ export interface ModelCapabilityConfig {
   toolCall?: boolean;
   cache?: boolean;
   price?: Omit<ModelPrice, "currency" | "source">;
-  /** false explicitly disables a legacy profile fallback. */
-  fallback?: string | false;
 }
 
 export function resolveModelRouteCapabilities(
@@ -56,7 +53,6 @@ export function resolveModelRouteCapabilities(
   override: ModelCapabilityConfig | undefined,
 ): ModelRouteCapabilities {
   const profile = resolveProviderProfile(provider, model);
-  const fallbackModel = override?.fallback === false ? undefined : override?.fallback;
   const reasoningProfile = resolveModelReasoningCapability(provider, model, {
     config: override?.reasoning,
   });
@@ -74,7 +70,6 @@ export function resolveModelRouteCapabilities(
     price: override?.price
       ? { currency: "USD", source: "config", ...override.price }
       : unknownModelPrice(),
-    ...(fallbackModel ? { fallbackModel } : {}),
   };
 }
 
@@ -106,6 +101,5 @@ export function providerProfileForRoute(
       capabilities.reasoning === "unknown"
         ? profile.supportsThinkingControl
         : capabilities.reasoning,
-    ...(capabilities.fallbackModel ? { fallbackModel: capabilities.fallbackModel } : {}),
   };
 }

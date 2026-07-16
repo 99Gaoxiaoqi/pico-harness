@@ -31,7 +31,7 @@ export interface CreateSubagentModelRuntimeOptions {
  * 为一次子代理执行构造独立模型运行时。
  *
  * Provider 与 Compactor 均不复用父 Agent 或兄弟子代理的可变状态。第一版不接入
- * 裸模型 fallback；若未来允许跨路由 fallback，必须再次经过 ModelRouter 与凭证校验。
+ * 子代理模型始终由 ModelRouter 解析并校验路由与凭证。
  */
 export function createSubagentModelRuntime(
   options: CreateSubagentModelRuntimeOptions,
