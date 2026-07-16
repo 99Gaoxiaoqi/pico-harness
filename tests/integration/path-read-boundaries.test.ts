@@ -66,6 +66,34 @@ test("context attachment byte limits apply before a sparse oversized file is ful
   assert.match(attachment?.content ?? "", /bounded-prefix/u);
 });
 
+test("directory attachments sample only the configured entry limit without claiming a full count", async (context) => {
+  const fixture = await createFixture("bounded-directory");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+
+  const directory = join(fixture.workspace, "many");
+  await mkdir(directory);
+  await Promise.all(
+    Array.from({ length: 16 }, (_, index) =>
+      writeFile(join(directory, `entry-${String(index).padStart(2, "0")}.txt`), "visible\n"),
+    ),
+  );
+
+  const expanded = await expandMentionsToPrompt("inspect @many", {
+    cwd: fixture.workspace,
+    limits: { maxDirectoryEntries: 1 },
+  });
+  const attachment = expanded.attachments[0];
+  const visibleEntries = (attachment?.content ?? "")
+    .split("\n")
+    .filter((line) => line.length > 0 && !line.startsWith("..."));
+
+  assert.equal(attachment?.type, "directory");
+  assert.equal(attachment?.truncated, true);
+  assert.equal(visibleEntries.length, 1);
+  assert.match(attachment?.content ?? "", /目录项超过 1 项，已截断/u);
+  assert.doesNotMatch(attachment?.content ?? "", /共 \d+ 项/u);
+});
+
 test("RepoMap rejects external symlinks and accepts ordinary and dot-prefixed files", async (context) => {
   const fixture = await createFixture("repo-map");
   const service = new RepoMapService(fixture.workspaceAlias);

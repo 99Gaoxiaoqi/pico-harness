@@ -1,10 +1,15 @@
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
 const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
+const MACOS_PROVENANCE_ATTRIBUTE = "com.apple.provenance";
+const METADATA_PROBE_MAX_BYTES = 64 * 1024;
+const execFileAsync = promisify(execFile);
 
 interface FileVersion {
   readonly dev: bigint;
@@ -20,6 +25,10 @@ interface FileVersion {
 interface DirectoryIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
+}
+
+interface MacExtendedMetadataSnapshot {
+  readonly provenanceHex?: string;
 }
 
 export type AtomicFilePrecondition =
@@ -134,6 +143,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
   await input.revalidateTarget();
   await assertDirectoryIdentity(directory, directoryIdentity);
   await assertTargetPrecondition(input.targetPath, input.precondition);
+  const macMetadata = await captureMacExtendedMetadata(input.targetPath, input.precondition);
 
   const temporaryPath = join(
     directory,
@@ -175,6 +185,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     // 只发布普通 rwx 位。覆盖时不复活 setuid/setgid/sticky；新建时保持 0666 + umask。
     await handle.chmod(publishedPermissionMode);
     await handle.sync();
+    await assertMacExtendedMetadataPreserved(temporaryPath, macMetadata);
     const finalizedTemporary = await handle.stat({ bigint: true });
     assertPreparedTemporary(
       finalizedTemporary,
@@ -200,6 +211,106 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
       await unlinkIfSameFile(temporaryPath, temporaryIdentity);
     }
   }
+}
+
+async function captureMacExtendedMetadata(
+  targetPath: string,
+  precondition: AtomicFilePrecondition,
+): Promise<MacExtendedMetadataSnapshot | undefined> {
+  if (process.platform !== "darwin" || precondition.kind !== "file") return undefined;
+
+  const [attributeOutput, aclOutput] = await Promise.all([
+    runMacMetadataProbe("/usr/bin/xattr", [targetPath], targetPath),
+    runMacMetadataProbe("/bin/ls", ["-lde", targetPath], targetPath),
+  ]);
+  if (hasExtendedAcl(aclOutput)) {
+    throw new Error(`目标文件包含无法保真的扩展 ACL，已拒绝覆盖: ${targetPath}`);
+  }
+
+  const attributeNames = parseAttributeNames(attributeOutput);
+  // macOS 会自动给新文件附加 provenance；只有临时文件能逐字匹配该值时才允许覆盖。
+  // 其他扩展属性没有可靠的 fd 级复制接口，因此一律在创建临时文件前拒绝。
+  if (
+    attributeNames.length > 1 ||
+    attributeNames.some((name) => name !== MACOS_PROVENANCE_ATTRIBUTE)
+  ) {
+    throw new Error(`目标文件包含无法保真的扩展属性，已拒绝覆盖: ${targetPath}`);
+  }
+
+  if (attributeNames.length === 0) return {};
+  return {
+    provenanceHex: await readMacProvenanceHex(targetPath),
+  };
+}
+
+async function assertMacExtendedMetadataPreserved(
+  temporaryPath: string,
+  expected: MacExtendedMetadataSnapshot | undefined,
+): Promise<void> {
+  if (!expected) return;
+
+  const [attributeOutput, aclOutput] = await Promise.all([
+    runMacMetadataProbe("/usr/bin/xattr", [temporaryPath], temporaryPath),
+    runMacMetadataProbe("/bin/ls", ["-lde", temporaryPath], temporaryPath),
+  ]);
+  const attributeNames = parseAttributeNames(attributeOutput);
+  const expectedAttributeNames =
+    expected.provenanceHex === undefined ? [] : [MACOS_PROVENANCE_ATTRIBUTE];
+  if (
+    hasExtendedAcl(aclOutput) ||
+    attributeNames.length !== expectedAttributeNames.length ||
+    attributeNames.some((name, index) => name !== expectedAttributeNames[index])
+  ) {
+    throw new Error(`无法保真复制目标文件扩展元数据，已拒绝覆盖: ${temporaryPath}`);
+  }
+
+  if (
+    expected.provenanceHex !== undefined &&
+    (await readMacProvenanceHex(temporaryPath)) !== expected.provenanceHex
+  ) {
+    throw new Error(`无法保真复制目标文件扩展属性，已拒绝覆盖: ${temporaryPath}`);
+  }
+}
+
+async function readMacProvenanceHex(path: string): Promise<string> {
+  const output = await runMacMetadataProbe(
+    "/usr/bin/xattr",
+    ["-px", MACOS_PROVENANCE_ATTRIBUTE, path],
+    path,
+  );
+  const normalized = output.replaceAll(/\s/gu, "").toLowerCase();
+  if (!/^(?:[0-9a-f]{2})*$/u.test(normalized)) {
+    throw new Error(`无法验证目标文件扩展属性，已拒绝覆盖: ${path}`);
+  }
+  return normalized;
+}
+
+async function runMacMetadataProbe(
+  command: "/usr/bin/xattr" | "/bin/ls",
+  args: readonly string[],
+  path: string,
+): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(command, [...args], {
+      encoding: "utf8",
+      env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+      maxBuffer: METADATA_PROBE_MAX_BYTES,
+    });
+    return stdout;
+  } catch (error) {
+    throw new Error(`无法验证目标文件扩展元数据，已拒绝覆盖: ${path}`, { cause: error });
+  }
+}
+
+function parseAttributeNames(output: string): string[] {
+  return output.split(/\r?\n/u).filter((name) => name.length > 0);
+}
+
+function hasExtendedAcl(output: string): boolean {
+  return output
+    .split(/\r?\n/u)
+    .slice(1)
+    .some((line) => /^\s*\d+:/u.test(line));
 }
 
 async function captureDirectoryIdentity(directory: string): Promise<DirectoryIdentity> {

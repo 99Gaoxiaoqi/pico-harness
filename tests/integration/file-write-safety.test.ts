@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -14,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 import {
   captureAtomicFilePrecondition,
   writeAtomicWorkspaceFile,
@@ -22,6 +24,7 @@ import { EditFileTool, WriteFileTool } from "../../src/tools/registry-impl.js";
 
 const EDIT_FILE_MAX_BYTES = 16 * 1024 * 1024;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
+const execFileAsync = promisify(execFile);
 
 test("write_file atomically creates and overwrites while preserving ordinary metadata", async (context) => {
   const fixture = await createFixture("write");
@@ -93,6 +96,62 @@ test("edit_file atomically preserves CRLF, permissions, ownership, and replace_a
   }
   await assertNoTemporaryFiles(fixture.workspace);
 });
+
+test(
+  "write_file rejects overwriting macOS extended attributes without changing the original",
+  { skip: process.platform !== "darwin" },
+  async (context) => {
+    const fixture = await createFixture("extended-attribute");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "xattr.txt");
+    await writeFile(targetPath, "old-content\n");
+    await execFileAsync("/usr/bin/xattr", ["-w", "com.pico.test", "preserve-me", targetPath]);
+    const before = await stat(targetPath);
+
+    await assert.rejects(
+      new WriteFileTool(fixture.workspace).execute(
+        JSON.stringify({ path: "xattr.txt", content: "new-content\n" }),
+      ),
+      /扩展属性.*拒绝覆盖/u,
+    );
+
+    assert.equal(await readFile(targetPath, "utf8"), "old-content\n");
+    assert.equal((await stat(targetPath)).ino, before.ino);
+    const { stdout } = await execFileAsync("/usr/bin/xattr", ["-p", "com.pico.test", targetPath], {
+      encoding: "utf8",
+    });
+    assert.equal(stdout.trimEnd(), "preserve-me");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "edit_file rejects overwriting a macOS extended ACL without changing the original",
+  { skip: process.platform !== "darwin" },
+  async (context) => {
+    const fixture = await createFixture("extended-acl");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "acl.txt");
+    await writeFile(targetPath, "alpha\n");
+    await execFileAsync("/bin/chmod", ["+a", "everyone allow read", targetPath]);
+    const before = await stat(targetPath);
+
+    await assert.rejects(
+      new EditFileTool(fixture.workspace).execute(
+        JSON.stringify({ path: "acl.txt", old_text: "alpha", new_text: "beta" }),
+      ),
+      /扩展 ACL.*拒绝覆盖/u,
+    );
+
+    assert.equal(await readFile(targetPath, "utf8"), "alpha\n");
+    assert.equal((await stat(targetPath)).ino, before.ino);
+    const { stdout } = await execFileAsync("/bin/ls", ["-lde", targetPath], {
+      encoding: "utf8",
+    });
+    assert.match(stdout, /^\s*0:/mu);
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
 
 test("edit_file not-found leaves the original inode and content untouched", async (context) => {
   const fixture = await createFixture("not-found");
