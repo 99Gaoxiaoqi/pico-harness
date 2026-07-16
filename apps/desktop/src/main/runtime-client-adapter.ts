@@ -1,7 +1,6 @@
 export {
   LocalRuntimeClient as LocalDaemonRuntimeClientAdapter,
   RuntimeClientError,
-  resolveDaemonEndpoint,
 } from "../../../../src/daemon/client.js";
 
 export type {

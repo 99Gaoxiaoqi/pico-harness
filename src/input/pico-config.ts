@@ -40,9 +40,6 @@ export interface PicoProjectConfig {
   compatibility: PicoCompatibilityConfig;
 }
 
-/** @deprecated Prefer PicoProjectConfig so user and project configuration stay distinct. */
-export type PicoConfig = PicoProjectConfig;
-
 export interface ClaudeCompatibilityConfig {
   enabled: boolean;
   projectResources: boolean;

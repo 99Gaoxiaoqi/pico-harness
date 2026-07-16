@@ -1,4 +1,4 @@
-import type { KeybindingMap } from "./schema.js";
+import type { KeybindingMap } from "../../input/keybindings-schema.js";
 
 export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   Global: {

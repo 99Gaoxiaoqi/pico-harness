@@ -5,7 +5,7 @@ import type {
   KeybindingContext,
   KeybindingMap,
   KeybindingValue,
-} from "./schema.js";
+} from "../../input/keybindings-schema.js";
 
 export type UserKeybindingConfig = KeybindingMap;
 

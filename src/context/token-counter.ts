@@ -82,8 +82,3 @@ export function countTokens(text: string): number {
   cache.set(text, count);
   return count;
 }
-
-/** 清空计数缓存(主要用于测试隔离)。 */
-export function resetTokenCounterCache(): void {
-  cache.clear();
-}
