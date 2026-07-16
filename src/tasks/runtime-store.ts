@@ -1,6 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
-import { access, readFile, rename } from "node:fs/promises";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { isDeepStrictEqual } from "node:util";
@@ -39,6 +49,7 @@ import {
 } from "./runtime-types.js";
 
 const DEFAULT_LEASE_TTL_MS = 30_000;
+const LEGACY_TASK_STORE_SNAPSHOT_SUFFIX = ".migrating-v1";
 const LEGACY_TASK_STORE_ARCHIVE_SUFFIX = ".migrated-v1";
 
 export class RuntimeConflictError extends Error {
@@ -1778,12 +1789,39 @@ export class RuntimeStore {
 
   /**
    * Seeds missing SQLite jobs from the retired JSON ledger exactly once.
-   * The DB transaction commits before the atomic archive rename, so a crash can only leave
-   * the source available for an idempotent retry; existing SQLite jobs are never reconciled back.
+   * A hard-link snapshot freezes the cutover input before parsing. The durable completion marker
+   * is published only after the DB transaction commits; existing SQLite jobs always win.
    */
   async migrateLegacyTaskStore(filePath: string): Promise<LegacyTaskMigrationResult> {
+    const snapshotPath = `${filePath}${LEGACY_TASK_STORE_SNAPSHOT_SUFFIX}`;
     const archivePath = `${filePath}${LEGACY_TASK_STORE_ARCHIVE_SUFFIX}`;
-    if (await pathExists(archivePath)) {
+    if (existsSync(archivePath)) {
+      syncLegacyTaskMigrationArtifact(archivePath, filePath, "确认 legacy TaskStore 完成标记失败");
+      return {
+        status: "already_migrated",
+        imported: 0,
+        skipped: 0,
+        interrupted: 0,
+        archivePath,
+      };
+    }
+
+    const capture = captureLegacyTaskStoreSnapshot(filePath, snapshotPath, archivePath);
+    if (capture !== "snapshot") {
+      return {
+        status: capture === "absent" ? "absent" : "already_migrated",
+        imported: 0,
+        skipped: 0,
+        interrupted: 0,
+        archivePath,
+      };
+    }
+    if (existsSync(archivePath)) {
+      syncLegacyTaskMigrationArtifact(
+        archivePath,
+        filePath,
+        "确认并发 legacy TaskStore 完成标记失败",
+      );
       return {
         status: "already_migrated",
         imported: 0,
@@ -1795,15 +1833,28 @@ export class RuntimeStore {
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+      parsed = JSON.parse(await readFile(snapshotPath, "utf8")) as unknown;
       assertLegacyTaskStore(parsed);
     } catch (error) {
-      if (isNodeCode(error, "ENOENT")) {
-        return { status: "absent", imported: 0, skipped: 0, interrupted: 0 };
+      if (existsSync(archivePath)) {
+        syncLegacyTaskMigrationArtifact(
+          archivePath,
+          filePath,
+          "确认并发 legacy TaskStore 完成标记失败",
+        );
+        return {
+          status: "already_migrated",
+          imported: 0,
+          skipped: 0,
+          interrupted: 0,
+          archivePath,
+        };
       }
-      throw new Error(`legacy TaskStore 迁移源无效，已保留原文件: ${filePath}`, {
-        cause: error,
-      });
+      throw legacyTaskMigrationError(
+        filePath,
+        `固定快照无效，已保留 source 与 snapshot: ${snapshotPath}`,
+        error,
+      );
     }
 
     const legacy = parsed as LegacyTaskStoreFile;
@@ -1872,10 +1923,31 @@ export class RuntimeStore {
       }
     });
     importAll();
+
+    if (existsSync(archivePath)) {
+      syncLegacyTaskMigrationArtifact(
+        archivePath,
+        filePath,
+        "确认并发 legacy TaskStore 完成标记失败",
+      );
+      return {
+        status: "already_migrated",
+        imported,
+        skipped,
+        interrupted,
+        archivePath,
+      };
+    }
+
     try {
-      await rename(filePath, archivePath);
+      linkSync(snapshotPath, archivePath);
     } catch (error) {
-      if (isNodeCode(error, "ENOENT") && (await pathExists(archivePath))) {
+      if (isNodeCode(error, "EEXIST") || existsSync(archivePath)) {
+        syncLegacyTaskMigrationArtifact(
+          archivePath,
+          filePath,
+          "确认并发 legacy TaskStore 完成标记失败",
+        );
         return {
           status: "already_migrated",
           imported,
@@ -1884,10 +1956,26 @@ export class RuntimeStore {
           archivePath,
         };
       }
-      throw new Error(`legacy TaskStore 已导入但归档失败，已保留迁移源: ${filePath}`, {
-        cause: error,
-      });
+      throw legacyTaskMigrationError(
+        filePath,
+        `SQLite 已导入但发布完成标记失败，snapshot 保留: ${snapshotPath}`,
+        error,
+      );
     }
+    syncLegacyTaskMigrationArtifact(archivePath, filePath, "持久化 legacy TaskStore 完成标记失败");
+    try {
+      unlinkSync(snapshotPath);
+      syncLegacyTaskMigrationDirectory(filePath, "清理 legacy TaskStore 固定快照失败");
+    } catch (error) {
+      if (!isNodeCode(error, "ENOENT")) {
+        throw legacyTaskMigrationError(
+          filePath,
+          `完成标记已发布但清理 snapshot 失败: ${snapshotPath}`,
+          error,
+        );
+      }
+    }
+    // 原 source 可能已被旧 writer 原子替换；保留它，但 marker 会让新 Runtime 永久忽略。
     return { status: "migrated", imported, skipped, interrupted, archivePath };
   }
 
@@ -2472,14 +2560,163 @@ function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch (error) {
-    if (isNodeCode(error, "ENOENT")) return false;
-    throw error;
+type LegacyTaskSnapshotCapture = "snapshot" | "absent" | "already_migrated";
+
+function captureLegacyTaskStoreSnapshot(
+  filePath: string,
+  snapshotPath: string,
+  archivePath: string,
+): LegacyTaskSnapshotCapture {
+  const directory = dirname(filePath);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+
+  if (existsSync(snapshotPath)) {
+    syncLegacyTaskMigrationArtifact(snapshotPath, filePath, "确认 legacy TaskStore 固定快照失败");
+    return "snapshot";
   }
+
+  try {
+    // legacy writer 通过 rename 原子替换 state.json；hard link 固定当前 inode 后不再受影响。
+    linkSync(filePath, snapshotPath);
+    syncLegacyTaskMigrationArtifact(snapshotPath, filePath, "持久化 legacy TaskStore 固定快照失败");
+    return "snapshot";
+  } catch (error) {
+    if (existsSync(archivePath)) {
+      syncLegacyTaskMigrationArtifact(
+        archivePath,
+        filePath,
+        "确认并发 legacy TaskStore 完成标记失败",
+      );
+      return "already_migrated";
+    }
+    if (isNodeCode(error, "EEXIST") || existsSync(snapshotPath)) {
+      syncLegacyTaskMigrationArtifact(
+        snapshotPath,
+        filePath,
+        "确认并发 legacy TaskStore 固定快照失败",
+      );
+      return "snapshot";
+    }
+    if (!isNodeCode(error, "ENOENT")) {
+      throw legacyTaskMigrationError(filePath, "建立固定快照失败", error);
+    }
+  }
+
+  if (existsSync(snapshotPath)) {
+    syncLegacyTaskMigrationArtifact(
+      snapshotPath,
+      filePath,
+      "确认并发 legacy TaskStore 固定快照失败",
+    );
+    return "snapshot";
+  }
+  if (!publishAbsentLegacyTaskMigrationMarker(filePath, archivePath)) {
+    syncLegacyTaskMigrationArtifact(
+      archivePath,
+      filePath,
+      "确认并发 legacy TaskStore 完成标记失败",
+    );
+    return "already_migrated";
+  }
+  syncLegacyTaskMigrationArtifact(archivePath, filePath, "持久化无 legacy TaskStore 完成标记失败");
+  return "absent";
+}
+
+function publishAbsentLegacyTaskMigrationMarker(filePath: string, archivePath: string): boolean {
+  const temporaryPath = `${archivePath}.${process.pid}.${randomUUID()}.tmp`;
+  let descriptor: number | undefined;
+  let published: boolean;
+  try {
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(
+      descriptor,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        migration: "runtime-task-store-v1",
+        legacyTaskStore: "absent",
+      })}\n`,
+      "utf8",
+    );
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    try {
+      linkSync(temporaryPath, archivePath);
+      published = true;
+    } catch (error) {
+      if (!isNodeCode(error, "EEXIST")) throw error;
+      published = false;
+    }
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the publication failure as the primary recovery signal.
+      }
+    }
+    try {
+      unlinkSync(temporaryPath);
+    } catch (cleanupError) {
+      if (!isNodeCode(cleanupError, "ENOENT")) {
+        throw legacyTaskMigrationError(filePath, "清理完成标记临时文件失败", cleanupError);
+      }
+    }
+    throw legacyTaskMigrationError(filePath, "原子发布无源完成标记失败", error);
+  }
+
+  try {
+    unlinkSync(temporaryPath);
+  } catch (error) {
+    if (!isNodeCode(error, "ENOENT")) {
+      throw legacyTaskMigrationError(filePath, "清理完成标记临时文件失败", error);
+    }
+  }
+  return published;
+}
+
+function syncLegacyTaskMigrationArtifact(
+  artifactPath: string,
+  filePath: string,
+  operation: string,
+): void {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(artifactPath, "r");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    syncLegacyTaskMigrationDirectory(filePath, operation);
+  } catch (error) {
+    throw legacyTaskMigrationError(filePath, operation, error);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function syncLegacyTaskMigrationDirectory(filePath: string, operation: string): void {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(dirname(filePath), "r");
+    fsyncSync(descriptor);
+  } catch (error) {
+    if (!new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(nodeErrorCode(error))) {
+      throw legacyTaskMigrationError(filePath, operation, error);
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function legacyTaskMigrationError(filePath: string, operation: string, cause: unknown): Error {
+  return new Error(`legacy TaskStore 迁移失败（${operation}）: ${filePath}`, { cause });
+}
+
+function nodeErrorCode(error: unknown): string {
+  return error instanceof Error && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
