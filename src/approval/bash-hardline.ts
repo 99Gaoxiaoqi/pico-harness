@@ -130,6 +130,11 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   }
 
   if (SHELL_COMMANDS.has(executable)) {
+    if (OPAQUE_SHELL_COMMANDS.has(executable)) {
+      // csh/fish/PowerShell/cmd 不遵循 Bash 语法；即使命令文本静态可见，
+      // 也不能用当前解析器证明其脚本、stdin 或内联命令安全。
+      return !isShellDisplayOnlyInvocation(args);
+    }
     const commandIndex = findShellCommandOptionIndex(args);
     if (commandIndex >= 0) {
       const nested = args[commandIndex + 1];
@@ -1628,7 +1633,34 @@ const SAFE_WORKSPACE_CWD = "/tmp/.pico-workspace";
 
 const UNKNOWN_SHELL_CWD = "/etc/.pico-unknown-cwd";
 
-const SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "dash", "fish", "ksh", "sh", "zsh"]);
+const BASH_LIKE_SHELL_COMMANDS: readonly string[] = [
+  "ash",
+  "bash",
+  "dash",
+  "hush",
+  "ksh",
+  "mksh",
+  "oksh",
+  "pdksh",
+  "posh",
+  "sh",
+  "yash",
+  "zsh",
+];
+
+const OPAQUE_SHELL_COMMANDS: ReadonlySet<string> = new Set([
+  "cmd",
+  "csh",
+  "fish",
+  "powershell",
+  "pwsh",
+  "tcsh",
+]);
+
+const SHELL_COMMANDS: ReadonlySet<string> = new Set([
+  ...BASH_LIKE_SHELL_COMMANDS,
+  ...OPAQUE_SHELL_COMMANDS,
+]);
 
 const SHELL_SOURCE_COMMANDS: ReadonlySet<string> = new Set([".", "source"]);
 
