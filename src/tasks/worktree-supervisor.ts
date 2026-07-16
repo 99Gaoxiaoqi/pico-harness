@@ -132,6 +132,13 @@ export interface WorktreeSupervisorOptions {
   finalizer?: WorktreeTaskFinalizer;
 }
 
+export interface WorktreeSupervisorShutdown {
+  /** Resolves after every captured runner received an abort and its bounded stop call returned. */
+  readonly stopping: Promise<void>;
+  /** Resolves only after every runner owned when shutdown began has actually settled. */
+  readonly released: Promise<void>;
+}
+
 export interface CleanupOptions {
   /** 调用方已确认该分支已合并。 */
   merged?: boolean;
@@ -181,6 +188,12 @@ interface WorktreeTaskRecord {
   promise: Promise<void>;
 }
 
+interface WorktreeTaskAdmission {
+  readonly promise: Promise<void>;
+  release(released?: Promise<void>): void;
+  reject(reason: unknown): void;
+}
+
 const DEFAULT_MAX_OUTPUT_CHARS = 32_000;
 const DEFAULT_MAX_PENDING_MESSAGES = 100;
 const DEFAULT_STOP_TIMEOUT_MS = 10_000;
@@ -204,6 +217,9 @@ export class WorktreeSupervisor {
   private readonly records = new Map<string, WorktreeTaskRecord>();
   private readonly completionSubscribers = new Set<CompletionSubscriber>();
   private readonly lifecycleSubscribers = new Set<WorktreeLifecycleSubscriber>();
+  private readonly admissions = new Set<WorktreeTaskAdmission>();
+  private acceptingTasks = true;
+  private shutdown?: WorktreeSupervisorShutdown;
 
   constructor(options: WorktreeSupervisorOptions) {
     if (!isAbsolute(options.repoRoot)) {
@@ -241,6 +257,25 @@ export class WorktreeSupervisor {
 
   start(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
     return this.startAttempt(request, runner, 1);
+  }
+
+  /**
+   * Atomically stops task admission and snapshots every runner whose lifecycle has not settled.
+   * `stopping` is the bounded API boundary; `released` is the resource-ownership boundary.
+   */
+  beginShutdown(reason = "worktree supervisor closed"): WorktreeSupervisorShutdown {
+    if (this.shutdown) return this.shutdown;
+    this.acceptingTasks = false;
+    const owned = [...this.records.values()];
+    const released = Promise.all([
+      ...owned.map((record) => record.promise),
+      ...[...this.admissions].map((admission) => admission.promise),
+    ]).then(() => undefined);
+    const stopping = Promise.allSettled(
+      owned.filter((record) => !record.settled).map((record) => this.stop(record.taskId, reason)),
+    ).then(() => undefined);
+    this.shutdown = { stopping, released };
+    return this.shutdown;
   }
 
   list(): WorktreeTaskSnapshot[] {
@@ -385,55 +420,74 @@ export class WorktreeSupervisor {
     attempt: number,
     parentTaskId?: string,
   ): WorktreeTaskSnapshot {
+    if (!this.acceptingTasks) throw new Error("WorktreeSupervisor 正在关闭");
     const description = request.description.trim();
     if (!description) throw new Error("任务描述不能为空");
     const baseRef = validateBaseRef(request.baseRef ?? "HEAD");
-    const task = this.taskRegistry.create("local_agent", {
-      description,
-      data: {
-        ...(request.data ?? {}),
-        supervisor: "worktree",
-        attempt,
-        ...(parentTaskId ? { parentTaskId } : {}),
-      },
-    });
-    const resourceId = sanitizeSlug(this.generateId(), "resource");
-    const slug = sanitizeSlug(request.branchSlug ?? description, "task");
-    const taskSlug = sanitizeSlug(task.taskId, "agent");
-    const branch = validateBranchName(`pico/${slug}-${taskSlug}-a${attempt}-${resourceId}`);
-    const worktreePath = resolve(
-      this.worktreeRoot,
-      `${slug}-${taskSlug}-a${attempt}-${resourceId}`,
-    );
-    assertContainedPath(this.worktreeRoot, worktreePath, "worktreePath");
-
-    const startedAt = this.now();
-    const record: WorktreeTaskRecord = {
-      taskId: task.taskId,
-      ...(parentTaskId ? { parentTaskId } : {}),
-      attempt,
-      request: {
-        ...request,
+    const admission = createTaskAdmission();
+    this.admissions.add(admission);
+    try {
+      const task = this.taskRegistry.create("local_agent", {
         description,
-        ...(request.data ? { data: { ...request.data } } : {}),
-      },
-      runner,
-      status: "preparing",
-      branch,
-      worktreePath,
-      baseRef,
-      controller: new AbortController(),
-      startedAt,
-      updatedAt: startedAt,
-      output: new BoundedTextRing(this.maxOutputChars),
-      pendingMessages: [],
-      completionNotified: false,
-      settled: false,
-      promise: Promise.resolve(),
-    };
-    this.records.set(record.taskId, record);
-    record.promise = Promise.resolve().then(() => this.run(record));
-    return this.toSnapshot(record);
+        data: {
+          ...(request.data ?? {}),
+          supervisor: "worktree",
+          attempt,
+          ...(parentTaskId ? { parentTaskId } : {}),
+        },
+      });
+      const resourceId = sanitizeSlug(this.generateId(), "resource");
+      const slug = sanitizeSlug(request.branchSlug ?? description, "task");
+      const taskSlug = sanitizeSlug(task.taskId, "agent");
+      const branch = validateBranchName(`pico/${slug}-${taskSlug}-a${attempt}-${resourceId}`);
+      const worktreePath = resolve(
+        this.worktreeRoot,
+        `${slug}-${taskSlug}-a${attempt}-${resourceId}`,
+      );
+      assertContainedPath(this.worktreeRoot, worktreePath, "worktreePath");
+
+      if (!this.acceptingTasks) {
+        this.taskRegistry.kill(task.taskId, "WorktreeSupervisor 在任务准入期间关闭", {
+          notified: true,
+        });
+        admission.release();
+        throw new Error("WorktreeSupervisor 正在关闭");
+      }
+
+      const startedAt = this.now();
+      const record: WorktreeTaskRecord = {
+        taskId: task.taskId,
+        ...(parentTaskId ? { parentTaskId } : {}),
+        attempt,
+        request: {
+          ...request,
+          description,
+          ...(request.data ? { data: { ...request.data } } : {}),
+        },
+        runner,
+        status: "preparing",
+        branch,
+        worktreePath,
+        baseRef,
+        controller: new AbortController(),
+        startedAt,
+        updatedAt: startedAt,
+        output: new BoundedTextRing(this.maxOutputChars),
+        pendingMessages: [],
+        completionNotified: false,
+        settled: false,
+        promise: Promise.resolve(),
+      };
+      this.records.set(record.taskId, record);
+      record.promise = Promise.resolve().then(() => this.run(record));
+      admission.release(record.promise);
+      return this.toSnapshot(record);
+    } catch (error) {
+      admission.reject(error);
+      throw error;
+    } finally {
+      this.admissions.delete(admission);
+    }
   }
 
   private async run(record: WorktreeTaskRecord): Promise<void> {
@@ -959,6 +1013,18 @@ function workerCommitMessage(description: string): string {
   return `feat(worker): ${subject}`;
 }
 
+function createTaskAdmission(): WorktreeTaskAdmission {
+  let release = (_released?: Promise<void>): void => undefined;
+  let reject = (_reason: unknown): void => undefined;
+  const promise = new Promise<void>((resolveAdmission, rejectAdmission) => {
+    release = (released) => resolveAdmission(released);
+    reject = rejectAdmission;
+  });
+  // A normal validation failure may occur without a concurrent shutdown observer.
+  void promise.catch(() => undefined);
+  return { promise, release, reject };
+}
+
 function waitForSettlement(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
@@ -967,12 +1033,13 @@ function waitForSettlement(promise: Promise<void>, timeoutMs: number): Promise<b
       settled = true;
       resolve(false);
     }, timeoutMs);
-    void promise.finally(() => {
+    const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve(true);
-    });
+    };
+    void promise.then(finish, finish);
   });
 }
 

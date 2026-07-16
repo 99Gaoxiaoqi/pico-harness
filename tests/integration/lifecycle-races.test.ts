@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import {
 import { loadHookSnapshot } from "../../src/hooks/config.js";
 import { HookConfigReloader } from "../../src/hooks/config/reloader.js";
 import { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
+import { JobService } from "../../src/tasks/job-service.js";
 
 test("Workspace registry fences a get still canonicalizing when close begins", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-registry-close-"));
@@ -334,6 +336,171 @@ test("Daemon keeps singleton ownership until a timed-out executor actually settl
   await restartedHost.start();
   assert.equal(restartedHost.status, "running");
   await restartedHost.stop();
+});
+
+test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner settles", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-task-runner-ownership-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const endpoint: LocalDaemonEndpoint = {
+    transport: "unix",
+    address: join(root, "runtime.sock"),
+    authTokenPath: join(root, "runtime.auth"),
+  };
+  const lockPath = join(root, "runtime.lock");
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await initializeGitRepository(workspace);
+
+  const entered = deferred();
+  const release = deferred();
+  const runnerReturned = deferred();
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: workspace,
+    closeDrainTimeoutMs: 5,
+    taskHostRuntimeOptions: { picoHome, runnerStopTimeoutMs: 5 },
+  });
+  const taskHost = runtime.taskHostRuntime;
+  assert.ok(taskHost);
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: picoHome },
+    registrationStore,
+    createWorkspaceRuntime: async () => runtime,
+    execute: async () => undefined,
+  });
+  const host = createLifecycleTestHost({
+    endpoint,
+    lockPath,
+    registrationStore,
+    service,
+  });
+  const candidates: LocalDaemonHost[] = [host];
+  const taskIds: string[] = [];
+  context.after(async () => {
+    release.resolve();
+    await Promise.allSettled(taskIds.map((taskId) => taskHost.supervisor.wait(taskId)));
+    await Promise.allSettled([
+      runtime.waitForOwnershipRelease(),
+      ...candidates.map((candidate) => candidate.stop()),
+    ]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  assert.strictEqual(await service.getWorkspaceRuntime(workspace), runtime);
+  const task = runtime.startTask({ description: "ignore shutdown abort" }, async ({ signal }) => {
+    entered.resolve();
+    await release.promise;
+    assert.equal(signal.aborted, true);
+    runnerReturned.resolve();
+    return { summary: "late success must remain cancelled" };
+  });
+  taskIds.push(task.taskId);
+  await entered.promise;
+
+  await completesWithin(host.stop(), 500, "daemon stop waited forever for a worktree runner");
+  assert.equal(await pathExists(lockPath), true);
+  assert.equal(runtime.hasPendingOwnership(), true);
+  assert.equal(taskHost.jobService.get(task.taskId)?.job.status, "running");
+
+  const earlyService = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "early-pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const earlyHost = createLifecycleTestHost({
+    endpoint,
+    lockPath,
+    registrationStore,
+    service: earlyService,
+  });
+  candidates.push(earlyHost);
+  await assert.rejects(
+    earlyHost.start(),
+    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
+  );
+
+  release.resolve();
+  await runnerReturned.promise;
+  await service.shutdownOwnershipFence().released;
+  await runtime.waitForOwnershipRelease();
+  const settled = await taskHost.supervisor.wait(task.taskId);
+  assert.equal(settled.status, "stopped");
+  assert.equal(settled.registry.status, "killed");
+
+  const { service: probe } = await JobService.create({ workDir: workspace, picoHome });
+  try {
+    assert.equal(probe.get(task.taskId)?.job.status, "cancelled");
+  } finally {
+    probe.close();
+  }
+  await waitUntilAsync(async () => !(await pathExists(lockPath)));
+
+  const restartedService = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "restarted-pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const restartedHost = createLifecycleTestHost({
+    endpoint,
+    lockPath,
+    registrationStore,
+    service: restartedService,
+  });
+  candidates.push(restartedHost);
+  await restartedHost.start();
+  assert.equal(restartedHost.status, "running");
+  await restartedHost.stop();
+});
+
+test("TaskHost fences a task admission whose pending subscriber synchronously closes", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-admission-close-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await initializeGitRepository(workspace);
+
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: workspace,
+    taskHostRuntimeOptions: { picoHome, runnerStopTimeoutMs: 5 },
+  });
+  const taskHost = runtime.taskHostRuntime;
+  assert.ok(taskHost);
+  const observed: { closing?: Promise<void>; taskId?: string } = {};
+  let runnerStarted = false;
+  const unsubscribe = taskHost.taskRegistry.subscribe((snapshot) => {
+    if (snapshot.status !== "pending" || snapshot.data?.["supervisor"] !== "worktree") return;
+    observed.taskId = snapshot.taskId;
+    observed.closing = taskHost.close();
+  });
+  context.after(async () => {
+    unsubscribe();
+    await Promise.allSettled([runtime.close(), runtime.waitForOwnershipRelease()]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  assert.throws(
+    () =>
+      runtime.startTask({ description: "close during admission" }, async () => {
+        runnerStarted = true;
+      }),
+    /WorktreeSupervisor 正在关闭/u,
+  );
+  assert.ok(observed.closing);
+  assert.ok(observed.taskId);
+  await observed.closing;
+  await taskHost.waitForOwnershipRelease();
+  assert.equal(runnerStarted, false);
+  assert.equal(taskHost.taskRegistry.get(observed.taskId)?.status, "killed");
+
+  const { service: probe } = await JobService.create({ workDir: workspace, picoHome });
+  try {
+    assert.equal(probe.get(observed.taskId)?.job.status, "cancelled");
+  } finally {
+    probe.close();
+  }
 });
 
 test("Daemon retains its singleton lock when the shutdown ownership fence rejects", async (context) => {
@@ -1141,4 +1308,34 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
   return value;
+}
+
+async function initializeGitRepository(cwd: string): Promise<void> {
+  await runGit(["init", "--quiet", "--initial-branch=main"], cwd);
+  await runGit(
+    [
+      "-c",
+      "user.name=Pico Test",
+      "-c",
+      "user.email=pico@example.invalid",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "baseline",
+    ],
+    cwd,
+  );
+}
+
+function runGit(args: readonly string[], cwd: string): Promise<void> {
+  return new Promise((resolveRun, reject) => {
+    execFile("git", [...args], { cwd, encoding: "utf8" }, (error, _stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolveRun();
+    });
+  });
 }
