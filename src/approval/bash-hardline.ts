@@ -41,7 +41,12 @@ export function isHardlineBashCommand(command: string, initialCwd?: string): boo
   );
 }
 
-function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd: string): boolean {
+function isHardlineBashCommandAtDepth(
+  command: string,
+  depth: number,
+  initialCwd: string,
+  inheritedStartupTaints: ReadonlySet<string> = EMPTY_STRING_SET,
+): boolean {
   if (OTHER_HARDLINE_PATTERNS.some((pattern) => pattern.test(command))) return true;
 
   const parsed = parseShell(command);
@@ -49,6 +54,7 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
     return true;
   }
   const cwdCandidatesBySubshellDepth: string[][] = [[initialCwd]];
+  const startupTaintsBySubshellDepth: Set<string>[] = [new Set(inheritedStartupTaints)];
   let previousSubshellPath: readonly number[] = [];
   for (let commandIndex = 0; commandIndex < parsed.commands.length; commandIndex++) {
     const context = parsed.commandContexts[commandIndex]!;
@@ -61,24 +67,30 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
       sharedSubshellDepth++;
     }
     cwdCandidatesBySubshellDepth.length = sharedSubshellDepth + 1;
+    startupTaintsBySubshellDepth.length = sharedSubshellDepth + 1;
     for (
       let depthIndex = sharedSubshellDepth + 1;
       depthIndex <= context.subshellDepth;
       depthIndex++
     ) {
       cwdCandidatesBySubshellDepth[depthIndex] = cwdCandidatesBySubshellDepth[depthIndex - 1]!;
+      startupTaintsBySubshellDepth[depthIndex] = new Set(
+        startupTaintsBySubshellDepth[depthIndex - 1]!,
+      );
     }
     const cwdCandidates = cwdCandidatesBySubshellDepth[context.subshellDepth]!;
+    const startupTaints = startupTaintsBySubshellDepth[context.subshellDepth]!;
     const words = parsed.commands[commandIndex]!;
     const nextCwdCandidates: string[] = [];
     let changesCwd = false;
     for (const cwd of cwdCandidates) {
       for (const nested of parsed.nestedCommands) {
         if (nested.commandIndex !== commandIndex) continue;
-        if (isHardlineBashCommandAtDepth(nested.content, depth + 1, cwd)) return true;
+        if (isHardlineBashCommandAtDepth(nested.content, depth + 1, cwd, startupTaints))
+          return true;
       }
       const contextualWords = words.map((word) => ({ ...word, cwd }));
-      if (isHardlineCommandWords(contextualWords, depth)) return true;
+      if (isHardlineCommandWords(contextualWords, depth, startupTaints)) return true;
       const nextCwd = nextShellCwd(contextualWords, cwd);
       if (nextCwd !== undefined) {
         changesCwd = true;
@@ -94,23 +106,35 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
           ? [UNKNOWN_SHELL_CWD]
           : mergeShellCwdCandidates(cwdCandidates, nextCwdCandidates);
     }
+    if (!context.isolatedCwd) {
+      startupTaintsBySubshellDepth[context.subshellDepth] = nextShellStartupTaints(
+        words,
+        startupTaints,
+      );
+    }
     previousSubshellPath = context.subshellPath;
   }
 
   return parsed.ambiguous && hasAmbiguousDestructiveRmShape(parsed.commands);
 }
 
-function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boolean {
+function isHardlineCommandWords(
+  words: readonly ShellWord[],
+  depth: number,
+  startupTaints: ReadonlySet<string> = EMPTY_STRING_SET,
+): boolean {
   if (hasDestructiveOutputRedirection(words)) return true;
 
   const executableIndex = findExecutableIndex(words);
   if (executableIndex < 0) return false;
 
-  const executable = commandBasename(words[executableIndex]!.value);
+  const executableWord = words[executableIndex]!;
+  if (executableWord.dynamic || executableWord.unquotedExpansion) return true;
+  const executable = commandBasename(executableWord.value);
   const args = words.slice(executableIndex + 1);
   const leadingEnvironmentAssignments = words
     .slice(0, executableIndex)
-    .filter((word) => isEnvironmentAssignment(word.value));
+    .filter((word) => isPotentialEnvironmentAssignment(word.value));
   if (SHELL_SOURCE_COMMANDS.has(executable)) return true;
   if (hasLegacyLiteralHardlinePayload(executable, args)) return true;
   if (executable === "rm") return isDestructiveRmInvocation(args, false);
@@ -133,19 +157,21 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   }
 
   if (SHELL_COMMANDS.has(executable)) {
-    if (
-      executable === "bash" &&
-      leadingEnvironmentAssignments.some((word) => isBashEnvironmentAssignment(word.value))
-    ) {
-      return true;
+    const effectiveStartupTaints = new Set(startupTaints);
+    for (const assignment of leadingEnvironmentAssignments) {
+      const name = environmentAssignmentName(assignment.value);
+      if (name) effectiveStartupTaints.add(name);
     }
+    const shellOptions = scanShellInvocationOptions(args);
+    if (hasShellStartupInjection(executable, shellOptions, effectiveStartupTaints)) return true;
     if (OPAQUE_SHELL_COMMANDS.has(executable)) {
       // csh/fish/PowerShell/cmd 不遵循 Bash 语法；即使命令文本静态可见，
       // 也不能用当前解析器证明其脚本、stdin 或内联命令安全。
       return !isShellDisplayOnlyInvocation(args);
     }
-    if (executable === "bash" && hasBashStartupFileOption(args)) return true;
-    const commandIndex = findShellCommandOptionIndex(args);
+    if (shellOptions.ambiguous || (executable === "bash" && shellOptions.startupFile)) return true;
+    if (shellOptions.noExec) return false;
+    const commandIndex = shellOptions.commandIndex;
     if (commandIndex >= 0) {
       const nested = args[commandIndex + 1];
       if (!nested || nested.dynamic || depth >= MAX_NESTED_COMMAND_DEPTH) return true;
@@ -153,6 +179,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
         nested.value,
         depth + 1,
         words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD,
+        effectiveStartupTaints,
       );
     }
     // 已建模 Shell 入口没有静态 -c 时会读取 stdin/脚本；纯文本分类器
@@ -166,8 +193,11 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
       args.map((word) => word.value).join(" "),
       depth + 1,
       words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD,
+      startupTaints,
     );
   }
+
+  if (executable === "command" && isCommandLookupInvocation(args)) return false;
 
   if (FIND_EXEC_FORWARDERS.has(executable)) {
     const forwarded = findForwardedCommandContext(executable, args, 0);
@@ -181,7 +211,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
         ...forwarded.environmentAssignments,
         ...args.slice(forwarded.commandIndex),
       ].map((word) => ({ ...word, cwd: forwardedCwd }));
-      if (isHardlineCommandWords(forwardedWords, depth)) return true;
+      if (isHardlineCommandWords(forwardedWords, depth, startupTaints)) return true;
     }
   }
 
@@ -200,7 +230,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
     );
     if (
       structuredHardlineIndex >= 0 &&
-      isHardlineCommandWords(args.slice(structuredHardlineIndex), depth)
+      isHardlineCommandWords(args.slice(structuredHardlineIndex), depth, startupTaints)
     ) {
       return true;
     }
@@ -210,7 +240,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
     });
     if (
       nestedExecutableIndex >= 0 &&
-      isHardlineCommandWords(args.slice(nestedExecutableIndex), depth)
+      isHardlineCommandWords(args.slice(nestedExecutableIndex), depth, startupTaints)
     ) {
       return true;
     }
@@ -221,71 +251,163 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   }
 
   // 可执行文件本身来自 shell 展开时无法证明不会落到系统级破坏命令。
-  return words[executableIndex]!.dynamic;
+  return false;
+}
+
+function isCommandLookupInvocation(args: readonly ShellWord[]): boolean {
+  for (const word of args) {
+    if (word.dynamic) return false;
+    if (word.value === "--") return false;
+    if (!word.value.startsWith("-")) return false;
+    if (/^-[^-]*[vV]/u.test(word.value)) return true;
+  }
+  return false;
 }
 
 /** Preserve the legacy literal deny floor for known inline-code interpreter modes. */
 function hasLegacyLiteralHardlinePayload(executable: string, args: readonly ShellWord[]): boolean {
-  if (!hasInlineCodeMode(executable, args)) return false;
+  const entryKind = interpreterEntryKind(executable, args);
+  if (entryKind !== "inline" && entryKind !== "ambiguous") return false;
   const payload = args.map((word) => word.value).join(" ");
   return LEGACY_LITERAL_HARDLINE_PATTERNS.some((pattern) => pattern.test(payload));
 }
 
-function hasInlineCodeMode(executable: string, args: readonly ShellWord[]): boolean {
+type InterpreterEntryKind = "inline" | "script" | "other" | "ambiguous";
+
+function interpreterEntryKind(
+  executable: string,
+  args: readonly ShellWord[],
+): InterpreterEntryKind {
   if (/^python(?:(?:\d+(?:\.\d+)*)t?)?$/u.test(executable)) {
-    return hasInlineCodeOptionBeforeEntry(
-      args,
-      (value) => value === "-c" || /^-c.+/su.test(value),
-      PYTHON_INLINE_OPTIONS_WITH_VALUE,
-    );
+    return pythonEntryKind(args);
   }
   if (executable === "node" || executable === "nodejs") {
-    return hasInlineCodeOptionBeforeEntry(
-      args,
-      (value) =>
-        value === "-e" ||
-        value === "--eval" ||
-        /^-e.+/su.test(value) ||
-        value.startsWith("--eval="),
-      NODE_INLINE_OPTIONS_WITH_VALUE,
-    );
+    return nodeEntryKind(args);
   }
   if (/^perl(?:\d+(?:\.\d+)*)?$/u.test(executable)) {
-    return hasInlineCodeOptionBeforeEntry(
-      args,
-      (value) => /^-[^-]*e/su.test(value),
-      PERL_INLINE_OPTIONS_WITH_VALUE,
-    );
+    return clusteredInterpreterEntryKind(args, new Set(["e", "E"]), new Set(["F", "I", "M", "m"]));
   }
   if (/^ruby(?:\d+(?:\.\d+)*)?$/u.test(executable)) {
-    return hasInlineCodeOptionBeforeEntry(
+    return clusteredInterpreterEntryKind(
       args,
-      (value) => /^-[^-]*e/su.test(value),
-      RUBY_INLINE_OPTIONS_WITH_VALUE,
+      new Set(["e"]),
+      new Set(["C", "E", "F", "I", "r"]),
+      new Set(["W", "x"]),
     );
   }
-  return false;
+  return "other";
 }
 
-function hasInlineCodeOptionBeforeEntry(
-  args: readonly ShellWord[],
-  isInlineOption: (value: string) => boolean,
-  optionsWithValue: ReadonlySet<string> = EMPTY_STRING_SET,
-): boolean {
+function pythonEntryKind(args: readonly ShellWord[]): InterpreterEntryKind {
+  let ambiguousLongOptionValue = false;
   for (let index = 0; index < args.length; index++) {
     const word = args[index]!;
     const value = word.value;
-    if (word.dynamic || value === "--" || value === "-") return false;
-    const optionValue = optionValuePlacement(value, optionsWithValue);
+    if (word.dynamic) return "ambiguous";
+    if (value === "--" || value === "-") return "other";
+    if (!value.startsWith("-")) {
+      return ambiguousLongOptionValue && args.slice(index + 1).some(isPythonInlineOption)
+        ? "ambiguous"
+        : "script";
+    }
+    const optionValue = optionValuePlacement(value, PYTHON_OPTIONS_WITH_VALUE);
     if (optionValue === "next") {
+      if (index + 1 >= args.length) return "ambiguous";
       index++;
       continue;
     }
     if (optionValue === "attached") continue;
-    if (isInlineOption(value)) return true;
-    if (!value.startsWith("-") && !value.startsWith("+")) return false;
+    if (value.startsWith("--")) {
+      if (!value.includes("=")) ambiguousLongOptionValue = true;
+      continue;
+    }
+    const cluster = value.slice(1);
+    for (let optionIndex = 0; optionIndex < cluster.length; optionIndex++) {
+      const option = cluster[optionIndex]!;
+      if (option === "c") return "inline";
+      if (option === "m") return "other";
+      if (option === "W" || option === "X") {
+        if (optionIndex + 1 === cluster.length) {
+          if (index + 1 >= args.length) return "ambiguous";
+          index++;
+        }
+        break;
+      }
+    }
   }
-  return false;
+  return "other";
+}
+
+function nodeEntryKind(args: readonly ShellWord[]): InterpreterEntryKind {
+  let ambiguousLongOptionValue = false;
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (word.dynamic) return "ambiguous";
+    if (value === "--" || value === "-") return "other";
+    if (!value.startsWith("-")) {
+      return ambiguousLongOptionValue && args.slice(index + 1).some(isNodeInlineOption)
+        ? "ambiguous"
+        : "script";
+    }
+    if (isNodeInlineOption(word)) return "inline";
+    const optionValue = optionValuePlacement(value, NODE_OPTIONS_WITH_VALUE);
+    if (optionValue === "next") {
+      if (index + 1 >= args.length) return "ambiguous";
+      index++;
+    } else if (value.startsWith("--") && !value.includes("=")) {
+      ambiguousLongOptionValue = true;
+    }
+  }
+  return "other";
+}
+
+function isPythonInlineOption(word: ShellWord): boolean {
+  return !word.dynamic && (word.value === "-c" || /^-[^-]*c/u.test(word.value));
+}
+
+function isNodeInlineOption(word: ShellWord): boolean {
+  const value = word.value;
+  return (
+    !word.dynamic &&
+    (value === "-e" ||
+      value === "-p" ||
+      value === "--eval" ||
+      value === "--print" ||
+      /^-[ep].+/su.test(value) ||
+      value.startsWith("--eval=") ||
+      value.startsWith("--print="))
+  );
+}
+
+function clusteredInterpreterEntryKind(
+  args: readonly ShellWord[],
+  inlineOptions: ReadonlySet<string>,
+  valueOptions: ReadonlySet<string>,
+  optionalAttachedValueOptions: ReadonlySet<string> = EMPTY_STRING_SET,
+): InterpreterEntryKind {
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (word.dynamic) return "ambiguous";
+    if (value === "--" || value === "-") return "other";
+    if (!value.startsWith("-")) return "script";
+    if (value.startsWith("--")) continue;
+    const cluster = value.slice(1);
+    for (let optionIndex = 0; optionIndex < cluster.length; optionIndex++) {
+      const option = cluster[optionIndex]!;
+      if (inlineOptions.has(option)) return "inline";
+      if (valueOptions.has(option)) {
+        if (optionIndex + 1 === cluster.length) {
+          if (index + 1 >= args.length) return "ambiguous";
+          index++;
+        }
+        break;
+      }
+      if (optionalAttachedValueOptions.has(option) && optionIndex + 1 < cluster.length) break;
+    }
+  }
+  return "other";
 }
 
 function optionValuePlacement(
@@ -303,38 +425,65 @@ function optionValuePlacement(
   return undefined;
 }
 
-function hasBashStartupFileOption(args: readonly ShellWord[]): boolean {
-  for (let index = 0; index < args.length; index++) {
-    const word = args[index]!;
-    const value = word.value;
-    if (word.dynamic || value === "--") return false;
-    if (isBashStartupFileOption(value)) return true;
-    if (SHELL_OPTIONS_WITH_VALUE.has(value)) {
-      index++;
-      continue;
-    }
-    if (hasAttachedShellOptionValue(value)) continue;
-    if (isShellCommandOption(value)) return false;
-    if (!value.startsWith("-") && !value.startsWith("+")) return false;
-  }
-  return false;
+interface ShellInvocationOptions {
+  readonly commandIndex: number;
+  readonly startupFile: boolean;
+  readonly interactive: boolean;
+  readonly login: boolean;
+  readonly noExec: boolean;
+  readonly ambiguous: boolean;
 }
 
-function findShellCommandOptionIndex(args: readonly ShellWord[]): number {
+function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocationOptions {
+  let startupFile = false;
+  let interactive = false;
+  let login = false;
+  let noExec = false;
   for (let index = 0; index < args.length; index++) {
     const word = args[index]!;
     const value = word.value;
-    if (word.dynamic || value === "--") return -1;
-    if (SHELL_OPTIONS_WITH_VALUE.has(value)) {
-      index++;
+    if (word.dynamic) {
+      return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: true };
+    }
+    if (value === "--" || value === "-") break;
+    if (isBashStartupFileOption(value)) {
+      startupFile = true;
+      if (!value.includes("=")) index++;
       continue;
     }
-    // -oVALUE/-OVALUE 中的 c 属于选项名，不是短选项簇里的 -c。
-    if (hasAttachedShellOptionValue(value)) continue;
-    if (isShellCommandOption(value)) return index;
-    if (!value.startsWith("-") && !value.startsWith("+")) return -1;
+    if (value === "--login") {
+      login = true;
+      continue;
+    }
+    if (value.startsWith("--")) continue;
+    if (!/^[-+][^-]/u.test(value)) break;
+
+    const enablesOption = value[0] === "-";
+    const cluster = value.slice(1);
+    for (let optionIndex = 0; optionIndex < cluster.length; optionIndex++) {
+      const option = cluster[optionIndex]!;
+      if (option === "o" || option === "O") {
+        let optionName: string;
+        if (optionIndex + 1 === cluster.length) {
+          if (index + 1 >= args.length) {
+            return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: true };
+          }
+          optionName = args[++index]!.value;
+        } else {
+          optionName = cluster.slice(optionIndex + 1);
+        }
+        if (option === "o" && optionName === "noexec") noExec = enablesOption;
+        break;
+      }
+      if (option === "n") noExec = enablesOption;
+      if (option === "i") interactive = enablesOption;
+      if (option === "l") login = enablesOption;
+      if (enablesOption && option === "c") {
+        return { commandIndex: index, startupFile, interactive, login, noExec, ambiguous: false };
+      }
+    }
   }
-  return -1;
+  return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: false };
 }
 
 function isBashStartupFileOption(value: string): boolean {
@@ -342,18 +491,6 @@ function isBashStartupFileOption(value: string): boolean {
     if (value === option || value.startsWith(`${option}=`)) return true;
   }
   return false;
-}
-
-function hasAttachedShellOptionValue(value: string): boolean {
-  return /^(?:[-+]O.+|[-+]o.+)/u.test(value);
-}
-
-function isShellCommandOption(value: string): boolean {
-  return value === "-c" || /^-[^-]*c/u.test(value);
-}
-
-function isBashEnvironmentAssignment(value: string): boolean {
-  return value.startsWith("BASH_ENV=");
 }
 
 function isShellDisplayOnlyInvocation(args: readonly ShellWord[]): boolean {
@@ -578,9 +715,8 @@ function findForwardedCommandContext(
       continue;
     }
     if (
-      !optionsEnded &&
-      (wrapper === "env" || wrapper === "sudo" || wrapper === "doas") &&
-      isEnvironmentAssignment(value)
+      (wrapper === "env" && isPotentialEnvironmentAssignment(value)) ||
+      ((wrapper === "sudo" || wrapper === "doas") && isEnvironmentAssignment(value))
     ) {
       environmentAssignments.push(word);
       continue;
@@ -600,15 +736,10 @@ function findForwardedCommandContext(
       continue;
     }
     if (!optionsEnded && /^-[^-]/u.test(value)) {
-      const matchedOption = [...optionsWithValue].find(
-        (candidate) => candidate.length === 2 && value.startsWith(candidate),
-      );
-      if (matchedOption) {
-        const optionValue =
-          value === matchedOption
-            ? words[++index]
-            : { ...word, value: value.slice(matchedOption.length) };
-        if (isWrapperCwdOption(wrapper, matchedOption)) cwd = optionValue;
+      const match = findShortWrapperValueOption(word, words[index + 1], optionsWithValue);
+      if (match) {
+        if (match.consumesNext) index++;
+        if (isWrapperCwdOption(wrapper, match.option)) cwd = match.value;
       }
       continue;
     }
@@ -623,6 +754,25 @@ function findForwardedCommandContext(
     return { commandIndex: index, ...(cwd ? { cwd } : {}), environmentAssignments };
   }
   return { commandIndex: -1, ...(cwd ? { cwd } : {}), environmentAssignments };
+}
+
+function findShortWrapperValueOption(
+  word: ShellWord,
+  nextWord: ShellWord | undefined,
+  optionsWithValue: ReadonlySet<string>,
+): { option: string; value?: ShellWord; consumesNext: boolean } | undefined {
+  const cluster = word.value;
+  for (let index = 1; index < cluster.length; index++) {
+    const option = `-${cluster[index]!}`;
+    if (!optionsWithValue.has(option)) continue;
+    const attached = cluster.slice(index + 1);
+    return {
+      option,
+      value: attached ? { ...word, value: attached } : nextWord,
+      consumesNext: attached.length === 0,
+    };
+  }
+  return undefined;
 }
 
 function isWrapperCwdOption(wrapper: string, option: string): boolean {
@@ -1703,10 +1853,66 @@ function isEnvironmentAssignment(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
 }
 
+function isPotentialEnvironmentAssignment(value: string): boolean {
+  return isEnvironmentAssignment(value) || /^BASH_FUNC_.+%%=/u.test(value);
+}
+
+function environmentAssignmentName(value: string): string | undefined {
+  const equalsIndex = value.indexOf("=");
+  if (equalsIndex <= 0) return undefined;
+  return value.slice(0, equalsIndex);
+}
+
+function nextShellStartupTaints(
+  words: readonly ShellWord[],
+  current: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set(current);
+  const executableIndex = findExecutableIndex(words);
+  if (executableIndex < 0) {
+    for (const word of words) addStartupTaint(next, environmentAssignmentName(word.value));
+    return next;
+  }
+
+  const executable = commandBasename(words[executableIndex]!.value);
+  if (executable === "eval") {
+    next.add("*");
+    return next;
+  }
+  if (!SHELL_ENVIRONMENT_MUTATION_BUILTINS.has(executable)) return next;
+  for (const word of words.slice(executableIndex + 1)) {
+    if (word.value.startsWith("-")) continue;
+    addStartupTaint(next, environmentAssignmentName(word.value) ?? word.value);
+  }
+  return next;
+}
+
+function addStartupTaint(taints: Set<string>, name: string | undefined): void {
+  if (!name) return;
+  if (SHELL_STARTUP_ENVIRONMENT_NAMES.has(name) || name.startsWith("BASH_FUNC_")) {
+    taints.add(name);
+  }
+}
+
+function hasShellStartupInjection(
+  executable: string,
+  options: ShellInvocationOptions,
+  taints: ReadonlySet<string>,
+): boolean {
+  if (options.interactive || options.login || taints.has("*")) return true;
+  if (executable === "bash") {
+    if (taints.has("BASH_ENV")) return true;
+    if ([...taints].some((name) => name.startsWith("BASH_FUNC_"))) return true;
+  }
+  if (executable === "zsh" && taints.has("ZDOTDIR")) return true;
+  if (BASH_LIKE_SHELL_COMMANDS.includes(executable) && taints.has("ENV")) return true;
+  return false;
+}
+
 function findExecutableIndex(words: readonly ShellWord[]): number {
   return words.findIndex(
     (word) =>
-      !isEnvironmentAssignment(word.value) &&
+      !isPotentialEnvironmentAssignment(word.value) &&
       (word.quotedOrEscaped || !SHELL_CONTROL_PREFIXES.has(word.value.toLowerCase())),
   );
 }
@@ -1755,17 +1961,42 @@ const SHELL_COMMANDS: ReadonlySet<string> = new Set([
 
 const SHELL_SOURCE_COMMANDS: ReadonlySet<string> = new Set([".", "source"]);
 
+const SHELL_ENVIRONMENT_MUTATION_BUILTINS: ReadonlySet<string> = new Set([
+  "declare",
+  "export",
+  "readonly",
+  "typeset",
+]);
+
+const SHELL_STARTUP_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set([
+  "BASH_ENV",
+  "ENV",
+  "HOME",
+  "PROMPT_COMMAND",
+  "ZDOTDIR",
+]);
+
 const BASH_STARTUP_FILE_OPTIONS: ReadonlySet<string> = new Set(["--init-file", "--rcfile"]);
 
-const SHELL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["+O", "+o", "-O", "-o"]);
+const PYTHON_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-W",
+  "-X",
+  "--check-hash-based-pycs",
+]);
 
-const PYTHON_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-W", "-X"]);
-
-const NODE_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-r", "--require", "--title"]);
-
-const PERL_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-I"]);
-
-const RUBY_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-I"]);
+const NODE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-C",
+  "-r",
+  "--conditions",
+  "--env-file",
+  "--env-file-if-exists",
+  "--experimental-loader",
+  "--import",
+  "--input-type",
+  "--loader",
+  "--require",
+  "--title",
+]);
 
 const CWD_FORWARDERS: ReadonlySet<string> = new Set(["builtin", "command", "time"]);
 
@@ -1861,7 +2092,10 @@ const FIND_EXEC_FORWARDERS: ReadonlySet<string> = new Set([
 const FIND_WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["chroot", new Set(["--groups", "--userspec"])],
   ["doas", new Set(["-C", "-u"])],
-  ["env", new Set(["-a", "-C", "-u", "--argv0", "--chdir", "--unset"])],
+  [
+    "env",
+    new Set(["-a", "-C", "-P", "-S", "-u", "--argv0", "--chdir", "--split-string", "--unset"]),
+  ],
   ["exec", new Set(["-a"])],
   [
     "ionice",

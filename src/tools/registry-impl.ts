@@ -25,7 +25,12 @@ import {
 } from "./line-endings.js";
 import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
-import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
+import {
+  isWindows,
+  resolveShell,
+  sanitizeShellProcessEnvironment,
+  shellCommandArgs,
+} from "../os/shell.js";
 import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookService } from "../hooks/service.js";
@@ -986,7 +991,7 @@ function runForegroundCommand(
           detached: !isWindows,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
-          ...(env ? { env } : {}),
+          env: sanitizeShellProcessEnvironment(env ?? process.env),
         },
       );
     } catch (error) {

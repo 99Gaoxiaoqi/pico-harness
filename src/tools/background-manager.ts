@@ -1,6 +1,11 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
+import {
+  isWindows,
+  resolveShell,
+  sanitizeShellProcessEnvironment,
+  shellCommandArgs,
+} from "../os/shell.js";
 import { signalProcessTree } from "../os/process-tree.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 
@@ -98,7 +103,7 @@ export class BackgroundManager {
           detached: !isWindows,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
-          ...(spawnOptions?.env ? { env: spawnOptions.env } : {}),
+          env: sanitizeShellProcessEnvironment(spawnOptions?.env ?? process.env),
         },
       );
     } catch (err) {
