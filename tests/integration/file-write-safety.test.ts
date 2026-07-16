@@ -153,6 +153,57 @@ test(
   },
 );
 
+test(
+  "write_file and edit_file preserve Linux POSIX ACLs and extended attributes",
+  { skip: process.platform !== "linux" },
+  async (context) => {
+    const fixture = await createFixture("linux-extended-metadata");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "metadata.txt");
+    await writeFile(targetPath, "alpha\n");
+    await chmod(targetPath, 0o755);
+    await execFileAsync("/usr/bin/setfacl", ["-m", "u:65534:r--", targetPath]);
+    await execFileAsync("/usr/bin/setfattr", ["-n", "user.pico", "-v", "preserve-me", targetPath]);
+    const setCapability = async (): Promise<void> => {
+      await execFileAsync("/usr/sbin/setcap", ["cap_net_bind_service=ep", targetPath]);
+      const { stdout } = await execFileAsync("/usr/sbin/getcap", [targetPath], {
+        encoding: "utf8",
+      });
+      assert.match(stdout, /cap_net_bind_service=ep/u);
+    };
+    await setCapability();
+
+    const assertMetadata = async (): Promise<void> => {
+      const [{ stdout: acl }, { stdout: attribute }, { stdout: capability }] = await Promise.all([
+        execFileAsync("/usr/bin/getfacl", ["-cpn", targetPath], { encoding: "utf8" }),
+        execFileAsync("/usr/bin/getfattr", ["--only-values", "-n", "user.pico", targetPath], {
+          encoding: "utf8",
+        }),
+        execFileAsync("/usr/sbin/getcap", [targetPath], { encoding: "utf8" }),
+      ]);
+      assert.match(acl, /^user:65534:r--$/mu);
+      assert.equal(attribute.trimEnd(), "preserve-me");
+      assert.equal(capability, "", "内容改变后不能复活旧 security.capability");
+    };
+
+    const originalInode = (await stat(targetPath)).ino;
+    await new WriteFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: "metadata.txt", content: "beta\n" }),
+    );
+    assert.equal(await readFile(targetPath, "utf8"), "beta\n");
+    assert.notEqual((await stat(targetPath)).ino, originalInode);
+    await assertMetadata();
+
+    await setCapability();
+    await new EditFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: "metadata.txt", old_text: "beta", new_text: "gamma" }),
+    );
+    assert.equal(await readFile(targetPath, "utf8"), "gamma\n");
+    await assertMetadata();
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
 test("edit_file not-found leaves the original inode and content untouched", async (context) => {
   const fixture = await createFixture("not-found");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));

@@ -144,6 +144,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
   await assertDirectoryIdentity(directory, directoryIdentity);
   await assertTargetPrecondition(input.targetPath, input.precondition);
   const macMetadata = await captureMacExtendedMetadata(input.targetPath, input.precondition);
+  const linuxMetadataSource = await openLinuxMetadataSource(input.targetPath, input.precondition);
 
   const temporaryPath = join(
     directory,
@@ -172,6 +173,16 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     if (input.precondition.kind === "missing") {
       // 先由 open(0666) 得到与旧实现相同的 umask/default-ACL 模式，再收紧暂存权限。
       await handle.chmod(0o600);
+    } else if (linuxMetadataSource) {
+      // GNU cp 的 attributes-only 不触碰内容；先复制 ACL/xattr，再写入新内容，避免
+      // 把旧 security.capability 或 setid 权限复活到已经改变的字节上。
+      await copyLinuxExtendedMetadata(
+        linuxMetadataSource,
+        input.precondition.version,
+        handle,
+        temporaryIdentity,
+        temporaryPath,
+      );
     }
 
     // open() 也使用路径；先确认它确实发生在刚才校验的父目录，再写入用户内容。
@@ -207,10 +218,84 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     published = true;
   } finally {
     await handle?.close().catch(() => undefined);
+    await linuxMetadataSource?.close().catch(() => undefined);
     if (!published && temporaryIdentity) {
       await unlinkIfSameFile(temporaryPath, temporaryIdentity);
     }
   }
+}
+
+async function openLinuxMetadataSource(
+  targetPath: string,
+  precondition: AtomicFilePrecondition,
+): Promise<FileHandle | undefined> {
+  if (process.platform !== "linux" || precondition.kind !== "file") return undefined;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(
+      targetPath,
+      constants.O_RDONLY | NO_FOLLOW_FLAG | (constants.O_NONBLOCK ?? 0),
+    );
+    const info = await handle.stat({ bigint: true });
+    assertRegularNonSymlink(info, targetPath);
+    if (!sameFileVersion(precondition.version, toFileVersion(info))) {
+      throw new Error(`复制扩展元数据前目标文件已被替换或修改: ${targetPath}`);
+    }
+    return handle;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    throw new Error(`无法绑定 Linux 目标元数据，已拒绝覆盖: ${targetPath}`, { cause: error });
+  }
+}
+
+async function copyLinuxExtendedMetadata(
+  source: FileHandle,
+  expectedSource: FileVersion,
+  destination: FileHandle,
+  expectedDestination: FileVersion,
+  temporaryPath: string,
+): Promise<void> {
+  const sourceDescriptorPath = `/proc/${process.pid}/fd/${source.fd}`;
+  const destinationDescriptorPath = `/proc/${process.pid}/fd/${destination.fd}`;
+  let lastError: unknown;
+  for (const command of ["/bin/cp", "/usr/bin/cp"] as const) {
+    try {
+      await execFileAsync(
+        command,
+        [
+          "--attributes-only",
+          "--preserve=mode,xattr",
+          "--",
+          sourceDescriptorPath,
+          destinationDescriptorPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+          maxBuffer: METADATA_PROBE_MAX_BYTES,
+        },
+      );
+      const [sourceAfter, destinationAfter] = await Promise.all([
+        source.stat({ bigint: true }),
+        destination.stat({ bigint: true }),
+      ]);
+      assertRegularNonSymlink(sourceAfter, sourceDescriptorPath);
+      assertRegularNonSymlink(destinationAfter, destinationDescriptorPath);
+      if (!sameFileVersion(expectedSource, toFileVersion(sourceAfter))) {
+        throw new Error(`复制扩展元数据时源文件发生并发变化: ${sourceDescriptorPath}`);
+      }
+      if (!sameFileIdentity(expectedDestination, toFileVersion(destinationAfter))) {
+        throw new Error(`复制扩展元数据时临时文件已被替换: ${temporaryPath}`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!hasErrnoCode(error, "ENOENT")) break;
+    }
+  }
+  throw new Error(`无法保真复制 Linux ACL/扩展属性，已拒绝覆盖: ${temporaryPath}`, {
+    cause: lastError,
+  });
 }
 
 async function captureMacExtendedMetadata(
