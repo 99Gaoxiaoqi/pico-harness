@@ -49,8 +49,6 @@ export interface ToolResultObservationProcessorOptions {
   externalizeThresholdChars?: number;
   summaryMaxChars?: number;
   cleanupAfterWrite?: boolean;
-  /** @deprecated Use cleanupAfterWrite. */
-  cleanup?: boolean;
   ttlHours?: number;
 }
 
@@ -58,7 +56,7 @@ export function createToolResultObservationProcessor(
   opts: ToolResultObservationProcessorOptions,
 ): ToolObservationProcessor {
   const summaryMaxChars = opts.summaryMaxChars ?? DEFAULT_SUMMARY_MAX_CHARS;
-  const cleanupAfterWrite = opts.cleanupAfterWrite ?? opts.cleanup ?? true;
+  const cleanupAfterWrite = opts.cleanupAfterWrite ?? true;
 
   return async ({ toolCall, result, output, sessionId }) => {
     // read_file 自身提供行分页和页大小上限。如果再走通用外部化，
