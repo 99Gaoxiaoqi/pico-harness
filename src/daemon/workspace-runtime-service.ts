@@ -112,9 +112,6 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         this.unsubscribers.set(
           workspacePath,
           runtime.subscribe((event) => {
-            if (event.run) {
-              this.eventStore(event.workspace).upsertDaemonRun(daemonRunRecord(event.run));
-            }
             this.publish(
               createRuntimeNotification({
                 topic: event.type,
@@ -127,6 +124,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
                 at: event.at,
                 payload: eventPayload(event),
               }),
+              event.run ? daemonRunRecord(event.run) : undefined,
             );
           }),
         );
@@ -173,7 +171,9 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return { workspacePath: registered, registered: true };
     }
     if (request.method === "workspace.unregister") {
-      const workspacePath = requiredString(params, "workspacePath");
+      const workspacePath = await canonicalizeWorkspacePath(
+        requiredString(params, "workspacePath"),
+      );
       const registered = await this.registrationStore.unregister(workspacePath);
       this.publish(
         createRuntimeNotification({
@@ -465,18 +465,21 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     }
   }
 
-  private publish(notification: RuntimeNotification): void {
-    this.eventStore(notification.scope.workspacePath).appendRuntimeEvent({
-      eventId: notification.eventId,
-      topic: notification.topic,
-      workspacePath: notification.scope.workspacePath,
-      createdAt: notification.at,
-      payload: {
-        scope: notification.scope,
-        resourceVersion: notification.resourceVersion,
-        payload: notification.payload,
+  private publish(notification: RuntimeNotification, run?: DaemonRunRecord): void {
+    this.eventStore(notification.scope.workspacePath).appendRuntimeEvent(
+      {
+        eventId: notification.eventId,
+        topic: notification.topic,
+        workspacePath: notification.scope.workspacePath,
+        createdAt: notification.at,
+        payload: {
+          scope: notification.scope,
+          resourceVersion: notification.resourceVersion,
+          payload: notification.payload,
+        },
       },
-    });
+      run ? { daemonRun: run } : undefined,
+    );
     if (this.deferredNotifications) {
       this.deferredNotifications.push(notification);
       return;
