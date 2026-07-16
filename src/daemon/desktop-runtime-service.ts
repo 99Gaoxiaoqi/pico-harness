@@ -225,6 +225,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     string,
     { readonly requestFingerprint: string; readonly promise: Promise<JsonObject> }
   >();
+  private readonly inFlightHandles = new Set<Promise<JsonValue>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private userConfigWatchTail: Promise<void> = Promise.resolve();
   /** Serializes operations that can create or remove live Provider dependencies. */
@@ -306,8 +307,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
-  async handle(request: RuntimeRequest): Promise<JsonValue> {
-    this.assertAcceptingRequests();
+  handle(request: RuntimeRequest): Promise<JsonValue> {
+    try {
+      this.assertAcceptingRequests();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const operation = this.dispatchRequest(request);
+    this.inFlightHandles.add(operation);
+    void operation.then(
+      () => {
+        this.inFlightHandles.delete(operation);
+      },
+      () => {
+        this.inFlightHandles.delete(operation);
+      },
+    );
+    return operation;
+  }
+
+  private async dispatchRequest(request: RuntimeRequest): Promise<JsonValue> {
     switch (request.method) {
       case "workspace.init":
         return this.initializeWorkspace(request.params.workspacePath);
@@ -513,6 +532,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await this.providerDependencyTail.catch(() => undefined);
     await Promise.allSettled([...this.pendingSends.values()].map(({ promise }) => promise));
     await this.queuedInputDispatchTail.catch(() => undefined);
+    await Promise.allSettled([...this.inFlightHandles]);
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
     // Keep the projection subscriber and RuntimeStore alive until those events are projected.
     try {
@@ -1328,7 +1348,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       readonly inputKey: string;
       readonly runStartKey: string;
     },
-    assertCanStart?: () => void,
   ): Promise<JsonObject> {
     try {
       const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
@@ -1353,7 +1372,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           prompt: resolved.prompt,
           execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
           idempotencyKey: identity.runStartKey,
-          ...(assertCanStart ? { assertCanStart } : {}),
         }),
         "run.start result",
       );
@@ -1411,18 +1429,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
     if (!next) return;
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
+    // 队列准入线性化点：通过后 close() 会等待 queuedInputDispatchTail，允许本项完整启动并出队。
     if (this.lifecycleState !== "open") return;
-    await this.startSessionRun(
-      workspacePath,
-      sessionId,
-      next.input,
-      undefined,
-      {
-        inputKey: next.queueId,
-        runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
-      },
-      () => this.assertAcceptingRequests(),
-    );
+    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, {
+      inputKey: next.queueId,
+      runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
+    });
     await this.conversationStateStore.removeQueued(next.queueId);
   }
 
