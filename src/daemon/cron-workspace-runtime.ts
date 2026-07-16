@@ -15,13 +15,18 @@ export interface CronWorkspaceRuntimeOptions extends Omit<
   databasePath?: string;
   picoHome?: string;
   policyGuard?: CronPolicyGuard;
+  closeDrainTimeoutMs?: number;
 }
 
 /** A daemon-owned Cron ledger and scheduler for one canonical workspace. */
 export class CronWorkspaceRuntime {
   readonly cronService: CronService;
   readonly scheduler: CronRuntimeScheduler;
+  private readonly closeDrainTimeoutMs: number;
   private closed = false;
+  private closePromise?: Promise<void>;
+  private ownershipReleasePending = false;
+  private ownershipReleasePromise: Promise<void> = Promise.resolve();
 
   constructor(options: CronWorkspaceRuntimeOptions) {
     this.cronService = new CronService({
@@ -40,6 +45,7 @@ export class CronWorkspaceRuntime {
       ...(options.leaseHeartbeatMs ? { leaseHeartbeatMs: options.leaseHeartbeatMs } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
+    this.closeDrainTimeoutMs = normalizeCloseDrainTimeoutMs(options.closeDrainTimeoutMs);
   }
 
   recoverInterruptedRuns(reason?: string): CronRunRecord[] {
@@ -56,11 +62,56 @@ export class CronWorkspaceRuntime {
     this.scheduler.start();
   }
 
-  async close(): Promise<void> {
+  beginClose(): void {
     if (this.closed) return;
     this.closed = true;
-    await this.scheduler.stopAndWait();
-    this.cronService.close();
+    this.scheduler.stop();
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.beginClose();
+    let resolveClose: () => void = () => undefined;
+    let rejectClose: (reason: unknown) => void = () => undefined;
+    const closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    this.closePromise = closePromise;
+    void this.performClose().then(resolveClose, rejectClose);
+    return closePromise;
+  }
+
+  hasPendingOwnership(): boolean {
+    return this.ownershipReleasePending;
+  }
+
+  waitForOwnershipRelease(): Promise<void> {
+    return this.ownershipReleasePromise;
+  }
+
+  private async performClose(): Promise<void> {
+    const activeTickDrain = this.scheduler.stopAndWait();
+    const drained = await settlesWithin(activeTickDrain, this.closeDrainTimeoutMs);
+    const releaseOwnership = async (): Promise<void> => {
+      await activeTickDrain;
+      this.cronService.close();
+    };
+    if (drained) {
+      await releaseOwnership();
+      return;
+    }
+
+    this.ownershipReleasePending = true;
+    const ownershipRelease = releaseOwnership();
+    this.ownershipReleasePromise = ownershipRelease;
+    ownershipRelease.then(
+      () => {
+        this.ownershipReleasePending = false;
+      },
+      () => undefined,
+    );
+    void ownershipRelease.catch(() => undefined);
   }
 }
 
@@ -74,7 +125,11 @@ export interface ManagedCronWorkspaceRuntime {
   /** Optional for legacy/test factories; production runtimes always implement it. */
   runNow?(cronJobId: string): CronRunRecord;
   start(): void;
+  /** Stops timers and rejects new manual Runs before asynchronous drain begins. */
+  beginClose?(): void;
   close(): Promise<void>;
+  hasPendingOwnership?(): boolean;
+  waitForOwnershipRelease?(): Promise<void>;
 }
 
 export interface CronWorkspaceRuntimeFactory {
@@ -88,6 +143,7 @@ export function createCronWorkspaceRuntimeFactory(options: {
   policyGuard?: CronPolicyGuard;
   picoHome?: string;
   leaseHeartbeatMs?: number;
+  closeDrainTimeoutMs?: number;
   now?: () => number;
 }): CronWorkspaceRuntimeFactory {
   return {
@@ -101,7 +157,32 @@ export function createCronWorkspaceRuntimeFactory(options: {
         ...(options.picoHome ? { picoHome: options.picoHome } : {}),
         ...(options.policyGuard ? { policyGuard: options.policyGuard } : {}),
         ...(options.leaseHeartbeatMs ? { leaseHeartbeatMs: options.leaseHeartbeatMs } : {}),
+        ...(options.closeDrainTimeoutMs !== undefined
+          ? { closeDrainTimeoutMs: options.closeDrainTimeoutMs }
+          : {}),
         ...(options.now ? { now: options.now } : {}),
       }),
   };
+}
+
+function normalizeCloseDrainTimeoutMs(value: number | undefined): number {
+  const timeoutMs = value ?? 5_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError("Cron closeDrainTimeoutMs 必须是非负有限数");
+  }
+  return timeoutMs;
+}
+
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
