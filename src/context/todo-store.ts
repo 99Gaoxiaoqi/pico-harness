@@ -6,7 +6,7 @@
 //
 // 设计借鉴:
 // - PlanStore 的路径绑定模式(构造时固定 workspace state 路径,杜绝穿越)
-// - SkillRegistry 的 JSON 持久化模式(内存缓存 + 每次变更即刻落盘 + IO 错误降级)
+// - 内存缓存 + 每次变更即刻落盘 + IO 错误降级
 //
 // 错误处理约定:所有 IO 错误降级不阻断主流程。
 //   - load 失败(ENOENT/权限/畸形 JSON)→ 返回空 state,不抛

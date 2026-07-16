@@ -241,7 +241,7 @@ export async function createPicoCommandRegistry(
   );
   const registry = new CommandRegistry([
     ...builtins,
-    createStatusCommand(settings, options.session, options.mcpStatus),
+    createStatusCommand(settings, options.mcpStatus),
     createModelRuntimeCommand("usage", options.modelRuntime),
     createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
@@ -453,7 +453,6 @@ async function loadSessionArgumentCandidates(
 
 function createStatusCommand(
   settings: SessionSettings,
-  session?: Session,
   mcpStatus?: McpStatusProvider,
 ): SlashCommand {
   return {
@@ -466,7 +465,7 @@ function createStatusCommand(
     execute: (): LocalCommandResult => ({
       type: "local",
       action: "status",
-      message: formatStatusWithMcp(settings, session, mcpStatus),
+      message: formatStatusWithMcp(settings, mcpStatus),
     }),
   };
 }
@@ -540,10 +539,9 @@ function createGoalCommand(goalManager?: GoalManager): SlashCommand {
 
 function formatStatusWithMcp(
   settings: SessionSettings,
-  session: Session | undefined,
   mcpStatus: McpStatusProvider | undefined,
 ): string {
-  const base = [formatSessionStatus(settings), ...formatMemoryBackend(session, false)].join("\n");
+  const base = formatSessionStatus(settings);
   const snapshot = mcpStatus?.();
   if (snapshot === undefined) return base;
   return `${base}\n${formatMcpOverview(snapshot)}`;
@@ -771,7 +769,6 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
           ...(options.taskRuntimeDiagnostic
             ? { taskRuntimeDiagnostic: options.taskRuntimeDiagnostic }
             : {}),
-          ...(options.session ? { memoryStatus: options.session.memoryStatus } : {}),
           ...(options.storageDoctor ? { storageDoctor: options.storageDoctor } : {}),
           ...(options.effectiveConfig
             ? {
@@ -2448,20 +2445,4 @@ function commandExecution(
     ...(command.model === undefined ? {} : { model: command.model }),
     ...(command.allowedTools === undefined ? {} : { allowedTools: command.allowedTools }),
   };
-}
-
-function formatMemoryBackend(
-  session: Session | undefined,
-  includeRecommendation: boolean,
-): string[] {
-  if (!session) return ["Memory: unavailable (no live session)"];
-  const status = session.memoryStatus;
-  return [
-    `Memory: ${status.backend} (${status.state}; source=${status.persistentSource})`,
-    `Memory runtime: ${status.nodeVersion}; ABI ${status.nodeModuleAbi ?? "unknown"}`,
-    ...(status.reason ? [`Memory reason: ${status.reason}`] : []),
-    ...(includeRecommendation && status.recommendation
-      ? [`Memory recommendation: ${status.recommendation}`]
-      : []),
-  ];
 }

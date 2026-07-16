@@ -15,20 +15,9 @@ import { logger } from "../observability/logger.js";
 import { PlanStore } from "./plan-store.js";
 import { SkillLoader } from "./skill.js";
 import { TodoStore } from "./todo-store.js";
-import type { LearnedSkill } from "../memory/skill-schema.js";
 // GoalManager 用 import type:只取类型签名,避免 context → engine 的循环依赖
 // (engine/loop.ts 反向 import composer)。单例实例由 host 注入,本类不 new。
 import type { GoalManager } from "../engine/goal-manager.js";
-
-interface ISkillRegistry {
-  init(): Promise<void>;
-  getTopSkills(limit: number): LearnedSkill[];
-  search(query: string): LearnedSkill[];
-}
-
-interface IMemoryNudger {
-  generate(sessionId: string, turnCount: number): Promise<string | null>;
-}
 
 /** 负责根据工作区环境动态生成 System Prompt */
 export class PromptComposer {
@@ -37,9 +26,6 @@ export class PromptComposer {
   private readonly planMode: boolean;
   private readonly planStore: PlanStore;
   private readonly todoStore: TodoStore;
-  private readonly skillRegistry?: ISkillRegistry;
-  private readonly nudger?: IMemoryNudger;
-  private readonly sessionId?: string;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
   private readonly goalManager?: GoalManager;
   private readonly onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
@@ -48,9 +34,6 @@ export class PromptComposer {
    * @param workDir 工作目录
    * @param planMode 是否启用 Plan Mode
    * @param options 可选配置
-   *   - sessionId: 会话 ID（用于 Nudger）
-   *   - skillRegistry: 技能注册表实例（测试时可注入 mock）
-   *   - memoryNudger: 记忆提示器实例（测试时可注入 mock）
    *   - goalManager: GoalManager 单例（注入后把 active goal 注入 prompt）
    *   - todoStore: TodoStore 单例（注入后与 TodoTool 共享,根治跨实例不可见 bug）
    */
@@ -58,9 +41,6 @@ export class PromptComposer {
     workDir: string,
     planMode = false,
     options?: {
-      sessionId?: string;
-      skillRegistry?: ISkillRegistry;
-      memoryNudger?: IMemoryNudger;
       goalManager?: GoalManager;
       todoStore?: TodoStore;
       skillLoader?: SkillLoader;
@@ -74,25 +54,14 @@ export class PromptComposer {
     // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
     // 未注入则内部 new,保持向后兼容;单实例场景不受跨实例 bug 影响。
     this.todoStore = options?.todoStore ?? new TodoStore(workDir);
-    this.sessionId = options?.sessionId;
-
-    // Registry lifecycle belongs to the host. The composer never starts hidden
-    // asynchronous initialization from its constructor.
-    this.skillRegistry = options?.skillRegistry;
-
-    // 初始化 Nudger（可选）
-    this.nudger = options?.memoryNudger;
 
     // GoalManager（可选注入）
     this.goalManager = options?.goalManager;
     this.onInstructionsLoaded = options?.onInstructionsLoaded;
   }
 
-  /**
-   * 组装并返回完整的系统提示词字符串
-   * @param turnCount 当前轮次（用于触发 Periodic Nudge）
-   */
-  async build(turnCount = 0): Promise<string> {
+  /** 组装并返回完整的系统提示词字符串。 */
+  async build(): Promise<string> {
     const parts: string[] = [];
     const loadedInstructionPaths: string[] = [];
 
@@ -142,13 +111,7 @@ ${agentsContent}
       parts.push(skillsContent);
     }
 
-    // 5. 技能记忆（新增）
-    const skillContext = await this.buildSkillContext();
-    if (skillContext) {
-      parts.push(skillContext);
-    }
-
-    // 5.5 结构化 TodoList:注入当前任务清单状态(空清单不注入)
+    // 5. 结构化 TodoList:注入当前任务清单状态(空清单不注入)
     // todo 失败不阻断 prompt 组装,降级为跳过
     try {
       const todoContext = await this.todoStore.buildTodoContext();
@@ -159,7 +122,7 @@ ${agentsContent}
       logger.warn({ err }, "[composer] 构建 TodoList 上下文失败,降级跳过");
     }
 
-    // 5.6 Goal Mode:注入当前激活目标状态(无 active goal 不注入)
+    // 6. Goal Mode:注入当前激活目标状态(无 active goal 不注入)
     // 对标 todo 注入,让模型每轮"看到"自己追的长程目标与 budget 约束。
     // GoalManager 单例由 host 注入;未注入(goalManager=undefined)则跳过。
     try {
@@ -173,78 +136,8 @@ ${agentsContent}
       logger.warn({ err }, "[composer] 构建 Goal 上下文失败,降级跳过");
     }
 
-    // 6. Periodic Nudge（新增）
-    if (this.nudger && this.sessionId && turnCount > 0) {
-      try {
-        const nudge = await this.nudger.generate(this.sessionId, turnCount);
-        if (nudge) {
-          parts.push(nudge);
-        }
-      } catch (err) {
-        logger.warn({ err }, "[composer] Nudge 生成失败");
-      }
-    }
-
     await this.onInstructionsLoaded?.(loadedInstructionPaths);
     return parts.join("\n\n");
-  }
-
-  /**
-   * 构建技能记忆上下文（格式化为 Markdown）
-   */
-  private async buildSkillContext(): Promise<string | null> {
-    if (!this.skillRegistry) return null;
-    try {
-      const topSkills = this.skillRegistry.getTopSkills(5);
-      if (topSkills.length === 0) {
-        return null;
-      }
-
-      const parts = ["# 已掌握的技能 (来自 Pico workspace memory)"];
-
-      for (const skill of topSkills) {
-        const { successCount, failCount } = skill.stats;
-        const total = successCount + failCount || 1;
-        const successRate = ((successCount / total) * 100).toFixed(0);
-
-        parts.push(`\n## ${skill.name} (成功率 ${successRate}%)`);
-        parts.push(`- **触发条件**: ${skill.trigger}`);
-        parts.push(`- **执行步骤**:`);
-        // 缩进 instructions
-        const indented = skill.instructions
-          .split("\n")
-          .map((line) => `  ${line}`)
-          .join("\n");
-        parts.push(indented);
-
-        // 展示第一个已知问题（如果有）
-        if (skill.knownFailures.length > 0) {
-          const firstFailure = skill.knownFailures[0];
-          if (firstFailure) {
-            parts.push(
-              `- **已知问题** (出现 ${firstFailure.occurrences} 次): ${firstFailure.errorPattern.slice(0, 100)}`,
-            );
-            if (firstFailure.solution) {
-              parts.push(`  解决方案: ${firstFailure.solution}`);
-            }
-          }
-        }
-
-        parts.push(`- **统计**: 成功 ${successCount} 次，失败 ${failCount} 次`);
-      }
-
-      parts.push("\n💡 提示: 遇到匹配的触发条件时，优先使用已掌握的技能。");
-
-      return parts.join("\n");
-    } catch (err) {
-      logger.warn({ err }, "[composer] 构建技能记忆失败");
-      return null;
-    }
-  }
-
-  /** 获取 SkillRegistry 实例（用于外部记录技能执行） */
-  getSkillRegistry(): ISkillRegistry | undefined {
-    return this.skillRegistry;
   }
 }
 

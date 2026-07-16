@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import process from "node:process";
 
 const EXPECTED_NODE_MAJOR = 22;
@@ -26,30 +29,37 @@ if (nodeMajor !== EXPECTED_NODE_MAJOR) {
   fail(`项目固定使用 Node ${EXPECTED_NODE_MAJOR}，检测到 Node ${nodeMajor}。`, "Node 版本不匹配");
 } else {
   let db;
+  let probeDirectory;
 
   try {
     const { default: Database } = await import("better-sqlite3");
-    db = new Database(":memory:");
+    probeDirectory = mkdtempSync(join(tmpdir(), "pico-storage-check-"));
+    db = new Database(join(probeDirectory, "capability.sqlite"));
 
     const sqliteVersion = db.prepare("SELECT sqlite_version() AS version").get().version;
-    const hasFts5 = db
-      .prepare("SELECT sqlite_compileoption_used('ENABLE_FTS5') AS enabled")
-      .get().enabled;
-    if (hasFts5 !== 1) throw new Error("SQLite 未编译 ENABLE_FTS5");
-
-    db.exec("CREATE VIRTUAL TABLE capability_probe USING fts5(content, tokenize='trigram')");
-    db.prepare("INSERT INTO capability_probe(content) VALUES (?)").run("pico storage capability");
-    const match = db
-      .prepare("SELECT content FROM capability_probe WHERE capability_probe MATCH ?")
-      .get("storage");
-    if (match?.content !== "pico storage capability") {
-      throw new Error("FTS5 trigram 写入或检索校验失败");
+    const journalMode = db.pragma("journal_mode = WAL", { simple: true });
+    db.pragma("foreign_keys = ON");
+    const foreignKeys = db.pragma("foreign_keys", { simple: true });
+    if (journalMode !== "wal" || foreignKeys !== 1) {
+      throw new Error(`SQLite WAL/foreign_keys 初始化失败 (${journalMode}/${foreignKeys})`);
+    }
+    db.exec("CREATE TABLE capability_probe (id INTEGER PRIMARY KEY, content TEXT NOT NULL)");
+    const writeAndRead = db.transaction((content) => {
+      db.prepare("INSERT INTO capability_probe(content) VALUES (?)").run(content);
+      return db.prepare("SELECT content FROM capability_probe WHERE id = 1").get();
+    });
+    const row = writeAndRead.immediate("pico storage capability");
+    if (row?.content !== "pico storage capability") {
+      throw new Error("SQLite immediate transaction 写入或读取校验失败");
     }
 
-    console.log(`[storage-check] 通过: ${runtime}, SQLite ${sqliteVersion}, FTS5 trigram`);
+    console.log(
+      `[storage-check] 通过: ${runtime}, SQLite ${sqliteVersion}, native transaction/WAL`,
+    );
   } catch (error) {
-    fail("better-sqlite3 原生模块或 FTS5 trigram 不可用。", error);
+    fail("better-sqlite3 原生模块或项目所需 SQLite 能力不可用。", error);
   } finally {
     db?.close();
+    if (probeDirectory) rmSync(probeDirectory, { recursive: true, force: true });
   }
 }

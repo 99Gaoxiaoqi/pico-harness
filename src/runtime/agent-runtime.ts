@@ -690,11 +690,6 @@ export async function executeAgentRuntime(
     }
     const systemPromptFactory = async (): Promise<string> => {
       const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
-        sessionId: session.id,
-        skillRegistry: runtimeState.skillRegistry,
-        ...(runtimeState.memoryNudger !== undefined
-          ? { memoryNudger: runtimeState.memoryNudger }
-          : {}),
         goalManager,
         todoStore,
         skillLoader: skillLoaderFactory(workDir),
@@ -705,7 +700,7 @@ export async function executeAgentRuntime(
             { signal: dependencies.signal },
           );
         },
-      }).build(runtimeState.conversationTurnCount(session));
+      }).build();
       if (
         backgroundPolicy ||
         !dependencies.scheduleDraftCoordinator ||

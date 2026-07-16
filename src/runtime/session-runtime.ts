@@ -5,9 +5,7 @@ import { globalSessionManager, type Session, type SessionManager } from "../engi
 import { SteerQueue } from "../engine/steer-queue.js";
 import type { Message } from "../schema/message.js";
 import { FileIndex } from "../input/file-index.js";
-import { MemoryNudger } from "../memory/memory-nudger.js";
 import { logger } from "../observability/logger.js";
-import { SkillRegistry } from "../memory/skill-registry.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import type { CompletionOutboxRecord } from "../tasks/runtime-types.js";
@@ -77,8 +75,6 @@ export interface SessionRuntime {
   readonly delegationManager: DelegationManager;
   readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
   readonly hookRewakeQueue: HookRewakeQueue;
-  readonly skillRegistry: SkillRegistry;
-  readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
   readonly codeIntelligence: CodeIntelligenceService;
@@ -100,7 +96,6 @@ export interface SessionRuntime {
   ): Promise<HookOutput>;
   drainHookEvents(): Promise<void>;
   assertCompatible(session: Session): void;
-  conversationTurnCount(session: Session): number;
   dispose(): Promise<void>;
 }
 
@@ -417,8 +412,6 @@ async function createPinnedSessionRuntime(
     : undefined;
 
   const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
-  const skillRegistry = new SkillRegistry(workDir, { picoHome });
-  await skillRegistry.init();
   const goalManager = new GoalManager();
   const unbindGoalManager = session.bindGoalManager(goalManager);
   const codeIntelligenceManager = new CodeIntelligenceManager({
@@ -541,8 +534,6 @@ async function createPinnedSessionRuntime(
     }),
     delegationCompletionQueue,
     hookRewakeQueue,
-    skillRegistry,
-    memoryNudger: new MemoryNudger(skillRegistry, session.sessionSummaryStore),
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue,
     codeIntelligence,
@@ -693,8 +684,6 @@ interface DefaultSessionRuntimeOptions {
   delegationManager: DelegationManager;
   delegationCompletionQueue: DelegationCompletionWakeQueue;
   hookRewakeQueue: HookRewakeQueue;
-  skillRegistry: SkillRegistry;
-  memoryNudger: MemoryNudger | undefined;
   fileIndex: FileIndex;
   steerQueue: SteerQueue;
   codeIntelligence: CodeIntelligenceService;
@@ -720,8 +709,6 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly delegationManager: DelegationManager;
   readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
   readonly hookRewakeQueue: HookRewakeQueue;
-  readonly skillRegistry: SkillRegistry;
-  readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
   readonly codeIntelligence: CodeIntelligenceService;
@@ -756,8 +743,6 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.delegationManager = options.delegationManager;
     this.delegationCompletionQueue = options.delegationCompletionQueue;
     this.hookRewakeQueue = options.hookRewakeQueue;
-    this.skillRegistry = options.skillRegistry;
-    this.memoryNudger = options.memoryNudger;
     this.fileIndex = options.fileIndex;
     this.steerQueue = options.steerQueue;
     this.codeIntelligence = options.codeIntelligence;
@@ -875,13 +860,6 @@ class DefaultSessionRuntime implements SessionRuntime {
       );
     }
     throw new Error(`SessionRuntime is bound to a different Session instance: ${this.sessionId}`);
-  }
-
-  conversationTurnCount(session: Session): number {
-    this.assertCompatible(session);
-    return session
-      .getHistory()
-      .filter((message) => message.role === "user" && message.toolCallId === undefined).length;
   }
 
   async dispose(): Promise<void> {

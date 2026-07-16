@@ -10,7 +10,6 @@ import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { primeTokenizer } from "../context/token-counter.js";
-import { FTS5Store } from "../memory/fts5-store.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
@@ -268,9 +267,6 @@ async function isEntrypoint(): Promise<boolean> {
 }
 
 async function executeEntrypoint(): Promise<void> {
-  ["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((event) => {
-    process.on(event, () => FTS5Store.closeAll());
-  });
   const runtime: CliRuntime = {
     env: process.env,
     version: await loadPackageVersion(),

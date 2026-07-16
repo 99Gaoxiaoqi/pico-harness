@@ -6,7 +6,6 @@ import {
   type StorageDoctorFinding,
   type StorageDoctorReport,
 } from "../storage/storage-doctor.js";
-import type { MemoryBackendStatus } from "../memory/memory-store.js";
 
 export type WorkspaceDiagnosticStatus = "ok" | "warning" | "error" | "unavailable";
 
@@ -34,7 +33,6 @@ export interface WorkspaceDoctorOptions {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly taskRuntimeAvailable?: boolean;
   readonly taskRuntimeDiagnostic?: string;
-  readonly memoryStatus?: MemoryBackendStatus;
   readonly storageDoctor?: Pick<StorageDoctor, "scan">;
   readonly configuration?: WorkspaceConfigurationDiagnostic;
 }
@@ -106,7 +104,6 @@ export async function runWorkspaceDoctor(
       options.taskRuntimeAvailable ? "healthy" : "unavailable",
       options.taskRuntimeDiagnostic,
     ),
-    memoryCheck(options.memoryStatus),
     storageCheck(storage.report, storage.error),
   ];
   const output = [
@@ -135,7 +132,6 @@ export async function runWorkspaceDoctor(
     ...(options.taskRuntimeDiagnostic
       ? [`Task runtime reason: ${options.taskRuntimeDiagnostic}`]
       : []),
-    ...renderMemoryBackend(options.memoryStatus),
     ...renderStorage(storage.report, storage.error),
   ].join("\n");
   return {
@@ -187,17 +183,6 @@ function check(
   recommendation?: string,
 ): WorkspaceDiagnosticCheck {
   return { id, label, status, summary, ...(recommendation ? { recommendation } : {}) };
-}
-
-function memoryCheck(status: MemoryBackendStatus | undefined): WorkspaceDiagnosticCheck {
-  if (!status) return check("memory", "Memory", "unavailable", "no live session");
-  return check(
-    "memory",
-    "Memory",
-    status.state === "healthy" ? "ok" : "warning",
-    `${status.backend} (${status.state}; source=${status.persistentSource})`,
-    status.recommendation,
-  );
 }
 
 function runtimeLedgerCheck(
@@ -268,16 +253,6 @@ async function scanStorage(options: WorkspaceDoctorOptions): Promise<{
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
-}
-
-function renderMemoryBackend(status: MemoryBackendStatus | undefined): string[] {
-  if (!status) return ["Memory: unavailable (no live session)"];
-  return [
-    `Memory: ${status.backend} (${status.state}; source=${status.persistentSource})`,
-    `Memory runtime: ${status.nodeVersion}; ABI ${status.nodeModuleAbi ?? "unknown"}`,
-    ...(status.reason ? [`Memory reason: ${status.reason}`] : []),
-    ...(status.recommendation ? [`Memory recommendation: ${status.recommendation}`] : []),
-  ];
 }
 
 function renderRuntimeLedger(
