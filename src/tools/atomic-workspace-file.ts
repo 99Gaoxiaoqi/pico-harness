@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
-import { lstat, open, rename, unlink, type FileHandle } from "node:fs/promises";
+import { lstat, open, rename, stat, statfs, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -11,6 +11,8 @@ const LINUX_O_PATH_FLAG = 0o10000000;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
 const MACOS_PROVENANCE_ATTRIBUTE = "com.apple.provenance";
 const LINUX_CAPABILITY_ATTRIBUTE = "security.capability";
+const LINUX_POSIX_ACL_ATTRIBUTE = "system.posix_acl_access";
+const LINUX_PROC_SUPER_MAGIC = 0x9fa0n;
 const METADATA_PROBE_MAX_BYTES = 256 * 1024;
 const execFileAsync = promisify(execFile);
 
@@ -183,9 +185,9 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
       // 先由 open(0666) 得到与旧实现相同的 umask/default-ACL 模式，再收紧暂存权限。
       await handle.chmod(0o600);
     } else if (linuxMetadataSource) {
-      // 属性直接写入已打开的临时 inode；随后即使内容为空也先 ftruncate，确保内核
-      // 清除 security.capability，再写用户内容并在发布前逐项复核。
-      await applyLinuxExtendedMetadata(
+      // 暂存阶段只迁移不会放宽访问的 user.* 属性；ACL 延迟到内容完整且发布前
+      // 路径复核通过后再应用，其他安全 namespace 只接受同目录自然继承的相同值。
+      await stageLinuxExtendedMetadata(
         linuxMetadataSource,
         handle,
         temporaryIdentity,
@@ -199,11 +201,21 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     await assertDirectoryIdentity(directory, directoryIdentity);
 
     await writeAll(handle, bytes);
+    await handle.sync();
+    const stagedTemporaryVersion = toFileVersion(await handle.stat({ bigint: true }));
+
+    // 在放宽 owner/mode/ACL 前完成最后一次原请求复核；失败时临时文件仍保持 0600。
+    await input.revalidateTarget();
+    await assertDirectoryIdentity(directory, directoryIdentity);
+    await assertTargetPrecondition(input.targetPath, input.precondition);
+    await assertTemporaryVersion(temporaryPath, stagedTemporaryVersion);
+
     if (input.precondition.kind === "file") {
       await preserveOwnership(handle, input.precondition.version, temporaryPath);
     }
     // 只发布普通 rwx 位。覆盖时不复活 setuid/setgid/sticky；新建时保持 0666 + umask。
     await handle.chmod(publishedPermissionMode);
+    await finalizeLinuxExtendedMetadata(handle, linuxMetadataSource, temporaryPath);
     await handle.sync();
     const beforeMetadataVerification = await handle.stat({ bigint: true });
     await assertMacExtendedMetadataPreserved(temporaryPath, macMetadata);
@@ -223,16 +235,19 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
       temporaryPath,
     );
     finalizedTemporaryVersion = toFileVersion(finalizedTemporary);
-    await handle.close();
-    handle = undefined;
+    if (!linuxMetadataSource) {
+      await handle.close();
+      handle = undefined;
+      await input.revalidateTarget();
+    }
 
-    await input.revalidateTarget();
     await assertDirectoryIdentity(directory, directoryIdentity);
     await assertTargetPrecondition(input.targetPath, input.precondition);
     await assertTemporaryVersion(temporaryPath, finalizedTemporaryVersion);
     await rename(temporaryPath, input.targetPath);
     published = true;
   } finally {
+    if (!published && linuxMetadataSource) await handle?.chmod(0).catch(() => undefined);
     await handle?.close().catch(() => undefined);
     await linuxMetadataSource?.handle.close().catch(() => undefined);
     if (!published && temporaryIdentity) {
@@ -266,26 +281,40 @@ async function openLinuxMetadataSource(
   }
 }
 
-async function applyLinuxExtendedMetadata(
+async function stageLinuxExtendedMetadata(
   source: LinuxMetadataSource,
   destination: FileHandle,
   expectedDestination: FileVersion,
   temporaryPath: string,
 ): Promise<void> {
   const sourceDescriptorPath = linuxDescriptorPath(source.handle);
-  const destinationDescriptorPath = `/proc/${process.pid}/fd/${destination.fd}`;
-  const expectedAttributes = publishedLinuxAttributes(source.attributes);
   const currentAttributes = await readLinuxExtendedAttributes(destination, temporaryPath);
+  assertSupportedLinuxAttributeNamespaces(source.attributes, sourceDescriptorPath);
+  assertSupportedLinuxAttributeNamespaces(currentAttributes, temporaryPath);
 
-  for (const [name, value] of [...expectedAttributes].sort(([left], [right]) =>
-    left.localeCompare(right),
-  )) {
+  // SELinux/IMA/EVM/trusted/system 等语义可能与内容或 LSM 绑定，绝不能在写入后
+  // 重新附加。只有临时 inode 已从同目录自然继承完全相同的值时才继续。
+  for (const [name, value] of source.attributes) {
+    if (isManagedLinuxAttribute(name)) continue;
+    if (currentAttributes.get(name) !== value) {
+      throw new Error(`目标含无法安全迁移的 Linux 扩展属性，已拒绝覆盖: ${temporaryPath}`);
+    }
+  }
+  for (const [name, value] of currentAttributes) {
+    if (isManagedLinuxAttribute(name)) continue;
+    if (source.attributes.get(name) !== value) {
+      throw new Error(`临时文件含无法安全迁移的 Linux 扩展属性，已拒绝覆盖: ${temporaryPath}`);
+    }
+  }
+
+  for (const [name, value] of sortedLinuxAttributes(source.attributes)) {
+    if (!isUserLinuxAttribute(name)) continue;
     if (currentAttributes.get(name) === value) continue;
-    await runLinuxSetfattr(["--name", name, "--value", value, "--", destinationDescriptorPath]);
+    await setLinuxExtendedAttribute(destination, name, value, temporaryPath);
   }
   for (const name of [...currentAttributes.keys()].sort()) {
-    if (expectedAttributes.has(name)) continue;
-    await runLinuxSetfattr(["--remove", name, "--", destinationDescriptorPath]);
+    if (!isUserLinuxAttribute(name) || source.attributes.has(name)) continue;
+    await removeLinuxExtendedAttribute(destination, name, temporaryPath);
   }
 
   const [sourceAfter, destinationAfter] = await Promise.all([
@@ -293,12 +322,48 @@ async function applyLinuxExtendedMetadata(
     destination.stat({ bigint: true }),
   ]);
   assertRegularNonSymlink(sourceAfter, sourceDescriptorPath);
-  assertRegularNonSymlink(destinationAfter, destinationDescriptorPath);
+  assertRegularNonSymlink(destinationAfter, temporaryPath);
   if (!sameFileVersion(source.version, toFileVersion(sourceAfter))) {
     throw new Error(`复制扩展元数据时源文件发生并发变化: ${sourceDescriptorPath}`);
   }
   if (!sameFileIdentity(expectedDestination, toFileVersion(destinationAfter))) {
     throw new Error(`复制扩展元数据时临时文件已被替换: ${temporaryPath}`);
+  }
+}
+
+async function finalizeLinuxExtendedMetadata(
+  destination: FileHandle,
+  source: LinuxMetadataSource | undefined,
+  temporaryPath: string,
+): Promise<void> {
+  if (!source) return;
+  const current = await readLinuxExtendedAttributes(destination, temporaryPath);
+
+  for (const [name, value] of sortedLinuxAttributes(source.attributes)) {
+    if (!isUserLinuxAttribute(name) || current.get(name) === value) continue;
+    await setLinuxExtendedAttribute(destination, name, value, temporaryPath);
+  }
+  for (const name of [...current.keys()].sort()) {
+    if (isUserLinuxAttribute(name) && !source.attributes.has(name)) {
+      await removeLinuxExtendedAttribute(destination, name, temporaryPath);
+    }
+  }
+
+  if (current.has(LINUX_CAPABILITY_ATTRIBUTE)) {
+    await removeLinuxExtendedAttribute(destination, LINUX_CAPABILITY_ATTRIBUTE, temporaryPath);
+  }
+  const expectedAcl = source.attributes.get(LINUX_POSIX_ACL_ATTRIBUTE);
+  if (expectedAcl === undefined) {
+    if (current.has(LINUX_POSIX_ACL_ATTRIBUTE)) {
+      await removeLinuxExtendedAttribute(destination, LINUX_POSIX_ACL_ATTRIBUTE, temporaryPath);
+    }
+  } else if (current.get(LINUX_POSIX_ACL_ATTRIBUTE) !== expectedAcl) {
+    await setLinuxExtendedAttribute(
+      destination,
+      LINUX_POSIX_ACL_ATTRIBUTE,
+      expectedAcl,
+      temporaryPath,
+    );
   }
 }
 
@@ -319,15 +384,19 @@ async function readLinuxExtendedAttributes(
   handle: FileHandle,
   displayPath: string,
 ): Promise<ReadonlyMap<string, string>> {
-  const descriptorPath = linuxDescriptorPath(handle);
   let lastError: unknown;
   for (const command of ["/usr/bin/getfattr", "/bin/getfattr"] as const) {
     try {
-      const { stdout } = await execFileAsync(
+      const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
+      const { stdout, stderr } = await execFileAsync(
         command,
         ["--absolute-names", "--dump", "--match=-", "--encoding=hex", "--", descriptorPath],
         linuxMetadataProcessOptions(),
       );
+      if (stderr.length > 0) {
+        throw new Error("getfattr reported an incomplete metadata read");
+      }
+      await assertLinuxDescriptorBinding(handle, displayPath);
       return parseLinuxAttributeDump(stdout, displayPath);
     } catch (error) {
       lastError = error;
@@ -339,18 +408,78 @@ async function readLinuxExtendedAttributes(
   });
 }
 
-async function runLinuxSetfattr(args: readonly string[]): Promise<void> {
+async function setLinuxExtendedAttribute(
+  handle: FileHandle,
+  name: string,
+  value: string,
+  displayPath: string,
+): Promise<void> {
+  await runLinuxSetfattr(handle, ["--name", name, "--value", value], displayPath);
+}
+
+async function removeLinuxExtendedAttribute(
+  handle: FileHandle,
+  name: string,
+  displayPath: string,
+): Promise<void> {
+  await runLinuxSetfattr(handle, ["--remove", name], displayPath);
+}
+
+async function runLinuxSetfattr(
+  handle: FileHandle,
+  args: readonly string[],
+  displayPath: string,
+): Promise<void> {
   let lastError: unknown;
   for (const command of ["/usr/bin/setfattr", "/bin/setfattr"] as const) {
     try {
-      await execFileAsync(command, [...args], linuxMetadataProcessOptions());
+      const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
+      const { stderr } = await execFileAsync(
+        command,
+        [...args, "--", descriptorPath],
+        linuxMetadataProcessOptions(),
+      );
+      if (stderr.length > 0) {
+        throw new Error("setfattr reported an incomplete metadata write");
+      }
+      await assertLinuxDescriptorBinding(handle, displayPath);
       return;
     } catch (error) {
       lastError = error;
       if (!hasErrnoCode(error, "ENOENT")) break;
     }
   }
-  throw new Error("无法写入 Linux ACL/扩展属性，已拒绝覆盖", { cause: lastError });
+  throw new Error(`无法写入 Linux ACL/扩展属性，已拒绝覆盖: ${displayPath}`, {
+    cause: lastError,
+  });
+}
+
+async function assertLinuxDescriptorBinding(
+  handle: FileHandle,
+  displayPath: string,
+): Promise<string> {
+  const descriptorPath = linuxDescriptorPath(handle);
+  try {
+    const [filesystem, linkInfo, pathInfo, handleInfo] = await Promise.all([
+      statfs(dirname(descriptorPath), { bigint: true }),
+      lstat(descriptorPath, { bigint: true }),
+      stat(descriptorPath, { bigint: true }),
+      handle.stat({ bigint: true }),
+    ]);
+    if (filesystem.type !== LINUX_PROC_SUPER_MAGIC || !linkInfo.isSymbolicLink()) {
+      throw new Error("descriptor path is not a procfs symlink");
+    }
+    assertRegularNonSymlink(pathInfo, descriptorPath);
+    assertRegularNonSymlink(handleInfo, displayPath);
+    if (!sameFileIdentity(toFileVersion(pathInfo), toFileVersion(handleInfo))) {
+      throw new Error("descriptor path does not identify the opened file");
+    }
+    return descriptorPath;
+  } catch (error) {
+    throw new Error(`Linux 文件描述符绑定验证失败，已拒绝覆盖: ${displayPath}`, {
+      cause: error,
+    });
+  }
 }
 
 function linuxMetadataProcessOptions() {
@@ -372,6 +501,34 @@ function parseLinuxAttributeDump(output: string, displayPath: string): ReadonlyM
     attributes.set(match[1]!, match[2]!.toLowerCase());
   }
   return attributes;
+}
+
+function assertSupportedLinuxAttributeNamespaces(
+  attributes: ReadonlyMap<string, string>,
+  displayPath: string,
+): void {
+  for (const name of attributes.keys()) {
+    if (/^(?:security|system|trusted|user)\./u.test(name)) continue;
+    throw new Error(`目标含不支持的 Linux 扩展属性 ${name}，已拒绝覆盖: ${displayPath}`);
+  }
+}
+
+function isUserLinuxAttribute(name: string): boolean {
+  return name.startsWith("user.");
+}
+
+function isManagedLinuxAttribute(name: string): boolean {
+  return (
+    isUserLinuxAttribute(name) ||
+    name === LINUX_POSIX_ACL_ATTRIBUTE ||
+    name === LINUX_CAPABILITY_ATTRIBUTE
+  );
+}
+
+function sortedLinuxAttributes(
+  attributes: ReadonlyMap<string, string>,
+): readonly (readonly [string, string])[] {
+  return [...attributes].sort(([left], [right]) => left.localeCompare(right));
 }
 
 function publishedLinuxAttributes(
