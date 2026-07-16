@@ -217,10 +217,11 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     // 2. 翻译工具定义
+    const outputTokenField = this.config.capabilities?.outputTokenField ?? "max_tokens";
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
-      max_tokens: this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens,
+      [outputTokenField]: this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens,
     };
     // 无可用工具时不挂载 tools,模型只能纯文本输出
     if (availableTools.length > 0) {
@@ -362,11 +363,12 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
+    const outputTokenField = this.config.capabilities?.outputTokenField ?? "max_tokens";
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
       stream: true, // 关键:启用流式
-      max_tokens: this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens,
+      [outputTokenField]: this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens,
     };
     if (this.config.capabilities?.streamUsage === true) {
       body.stream_options = { include_usage: true };
