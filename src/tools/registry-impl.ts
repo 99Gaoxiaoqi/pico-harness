@@ -616,17 +616,33 @@ async function readBoundedRegularUtf8(
       );
     }
 
-    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    const maximumCapacity = maxBytes + 1;
+    let buffer = Buffer.allocUnsafe(info.size + 1);
     let offset = 0;
-    while (offset < buffer.length) {
+    while (true) {
+      if (offset === buffer.length) {
+        if (buffer.length === maximumCapacity) {
+          throw new Error(
+            `文件读取超过 read_file 上限 ${maxBytes} 字节；内容可能在读取期间增长，请用 grep 先缩小范围。`,
+          );
+        }
+        const nextCapacity = Math.min(
+          maximumCapacity,
+          Math.max(buffer.length + 1, buffer.length * 2),
+        );
+        const grown = Buffer.allocUnsafe(nextCapacity);
+        buffer.copy(grown, 0, 0, offset);
+        buffer = grown;
+      }
+
       const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
       if (bytesRead === 0) break;
       offset += bytesRead;
-    }
-    if (offset > maxBytes) {
-      throw new Error(
-        `文件读取超过 read_file 上限 ${maxBytes} 字节；内容可能在读取期间增长，请用 grep 先缩小范围。`,
-      );
+      if (offset > maxBytes) {
+        throw new Error(
+          `文件读取超过 read_file 上限 ${maxBytes} 字节；内容可能在读取期间增长，请用 grep 先缩小范围。`,
+        );
+      }
     }
     return buffer.subarray(0, offset).toString("utf8");
   } finally {

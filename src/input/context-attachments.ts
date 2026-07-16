@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { open, readdir, type FileHandle } from "node:fs/promises";
+import { open, opendir, type FileHandle } from "node:fs/promises";
 import { relative } from "node:path";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { parseMentions, type MentionReference } from "./mentions.js";
@@ -214,12 +214,22 @@ async function readDirectoryAttachment(
   reference: string,
   limits: AttachmentLimits,
 ): Promise<ContextAttachment> {
-  const entries = await readdir(fullPath, { withFileTypes: true });
-  const names = entries.map((entry) => `${entry.name}${entry.isDirectory() ? "/" : ""}`).sort();
-  const visible = names.slice(0, limits.maxDirectoryEntries);
-  const truncated = names.length > visible.length;
+  const directory = await opendir(fullPath);
+  const sampledNames: string[] = [];
+  try {
+    while (sampledNames.length <= limits.maxDirectoryEntries) {
+      const entry = await directory.read();
+      if (!entry) break;
+      sampledNames.push(`${entry.name}${entry.isDirectory() ? "/" : ""}`);
+    }
+  } finally {
+    await directory.close();
+  }
+
+  const truncated = sampledNames.length > limits.maxDirectoryEntries;
+  const visible = sampledNames.slice(0, limits.maxDirectoryEntries).sort();
   const content = truncated
-    ? `${visible.join("\n")}\n... (共 ${names.length} 项,已截断至前 ${visible.length} 项)`
+    ? `${visible.join("\n")}\n... (目录项超过 ${limits.maxDirectoryEntries} 项，已截断)`
     : visible.join("\n");
 
   return {
