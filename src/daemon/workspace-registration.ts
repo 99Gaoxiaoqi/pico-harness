@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { chmod, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 
@@ -22,8 +22,9 @@ export class WorkspaceRegistrationStore {
     await this.mutate(async () => {
       const state = await this.read();
       workspaces = await normalizeWorkspacePaths(state.workspaces, true);
-      if (!samePaths(state.workspaces, workspaces)) {
-        await this.write({ version: VERSION, workspaces });
+      const persisted = await normalizeWorkspacePaths(state.workspaces);
+      if (!samePaths(state.workspaces, persisted)) {
+        await this.write({ version: VERSION, workspaces: persisted });
       }
     });
     return workspaces;
@@ -43,20 +44,30 @@ export class WorkspaceRegistrationStore {
   }
 
   async unregister(workspacePath: string): Promise<string> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath).catch((error: unknown) => {
-      if (isErrno(error, "ENOENT")) return resolve(workspacePath);
-      throw error;
-    });
+    const candidates = await unregisterCandidates(workspacePath);
+    let canonical = candidates[0] ?? resolve(workspacePath);
     await this.mutate(async () => {
       const state = await this.read();
       const normalized = await normalizeWorkspacePaths(state.workspaces);
-      const workspaces = normalized.filter((path) => path !== canonical);
+      canonical = candidates.find((candidate) => normalized.includes(candidate)) ?? canonical;
+      const workspaces = normalized.filter((path) => !candidates.includes(path));
       if (!samePaths(state.workspaces, workspaces)) {
         await this.write({
           version: VERSION,
           workspaces,
         });
       }
+    });
+    return canonical;
+  }
+
+  async resolveRegisteredPath(workspacePath: string): Promise<string> {
+    const candidates = await unregisterCandidates(workspacePath);
+    let canonical = candidates[0] ?? resolve(workspacePath);
+    await this.mutate(async () => {
+      const state = await this.read();
+      const normalized = await normalizeWorkspacePaths(state.workspaces);
+      canonical = candidates.find((candidate) => normalized.includes(candidate)) ?? canonical;
     });
     return canonical;
   }
@@ -101,6 +112,37 @@ export class WorkspaceRegistrationStore {
         if (!isErrno(error, "ENOENT")) throw error;
       });
     }
+  }
+}
+
+async function unregisterCandidates(workspacePath: string): Promise<string[]> {
+  const absolute = resolve(workspacePath);
+  try {
+    return [await canonicalizeWorkspacePath(absolute)];
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+  }
+
+  const ancestor = await nearestExistingAncestor(absolute);
+  if (!ancestor) return [absolute];
+  const canonicalAncestor = await canonicalizeWorkspacePath(ancestor.physical);
+  const physicalTarget = resolve(ancestor.physical, relative(ancestor.logical, absolute));
+  return [...new Set([canonicalAncestor, physicalTarget, absolute])];
+}
+
+async function nearestExistingAncestor(
+  input: string,
+): Promise<{ logical: string; physical: string } | undefined> {
+  let candidate = input;
+  while (true) {
+    try {
+      return { logical: candidate, physical: await realpath(candidate) };
+    } catch (error) {
+      if (!isErrno(error, "ENOENT")) throw error;
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate) return undefined;
+    candidate = parent;
   }
 }
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, listCliSessionSummaries } from "../cli/session-resolver.js";
@@ -2202,12 +2202,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async unregisterWorkspace(workspacePath: string): Promise<JsonValue> {
-    let workspaceExists = true;
-    const canonical = await canonicalizeWorkspacePath(workspacePath).catch((error: unknown) => {
-      if (!isNodeCode(error, "ENOENT")) throw error;
-      workspaceExists = false;
-      return resolve(workspacePath);
-    });
+    const canonical = await this.registrationStore.resolveRegisteredPath(workspacePath);
+    const workspaceExists = await access(resolve(workspacePath)).then(
+      () => true,
+      (error: unknown) => {
+        if (isNodeCode(error, "ENOENT")) return false;
+        throw error;
+      },
+    );
     if (workspaceExists) await this.assertNoActiveRuns([canonical], "注销工作区");
     const activeAutomationRuns = this.options.automations?.activeRunReferences([canonical]) ?? [];
     if (activeAutomationRuns.length > 0) {
