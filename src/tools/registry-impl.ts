@@ -917,7 +917,7 @@ export class BashTool implements BaseTool {
   }
 
   private buildSandboxPlan(command: string): SandboxSpawnPlan | undefined {
-    if (isHardlineBashCommand(command)) {
+    if (isHardlineBashCommand(command, this.workDir)) {
       throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
     }
     const sandbox = this.options.sandbox;

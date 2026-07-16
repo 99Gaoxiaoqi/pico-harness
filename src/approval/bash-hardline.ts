@@ -7,6 +7,7 @@ interface ShellWord {
   readonly quotedOrEscaped: boolean;
   readonly unquotedExpansion: boolean;
   readonly outputRedirection: boolean;
+  readonly cwd?: string;
 }
 
 interface ParsedShell {
@@ -19,23 +20,34 @@ interface ParsedShell {
  * Bash hardline 纯判定。只识别不可审批绕过的系统级破坏，
  * 工作区内的普通递归删除仍交给 YOLO 正常执行。
  */
-export function isHardlineBashCommand(command: string): boolean {
-  return isHardlineBashCommandAtDepth(command, 0);
+export function isHardlineBashCommand(command: string, initialCwd?: string): boolean {
+  return isHardlineBashCommandAtDepth(
+    command,
+    0,
+    initialCwd ? normalizeSlashPath(initialCwd.replaceAll("\\", "/")) : UNKNOWN_SHELL_CWD,
+  );
 }
 
-function isHardlineBashCommandAtDepth(command: string, depth: number): boolean {
+function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd: string): boolean {
   if (OTHER_HARDLINE_PATTERNS.some((pattern) => pattern.test(command))) return true;
 
   const parsed = parseShell(command);
   if (depth >= MAX_NESTED_COMMAND_DEPTH && parsed.nestedCommands.length > 0) {
     return true;
   }
-  if (parsed.nestedCommands.some((nested) => isHardlineBashCommandAtDepth(nested, depth + 1))) {
+  if (
+    parsed.nestedCommands.some((nested) =>
+      isHardlineBashCommandAtDepth(nested, depth + 1, initialCwd),
+    )
+  ) {
     return true;
   }
 
+  let cwd = initialCwd;
   for (const words of parsed.commands) {
-    if (isHardlineCommandWords(words, depth)) return true;
+    const contextualWords = words.map((word) => ({ ...word, cwd }));
+    if (isHardlineCommandWords(contextualWords, depth)) return true;
+    cwd = nextShellCwd(contextualWords, cwd) ?? cwd;
   }
 
   return parsed.ambiguous && hasAmbiguousDestructiveRmShape(parsed.commands);
@@ -56,6 +68,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   if (executable === "git" && isDestructiveGitInvocation(args)) return true;
   if (executable === "git-push" && isDestructiveGitPushInvocation(args)) return true;
   if (executable === "env" && hasEnvSplitString(args)) return true;
+  if (executable === "xargs" && isDestructiveXargsInvocation(args, depth)) return true;
   if (POWER_COMMANDS.has(executable)) return true;
   if (POWER_MANAGERS.has(executable) && isPowerManagerInvocation(executable, args)) return true;
   if (executable === "wipefs" && isDestructiveWipefsInvocation(args)) return true;
@@ -74,13 +87,35 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
     if (commandIndex >= 0) {
       const nested = args[commandIndex + 1];
       if (!nested || nested.dynamic || depth >= MAX_NESTED_COMMAND_DEPTH) return true;
-      return isHardlineBashCommandAtDepth(nested.value, depth + 1);
+      return isHardlineBashCommandAtDepth(
+        nested.value,
+        depth + 1,
+        words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD,
+      );
     }
   }
 
   if (executable === "eval") {
     if (args.length === 0 || args.some((word) => word.dynamic)) return true;
-    return isHardlineBashCommandAtDepth(args.map((word) => word.value).join(" "), depth + 1);
+    return isHardlineBashCommandAtDepth(
+      args.map((word) => word.value).join(" "),
+      depth + 1,
+      words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD,
+    );
+  }
+
+  if (FIND_EXEC_FORWARDERS.has(executable)) {
+    const forwarded = findForwardedCommandContext(executable, args, 0);
+    if (forwarded.commandIndex >= 0) {
+      const inheritedCwd = words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD;
+      const forwardedCwd = forwarded.cwd
+        ? resolveForwardedCwd(forwarded.cwd, inheritedCwd)
+        : inheritedCwd;
+      const forwardedWords = args
+        .slice(forwarded.commandIndex)
+        .map((word) => ({ ...word, cwd: forwardedCwd }));
+      if (isHardlineCommandWords(forwardedWords, depth)) return true;
+    }
   }
 
   if (RM_FORWARDING_COMMANDS.has(executable)) {
@@ -153,10 +188,7 @@ function isDestructiveRmInvocation(
     targets.push(word);
   }
 
-  const hasProtectedTarget = targets.some(
-    (target) =>
-      isProtectedRmTarget(target.value) || isPotentiallyProtectedAbsoluteExpansion(target),
-  );
+  const hasProtectedTarget = targets.some((target) => isProtectedMutationTarget(target));
   // rm 的动态参数可能同时改写选项与目标，无法静态证明安全时直接 fail-closed。
   if (hasDynamicArgument || hasProtectedTarget) return true;
   if (!recursive || !force) return false;
@@ -191,71 +223,216 @@ function isDestructiveFindInvocation(args: readonly ShellWord[]): boolean {
   }
 
   const hasProtectedRoot =
-    hasExternalRoots ||
-    roots.some(
-      (root) =>
-        root.dynamic ||
-        isProtectedRmTarget(root.value) ||
-        isPotentiallyProtectedAbsoluteExpansion(root),
-    );
-  if (!hasProtectedRoot) return false;
-  return hasDelete || hasFindDestructiveExecutor(args);
+    hasExternalRoots || roots.some((root) => root.dynamic || isProtectedMutationTarget(root));
+  return (hasProtectedRoot && hasDelete) || hasFindDestructiveExecutor(args, hasProtectedRoot);
 }
 
-function hasFindDestructiveExecutor(args: readonly ShellWord[]): boolean {
+function hasFindDestructiveExecutor(
+  args: readonly ShellWord[],
+  hasProtectedRoot: boolean,
+): boolean {
   for (let index = 0; index < args.length; index++) {
-    if (!FIND_EXEC_ACTIONS.has(args[index]!.value)) continue;
+    const action = args[index]!.value;
+    if (!FIND_EXEC_ACTIONS.has(action)) continue;
     const endIndex = args.findIndex(
       (word, candidateIndex) =>
         candidateIndex > index && (word.value === ";" || word.value === "+"),
     );
     const command = args.slice(index + 1, endIndex < 0 ? args.length : endIndex);
-    if (isFindDestructiveCommand(command)) return true;
+    const executesInMatchDirectory = action === "-execdir" || action === "-okdir";
+    if (isFindDestructiveCommand(command, hasProtectedRoot, executesInMatchDirectory)) {
+      return true;
+    }
   }
   return false;
 }
 
-function isFindDestructiveCommand(command: readonly ShellWord[]): boolean {
+function isFindDestructiveCommand(
+  command: readonly ShellWord[],
+  hasProtectedRoot: boolean,
+  executesInMatchDirectory: boolean,
+): boolean {
   let executableIndex = 0;
+  let effectiveCwd =
+    hasProtectedRoot && executesInMatchDirectory
+      ? FIND_PROTECTED_TARGET_SENTINEL
+      : (command[0]?.cwd ?? SAFE_WORKSPACE_CWD);
   while (executableIndex < command.length) {
     const executable = command[executableIndex]!;
     if (executable.dynamic) return true;
     const name = commandBasename(executable.value);
-    if (FIND_DESTRUCTIVE_EXECUTABLES.has(name)) return true;
-    if (!FIND_EXEC_FORWARDERS.has(name)) return false;
-    executableIndex = findForwardedCommandIndex(name, command, executableIndex + 1);
+    if (!FIND_EXEC_FORWARDERS.has(name)) {
+      return isHardlineCommandWords(
+        command
+          .slice(executableIndex)
+          .map((word) => ({ ...word, cwd: effectiveCwd }))
+          .map((word) => (hasProtectedRoot ? taintFindProtectedTarget(word) : word)),
+        0,
+      );
+    }
+    const forwarded = findForwardedCommandContext(name, command, executableIndex + 1);
+    if (forwarded.cwd) effectiveCwd = resolveForwardedCwd(forwarded.cwd, effectiveCwd);
+    executableIndex = forwarded.commandIndex;
     if (executableIndex < 0) return false;
   }
   return false;
 }
 
-function findForwardedCommandIndex(
+function taintFindProtectedTarget(word: ShellWord): ShellWord {
+  if (!word.value.includes("{}")) return word;
+  return {
+    ...word,
+    value: word.value.replaceAll("{}", FIND_PROTECTED_TARGET_SENTINEL),
+  };
+}
+
+function isDestructiveXargsInvocation(args: readonly ShellWord[], depth: number): boolean {
+  let commandIndex = -1;
+  let replacement: string | undefined;
+  let optionsEnded = false;
+
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (!optionsEnded && value === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && value.startsWith("--")) {
+      const matchedOption = findMatchingLongOption(value, XARGS_OPTIONS_WITH_VALUE);
+      if (matchedOption) {
+        const hasAttachedValue = value.includes("=");
+        const optionValue = hasAttachedValue
+          ? value.slice(value.indexOf("=") + 1)
+          : XARGS_OPTIONS_WITH_OPTIONAL_VALUE.has(matchedOption)
+            ? undefined
+            : args[++index]?.value;
+        if (matchedOption === "--replace") replacement = optionValue ?? "{}";
+      }
+      continue;
+    }
+    if (!optionsEnded && /^-[^-]/u.test(value)) {
+      const matchedOption = [...XARGS_OPTIONS_WITH_VALUE].find(
+        (candidate) => candidate.length === 2 && value.startsWith(candidate),
+      );
+      if (matchedOption) {
+        const optionValue = value === matchedOption ? args[++index]?.value : value.slice(2);
+        if (matchedOption === "-I" || matchedOption === "-J") {
+          replacement = optionValue ?? "{}";
+        }
+      }
+      continue;
+    }
+    commandIndex = index;
+    break;
+  }
+
+  if (commandIndex < 0) return false;
+  const unknownInput: ShellWord = {
+    value: XARGS_PROTECTED_TARGET_SENTINEL,
+    dynamic: true,
+    quotedOrEscaped: false,
+    unquotedExpansion: false,
+    outputRedirection: false,
+    ...(args[commandIndex]?.cwd ? { cwd: args[commandIndex]!.cwd } : {}),
+  };
+  let command = args.slice(commandIndex);
+  if (replacement !== undefined) {
+    command = command.map((word) =>
+      replacement && word.value.includes(replacement)
+        ? {
+            ...word,
+            value: word.value.replaceAll(replacement, XARGS_PROTECTED_TARGET_SENTINEL),
+            dynamic: true,
+          }
+        : word,
+    );
+  } else {
+    command = [...command, unknownInput];
+  }
+  return isHardlineCommandWords(command, depth);
+}
+
+function findForwardedCommandContext(
   wrapper: string,
   words: readonly ShellWord[],
   startIndex: number,
-): number {
-  let skipOperand = wrapper === "chroot" || wrapper === "timeout" ? 1 : 0;
+): { commandIndex: number; cwd?: ShellWord } {
+  let skipOperand = wrapper === "timeout" ? 1 : 0;
+  let optionsEnded = false;
+  let cwd: ShellWord | undefined;
   const optionsWithValue = FIND_WRAPPER_OPTIONS_WITH_VALUE.get(wrapper) ?? EMPTY_STRING_SET;
   for (let index = startIndex; index < words.length; index++) {
+    const word = words[index]!;
     const value = words[index]!.value;
-    if (value === "--") return index + 1 < words.length ? index + 1 : -1;
-    if (wrapper === "env" && isEnvironmentAssignment(value)) continue;
-    if (value.startsWith("--")) {
-      const optionName = value.split("=", 1)[0]!;
-      if (optionsWithValue.has(optionName) && !value.includes("=")) index++;
+    if (!optionsEnded && value === "--") {
+      optionsEnded = true;
       continue;
     }
-    if (/^-[^-]/u.test(value)) {
-      if (optionsWithValue.has(value)) index++;
+    if (
+      !optionsEnded &&
+      (wrapper === "env" || wrapper === "sudo" || wrapper === "doas") &&
+      isEnvironmentAssignment(value)
+    ) {
+      continue;
+    }
+    if (!optionsEnded && value.startsWith("--")) {
+      const matchedOption = findMatchingLongOption(value, optionsWithValue);
+      if (matchedOption) {
+        let optionValue: ShellWord | undefined;
+        if (value.includes("=")) {
+          optionValue = { ...word, value: value.slice(value.indexOf("=") + 1) };
+        } else {
+          optionValue = words[index + 1];
+          index++;
+        }
+        if (isWrapperCwdOption(wrapper, matchedOption)) cwd = optionValue;
+      }
+      continue;
+    }
+    if (!optionsEnded && /^-[^-]/u.test(value)) {
+      const matchedOption = [...optionsWithValue].find(
+        (candidate) => candidate.length === 2 && value.startsWith(candidate),
+      );
+      if (matchedOption) {
+        const optionValue =
+          value === matchedOption
+            ? words[++index]
+            : { ...word, value: value.slice(matchedOption.length) };
+        if (isWrapperCwdOption(wrapper, matchedOption)) cwd = optionValue;
+      }
       continue;
     }
     if (skipOperand > 0) {
       skipOperand--;
       continue;
     }
-    return index;
+    if (wrapper === "chroot" && !cwd) {
+      cwd = word;
+      continue;
+    }
+    return { commandIndex: index, ...(cwd ? { cwd } : {}) };
   }
-  return -1;
+  return { commandIndex: -1, ...(cwd ? { cwd } : {}) };
+}
+
+function isWrapperCwdOption(wrapper: string, option: string): boolean {
+  return (
+    (wrapper === "env" && (option === "-C" || option === "--chdir")) ||
+    (wrapper === "sudo" &&
+      (option === "-D" || option === "-R" || option === "--chdir" || option === "--chroot"))
+  );
+}
+
+function resolveForwardedCwd(cwd: ShellWord, inheritedCwd: string): string {
+  if (cwd.dynamic || cwd.unquotedExpansion || isHomeExpression(cwd.value)) {
+    return UNKNOWN_SHELL_CWD;
+  }
+  const slashPath = cwd.value.replaceAll("\\", "/");
+  if (slashPath.startsWith("/") || /^[A-Za-z]:\//u.test(slashPath)) {
+    return normalizeSlashPath(slashPath);
+  }
+  return resolveAgainstCwd(inheritedCwd, slashPath);
 }
 
 function isFindExpressionStart(value: string): boolean {
@@ -369,9 +546,8 @@ function isDestructiveWipefsInvocation(args: readonly ShellWord[]): boolean {
     const value = word.value;
     return (
       word.dynamic ||
-      value === "--all" ||
-      value === "--offset" ||
-      value.startsWith("--offset=") ||
+      matchesLongOption(value, "--all") ||
+      matchesLongOption(value, "--offset") ||
       (/^-[^-]/u.test(value) && /[ao]/u.test(value.slice(1)))
     );
   });
@@ -383,11 +559,99 @@ function isProtectedMutationInvocation(args: readonly ShellWord[]): boolean {
 }
 
 function isProtectedMutationTarget(target: ShellWord): boolean {
-  return (
+  if (
     target.dynamic ||
     isProtectedRmTarget(target.value) ||
     isPotentiallyProtectedAbsoluteExpansion(target)
+  ) {
+    return true;
+  }
+  const contextualValue = resolveTargetFromCwd(target);
+  if (!contextualValue) return false;
+  const contextualTarget = { ...target, value: contextualValue };
+  return (
+    isProtectedRmTarget(contextualValue) ||
+    isPotentiallyProtectedAbsoluteExpansion(contextualTarget, false)
   );
+}
+
+function resolveTargetFromCwd(target: ShellWord): string | undefined {
+  if (!target.cwd || !target.value || target.value === "-") return undefined;
+  const slashPath = target.value.replaceAll("\\", "/");
+  if (slashPath.startsWith("/") || /^[A-Za-z]:\//u.test(slashPath)) return undefined;
+  if (isHomeExpression(slashPath)) return undefined;
+  return resolveAgainstCwd(target.cwd, slashPath);
+}
+
+function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string | undefined {
+  let effectiveWords = words;
+  let executableIndex = findExecutableIndex(effectiveWords);
+  if (executableIndex < 0) return undefined;
+  let executable = commandBasename(effectiveWords[executableIndex]!.value);
+  while (CWD_FORWARDERS.has(executable)) {
+    const args = effectiveWords.slice(executableIndex + 1);
+    const forwarded = findForwardedCommandContext(executable, args, 0);
+    if (forwarded.commandIndex < 0) return undefined;
+    effectiveWords = args.slice(forwarded.commandIndex);
+    executableIndex = findExecutableIndex(effectiveWords);
+    if (executableIndex < 0) return undefined;
+    executable = commandBasename(effectiveWords[executableIndex]!.value);
+  }
+  if (executable === "eval") {
+    const args = effectiveWords.slice(executableIndex + 1);
+    if (args.length === 0 || args.some((word) => word.dynamic)) return UNKNOWN_SHELL_CWD;
+    return finalStaticShellCwd(args.map((word) => word.value).join(" "), currentCwd);
+  }
+  if (executable === "popd") return UNKNOWN_SHELL_CWD;
+  if (executable !== "cd" && executable !== "pushd") return undefined;
+
+  let optionsEnded = false;
+  let target: ShellWord | undefined;
+  for (const word of effectiveWords.slice(executableIndex + 1)) {
+    if (word.outputRedirection) continue;
+    if (!optionsEnded && word.value === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && word.value.startsWith("-") && word.value !== "-") continue;
+    target = word;
+    break;
+  }
+
+  if (!target || target.dynamic || target.unquotedExpansion || target.value === "-") {
+    return UNKNOWN_SHELL_CWD;
+  }
+  const slashPath = target.value.replaceAll("\\", "/");
+  if (isHomeExpression(slashPath)) return UNKNOWN_SHELL_CWD;
+  if (
+    !slashPath.startsWith("/") &&
+    effectiveWords
+      .slice(0, executableIndex)
+      .some((word) => word.value.toUpperCase().startsWith("CDPATH="))
+  ) {
+    return UNKNOWN_SHELL_CWD;
+  }
+  if (slashPath.startsWith("/") || /^[A-Za-z]:\//u.test(slashPath)) {
+    return normalizeSlashPath(slashPath);
+  }
+  return resolveAgainstCwd(currentCwd, slashPath);
+}
+
+function finalStaticShellCwd(command: string, initialCwd: string): string {
+  const parsed = parseShell(command);
+  if (parsed.ambiguous || parsed.nestedCommands.length > 0) return UNKNOWN_SHELL_CWD;
+  let cwd = initialCwd;
+  for (const words of parsed.commands) {
+    const contextualWords = words.map((word) => ({ ...word, cwd }));
+    cwd = nextShellCwd(contextualWords, cwd) ?? cwd;
+  }
+  return cwd;
+}
+
+function resolveAgainstCwd(cwd: string, target: string): string {
+  const drive = cwd.match(/^([A-Za-z]):(\/.*)$/u);
+  if (!drive) return posix.resolve(cwd, target);
+  return `${drive[1]!.toUpperCase()}:${posix.resolve(drive[2]!, target)}`;
 }
 
 function isDestructiveNativeMutationInvocation(
@@ -397,8 +661,9 @@ function isDestructiveNativeMutationInvocation(
   switch (executable) {
     case "cp":
     case "install":
-    case "ln":
       return isProtectedDestinationInvocation(executable, args);
+    case "ln":
+      return isProtectedLinkInvocation(args);
     case "mv":
       return isProtectedMoveInvocation(args);
     case "sed":
@@ -424,11 +689,22 @@ function isProtectedDestinationInvocation(
   const optionsWithValue =
     executable === "install" ? INSTALL_OPTIONS_WITH_VALUE : COPY_OPTIONS_WITH_VALUE;
   const parsed = collectUtilityOperands(args, optionsWithValue, true);
+  if (parsed.ambiguousDynamicArgument) return true;
   if (parsed.targetDirectory && isProtectedMutationTarget(parsed.targetDirectory)) return true;
+
+  if (
+    executable === "cp" &&
+    isCopyLinkMode(args) &&
+    parsed.operands.some((operand) => isProtectedMutationTarget(operand))
+  ) {
+    return true;
+  }
 
   const directoryMode =
     executable === "install" &&
-    args.some((word) => word.value === "-d" || word.value === "--directory");
+    args.some(
+      (word) => /^-[^-]*d/u.test(word.value) || matchesLongOption(word.value, "--directory"),
+    );
   if (directoryMode) {
     return parsed.operands.some((operand) => isProtectedMutationTarget(operand));
   }
@@ -438,20 +714,40 @@ function isProtectedDestinationInvocation(
 
 function isProtectedMoveInvocation(args: readonly ShellWord[]): boolean {
   const parsed = collectUtilityOperands(args, COPY_OPTIONS_WITH_VALUE, true);
+  if (parsed.ambiguousDynamicArgument) return true;
   if (parsed.targetDirectory && isProtectedMutationTarget(parsed.targetDirectory)) return true;
   return parsed.operands.some((operand) => isProtectedMutationTarget(operand));
 }
 
+function isProtectedLinkInvocation(args: readonly ShellWord[]): boolean {
+  const parsed = collectUtilityOperands(args, COPY_OPTIONS_WITH_VALUE, true);
+  if (parsed.ambiguousDynamicArgument) return true;
+  if (parsed.targetDirectory && isProtectedMutationTarget(parsed.targetDirectory)) return true;
+  return parsed.operands.some((operand) => isProtectedMutationTarget(operand));
+}
+
+function isCopyLinkMode(args: readonly ShellWord[]): boolean {
+  return args.some(
+    (word) =>
+      /^-[^-]*[PRadlrs]/u.test(word.value) ||
+      matchesLongOption(word.value, "--archive") ||
+      matchesLongOption(word.value, "--link") ||
+      matchesLongOption(word.value, "--no-dereference") ||
+      matchesLongOption(word.value, "--recursive") ||
+      matchesLongOption(word.value, "--symbolic-link"),
+  );
+}
+
 function isProtectedSedInPlaceInvocation(args: readonly ShellWord[]): boolean {
   const inPlace = args.some(
-    (word) => /^-[^-]*i/u.test(word.value) || word.value.startsWith("--in-place"),
+    (word) => /^-[^-]*i/u.test(word.value) || matchesLongOption(word.value, "--in-place"),
   );
-  if (!inPlace) return false;
 
   const files: ShellWord[] = [];
   let hasExplicitScript = false;
   let consumedDefaultScript = false;
   let optionsEnded = false;
+  let ambiguousDynamicArgument = false;
   for (let index = 0; index < args.length; index++) {
     const word = args[index]!;
     const value = word.value;
@@ -459,17 +755,23 @@ function isProtectedSedInPlaceInvocation(args: readonly ShellWord[]): boolean {
       optionsEnded = true;
       continue;
     }
-    if (!optionsEnded && SED_SCRIPT_OPTIONS.has(value)) {
-      hasExplicitScript = true;
-      index++;
-      continue;
-    }
-    if (
-      !optionsEnded &&
-      SED_SCRIPT_OPTIONS_WITH_VALUE_PREFIX.some((prefix) => value.startsWith(prefix))
-    ) {
-      hasExplicitScript = true;
-      continue;
+    if (!optionsEnded) {
+      const scriptOption = sedScriptOptionKind(value);
+      if (scriptOption) {
+        hasExplicitScript = true;
+        if (scriptOption === "separate") index++;
+        continue;
+      }
+      if (word.dynamic) {
+        const scriptAlreadyKnown = hasExplicitScript || consumedDefaultScript;
+        const requiredFollowingOperands = scriptAlreadyKnown ? 1 : 2;
+        if (
+          !word.quotedOrEscaped ||
+          countFollowingSedOperands(args, index + 1) >= requiredFollowingOperands
+        ) {
+          ambiguousDynamicArgument = true;
+        }
+      }
     }
     if (!optionsEnded && value.startsWith("-")) continue;
     if (!hasExplicitScript && !consumedDefaultScript) {
@@ -478,15 +780,54 @@ function isProtectedSedInPlaceInvocation(args: readonly ShellWord[]): boolean {
     }
     files.push(word);
   }
+  if (ambiguousDynamicArgument) return true;
+  if (!inPlace) return false;
   return files.some((file) => isProtectedMutationTarget(file));
+}
+
+function countFollowingSedOperands(args: readonly ShellWord[], startIndex: number): number {
+  let count = 0;
+  let optionsEnded = false;
+  for (let index = startIndex; index < args.length; index++) {
+    const word = args[index]!;
+    if (!optionsEnded && word.value === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded) {
+      const scriptOption = sedScriptOptionKind(word.value);
+      if (scriptOption) {
+        if (scriptOption === "separate") index++;
+        continue;
+      }
+      if (word.value.startsWith("-")) continue;
+    }
+    count++;
+  }
+  return count;
+}
+
+function sedScriptOptionKind(value: string): "attached" | "separate" | undefined {
+  if (value.startsWith("--")) {
+    if (!matchesLongOption(value, "--expression") && !matchesLongOption(value, "--file")) {
+      return undefined;
+    }
+    return value.includes("=") ? "attached" : "separate";
+  }
+  if (!/^-[^-]/u.test(value)) return undefined;
+  const optionIndex = value.slice(1).search(/[ef]/u);
+  if (optionIndex < 0) return undefined;
+  return optionIndex + 2 < value.length ? "attached" : "separate";
 }
 
 function hasProtectedUtilityOperand(
   args: readonly ShellWord[],
   optionsWithValue: ReadonlySet<string>,
 ): boolean {
-  return collectUtilityOperands(args, optionsWithValue, false).operands.some((operand) =>
-    isProtectedMutationTarget(operand),
+  const parsed = collectUtilityOperands(args, optionsWithValue, false);
+  return (
+    parsed.ambiguousDynamicArgument ||
+    parsed.operands.some((operand) => isProtectedMutationTarget(operand))
   );
 }
 
@@ -494,10 +835,15 @@ function collectUtilityOperands(
   args: readonly ShellWord[],
   optionsWithValue: ReadonlySet<string>,
   supportsTargetDirectory: boolean,
-): { operands: ShellWord[]; targetDirectory?: ShellWord } {
+): {
+  operands: ShellWord[];
+  targetDirectory?: ShellWord;
+  ambiguousDynamicArgument: boolean;
+} {
   const operands: ShellWord[] = [];
   let targetDirectory: ShellWord | undefined;
   let optionsEnded = false;
+  let ambiguousDynamicArgument = false;
 
   for (let index = 0; index < args.length; index++) {
     const word = args[index]!;
@@ -506,17 +852,18 @@ function collectUtilityOperands(
       optionsEnded = true;
       continue;
     }
+    if (!optionsEnded && word.dynamic) ambiguousDynamicArgument = true;
     if (!optionsEnded && supportsTargetDirectory) {
-      if (value === "-t" || value === "--target-directory") {
+      if (value === "-t" || matchesLongOption(value, "--target-directory")) {
+        const attachedTarget = value.includes("=")
+          ? value.slice(value.indexOf("=") + 1)
+          : undefined;
+        if (attachedTarget !== undefined) {
+          targetDirectory = { ...word, value: attachedTarget };
+          continue;
+        }
         targetDirectory = args[index + 1];
         index++;
-        continue;
-      }
-      if (value.startsWith("--target-directory=")) {
-        targetDirectory = {
-          ...word,
-          value: value.slice("--target-directory=".length),
-        };
         continue;
       }
       if (value.startsWith("-t") && value.length > 2) {
@@ -525,8 +872,8 @@ function collectUtilityOperands(
       }
     }
     if (!optionsEnded && value.startsWith("--")) {
-      const optionName = value.split("=", 1)[0]!;
-      if (optionsWithValue.has(optionName) && !value.includes("=")) index++;
+      if (UTILITY_EXACT_FLAG_OPTIONS.has(value)) continue;
+      if (matchesAnyLongOption(value, optionsWithValue) && !value.includes("=")) index++;
       continue;
     }
     if (!optionsEnded && /^-[^-]/u.test(value)) {
@@ -541,6 +888,7 @@ function collectUtilityOperands(
 
   return {
     operands,
+    ambiguousDynamicArgument,
     ...(targetDirectory ? { targetDirectory } : {}),
   };
 }
@@ -612,6 +960,9 @@ function isProtectedRmTarget(target: string): boolean {
   }
 
   const lower = normalized.toLowerCase();
+  if (TEMP_ROOTS.some((root) => lower === root || isWholeDirectoryContents(lower, root))) {
+    return true;
+  }
   return CRITICAL_POSIX_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`));
 }
 
@@ -629,16 +980,26 @@ function isAbsoluteUserRoot(target: string): boolean {
   );
 }
 
-function isPotentiallyProtectedAbsoluteExpansion(target: ShellWord): boolean {
+function isPotentiallyProtectedAbsoluteExpansion(
+  target: ShellWord,
+  allowAbsoluteBraceAlternative = true,
+): boolean {
   if (!target.unquotedExpansion) return false;
 
   const slashPath = target.value.replaceAll("\\", "/");
   const normalized = normalizeSlashPath(slashPath);
   const expansionIndex = normalized.search(/[?*[{~$@+!]/u);
-  if (expansionIndex >= 0 && expansionTouchesAbsoluteRootComponent(normalized, expansionIndex)) {
-    return true;
+  if (expansionIndex >= 0) {
+    if (expansionTouchesAbsoluteRootComponent(normalized, expansionIndex)) return true;
+    const staticPrefix = normalized.slice(0, expansionIndex).toLowerCase();
+    if (
+      normalized.startsWith("/") &&
+      [...CRITICAL_POSIX_ROOTS, ...TEMP_ROOTS].some((root) => root.startsWith(staticPrefix))
+    ) {
+      return true;
+    }
   }
-  return braceMayProduceAbsoluteTarget(slashPath);
+  return allowAbsoluteBraceAlternative && braceMayProduceAbsoluteTarget(slashPath);
 }
 
 function expansionTouchesAbsoluteRootComponent(target: string, expansionIndex: number): boolean {
@@ -715,12 +1076,22 @@ function hasRecursiveAndForceFlags(words: readonly ShellWord[]): boolean {
   return recursive && force;
 }
 
-function matchesLongOption(
-  value: string,
-  canonical: "--delete" | "--force" | "--force-with-lease" | "--mirror" | "--prune" | "--recursive",
-): boolean {
+function matchesLongOption(value: string, canonical: string): boolean {
   const optionName = value.split("=", 1)[0]!;
   return optionName.length > 2 && canonical.startsWith(optionName);
+}
+
+function matchesAnyLongOption(value: string, canonicalOptions: ReadonlySet<string>): boolean {
+  return findMatchingLongOption(value, canonicalOptions) !== undefined;
+}
+
+function findMatchingLongOption(
+  value: string,
+  canonicalOptions: ReadonlySet<string>,
+): string | undefined {
+  return [...canonicalOptions].find(
+    (canonical) => canonical.startsWith("--") && matchesLongOption(value, canonical),
+  );
 }
 
 function parseShell(command: string): ParsedShell {
@@ -1021,7 +1392,13 @@ function commandBasename(command: string): string {
 
 const MAX_NESTED_COMMAND_DEPTH = 8;
 
+const SAFE_WORKSPACE_CWD = "/tmp/.pico-workspace";
+
+const UNKNOWN_SHELL_CWD = "/etc/.pico-unknown-cwd";
+
 const SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "dash", "ksh", "sh", "zsh"]);
+
+const CWD_FORWARDERS: ReadonlySet<string> = new Set(["builtin", "command"]);
 
 const SHELL_CONTROL_PREFIXES: ReadonlySet<string> = new Set([
   "!",
@@ -1057,13 +1434,39 @@ const FIND_PRE_PATH_OPTIONS: ReadonlySet<string> = new Set(["-H", "-L", "-P"]);
 
 const FIND_EXEC_ACTIONS: ReadonlySet<string> = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 
-const FIND_DESTRUCTIVE_EXECUTABLES: ReadonlySet<string> = new Set([
-  "mv",
-  "rm",
-  "rmdir",
-  "shred",
-  "truncate",
-  "unlink",
+const FIND_PROTECTED_TARGET_SENTINEL = "/etc/.pico-find-protected-target";
+
+const XARGS_PROTECTED_TARGET_SENTINEL = "/etc/.pico-xargs-protected-target";
+
+const XARGS_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-E",
+  "-I",
+  "-J",
+  "-L",
+  "-P",
+  "-R",
+  "-S",
+  "-a",
+  "-d",
+  "-n",
+  "-s",
+  "--arg-file",
+  "--delimiter",
+  "--eof",
+  "--max-args",
+  "--max-chars",
+  "--max-lines",
+  "--max-procs",
+  "--process-slot-var",
+  "--replace",
+]);
+
+const XARGS_OPTIONS_WITH_OPTIONAL_VALUE: ReadonlySet<string> = new Set([
+  "--eof",
+  "--max-args",
+  "--max-lines",
+  "--max-procs",
+  "--replace",
 ]);
 
 const FIND_EXEC_FORWARDERS: ReadonlySet<string> = new Set([
@@ -1083,6 +1486,7 @@ const FIND_EXEC_FORWARDERS: ReadonlySet<string> = new Set([
 ]);
 
 const FIND_WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["chroot", new Set(["--groups", "--userspec"])],
   ["doas", new Set(["-C", "-u"])],
   ["env", new Set(["-a", "-C", "-u", "--argv0", "--chdir", "--unset"])],
   ["exec", new Set(["-a"])],
@@ -1090,6 +1494,7 @@ const FIND_WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> 
   [
     "sudo",
     new Set([
+      "-D",
       "-g",
       "-h",
       "-p",
@@ -1100,6 +1505,7 @@ const FIND_WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> 
       "-U",
       "-u",
       "--chroot",
+      "--chdir",
       "--close-from",
       "--group",
       "--host",
@@ -1145,6 +1551,8 @@ const NATIVE_MUTATION_COMMANDS: ReadonlySet<string> = new Set([
 
 const EMPTY_STRING_SET: ReadonlySet<string> = new Set();
 
+const UTILITY_EXACT_FLAG_OPTIONS: ReadonlySet<string> = new Set(["--strip"]);
+
 const COPY_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-S", "--suffix"]);
 
 const INSTALL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
@@ -1173,15 +1581,6 @@ const TRUNCATE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
   "--size",
 ]);
 
-const SED_SCRIPT_OPTIONS: ReadonlySet<string> = new Set(["-e", "-f", "--expression", "--file"]);
-
-const SED_SCRIPT_OPTIONS_WITH_VALUE_PREFIX: readonly string[] = [
-  "-e",
-  "-f",
-  "--expression=",
-  "--file=",
-];
-
 const GIT_GLOBAL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
   "-C",
   "-c",
@@ -1204,7 +1603,6 @@ const CRITICAL_POSIX_ROOTS: readonly string[] = [
   "/library",
   "/opt",
   "/private/etc",
-  "/private/tmp",
   "/private/var",
   "/proc",
   "/root",
@@ -1215,5 +1613,7 @@ const CRITICAL_POSIX_ROOTS: readonly string[] = [
   "/usr",
   "/var",
 ];
+
+const TEMP_ROOTS: readonly string[] = ["/private/tmp", "/tmp"];
 
 const OTHER_HARDLINE_PATTERNS: readonly RegExp[] = [/:\(\)\s*\{/u];

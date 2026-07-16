@@ -7,6 +7,7 @@ import { evaluateYoloToolCall } from "../../src/safety/yolo-sandbox.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 
 test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
+  const workDir = process.cwd();
   const dangerous = [
     "rm -rf /etc{,}",
     "rm -rf /u?r",
@@ -33,10 +34,15 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "shopt -s extglob; rm /@(etc)/passwd",
     "rm /private/etc/passwd",
     "rm /private/var/db/index",
-    "rm /private/tmp/system.sock",
+    "rm -rf /private/tmp",
+    "rm -rf /private/tmp/*",
+    "rm /private/e@(tc)/passwd",
+    "cp ./generated.txt /private/{etc,var}/pico",
     "rm.exe /etc/passwd",
     'find "$HOME" -delete',
     "find /etc -delete",
+    "find /tmp -delete",
+    "find /private/tmp -delete",
     "find ./../etc -delete",
     'find "$ROOT" -delete',
     "find /et* -delete",
@@ -44,6 +50,7 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "find -files0-from targets.txt -delete",
     "find -files0-from - -delete",
     "find /etc -exec rm -f {} +",
+    "find /tmp -exec rm -f {} +",
     "find / -exec rm {} +",
     'find "$ROOT" -exec unlink {} \\;',
     "find /et* -exec shred {} +",
@@ -51,6 +58,19 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "find /etc -exec mv {} /tmp/pico-backup +",
     "find /etc -exec sudo -u root rm -f {} +",
     "find /etc -exec env LC_ALL=C unlink {} +",
+    "find /etc -exec chmod 000 {} +",
+    "find /etc -exec chown root {} +",
+    "find /etc -exec cp ./generated.txt {} +",
+    "find /etc -exec sed -i -e 's/root/disabled/' {} +",
+    "find /etc -exec tee {} +",
+    "find /etc -exec dd if=/dev/zero of={} +",
+    "find /etc -exec install ./generated.txt {} +",
+    "find /etc -exec ln -s ./generated.txt {} +",
+    "find /dev -exec wipefs --all {} +",
+    "find /etc -exec sudo OWNER=root chmod 000 {} +",
+    "find /etc -execdir sed -i 's/root/disabled/' ./relative \\;",
+    "find /etc -execdir cp /tmp/pico-source ./relative \\;",
+    "find . -exec cp /tmp/pico-source /etc/passwd \\;",
     'find /etc -okdir "$DELETE_CMD" {} +',
     "shopt -s extglob; find /@(etc) -delete",
     "mkfs.ext4 -F /dev/sda",
@@ -101,6 +121,7 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "systemctl isolate poweroff.target",
     "loginctl poweroff",
     "wipefs --all /dev/sda",
+    "wipefs --al /dev/sda",
     "wipefs -o 0 /dev/sda",
     "chmod -R 000 /etc",
     "chmod 000 /etc/passwd",
@@ -114,14 +135,73 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "shred -n 1 /etc/passwd",
     "cp ./generated.txt /etc/passwd",
     "cp -t /etc ./generated.txt",
+    "cp --target-direct=/etc ./generated.txt",
+    "cp -s /etc/passwd ./pico-link && printf x > ./pico-link",
+    "cp --link /etc/passwd ./pico-link && printf x > ./pico-link",
+    "cp -a /etc/localtime ./pico-link && printf x > ./pico-link",
+    "cp -P /etc/localtime ./pico-link && printf x > ./pico-link",
+    "cp -d /etc/localtime ./pico-link && printf x > ./pico-link",
+    "cp --archive /etc/localtime ./pico-link && printf x > ./pico-link",
+    "cp --no-dereference /etc/localtime ./pico-link && printf x > ./pico-link",
+    "cp $ARGS",
     "sudo cp ./generated.txt /etc/passwd",
     "mv /etc/hosts ./backup",
     "mv ./generated.txt /etc/generated.txt",
+    "mv --target-direct=/etc ./generated.txt",
     "install ./generated.txt /etc/generated.txt",
     "install -d /etc/pico",
+    "install --director /etc/pico",
+    "install -dm755 /etc/pico",
+    "install --strip ./generated.txt /etc/generated.txt",
+    "install $ARGS",
     "tee /etc/passwd",
     "sed -i 's/root/disabled/' /etc/passwd",
+    "sed --in-plac 's/root/disabled/' /etc/passwd",
+    "opts=-i; sed $opts 's/root/disabled/' /etc/passwd",
     "ln -s ./generated.txt /etc/pico-link",
+    "ln --target-direct=/etc ./generated.txt",
+    "ln -sf /etc/passwd ./pico-link && printf x > ./pico-link",
+    "ln /etc/passwd ./pico-link && printf x > ./pico-link",
+    "ln $ARGS",
+    "printf '/etc/passwd\\0' | xargs -0 rm -f",
+    "printf '/etc/passwd\\0' | xargs -0 unlink",
+    "printf '/etc/passwd\\0' | xargs -0 truncate -s 0",
+    "printf '/etc/passwd\\0' | xargs -0 chmod 000",
+    "printf '/etc/passwd\\0' | xargs -0 chown root",
+    "printf '/etc/passwd\\0' | xargs -0 sed -i 's/root/disabled/'",
+    "printf '/etc/passwd\\0' | xargs -0 tee",
+    "printf '/etc/passwd\\0' | xargs -0 shred",
+    "printf '/etc/passwd\\0' | xargs -0 cp ./generated.txt",
+    "printf '/etc/passwd\\0' | xargs -0 mv ./generated.txt",
+    "printf '/etc/passwd\\0' | xargs -0 install ./generated.txt",
+    "printf '/etc/passwd\\0' | xargs -0 ln -s ./generated.txt",
+    "printf 'of=/etc/passwd\\0' | xargs -0 dd if=/dev/zero",
+    "printf '/dev/sda\\0' | xargs -0 wipefs --all",
+    "find /etc -print0 | xargs -0 rm -f",
+    "find /etc -print0 | xargs -0 chmod 000",
+    "printf '/etc/passwd\\n' | xargs --replace rm -f {}",
+    "printf '/etc/passwd\\n' | xargs --eof rm -f",
+    "printf '/etc/passwd\\n' | xargs --max-lines rm -f",
+    "printf '/etc/passwd\\n' | xargs --max-args rm -f",
+    "printf '/etc/passwd\\n' | xargs --max-procs rm -f",
+    "printf '/etc/passwd\\n' | xargs -R 1 rm -f",
+    "printf '/etc/passwd\\n' | xargs -S 255 rm -f",
+    "printf '/etc/passwd\\n' | xargs --process-slot-var SLOT rm -f",
+    "env -C /etc rm passwd",
+    "env --chdir=/etc truncate -s 0 passwd",
+    "sudo -D /etc rm -f passwd",
+    "sudo --chdir=/etc sed -i 's/root/disabled/' passwd",
+    "sudo -R / rm -f etc/passwd",
+    "chroot / rm -f etc/passwd",
+    "cd /etc && rm -f passwd",
+    "builtin cd /etc && rm -f passwd",
+    "command cd /etc && truncate -s 0 passwd",
+    "eval 'cd /etc'; unlink passwd",
+    "cd /etc; truncate -s 0 passwd",
+    "(cd /etc && unlink passwd)",
+    "cd / && cp /tmp/pico-source etc/passwd",
+    "cd /etc && sh -c 'rm -f passwd'",
+    "cd /etc && find . -delete",
     ": > /etc/passwd",
     "> /dev/sda",
     "printf x >/etc/passwd",
@@ -131,10 +211,13 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "printf x >/tmp/pico.log>/etc/passwd",
     'printf x > "$TARGET"',
     "shopt -s extglob; printf x > /@(etc)/passwd",
+    "printf x > /private/v@(ar)/pico",
+    "cd /etc && printf x > passwd",
+    "(cd /etc; : > passwd)",
   ];
 
   for (const command of dangerous) {
-    assert.equal(isHardlineBashCommand(command), true, command);
+    assert.equal(isHardlineBashCommand(command, workDir), true, command);
   }
 
   const ordinary = [
@@ -147,15 +230,23 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "rm -f ./config.json",
     "rm ./generated.txt",
     "rm /tmp/pico-*",
+    "rm /private/tmp/pico-*",
     "shopt -s extglob; rm /tmp/@(pico-a|pico-b)",
     "rm '/e[t]c/passwd'",
     "find . -delete",
     "find /tmp/pico-cache -delete",
+    "find /tmp/pico-cache -exec rm -f {} +",
     "find /Users/alice/project -delete",
     'find . -name "$PATTERN" -delete',
     "find . -exec rm ./tmp {} +",
     "find /etc -exec echo rm {} +",
     "find /etc -exec sudo echo rm {} +",
+    "find /etc -exec cp {} ./backup +",
+    "find /etc -exec install {} ./backup +",
+    "find /etc -exec sed -n '1p' {} +",
+    "find /etc -exec dd if={} of=./backup +",
+    "find /etc -exec chmod 644 ./generated.txt +",
+    "find /etc -exec rm ./generated.txt +",
     "shopt -s extglob; find /tmp/@(pico-a|pico-b) -delete",
     "mkfs.ext4 ./disk.img",
     "dd if=/dev/zero of=./disk.img",
@@ -167,11 +258,16 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "chown user:group ./generated.txt",
     "truncate -s 0 ./generated.txt",
     "truncate --reference /etc/passwd ./generated.txt",
+    'truncate --reference "$REFERENCE" ./generated.txt',
+    "truncate -s 0 /private/tmp/pico-file",
     "unlink ./generated.txt",
     "rmdir ./generated-dir",
     "shred -n 1 ./generated.txt",
     "shred --random-source /etc/urandom ./generated.txt",
     "cp /etc/hosts ./backup",
+    "cp -L /etc/localtime ./backup",
+    'cp -- "$SOURCE" ./backup',
+    'cp -S "$SUFFIX" /etc/hosts ./backup',
     "cp.exe /etc/hosts ./backup",
     "sudo cp /etc/hosts ./backup",
     "mv ./generated.txt ./backup",
@@ -179,12 +275,23 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
     "install -m 644 /etc/hosts ./backup",
     "tee ./generated.txt",
     "sed -n '1p' /etc/passwd",
+    'sed "$SCRIPT" ./generated.txt',
     "sed -i -e '/etc/p' ./generated.txt",
     "sed -i -f /etc/pico.sed ./generated.txt",
-    "ln -s /etc/hosts ./hosts-link",
+    "ln -s ./generated.txt ./hosts-link",
+    "printf 'pico\\0' | xargs -0 echo",
+    "printf 'pico\\0' | xargs -0 cat",
+    "env -C /tmp rm pico-file",
+    "env -C ./tmp rm pico-file",
+    "sudo -D /tmp truncate -s 0 pico-file",
+    "chroot /tmp/pico-root rm etc/passwd",
+    "cd /tmp && rm pico-file",
+    "cd ./subdir && rm generated",
+    "cd /tmp && cp /etc/hosts backup",
     ": > ./generated.txt",
     "printf x >/tmp/pico.log",
     "printf x >|/tmp/pico.log",
+    "cd /tmp && printf x > pico-file",
     "printf x > '/@(etc)/passwd'",
     "printf x 2>&1",
     "echo '>' /etc/passwd",
@@ -202,8 +309,12 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
   ];
 
   for (const command of ordinary) {
-    assert.equal(isHardlineBashCommand(command), false, command);
+    assert.equal(isHardlineBashCommand(command, workDir), false, command);
   }
+
+  assert.equal(isHardlineBashCommand("rm -f etc/passwd", "/"), true);
+  assert.equal(isHardlineBashCommand("rm -f Windows/System32/config/system", "C:/"), true);
+  assert.equal(isHardlineBashCommand("rm -f ./generated.txt"), true);
 });
 
 test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", async () => {
@@ -242,7 +353,7 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
   ];
 
   for (const command of dangerous) {
-    assert.equal(isHardlineCommand("bash", bashArgs(command)), true, command);
+    assert.equal(isHardlineCommand("bash", bashArgs(command), workDir), true, command);
   }
 
   const ordinaryWorkspaceDeletes = [
@@ -259,7 +370,7 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     'echo "(rm -rf /)"',
   ];
   for (const command of ordinaryWorkspaceDeletes) {
-    assert.equal(isHardlineCommand("bash", bashArgs(command)), false, command);
+    assert.equal(isHardlineCommand("bash", bashArgs(command), workDir), false, command);
   }
 
   assert.equal(isHardlineCommand("write_file", bashArgs("rm -rf /")), false);
@@ -272,9 +383,15 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
   assert.match(sandboxDecision.reason ?? "", /Hardline/u);
   assert.equal(evaluateYoloToolCall(ordinaryCall, workDir, roots).allowed, true);
 
+  const relativeSystemCall = toolCall("rm -f etc/passwd");
+  assert.equal(evaluateYoloToolCall(relativeSystemCall, "/", roots).allowed, false);
+  assert.equal(isHardlineCommand("bash", ordinaryCall.arguments), true);
+
   const foregroundSafety = buildForegroundSafetyMiddleware(workDir, { mode: "yolo" }, roots);
   assert.equal((await foregroundSafety(hardlineCall)).allowed, false);
   assert.equal((await foregroundSafety(ordinaryCall)).allowed, true);
+  const rootForegroundSafety = buildForegroundSafetyMiddleware("/", { mode: "yolo" }, roots);
+  assert.equal((await rootForegroundSafety(relativeSystemCall)).allowed, false);
 });
 
 function bashArgs(command: string): string {
