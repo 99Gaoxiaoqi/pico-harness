@@ -274,9 +274,10 @@ export class HookConfigReloader {
     const exactPaths = new Set(result.watchedPaths.map((path) => resolve(path)));
     for (const eventHandlers of Object.values(result.snapshot.handlers)) {
       for (const entry of eventHandlers) {
-        const references = await resolveReferencedScripts(
-          entry.handler,
-          this.options.workDir,
+        const references = await (
+          this.options.trustStore
+            ? this.options.trustStore.referencedScripts(this.options.workDir, entry.handler)
+            : resolveReferencedScripts(entry.handler, this.options.workDir)
         ).catch(() => undefined);
         if (!this.isActive(generation)) return undefined;
         // Unsupported indirect invocations are already fail-closed as pending and cannot be trusted.
