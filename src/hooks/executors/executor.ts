@@ -297,7 +297,9 @@ export class DefaultHookExecutor implements HookExecutor {
     execute: () => Promise<Result>,
     signal: AbortSignal,
   ): Promise<Result> {
-    return this.options.modelRuntime?.run(execute, signal) ?? execute();
+    const runtime = this.options.modelRuntime;
+    if (!runtime) throw new Error("模型 Hook 未配置 RuntimeRun");
+    return runtime.run(execute, signal);
   }
 }
 
