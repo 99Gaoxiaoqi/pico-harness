@@ -88,6 +88,39 @@ test("OpenAI routes can select max_completion_tokens explicitly", async (context
   assert.equal(Object.hasOwn(requestBody ?? {}, "max_tokens"), false);
 });
 
+test("legacy OpenAI-compatible calls do not guess an output-token field", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Record<string, unknown>[] = [];
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requestBodies.push(body);
+    if (body["stream"] === true) {
+      return streamResponse([
+        new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'),
+        new TextEncoder().encode("data: [DONE]\n\n"),
+      ]);
+    }
+    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+  };
+
+  const provider = new OpenAIProvider({
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "test-key",
+    model: "legacy-compatible-model",
+  });
+  await provider.generate([{ role: "user", content: "test" }], []);
+  await provider.generateStream([{ role: "user", content: "test" }], [], () => undefined);
+
+  assert.equal(requestBodies.length, 2);
+  for (const body of requestBodies) {
+    assert.equal(Object.hasOwn(body, "max_tokens"), false);
+    assert.equal(Object.hasOwn(body, "max_completion_tokens"), false);
+  }
+});
+
 test("OpenAI reasoning patches cannot unset the configured output-token limit", async (context) => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;
@@ -254,7 +287,8 @@ test("OpenAI-compatible routes omit stream_options unless explicitly enabled", a
   }).generateStream([{ role: "user", content: "test" }], [], () => undefined);
 
   assert.equal(Object.hasOwn(requestBody ?? {}, "stream_options"), false);
-  assert.equal(requestBody?.["max_tokens"], 4096);
+  assert.equal(Object.hasOwn(requestBody ?? {}, "max_tokens"), false);
+  assert.equal(Object.hasOwn(requestBody ?? {}, "max_completion_tokens"), false);
   assert.equal(response.content, "OK");
   assert.equal(response.usage?.promptTokens, 3);
   assert.equal(response.usage?.completionTokens, 1);
