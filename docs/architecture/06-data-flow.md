@@ -28,7 +28,7 @@
 │ │     ├─ TodoList($PICO_HOME/workspaces/<id>/todo.json)        │ │
 │ │     └─ Goal(如有 active goal)                                │ │
 │ │   availableTools = registry.getAvailableTools()              │ │
-│ │     └─ toolDisclosure.pickForLLM(渐进披露:7 核心+search_tools) │ │
+│ │     └─ toolDisclosure.pickForLLM(CORE_TOOLS+已披露+search_tools)│ │
 │ │   modelContext = session.getModelContext()                   │ │
 │ │     └─ 完整历史副本 + ToolResult 访问元数据更新                │ │
 │ │   contextHistory = [system, ...modelContext]                 │ │
@@ -37,39 +37,33 @@
 │ │   低于 85% 原样发送；超水位先缩短旧 ToolResult                │ │
 │ │   仍超水位则在完整工具批次边界摘要旧前缀                       │ │
 │ │                                                              │ │
-│ │ ③ Phase 1 慢思考(enableThinking)                              │ │
-│ │   reporter.onThinking() → spinner 启动                        │ │
-│ │   thinkResp = provider.generate(compactedContext, tools=[])  │ │
-│ │     └─ 传空 tools[],模型被迫纯文本规划                          │ │
-│ │   session.append(thinkResp)                                  │ │
-│ │   compactedContext.push(thinkResp)                           │ │
-│ │                                                              │ │
-│ │ ④ Phase 2 行动                                               │ │
+│ │ ③ 模型推理与行动                                             │ │
 │ │   responseMsg = provider.generate(compactedContext, tools)   │ │
+│ │     ├─ thinkingEffort 由当前模型路由映射为 Provider 原生参数 │ │
 │ │     ├─ 流式: generateStream → onDelta → reporter.onTextDelta │ │
 │ │     └─ CostTracker 包装: 计时/计费/session.recordUsage       │ │
 │ │   responseMsg.toolCalls = [{name:"read_file", args:"{...}"}] │ │
-│ │   session.append(responseMsg)                                │ │
+│ │   await session.commitMessages(responseMsg)                  │ │
 │ │                                                              │ │
-│ │ ⑤ 工具执行(资源冲突图调度)                                    │ │
+│ │ ④ 工具执行(资源冲突图调度)                                    │ │
 │ │   scheduler = new ToolScheduler({maxConcurrency:8})          │ │
 │ │   registry.execute({name:"read_file", args})                 │ │
 │ │     ├─ Hardline/Plan/Trust 安全门                             │ │
-│ │     ├─ PreToolUse Hook(改写后重跑安全门)                 │ │
-│ │     ├─ PermissionRequest Hook / 人工审批                    │ │
-│ │     ├─ preWriteHook(文件历史备份:read 不写,跳过)               │ │
+│ │     ├─ PreToolUse Hook(改写后重跑安全门)                      │ │
+│ │     ├─ PermissionRequest Hook / 人工审批                     │ │
+│ │     ├─ preWriteHook(写工具记录 File History preimage)        │ │
 │ │     ├─ tool.execute(args) → 文件内容                          │ │
-│ │     ├─ truncateToolOutput(截断 8000 字符)                     │ │
-│ │     └─ PostToolUse/PostToolUseFailure（有界等待）          │ │
-│ │   session.append(toolResult)                                 │ │
+│ │     ├─ 大结果按策略外置到 Artifact/Evidence                  │ │
+│ │     └─ PostToolUse/PostToolUseFailure（有界等待）            │ │
+│ │   await session.commitMessages(...toolResults)               │ │
 │ │                                                              │ │
-│ │ ⑥ 文件历史快照(每轮 finally)                                  │ │
-│ │   fileHistoryMakeSnapshot(session.fileHistory, messageId)    │ │
+│ │ ⑤ 文件历史 journal(工具批次 finally)                         │ │
+│ │   全部已启动工具收口后提交 CAS preimage 与 Session manifest  │ │
 │ └──────────────────────────────────────────────────────────────┘ │
 │                                                                  │
 │ ┌─ Turn 2 ────────────────────────────────────────────────────┐ │
-│ │ ①-④ 同上,模型看到 read_file 结果                              │ │
-│ │ ⑤ toolCalls.length === 0 → 任务完成                           │ │
+│ │ ①-③ 同上,模型看到 read_file 结果                              │ │
+│ │ ④ toolCalls.length === 0 → 任务完成                           │ │
 │ │   reporter.onFinish() → spinner 停止                          │ │
 │ │   break                                                      │ │
 │ └──────────────────────────────────────────────────────────────┘ │
@@ -100,8 +94,8 @@ provider.generate() 若仍返回 ContextOverflowError
     ├─ 用 10% 尾部目标执行一次紧急 FullCompaction
     ├─ 重试一次，不做 14/10/6 条消息缩窗
     └─ 仍失败才硬重置:
-        session.truncateTo(beforeLen - 1)
-        清空历史只保留本轮用户输入
+        RuntimeRun.recordCheckpoint([CONTEXT RESET], throughEventId)
+        让有效投影只保留最小审计 checkpoint 与本轮用户输入
         continue 下一轮
 ```
 
@@ -152,30 +146,24 @@ TUI rewind command/dialog:
   └─ 统一调用 applyTuiRewind，同步 Session、文件、transcript、输入框与 mode
 
 session.rewindBoth(messageId, messageIndex):
-  │
-  ├─ ① fileHistoryRewind(state, "turn-3")
-  │   ├─ 找到 messageId="turn-3" 的快照
-  │   ├─ 遍历快照的 trackedFileBackups:
-  │   │   ├─ backupFileName=null → unlink(删除 Agent 新建的文件)
-  │   │   └─ 有备份 → copyFile 恢复原始内容
-  │   ├─ 遍历 trackedFiles: 不在快照里的(快照后新建)→ unlink
-  │   └─ snapshots = slice(0, targetIdx+1)
-  │
-  └─ ② rewindTo(messageIndex)
-      ├─ history = slice(0, messageIndex)  // 截断对话
-      ├─ pruneToolResultMeta
-      ├─ conversationId = 新 fork ID
-      ├─ store.bumpEpoch()  // 持久化会话世代变更
-      └─ persistRewindTo(messageIndex)  // 落盘 truncate 事件
+  └─ RewindOperationCoordinator
+      ├─ 固定 Session seq / 有效历史 digest / File History revision
+      ├─ 读取全部 CAS preimage，并预检当前文件仍等于记录的 after 指纹
+      ├─ journal: prepared
+      ├─ 原子恢复 workspace；外部变化则 needs_attention，不覆盖后来修改
+      ├─ 追加幂等 history.rewound(throughEventId)
+      │   └─ 旧 RuntimeEvent 不删除，只改变活动历史投影
+      ├─ 修剪 File History 和失效的 Summary sidecar
+      └─ journal: completed
 
-结果: 代码回到 turn-3 开头 + 对话回到 turn-3 之前
+进程在中间崩溃时，下次启动从 journal 当前阶段继续向前收敛。
 ```
 
 ---
 
 ## 5. 子代理委派流程
 
-下面只展示 `explore` 的只读数据流，不代表所有 Worker 都只读。可写 Shared/Isolated Worker 的任务范围、OCC、动态写入和隔离升级流程见[多 Agent 共享工作区并发规范](./08-multi-agent-concurrency.md)。
+下面展示 `explore` 的只读数据流。可写 `worker` 使用另一条固定路径：宿主必须先创建独立 Git worktree 和 Worker 沙箱；能力不可用时直接拒绝，不降级写主工作区。
 
 ```
 主 Agent: "搜索所有 TODO 注释并总结"
@@ -191,7 +179,7 @@ AgentEngine.runSub():
   │   ├─ bash(强制 readOnly=true)
   │   └─ fetch_url / web_search
   ├─ 专属 System Prompt(严厉警告必须用工具)
-  ├─ maxSubTurns=10, 关闭慢思考
+  ├─ maxSubTurns 默认 10，思考档位来自已解析的子代理模型路由
   │
   │  ┌─ 子 Agent Turn 1-N ──────────────────┐
   │  │  grep "TODO" → 找到 15 个文件           │
@@ -227,7 +215,6 @@ ReplApp.handleSubmit:
       ▼ engine 事件流
       ├─ onStart → spinnerMode="requesting" → emit → App 重渲染
       ├─ onTurnStart → resetTurnBuffer
-      ├─ onThinking → push thinking → spinnerMode="thinking" → emit
       ├─ onTextDelta("你") → streamingText+="你" → push assistant → emit
       │   └─ App: MessageRow(非 isStatic) → StreamingText(逐行增量)
       ├─ onTextDelta("好") → assistant.content+="好" → emit
@@ -250,7 +237,8 @@ Renderer 用户操作
                  └─ Electron Main LocalRuntimeClient
                       └─ authenticated local daemon socket/pipe
                            └─ DesktopRuntimeService / WorkspaceRuntimeService
-                                ├─ 读写 RuntimeEventStore / RuntimeStore
+                                ├─ RuntimeEventStore：Session / Agent ledger
+                                ├─ RuntimeStore：控制面与通知 replay ledger
                                 └─ 需要模型执行时调用 AgentRuntime
 
 daemon subscription
@@ -260,9 +248,11 @@ daemon subscription
                  └─ Renderer 将通知投影为 Transcript / Timeline / status
 ```
 
-Renderer 不直接读取 SQLite、文件系统或 secret。Session 标题来自 RuntimeEvent；Desktop
-metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自 RuntimeStore 控制面，不能
-替代 Session Transcript。
+Renderer 不直接读取 SQLite、文件系统、daemon token 或已有 Provider secret。用户在
+Providers 页面输入的新 secret 会短暂经过 Renderer，并通过类型化 write-only 请求发送；
+它不会出现在响应、事件、Renderer Store、持久配置或日志中。Session 标题来自
+RuntimeEvent；Desktop metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自
+RuntimeStore 控制面，不能替代 Session Transcript。
 
 ---
 
@@ -271,8 +261,8 @@ metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自 RuntimeS
 ```
 轮次 N:
   loop.ts: availableTools = toolDisclosure.pickForLLM(allTools)
-    → [7 核心工具] + [search_tools]  (还没 disclose 过)
-  provider.generate(msgs, availableTools)  // 模型只看到 8 个工具
+    → [CORE_TOOLS] + [search_tools]  (还没 disclose 过)
+  provider.generate(msgs, availableTools)
 
   模型: 需要搜索网络 → 调 search_tools({query:"搜索网络"})
     │
@@ -285,6 +275,6 @@ metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自 RuntimeS
 
 轮次 N+1:
   loop.ts: availableTools = toolDisclosure.pickForLLM(allTools)
-    → [7 核心] + [web_search, fetch_url] + [search_tools]  = 10 个
+    → [CORE_TOOLS] + [web_search, fetch_url] + [search_tools]
   模型现在能直接调 web_search
 ```

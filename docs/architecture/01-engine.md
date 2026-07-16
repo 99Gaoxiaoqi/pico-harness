@@ -1,19 +1,19 @@
 # 核心引擎层 (`src/engine/`)
 
-> 引擎是微型 OS 内核：Session 驱动的 Two-Stage ReAct 循环。自身不维护状态，靠外部 Session 推理。
+> 引擎是微型 OS 内核：Session 驱动的单阶段 ReAct 循环。Session 承载可恢复状态，引擎负责编排每轮模型调用、工具批次和安全边界。
 
 ## 文件总览
 
-| 文件                     | 行数  | 职责                                                       |
-| ------------------------ | ----- | ---------------------------------------------------------- |
-| `loop.ts`                | ~1316 | AgentEngine 主循环（心脏）                                 |
-| `session.ts`             | ~1800 | Session + SessionManager（会话隔离 + 内存投影 + 工作记忆） |
-| `session-persistence.ts` | ~25   | 会话持久化游标与提交回执协议                               |
-| `reminder.ts`            | ~228  | 死循环探测 + ToolGuardrail                                 |
-| `goal-manager.ts`        | ~243  | 长程目标状态机                                             |
-| `reporter.ts`            | ~133  | 事件输出接口（I/O 解耦）                                   |
-| `budget.ts`              | ~67   | 轮次/Token/成本预算                                        |
-| `steer-queue.ts`         | ~47   | 运行时注入引导文本                                         |
+| 文件                     | 职责                               |
+| ------------------------ | ---------------------------------- |
+| `loop.ts`                | AgentEngine 主循环                 |
+| `session.ts`             | Session、SessionManager 与内存投影 |
+| `session-persistence.ts` | 会话持久化游标与提交回执协议       |
+| `reminder.ts`            | 死循环探测与 ToolGuardrail         |
+| `goal-manager.ts`        | 长程目标状态机                     |
+| `reporter.ts`            | 事件输出接口                       |
+| `budget.ts`              | 轮次、Token、成本和墙钟预算        |
+| `steer-queue.ts`         | 运行时注入引导文本                 |
 
 ---
 
@@ -33,7 +33,7 @@ class AgentEngine {
 
 ### `run()` 主循环完整流程
 
-每一轮（`for(;;)`）的 8 个步骤：
+每一轮（`for(;;)`）的主要步骤：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -56,34 +56,31 @@ class AgentEngine {
 │   pendingSteer = steerQueue.peek()                               │
 │   if (pendingSteer) compactedContext.push([STEER] ...)           │
 ├─────────────────────────────────────────────────────────────────┤
-│ 步骤 3: Phase 1 慢思考(可选,enableThinking)                        │
-│   reporter.onThinking()                                          │
-│   thinkResp = generate(传入空 tools[],模型被迫纯文本规划)          │
-│   session.append(thinkResp)                                      │
-│   compactedContext.push(thinkResp)  // 供 Phase 2 自回归          │
-├─────────────────────────────────────────────────────────────────┤
-│ 步骤 4: Phase 2 行动(Action)                                      │
-│   responseMsg = generate(传入 availableTools,模型生成 toolCalls)   │
-│   session.append(responseMsg)                                    │
+│ 步骤 3: 模型推理与行动                                            │
+│   responseMsg = generate(传入 availableTools,模型生成正文/toolCalls)│
+│   thinkingEffort 由当前模型路由映射为 Provider 原生参数           │
+│   await session.commitMessages(responseMsg)                      │
 │   reporter.onMessage(content)                                    │
 ├─────────────────────────────────────────────────────────────────┤
-│ 步骤 5: 退出/续接判断                                             │
+│ 步骤 4: 退出/续接判断                                             │
 │   toolCalls = responseMsg.toolCalls                              │
 │   if (toolCalls.length === 0):                                   │
 │     shouldContinueAfterStop?.() → 续接 or onFinish + break       │
 ├─────────────────────────────────────────────────────────────────┤
-│ 步骤 6: 工具执行(资源冲突图调度,maxConcurrency=8)                   │
+│ 步骤 5: 工具执行(资源冲突图调度,maxConcurrency=8)                   │
+│   有文件副作用时先建立 File History journal                       │
 │   scheduler = new ToolScheduler({maxConcurrency: 8})             │
 │   results = Promise.all(toolCalls.map(tc =>                      │
 │     scheduler.add({accesses, start: runOneTool(tc)})))           │
-│   session.append(...observations)                                │
+│   已启动任务收口后提交 CAS preimage 和 manifest                   │
+│   await session.commitMessages(...observations)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│ 步骤 7: Steer C 点(drain 落 session)                               │
+│ 步骤 6: Steer C 点(drain 落 session)                               │
 │   steerTexts = steerQueue.drain()                                │
-│   session.append(...steerTexts)  // 下一轮 getModelContext 浮现   │
+│   await session.commitMessages(...steerTexts)                    │
 ├─────────────────────────────────────────────────────────────────┤
-│ 步骤 8: 每轮收尾                                                  │
-│   fileHistoryMakeSnapshot(session.fileHistory, messageId)        │
+│ 步骤 7: 每轮收尾                                                  │
+│   发布/更新当前 Session 的 File History 快照 manifest            │
 │   turnSpan.end()                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -120,19 +117,19 @@ generateWithRetry (内层:普通重试)
 
 ### 核心职责
 
-会话物理隔离（并发 run 不共用 history）+ 完整模型历史的内存投影。持久化事实统一由
+会话运行态隔离（并发 run 不共用 history）+ 完整模型历史的内存投影。同一工作区的 Session
+仍共享项目文件和 Runtime 数据库。持久化事实统一由
 `RuntimeEventStore` 写入 workspace 的 `runtime.sqlite`，Session 可随时从事件重建。
 
 ### 关键机制
 
 - **`getModelContext()`**:返回完整历史副本并更新 ToolResult 访问元数据；协议清理由请求投影层完成
-- **`getWorkingMemory(limit)`**:仅为兼容测试保留，主 Agent 不再调用
-- **`append(msg)`**:处理 deferred + toolResultMeta 登记。assistant 带 toolCalls → 登记 pendingToolCallIds；ToolResult 到达 → 从 pending 删除；普通消息且 pending 非空 → 暂存 deferredMessages
+- **`commitMessages(...messages)`**：先提交 durable RuntimeEvent，再更新内存历史和 ToolResult 元数据
 - **`serialize(task)`**:per-session 串行执行队列，同一 Session 的 engine.run 必须串行
 - **跨进程单写者**：持久化 Session 从 recover 到 close 持有 owner lease；每个排队写在提交前后校验所有权，heartbeat 报告丢锁后立即进入 `write_uncertain`，已接纳的后续写也会停止
 - **持久化提交**：消息先提交 `RuntimeEventStore`，再更新 Session 内存投影；相同 `eventId` 重试幂等
-- **增量投影**：正常 append 只读取 canonical suffix，并在同一事务推进 FTS 消息和 projection cursor；首次恢复、rewind、重复事件或游标/分支错位才做全量 replay
-- **LRU + TTL 双重驱逐**:maxSessions=128，TTL=24h
+- **增量投影**：正常提交读取 canonical suffix；首次恢复、rewind、重复事件或游标/分支错位才做全量 replay
+- **LRU + TTL 双重驱逐**：maxSessions=128，TTL=24h；活跃 `SessionRuntime` 会 pin Session，关闭时 release
 
 ### RuntimeEventStore (`src/runtime/runtime-event-store.ts`)
 
@@ -141,7 +138,7 @@ SQLite 追加事件表是会话与运行时的唯一事实源：`message.committ
 
 - **事务提交**：事件内容与全局 sequence 在同一 SQLite 事务中提交
 - **Exactly-once**：`(session_id, event_id)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝
-- **可重建投影**：Session history、usage、CLI 会话列表和搜索索引均从事件恢复
+- **可重建投影**：Session history、usage、Goal、CLI 会话列表和 Transcript 均从事件恢复
 - **版本边界**：Store 与 Storage Doctor 共用 RuntimeEvent decoder；未知/旧版/未来版事件 fail closed，共享 SQLite 若为未来 schema 或 migration 身份不匹配则在 WAL、DDL 和写入前拒绝
 - **单一恢复路径**：不再读取或写入 Session/run JSONL，也不迁移旧 `.claw` 会话数据
 
@@ -175,7 +172,7 @@ SQLite 追加事件表是会话与运行时的唯一事实源：`message.committ
 
 ### GoalManager (`goal-manager.ts`)
 
-长程目标状态机：active/paused/blocked/complete。**内存单例**（不落盘），host 创建唯一实例注入 registry(3 工具) + engine(PromptComposer)。`buildGoalContext()` 渲染 Markdown 注入 prompt。
+长程目标状态机：active/paused/blocked/complete。GoalManager 是当前 Session 的进程内状态 owner，host 创建唯一实例注入 registry(3 工具) + engine(PromptComposer)。Session 通过 `session.state.committed` 持久化完整 snapshot；恢复后 `bindGoalManager()` 先水合再订阅变化。`buildGoalContext()` 渲染 Markdown 注入 prompt。
 
 ### SteerQueue (`steer-queue.ts`)
 

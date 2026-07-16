@@ -39,37 +39,25 @@ CanonicalUsage = {
 
 ## 2. 文件历史系统 (`src/safety/`)
 
-文件回滚统一使用 `file-history.ts` 的 copyFile/CAS 快照与持久化 operation journal，
-不依赖 Git 暂存区，也不存在另一套 Git checkpoint fallback。
+文件回滚统一使用 File History v2 的内容寻址快照和持久化 operation journal，不依赖 Git 暂存区，也不存在另一套 Git checkpoint fallback。
 
-### 纯 copyFile 机制（三步）
+```text
+建立 rewind point
+  └─ 写前捕获每个文件的 preimage
+       └─ 发布到 blobs/sha256/<prefix>/<digest>
 
-```
-① trackEdit (写操作前,loop.ts 经 registry.setPreWriteHook 调用)
-   ├─ 按 messageId 分组(每 turn 清空 pending)
-   ├─ 每文件每 turn 只 track 一次(多次写同文件只备份第一次)
-   └─ createBackup: copyFile + chmod 保留权限
-       └─ 文件不存在 → backupFileName: null(回滚时删除)
+每轮结束
+  └─ 原子更新每 Session 的 v2 manifest（最多 100 个快照）
 
-② makeSnapshot (每轮 turn 结束,loop.ts finally 块)
-   ├─ 遍历所有 trackedFiles
-   ├─ mtime+size 没变 → 复用旧备份(不重复 copy)
-   ├─ 变了 → 新建 backup(version++)
-   └─ 快照数上限 100,超限删最旧 + cleanupExclusiveBackups
-
-③ rewind (三轴可选)
-   ├─ code: fileHistoryRewind(messageId) → 只恢复文件
-   ├─ conversation: rewindTo(messageIndex) → 只截断对话
-   └─ both: 先恢复文件再截断对话
+执行 rewind
+  ├─ 预读全部 CAS blob 并校验当前文件指纹
+  ├─ journal 发布 prepared operation
+  ├─ code/both：恢复 workspace，外部变化时 fail-closed
+  ├─ conversation/both：追加幂等 history.rewound RuntimeEvent
+  └─ 修剪 File History / Summary sidecar 后将 operation 置为 completed
 ```
 
-### 备份路径
-
-`$PICO_HOME/file-history/<sha256(sessionId)[:32]>/<sha256(filePath)[:16]>@v<N>`（默认位于 `~/.pico`）
-
-### 持久化
-
-`manifest.json` 原子写（先写 .tmp 再 rename，防崩溃损坏）。
+旧版 `backupFileName` 只用于读取和物化 legacy manifest，不是当前权威存储格式。`ContentAddressedBlobGarbageCollector` 与声明式 retention policy 目前保留但未接入生产调度，因此不能假定存在自动全局 GC。
 
 公开交互入口在 TUI 内：`/snapshots` 列出快照，`/rewind` 选择 code / conversation / both。
 
@@ -224,6 +212,6 @@ Plugin/Skill/Agent Catalog；周期任务写入本机账本，并由用户级 da
 
 1. **零外部协议依赖**：手写 JSON-RPC over stdio、手写 SSE 行解析、不用 @modelcontextprotocol/sdk
 2. **装饰器/AOP 贯穿**：CostTracker（计费）、McpToolBridge（工具适配）、ApprovalManager（Promise 挂起）
-3. **单一 Rewind 路径**：file-history（copyFile/CAS）+ operation journal，三轴 rewind 在 Session 层组合
+3. **单一 Rewind 路径**：File History CAS + operation journal，三种 rewind mode 在 Session 层组合
 4. **两层审批**：`buildPermissionMiddleware` 负责安全判定与会话授权，ApprovalManager 负责挂起和唤醒人工审批
-5. **严格类型安全**：全开 strict + noUncheckedIndexedAccess，代码里随处可见 `!` 非空断言和 `?? fallback`
+5. **严格类型安全**：全开 strict + noUncheckedIndexedAccess，边界值必须显式校验或提供安全默认值
