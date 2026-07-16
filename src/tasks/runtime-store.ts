@@ -1,12 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { access, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
-import { quarantineCorruptJson } from "../storage/atomic-json.js";
 import { parseBackgroundYoloPolicySnapshot } from "../safety/background-yolo-policy-schema.js";
 import { migrateRuntimeStoreSchema } from "./runtime-store-schema.js";
 import {
@@ -40,6 +39,7 @@ import {
 } from "./runtime-types.js";
 
 const DEFAULT_LEASE_TTL_MS = 30_000;
+const LEGACY_TASK_STORE_ARCHIVE_SUFFIX = ".migrated-v1";
 
 export class RuntimeConflictError extends Error {
   constructor(message: string) {
@@ -114,11 +114,12 @@ export interface CancelQueuedJobInput {
   reason?: string;
 }
 
-export interface LegacyTaskImportResult {
+export interface LegacyTaskMigrationResult {
+  status: "absent" | "migrated" | "already_migrated";
   imported: number;
   skipped: number;
   interrupted: number;
-  quarantinePath?: string;
+  archivePath?: string;
 }
 
 export interface CreateCronJobInput {
@@ -1737,23 +1738,34 @@ export class RuntimeStore {
     };
   }
 
-  async importLegacyTaskStore(filePath: string): Promise<LegacyTaskImportResult> {
+  /**
+   * Seeds missing SQLite jobs from the retired JSON ledger exactly once.
+   * The DB transaction commits before the atomic archive rename, so a crash can only leave
+   * the source available for an idempotent retry; existing SQLite jobs are never reconciled back.
+   */
+  async migrateLegacyTaskStore(filePath: string): Promise<LegacyTaskMigrationResult> {
+    const archivePath = `${filePath}${LEGACY_TASK_STORE_ARCHIVE_SUFFIX}`;
+    if (await pathExists(archivePath)) {
+      return {
+        status: "already_migrated",
+        imported: 0,
+        skipped: 0,
+        interrupted: 0,
+        archivePath,
+      };
+    }
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
       assertLegacyTaskStore(parsed);
     } catch (error) {
-      if (isNodeCode(error, "ENOENT")) return { imported: 0, skipped: 0, interrupted: 0 };
-      const quarantined = await quarantineCorruptJson(filePath, {
-        reason: "legacy_task_store_invalid",
-        error: error instanceof Error ? error.message : String(error),
+      if (isNodeCode(error, "ENOENT")) {
+        return { status: "absent", imported: 0, skipped: 0, interrupted: 0 };
+      }
+      throw new Error(`legacy TaskStore 迁移源无效，已保留原文件: ${filePath}`, {
+        cause: error,
       });
-      return {
-        imported: 0,
-        skipped: 0,
-        interrupted: 0,
-        quarantinePath: quarantined.quarantinePath,
-      };
     }
 
     const legacy = parsed as LegacyTaskStoreFile;
@@ -1765,13 +1777,8 @@ export class RuntimeStore {
         const mapped = mapLegacyStatus(task.status);
         const current = this.getJob(task.taskId);
         if (current) {
-          const decision = legacyReconciliationDecision(task, current);
-          if (decision === "skip") {
-            skipped++;
-            continue;
-          }
-          this.reconcileLegacyTerminal(task, current, mapped.status);
-          imported++;
+          // SQLite is authoritative. Legacy JSON may only seed missing jobs once.
+          skipped++;
           continue;
         }
 
@@ -1798,7 +1805,7 @@ export class RuntimeStore {
             stringifyJson({
               ...(task.data ?? {}),
               legacyTaskStore: { notified: task.notified, outputOffset: task.outputOffset },
-              legacyTaskStoreImport: legacyImportMarker(task, fingerprint, 0, this.now()),
+              legacyTaskStoreImport: legacyImportMarker(task, fingerprint, this.now()),
             }),
             task.startTime,
             terminalAt ?? task.startTime,
@@ -1827,115 +1834,23 @@ export class RuntimeStore {
       }
     });
     importAll();
-    return { imported, skipped, interrupted };
-  }
-
-  private reconcileLegacyTerminal(task: LegacyTask, current: JobRecord, status: JobStatus): void {
-    if (!isTerminalJobStatus(status) || task.endTime === undefined) {
-      throw new RuntimeConflictError(`legacy 任务 ${task.taskId} 缺少可安全前滚的终态证据`);
-    }
-
-    const now = this.now();
-    const fingerprint = legacyTaskFingerprint(task);
-    const error = mapLegacyStatus(task.status).error ?? task.error;
-    let attemptNumber = current.attemptCount;
-    let leaseEpoch = Math.max(current.leaseEpoch, 1);
-    let attemptId: string;
-    const runningAttempt =
-      current.status === "running"
-        ? (this.db
-            .prepare(
-              `SELECT * FROM job_attempts
-               WHERE job_id = ? AND status = 'running'
-               ORDER BY attempt_number DESC LIMIT 1`,
-            )
-            .get(task.taskId) as AttemptRow | undefined)
-        : undefined;
-
-    if (current.status === "running" && !runningAttempt) {
-      throw new RuntimeConflictError(
-        `runtime 任务 ${task.taskId} 缺少 running attempt，拒绝从 legacy 终态前滚`,
-      );
-    }
-
-    if (runningAttempt) {
-      attemptId = runningAttempt.attempt_id;
-      leaseEpoch = runningAttempt.lease_epoch;
-      const attemptUpdate = this.db
-        .prepare(
-          `UPDATE job_attempts
-           SET status = ?, output_path = COALESCE(?, output_path), output_offset = ?,
-               error = ?, result_json = ?, finished_at = ?, updated_at = ?, version = version + 1
-           WHERE attempt_id = ? AND status = 'running' AND version = ?`,
-        )
-        .run(
-          status,
-          task.outputFile ?? null,
-          task.outputOffset,
-          error ?? null,
-          stringifyJson(legacyTerminalResult(task, fingerprint)),
-          task.endTime,
-          now,
-          runningAttempt.attempt_id,
-          runningAttempt.version,
-        );
-      if (attemptUpdate.changes !== 1) {
-        throw new RuntimeConflictError(
-          `legacy 任务 ${task.taskId} 的 running attempt 前滚 CAS 失败`,
-        );
+    try {
+      await rename(filePath, archivePath);
+    } catch (error) {
+      if (isNodeCode(error, "ENOENT") && (await pathExists(archivePath))) {
+        return {
+          status: "already_migrated",
+          imported,
+          skipped,
+          interrupted,
+          archivePath,
+        };
       }
-    } else {
-      attemptNumber++;
-      attemptId = this.insertLegacyTerminalAttempt(
-        task,
-        status,
-        attemptNumber,
-        leaseEpoch,
-        fingerprint,
-        task.endTime,
-      );
+      throw new Error(`legacy TaskStore 已导入但归档失败，已保留迁移源: ${filePath}`, {
+        cause: error,
+      });
     }
-
-    const data = {
-      ...(current.data ?? {}),
-      ...(task.data ?? {}),
-      legacyTaskStore: { notified: task.notified, outputOffset: task.outputOffset },
-      legacyTaskStoreImport: legacyImportMarker(task, fingerprint, current.version, now),
-    };
-    const jobUpdate = this.db
-      .prepare(
-        `UPDATE jobs
-         SET status = ?, description = ?, tool_use_id = COALESCE(?, tool_use_id),
-             output_path = COALESCE(?, output_path), data_json = ?, lease_epoch = ?,
-             attempt_count = ?, terminal_at = ?, error = ?, updated_at = ?, version = version + 1
-         WHERE job_id = ? AND status = ? AND version = ?`,
-      )
-      .run(
-        status,
-        task.description,
-        task.toolUseId ?? null,
-        task.outputFile ?? null,
-        stringifyJson(data),
-        leaseEpoch,
-        attemptNumber,
-        task.endTime,
-        error ?? null,
-        now,
-        task.taskId,
-        current.status,
-        current.version,
-      );
-    if (jobUpdate.changes !== 1) {
-      throw new RuntimeConflictError(`legacy 任务 ${task.taskId} 前滚 CAS 失败`);
-    }
-    this.insertLegacyCompletion(task, current, status, attemptId, fingerprint, now);
-    this.db
-      .prepare(
-        `UPDATE runtime_leases
-         SET expires_at = MIN(expires_at, ?), version = version + 1
-         WHERE resource_key = ?`,
-      )
-      .run(now, `job:${task.taskId}`);
+    return { status: "migrated", imported, skipped, interrupted, archivePath };
   }
 
   private insertLegacyTerminalAttempt(
@@ -1971,68 +1886,6 @@ export class RuntimeStore {
         stringifyJson(legacyTerminalResult(task, fingerprint)),
       );
     return attemptId;
-  }
-
-  private insertLegacyCompletion(
-    task: LegacyTask,
-    current: JobRecord,
-    status: TerminalJobStatus,
-    attemptId: string,
-    fingerprint: string,
-    createdAt: number,
-  ): void {
-    if (
-      !current.ownerSessionId ||
-      (current.type !== "local_agent" && task.type !== "local_agent")
-    ) {
-      return;
-    }
-    const completionStatus = legacyDelegationStatus(task);
-    if (current.completionPolicy === "detached" && completionStatus === "completed") return;
-
-    const explicitCompletionId = nonEmptyString(task.data?.["completionId"]);
-    const completionId =
-      explicitCompletionId ?? `completion:legacy:${task.taskId}:${fingerprint.slice(0, 16)}`;
-    const activityIds = Array.isArray(task.data?.["activityIds"])
-      ? task.data["activityIds"].filter((value): value is string => typeof value === "string")
-      : [];
-    const error = mapLegacyStatus(task.status).error ?? task.error;
-    this.insertCompletion({
-      completionId,
-      jobId: task.taskId,
-      attemptId,
-      policy: current.completionPolicy,
-      status,
-      payload: {
-        legacyTaskStoreReconciliation: true,
-        delegationCompletion: {
-          completionId,
-          jobId: task.taskId,
-          ownerSessionId: current.ownerSessionId,
-          completionSeq: safeInteger(task.data?.["completionSeq"]) ?? task.endTime ?? createdAt,
-          activityIds,
-          completionPolicy: current.completionPolicy,
-          status: completionStatus,
-          outputSummary:
-            typeof task.data?.["outputSummary"] === "string"
-              ? task.data["outputSummary"]
-              : task.description,
-          ...(error ? { error } : {}),
-        },
-      },
-      createdAt,
-    });
-    const isSynchronousRequiredSuccess =
-      current.completionPolicy === "required" && completionStatus === "completed";
-    if (
-      task.notified ||
-      task.data?.["internalCompletion"] === true ||
-      isSynchronousRequiredSuccess
-    ) {
-      this.db
-        .prepare("UPDATE completion_outbox SET delivered_at = ? WHERE completion_id = ?")
-        .run(createdAt, completionId);
-    }
   }
 
   private assertLease(resourceKey: string, ownerId: string, leaseEpoch: number): void {
@@ -2502,46 +2355,6 @@ interface LegacyTask {
   data?: Record<string, unknown>;
 }
 
-type LegacyReconciliationDecision = "reconcile" | "skip";
-
-function legacyReconciliationDecision(
-  task: LegacyTask,
-  current: JobRecord,
-): LegacyReconciliationDecision {
-  if (!isLegacyTerminalStatus(task.status) || isTerminalJobStatus(current.status)) return "skip";
-
-  const fingerprint = legacyTaskFingerprint(task);
-  const priorImport = recordValue(current.data?.["legacyTaskStoreImport"]);
-  if (priorImport?.["fingerprint"] === fingerprint) return "skip";
-  if (task.endTime === undefined) {
-    throw new RuntimeConflictError(
-      `legacy 任务 ${task.taskId} 的终态缺少 endTime，拒绝覆盖 runtime ${current.status}`,
-    );
-  }
-
-  const legacyVersion = positiveInteger(task.data?.["runtimeVersion"]);
-  const timeComparison = Math.sign(task.endTime - current.updatedAt);
-  const versionComparison =
-    legacyVersion === undefined ? undefined : Math.sign(legacyVersion - current.version);
-
-  if (
-    versionComparison !== undefined &&
-    versionComparison !== 0 &&
-    timeComparison !== 0 &&
-    versionComparison !== timeComparison
-  ) {
-    throw new RuntimeConflictError(
-      `legacy 任务 ${task.taskId} 的版本与时间证据冲突，拒绝覆盖 runtime`,
-    );
-  }
-  if (versionComparison !== undefined && versionComparison < 0) return "skip";
-  if (timeComparison < 0) return "skip";
-  if (timeComparison === 0 && (versionComparison === undefined || versionComparison === 0)) {
-    throw new RuntimeConflictError(`legacy 任务 ${task.taskId} 与 runtime 无法判定新旧，拒绝覆盖`);
-  }
-  return "reconcile";
-}
-
 function legacyTaskFingerprint(task: LegacyTask): string {
   return createHash("sha256").update(JSON.stringify(task)).digest("hex");
 }
@@ -2549,16 +2362,14 @@ function legacyTaskFingerprint(task: LegacyTask): string {
 function legacyImportMarker(
   task: LegacyTask,
   fingerprint: string,
-  runtimeVersionBefore: number,
-  reconciledAt: number,
+  importedAt: number,
 ): Record<string, unknown> {
   return {
     version: 1,
     fingerprint,
     legacyStatus: task.status,
     ...(task.endTime !== undefined ? { legacyEndTime: task.endTime } : {}),
-    runtimeVersionBefore,
-    reconciledAt,
+    importedAt,
   };
 }
 
@@ -2568,46 +2379,6 @@ function legacyTerminalResult(task: LegacyTask, fingerprint: string): Record<str
     legacyTaskStoreFingerprint: fingerprint,
     ...(task.data ?? {}),
   };
-}
-
-function isLegacyTerminalStatus(
-  status: LegacyTask["status"],
-): status is Extract<LegacyTask["status"], "completed" | "failed" | "killed"> {
-  return status === "completed" || status === "failed" || status === "killed";
-}
-
-function positiveInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
-}
-
-function safeInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function legacyDelegationStatus(
-  task: LegacyTask,
-): "completed" | "partial" | "error" | "timed_out" | "cancelled" {
-  const aggregate = task.data?.["aggregateStatus"];
-  if (
-    aggregate === "completed" ||
-    aggregate === "partial" ||
-    aggregate === "error" ||
-    aggregate === "timed_out" ||
-    aggregate === "cancelled"
-  ) {
-    return aggregate;
-  }
-  if (task.status === "completed") return "completed";
-  if (task.status === "killed") return "cancelled";
-  return "error";
-}
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return isRecord(value) ? value : undefined;
 }
 
 function assertLegacyTaskStore(value: unknown): asserts value is LegacyTaskStoreFile {
@@ -2661,6 +2432,16 @@ function mapLegacyStatus(status: LegacyTask["status"]): { status: JobStatus; err
 
 function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (isNodeCode(error, "ENOENT")) return false;
+    throw error;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

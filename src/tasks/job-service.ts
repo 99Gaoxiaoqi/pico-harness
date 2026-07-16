@@ -6,7 +6,7 @@ import {
   RuntimeStore,
   generateRuntimeId,
   type FinishJobResult,
-  type LegacyTaskImportResult,
+  type LegacyTaskMigrationResult,
   type RuntimeStoreOptions,
 } from "./runtime-store.js";
 import {
@@ -36,7 +36,7 @@ export interface JobServiceOptions extends RuntimeStoreOptions {
 
 export interface JobServiceCreateResult {
   service: JobService;
-  legacyImport: LegacyTaskImportResult;
+  legacyMigration: LegacyTaskMigrationResult;
 }
 
 export interface DispatchJobInput {
@@ -116,8 +116,13 @@ export class JobService {
         resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.tasks,
         "state.json",
       );
-    const legacyImport = await service.store.importLegacyTaskStore(legacyPath);
-    return { service, legacyImport };
+    try {
+      const legacyMigration = await service.store.migrateLegacyTaskStore(legacyPath);
+      return { service, legacyMigration };
+    } catch (error) {
+      service.close();
+      throw error;
+    }
   }
 
   dispatch(input: DispatchJobInput): JobRecord {
