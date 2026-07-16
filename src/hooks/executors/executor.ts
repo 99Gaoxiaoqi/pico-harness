@@ -18,8 +18,8 @@ import type {
 } from "../types.js";
 import type { HookExecutor } from "../service.js";
 import {
-  resolveCommandHookInvocation,
-  sanitizeCommandHookEnvironment,
+  resolveCommandHookExecution,
+  type ResolvedCommandHookInvocation,
 } from "../config/referenced-scripts.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -132,14 +132,12 @@ export class DefaultHookExecutor implements HookExecutor {
     parentSignal?: AbortSignal,
   ): Promise<HookOutput> {
     const signal = handlerSignal(parentSignal, timeoutMs(handler));
-    const running = startCommand(
-      resolved,
+    const invocation = await resolveCommandHookExecution(
       handler,
-      input,
       this.options.workDir,
       this.options.env ?? process.env,
-      signal,
     );
+    const running = startCommand(resolved, invocation, input, this.options.workDir, signal);
     const runsInBackground = handler.async || handler.asyncRewake;
     if (runsInBackground) {
       const trackedCommand = running.completion
@@ -314,18 +312,16 @@ interface RunningCommand {
 
 function startCommand(
   resolved: ResolvedHookHandler,
-  handler: CommandHookHandler,
+  invocation: ResolvedCommandHookInvocation,
   input: HookInput,
   cwd: string,
-  baseEnv: Readonly<NodeJS.ProcessEnv>,
   signal: AbortSignal,
 ): RunningCommand {
   let child: ChildProcess;
   try {
-    const invocation = resolveCommandHookInvocation(handler);
     const spawnOptions: SpawnOptions = {
       cwd,
-      env: sanitizeCommandHookEnvironment(handler, baseEnv),
+      env: invocation.env,
       windowsHide: true,
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],

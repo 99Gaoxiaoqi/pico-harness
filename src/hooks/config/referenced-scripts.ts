@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, realpath } from "node:fs/promises";
+import { access, lstat, open, realpath } from "node:fs/promises";
 import { basename, delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import type { CommandHookHandler, HookHandler } from "../types.js";
 
@@ -12,6 +12,14 @@ export interface ReferencedScriptResolution {
 export interface CommandHookInvocation {
   readonly command: string;
   readonly args: readonly string[];
+}
+
+export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
+  /** Canonical absolute executable selected with the same environment passed to spawn. */
+  readonly command: string;
+  readonly env: Readonly<NodeJS.ProcessEnv>;
+  readonly referencedPaths: readonly string[];
+  readonly executablePaths: readonly string[];
 }
 
 const PACKAGE_EXECUTABLES = new Set([
@@ -76,8 +84,17 @@ const NODE_SAFE_VALUE_OPTIONS = [
 const NODE_DISPLAY_FLAGS = new Set(["--version", "-v", "--help", "-h"]);
 const BLOCKED_ENVIRONMENT_NAMES = new Set([
   "BASH_ENV",
+  "BASHOPTS",
+  "BASH_XTRACEFD",
+  "SHELLOPTS",
+  "PS4",
+  "CDPATH",
+  "GLOBIGNORE",
   "ENV",
   "ZDOTDIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_DATA_DIRS",
   "SHELL",
   "COMSPEC",
   "NODE_OPTIONS",
@@ -86,13 +103,27 @@ const BLOCKED_ENVIRONMENT_NAMES = new Set([
   "LD_PRELOAD",
   "LD_AUDIT",
   "LD_LIBRARY_PATH",
+  "LIBPATH",
+  "SHLIB_PATH",
+  "LDR_PRELOAD",
+  "LDR_PRELOAD64",
+  "OPENSSL_CONF",
+  "OPENSSL_CONF_INCLUDE",
+  "OPENSSL_MODULES",
+  "OPENSSL_ENGINES",
   "PYTHONPATH",
   "PYTHONHOME",
   "PYTHONSTARTUP",
+  "PYTHONUSERBASE",
+  "PYTHONNOUSERSITE",
   "RUBYOPT",
   "RUBYLIB",
+  "RUBYGEMS_GEMDEPS",
+  "GEM_HOME",
+  "GEM_PATH",
   "PERL5OPT",
   "PERL5LIB",
+  "PERLLIB",
   "JAVA_TOOL_OPTIONS",
   "_JAVA_OPTIONS",
   "JDK_JAVA_OPTIONS",
@@ -132,11 +163,65 @@ export function sanitizeCommandHookEnvironment(
   for (const [name, value] of Object.entries(baseEnvironment)) {
     if (!isBlockedEnvironmentName(name)) sanitized[name] = value;
   }
-  return { ...sanitized, ...handler.env };
+  const result = { ...sanitized, ...handler.env };
+  // Prevent supported interpreters (including workspace scripts reached through shebangs) from
+  // falling back to mutable per-user startup/config locations after their injection variables
+  // have been removed.
+  result.PYTHONNOUSERSITE = "1";
+  result.PYTHONDONTWRITEBYTECODE = "1";
+  if (process.platform !== "win32") {
+    result.ZDOTDIR = "/dev/null";
+    result.XDG_CONFIG_HOME = "/dev/null";
+    result.XDG_DATA_HOME = "/dev/null";
+    result.XDG_DATA_DIRS = "/dev/null";
+  }
+  return result;
 }
 
 /** Backward-compatible export for the executor import used before the boundary was generalized. */
 export const sanitizePackageInvocationEnvironment = sanitizeCommandHookEnvironment;
+
+/** Resolve the exact executable and environment that the executor must pass to spawn. */
+export async function resolveCommandHookExecution(
+  handler: CommandHookHandler,
+  workspace: string,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<ResolvedCommandHookInvocation> {
+  const invocation = resolveCommandHookInvocation(handler);
+  const sanitizedEnvironment = sanitizeCommandHookEnvironment(handler, environment);
+  const canonicalWorkspace = await realpath(workspace);
+  const executable = await resolveExecutable(
+    invocation.command,
+    canonicalWorkspace,
+    sanitizedEnvironment,
+  );
+  const executableName = executableBasename(executable);
+  assertSupportedResolvedExecutable(executableName, executable, canonicalWorkspace);
+  const referencedPaths: string[] = [];
+  const executablePaths = [executable];
+  executablePaths.push(...(await resolveShebangInterpreterChain(executable)));
+  if (isWithin(canonicalWorkspace, executable)) {
+    referencedPaths.push(executable);
+  }
+  if (NODE_EXECUTABLES.has(executableName)) {
+    referencedPaths.push(...(await resolveNodeCodePaths(invocation.args, canonicalWorkspace)));
+  } else if (FILE_INTERPRETERS.has(executableName)) {
+    referencedPaths.push(
+      await resolveInterpreterScript(invocation.args, canonicalWorkspace, executableName),
+    );
+  } else {
+    referencedPaths.push(
+      ...(await resolveWorkspaceExecutableArgumentFiles(invocation.args, canonicalWorkspace)),
+    );
+  }
+  return {
+    command: executable,
+    args: invocation.args,
+    env: sanitizedEnvironment,
+    referencedPaths: sortedUnique(referencedPaths),
+    executablePaths: sortedUnique(executablePaths),
+  };
+}
 
 export async function resolveReferencedScripts(
   handler: HookHandler,
@@ -146,29 +231,13 @@ export async function resolveReferencedScripts(
   if (handler.type !== "command") {
     return { paths: [], watchPaths: [], executablePaths: [] };
   }
-  const invocation = resolveCommandHookInvocation(handler);
-  const sanitizedEnvironment = sanitizeCommandHookEnvironment(handler, environment);
-  const executable = await resolveExecutable(invocation.command, workspace, sanitizedEnvironment);
-  const executableName = executableBasename(executable);
-  if (PACKAGE_EXECUTABLES.has(executableName)) {
-    throw unsupportedCommand(`解析后的可执行文件属于 package-manager/runner: ${executableName}`);
-  }
-  const paths: string[] = [];
-
-  if (isWithin(workspace, executable)) paths.push(executable);
-  if (NODE_EXECUTABLES.has(executableName)) {
-    paths.push(...(await resolveNodeCodePaths(invocation.args, workspace)));
-  } else if (FILE_INTERPRETERS.has(executableName)) {
-    const script = await resolveInterpreterScript(invocation.args, workspace, executableName);
-    if (script) paths.push(script);
-  }
-
-  const uniquePaths = sortedUnique(paths);
+  const invocation = await resolveCommandHookExecution(handler, workspace, environment);
+  const uniquePaths = sortedUnique(invocation.referencedPaths);
   const canonicalPaths = await canonicalExistingPaths(uniquePaths);
   return {
     paths: canonicalPaths,
     watchPaths: sortedUnique([...uniquePaths, ...canonicalPaths]),
-    executablePaths: [executable],
+    executablePaths: invocation.executablePaths,
   };
 }
 
@@ -201,25 +270,33 @@ function assertSupportedInvocation(invocation: CommandHookInvocation): void {
   if (COMMAND_FORWARDERS.has(name)) {
     throw unsupportedCommand(`不支持可转发其他命令的包装器 ${name}`);
   }
-  if (NODE_EXECUTABLES.has(name)) assertSafeNodeInvocation(invocation.args);
-  if (FILE_INTERPRETERS.has(name) && invocation.args.some(isInterpreterInlineCodeOption)) {
-    throw unsupportedCommand(`${name} 的内联/模块执行模式无法绑定完整代码来源`);
+  if (FILE_INTERPRETERS.has(name)) {
+    const prefix = invocation.args[0];
+    if (prefix?.startsWith("-") && prefix !== "--") {
+      throw unsupportedCommand(`${name} 的内联/选项执行模式无法绑定完整代码来源`);
+    }
   }
 }
 
-function assertSafeNodeInvocation(args: readonly string[]): void {
-  for (const value of args) {
-    if (value === "--run" || value.startsWith("--run=")) {
-      throw unsupportedCommand("node --run 会执行未绑定的 package script");
-    }
-    if (
-      value === "--env-file" ||
-      value.startsWith("--env-file=") ||
-      value === "--env-file-if-exists" ||
-      value.startsWith("--env-file-if-exists=")
-    ) {
-      throw unsupportedCommand("node env-file 可注入运行时加载配置");
-    }
+function assertSupportedResolvedExecutable(
+  executableName: string,
+  executable: string,
+  workspace: string,
+): void {
+  if (PACKAGE_EXECUTABLES.has(executableName)) {
+    throw unsupportedCommand(`解析后的可执行文件属于 package-manager/runner: ${executableName}`);
+  }
+  if (COMMAND_FORWARDERS.has(executableName)) {
+    throw unsupportedCommand(`解析后的可执行文件属于命令转发器: ${executableName}`);
+  }
+  if (
+    !isWithin(workspace, executable) &&
+    !NODE_EXECUTABLES.has(executableName) &&
+    !FILE_INTERPRETERS.has(executableName)
+  ) {
+    throw unsupportedCommand(
+      `外部可执行文件 ${executableName} 的代码来源语法未经审计；请使用工作区内的直接 wrapper`,
+    );
   }
 }
 
@@ -234,6 +311,7 @@ async function resolveNodeCodePaths(
   for (let index = 0; index < args.length; index++) {
     const value = args[index]!;
     if (value === "--") {
+      displayOnly = false;
       entry = args[index + 1];
       break;
     }
@@ -247,6 +325,17 @@ async function resolveNodeCodePaths(
     }
     if (NODE_DISPLAY_FLAGS.has(value)) continue;
     displayOnly = false;
+    if (value === "--run" || value.startsWith("--run=")) {
+      throw unsupportedCommand("node --run 会执行未绑定的 package script");
+    }
+    if (
+      value === "--env-file" ||
+      value.startsWith("--env-file=") ||
+      value === "--env-file-if-exists" ||
+      value.startsWith("--env-file-if-exists=")
+    ) {
+      throw unsupportedCommand("node env-file 可注入运行时加载配置");
+    }
     if (
       NODE_SAFE_FLAGS.has(value) ||
       NODE_SAFE_VALUE_OPTIONS.some((prefix) => value.startsWith(prefix))
@@ -290,14 +379,70 @@ async function resolveInterpreterScript(
   args: readonly string[],
   workspace: string,
   interpreter: string,
-): Promise<string | undefined> {
+): Promise<string> {
   if (args.length === 0) {
     throw unsupportedCommand(`${interpreter} 缺少可绑定的普通文件入口`);
   }
-  if (args[0]!.startsWith("-")) {
-    throw unsupportedCommand(`无法证明 ${interpreter} 选项 ${args[0]} 的代码来源`);
+  const entryIndex = args[0] === "--" ? 1 : 0;
+  const entry = args[entryIndex];
+  if (!entry) {
+    throw unsupportedCommand(`${interpreter} 缺少可绑定的普通文件入口`);
   }
-  return await resolveExistingCodeFile(args[0]!, workspace, `${interpreter} 入口`, true);
+  if (entry.startsWith("-")) {
+    throw unsupportedCommand(`无法证明 ${interpreter} 选项 ${entry} 的代码来源`);
+  }
+  return await resolveExistingCodeFile(entry, workspace, `${interpreter} 入口`, true);
+}
+
+/**
+ * A workspace executable is itself byte-bound. Conservatively bind ordinary files that are
+ * visibly passed to it as operands as well; implicit/transitive loads remain outside this layer.
+ */
+async function resolveWorkspaceExecutableArgumentFiles(
+  args: readonly string[],
+  workspace: string,
+): Promise<readonly string[]> {
+  const paths: string[] = [];
+  for (const argument of args) {
+    for (const candidate of workspaceArgumentFileCandidates(argument)) {
+      const logicalPath = isAbsolute(candidate)
+        ? resolve(candidate)
+        : resolve(workspace, candidate);
+      let info;
+      try {
+        info = await lstat(logicalPath);
+      } catch (error) {
+        if (isErrno(error, "ENOENT")) continue;
+        throw error;
+      }
+      if (info.isDirectory()) {
+        throw unsupportedCommand(`工作区可执行文件参数不允许使用目录: ${candidate}`);
+      }
+      const canonicalPath = await realpath(logicalPath);
+      const canonicalInfo = await lstat(canonicalPath);
+      if (!canonicalInfo.isFile()) {
+        throw unsupportedCommand(`工作区可执行文件参数不是普通文件: ${candidate}`);
+      }
+      paths.push(canonicalPath);
+    }
+  }
+  return sortedUnique(paths);
+}
+
+function workspaceArgumentFileCandidates(argument: string): readonly string[] {
+  if (!argument || argument === "-" || argument === "--") return [];
+  // Unknown workspace executables have no audited option grammar. Treat every extant raw argv
+  // value as a possible file operand, including names beginning with "-" after an option marker.
+  const candidates = new Set<string>([argument]);
+
+  const equalsIndex = argument.indexOf("=");
+  if (equalsIndex >= 0 && equalsIndex + 1 < argument.length) {
+    candidates.add(argument.slice(equalsIndex + 1));
+  }
+  if (argument.startsWith("@") && argument.length > 1) candidates.add(argument.slice(1));
+  if (/^-[^-][^=]/u.test(argument) && argument.length > 2) candidates.add(argument.slice(2));
+
+  return [...candidates];
 }
 
 async function resolveExistingCodeFile(
@@ -336,7 +481,7 @@ async function resolveExecutable(
   }
   const pathValue = environmentValue(environment, "PATH");
   if (!pathValue) throw unsupportedCommand(`PATH 中无法解析可执行文件 ${command}`);
-  const extensions = executableExtensions(command, environment);
+  const extensions = executableExtensions(command);
   for (const directory of pathValue.split(delimiter)) {
     if (!directory || !isAbsolute(directory)) {
       throw unsupportedCommand("继承 PATH 含相对目录，无法绑定可执行文件");
@@ -350,9 +495,71 @@ async function resolveExecutable(
 }
 
 async function requireExecutable(path: string): Promise<string> {
+  if (process.platform === "win32" && !/\.exe$/iu.test(path)) {
+    throw unsupportedCommand("Windows command Hook 仅允许 shell:false 可直接启动的 .exe");
+  }
   if (!(await isExecutableFile(path)))
     throw unsupportedCommand(`可执行文件不存在或不可执行: ${path}`);
   return await realpath(path);
+}
+
+async function resolveShebangInterpreterChain(executable: string): Promise<readonly string[]> {
+  if (process.platform === "win32") return [];
+  const interpreters: string[] = [];
+  const visited = new Set([executable]);
+  let current = executable;
+  while (true) {
+    const interpreter = await readShebangInterpreter(current);
+    if (!interpreter) return interpreters;
+    if (basename(interpreter).startsWith("-")) {
+      throw unsupportedCommand("工作区 executable 的 shebang 解释器名称不允许以 - 开头");
+    }
+    const resolvedInterpreter = await requireExecutable(interpreter);
+    const interpreterName = executableBasename(resolvedInterpreter);
+    if (PACKAGE_EXECUTABLES.has(interpreterName) || COMMAND_FORWARDERS.has(interpreterName)) {
+      throw unsupportedCommand(`工作区 executable 不允许使用 shebang 转发器 ${interpreterName}`);
+    }
+    if (visited.has(resolvedInterpreter)) {
+      throw unsupportedCommand("工作区 executable 的 shebang 解释器链存在循环");
+    }
+    if (interpreters.length > 0) {
+      throw unsupportedCommand("工作区 executable 的 shebang 解释器自身不得再使用 shebang");
+    }
+    visited.add(resolvedInterpreter);
+    interpreters.push(resolvedInterpreter);
+    current = resolvedInterpreter;
+  }
+}
+
+async function readShebangInterpreter(executable: string): Promise<string | undefined> {
+  const handle = await open(executable, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const buffer = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead < 2 || buffer[0] !== 0x23 || buffer[1] !== 0x21) return undefined;
+    const newline = buffer.subarray(2, bytesRead).indexOf(0x0a);
+    if (newline < 0 && bytesRead === buffer.length) {
+      throw unsupportedCommand("工作区 executable 的 shebang 超过静态解析上限");
+    }
+    const rawDeclaration = buffer
+      .subarray(2, newline < 0 ? bytesRead : newline + 2)
+      .toString("utf8");
+    if (rawDeclaration.includes("\r")) {
+      throw unsupportedCommand("工作区 executable 的 shebang 不允许 CR/CRLF 行尾");
+    }
+    const declaration = rawDeclaration.trim();
+    const words = declaration.split(/\s+/u);
+    const interpreter = words[0];
+    if (!interpreter || !isAbsolute(interpreter)) {
+      throw unsupportedCommand("工作区 executable 的 shebang 必须使用绝对解释器路径");
+    }
+    if (words.length !== 1) {
+      throw unsupportedCommand("工作区 executable 的 shebang 不允许携带解释器参数");
+    }
+    return interpreter;
+  } finally {
+    await handle.close();
+  }
 }
 
 async function isExecutableFile(path: string): Promise<boolean> {
@@ -366,16 +573,9 @@ async function isExecutableFile(path: string): Promise<boolean> {
   }
 }
 
-function executableExtensions(command: string, environment: Readonly<NodeJS.ProcessEnv>): string[] {
-  if (process.platform !== "win32" || /\.[^./\\]+$/u.test(command)) return [""];
-  const pathExt = environmentValue(environment, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD";
-  return [
-    "",
-    ...pathExt
-      .split(";")
-      .filter(Boolean)
-      .map((value) => value.toLowerCase()),
-  ];
+function executableExtensions(command: string): string[] {
+  if (process.platform !== "win32") return [""];
+  return /\.exe$/iu.test(command) ? [""] : [".exe"];
 }
 
 function parseStaticCommandLine(command: string): string[] {
@@ -450,30 +650,33 @@ function parseStaticCommandLine(command: string): string[] {
   return words;
 }
 
-function isInterpreterInlineCodeOption(value: string): boolean {
+function isBlockedEnvironmentName(name: string): boolean {
+  const normalized = name.toUpperCase();
   return (
-    value === "-c" ||
-    value === "-e" ||
-    value === "-m" ||
-    value.startsWith("-c") ||
-    value.startsWith("-e")
+    BLOCKED_ENVIRONMENT_NAMES.has(normalized) ||
+    normalized.startsWith("BASH_FUNC_") ||
+    normalized.startsWith("DYLD_") ||
+    normalized.startsWith("LD_") ||
+    normalized.startsWith("PYTHON")
   );
 }
 
-function isBlockedEnvironmentName(name: string): boolean {
-  const normalized = name.toUpperCase();
-  return BLOCKED_ENVIRONMENT_NAMES.has(normalized) || normalized.startsWith("DYLD_");
-}
-
 function executableBasename(path: string): string {
-  return basename(path)
+  const name = basename(path)
     .toLowerCase()
     .replace(/\.(?:exe|cmd|bat|com|js|mjs|cjs)$/u, "");
+  if (/^python3(?:\.\d+)+[dt]?$/u.test(name)) return "python3";
+  if (/^ruby\d+(?:\.\d+)*$/u.test(name)) return "ruby";
+  return name;
 }
 
 function looksExplicitPath(value: string): boolean {
   return (
-    isAbsolute(value) || value.startsWith("./") || value.startsWith("../") || value.includes("\\")
+    isAbsolute(value) ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.includes("/") ||
+    value.includes("\\")
   );
 }
 
@@ -508,9 +711,10 @@ function environmentValue(
   environment: Readonly<NodeJS.ProcessEnv>,
   expectedName: string,
 ): string | undefined {
-  const actualName = Object.keys(environment).find(
-    (name) => name.toUpperCase() === expectedName.toUpperCase(),
-  );
+  if (process.platform !== "win32") return environment[expectedName];
+  const actualName = Object.keys(environment)
+    .filter((name) => name.toUpperCase() === expectedName.toUpperCase())
+    .sort()[0];
   return actualName ? environment[actualName] : undefined;
 }
 

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { resolveCommandHookInvocation } from "../../src/hooks/config/referenced-scripts.js";
+import {
+  resolveCommandHookInvocation,
+  sanitizeCommandHookEnvironment,
+} from "../../src/hooks/config/referenced-scripts.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/executor.js";
 import { HookTrustStore, type HookTrustSubject } from "../../src/hooks/trust/store.js";
 import type { CommandHookHandler } from "../../src/hooks/types.js";
@@ -19,6 +22,167 @@ test("ordinary executable scripts remain byte-bound", async (context) => {
   await writeExecutable(scriptPath, '#!/bin/sh\nprintf \'{"additionalContext":"B"}\\n\'\n');
 
   assert.equal(await fixture.store.status(subject), "pending");
+});
+
+test("workspace shebang interpreters are version-bound", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const interpreterPath = join(fixture.root, "custom-interpreter");
+  const scriptPath = join(fixture.workspace, "check-with-custom-interpreter");
+  await copyFile("/bin/sh", interpreterPath);
+  await chmod(interpreterPath, 0o755);
+  await writeExecutable(
+    scriptPath,
+    `#!${interpreterPath}\nprintf '{"additionalContext":"A"}\\n'\n`,
+  );
+  const subject = fixture.subject({ type: "command", command: scriptPath, args: [] });
+  await fixture.store.trust(subject);
+  assert.equal(await fixture.store.status(subject), "active");
+
+  await writeExecutable(interpreterPath, "changed interpreter bytes\n");
+
+  assert.equal(await fixture.store.status(subject), "pending");
+});
+
+for (const scenario of [
+  { label: "env forwarder", declaration: "#!/usr/bin/env sh" },
+  { label: "login option", declaration: "#!/bin/sh -l" },
+] as const) {
+  test(`workspace shebang ${scenario.label} fails closed`, async (context) => {
+    if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+    const fixture = await createFixture(context);
+    const scriptPath = join(fixture.workspace, "unsafe-shebang");
+    await writeExecutable(scriptPath, `${scenario.declaration}\nexit 0\n`);
+
+    await assert.rejects(
+      fixture.store.trust(fixture.subject({ type: "command", command: scriptPath, args: [] })),
+      /shebang 不允许携带解释器参数/u,
+    );
+  });
+}
+
+test("workspace shebang CRLF line endings fail closed", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const scriptPath = join(fixture.workspace, "crlf-shebang");
+  await writeExecutable(scriptPath, "#!/bin/sh\r\nexit 0\r\n");
+
+  await assert.rejects(
+    fixture.store.trust(fixture.subject({ type: "command", command: scriptPath, args: [] })),
+    /shebang 不允许 CR\/CRLF 行尾/u,
+  );
+});
+
+test("nested workspace shebang forwarders fail closed", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const wrapperPath = join(fixture.root, "interpreter-wrapper");
+  const scriptPath = join(fixture.workspace, "nested-shebang");
+  await writeExecutable(wrapperPath, '#!/usr/bin/env sh\nexec /bin/sh "$@"\n');
+  await writeExecutable(scriptPath, `#!${wrapperPath}\nexit 0\n`);
+
+  await assert.rejects(
+    fixture.store.trust(fixture.subject({ type: "command", command: scriptPath, args: [] })),
+    /shebang 不允许携带解释器参数/u,
+  );
+});
+
+test("nested workspace shebang interpreters fail closed on every platform", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const wrapperPath = join(fixture.root, "nested-interpreter");
+  const scriptPath = join(fixture.workspace, "nested-interpreter-script");
+  await writeExecutable(wrapperPath, '#!/bin/sh\nexec /bin/sh "$@"\n');
+  await writeExecutable(scriptPath, `#!${wrapperPath}\nexit 0\n`);
+
+  await assert.rejects(
+    fixture.store.trust(fixture.subject({ type: "command", command: scriptPath, args: [] })),
+    /shebang 解释器自身不得再使用 shebang/u,
+  );
+});
+
+test("known external interpreter names cannot hide shebang forwarders", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const externalBin = join(fixture.root, "external-bin");
+  const interpreterPath = join(externalBin, "sh");
+  const scriptPath = join(fixture.workspace, "ordinary-script.sh");
+  await mkdir(externalBin);
+  await writeExecutable(interpreterPath, '#!/usr/bin/env sh\nexec /bin/sh "$@"\n');
+  await writeFile(scriptPath, "exit 0\n");
+
+  await assert.rejects(
+    fixture.store.trust(
+      fixture.subject({ type: "command", command: interpreterPath, args: [scriptPath] }),
+    ),
+    /shebang 不允许携带解释器参数/u,
+  );
+});
+
+test("versioned Python 3 executable names retain the audited interpreter grammar", async (context) => {
+  if (process.platform === "win32") return context.skip("POSIX executable fixture");
+  const fixture = await createFixture(context);
+  const interpreterPath = join(fixture.root, "python3.14");
+  const scriptPath = join(fixture.workspace, "ordinary.py");
+  await copyFile("/bin/sh", interpreterPath);
+  await chmod(interpreterPath, 0o755);
+  await writeFile(scriptPath, "print('ordinary')\n");
+  const subject = fixture.subject({
+    type: "command",
+    command: interpreterPath,
+    args: [scriptPath],
+  });
+
+  await fixture.store.trust(subject);
+
+  assert.equal(await fixture.store.status(subject), "active");
+});
+
+test("versioned Ruby executable names retain the audited interpreter grammar", async (context) => {
+  if (process.platform === "win32") return context.skip("POSIX executable fixture");
+  const fixture = await createFixture(context);
+  const interpreterPath = join(fixture.root, "ruby3.3");
+  const scriptPath = join(fixture.workspace, "ordinary.rb");
+  await copyFile("/bin/sh", interpreterPath);
+  await chmod(interpreterPath, 0o755);
+  await writeFile(scriptPath, "puts 'ordinary'\n");
+  const subject = fixture.subject({
+    type: "command",
+    command: interpreterPath,
+    args: [scriptPath],
+  });
+
+  await fixture.store.trust(subject);
+
+  assert.equal(await fixture.store.status(subject), "active");
+});
+
+test("cyclic workspace shebang interpreter chains fail closed", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const wrapperPath = join(fixture.root, "cycle-wrapper");
+  const scriptPath = join(fixture.workspace, "cycle-script");
+  await writeExecutable(scriptPath, `#!${wrapperPath}\nexit 0\n`);
+  await writeExecutable(wrapperPath, `#!${scriptPath}\nexit 0\n`);
+
+  await assert.rejects(
+    fixture.store.trust(fixture.subject({ type: "command", command: scriptPath, args: [] })),
+    /shebang 解释器链存在循环/u,
+  );
+});
+
+test("workspace shebang interpreter names cannot trigger login argv zero", async (context) => {
+  if (process.platform === "win32") return context.skip("Shebangs are POSIX-only");
+  const fixture = await createFixture(context);
+  const aliasPath = join(fixture.root, "-sh");
+  const scriptPath = join(fixture.workspace, "login-alias-shebang");
+  await symlink("/bin/sh", aliasPath);
+  await writeExecutable(scriptPath, `#!${aliasPath}\nexit 0\n`);
+
+  await assert.rejects(
+    fixture.store.trust(fixture.subject({ type: "command", command: scriptPath, args: [] })),
+    /shebang 解释器名称不允许以 - 开头/u,
+  );
 });
 
 for (const handler of [
@@ -85,7 +249,7 @@ test("inherited runtime loader variables are stripped before command execution",
     scriptPath,
     [
       "#!/bin/sh",
-      'printf \'{"additionalContext":"%s:%s:%s:%s"}\\n\' "${BASH_ENV-unset}" "${ENV-unset}" "${NODE_OPTIONS-unset}" "${KEEP-unset}"',
+      'printf \'{"additionalContext":"%s:%s:%s:%s:%s"}\\n\' "${BASH_ENV-unset}" "${ENV-unset}" "${NODE_OPTIONS-unset}" "${PYTHONPYCACHEPREFIX-unset}" "${KEEP-unset}"',
       "",
     ].join("\n"),
   );
@@ -103,6 +267,7 @@ test("inherited runtime loader variables are stripped before command execution",
       BASH_ENV: preloadPath,
       ENV: preloadPath,
       NODE_OPTIONS: `--require=${preloadPath}`,
+      PYTHONPYCACHEPREFIX: join(fixture.root, "attacker-pyc-cache"),
       LD_PRELOAD: join(fixture.workspace, "missing.so"),
       DYLD_INSERT_LIBRARIES: join(fixture.workspace, "missing.dylib"),
     },
@@ -127,8 +292,79 @@ test("inherited runtime loader variables are stripped before command execution",
     {},
   );
 
-  assert.equal(output.additionalContext, "unset:unset:unset:preserved");
+  assert.equal(output.additionalContext, "unset:unset:unset:unset:preserved");
   assert.equal(await exists(markerPath), false);
+});
+
+test("inherited Bash exported functions are stripped before trust and execution", async (context) => {
+  if (process.platform === "win32") return context.skip("Bash exported functions are POSIX-only");
+  const fixture = await createFixture(context);
+  const scriptPath = join(fixture.workspace, "function-check.sh");
+  await writeFile(
+    scriptPath,
+    [
+      "if command -v hookpayload >/dev/null 2>&1; then",
+      "  value=$(hookpayload)",
+      "else",
+      "  value=unset",
+      "fi",
+      'printf \'{"additionalContext":"%s"}\\n\' "$value"',
+      "",
+    ].join("\n"),
+  );
+  const environment: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    "BASH_FUNC_hookpayload%%": "() { printf A; }",
+  };
+  const store = new HookTrustStore({ picoHome: fixture.picoHome, env: environment });
+  const handler = { type: "command", command: "bash", args: ["./function-check.sh"] } as const;
+  const subject = fixture.subject(handler);
+  await store.trust(subject);
+  environment["BASH_FUNC_hookpayload%%"] = "() { printf B; }";
+  assert.equal(await store.status(subject), "active");
+
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace, env: environment });
+  context.after(async () => await executor.dispose());
+  const output = await executeStopHook(executor, fixture, handler, "bash-exported-function");
+
+  assert.equal(output.additionalContext, "unset");
+});
+
+test("interpreter startup environments are stripped or pinned to inert sentinels", () => {
+  const handler = { type: "command", command: process.execPath, args: ["--version"] } as const;
+  const sanitized = sanitizeCommandHookEnvironment(handler, {
+    PATH: process.env.PATH,
+    SHELLOPTS: "xtrace",
+    PS4: "$(injected)",
+    RUBYGEMS_GEMDEPS: "./gem.deps.rb",
+    PYTHONUSERBASE: "./python-user-base",
+    PYTHONPYCACHEPREFIX: "./python-cache",
+    PYTHONWARNINGS: "ignore::payload.CustomWarning",
+    PYTHONBREAKPOINT: "payload.breakpoint",
+    PYTHON_PRESITE: "payload",
+    PERLLIB: "./perl-lib",
+    XDG_CONFIG_HOME: "./fish-config",
+    OPENSSL_CONF: "./openssl.cnf",
+    LD_PROFILE: "./profile.so",
+  });
+
+  assert.equal(sanitized.SHELLOPTS, undefined);
+  assert.equal(sanitized.PS4, undefined);
+  assert.equal(sanitized.RUBYGEMS_GEMDEPS, undefined);
+  assert.equal(sanitized.PYTHONUSERBASE, undefined);
+  assert.equal(sanitized.PYTHONPYCACHEPREFIX, undefined);
+  assert.equal(sanitized.PYTHONWARNINGS, undefined);
+  assert.equal(sanitized.PYTHONBREAKPOINT, undefined);
+  assert.equal(sanitized.PYTHON_PRESITE, undefined);
+  assert.equal(sanitized.PERLLIB, undefined);
+  assert.equal(sanitized.OPENSSL_CONF, undefined);
+  assert.equal(sanitized.LD_PROFILE, undefined);
+  assert.equal(sanitized.PYTHONNOUSERSITE, "1");
+  assert.equal(sanitized.PYTHONDONTWRITEBYTECODE, "1");
+  if (process.platform !== "win32") {
+    assert.equal(sanitized.ZDOTDIR, "/dev/null");
+    assert.equal(sanitized.XDG_CONFIG_HOME, "/dev/null");
+  }
 });
 
 for (const name of [
@@ -139,11 +375,23 @@ for (const name of [
   "ZDOTDIR",
   "NODE_OPTIONS",
   "LD_PRELOAD",
+  "LD_PROFILE",
   "DYLD_INSERT_LIBRARIES",
+  "OPENSSL_CONF",
   "PYTHONPATH",
   "RUBYOPT",
   "PERL5OPT",
   "JAVA_TOOL_OPTIONS",
+  "BASH_FUNC_hookpayload%%",
+  "SHELLOPTS",
+  "PS4",
+  "RUBYGEMS_GEMDEPS",
+  "PYTHONUSERBASE",
+  "PYTHONPYCACHEPREFIX",
+  "PYTHONWARNINGS",
+  "PYTHONDONTWRITEBYTECODE",
+  "PERLLIB",
+  "XDG_CONFIG_HOME",
 ] as const) {
   test(`handler.env ${name} fails closed`, async (context) => {
     const fixture = await createFixture(context);
@@ -173,6 +421,108 @@ test("the executable selected from host PATH is version-bound", async (context) 
   await writeExecutable(executablePath, '#!/bin/sh\nprintf \'{"additionalContext":"B"}\\n\'\n');
 
   assert.equal(await store.status(subject), "pending");
+});
+
+test("relative executable paths and spawn use the same workspace file", async (context) => {
+  const fixture = await createFixture(context);
+  const pathRoot = join(fixture.root, "path-root");
+  const workspaceScript = join(fixture.workspace, "scripts", "hook.sh");
+  const pathScript = join(pathRoot, "scripts", "hook.sh");
+  await mkdir(join(fixture.workspace, "scripts"), { recursive: true });
+  await mkdir(join(pathRoot, "scripts"), { recursive: true });
+  await writeExecutable(
+    workspaceScript,
+    '#!/bin/sh\nprintf \'{"additionalContext":"workspace"}\\n\'\n',
+  );
+  await writeExecutable(pathScript, '#!/bin/sh\nprintf \'{"additionalContext":"path"}\\n\'\n');
+  const environment = { PATH: `${pathRoot}${delimiter}${process.env.PATH ?? ""}` };
+  const store = new HookTrustStore({ picoHome: fixture.picoHome, env: environment });
+  const handler = { type: "command", command: "scripts/hook.sh", args: [] } as const;
+  await store.trust(fixture.subject(handler));
+
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace, env: environment });
+  context.after(async () => await executor.dispose());
+  const output = await executeStopHook(executor, fixture, handler, "relative-executable");
+
+  assert.equal(output.additionalContext, "workspace");
+});
+
+test("PATH resolution matches spawn when a differently-cased key is also present", async (context) => {
+  if (process.platform === "win32")
+    return context.skip("Windows environment keys are case-insensitive");
+  const fixture = await createFixture(context);
+  const wrongBin = join(fixture.workspace, "wrong-bin");
+  const rightBin = join(fixture.workspace, "right-bin");
+  await mkdir(wrongBin);
+  await mkdir(rightBin);
+  await writeExecutable(
+    join(wrongBin, "pico-path-runner"),
+    '#!/bin/sh\nprintf \'{"additionalContext":"wrong"}\\n\'\n',
+  );
+  await writeExecutable(
+    join(rightBin, "pico-path-runner"),
+    '#!/bin/sh\nprintf \'{"additionalContext":"right"}\\n\'\n',
+  );
+  const environment = {
+    Path: wrongBin,
+    PATH: `${rightBin}${delimiter}${process.env.PATH ?? ""}`,
+  };
+  const store = new HookTrustStore({ picoHome: fixture.picoHome, env: environment });
+  const handler = { type: "command", command: "pico-path-runner", args: [] } as const;
+  await store.trust(fixture.subject(handler));
+
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace, env: environment });
+  context.after(async () => await executor.dispose());
+  const output = await executeStopHook(executor, fixture, handler, "path-case");
+
+  assert.equal(output.additionalContext, "right");
+});
+
+test("unknown external command wrappers cannot establish trust", async (context) => {
+  const fixture = await createFixture(context);
+  const externalRunner = join(fixture.root, "external-dsl-runner");
+  const payload = join(fixture.workspace, "rule.dsl");
+  await writeExecutable(externalRunner, "#!/bin/sh\nexit 0\n");
+  await writeFile(payload, "version-one\n");
+
+  await assert.rejects(
+    fixture.store.trust(
+      fixture.subject({ type: "command", command: externalRunner, args: ["-f", payload] }),
+    ),
+    /外部可执行文件.*未经审计/u,
+  );
+});
+
+test("workspace executables bind visible ordinary-file arguments", async (context) => {
+  const fixture = await createFixture(context);
+  const runner = join(fixture.workspace, "dsl-runner");
+  const payload = join(fixture.workspace, "rule.dsl");
+  await writeExecutable(runner, "#!/bin/sh\nexit 0\n");
+  await writeFile(payload, "version-one\n");
+  const subject = fixture.subject({ type: "command", command: runner, args: ["-f", "rule.dsl"] });
+  await fixture.store.trust(subject);
+
+  await writeFile(payload, "version-two\n");
+
+  assert.equal(await fixture.store.status(subject), "pending");
+});
+
+test("workspace executables bind dash-prefixed operands after option markers", async (context) => {
+  const fixture = await createFixture(context);
+  const runner = join(fixture.workspace, "operand-runner");
+  const payload = join(fixture.workspace, "-payload.sh");
+  await writeExecutable(runner, "#!/bin/sh\nexit 0\n");
+  await writeFile(payload, "version-one\n");
+  const subject = fixture.subject({
+    type: "command",
+    command: runner,
+    args: ["--", "-payload.sh"],
+  });
+  await fixture.store.trust(subject);
+
+  await writeFile(payload, "version-two\n");
+
+  assert.equal(await fixture.store.status(subject), "pending");
 });
 
 test("Node extensionless entry files are byte-bound", async (context) => {
@@ -269,6 +619,41 @@ test("Node ordinary entry keeps trust until its bytes change", async (context) =
   assert.equal(await fixture.store.status(subject), "pending");
 });
 
+test("Node options after the entry remain ordinary script arguments", async (context) => {
+  const fixture = await createFixture(context);
+  const entryPath = join(fixture.workspace, "argv.cjs");
+  await writeFile(
+    entryPath,
+    'process.stdout.write(JSON.stringify({ additionalContext: process.argv.slice(2).join(":") }));\n',
+  );
+  const handler = {
+    type: "command",
+    command: process.execPath,
+    args: ["./argv.cjs", "--env-file"],
+  } as const;
+  await fixture.store.trust(fixture.subject(handler));
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  context.after(async () => await executor.dispose());
+
+  const output = await executeStopHook(executor, fixture, handler, "node-script-argv");
+
+  assert.equal(output.additionalContext, "--env-file");
+});
+
+test("known interpreter options after the script remain ordinary argv", async (context) => {
+  const fixture = await createFixture(context);
+  const scriptPath = join(fixture.workspace, "argv.sh");
+  await writeFile(scriptPath, '#!/bin/sh\nprintf \'{"additionalContext":"%s"}\\n\' "$1"\n');
+  const handler = { type: "command", command: "sh", args: ["./argv.sh", "-c"] } as const;
+  await fixture.store.trust(fixture.subject(handler));
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  context.after(async () => await executor.dispose());
+
+  const output = await executeStopHook(executor, fixture, handler, "interpreter-script-argv");
+
+  assert.equal(output.additionalContext, "-c");
+});
+
 interface Fixture {
   readonly root: string;
   readonly workspace: string;
@@ -313,5 +698,30 @@ async function exists(path: string): Promise<boolean> {
   return await access(path).then(
     () => true,
     () => false,
+  );
+}
+
+async function executeStopHook(
+  executor: DefaultHookExecutor,
+  fixture: Fixture,
+  handler: CommandHookHandler,
+  id: string,
+) {
+  return await executor.execute(
+    {
+      id,
+      event: "Stop",
+      source: fixture.source,
+      order: 0,
+      handler,
+      trusted: true,
+    },
+    {
+      session_id: id,
+      cwd: fixture.workspace,
+      hook_event_name: "Stop",
+      payload: { reason: "test" },
+    },
+    {},
   );
 }
