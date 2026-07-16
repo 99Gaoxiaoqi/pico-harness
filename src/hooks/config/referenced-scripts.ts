@@ -1,4 +1,5 @@
-import { constants } from "node:fs";
+import { createHash } from "node:crypto";
+import { constants, type BigIntStats } from "node:fs";
 import { access, lstat, open, realpath } from "node:fs/promises";
 import { basename, delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import type { CommandHookHandler, HookHandler } from "../types.js";
@@ -14,6 +15,13 @@ export interface CommandHookInvocation {
   readonly args: readonly string[];
 }
 
+export interface ResolvedPathBinding {
+  /** Absolute path spelling/alias whose semantics are passed to the child process. */
+  readonly logicalPath: string;
+  /** Canonical object selected through logicalPath while trust was resolved. */
+  readonly canonicalPath: string;
+}
+
 export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
   /** Absolute logical executable selected with the same environment passed to spawn. */
   readonly command: string;
@@ -21,6 +29,9 @@ export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
   readonly canonicalCommand: string;
   readonly env: Readonly<NodeJS.ProcessEnv>;
   readonly referencedPaths: readonly string[];
+  readonly referencedFileHashes: Readonly<Record<string, string>>;
+  /** Logical paths later resolved by spawn, an interpreter, or a visible file operand. */
+  readonly pathBindings: readonly ResolvedPathBinding[];
   readonly executablePaths: readonly string[];
   readonly executableIdentities: Readonly<Record<string, ExecutableFileIdentity>>;
 }
@@ -96,6 +107,7 @@ const NODE_SAFE_VALUE_OPTIONS = [
   "--dns-result-order=",
 ] as const;
 const NODE_DISPLAY_FLAGS = new Set(["--version", "-v", "--help", "-h"]);
+const MAX_HASHED_HOOK_SCRIPT_BYTES = 16 * 1024 * 1024;
 const BLOCKED_ENVIRONMENT_NAMES = new Set([
   "BASH_ENV",
   "BASHOPTS",
@@ -211,31 +223,40 @@ export async function resolveCommandHookExecution(
   );
   const executableName = executableBasename(executable.canonicalPath);
   assertSupportedResolvedExecutable(executableName, executable.canonicalPath, canonicalWorkspace);
-  const referencedPaths: string[] = [];
+  const referencedFiles: ResolvedPathBinding[] = [];
+  const shebangInterpreters = await resolveShebangInterpreterChain(executable.canonicalPath);
   const executablePaths = sortedUnique([
     executable.canonicalPath,
-    ...(await resolveShebangInterpreterChain(executable.canonicalPath)),
+    ...shebangInterpreters.map((entry) => entry.canonicalPath),
   ]);
   if (isWithin(canonicalWorkspace, executable.canonicalPath)) {
-    referencedPaths.push(executable.canonicalPath);
+    referencedFiles.push(executable);
   }
   if (NODE_EXECUTABLES.has(executableName)) {
-    referencedPaths.push(...(await resolveNodeCodePaths(invocation.args, canonicalWorkspace)));
+    referencedFiles.push(...(await resolveNodeCodePaths(invocation.args, canonicalWorkspace)));
   } else if (FILE_INTERPRETERS.has(executableName)) {
-    referencedPaths.push(
+    referencedFiles.push(
       await resolveInterpreterScript(invocation.args, canonicalWorkspace, executableName),
     );
   } else {
-    referencedPaths.push(
+    referencedFiles.push(
       ...(await resolveWorkspaceExecutableArgumentFiles(invocation.args, canonicalWorkspace)),
     );
   }
+  const pathBindings = sortedUniquePathBindings([
+    executable,
+    ...shebangInterpreters,
+    ...referencedFiles,
+  ]);
+  const referencedPaths = sortedUnique(referencedFiles.map((entry) => entry.canonicalPath));
   return {
     command: executable.logicalPath,
     canonicalCommand: executable.canonicalPath,
     args: invocation.args,
     env: sanitizedEnvironment,
-    referencedPaths: sortedUnique(referencedPaths),
+    referencedPaths,
+    referencedFileHashes: await hashReferencedFiles(referencedPaths),
+    pathBindings,
     executablePaths,
     executableIdentities: await readExecutableIdentities(executablePaths),
   };
@@ -249,9 +270,21 @@ export async function resolveCommandHookExecution(
 export async function revalidateResolvedCommandHookExecution(
   invocation: ResolvedCommandHookInvocation,
 ): Promise<void> {
-  const currentCanonicalCommand = await realpath(invocation.command);
-  if (currentCanonicalCommand !== invocation.canonicalCommand) {
-    throw unsupportedCommand("logical executable 已重定向到未经信任的 canonical 对象");
+  for (const binding of invocation.pathBindings) {
+    const currentCanonicalPath = await realpath(binding.logicalPath);
+    if (currentCanonicalPath !== binding.canonicalPath) {
+      throw unsupportedCommand(
+        binding.logicalPath === invocation.command
+          ? "logical executable 已重定向到未经信任的 canonical 对象"
+          : `logical 引用路径已重定向到未经信任的对象: ${binding.logicalPath}`,
+      );
+    }
+  }
+  const currentReferencedHashes = await hashReferencedFiles(invocation.referencedPaths);
+  for (const path of invocation.referencedPaths) {
+    if (currentReferencedHashes[path] !== invocation.referencedFileHashes[path]) {
+      throw unsupportedCommand(`Hook 引用文件内容已变化: ${path}`);
+    }
   }
   const currentIdentities = await readExecutableIdentities(invocation.executablePaths);
   for (const path of invocation.executablePaths) {
@@ -277,7 +310,7 @@ export async function resolveReferencedScripts(
     watchPaths: sortedUnique([
       ...uniquePaths,
       ...canonicalPaths,
-      invocation.command,
+      ...invocation.pathBindings.flatMap((entry) => [entry.logicalPath, entry.canonicalPath]),
       ...invocation.executablePaths,
     ]),
     executablePaths: invocation.executablePaths,
@@ -346,8 +379,8 @@ function assertSupportedResolvedExecutable(
 async function resolveNodeCodePaths(
   args: readonly string[],
   workspace: string,
-): Promise<readonly string[]> {
-  const paths: string[] = [];
+): Promise<readonly ResolvedPathBinding[]> {
+  const paths: ResolvedPathBinding[] = [];
   let entry: string | undefined;
   let displayOnly = args.length > 0;
 
@@ -394,14 +427,14 @@ async function resolveNodeCodePaths(
 
   if (entry !== undefined) {
     const entryPath = await resolveExistingCodeFile(entry, workspace, "Node 入口", true);
-    if (PACKAGE_EXECUTABLES.has(executableBasename(entryPath))) {
+    if (PACKAGE_EXECUTABLES.has(executableBasename(entryPath.canonicalPath))) {
       throw unsupportedCommand("Node 入口属于 package-manager/runner");
     }
     paths.push(entryPath);
   } else if (!displayOnly) {
     throw unsupportedCommand("Node 命令缺少可绑定的普通文件入口");
   }
-  return sortedUnique(paths);
+  return sortedUniquePathBindings(paths);
 }
 
 function nodeLoaderOption(
@@ -422,7 +455,7 @@ async function resolveInterpreterScript(
   args: readonly string[],
   workspace: string,
   interpreter: string,
-): Promise<string> {
+): Promise<ResolvedPathBinding> {
   if (args.length === 0) {
     throw unsupportedCommand(`${interpreter} 缺少可绑定的普通文件入口`);
   }
@@ -444,8 +477,8 @@ async function resolveInterpreterScript(
 async function resolveWorkspaceExecutableArgumentFiles(
   args: readonly string[],
   workspace: string,
-): Promise<readonly string[]> {
-  const paths: string[] = [];
+): Promise<readonly ResolvedPathBinding[]> {
+  const paths: ResolvedPathBinding[] = [];
   for (const argument of args) {
     for (const candidate of workspaceArgumentFileCandidates(argument)) {
       const logicalPath = isAbsolute(candidate)
@@ -466,10 +499,10 @@ async function resolveWorkspaceExecutableArgumentFiles(
       if (!canonicalInfo.isFile()) {
         throw unsupportedCommand(`工作区可执行文件参数不是普通文件: ${candidate}`);
       }
-      paths.push(canonicalPath);
+      paths.push({ logicalPath, canonicalPath });
     }
   }
-  return sortedUnique(paths);
+  return sortedUniquePathBindings(paths);
 }
 
 function workspaceArgumentFileCandidates(argument: string): readonly string[] {
@@ -493,7 +526,7 @@ async function resolveExistingCodeFile(
   workspace: string,
   label: string,
   allowBareRelative = false,
-): Promise<string> {
+): Promise<ResolvedPathBinding> {
   if (isDynamicCodeReference(value) || (!allowBareRelative && isBareModuleReference(value))) {
     throw unsupportedCommand(`${label} 不是静态文件路径: ${value}`);
   }
@@ -509,7 +542,7 @@ async function resolveExistingCodeFile(
   const canonicalPath = await realpath(logicalPath);
   const canonicalInfo = await lstat(canonicalPath);
   if (!canonicalInfo.isFile()) throw unsupportedCommand(`${label} 不是普通文件: ${value}`);
-  return canonicalPath;
+  return { logicalPath, canonicalPath };
 }
 
 async function resolveExecutable(
@@ -547,9 +580,11 @@ async function requireExecutable(path: string): Promise<string> {
   return await realpath(path);
 }
 
-async function resolveShebangInterpreterChain(executable: string): Promise<readonly string[]> {
+async function resolveShebangInterpreterChain(
+  executable: string,
+): Promise<readonly ResolvedPathBinding[]> {
   if (process.platform === "win32") return [];
-  const interpreters: string[] = [];
+  const interpreters: ResolvedPathBinding[] = [];
   const visited = new Set([executable]);
   let current = executable;
   while (true) {
@@ -558,7 +593,8 @@ async function resolveShebangInterpreterChain(executable: string): Promise<reado
     if (basename(interpreter).startsWith("-")) {
       throw unsupportedCommand("工作区 executable 的 shebang 解释器名称不允许以 - 开头");
     }
-    const resolvedInterpreter = await requireExecutable(interpreter);
+    const logicalInterpreter = resolve(interpreter);
+    const resolvedInterpreter = await requireExecutable(logicalInterpreter);
     const interpreterName = executableBasename(resolvedInterpreter);
     if (PACKAGE_EXECUTABLES.has(interpreterName) || COMMAND_FORWARDERS.has(interpreterName)) {
       throw unsupportedCommand(`工作区 executable 不允许使用 shebang 转发器 ${interpreterName}`);
@@ -570,7 +606,7 @@ async function resolveShebangInterpreterChain(executable: string): Promise<reado
       throw unsupportedCommand("工作区 executable 的 shebang 解释器自身不得再使用 shebang");
     }
     visited.add(resolvedInterpreter);
-    interpreters.push(resolvedInterpreter);
+    interpreters.push({ logicalPath: logicalInterpreter, canonicalPath: resolvedInterpreter });
     current = resolvedInterpreter;
   }
 }
@@ -764,6 +800,64 @@ async function readExecutableIdentities(
   return identities;
 }
 
+async function hashReferencedFiles(
+  paths: readonly string[],
+): Promise<Readonly<Record<string, string>>> {
+  const hashes: Record<string, string> = {};
+  for (const path of paths) hashes[path] = await hashReferencedFile(path);
+  return hashes;
+}
+
+async function hashReferencedFile(path: string): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw unsupportedCommand(`Hook 引用路径不是普通文件: ${path}`);
+    if (before.size > BigInt(MAX_HASHED_HOOK_SCRIPT_BYTES)) {
+      throw unsupportedCommand(
+        `Hook 引用文件超过 ${MAX_HASHED_HOOK_SCRIPT_BYTES} 字节，无法建立信任: ${path}`,
+      );
+    }
+
+    const digest = createHash("sha256");
+    let total = 0;
+    while (true) {
+      const remaining = MAX_HASHED_HOOK_SCRIPT_BYTES + 1 - total;
+      if (remaining <= 0) {
+        throw unsupportedCommand(
+          `Hook 引用文件超过 ${MAX_HASHED_HOOK_SCRIPT_BYTES} 字节，无法建立信任: ${path}`,
+        );
+      }
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      digest.update(buffer.subarray(0, bytesRead));
+    }
+
+    const after = await handle.stat({ bigint: true });
+    if (total !== Number(before.size) || !sameStableFileInfo(before, after)) {
+      throw unsupportedCommand(`读取 Hook 引用文件时内容发生变化: ${path}`);
+    }
+    return digest.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+function sameStableFileInfo(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
 function sameExecutableIdentity(
   left: ExecutableFileIdentity | undefined,
   right: ExecutableFileIdentity | undefined,
@@ -802,6 +896,18 @@ function environmentValue(
 
 function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function sortedUniquePathBindings(bindings: readonly ResolvedPathBinding[]): ResolvedPathBinding[] {
+  const unique = new Map<string, ResolvedPathBinding>();
+  for (const binding of bindings) {
+    unique.set(`${binding.logicalPath}\0${binding.canonicalPath}`, binding);
+  }
+  return [...unique.values()].sort(
+    (left, right) =>
+      left.logicalPath.localeCompare(right.logicalPath) ||
+      left.canonicalPath.localeCompare(right.canonicalPath),
+  );
 }
 
 function unsupportedCommand(reason: string): Error {

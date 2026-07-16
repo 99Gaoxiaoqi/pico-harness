@@ -4,6 +4,8 @@ import { dirname, join, normalize, resolve } from "node:path";
 import { resolvePicoHome } from "../../paths/pico-paths.js";
 import {
   resolveCommandHookExecution,
+  resolveReferencedScripts,
+  type ReferencedScriptResolution,
   type ResolvedCommandHookInvocation,
 } from "../config/referenced-scripts.js";
 import type { HookHandler, HookSource, ResolvedHookHandler } from "../types.js";
@@ -14,7 +16,6 @@ import {
 } from "./secure-file.js";
 
 const STORE_VERSION = 1;
-const MAX_HASHED_HOOK_SCRIPT_BYTES = 16 * 1024 * 1024;
 
 export type HookTrustStatus = "active" | "pending";
 
@@ -98,6 +99,14 @@ export class HookTrustStore {
     return (await this.resolveFingerprint(subject)).fingerprint;
   }
 
+  /** Resolve watcher paths with the exact environment owned by this trust authority. */
+  async referencedScripts(
+    workspace: string,
+    handler: HookHandler,
+  ): Promise<ReferencedScriptResolution> {
+    return await resolveReferencedScripts(handler, workspace, this.environment);
+  }
+
   /**
    * Return the exact command resolution whose fingerprint still has an active trust record.
    * The executor must use this invocation directly instead of resolving the logical alias again.
@@ -170,38 +179,13 @@ async function hashReferencedScripts(
     hashes[`executable:${executable}`] = hash(stableStringify(identity));
   }
   for (const candidate of commandExecution.referencedPaths) {
-    try {
-      const stat = await lstat(candidate);
-      if (stat.isSymbolicLink()) {
-        const target = await realpath(candidate);
-        hashes[target] = await hashScriptFile(target);
-      } else if (stat.isFile()) {
-        const target = await realpath(candidate);
-        hashes[target] = await hashScriptFile(target);
-      } else {
-        throw new Error(`Hook 引用路径不是普通文件: ${candidate}`);
-      }
-    } catch (error) {
-      if (isErrno(error, "ENOENT")) {
-        throw new Error(`Hook 引用文件不存在: ${candidate}`, { cause: error });
-      }
-      throw error;
-    }
+    const digest = commandExecution.referencedFileHashes[candidate];
+    if (!digest) throw new Error(`Hook 引用文件缺少已解析哈希: ${candidate}`);
+    hashes[candidate] = digest;
   }
   return Object.fromEntries(
     Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)),
   );
-}
-
-async function hashScriptFile(path: string): Promise<string> {
-  const info = await lstat(path);
-  if (!info.isFile()) throw new Error(`Hook 引用路径不是普通文件: ${path}`);
-  if (info.size > MAX_HASHED_HOOK_SCRIPT_BYTES) {
-    throw new Error(
-      `Hook 引用文件超过 ${MAX_HASHED_HOOK_SCRIPT_BYTES} 字节，无法建立信任: ${path}`,
-    );
-  }
-  return hash(await readFile(path));
 }
 
 function parseRecord(input: unknown): HookTrustRecord {
