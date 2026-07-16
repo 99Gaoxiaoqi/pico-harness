@@ -13,6 +13,8 @@ import {
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
+import { DesktopRuntimeService } from "../../src/daemon/desktop-runtime-service.js";
 
 test("linked Git worktree keeps its own canonical Runtime identity", async (context) => {
   const fixture = await createFixture("linked-worktree-identity");
@@ -71,6 +73,35 @@ test("Git discovery ignores inherited repository-selection environment", async (
     restoreEnvironment("GIT_DIR", previousGitDir);
     restoreEnvironment("GIT_WORK_TREE", previousGitWorkTree);
   }
+});
+
+test("Task Runtime Git discovery ignores inherited repository-selection environment", async (context) => {
+  const fixture = await createFixture("task-git-environment-isolation");
+  const otherRepository = join(fixture.root, "other-repository");
+  await mkdir(otherRepository);
+  await initializeGitRepository(fixture.workspace);
+  await initializeGitRepository(otherRepository);
+
+  const previousGitDir = process.env.GIT_DIR;
+  const previousGitWorkTree = process.env.GIT_WORK_TREE;
+  process.env.GIT_DIR = join(fixture.workspace, ".git");
+  process.env.GIT_WORK_TREE = fixture.workspace;
+  let runtime: TaskHostRuntime | undefined;
+  try {
+    runtime = await TaskHostRuntime.create({
+      workDir: otherRepository,
+      picoHome: fixture.picoHome,
+    });
+  } finally {
+    restoreEnvironment("GIT_DIR", previousGitDir);
+    restoreEnvironment("GIT_WORK_TREE", previousGitWorkTree);
+  }
+  context.after(async () => {
+    await runtime?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  assert.ok(runtime);
+  assert.equal(runtime.repoRoot, await realpath(otherRepository));
 });
 
 test("legacy child registrations migrate to the Git identity and remain removable", async (context) => {
@@ -142,6 +173,52 @@ test("legacy child registrations migrate to the Git identity and remain removabl
     "临时离线的登记路径恢复后应自动重新出现",
   );
   await registrationStore.unregister(prunedWorkspace);
+});
+
+test("Desktop unregister checks active Runs on the canonical root of a deleted child", async (context) => {
+  const fixture = await createFixture("deleted-child-active-run");
+  const childWorkspace = join(fixture.workspace, "packages", "app");
+  await mkdir(childWorkspace, { recursive: true });
+  await runGit(["init", "--quiet", "--initial-branch=main"], fixture.workspace);
+  const execution = deferred();
+  const registrationStore = new WorkspaceRegistrationStore(
+    join(fixture.picoHome, "registrations.json"),
+  );
+  const runtimeService = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    registrationStore,
+    execute: async () => await execution.promise,
+  });
+  const desktop = new DesktopRuntimeService({
+    runtimeService,
+    registrationStore,
+    env: { PICO_HOME: fixture.picoHome },
+  });
+  context.after(async () => {
+    execution.resolve();
+    await desktop.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  await registrationStore.register(childWorkspace);
+  const started = asRun(
+    await runtimeService.startForegroundRun({
+      workspacePath: fixture.workspace,
+      prompt: "keep running",
+      idempotencyKey: "deleted-child-active-run",
+    }),
+  );
+  assert.equal(started.status, "running");
+  await rm(childWorkspace, { recursive: true });
+
+  await assert.rejects(
+    desktop.handle(createRuntimeRequest("workspace.unregister", { workspacePath: childWorkspace })),
+    (error: unknown) =>
+      error instanceof RuntimeProtocolError &&
+      error.code === RUNTIME_ERROR_CODES.CONFLICT &&
+      /活动 Run/u.test(error.message),
+  );
+  execution.resolve();
 });
 
 test(
@@ -557,4 +634,22 @@ function runGit(args: readonly string[], cwd: string): Promise<void> {
       resolveRun();
     });
   });
+}
+
+async function initializeGitRepository(cwd: string): Promise<void> {
+  await runGit(["init", "--quiet", "--initial-branch=main"], cwd);
+  await runGit(
+    [
+      "-c",
+      "user.name=Pico Test",
+      "-c",
+      "user.email=pico@example.invalid",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "baseline",
+    ],
+    cwd,
+  );
 }

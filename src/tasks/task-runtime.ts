@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { logger } from "../observability/logger.js";
+import { buildSafeGitEnvironment } from "./git-safety.js";
 import { TaskRegistry, type TaskSnapshot } from "./task-registry.js";
 import { JobService } from "./job-service.js";
 import {
@@ -318,13 +319,18 @@ function gitWorkspaceError(cwd: string, error: unknown): string {
 
 function gitOutput(args: readonly string[], cwd: string): Promise<string> {
   return new Promise((resolveOutput, reject) => {
-    execFile("git", [...args], { cwd, encoding: "utf8" }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr.trim() || error.message));
-        return;
-      }
-      resolveOutput(stdout.trim());
-    });
+    execFile(
+      "git",
+      [...args],
+      { cwd, encoding: "utf8", env: buildSafeGitEnvironment() },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr.trim() || error.message));
+          return;
+        }
+        resolveOutput(stdout.trim());
+      },
+    );
   });
 }
 
@@ -333,7 +339,7 @@ function gitIsAncestor(source: string, target: string, cwd: string): Promise<boo
     execFile(
       "git",
       ["merge-base", "--is-ancestor", source, target],
-      { cwd, encoding: "utf8" },
+      { cwd, encoding: "utf8", env: buildSafeGitEnvironment() },
       (error, _stdout, stderr) => {
         if (!error) {
           resolveResult(true);
