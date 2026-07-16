@@ -202,6 +202,157 @@ test("Hook reloader stop fences an in-flight reload and supports a fresh generat
   await reloader.stop();
 });
 
+test("Hook reloader absorbs an obsolete guard rejection after restart", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-stuck-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const firstGuardEntered = deferred();
+  const firstGuardRelease = deferred<boolean>();
+  const unhandledRejections: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandledRejections.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  let guardCalls = 0;
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    stopDrainTimeoutMs: 5,
+    beforeSwap: async () => {
+      guardCalls++;
+      if (guardCalls !== 1) return true;
+      firstGuardEntered.resolve();
+      return await firstGuardRelease.promise;
+    },
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => {
+    process.off("unhandledRejection", onUnhandledRejection);
+    firstGuardRelease.resolve(true);
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  const staleReload = reloader.reload();
+  await firstGuardEntered.promise;
+  await completesWithin(reloader.stop(), 500, "Hook reloader stop exceeded its bounded drain");
+  assert.equal(swaps, 0);
+
+  await reloader.start();
+  assert.equal(await reloader.reload(), true);
+  assert.equal(swaps, 1);
+
+  firstGuardRelease.reject(new Error("late stale guard failure"));
+  await waitForImmediate();
+  assert.deepEqual(unhandledRejections, []);
+  assert.equal(await staleReload, false);
+  assert.equal(swaps, 1, "旧 generation 的 guard 晚拒绝不能影响新代");
+  await reloader.stop();
+});
+
+test("Hook reloader keeps staged candidates paired across detached generations", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-staging-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const guardEntered = [deferred(), deferred()];
+  const guardRelease = [deferred<boolean>(), deferred<boolean>()];
+  const staged = new WeakMap<object, number>();
+  const applied: number[] = [];
+  let guardCalls = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    stopDrainTimeoutMs: 5,
+    beforeSwap: async ({ candidate }) => {
+      const index = guardCalls++;
+      guardEntered[index]?.resolve();
+      const accepted = await guardRelease[index]?.promise;
+      if (accepted) staged.set(candidate, index + 1);
+      return accepted ?? false;
+    },
+    onSwap: (candidate) => {
+      applied.push(staged.get(candidate) ?? -1);
+      staged.delete(candidate);
+    },
+  });
+  context.after(async () => {
+    for (const guard of guardRelease) guard.resolve(false);
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  const staleReload = reloader.reload();
+  await guardEntered[0]?.promise;
+  await completesWithin(reloader.stop(), 500, "Hook reloader stop exceeded its bounded drain");
+  await reloader.start();
+  const currentReload = reloader.reload();
+  await guardEntered[1]?.promise;
+
+  guardRelease[1]?.resolve(true);
+  guardRelease[0]?.resolve(true);
+
+  assert.equal(await currentReload, true);
+  assert.equal(await staleReload, false);
+  assert.deepEqual(applied, [2]);
+  await reloader.stop();
+});
+
+test("Hook reloader stop returns when an obsolete guard never settles", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-never-guard-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const guardEntered = deferred();
+  const neverSettles = new Promise<boolean>(() => undefined);
+  let guardCalls = 0;
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    stopDrainTimeoutMs: 5,
+    beforeSwap: async () => {
+      guardCalls++;
+      if (guardCalls !== 1) return true;
+      guardEntered.resolve();
+      return await neverSettles;
+    },
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  void reloader.reload();
+  await guardEntered.promise;
+  await completesWithin(reloader.stop(), 500, "Hook reloader stop waited forever for beforeSwap");
+
+  await reloader.start();
+  assert.equal(await reloader.reload(), true);
+  assert.equal(swaps, 1);
+  await reloader.stop();
+});
+
 test("Hook reloader treats synchronous swap as the commit point", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-commit-"));
   const workspace = join(root, "workspace");
@@ -311,14 +462,17 @@ test("Hook reloader replaces watcher path sets after a same-directory script cha
 interface Deferred<T = void> {
   readonly promise: Promise<T>;
   resolve(value: T): void;
+  reject(reason?: unknown): void;
 }
 
 function deferred<T = void>(): Deferred<T> {
   let resolve = (_value: T): void => undefined;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject = (_reason?: unknown): void => undefined;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function writeCommandHook(path: string, command: string): Promise<void> {
@@ -332,6 +486,24 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await delay(10);
   assert.equal(predicate(), true, `condition was not met within ${timeoutMs}ms`);
+}
+
+async function completesWithin(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function manualTimers(): {
