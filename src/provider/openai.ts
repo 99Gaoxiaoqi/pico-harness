@@ -274,6 +274,9 @@ export class OpenAIProvider implements LLMProvider {
       messages: openaiMsgs,
       stream: true, // 关键:启用流式
     };
+    if (this.config.capabilities?.streamUsage === true) {
+      body.stream_options = { include_usage: true };
+    }
     if (availableTools.length > 0) {
       body.tools = availableTools.map((t) => ({
         type: "function",
@@ -363,6 +366,29 @@ export class OpenAIProvider implements LLMProvider {
               };
             };
 
+            // OpenAI 兼容 Provider 通常用 choices 为空的最后一个 chunk 上报 Usage。
+            // 必须先消费 Usage，再判断是否存在内容 delta。
+            if (chunk.usage) {
+              usage = {
+                promptTokens: chunk.usage.prompt_tokens ?? 0,
+                completionTokens: chunk.usage.completion_tokens ?? 0,
+                cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+                reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
+                reportedFields: [
+                  ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
+                  ...(typeof chunk.usage.completion_tokens === "number"
+                    ? (["completion"] as const)
+                    : []),
+                  ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
+                    ? (["cacheRead"] as const)
+                    : []),
+                  ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
+                    ? (["reasoning"] as const)
+                    : []),
+                ],
+              };
+            }
+
             const delta = chunk.choices?.[0]?.delta;
             if (!delta) continue;
 
@@ -387,28 +413,6 @@ export class OpenAIProvider implements LLMProvider {
                 }
                 toolCallAccumulator.set(tc.index, existing);
               }
-            }
-
-            // usage 在最后一个 chunk 中
-            if (chunk.usage) {
-              usage = {
-                promptTokens: chunk.usage.prompt_tokens ?? 0,
-                completionTokens: chunk.usage.completion_tokens ?? 0,
-                cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
-                reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
-                reportedFields: [
-                  ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
-                  ...(typeof chunk.usage.completion_tokens === "number"
-                    ? (["completion"] as const)
-                    : []),
-                  ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
-                    ? (["cacheRead"] as const)
-                    : []),
-                  ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
-                    ? (["reasoning"] as const)
-                    : []),
-                ],
-              };
             }
           } catch {
             // 跳过无法解析的行
