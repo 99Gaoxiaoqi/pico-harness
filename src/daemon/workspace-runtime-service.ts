@@ -295,8 +295,9 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     if (!input.idempotencyKey) return start().result;
 
     let startedRunId: string | undefined;
+    let outcome: DaemonIdempotentCommandResult<Record<string, JsonValue>>;
     try {
-      const outcome = await this.executeIdempotentDaemonCommand(
+      outcome = await this.executeIdempotentDaemonCommand(
         runtime.workspace,
         {
           commandType: "run.start",
@@ -314,20 +315,20 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           return started;
         },
       );
-      if (outcome.resourceId) {
-        const durable = this.eventStore(runtime.workspace).getDaemonRun(
-          runtime.workspace,
-          outcome.resourceId,
-        );
-        if (durable) return runPayload(workspaceRunSnapshot(durable));
-      }
-      return outcome.result;
     } catch (error) {
       if (startedRunId) {
         runtime.failBeforeExecution(startedRunId, "run.start 幂等记录持久化失败");
       }
       throw error;
     }
+    if (outcome.resourceId) {
+      const durable = this.eventStore(runtime.workspace).getDaemonRun(
+        runtime.workspace,
+        outcome.resourceId,
+      );
+      if (durable) return runPayload(workspaceRunSnapshot(durable));
+    }
+    return outcome.result;
   }
 
   async replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
