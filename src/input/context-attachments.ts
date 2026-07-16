@@ -1,6 +1,7 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { open, readdir, type FileHandle } from "node:fs/promises";
 import { relative } from "node:path";
-import { safeResolve } from "../tools/registry-impl.js";
+import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { parseMentions, type MentionReference } from "./mentions.js";
 
 export type ContextAttachmentType = "file" | "directory" | "skill" | "agent" | "missing";
@@ -62,10 +63,12 @@ export async function resolveContextAttachments(
 ): Promise<ContextAttachment[]> {
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
   const attachments: ContextAttachment[] = [];
+  let workspaceRoots: WorkspaceRoots | undefined;
 
   for (const mention of mentions) {
     if (mention.kind === "path") {
-      attachments.push(await resolvePathAttachment(mention, options.cwd, limits));
+      workspaceRoots ??= await WorkspaceRoots.create(options.cwd);
+      attachments.push(await resolvePathAttachment(mention, workspaceRoots, limits));
     } else if (mention.kind === "skill" || mention.kind === "agent") {
       attachments.push(await resolveNamedAttachment(mention, options));
     }
@@ -94,12 +97,12 @@ export function injectContextAttachments(prompt: string, attachments: ContextAtt
 
 async function resolvePathAttachment(
   mention: MentionReference,
-  cwd: string,
+  workspaceRoots: WorkspaceRoots,
   limits: AttachmentLimits,
 ): Promise<ContextAttachment> {
   let fullPath: string;
   try {
-    fullPath = safeResolve(cwd, mention.target);
+    fullPath = await workspaceRoots.assertAllowed(mention.target);
   } catch (error) {
     const reference = normalizeReference(mention.target);
     return missingAttachment(
@@ -108,29 +111,37 @@ async function resolvePathAttachment(
     );
   }
 
-  let info: Awaited<ReturnType<typeof stat>>;
+  const physicalRoot = workspaceRoots.list()[0] ?? fullPath;
+  const reference = toReference(physicalRoot, fullPath);
+  let handle: FileHandle;
+  let info: Stats;
   try {
-    info = await stat(fullPath);
+    handle = await open(
+      fullPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    info = await handle.stat();
   } catch (error) {
-    const reference = toReference(cwd, fullPath);
     return missingAttachment(reference, `File not found: ${reference}\n${errorMessage(error)}`);
   }
 
-  const reference = toReference(cwd, fullPath);
+  try {
+    if (info.isDirectory()) {
+      return await readDirectoryAttachment(fullPath, reference, limits);
+    }
+    if (info.isFile()) {
+      return await readFileAttachment(handle, reference, mention, limits, info.size);
+    }
 
-  if (info.isDirectory()) {
-    return readDirectoryAttachment(fullPath, reference, limits);
+    return {
+      type: "missing",
+      reference,
+      content: `Unsupported path type: ${reference}`,
+      truncated: false,
+    };
+  } finally {
+    await handle.close();
   }
-  if (info.isFile()) {
-    return readFileAttachment(fullPath, reference, mention, limits);
-  }
-
-  return {
-    type: "missing",
-    reference,
-    content: `Unsupported path type: ${reference}`,
-    truncated: false,
-  };
 }
 
 function missingAttachment(reference: string, content: string): ContextAttachment {
@@ -143,14 +154,18 @@ function missingAttachment(reference: string, content: string): ContextAttachmen
 }
 
 async function readFileAttachment(
-  fullPath: string,
+  handle: FileHandle,
   reference: string,
   mention: MentionReference,
   limits: AttachmentLimits,
+  knownSize: number,
 ): Promise<ContextAttachment> {
-  const data = await readFile(fullPath);
-  const bytesTruncated = data.byteLength > limits.maxFileBytes;
-  const text = data.subarray(0, limits.maxFileBytes).toString("utf8");
+  const { data, truncated: bytesTruncated } = await readBounded(
+    handle,
+    limits.maxFileBytes,
+    knownSize,
+  );
+  const text = data.toString("utf8");
   const allLoadedLines = splitLines(text);
   const requestedStart = mention.lineStart ?? 1;
   const requestedEnd = mention.lineEnd ?? allLoadedLines.length;
@@ -173,6 +188,24 @@ async function readFileAttachment(
     truncated,
     lineStart: requestedStart,
     lineEnd: actualEnd,
+  };
+}
+
+async function readBounded(
+  handle: FileHandle,
+  maxBytes: number,
+  knownSize: number,
+): Promise<{ data: Buffer; truncated: boolean }> {
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return {
+    data: buffer.subarray(0, Math.min(offset, maxBytes)),
+    truncated: knownSize > maxBytes || offset > maxBytes,
   };
 }
 
