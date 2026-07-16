@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { loadPicoProjectConfig } from "../../src/input/pico-config.js";
 import { createProvider } from "../../src/provider/factory.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
+import { loadModelRouter } from "../../src/provider/model-router.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 
 function streamResponse(chunks: Uint8Array[]): Response {
@@ -86,6 +87,69 @@ test("OpenAI routes can select max_completion_tokens explicitly", async (context
 
   assert.equal(requestBody?.["max_completion_tokens"], 2048);
   assert.equal(Object.hasOwn(requestBody ?? {}, "max_tokens"), false);
+});
+
+test("official OpenAI configured and discovered routes use max_completion_tokens", async () => {
+  const configured = await loadModelRouter({
+    config: {
+      providers: {
+        official: {
+          protocol: "openai",
+          baseURL: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_TEST_KEY",
+          models: ["o3"],
+          discoverModels: false,
+        },
+      },
+    },
+    env: { OPENAI_TEST_KEY: "test-key" },
+    legacyProvider: "openai",
+    legacyModel: "unused",
+  });
+  assert.equal(
+    configured.require("official/o3").capabilities.outputTokenField,
+    "max_completion_tokens",
+  );
+
+  const discovered = await loadModelRouter({
+    config: {
+      providers: {
+        official: {
+          protocol: "openai",
+          baseURL: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_TEST_KEY",
+          models: [],
+          discoverModels: true,
+        },
+      },
+    },
+    env: { OPENAI_TEST_KEY: "test-key" },
+    legacyProvider: "openai",
+    legacyModel: "unused",
+    fetch: async () => Response.json({ data: [{ id: "o4-mini" }] }),
+  });
+  assert.equal(
+    discovered.require("official/o4-mini").capabilities.outputTokenField,
+    "max_completion_tokens",
+  );
+
+  const compatible = await loadModelRouter({
+    config: {
+      providers: {
+        compatible: {
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "COMPATIBLE_TEST_KEY",
+          models: ["o3"],
+          discoverModels: false,
+        },
+      },
+    },
+    env: { COMPATIBLE_TEST_KEY: "test-key" },
+    legacyProvider: "openai",
+    legacyModel: "unused",
+  });
+  assert.equal(compatible.require("compatible/o3").capabilities.outputTokenField, "max_tokens");
 });
 
 test("legacy OpenAI-compatible calls do not guess an output-token field", async (context) => {

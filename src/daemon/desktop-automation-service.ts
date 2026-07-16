@@ -450,6 +450,7 @@ async function resolveDesktopAutomationTarget(
       provider.protocol,
       model,
       provider.modelCapabilities?.[model],
+      { baseURL: provider.baseURL },
     ),
   };
   const userProvider = (await dependencies.userConfigStore.read()).config.providers[providerId];

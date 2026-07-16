@@ -560,6 +560,7 @@ async function resolveCronModelRoute(
       provider.protocol,
       model,
       provider.modelCapabilities?.[model],
+      { baseURL: provider.baseURL },
     ),
   };
   if (parsedCredential.version === "v1") {
