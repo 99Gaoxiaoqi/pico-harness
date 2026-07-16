@@ -38,7 +38,7 @@ interface LLMProvider {
 
 - `createProvider(kind, config, thinkingEffort?)`：只根据显式配置创建协议适配器
 - Factory 不读取 `process.env`，也不持有进程级凭证池
-- 模型可用性 fallback 属于 `AgentRuntime` 的路由装配，不属于 Provider factory
+- 产品入口固定使用显式解析出的 `provider/model`，模型不可用时直接报错，不自动跨模型 fallback
 
 ### 配置与凭证分层
 
@@ -80,7 +80,8 @@ CredentialPool (credential-pool.ts)
 
 CredentialPool 由每次 `AgentRuntime` 执行根据显式 `runtimeEnv` 创建，轮换状态不会在不同
 Runtime Host 之间共享。`CredentialRotationCoordinator` 将实际失败的 key 与 Provider 请求
-绑定，避免并发晚到的 429 错误误伤已经切换的新 key。
+绑定，避免并发晚到的 429 错误误伤已经切换的新 key。重试和同 Provider 凭证轮换不会改变
+当前模型路由；切换模型必须由用户或宿主发起新的显式选择。
 
 ### 成本追踪 (CostTracker)
 
@@ -109,14 +110,14 @@ new CostTracker(provider, modelRoute, session);
 
 ### 入口边界
 
-| 维度         | TUI                            | Desktop                                          |
-| ------------ | ------------------------------ | ------------------------------------------------ |
-| **启动**     | `pico` / `npm run dev`         | Electron Main 连接当前 `PICO_HOME` 的本地 daemon |
-| **I/O**      | ink React TUI + `TuiReporter`  | React Renderer + 类型化 Preload/Runtime 事件     |
-| **Provider** | 共享 ModelRouter + CostTracker | 同一 ModelRouter；Renderer 不接触 secret         |
-| **Session**  | 当前项目 TUI Session           | Workspace → Session → 多轮 Run 的连续 Transcript |
-| **审批**     | 本地 TUI/终端审批              | Transcript 内 Approval / Ask User                |
-| **MCP**      | 工作区配置，可用高级命令管理   | 同一工作区配置，通过 daemon 类型化方法管理       |
+| 维度         | TUI                                | Desktop                                                    |
+| ------------ | ---------------------------------- | ---------------------------------------------------------- |
+| **启动**     | `pico` / `npm run dev`             | Electron Main 连接当前 `PICO_HOME` 的本地 daemon           |
+| **I/O**      | ink React TUI + `TuiReporter`      | React Renderer + 类型化 Preload/Runtime 事件               |
+| **Provider** | 共享路由实现；实例属于当前 Runtime | 同一实现位于 daemon；Renderer 只短暂提交 write-only secret |
+| **Session**  | 当前项目 TUI Session               | Workspace → Session → 多轮 Run 的连续 Transcript           |
+| **审批**     | 本地 TUI/终端审批                  | Transcript 内 Approval / Ask User                          |
+| **MCP**      | 工作区配置，可用高级命令管理       | 同一工作区配置，通过 daemon 类型化方法管理                 |
 
 ### TUI 启动装配 (`cli/main.ts` → `tui/repl.tsx` → `run-agent.ts`)
 
@@ -139,7 +140,7 @@ main.ts parseArgs
 6. buildRegistry + Hooks + 审批中间件
 7. PromptComposer.build（预组装 system prompt）
 8. AgentEngine 构造（`PICO_TRACE=1` 或 `trace: true` 时注入 Tracer）
-9. session.append(user) + engine.run(session)
+9. session.commitMessages(user) + engine.run(session)
 
 Desktop 的装配链是 `Renderer → Preload → Electron Main → LocalRuntimeClient → daemon →
 DesktopRuntimeService/WorkspaceRuntimeService → AgentRuntime`。协议参数、结果与事件由
