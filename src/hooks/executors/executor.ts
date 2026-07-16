@@ -17,6 +17,7 @@ import type {
   ResolvedHookHandler,
 } from "../types.js";
 import type { HookExecutor } from "../service.js";
+import { sanitizePackageInvocationEnvironment } from "../config/referenced-scripts.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -319,7 +320,7 @@ function startCommand(
   let child: ChildProcess;
   const spawnOptions: SpawnOptions = {
     cwd,
-    env: { ...baseEnv, ...handler.env },
+    env: sanitizePackageInvocationEnvironment(handler, { ...baseEnv, ...handler.env }),
     windowsHide: true,
     detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],

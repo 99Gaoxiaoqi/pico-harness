@@ -19,6 +19,21 @@ export interface ReferencedScriptResolution {
   readonly packageScripts: readonly ReferencedPackageScript[];
 }
 
+/** Package target selectors inherited from the host must not retarget a trusted invocation. */
+export function sanitizePackageInvocationEnvironment(
+  handler: Extract<HookHandler, { type: "command" }>,
+  environment: Readonly<NodeJS.ProcessEnv>,
+): NodeJS.ProcessEnv {
+  const tokens = commandTokens(handler);
+  const manager = referencedPackageManager(
+    handler.args === undefined ? handler.command : [handler.command, ...handler.args].join(" "),
+  );
+  if (!manager || !unwrapPackageInvocation(tokens, manager)) return { ...environment };
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !isPackageSelectorEnvironmentName(name)),
+  );
+}
+
 /**
  * Resolve only explicit script references. Package-manager commands are read, never executed,
  * and resolution is deliberately limited to the workspace package.json and its direct files.
@@ -119,18 +134,7 @@ async function resolvePackageScript(
   }
   const scripts = isRecord(parsed.scripts) ? parsed.scripts : {};
 
-  const lifecycleNames = packageLifecycleNames(invocation, scripts);
-  const definitions = Object.fromEntries(
-    lifecycleNames.map((name) => {
-      const definition = scripts[name];
-      return [name, packageScriptDefinition(invocation, name, definition)];
-    }),
-  );
-  const paths = Object.values(definitions).flatMap((definition) =>
-    definition === null
-      ? []
-      : referencedPathCandidates(shellWords(definition), dirname(manifestPath)),
-  );
+  const graph = resolvePackageScriptGraph(invocation, scripts, dirname(manifestPath));
   return {
     reference: {
       manager: invocation.manager,
@@ -138,10 +142,59 @@ async function resolvePackageScript(
       manifestPath,
       canonicalManifestPath,
       state: "resolved",
-      definitions,
+      definitions: graph.definitions,
     },
-    paths: sortedUnique(paths),
+    paths: graph.paths,
   };
+}
+
+interface PackageScriptGraph {
+  readonly definitions: Readonly<Record<string, string | null>>;
+  readonly paths: readonly string[];
+}
+
+function resolvePackageScriptGraph(
+  root: PackageRunInvocation,
+  scripts: Readonly<Record<string, unknown>>,
+  packageDirectory: string,
+): PackageScriptGraph {
+  const definitions = new Map<string, string | null>();
+  const paths = new Set<string>();
+  const visited = new Set<string>();
+
+  const visit = (invocation: PackageRunInvocation, depth: number): void => {
+    const invocationKey = packageInvocationKey(invocation);
+    if (visited.has(invocationKey)) return;
+    if (depth > MAX_NESTED_PACKAGE_SCRIPT_DEPTH) {
+      throw unsupportedPackageInvocation(
+        invocation.manager,
+        `嵌套 package script 超过 ${MAX_NESTED_PACKAGE_SCRIPT_DEPTH} 层`,
+      );
+    }
+    visited.add(invocationKey);
+
+    for (const name of packageLifecycleNames(invocation, scripts)) {
+      const definition = packageScriptDefinition(invocation, name, scripts[name]);
+      definitions.set(`${invocationKey}#${encodeURIComponent(name)}`, definition);
+      if (definition === null) continue;
+      for (const segment of splitSimpleShellCommands(definition)) {
+        for (const path of referencedPathCandidates(shellWords(segment), packageDirectory)) {
+          paths.add(path);
+        }
+      }
+      for (const nested of nestedPackageInvocations(definition)) visit(nested, depth + 1);
+    }
+  };
+
+  visit(root, 0);
+  return {
+    definitions: Object.fromEntries(definitions),
+    paths: sortedUnique([...paths]),
+  };
+}
+
+function packageInvocationKey(invocation: PackageRunInvocation): string {
+  return `${invocation.manager}:${invocation.lifecycle}:${encodeURIComponent(invocation.scriptName)}`;
 }
 
 function packageResolution(
@@ -173,8 +226,8 @@ function packageRunInvocation(tokens: readonly string[]): PackageRunInvocation |
   const actionPosition = nextPackageArgument(tokens, 1, manager);
   if (!actionPosition) return undefined;
   const action = actionPosition.value;
-  if (action === "run" || (manager === "npm" && action === "run-script")) {
-    const scriptPosition = nextPackageArgument(tokens, actionPosition.nextIndex, manager);
+  if (isPackageRunAction(manager, action)) {
+    const scriptPosition = nextPackageArgument(tokens, actionPosition.nextIndex, manager, true);
     if (!scriptPosition) return undefined;
     return {
       manager,
@@ -195,13 +248,17 @@ function nextPackageArgument(
   tokens: readonly string[],
   startIndex: number,
   manager: PackageManager,
+  delimiterIntroducesValue = false,
 ): PackageArgument | undefined {
   let index = startIndex;
   while (index < tokens.length) {
     const token = tokens[index];
     if (!token) return undefined;
     if (!token.startsWith("-")) return { value: token, nextIndex: index + 1 };
-    if (token === "--") return undefined;
+    if (token === "--") {
+      const value = delimiterIntroducesValue ? tokens[index + 1] : undefined;
+      return value ? { value, nextIndex: index + 2 } : undefined;
+    }
 
     const separator = token.indexOf("=");
     const option = separator === -1 ? token : token.slice(0, separator);
@@ -223,6 +280,14 @@ function nextPackageArgument(
     throw unsupportedPackageInvocation(manager, `无法安全解析选项 ${option}`);
   }
   return undefined;
+}
+
+function isPackageRunAction(manager: PackageManager, action: string): boolean {
+  return (
+    action === "run" ||
+    (manager === "npm" && NPM_RUN_ALIASES.has(action)) ||
+    (manager === "pnpm" && action === "run-script")
+  );
 }
 
 type PackageOptionBehavior = "flag" | "value" | "terminal" | "unsupported";
@@ -301,6 +366,293 @@ function packageLifecycle(
   return "standard";
 }
 
+function nestedPackageInvocations(definition: string): readonly PackageRunInvocation[] {
+  const manager = referencedPackageManager(definition);
+  const dynamicExecutable = looksLikeDynamicPackageInvocation(definition);
+  if (!manager && !dynamicExecutable) return [];
+  const selectorEnvironment = packageSelectorEnvironmentAssignment(definition);
+  if (selectorEnvironment) {
+    throw unsupportedNestedPackageInvocation(
+      `嵌套脚本通过环境变量 ${selectorEnvironment} 改变 package.json 目标`,
+      manager,
+    );
+  }
+  if (hasDisplayOnlyPackagePipeline(definition)) {
+    throw unsupportedNestedPackageInvocation(
+      "display-only 命令可通过管道执行未绑定的 package script",
+      manager,
+    );
+  }
+
+  const segments = splitSimpleShellCommands(definition);
+  if (segments.some(changesPackageDirectory)) {
+    throw unsupportedNestedPackageInvocation(
+      "嵌套脚本会改变或动态决定 package.json 的工作目录",
+      manager,
+    );
+  }
+
+  const invocations: PackageRunInvocation[] = [];
+  for (const segment of segments) {
+    if (!referencedPackageManager(segment)) continue;
+    const handler = { type: "command", command: segment } as const;
+    const tokens = commandTokens(handler);
+    const packageTokens = packageInvocationTokens(handler, tokens);
+    if (!packageTokens) continue;
+    const invocation = packageRunInvocation(packageTokens);
+    if (!invocation) {
+      if (packageTokens.some(hasDynamicShellToken)) {
+        throw unsupportedNestedPackageInvocation("嵌套 package-manager action 不是静态值", manager);
+      }
+      continue;
+    }
+    assertStaticPackageScriptName(invocation, manager);
+    invocations.push(invocation);
+  }
+  if (dynamicExecutable) {
+    throw unsupportedNestedPackageInvocation("嵌套 package-manager 可执行文件不是静态值", manager);
+  }
+  return invocations;
+}
+
+function packageSelectorEnvironmentAssignment(definition: string): string | undefined {
+  for (const segment of splitShellCommands(definition, false)) {
+    for (const token of shellWords(segment)) {
+      const name = environmentAssignmentName(token);
+      if (name && isPackageSelectorEnvironmentName(name)) return name;
+    }
+  }
+  return undefined;
+}
+
+function hasDisplayOnlyPackagePipeline(definition: string): boolean {
+  if (!hasShellPipeline(definition)) return false;
+  return splitShellCommands(definition, false).some((segment) => {
+    if (!referencedPackageManager(segment)) return false;
+    const tokens = shellWords(segment);
+    const firstCommand = tokens.find((token) => !isEnvironmentAssignment(token));
+    return isDisplayOnlyPackageReference(tokens, firstCommand);
+  });
+}
+
+function hasShellPipeline(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index];
+    if (character === undefined) continue;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "|" && command[index - 1] !== "|" && command[index + 1] !== "|") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertStaticPackageScriptName(
+  invocation: PackageRunInvocation,
+  parentManager: PackageManager | undefined,
+): void {
+  if (
+    invocation.scriptName.length === 0 ||
+    /[$`*?[\]{}()<>;&|\\~\r\n]/u.test(invocation.scriptName)
+  ) {
+    throw unsupportedNestedPackageInvocation(
+      `嵌套 package script 名不是静态值: ${invocation.scriptName}`,
+      parentManager ?? invocation.manager,
+    );
+  }
+}
+
+function hasDynamicShellToken(token: string): boolean {
+  return /[$`*?[\]{}()<>;&|\\~\r\n]/u.test(token);
+}
+
+function looksLikeDynamicPackageInvocation(definition: string): boolean {
+  return splitShellCommands(definition, false).some((segment) => {
+    const tokens = shellWords(segment);
+    let index = skipEnvironmentAssignments(tokens, 0);
+    while (index < tokens.length) {
+      const token = tokens[index];
+      if (!token) return false;
+      if (isDynamicShellExecutable(token)) return true;
+      const name = executableName(token);
+      if (name === "env") {
+        index = skipDynamicEnvWrapper(tokens, index + 1);
+        index = skipEnvironmentAssignments(tokens, index);
+        continue;
+      }
+      if (name === "command") {
+        index = skipDynamicCommandWrapper(tokens, index + 1);
+        if (index < 0) return false;
+        continue;
+      }
+      if (name === "exec") {
+        index += 1;
+        if (tokens[index] === "--") index += 1;
+        if (tokens[index]?.startsWith("-")) {
+          return tokens.slice(index + 1).some(isDynamicShellExecutable);
+        }
+        continue;
+      }
+      return false;
+    }
+    return false;
+  });
+}
+
+function skipDynamicEnvWrapper(tokens: readonly string[], startIndex: number): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (!token) return index;
+    if (token === "--") return index + 1;
+    if (isEnvironmentAssignment(token) || !token.startsWith("-")) return index;
+    if (token === "-u" || token === "--unset") {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return index;
+}
+
+function skipDynamicCommandWrapper(tokens: readonly string[], startIndex: number): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === "--") return index + 1;
+    if (token === "-p") {
+      index += 1;
+      continue;
+    }
+    if (token === "-v" || token === "-V") return -1;
+    return index;
+  }
+  return index;
+}
+
+function isDynamicShellExecutable(token: string): boolean {
+  return /[$`]/u.test(token) || /%[^%]+%/u.test(token) || /![^!]+!/u.test(token);
+}
+
+function changesPackageDirectory(segment: string): boolean {
+  const tokens = shellWords(segment);
+  let index = skipEnvironmentAssignments(tokens, 0);
+  let name = executableName(tokens[index] ?? "");
+  while (name === "command" || name === "builtin") {
+    index += 1;
+    while (tokens[index]?.startsWith("-")) {
+      if (tokens[index] === "--") {
+        index += 1;
+        break;
+      }
+      index += 1;
+    }
+    name = executableName(tokens[index] ?? "");
+  }
+  return PACKAGE_DIRECTORY_COMMANDS.has(name) || DYNAMIC_SHELL_CONTEXT_COMMANDS.has(name);
+}
+
+function splitSimpleShellCommands(command: string): readonly string[] {
+  const manager = referencedPackageManager(command);
+  const strict = manager !== undefined || looksLikeDynamicPackageInvocation(command);
+  return splitShellCommands(command, strict, manager);
+}
+
+function splitShellCommands(
+  command: string,
+  strict: boolean,
+  manager?: PackageManager,
+): readonly string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+
+  const push = () => {
+    const segment = current.trim();
+    if (segment) segments.push(segment);
+    current = "";
+  };
+
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index];
+    if (character === undefined) continue;
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      current += character;
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      current += character;
+      if (character === '"') {
+        quote = undefined;
+        continue;
+      }
+      if (strict && (character === "`" || (character === "$" && command[index + 1] === "("))) {
+        throw unsupportedNestedPackageInvocation("嵌套 package script 含动态 shell 展开", manager);
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      current += character;
+      quote = character;
+      continue;
+    }
+    if (
+      strict &&
+      ("`(){}<>".includes(character) || (character === "$" && command[index + 1] === "("))
+    ) {
+      throw unsupportedNestedPackageInvocation("嵌套 package script 含复杂 shell 语法", manager);
+    }
+    if (";&|\n\r".includes(character)) {
+      push();
+      if ((character === "&" || character === "|") && command[index + 1] === character) {
+        index += 1;
+      }
+      continue;
+    }
+    current += character;
+  }
+  if (strict && quote !== undefined) {
+    throw unsupportedNestedPackageInvocation("嵌套 package script 引号未闭合", manager);
+  }
+  push();
+  return segments;
+}
+
+function unsupportedNestedPackageInvocation(reason: string, manager?: PackageManager): Error {
+  return manager
+    ? unsupportedPackageInvocation(manager, reason)
+    : new Error(`不支持为动态 package-manager Hook 建立间接脚本信任: ${reason}`);
+}
+
 function assertNoUnsupportedPackageSelectors(
   tokens: readonly string[],
   manager: PackageManager,
@@ -329,7 +681,10 @@ function packageInvocationTokens(
   if (handler.args === undefined && hasShellControlSyntax(handler.command)) {
     throw unsupportedPackageInvocation(manager, "shell 组合可能执行未绑定的间接脚本");
   }
-  if (unwrapped) return unwrapped;
+  if (unwrapped) {
+    assertNoExplicitPackageSelectorEnvironment(handler, tokens, manager);
+    return unwrapped;
+  }
 
   const firstCommand = tokens.find((token) => !isEnvironmentAssignment(token));
   if (isDisplayOnlyPackageReference(tokens, firstCommand)) return undefined;
@@ -337,6 +692,24 @@ function packageInvocationTokens(
     manager,
     `无法证明前置命令 ${firstCommand ? executableName(firstCommand) : "<missing>"} 不会执行包管理器`,
   );
+}
+
+function assertNoExplicitPackageSelectorEnvironment(
+  handler: Extract<HookHandler, { type: "command" }>,
+  tokens: readonly string[],
+  manager: PackageManager,
+): void {
+  const names = [
+    ...Object.keys(handler.env ?? {}),
+    ...tokens.flatMap((token) => {
+      const name = environmentAssignmentName(token);
+      return name ? [name] : [];
+    }),
+  ];
+  const selector = names.find(isPackageSelectorEnvironmentName);
+  if (selector) {
+    throw unsupportedPackageInvocation(manager, `环境变量 ${selector} 会改变 package.json 目标`);
+  }
 }
 
 function isDisplayOnlyPackageReference(
@@ -452,6 +825,14 @@ function isEnvironmentAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(token);
 }
 
+function environmentAssignmentName(token: string): string | undefined {
+  return token.match(/^([A-Za-z_][A-Za-z0-9_]*)=/u)?.[1];
+}
+
+function isPackageSelectorEnvironmentName(name: string): boolean {
+  return PACKAGE_SELECTOR_ENVIRONMENT_NAMES.has(name.toLowerCase());
+}
+
 function referencedPackageManager(command: string): PackageManager | undefined {
   const match = command.match(/\b(npm|pnpm|yarn|bun)(?:\.cmd)?\b/iu)?.[1]?.toLowerCase();
   return match === "npm" || match === "pnpm" || match === "yarn" || match === "bun"
@@ -508,6 +889,8 @@ const NPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
   restart: "restart",
 };
 
+const NPM_RUN_ALIASES = wordSet("run-script rum urn");
+
 const PNPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
   test: "test",
   t: "test",
@@ -515,8 +898,14 @@ const PNPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
 };
 
 const TERMINAL_PACKAGE_OPTIONS = wordSet("-h --help -v --version --revision");
+const MAX_NESTED_PACKAGE_SCRIPT_DEPTH = 32;
 
 const DISPLAY_ONLY_COMMANDS = wordSet("echo printf type which where whence hash");
+const PACKAGE_DIRECTORY_COMMANDS = wordSet("cd pushd popd");
+const DYNAMIC_SHELL_CONTEXT_COMMANDS = wordSet(". source eval alias unalias");
+const PACKAGE_SELECTOR_ENVIRONMENT_NAMES = wordSet(
+  "npm_config_workspace npm_config_workspaces npm_config_include_workspace_root npm_config_prefix npm_config_dir npm_config_filter npm_config_recursive npm_config_workspace_root npm_config_global npm_config_location",
+);
 
 const PACKAGE_FLAG_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {
   npm: wordSet(
