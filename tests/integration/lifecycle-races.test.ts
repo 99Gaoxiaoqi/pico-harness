@@ -206,8 +206,10 @@ test("Hook reloader treats synchronous swap as the commit point", async (context
   const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-commit-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  await mkdir(workspace, { recursive: true });
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
   await mkdir(picoHome, { recursive: true });
+  await writeFile(configPath, "{}\n");
   context.after(() => rm(root, { recursive: true, force: true }));
 
   const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
@@ -218,6 +220,7 @@ test("Hook reloader treats synchronous swap as the commit point", async (context
     workDir: workspace,
     picoHome,
     initial,
+    debounceMs: 5,
     onSwap: (result) => {
       swaps++;
       externalSnapshot = result.snapshot;
@@ -233,9 +236,15 @@ test("Hook reloader treats synchronous swap as the commit point", async (context
   assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
   assert.notStrictEqual(externalSnapshot, initial.snapshot);
 
+  await writeFile(configPath, '{"SessionStart":[]}\n');
+  await delay(30);
+  assert.equal(swaps, 1, "await stop 后不能残留可触发的 watcher");
+
   await reloader.start();
   assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
-  await reloader.stop();
+  await writeFile(configPath, "{}\n");
+  await waitUntil(() => swaps === 2);
+  await stopping;
 });
 
 test("Hook reloader keeps the previous snapshot when synchronous swap throws", async (context) => {
