@@ -14,6 +14,10 @@ export class DesktopLifecycleController {
     return this.backgroundMode && !this.quitting;
   }
 
+  isQuitting(): boolean {
+    return this.quitting;
+  }
+
   requestQuit(): void {
     this.quitting = true;
     setTimeout(() => app.quit(), 0);
