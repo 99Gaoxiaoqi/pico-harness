@@ -51,6 +51,7 @@ export async function createSessionHookRuntime(
   const trustStore = new HookTrustStore({
     ...(options.userHome ? { userHome: options.userHome } : {}),
     ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    ...(options.env ? { env: options.env } : {}),
   });
   const stateStore = new HookLocalStateStore(options.workDir, {
     ...(options.picoHome

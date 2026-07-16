@@ -42,16 +42,20 @@ export interface HookTrustStoreOptions {
   /** Host-owned Pico state root. Takes precedence over the legacy userHome seam. */
   picoHome?: string;
   filePath?: string;
+  /** Environment inherited by command Hooks; package target selectors are fail-closed. */
+  env?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /** executable handler 信任库；定义或脚本字节改变即匹配不上旧记录。 */
 export class HookTrustStore {
   readonly filePath: string;
+  private readonly environment: Readonly<NodeJS.ProcessEnv>;
 
   constructor(options: HookTrustStoreOptions = {}) {
     const picoHome =
       options.picoHome ?? (options.userHome ? join(options.userHome, ".pico") : resolvePicoHome());
     this.filePath = options.filePath ?? join(picoHome, "trusted-hooks.json");
+    this.environment = options.env ?? process.env;
   }
 
   async status(subject: HookTrustSubject): Promise<HookTrustStatus> {
@@ -90,7 +94,7 @@ export class HookTrustStore {
     const workspace = await canonicalExistingDirectory(subject.workspace);
     const sourcePath = await canonicalMaybeExisting(subject.source.path);
     const definitionHash = hash(stableStringify(trustedDefinition(subject.handler)));
-    const scriptHashes = await hashReferencedScripts(subject.handler, workspace);
+    const scriptHashes = await hashReferencedScripts(subject.handler, workspace, this.environment);
     const source = {
       kind: subject.source.kind,
       path: sourcePath,
@@ -125,9 +129,10 @@ export class HookTrustStore {
 async function hashReferencedScripts(
   handler: HookHandler,
   workspace: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
 ): Promise<Readonly<Record<string, string>>> {
   if (handler.type !== "command") return {};
-  const references = await resolveReferencedScripts(handler, workspace);
+  const references = await resolveReferencedScripts(handler, workspace, environment);
   const hashes: Record<string, string> = {};
   for (const packageScript of references.packageScripts) {
     const key = `package-script:${packageScript.canonicalManifestPath}#${encodeURIComponent(
