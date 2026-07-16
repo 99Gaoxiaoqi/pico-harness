@@ -267,6 +267,9 @@ for (const command of [
   "sh -c 'npm test'",
   "sudo npm test",
   "env -S 'npm test'",
+  "stdbuf -oL npm test",
+  "corepack yarn test",
+  "ionice npm test",
 ] as const) {
   test(`${command} fails closed instead of receiving partial trust`, async (context) => {
     const fixture = await createFixture(context, { type: "command", command });

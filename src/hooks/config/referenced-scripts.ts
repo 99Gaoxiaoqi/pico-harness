@@ -332,13 +332,21 @@ function packageInvocationTokens(
   if (unwrapped) return unwrapped;
 
   const firstCommand = tokens.find((token) => !isEnvironmentAssignment(token));
-  if (firstCommand && INDIRECT_EXECUTION_WRAPPERS.has(executableName(firstCommand))) {
-    throw unsupportedPackageInvocation(
-      manager,
-      `无法完整解析包装器 ${executableName(firstCommand)}`,
-    );
-  }
-  return undefined;
+  if (isDisplayOnlyPackageReference(tokens, firstCommand)) return undefined;
+  throw unsupportedPackageInvocation(
+    manager,
+    `无法证明前置命令 ${firstCommand ? executableName(firstCommand) : "<missing>"} 不会执行包管理器`,
+  );
+}
+
+function isDisplayOnlyPackageReference(
+  tokens: readonly string[],
+  firstCommand: string | undefined,
+): boolean {
+  if (!firstCommand) return false;
+  const name = executableName(firstCommand);
+  if (DISPLAY_ONLY_COMMANDS.has(name)) return true;
+  return name === "command" && tokens.some((token) => token === "-v" || token === "-V");
 }
 
 function unwrapPackageInvocation(
@@ -508,9 +516,7 @@ const PNPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
 
 const TERMINAL_PACKAGE_OPTIONS = wordSet("-h --help -v --version --revision");
 
-const INDIRECT_EXECUTION_WRAPPERS = wordSet(
-  "bash sh zsh dash ksh fish cmd powershell pwsh sudo doas nohup nice time timeout xargs eval source . setsid chroot script",
-);
+const DISPLAY_ONLY_COMMANDS = wordSet("echo printf type which where whence hash");
 
 const PACKAGE_FLAG_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {
   npm: wordSet(
