@@ -37,14 +37,8 @@ import {
   type SessionRuntimeStateSnapshot,
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
-import { FTS5Store } from "../memory/fts5-store.js";
 import { hasIncompleteToolExchange } from "../context/safe-compaction-boundary.js";
-import { InMemorySearchStore } from "../memory/in-memory-search-store.js";
-import type {
-  ConversationSearchStore,
-  MemoryBackendStatus,
-  SessionSummaryStore,
-} from "../memory/memory-store.js";
+import type { SessionSummaryStore } from "../memory/memory-store.js";
 import { createSessionSummaryStore } from "../memory/summary-store.js";
 import {
   createFileHistoryState,
@@ -158,8 +152,6 @@ export interface SessionOptions {
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   picoHome?: string;
   identity?: SessionIdentity;
-  /** Deterministic backend injection for integration and embedders. */
-  memorySearchStore?: ConversationSearchStore;
   /** @deprecated Session catalog is no longer written by Session. */
   sessionCatalog?: false;
 }
@@ -302,10 +294,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
    */
   private runQueue: Promise<unknown> = Promise.resolve();
 
-  /** 当前检索后端；FTS5 不可用时由 RuntimeEvent 投影重建内存索引。 */
-  private searchStore!: ConversationSearchStore;
-  /** acquire 得到的共享 FTS5 租约；即使降级也需要对称 release。 */
-  private fts5Lease?: FTS5Store;
   private summaryStore!: SessionSummaryStore;
   private summaryStoreLeasePath?: string;
 
@@ -330,7 +318,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.updatedAt = new Date();
     fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(workDir));
     this.initPersistence(options?.persistence);
-    this.initMemorySearch(options?.memorySearchStore);
     const summaryPath = join(
       resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.memory,
       "summaries.json",
@@ -361,73 +348,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   }
 
   /**
-   * 初始化 FTS5 全文检索存储。
-   * 【连接池化】通过 FTS5Store.acquire 复用 workDir 级单例,避免每 Session 开一个
-   * SQLite 连接。失败时降级为 undefined,不影响主流程(记忆提醒功能可选)。
-   */
-  private initMemorySearch(explicit?: ConversationSearchStore): void {
-    if (explicit) {
-      this.searchStore = explicit;
-      this.switchMemorySearchToInMemoryIfDegraded();
-      return;
-    }
-    try {
-      const store = FTS5Store.acquire(this.workDir, { picoHome: this.picoHome });
-      if (store) this.fts5Lease = store;
-      if (store?.status.state === "healthy") {
-        this.searchStore = store;
-        return;
-      }
-      this.searchStore = this.createInMemorySearchFallback(store?.status);
-    } catch (err) {
-      logger.warn({ err }, "[session] FTS5 初始化失败,降级为 RuntimeEvent 可重建内存索引");
-      this.searchStore = this.createInMemorySearchFallback({
-        backend: "sqlite_fts5",
-        state: "degraded",
-        persistentSource: "sqlite",
-        nodeVersion: process.version,
-        nodeModuleAbi: process.versions.modules,
-        reason: err instanceof Error ? err.message : String(err),
-        recommendation:
-          "请在当前 Node 环境运行 npm rebuild better-sqlite3；仍失败时重新运行 npm ci。",
-      });
-    }
-  }
-
-  private createInMemorySearchFallback(status?: MemoryBackendStatus): InMemorySearchStore {
-    return new InMemorySearchStore({
-      persistentSource: this.store ? "sqlite" : "none",
-      reason: status?.reason ?? "SQLite FTS5 unavailable",
-      ...(status?.recommendation ? { recommendation: status.recommendation } : {}),
-      nodeVersion: status?.nodeVersion,
-      nodeModuleAbi: status?.nodeModuleAbi,
-    });
-  }
-
-  /** FTS5 在运行期失效时立即切换到可重建的进程内索引。 */
-  private switchMemorySearchToInMemoryIfDegraded(): boolean {
-    const current = this.searchStore;
-    const status = current.status;
-    if (status.state !== "degraded" || status.backend === "in_memory") return false;
-
-    const fallback = this.createInMemorySearchFallback(status);
-    fallback.replaceSession(this.id, this.history);
-    this.searchStore = fallback;
-
-    if (current === this.fts5Lease) {
-      FTS5Store.release(this.workDir, { picoHome: this.picoHome });
-      this.fts5Lease = undefined;
-    } else {
-      current.close();
-    }
-    logger.warn(
-      { reason: status.reason, backend: status.backend },
-      "[session] 记忆索引运行期降级,已切换为 RuntimeEvent 可重建内存索引",
-    );
-    return true;
-  }
-
-  /**
    * 重启后读取 runtime.sqlite manifest + events，重建内存投影。
    * 在 SessionManager.getOrCreate 新建实例时自动调用一次。
    * 持久化关闭时为空操作。
@@ -435,10 +355,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   async recover(): Promise<void> {
     if (this.store) await this.ensureRuntimeOwnership();
     await this.recoverFileHistory();
-    if (!this.store) {
-      this.rebuildSearchIndex();
-      return;
-    }
+    if (!this.store) return;
     try {
       const manifest = await this.ensureRuntimeSession();
       const projection = await this.store.readSessionProjection(this.id);
@@ -530,7 +447,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.conversationId = cursor ? `${cursor.logId}:${cursor.epoch}` : this.id;
     const lastEvent = projection.entries.at(-1)?.event;
     this.updatedAt = lastEvent ? new Date(lastEvent.at) : this.createdAt;
-    this.rebuildSearchIndex(cursor);
   }
 
   private async replayRuntimeHistoryProjection(): Promise<void> {
@@ -567,18 +483,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     if (!this.toolResultMeta.has(message.toolCallId)) {
       this.toolResultMeta.set(message.toolCallId, { cachedAt: Date.now(), accessCount: 0 });
     }
-  }
-
-  private rebuildSearchIndex(cursor?: CommitReceipt["cursor"]): void {
-    const replace = (): void => {
-      if (cursor && this.searchStore.projectReplace) {
-        this.searchStore.projectReplace(this.id, this.history, cursor);
-      } else {
-        this.searchStore.replaceSession(this.id, this.history);
-      }
-    };
-    replace();
-    if (this.switchMemorySearchToInMemoryIfDegraded()) replace();
   }
 
   /**
@@ -1027,7 +931,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     });
   }
 
-  /** Advances the disposable Session/search projection once for one durable append batch. */
+  /** Advances the disposable in-memory Session projection once for one durable append batch. */
   async commitRuntimeProjectionBatch(
     commits: readonly RuntimeEventStoreAppendResult[],
   ): Promise<void> {
@@ -1040,8 +944,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     const previousCursor = this.runtimeProjectionCursor;
     const previousBranchId = this.runtimeProjectionBranchId;
     const targetCursor = commits.at(-1)!.cursor;
-    const indexedCursor = this.searchStore.getProjectionCursor?.(this.id);
-    const projectAppend = this.searchStore.projectAppend?.bind(this.searchStore);
     let precedingSequence = previousCursor?.seq ?? -1;
     const commitsAreFreshAndOrdered = commits.every((commit) => {
       const ordered =
@@ -1054,9 +956,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       !previousCursor ||
       !previousBranchId ||
       this.deferredMessages.length > 0 ||
-      !projectAppend ||
-      !indexedCursor ||
-      !sessionCursorsEqual(indexedCursor, previousCursor) ||
       !commitsAreFreshAndOrdered
     ) {
       await this.replayRuntimeHistoryProjection();
@@ -1094,19 +993,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         runtimeEventHasModelMessage(entry.event),
       )
       .map((entry) => structuredClone(entry.event.data.message));
-    const applied = projectAppend(
-      this.id,
-      this.history.length,
-      messages,
-      previousCursor,
-      delta.cursor,
-    );
-    if (!applied) {
-      this.switchMemorySearchToInMemoryIfDegraded();
-      await this.replayRuntimeHistoryProjection();
-      return;
-    }
-
     this.applyRuntimeHistoryProjectionDelta(
       messages,
       delta.cursor,
@@ -1198,7 +1084,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       this.deferredMessages = [];
       this.rebuildPendingToolState();
       this.rebuildToolResultMeta();
-      this.rebuildSearchIndex();
       this.updatedAt = new Date();
       return;
     }
@@ -1312,16 +1197,8 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
 
   /** persistence:false 兼容路径。 */
   private doAppend(msg: Message): void {
-    const beforeLen = this.history.length;
     this.history.push(msg);
     this.updatedAt = new Date();
-
-    try {
-      this.searchStore.insert(this.id, beforeLen, msg);
-      this.switchMemorySearchToInMemoryIfDegraded();
-    } catch (err) {
-      logger.warn({ err }, "[session] 记忆索引失败");
-    }
   }
 
   /**
@@ -1339,7 +1216,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       return;
     }
     this.history = nextHistory;
-    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
   }
@@ -1361,7 +1237,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     }
     const nextHistory = this.history.slice(0, cutIndex);
     this.history = nextHistory;
-    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
     this.deferredMessages = [];
@@ -1437,7 +1312,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     if (this.store) return this.commitRuntimeRewind(messageIndex, runtimeBranchId);
     const nextHistory = this.history.slice(0, messageIndex);
     this.history = nextHistory;
-    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     this.deferredMessages = [];
     this.pendingToolCallIds.clear();
@@ -1819,7 +1693,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       return;
     }
     this.history = nextHistory;
-    this.rebuildSearchIndex();
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
@@ -1946,47 +1819,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     return this.toolResultMeta;
   }
 
-  /**
-   * 全文检索历史对话(基于 FTS5)。
-   * 用于 MemoryNudger 生成记忆提醒时查询相关历史。
-   * @param query - 搜索关键词
-   * @param limit - 返回结果数(默认 10)
-   * @returns 匹配的对话片段(按相关性排序,仅返回当前 Session 的消息)
-   */
-  search(
-    query: string,
-    limit = 10,
-  ): Array<{ content: string; turnIndex: number; sessionId: string }> {
-    try {
-      // 传入 sessionId 过滤,只返回当前 Session 的消息
-      let results = this.searchStore.search(query, limit, this.id);
-      if (this.switchMemorySearchToInMemoryIfDegraded()) {
-        results = this.searchStore.search(query, limit, this.id);
-      }
-      return results.map((r) => ({
-        content: r.content,
-        turnIndex: r.turnIndex,
-        sessionId: r.sessionId,
-      }));
-    } catch (err) {
-      logger.warn({ err, query }, "[session] 记忆检索失败");
-      return [];
-    }
-  }
-
-  /** 获取 FTS5Store 实例(用于 MemoryNudger) */
-  get fts5Store(): FTS5Store | undefined {
-    return this.fts5Lease?.status.state === "healthy" ? this.fts5Lease : undefined;
-  }
-
-  get memoryStatus(): MemoryBackendStatus {
-    return this.searchStore.status;
-  }
-
-  get sessionSummaryStore(): SessionSummaryStore {
-    return this.summaryStore;
-  }
-
   saveMemorySummary(summary: string, messageCount: number): void {
     this.assertWritable();
     this.summaryStore.save(this.id, summary, messageCount);
@@ -2097,9 +1929,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   /**
    * 发起关闭：同步停止接收新的 serialize 任务，返回的 Promise 在已接纳
    * 的任务、兼容写入与 RuntimeEvent tail 完全 drain 后关闭资源并 resolve。
-   * 【连接池化】只释放本 Session 持有的引用(FTS5Store.release),引用计数归零
-   * 才真正关闭共享的 sessions.db。关键:Windows 上 SQLite 文件未释放句柄时删除会
-   * 触发 EBUSY,必须释放后才能 rm 工作目录。幂等(重复调用安全)。
+   * 幂等(重复调用安全)。
    */
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
@@ -2119,14 +1949,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         try {
           this.goalBinding?.unsubscribe();
           this.goalBinding = undefined;
-          const leasedFts5 = this.fts5Lease;
-          if (leasedFts5) {
-            FTS5Store.release(this.workDir, { picoHome: this.picoHome });
-            this.fts5Lease = undefined;
-          }
-          if (this.searchStore !== leasedFts5) {
-            this.searchStore.close();
-          }
           if (this.summaryStoreLeasePath) {
             releaseSummaryStore(this.summaryStoreLeasePath);
             this.summaryStoreLeasePath = undefined;
@@ -2350,15 +2172,6 @@ function runtimeCursorForEntries(
 ): SessionCursor | undefined {
   const head = entries.at(-1);
   return head ? runtimeCursorForEntry(sessionId, entries, head) : undefined;
-}
-
-function sessionCursorsEqual(left: SessionCursor, right: SessionCursor): boolean {
-  return (
-    left.logId === right.logId &&
-    left.seq === right.seq &&
-    left.epoch === right.epoch &&
-    left.eventId === right.eventId
-  );
 }
 
 function runtimeCursorForEntry(
