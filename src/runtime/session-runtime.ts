@@ -39,14 +39,12 @@ import type {
   HookOutput,
 } from "../hooks/types.js";
 import { isTerminalTaskStatus, type TaskSnapshot } from "../tasks/task-registry.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 
 /** UI-independent services scoped to one persisted session. */
 export interface SessionRuntimeOptions {
-  workDir: string;
-  sessionId: string;
+  /** Exact persisted Session that owns every session-scoped runtime service. */
   session: Session;
-  /** Host-owned Pico state root for session-scoped durable stores. */
-  picoHome?: string;
   /** Host-owned environment inherited by the session Hook executor. */
   env?: Readonly<NodeJS.ProcessEnv>;
   toolDisclosure?: ToolDisclosure;
@@ -67,6 +65,7 @@ export interface SessionRuntimeOptions {
 export interface SessionRuntime {
   readonly workDir: string;
   readonly sessionId: string;
+  readonly picoHome: string;
   readonly goalManager: GoalManager;
   readonly todoStore: TodoStore;
   readonly toolDisclosure: ToolDisclosure;
@@ -98,7 +97,7 @@ export interface SessionRuntime {
     context?: HookExecutionContext,
   ): Promise<HookOutput>;
   drainHookEvents(): Promise<void>;
-  assertCompatible(workDir: string, sessionId: string): void;
+  assertCompatible(session: Session): void;
   conversationTurnCount(session: Session): number;
   dispose(): Promise<void>;
 }
@@ -394,26 +393,19 @@ function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): bool
 export async function createSessionRuntime(
   options: SessionRuntimeOptions,
 ): Promise<SessionRuntime> {
-  const workDir = resolve(options.workDir);
+  const session = options.session;
+  const workDir = resolve(session.workDir);
+  const sessionId = session.id;
+  const picoHome = resolvePicoHome({ picoHome: session.picoHome });
   const completionPollIntervalMs = options.taskHostRuntime
     ? positiveDuration(options.completionPollIntervalMs ?? 250, "completionPollIntervalMs")
     : undefined;
-  if (options.session.id !== options.sessionId) {
-    throw new Error(
-      `TUI runtime session mismatch: expected ${options.sessionId}, received ${options.session.id}`,
-    );
-  }
-  if (resolve(options.session.workDir) !== workDir) {
-    throw new Error(
-      `TUI runtime workDir mismatch: expected ${workDir}, received ${options.session.workDir}`,
-    );
-  }
 
   const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
-  const skillRegistry = new SkillRegistry(workDir, { picoHome: options.picoHome });
+  const skillRegistry = new SkillRegistry(workDir, { picoHome });
   await skillRegistry.init();
   const goalManager = new GoalManager();
-  const unbindGoalManager = options.session.bindGoalManager(goalManager);
+  const unbindGoalManager = session.bindGoalManager(goalManager);
   const codeIntelligenceManager = new CodeIntelligenceManager({
     rootDir: workDir,
     ...(options.lspServers ? { lspServers: options.lspServers } : {}),
@@ -432,12 +424,12 @@ export async function createSessionRuntime(
     deliver: async (completion) => {
       if (jobService) {
         const pending = jobService
-          .pendingCompletions({ ownerSessionId: options.sessionId, limit: 1_000 })
+          .pendingCompletions({ ownerSessionId: sessionId, limit: 1_000 })
           .find((candidate) => candidate.completionId === completion.completionId);
         // Durable outbox 是新 completion 的权威源。如果消息已经入会话且
         // outbox 已 ack，这是崩溃恢复的 resume-only wake，不得重复注入。
         if (!pending) {
-          const alreadyCommitted = options.session
+          const alreadyCommitted = session
             .getHistory()
             .some(
               (message) =>
@@ -449,18 +441,18 @@ export async function createSessionRuntime(
             `Delegation completion ${completion.completionId} has no pending durable outbox record`,
           );
         }
-        await options.session.commitMessageOnce(
+        await session.commitMessageOnce(
           completion.completionId,
           createDelegationCompletionMessage(completion),
         );
         jobService.markCompletionDelivered(completion.completionId);
         return;
       }
-      await options.session.commitMessages(createDelegationCompletionMessage(completion));
+      await session.commitMessages(createDelegationCompletionMessage(completion));
     },
   });
   const hookRewakeQueue = new HookRewakeQueue(async (entries) => {
-    await options.session.commitMessages({
+    await session.commitMessages({
       role: "user",
       content: entries.map((entry) => entry.message).join("\n\n"),
       providerData: {
@@ -478,15 +470,15 @@ export async function createSessionRuntime(
     const scanDurableCompletions = (): void => {
       try {
         for (const completion of jobService.pendingCompletions({
-          ownerSessionId: options.sessionId,
+          ownerSessionId: sessionId,
           limit: 1_000,
         })) {
-          const envelope = delegationEnvelopeFromOutbox(completion, options.sessionId);
+          const envelope = delegationEnvelopeFromOutbox(completion, sessionId);
           if (envelope) delegationCompletionQueue.enqueue(envelope);
         }
       } catch (error) {
         logger.warn(
-          { sessionId: options.sessionId, error: String(error) },
+          { sessionId, error: String(error) },
           "[runtime-store] 扫描 durable completion outbox 失败",
         );
       }
@@ -494,10 +486,7 @@ export async function createSessionRuntime(
     scanDurableCompletions();
     completionPollTimer = setInterval(scanDurableCompletions, completionPollIntervalMs);
     completionPollTimer.unref?.();
-    for (const completion of unconsumedDelegationCompletions(
-      options.session.getHistory(),
-      options.sessionId,
-    )) {
+    for (const completion of unconsumedDelegationCompletions(session.getHistory(), sessionId)) {
       delegationCompletionQueue.enqueue(completion);
     }
   }
@@ -506,8 +495,8 @@ export async function createSessionRuntime(
       ? undefined
       : await createSessionHookRuntime({
           workDir,
-          sessionId: options.sessionId,
-          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+          sessionId,
+          picoHome,
           ...(options.env ? { env: options.env } : {}),
           ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
           ...(options.hookExtensionSources
@@ -515,22 +504,21 @@ export async function createSessionRuntime(
             : {}),
         }).catch((error) => {
           logger.warn(
-            { sessionId: options.sessionId, error: String(error) },
+            { sessionId, error: String(error) },
             "[Hook] 会话级运行时初始化失败，前台 hooks fail-open",
           );
           return undefined;
         });
   return new DefaultSessionRuntime({
-    workDir,
-    sessionId: options.sessionId,
+    session,
     goalManager,
-    todoStore: new TodoStore(workDir, { picoHome: options.picoHome }),
+    todoStore: new TodoStore(workDir, { picoHome }),
     toolDisclosure: options.toolDisclosure ?? new ToolDisclosure(),
     taskRegistry,
     ...(options.taskHostRuntime ? { taskHostRuntime: options.taskHostRuntime } : {}),
     backgroundManager: new BackgroundManager({
       taskRegistry,
-      ownerSessionId: options.sessionId,
+      ownerSessionId: sessionId,
     }),
     delegationManager: new DelegationManager({
       taskRegistry,
@@ -539,7 +527,7 @@ export async function createSessionRuntime(
     delegationCompletionQueue,
     hookRewakeQueue,
     skillRegistry,
-    memoryNudger: new MemoryNudger(skillRegistry, options.session.sessionSummaryStore),
+    memoryNudger: new MemoryNudger(skillRegistry, session.sessionSummaryStore),
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue,
     codeIntelligence,
@@ -679,8 +667,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface DefaultSessionRuntimeOptions {
-  workDir: string;
-  sessionId: string;
+  session: Session;
   goalManager: GoalManager;
   todoStore: TodoStore;
   toolDisclosure: ToolDisclosure;
@@ -706,6 +693,7 @@ interface DefaultSessionRuntimeOptions {
 class DefaultSessionRuntime implements SessionRuntime {
   readonly workDir: string;
   readonly sessionId: string;
+  readonly picoHome: string;
   readonly goalManager: GoalManager;
   readonly todoStore: TodoStore;
   readonly toolDisclosure: ToolDisclosure;
@@ -733,11 +721,14 @@ class DefaultSessionRuntime implements SessionRuntime {
   private readonly unsubscribeWorktreeHooks?: () => void;
   private readonly unbindGoalManager: () => void;
   private readonly stopDelegationCompletionPolling: () => void;
+  private readonly session: Session;
   private disposePromise?: Promise<void>;
 
   constructor(options: DefaultSessionRuntimeOptions) {
-    this.workDir = options.workDir;
-    this.sessionId = options.sessionId;
+    this.session = options.session;
+    this.workDir = resolve(options.session.workDir);
+    this.sessionId = options.session.id;
+    this.picoHome = resolvePicoHome({ picoHome: options.session.picoHome });
     this.goalManager = options.goalManager;
     this.todoStore = options.todoStore;
     this.toolDisclosure = options.toolDisclosure;
@@ -844,21 +835,31 @@ class DefaultSessionRuntime implements SessionRuntime {
     }
   }
 
-  assertCompatible(workDir: string, sessionId: string): void {
-    if (resolve(workDir) !== this.workDir) {
+  assertCompatible(session: Session): void {
+    if (session === this.session) return;
+
+    const workDir = resolve(session.workDir);
+    const picoHome = resolvePicoHome({ picoHome: session.picoHome });
+    if (picoHome !== this.picoHome) {
       throw new Error(
-        `TUI runtime workDir mismatch: expected ${this.workDir}, received ${resolve(workDir)}`,
+        `SessionRuntime picoHome mismatch: expected ${this.picoHome}, received ${picoHome}`,
       );
     }
-    if (sessionId !== this.sessionId) {
+    if (workDir !== this.workDir) {
       throw new Error(
-        `TUI runtime session mismatch: expected ${this.sessionId}, received ${sessionId}`,
+        `SessionRuntime workDir mismatch: expected ${this.workDir}, received ${workDir}`,
       );
     }
+    if (session.id !== this.sessionId) {
+      throw new Error(
+        `SessionRuntime session mismatch: expected ${this.sessionId}, received ${session.id}`,
+      );
+    }
+    throw new Error(`SessionRuntime is bound to a different Session instance: ${this.sessionId}`);
   }
 
   conversationTurnCount(session: Session): number {
-    this.assertCompatible(session.workDir, session.id);
+    this.assertCompatible(session);
     return session
       .getHistory()
       .filter((message) => message.role === "user" && message.toolCallId === undefined).length;

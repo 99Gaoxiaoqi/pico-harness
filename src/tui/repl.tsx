@@ -1312,8 +1312,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           ],
     );
     const runtimeState = await createTuiRuntimeState({
-      workDir: opts.workDir,
-      sessionId: selection.sessionId,
       session,
       lspServers: [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
       hookExtensionSources: pluginSnapshot.hookSources,
