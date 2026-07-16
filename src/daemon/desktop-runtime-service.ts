@@ -81,6 +81,7 @@ import {
   RuntimeEventStoreIntegrityError,
   type RuntimeEventStoreEntry,
 } from "../runtime/runtime-event-store.js";
+import { RuntimeRun } from "../runtime/runtime-run.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -656,8 +657,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, result.message);
         }
       }
-      // Persist a zero-usage runtime snapshot so every surface discovers the new ledger session.
-      session.updateRuntimeState({ usage: session.getRuntimeStateSnapshot().usage });
+      // recover() 已初始化 durable manifest；Usage 只由 model.call.settled 持久化。
       await session.flushPersistence();
     } finally {
       await session.close();
@@ -873,6 +873,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         now: this.now,
       });
       try {
+        const runtimeEventStore = session.runtimeEventStore;
+        if (!runtimeEventStore) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "当前会话没有 durable RuntimeEvent store，无法压缩",
+          );
+        }
+        await RuntimeRun.reconcileIncompleteRuns({
+          sessionId: session.id,
+          workDir: session.workDir,
+          store: runtimeEventStore,
+          writeGuard: session,
+        });
+        await RuntimeRun.repairSessionProjection(session, {
+          workDir: session.workDir,
+          store: runtimeEventStore,
+        });
         ensureSessionUsageBaseline(ledger, session);
         const provider = new CostTracker(
           rawProvider,
@@ -895,21 +912,30 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const historyTokens = estimateMessagesTokens(session.getHistory());
         const profile = resolveProviderProfile(active.provider, active.config.model);
         const budget = createContextBudget(profile);
-        const compacted = await new FullCompactor({ provider }).compact(session, {
-          inputBudgetTokens: budget.inputBudgetTokens,
-          targetRetainedTokens: Math.max(
-            1,
-            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
-          ),
-          trigger: "manual",
+        const runtimeRun = await RuntimeRun.start({
+          sessionId: session.id,
+          workDir: session.workDir,
+          store: runtimeEventStore,
+          writeGuard: session,
         });
-        if (!compacted) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
-          );
-        }
-        await session.flushPersistence();
+        await runtimeRun.run(async () => {
+          const result = await new FullCompactor({ provider }).compact(session, {
+            inputBudgetTokens: budget.inputBudgetTokens,
+            targetRetainedTokens: Math.max(
+              1,
+              Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
+            ),
+            trigger: "manual",
+          });
+          if (!result) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
+            );
+          }
+          await session.flushPersistence();
+          return true;
+        });
         return { beforeMessageCount, afterMessageCount: session.length };
       } finally {
         ledger.close();

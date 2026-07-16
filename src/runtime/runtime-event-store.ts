@@ -11,7 +11,8 @@ import {
 } from "../storage/runtime-schema-preflight.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
-  type SessionRuntimeStatePatch,
+  normalizeSessionRuntimeStateWritePatch,
+  type SessionRuntimeStateWritePatch,
 } from "../engine/session-runtime.js";
 import type { SessionCursor } from "../engine/session-persistence.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
@@ -212,9 +213,11 @@ export class RuntimeEventStore {
 
   async appendSessionState(
     sessionId: string,
-    patch: SessionRuntimeStatePatch,
+    patch: SessionRuntimeStateWritePatch,
     options: AppendRuntimeSessionStateOptions = {},
   ): Promise<RuntimeEventStoreAppendResult> {
+    const normalized = normalizeSessionRuntimeStateWritePatch(patch);
+    if (!normalized) throw new Error("Runtime session state write patch is invalid");
     const at = (options.now ?? (() => new Date()))().toISOString();
     return this.append({
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
@@ -229,7 +232,7 @@ export class RuntimeEventStore {
       kind: "session.state.committed",
       data: {
         stateVersion: SESSION_RUNTIME_STATE_VERSION,
-        patch: structuredClone(patch),
+        patch: structuredClone(normalized),
       },
     });
   }

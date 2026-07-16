@@ -75,25 +75,30 @@ export function projectRuntimeSessionState(
 ): SessionRuntimeStateSnapshot {
   let settings: SessionRuntimeStateSnapshot["settings"];
   let goal: SessionRuntimeStateSnapshot["goal"];
-  let persistedUsage: SessionUsageSnapshot | undefined;
   for (const event of events) {
     if (event.kind !== "session.state.committed") continue;
     if (event.data.patch.settings) settings = structuredClone(event.data.patch.settings);
     if (event.data.patch.goal) goal = structuredClone(event.data.patch.goal);
-    if (event.data.patch.usage) persistedUsage = structuredClone(event.data.patch.usage);
   }
-  const usage = mergeUsage(projectRuntimeSessionUsage(events), persistedUsage);
   return {
     stateVersion: SESSION_RUNTIME_STATE_VERSION,
     ...(settings ? { settings } : {}),
     ...(goal ? { goal } : {}),
-    usage,
+    usage: projectRuntimeSessionUsage(events),
   };
 }
 
 export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): SessionUsageSnapshot {
-  const usage = createEmptyUsageSnapshot();
-  for (const event of events) {
+  // The last legacy cumulative snapshot closes its immutable prefix; only later call facts add on.
+  let legacyPrefixEnd = -1;
+  let usage = createEmptyUsageSnapshot();
+  for (const [index, event] of events.entries()) {
+    if (event.kind !== "session.state.committed" || !event.data.patch.usage) continue;
+    legacyPrefixEnd = index;
+    usage = structuredClone(event.data.patch.usage);
+  }
+
+  for (const event of events.slice(legacyPrefixEnd + 1)) {
     if (event.kind !== "model.call.settled" || event.data.status !== "succeeded") continue;
     usage.totalProviderCalls++;
     const reportedUsage = event.data.usage;
@@ -164,43 +169,4 @@ function projectBranchEventIndexes<Event extends RuntimeEvent>(
     eventIndexes.set(event.eventId, eventIndex);
   }
   return projected;
-}
-
-function mergeUsage(
-  derived: SessionUsageSnapshot,
-  persisted: SessionUsageSnapshot | undefined,
-): SessionUsageSnapshot {
-  if (!persisted) return derived;
-  const usePersistedStatus = persisted.totalProviderCalls >= derived.totalProviderCalls;
-  return {
-    totalPromptTokens: Math.max(derived.totalPromptTokens, persisted.totalPromptTokens),
-    totalCompletionTokens: Math.max(derived.totalCompletionTokens, persisted.totalCompletionTokens),
-    totalInputTokens: Math.max(derived.totalInputTokens, persisted.totalInputTokens),
-    totalCacheReadTokens: Math.max(derived.totalCacheReadTokens, persisted.totalCacheReadTokens),
-    totalCacheWriteTokens: Math.max(derived.totalCacheWriteTokens, persisted.totalCacheWriteTokens),
-    totalReasoningTokens: Math.max(derived.totalReasoningTokens, persisted.totalReasoningTokens),
-    totalCostCNY: Math.max(derived.totalCostCNY, persisted.totalCostCNY),
-    lastCostStatus: usePersistedStatus ? persisted.lastCostStatus : derived.lastCostStatus,
-    totalProviderCalls: Math.max(derived.totalProviderCalls, persisted.totalProviderCalls),
-    totalUsageReports: Math.max(derived.totalUsageReports, persisted.totalUsageReports),
-    totalInputReports: Math.max(derived.totalInputReports, persisted.totalInputReports),
-    totalCacheReadReports: Math.max(derived.totalCacheReadReports, persisted.totalCacheReadReports),
-    totalCacheWriteReports: Math.max(
-      derived.totalCacheWriteReports,
-      persisted.totalCacheWriteReports,
-    ),
-    totalReasoningReports: Math.max(derived.totalReasoningReports, persisted.totalReasoningReports),
-    totalEstimatedCostReports: Math.max(
-      derived.totalEstimatedCostReports,
-      persisted.totalEstimatedCostReports,
-    ),
-    totalIncludedCostReports: Math.max(
-      derived.totalIncludedCostReports,
-      persisted.totalIncludedCostReports,
-    ),
-    totalUnknownCostReports: Math.max(
-      derived.totalUnknownCostReports,
-      persisted.totalUnknownCostReports,
-    ),
-  };
 }
