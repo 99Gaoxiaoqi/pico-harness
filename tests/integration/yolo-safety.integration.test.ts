@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { isHardlineBashCommand } from "../../src/approval/bash-hardline.js";
 import { isHardlineCommand } from "../../src/approval/manager.js";
@@ -365,6 +366,11 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "exec rm -rf /",
     "busybox rm --force --recursive /etc",
     "sudo bash -lc 'rm --force --recursive /'",
+    "zsh -ocorrect -c 'rm -rf /'",
+    "bash --rcfile ./evil -ic 'printf safe'",
+    "bash --init-file ./evil -ic 'printf safe'",
+    "BASH_ENV=./evil bash -c 'printf safe'",
+    "env BASH_ENV=./evil bash -c 'printf safe'",
     "printf '%s\\n' 'rm -rf /' | sh",
     "printf '%s\\n' 'rm -rf /' | bash -s",
     "printf '%s\\n' 'rm -rf /' | ash",
@@ -379,6 +385,10 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "busybox ash ./destructive-script.sh",
     "command sh ./destructive-script.sh",
     "timeout 1 sh ./destructive-script.sh",
+    "stdbuf -oL sh ./destructive-script.sh",
+    "ionice -c2 sh ./destructive-script.sh",
+    "printf '%s\\n' 'rm -rf /' | stdbuf -oL sh",
+    "printf '%s\\n' 'rm -rf /' | ionice -c2 sh",
     "csh ./destructive-script.csh",
     "tcsh ./destructive-script.csh",
     "fish ./destructive-script.fish",
@@ -387,9 +397,17 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "cmd.exe /d /s /c destructive-script.cmd",
     "env pwsh -Command 'Write-Output safe'",
     `python3 -c "import os; os.system('rm -rf /')"`,
+    `python3 -W ignore -c "import os; os.system('rm -rf /')"`,
+    `python3 -X dev -c "import os; os.system('rm -rf /')"`,
+    `python3.14t -W ignore -c "import os; os.system('rm -rf /')"`,
     `node -e "require('node:child_process').execSync('rm -rf /')"`,
+    `node --title pico -e "require('node:child_process').execSync('rm -rf /')"`,
+    `node -r ./bootstrap.js -e "require('node:child_process').execSync('rm -rf /')"`,
     `perl -e "system('rm -rf /')"`,
+    `perl -I ./lib -e "system('rm -rf /')"`,
     `ruby -e "system('rm -rf /')"`,
+    `ruby -I ./lib -e "system('rm -rf /')"`,
+    `ruby3.1 -I ./lib -e "system('rm -rf /')"`,
     "{ rm -rf /; }",
     "(rm -rf /)",
     "if true; then rm -rf /; fi",
@@ -428,11 +446,22 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "busybox ash -c 'printf ok'",
     "ash --version",
     "pwsh --version",
+    "zsh -ocorrect -c 'printf ok'",
+    "bash -c 'printf ok' --rcfile ./script-argument",
+    "BASH_ENV=./evil printf safe",
+    "env BASH_ENV=./evil printf safe",
+    "time -f BASH_ENV=./evil bash -c 'printf ok'",
     "env bash -c 'printf ok'",
     "timeout 1 sh -c 'printf ok'",
+    "stdbuf -oL sh -c 'printf ok'",
+    "ionice -c2 ash -c 'printf ok'",
     `python3 -c "print('rm -rf ./dist')"`,
     `python3 ./ordinary.py -c "rm -rf /"`,
+    `python3 -W ignore ./ordinary.py -c "rm -rf /"`,
     `node ./ordinary.js -e "rm -rf /"`,
+    `node --title pico ./ordinary.js -e "rm -rf /"`,
+    `perl -I ./lib ./ordinary.pl -e "rm -rf /"`,
+    `ruby3.1 -I ./lib ./ordinary.rb -e "rm -rf /"`,
     '"then" rm -rf /',
     'echo "(rm -rf /)"',
   ];
@@ -460,6 +489,21 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
   const rootForegroundSafety = buildForegroundSafetyMiddleware("/", { mode: "yolo" }, roots);
   assert.equal((await rootForegroundSafety(relativeSystemCall)).allowed, false);
 });
+
+test(
+  "YOLO hardline 对真实 POSIX Shell stdin 执行入口 fail-closed",
+  { skip: process.platform === "win32" },
+  () => {
+    const script = "printf 'stdin-shell-ran\\n'\n";
+    const execution = spawnSync("/bin/sh", [], { encoding: "utf8", input: script });
+    assert.equal(execution.error, undefined);
+    assert.equal(execution.status, 0, execution.stderr);
+    assert.equal(execution.stdout, "stdin-shell-ran\n");
+
+    const visibleInvocation = `printf '%s' ${JSON.stringify(script)} | sh`;
+    assert.equal(isHardlineBashCommand(visibleInvocation, process.cwd()), true);
+  },
+);
 
 function bashArgs(command: string): string {
   return JSON.stringify({ command });
