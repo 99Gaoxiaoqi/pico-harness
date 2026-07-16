@@ -238,9 +238,7 @@ export class RuntimeRun {
     return RuntimeRun.startInternal(options);
   }
 
-  private static async startInternal(
-    options: RuntimeRunConstructionOptions,
-  ): Promise<RuntimeRun> {
+  private static async startInternal(options: RuntimeRunConstructionOptions): Promise<RuntimeRun> {
     const store =
       options.store ??
       new RuntimeEventStore({
