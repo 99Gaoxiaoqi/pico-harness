@@ -1,6 +1,6 @@
 # Pico Harness 架构收敛后续计划
 
-> 状态：实施中
+> 状态：已完成
 > 建立日期：2026-07-16
 > 基线：`main@2235201`
 > 集成分支：`codex/architecture-convergence-2`
@@ -75,12 +75,20 @@
 
 ## 第四部分：未接入代码退出
 
-- [ ] 删除已确认零生产调用的 RuntimeRun、Session、Tool helper 和 deprecated facade。
-- [ ] 删除无生产写入者的 learned `SkillRegistry` 与 `MemoryNudger`，保留 `SkillLoader/skill_view`。
-- [ ] 若没有明确 `memory_search` 产品入口，删除 Session FTS 投影链及 fallback。
-- [ ] 完成 Summary aggregate index 一次性迁移并退出长期双写/fallback。
-- [ ] 删除产品入口已禁用的 model fallback，保留 retry、限流和凭证轮换。
-- [ ] 更新架构文档，使事实源、Memory、Goal、rewind 和 Desktop secret 边界与实现一致。
+- [x] 删除已确认零生产调用的 RuntimeRun、Session、Tool helper 和 deprecated facade。✔️
+- [x] 删除无生产写入者的 learned `SkillRegistry` 与 `MemoryNudger`，保留 `SkillLoader/skill_view`。✔️
+- [x] 在没有明确 `memory_search` 产品入口的前提下，删除 Session FTS 投影链及 fallback。✔️
+- [x] 完成 Summary aggregate index 一次性迁移并退出长期双写/fallback。✔️
+- [x] 删除产品入口已禁用的 model fallback，保留 retry、限流和凭证轮换。✔️
+- [x] 更新架构文档，使事实源、Memory、Goal、rewind 和 Desktop secret 边界与实现一致。✔️
+
+### 完成记录
+
+- 提交：`6c0c28f refactor(core): 删除无调用的兼容门面`；`555e1f8 refactor(memory): 删除未接入的搜索与学习链路`；`94bb87c refactor(memory): 退出摘要聚合索引`；`7b1efbf refactor(runtime): 收敛模型路由与会话兼容接口`；`5138151 docs(architecture): 收敛当前架构事实`。
+- 删除：FTS5/InMemorySearch、learned SkillRegistry/MemoryNudger、bare-model fallback、legacy CLI/TUI Runtime 转发层，以及零调用的 Session/RuntimeRun/Tool helper；真实 `SkillLoader/skill_view`、RuntimeEvent、Summary、retry、限流和凭证轮换保留。
+- 迁移：Summary per-session v2 成为唯一权威；legacy aggregate 只固定快照迁移一次。Task JSON 同样通过固定快照和 durable marker 完成永久 cutover；首次无源后新出现的 JSON 也不再影响 SQLite。
+- 复审修复：`5f048d5 fix(tasks): 固化旧任务迁移切换点`；`5695021 fix(runtime): 修复回放与实时事件重叠去重`。真实 socket + SQLite smoke 覆盖 10,050 条 replay/live 完全重叠，无丢失、无重复且 cursor 不回退。
+- 文档：当前架构只承诺 worktree-only 可写 Worker；Shared/OCC 降为未采用的历史提案。Summary 明确为 compaction/rewind/fork sidecar，不宣称是 Session 恢复真源或跨重启增量摘要来源。
 
 ### 明确保留
 
@@ -91,13 +99,16 @@
 
 ## 最终验证与交付
 
-- [ ] 最终集成态通过 `npm run lint`。
-- [ ] 最终集成态通过 `npm run typecheck` 和 `npm run build`。
-- [ ] Desktop 相关变更通过 `npm run desktop:typecheck` 和适用的打包验证。
-- [ ] 存储相关变更通过 `npm run check:storage` 和针对性 smoke。
-- [ ] 完成一次聚焦独立复审，确认没有恢复 fallback、双写或新状态 owner。
-- [ ] 检查最终差异，只提交本计划范围内的变更并保护用户已有文件。
+- [x] 最终集成态通过 `npm run lint`。✔️
+- [x] 最终集成态通过 `npm run typecheck` 和 `npm run build`。✔️
+- [x] Desktop 相关变更通过 `npm run desktop:typecheck` 和适用的打包验证。✔️
+- [x] 存储相关变更通过 `npm run check:storage` 和针对性 smoke。✔️
+- [x] 完成一次聚焦独立复审，确认没有恢复 fallback、双写或新状态 owner。✔️
+- [x] 检查最终差异，只提交本计划范围内的变更并保护用户已有文件。✔️
 
 ## 完成记录
 
-实施过程中按部分补充提交哈希、验证命令和必要的迁移说明。
+- 最终集成态在 Node 22.23.0 下通过 lint、核心与 Desktop typecheck、核心 build、SQLite/WAL storage check，以及 macOS arm64 Desktop package。
+- 定向 smoke 覆盖 Hook trust、daemon 状态根与生命周期、RuntimeEvent 只读投影、Task/Summary 固定快照迁移、Session pin/Home 隔离、显式模型路由，以及 10,050 条 replay/live 重叠去重。
+- 聚焦独立复审发现并修复 Task migration cutover 与 replay/live overlap 两项问题；修复后重新执行受影响 smoke 和最终全量校验。
+- 最终扫描未发现已删除入口、model fallback、learned memory 或测试代码残留；差异仅包含本计划范围内的实现与文档，主工作区既有未跟踪文件保持不变。
