@@ -15,7 +15,7 @@ export interface CommandHookInvocation {
 }
 
 export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
-  /** Canonical absolute executable selected with the same environment passed to spawn. */
+  /** Absolute logical executable selected with the same environment passed to spawn. */
   readonly command: string;
   readonly env: Readonly<NodeJS.ProcessEnv>;
   readonly referencedPaths: readonly string[];
@@ -195,13 +195,13 @@ export async function resolveCommandHookExecution(
     canonicalWorkspace,
     sanitizedEnvironment,
   );
-  const executableName = executableBasename(executable);
-  assertSupportedResolvedExecutable(executableName, executable, canonicalWorkspace);
+  const executableName = executableBasename(executable.canonicalPath);
+  assertSupportedResolvedExecutable(executableName, executable.canonicalPath, canonicalWorkspace);
   const referencedPaths: string[] = [];
-  const executablePaths = [executable];
-  executablePaths.push(...(await resolveShebangInterpreterChain(executable)));
-  if (isWithin(canonicalWorkspace, executable)) {
-    referencedPaths.push(executable);
+  const executablePaths = [executable.canonicalPath];
+  executablePaths.push(...(await resolveShebangInterpreterChain(executable.canonicalPath)));
+  if (isWithin(canonicalWorkspace, executable.canonicalPath)) {
+    referencedPaths.push(executable.canonicalPath);
   }
   if (NODE_EXECUTABLES.has(executableName)) {
     referencedPaths.push(...(await resolveNodeCodePaths(invocation.args, canonicalWorkspace)));
@@ -215,7 +215,7 @@ export async function resolveCommandHookExecution(
     );
   }
   return {
-    command: executable,
+    command: executable.logicalPath,
     args: invocation.args,
     env: sanitizedEnvironment,
     referencedPaths: sortedUnique(referencedPaths),
@@ -473,11 +473,10 @@ async function resolveExecutable(
   command: string,
   workspace: string,
   environment: Readonly<NodeJS.ProcessEnv>,
-): Promise<string> {
+): Promise<{ readonly logicalPath: string; readonly canonicalPath: string }> {
   if (looksExplicitPath(command)) {
-    return await requireExecutable(
-      isAbsolute(command) ? resolve(command) : resolve(workspace, command),
-    );
+    const logicalPath = isAbsolute(command) ? resolve(command) : resolve(workspace, command);
+    return { logicalPath, canonicalPath: await requireExecutable(logicalPath) };
   }
   const pathValue = environmentValue(environment, "PATH");
   if (!pathValue) throw unsupportedCommand(`PATH 中无法解析可执行文件 ${command}`);
@@ -488,7 +487,9 @@ async function resolveExecutable(
     }
     for (const extension of extensions) {
       const candidate = resolve(directory, `${command}${extension}`);
-      if (await isExecutableFile(candidate)) return await realpath(candidate);
+      if (await isExecutableFile(candidate)) {
+        return { logicalPath: candidate, canonicalPath: await realpath(candidate) };
+      }
     }
   }
   throw unsupportedCommand(`PATH 中无法解析可执行文件 ${command}`);

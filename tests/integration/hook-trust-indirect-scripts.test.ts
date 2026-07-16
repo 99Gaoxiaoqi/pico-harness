@@ -1,15 +1,30 @@
 import assert from "node:assert/strict";
-import { access, chmod, copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { promisify } from "node:util";
 import { test } from "node:test";
 import {
+  resolveCommandHookExecution,
   resolveCommandHookInvocation,
   sanitizeCommandHookEnvironment,
 } from "../../src/hooks/config/referenced-scripts.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/executor.js";
 import { HookTrustStore, type HookTrustSubject } from "../../src/hooks/trust/store.js";
 import type { CommandHookHandler } from "../../src/hooks/types.js";
+
+const execFile = promisify(execFileCallback);
 
 test("ordinary executable scripts remain byte-bound", async (context) => {
   const fixture = await createFixture(context);
@@ -136,6 +151,62 @@ test("versioned Python 3 executable names retain the audited interpreter grammar
   await fixture.store.trust(subject);
 
   assert.equal(await fixture.store.status(subject), "active");
+});
+
+test("Python virtualenv hooks preserve the selected logical executable path", async (context) => {
+  if (process.platform === "win32") return context.skip("POSIX virtualenv executable layout");
+  const fixture = await createFixture(context);
+  const virtualenvPath = join(fixture.workspace, ".venv");
+  const scriptPath = join(fixture.workspace, "virtualenv-hook.py");
+  await execFile("python3", ["-m", "venv", virtualenvPath]);
+  await writeFile(
+    scriptPath,
+    "import json, sys\nprint(json.dumps({'additionalContext': sys.prefix}))\n",
+  );
+  const handler = {
+    type: "command",
+    command: "./.venv/bin/python",
+    args: ["./virtualenv-hook.py"],
+  } as const;
+  const subject = fixture.subject(handler);
+  await fixture.store.trust(subject);
+  const invocation = await resolveCommandHookExecution(handler, fixture.workspace);
+  assert.equal(
+    invocation.command,
+    join(await realpath(fixture.workspace), ".venv", "bin", "python"),
+  );
+
+  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  context.after(async () => await executor.dispose());
+  const output = await executeStopHook(executor, fixture, handler, "python-virtualenv");
+
+  assert.equal(await realpath(output.additionalContext ?? ""), await realpath(virtualenvPath));
+});
+
+test("logical interpreter aliases remain trust-bound to their canonical target", async (context) => {
+  if (process.platform === "win32") return context.skip("POSIX executable symlink fixture");
+  const fixture = await createFixture(context);
+  const binPath = join(fixture.workspace, ".venv", "bin");
+  const interpreterTarget = join(fixture.root, "python3.14");
+  const interpreterAlias = join(binPath, "python");
+  const scriptPath = join(fixture.workspace, "ordinary.py");
+  await mkdir(binPath, { recursive: true });
+  await copyFile("/bin/sh", interpreterTarget);
+  await chmod(interpreterTarget, 0o755);
+  await symlink(interpreterTarget, interpreterAlias);
+  await writeFile(scriptPath, "print('ordinary')\n");
+  const handler = {
+    type: "command",
+    command: "./.venv/bin/python",
+    args: ["./ordinary.py"],
+  } as const;
+  const subject = fixture.subject(handler);
+  await fixture.store.trust(subject);
+  assert.equal(await fixture.store.status(subject), "active");
+
+  await writeFile(interpreterTarget, "changed interpreter bytes\n");
+
+  assert.equal(await fixture.store.status(subject), "pending");
 });
 
 test("versioned Ruby executable names retain the audited interpreter grammar", async (context) => {
