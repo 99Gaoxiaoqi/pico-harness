@@ -414,21 +414,33 @@ export class WorkspaceTaskRuntime {
       }
     }
 
-    const releaseOwnership = async (): Promise<void> => {
-      await executorDrain;
-      try {
-        await this.taskHostRuntime?.close();
-      } finally {
-        this.subscribers.clear();
-      }
-    };
-    if (drained) {
-      await releaseOwnership();
+    if (!drained) {
+      this.deferOwnershipRelease(this.releaseOwnershipAfter(executorDrain));
       return;
     }
 
+    await this.taskHostRuntime?.close();
+    const ownershipRelease = this.finishOwnershipRelease();
+    if (this.taskHostRuntime?.hasPendingOwnership()) {
+      this.deferOwnershipRelease(ownershipRelease);
+      return;
+    }
+    await ownershipRelease;
+  }
+
+  private async releaseOwnershipAfter(executorDrain: Promise<void>): Promise<void> {
+    await executorDrain;
+    await this.taskHostRuntime?.close();
+    await this.finishOwnershipRelease();
+  }
+
+  private async finishOwnershipRelease(): Promise<void> {
+    await this.taskHostRuntime?.waitForOwnershipRelease();
+    this.subscribers.clear();
+  }
+
+  private deferOwnershipRelease(ownershipRelease: Promise<void>): void {
     this.ownershipReleasePending = true;
-    const ownershipRelease = releaseOwnership();
     this.ownershipReleasePromise = ownershipRelease;
     ownershipRelease.then(
       () => {

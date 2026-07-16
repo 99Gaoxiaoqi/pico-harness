@@ -27,6 +27,8 @@ export interface TaskHostRuntimeOptions {
   picoHome?: string;
   runtimeMirror?: RuntimeTaskMirrorOptions;
   reconcileIntervalMs?: number;
+  /** Runner 收到 abort 后的有界停止等待；超时不代表 ownership 已释放。 */
+  runnerStopTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -41,6 +43,10 @@ export class TaskHostRuntime {
 
   private readonly runtimeMirror: RuntimeTaskMirror;
   private readonly reconcileTimer: ReturnType<typeof setInterval>;
+  private lifecycleState: "open" | "closing" | "closed" = "open";
+  private closePromise?: Promise<void>;
+  private ownershipReleasePending = false;
+  private ownershipReleasePromise: Promise<void> = Promise.resolve();
 
   private constructor(
     repoRoot: string,
@@ -48,6 +54,7 @@ export class TaskHostRuntime {
     jobService: JobService,
     runtimeMirrorOptions: RuntimeTaskMirrorOptions = {},
     reconcileIntervalMs = 5_000,
+    runnerStopTimeoutMs?: number,
   ) {
     this.repoRoot = repoRoot;
     this.targetBranch = targetBranch;
@@ -66,6 +73,7 @@ export class TaskHostRuntime {
     this.supervisor = new WorktreeSupervisor({
       taskRegistry: this.taskRegistry,
       repoRoot,
+      ...(runnerStopTimeoutMs !== undefined ? { stopTimeoutMs: runnerStopTimeoutMs } : {}),
       finalizer: (input) => this.finalizeWorktree(input),
     });
     this.reconcileTimer = setInterval(
@@ -116,10 +124,12 @@ export class TaskHostRuntime {
       service,
       options.runtimeMirror ?? {},
       options.reconcileIntervalMs ?? 5_000,
+      options.runnerStopTimeoutMs,
     );
   }
 
   start(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
+    this.assertOpen();
     return this.supervisor.start(request, runner);
   }
 
@@ -143,14 +153,17 @@ export class TaskHostRuntime {
   }
 
   retry(taskId: string): WorktreeTaskSnapshot {
+    this.assertOpen();
     return this.supervisor.retry(taskId);
   }
 
   sendMessage(taskId: string, message: string): WorktreeTaskSnapshot {
+    this.assertOpen();
     return this.supervisor.sendMessage(taskId, message);
   }
 
   async merge(taskId: string): Promise<WorktreeMergeSnapshot> {
+    this.assertOpen();
     const task = this.supervisor.get(taskId);
     if (!task) throw new Error(`任务 ${taskId} 不属于当前 TUI 的 worktree supervisor`);
     if (task.status !== "completed") throw new Error(`任务 ${taskId} 尚未完成，不能合并`);
@@ -165,6 +178,7 @@ export class TaskHostRuntime {
   }
 
   async cleanupMerged(taskId: string): Promise<void> {
+    this.assertOpen();
     const merged = this.mergeQueue.get(taskId);
     if (merged?.status !== "merged") throw new Error(`任务 ${taskId} 尚未完成合并`);
     await this.supervisor.cleanup(taskId, { merged: true });
@@ -284,20 +298,74 @@ export class TaskHostRuntime {
     return finalization;
   }
 
-  async close(): Promise<void> {
+  /**
+   * Requests runner shutdown and returns after the bounded stop window. Callers that transfer
+   * singleton ownership must additionally observe waitForOwnershipRelease().
+   */
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.lifecycleState = "closing";
+    let resolveClose: () => void = () => undefined;
+    let rejectClose: (reason: unknown) => void = () => undefined;
+    const closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    this.closePromise = closePromise;
+    void this.performCloseRequest().then(resolveClose, rejectClose);
+    return closePromise;
+  }
+
+  /** True until every captured runner and its TaskHost-owned resources release successfully. */
+  hasPendingOwnership(): boolean {
+    return this.ownershipReleasePending;
+  }
+
+  /** Rejects on any runner-settlement or resource-close failure so hosts fail closed. */
+  waitForOwnershipRelease(): Promise<void> {
+    return this.ownershipReleasePromise;
+  }
+
+  private async performCloseRequest(): Promise<void> {
     clearInterval(this.reconcileTimer);
-    const running = this.supervisor
-      .list()
-      .filter(
-        (task) =>
-          task.status === "preparing" || task.status === "running" || task.status === "stopping",
-      );
-    await Promise.allSettled(
-      running.map((task) => this.supervisor.stop(task.taskId, "TUI closed")),
+    const shutdown = this.supervisor.beginShutdown("TUI closed");
+    this.ownershipReleasePending = true;
+    const ownershipRelease = this.releaseOwnedResources(shutdown.released);
+    this.ownershipReleasePromise = ownershipRelease;
+    ownershipRelease.then(
+      () => {
+        this.ownershipReleasePending = false;
+        this.lifecycleState = "closed";
+      },
+      () => undefined,
     );
+    // Standalone TaskHost users may never construct an outer daemon fence.
+    void ownershipRelease.catch(() => undefined);
+    await shutdown.stopping;
+  }
+
+  private async releaseOwnedResources(runnersReleased: Promise<void>): Promise<void> {
+    await runnersReleased;
     await this.mergeQueue.waitForIdle();
-    this.runtimeMirror.close();
-    this.jobService.close();
+    const closeErrors: unknown[] = [];
+    try {
+      this.runtimeMirror.close();
+    } catch (error) {
+      closeErrors.push(error);
+    }
+    try {
+      this.jobService.close();
+    } catch (error) {
+      closeErrors.push(error);
+    }
+    if (closeErrors.length === 1) throw closeErrors[0];
+    if (closeErrors.length > 1) {
+      throw new AggregateError(closeErrors, "TaskHostRuntime 资源关闭失败");
+    }
+  }
+
+  private assertOpen(): void {
+    if (this.lifecycleState !== "open") throw new Error("TaskHostRuntime 已关闭");
   }
 }
 
