@@ -217,11 +217,9 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     // 2. 翻译工具定义
-    const outputTokenField = this.config.capabilities?.outputTokenField ?? "max_tokens";
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
-      [outputTokenField]: this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens,
     };
     // 无可用工具时不挂载 tools,模型只能纯文本输出
     if (availableTools.length > 0) {
@@ -234,7 +232,7 @@ export class OpenAIProvider implements LLMProvider {
         },
       }));
     }
-    const requestBody = this.applyThinkingLevel(body);
+    const requestBody = this.finalizeRequestBody(body);
 
     // 3. 构建请求并发送
     const bodyJson = JSON.stringify(requestBody);
@@ -363,12 +361,10 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
-    const outputTokenField = this.config.capabilities?.outputTokenField ?? "max_tokens";
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
       stream: true, // 关键:启用流式
-      [outputTokenField]: this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens,
     };
     if (this.config.capabilities?.streamUsage === true) {
       body.stream_options = { include_usage: true };
@@ -379,7 +375,7 @@ export class OpenAIProvider implements LLMProvider {
         function: { name: t.name, description: t.description, parameters: t.inputSchema },
       }));
     }
-    const requestBody = this.applyThinkingLevel(body);
+    const requestBody = this.finalizeRequestBody(body);
 
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
       method: "POST",
@@ -520,5 +516,17 @@ export class OpenAIProvider implements LLMProvider {
     if (!isLegacyThinkingEffort(this.thinkingEffort)) return body;
     const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
     return reasoningEffort === undefined ? body : { ...body, reasoning_effort: reasoningEffort };
+  }
+
+  /** Reasoning patches are configurable, so restore the preflight output-budget invariant last. */
+  private finalizeRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+    const requestBody = { ...this.applyThinkingLevel(body) };
+    const outputTokenField = this.config.capabilities?.outputTokenField ?? "max_tokens";
+    const alternateField =
+      outputTokenField === "max_tokens" ? "max_completion_tokens" : "max_tokens";
+    delete requestBody[alternateField];
+    requestBody[outputTokenField] =
+      this.config.capabilities?.maxOutputTokens ?? this.profile.maxOutputTokens;
+    return requestBody;
   }
 }

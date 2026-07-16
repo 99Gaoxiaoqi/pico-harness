@@ -88,6 +88,101 @@ test("OpenAI routes can select max_completion_tokens explicitly", async (context
   assert.equal(Object.hasOwn(requestBody ?? {}, "max_tokens"), false);
 });
 
+test("OpenAI reasoning patches cannot unset the configured output-token limit", async (context) => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | undefined;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+  };
+
+  const provider = createProvider(
+    "openai",
+    {
+      baseURL: "https://provider.invalid/v1",
+      apiKey: "test-key",
+      model: "reasoning-model",
+      routeId: "test/reasoning-model",
+      capabilities: resolveModelRouteCapabilities("openai", "reasoning-model", {
+        output: 1024,
+        reasoning: {
+          enabled: true,
+          levels: ["strict"],
+          defaultLevel: "strict",
+          providerOptionsByLevel: {
+            strict: {
+              openai: {
+                unset: [["max_tokens"]],
+                set: [{ path: ["max_completion_tokens"], value: 999_999 }],
+              },
+            },
+          },
+        },
+      }),
+    },
+    "strict",
+  );
+
+  await provider.generate([{ role: "user", content: "test" }], []);
+
+  assert.equal(requestBody?.["max_tokens"], 1024);
+  assert.equal(Object.hasOwn(requestBody ?? {}, "max_completion_tokens"), false);
+});
+
+test("OpenAI reasoning patches cannot raise or double-write the output-token limit", async (context) => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | undefined;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return streamResponse([
+      new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'),
+      new TextEncoder().encode("data: [DONE]\n\n"),
+    ]);
+  };
+
+  const provider = createProvider(
+    "openai",
+    {
+      baseURL: "https://provider.invalid/v1",
+      apiKey: "test-key",
+      model: "reasoning-model",
+      routeId: "test/reasoning-model",
+      capabilities: resolveModelRouteCapabilities("openai", "reasoning-model", {
+        output: 2048,
+        outputTokenField: "max_completion_tokens",
+        reasoning: {
+          enabled: true,
+          levels: ["strict"],
+          defaultLevel: "strict",
+          providerOptionsByLevel: {
+            strict: {
+              openai: {
+                set: [
+                  { path: ["max_completion_tokens"], value: 999_999 },
+                  { path: ["max_tokens"], value: 999_999 },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    },
+    "strict",
+  );
+
+  assert.ok(provider.generateStream);
+  await provider.generateStream([{ role: "user", content: "test" }], [], () => undefined);
+
+  assert.equal(requestBody?.["max_completion_tokens"], 2048);
+  assert.equal(Object.hasOwn(requestBody ?? {}, "max_tokens"), false);
+});
+
 test("OpenAI stream requests and consumes the terminal Usage-only chunk", async (context) => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;
