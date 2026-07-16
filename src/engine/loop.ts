@@ -2373,6 +2373,12 @@ export class AgentEngine implements AgentRunner {
       );
     const parentRun = currentRuntimeRun();
     if (!parentRun) return runAttributed();
+    const writeGuard = parentRun.runtimeEventWriteGuard;
+    if (!writeGuard) {
+      throw new Error(
+        `Nested Runtime run ${parentRun.runId} does not hold a live Session write capability`,
+      );
+    }
 
     const childRun = await RuntimeRun.start({
       sessionId: parentRun.sessionId,
@@ -2382,7 +2388,7 @@ export class AgentEngine implements AgentRunner {
       parentRunId: parentRun.runId,
       ...(currentRuntimeToolCallId() ? { parentToolCallId: currentRuntimeToolCallId() } : {}),
       store: parentRun.store,
-      ...(parentRun.runtimeEventWriteGuard ? { writeGuard: parentRun.runtimeEventWriteGuard } : {}),
+      writeGuard,
     });
     return childRun.run(async () => {
       const result = await runAttributed();

@@ -2501,7 +2501,10 @@ export class SessionManager {
   /** 默认空闲超时 24h:超过未访问的会话被惰性驱逐 */
   static readonly DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 
-  private readonly entries = new Map<string, { session: Session; lastAccessMs: number }>();
+  private readonly entries = new Map<
+    string,
+    { session: Session; lastAccessMs: number; pinCount: number }
+  >();
   /** 合并同 key 的并发 recover，避免 drain 结束后同时创建两个实例。 */
   private readonly openingByKey = new Map<string, Promise<Session>>();
   private readonly maxSessions: number;
@@ -2561,6 +2564,38 @@ export class SessionManager {
     return entry.session;
   }
 
+  /**
+   * Pins the exact managed Session for a long-lived SessionRuntime. The returned release
+   * is idempotent; the final release starts a fresh idle window without weakening identity checks.
+   */
+  pin(session: Session): () => void {
+    const key = this.entryKey(session.id, session.workDir, session.picoHome);
+    const entry = this.entries.get(key);
+    if (!entry) {
+      throw new Error(`SessionManager cannot pin unmanaged Session: ${session.id}`);
+    }
+    if (entry.session !== session) {
+      throw new Error(`SessionManager cannot pin a different Session instance: ${session.id}`);
+    }
+    entry.pinCount++;
+    entry.lastAccessMs = Date.now();
+    this.touch(key);
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      entry.pinCount--;
+      if (entry.pinCount < 0) {
+        throw new Error(`SessionManager pin underflow: ${session.id}`);
+      }
+      if (entry.pinCount === 0 && this.entries.get(key) === entry) {
+        entry.lastAccessMs = Date.now();
+        this.touch(key);
+      }
+    };
+  }
+
   /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined。释放底层资源。 */
   delete(
     id: string,
@@ -2591,10 +2626,11 @@ export class SessionManager {
   }
 
   /** LRU 驱赶:超出 maxSessions 时驱逐最旧项,直到回到上限内。 */
-  private evictLru(): void {
+  private evictLru(protectedKey?: string): void {
     while (this.entries.size > this.maxSessions) {
       const oldestInactive = [...this.entries].find(
-        ([, entry]) => !entry.session.hasPendingTasks,
+        ([key, entry]) =>
+          key !== protectedKey && entry.pinCount === 0 && !entry.session.hasPendingTasks,
       )?.[0];
       if (oldestInactive === undefined) break;
       this.deleteByKey(oldestInactive);
@@ -2605,7 +2641,11 @@ export class SessionManager {
   private evictExpired(): void {
     const now = Date.now();
     for (const [key, entry] of this.entries) {
-      if (!entry.session.hasPendingTasks && now - entry.lastAccessMs > this.ttlMs) {
+      if (
+        entry.pinCount === 0 &&
+        !entry.session.hasPendingTasks &&
+        now - entry.lastAccessMs > this.ttlMs
+      ) {
         this.deleteByKey(key);
       }
     }
@@ -2642,8 +2682,9 @@ export class SessionManager {
       await session.close().catch(() => undefined);
       throw error;
     }
-    this.entries.set(key, { session, lastAccessMs: Date.now() });
-    this.evictLru();
+    this.entries.set(key, { session, lastAccessMs: Date.now(), pinCount: 0 });
+    // A newly returned Session must not be immediately closed when older entries are pinned.
+    this.evictLru(key);
     return session;
   }
 
