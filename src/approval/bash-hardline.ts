@@ -52,6 +52,7 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   if (executable === "dd" && isDestructiveDdInvocation(args)) return true;
   if (executable === "git" && isDestructiveGitInvocation(args)) return true;
   if (executable === "git-push" && isDestructiveGitPushInvocation(args)) return true;
+  if (executable === "env" && hasEnvSplitString(args)) return true;
 
   if (SHELL_COMMANDS.has(executable)) {
     const commandIndex = args.findIndex(
@@ -107,8 +108,11 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
     }
   }
 
-  // 无法静态确认的可执行文件若携带 rm 的破坏性参数与系统目标，按 fail-closed 处理。
-  return words[executableIndex]!.dynamic && isDestructiveRmInvocation(args, false);
+  // 无法静态确认的可执行文件若携带已知破坏性参数，按 fail-closed 处理。
+  return (
+    words[executableIndex]!.dynamic &&
+    (isDestructiveRmInvocation(args, false) || isDestructiveGitInvocation(args))
+  );
 }
 
 function isDestructiveRmInvocation(
@@ -250,10 +254,24 @@ function isDestructiveGitPushInvocation(args: readonly ShellWord[]): boolean {
       word.dynamic ||
       matchesLongOption(value, "--force") ||
       matchesLongOption(value, "--force-with-lease") ||
+      value === "--delete" ||
+      value === "--mirror" ||
+      value === "--prune" ||
       /^-[^-]*f/u.test(value) ||
-      (value.startsWith("+") && value.length > 1)
+      /^-[^-]*d/u.test(value) ||
+      ((value.startsWith("+") || value.startsWith(":")) && value.length > 1)
     );
   });
+}
+
+function hasEnvSplitString(args: readonly ShellWord[]): boolean {
+  for (const word of args) {
+    const value = word.value;
+    if (value === "--") return false;
+    if (/^-[^-]*S/u.test(value)) return true;
+    if (value === "--split-string" || value.startsWith("--split-string=")) return true;
+  }
+  return false;
 }
 
 function isProtectedRmTarget(target: string): boolean {
