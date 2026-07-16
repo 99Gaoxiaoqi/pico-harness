@@ -46,6 +46,7 @@ import {
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
+const NON_BLOCKING_FLAG = constants.O_NONBLOCK ?? 0;
 
 export interface ToolRegistryOptions {
   defaultResultSizeChars?: number;
@@ -528,21 +529,9 @@ export class ReadFileTool implements BaseTool {
     // 2. 所有文件访问统一经过共享工作区边界。
     const fullPath = await this.roots.assertAllowed(path);
 
-    // 3. 先用不跟随符号链接的 FD 检查大小，避免分页之前就把超大文件读入内存。
-    const handle = await open(fullPath, constants.O_RDONLY | NO_FOLLOW_FLAG);
-    let raw: string;
-    try {
-      const info = await handle.stat();
-      if (!info.isFile()) throw new Error(`路径不是普通文件: ${path}`);
-      if (info.size > READ_FILE_MAX_BYTES) {
-        throw new Error(
-          `文件大小 ${info.size} 字节，超过 read_file 上限 ${READ_FILE_MAX_BYTES} 字节；请用 grep 先缩小范围。`,
-        );
-      }
-      raw = await handle.readFile({ encoding: "utf8" });
-    } finally {
-      await handle.close();
-    }
+    // 3. 通过 O_NONBLOCK + max+1 的同一 FD 有界读取：FIFO 不会卡住进程，
+    //    普通文件即使在 stat 后并发增长也无法越过分配上限。
+    const raw = await readBoundedRegularUtf8(fullPath, path, READ_FILE_MAX_BYTES);
 
     // 4. 模型视图归一化:纯 CRLF → LF(模型只处理一种行尾,Edit 匹配才稳定);
     //    lf/mixed 原样返回,并记录原始行尾风格供 Edit 写回还原。
@@ -609,6 +598,39 @@ export class ReadFileTool implements BaseTool {
       paginationRequested,
       clippedLineCount,
     });
+  }
+}
+
+async function readBoundedRegularUtf8(
+  fullPath: string,
+  displayPath: string,
+  maxBytes: number,
+): Promise<string> {
+  const handle = await open(fullPath, constants.O_RDONLY | NO_FOLLOW_FLAG | NON_BLOCKING_FLAG);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error(`路径不是普通文件: ${displayPath}`);
+    if (info.size > maxBytes) {
+      throw new Error(
+        `文件大小 ${info.size} 字节，超过 read_file 上限 ${maxBytes} 字节；请用 grep 先缩小范围。`,
+      );
+    }
+
+    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > maxBytes) {
+      throw new Error(
+        `文件读取超过 read_file 上限 ${maxBytes} 字节；内容可能在读取期间增长，请用 grep 先缩小范围。`,
+      );
+    }
+    return buffer.subarray(0, offset).toString("utf8");
+  } finally {
+    await handle.close();
   }
 }
 
