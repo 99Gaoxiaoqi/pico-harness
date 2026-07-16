@@ -55,6 +55,7 @@ export interface RuntimeEventStoreEntry {
 }
 
 export interface RuntimeSessionProjectionSnapshot {
+  readonly manifest: RuntimeSessionManifest;
   readonly activeBranchId: string;
   readonly entries: readonly RuntimeEventStoreEntry[];
   readonly cursor?: SessionCursor;
@@ -324,6 +325,7 @@ export class RuntimeEventStore {
         }
         const head = entries.at(-1);
         return {
+          manifest: manifestFromRow(session),
           activeBranchId,
           entries,
           ...(head
