@@ -94,8 +94,6 @@ import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
 import type { ScheduleDraftCoordinator } from "../tasks/cron-draft.js";
 import { looksLikeScheduleCreationIntent, ScheduleTaskTool } from "../tools/schedule-task.js";
 import { BackgroundManager } from "../tools/background-manager.js";
-import { loadHooksConfig } from "../hooks/config.js";
-import { HookRunner } from "../hooks/runner.js";
 import type { HookService } from "../hooks/service.js";
 import {
   getOrCreateSessionSettings,
@@ -388,7 +386,6 @@ export async function executeAgentRuntime(
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let cleanupRuntimeState: SessionRuntime | undefined;
   let ownedUsageStore: RuntimeStore | undefined;
-  let cleanupRegistry: ToolRegistry | undefined;
   let ownsMcpManager = false;
   let cleanupMcpManager: McpConnectionManager | undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
@@ -675,20 +672,12 @@ export async function executeAgentRuntime(
       artifactBaseDir,
       runtimeEnv,
     );
-    cleanupRegistry = registry;
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
-    // 【任务 2.6】用户可配置 Shell Hooks：原生 .pico 配置优先，并兼容 legacy 配置，
-    // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
-    registry.setSessionId?.(session.id);
+    // 前台只使用会话级 HookService；legacy .claw source 也由它统一加载并校验信任。
     if (runtimeState.hookService) {
       registry.setHookService?.(runtimeState.hookService);
-    } else if (!backgroundPolicy) {
-      const hooksConfig = await loadHooksConfig(workDir);
-      if (hooksConfig) {
-        registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
-      }
     }
     const artifactRuntime = buildArtifactRuntime(session.id, artifactBaseDir);
     // Inject steer text into the session-scoped queue before the next provider turn.
@@ -1052,9 +1041,6 @@ export async function executeAgentRuntime(
     // 阶段 5：只释放本次调用持有的资源。
     await bestEffortRuntimeCleanup("Session 组件 Hook", () =>
       cleanupRuntimeState?.clearComponentHooks(),
-    );
-    await bestEffortRuntimeCleanup("Registry Hook 事件", () =>
-      cleanupRegistry?.drainHookEvents?.(),
     );
     await bestEffortRuntimeCleanup("MCP 状态订阅", () => unsubscribeMcpStatus?.());
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。

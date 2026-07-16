@@ -28,7 +28,6 @@ import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
 import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
-import type { HookRunner } from "../hooks/runner.js";
 import type { HookService } from "../hooks/service.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
 import {
@@ -100,20 +99,7 @@ export class ToolRegistry implements Registry {
   private readonly permissionMiddlewares: RequestMiddleware[] = [];
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
   private preWriteHook?: (toolName: string, args: string) => Promise<void>;
-  /**
-   * 用户可配置 Shell Hooks 执行器(任务 2.6)。
-   * 挂载后:PreToolUse 在工具执行前判定 allow/deny(+可改写参数);
-   * PostToolUse 在工具执行后 fire-and-forget 通知。
-   * 未挂载(undefined)时跳过所有 hook 逻辑,零开销。
-   */
-  private hookRunner?: HookRunner;
   private hookService?: HookService;
-  /**
-   * 传给 hook stdin 的 session_id。
-   * execute(call) 签名无 sessionId 入参,故由 host 在装配时 setSessionId 注入,
-   * 默认空串(hook 仍可用 cwd 做识别)。
-   */
-  private sessionId = "";
 
   constructor(opts: ToolRegistryOptions = {}) {
     this.defaultResultSizeChars = opts.defaultResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS;
@@ -124,26 +110,9 @@ export class ToolRegistry implements Registry {
     this.preWriteHook = hook;
   }
 
-  /** 挂载 HookRunner,启用 PreToolUse/PostToolUse 钩子(任务 2.6) */
-  setHookRunner(runner: HookRunner): void {
-    this.hookRunner = runner;
-    logger.info("[Registry] 已挂载 HookRunner (PreToolUse/PostToolUse)");
-  }
-
   setHookService(service: HookService): void {
     this.hookService = service;
     logger.info("[Registry] 已挂载会话级 HookService");
-  }
-
-  async drainHookEvents(): Promise<void> {
-    // 新 HookService 路径不启动裸 fire-and-forget；降级 HookRunner 仍需
-    // 在 Runtime 清理边界等待 PostToolUse，防止会话结束后遗留脚本。
-    await this.hookRunner?.drain();
-  }
-
-  /** 设置传给 hook stdin 的 session_id(无则默认空串) */
-  setSessionId(sessionId: string): void {
-    this.sessionId = sessionId;
   }
 
   register(tool: BaseTool): void {
@@ -298,15 +267,8 @@ export class ToolRegistry implements Registry {
     // 2. Hardline / Plan / Trust 不可绕过安全门始终先于 Hook。
     const initialRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
     if (initialRejection) return initialRejection;
-    const usesLegacyHookPipeline = !this.hookService && this.hookRunner !== undefined;
-    if (usesLegacyHookPipeline) {
-      const legacyRequestRejection = await runMiddlewares(this.requestMiddlewares, "permission");
-      if (legacyRequestRejection) return legacyRequestRejection;
-    }
 
-    // 3. 【任务 2.6】PreToolUse hook:在工具执行前判定 allow/deny。
-    //    放在 requestMiddlewares 之后(审批先于用户 hook),preWriteHook/tool.execute 之前。
-    //    hook 任何故障均 fail-open(由 HookRunner 内部兜底),不会阻断工具。
+    // 3. PreToolUse 位于不可绕过的安全门之后、权限审批与工具执行之前。
     let toolInput: unknown;
     let forceApproval = false;
     try {
@@ -340,47 +302,11 @@ export class ToolRegistry implements Registry {
         const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
         if (rewrittenRejection) return rewrittenRejection;
       }
-    } else if (this.hookRunner) {
-      let hookResult;
-      try {
-        hookResult = await this.hookRunner.runPreToolUse(
-          currentCall.name,
-          toolInput,
-          this.sessionId,
-        );
-      } catch (err) {
-        // HookRunner 内部已 fail-open,此处防御性兜底:绝不阻断
-        logger.warn(
-          { err: String(err), tool: currentCall.name },
-          `[Registry] PreToolUse hook 异常,fail-open 放行`,
-        );
-        hookResult = { decision: "allow" as const };
-      }
-      if (hookResult.decision === "deny") {
-        logger.warn(
-          { tool: currentCall.name, reason: hookResult.reason },
-          `[Registry] 🚫 工具 ${currentCall.name} 被 PreToolUse hook 阻断`,
-        );
-        return {
-          toolCallId: currentCall.id,
-          output: `🚫 被 PreToolUse hook 阻断: ${hookResult.reason ?? "(无原因)"}`,
-          isError: true,
-        };
-      }
-      // modifiedInput:hook 改写了工具输入 → 替换 arguments
-      if (hookResult.modifiedInput !== undefined) {
-        currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
-        toolInput = hookResult.modifiedInput;
-        const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
-        if (rewrittenRejection) return rewrittenRejection;
-        const legacyRequestRejection = await runMiddlewares(this.requestMiddlewares, "permission");
-        if (legacyRequestRejection) return legacyRequestRejection;
-      }
     }
 
     // 4. Hook 改写并重过安全门后，才进入权限 Hook/人工审批。
     const permissionRejection = await runMiddlewares(
-      [...this.permissionMiddlewares, ...(usesLegacyHookPipeline ? [] : this.requestMiddlewares)],
+      [...this.permissionMiddlewares, ...this.requestMiddlewares],
       "permission",
       forceApproval,
     );
@@ -410,8 +336,7 @@ export class ToolRegistry implements Registry {
         ? truncateToolOutput(output, tool.maxResultSizeChars ?? this.defaultResultSizeChars)
         : output;
 
-      // 5. 【任务 2.6】PostToolUse hook:工具执行成功后 fire-and-forget 通知。
-      //    不阻断、不影响返回值;任何故障静默忽略。
+      // 5. 工具成功后通过同一 HookService 分发 PostToolUse。
       if (this.hookService) {
         await this.hookService.dispatch(
           "PostToolUse",
@@ -423,16 +348,6 @@ export class ToolRegistry implements Registry {
           },
           { signal: context?.signal },
         );
-      } else if (this.hookRunner) {
-        try {
-          this.hookRunner
-            .runPostToolUse(currentCall.name, toolInput, finalOutput, this.sessionId)
-            .catch(() => {
-              /* fire-and-forget */
-            });
-        } catch {
-          /* fire-and-forget */
-        }
       }
 
       return {
