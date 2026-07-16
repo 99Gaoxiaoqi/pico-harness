@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
@@ -16,7 +17,6 @@ import {
   type RuntimeEvent,
   type RuntimeEventBase,
   type RuntimeEventRefs,
-  type RuntimeHistoryRewoundEvent,
   type RuntimeMessageCommittedEvent,
   type RuntimeModelCallSettledEvent,
   type RuntimeRunStartedEvent,
@@ -45,7 +45,7 @@ const forkBootstrapTails = new Map<string, Promise<void>>();
 
 export const RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX = "fork-bootstrap:";
 
-export interface RuntimeRunStartOptions {
+interface RuntimeRunBaseOptions {
   readonly sessionId: string;
   readonly workDir: string;
   readonly runId?: string;
@@ -56,9 +56,18 @@ export interface RuntimeRunStartOptions {
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
   readonly store?: RuntimeEventStore;
-  /** Present only for a run owned by one live Session. Detached recovery/fork flows omit it. */
-  readonly writeGuard?: RuntimeEventWriteGuard;
 }
+
+export interface RuntimeRunStartOptions extends RuntimeRunBaseOptions {
+  /** Exact live Session capability; generic live starts cannot omit ownership validation. */
+  readonly writeGuard: RuntimeEventWriteGuard;
+}
+
+type DetachedRuntimeRunStartOptions = RuntimeRunBaseOptions;
+
+type RuntimeRunConstructionOptions = RuntimeRunBaseOptions & {
+  readonly writeGuard?: RuntimeEventWriteGuard;
+};
 
 /** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
 export interface RuntimeEventWriteGuard {
@@ -70,8 +79,8 @@ export interface ReconcileRuntimeRunsOptions {
   readonly workDir: string;
   readonly now?: () => Date;
   readonly store?: RuntimeEventStore;
-  /** Live reconciliation uses its exact Session; detached recovery intentionally omits it. */
-  readonly writeGuard?: RuntimeEventWriteGuard;
+  /** Live reconciliation always uses its exact Session capability. */
+  readonly writeGuard: RuntimeEventWriteGuard;
 }
 
 export interface RepairRuntimeSessionProjectionOptions {
@@ -104,14 +113,6 @@ export interface RuntimeForkModelCheckpointSeed {
 export interface BootstrapRuntimeSessionHistoryOptions {
   readonly session: Session;
   readonly workDir: string;
-  readonly store?: RuntimeEventStore;
-}
-
-export interface RecordRuntimeSessionRewindOptions {
-  readonly sessionId: string;
-  readonly workDir: string;
-  readonly messageIndex: number;
-  readonly branchId: string;
   readonly store?: RuntimeEventStore;
 }
 
@@ -211,7 +212,7 @@ export class RuntimeRun {
   private constructor(
     readonly sessionId: string,
     readonly workDir: string,
-    options: RuntimeRunStartOptions,
+    options: RuntimeRunConstructionOptions,
   ) {
     this.runId = options.runId ?? randomUUID();
     this.invocationId = options.invocationId ?? `invocation:${randomUUID()}`;
@@ -234,6 +235,17 @@ export class RuntimeRun {
   }
 
   static async start(options: RuntimeRunStartOptions): Promise<RuntimeRun> {
+    return RuntimeRun.startInternal(options);
+  }
+
+  /** Detached writes are confined to the durable fork publication path. */
+  private static async startDetached(options: DetachedRuntimeRunStartOptions): Promise<RuntimeRun> {
+    return RuntimeRun.startInternal(options);
+  }
+
+  private static async startInternal(
+    options: RuntimeRunConstructionOptions,
+  ): Promise<RuntimeRun> {
     const store =
       options.store ??
       new RuntimeEventStore({
@@ -358,7 +370,11 @@ export class RuntimeRun {
       messageCount: messages.length,
     };
     const identity = runtimeForkBootstrapIdentity(options, completion, modelCheckpoint);
-    const targetSessionKey = runtimeSessionKey(options.workDir, options.targetSessionId);
+    const targetSessionKey = runtimeSessionKey(
+      store.databasePath,
+      options.workDir,
+      options.targetSessionId,
+    );
 
     return serializeForkBootstrap(targetSessionKey, async () => {
       const existingEvents = await store.readSession(options.targetSessionId);
@@ -390,7 +406,7 @@ export class RuntimeRun {
         }
         if (completedMarker.runId === identity.runId) {
           assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint);
-          await ensureRuntimeForkTerminal(options, store, existingEvents, identity);
+          await RuntimeRun.ensureForkTerminal(options, store, existingEvents, identity);
         }
         return false;
       }
@@ -413,7 +429,7 @@ export class RuntimeRun {
         (event) => event.kind === "run.started" && event.runId === identity.runId,
       );
       const bootstrapAt = existingStart?.at ?? runtimeForkBootstrapAt(options.operationCreatedAt);
-      const forkRun = await RuntimeRun.start({
+      const forkRun = await RuntimeRun.startDetached({
         sessionId: options.targetSessionId,
         workDir: options.workDir,
         runId: identity.runId,
@@ -456,6 +472,43 @@ export class RuntimeRun {
     });
   }
 
+  private static async ensureForkTerminal(
+    options: BootstrapRuntimeForkOptions,
+    store: RuntimeEventStore,
+    events: readonly RuntimeEvent[],
+    identity: RuntimeForkBootstrapIdentity,
+  ): Promise<void> {
+    const terminal = events.find(
+      (event): event is RuntimeRunTerminalEvent =>
+        event.kind === "run.terminal" && event.runId === identity.runId,
+    );
+    if (terminal) {
+      if (terminal.eventId !== identity.terminalEventId || terminal.data.status !== "completed") {
+        throw new Error(`Runtime fork run ${identity.runId} has a conflicting terminal fact`);
+      }
+      return;
+    }
+
+    const started = events.find(
+      (event): event is RuntimeRunStartedEvent =>
+        event.kind === "run.started" && event.runId === identity.runId,
+    );
+    if (!started || started.eventId !== identity.runStartedEventId) {
+      throw new Error(`Runtime fork run ${identity.runId} is missing its stable start fact`);
+    }
+    const run = await RuntimeRun.startDetached({
+      sessionId: options.targetSessionId,
+      workDir: options.workDir,
+      runId: identity.runId,
+      invocationId: identity.invocationId,
+      runStartedEventId: identity.runStartedEventId,
+      terminalEventId: identity.terminalEventId,
+      now: () => new Date(started.at),
+      store,
+    });
+    await run.finish("completed");
+  }
+
   /**
    * Adopts an existing in-memory Session into canonical history before its first
    * RuntimeEvent-backed run.
@@ -482,42 +535,6 @@ export class RuntimeRun {
       for (const message of history) {
         await run.recordBootstrapMessage(message);
       }
-    });
-    return true;
-  }
-
-  /** Appends an immutable rewind fact after the Session/UI projection has completed its saga. */
-  static async recordSessionRewind(options: RecordRuntimeSessionRewindOptions): Promise<boolean> {
-    const store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
-      });
-    if (!(await store.readSessionManifest(options.sessionId))) return false;
-
-    const events = await store.readSession(options.sessionId);
-    const messages = projectRuntimeSessionMessageEntries(events);
-    const retainedCount = Math.max(0, Math.min(options.messageIndex, messages.length));
-    const throughEventId = messages[retainedCount - 1]?.eventId;
-    const existing = events.find(
-      (event): event is RuntimeHistoryRewoundEvent =>
-        event.kind === "history.rewound" && event.data.branchId === options.branchId,
-    );
-    if (existing) {
-      if (existing.data.throughEventId !== throughEventId) {
-        throw new Error(
-          `Runtime rewind branch ${options.branchId} is already bound to another history boundary`,
-        );
-      }
-      return true;
-    }
-    const rewindRun = await RuntimeRun.start({
-      sessionId: options.sessionId,
-      workDir: options.workDir,
-      store,
-    });
-    await rewindRun.run(async () => {
-      await rewindRun.recordHistoryRewound(options.branchId, throughEventId);
     });
     return true;
   }
@@ -558,7 +575,7 @@ export class RuntimeRun {
     const store = session.runtimeEventStore;
     if (!store) return undefined;
     if (!(await store.readSessionManifest(session.id))) return undefined;
-    const sessionKey = runtimeSessionKey(session.workDir, session.id);
+    const sessionKey = runtimeSessionKey(store.databasePath, session.workDir, session.id);
     return serializeExternalMessageCommit(sessionKey, eventId, async () => {
       const existing = await store.readSessionEvent(session.id, eventId);
       if (existing) {
@@ -795,16 +812,6 @@ export class RuntimeRun {
         throughEventId: options.throughEventId,
         summary: structuredClone(options.summary),
       },
-    };
-    await this.append(event);
-  }
-
-  async recordHistoryRewound(branchId: string, throughEventId?: string): Promise<void> {
-    this.assertOpen();
-    const event: RuntimeHistoryRewoundEvent = {
-      ...this.base(createRuntimeEventId("history-rewound"), true, "internal"),
-      kind: "history.rewound",
-      data: { branchId, ...(throughEventId ? { throughEventId } : {}) },
     };
     await this.append(event);
   }
@@ -1097,8 +1104,8 @@ function serializeForkBootstrap<Result>(
   });
 }
 
-function runtimeSessionKey(workDir: string, sessionId: string): string {
-  return `${canonicalizeWorkspacePath(workDir)}\0${sessionId}`;
+function runtimeSessionKey(databasePath: string, workDir: string, sessionId: string): string {
+  return `${resolve(databasePath)}\0${canonicalizeWorkspacePath(workDir)}\0${sessionId}`;
 }
 
 function runtimeForkBootstrapIdentity(
@@ -1183,43 +1190,6 @@ function assertRuntimeForkCheckpoint(
 
 function runtimeEventIdDigest(eventIds: readonly string[]): string {
   return createHash("sha256").update(eventIds.join("\n")).digest("hex");
-}
-
-async function ensureRuntimeForkTerminal(
-  options: BootstrapRuntimeForkOptions,
-  store: RuntimeEventStore,
-  events: readonly RuntimeEvent[],
-  identity: RuntimeForkBootstrapIdentity,
-): Promise<void> {
-  const terminal = events.find(
-    (event): event is RuntimeRunTerminalEvent =>
-      event.kind === "run.terminal" && event.runId === identity.runId,
-  );
-  if (terminal) {
-    if (terminal.eventId !== identity.terminalEventId || terminal.data.status !== "completed") {
-      throw new Error(`Runtime fork run ${identity.runId} has a conflicting terminal fact`);
-    }
-    return;
-  }
-
-  const started = events.find(
-    (event): event is RuntimeRunStartedEvent =>
-      event.kind === "run.started" && event.runId === identity.runId,
-  );
-  if (!started || started.eventId !== identity.runStartedEventId) {
-    throw new Error(`Runtime fork run ${identity.runId} is missing its stable start fact`);
-  }
-  const run = await RuntimeRun.start({
-    sessionId: options.targetSessionId,
-    workDir: options.workDir,
-    runId: identity.runId,
-    invocationId: identity.invocationId,
-    runStartedEventId: identity.runStartedEventId,
-    terminalEventId: identity.terminalEventId,
-    now: () => new Date(started.at),
-    store,
-  });
-  await run.finish("completed");
 }
 
 function runtimeForkBootstrapAt(operationCreatedAt: string | undefined): string {

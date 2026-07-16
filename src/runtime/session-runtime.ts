@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
-import type { Session } from "../engine/session.js";
+import { globalSessionManager, type Session, type SessionManager } from "../engine/session.js";
 import { SteerQueue } from "../engine/steer-queue.js";
 import type { Message } from "../schema/message.js";
 import { FileIndex } from "../input/file-index.js";
@@ -45,6 +45,8 @@ import { resolvePicoHome } from "../paths/pico-paths.js";
 export interface SessionRuntimeOptions {
   /** Exact persisted Session that owns every session-scoped runtime service. */
   session: Session;
+  /** Manager that owns the exact Session; defaults to the product-wide manager. */
+  sessionManager?: SessionManager;
   /** Host-owned environment inherited by the session Hook executor. */
   env?: Readonly<NodeJS.ProcessEnv>;
   toolDisclosure?: ToolDisclosure;
@@ -393,6 +395,19 @@ function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): bool
 export async function createSessionRuntime(
   options: SessionRuntimeOptions,
 ): Promise<SessionRuntime> {
+  const releaseSessionPin = (options.sessionManager ?? globalSessionManager).pin(options.session);
+  try {
+    return await createPinnedSessionRuntime(options, releaseSessionPin);
+  } catch (error) {
+    releaseSessionPin();
+    throw error;
+  }
+}
+
+async function createPinnedSessionRuntime(
+  options: SessionRuntimeOptions,
+  releaseSessionPin: () => void,
+): Promise<SessionRuntime> {
   const session = options.session;
   const workDir = resolve(session.workDir);
   const sessionId = session.id;
@@ -533,6 +548,7 @@ export async function createSessionRuntime(
     codeIntelligence,
     codeIntelligenceManager,
     unbindGoalManager,
+    releaseSessionPin,
     stopDelegationCompletionPolling: () => {
       if (completionPollTimer) clearInterval(completionPollTimer);
       completionPollTimer = undefined;
@@ -684,6 +700,7 @@ interface DefaultSessionRuntimeOptions {
   codeIntelligence: CodeIntelligenceService;
   codeIntelligenceManager: CodeIntelligenceManager;
   unbindGoalManager: () => void;
+  releaseSessionPin: () => void;
   stopDelegationCompletionPolling: () => void;
   sessionStartSource: "startup" | "resume";
   hookRuntime?: SessionHookRuntime;
@@ -720,6 +737,7 @@ class DefaultSessionRuntime implements SessionRuntime {
   private readonly unsubscribeTaskHooks: () => void;
   private readonly unsubscribeWorktreeHooks?: () => void;
   private readonly unbindGoalManager: () => void;
+  private readonly releaseSessionPin: () => void;
   private readonly stopDelegationCompletionPolling: () => void;
   private readonly session: Session;
   private disposePromise?: Promise<void>;
@@ -745,6 +763,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.codeIntelligence = options.codeIntelligence;
     this.codeIntelligenceManager = options.codeIntelligenceManager;
     this.unbindGoalManager = options.unbindGoalManager;
+    this.releaseSessionPin = options.releaseSessionPin;
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
     this.sessionStartSource = options.sessionStartSource;
     this.hookRuntime = options.hookRuntime;
@@ -889,10 +908,14 @@ class DefaultSessionRuntime implements SessionRuntime {
           await this._hookService.dispatch("SessionEnd", { reason: "runtime_dispose" });
         }
       } finally {
-        await this.hookRuntime?.dispose();
-        this.delegationCompletionQueue.close();
-        this.hookRewakeQueue.close();
-        this.unbindGoalManager();
+        try {
+          await this.hookRuntime?.dispose();
+          this.delegationCompletionQueue.close();
+          this.hookRewakeQueue.close();
+          this.unbindGoalManager();
+        } finally {
+          this.releaseSessionPin();
+        }
       }
     })();
     return this.disposePromise;
