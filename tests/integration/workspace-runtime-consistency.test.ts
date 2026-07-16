@@ -106,6 +106,7 @@ test("legacy child registrations migrate to the Git identity and remain removabl
 
   const removedWorkspace = join(fixture.root, "removed-workspace");
   await mkdir(removedWorkspace);
+  const canonicalRemovedWorkspace = await realpath(removedWorkspace);
   await registrationStore.register(removedWorkspace);
   await rm(removedWorkspace, { recursive: true });
   const removed = asRecord(
@@ -113,14 +114,34 @@ test("legacy child registrations migrate to the Git identity and remain removabl
       createRuntimeRequest("workspace.unregister", { workspacePath: removedWorkspace }),
     ),
   );
-  assert.equal(removed["workspacePath"], removedWorkspace);
+  assert.equal(removed["workspacePath"], canonicalRemovedWorkspace);
+  assert.deepEqual(await registrationStore.list(), []);
+
+  const removedChild = join(fixture.workspace, "packages", "removed-app");
+  await mkdir(removedChild, { recursive: true });
+  assert.equal(await registrationStore.register(removedChild), canonicalWorkspace);
+  await rm(removedChild, { recursive: true });
+  const removedFromAncestor = asRecord(
+    await service.handle(
+      createRuntimeRequest("workspace.unregister", { workspacePath: removedChild }),
+    ),
+  );
+  assert.equal(removedFromAncestor["workspacePath"], canonicalWorkspace);
   assert.deepEqual(await registrationStore.list(), []);
 
   const prunedWorkspace = join(fixture.root, "pruned-workspace");
   await mkdir(prunedWorkspace);
+  const canonicalPrunedWorkspace = await realpath(prunedWorkspace);
   await registrationStore.register(prunedWorkspace);
   await rm(prunedWorkspace, { recursive: true });
-  assert.deepEqual(await registrationStore.list(), [], "读取登记时应清理已不存在的陈旧路径");
+  assert.deepEqual(await registrationStore.list(), [], "读取登记时应暂时隐藏不存在的路径");
+  await mkdir(prunedWorkspace);
+  assert.deepEqual(
+    await registrationStore.list(),
+    [canonicalPrunedWorkspace],
+    "临时离线的登记路径恢复后应自动重新出现",
+  );
+  await registrationStore.unregister(prunedWorkspace);
 });
 
 test(
