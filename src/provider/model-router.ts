@@ -217,6 +217,7 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
         provider.config.protocol,
         model,
         provider.config.modelCapabilities?.[model],
+        { baseURL: provider.config.baseURL },
       ),
       source:
         provider.source === "legacy"

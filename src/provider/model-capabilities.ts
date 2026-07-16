@@ -45,7 +45,7 @@ export interface ModelRouteCapabilities {
 export interface ModelCapabilityConfig {
   context?: number;
   output?: number;
-  /** Defaults to max_tokens for broad OpenAI-compatible endpoint support. */
+  /** Official OpenAI defaults to max_completion_tokens; compatible endpoints keep max_tokens. */
   outputTokenField?: OpenAIOutputTokenField;
   vision?: boolean;
   reasoning?: ModelReasoningCapabilityInput;
@@ -55,10 +55,16 @@ export interface ModelCapabilityConfig {
   price?: Omit<ModelPrice, "currency" | "source">;
 }
 
+export interface ModelRouteCapabilityContext {
+  /** Endpoint authority is required to choose an official OpenAI wire default safely. */
+  baseURL?: string;
+}
+
 export function resolveModelRouteCapabilities(
   provider: ProviderKind,
   model: string,
   override: ModelCapabilityConfig | undefined,
+  context: ModelRouteCapabilityContext = {},
 ): ModelRouteCapabilities {
   const profile = resolveProviderProfile(provider, model);
   const reasoningProfile = resolveModelReasoningCapability(provider, model, {
@@ -69,7 +75,8 @@ export function resolveModelRouteCapabilities(
     contextSource: override?.context === undefined ? "profile_default" : "config",
     maxOutputTokens: override?.output ?? profile.maxOutputTokens,
     outputSource: override?.output === undefined ? "profile_default" : "config",
-    outputTokenField: override?.outputTokenField ?? "max_tokens",
+    outputTokenField:
+      override?.outputTokenField ?? defaultOpenAIOutputTokenField(provider, context.baseURL),
     // Adapter support does not prove a custom endpoint/model supports the feature.
     vision: override?.vision ?? "unknown",
     reasoning: reasoningProfile.enabled,
@@ -81,6 +88,22 @@ export function resolveModelRouteCapabilities(
       ? { currency: "USD", source: "config", ...override.price }
       : unknownModelPrice(),
   };
+}
+
+function defaultOpenAIOutputTokenField(
+  provider: ProviderKind,
+  baseURL: string | undefined,
+): OpenAIOutputTokenField {
+  if (provider !== "openai" || !baseURL) return "max_tokens";
+  try {
+    const endpoint = new URL(baseURL);
+    if (endpoint.protocol === "https:" && endpoint.hostname.toLowerCase() === "api.openai.com") {
+      return "max_completion_tokens";
+    }
+  } catch {
+    // Endpoint validation belongs to configuration loading; retain the compatible fallback here.
+  }
+  return "max_tokens";
 }
 
 export function unknownModelPrice(): ModelPrice {

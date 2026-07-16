@@ -1471,7 +1471,10 @@ function activeRouteModelRouter(
         apiKeyEnv,
         source: "config",
         capabilities:
-          config.capabilities ?? resolveModelRouteCapabilities(kind, config.model, undefined),
+          config.capabilities ??
+          resolveModelRouteCapabilities(kind, config.model, undefined, {
+            baseURL: config.baseURL,
+          }),
       },
     ],
     { [apiKeyEnv]: config.apiKey },
