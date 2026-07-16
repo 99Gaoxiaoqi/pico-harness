@@ -44,3 +44,15 @@
 - 实现提交：`da48d7a`、`c75924b`、`2a1820b`、`c9ba64c`、`ce04bbf`、`5fb00bb`、`885b9ed`、`ed5e383`、`e16b490`、`5ea4973`。
 - 最终独立复审覆盖：queued Run 准入、全局请求 drain、事务后通知、动态 Run 绑定、两阶段关闭、Hook RuntimeRun 和 rollout-aware Usage。
 - 本轮未恢复已删除的测试代码，未修改明确保留的 GC/retention 模块，也未纳入用户的其他未跟踪文件。
+
+## 后续真实模型验证加固（2026-07-16）
+
+> 原计划完成后，用户另行明确要求恢复最小测试入口并使用真实大模型验证；本节作为后续记录，不改写上述历史范围。
+
+- [x] 恢复精简的 Node 集成测试与真实模型 E2E 入口，并纳入 lint、format 与 typecheck。✔️
+- [x] 覆盖 Desktop 停机栅栏、稳定幂等键、Run 跨重启幂等、Session 动态绑定、中断 Run 恢复事实、Hook/CostTracker RuntimeRun 边界。✔️
+- [x] 使用项目默认路由 `volcengine/deepseek-v4-pro-260425` 实跑路由 fail-closed、Prompt Hook 边界和两轮上下文/Usage 恢复。✔️
+- [x] 修复 OpenAI 流式响应末尾 Usage-only chunk 被跳过的真实缺陷，Usage 继续只由 `model.call.settled` 事实投影。✔️
+- [x] 将 `stream_options.include_usage` 收敛为路由显式 `streamUsage` 能力；旧配置、未声明路由和其他 OpenAI-compatible 端点不改变请求格式。✔️
+- [x] 最终验证通过：集成测试 10/10，真实模型 E2E 3/3，以及 lint、typecheck、Desktop typecheck、build、format 和 storage check。✔️
+- [x] 依赖安全复核：生产依赖 `npm audit --omit=dev` 为 0；全量 audit 的 25 项既有问题均位于开发工具链，本轮未改动依赖。✔️

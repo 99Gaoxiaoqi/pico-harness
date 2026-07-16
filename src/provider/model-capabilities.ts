@@ -33,6 +33,8 @@ export interface ModelRouteCapabilities {
   reasoningProfile: ResolvedModelReasoningCapability;
   toolCall: CapabilitySupport;
   cache: CapabilitySupport;
+  /** Whether this route accepts OpenAI stream_options.include_usage. */
+  streamUsage: CapabilitySupport;
   price: ModelPrice;
 }
 
@@ -44,6 +46,7 @@ export interface ModelCapabilityConfig {
   reasoning?: ModelReasoningCapabilityInput;
   toolCall?: boolean;
   cache?: boolean;
+  streamUsage?: boolean;
   price?: Omit<ModelPrice, "currency" | "source">;
 }
 
@@ -67,6 +70,7 @@ export function resolveModelRouteCapabilities(
     reasoningProfile,
     toolCall: override?.toolCall ?? "unknown",
     cache: override?.cache ?? "unknown",
+    streamUsage: override?.streamUsage ?? "unknown",
     price: override?.price
       ? { currency: "USD", source: "config", ...override.price }
       : unknownModelPrice(),

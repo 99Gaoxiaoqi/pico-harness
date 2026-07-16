@@ -31,9 +31,11 @@
     "prepack": "npm run build",
     "pretypecheck": "npm run build:protocol",
     "typecheck": "tsc --noEmit",
+    "test:integration": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/*.test.ts",
+    "test:llm-e2e": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/runtime-consistency.real-llm.test.ts",
     "check:storage": "node scripts/check-storage-capability.mjs",
-    "lint": "eslint src scripts 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js --no-error-on-unmatched-pattern",
-    "format": "prettier --check src scripts apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json"
+    "lint": "eslint src scripts tests 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js --no-error-on-unmatched-pattern",
+    "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json"
   },
   "engines": {
     "node": "22.x"

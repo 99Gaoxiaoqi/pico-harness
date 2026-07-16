@@ -74,7 +74,8 @@
             "levels": ["off", "high", "max"]
           },
           "toolCall": true,
-          "cache": false
+          "cache": false,
+          "streamUsage": true
         },
         "doubao-seed-2-0-lite-260428": {
           "context": 262144,
