@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { logger } from "../observability/logger.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
 import { removeLocalDaemonEndpoint, resolveLocalDaemonEndpoint } from "./endpoint.js";
 import { LocalDaemonInstanceLock, type LocalDaemonInstanceLockOptions } from "./instance-lock.js";
@@ -37,6 +38,10 @@ export class LocalDaemonHost {
   private instanceLock?: LocalDaemonInstanceLock;
   private state: HostState = "stopped";
   private serviceClosed = false;
+  private serviceCloseSucceeded = false;
+  private serviceClosePromise?: Promise<void>;
+  private startPromise?: Promise<void>;
+  private stopPromise?: Promise<void>;
   private reconcileQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: LocalDaemonHostOptions) {
@@ -54,10 +59,29 @@ export class LocalDaemonHost {
     return [...this.cronRuntimes.keys()].sort();
   }
 
-  async start(): Promise<void> {
-    if (this.state === "running") return;
-    if (this.state !== "stopped") throw new Error(`daemon 当前处于 ${this.state}`);
+  start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    if (this.stopPromise) return Promise.reject(new Error("daemon 正在停止"));
+    if (this.state === "running") return Promise.resolve();
+    if (this.state !== "stopped") return Promise.reject(new Error(`daemon 当前处于 ${this.state}`));
+    if (this.serviceClosed) {
+      return Promise.reject(new Error("daemon host 已关闭，请创建新 host 后重启"));
+    }
     this.state = "starting";
+    const startPromise = Promise.resolve().then(() => this.startOnce());
+    this.startPromise = startPromise;
+    void startPromise.then(
+      () => {
+        if (this.startPromise === startPromise) this.startPromise = undefined;
+      },
+      () => {
+        if (this.startPromise === startPromise) this.startPromise = undefined;
+      },
+    );
+    return startPromise;
+  }
+
+  private async startOnce(): Promise<void> {
     try {
       this.instanceLock = await LocalDaemonInstanceLock.acquire({
         endpoint: this.endpoint,
@@ -70,8 +94,11 @@ export class LocalDaemonHost {
       this.state = "running";
       for (const runtime of this.cronRuntimes.values()) runtime.start();
     } catch (error) {
-      await this.closeResources();
-      this.state = "stopped";
+      try {
+        await this.closeResources();
+      } finally {
+        this.state = "stopped";
+      }
       throw error;
     }
   }
@@ -90,12 +117,32 @@ export class LocalDaemonHost {
     return runtime.runNow(cronJobId);
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (this.state === "stopped" && !this.startPromise) return Promise.resolve();
+    const stopPromise = Promise.resolve().then(() => this.stopOnce());
+    this.stopPromise = stopPromise;
+    void stopPromise.then(
+      () => {
+        if (this.stopPromise === stopPromise) this.stopPromise = undefined;
+      },
+      () => {
+        if (this.stopPromise === stopPromise) this.stopPromise = undefined;
+      },
+    );
+    return stopPromise;
+  }
+
+  private async stopOnce(): Promise<void> {
+    const starting = this.startPromise;
+    if (starting) await starting.catch(() => undefined);
     if (this.state === "stopped") return;
-    if (this.state === "stopping") return;
     this.state = "stopping";
-    await this.closeResources();
-    this.state = "stopped";
+    try {
+      await this.closeResources();
+    } finally {
+      this.state = "stopped";
+    }
   }
 
   private async reconcileRegisteredWorkspaces(): Promise<void> {
@@ -135,19 +182,88 @@ export class LocalDaemonHost {
 
   private async closeResources(): Promise<void> {
     await this.reconcileQueue;
-    await this.daemon.stop().catch(() => undefined);
+    let daemonCloseError: unknown;
+    try {
+      await this.daemon.stop();
+    } catch (error) {
+      daemonCloseError = error;
+    }
     const runtimes = [...this.cronRuntimes.values()];
     this.cronRuntimes.clear();
-    await Promise.allSettled(runtimes.map((runtime) => runtime.close()));
+    const runtimeCloseResults = await Promise.allSettled(
+      runtimes.map((runtime) => runtime.close()),
+    );
+    const runtimeCloseFailure = runtimeCloseResults.find((result) => result.status === "rejected");
+    let serviceCloseError: unknown;
     try {
-      if (!this.serviceClosed) {
-        await this.options.service.close?.();
-        this.serviceClosed = true;
-      }
+      await this.closeService();
+    } catch (error) {
+      serviceCloseError = error;
     } finally {
-      await this.instanceLock?.release();
-      this.instanceLock = undefined;
+      await this.releaseInstanceLockWhenSafe({
+        unfencedResourcesClosed:
+          daemonCloseError === undefined && runtimeCloseFailure === undefined,
+        serviceCloseSucceeded: this.serviceCloseSucceeded,
+      });
     }
+    if (serviceCloseError !== undefined) throw serviceCloseError;
+    if (daemonCloseError !== undefined) throw daemonCloseError;
+    if (runtimeCloseFailure?.status === "rejected") throw runtimeCloseFailure.reason;
+  }
+
+  private closeService(): Promise<void> {
+    if (this.serviceClosePromise) return this.serviceClosePromise;
+    // A DisposableLocalRuntimeService is single-use even when its close reports failure.
+    this.serviceClosed = true;
+    let resolveClose: () => void = () => undefined;
+    let rejectClose: (reason: unknown) => void = () => undefined;
+    const closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    this.serviceClosePromise = closePromise;
+    try {
+      Promise.resolve(this.options.service.close?.()).then(() => {
+        this.serviceCloseSucceeded = true;
+        resolveClose();
+      }, rejectClose);
+    } catch (error) {
+      rejectClose(error);
+    }
+    return closePromise;
+  }
+
+  private async releaseInstanceLockWhenSafe(options: {
+    unfencedResourcesClosed: boolean;
+    serviceCloseSucceeded: boolean;
+  }): Promise<void> {
+    const instanceLock = this.instanceLock;
+    if (!instanceLock) return;
+    const fence = this.options.service.shutdownOwnershipFence?.();
+    if (!options.unfencedResourcesClosed || (!options.serviceCloseSucceeded && !fence)) {
+      logger.error(
+        { lockPath: instanceLock.lockPath },
+        "Daemon shutdown could not prove ownership release; retaining singleton lock",
+      );
+      return;
+    }
+    if (!fence || !fence.pending) {
+      await fence?.released;
+      await instanceLock.release();
+      if (this.instanceLock === instanceLock) this.instanceLock = undefined;
+      return;
+    }
+
+    const deferredRelease = fence.released.then(async () => {
+      await instanceLock.release();
+      if (this.instanceLock === instanceLock) this.instanceLock = undefined;
+    });
+    void deferredRelease.catch((error: unknown) => {
+      logger.error(
+        { error, lockPath: instanceLock.lockPath },
+        "Daemon shutdown ownership fence failed; retaining singleton lock",
+      );
+    });
   }
 }
 
@@ -157,9 +273,13 @@ export function installLocalDaemonShutdownHandlers(host: LocalDaemonHost): () =>
   const shutdown = () => {
     if (stopping) return;
     stopping = true;
-    void host.stop().finally(() => {
-      dispose();
-    });
+    void host.stop().then(
+      () => dispose(),
+      (error: unknown) => {
+        logger.error({ error }, "Daemon shutdown failed after process signal");
+        dispose();
+      },
+    );
   };
   const dispose = () => {
     process.off("SIGINT", shutdown);

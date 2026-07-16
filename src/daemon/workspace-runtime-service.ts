@@ -22,7 +22,11 @@ import {
   type RuntimeRequest,
   type WorkspaceStatusResult,
 } from "./protocol.js";
-import type { LocalRuntimeService, RuntimeNotificationCursor } from "./service.js";
+import type {
+  DisposableLocalRuntimeService,
+  RuntimeNotificationCursor,
+  ShutdownOwnershipFence,
+} from "./service.js";
 import {
   RuntimeConflictError,
   RuntimeStore,
@@ -83,7 +87,7 @@ const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADA
  * intentionally injectable, so the daemon may use AgentRuntime today and another
  * client surface tomorrow without changing the IPC protocol.
  */
-export class WorkspaceRuntimeService implements LocalRuntimeService {
+export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private readonly registry: WorkspaceRuntimeRegistry<WorkspaceTaskRuntime>;
   private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
   private readonly unsubscribers = new Map<string, () => void>();
@@ -95,6 +99,8 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private lifecycleState: "open" | "closing_runtimes" | "runtimes_closed" | "closed" = "open";
   private runtimeClosePromise?: Promise<void>;
   private closePromise?: Promise<void>;
+  private resourceClosePending = false;
+  private resourceClosePromise: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.picoHome = resolvePicoHome({ env: options.env });
@@ -448,19 +454,45 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     return this.closePromise;
   }
 
+  shutdownOwnershipFence(): ShutdownOwnershipFence {
+    return {
+      pending: this.resourceClosePending,
+      released: this.resourceClosePromise,
+    };
+  }
+
   private async closeOnce(): Promise<void> {
     // Runtime.close() publishes terminal cancellation events. Keep both the runtime
     // subscriptions and durable ledgers alive until those events have been recorded.
     try {
       await this.closeRuntimes();
     } finally {
-      for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
-      this.unsubscribers.clear();
-      this.listeners.clear();
-      for (const store of this.eventStores.values()) store.close();
-      this.eventStores.clear();
       this.lifecycleState = "closed";
+      const runtimeOwnershipPending = this.registry.hasPendingOwnership();
+      this.resourceClosePending = true;
+      const resourceClose = this.registry.waitForOwnershipRelease().then(() => {
+        this.releaseResources();
+      });
+      this.resourceClosePromise = resourceClose;
+      resourceClose.then(
+        () => {
+          this.resourceClosePending = false;
+        },
+        () => undefined,
+      );
+      // Local Runtime users may close a service without constructing a daemon host. Preserve the
+      // rejecting fence for ownership decisions while preventing a process-level rejection leak.
+      void resourceClose.catch(() => undefined);
+      if (!runtimeOwnershipPending) await resourceClose;
     }
+  }
+
+  private releaseResources(): void {
+    for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
+    this.unsubscribers.clear();
+    this.listeners.clear();
+    for (const store of this.eventStores.values()) store.close();
+    this.eventStores.clear();
   }
 
   private publish(notification: RuntimeNotification, run?: DaemonRunRecord): void {
@@ -505,6 +537,9 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     try {
       return await this.registry.get(workspacePath);
     } catch (error) {
+      if (this.lifecycleState !== "open") {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Workspace Runtime 正在关闭");
+      }
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith("所选文件夹不是 Git 仓库") || message.startsWith("Pico 未找到 Git")) {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
