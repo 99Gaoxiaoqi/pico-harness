@@ -220,6 +220,11 @@ export class LocalDaemonHost {
           !this.cronShutdownFailures.has(workspacePath)
         ) {
           this.cronShutdownRuntimes.delete(workspacePath);
+          if (this.state === "running") {
+            void this.reconcileRegisteredWorkspaces().catch((error: unknown) => {
+              this.options.onWorkspaceError?.(workspacePath, error);
+            });
+          }
         }
       },
       (error: unknown) => {
