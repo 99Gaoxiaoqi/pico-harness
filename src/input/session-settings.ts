@@ -327,21 +327,48 @@ export function setSessionModelRoute(
   };
 }
 
-/** 恢复旧会话时将已解析的兼容路由写回运行态，不因凭证缺失阻断 TUI 自救。 */
+/** 将用户显式选择或 legacy 会话唯一匹配出的路由写回运行态。 */
 export function migrateSessionModelRoute(settings: SessionSettings, route: ModelRoute): void {
   applySessionModelRoute(settings, route);
 }
 
+/**
+ * 恢复会话时以已持久化的 route ID 为权威，不跨 Provider 静默迁移。
+ * 只有真正没有 route ID 的 legacy 设置才允许按 provider + model 唯一匹配。
+ */
 export function resolveRestoredSessionModelRoute(
   router: ModelRouter,
   restored: PersistedSessionSettings | undefined,
   fallbackRouteId?: string,
 ): ModelRoute {
-  return (
-    router.resolve(restored?.modelRouteId) ??
-    router.resolve(restored?.model) ??
-    router.resolve(fallbackRouteId) ??
-    router.require(undefined)
+  if (!restored) {
+    return router.resolve(fallbackRouteId) ?? router.require(undefined);
+  }
+
+  if (restored.modelRouteId !== undefined) {
+    const routeId = restored.modelRouteId.trim();
+    const route = router.routes.find((candidate) => candidate.id === routeId);
+    if (route) return route;
+
+    const available = router.routes.map((candidate) => candidate.id).join(", ") || "none";
+    throw new Error(
+      `会话固定的模型路由 ${routeId || "(empty)"} 已不可用。为避免把会话发送到其他 Provider，Pico 不会自动切换模型。请使用 --model <provider/model> 显式选择。可用模型: ${available}。`,
+    );
+  }
+
+  const legacyMatches = router.routes.filter(
+    (candidate) => candidate.provider === restored.provider && candidate.model === restored.model,
+  );
+  if (legacyMatches.length === 1) return legacyMatches[0]!;
+
+  if (legacyMatches.length === 0) {
+    throw new Error(
+      `旧会话模型 ${restored.provider}/${restored.model} 已不可用。为避免自动切换 Provider，请使用 --model <provider/model> 显式选择。`,
+    );
+  }
+
+  throw new Error(
+    `旧会话模型 ${restored.provider}/${restored.model} 匹配到多个路由 (${legacyMatches.map((candidate) => candidate.id).join(", ")})。请使用 --model <provider/model> 显式选择。`,
   );
 }
 

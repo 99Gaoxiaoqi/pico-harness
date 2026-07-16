@@ -1289,8 +1289,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
     const hydration = await session.readHydrationSnapshot();
     const restoredSettings = hydration.runtime.settings;
-    // 配置从 legacy 环境变量迁移到 providerID/modelID 后，旧 session 仍可能保存
-    // legacy/<model>。优先恢复精确路由，失效时按模型名或项目默认路由平滑迁移。
+    // 已有 route ID 必须精确恢复；真正没有 route ID 的 legacy session
+    // 只有在 provider + model 唯一匹配时才会迁移，避免跨 Provider 静默切换。
     const initialRoute = resolveTuiStartupModelRoute(bundleModelRouter, restoredSettings, {
       cliModel: opts.model,
       modelExplicit: opts.modelExplicit,
