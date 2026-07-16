@@ -157,6 +157,23 @@
 - 最终只读复审：未发现可证实的 P0/P1/P2；`blob-garbage-collector.ts` 与 `retention-policy.ts` 相对计划基线保持零差异。
 - 交付：集成分支以 fast-forward 方式合并到 `main`，远程 `main` 首轮推送至 `0fcc9ad`；完成记录随后单独提交并再次推送。
 
+## 补充架构审查闭环
+
+> 2026-07-16 在原计划交付后再次并行审查，以下 P1 已于 `main@47073cf` 闭环。
+
+- [x] 将 `SessionRuntime` 绑定到唯一 `Session` 实例，统一从该实例派生 `workDir`、`sessionId` 与 `picoHome`，拒绝同名但不同实例或状态根的复用。✔️
+- [x] 将 Desktop Transcript 改为直接读取同一 SQLite 事务中的 RuntimeEvent 投影和 manifest，不再通过全局 `SessionManager` 获取写租约。✔️
+- [x] 将 live `RuntimeRun` 的初始化、单条/批量事件追加、终态写入和恢复补写统一置于精确 `Session` owner lease 的前后校验之下。✔️
+- [x] 为 Desktop daemon 退出建立幂等 shutdown fence；重复退出持续阻拦到 drain 完成，停止失败记录错误后仍只放行一次退出。✔️
+- [x] 在最终组合态完成独立差异复审、跨 `PICO_HOME`/租约丢失/只读 Transcript/重复退出 smoke、Node 22 构建与存储检查、生产依赖审计、Desktop 打包及真实应用 ping/退出验证。✔️
+- [x] 将 5 个修复提交 fast-forward 合并并推送到 `main@47073cf`，清理临时任务分支与 worktree，保留用户原有未跟踪文件。✔️
+
+### 后续候选（未纳入本轮 P1）
+
+- [ ] 评估长生命周期 `SessionRuntime` 与 `SessionManager` TTL/LRU 驱逐策略的 pin/释放边界，避免缓存驱逐后只能通过身份校验中止下一轮执行。
+- [ ] 收敛仅由 `env.PICO_HOME` 注入时的入口冻结规则，确保 `AgentRuntime` 的依赖装配始终显式使用同一状态根。
+- [ ] 评估 `recordSessionRewind` 的 detached 写入是否也应接入显式写能力；在确定 rewind saga 的 owner 边界前不扩展抽象。
+
 ## 建议实施顺序
 
 1. 第一部分：Runtime Context 边界。
