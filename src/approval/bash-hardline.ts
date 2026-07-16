@@ -60,6 +60,12 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   if (POWER_MANAGERS.has(executable) && isPowerManagerInvocation(executable, args)) return true;
   if (executable === "wipefs" && isDestructiveWipefsInvocation(args)) return true;
   if (PERMISSION_COMMANDS.has(executable) && isProtectedMutationInvocation(args)) return true;
+  if (
+    NATIVE_MUTATION_COMMANDS.has(executable) &&
+    isDestructiveNativeMutationInvocation(executable, args)
+  ) {
+    return true;
+  }
 
   if (SHELL_COMMANDS.has(executable)) {
     const commandIndex = args.findIndex(
@@ -147,7 +153,10 @@ function isDestructiveRmInvocation(
     targets.push(word);
   }
 
-  const hasProtectedTarget = targets.some((target) => isProtectedRmTarget(target.value));
+  const hasProtectedTarget = targets.some(
+    (target) =>
+      isProtectedRmTarget(target.value) || isPotentiallyProtectedAbsoluteExpansion(target),
+  );
   // rm 的动态参数可能同时改写选项与目标，无法静态证明安全时直接 fail-closed。
   if (hasDynamicArgument || hasProtectedTarget) return true;
   if (!recursive || !force) return false;
@@ -196,12 +205,57 @@ function isDestructiveFindInvocation(args: readonly ShellWord[]): boolean {
 function hasFindDestructiveExecutor(args: readonly ShellWord[]): boolean {
   for (let index = 0; index < args.length; index++) {
     if (!FIND_EXEC_ACTIONS.has(args[index]!.value)) continue;
-    const executable = args[index + 1];
-    if (!executable) continue;
-    if (executable.dynamic) return true;
-    if (FIND_DESTRUCTIVE_EXECUTABLES.has(commandBasename(executable.value))) return true;
+    const endIndex = args.findIndex(
+      (word, candidateIndex) =>
+        candidateIndex > index && (word.value === ";" || word.value === "+"),
+    );
+    const command = args.slice(index + 1, endIndex < 0 ? args.length : endIndex);
+    if (isFindDestructiveCommand(command)) return true;
   }
   return false;
+}
+
+function isFindDestructiveCommand(command: readonly ShellWord[]): boolean {
+  let executableIndex = 0;
+  while (executableIndex < command.length) {
+    const executable = command[executableIndex]!;
+    if (executable.dynamic) return true;
+    const name = commandBasename(executable.value);
+    if (FIND_DESTRUCTIVE_EXECUTABLES.has(name)) return true;
+    if (!FIND_EXEC_FORWARDERS.has(name)) return false;
+    executableIndex = findForwardedCommandIndex(name, command, executableIndex + 1);
+    if (executableIndex < 0) return false;
+  }
+  return false;
+}
+
+function findForwardedCommandIndex(
+  wrapper: string,
+  words: readonly ShellWord[],
+  startIndex: number,
+): number {
+  let skipOperand = wrapper === "chroot" || wrapper === "timeout" ? 1 : 0;
+  const optionsWithValue = FIND_WRAPPER_OPTIONS_WITH_VALUE.get(wrapper) ?? EMPTY_STRING_SET;
+  for (let index = startIndex; index < words.length; index++) {
+    const value = words[index]!.value;
+    if (value === "--") return index + 1 < words.length ? index + 1 : -1;
+    if (wrapper === "env" && isEnvironmentAssignment(value)) continue;
+    if (value.startsWith("--")) {
+      const optionName = value.split("=", 1)[0]!;
+      if (optionsWithValue.has(optionName) && !value.includes("=")) index++;
+      continue;
+    }
+    if (/^-[^-]/u.test(value)) {
+      if (optionsWithValue.has(value)) index++;
+      continue;
+    }
+    if (skipOperand > 0) {
+      skipOperand--;
+      continue;
+    }
+    return index;
+  }
+  return -1;
 }
 
 function isFindExpressionStart(value: string): boolean {
@@ -225,7 +279,8 @@ function isStructuredHardlineExecutable(executable: string): boolean {
     executable === "wipefs" ||
     POWER_COMMANDS.has(executable) ||
     POWER_MANAGERS.has(executable) ||
-    PERMISSION_COMMANDS.has(executable)
+    PERMISSION_COMMANDS.has(executable) ||
+    NATIVE_MUTATION_COMMANDS.has(executable)
   );
 }
 
@@ -299,7 +354,14 @@ function isPowerManagerInvocation(executable: string, args: readonly ShellWord[]
   if (executable === "init" || executable === "telinit") {
     return args.some((word) => word.dynamic || word.value === "0" || word.value === "6");
   }
-  return args.some((word) => word.dynamic || POWER_ACTIONS.has(word.value.toLowerCase()));
+  if (args.some((word) => word.dynamic || POWER_ACTIONS.has(word.value.toLowerCase()))) {
+    return true;
+  }
+  if (executable !== "systemctl") return false;
+  const hasActivatingAction = args.some((word) =>
+    POWER_TARGET_ACTIONS.has(word.value.toLowerCase()),
+  );
+  return hasActivatingAction && args.some((word) => POWER_TARGETS.has(word.value.toLowerCase()));
 }
 
 function isDestructiveWipefsInvocation(args: readonly ShellWord[]): boolean {
@@ -326,6 +388,161 @@ function isProtectedMutationTarget(target: ShellWord): boolean {
     isProtectedRmTarget(target.value) ||
     isPotentiallyProtectedAbsoluteExpansion(target)
   );
+}
+
+function isDestructiveNativeMutationInvocation(
+  executable: string,
+  args: readonly ShellWord[],
+): boolean {
+  switch (executable) {
+    case "cp":
+    case "install":
+    case "ln":
+      return isProtectedDestinationInvocation(executable, args);
+    case "mv":
+      return isProtectedMoveInvocation(args);
+    case "sed":
+      return isProtectedSedInPlaceInvocation(args);
+    case "shred":
+      return hasProtectedUtilityOperand(args, SHRED_OPTIONS_WITH_VALUE);
+    case "tee":
+      return hasProtectedUtilityOperand(args, EMPTY_STRING_SET);
+    case "truncate":
+      return hasProtectedUtilityOperand(args, TRUNCATE_OPTIONS_WITH_VALUE);
+    case "rmdir":
+    case "unlink":
+      return hasProtectedUtilityOperand(args, EMPTY_STRING_SET);
+    default:
+      return false;
+  }
+}
+
+function isProtectedDestinationInvocation(
+  executable: "cp" | "install" | "ln",
+  args: readonly ShellWord[],
+): boolean {
+  const optionsWithValue =
+    executable === "install" ? INSTALL_OPTIONS_WITH_VALUE : COPY_OPTIONS_WITH_VALUE;
+  const parsed = collectUtilityOperands(args, optionsWithValue, true);
+  if (parsed.targetDirectory && isProtectedMutationTarget(parsed.targetDirectory)) return true;
+
+  const directoryMode =
+    executable === "install" &&
+    args.some((word) => word.value === "-d" || word.value === "--directory");
+  if (directoryMode) {
+    return parsed.operands.some((operand) => isProtectedMutationTarget(operand));
+  }
+  if (parsed.operands.length < 2) return false;
+  return isProtectedMutationTarget(parsed.operands.at(-1)!);
+}
+
+function isProtectedMoveInvocation(args: readonly ShellWord[]): boolean {
+  const parsed = collectUtilityOperands(args, COPY_OPTIONS_WITH_VALUE, true);
+  if (parsed.targetDirectory && isProtectedMutationTarget(parsed.targetDirectory)) return true;
+  return parsed.operands.some((operand) => isProtectedMutationTarget(operand));
+}
+
+function isProtectedSedInPlaceInvocation(args: readonly ShellWord[]): boolean {
+  const inPlace = args.some(
+    (word) => /^-[^-]*i/u.test(word.value) || word.value.startsWith("--in-place"),
+  );
+  if (!inPlace) return false;
+
+  const files: ShellWord[] = [];
+  let hasExplicitScript = false;
+  let consumedDefaultScript = false;
+  let optionsEnded = false;
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (!optionsEnded && value === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && SED_SCRIPT_OPTIONS.has(value)) {
+      hasExplicitScript = true;
+      index++;
+      continue;
+    }
+    if (
+      !optionsEnded &&
+      SED_SCRIPT_OPTIONS_WITH_VALUE_PREFIX.some((prefix) => value.startsWith(prefix))
+    ) {
+      hasExplicitScript = true;
+      continue;
+    }
+    if (!optionsEnded && value.startsWith("-")) continue;
+    if (!hasExplicitScript && !consumedDefaultScript) {
+      consumedDefaultScript = true;
+      continue;
+    }
+    files.push(word);
+  }
+  return files.some((file) => isProtectedMutationTarget(file));
+}
+
+function hasProtectedUtilityOperand(
+  args: readonly ShellWord[],
+  optionsWithValue: ReadonlySet<string>,
+): boolean {
+  return collectUtilityOperands(args, optionsWithValue, false).operands.some((operand) =>
+    isProtectedMutationTarget(operand),
+  );
+}
+
+function collectUtilityOperands(
+  args: readonly ShellWord[],
+  optionsWithValue: ReadonlySet<string>,
+  supportsTargetDirectory: boolean,
+): { operands: ShellWord[]; targetDirectory?: ShellWord } {
+  const operands: ShellWord[] = [];
+  let targetDirectory: ShellWord | undefined;
+  let optionsEnded = false;
+
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (!optionsEnded && value === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && supportsTargetDirectory) {
+      if (value === "-t" || value === "--target-directory") {
+        targetDirectory = args[index + 1];
+        index++;
+        continue;
+      }
+      if (value.startsWith("--target-directory=")) {
+        targetDirectory = {
+          ...word,
+          value: value.slice("--target-directory=".length),
+        };
+        continue;
+      }
+      if (value.startsWith("-t") && value.length > 2) {
+        targetDirectory = { ...word, value: value.slice(2) };
+        continue;
+      }
+    }
+    if (!optionsEnded && value.startsWith("--")) {
+      const optionName = value.split("=", 1)[0]!;
+      if (optionsWithValue.has(optionName) && !value.includes("=")) index++;
+      continue;
+    }
+    if (!optionsEnded && /^-[^-]/u.test(value)) {
+      const option = [...optionsWithValue].find(
+        (candidate) => candidate.length === 2 && value.startsWith(candidate),
+      );
+      if (option && value === option) index++;
+      continue;
+    }
+    operands.push(word);
+  }
+
+  return {
+    operands,
+    ...(targetDirectory ? { targetDirectory } : {}),
+  };
 }
 
 function hasDestructiveOutputRedirection(words: readonly ShellWord[]): boolean {
@@ -417,7 +634,7 @@ function isPotentiallyProtectedAbsoluteExpansion(target: ShellWord): boolean {
 
   const slashPath = target.value.replaceAll("\\", "/");
   const normalized = normalizeSlashPath(slashPath);
-  const expansionIndex = normalized.search(/[?*[{~$]/u);
+  const expansionIndex = normalized.search(/[?*[{~$@+!]/u);
   if (expansionIndex >= 0 && expansionTouchesAbsoluteRootComponent(normalized, expansionIndex)) {
     return true;
   }
@@ -515,6 +732,7 @@ function parseShell(command: string): ParsedShell {
   let quotedOrEscaped = false;
   let unquotedExpansion = false;
   let outputRedirection = false;
+  let extglobDepth = 0;
   let tokenStarted = false;
   let quote: "single" | "double" | undefined;
   let ambiguous = false;
@@ -527,6 +745,8 @@ function parseShell(command: string): ParsedShell {
     quotedOrEscaped = false;
     unquotedExpansion = false;
     outputRedirection = false;
+    if (extglobDepth > 0) ambiguous = true;
+    extglobDepth = 0;
     tokenStarted = false;
   };
   const finishCommand = (): void => {
@@ -631,6 +851,21 @@ function parseShell(command: string): ParsedShell {
     if (char === "#" && !tokenStarted) {
       finishCommand();
       while (index + 1 < command.length && command[index + 1] !== "\n") index++;
+      continue;
+    }
+    if (extglobDepth > 0) {
+      value += char;
+      if (char === "(") extglobDepth++;
+      if (char === ")") extglobDepth--;
+      if (/\s/u.test(char)) ambiguous = true;
+      tokenStarted = true;
+      continue;
+    }
+    if (char === "(" && /[@?!+*]$/u.test(value)) {
+      value += char;
+      unquotedExpansion = true;
+      extglobDepth = 1;
+      tokenStarted = true;
       continue;
     }
     if (char === "&" && next === ">") {
@@ -780,7 +1015,8 @@ function findExecutableIndex(words: readonly ShellWord[]): number {
 }
 
 function commandBasename(command: string): string {
-  return command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? command;
+  const basename = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? command;
+  return basename.endsWith(".exe") ? basename.slice(0, -4) : basename;
 }
 
 const MAX_NESTED_COMMAND_DEPTH = 8;
@@ -822,6 +1058,7 @@ const FIND_PRE_PATH_OPTIONS: ReadonlySet<string> = new Set(["-H", "-L", "-P"]);
 const FIND_EXEC_ACTIONS: ReadonlySet<string> = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 
 const FIND_DESTRUCTIVE_EXECUTABLES: ReadonlySet<string> = new Set([
+  "mv",
   "rm",
   "rmdir",
   "shred",
@@ -829,22 +1066,121 @@ const FIND_DESTRUCTIVE_EXECUTABLES: ReadonlySet<string> = new Set([
   "unlink",
 ]);
 
-const POWER_COMMANDS: ReadonlySet<string> = new Set([
-  "halt",
-  "halt.exe",
-  "poweroff",
-  "poweroff.exe",
-  "reboot",
-  "reboot.exe",
-  "shutdown",
-  "shutdown.exe",
+const FIND_EXEC_FORWARDERS: ReadonlySet<string> = new Set([
+  "builtin",
+  "busybox",
+  "chroot",
+  "command",
+  "doas",
+  "env",
+  "exec",
+  "nice",
+  "nohup",
+  "sudo",
+  "time",
+  "timeout",
+  "toybox",
 ]);
+
+const FIND_WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["doas", new Set(["-C", "-u"])],
+  ["env", new Set(["-a", "-C", "-u", "--argv0", "--chdir", "--unset"])],
+  ["exec", new Set(["-a"])],
+  ["nice", new Set(["-n", "--adjustment"])],
+  [
+    "sudo",
+    new Set([
+      "-g",
+      "-h",
+      "-p",
+      "-R",
+      "-r",
+      "-t",
+      "-T",
+      "-U",
+      "-u",
+      "--chroot",
+      "--close-from",
+      "--group",
+      "--host",
+      "--other-user",
+      "--prompt",
+      "--role",
+      "--type",
+      "--user",
+    ]),
+  ],
+  ["time", new Set(["-f", "-o", "--format", "--output"])],
+  ["timeout", new Set(["-k", "-s", "--kill-after", "--signal"])],
+]);
+
+const POWER_COMMANDS: ReadonlySet<string> = new Set(["halt", "poweroff", "reboot", "shutdown"]);
 
 const POWER_MANAGERS: ReadonlySet<string> = new Set(["init", "loginctl", "systemctl", "telinit"]);
 
 const POWER_ACTIONS: ReadonlySet<string> = new Set(["halt", "poweroff", "reboot"]);
 
+const POWER_TARGET_ACTIONS: ReadonlySet<string> = new Set(["isolate", "start"]);
+
+const POWER_TARGETS: ReadonlySet<string> = new Set([
+  "halt.target",
+  "poweroff.target",
+  "reboot.target",
+]);
+
 const PERMISSION_COMMANDS: ReadonlySet<string> = new Set(["chgrp", "chmod", "chown"]);
+
+const NATIVE_MUTATION_COMMANDS: ReadonlySet<string> = new Set([
+  "cp",
+  "install",
+  "ln",
+  "mv",
+  "rmdir",
+  "sed",
+  "shred",
+  "tee",
+  "truncate",
+  "unlink",
+]);
+
+const EMPTY_STRING_SET: ReadonlySet<string> = new Set();
+
+const COPY_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-S", "--suffix"]);
+
+const INSTALL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  ...COPY_OPTIONS_WITH_VALUE,
+  "-g",
+  "-m",
+  "-o",
+  "--group",
+  "--mode",
+  "--owner",
+  "--strip-program",
+]);
+
+const SHRED_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-n",
+  "-s",
+  "--iterations",
+  "--random-source",
+  "--size",
+]);
+
+const TRUNCATE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-r",
+  "-s",
+  "--reference",
+  "--size",
+]);
+
+const SED_SCRIPT_OPTIONS: ReadonlySet<string> = new Set(["-e", "-f", "--expression", "--file"]);
+
+const SED_SCRIPT_OPTIONS_WITH_VALUE_PREFIX: readonly string[] = [
+  "-e",
+  "-f",
+  "--expression=",
+  "--file=",
+];
 
 const GIT_GLOBAL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
   "-C",
@@ -867,6 +1203,9 @@ const CRITICAL_POSIX_ROOTS: readonly string[] = [
   "/lib64",
   "/library",
   "/opt",
+  "/private/etc",
+  "/private/tmp",
+  "/private/var",
   "/proc",
   "/root",
   "/run",
