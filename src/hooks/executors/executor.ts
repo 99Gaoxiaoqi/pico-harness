@@ -320,7 +320,7 @@ function startCommand(
   let child: ChildProcess;
   const spawnOptions: SpawnOptions = {
     cwd,
-    env: sanitizePackageInvocationEnvironment(handler, { ...baseEnv, ...handler.env }),
+    env: sanitizePackageInvocationEnvironment(handler, baseEnv),
     windowsHide: true,
     detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],

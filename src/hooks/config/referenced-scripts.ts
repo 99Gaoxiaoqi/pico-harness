@@ -1,5 +1,6 @@
 import { access, lstat, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, normalize, resolve } from "node:path";
+import { homedir } from "node:os";
 import type { HookHandler } from "../types.js";
 
 type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
@@ -22,16 +23,23 @@ export interface ReferencedScriptResolution {
 /** Package target selectors inherited from the host must not retarget a trusted invocation. */
 export function sanitizePackageInvocationEnvironment(
   handler: Extract<HookHandler, { type: "command" }>,
-  environment: Readonly<NodeJS.ProcessEnv>,
+  baseEnvironment: Readonly<NodeJS.ProcessEnv>,
 ): NodeJS.ProcessEnv {
+  const environment = { ...baseEnvironment, ...handler.env };
   const tokens = commandTokens(handler);
   const manager = referencedPackageManager(
     handler.args === undefined ? handler.command : [handler.command, ...handler.args].join(" "),
   );
   if (!manager || !unwrapPackageInvocation(tokens, manager)) return { ...environment };
-  return Object.fromEntries(
+  const sanitized = Object.fromEntries(
     Object.entries(environment).filter(([name]) => !isPackageSelectorEnvironmentName(name)),
   );
+  for (const name of Object.keys(handler.env ?? {}).filter(isPackageConfigurationSourceName)) {
+    const inherited = environmentValue(baseEnvironment, name);
+    if (inherited === undefined) delete sanitized[name];
+    else sanitized[name] = inherited;
+  }
+  return sanitized;
 }
 
 /**
@@ -41,6 +49,7 @@ export function sanitizePackageInvocationEnvironment(
 export async function resolveReferencedScripts(
   handler: HookHandler,
   workspace: string,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): Promise<ReferencedScriptResolution> {
   if (handler.type !== "command") return { paths: [], watchPaths: [], packageScripts: [] };
   const tokens = commandTokens(handler);
@@ -49,6 +58,10 @@ export async function resolveReferencedScripts(
   const invocation = packageTokens ? packageRunInvocation(packageTokens) : undefined;
   const packageScripts: ReferencedPackageScript[] = [];
   if (invocation) {
+    assertNoInheritedPackageSelectorEnvironment(environment, invocation.manager);
+    paths.push(
+      ...(await resolvePackageConfigurationPaths(workspace, environment, invocation.manager)),
+    );
     const resolved = await resolvePackageScript(invocation, workspace);
     packageScripts.push(resolved.reference);
     paths.push(...resolved.paths);
@@ -64,6 +77,86 @@ export async function resolveReferencedScripts(
     ]),
     packageScripts,
   };
+}
+
+async function resolvePackageConfigurationPaths(
+  workspace: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  manager: PackageManager,
+): Promise<readonly string[]> {
+  const candidates = packageConfigurationCandidates(workspace, environment);
+  for (const path of candidates) {
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) continue;
+      throw unsupportedPackageInvocation(manager, `无法安全读取 package-manager 配置 ${path}`);
+    }
+    const selector = packageSelectorConfigurationKey(raw);
+    if (selector) {
+      throw unsupportedPackageInvocation(
+        manager,
+        `package-manager 配置 ${path} 通过 ${selector} 改变 package.json 目标`,
+      );
+    }
+  }
+  return candidates;
+}
+
+function packageConfigurationCandidates(
+  workspace: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+): readonly string[] {
+  const candidates: string[] = [];
+  let current = normalize(resolve(workspace));
+  for (;;) {
+    candidates.push(resolve(current, ".npmrc"));
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  const userHome =
+    environmentValue(environment, "HOME") ??
+    environmentValue(environment, "USERPROFILE") ??
+    homedir();
+  if (userHome) candidates.push(resolve(userHome, ".npmrc"));
+  return sortedUnique(candidates);
+}
+
+function packageSelectorConfigurationKey(raw: string): string | undefined {
+  for (const sourceLine of raw.replace(/^\uFEFF/u, "").split(/\r?\n/u)) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const separator = line.indexOf("=");
+    const rawKey = separator < 0 ? line.split(/[\s#;]/u, 1)[0] : line.slice(0, separator);
+    const key = (rawKey ?? "").trim().replace(/\[\]$/u, "").toLowerCase().replace(/_/gu, "-");
+    if (key && PACKAGE_SELECTOR_CONFIGURATION_KEYS.has(key)) return key;
+  }
+  return undefined;
+}
+
+function assertNoInheritedPackageSelectorEnvironment(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  manager: PackageManager,
+): void {
+  const selector = Object.keys(environment).find(isPackageSelectorEnvironmentName);
+  if (selector) {
+    throw unsupportedPackageInvocation(
+      manager,
+      `继承环境变量 ${selector} 会改变 package.json 目标`,
+    );
+  }
+}
+
+function environmentValue(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  expectedName: string,
+): string | undefined {
+  const actualName = Object.keys(environment).find(
+    (name) => name.toLowerCase() === expectedName.toLowerCase(),
+  );
+  return actualName ? environment[actualName] : undefined;
 }
 
 /** Preserve the original direct-path behavior for callers that only need lexical candidates. */
@@ -419,7 +512,7 @@ function packageSelectorEnvironmentAssignment(definition: string): string | unde
   for (const segment of splitShellCommands(definition, false)) {
     for (const token of shellWords(segment)) {
       const name = environmentAssignmentName(token);
-      if (name && isPackageSelectorEnvironmentName(name)) return name;
+      if (name && isExplicitPackageConfigurationEnvironmentName(name)) return name;
     }
   }
   return undefined;
@@ -706,7 +799,7 @@ function assertNoExplicitPackageSelectorEnvironment(
       return name ? [name] : [];
     }),
   ];
-  const selector = names.find(isPackageSelectorEnvironmentName);
+  const selector = names.find(isExplicitPackageConfigurationEnvironmentName);
   if (selector) {
     throw unsupportedPackageInvocation(manager, `环境变量 ${selector} 会改变 package.json 目标`);
   }
@@ -830,7 +923,19 @@ function environmentAssignmentName(token: string): string | undefined {
 }
 
 function isPackageSelectorEnvironmentName(name: string): boolean {
-  return PACKAGE_SELECTOR_ENVIRONMENT_NAMES.has(name.toLowerCase());
+  return PACKAGE_SELECTOR_ENVIRONMENT_NAMES.has(normalizePackageEnvironmentName(name));
+}
+
+function isPackageConfigurationSourceName(name: string): boolean {
+  return PACKAGE_CONFIGURATION_SOURCE_ENVIRONMENT_NAMES.has(normalizePackageEnvironmentName(name));
+}
+
+function normalizePackageEnvironmentName(name: string): string {
+  return name.toLowerCase().replace(/-/gu, "_").replace(/\[\]$/u, "");
+}
+
+function isExplicitPackageConfigurationEnvironmentName(name: string): boolean {
+  return isPackageSelectorEnvironmentName(name) || isPackageConfigurationSourceName(name);
 }
 
 function referencedPackageManager(command: string): PackageManager | undefined {
@@ -904,7 +1009,11 @@ const DISPLAY_ONLY_COMMANDS = wordSet("echo printf type which where whence hash"
 const PACKAGE_DIRECTORY_COMMANDS = wordSet("cd pushd popd");
 const DYNAMIC_SHELL_CONTEXT_COMMANDS = wordSet(". source eval alias unalias");
 const PACKAGE_SELECTOR_ENVIRONMENT_NAMES = wordSet(
-  "npm_config_workspace npm_config_workspaces npm_config_include_workspace_root npm_config_prefix npm_config_dir npm_config_filter npm_config_recursive npm_config_workspace_root npm_config_global npm_config_location",
+  "npm_config_workspace npm_config_workspaces npm_config_include_workspace_root npm_config_prefix npm_config_dir npm_config_filter npm_config_recursive npm_config_workspace_root npm_config_global npm_config_location npm_config_cwd npm_config_local_prefix npm_config_global_prefix npm_config_userconfig npm_config_globalconfig",
+);
+const PACKAGE_CONFIGURATION_SOURCE_ENVIRONMENT_NAMES = wordSet("home userprofile");
+const PACKAGE_SELECTOR_CONFIGURATION_KEYS = wordSet(
+  "workspace workspaces include-workspace-root prefix dir filter recursive workspace-root global location cwd local-prefix global-prefix userconfig globalconfig",
 );
 
 const PACKAGE_FLAG_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {

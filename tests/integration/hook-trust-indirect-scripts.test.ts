@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { test } from "node:test";
 import { resolveReferencedScripts } from "../../src/hooks/config/referenced-scripts.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/executor.js";
 import { HookTrustStore, type HookTrustSubject } from "../../src/hooks/trust/store.js";
+
+const execFileAsync = promisify(execFile);
 
 test("package script definition changes invalidate Hook trust", async (context) => {
   const fixture = await createFixture(context);
@@ -194,6 +198,8 @@ for (const definition of [
   "yarn --cwd child run inner",
   "bun --cwd child run inner",
   "npm_config_workspace=child npm run inner",
+  "HOME=packages/app npm run inner",
+  "NPM_CONFIG_USERCONFIG=packages/app/.npmrc npm run inner",
   "export npm_config_prefix=packages/app; npm run inner",
   "echo 'npm run inner' | sh",
   'printf "npm run inner\\n" | bash',
@@ -218,7 +224,10 @@ for (const definition of [
   });
 }
 
-for (const scenario of [
+const selectorEnvironmentScenarios: readonly {
+  readonly label: string;
+  readonly handler: HookTrustSubject["handler"];
+}[] = [
   {
     label: "inline workspace selector environment",
     handler: { type: "command", command: "npm_config_workspace=child npm run test" },
@@ -235,7 +244,17 @@ for (const scenario of [
       env: { NPM_CONFIG_WORKSPACES: "true" },
     },
   },
-] as const) {
+  {
+    label: "inline HOME config-source selector",
+    handler: { type: "command", command: "HOME=child npm run test" },
+  },
+  {
+    label: "handler.env HOME config-source selector",
+    handler: { type: "command", command: "npm run test", env: { HOME: "child" } },
+  },
+];
+
+for (const scenario of selectorEnvironmentScenarios) {
   test(`${scenario.label} fails closed`, async (context) => {
     const fixture = await createFixture(context, scenario.handler);
     await writePackageScripts(fixture.workspace, { test: "node test.cjs" });
@@ -245,6 +264,106 @@ for (const scenario of [
       /环境变量 .* package\.json 目标/u,
     );
     assert.deepEqual(await fixture.store.list(), []);
+  });
+}
+
+test("project npmrc retargeting is observed by npm and rejected by trust status", async (context) => {
+  const fixture = await createFixture(context);
+  const child = join(fixture.workspace, "child");
+  await mkdir(child, { recursive: true });
+  await writeFile(
+    join(fixture.workspace, "package.json"),
+    `${JSON.stringify(
+      {
+        private: true,
+        workspaces: ["child"],
+        scripts: { pretool: "echo ROOT" },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await writeFile(
+    join(child, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "child",
+        version: "1.0.0",
+        scripts: { pretool: "echo CHILD" },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await fixture.store.trust(fixture.packageSubject);
+
+  await writeFile(join(fixture.workspace, ".npmrc"), "workspace=child\n");
+  const { stdout } = await execFileAsync("npm", ["run", "pretool"], {
+    cwd: fixture.workspace,
+    env: { PATH: process.env.PATH, HOME: fixture.home },
+  });
+
+  assert.match(stdout, /CHILD/u);
+  await assert.rejects(
+    fixture.store.status(fixture.packageSubject),
+    /package-manager 配置 .*\.npmrc 通过 workspace 改变 package\.json 目标/u,
+  );
+});
+
+for (const source of [
+  {
+    label: "ancestor",
+    path: (fixture: Fixture) => join(fixture.root, ".npmrc"),
+    config: "workspaces=true\n",
+  },
+  {
+    label: "user",
+    path: (fixture: Fixture) => join(fixture.home, ".npmrc"),
+    config: "workspaces\n",
+  },
+] as const) {
+  test(`${source.label} npmrc workspace selector fails closed`, async (context) => {
+    const fixture = await createFixture(context);
+    await writePackageScripts(fixture.workspace, { pretool: "node root.cjs" });
+    await writeFile(source.path(fixture), source.config);
+
+    await assert.rejects(
+      fixture.store.trust(fixture.packageSubject),
+      /package-manager 配置 .*\.npmrc 通过 workspaces 改变 package\.json 目标/u,
+    );
+  });
+}
+
+test("benign npmrc bytes remain trust-bound", async (context) => {
+  const fixture = await createFixture(context);
+  await writePackageScripts(fixture.workspace, { pretool: "node root.cjs" });
+  const configPath = join(fixture.workspace, ".npmrc");
+  await writeFile(configPath, "engine-strict=true\n");
+  await fixture.store.trust(fixture.packageSubject);
+  assert.equal(await fixture.store.status(fixture.packageSubject), "active");
+
+  await writeFile(configPath, "engine-strict=false\n");
+
+  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+});
+
+for (const selector of [
+  { name: "npm_config_workspace", value: "child" },
+  { name: "NPM_CONFIG_USERCONFIG", value: "custom.npmrc" },
+  { name: "npm_config_globalconfig", value: "global.npmrc" },
+] as const) {
+  test(`inherited ${selector.name} selector fails closed`, async (context) => {
+    const fixture = await createFixture(context);
+    await writePackageScripts(fixture.workspace, { pretool: "node root.cjs" });
+    const store = new HookTrustStore({
+      picoHome: join(fixture.root, `pico-${selector.name.toLowerCase()}`),
+      env: { HOME: fixture.home, [selector.name]: selector.value },
+    });
+
+    await assert.rejects(
+      store.trust(fixture.packageSubject),
+      /继承环境变量 .* package\.json 目标/u,
+    );
   });
 }
 
@@ -535,7 +654,10 @@ for (const command of ["echo npm test", "command -v npm"] as const) {
 }
 
 interface Fixture {
+  readonly root: string;
   readonly workspace: string;
+  readonly home: string;
+  readonly picoHome: string;
   readonly store: HookTrustStore;
   readonly packageSubject: HookTrustSubject;
 }
@@ -548,12 +670,17 @@ async function createFixture(
 ): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "pico-hook-indirect-trust-"));
   const workspace = join(root, "workspace");
+  const home = join(root, "home");
   const picoHome = join(root, "pico-home");
   await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(home, { recursive: true });
   context.after(() => rm(root, { recursive: true, force: true }));
   return {
+    root,
     workspace,
-    store: new HookTrustStore({ picoHome }),
+    home,
+    picoHome,
+    store: new HookTrustStore({ picoHome, env: { HOME: home } }),
     packageSubject: {
       workspace,
       source: { kind: "project", path: join(workspace, ".pico", "hooks.json"), version: 1 },
