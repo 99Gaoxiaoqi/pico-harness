@@ -237,7 +237,7 @@ function serializeForSummary(msgs: Message[]): string {
 export interface ToolResultMetaEntry {
   /** 首次缓存(append)的时间戳 */
   cachedAt: number;
-  /** 被 getWorkingMemory 读出的次数 */
+  /** 被 getModelContext 请求投影读出的次数 */
   accessCount: number;
 }
 

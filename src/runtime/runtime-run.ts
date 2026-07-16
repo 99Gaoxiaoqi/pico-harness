@@ -110,12 +110,6 @@ export interface RuntimeForkModelCheckpointSeed {
   readonly summary: Message;
 }
 
-export interface BootstrapRuntimeSessionHistoryOptions {
-  readonly session: Session;
-  readonly workDir: string;
-  readonly store?: RuntimeEventStore;
-}
-
 export interface RuntimeModelCallStartedOptions {
   readonly providerCallId: string;
   readonly provider?: string;
@@ -510,36 +504,6 @@ export class RuntimeRun {
   }
 
   /**
-   * Adopts an existing in-memory Session into canonical history before its first
-   * RuntimeEvent-backed run.
-   */
-  static async bootstrapSessionHistory(
-    options: BootstrapRuntimeSessionHistoryOptions,
-  ): Promise<boolean> {
-    const store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
-      });
-    if (await store.readSessionManifest(options.session.id)) return false;
-    const history = options.session.getModelContext();
-    if (history.length === 0) return false;
-
-    const run = await RuntimeRun.start({
-      sessionId: options.session.id,
-      workDir: options.workDir,
-      store,
-      writeGuard: options.session,
-    });
-    await run.run(async () => {
-      for (const message of history) {
-        await run.recordBootstrapMessage(message);
-      }
-    });
-    return true;
-  }
-
-  /**
    * Bridges Session writes that originate while no foreground Agent run is active
    * (for example a delivered subagent completion or an async hook wake-up). RuntimeEvent
    * remains the write-ahead source; Session is updated only through the short-lived run.
@@ -701,19 +665,6 @@ export class RuntimeRun {
       ...(refs ? { refs } : {}),
       kind: "message.committed",
       data: { message },
-    });
-  }
-
-  /** Persists a pre-runtime Session message without re-appending its in-memory projection. */
-  async recordBootstrapMessage(message: Message): Promise<void> {
-    this.assertOpen();
-    const canonicalMessage = canonicalizeRuntimeMessage(message);
-    const refs = this.messageRefs(canonicalMessage);
-    await this.append({
-      ...this.base(createRuntimeEventId("bootstrap-message")),
-      ...(refs ? { refs } : {}),
-      kind: "message.committed",
-      data: { message: canonicalMessage },
     });
   }
 

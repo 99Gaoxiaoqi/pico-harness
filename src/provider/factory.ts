@@ -35,7 +35,7 @@ export function createProvider(
   return createRawProvider(kind, config, thinkingEffort);
 }
 
-/** 创建原始 Provider;运行时 fallback/计费由装配层负责。 */
+/** 创建原始 Provider；运行时计费、重试与凭证轮换由装配层负责。 */
 export function createRawProvider(
   kind: ProviderKind,
   config: ProviderConfig,

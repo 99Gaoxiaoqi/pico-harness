@@ -152,8 +152,6 @@ export interface SessionOptions {
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   picoHome?: string;
   identity?: SessionIdentity;
-  /** @deprecated Session catalog is no longer written by Session. */
-  sessionCatalog?: false;
 }
 
 /** fork 只读边界：hydration 与父日志游标必须指向同一次 durable flush。 */
@@ -270,7 +268,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   private runtimeProjectionBranchId?: string;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
-  private compatibilityAppendTail: Promise<void> = Promise.resolve();
   private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
   private persistenceFailure?: SessionWriteUncertainError;
   private closePromise?: Promise<void>;
@@ -723,7 +720,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
 
   /** 等待当前已排队的会话写入完成。 */
   async flushPersistence(): Promise<void> {
-    await this.compatibilityAppendTail;
     await this.persistenceTail;
     if (this.persistenceFailure) throw this.persistenceFailure;
   }
@@ -876,22 +872,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.totalUnknownCostReports = usage.totalUnknownCostReports;
   }
 
-  /** @deprecated 仅供 legacy 同步调用方；生产路径必须 await commitMessages。 */
-  append(...msgs: Message[]): void {
-    this.assertWritable();
-    if (!this.store) {
-      for (const msg of msgs) this.appendOneInMemory(msg);
-      return;
-    }
-    const operation = this.commitMessages(...msgs);
-    this.compatibilityAppendTail = Promise.all([this.compatibilityAppendTail, operation])
-      .then(() => undefined)
-      .catch((error: unknown) => {
-        logger.error({ error: String(error) }, "[session] 兼容 append 持久化失败");
-      });
-  }
-
-  /** 生产接口：RuntimeEvent durable 后才刷新 Session/FTS 内存投影。 */
+  /** 生产接口：RuntimeEvent durable 后才刷新 Session 内存投影。 */
   async commitMessages(...msgs: Message[]): Promise<void> {
     this.assertWritable();
     if (!this.store) {
@@ -1062,14 +1043,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     return commitReceiptFromAppend(persisted);
   }
 
-  /** Checks the canonical RuntimeEvent entries for a stable event ID. */
-  async hasProjectionEvent(eventId: string): Promise<boolean> {
-    if (!eventId.trim()) return false;
-    if (!this.store) return this.inMemoryCommitReceipts.has(eventId);
-    await this.ensureRuntimeSession();
-    return (await this.store.readSessionEvent(this.id, eventId)) !== undefined;
-  }
-
   /**
    * Rebuilds the disposable Session projection from canonical RuntimeEvent history.
    */
@@ -1116,29 +1089,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     }
     this.restoreUsage(projected);
     this.updatedAt = new Date(events.at(-1)?.at ?? this.updatedAt);
-  }
-
-  /** 用 RuntimeEvent 拷贝父会话的冻结消息投影。 */
-  async seedForkFrom(source: Session, messages: readonly Message[]): Promise<void> {
-    this.assertWritable();
-    const seeded = [...structuredClone(messages)];
-    if (!this.store) {
-      if (this.history.length > 0) return;
-      for (const message of seeded) this.appendOneInMemory(message);
-      return;
-    }
-    await source.readDurableForkSnapshot();
-    await this.enqueuePersistence("fork seed", async (store) => {
-      await this.ensureRuntimeSession();
-      await RuntimeRun.bootstrapFork({
-        sourceSessionId: source.id,
-        targetSessionId: this.id,
-        messages: seeded,
-        workDir: this.workDir,
-        store,
-      });
-      await this.replayRuntimeHistoryProjection();
-    });
   }
 
   private prepareAppend(msg: Message): {
@@ -1739,7 +1689,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     };
   }
 
-  /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
+  /** 全量历史深拷贝，供宿主投影、诊断与压缩读取，不作为 Provider 的直接投影策略。 */
   getHistory(): Message[] {
     return structuredClone(this.history);
   }
@@ -1747,48 +1697,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   /** 当前历史消息条数 */
   get length(): number {
     return this.history.length;
-  }
-
-  /**
-   * 驾驭工程的核心!不返回全量历史,而是从后往前截取最近的 limit 条消息,
-   * 形成 Agent 的"短期工作记忆"。
-   *
-   * 【驾驭防线】大模型 API 强制要求历史消息的连续性!
-   * 若截断的第一条恰好是个孤儿 ToolResult(role=user 且带 toolCallId),
-   * 但发出该 ToolCall 的 assistant 消息已被截断抛弃,API 直接 400 Bad Request。
-   * 故切片首条若属孤儿工具响应,必须强行舍弃,顺延到下一条正常消息。
-   */
-  /** @deprecated Main-agent inference uses getModelContext(); retained for compatibility tests. */
-  getWorkingMemory(limit: number): Message[] {
-    const total = this.history.length;
-    let res: Message[];
-    if (total <= limit || limit <= 0) {
-      // 历史总量小于限制或不设限:全量返回(深拷贝以防外部修改污染内部)
-      res = this.history.map((m) => ({ ...m }));
-    } else {
-      // 截取最近的 limit 条
-      res = this.history.slice(total - limit).map((m) => ({ ...m }));
-
-      // 丢弃断头的孤儿 ToolResult,保证历史连续性
-      while (res.length > 0) {
-        const first = res[0]!;
-        if (first.role === "user" && first.toolCallId) {
-          res = res.slice(1);
-        } else {
-          break;
-        }
-      }
-    }
-
-    // 3.1 MicroCompaction:对本次返回的 ToolResult bump accessCount
-    // (bump 只对本次返回的算一次访问,反映"近期被读过")
-    for (const msg of res) {
-      if (msg.role === "user" && msg.toolCallId) {
-        const meta = this.toolResultMeta.get(msg.toolCallId);
-        if (meta) meta.accessCount++;
-      }
-    }
-    return res;
   }
 
   /**
@@ -1928,7 +1836,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
 
   /**
    * 发起关闭：同步停止接收新的 serialize 任务，返回的 Promise 在已接纳
-   * 的任务、兼容写入与 RuntimeEvent tail 完全 drain 后关闭资源并 resolve。
+   * 的任务与 RuntimeEvent tail 完全 drain 后关闭资源并 resolve。
    * 幂等(重复调用安全)。
    */
   close(): Promise<void> {
@@ -1936,7 +1844,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.acceptingSerializedTasks = false;
     this.lifecycle = "closing";
     const drain = this.runQueue
-      .then(() => this.compatibilityAppendTail)
       .then(() => this.persistenceTail)
       .then(async () => {
         const store = this.store;

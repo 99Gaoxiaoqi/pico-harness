@@ -410,14 +410,6 @@ function parseModelCapabilities(
     result.reasoning = parseModelReasoning(reasoning, configPath, `${field}.reasoning`);
   }
 
-  const fallback = value["fallback"];
-  if (fallback !== undefined) {
-    if (fallback !== false && (typeof fallback !== "string" || fallback.trim().length === 0)) {
-      throw configError(configPath, `${field}.fallback`, "must be a non-empty string or false");
-    }
-    result.fallback = typeof fallback === "string" ? fallback.trim() : false;
-  }
-
   const price = value["price"];
   if (price !== undefined) {
     if (!isRecord(price)) throw configError(configPath, `${field}.price`, "must be an object");

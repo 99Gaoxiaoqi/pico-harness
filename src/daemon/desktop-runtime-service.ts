@@ -618,7 +618,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     const session = new Session(sessionId, canonical, {
       persistence: true,
-      sessionCatalog: false,
       picoHome: this.picoHome,
     });
     try {
@@ -720,7 +719,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "分叉");
     const source = await globalSessionManager.getOrCreate(sessionId, canonical, {
       persistence: true,
-      sessionCatalog: false,
       picoHome: this.picoHome,
     });
     const targetSessionId = this.createSessionId();
@@ -2651,7 +2649,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<T> {
     const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
       persistence: true,
-      sessionCatalog: false,
       picoHome: this.picoHome,
     });
     return session.serialize(() => operation(session));

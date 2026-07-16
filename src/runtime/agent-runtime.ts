@@ -23,16 +23,15 @@ import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { createProvider, createRawProvider, type ProviderKind } from "../provider/factory.js";
-import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
 import type { CredentialRef, CredentialResolver } from "../provider/credential-vault.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
+import type { LLMProvider } from "../provider/interface.js";
 import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
 import { CredentialPool } from "../provider/credential-pool.js";
 import { resolveProviderProfile } from "../provider/profile.js";
-import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
+import type { ImagePart, Message } from "../schema/message.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { AskUserHandler } from "../tools/ask-user.js";
@@ -157,8 +156,6 @@ export interface RunAgentCliOptions {
   model?: string;
   modelRouteId?: string;
   modelCapabilities?: ModelRouteCapabilities;
-  /** Route-aware callers disable bare-model fallback because a fallback may need another endpoint. */
-  allowModelFallback?: boolean;
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;
   planMode?: boolean;
@@ -555,14 +552,12 @@ export async function executeAgentRuntime(
           }
         : undefined;
     const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
-      effectiveOptions.allowModelFallback === false
-        ? new CostTracker(
-            providerFactory(kind, config),
-            trackingRoute(kind, config),
-            session,
-            trackerOptions,
-          )
-        : createTrackedProviderWithFallback(kind, config, providerFactory, session, trackerOptions);
+      new CostTracker(
+        providerFactory(kind, config),
+        trackingRoute(kind, config),
+        session,
+        trackerOptions,
+      );
     let trackedProvider: LLMProvider;
     let rebuildProvider: (() => LLMProvider | undefined) | undefined;
     if (dependencies.provider !== undefined) {
@@ -1306,150 +1301,6 @@ function pruneRegistryToCommandAllowlist(
   const allowed = new Set(normalized);
   for (const tool of registry.getAvailableTools()) {
     if (!allowed.has(tool.name)) registry.unregister(tool.name);
-  }
-}
-
-function createTrackedProviderWithFallback(
-  kind: ProviderKind,
-  config: ProviderConfig,
-  providerFactory: RunAgentProviderFactory,
-  session: Session,
-  trackerOptions: CostTrackerOptions,
-): LLMProvider {
-  const fallbackModel = config.capabilities
-    ? config.capabilities.fallbackModel
-    : fallbackModelFor(config.model);
-  if (!fallbackModel) {
-    return new CostTracker(
-      providerFactory(kind, config),
-      trackingRoute(kind, config),
-      session,
-      trackerOptions,
-    );
-  }
-
-  return new CostTrackedModelFallbackProvider(
-    kind,
-    config,
-    fallbackModel,
-    providerFactory,
-    session,
-    trackerOptions,
-  );
-}
-
-/** @internal 保持计费路由的模型 fallback 包装器。 */
-export class CostTrackedModelFallbackProvider implements LLMProvider {
-  private readonly primaryProvider: LLMProvider;
-  private fallbackProvider: LLMProvider | undefined;
-  private fallbackSwitch: Promise<LLMProvider> | undefined;
-
-  constructor(
-    private readonly kind: ProviderKind,
-    private readonly primaryConfig: ProviderConfig,
-    private readonly fallbackModel: string,
-    private readonly providerFactory: RunAgentProviderFactory,
-    private readonly session: Session,
-    private readonly trackerOptions: CostTrackerOptions = {},
-  ) {
-    this.primaryProvider = this.createTrackedProvider(primaryConfig);
-  }
-
-  get modelName(): string {
-    if (this.fallbackProvider || this.fallbackSwitch) return this.fallbackModel;
-    return this.primaryProvider.modelName ?? this.primaryConfig.model;
-  }
-
-  async generate(
-    messages: Message[],
-    availableTools: ToolDefinition[],
-    options?: LLMProviderRequestOptions,
-  ): Promise<Message> {
-    const provider = await this.providerForRequest();
-    try {
-      return await provider.generate(messages, availableTools, options);
-    } catch (err) {
-      if (
-        provider !== this.primaryProvider ||
-        !isModelUnavailableError(err, this.primaryConfig.model)
-      ) {
-        throw err;
-      }
-
-      const fallback = await this.switchToFallback();
-      return fallback.generate(messages, availableTools, options);
-    }
-  }
-
-  async generateStream(
-    messages: Message[],
-    availableTools: ToolDefinition[],
-    onDelta: (delta: string) => void,
-    options?: LLMProviderRequestOptions,
-  ): Promise<Message> {
-    const provider = await this.providerForRequest();
-    try {
-      return await this.generateFrom(provider, messages, availableTools, onDelta, options);
-    } catch (err) {
-      if (
-        provider !== this.primaryProvider ||
-        !isModelUnavailableError(err, this.primaryConfig.model)
-      ) {
-        throw err;
-      }
-
-      const fallback = await this.switchToFallback();
-      return this.generateFrom(fallback, messages, availableTools, onDelta, options);
-    }
-  }
-
-  private providerForRequest(): Promise<LLMProvider> {
-    if (this.fallbackSwitch) return this.fallbackSwitch;
-    return Promise.resolve(this.primaryProvider);
-  }
-
-  private switchToFallback(): Promise<LLMProvider> {
-    if (!this.fallbackSwitch) {
-      console.warn(
-        `[Provider] ${this.primaryConfig.model} 不可用,自动切换到 ${this.fallbackModel}`,
-      );
-      this.fallbackSwitch = Promise.resolve().then(() => {
-        const provider = this.createTrackedProvider({
-          ...this.primaryConfig,
-          model: this.fallbackModel,
-        });
-        this.fallbackProvider = provider;
-        return provider;
-      });
-    }
-    return this.fallbackSwitch;
-  }
-
-  private generateFrom(
-    provider: LLMProvider,
-    messages: Message[],
-    availableTools: ToolDefinition[],
-    onDelta: (delta: string) => void,
-    options?: LLMProviderRequestOptions,
-  ): Promise<Message> {
-    return provider.generateStream
-      ? provider.generateStream(messages, availableTools, onDelta, options)
-      : provider.generate(messages, availableTools, options);
-  }
-
-  private createTrackedProvider(config: ProviderConfig): LLMProvider {
-    // A fallback model requires its own capability record. Until the router supplies one,
-    // omit primary-model metadata instead of pretending both models share capabilities.
-    const fallbackConfig =
-      config.model === this.primaryConfig.model
-        ? config
-        : { ...config, capabilities: undefined, routeId: undefined };
-    return new CostTracker(
-      this.providerFactory(this.kind, fallbackConfig),
-      trackingRoute(this.kind, fallbackConfig),
-      this.session,
-      this.trackerOptions,
-    );
   }
 }
 
