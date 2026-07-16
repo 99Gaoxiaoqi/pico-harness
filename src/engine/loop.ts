@@ -1093,7 +1093,14 @@ export class AgentEngine implements AgentRunner {
     }
     // AgentRuntime already owns the canonical RuntimeEvent run. Direct embedders are
     // serialized here so one durable Session cannot execute overlapping model turns.
-    if (ambientRun?.claimsSession(session)) return execute();
+    if (ambientRun?.claimsSession(session)) {
+      if (ambientRun.runtimeEventWriteGuard !== session) {
+        throw new Error(
+          `Runtime run ${ambientRun.runId} does not hold the exact Session write capability`,
+        );
+      }
+      return execute();
+    }
     return session.serialize(() => this.runWithRuntimeEvents(session, execute, signal));
   }
 
@@ -1107,6 +1114,7 @@ export class AgentEngine implements AgentRunner {
       sessionId: session.id,
       workDir: session.workDir,
       ...(runtimeStore ? { store: runtimeStore } : {}),
+      writeGuard: session,
     });
     await RuntimeRun.repairSessionProjection(session, {
       workDir: session.workDir,

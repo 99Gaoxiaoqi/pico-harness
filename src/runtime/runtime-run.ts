@@ -70,6 +70,8 @@ export interface ReconcileRuntimeRunsOptions {
   readonly workDir: string;
   readonly now?: () => Date;
   readonly store?: RuntimeEventStore;
+  /** Live reconciliation uses its exact Session; detached recovery intentionally omits it. */
+  readonly writeGuard?: RuntimeEventWriteGuard;
 }
 
 export interface RepairRuntimeSessionProjectionOptions {
@@ -292,8 +294,13 @@ export class RuntimeRun {
           recovered: true,
         },
       };
-      const results = await store.appendBatch(
-        existingTerminal ? syntheticToolResults : [...syntheticToolResults, terminal],
+      const results = await writeWithRuntimeEventGuard(
+        options.writeGuard,
+        () =>
+          store.appendBatch(
+            existingTerminal ? syntheticToolResults : [...syntheticToolResults, terminal],
+          ),
+        `Runtime reconciliation for session ${options.sessionId}`,
       );
       if (results.some((result) => result.inserted)) reconciled.push(runId);
     }
