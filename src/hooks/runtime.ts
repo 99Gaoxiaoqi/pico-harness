@@ -30,6 +30,8 @@ export interface SessionHookRuntimeOptions extends Pick<
   sessionId: string;
   /** Environment inherited by Hook processes. Hosts should pair it with picoHome. */
   env?: Readonly<NodeJS.ProcessEnv>;
+  /** Host/test seam for sharing the exact trust authority used by loading and execution. */
+  trustStore?: HookTrustStore;
 }
 
 export interface SessionHookRuntime {
@@ -48,11 +50,13 @@ export interface SessionHookRuntime {
 export async function createSessionHookRuntime(
   options: SessionHookRuntimeOptions,
 ): Promise<SessionHookRuntime> {
-  const trustStore = new HookTrustStore({
-    ...(options.userHome ? { userHome: options.userHome } : {}),
-    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
-    ...(options.env ? { env: options.env } : {}),
-  });
+  const trustStore =
+    options.trustStore ??
+    new HookTrustStore({
+      ...(options.userHome ? { userHome: options.userHome } : {}),
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+      ...(options.env ? { env: options.env } : {}),
+    });
   const stateStore = new HookLocalStateStore(options.workDir, {
     ...(options.picoHome
       ? { picoHome: options.picoHome }
@@ -82,6 +86,12 @@ export async function createSessionHookRuntime(
   const executor = new DefaultHookExecutor({
     workDir: options.workDir,
     ...(options.env ? { env: options.env } : {}),
+    authorizeCommandExecution: async (entry) =>
+      await trustStore.authorizeCommandExecution({
+        workspace: options.workDir,
+        source: entry.source,
+        handler: entry.handler,
+      }),
   });
   const service = new HookService({
     workDir: options.workDir,

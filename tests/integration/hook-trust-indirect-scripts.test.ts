@@ -18,6 +18,7 @@ import { test } from "node:test";
 import {
   resolveCommandHookExecution,
   resolveCommandHookInvocation,
+  resolveReferencedScripts,
   sanitizeCommandHookEnvironment,
 } from "../../src/hooks/config/referenced-scripts.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/executor.js";
@@ -175,8 +176,19 @@ test("Python virtualenv hooks preserve the selected logical executable path", as
     invocation.command,
     join(await realpath(fixture.workspace), ".venv", "bin", "python"),
   );
+  const references = await resolveReferencedScripts(handler, fixture.workspace);
+  assert.ok(references.watchPaths.includes(invocation.command));
+  assert.ok(references.watchPaths.includes(invocation.canonicalCommand));
 
-  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  const executor = new DefaultHookExecutor({
+    workDir: fixture.workspace,
+    authorizeCommandExecution: async (entry) =>
+      await fixture.store.authorizeCommandExecution({
+        workspace: fixture.workspace,
+        source: entry.source,
+        handler: entry.handler,
+      }),
+  });
   context.after(async () => await executor.dispose());
   const output = await executeStopHook(executor, fixture, handler, "python-virtualenv");
 

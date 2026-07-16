@@ -18,6 +18,7 @@ import type {
 } from "../types.js";
 import type { HookExecutor } from "../service.js";
 import {
+  revalidateResolvedCommandHookExecution,
   resolveCommandHookExecution,
   type ResolvedCommandHookInvocation,
 } from "../config/referenced-scripts.js";
@@ -63,6 +64,10 @@ export interface HookHandlerExecutorOptions {
   modelRuntime?: HookModelRuntime;
   fetch?: typeof globalThis.fetch;
   env?: Readonly<NodeJS.ProcessEnv>;
+  /** Product runtime capability that returns one currently trusted, fully resolved invocation. */
+  authorizeCommandExecution?: (
+    handler: ResolvedHookHandler,
+  ) => Promise<ResolvedCommandHookInvocation | undefined>;
   onAsyncRewake?: (handler: ResolvedHookHandler, output: HookOutput) => void | Promise<void>;
 }
 
@@ -132,11 +137,15 @@ export class DefaultHookExecutor implements HookExecutor {
     parentSignal?: AbortSignal,
   ): Promise<HookOutput> {
     const signal = handlerSignal(parentSignal, timeoutMs(handler));
-    const invocation = await resolveCommandHookExecution(
-      handler,
-      this.options.workDir,
-      this.options.env ?? process.env,
-    );
+    const invocation = this.options.authorizeCommandExecution
+      ? await this.options.authorizeCommandExecution(resolved)
+      : await resolveCommandHookExecution(
+          handler,
+          this.options.workDir,
+          this.options.env ?? process.env,
+        );
+    if (!invocation) throw new Error("command Hook 执行前信任已失效");
+    await revalidateResolvedCommandHookExecution(invocation);
     const running = startCommand(resolved, invocation, input, this.options.workDir, signal);
     const runsInBackground = handler.async || handler.asyncRewake;
     if (runsInBackground) {

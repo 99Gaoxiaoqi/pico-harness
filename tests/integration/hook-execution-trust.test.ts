@@ -1,12 +1,27 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadHookSnapshot } from "../../src/hooks/config.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/index.js";
+import { createSessionHookRuntime } from "../../src/hooks/runtime.js";
 import { HookService } from "../../src/hooks/service.js";
-import { HookTrustStore } from "../../src/hooks/trust/store.js";
+import {
+  HookTrustStore,
+  type HookTrustStatus,
+  type HookTrustSubject,
+} from "../../src/hooks/trust/store.js";
 
 test("command Hook revalidates script bytes immediately before execution", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-hook-execution-trust-"));
@@ -153,11 +168,157 @@ test("each command Hook revalidates after preceding handlers complete", async (c
   assert.ok(denied.diagnostics?.some((diagnostic) => /执行前信任已失效/u.test(diagnostic.message)));
 });
 
+test("session Hook runtime rejects an executable alias redirected after service revalidation", async (context) => {
+  if (process.platform === "win32") return context.skip("POSIX executable symlink fixture");
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-alias-execution-trust-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  const trustedTarget = join(workspace, "trusted-hook.cjs");
+  const replacementTarget = join(workspace, "replacement-hook.cjs");
+  const executableAlias = join(workspace, "hook-alias");
+  const nextAlias = join(workspace, ".hook-alias.next");
+  const trustedMarker = join(root, "trusted-executed.txt");
+  const replacementMarker = join(root, "replacement-executed.txt");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const handler = { type: "command", command: "./hook-alias" } as const;
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ PreToolUse: [{ hooks: [handler] }] }, null, 2)}\n`,
+  );
+  await writeExecutableMarkerScript(trustedTarget, trustedMarker, "trusted");
+  await writeExecutableMarkerScript(replacementTarget, replacementMarker, "replacement");
+  await symlink(trustedTarget, executableAlias);
+
+  const trustStore = new RedirectAfterStatusHookTrustStore({ picoHome });
+  const pending = await loadHookSnapshot({ workDir: workspace, picoHome, trustStore });
+  const pendingEntry = pending.snapshot.handlers.PreToolUse[0];
+  assert.ok(pendingEntry);
+  await trustStore.trustResolved(workspace, pendingEntry);
+
+  const runtime = await createSessionHookRuntime({
+    workDir: workspace,
+    picoHome,
+    sessionId: "hook-alias-execution-trust",
+    trustStore,
+  });
+  context.after(async () => await runtime.dispose());
+  const activeVersion = runtime.service.currentSnapshot().version;
+  assert.equal(runtime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted, true);
+
+  trustStore.redirectAfterNextActiveStatus(async () => {
+    await symlink(replacementTarget, nextAlias);
+    await rename(nextAlias, executableAlias);
+  });
+  const output = await runtime.service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
+
+  assert.equal(await exists(trustedMarker), false, "重定向后不应退回执行旧目标");
+  assert.equal(
+    await exists(replacementMarker),
+    false,
+    "旧 trusted snapshot 不得执行新 canonical 对象",
+  );
+  assert.ok(output.diagnostics?.some((diagnostic) => /执行前信任已失效/u.test(diagnostic.message)));
+
+  await waitUntil(
+    () =>
+      runtime.service.currentSnapshot().version > activeVersion &&
+      runtime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted === false,
+  );
+
+  const pendingVersion = runtime.service.currentSnapshot().version;
+  await symlink(trustedTarget, nextAlias);
+  await rename(nextAlias, executableAlias);
+  await waitUntil(
+    () =>
+      runtime.service.currentSnapshot().version > pendingVersion &&
+      runtime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted === true,
+  );
+
+  trustStore.redirectAfterNextAuthorization(async () => {
+    await symlink(replacementTarget, nextAlias);
+    await rename(nextAlias, executableAlias);
+  });
+  const postAuthorizationOutput = await runtime.service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
+
+  assert.equal(await exists(trustedMarker), false);
+  assert.equal(await exists(replacementMarker), false);
+  assert.ok(
+    postAuthorizationOutput.diagnostics?.some((diagnostic) =>
+      /logical executable 已重定向/u.test(diagnostic.message),
+    ),
+  );
+});
+
 async function writeMarkerScript(path: string, marker: string): Promise<void> {
   await writeFile(
     path,
     `require("node:fs").writeFileSync(process.argv[2], ${JSON.stringify(marker)});\n`,
   );
+}
+
+async function writeExecutableMarkerScript(
+  path: string,
+  markerPath: string,
+  marker: string,
+): Promise<void> {
+  await writeFile(
+    path,
+    `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(
+      markerPath,
+    )}, ${JSON.stringify(marker)});\nprocess.stdout.write('{"decision":"allow"}');\n`,
+  );
+  await chmod(path, 0o755);
+}
+
+class RedirectAfterStatusHookTrustStore extends HookTrustStore {
+  private redirect?: () => Promise<void>;
+  private redirectAfterAuthorization?: () => Promise<void>;
+
+  redirectAfterNextActiveStatus(redirect: () => Promise<void>): void {
+    this.redirect = redirect;
+  }
+
+  redirectAfterNextAuthorization(redirect: () => Promise<void>): void {
+    this.redirectAfterAuthorization = redirect;
+  }
+
+  override async status(subject: HookTrustSubject): Promise<HookTrustStatus> {
+    const status = await super.status(subject);
+    const redirect = status === "active" ? this.redirect : undefined;
+    if (redirect) {
+      this.redirect = undefined;
+      await redirect();
+    }
+    return status;
+  }
+
+  override async authorizeCommandExecution(subject: HookTrustSubject) {
+    const invocation = await super.authorizeCommandExecution(subject);
+    const redirect = invocation ? this.redirectAfterAuthorization : undefined;
+    if (redirect) {
+      this.redirectAfterAuthorization = undefined;
+      await redirect();
+    }
+    return invocation;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("等待 Hook alias watcher 刷新超时");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
