@@ -306,7 +306,7 @@ export function createProductionLocalDaemonHost(
       }
     },
     ensureWorkspaceRuntime: async (workspacePath) => {
-      await registrationStore.register(workspacePath);
+      const canonicalWorkspace = await registrationStore.register(workspacePath);
       if (host.status !== "running") {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
@@ -314,10 +314,10 @@ export function createProductionLocalDaemonHost(
         );
       }
       await host.refreshRegisteredWorkspaces();
-      if (!host.registeredWorkspaces.includes(workspacePath)) {
+      if (!host.registeredWorkspaces.includes(canonicalWorkspace)) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
-          `工作区 Cron runtime 启动失败: ${workspacePath}`,
+          `工作区 Cron runtime 启动失败: ${canonicalWorkspace}`,
         );
       }
     },

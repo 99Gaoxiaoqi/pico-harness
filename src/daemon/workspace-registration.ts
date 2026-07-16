@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
+import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -17,28 +18,40 @@ export class WorkspaceRegistrationStore {
   }
 
   async list(): Promise<readonly string[]> {
-    return (await this.read()).workspaces;
+    let workspaces: readonly string[] = [];
+    await this.mutate(async () => {
+      const state = await this.read();
+      workspaces = await normalizeWorkspacePaths(state.workspaces);
+      if (!samePaths(state.workspaces, workspaces)) {
+        await this.write({ version: VERSION, workspaces });
+      }
+    });
+    return workspaces;
   }
 
   async register(workspacePath: string): Promise<string> {
-    const canonical = await realpath(workspacePath);
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.mutate(async () => {
       const state = await this.read();
-      if (!state.workspaces.includes(canonical)) {
-        await this.write({ version: VERSION, workspaces: [...state.workspaces, canonical].sort() });
+      const normalized = await normalizeWorkspacePaths(state.workspaces);
+      const workspaces = [...new Set([...normalized, canonical])].sort();
+      if (!samePaths(state.workspaces, workspaces)) {
+        await this.write({ version: VERSION, workspaces });
       }
     });
     return canonical;
   }
 
   async unregister(workspacePath: string): Promise<string> {
-    const canonical = await realpath(workspacePath);
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.mutate(async () => {
       const state = await this.read();
-      if (state.workspaces.includes(canonical)) {
+      const normalized = await normalizeWorkspacePaths(state.workspaces);
+      const workspaces = normalized.filter((path) => path !== canonical);
+      if (!samePaths(state.workspaces, workspaces)) {
         await this.write({
           version: VERSION,
-          workspaces: state.workspaces.filter((path) => path !== canonical),
+          workspaces,
         });
       }
     });
@@ -86,6 +99,17 @@ export class WorkspaceRegistrationStore {
       });
     }
   }
+}
+
+async function normalizeWorkspacePaths(paths: readonly string[]): Promise<string[]> {
+  const normalized = await Promise.all(
+    paths.map(async (path) => await canonicalizeWorkspacePath(path).catch(() => path)),
+  );
+  return [...new Set(normalized)].sort();
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
 }
 
 function isState(value: unknown): value is { version: typeof VERSION; workspaces: string[] } {

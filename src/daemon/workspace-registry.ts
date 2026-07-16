@@ -59,7 +59,7 @@ function resolveGitTopLevel(workspacePath: string): Promise<string | undefined> 
       {
         cwd: workspacePath,
         encoding: "utf8",
-        env: { ...process.env, LANG: "C", LC_ALL: "C" },
+        env: gitDiscoveryEnvironment(process.env),
         maxBuffer: 64 * 1024,
         timeout: 5_000,
         windowsHide: true,
@@ -81,4 +81,11 @@ function resolveGitTopLevel(workspacePath: string): Promise<string | undefined> 
       },
     );
   });
+}
+
+function gitDiscoveryEnvironment(environment: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
+  const isolated = Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !name.toUpperCase().startsWith("GIT_")),
+  );
+  return { ...isolated, LANG: "C", LC_ALL: "C" };
 }
