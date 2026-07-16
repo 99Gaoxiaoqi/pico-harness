@@ -4,6 +4,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -22,6 +23,8 @@ import type {
 
 const LEGACY_SUMMARY_FILE_VERSION = 1;
 const SUMMARY_FILE_VERSION = 2 as const;
+const LEGACY_SUMMARY_SNAPSHOT_SUFFIX = ".migrating-v2";
+const LEGACY_SUMMARY_ARCHIVE_SUFFIX = ".migrated-v2";
 
 interface SummaryFileV2 {
   schemaVersion: typeof SUMMARY_FILE_VERSION;
@@ -29,14 +32,9 @@ interface SummaryFileV2 {
   summary: StoredSessionSummary & { basis: SessionSummaryBasis };
 }
 
-interface SummaryCompatibilityIndexV2 {
-  schemaVersion: typeof SUMMARY_FILE_VERSION;
-  summaries: Record<string, StoredSessionSummary>;
-}
-
 export interface SessionSummaryStoreOptions {
   persistent: boolean;
-  /** legacy 聚合文件路径；v2 会在同级 summaries/ 中按 session 分文件保存。 */
+  /** legacy 聚合文件路径；仅用于向同级 summaries/ 的一次性迁移。 */
   filePath: string;
 }
 
@@ -59,6 +57,17 @@ export class SummaryIntegrityError extends Error {
   ) {
     super(message);
     this.name = "SummaryIntegrityError";
+  }
+}
+
+export class SummaryMigrationError extends Error {
+  constructor(
+    readonly sourcePath: string,
+    message: string,
+    override readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "SummaryMigrationError";
   }
 }
 
@@ -107,8 +116,8 @@ export class InMemorySessionSummaryStore implements SessionSummaryStore {
 }
 
 /**
- * v2 以每个 Session 一个原子 JSON 文件为权威状态。legacy 聚合文件只用于
- * 首次导入与一个兼容周期的可见索引，损坏时不会破坏已发布的 per-session 文件。
+ * v2 以每个 Session 一个原子 JSON 文件为唯一权威状态。legacy 聚合文件仅在
+ * 构造时执行一次性迁移，全部条目发布成功后才归档，运行期不再读写聚合索引。
  */
 export class FileSessionSummaryStore
   extends InMemorySessionSummaryStore
@@ -117,13 +126,11 @@ export class FileSessionSummaryStore
   private persistenceAvailable = true;
   private temporaryFileSequence = 0;
   private readonly summariesDirectory: string;
-  private readonly compatibilityFallbacks = new Map<string, StoredSessionSummary>();
-  private compatibilityIndexError: unknown;
 
-  constructor(private readonly filePath: string) {
+  constructor(filePath: string) {
     super();
     this.summariesDirectory = join(dirname(filePath), basename(filePath, ".json"));
-    this.loadCompatibilityIndex();
+    this.migrateLegacyIndex(filePath);
   }
 
   override get persistent(): boolean {
@@ -137,7 +144,6 @@ export class FileSessionSummaryStore
     basis?: SessionSummaryBasis,
   ): void {
     super.save(sessionId, summary, messageCount, basis);
-    this.compatibilityFallbacks.delete(sessionId);
     const stored = this.summaries.get(sessionId)!;
     if (!stored.basis) throw new Error("Summary basis was not initialized");
     try {
@@ -150,7 +156,6 @@ export class FileSessionSummaryStore
         } satisfies SummaryFileV2,
         this.temporaryFileSequence++,
       );
-      this.persistCompatibilityIndex();
       this.persistenceAvailable = true;
     } catch (error) {
       this.persistenceAvailable = false;
@@ -174,8 +179,7 @@ export class FileSessionSummaryStore
         this.summaries.set(sessionId, file.summary);
         return cloneSummary(file.summary);
       }
-      const fallback = this.compatibilityFallbacks.get(sessionId);
-      return fallback ? cloneSummary(fallback) : null;
+      return null;
     } catch (error) {
       this.persistenceAvailable = false;
       logger.warn({ error, sessionId }, "读取 per-session 会话摘要失败");
@@ -188,14 +192,12 @@ export class FileSessionSummaryStore
     const summary = this.get(sessionId);
     if (!summary?.basis || isSummaryBasisCovered(summary.basis, boundary)) return false;
     this.summaries.delete(sessionId);
-    this.compatibilityFallbacks.delete(sessionId);
     try {
       try {
         unlinkSync(this.sessionPath(sessionId));
       } catch (error) {
         if (getErrorCode(error) !== "ENOENT") throw error;
       }
-      this.persistCompatibilityIndex();
       return true;
     } catch (error) {
       this.persistenceAvailable = false;
@@ -242,8 +244,6 @@ export class FileSessionSummaryStore
 
     writeJsonAtomicSync(targetPath, targetFile, this.temporaryFileSequence++);
     this.summaries.set(targetSessionId, clonedSummary);
-    this.compatibilityFallbacks.delete(targetSessionId);
-    this.persistCompatibilityIndex();
     return {
       sourceSessionId,
       targetSessionId,
@@ -255,75 +255,149 @@ export class FileSessionSummaryStore
   private resolveCloneSource(sessionId: string): SummaryFileV2 | undefined {
     const path = this.sessionPath(sessionId);
     if (existsSync(path)) return this.readSummaryFileStrict(path, sessionId);
-    if (this.compatibilityIndexError) {
-      throw new SummaryIntegrityError(
-        sessionId,
-        `会话摘要兼容索引损坏，无法判定源摘要是否存在: ${this.filePath}`,
-        this.compatibilityIndexError,
-      );
-    }
-    const fallback = this.compatibilityFallbacks.get(sessionId);
-    if (!fallback) return undefined;
-
-    const migratedSummary: StoredSessionSummary & { basis: SessionSummaryBasis } = {
-      ...fallback,
-      basis: fallback.basis
-        ? { ...fallback.basis }
-        : {
-            throughEventId: null,
-            messageCount: fallback.messageCount,
-            prefixDigest: null,
-          },
-    };
-    const migrated = {
-      schemaVersion: SUMMARY_FILE_VERSION,
-      sessionId,
-      summary: migratedSummary,
-    } satisfies SummaryFileV2;
-    try {
-      writeJsonAtomicSync(path, migrated, this.temporaryFileSequence++);
-      this.summaries.set(sessionId, migratedSummary);
-      this.compatibilityFallbacks.delete(sessionId);
-      this.persistCompatibilityIndex();
-      return migrated;
-    } catch (error) {
-      throw new SummaryIntegrityError(sessionId, `迁移 legacy 会话摘要失败: ${path}`, error);
-    }
+    return undefined;
   }
 
   private readSummaryFileStrict(path: string, sessionId: string): SummaryFileV2 {
     try {
       return parseSummaryFileV2(JSON.parse(readFileSync(path, "utf8")) as unknown, sessionId);
     } catch (error) {
-      throw new SummaryIntegrityError(sessionId, `会话摘要损坏，拒绝克隆: ${path}`, error);
+      throw new SummaryIntegrityError(sessionId, `per-session 会话摘要损坏: ${path}`, error);
     }
   }
 
-  private loadCompatibilityIndex(): void {
+  private migrateLegacyIndex(filePath: string): void {
+    const snapshotPath = `${filePath}${LEGACY_SUMMARY_SNAPSHOT_SUFFIX}`;
+    const archivePath = `${filePath}${LEGACY_SUMMARY_ARCHIVE_SUFFIX}`;
+    // 归档文件同时是完成标记；即使旧进程重新生成 aggregate，也不得再次参与读取。
+    if (existsSync(archivePath)) {
+      this.syncMigrationDirectory(filePath, "确认 legacy 聚合索引完成标记失败");
+      return;
+    }
+    if (!this.captureLegacySnapshot(filePath, snapshotPath, archivePath)) return;
+
+    if (existsSync(archivePath)) {
+      this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引完成标记失败");
+      return;
+    }
+
+    let summaries: Record<string, StoredSessionSummary>;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(this.filePath, "utf8"));
-      const summaries = parseCompatibilityIndex(parsed);
-      for (const summary of Object.values(summaries)) {
-        this.compatibilityFallbacks.set(summary.sessionId, summary);
-      }
+      const parsed: unknown = JSON.parse(readFileSync(snapshotPath, "utf8"));
+      summaries = parseLegacySummaryIndex(parsed);
     } catch (error) {
-      if (getErrorCode(error) === "ENOENT") return;
-      // 聚合索引不再是权威源；损坏不禁用 per-session 读取。
-      this.compatibilityIndexError = error;
-      logger.warn({ error, filePath: this.filePath }, "会话摘要兼容索引无效");
+      if (existsSync(archivePath)) {
+        this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引完成标记失败");
+        return;
+      }
+      throw summaryMigrationError(
+        filePath,
+        `读取或解析 legacy 聚合索引固定快照失败（快照保留: ${snapshotPath}）`,
+        error,
+      );
+    }
+
+    for (const summary of Object.values(summaries)) {
+      const migratedSummary = withSummaryBasis(summary);
+      const targetPath = this.sessionPath(summary.sessionId);
+      try {
+        const created = writeJsonAtomicIfAbsentSync(
+          targetPath,
+          {
+            schemaVersion: SUMMARY_FILE_VERSION,
+            sessionId: summary.sessionId,
+            summary: migratedSummary,
+          } satisfies SummaryFileV2,
+          this.temporaryFileSequence++,
+        );
+        if (!created) this.readSummaryFileStrict(targetPath, summary.sessionId);
+      } catch (error) {
+        throw summaryMigrationError(
+          filePath,
+          `发布或校验会话 ${JSON.stringify(summary.sessionId)} 的 per-session 摘要失败（快照保留: ${snapshotPath}）`,
+          error,
+        );
+      }
+    }
+
+    if (existsSync(archivePath)) {
+      this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引完成标记失败");
+      return;
+    }
+    try {
+      renameSync(snapshotPath, archivePath);
+    } catch (error) {
+      if (existsSync(archivePath)) {
+        this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引完成标记失败");
+        return;
+      }
+      throw summaryMigrationError(
+        filePath,
+        `归档 legacy 聚合索引固定快照失败（快照保留: ${snapshotPath}）`,
+        error,
+      );
+    }
+    // 不删除原 aggregate：它可能已被并发旧 writer 替换。archive marker 会让新 Runtime 永久忽略它。
+    this.syncMigrationDirectory(filePath, `持久化 legacy 聚合索引完成标记失败: ${archivePath}`);
+  }
+
+  private captureLegacySnapshot(
+    filePath: string,
+    snapshotPath: string,
+    archivePath: string,
+  ): boolean {
+    if (existsSync(snapshotPath)) {
+      this.syncMigrationDirectory(filePath, "确认 legacy 聚合索引固定快照失败");
+      return true;
+    }
+
+    try {
+      // hard link 固定本次迁移快照；旧 writer 后续替换 aggregate 不会改变快照内容。
+      linkSync(filePath, snapshotPath);
+      this.syncMigrationDirectory(filePath, "持久化 legacy 聚合索引固定快照失败");
+      return true;
+    } catch (error) {
+      if (existsSync(archivePath)) {
+        this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引完成标记失败");
+        return false;
+      }
+      if (getErrorCode(error) === "EEXIST" || existsSync(snapshotPath)) {
+        this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引固定快照失败");
+        return true;
+      }
+      if (getErrorCode(error) !== "ENOENT") {
+        throw summaryMigrationError(filePath, "建立 legacy 聚合索引固定快照失败", error);
+      }
+    }
+
+    if (existsSync(snapshotPath)) {
+      this.syncMigrationDirectory(filePath, "确认并发 legacy 聚合索引固定快照失败");
+      return true;
+    }
+
+    try {
+      writeJsonAtomicIfAbsentSync(
+        archivePath,
+        {
+          schemaVersion: 1,
+          migration: "per-session-summary-v2",
+          legacyAggregate: "absent",
+        },
+        this.temporaryFileSequence++,
+      );
+      this.syncMigrationDirectory(filePath, "持久化无 legacy 聚合索引完成标记失败");
+      return false;
+    } catch (error) {
+      throw summaryMigrationError(filePath, "记录无 legacy 聚合索引的完成标记失败", error);
     }
   }
 
-  private persistCompatibilityIndex(): void {
-    writeJsonAtomicSync(
-      this.filePath,
-      {
-        schemaVersion: SUMMARY_FILE_VERSION,
-        summaries: Object.fromEntries(new Map([...this.compatibilityFallbacks, ...this.summaries])),
-      } satisfies SummaryCompatibilityIndexV2,
-      this.temporaryFileSequence++,
-    );
-    this.compatibilityIndexError = undefined;
+  private syncMigrationDirectory(filePath: string, operation: string): void {
+    try {
+      syncDirectory(dirname(filePath));
+    } catch (error) {
+      throw summaryMigrationError(filePath, operation, error);
+    }
   }
 
   private sessionPath(sessionId: string): string {
@@ -363,18 +437,22 @@ export function isSummaryBasisCovered(
   return true;
 }
 
-function parseCompatibilityIndex(value: unknown): Record<string, StoredSessionSummary> {
-  if (!isRecord(value) || !isRecord(value.summaries)) throw new Error("Invalid summary index");
+function parseLegacySummaryIndex(value: unknown): Record<string, StoredSessionSummary> {
+  if (!isRecord(value) || !isRecord(value.summaries)) {
+    throw new Error("legacy 会话摘要索引缺少 summaries 对象");
+  }
   if (
     value.version !== LEGACY_SUMMARY_FILE_VERSION &&
     value.schemaVersion !== SUMMARY_FILE_VERSION
   ) {
-    throw new Error("Unsupported summary index version");
+    throw new Error("legacy 会话摘要索引版本不受支持");
   }
   const summaries: Record<string, StoredSessionSummary> = {};
   for (const [sessionId, candidate] of Object.entries(value.summaries)) {
     const summary = parseStoredSessionSummary(candidate);
-    if (!summary || summary.sessionId !== sessionId) throw new Error("Invalid stored summary");
+    if (!summary || summary.sessionId !== sessionId) {
+      throw new Error(`legacy 会话摘要条目无效: ${JSON.stringify(sessionId)}`);
+    }
     summaries[sessionId] = summary;
   }
   return summaries;
@@ -445,6 +523,70 @@ function cloneSummary(summary: StoredSessionSummary): StoredSessionSummary {
   return { ...summary, ...(summary.basis ? { basis: { ...summary.basis } } : {}) };
 }
 
+function withSummaryBasis(
+  summary: StoredSessionSummary,
+): StoredSessionSummary & { basis: SessionSummaryBasis } {
+  return {
+    ...summary,
+    basis: summary.basis
+      ? { ...summary.basis }
+      : {
+          throughEventId: null,
+          messageCount: summary.messageCount,
+          prefixDigest: null,
+        },
+  };
+}
+
+function summaryMigrationError(
+  sourcePath: string,
+  operation: string,
+  cause: unknown,
+): SummaryMigrationError {
+  return new SummaryMigrationError(
+    sourcePath,
+    `legacy 会话摘要迁移失败（${operation}）: ${sourcePath}: ${errorMessage(cause)}`,
+    cause,
+  );
+}
+
+function writeJsonAtomicIfAbsentSync(path: string, value: unknown, sequence: number): boolean {
+  const directory = dirname(path);
+  const temporaryPath = join(
+    directory,
+    `.${basename(path)}.${process.pid}.${Date.now()}.${sequence}.tmp`,
+  );
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+  let fileDescriptor: number | undefined;
+  try {
+    fileDescriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fsyncSync(fileDescriptor);
+    closeSync(fileDescriptor);
+    fileDescriptor = undefined;
+    try {
+      // hard link 只在目标不存在时原子发布，避免并发迁移覆盖 per-session 权威文件。
+      linkSync(temporaryPath, path);
+    } catch (error) {
+      if (getErrorCode(error) === "EEXIST") return false;
+      throw error;
+    }
+    chmodSync(path, 0o600);
+    syncDirectory(directory);
+    return true;
+  } finally {
+    if (fileDescriptor !== undefined) closeSync(fileDescriptor);
+    try {
+      unlinkSync(temporaryPath);
+    } catch (error) {
+      if (getErrorCode(error) !== "ENOENT") {
+        logger.warn({ error, temporaryPath }, "清理会话摘要迁移临时文件失败");
+      }
+    }
+  }
+}
+
 function writeJsonAtomicSync(path: string, value: unknown, sequence: number): void {
   const directory = dirname(path);
   const temporaryPath = join(
@@ -503,4 +645,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function getErrorCode(error: unknown): string | undefined {
   return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
