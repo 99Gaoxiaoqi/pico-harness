@@ -11,6 +11,7 @@ import {
   type RuntimeResponse,
   type JsonValue,
   serializeRuntimeNotification,
+  parseStrictRuntimeParams,
   isJsonObject,
 } from "./protocol.js";
 import {
@@ -158,13 +159,17 @@ export class LocalRuntimeDaemon {
     setSubscription: (dispose: () => void) => void,
   ): Promise<void> {
     try {
-      if (request.method === "events.replay") {
-        const events = await this.options.service.replayEvents(readCursor(request.params));
+      const validatedRequest = {
+        ...request,
+        params: parseStrictRuntimeParams(request.method, request.params),
+      } as RuntimeRequest;
+      if (validatedRequest.method === "events.replay") {
+        const events = await this.options.service.replayEvents(readCursor(validatedRequest.params));
         this.write(socket, success(request, { events: events.map(serializeRuntimeNotification) }));
         return;
       }
-      if (request.method === "events.subscribe") {
-        const cursor = readCursor(request.params);
+      if (validatedRequest.method === "events.subscribe") {
+        const cursor = readCursor(validatedRequest.params);
         if (!cursor.workspacePath) {
           throw new RuntimeProtocolError(
             "INVALID_PARAMS",
@@ -187,7 +192,7 @@ export class LocalRuntimeDaemon {
         );
         return;
       }
-      const result = await this.options.service.handle(request);
+      const result = await this.options.service.handle(validatedRequest);
       this.write(socket, success(request, result));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
