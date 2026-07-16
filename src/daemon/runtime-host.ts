@@ -4,7 +4,7 @@ import type { LocalDaemonEndpoint } from "./endpoint.js";
 import { removeLocalDaemonEndpoint, resolveLocalDaemonEndpoint } from "./endpoint.js";
 import { LocalDaemonInstanceLock, type LocalDaemonInstanceLockOptions } from "./instance-lock.js";
 import { LocalRuntimeDaemon } from "./server.js";
-import type { DisposableLocalRuntimeService } from "./service.js";
+import type { DisposableLocalRuntimeService, ShutdownOwnershipFence } from "./service.js";
 import type {
   CronWorkspaceRuntimeFactory,
   ManagedCronWorkspaceRuntime,
@@ -35,6 +35,8 @@ export class LocalDaemonHost {
   private readonly daemon: LocalRuntimeDaemon;
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly cronRuntimes = new Map<string, ManagedCronWorkspaceRuntime>();
+  private readonly cronShutdownRuntimes = new Map<string, ManagedCronWorkspaceRuntime>();
+  private readonly cronShutdownFailures = new Map<string, unknown>();
   private instanceLock?: LocalDaemonInstanceLock;
   private state: HostState = "stopped";
   private serviceClosed = false;
@@ -162,10 +164,18 @@ export class LocalDaemonHost {
     for (const [workspacePath, runtime] of this.cronRuntimes) {
       if (registered.has(workspacePath)) continue;
       this.cronRuntimes.delete(workspacePath);
-      await runtime.close();
+      this.cronShutdownRuntimes.set(workspacePath, runtime);
+      try {
+        runtime.beginClose?.();
+        await runtime.close();
+        this.trackCronOwnershipRelease(workspacePath, runtime);
+      } catch (error) {
+        this.cronShutdownFailures.set(workspacePath, error);
+      }
     }
     for (const workspacePath of registered) {
       if (this.cronRuntimes.has(workspacePath)) continue;
+      if (this.cronShutdownRuntimes.has(workspacePath)) continue;
       try {
         const runtime = await this.options.cronRuntimeFactory.create({
           workspacePath,
@@ -178,6 +188,44 @@ export class LocalDaemonHost {
         this.options.onWorkspaceError?.(workspacePath, error);
       }
     }
+    const shutdownFailure = this.cronShutdownFailures.values().next();
+    if (!shutdownFailure.done) throw shutdownFailure.value;
+    const reactivatedWhileClosing = [...registered].find((workspacePath) =>
+      this.cronShutdownRuntimes.has(workspacePath),
+    );
+    if (reactivatedWhileClosing) {
+      throw new Error(`Cron runtime 仍在关闭，暂时无法重新注册: ${reactivatedWhileClosing}`);
+    }
+  }
+
+  private trackCronOwnershipRelease(
+    workspacePath: string,
+    runtime: ManagedCronWorkspaceRuntime,
+  ): void {
+    const ownership = readCronOwnershipFence(runtime);
+    if (ownership.error !== undefined) {
+      this.cronShutdownFailures.set(workspacePath, ownership.error);
+      return;
+    }
+    if (!ownership.fence) {
+      if (this.cronShutdownRuntimes.get(workspacePath) === runtime) {
+        this.cronShutdownRuntimes.delete(workspacePath);
+      }
+      return;
+    }
+    void ownership.fence.released.then(
+      () => {
+        if (
+          this.cronShutdownRuntimes.get(workspacePath) === runtime &&
+          !this.cronShutdownFailures.has(workspacePath)
+        ) {
+          this.cronShutdownRuntimes.delete(workspacePath);
+        }
+      },
+      (error: unknown) => {
+        this.cronShutdownFailures.set(workspacePath, error);
+      },
+    );
   }
 
   private async closeResources(): Promise<void> {
@@ -188,27 +236,58 @@ export class LocalDaemonHost {
     } catch (error) {
       daemonCloseError = error;
     }
-    const runtimes = [...this.cronRuntimes.values()];
+    const runtimes = [
+      ...new Set([...this.cronRuntimes.values(), ...this.cronShutdownRuntimes.values()]),
+    ];
     this.cronRuntimes.clear();
-    const runtimeCloseResults = await Promise.allSettled(
-      runtimes.map((runtime) => runtime.close()),
-    );
-    const runtimeCloseFailure = runtimeCloseResults.find((result) => result.status === "rejected");
+    const runtimeClosePromises = runtimes.map(async (runtime) => {
+      runtime.beginClose?.();
+      await runtime.close();
+    });
     let serviceCloseError: unknown;
     try {
       await this.closeService();
     } catch (error) {
       serviceCloseError = error;
-    } finally {
+    }
+    const runtimeCloseResults = await Promise.allSettled(runtimeClosePromises);
+    const runtimeCloseFailure = runtimeCloseResults.find((result) => result.status === "rejected");
+    const priorRuntimeCloseFailure = this.cronShutdownFailures.values().next();
+    const cronOwnership = runtimes.map(readCronOwnershipFence);
+    const cronOwnershipFailure = cronOwnership.find(
+      (ownership) => ownership.error !== undefined,
+    )?.error;
+    const cronOwnershipFences = cronOwnership.flatMap((ownership) =>
+      ownership.fence ? [ownership.fence] : [],
+    );
+    const cronOwnershipFence: ShutdownOwnershipFence | undefined =
+      cronOwnershipFences.length > 0
+        ? {
+            pending: cronOwnershipFences.some((fence) => fence.pending),
+            released: Promise.all(cronOwnershipFences.map((fence) => fence.released)).then(
+              () => undefined,
+            ),
+          }
+        : undefined;
+    void cronOwnershipFence?.released.catch(() => undefined);
+    try {
       await this.releaseInstanceLockWhenSafe({
         unfencedResourcesClosed:
-          daemonCloseError === undefined && runtimeCloseFailure === undefined,
+          daemonCloseError === undefined &&
+          runtimeCloseFailure === undefined &&
+          priorRuntimeCloseFailure.done === true &&
+          cronOwnershipFailure === undefined,
         serviceCloseSucceeded: this.serviceCloseSucceeded,
+        additionalFences: cronOwnershipFence ? [cronOwnershipFence] : [],
       });
+    } catch (error) {
+      if (serviceCloseError === undefined) serviceCloseError = error;
     }
     if (serviceCloseError !== undefined) throw serviceCloseError;
     if (daemonCloseError !== undefined) throw daemonCloseError;
     if (runtimeCloseFailure?.status === "rejected") throw runtimeCloseFailure.reason;
+    if (priorRuntimeCloseFailure.done !== true) throw priorRuntimeCloseFailure.value;
+    if (cronOwnershipFailure !== undefined) throw cronOwnershipFailure;
   }
 
   private closeService(): Promise<void> {
@@ -236,25 +315,32 @@ export class LocalDaemonHost {
   private async releaseInstanceLockWhenSafe(options: {
     unfencedResourcesClosed: boolean;
     serviceCloseSucceeded: boolean;
+    additionalFences?: readonly ShutdownOwnershipFence[];
   }): Promise<void> {
     const instanceLock = this.instanceLock;
     if (!instanceLock) return;
-    const fence = this.options.service.shutdownOwnershipFence?.();
-    if (!options.unfencedResourcesClosed || (!options.serviceCloseSucceeded && !fence)) {
+    const serviceFence = this.options.service.shutdownOwnershipFence?.();
+    if (!options.unfencedResourcesClosed || (!options.serviceCloseSucceeded && !serviceFence)) {
       logger.error(
         { lockPath: instanceLock.lockPath },
         "Daemon shutdown could not prove ownership release; retaining singleton lock",
       );
       return;
     }
-    if (!fence || !fence.pending) {
-      await fence?.released;
+    const fences = [serviceFence, ...(options.additionalFences ?? [])].filter(
+      (fence): fence is ShutdownOwnershipFence => fence !== undefined,
+    );
+    const ownershipRelease = Promise.all(fences.map((fence) => fence.released)).then(
+      () => undefined,
+    );
+    if (!fences.some((fence) => fence.pending)) {
+      await ownershipRelease;
       await instanceLock.release();
       if (this.instanceLock === instanceLock) this.instanceLock = undefined;
       return;
     }
 
-    const deferredRelease = fence.released.then(async () => {
+    const deferredRelease = ownershipRelease.then(async () => {
       await instanceLock.release();
       if (this.instanceLock === instanceLock) this.instanceLock = undefined;
     });
@@ -264,6 +350,32 @@ export class LocalDaemonHost {
         "Daemon shutdown ownership fence failed; retaining singleton lock",
       );
     });
+  }
+}
+
+function readCronOwnershipFence(runtime: ManagedCronWorkspaceRuntime): {
+  fence?: ShutdownOwnershipFence;
+  error?: unknown;
+} {
+  const readPending = runtime.hasPendingOwnership;
+  const waitForRelease = runtime.waitForOwnershipRelease;
+  if (!readPending && !waitForRelease) return {};
+  if (!readPending || !waitForRelease) {
+    return {
+      error: new Error(
+        "Cron runtime ownership fence 不完整：hasPendingOwnership 与 waitForOwnershipRelease 必须同时提供",
+      ),
+    };
+  }
+  try {
+    return {
+      fence: {
+        pending: readPending.call(runtime),
+        released: waitForRelease.call(runtime),
+      },
+    };
+  } catch (error) {
+    return { error };
   }
 }
 
