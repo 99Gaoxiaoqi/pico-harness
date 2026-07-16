@@ -194,6 +194,7 @@ export class SessionForkService {
         sessionId: source.id,
         workDir: this.workDir,
         store: sourceRuntimeStore,
+        writeGuard: source,
       });
       await RuntimeRun.repairSessionProjection(source, {
         workDir: this.workDir,
