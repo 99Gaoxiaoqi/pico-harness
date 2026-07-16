@@ -11,6 +11,8 @@ import {
 import { resolveReferencedScripts } from "./referenced-scripts.js";
 import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
 
+const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 1_000;
+
 export interface HookConfigChangeContext {
   oldSnapshot: HookSnapshot;
   candidate: LoadHookSnapshotResult;
@@ -19,8 +21,13 @@ export interface HookConfigChangeContext {
 
 export interface HookConfigReloaderOptions extends LoadHookSnapshotOptions {
   debounceMs?: number;
+  /** stop 等待旧 generation 串行尾收口的最长时间。 */
+  stopDrainTimeoutMs?: number;
   initial?: LoadHookSnapshotResult;
-  /** 由集成层使用旧 HookService snapshot 发 ConfigChange；deny 时不交换。 */
+  /**
+   * 由集成层使用旧 HookService snapshot 发 ConfigChange；deny 时不交换。
+   * stop deadline 后旧代 guard 可能晚返回，候选准备态必须绑定 context.candidate。
+   */
   beforeSwap?: (context: HookConfigChangeContext) => Promise<HookOutput | boolean>;
   /** 同步提交回调；所有异步准备必须在 beforeSwap 内完成。 */
   onSwap: (result: LoadHookSnapshotResult) => undefined;
@@ -45,9 +52,11 @@ export class HookConfigReloader {
   private generation = 0;
   private serial = Promise.resolve();
   private stoppingPromise?: Promise<void>;
+  private readonly stopDrainTimeoutMs: number;
 
   constructor(private readonly options: HookConfigReloaderOptions) {
     this.current = options.initial;
+    this.stopDrainTimeoutMs = boundedDrainTimeout(options.stopDrainTimeoutMs);
   }
 
   async start(): Promise<LoadHookSnapshotResult> {
@@ -75,7 +84,7 @@ export class HookConfigReloader {
     if (this.stopped) return false;
     const generation = this.generation;
     let accepted = false;
-    this.serial = this.serial
+    const running = (this.serial = this.serial
       .catch(() => undefined)
       .then(async () => {
         if (!this.isActive(generation)) return;
@@ -132,8 +141,13 @@ export class HookConfigReloader {
           closeWatcherMap(preparedWatchers);
           throw error;
         }
-      });
-    await this.serial;
+      }));
+    try {
+      await running;
+    } catch (error) {
+      if (!this.isActive(generation)) return false;
+      throw error;
+    }
     return accepted;
   }
 
@@ -146,7 +160,7 @@ export class HookConfigReloader {
     if (this.stopped) return false;
     const generation = this.generation;
     let retired = false;
-    this.serial = this.serial
+    const running = (this.serial = this.serial
       .catch(() => undefined)
       .then(async () => {
         if (!this.isActive(generation)) return;
@@ -195,8 +209,13 @@ export class HookConfigReloader {
           closeWatcherMap(preparedWatchers);
           throw error;
         }
-      });
-    await this.serial;
+      }));
+    try {
+      await running;
+    } catch (error) {
+      if (!this.isActive(generation)) return false;
+      throw error;
+    }
     return retired;
   }
 
@@ -207,7 +226,10 @@ export class HookConfigReloader {
     this.generation++;
     this.clearScheduledReload();
     this.closeWatchers();
-    const stopping = this.finishStop();
+    const draining = this.serial.catch(() => undefined);
+    // 旧 generation 可能永久卡在外部 beforeSwap。新一代不能继承该串行尾。
+    this.serial = Promise.resolve();
+    const stopping = this.finishStop(draining);
     const tracked = stopping.finally(() => {
       if (this.stoppingPromise === tracked) this.stoppingPromise = undefined;
     });
@@ -232,7 +254,14 @@ export class HookConfigReloader {
       if (!this.isActive(generation)) return;
       const changed = [...this.changed];
       this.changed.clear();
-      void this.reload(changed);
+      void this.reload(changed).catch((error: unknown) => {
+        if (!this.isActive(generation)) return;
+        try {
+          this.options.onReject?.(`Hook 重载失败: ${String(error)}`);
+        } catch {
+          // Watcher 回调没有可传递的 caller，避免二次报错变成 unhandled rejection。
+        }
+      });
     }, this.options.debounceMs ?? 120);
     this.timer = timer;
   }
@@ -321,10 +350,32 @@ export class HookConfigReloader {
     this.watchers.clear();
   }
 
-  private async finishStop(): Promise<void> {
-    await this.serial.catch(() => undefined);
+  private async finishStop(draining: Promise<void>): Promise<void> {
+    await settleWithinDeadline(draining, this.stopDrainTimeoutMs);
     this.clearScheduledReload();
     this.closeWatchers();
+  }
+}
+
+function boundedDrainTimeout(value: number | undefined): number {
+  const timeoutMs = value ?? DEFAULT_STOP_DRAIN_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError("Hook reloader stopDrainTimeoutMs 必须是非负有限数");
+  }
+  return timeoutMs;
+}
+
+async function settleWithinDeadline(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

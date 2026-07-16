@@ -73,9 +73,7 @@ export async function createSessionHookRuntime(
   const componentSources = new Map<string, HookConfigSourceSpec>();
   let componentSourceSequence = 0;
   let componentSourceQueue = Promise.resolve();
-  let candidateRules:
-    | { readonly snapshotId: string; readonly rules: readonly HookifyRule[] }
-    | undefined;
+  const candidateRules = new WeakMap<LoadHookSnapshotResult, readonly HookifyRule[]>();
   const decisionProvider: HookDecisionProvider = {
     evaluate(event, payload) {
       return evaluateHookifyRules(rules, event, payload);
@@ -102,7 +100,6 @@ export async function createSessionHookRuntime(
     ...loadOptions,
     initial,
     beforeSwap: async ({ candidate, changedPaths }) => {
-      candidateRules = undefined;
       let nextRules: readonly HookifyRule[];
       try {
         nextRules = await loadHookifyRules(options.workDir);
@@ -114,19 +111,18 @@ export async function createSessionHookRuntime(
         proposedHash: candidate.snapshot.id,
       });
       if (decision.decision === "allow") {
-        candidateRules = { snapshotId: candidate.snapshot.id, rules: nextRules };
+        candidateRules.set(candidate, nextRules);
       }
       return decision;
     },
     onSwap(result) {
       service.replaceSnapshot(result.snapshot);
-      if (candidateRules?.snapshotId === result.snapshot.id) {
-        rules = candidateRules.rules;
-      }
-      candidateRules = undefined;
+      const nextRules = candidateRules.get(result);
+      if (nextRules) rules = nextRules;
+      candidateRules.delete(result);
     },
-    onReject(message) {
-      candidateRules = undefined;
+    onReject(message, candidate) {
+      if (candidate) candidateRules.delete(candidate);
       logger.warn({ message }, "[Hook] 配置热重载被拒绝，保留旧快照");
       void service
         .dispatch("Notification", { level: "error", message })
