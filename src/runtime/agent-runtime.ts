@@ -943,6 +943,7 @@ export async function executeAgentRuntime(
         sessionId: session.id,
         workDir,
         store: runtimeEventStore,
+        writeGuard: session,
       });
       dependencies.onEvent?.({
         type: "run.started",

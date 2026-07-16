@@ -660,6 +660,7 @@ function createCompactCommand(
           sessionId: session.id,
           workDir: session.workDir,
           store: runtimeEventStore,
+          writeGuard: session,
         });
         const preview = await runtimeRun.run(async () => {
           const entries = await runtimeRun.readModelHistoryEntries();
