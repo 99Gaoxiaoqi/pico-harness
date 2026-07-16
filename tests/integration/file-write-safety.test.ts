@@ -232,6 +232,87 @@ test(
   },
 );
 
+test(
+  "Linux atomic staging keeps inherited ACL readers out until final publication",
+  { skip: process.platform !== "linux" },
+  async (context) => {
+    const fixture = await createFixture("linux-private-staging");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "private.txt");
+    await writeFile(targetPath, "old-content\n");
+    await execFileAsync("/usr/bin/setfacl", ["-m", "u:65534:r--", targetPath]);
+    const precondition = await captureAtomicFilePrecondition(targetPath);
+    let revalidationCount = 0;
+    let inspectedPrivateStage = false;
+
+    await assert.rejects(
+      writeAtomicWorkspaceFile({
+        targetPath,
+        content: "UNPUBLISHED-SECRET\n",
+        precondition,
+        revalidateTarget: async () => {
+          revalidationCount++;
+          if (revalidationCount !== 3) return;
+          const temporaryName = (await readdir(fixture.workspace)).find((entry) =>
+            entry.startsWith(TEMPORARY_FILE_PREFIX),
+          );
+          assert.ok(temporaryName, "完整写入后的发布前复核必须观察到临时文件");
+          const temporaryPath = join(fixture.workspace, temporaryName);
+          assert.equal((await stat(temporaryPath)).mode & 0o777, 0o600);
+          const { stdout: acl } = await execFileAsync("/usr/bin/getfacl", ["-cpn", temporaryPath]);
+          assert.doesNotMatch(acl, /^user:65534:r--$/mu);
+          inspectedPrivateStage = true;
+          await writeFile(targetPath, "concurrent-change\n");
+        },
+      }),
+      /目标文件已被替换或修改/u,
+    );
+
+    assert.equal(inspectedPrivateStage, true);
+    assert.equal(await readFile(targetPath, "utf8"), "concurrent-change\n");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "Linux write-only xattrs fail closed when metadata cannot be read completely",
+  {
+    skip:
+      process.platform !== "linux" ||
+      (typeof process.geteuid === "function" && process.geteuid() === 0),
+  },
+  async (context) => {
+    const fixture = await createFixture("linux-write-only-xattr");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "write-only-xattr.txt");
+    await writeFile(targetPath, "old-content\n");
+    await execFileAsync("/usr/bin/setfattr", ["-n", "user.pico", "-v", "must-survive", targetPath]);
+    const originalInode = (await stat(targetPath)).ino;
+    await chmod(targetPath, 0o200);
+
+    try {
+      await assert.rejects(
+        new WriteFileTool(fixture.workspace).execute(
+          JSON.stringify({ path: "write-only-xattr.txt", content: "replacement\n" }),
+        ),
+        /Linux.*扩展属性|Linux 目标元数据/u,
+      );
+    } finally {
+      await chmod(targetPath, 0o600);
+    }
+
+    assert.equal((await stat(targetPath)).ino, originalInode);
+    assert.equal(await readFile(targetPath, "utf8"), "old-content\n");
+    const { stdout } = await execFileAsync(
+      "/usr/bin/getfattr",
+      ["--only-values", "-n", "user.pico", targetPath],
+      { encoding: "utf8" },
+    );
+    assert.equal(stdout.trimEnd(), "must-survive");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
 test("edit_file not-found leaves the original inode and content untouched", async (context) => {
   const fixture = await createFixture("not-found");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
