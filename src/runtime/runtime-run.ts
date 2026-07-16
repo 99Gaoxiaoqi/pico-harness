@@ -123,6 +123,7 @@ export interface RuntimeModelCallSettledOptions {
   readonly latencyMs: number;
   readonly usage?: RuntimeModelCallSettledEvent["data"]["usage"];
   readonly costCNY?: number;
+  readonly costStatus?: RuntimeModelCallSettledEvent["data"]["costStatus"];
   readonly error?: string;
 }
 

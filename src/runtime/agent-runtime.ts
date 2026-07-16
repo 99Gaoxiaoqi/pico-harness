@@ -581,6 +581,10 @@ export async function executeAgentRuntime(
     let activeMcpManager = dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
+      modelRuntime: {
+        run: (execute, signal) =>
+          runHostOwnedRuntimeOperation(session, runtimeEventStore, execute, signal),
+      },
       mcpInvoker: {
         async invokeConnectedTool(server, tool, input, context) {
           if (!activeMcpManager) throw new Error("MCP manager 尚未连接");
@@ -1411,6 +1415,43 @@ function hookPurposeProvider(provider: LLMProvider): LLMProvider {
         }
       : {}),
   };
+}
+
+async function runHostOwnedRuntimeOperation<Result>(
+  session: Session,
+  store: RuntimeEventStore,
+  execute: () => Promise<Result>,
+  signal: AbortSignal,
+): Promise<Result> {
+  const ambient = currentRuntimeRun();
+  if (ambient) {
+    if (!ambient.claimsSession(session) || ambient.runtimeEventWriteGuard !== session) {
+      throw new Error(
+        `Hook model handler cannot reuse RuntimeRun ${ambient.runId} for Session ${session.id}`,
+      );
+    }
+    return execute();
+  }
+
+  return session.serialize(async () => {
+    await RuntimeRun.reconcileIncompleteRuns({
+      sessionId: session.id,
+      workDir: session.workDir,
+      store,
+      writeGuard: session,
+    });
+    await RuntimeRun.repairSessionProjection(session, {
+      workDir: session.workDir,
+      store,
+    });
+    const runtimeRun = await RuntimeRun.start({
+      sessionId: session.id,
+      workDir: session.workDir,
+      store,
+      writeGuard: session,
+    });
+    return runtimeRun.run(execute, signal);
+  });
 }
 
 function activeRouteModelRouter(

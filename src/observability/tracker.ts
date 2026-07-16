@@ -96,7 +96,7 @@ export class CostTracker implements LLMProvider {
   ): Promise<Message> {
     const callId = this.options.callId?.() ?? `call_${randomUUID()}`;
     const context = this.resolveContext(purpose);
-    const runtimeRun = currentRuntimeRun();
+    const runtimeRun = this.requireMatchingRuntimeRun();
     const route = normalizeRoute(this.modelRoute);
     await runtimeRun?.recordModelCallStarted({
       providerCallId: callId,
@@ -132,6 +132,21 @@ export class CostTracker implements LLMProvider {
       this.recordLedger(callId, context, status, undefined, latencyMs, error);
       throw error;
     }
+  }
+
+  /** Durable Session calls must already be enclosed by the host's canonical RuntimeRun. */
+  private requireMatchingRuntimeRun() {
+    const runtimeRun = currentRuntimeRun();
+    if (!this.session?.runtimeEventStore) return runtimeRun;
+    if (
+      !runtimeRun?.claimsSession(this.session) ||
+      runtimeRun.runtimeEventWriteGuard !== this.session
+    ) {
+      throw new Error(
+        `CostTracker requires a matching host-owned RuntimeRun for durable Session ${this.session.id}`,
+      );
+    }
+    return runtimeRun;
   }
 
   private resolveContext(purpose?: LLMProviderRequestOptions["purpose"]): ProviderCallContext {
