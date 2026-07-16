@@ -8,7 +8,10 @@ import { promisify } from "node:util";
 const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
 // Node 未暴露 Linux O_PATH；该稳定 ABI 标志让覆盖绑定目标 inode 而不额外要求读权限。
 const LINUX_O_PATH_FLAG = 0o10000000;
+// Linux O_TMPFILE 的高位在当前支持架构上一致，O_DIRECTORY 则由 Node 提供架构值。
+const LINUX_O_TMPFILE_FLAG = 0o20000000 | (constants.O_DIRECTORY ?? 0);
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
+const METADATA_PROBE_PREFIX = ".pico-metadata-probe-";
 const MACOS_PROVENANCE_ATTRIBUTE = "com.apple.provenance";
 const LINUX_CAPABILITY_ATTRIBUTE = "security.capability";
 const LINUX_POSIX_ACL_ATTRIBUTE = "system.posix_acl_access";
@@ -40,6 +43,7 @@ interface LinuxMetadataSource {
   readonly handle: FileHandle;
   readonly version: FileVersion;
   readonly attributes: ReadonlyMap<string, string>;
+  readonly permissionMode: number;
 }
 
 export type AtomicFilePrecondition =
@@ -155,13 +159,16 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
   await assertDirectoryIdentity(directory, directoryIdentity);
   await assertTargetPrecondition(input.targetPath, input.precondition);
   const macMetadata = await captureMacExtendedMetadata(input.targetPath, input.precondition);
-  const linuxMetadataSource = await openLinuxMetadataSource(input.targetPath, input.precondition);
+  const linuxMetadataSource = await openLinuxMetadataSource(
+    input.targetPath,
+    input.precondition,
+    directory,
+  );
 
   const temporaryPath = join(
     directory,
     `${TEMPORARY_FILE_PREFIX}${randomBytes(16).toString("hex")}.tmp`,
   );
-  const createMode = input.precondition.kind === "file" ? 0o600 : 0o666;
   const bytes = Buffer.from(input.content, "utf8");
   let handle: FileHandle | undefined;
   let temporaryIdentity: FileVersion | undefined;
@@ -172,7 +179,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     handle = await open(
       temporaryPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW_FLAG,
-      createMode,
+      0o600,
     );
     const temporaryInfo = await handle.stat({ bigint: true });
     assertRegularNonSymlink(temporaryInfo, temporaryPath);
@@ -180,11 +187,8 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     const publishedPermissionMode =
       input.precondition.kind === "file"
         ? input.precondition.permissionMode
-        : Number(temporaryInfo.mode & 0o777n);
-    if (input.precondition.kind === "missing") {
-      // 先由 open(0666) 得到与旧实现相同的 umask/default-ACL 模式，再收紧暂存权限。
-      await handle.chmod(0o600);
-    } else if (linuxMetadataSource) {
+        : (linuxMetadataSource?.permissionMode ?? 0o666 & ~process.umask());
+    if (linuxMetadataSource) {
       // 暂存阶段只迁移不会放宽访问的 user.* 属性；ACL 延迟到内容完整且发布前
       // 路径复核通过后再应用，其他安全 namespace 只接受同目录自然继承的相同值。
       await stageLinuxExtendedMetadata(
@@ -269,8 +273,10 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
 async function openLinuxMetadataSource(
   targetPath: string,
   precondition: AtomicFilePrecondition,
+  directory: string,
 ): Promise<LinuxMetadataSource | undefined> {
-  if (process.platform !== "linux" || precondition.kind !== "file") return undefined;
+  if (process.platform !== "linux") return undefined;
+  if (precondition.kind === "missing") return openLinuxCreationMetadataProbe(directory);
   let handle: FileHandle | undefined;
   try {
     handle = await open(targetPath, LINUX_O_PATH_FLAG | NO_FOLLOW_FLAG);
@@ -284,11 +290,78 @@ async function openLinuxMetadataSource(
     if (!sameFileVersion(precondition.version, toFileVersion(after))) {
       throw new Error(`读取扩展元数据时目标文件发生并发变化: ${targetPath}`);
     }
-    return { handle, version: precondition.version, attributes };
+    return {
+      handle,
+      version: precondition.version,
+      attributes,
+      permissionMode: precondition.permissionMode,
+    };
   } catch (error) {
     await handle?.close().catch(() => undefined);
     throw new Error(`无法绑定 Linux 目标元数据，已拒绝覆盖: ${targetPath}`, { cause: error });
   }
+}
+
+async function openLinuxCreationMetadataProbe(directory: string): Promise<LinuxMetadataSource> {
+  let handle: FileHandle | undefined;
+  let namedProbePath: string | undefined;
+  let namedProbeIdentity: FileVersion | undefined;
+  try {
+    try {
+      handle = await open(
+        directory,
+        constants.O_RDWR | constants.O_EXCL | NO_FOLLOW_FLAG | LINUX_O_TMPFILE_FLAG,
+        0o666,
+      );
+    } catch (error) {
+      if (!isUnsupportedAnonymousTemporaryFileError(error)) throw error;
+      namedProbePath = join(
+        directory,
+        `${METADATA_PROBE_PREFIX}${randomBytes(16).toString("hex")}.tmp`,
+      );
+      handle = await open(
+        namedProbePath,
+        constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW_FLAG,
+        0o666,
+      );
+      const namedInfo = await handle.stat({ bigint: true });
+      assertRegularNonSymlink(namedInfo, namedProbePath);
+      namedProbeIdentity = toFileVersion(namedInfo);
+      await unlinkIfSameFile(namedProbePath, namedProbeIdentity);
+    }
+
+    const probeInfo = await handle.stat({ bigint: true });
+    assertRegularNonSymlink(probeInfo, directory);
+    if (probeInfo.nlink !== 0n || probeInfo.size !== 0n) {
+      throw new Error("new-file metadata probe is not an empty unlinked inode");
+    }
+    const version = toFileVersion(probeInfo);
+    const attributes = await readLinuxExtendedAttributes(handle, directory);
+    const after = await handle.stat({ bigint: true });
+    if (!sameFileVersion(version, toFileVersion(after))) {
+      throw new Error("new-file metadata probe changed while being inspected");
+    }
+    return {
+      handle,
+      version,
+      attributes,
+      permissionMode: Number(probeInfo.mode & 0o777n),
+    };
+  } catch (error) {
+    if (namedProbePath && namedProbeIdentity) {
+      await unlinkIfSameFile(namedProbePath, namedProbeIdentity).catch(() => undefined);
+    }
+    await handle?.close().catch(() => undefined);
+    throw new Error(`无法安全推导 Linux 新文件权限，已拒绝创建: ${directory}`, {
+      cause: error,
+    });
+  }
+}
+
+function isUnsupportedAnonymousTemporaryFileError(error: unknown): boolean {
+  return ["EINVAL", "EISDIR", "ENOSYS", "ENOTSUP", "EOPNOTSUPP"].some((code) =>
+    hasErrnoCode(error, code),
+  );
 }
 
 async function stageLinuxExtendedMetadata(

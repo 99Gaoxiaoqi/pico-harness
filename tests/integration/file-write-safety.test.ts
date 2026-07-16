@@ -24,6 +24,7 @@ import { EditFileTool, WriteFileTool } from "../../src/tools/registry-impl.js";
 
 const EDIT_FILE_MAX_BYTES = 16 * 1024 * 1024;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
+const METADATA_PROBE_PREFIX = ".pico-metadata-probe-";
 const execFileAsync = promisify(execFile);
 
 test("write_file atomically creates and overwrites while preserving ordinary metadata", async (context) => {
@@ -164,7 +165,9 @@ test(
     await chmod(targetPath, 0o755);
     await execFileAsync("/usr/bin/setfacl", ["-m", "u:65534:r--", targetPath]);
     await execFileAsync("/usr/bin/setfattr", ["-n", "user.pico", "-v", "preserve-me", targetPath]);
+    const canSetCapability = typeof process.geteuid === "function" && process.geteuid() === 0;
     const setCapability = async (): Promise<void> => {
+      if (!canSetCapability) return;
       await execFileAsync("/usr/sbin/setcap", ["cap_net_bind_service=ep", targetPath]);
       const { stdout } = await execFileAsync("/usr/sbin/getcap", [targetPath], {
         encoding: "utf8",
@@ -183,7 +186,13 @@ test(
       ]);
       assert.match(acl, /^user:65534:r--$/mu);
       assert.equal(attribute.trimEnd(), "preserve-me");
-      assert.equal(capability, "", "内容改变后不能复活旧 security.capability");
+      assert.equal(
+        capability,
+        "",
+        canSetCapability
+          ? "内容改变后不能复活旧 security.capability"
+          : "普通用户创建的文件不应获得 security.capability",
+      );
     };
 
     const originalInode = (await stat(targetPath)).ino;
@@ -270,6 +279,145 @@ test(
 
     assert.equal(inspectedPrivateStage, true);
     assert.equal(await readFile(targetPath, "utf8"), "concurrent-change\n");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "Linux new-file staging keeps aborted content private and preserves default ACLs",
+  {
+    skip:
+      process.platform !== "linux" ||
+      typeof process.geteuid !== "function" ||
+      process.geteuid() !== 0,
+  },
+  async (context) => {
+    const fixture = await createFixture("linux-new-file-private-staging");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    await chmod(fixture.root, 0o755);
+    await chmod(fixture.workspace, 0o755);
+    const stopPath = join(fixture.root, "stop-new-file-watcher");
+
+    const watcherScript = String.raw`
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const [directory, stopPath, prefix] = process.argv.slice(1);
+      const held = [];
+      let leaked = false;
+      const inspect = (name) => {
+        if (leaked || typeof name !== "string" || !name.startsWith(prefix)) return;
+        process.stdout.write("SEEN:" + name + "\n");
+        try {
+          const fd = fs.openSync(path.join(directory, name), "r");
+          const info = fs.fstatSync(fd);
+          if (info.size === 0 && (info.mode & 0o777) !== 0o600) {
+            held.push(fd);
+            process.stdout.write("CAPTURED:" + (info.mode & 0o777).toString(8) + "\n");
+          } else {
+            fs.closeSync(fd);
+          }
+        } catch {}
+      };
+      const directoryWatcher = fs.watch(directory, (_event, name) => inspect(name));
+      process.stdout.write("READY\n");
+      const timer = setInterval(() => {
+        for (const name of fs.readdirSync(directory)) inspect(name);
+        for (const fd of held) {
+          try {
+            const buffer = Buffer.alloc(256);
+            const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+            if (bytes > 0) {
+              leaked = true;
+              process.stdout.write("LEAK:" + buffer.subarray(0, bytes).toString("base64") + "\n");
+              break;
+            }
+          } catch {}
+        }
+        if (leaked || fs.existsSync(stopPath)) {
+          clearInterval(timer);
+          directoryWatcher.close();
+          for (const fd of held) {
+            try { fs.closeSync(fd); } catch {}
+          }
+          process.exit(0);
+        }
+      }, 1);
+    `;
+    const watcher = spawn(
+      process.execPath,
+      ["-e", watcherScript, fixture.workspace, stopPath, TEMPORARY_FILE_PREFIX],
+      {
+        uid: 65_534,
+        gid: 65_534,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let watcherOutput = "";
+    let watcherError = "";
+    watcher.stdout.setEncoding("utf8");
+    watcher.stderr.setEncoding("utf8");
+    watcher.stdout.on("data", (chunk: string) => {
+      watcherOutput += chunk;
+    });
+    watcher.stderr.on("data", (chunk: string) => {
+      watcherError += chunk;
+    });
+    const watcherClosed = new Promise<number | null>((resolve, reject) => {
+      watcher.once("error", reject);
+      watcher.once("close", resolve);
+    });
+    await waitUntil(() => watcherOutput.includes("READY\n"));
+
+    try {
+      for (let attempt = 0; attempt < 64 && !watcherOutput.includes("LEAK:"); attempt++) {
+        const targetPath = join(fixture.workspace, `never-published-${attempt}.txt`);
+        let revalidationCount = 0;
+        await assert.rejects(
+          writeAtomicWorkspaceFile({
+            targetPath,
+            content: `ABORTED-CONTENT-${attempt}\n`,
+            precondition: { kind: "missing" },
+            revalidateTarget: async () => {
+              revalidationCount++;
+              if (revalidationCount === 2) {
+                await new Promise((resolve) => setTimeout(resolve, 2));
+              }
+              if (revalidationCount === 3) throw new Error("abort publication");
+            },
+          }),
+          /abort publication/u,
+        );
+      }
+    } finally {
+      await writeFile(stopPath, "stop\n");
+    }
+    const watcherExit = await watcherClosed;
+
+    assert.equal(watcherExit, 0, watcherError);
+    assert.match(watcherOutput, /^SEEN:/mu, "watcher 必须实际观察到有名字的内容临时文件");
+    assert.doesNotMatch(watcherOutput, /^CAPTURED:|^LEAK:/mu);
+    await assertNoTemporaryFiles(fixture.workspace);
+
+    await execFileAsync("/usr/bin/setfacl", [
+      "-m",
+      "d:u::rwx,d:u:65534:r--,d:g::r-x,d:m::r--,d:o::---",
+      fixture.workspace,
+    ]);
+    const baselinePath = join(fixture.workspace, "kernel-created.txt");
+    const toolPath = join(fixture.workspace, "tool-created.txt");
+    await writeFile(baselinePath, "baseline\n");
+    await new WriteFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: "tool-created.txt", content: "created\n" }),
+    );
+    const [baselineInfo, toolInfo, baselineAcl, toolAcl] = await Promise.all([
+      stat(baselinePath),
+      stat(toolPath),
+      execFileAsync("/usr/bin/getfacl", ["-cpn", baselinePath], { encoding: "utf8" }),
+      execFileAsync("/usr/bin/getfacl", ["-cpn", toolPath], { encoding: "utf8" }),
+    ]);
+    assert.equal(toolInfo.mode & 0o777, baselineInfo.mode & 0o777);
+    assert.equal(toolAcl.stdout, baselineAcl.stdout);
+    assert.equal(await readFile(toolPath, "utf8"), "created\n");
     await assertNoTemporaryFiles(fixture.workspace);
   },
 );
@@ -576,7 +724,9 @@ async function createFixture(label: string): Promise<{
 async function assertNoTemporaryFiles(directory: string): Promise<void> {
   const entries = await readdir(directory);
   assert.deepEqual(
-    entries.filter((entry) => entry.startsWith(TEMPORARY_FILE_PREFIX)),
+    entries.filter(
+      (entry) => entry.startsWith(TEMPORARY_FILE_PREFIX) || entry.startsWith(METADATA_PROBE_PREFIX),
+    ),
     [],
   );
 }
