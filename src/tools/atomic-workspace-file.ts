@@ -159,11 +159,12 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
   await assertDirectoryIdentity(directory, directoryIdentity);
   await assertTargetPrecondition(input.targetPath, input.precondition);
   const macMetadata = await captureMacExtendedMetadata(input.targetPath, input.precondition);
-  const linuxMetadataSource = await openLinuxMetadataSource(
-    input.targetPath,
-    input.precondition,
-    directory,
-  );
+  const linuxMetadataSource = await openLinuxMetadataSource(input.targetPath, input.precondition);
+  const linuxCreationPermissionMode =
+    process.platform === "linux" && input.precondition.kind === "missing"
+      ? await probeLinuxCreationPermissionMode(directory)
+      : undefined;
+  const hasPrivateLinuxStaging = process.platform === "linux";
 
   const temporaryPath = join(
     directory,
@@ -187,7 +188,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     const publishedPermissionMode =
       input.precondition.kind === "file"
         ? input.precondition.permissionMode
-        : (linuxMetadataSource?.permissionMode ?? 0o666 & ~process.umask());
+        : (linuxCreationPermissionMode ?? 0o666 & ~process.umask());
     if (linuxMetadataSource) {
       // 暂存阶段只迁移不会放宽访问的 user.* 属性；ACL 延迟到内容完整且发布前
       // 路径复核通过后再应用，其他安全 namespace 只接受同目录自然继承的相同值。
@@ -227,7 +228,8 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
         await handle.chmod(publishedPermissionMode);
       }
     } else {
-      // 只发布普通 rwx 位。覆盖时不复活 setuid/setgid/sticky；新建时保持 0666 + umask。
+      // Linux 新建 inode 已在 0600 下继承完整 default ACL；一次 chmod 原子恢复其
+      // ACL mask/mode。其他平台只发布普通 rwx 位，不复活特殊权限位。
       await handle.chmod(publishedPermissionMode);
     }
     await handle.sync();
@@ -249,7 +251,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
       temporaryPath,
     );
     finalizedTemporaryVersion = toFileVersion(finalizedTemporary);
-    if (!linuxMetadataSource) {
+    if (!hasPrivateLinuxStaging) {
       await handle.close();
       handle = undefined;
       await input.revalidateTarget();
@@ -261,7 +263,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     await rename(temporaryPath, input.targetPath);
     published = true;
   } finally {
-    if (!published && linuxMetadataSource) await handle?.chmod(0).catch(() => undefined);
+    if (!published && hasPrivateLinuxStaging) await handle?.chmod(0).catch(() => undefined);
     await handle?.close().catch(() => undefined);
     await linuxMetadataSource?.handle.close().catch(() => undefined);
     if (!published && temporaryIdentity) {
@@ -273,10 +275,8 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
 async function openLinuxMetadataSource(
   targetPath: string,
   precondition: AtomicFilePrecondition,
-  directory: string,
 ): Promise<LinuxMetadataSource | undefined> {
-  if (process.platform !== "linux") return undefined;
-  if (precondition.kind === "missing") return openLinuxCreationMetadataProbe(directory);
+  if (process.platform !== "linux" || precondition.kind !== "file") return undefined;
   let handle: FileHandle | undefined;
   try {
     handle = await open(targetPath, LINUX_O_PATH_FLAG | NO_FOLLOW_FLAG);
@@ -302,7 +302,7 @@ async function openLinuxMetadataSource(
   }
 }
 
-async function openLinuxCreationMetadataProbe(directory: string): Promise<LinuxMetadataSource> {
+async function probeLinuxCreationPermissionMode(directory: string): Promise<number> {
   let handle: FileHandle | undefined;
   let namedProbePath: string | undefined;
   let namedProbeIdentity: FileVersion | undefined;
@@ -325,8 +325,8 @@ async function openLinuxCreationMetadataProbe(directory: string): Promise<LinuxM
         0o666,
       );
       const namedInfo = await handle.stat({ bigint: true });
-      assertRegularNonSymlink(namedInfo, namedProbePath);
       namedProbeIdentity = toFileVersion(namedInfo);
+      assertRegularNonSymlink(namedInfo, namedProbePath);
       await unlinkIfSameFile(namedProbePath, namedProbeIdentity);
     }
 
@@ -335,19 +335,20 @@ async function openLinuxCreationMetadataProbe(directory: string): Promise<LinuxM
     if (probeInfo.nlink !== 0n || probeInfo.size !== 0n) {
       throw new Error("new-file metadata probe is not an empty unlinked inode");
     }
-    const version = toFileVersion(probeInfo);
-    const attributes = await readLinuxExtendedAttributes(handle, directory);
     const after = await handle.stat({ bigint: true });
-    if (!sameFileVersion(version, toFileVersion(after))) {
+    if (!sameFileVersion(toFileVersion(probeInfo), toFileVersion(after))) {
       throw new Error("new-file metadata probe changed while being inspected");
     }
-    return {
-      handle,
-      version,
-      attributes,
-      permissionMode: Number(probeInfo.mode & 0o777n),
-    };
+    await handle.close();
+    handle = undefined;
+    return Number(probeInfo.mode & 0o777n);
   } catch (error) {
+    if (namedProbePath && !namedProbeIdentity && handle) {
+      namedProbeIdentity = await handle
+        .stat({ bigint: true })
+        .then(toFileVersion)
+        .catch(() => undefined);
+    }
     if (namedProbePath && namedProbeIdentity) {
       await unlinkIfSameFile(namedProbePath, namedProbeIdentity).catch(() => undefined);
     }
