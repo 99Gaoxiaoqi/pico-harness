@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -275,6 +275,86 @@ test(
 );
 
 test(
+  "Linux ACL-denied readers never observe a wider temporary mode",
+  {
+    skip:
+      process.platform !== "linux" ||
+      typeof process.geteuid !== "function" ||
+      process.geteuid() !== 0,
+  },
+  async (context) => {
+    const fixture = await createFixture("linux-acl-publication-order");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    await chmod(fixture.root, 0o755);
+    await chmod(fixture.workspace, 0o755);
+    const targetPath = join(fixture.workspace, "acl-denied.txt");
+    const stopPath = join(fixture.root, "stop-watcher");
+    await writeFile(targetPath, "old-content\n");
+    await chmod(targetPath, 0o644);
+    await execFileAsync("/usr/bin/setfacl", ["-m", "u:65534:---", targetPath]);
+    await assert.rejects(readAsUser(targetPath, 65_534, 65_534), /EACCES|EPERM/u);
+
+    const watcherScript = String.raw`
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const [directory, stopPath, prefix] = process.argv.slice(1);
+      const waitCell = new Int32Array(new SharedArrayBuffer(4));
+      process.stdout.write("READY\n");
+      while (!fs.existsSync(stopPath)) {
+        for (const name of fs.readdirSync(directory)) {
+          if (!name.startsWith(prefix)) continue;
+          try {
+            const content = fs.readFileSync(path.join(directory, name), "utf8");
+            process.stdout.write("LEAK:" + Buffer.from(content).toString("base64") + "\n");
+            process.exit(0);
+          } catch {}
+        }
+        Atomics.wait(waitCell, 0, 0, 1);
+      }
+    `;
+    const watcher = spawn(
+      process.execPath,
+      ["-e", watcherScript, fixture.workspace, stopPath, TEMPORARY_FILE_PREFIX],
+      {
+        uid: 65_534,
+        gid: 65_534,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let watcherOutput = "";
+    let watcherError = "";
+    watcher.stdout.setEncoding("utf8");
+    watcher.stderr.setEncoding("utf8");
+    watcher.stdout.on("data", (chunk: string) => {
+      watcherOutput += chunk;
+    });
+    watcher.stderr.on("data", (chunk: string) => {
+      watcherError += chunk;
+    });
+    const watcherClosed = new Promise<number | null>((resolve, reject) => {
+      watcher.once("error", reject);
+      watcher.once("close", resolve);
+    });
+    await waitUntil(() => watcherOutput.includes("READY\n"));
+
+    try {
+      await new WriteFileTool(fixture.workspace).execute(
+        JSON.stringify({ path: "acl-denied.txt", content: "replacement-secret\n" }),
+      );
+    } finally {
+      await writeFile(stopPath, "stop\n");
+    }
+    const watcherExit = await watcherClosed;
+
+    assert.equal(watcherExit, 0, watcherError);
+    assert.doesNotMatch(watcherOutput, /^LEAK:/mu);
+    assert.equal(await readFile(targetPath, "utf8"), "replacement-secret\n");
+    await assert.rejects(readAsUser(targetPath, 65_534, 65_534), /EACCES|EPERM/u);
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
   "Linux write-only xattrs fail closed when metadata cannot be read completely",
   {
     skip:
@@ -499,4 +579,25 @@ async function assertNoTemporaryFiles(directory: string): Promise<void> {
     entries.filter((entry) => entry.startsWith(TEMPORARY_FILE_PREFIX)),
     [],
   );
+}
+
+async function readAsUser(path: string, uid: number, gid: number): Promise<string> {
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ["-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))", path],
+    {
+      encoding: "utf8",
+      uid,
+      gid,
+    },
+  );
+  return stdout;
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("等待测试 watcher 就绪超时");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
