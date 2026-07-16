@@ -70,33 +70,70 @@ export interface DesktopBeforeQuitEvent {
   preventDefault(): void;
 }
 
+export interface DesktopDaemonShutdownFenceOptions {
+  /** Owned daemon 排空的硬上限。 */
+  timeoutMs?: number;
+  /** 测试可注入手动 timer，生产默认使用 Node timer。 */
+  setTimeout?: (callback: () => void, delayMs: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
+}
+
 /** Keeps every repeated before-quit event fenced until the owned daemon finishes draining. */
 export function createDesktopDaemonShutdownFence(
   daemon: Pick<DesktopDaemonController, "ownsProcess" | "stop">,
   quit: () => void,
   onStopError: (error: unknown) => void,
+  options: DesktopDaemonShutdownFenceOptions = {},
 ): (event: DesktopBeforeQuitEvent) => void {
   let stoppingPromise: Promise<void> | undefined;
-  let stopped = false;
+  let timeoutHandle: unknown;
+  let timeoutPending = false;
+  let finished = false;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError("Desktop daemon shutdown timeoutMs 必须是非负有限数");
+  }
+  const scheduleTimeout =
+    options.setTimeout ??
+    ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+  const cancelTimeout =
+    options.clearTimeout ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
-  const finishQuit = (): void => {
-    stopped = true;
-    quit();
-  };
-  const finishAfterStopError = (error: unknown): void => {
+  const finish = (outcome: { readonly error?: never } | { readonly error: unknown }): void => {
+    if (finished) return;
+    finished = true;
+    if (timeoutPending) {
+      cancelTimeout(timeoutHandle);
+      timeoutPending = false;
+      timeoutHandle = undefined;
+    }
+    if (!("error" in outcome)) {
+      quit();
+      return;
+    }
     try {
-      onStopError(error);
+      onStopError(outcome.error);
     } finally {
-      finishQuit();
+      quit();
     }
   };
 
   return (event) => {
-    if (stopped) return;
+    if (finished) return;
     if (!stoppingPromise && !daemon.ownsProcess) return;
     event.preventDefault();
     if (stoppingPromise) return;
-    stoppingPromise = daemon.stop();
-    void stoppingPromise.then(finishQuit, finishAfterStopError);
+    stoppingPromise = Promise.resolve().then(() => daemon.stop());
+    timeoutHandle = scheduleTimeout(() => {
+      timeoutPending = false;
+      timeoutHandle = undefined;
+      finish({ error: new Error(`Pico desktop daemon stop exceeded ${timeoutMs}ms`) });
+    }, timeoutMs);
+    timeoutPending = true;
+    void stoppingPromise.then(
+      () => finish({}),
+      (error) => finish({ error }),
+    );
   };
 }

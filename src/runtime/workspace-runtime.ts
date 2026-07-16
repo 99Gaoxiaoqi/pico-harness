@@ -92,6 +92,8 @@ export interface WorkspaceTaskRuntimeOptions {
   taskHostRuntimeOptions?: Omit<TaskHostRuntimeOptions, "workDir">;
   now?: () => number;
   generateRunId?: () => string;
+  /** Executor 收到 abort 后的最长排空时间；超时后 Runtime 会强制收敛 Run 终态。 */
+  closeDrainTimeoutMs?: number;
 }
 
 export type WorkspaceMode = "folder" | "git";
@@ -128,11 +130,13 @@ export class WorkspaceTaskRuntime {
 
   private readonly now: () => number;
   private readonly generateRunId: () => string;
+  private readonly closeDrainTimeoutMs: number;
   private readonly runs = new Map<string, WorkspaceRunRecord>();
   private readonly subscribers = new Set<WorkspaceRuntimeEventSubscriber>();
   private readonly unsubscribeTaskRegistry: () => void;
   private eventSequence = 0;
   private closed = false;
+  private closePromise?: Promise<void>;
 
   /** Compatibility name used by the daemon's generic canonical-workspace registry. */
   get workspacePath(): string {
@@ -142,7 +146,7 @@ export class WorkspaceTaskRuntime {
   private constructor(
     workspace: string,
     taskHostRuntime: TaskHostRuntime | undefined,
-    options: Pick<WorkspaceTaskRuntimeOptions, "now" | "generateRunId">,
+    options: Pick<WorkspaceTaskRuntimeOptions, "now" | "generateRunId" | "closeDrainTimeoutMs">,
   ) {
     this.workspace = workspace;
     this.taskHostRuntime = taskHostRuntime;
@@ -155,6 +159,7 @@ export class WorkspaceTaskRuntime {
     };
     this.now = options.now ?? Date.now;
     this.generateRunId = options.generateRunId ?? (() => `run_${randomUUID()}`);
+    this.closeDrainTimeoutMs = normalizeCloseDrainTimeoutMs(options.closeDrainTimeoutMs);
     this.unsubscribeTaskRegistry =
       this.taskHostRuntime?.taskRegistry.subscribe((task) => {
         this.publish({
@@ -355,16 +360,40 @@ export class WorkspaceTaskRuntime {
     return this.requireVersionProtection().sendMessage(taskId, message);
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this.closePromise = this.performClose();
+    return this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
     this.unsubscribeTaskRegistry();
-    for (const record of this.runs.values()) {
-      if (!isTerminalRunStatus(record.snapshot.status)) this.cancelDuringClose(record);
+    const records = [...this.runs.values()];
+    try {
+      for (const record of records) {
+        if (!isTerminalRunStatus(record.snapshot.status)) this.cancelDuringClose(record);
+      }
+      const drained = await settleWithinDeadline(
+        records.map((record) => record.promise),
+        this.closeDrainTimeoutMs,
+      );
+      if (!drained) {
+        for (const record of records) {
+          if (!isTerminalRunStatus(record.snapshot.status)) {
+            this.finishRun(
+              record,
+              "cancelled",
+              undefined,
+              "workspace runtime close drain deadline exceeded",
+            );
+          }
+        }
+      }
+      await this.taskHostRuntime?.close();
+    } finally {
+      this.subscribers.clear();
     }
-    await Promise.allSettled([...this.runs.values()].map((record) => record.promise));
-    await this.taskHostRuntime?.close();
-    this.subscribers.clear();
   }
 
   private async executeRun(
@@ -427,6 +456,9 @@ export class WorkspaceTaskRuntime {
     field: "checkpointId" | "sessionId",
     value: string,
   ): void {
+    if (isTerminalRunStatus(record.snapshot.status)) {
+      throw new Error(`Run ${record.snapshot.runId} 已结束，无法继续绑定 ${field}`);
+    }
     const normalized = value.trim();
     if (!normalized) throw new Error(`Run ${field} 不能为空`);
     const current = record.snapshot[field];
@@ -528,6 +560,32 @@ function cloneRun(snapshot: WorkspaceRunSnapshot): WorkspaceRunSnapshot {
 
 function isTerminalRunStatus(status: WorkspaceRunStatus): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled";
+}
+
+function normalizeCloseDrainTimeoutMs(value: number | undefined): number {
+  const timeoutMs = value ?? 5_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError("closeDrainTimeoutMs 必须是非负有限数");
+  }
+  return timeoutMs;
+}
+
+async function settleWithinDeadline(
+  promises: readonly Promise<unknown>[],
+  timeoutMs: number,
+): Promise<boolean> {
+  if (promises.length === 0) return true;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      Promise.allSettled(promises).then(() => true),
+      new Promise<false>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function taskVersion(task: TaskSnapshot): number {

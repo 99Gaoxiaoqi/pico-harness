@@ -239,7 +239,7 @@ export async function createSessionHookRuntime(
     activateComponentSource,
     clearComponentSources,
     dispose: async () => {
-      reloader.stop();
+      await reloader.stop();
       await executor.dispose();
     },
   };
