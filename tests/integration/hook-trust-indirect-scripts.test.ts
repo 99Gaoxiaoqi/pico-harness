@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { resolveReferencedScripts } from "../../src/hooks/config/referenced-scripts.js";
+import { DefaultHookExecutor } from "../../src/hooks/executors/executor.js";
 import { HookTrustStore, type HookTrustSubject } from "../../src/hooks/trust/store.js";
 
 test("package script definition changes invalidate Hook trust", async (context) => {
@@ -58,6 +59,229 @@ test("ordinary directly referenced scripts preserve byte-bound trust", async (co
   await writeFile(scriptPath, "#!/bin/sh\nexit 2\n");
 
   assert.equal(await fixture.store.status(subject), "pending");
+});
+
+for (const command of [
+  "npm run inner",
+  "npm run -- inner",
+  "npm run-script -- inner",
+  "npm rum inner",
+  "npm urn inner",
+  "pnpm run inner",
+  "pnpm run-script -- inner",
+  "yarn inner",
+  "yarn run -- inner",
+  "bun run inner",
+  "bun run -- inner",
+] as const) {
+  test(`${command} recursively binds the called package script`, async (context) => {
+    const fixture = await createFixture(context, { type: "command", command: "npm test" });
+    await writePackageScripts(fixture.workspace, {
+      test: command,
+      inner: "node safe.cjs",
+    });
+    await fixture.store.trust(fixture.packageSubject);
+
+    await writePackageScripts(fixture.workspace, {
+      test: command,
+      inner: "node changed.cjs",
+    });
+
+    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+  });
+}
+
+test("nested package lifecycle and direct file bytes remain trust-bound", async (context) => {
+  const fixture = await createFixture(context, { type: "command", command: "npm test" });
+  const scripts = {
+    test: "npm run inner",
+    preinner: "node pre.cjs",
+    inner: "node inner.cjs",
+    postinner: "node post.cjs",
+  };
+  await writePackageScripts(fixture.workspace, scripts);
+  await writeFile(join(fixture.workspace, "pre.cjs"), "export const value = 'pre';\n");
+  await writeFile(join(fixture.workspace, "inner.cjs"), "export const value = 'inner';\n");
+  await writeFile(join(fixture.workspace, "post.cjs"), "export const value = 'post';\n");
+  await fixture.store.trust(fixture.packageSubject);
+
+  await writePackageScripts(fixture.workspace, {
+    ...scripts,
+    postinner: "node changed-post.cjs",
+  });
+  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+
+  await writePackageScripts(fixture.workspace, scripts);
+  await fixture.store.trust(fixture.packageSubject);
+  await writeFile(join(fixture.workspace, "inner.cjs"), "export const value = 'changed';\n");
+  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+});
+
+test("multiple static nested package calls are all trust-bound", async (context) => {
+  const fixture = await createFixture(context, { type: "command", command: "npm test" });
+  await writePackageScripts(fixture.workspace, {
+    test: "npm run first && pnpm run second",
+    first: "node first.cjs",
+    second: "node second.cjs",
+  });
+  await fixture.store.trust(fixture.packageSubject);
+
+  await writePackageScripts(fixture.workspace, {
+    test: "npm run first && pnpm run second",
+    first: "node first.cjs",
+    second: "node changed-second.cjs",
+  });
+
+  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+});
+
+test("nested npm restart binds its stop-start fallback lifecycle", async (context) => {
+  const fixture = await createFixture(context, { type: "command", command: "npm test" });
+  const scripts = {
+    test: "npm restart",
+    stop: "node stop.cjs",
+    start: "node start.cjs",
+    poststart: "node poststart.cjs",
+  };
+  await writePackageScripts(fixture.workspace, scripts);
+  await fixture.store.trust(fixture.packageSubject);
+
+  await writePackageScripts(fixture.workspace, {
+    ...scripts,
+    poststart: "node changed-poststart.cjs",
+  });
+
+  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+});
+
+test("static nested package-script cycles are deduplicated and remain trust-bound", async (context) => {
+  const fixture = await createFixture(context, { type: "command", command: "npm test" });
+  await writePackageScripts(fixture.workspace, {
+    test: "npm run inner",
+    inner: "npm test",
+  });
+  await fixture.store.trust(fixture.packageSubject);
+  assert.equal(await fixture.store.status(fixture.packageSubject), "active");
+
+  await writePackageScripts(fixture.workspace, {
+    test: "npm run inner",
+    inner: "node changed.cjs && npm test",
+  });
+
+  assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+});
+
+test("nested package-script depth overflow fails closed", async (context) => {
+  const fixture = await createFixture(context, { type: "command", command: "npm test" });
+  const scripts: Record<string, string> = { test: "npm run level0" };
+  for (let index = 0; index <= 32; index++) {
+    scripts[`level${index}`] = index === 32 ? "node terminal.cjs" : `npm run level${index + 1}`;
+  }
+  await writePackageScripts(fixture.workspace, scripts);
+
+  await assert.rejects(fixture.store.trust(fixture.packageSubject), /超过 32 层/u);
+});
+
+for (const definition of [
+  'npm run "$TARGET"',
+  "cd packages/app && npm run inner",
+  "command -- cd packages/app && npm run inner",
+  "builtin cd packages/app && npm run inner",
+  "eval 'cd packages/app' && npm run inner",
+  "npm --workspace child run inner",
+  "npm --prefix child run inner",
+  "pnpm --filter child run inner",
+  "yarn --cwd child run inner",
+  "bun --cwd child run inner",
+  "npm_config_workspace=child npm run inner",
+  "export npm_config_prefix=packages/app; npm run inner",
+  "echo 'npm run inner' | sh",
+  'printf "npm run inner\\n" | bash',
+  "command -v npm | sh",
+  "$PM run inner",
+  "$PM inner",
+  '"$PM" run inner',
+  'command "$PM" run inner',
+  'PM=npm; "$PM" run inner',
+] as const) {
+  test(`nested dynamic or cross-workspace call fails closed: ${definition}`, async (context) => {
+    const fixture = await createFixture(context, { type: "command", command: "npm test" });
+    await writePackageScripts(fixture.workspace, {
+      test: definition,
+      inner: "node inner.cjs",
+    });
+
+    await assert.rejects(
+      fixture.store.trust(fixture.packageSubject),
+      /(?:不支持为该 .* Hook 建立间接脚本信任|动态 package-manager Hook)/u,
+    );
+  });
+}
+
+for (const scenario of [
+  {
+    label: "inline workspace selector environment",
+    handler: { type: "command", command: "npm_config_workspace=child npm run test" },
+  },
+  {
+    label: "env wrapper prefix selector",
+    handler: { type: "command", command: "env npm_config_prefix=child npm run test" },
+  },
+  {
+    label: "handler.env workspace selector",
+    handler: {
+      type: "command",
+      command: "npm run test",
+      env: { NPM_CONFIG_WORKSPACES: "true" },
+    },
+  },
+] as const) {
+  test(`${scenario.label} fails closed`, async (context) => {
+    const fixture = await createFixture(context, scenario.handler);
+    await writePackageScripts(fixture.workspace, { test: "node test.cjs" });
+
+    await assert.rejects(
+      fixture.store.trust(fixture.packageSubject),
+      /环境变量 .* package\.json 目标/u,
+    );
+    assert.deepEqual(await fixture.store.list(), []);
+  });
+}
+
+test("inherited selector environment is removed before package invocation execution", async (context) => {
+  const fixture = await createFixture(context);
+  const fakeNpm = join(fixture.workspace, "npm");
+  await writeFile(
+    fakeNpm,
+    '#!/bin/sh\nprintf \'{"additionalContext":"%s:%s"}\\n\' "${npm_config_workspace-unset}" "${KEEP-unset}"\n',
+  );
+  await chmod(fakeNpm, 0o755);
+  const handler = { type: "command", command: fakeNpm, args: ["--version"] } as const;
+  const executor = new DefaultHookExecutor({
+    workDir: fixture.workspace,
+    env: { PATH: process.env.PATH, npm_config_workspace: "child", KEEP: "preserved" },
+  });
+  context.after(async () => await executor.dispose());
+
+  const output = await executor.execute(
+    {
+      id: "selector-environment",
+      event: "Stop",
+      source: fixture.packageSubject.source,
+      order: 0,
+      handler,
+      trusted: true,
+    },
+    {
+      session_id: "selector-environment",
+      cwd: fixture.workspace,
+      hook_event_name: "Stop",
+      payload: { reason: "test" },
+    },
+    {},
+  );
+
+  assert.equal(output.additionalContext, "unset:preserved");
 });
 
 for (const scenario of [
