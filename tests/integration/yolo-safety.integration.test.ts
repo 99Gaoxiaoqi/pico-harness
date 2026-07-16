@@ -22,6 +22,20 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "exec rm -rf /",
     "busybox rm --force --recursive /etc",
     "sudo bash -lc 'rm --force --recursive /'",
+    "{ rm -rf /; }",
+    "(rm -rf /)",
+    "if true; then rm -rf /; fi",
+    "! rm -rf /",
+    "while true; do rm -rf /; done",
+    "until false; do rm -rf /; done",
+    "if false; then :; elif true; then rm -rf /; fi",
+    "if false; then :; else rm -rf /; fi",
+    "case x in x) rm -rf /;; esac",
+    "coproc rm -rf /",
+    "rm -rf /Users/alice/*",
+    "rm -rf /home/alice/{*,.*}",
+    "rm -rf C:/Users/Alice/*",
+    "rm -rf /c/Users/Alice/{*,.*}",
     'rm -rf "$UNKNOWN_TARGET"',
     "rm -rf '/etc",
   ];
@@ -35,15 +49,19 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "rm --recursive --force -- './tmp/cache'",
     "rm -R -f packages/generated",
     "rm -rf /tmp/pico-cache",
+    "rm -rf /Users/alice/project/dist",
+    "rm -rf /home/alice/project/dist",
+    "rm -rf C:/Users/Alice/project/dist",
     `rm --recursive --force -- ${JSON.stringify(`${workDir}/tmp/generated`)}`,
     "printf '%s\\n' 'rm -rf /'",
+    '"then" rm -rf /',
+    'echo "(rm -rf /)"',
   ];
   for (const command of ordinaryWorkspaceDeletes) {
     assert.equal(isHardlineCommand("bash", bashArgs(command)), false, command);
   }
 
   assert.equal(isHardlineCommand("write_file", bashArgs("rm -rf /")), false);
-  assert.equal(isHardlineCommand("bash", "{"), true);
 
   const roots = WorkspaceRoots.createSync(workDir);
   const hardlineCall = toolCall("rm --recursive --force -- /");
