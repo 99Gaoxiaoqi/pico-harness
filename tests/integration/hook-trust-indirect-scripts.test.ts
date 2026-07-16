@@ -87,6 +87,34 @@ for (const scenario of [
   });
 }
 
+for (const scenario of [
+  {
+    label: "leading environment assignment",
+    handler: { type: "command", command: "NODE_ENV=test npm test" },
+  },
+  { label: "env wrapper", handler: { type: "command", command: "env npm test" } },
+  {
+    label: "env assignment and package option",
+    handler: { type: "command", command: "env NODE_ENV=test npm --silent test" },
+  },
+  { label: "command wrapper", handler: { type: "command", command: "command npm test" } },
+  { label: "exec wrapper", handler: { type: "command", command: "exec npm test" } },
+  {
+    label: "no-shell env wrapper",
+    handler: { type: "command", command: "env", args: ["NODE_ENV=test", "npm", "test"] },
+  },
+] as const) {
+  test(`${scenario.label} still binds the package script`, async (context) => {
+    const fixture = await createFixture(context, scenario.handler);
+    await writePackageScripts(fixture.workspace, { test: "node test.js" });
+    await fixture.store.trust(fixture.packageSubject);
+
+    await writePackageScripts(fixture.workspace, { test: "node changed.js" });
+
+    assert.equal(await fixture.store.status(fixture.packageSubject), "pending");
+  });
+}
+
 test("npm start binds its default server.js when the start script is absent", async (context) => {
   const fixture = await createFixture(context, { type: "command", command: "npm start" });
   const serverPath = join(fixture.workspace, "server.js");
@@ -235,6 +263,10 @@ for (const command of [
   "yarn --cwd child test",
   "bun --cwd child test",
   "npm test && npm run deploy",
+  "echo safe && npm test",
+  "sh -c 'npm test'",
+  "sudo npm test",
+  "env -S 'npm test'",
 ] as const) {
   test(`${command} fails closed instead of receiving partial trust`, async (context) => {
     const fixture = await createFixture(context, { type: "command", command });
@@ -261,6 +293,19 @@ test("shell composition on an ordinary non-package command keeps direct-path beh
 
   assert.deepEqual(resolution.packageScripts, []);
 });
+
+for (const command of ["echo npm test", "command -v npm"] as const) {
+  test(`${command} does not claim package-script execution`, async (context) => {
+    const fixture = await createFixture(context, { type: "command", command });
+
+    const resolution = await resolveReferencedScripts(
+      fixture.packageSubject.handler,
+      fixture.workspace,
+    );
+
+    assert.deepEqual(resolution.packageScripts, []);
+  });
+}
 
 interface Fixture {
   readonly workspace: string;
