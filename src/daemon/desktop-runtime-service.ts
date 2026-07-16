@@ -514,13 +514,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await Promise.allSettled([...this.pendingSends.values()].map(({ promise }) => promise));
     await this.queuedInputDispatchTail.catch(() => undefined);
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
-    // Keep the projection subscriber alive until those events are durably appended.
+    // Keep the projection subscriber and RuntimeStore alive until those events are projected.
     try {
-      await this.options.runtimeService.close();
-    } finally {
+      await this.options.runtimeService.closeRuntimes();
       await this.transcriptPersistenceTail.catch(() => undefined);
+    } finally {
       this.unsubscribeRuntimeEvents();
-      this.lifecycleState = "closed";
+      try {
+        await this.options.runtimeService.close();
+      } finally {
+        this.lifecycleState = "closed";
+      }
     }
   }
 
