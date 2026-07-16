@@ -105,7 +105,10 @@ import {
   type LegacyDesktopSessionTitleMetadata,
 } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
-import { projectRuntimeTranscript, TranscriptRevisionConflict } from "./desktop-transcript.js";
+import {
+  projectRuntimeTranscriptEntries,
+  TranscriptRevisionConflict,
+} from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import {
@@ -1125,11 +1128,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     await this.transcriptPersistenceTail;
     const session = await this.requireSession(canonical, params.sessionId);
-    const runtimeSession = await globalSessionManager.getOrCreate(params.sessionId, canonical, {
-      persistence: true,
-      picoHome: this.picoHome,
+    const eventStore = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace
+        .runtimeDatabase,
     });
-    const snapshot = await runtimeSession.readHydrationSnapshot();
+    const projection = await eventStore.readSessionProjection(params.sessionId);
+    if (!projection) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `Session ${params.sessionId} 不存在于工作区 ${canonical}`,
+      );
+    }
     const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
     const queuedInputs = (
       await this.conversationStateStore.listQueued(canonical, params.sessionId)
@@ -1152,7 +1161,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     let page;
     try {
-      page = projectRuntimeTranscript(snapshot, { ...params, maxBytes: transcriptBudget });
+      page = projectRuntimeTranscriptEntries(params.sessionId, projection.entries, {
+        ...params,
+        maxBytes: transcriptBudget,
+      });
     } catch (error) {
       if (error instanceof TranscriptRevisionConflict) {
         throw new RuntimeProtocolError(

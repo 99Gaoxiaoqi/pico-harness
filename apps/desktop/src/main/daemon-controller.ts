@@ -8,6 +8,7 @@ import {
 export class DesktopDaemonController {
   private host: LocalDaemonHost | undefined;
   private owned = false;
+  private stoppingPromise: Promise<void> | undefined;
 
   get ownsProcess(): boolean {
     return this.owned;
@@ -31,9 +32,45 @@ export class DesktopDaemonController {
   }
 
   async stop(): Promise<void> {
+    if (this.stoppingPromise) return this.stoppingPromise;
     const host = this.host;
-    this.host = undefined;
-    this.owned = false;
-    if (host) await host.stop();
+    if (!host) {
+      this.owned = false;
+      return;
+    }
+    const stoppingPromise = host.stop().finally(() => {
+      if (this.host === host) this.host = undefined;
+      this.owned = false;
+      if (this.stoppingPromise === stoppingPromise) this.stoppingPromise = undefined;
+    });
+    this.stoppingPromise = stoppingPromise;
+    return stoppingPromise;
   }
+}
+
+export interface DesktopBeforeQuitEvent {
+  preventDefault(): void;
+}
+
+/** Keeps every repeated before-quit event fenced until the owned daemon finishes draining. */
+export function createDesktopDaemonShutdownFence(
+  daemon: Pick<DesktopDaemonController, "ownsProcess" | "stop">,
+  quit: () => void,
+): (event: DesktopBeforeQuitEvent) => void {
+  let stoppingPromise: Promise<void> | undefined;
+  let stopped = false;
+
+  const finishQuit = (): void => {
+    stopped = true;
+    quit();
+  };
+
+  return (event) => {
+    if (stopped) return;
+    if (!stoppingPromise && !daemon.ownsProcess) return;
+    event.preventDefault();
+    if (stoppingPromise) return;
+    stoppingPromise = daemon.stop();
+    void stoppingPromise.then(finishQuit, finishQuit);
+  };
 }

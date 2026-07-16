@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
 import { projectTranscriptEvents } from "../presentation/transcript-event-store.js";
+import type { RuntimeEventStoreEntry } from "../runtime/runtime-event-store.js";
+import {
+  projectRuntimeSessionSequencedMessageEntries,
+  projectRuntimeSessionState,
+  projectRuntimeSessionTranscriptEventEntries,
+} from "../runtime/runtime-session-projection.js";
 import {
   isMessageHiddenFromTranscript,
   isToolResultErrorMessage,
@@ -20,14 +26,50 @@ export interface RuntimeTranscriptPage {
   readonly revision: string;
 }
 
+export interface RuntimeTranscriptProjectionOptions {
+  readonly before?: string;
+  readonly limit?: number;
+  readonly expectedRevision?: string;
+  readonly maxBytes?: number;
+}
+
+type RuntimeTranscriptSnapshot = Pick<
+  SessionHydrationSnapshot,
+  | "persistenceSequence"
+  | "sessionId"
+  | "messages"
+  | "messageSequences"
+  | "transcriptEvents"
+  | "transcriptEventSequences"
+  | "runtime"
+>;
+
+/** Builds the Desktop transcript read model directly from canonical RuntimeEvent facts. */
+export function projectRuntimeTranscriptEntries(
+  sessionId: string,
+  entries: readonly RuntimeEventStoreEntry[],
+  options: RuntimeTranscriptProjectionOptions,
+): RuntimeTranscriptPage {
+  const events = entries.map(({ event }) => event);
+  const messages = projectRuntimeSessionSequencedMessageEntries(entries);
+  const transcript = projectRuntimeSessionTranscriptEventEntries(entries);
+  return projectRuntimeTranscript(
+    {
+      persistenceSequence: entries.at(-1)?.sequence ?? null,
+      sessionId,
+      messages: messages.map(({ message }) => message),
+      messageSequences: messages.map(({ sequence }) => sequence),
+      transcriptEvents: transcript.map(({ event }) => event),
+      transcriptEventSequences: transcript.map(({ sequence }) => sequence),
+      runtime: projectRuntimeSessionState(events),
+    },
+    options,
+  );
+}
+
 export function projectRuntimeTranscript(
-  snapshot: SessionHydrationSnapshot,
-  options: {
-    readonly before?: string;
-    readonly limit?: number;
-    readonly expectedRevision?: string;
-    readonly maxBytes?: number;
-  },
+  snapshot: RuntimeTranscriptSnapshot,
+  options: RuntimeTranscriptProjectionOptions,
 ): RuntimeTranscriptPage {
   const items = projectVisibleItems(snapshot);
   const revision = transcriptRevision(snapshot, items);
@@ -50,7 +92,7 @@ export class TranscriptRevisionConflict extends Error {
   }
 }
 
-function projectVisibleItems(snapshot: SessionHydrationSnapshot): RuntimeConversationItem[] {
+function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConversationItem[] {
   const toolResults = indexToolResults(snapshot.messages);
   const items: OrderedConversationItem[] = [];
   let ordinal = 0;
@@ -146,7 +188,7 @@ interface OrderedConversationItem {
   readonly ordinal: number;
 }
 
-function projectStructuredItems(snapshot: SessionHydrationSnapshot): OrderedConversationItem[] {
+function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedConversationItem[] {
   if (snapshot.transcriptEvents.length === 0) return [];
   const projection = projectTranscriptEvents(snapshot.transcriptEvents);
   const createdAtByEntryId = new Map<string, number>();
@@ -321,7 +363,7 @@ function indexToolResults(messages: readonly Message[]): Map<string, Message[]> 
 }
 
 function transcriptRevision(
-  snapshot: SessionHydrationSnapshot,
+  snapshot: RuntimeTranscriptSnapshot,
   items: readonly RuntimeConversationItem[],
 ): string {
   const digest = createHash("sha256").update(JSON.stringify(items)).digest("hex").slice(0, 16);
