@@ -460,6 +460,7 @@ function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocation
 
     const enablesOption = value[0] === "-";
     const cluster = value.slice(1);
+    let hasCommandString = false;
     for (let optionIndex = 0; optionIndex < cluster.length; optionIndex++) {
       const option = cluster[optionIndex]!;
       if (option === "o" || option === "O") {
@@ -478,9 +479,10 @@ function scanShellInvocationOptions(args: readonly ShellWord[]): ShellInvocation
       if (option === "n") noExec = enablesOption;
       if (option === "i") interactive = enablesOption;
       if (option === "l") login = enablesOption;
-      if (enablesOption && option === "c") {
-        return { commandIndex: index, startupFile, interactive, login, noExec, ambiguous: false };
-      }
+      if (enablesOption && option === "c") hasCommandString = true;
+    }
+    if (hasCommandString) {
+      return { commandIndex: index, startupFile, interactive, login, noExec, ambiguous: false };
     }
   }
   return { commandIndex: -1, startupFile, interactive, login, noExec, ambiguous: false };
