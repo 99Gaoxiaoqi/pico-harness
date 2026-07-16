@@ -77,7 +77,7 @@ import {
 } from "../provider/provider-operation-journal.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
-  RuntimeEventStore,
+  readExistingRuntimeSessionProjection,
   RuntimeEventStoreIntegrityError,
   type RuntimeEventStoreEntry,
 } from "../runtime/runtime-event-store.js";
@@ -676,12 +676,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async migrateLegacySessionTitle(
     metadata: LegacyDesktopSessionTitleMetadata,
   ): Promise<"migrated" | "orphan"> {
-    const eventStore = new RuntimeEventStore({
+    const projection = await readExistingRuntimeSessionProjection({
       databasePath: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
         .runtimeDatabase,
+      sessionId: metadata.sessionId,
     });
     // Read the canonical ledger before Session hydration can append another settings snapshot.
-    const projection = await eventStore.readSessionProjection(metadata.sessionId);
     if (!projection) return "orphan";
     const initialTitle = latestRuntimeTitle(projection.entries);
     if (canonicalTitleWins(initialTitle, metadata) || initialTitle.title === metadata.title) {
@@ -691,9 +691,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await this.withSession(metadata.workspacePath, metadata.sessionId, async (session) => {
       // A queued Session operation may have renamed the title after the first read. Re-read while
       // serialized, still before getSessionSettings() can enqueue its hydration snapshot.
-      const currentTitle = latestRuntimeTitle(
-        await eventStore.readSessionEntries(metadata.sessionId),
-      );
+      const currentProjection = await readExistingRuntimeSessionProjection({
+        databasePath: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome })
+          .workspace.runtimeDatabase,
+        sessionId: metadata.sessionId,
+      });
+      if (!currentProjection) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session ${metadata.sessionId} disappeared during title migration`,
+        );
+      }
+      const currentTitle = latestRuntimeTitle(currentProjection.entries);
       if (canonicalTitleWins(currentTitle, metadata) || currentTitle.title === metadata.title)
         return;
 
@@ -1132,11 +1140,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     await this.transcriptPersistenceTail;
     const session = await this.requireSession(canonical, params.sessionId);
-    const eventStore = new RuntimeEventStore({
+    const projection = await readExistingRuntimeSessionProjection({
       databasePath: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace
         .runtimeDatabase,
+      sessionId: params.sessionId,
     });
-    const projection = await eventStore.readSessionProjection(params.sessionId);
     if (!projection) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,

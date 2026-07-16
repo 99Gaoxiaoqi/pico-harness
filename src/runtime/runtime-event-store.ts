@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
@@ -41,6 +41,10 @@ export interface InitializeRuntimeSessionOptions {
 
 export interface RuntimeEventStoreOptions {
   readonly databasePath: string;
+}
+
+export interface ReadRuntimeSessionProjectionOptions extends RuntimeEventStoreOptions {
+  readonly sessionId: string;
 }
 
 export interface RuntimeEventStoreAppendResult {
@@ -313,26 +317,7 @@ export class RuntimeEventStore {
   ): Promise<RuntimeSessionProjectionSnapshot | undefined> {
     const db = this.openDatabase();
     try {
-      return db.transaction((): RuntimeSessionProjectionSnapshot | undefined => {
-        const session = this.selectSession(db, sessionId);
-        if (!session) return undefined;
-        const entries = this.selectSessionEntries(db, sessionId);
-        const activeBranchId = activeBranchForEntries(entries);
-        if (activeBranchId !== session.active_branch_id) {
-          throw new RuntimeEventStoreIntegrityError(
-            `Runtime session ${sessionId} active branch does not match its canonical events`,
-          );
-        }
-        const head = entries.at(-1);
-        return {
-          manifest: manifestFromRow(session),
-          activeBranchId,
-          entries,
-          ...(head
-            ? { cursor: cursorForEntries(sessionId, entries, head.sequence, head.event.eventId) }
-            : {}),
-        };
-      })();
+      return db.transaction(() => readSessionProjectionFromDatabase(db, sessionId))();
     } finally {
       db.close();
     }
@@ -568,18 +553,6 @@ export class RuntimeEventStore {
     return row;
   }
 
-  private selectSessionEntries(db: Database.Database, sessionId: string): RuntimeEventStoreEntry[] {
-    const rows = db
-      .prepare(
-        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-         FROM agent_runtime_events
-         WHERE session_id = ?
-         ORDER BY sequence`,
-      )
-      .all(sessionId) as EventRow[];
-    return rows.map((row) => decodeEventRow(row, sessionId));
-  }
-
   private selectSessionEventAtSequence(
     db: Database.Database,
     sessionId: string,
@@ -672,8 +645,62 @@ export class RuntimeEventStore {
   }
 }
 
+/**
+ * Reads an existing canonical Session projection without creating directories, opening a
+ * writable connection, changing journal settings, or running schema DDL.
+ */
+export async function readExistingRuntimeSessionProjection(
+  options: ReadRuntimeSessionProjectionOptions,
+): Promise<RuntimeSessionProjectionSnapshot | undefined> {
+  const databasePath = resolve(options.databasePath);
+  if (!existsSync(databasePath)) return undefined;
+
+  const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    db.pragma("busy_timeout = 5000");
+    assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, databasePath));
+    return db.transaction(() => readSessionProjectionFromDatabase(db, options.sessionId))();
+  } finally {
+    db.close();
+  }
+}
+
 export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
+}
+
+function readSessionProjectionFromDatabase(
+  db: Database.Database,
+  sessionId: string,
+): RuntimeSessionProjectionSnapshot | undefined {
+  const session = db.prepare("SELECT * FROM agent_sessions WHERE session_id = ?").get(sessionId) as
+    | SessionRow
+    | undefined;
+  if (!session) return undefined;
+  const rows = db
+    .prepare(
+      `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+       FROM agent_runtime_events
+       WHERE session_id = ?
+       ORDER BY sequence`,
+    )
+    .all(sessionId) as EventRow[];
+  const entries = rows.map((row) => decodeEventRow(row, sessionId));
+  const activeBranchId = activeBranchForEntries(entries);
+  if (activeBranchId !== session.active_branch_id) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime session ${sessionId} active branch does not match its canonical events`,
+    );
+  }
+  const head = entries.at(-1);
+  return {
+    manifest: manifestFromRow(session),
+    activeBranchId,
+    entries,
+    ...(head
+      ? { cursor: cursorForEntries(sessionId, entries, head.sequence, head.event.eventId) }
+      : {}),
+  };
 }
 
 function manifestFromRow(row: SessionRow): RuntimeSessionManifest {
