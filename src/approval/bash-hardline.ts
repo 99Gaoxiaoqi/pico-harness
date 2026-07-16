@@ -108,6 +108,9 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
 
   const executable = commandBasename(words[executableIndex]!.value);
   const args = words.slice(executableIndex + 1);
+  const leadingEnvironmentAssignments = words
+    .slice(0, executableIndex)
+    .filter((word) => isEnvironmentAssignment(word.value));
   if (SHELL_SOURCE_COMMANDS.has(executable)) return true;
   if (hasLegacyLiteralHardlinePayload(executable, args)) return true;
   if (executable === "rm") return isDestructiveRmInvocation(args, false);
@@ -130,11 +133,18 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
   }
 
   if (SHELL_COMMANDS.has(executable)) {
+    if (
+      executable === "bash" &&
+      leadingEnvironmentAssignments.some((word) => isBashEnvironmentAssignment(word.value))
+    ) {
+      return true;
+    }
     if (OPAQUE_SHELL_COMMANDS.has(executable)) {
       // csh/fish/PowerShell/cmd 不遵循 Bash 语法；即使命令文本静态可见，
       // 也不能用当前解析器证明其脚本、stdin 或内联命令安全。
       return !isShellDisplayOnlyInvocation(args);
     }
+    if (executable === "bash" && hasBashStartupFileOption(args)) return true;
     const commandIndex = findShellCommandOptionIndex(args);
     if (commandIndex >= 0) {
       const nested = args[commandIndex + 1];
@@ -145,8 +155,8 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
         words[executableIndex]!.cwd ?? SAFE_WORKSPACE_CWD,
       );
     }
-    // Without a static -c payload the shell reads code from stdin or a script file. The pure
-    // classifier cannot bind those bytes, so this bypass-immune boundary must fail closed.
+    // 已建模 Shell 入口没有静态 -c 时会读取 stdin/脚本；纯文本分类器
+    // 不能绑定这些字节，因此对该可见调用 fail-closed。
     return !isShellDisplayOnlyInvocation(args);
   }
 
@@ -166,9 +176,11 @@ function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boo
       const forwardedCwd = forwarded.cwd
         ? resolveForwardedCwd(forwarded.cwd, inheritedCwd)
         : inheritedCwd;
-      const forwardedWords = args
-        .slice(forwarded.commandIndex)
-        .map((word) => ({ ...word, cwd: forwardedCwd }));
+      const forwardedWords = [
+        ...leadingEnvironmentAssignments,
+        ...forwarded.environmentAssignments,
+        ...args.slice(forwarded.commandIndex),
+      ].map((word) => ({ ...word, cwd: forwardedCwd }));
       if (isHardlineCommandWords(forwardedWords, depth)) return true;
     }
   }
@@ -220,8 +232,12 @@ function hasLegacyLiteralHardlinePayload(executable: string, args: readonly Shel
 }
 
 function hasInlineCodeMode(executable: string, args: readonly ShellWord[]): boolean {
-  if (/^python(?:\d+(?:\.\d+)*)?$/u.test(executable)) {
-    return hasInlineCodeOptionBeforeEntry(args, (value) => value === "-c" || /^-c.+/su.test(value));
+  if (/^python(?:(?:\d+(?:\.\d+)*)t?)?$/u.test(executable)) {
+    return hasInlineCodeOptionBeforeEntry(
+      args,
+      (value) => value === "-c" || /^-c.+/su.test(value),
+      PYTHON_INLINE_OPTIONS_WITH_VALUE,
+    );
   }
   if (executable === "node" || executable === "nodejs") {
     return hasInlineCodeOptionBeforeEntry(
@@ -231,10 +247,22 @@ function hasInlineCodeMode(executable: string, args: readonly ShellWord[]): bool
         value === "--eval" ||
         /^-e.+/su.test(value) ||
         value.startsWith("--eval="),
+      NODE_INLINE_OPTIONS_WITH_VALUE,
     );
   }
-  if (executable === "perl" || executable === "ruby") {
-    return hasInlineCodeOptionBeforeEntry(args, (value) => /^-[^-]*e/su.test(value));
+  if (/^perl(?:\d+(?:\.\d+)*)?$/u.test(executable)) {
+    return hasInlineCodeOptionBeforeEntry(
+      args,
+      (value) => /^-[^-]*e/su.test(value),
+      PERL_INLINE_OPTIONS_WITH_VALUE,
+    );
+  }
+  if (/^ruby(?:\d+(?:\.\d+)*)?$/u.test(executable)) {
+    return hasInlineCodeOptionBeforeEntry(
+      args,
+      (value) => /^-[^-]*e/su.test(value),
+      RUBY_INLINE_OPTIONS_WITH_VALUE,
+    );
   }
   return false;
 }
@@ -242,11 +270,52 @@ function hasInlineCodeMode(executable: string, args: readonly ShellWord[]): bool
 function hasInlineCodeOptionBeforeEntry(
   args: readonly ShellWord[],
   isInlineOption: (value: string) => boolean,
+  optionsWithValue: ReadonlySet<string> = EMPTY_STRING_SET,
 ): boolean {
-  for (const word of args) {
-    if (word.dynamic || word.value === "--") return false;
-    if (isInlineOption(word.value)) return true;
-    if (!word.value.startsWith("-") && !word.value.startsWith("+")) return false;
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (word.dynamic || value === "--" || value === "-") return false;
+    const optionValue = optionValuePlacement(value, optionsWithValue);
+    if (optionValue === "next") {
+      index++;
+      continue;
+    }
+    if (optionValue === "attached") continue;
+    if (isInlineOption(value)) return true;
+    if (!value.startsWith("-") && !value.startsWith("+")) return false;
+  }
+  return false;
+}
+
+function optionValuePlacement(
+  value: string,
+  optionsWithValue: ReadonlySet<string>,
+): "attached" | "next" | undefined {
+  for (const option of optionsWithValue) {
+    if (value === option) return "next";
+    if (option.startsWith("--")) {
+      if (value.startsWith(`${option}=`)) return "attached";
+    } else if (value.startsWith(option)) {
+      return "attached";
+    }
+  }
+  return undefined;
+}
+
+function hasBashStartupFileOption(args: readonly ShellWord[]): boolean {
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index]!;
+    const value = word.value;
+    if (word.dynamic || value === "--") return false;
+    if (isBashStartupFileOption(value)) return true;
+    if (SHELL_OPTIONS_WITH_VALUE.has(value)) {
+      index++;
+      continue;
+    }
+    if (hasAttachedShellOptionValue(value)) continue;
+    if (isShellCommandOption(value)) return false;
+    if (!value.startsWith("-") && !value.startsWith("+")) return false;
   }
   return false;
 }
@@ -256,15 +325,35 @@ function findShellCommandOptionIndex(args: readonly ShellWord[]): number {
     const word = args[index]!;
     const value = word.value;
     if (word.dynamic || value === "--") return -1;
-    if (value === "-c" || /^-[^-]*c/u.test(value)) return index;
     if (SHELL_OPTIONS_WITH_VALUE.has(value)) {
       index++;
       continue;
     }
-    if (/^(?:--(?:init-file|rcfile)=|[-+]O.+|[-+]o.+)/u.test(value)) continue;
+    // -oVALUE/-OVALUE 中的 c 属于选项名，不是短选项簇里的 -c。
+    if (hasAttachedShellOptionValue(value)) continue;
+    if (isShellCommandOption(value)) return index;
     if (!value.startsWith("-") && !value.startsWith("+")) return -1;
   }
   return -1;
+}
+
+function isBashStartupFileOption(value: string): boolean {
+  for (const option of BASH_STARTUP_FILE_OPTIONS) {
+    if (value === option || value.startsWith(`${option}=`)) return true;
+  }
+  return false;
+}
+
+function hasAttachedShellOptionValue(value: string): boolean {
+  return /^(?:[-+]O.+|[-+]o.+)/u.test(value);
+}
+
+function isShellCommandOption(value: string): boolean {
+  return value === "-c" || /^-[^-]*c/u.test(value);
+}
+
+function isBashEnvironmentAssignment(value: string): boolean {
+  return value.startsWith("BASH_ENV=");
 }
 
 function isShellDisplayOnlyInvocation(args: readonly ShellWord[]): boolean {
@@ -475,10 +564,11 @@ function findForwardedCommandContext(
   wrapper: string,
   words: readonly ShellWord[],
   startIndex: number,
-): { commandIndex: number; cwd?: ShellWord } {
+): { commandIndex: number; cwd?: ShellWord; environmentAssignments: readonly ShellWord[] } {
   let skipOperand = wrapper === "timeout" ? 1 : 0;
   let optionsEnded = false;
   let cwd: ShellWord | undefined;
+  const environmentAssignments: ShellWord[] = [];
   const optionsWithValue = FIND_WRAPPER_OPTIONS_WITH_VALUE.get(wrapper) ?? EMPTY_STRING_SET;
   for (let index = startIndex; index < words.length; index++) {
     const word = words[index]!;
@@ -492,6 +582,7 @@ function findForwardedCommandContext(
       (wrapper === "env" || wrapper === "sudo" || wrapper === "doas") &&
       isEnvironmentAssignment(value)
     ) {
+      environmentAssignments.push(word);
       continue;
     }
     if (!optionsEnded && value.startsWith("--")) {
@@ -529,9 +620,9 @@ function findForwardedCommandContext(
       cwd = word;
       continue;
     }
-    return { commandIndex: index, ...(cwd ? { cwd } : {}) };
+    return { commandIndex: index, ...(cwd ? { cwd } : {}), environmentAssignments };
   }
-  return { commandIndex: -1, ...(cwd ? { cwd } : {}) };
+  return { commandIndex: -1, ...(cwd ? { cwd } : {}), environmentAssignments };
 }
 
 function isWrapperCwdOption(wrapper: string, option: string): boolean {
@@ -1664,14 +1755,17 @@ const SHELL_COMMANDS: ReadonlySet<string> = new Set([
 
 const SHELL_SOURCE_COMMANDS: ReadonlySet<string> = new Set([".", "source"]);
 
-const SHELL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
-  "+O",
-  "+o",
-  "-O",
-  "-o",
-  "--init-file",
-  "--rcfile",
-]);
+const BASH_STARTUP_FILE_OPTIONS: ReadonlySet<string> = new Set(["--init-file", "--rcfile"]);
+
+const SHELL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["+O", "+o", "-O", "-o"]);
+
+const PYTHON_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-W", "-X"]);
+
+const NODE_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-r", "--require", "--title"]);
+
+const PERL_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-I"]);
+
+const RUBY_INLINE_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["-I"]);
 
 const CWD_FORWARDERS: ReadonlySet<string> = new Set(["builtin", "command", "time"]);
 
@@ -1696,8 +1790,10 @@ const RM_FORWARDING_COMMANDS: ReadonlySet<string> = new Set([
   "env",
   "exec",
   "find",
+  "ionice",
   "nice",
   "nohup",
+  "stdbuf",
   "sudo",
   "time",
   "timeout",
@@ -1752,8 +1848,10 @@ const FIND_EXEC_FORWARDERS: ReadonlySet<string> = new Set([
   "doas",
   "env",
   "exec",
+  "ionice",
   "nice",
   "nohup",
+  "stdbuf",
   "sudo",
   "time",
   "timeout",
@@ -1765,7 +1863,12 @@ const FIND_WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> 
   ["doas", new Set(["-C", "-u"])],
   ["env", new Set(["-a", "-C", "-u", "--argv0", "--chdir", "--unset"])],
   ["exec", new Set(["-a"])],
+  [
+    "ionice",
+    new Set(["-P", "-c", "-n", "-p", "-u", "--class", "--classdata", "--pgid", "--pid", "--uid"]),
+  ],
   ["nice", new Set(["-n", "--adjustment"])],
+  ["stdbuf", new Set(["-e", "-i", "-o", "--error", "--input", "--output"])],
   [
     "sudo",
     new Set([
