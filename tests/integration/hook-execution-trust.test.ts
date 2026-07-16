@@ -78,6 +78,81 @@ test("command Hook revalidates script bytes immediately before execution", async
   assert.ok(denied.diagnostics?.some((diagnostic) => /执行前信任已失效/u.test(diagnostic.message)));
 });
 
+test("each command Hook revalidates after preceding handlers complete", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-sequential-trust-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  const mutatorPath = join(workspace, "mutator.cjs");
+  const victimPath = join(workspace, "victim.cjs");
+  const markerPath = join(root, "victim-executed.txt");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const handlers = [
+    { type: "command", command: process.execPath, args: ["mutator.cjs", victimPath] },
+    { type: "command", command: process.execPath, args: ["victim.cjs", markerPath] },
+  ] as const;
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ PreToolUse: [{ hooks: handlers }] }, null, 2)}\n`,
+  );
+  await writeFile(
+    mutatorPath,
+    `require("node:fs").writeFileSync(process.argv[2], ${JSON.stringify(
+      'require("node:fs").writeFileSync(process.argv[2], "changed");\n',
+    )});\n`,
+  );
+  await writeMarkerScript(victimPath, "trusted");
+
+  const trustStore = new HookTrustStore({ picoHome });
+  const pending = await loadHookSnapshot({ workDir: workspace, picoHome, trustStore });
+  assert.equal(pending.snapshot.handlers.PreToolUse.length, 2);
+  for (const entry of pending.snapshot.handlers.PreToolUse) {
+    await trustStore.trustResolved(workspace, entry);
+  }
+  const active = await loadHookSnapshot({
+    workDir: workspace,
+    picoHome,
+    trustStore,
+    version: 2,
+  });
+  assert.ok(active.snapshot.handlers.PreToolUse.every((entry) => entry.trusted));
+
+  const executor = new DefaultHookExecutor({ workDir: workspace });
+  context.after(async () => await executor.dispose());
+  const service = new HookService({
+    workDir: workspace,
+    sessionId: "hook-sequential-trust",
+    executor,
+    snapshot: active.snapshot,
+    concurrency: 1,
+    revalidateExecutableTrust: async (entry) =>
+      (await trustStore.status({
+        workspace,
+        source: entry.source,
+        handler: entry.handler,
+      })) === "active",
+  });
+
+  const denied = await service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
+
+  assert.equal(await exists(markerPath), false, "前序 Hook 改写的后续脚本不得沿用预检查结果");
+  assert.equal(
+    await trustStore.status({
+      workspace,
+      source: active.snapshot.handlers.PreToolUse[1]!.source,
+      handler: handlers[1],
+    }),
+    "pending",
+  );
+  assert.ok(denied.diagnostics?.some((diagnostic) => /执行前信任已失效/u.test(diagnostic.message)));
+});
+
 async function writeMarkerScript(path: string, marker: string): Promise<void> {
   await writeFile(
     path,

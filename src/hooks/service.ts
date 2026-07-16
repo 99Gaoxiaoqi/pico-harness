@@ -112,53 +112,25 @@ export class HookService {
       .filter((entry) => conditionMatches(entry.groupCondition, payload))
       .filter((entry) => conditionMatches(entry.handler.if, payload));
     const handlers = deduplicate(candidates);
-    const trustChecks = await Promise.all(
-      handlers.map(async (entry) => {
-        if (!isExecutable(entry.handler) || !this.options.revalidateExecutableTrust) {
-          return { entry, allowed: true } as const;
-        }
-        try {
-          return {
-            entry,
-            allowed: await this.options.revalidateExecutableTrust(entry),
-          } as const;
-        } catch (error) {
-          return { entry, allowed: false, error } as const;
-        }
-      }),
-    );
-    const trustDiagnostics: HookDiagnostic[] = trustChecks.flatMap((check) =>
-      check.allowed
-        ? []
-        : [
-            {
-              handlerId: check.entry.id,
-              source: check.entry.source,
-              level: "warn" as const,
-              message:
-                "error" in check
-                  ? `handler 执行前信任复核失败，已跳过: ${formatError(check.error)}`
-                  : "handler 执行前信任已失效，已跳过",
-            },
-          ],
-    );
-    const authorizedHandlers = trustChecks
-      .filter((check) => check.allowed)
-      .map((check) => check.entry);
-    const trustOutputs: HookOutput[] =
-      trustDiagnostics.length > 0 ? [{ decision: "allow", diagnostics: trustDiagnostics }] : [];
-    if (authorizedHandlers.length === 0) {
-      return aggregateHookOutputs([...providerOutputs, ...trustOutputs]);
-    }
+    if (handlers.length === 0) return aggregateHookOutputs(providerOutputs);
 
     const input = makeInput(this.options.sessionId, this.options.workDir, event, payload);
     return await this.hookScope.run(true, async () => {
       const results = await runLimited(
-        authorizedHandlers,
+        handlers,
         this.concurrency,
         this.agentConcurrency,
         context.signal,
         async (entry) => {
+          if (isExecutable(entry.handler) && this.options.revalidateExecutableTrust) {
+            try {
+              if (!(await this.options.revalidateExecutableTrust(entry))) {
+                return trustRejectedOutput(entry);
+              }
+            } catch (error) {
+              return trustRejectedOutput(entry, error);
+            }
+          }
           try {
             return await this.options.executor.execute(entry, input, context);
           } catch (error) {
@@ -177,9 +149,26 @@ export class HookService {
           }
         },
       );
-      return aggregateHookOutputs([...providerOutputs, ...trustOutputs, ...results]);
+      return aggregateHookOutputs([...providerOutputs, ...results]);
     });
   }
+}
+
+function trustRejectedOutput(entry: ResolvedHookHandler, error?: unknown): HookOutput {
+  return {
+    decision: "allow",
+    diagnostics: [
+      {
+        handlerId: entry.id,
+        source: entry.source,
+        level: "warn",
+        message:
+          error === undefined
+            ? "handler 执行前信任已失效，已跳过"
+            : `handler 执行前信任复核失败，已跳过: ${formatError(error)}`,
+      },
+    ],
+  };
 }
 
 function agentSourceMatchesScope(
