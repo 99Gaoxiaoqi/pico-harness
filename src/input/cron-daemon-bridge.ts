@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 import {
   createUserDaemonInstaller,
   LocalRuntimeClient,
+  resolveCanonicalPicoHome,
   resolveLocalDaemonEndpoint,
+  resolveLocalDaemonServiceName,
   type RuntimeJob,
   type RuntimeProviderInput,
 } from "../daemon/index.js";
@@ -117,6 +119,8 @@ export interface CronDaemonStatus {
 export interface LocalCronDaemonBridgeOptions {
   createClient?: () => Pick<LocalRuntimeClient, "request" | "close">;
   startDaemon?: () => Promise<"installed" | "process">;
+  env?: Readonly<Record<string, string | undefined>>;
+  picoHome?: string;
 }
 
 /**
@@ -129,10 +133,16 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
   private readonly startDaemon?: () => Promise<"installed" | "process">;
 
   constructor(options: LocalCronDaemonBridgeOptions = {}) {
-    this.createClient =
-      options.createClient ?? (() => new LocalRuntimeClient(resolveLocalDaemonEndpoint()));
+    const env = options.env ?? process.env;
+    const picoHome = resolveCanonicalPicoHome({ env, picoHome: options.picoHome });
+    const endpoint = resolveLocalDaemonEndpoint({ env, picoHome });
+    const serviceName = resolveLocalDaemonServiceName({ env, picoHome });
+    this.createClient = options.createClient ?? (() => new LocalRuntimeClient(endpoint));
     this.startDaemon =
-      options.startDaemon ?? (options.createClient ? undefined : startOrInstallLocalDaemon);
+      options.startDaemon ??
+      (options.createClient
+        ? undefined
+        : () => startOrInstallLocalDaemon({ picoHome, serviceName }));
   }
 
   async registerWorkspace(workspacePath: string): Promise<CronDaemonRegistration> {
@@ -391,21 +401,25 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
   }
 }
 
-async function startOrInstallLocalDaemon(): Promise<"installed" | "process"> {
+async function startOrInstallLocalDaemon(input: {
+  picoHome: string;
+  serviceName: string;
+}): Promise<"installed" | "process"> {
   const daemonMain = fileURLToPath(new URL("../daemon/main.js", import.meta.url));
   const installer = createUserDaemonInstaller();
   if (installer.install) {
     await installer.install({
-      serviceName: "com.pico.runtime",
+      serviceName: input.serviceName,
       executable: process.execPath,
       args: [daemonMain],
+      environment: { PICO_HOME: input.picoHome },
     });
     return "installed";
   }
   const child = spawn(process.execPath, [daemonMain], {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: { ...process.env, PICO_HOME: input.picoHome },
   });
   child.unref();
   return "process";

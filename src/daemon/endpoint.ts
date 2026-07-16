@@ -21,25 +21,28 @@ export interface LocalDaemonEndpointOptions {
   picoHome?: string;
 }
 
+/** Resolves the state root exactly once so endpoint and service installation share one namespace. */
+export function resolveCanonicalPicoHome(options: LocalDaemonEndpointOptions = {}): string {
+  const targetPlatform = options.platform ?? platform();
+  return canonicalPicoHome(
+    resolvePicoHome({
+      env: options.env ?? process.env,
+      homeDir: options.homeDir,
+      picoHome: options.picoHome,
+    }),
+    targetPlatform,
+  );
+}
+
+/** Per-state-root user daemon label. Its digest is the endpoint namespace digest prefix. */
+export function resolveLocalDaemonServiceName(options: LocalDaemonEndpointOptions = {}): string {
+  return `com.pico.runtime.${resolveLocalDaemonNamespace(options).digest.slice(0, 12)}`;
+}
+
 export function resolveLocalDaemonEndpoint(
   options: LocalDaemonEndpointOptions = {},
 ): LocalDaemonEndpoint {
-  const targetPlatform = options.platform ?? platform();
-  const env = options.env ?? process.env;
-  const identity = options.userIdentity ?? currentUserIdentity();
-  const picoHome = canonicalPicoHome(
-    resolvePicoHome({ env, homeDir: options.homeDir, picoHome: options.picoHome }),
-    targetPlatform,
-  );
-  const namespaceHash = createHash("sha256")
-    .update("pico-runtime-v1")
-    .update("\0")
-    .update(identity)
-    .update("\0")
-    .update(picoHome)
-    .digest();
-  const digest = namespaceHash.toString("hex").slice(0, 16);
-  const compactDigest = namespaceHash.toString("base64url").slice(0, 11);
+  const { targetPlatform, env, digest, compactDigest } = resolveLocalDaemonNamespace(options);
   if (targetPlatform === "win32") {
     const runtimeDir =
       options.runtimeDir ??
@@ -64,6 +67,31 @@ export function resolveLocalDaemonEndpoint(
     transport: "unix",
     address,
     authTokenPath: join(runtimeDir, configuredRuntimeDir === undefined ? "runtime-v1.auth" : "a"),
+  };
+}
+
+function resolveLocalDaemonNamespace(options: LocalDaemonEndpointOptions): {
+  targetPlatform: NodeJS.Platform;
+  env: Readonly<Record<string, string | undefined>>;
+  digest: string;
+  compactDigest: string;
+} {
+  const targetPlatform = options.platform ?? platform();
+  const env = options.env ?? process.env;
+  const identity = options.userIdentity ?? currentUserIdentity();
+  const picoHome = resolveCanonicalPicoHome({ ...options, env, platform: targetPlatform });
+  const namespaceHash = createHash("sha256")
+    .update("pico-runtime-v1")
+    .update("\0")
+    .update(identity)
+    .update("\0")
+    .update(picoHome)
+    .digest();
+  return {
+    targetPlatform,
+    env,
+    digest: namespaceHash.toString("hex").slice(0, 16),
+    compactDigest: namespaceHash.toString("base64url").slice(0, 11),
   };
 }
 
