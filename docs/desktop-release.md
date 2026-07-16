@@ -15,13 +15,14 @@
 
 ## 验证顺序
 
-1. `npm ci`，然后运行生产依赖审计、Desktop typecheck 与全仓 lint。当前仓库不包含自动化测试代码，发布流程不声称存在 test gate。
-2. 分别执行 `npm run desktop:make -- --arch=arm64` 与 `--arch=x64`。
-3. 用 `codesign --verify --deep --strict` 验证 `.app`，用 `spctl --assess --type execute` 验证 Gatekeeper。
-4. 用 `xcrun stapler validate` 验证公证票据已装订。
-5. 在没有开发证书和仓库源码的干净机器上安装 DMG，完成首次启动、工作区信任、任务审批、退出与重启。
-6. 从上一正式版本执行一次 ZIP 自动更新，验证下载、延后安装和重新启动安装。
+1. `npm ci`，然后运行完整依赖审计、存储能力检查、Runtime/Desktop typecheck、全仓 lint/format 和 `test:integration`。这些确定性门禁全部在 `desktop:make` 之前运行，失败时不开始签名。
+2. 发布候选版在具有有效 Provider 配置、凭证和网络的受控环境运行 `npm run test:llm-e2e`。它覆盖真实模型调用与 Runtime 恢复，不在无凭证 GitHub Actions 中强制执行。
+3. 分别执行 `npm run desktop:make -- --arch=arm64` 与 `--arch=x64`。
+4. 用 `codesign --verify --deep --strict` 验证 `.app`，用 `spctl --assess --type execute` 验证 Gatekeeper。
+5. 用 `xcrun stapler validate` 验证公证票据已装订。
+6. 在没有开发证书和仓库源码的干净机器上安装 DMG，完成首次启动、工作区信任、任务审批、退出与重启。
+7. 从上一正式版本执行一次 ZIP 自动更新，验证下载、延后安装和重新启动安装。
 
 ## 依赖审计边界
 
-`npm audit --omit=dev --audit-level=high` 必须为 0。当前 Electron Forge 7 的构建期依赖仍包含上游 `tar/tmp` 告警，且 Forge 可用版本没有完整修复；它不进入应用生产依赖，但发布 Runner 不应处理不受信任的源码或制品。上游出现修复版本后升级 Forge，并在全量审计归零前保留这一已知风险。
+`npm audit --audit-level=high` 与 `npm audit --omit=dev --audit-level=high` 都必须为 0。根 `overrides` 将 Electron Forge 使用的 `@electron/rebuild` 和 `external-editor` 下的 `tmp` 锁定到已修复版本；更改或移除覆盖前，必须重跑完整审计、`npm ci`、Desktop typecheck 和未签名打包，确认构建链兼容。
