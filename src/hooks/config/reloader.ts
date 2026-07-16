@@ -60,8 +60,14 @@ export class HookConfigReloader {
     const generation = this.generation;
     const current = this.current ?? (await loadHookSnapshot(this.loadOptions()));
     if (!this.isActive(generation)) return current;
+    const preparedWatchers = await this.prepareWatchers(current, generation);
+    if (!preparedWatchers) return current;
+    if (!this.isActive(generation)) {
+      closeWatcherMap(preparedWatchers);
+      return current;
+    }
     this.current = current;
-    await this.refreshWatchers(current, generation);
+    this.replaceWatchers(preparedWatchers);
     return current;
   }
 
@@ -108,13 +114,24 @@ export class HookConfigReloader {
           );
           return;
         }
-        const swapResult = this.options.onSwap(candidate);
-        if (swapResult !== undefined) {
-          throw new TypeError("Hook onSwap 必须同步完成且不返回值");
+        const preparedWatchers = await this.prepareWatchers(candidate, generation);
+        if (!preparedWatchers) return;
+        if (!this.isActive(generation)) {
+          closeWatcherMap(preparedWatchers);
+          return;
         }
-        this.current = candidate;
-        accepted = true;
-        await this.refreshWatchers(candidate, generation);
+        try {
+          const swapResult = this.options.onSwap(candidate);
+          if (swapResult !== undefined) {
+            throw new TypeError("Hook onSwap 必须同步完成且不返回值");
+          }
+          this.current = candidate;
+          this.replaceWatchers(preparedWatchers);
+          accepted = true;
+        } catch (error) {
+          closeWatcherMap(preparedWatchers);
+          throw error;
+        }
       });
     await this.serial;
     return accepted;
@@ -160,13 +177,24 @@ export class HookConfigReloader {
         });
         const next = Object.freeze({ ...previous, snapshot, sources: Object.freeze(sources) });
         if (!this.isActive(generation)) return;
-        const swapResult = this.options.onSwap(next);
-        if (swapResult !== undefined) {
-          throw new TypeError("Hook onSwap 必须同步完成且不返回值");
+        const preparedWatchers = await this.prepareWatchers(next, generation);
+        if (!preparedWatchers) return;
+        if (!this.isActive(generation)) {
+          closeWatcherMap(preparedWatchers);
+          return;
         }
-        this.current = next;
-        retired = true;
-        await this.refreshWatchers(next, generation);
+        try {
+          const swapResult = this.options.onSwap(next);
+          if (swapResult !== undefined) {
+            throw new TypeError("Hook onSwap 必须同步完成且不返回值");
+          }
+          this.current = next;
+          this.replaceWatchers(preparedWatchers);
+          retired = true;
+        } catch (error) {
+          closeWatcherMap(preparedWatchers);
+          throw error;
+        }
       });
     await this.serial;
     return retired;
@@ -209,51 +237,68 @@ export class HookConfigReloader {
     this.timer = timer;
   }
 
-  private async refreshWatchers(result: LoadHookSnapshotResult, generation: number): Promise<void> {
-    if (!this.isActive(generation)) return;
+  private async prepareWatchers(
+    result: LoadHookSnapshotResult,
+    generation: number,
+  ): Promise<Map<string, FSWatcher> | undefined> {
+    if (!this.isActive(generation)) return undefined;
     const exactPaths = new Set(result.watchedPaths.map((path) => resolve(path)));
     for (const eventHandlers of Object.values(result.snapshot.handlers)) {
       for (const entry of eventHandlers) {
         const references = await resolveReferencedScripts(entry.handler, this.options.workDir);
-        if (!this.isActive(generation)) return;
+        if (!this.isActive(generation)) return undefined;
         for (const path of references.watchPaths) {
           exactPaths.add(resolve(path));
         }
       }
     }
     const wantedDirectories = await existingWatchDirectories([...exactPaths]);
-    if (!this.isActive(generation)) return;
-    for (const [directory, watcher] of this.watchers) {
-      if (wantedDirectories.includes(directory)) continue;
-      watcher.close();
-      this.watchers.delete(directory);
-    }
-    for (const directory of wantedDirectories) {
-      if (!this.isActive(generation)) return;
-      if (this.watchers.has(directory)) continue;
-      const exists = await access(directory).then(
-        () => true,
-        () => false,
-      );
-      if (!this.isActive(generation)) return;
-      if (!exists) continue;
-      const watcher = watch(directory, { recursive: false }, (_event, filename) => {
-        if (!filename) return;
-        const path = resolve(directory, filename.toString());
-        if (
-          exactPaths.has(path) ||
-          [...exactPaths].some((target) => target.startsWith(`${path}${sep}`)) ||
-          isHookifyFile(path, this.options.workDir)
-        )
-          this.schedule(path, generation);
-      });
-      watcher.on("error", (error) => {
-        if (this.isActive(generation)) {
-          this.options.onReject?.(`Hook watcher 失败: ${String(error)}`);
+    if (!this.isActive(generation)) return undefined;
+    const prepared = new Map<string, FSWatcher>();
+    try {
+      for (const directory of wantedDirectories) {
+        if (!this.isActive(generation)) {
+          closeWatcherMap(prepared);
+          return undefined;
         }
-      });
-      this.watchers.set(directory, watcher);
+        const exists = await access(directory).then(
+          () => true,
+          () => false,
+        );
+        if (!this.isActive(generation)) {
+          closeWatcherMap(prepared);
+          return undefined;
+        }
+        if (!exists) continue;
+        const watcher = watch(directory, { recursive: false }, (_event, filename) => {
+          if (!filename) return;
+          const path = resolve(directory, filename.toString());
+          if (
+            exactPaths.has(path) ||
+            [...exactPaths].some((target) => target.startsWith(`${path}${sep}`)) ||
+            isHookifyFile(path, this.options.workDir)
+          )
+            this.schedule(path, generation);
+        });
+        watcher.on("error", (error) => {
+          if (this.isActive(generation)) {
+            this.options.onReject?.(`Hook watcher 失败: ${String(error)}`);
+          }
+        });
+        prepared.set(directory, watcher);
+      }
+      return prepared;
+    } catch (error) {
+      closeWatcherMap(prepared);
+      throw error;
     }
+  }
+
+  private replaceWatchers(next: ReadonlyMap<string, FSWatcher>): void {
+    const previous = [...this.watchers.values()];
+    this.watchers.clear();
+    for (const [directory, watcher] of next) this.watchers.set(directory, watcher);
+    for (const watcher of previous) safeCloseWatcher(watcher);
   }
 
   private isActive(generation: number): boolean {
@@ -267,7 +312,7 @@ export class HookConfigReloader {
   }
 
   private closeWatchers(): void {
-    for (const watcher of this.watchers.values()) watcher.close();
+    for (const watcher of this.watchers.values()) safeCloseWatcher(watcher);
     this.watchers.clear();
   }
 
@@ -275,6 +320,18 @@ export class HookConfigReloader {
     await this.serial.catch(() => undefined);
     this.clearScheduledReload();
     this.closeWatchers();
+  }
+}
+
+function closeWatcherMap(watchers: ReadonlyMap<string, FSWatcher>): void {
+  for (const watcher of watchers.values()) safeCloseWatcher(watcher);
+}
+
+function safeCloseWatcher(watcher: FSWatcher): void {
+  try {
+    watcher.close();
+  } catch {
+    // Closing an already-closed watcher is harmless during stop/rollback.
   }
 }
 

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setImmediate as waitForImmediate } from "node:timers/promises";
+import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
   createDesktopDaemonShutdownFence,
@@ -262,6 +262,43 @@ test("Hook reloader keeps the previous snapshot when synchronous swap throws", a
   assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
 });
 
+test("Hook reloader replaces watcher path sets after a same-directory script change", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-watch-paths-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  const safeScript = join(workspace, "safe.js");
+  const changedScript = join(workspace, "changed.js");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeFile(safeScript, "export const value = 'safe';\n");
+  await writeFile(changedScript, "export const value = 'initial';\n");
+  await writeCommandHook(configPath, "node safe.js");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    debounceMs: 5,
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  await writeCommandHook(configPath, "node changed.js");
+  assert.equal(await reloader.reload([configPath]), true);
+  assert.equal(swaps, 1);
+
+  await writeFile(changedScript, "export const value = 'changed';\n");
+  await waitUntil(() => swaps >= 2);
+  assert.equal(swaps, 2);
+});
+
 interface Deferred<T = void> {
   readonly promise: Promise<T>;
   resolve(value: T): void;
@@ -273,6 +310,19 @@ function deferred<T = void>(): Deferred<T> {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function writeCommandHook(path: string, command: string): Promise<void> {
+  await writeFile(
+    path,
+    `${JSON.stringify({ PreToolUse: [{ hooks: [{ type: "command", command }] }] }, null, 2)}\n`,
+  );
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await delay(10);
+  assert.equal(predicate(), true, `condition was not met within ${timeoutMs}ms`);
 }
 
 function manualTimers(): {
