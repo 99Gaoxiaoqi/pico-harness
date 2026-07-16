@@ -17,9 +17,23 @@ export interface CommandHookInvocation {
 export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
   /** Absolute logical executable selected with the same environment passed to spawn. */
   readonly command: string;
+  /** Canonical executable selected through the logical command during this resolution. */
+  readonly canonicalCommand: string;
   readonly env: Readonly<NodeJS.ProcessEnv>;
   readonly referencedPaths: readonly string[];
   readonly executablePaths: readonly string[];
+  readonly executableIdentities: Readonly<Record<string, ExecutableFileIdentity>>;
+}
+
+export interface ExecutableFileIdentity {
+  readonly dev: string;
+  readonly ino: string;
+  readonly mode: string;
+  readonly uid: string;
+  readonly gid: string;
+  readonly size: string;
+  readonly mtimeNs: string;
+  readonly ctimeNs: string;
 }
 
 const PACKAGE_EXECUTABLES = new Set([
@@ -198,8 +212,10 @@ export async function resolveCommandHookExecution(
   const executableName = executableBasename(executable.canonicalPath);
   assertSupportedResolvedExecutable(executableName, executable.canonicalPath, canonicalWorkspace);
   const referencedPaths: string[] = [];
-  const executablePaths = [executable.canonicalPath];
-  executablePaths.push(...(await resolveShebangInterpreterChain(executable.canonicalPath)));
+  const executablePaths = sortedUnique([
+    executable.canonicalPath,
+    ...(await resolveShebangInterpreterChain(executable.canonicalPath)),
+  ]);
   if (isWithin(canonicalWorkspace, executable.canonicalPath)) {
     referencedPaths.push(executable.canonicalPath);
   }
@@ -216,11 +232,33 @@ export async function resolveCommandHookExecution(
   }
   return {
     command: executable.logicalPath,
+    canonicalCommand: executable.canonicalPath,
     args: invocation.args,
     env: sanitizedEnvironment,
     referencedPaths: sortedUnique(referencedPaths),
-    executablePaths: sortedUnique(executablePaths),
+    executablePaths,
+    executableIdentities: await readExecutableIdentities(executablePaths),
   };
+}
+
+/**
+ * Re-check the pathname-to-object binding immediately before spawn. The following spawn syscall
+ * is still an OS-level check/use boundary, but an earlier alias redirect cannot silently select a
+ * different canonical executable.
+ */
+export async function revalidateResolvedCommandHookExecution(
+  invocation: ResolvedCommandHookInvocation,
+): Promise<void> {
+  const currentCanonicalCommand = await realpath(invocation.command);
+  if (currentCanonicalCommand !== invocation.canonicalCommand) {
+    throw unsupportedCommand("logical executable 已重定向到未经信任的 canonical 对象");
+  }
+  const currentIdentities = await readExecutableIdentities(invocation.executablePaths);
+  for (const path of invocation.executablePaths) {
+    if (!sameExecutableIdentity(currentIdentities[path], invocation.executableIdentities[path])) {
+      throw unsupportedCommand(`可执行文件身份已变化: ${path}`);
+    }
+  }
 }
 
 export async function resolveReferencedScripts(
@@ -236,7 +274,12 @@ export async function resolveReferencedScripts(
   const canonicalPaths = await canonicalExistingPaths(uniquePaths);
   return {
     paths: canonicalPaths,
-    watchPaths: sortedUnique([...uniquePaths, ...canonicalPaths]),
+    watchPaths: sortedUnique([
+      ...uniquePaths,
+      ...canonicalPaths,
+      invocation.command,
+      ...invocation.executablePaths,
+    ]),
     executablePaths: invocation.executablePaths,
   };
 }
@@ -698,6 +741,44 @@ async function canonicalExistingPaths(paths: readonly string[]): Promise<readonl
   const canonical: string[] = [];
   for (const path of paths) canonical.push(await realpath(path));
   return sortedUnique(canonical);
+}
+
+async function readExecutableIdentities(
+  paths: readonly string[],
+): Promise<Readonly<Record<string, ExecutableFileIdentity>>> {
+  const identities: Record<string, ExecutableFileIdentity> = {};
+  for (const path of paths) {
+    const info = await lstat(path, { bigint: true });
+    if (!info.isFile()) throw unsupportedCommand(`Hook 可执行文件不是普通文件: ${path}`);
+    identities[path] = {
+      dev: info.dev.toString(),
+      ino: info.ino.toString(),
+      mode: info.mode.toString(),
+      uid: info.uid.toString(),
+      gid: info.gid.toString(),
+      size: info.size.toString(),
+      mtimeNs: info.mtimeNs.toString(),
+      ctimeNs: info.ctimeNs.toString(),
+    };
+  }
+  return identities;
+}
+
+function sameExecutableIdentity(
+  left: ExecutableFileIdentity | undefined,
+  right: ExecutableFileIdentity | undefined,
+): boolean {
+  if (!left || !right) return false;
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
 }
 
 function isWithin(root: string, path: string): boolean {

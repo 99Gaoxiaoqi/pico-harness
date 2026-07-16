@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, join, normalize, resolve } from "node:path";
 import { resolvePicoHome } from "../../paths/pico-paths.js";
-import { resolveReferencedScripts } from "../config/referenced-scripts.js";
+import {
+  resolveCommandHookExecution,
+  type ResolvedCommandHookInvocation,
+} from "../config/referenced-scripts.js";
 import type { HookHandler, HookSource, ResolvedHookHandler } from "../types.js";
 import {
   assertRegularNonSymlink,
@@ -60,13 +63,13 @@ export class HookTrustStore {
   }
 
   async status(subject: HookTrustSubject): Promise<HookTrustStatus> {
-    const fingerprint = await this.fingerprint(subject);
+    const { fingerprint } = await this.resolveFingerprint(subject);
     const records = await this.readRecords();
     return records.some((record) => record.id === fingerprint.id) ? "active" : "pending";
   }
 
   async trust(subject: HookTrustSubject): Promise<HookTrustRecord> {
-    const fingerprint = await this.fingerprint(subject);
+    const { fingerprint } = await this.resolveFingerprint(subject);
     const records = await this.readRecords();
     const record: HookTrustRecord = { ...fingerprint, trustedAt: new Date().toISOString() };
     const next = [...records.filter((item) => item.id !== record.id), record];
@@ -75,7 +78,7 @@ export class HookTrustStore {
   }
 
   async revoke(subject: HookTrustSubject): Promise<void> {
-    const fingerprint = await this.fingerprint(subject);
+    const { fingerprint } = await this.resolveFingerprint(subject);
     const records = await this.readRecords();
     await this.writeRecords(records.filter((record) => record.id !== fingerprint.id));
   }
@@ -92,10 +95,38 @@ export class HookTrustStore {
   }
 
   async fingerprint(subject: HookTrustSubject): Promise<HookTrustFingerprint> {
+    return (await this.resolveFingerprint(subject)).fingerprint;
+  }
+
+  /**
+   * Return the exact command resolution whose fingerprint still has an active trust record.
+   * The executor must use this invocation directly instead of resolving the logical alias again.
+   */
+  async authorizeCommandExecution(
+    subject: HookTrustSubject,
+  ): Promise<ResolvedCommandHookInvocation | undefined> {
+    if (subject.handler.type !== "command") return undefined;
+    const { fingerprint, commandExecution } = await this.resolveFingerprint(subject);
+    const records = await this.readRecords();
+    return records.some((record) => record.id === fingerprint.id) ? commandExecution : undefined;
+  }
+
+  async list(): Promise<readonly HookTrustRecord[]> {
+    return await this.readRecords();
+  }
+
+  private async resolveFingerprint(subject: HookTrustSubject): Promise<{
+    fingerprint: HookTrustFingerprint;
+    commandExecution?: ResolvedCommandHookInvocation;
+  }> {
     const workspace = await canonicalExistingDirectory(subject.workspace);
     const sourcePath = await canonicalMaybeExisting(subject.source.path);
     const definitionHash = hash(stableStringify(trustedDefinition(subject.handler)));
-    const scriptHashes = await hashReferencedScripts(subject.handler, workspace, this.environment);
+    const commandExecution =
+      subject.handler.type === "command"
+        ? await resolveCommandHookExecution(subject.handler, workspace, this.environment)
+        : undefined;
+    const scriptHashes = await hashReferencedScripts(subject.handler, commandExecution);
     const source = {
       kind: subject.source.kind,
       path: sourcePath,
@@ -104,11 +135,10 @@ export class HookTrustStore {
         : { componentId: subject.source.componentId }),
     };
     const id = hash(stableStringify({ workspace, source, definitionHash, scriptHashes }));
-    return { id, workspace, source, definitionHash, scriptHashes };
-  }
-
-  async list(): Promise<readonly HookTrustRecord[]> {
-    return await this.readRecords();
+    return {
+      fingerprint: { id, workspace, source, definitionHash, scriptHashes },
+      ...(commandExecution ? { commandExecution } : {}),
+    };
   }
 
   private async readRecords(): Promise<readonly HookTrustRecord[]> {
@@ -129,29 +159,17 @@ export class HookTrustStore {
 
 async function hashReferencedScripts(
   handler: HookHandler,
-  workspace: string,
-  environment: Readonly<NodeJS.ProcessEnv>,
+  commandExecution: ResolvedCommandHookInvocation | undefined,
 ): Promise<Readonly<Record<string, string>>> {
   if (handler.type !== "command") return {};
-  const references = await resolveReferencedScripts(handler, workspace, environment);
+  if (!commandExecution) throw new Error("command Hook 缺少已解析的执行绑定");
   const hashes: Record<string, string> = {};
-  for (const executable of references.executablePaths) {
-    const info = await lstat(executable, { bigint: true });
-    if (!info.isFile()) throw new Error(`Hook 可执行文件不是普通文件: ${executable}`);
-    hashes[`executable:${executable}`] = hash(
-      stableStringify({
-        dev: info.dev.toString(),
-        ino: info.ino.toString(),
-        mode: info.mode.toString(),
-        uid: info.uid.toString(),
-        gid: info.gid.toString(),
-        size: info.size.toString(),
-        mtimeNs: info.mtimeNs.toString(),
-        ctimeNs: info.ctimeNs.toString(),
-      }),
-    );
+  for (const executable of commandExecution.executablePaths) {
+    const identity = commandExecution.executableIdentities[executable];
+    if (!identity) throw new Error(`Hook 可执行文件缺少身份绑定: ${executable}`);
+    hashes[`executable:${executable}`] = hash(stableStringify(identity));
   }
-  for (const candidate of references.paths) {
+  for (const candidate of commandExecution.referencedPaths) {
     try {
       const stat = await lstat(candidate);
       if (stat.isSymbolicLink()) {
