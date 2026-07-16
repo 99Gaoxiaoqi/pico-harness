@@ -22,7 +22,8 @@ export interface HookConfigReloaderOptions extends LoadHookSnapshotOptions {
   initial?: LoadHookSnapshotResult;
   /** 由集成层使用旧 HookService snapshot 发 ConfigChange；deny 时不交换。 */
   beforeSwap?: (context: HookConfigChangeContext) => Promise<HookOutput | boolean>;
-  onSwap: (result: LoadHookSnapshotResult) => void | Promise<void>;
+  /** 同步提交回调；所有异步准备必须在 beforeSwap 内完成。 */
+  onSwap: (result: LoadHookSnapshotResult) => undefined;
   onReject?: (message: string, candidate?: LoadHookSnapshotResult) => void;
   /** 组件激活集在会话期间可变，每次候选加载时重新取值。 */
   dynamicSources?: () =>
@@ -107,12 +108,13 @@ export class HookConfigReloader {
           );
           return;
         }
-        await this.options.onSwap(candidate);
+        const swapResult = this.options.onSwap(candidate);
+        if (swapResult !== undefined) {
+          throw new TypeError("Hook onSwap 必须同步完成且不返回值");
+        }
         this.current = candidate;
-        if (!this.isActive(generation)) return;
-        await this.refreshWatchers(candidate, generation);
-        if (!this.isActive(generation)) return;
         accepted = true;
+        await this.refreshWatchers(candidate, generation);
       });
     await this.serial;
     return accepted;
@@ -158,12 +160,13 @@ export class HookConfigReloader {
         });
         const next = Object.freeze({ ...previous, snapshot, sources: Object.freeze(sources) });
         if (!this.isActive(generation)) return;
-        await this.options.onSwap(next);
+        const swapResult = this.options.onSwap(next);
+        if (swapResult !== undefined) {
+          throw new TypeError("Hook onSwap 必须同步完成且不返回值");
+        }
         this.current = next;
-        if (!this.isActive(generation)) return;
-        await this.refreshWatchers(next, generation);
-        if (!this.isActive(generation)) return;
         retired = true;
+        await this.refreshWatchers(next, generation);
       });
     await this.serial;
     return retired;

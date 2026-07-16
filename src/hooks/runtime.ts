@@ -72,7 +72,9 @@ export async function createSessionHookRuntime(
   const componentSources = new Map<string, HookConfigSourceSpec>();
   let componentSourceSequence = 0;
   let componentSourceQueue = Promise.resolve();
-  let candidateRules: readonly HookifyRule[] | undefined;
+  let candidateRules:
+    | { readonly snapshotId: string; readonly rules: readonly HookifyRule[] }
+    | undefined;
   const decisionProvider: HookDecisionProvider = {
     evaluate(event, payload) {
       return evaluateHookifyRules(rules, event, payload);
@@ -93,19 +95,27 @@ export async function createSessionHookRuntime(
     ...loadOptions,
     initial,
     beforeSwap: async ({ candidate, changedPaths }) => {
+      candidateRules = undefined;
+      let nextRules: readonly HookifyRule[];
       try {
-        candidateRules = await loadHookifyRules(options.workDir);
+        nextRules = await loadHookifyRules(options.workDir);
       } catch (error) {
         return { decision: "deny", reason: `Hookify 规则无效: ${errorMessage(error)}` };
       }
-      return await service.dispatch("ConfigChange", {
+      const decision = await service.dispatch("ConfigChange", {
         paths: changedPaths,
         proposedHash: candidate.snapshot.id,
       });
+      if (decision.decision === "allow") {
+        candidateRules = { snapshotId: candidate.snapshot.id, rules: nextRules };
+      }
+      return decision;
     },
     onSwap(result) {
       service.replaceSnapshot(result.snapshot);
-      rules = candidateRules ?? rules;
+      if (candidateRules?.snapshotId === result.snapshot.id) {
+        rules = candidateRules.rules;
+      }
       candidateRules = undefined;
     },
     onReject(message) {

@@ -156,6 +156,7 @@ test("Hook reloader stop fences an in-flight reload and supports a fresh generat
   const guardEntered = deferred();
   const guardRelease = deferred<boolean>();
   let swaps = 0;
+  let externalSnapshot = initial.snapshot;
   const reloader = new HookConfigReloader({
     workDir: workspace,
     picoHome,
@@ -164,8 +165,9 @@ test("Hook reloader stop fences an in-flight reload and supports a fresh generat
       guardEntered.resolve();
       return await guardRelease.promise;
     },
-    onSwap: () => {
+    onSwap: (result) => {
       swaps++;
+      externalSnapshot = result.snapshot;
     },
   });
   context.after(async () => {
@@ -187,12 +189,77 @@ test("Hook reloader stop fences an in-flight reload and supports a fresh generat
   assert.equal(await reloading, false);
   await stopping;
   assert.equal(swaps, 0);
+  assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
+  assert.strictEqual(externalSnapshot, initial.snapshot);
   assert.equal(await reloader.reload(), false);
 
   await reloader.start();
+  assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
+  assert.strictEqual(externalSnapshot, initial.snapshot);
   assert.equal(await reloader.reload(), true);
   assert.equal(swaps, 1);
+  assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
   await reloader.stop();
+});
+
+test("Hook reloader treats synchronous swap as the commit point", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-commit-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  let externalSnapshot = initial.snapshot;
+  let swaps = 0;
+  let stopping: Promise<void> | undefined;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    onSwap: (result) => {
+      swaps++;
+      externalSnapshot = result.snapshot;
+      stopping = reloader.stop();
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  assert.equal(await reloader.reload(), true);
+  await stopping;
+  assert.equal(swaps, 1);
+  assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
+  assert.notStrictEqual(externalSnapshot, initial.snapshot);
+
+  await reloader.start();
+  assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
+  await reloader.stop();
+});
+
+test("Hook reloader keeps the previous snapshot when synchronous swap throws", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-swap-error-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    onSwap: () => {
+      throw new Error("swap failed");
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  await assert.rejects(reloader.reload(), /swap failed/u);
+  assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
 });
 
 interface Deferred<T = void> {
