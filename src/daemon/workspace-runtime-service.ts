@@ -297,6 +297,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
             workspacePath: runtime.workspace,
             prompt: input.prompt,
             ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+            ...(input.execution ? { execution: input.execution } : {}),
           },
         },
         () => {
@@ -451,6 +452,10 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         payload: notification.payload,
       },
     });
+    this.notifyPersisted(notification);
+  }
+
+  private notifyPersisted(notification: RuntimeNotification): void {
     for (const listener of this.listeners) listener(notification);
   }
 
@@ -474,11 +479,22 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       picoHome: this.picoHome,
       now: this.options.now,
     });
-    created.recoverInterruptedDaemonRuns(
-      workspacePath,
-      "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
-    );
+    try {
+      created.recoverInterruptedDaemonRuns(
+        workspacePath,
+        "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
+      );
+    } catch (error) {
+      created.close();
+      throw error;
+    }
     this.eventStores.set(workspacePath, created);
+    // Recovery events are deterministic and Transcript ingestion is idempotent. Catch up the
+    // complete workspace recovery stream once per service lifetime so a prior commit-before-notify
+    // crash cannot strand either the terminal projection or a durable queued input.
+    for (const event of created.listDaemonRunRecoveryEvents(workspacePath)) {
+      this.notifyPersisted(runtimeNotificationFromLedger(event));
+    }
     return created;
   }
 }

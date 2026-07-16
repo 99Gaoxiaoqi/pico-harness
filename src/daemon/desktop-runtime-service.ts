@@ -232,6 +232,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private userConfigWatchTimer?: NodeJS.Timeout;
   private observedUserConfig?: UserConfigSnapshot;
   private userConfigWatchClosed = false;
+  private lifecycleState: "open" | "closing" | "closed" = "open";
+  private closePromise?: Promise<void>;
+  private queuedInputDispatchTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
@@ -282,18 +285,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
       }
       if (event.topic !== "run.finished") return;
-      void this.transcriptPersistenceTail
-        .then(
-          () => this.consumeNextQueued(event.scope.workspacePath, sessionId),
-          () => this.consumeNextQueued(event.scope.workspacePath, sessionId),
-        )
-        .catch((error: unknown) =>
-          this.publishConversationFailure(event.scope.workspacePath, error),
-        );
+      if (this.lifecycleState !== "open") return;
+      const transcriptReady = this.transcriptPersistenceTail;
+      const dispatch = async () => {
+        await transcriptReady.catch(() => undefined);
+        if (this.lifecycleState !== "open") return;
+        await this.consumeNextQueued(event.scope.workspacePath, sessionId);
+      };
+      const queued = this.queuedInputDispatchTail.then(dispatch, dispatch);
+      this.queuedInputDispatchTail = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      void queued.catch((error: unknown) => {
+        if (this.lifecycleState === "open") {
+          this.publishConversationFailure(event.scope.workspacePath, error);
+        }
+      });
     });
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
+    this.assertAcceptingRequests();
     switch (request.method) {
       case "workspace.init":
         return this.initializeWorkspace(request.params.workspacePath);
@@ -483,17 +496,31 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.options.runtimeService.subscribe(listener);
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.lifecycleState = "closing";
+    this.closePromise = this.closeOnce();
+    return this.closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     this.userConfigWatchClosed = true;
     if (this.userConfigWatchTimer) clearTimeout(this.userConfigWatchTimer);
     unwatchFile(this.userConfigStore.filePath, this.userConfigWatchListener);
     await this.userConfigWatchReady.catch(() => undefined);
     await this.userConfigWatchTail.catch(() => undefined);
+    await this.providerDependencyTail.catch(() => undefined);
+    await Promise.allSettled([...this.pendingSends.values()].map(({ promise }) => promise));
+    await this.queuedInputDispatchTail.catch(() => undefined);
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
     // Keep the projection subscriber alive until those events are durably appended.
-    await this.options.runtimeService.close();
-    await this.transcriptPersistenceTail.catch(() => undefined);
-    this.unsubscribeRuntimeEvents();
+    try {
+      await this.options.runtimeService.close();
+    } finally {
+      await this.transcriptPersistenceTail.catch(() => undefined);
+      this.unsubscribeRuntimeEvents();
+      this.lifecycleState = "closed";
+    }
   }
 
   private async listWorkspaces(): Promise<JsonValue> {
@@ -1101,7 +1128,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       sessionId,
       params.input,
       initialResolution,
-      params.idempotencyKey,
+      {
+        inputKey: params.idempotencyKey,
+        runStartKey: desktopRunStartIdempotencyKey("send", params.idempotencyKey),
+      },
     );
     return { session: sessionRecord, run, disposition: "started" };
   }
@@ -1263,8 +1293,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     sessionId: string,
     input: RuntimeUserInput,
-    resolvedInput?: ResolvedRuntimeUserInput,
-    inputIdempotencyKey?: string,
+    resolvedInput: ResolvedRuntimeUserInput | undefined,
+    identity: {
+      readonly inputKey: string;
+      readonly runStartKey: string;
+    },
   ): Promise<JsonObject> {
     try {
       const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
@@ -1280,7 +1313,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         sessionId,
         resolved.prompt,
         runtimeInputDisplay(input),
-        inputIdempotencyKey ?? `run:${createHash("sha256").update(resolved.prompt).digest("hex")}`,
+        identity.inputKey,
       );
       return requireJsonRecord(
         await this.options.runtimeService.startForegroundRun({
@@ -1288,6 +1321,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           sessionId,
           prompt: resolved.prompt,
           execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
+          idempotencyKey: identity.runStartKey,
         }),
         "run.start result",
       );
@@ -1341,10 +1375,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
+    if (this.lifecycleState !== "open") return;
     const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
     if (!next) return;
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
-    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, next.queueId);
+    if (this.lifecycleState !== "open") return;
+    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, {
+      inputKey: next.queueId,
+      runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
+    });
     await this.conversationStateStore.removeQueued(next.queueId);
   }
 
@@ -2263,6 +2302,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return queued;
   }
 
+  private assertAcceptingRequests(): void {
+    if (this.lifecycleState === "open") return;
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      this.lifecycleState === "closing" ? "Runtime daemon 正在关闭" : "Runtime daemon 已关闭",
+    );
+  }
+
   private assertProviderFingerprint(expected: unknown, actual: string): void {
     const normalized = requireSha256(expected, "expectedProviderFingerprint");
     if (normalized !== actual) {
@@ -2902,6 +2949,11 @@ function firstSendRequestFingerprint(params: {
       }),
     )
     .digest("hex");
+}
+
+function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): string {
+  const digest = createHash("sha256").update(key).digest("hex");
+  return `desktop-${source}-run:${digest}`;
 }
 
 interface RuntimeTitleVersion {
