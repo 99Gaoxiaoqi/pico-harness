@@ -4,6 +4,7 @@ import { posix } from "node:path";
 interface ShellWord {
   readonly value: string;
   readonly dynamic: boolean;
+  readonly quotedOrEscaped: boolean;
 }
 
 interface ParsedShell {
@@ -39,7 +40,7 @@ function isHardlineBashCommandAtDepth(command: string, depth: number): boolean {
 }
 
 function isHardlineCommandWords(words: readonly ShellWord[], depth: number): boolean {
-  const executableIndex = words.findIndex((word) => !isEnvironmentAssignment(word.value));
+  const executableIndex = findExecutableIndex(words);
   if (executableIndex < 0) return false;
 
   const executable = commandBasename(words[executableIndex]!.value);
@@ -153,6 +154,7 @@ function isProtectedRmTarget(target: string): boolean {
   ) {
     return true;
   }
+  if (isAbsoluteUserProfileTarget(normalizedTarget)) return true;
 
   if (!slashPath.startsWith("/")) return false;
   const normalized = normalizedTarget;
@@ -164,8 +166,6 @@ function isProtectedRmTarget(target: string): boolean {
   ) {
     return true;
   }
-
-  if (/^\/(?:home|Users)\/[^/]+\/?$/u.test(normalized)) return true;
 
   const lower = normalized.toLowerCase();
   return CRITICAL_POSIX_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`));
@@ -186,6 +186,13 @@ function isWholeDirectoryContents(target: string, directory: string): boolean {
   if (directory === "/") return false;
   const suffix = target.slice(directory.length);
   return target.startsWith(`${directory}/`) && /^\/(?:[*.?{[])/u.test(suffix);
+}
+
+function isAbsoluteUserProfileTarget(target: string): boolean {
+  const match = target.match(/^(?:\/(?:home|Users)|[A-Za-z]:\/Users|\/[A-Za-z]\/Users)\/[^/]+/iu);
+  if (!match) return false;
+  const profileRoot = match[0];
+  return target === profileRoot || isWholeDirectoryContents(target, profileRoot);
 }
 
 function hasAmbiguousDestructiveRmShape(commands: readonly (readonly ShellWord[])[]): boolean {
@@ -216,15 +223,17 @@ function parseShell(command: string): ParsedShell {
   let words: ShellWord[] = [];
   let value = "";
   let dynamic = false;
+  let quotedOrEscaped = false;
   let tokenStarted = false;
   let quote: "single" | "double" | undefined;
   let ambiguous = false;
 
   const finishWord = (): void => {
     if (!tokenStarted) return;
-    words.push({ value, dynamic });
+    words.push({ value, dynamic, quotedOrEscaped });
     value = "";
     dynamic = false;
+    quotedOrEscaped = false;
     tokenStarted = false;
   };
   const finishCommand = (): void => {
@@ -296,11 +305,13 @@ function parseShell(command: string): ParsedShell {
 
     if (char === "'") {
       quote = "single";
+      quotedOrEscaped = true;
       tokenStarted = true;
       continue;
     }
     if (char === '"') {
       quote = "double";
+      quotedOrEscaped = true;
       tokenStarted = true;
       continue;
     }
@@ -310,6 +321,7 @@ function parseShell(command: string): ParsedShell {
         continue;
       }
       if (next !== "\n") value += next;
+      quotedOrEscaped = true;
       tokenStarted = true;
       index++;
       continue;
@@ -329,7 +341,11 @@ function parseShell(command: string): ParsedShell {
       finishCommand();
       continue;
     }
-    if ((char === "(" || char === ")") && !tokenStarted) {
+    if (char === "(" || char === ")") {
+      finishCommand();
+      continue;
+    }
+    if ((char === "{" || char === "}") && !tokenStarted) {
       finishCommand();
       continue;
     }
@@ -411,6 +427,14 @@ function isEnvironmentAssignment(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
 }
 
+function findExecutableIndex(words: readonly ShellWord[]): number {
+  return words.findIndex(
+    (word) =>
+      !isEnvironmentAssignment(word.value) &&
+      (word.quotedOrEscaped || !SHELL_CONTROL_PREFIXES.has(word.value.toLowerCase())),
+  );
+}
+
 function commandBasename(command: string): string {
   return command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? command;
 }
@@ -418,6 +442,18 @@ function commandBasename(command: string): string {
 const MAX_NESTED_COMMAND_DEPTH = 8;
 
 const SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "dash", "ksh", "sh", "zsh"]);
+
+const SHELL_CONTROL_PREFIXES: ReadonlySet<string> = new Set([
+  "!",
+  "coproc",
+  "do",
+  "elif",
+  "else",
+  "if",
+  "then",
+  "until",
+  "while",
+]);
 
 const RM_FORWARDING_COMMANDS: ReadonlySet<string> = new Set([
   "builtin",
