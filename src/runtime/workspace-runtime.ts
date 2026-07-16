@@ -68,6 +68,7 @@ export interface WorkspaceRuntimeEvent {
   type:
     | "workspace.ready"
     | "run.started"
+    | "run.updated"
     | "run.steer_requested"
     | "run.pause_requested"
     | "run.paused"
@@ -439,6 +440,11 @@ export class WorkspaceTaskRuntime {
       updatedAt: this.now(),
       version: record.snapshot.version + 1,
     };
+    this.publish({
+      type: "run.updated",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
   }
 
   private finishRun(
