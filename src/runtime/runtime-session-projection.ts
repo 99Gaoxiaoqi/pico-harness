@@ -89,17 +89,34 @@ export function projectRuntimeSessionState(
 }
 
 export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): SessionUsageSnapshot {
-  // The last legacy cumulative snapshot closes its immutable prefix; only later call facts add on.
-  let legacyPrefixEnd = -1;
   let usage = createEmptyUsageSnapshot();
-  for (const [index, event] of events.entries()) {
+  let sawSuccessfulCallFact = false;
+  let legacyProviderCallBaseline = 0;
+  const successfulCallFacts: Array<Extract<RuntimeEvent, { kind: "model.call.settled" }>> = [];
+  for (const event of events) {
+    if (event.kind === "model.call.settled" && event.data.status === "succeeded") {
+      sawSuccessfulCallFact = true;
+      successfulCallFacts.push(event);
+      continue;
+    }
     if (event.kind !== "session.state.committed" || !event.data.patch.usage) continue;
-    legacyPrefixEnd = index;
+    if (!sawSuccessfulCallFact) {
+      legacyProviderCallBaseline = Math.max(
+        legacyProviderCallBaseline,
+        event.data.patch.usage.totalProviderCalls,
+      );
+    }
     usage = structuredClone(event.data.patch.usage);
   }
 
-  for (const event of events.slice(legacyPrefixEnd + 1)) {
-    if (event.kind !== "model.call.settled" || event.data.status !== "succeeded") continue;
+  // Legacy snapshots predate call facts. Only the cumulative growth after that rollout
+  // can cover the oldest successful facts; delayed snapshot writes must not hide newer facts.
+  let coveredCallFacts = Math.max(0, usage.totalProviderCalls - legacyProviderCallBaseline);
+  for (const event of successfulCallFacts) {
+    if (coveredCallFacts > 0) {
+      coveredCallFacts--;
+      continue;
+    }
     usage.totalProviderCalls++;
     const reportedUsage = event.data.usage;
     if (!reportedUsage) continue;
