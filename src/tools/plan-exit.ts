@@ -13,7 +13,7 @@
 //      - modify:写回修改后的 PLAN.md → 调 onExit 退出
 //   4. 返回中文结果给模型
 //
-// 解耦:工具不直接操作 engine.planMode(私有状态),而是持有由 host(run-agent.ts)
+// 解耦:工具不直接操作 engine.planMode(私有状态),而是持有由 Runtime host
 // 注入的 onExit 回调。default-registry 构造时回调为空,host 构造 engine 后调
 // setExitCallback 注入,使工具与 engine 彻底解耦。
 
@@ -62,7 +62,7 @@ export class ExitPlanModeTool implements BaseTool {
     this.approval = approval;
   }
 
-  /** host(run-agent.ts)构造 engine 后注入退出回调 */
+  /** Runtime host 构造 engine 后注入退出回调 */
   setExitCallback(cb: PlanExitCallback): void {
     this.onExit = cb;
   }
@@ -72,7 +72,7 @@ export class ExitPlanModeTool implements BaseTool {
     this.notify = notify;
   }
 
-  /** host(run-agent.ts)注入本轮运行的中止信号 */
+  /** Runtime host 注入本轮运行的中止信号 */
   setAbortSignal(signal: AbortSignal | undefined): void {
     this.abortSignal = signal;
   }

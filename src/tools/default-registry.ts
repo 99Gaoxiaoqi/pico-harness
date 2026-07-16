@@ -138,7 +138,7 @@ export function buildDefaultToolRegistry(
   // 未注入时降级为内部 new,保持向后兼容(单实例场景不受跨实例 bug 影响)。
   registry.register(new TodoTool(todoStore ?? new TodoStore(workDir)));
   // ExitPlanModeTool:onExit 回调在 default-registry 构造时无法注入(无 engine 引用)。
-  // host(run-agent.ts / main.ts)构造 engine 后需遍历工具调 setExitCallback 注入,
+  // Runtime host 构造 engine 后需遍历工具调 setExitCallback 注入,
   // 否则审批通过也不会真正切换 planMode。Plan Mode 关闭时该工具不被模型调用。
   registry.register(new ExitPlanModeTool(new PlanStore(workDir), approvalManager));
   // Goal Mode 工具:三工具共享同一个 goalManager 单例(由 host 注入)。

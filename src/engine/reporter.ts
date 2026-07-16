@@ -185,7 +185,7 @@ export class TerminalReporter implements Reporter {
 
 /**
  * diff 文本按行着色:+绿 -红 @@青 其他 dim。
- * 导出函数,供 run-agent.ts 的 terminalNotifier 复用(本 worktree 暂不调用,留给合并后)。
+ * 导出函数，供终端宿主渲染 diff 通知时复用。
  */
 export function colorizeDiff(diff: string): string {
   return diff
