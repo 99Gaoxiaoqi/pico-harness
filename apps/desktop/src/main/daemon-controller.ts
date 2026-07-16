@@ -8,43 +8,61 @@ import {
 export class DesktopDaemonController {
   private host: LocalDaemonHost | undefined;
   private owned = false;
+  private startingPromise: Promise<void> | undefined;
   private stoppingPromise: Promise<void> | undefined;
 
   get ownsProcess(): boolean {
-    return this.owned;
+    // Fence quit while ownership is still being resolved. stop() will wait for
+    // the candidate and leave it untouched if another process owns the daemon.
+    return this.owned || this.startingPromise !== undefined;
   }
 
   async start(): Promise<void> {
+    if (this.startingPromise) return this.startingPromise;
     if (this.host) return;
     const candidate = createProductionLocalDaemonHost();
+    this.host = candidate;
+    const startingPromise = this.startCandidate(candidate);
+    this.startingPromise = startingPromise;
     try {
-      await candidate.start();
-      this.host = candidate;
-      this.owned = true;
-    } catch (error) {
-      if (error instanceof LocalDaemonAlreadyRunningError) {
-        this.host = undefined;
-        this.owned = false;
-        return;
-      }
-      throw error;
+      await startingPromise;
+    } finally {
+      if (this.startingPromise === startingPromise) this.startingPromise = undefined;
     }
   }
 
   async stop(): Promise<void> {
     if (this.stoppingPromise) return this.stoppingPromise;
-    const host = this.host;
-    if (!host) {
-      this.owned = false;
-      return;
-    }
-    const stoppingPromise = host.stop().finally(() => {
-      if (this.host === host) this.host = undefined;
-      this.owned = false;
+    const stoppingPromise = this.stopOwnedHost().finally(() => {
       if (this.stoppingPromise === stoppingPromise) this.stoppingPromise = undefined;
     });
     this.stoppingPromise = stoppingPromise;
     return stoppingPromise;
+  }
+
+  private async startCandidate(candidate: LocalDaemonHost): Promise<void> {
+    try {
+      await candidate.start();
+      if (this.host === candidate) this.owned = true;
+    } catch (error) {
+      if (this.host === candidate) this.host = undefined;
+      this.owned = false;
+      if (error instanceof LocalDaemonAlreadyRunningError) return;
+      throw error;
+    }
+  }
+
+  private async stopOwnedHost(): Promise<void> {
+    const startingPromise = this.startingPromise;
+    if (startingPromise) await startingPromise.catch(() => undefined);
+    const host = this.host;
+    if (!host || !this.owned) return;
+    try {
+      await host.stop();
+    } finally {
+      if (this.host === host) this.host = undefined;
+      this.owned = false;
+    }
   }
 }
 

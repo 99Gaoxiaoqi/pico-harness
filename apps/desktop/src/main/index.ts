@@ -15,14 +15,19 @@ let disposeUpdater: (() => void) | undefined;
 const runtime = new LocalDaemonRuntimeClientAdapter();
 const daemon = new DesktopDaemonController();
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
+const requestDesktopShutdown = (exitCode?: number): void => {
+  if (exitCode !== undefined) process.exitCode = exitCode;
+  lifecycle.markQuitting();
+  app.quit();
+};
 const stopOwnedDaemonBeforeQuit = createDesktopDaemonShutdownFence(
   daemon,
-  () => app.quit(),
+  () => requestDesktopShutdown(),
   (error) => console.error("Pico desktop daemon failed to stop cleanly", error),
 );
 
 if (!app.requestSingleInstanceLock()) {
-  app.quit();
+  requestDesktopShutdown();
 } else {
   app.on("second-instance", () => lifecycle.showWindow());
   app.on("before-quit", (event) => {
@@ -48,7 +53,9 @@ if (!app.requestSingleInstanceLock()) {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
       installApplicationMenu(() => mainWindow);
       await daemon.start();
+      if (lifecycle.isQuitting()) return;
       parseDesktopRuntimeResult("runtime.ping", await runtime.request("runtime.ping", {}));
+      if (lifecycle.isQuitting()) return;
       const platform = createPlatformServices();
       disposeIpc = registerDesktopIpcHandlers({
         ipcMain,
@@ -62,11 +69,12 @@ if (!app.requestSingleInstanceLock()) {
     })
     .catch((error: unknown) => {
       console.error("Pico desktop failed to start", error);
-      app.exit(1);
+      requestDesktopShutdown(1);
     });
 }
 
 async function openMainWindow(): Promise<void> {
+  if (lifecycle.isQuitting()) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
     lifecycle.showWindow();
     return;
