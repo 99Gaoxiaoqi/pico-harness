@@ -85,11 +85,12 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
         nextCwdCandidates.push(nextCwd);
       }
     }
-    if (changesCwd && context.isolatedCwd) return true;
     if (changesCwd) {
       const contextualWords = words.map((word) => ({ ...word, cwd: cwdCandidates[0]! }));
       cwdCandidatesBySubshellDepth[context.subshellDepth] =
-        context.conditionallyExecuted || hasComplexCwdControlPrefix(contextualWords)
+        context.isolatedCwd ||
+        context.conditionallyExecuted ||
+        hasComplexCwdControlPrefix(contextualWords)
           ? [UNKNOWN_SHELL_CWD]
           : mergeShellCwdCandidates(cwdCandidates, nextCwdCandidates);
     }
