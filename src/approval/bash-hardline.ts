@@ -48,7 +48,7 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
   if (depth >= MAX_NESTED_COMMAND_DEPTH && parsed.nestedCommands.length > 0) {
     return true;
   }
-  const cwdBySubshellDepth = [initialCwd];
+  const cwdCandidatesBySubshellDepth: string[][] = [[initialCwd]];
   let previousSubshellPath: readonly number[] = [];
   for (let commandIndex = 0; commandIndex < parsed.commands.length; commandIndex++) {
     const context = parsed.commandContexts[commandIndex]!;
@@ -60,26 +60,38 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
     ) {
       sharedSubshellDepth++;
     }
-    cwdBySubshellDepth.length = sharedSubshellDepth + 1;
+    cwdCandidatesBySubshellDepth.length = sharedSubshellDepth + 1;
     for (
       let depthIndex = sharedSubshellDepth + 1;
       depthIndex <= context.subshellDepth;
       depthIndex++
     ) {
-      cwdBySubshellDepth[depthIndex] = cwdBySubshellDepth[depthIndex - 1]!;
+      cwdCandidatesBySubshellDepth[depthIndex] = cwdCandidatesBySubshellDepth[depthIndex - 1]!;
     }
-    const cwd = cwdBySubshellDepth[context.subshellDepth]!;
-    for (const nested of parsed.nestedCommands) {
-      if (nested.commandIndex !== commandIndex) continue;
-      if (isHardlineBashCommandAtDepth(nested.content, depth + 1, cwd)) return true;
-    }
+    const cwdCandidates = cwdCandidatesBySubshellDepth[context.subshellDepth]!;
     const words = parsed.commands[commandIndex]!;
-    const contextualWords = words.map((word) => ({ ...word, cwd }));
-    if (isHardlineCommandWords(contextualWords, depth)) return true;
-    const nextCwd = nextShellCwd(contextualWords, cwd);
-    if (nextCwd !== undefined) {
-      cwdBySubshellDepth[context.subshellDepth] = UNKNOWN_SHELL_CWD;
-      cwdBySubshellDepth[0] = UNKNOWN_SHELL_CWD;
+    const nextCwdCandidates: string[] = [];
+    let changesCwd = false;
+    for (const cwd of cwdCandidates) {
+      for (const nested of parsed.nestedCommands) {
+        if (nested.commandIndex !== commandIndex) continue;
+        if (isHardlineBashCommandAtDepth(nested.content, depth + 1, cwd)) return true;
+      }
+      const contextualWords = words.map((word) => ({ ...word, cwd }));
+      if (isHardlineCommandWords(contextualWords, depth)) return true;
+      const nextCwd = nextShellCwd(contextualWords, cwd);
+      if (nextCwd !== undefined) {
+        changesCwd = true;
+        nextCwdCandidates.push(nextCwd);
+      }
+    }
+    if (changesCwd && context.isolatedCwd) return true;
+    if (changesCwd) {
+      const contextualWords = words.map((word) => ({ ...word, cwd: cwdCandidates[0]! }));
+      cwdCandidatesBySubshellDepth[context.subshellDepth] =
+        context.conditionallyExecuted || hasComplexCwdControlPrefix(contextualWords)
+          ? [UNKNOWN_SHELL_CWD]
+          : mergeShellCwdCandidates(cwdCandidates, nextCwdCandidates);
     }
     previousSubshellPath = context.subshellPath;
   }
@@ -682,6 +694,25 @@ function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string |
     return normalizeSlashPath(slashPath);
   }
   return resolveAgainstCwd(currentCwd, slashPath);
+}
+
+function hasComplexCwdControlPrefix(words: readonly ShellWord[]): boolean {
+  const executableIndex = findExecutableIndex(words);
+  if (executableIndex <= 0) return false;
+  return words
+    .slice(0, executableIndex)
+    .some((word) => SHELL_CONTROL_PREFIXES.has(word.value.toLowerCase()));
+}
+
+function mergeShellCwdCandidates(current: readonly string[], next: readonly string[]): string[] {
+  // cd/pushd 可能失败并保留原目录，两条路径都必须继续检查。
+  const merged = new Set<string>();
+  for (const candidate of [...current, ...next]) {
+    if (candidate === UNKNOWN_SHELL_CWD) return [UNKNOWN_SHELL_CWD];
+    merged.add(candidate);
+    if (merged.size > MAX_SHELL_CWD_CANDIDATES) return [UNKNOWN_SHELL_CWD];
+  }
+  return [...merged];
 }
 
 function staticShellMayChangeCwd(command: string, initialCwd: string): boolean {
@@ -1523,6 +1554,8 @@ function commandBasename(command: string): string {
 }
 
 const MAX_NESTED_COMMAND_DEPTH = 8;
+
+const MAX_SHELL_CWD_CANDIDATES = 16;
 
 const SAFE_WORKSPACE_CWD = "/tmp/.pico-workspace";
 
