@@ -28,8 +28,10 @@ export async function resolveReferencedScripts(
   workspace: string,
 ): Promise<ReferencedScriptResolution> {
   if (handler.type !== "command") return { paths: [], watchPaths: [], packageScripts: [] };
-  const paths = [...resolveReferencedScriptCandidates(handler, workspace)];
-  const invocation = packageRunInvocation(commandTokens(handler));
+  const tokens = commandTokens(handler);
+  assertSafePackageShell(handler, tokens);
+  const paths = [...referencedPathCandidates(tokens, workspace)];
+  const invocation = packageRunInvocation(tokens);
   const packageScripts: ReferencedPackageScript[] = [];
   if (invocation) {
     const resolved = await resolvePackageScript(invocation, workspace);
@@ -80,6 +82,7 @@ export async function existingReferencedScripts(
 interface PackageRunInvocation {
   readonly manager: PackageManager;
   readonly scriptName: string;
+  readonly lifecycle: "standard" | "npm-restart" | "npm-start";
 }
 
 async function resolvePackageScript(
@@ -114,20 +117,13 @@ async function resolvePackageScript(
   if (!isRecord(parsed)) {
     return packageResolution(invocation, manifestPath, canonicalManifestPath, "resolved");
   }
-  const scripts = parsed.scripts;
-  if (!isRecord(scripts)) {
-    return packageResolution(invocation, manifestPath, canonicalManifestPath, "resolved");
-  }
+  const scripts = isRecord(parsed.scripts) ? parsed.scripts : {};
 
-  const lifecycleNames = [
-    `pre${invocation.scriptName}`,
-    invocation.scriptName,
-    `post${invocation.scriptName}`,
-  ];
+  const lifecycleNames = packageLifecycleNames(invocation, scripts);
   const definitions = Object.fromEntries(
     lifecycleNames.map((name) => {
       const definition = scripts[name];
-      return [name, typeof definition === "string" ? definition : null];
+      return [name, packageScriptDefinition(invocation, name, definition)];
     }),
   );
   const paths = Object.values(definitions).flatMap((definition) =>
@@ -137,7 +133,8 @@ async function resolvePackageScript(
   );
   return {
     reference: {
-      ...invocation,
+      manager: invocation.manager,
+      scriptName: invocation.scriptName,
       manifestPath,
       canonicalManifestPath,
       state: "resolved",
@@ -155,7 +152,8 @@ function packageResolution(
 ): { reference: ReferencedPackageScript; paths: readonly string[] } {
   return {
     reference: {
-      ...invocation,
+      manager: invocation.manager,
+      scriptName: invocation.scriptName,
       manifestPath,
       canonicalManifestPath,
       state,
@@ -167,17 +165,271 @@ function packageResolution(
 
 function packageRunInvocation(tokens: readonly string[]): PackageRunInvocation | undefined {
   const executable = tokens[0];
-  const action = tokens[1];
-  const scriptName = tokens[2];
-  if (!executable || !action || !scriptName || scriptName.startsWith("-")) return undefined;
+  if (!executable) return undefined;
   const manager = packageManager(executable);
   if (!manager) return undefined;
-  if (manager === "npm") {
-    if (action !== "run" && action !== "run-script") return undefined;
-  } else if (action !== "run") {
-    return undefined;
+  assertNoUnsupportedPackageSelectors(tokens, manager);
+
+  const actionPosition = nextPackageArgument(tokens, 1, manager);
+  if (!actionPosition) return undefined;
+  const action = actionPosition.value;
+  if (action === "run" || (manager === "npm" && action === "run-script")) {
+    const scriptPosition = nextPackageArgument(tokens, actionPosition.nextIndex, manager);
+    if (!scriptPosition) return undefined;
+    return {
+      manager,
+      scriptName: scriptPosition.value,
+      lifecycle: packageLifecycle(manager, scriptPosition.value),
+    };
   }
-  return { manager, scriptName };
+
+  return directPackageScript(manager, action);
+}
+
+interface PackageArgument {
+  readonly value: string;
+  readonly nextIndex: number;
+}
+
+function nextPackageArgument(
+  tokens: readonly string[],
+  startIndex: number,
+  manager: PackageManager,
+): PackageArgument | undefined {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (!token) return undefined;
+    if (!token.startsWith("-")) return { value: token, nextIndex: index + 1 };
+    if (token === "--") return undefined;
+
+    const separator = token.indexOf("=");
+    const option = separator === -1 ? token : token.slice(0, separator);
+    const behavior = packageOptionBehavior(manager, option);
+    if (behavior === "flag") {
+      index += 1;
+      continue;
+    }
+    if (behavior === "value") {
+      if (separator !== -1) {
+        index += 1;
+        continue;
+      }
+      if (!tokens[index + 1]) return undefined;
+      index += 2;
+      continue;
+    }
+    if (behavior === "terminal") return undefined;
+    throw unsupportedPackageInvocation(manager, `无法安全解析选项 ${option}`);
+  }
+  return undefined;
+}
+
+type PackageOptionBehavior = "flag" | "value" | "terminal" | "unsupported";
+
+function packageOptionBehavior(manager: PackageManager, option: string): PackageOptionBehavior {
+  if (TERMINAL_PACKAGE_OPTIONS.has(option)) return "terminal";
+  if (UNSUPPORTED_PACKAGE_OPTIONS[manager].has(option)) return "unsupported";
+  if (PACKAGE_FLAG_OPTIONS[manager].has(option)) return "flag";
+  if (PACKAGE_VALUE_OPTIONS[manager].has(option)) return "value";
+  return "unsupported";
+}
+
+function directPackageScript(
+  manager: PackageManager,
+  action: string,
+): PackageRunInvocation | undefined {
+  if (manager === "npm") {
+    const scriptName = NPM_LIFECYCLE_SHORTHANDS[action];
+    if (!scriptName) return undefined;
+    return {
+      manager,
+      scriptName,
+      lifecycle: packageLifecycle(manager, scriptName),
+    };
+  }
+  if (manager === "pnpm") {
+    const scriptName = PNPM_LIFECYCLE_SHORTHANDS[action];
+    if (scriptName) return { manager, scriptName, lifecycle: "standard" };
+  }
+  if (NON_DIRECT_SCRIPT_COMMANDS[manager].has(action)) return undefined;
+  if (manager === "bun" && looksLikePath(action)) return undefined;
+  return { manager, scriptName: action, lifecycle: "standard" };
+}
+
+function packageLifecycleNames(
+  invocation: PackageRunInvocation,
+  scripts: Readonly<Record<string, unknown>>,
+): readonly string[] {
+  if (invocation.lifecycle === "npm-restart" && typeof scripts.restart !== "string") {
+    return [
+      "prerestart",
+      "prestop",
+      "stop",
+      "poststop",
+      "prestart",
+      "start",
+      "poststart",
+      "postrestart",
+    ];
+  }
+  return [`pre${invocation.scriptName}`, invocation.scriptName, `post${invocation.scriptName}`];
+}
+
+function packageScriptDefinition(
+  invocation: PackageRunInvocation,
+  name: string,
+  definition: unknown,
+): string | null {
+  if (typeof definition === "string") return definition;
+  if (
+    (invocation.lifecycle === "npm-start" || invocation.lifecycle === "npm-restart") &&
+    name === "start"
+  ) {
+    return "node server.js";
+  }
+  return null;
+}
+
+function packageLifecycle(
+  manager: PackageManager,
+  scriptName: string,
+): PackageRunInvocation["lifecycle"] {
+  if (manager !== "npm") return "standard";
+  if (scriptName === "restart") return "npm-restart";
+  if (scriptName === "start") return "npm-start";
+  return "standard";
+}
+
+function assertNoUnsupportedPackageSelectors(
+  tokens: readonly string[],
+  manager: PackageManager,
+): void {
+  for (const token of tokens.slice(1)) {
+    if (token === "--") return;
+    if (!token.startsWith("-")) continue;
+    const separator = token.indexOf("=");
+    const option = separator === -1 ? token : token.slice(0, separator);
+    if (UNSUPPORTED_PACKAGE_OPTIONS[manager].has(option)) {
+      throw unsupportedPackageInvocation(manager, `选择器 ${option} 会改变 package.json 目标`);
+    }
+  }
+}
+
+function assertSafePackageShell(
+  handler: Extract<HookHandler, { type: "command" }>,
+  tokens: readonly string[],
+): void {
+  if (handler.args !== undefined) return;
+  const manager = packageManager(tokens[0] ?? "");
+  if (manager && hasShellControlSyntax(handler.command)) {
+    throw unsupportedPackageInvocation(manager, "shell 组合可能执行未绑定的间接脚本");
+  }
+}
+
+function hasShellControlSyntax(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index];
+    if (character === undefined) continue;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') {
+        quote = undefined;
+        continue;
+      }
+      if (character === "`" || (character === "$" && command[index + 1] === "(")) return true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (";&|<>`(){}\n\r".includes(character)) return true;
+    if (character === "$" && command[index + 1] === "(") return true;
+  }
+  return false;
+}
+
+function unsupportedPackageInvocation(manager: PackageManager, reason: string): Error {
+  return new Error(`不支持为该 ${manager} Hook 建立间接脚本信任: ${reason}`);
+}
+
+const NPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
+  test: "test",
+  t: "test",
+  tst: "test",
+  start: "start",
+  stop: "stop",
+  restart: "restart",
+};
+
+const PNPM_LIFECYCLE_SHORTHANDS: Readonly<Record<string, string>> = {
+  test: "test",
+  t: "test",
+  start: "start",
+};
+
+const TERMINAL_PACKAGE_OPTIONS = wordSet("-h --help -v --version --revision");
+
+const PACKAGE_FLAG_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {
+  npm: wordSet(
+    "-s --silent --if-present --ignore-scripts --foreground-scripts --color --no-color --json --timing",
+  ),
+  pnpm: wordSet(
+    "-s --silent --if-present --stream --aggregate-output --parallel --sequential --color --no-color --use-stderr --reverse --sort",
+  ),
+  yarn: wordSet(
+    "-s --silent --verbose --json --no-progress --non-interactive --offline --ignore-scripts --ignore-engines",
+  ),
+  bun: wordSet(
+    "--silent --if-present --no-install --prefer-offline --prefer-latest --watch --hot --smol --no-clear-screen --bun -b --no-env-file",
+  ),
+};
+
+const PACKAGE_VALUE_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {
+  npm: wordSet("--loglevel --script-shell"),
+  pnpm: wordSet("--reporter --loglevel"),
+  yarn: wordSet("--network-timeout --mutex --registry"),
+  bun: wordSet("--shell --env-file --config -c --preload -r --require --import --install"),
+};
+
+/** These selectors can change the package.json being executed and need separate resolution. */
+const UNSUPPORTED_PACKAGE_OPTIONS: Readonly<Record<PackageManager, ReadonlySet<string>>> = {
+  npm: wordSet("--workspace -w --workspaces --include-workspace-root --prefix"),
+  pnpm: wordSet("--dir -C --filter -F --recursive -r --workspace-root -w --resume-from"),
+  yarn: wordSet("--cwd --focus"),
+  bun: wordSet("--cwd --filter -F --workspaces"),
+};
+
+const NON_DIRECT_SCRIPT_COMMANDS: Readonly<
+  Record<Exclude<PackageManager, "npm">, ReadonlySet<string>>
+> = {
+  pnpm: wordSet(
+    "add audit approve-builds bin c cache cat-file cat-index completion config create dedupe deploy dlx doctor env exec fetch find-hash help i ignored-builds import info init install install-test it licenses link list ln ls outdated pack patch patch-commit patch-remove pkg prune publish rb rebuild remove rm root self-update server setup store unlink uninstall up update upgrade view why",
+  ),
+  yarn: wordSet(
+    "add audit autoclean bin cache check config constraints create dedupe dlx exec explain generate-lock-entry global help import info init install licenses link list login logout node npm outdated owner pack patch patch-commit plugin policies publish rebuild remove search self-update set stage tag team unlink unplug unset up upgrade upgrade-interactive version versions why workspace workspaces",
+  ),
+  bun: wordSet(
+    "a add audit build c create exec feedback help i info init install link outdated patch pm publish remove repl rm unlink update upgrade why x",
+  ),
+};
+
+function wordSet(words: string): ReadonlySet<string> {
+  return new Set(words.split(/\s+/u));
 }
 
 function packageManager(executable: string): PackageManager | undefined {
