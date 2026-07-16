@@ -550,6 +550,3 @@ function toUnavailableError(error: unknown): RuntimeClientError {
     error instanceof Error ? { cause: error } : undefined,
   );
 }
-
-/** @deprecated Import resolveLocalDaemonEndpoint from the shared daemon package. */
-export const resolveDaemonEndpoint = resolveLocalDaemonEndpoint;

@@ -4,12 +4,6 @@ import { terminalWidth, truncateTerminalText } from "./terminal-width.js";
 import { truncateLogoCwd } from "./logo-panel.js";
 
 export interface StatusBarProps {
-  /** @deprecated model is shown by LogoPanel. Kept optional for source compatibility. */
-  model?: string;
-  /** @deprecated provider should be passed as contextSummary. */
-  provider?: string;
-  /** @deprecated cwd is shown by LogoPanel. */
-  cwd?: string;
   phase?: "idle" | "running" | "approval" | "queued" | string;
   sessionMode?: string;
   forkFrom?: string;
@@ -17,7 +11,6 @@ export interface StatusBarProps {
   contextSummary?: string;
   taskSummary?: string;
   summaryMaxLength?: number;
-  cwdMaxLength?: number;
   renderWidth?: number;
 }
 
@@ -31,9 +24,7 @@ export function buildStatusItems({
   contextSummary,
   taskSummary,
   summaryMaxLength = 32,
-  provider,
 }: StatusBarProps): StatusItem[] {
-  const context = contextSummary ?? provider;
   const items: StatusItem[] = [
     ["phase", phase],
     ["mode", sessionMode],
@@ -42,7 +33,9 @@ export function buildStatusItems({
     items.push(["forkFrom", shortSessionId(forkFrom)]);
   }
   if (permissionMode !== sessionMode) items.push(["perm", permissionMode]);
-  if (context) items.push(["context", truncateLogoCwd(context, summaryMaxLength)]);
+  if (contextSummary) {
+    items.push(["context", truncateLogoCwd(contextSummary, summaryMaxLength)]);
+  }
   if (taskSummary) items.push(["task", truncateLogoCwd(taskSummary, summaryMaxLength)]);
   return items;
 }

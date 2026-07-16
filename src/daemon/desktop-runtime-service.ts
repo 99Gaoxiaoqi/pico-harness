@@ -26,7 +26,7 @@ import {
 import {
   loadPicoConfig,
   parseModelProviderConfigs,
-  type PicoConfig,
+  type PicoProjectConfig,
 } from "../input/pico-config.js";
 import {
   EffectiveConfigResolver,
@@ -3409,7 +3409,7 @@ function effectiveSessionSettingDefaults(
   };
 }
 
-function safeConfig(config: PicoConfig): JsonValue {
+function safeConfig(config: PicoProjectConfig): JsonValue {
   return toJsonValue({
     schemaVersion: config.version,
     ...(config.model ? { model: config.model } : {}),
