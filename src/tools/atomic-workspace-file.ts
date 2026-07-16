@@ -6,9 +6,12 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
+// Node 未暴露 Linux O_PATH；该稳定 ABI 标志让覆盖绑定目标 inode 而不额外要求读权限。
+const LINUX_O_PATH_FLAG = 0o10000000;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
 const MACOS_PROVENANCE_ATTRIBUTE = "com.apple.provenance";
-const METADATA_PROBE_MAX_BYTES = 64 * 1024;
+const LINUX_CAPABILITY_ATTRIBUTE = "security.capability";
+const METADATA_PROBE_MAX_BYTES = 256 * 1024;
 const execFileAsync = promisify(execFile);
 
 interface FileVersion {
@@ -29,6 +32,12 @@ interface DirectoryIdentity {
 
 interface MacExtendedMetadataSnapshot {
   readonly provenanceHex?: string;
+}
+
+interface LinuxMetadataSource {
+  readonly handle: FileHandle;
+  readonly version: FileVersion;
+  readonly attributes: ReadonlyMap<string, string>;
 }
 
 export type AtomicFilePrecondition =
@@ -174,17 +183,17 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
       // 先由 open(0666) 得到与旧实现相同的 umask/default-ACL 模式，再收紧暂存权限。
       await handle.chmod(0o600);
     } else if (linuxMetadataSource) {
-      // GNU cp 的 attributes-only 不触碰内容；先复制 ACL/xattr，再写入新内容，避免
-      // 把旧 security.capability 或 setid 权限复活到已经改变的字节上。
-      await copyLinuxExtendedMetadata(
+      // 属性直接写入已打开的临时 inode；随后即使内容为空也先 ftruncate，确保内核
+      // 清除 security.capability，再写用户内容并在发布前逐项复核。
+      await applyLinuxExtendedMetadata(
         linuxMetadataSource,
-        input.precondition.version,
         handle,
         temporaryIdentity,
         temporaryPath,
       );
     }
 
+    if (linuxMetadataSource) await handle.truncate(0);
     // open() 也使用路径；先确认它确实发生在刚才校验的父目录，再写入用户内容。
     await input.revalidateTarget();
     await assertDirectoryIdentity(directory, directoryIdentity);
@@ -196,8 +205,15 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     // 只发布普通 rwx 位。覆盖时不复活 setuid/setgid/sticky；新建时保持 0666 + umask。
     await handle.chmod(publishedPermissionMode);
     await handle.sync();
+    const beforeMetadataVerification = await handle.stat({ bigint: true });
     await assertMacExtendedMetadataPreserved(temporaryPath, macMetadata);
+    await assertLinuxExtendedMetadataPreserved(handle, linuxMetadataSource, temporaryPath);
     const finalizedTemporary = await handle.stat({ bigint: true });
+    if (
+      !sameFileVersion(toFileVersion(beforeMetadataVerification), toFileVersion(finalizedTemporary))
+    ) {
+      throw new Error(`验证扩展元数据时临时文件发生并发变化: ${temporaryPath}`);
+    }
     assertPreparedTemporary(
       finalizedTemporary,
       temporaryIdentity,
@@ -218,7 +234,7 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     published = true;
   } finally {
     await handle?.close().catch(() => undefined);
-    await linuxMetadataSource?.close().catch(() => undefined);
+    await linuxMetadataSource?.handle.close().catch(() => undefined);
     if (!published && temporaryIdentity) {
       await unlinkIfSameFile(temporaryPath, temporaryIdentity);
     }
@@ -228,74 +244,153 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
 async function openLinuxMetadataSource(
   targetPath: string,
   precondition: AtomicFilePrecondition,
-): Promise<FileHandle | undefined> {
+): Promise<LinuxMetadataSource | undefined> {
   if (process.platform !== "linux" || precondition.kind !== "file") return undefined;
   let handle: FileHandle | undefined;
   try {
-    handle = await open(
-      targetPath,
-      constants.O_RDONLY | NO_FOLLOW_FLAG | (constants.O_NONBLOCK ?? 0),
-    );
+    handle = await open(targetPath, LINUX_O_PATH_FLAG | NO_FOLLOW_FLAG);
     const info = await handle.stat({ bigint: true });
     assertRegularNonSymlink(info, targetPath);
     if (!sameFileVersion(precondition.version, toFileVersion(info))) {
       throw new Error(`复制扩展元数据前目标文件已被替换或修改: ${targetPath}`);
     }
-    return handle;
+    const attributes = await readLinuxExtendedAttributes(handle, targetPath);
+    const after = await handle.stat({ bigint: true });
+    if (!sameFileVersion(precondition.version, toFileVersion(after))) {
+      throw new Error(`读取扩展元数据时目标文件发生并发变化: ${targetPath}`);
+    }
+    return { handle, version: precondition.version, attributes };
   } catch (error) {
     await handle?.close().catch(() => undefined);
     throw new Error(`无法绑定 Linux 目标元数据，已拒绝覆盖: ${targetPath}`, { cause: error });
   }
 }
 
-async function copyLinuxExtendedMetadata(
-  source: FileHandle,
-  expectedSource: FileVersion,
+async function applyLinuxExtendedMetadata(
+  source: LinuxMetadataSource,
   destination: FileHandle,
   expectedDestination: FileVersion,
   temporaryPath: string,
 ): Promise<void> {
-  const sourceDescriptorPath = `/proc/${process.pid}/fd/${source.fd}`;
+  const sourceDescriptorPath = linuxDescriptorPath(source.handle);
   const destinationDescriptorPath = `/proc/${process.pid}/fd/${destination.fd}`;
+  const expectedAttributes = publishedLinuxAttributes(source.attributes);
+  const currentAttributes = await readLinuxExtendedAttributes(destination, temporaryPath);
+
+  for (const [name, value] of [...expectedAttributes].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    if (currentAttributes.get(name) === value) continue;
+    await runLinuxSetfattr(["--name", name, "--value", value, "--", destinationDescriptorPath]);
+  }
+  for (const name of [...currentAttributes.keys()].sort()) {
+    if (expectedAttributes.has(name)) continue;
+    await runLinuxSetfattr(["--remove", name, "--", destinationDescriptorPath]);
+  }
+
+  const [sourceAfter, destinationAfter] = await Promise.all([
+    source.handle.stat({ bigint: true }),
+    destination.stat({ bigint: true }),
+  ]);
+  assertRegularNonSymlink(sourceAfter, sourceDescriptorPath);
+  assertRegularNonSymlink(destinationAfter, destinationDescriptorPath);
+  if (!sameFileVersion(source.version, toFileVersion(sourceAfter))) {
+    throw new Error(`复制扩展元数据时源文件发生并发变化: ${sourceDescriptorPath}`);
+  }
+  if (!sameFileIdentity(expectedDestination, toFileVersion(destinationAfter))) {
+    throw new Error(`复制扩展元数据时临时文件已被替换: ${temporaryPath}`);
+  }
+}
+
+async function assertLinuxExtendedMetadataPreserved(
+  destination: FileHandle,
+  source: LinuxMetadataSource | undefined,
+  temporaryPath: string,
+): Promise<void> {
+  if (!source) return;
+  const actual = await readLinuxExtendedAttributes(destination, temporaryPath);
+  const expected = publishedLinuxAttributes(source.attributes);
+  if (!sameLinuxAttributes(actual, expected)) {
+    throw new Error(`无法保真复制 Linux ACL/扩展属性，已拒绝覆盖: ${temporaryPath}`);
+  }
+}
+
+async function readLinuxExtendedAttributes(
+  handle: FileHandle,
+  displayPath: string,
+): Promise<ReadonlyMap<string, string>> {
+  const descriptorPath = linuxDescriptorPath(handle);
   let lastError: unknown;
-  for (const command of ["/bin/cp", "/usr/bin/cp"] as const) {
+  for (const command of ["/usr/bin/getfattr", "/bin/getfattr"] as const) {
     try {
-      await execFileAsync(
+      const { stdout } = await execFileAsync(
         command,
-        [
-          "--attributes-only",
-          "--preserve=mode,xattr",
-          "--",
-          sourceDescriptorPath,
-          destinationDescriptorPath,
-        ],
-        {
-          encoding: "utf8",
-          env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
-          maxBuffer: METADATA_PROBE_MAX_BYTES,
-        },
+        ["--absolute-names", "--dump", "--match=-", "--encoding=hex", "--", descriptorPath],
+        linuxMetadataProcessOptions(),
       );
-      const [sourceAfter, destinationAfter] = await Promise.all([
-        source.stat({ bigint: true }),
-        destination.stat({ bigint: true }),
-      ]);
-      assertRegularNonSymlink(sourceAfter, sourceDescriptorPath);
-      assertRegularNonSymlink(destinationAfter, destinationDescriptorPath);
-      if (!sameFileVersion(expectedSource, toFileVersion(sourceAfter))) {
-        throw new Error(`复制扩展元数据时源文件发生并发变化: ${sourceDescriptorPath}`);
-      }
-      if (!sameFileIdentity(expectedDestination, toFileVersion(destinationAfter))) {
-        throw new Error(`复制扩展元数据时临时文件已被替换: ${temporaryPath}`);
-      }
+      return parseLinuxAttributeDump(stdout, displayPath);
+    } catch (error) {
+      lastError = error;
+      if (!hasErrnoCode(error, "ENOENT")) break;
+    }
+  }
+  throw new Error(`无法读取 Linux ACL/扩展属性，已拒绝覆盖: ${displayPath}`, {
+    cause: lastError,
+  });
+}
+
+async function runLinuxSetfattr(args: readonly string[]): Promise<void> {
+  let lastError: unknown;
+  for (const command of ["/usr/bin/setfattr", "/bin/setfattr"] as const) {
+    try {
+      await execFileAsync(command, [...args], linuxMetadataProcessOptions());
       return;
     } catch (error) {
       lastError = error;
       if (!hasErrnoCode(error, "ENOENT")) break;
     }
   }
-  throw new Error(`无法保真复制 Linux ACL/扩展属性，已拒绝覆盖: ${temporaryPath}`, {
-    cause: lastError,
-  });
+  throw new Error("无法写入 Linux ACL/扩展属性，已拒绝覆盖", { cause: lastError });
+}
+
+function linuxMetadataProcessOptions() {
+  return {
+    encoding: "utf8" as const,
+    env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+    maxBuffer: METADATA_PROBE_MAX_BYTES,
+  };
+}
+
+function parseLinuxAttributeDump(output: string, displayPath: string): ReadonlyMap<string, string> {
+  const attributes = new Map<string, string>();
+  for (const line of output.split(/\r?\n/u)) {
+    if (line.length === 0 || line.startsWith("# ")) continue;
+    const match = line.match(/^([A-Za-z][A-Za-z0-9_.:-]*)=(0x(?:[0-9a-fA-F]{2})*)$/u);
+    if (!match || attributes.has(match[1]!)) {
+      throw new Error(`Linux 扩展属性输出无法安全解析，已拒绝覆盖: ${displayPath}`);
+    }
+    attributes.set(match[1]!, match[2]!.toLowerCase());
+  }
+  return attributes;
+}
+
+function publishedLinuxAttributes(
+  source: ReadonlyMap<string, string>,
+): ReadonlyMap<string, string> {
+  const published = new Map(source);
+  published.delete(LINUX_CAPABILITY_ATTRIBUTE);
+  return published;
+}
+
+function sameLinuxAttributes(
+  left: ReadonlyMap<string, string>,
+  right: ReadonlyMap<string, string>,
+): boolean {
+  return left.size === right.size && [...left].every(([name, value]) => right.get(name) === value);
+}
+
+function linuxDescriptorPath(handle: FileHandle): string {
+  return `/proc/${process.pid}/fd/${handle.fd}`;
 }
 
 async function captureMacExtendedMetadata(
