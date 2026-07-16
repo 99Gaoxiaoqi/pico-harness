@@ -77,12 +77,9 @@ function isHardlineBashCommandAtDepth(command: string, depth: number, initialCwd
     const contextualWords = words.map((word) => ({ ...word, cwd }));
     if (isHardlineCommandWords(contextualWords, depth)) return true;
     const nextCwd = nextShellCwd(contextualWords, cwd);
-    if (nextCwd !== undefined && context.isolatedCwd) return true;
     if (nextCwd !== undefined) {
-      cwdBySubshellDepth[context.subshellDepth] =
-        context.conditionallyExecuted || hasComplexCwdControlPrefix(contextualWords)
-          ? UNKNOWN_SHELL_CWD
-          : nextCwd;
+      cwdBySubshellDepth[context.subshellDepth] = UNKNOWN_SHELL_CWD;
+      cwdBySubshellDepth[0] = UNKNOWN_SHELL_CWD;
     }
     previousSubshellPath = context.subshellPath;
   }
@@ -637,7 +634,9 @@ function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string |
   if (executable === "eval") {
     const args = effectiveWords.slice(executableIndex + 1);
     if (args.length === 0 || args.some((word) => word.dynamic)) return UNKNOWN_SHELL_CWD;
-    return finalStaticShellCwd(args.map((word) => word.value).join(" "), currentCwd);
+    return staticShellMayChangeCwd(args.map((word) => word.value).join(" "), currentCwd)
+      ? UNKNOWN_SHELL_CWD
+      : undefined;
   }
   if (executable === "popd") return UNKNOWN_SHELL_CWD;
   if (executable !== "cd" && executable !== "pushd") return undefined;
@@ -685,23 +684,14 @@ function nextShellCwd(words: readonly ShellWord[], currentCwd: string): string |
   return resolveAgainstCwd(currentCwd, slashPath);
 }
 
-function hasComplexCwdControlPrefix(words: readonly ShellWord[]): boolean {
-  const executableIndex = findExecutableIndex(words);
-  if (executableIndex <= 0) return false;
-  return words
-    .slice(0, executableIndex)
-    .some((word) => SHELL_CONTROL_PREFIXES.has(word.value.toLowerCase()));
-}
-
-function finalStaticShellCwd(command: string, initialCwd: string): string {
+function staticShellMayChangeCwd(command: string, initialCwd: string): boolean {
   const parsed = parseShell(command);
-  if (parsed.ambiguous || parsed.nestedCommands.length > 0) return UNKNOWN_SHELL_CWD;
-  let cwd = initialCwd;
+  if (parsed.ambiguous || parsed.nestedCommands.length > 0) return true;
   for (const words of parsed.commands) {
-    const contextualWords = words.map((word) => ({ ...word, cwd }));
-    cwd = nextShellCwd(contextualWords, cwd) ?? cwd;
+    const contextualWords = words.map((word) => ({ ...word, cwd: initialCwd }));
+    if (nextShellCwd(contextualWords, initialCwd) !== undefined) return true;
   }
-  return cwd;
+  return false;
 }
 
 function resolveAgainstCwd(cwd: string, target: string): string {
@@ -1540,7 +1530,7 @@ const UNKNOWN_SHELL_CWD = "/etc/.pico-unknown-cwd";
 
 const SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "dash", "ksh", "sh", "zsh"]);
 
-const CWD_FORWARDERS: ReadonlySet<string> = new Set(["builtin", "command"]);
+const CWD_FORWARDERS: ReadonlySet<string> = new Set(["builtin", "command", "time"]);
 
 const SHELL_CONTROL_PREFIXES: ReadonlySet<string> = new Set([
   "!",
