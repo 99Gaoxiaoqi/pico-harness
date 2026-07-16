@@ -153,5 +153,37 @@ export function shellCommandArgs(shell: string, command: string): string[] {
   if (isWindows && name === "cmd.exe") {
     return ["/d", "/s", "/c", command];
   }
-  return ["-lc", command];
+  if (name === "bash" || name === "bash.exe") {
+    return ["--noprofile", "--norc", "-c", command];
+  }
+  return ["-c", command];
 }
+
+/** Keep ordinary user variables while removing ambient code-loading inputs for the host shell. */
+export function sanitizeShellProcessEnvironment(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(environment)) {
+    if (value === undefined || isShellStartupEnvironmentName(name)) continue;
+    sanitized[name] = value;
+  }
+  return sanitized;
+}
+
+function isShellStartupEnvironmentName(name: string): boolean {
+  const normalized = name.toUpperCase();
+  return SHELL_STARTUP_ENVIRONMENT_NAMES.has(normalized) || normalized.startsWith("BASH_FUNC_");
+}
+
+const SHELL_STARTUP_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set([
+  "BASHOPTS",
+  "BASH_ENV",
+  "BASH_XTRACEFD",
+  "CDPATH",
+  "ENV",
+  "GLOBIGNORE",
+  "PROMPT_COMMAND",
+  "PS4",
+  "SHELLOPTS",
+]);

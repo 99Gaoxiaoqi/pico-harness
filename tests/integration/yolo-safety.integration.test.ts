@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { isHardlineBashCommand } from "../../src/approval/bash-hardline.js";
 import { isHardlineCommand } from "../../src/approval/manager.js";
 import { buildForegroundSafetyMiddleware } from "../../src/runtime/agent-runtime.js";
 import { evaluateYoloToolCall } from "../../src/safety/yolo-sandbox.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
+import {
+  resolveShell,
+  sanitizeShellProcessEnvironment,
+  shellCommandArgs,
+} from "../../src/os/shell.js";
 
 test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
   const workDir = process.cwd();
@@ -366,11 +374,21 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "exec rm -rf /",
     "busybox rm --force --recursive /etc",
     "sudo bash -lc 'rm --force --recursive /'",
+    "/bin/[b]ash -c 'rm -rf /'",
     "zsh -ocorrect -c 'rm -rf /'",
+    "zsh -focorrect -c 'rm -rf /'",
     "bash --rcfile ./evil -ic 'printf safe'",
     "bash --init-file ./evil -ic 'printf safe'",
+    "bash -n +n -c 'rm -rf /'",
+    "bash -o noexec +o noexec -c 'rm -rf /'",
     "BASH_ENV=./evil bash -c 'printf safe'",
     "env BASH_ENV=./evil bash -c 'printf safe'",
+    "export BASH_ENV=./evil; bash -c 'printf safe'",
+    "eval 'export BASH_ENV=./evil'; bash -c 'printf safe'",
+    "ENV=./evil sh -c 'printf safe'",
+    "ZDOTDIR=./zdot zsh -c 'printf safe'",
+    "HOME=./home bash --noprofile -ic 'printf safe'",
+    "env 'BASH_FUNC_pico%%=() { printf marker; }' bash -c pico",
     "printf '%s\\n' 'rm -rf /' | sh",
     "printf '%s\\n' 'rm -rf /' | bash -s",
     "printf '%s\\n' 'rm -rf /' | ash",
@@ -387,6 +405,7 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     "timeout 1 sh ./destructive-script.sh",
     "stdbuf -oL sh ./destructive-script.sh",
     "ionice -c2 sh ./destructive-script.sh",
+    "env -iC / bash -c 'rm -f etc/passwd'",
     "printf '%s\\n' 'rm -rf /' | stdbuf -oL sh",
     "printf '%s\\n' 'rm -rf /' | ionice -c2 sh",
     "csh ./destructive-script.csh",
@@ -400,14 +419,21 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     `python3 -W ignore -c "import os; os.system('rm -rf /')"`,
     `python3 -X dev -c "import os; os.system('rm -rf /')"`,
     `python3.14t -W ignore -c "import os; os.system('rm -rf /')"`,
+    `python3 -qW ignore -c "import os; os.system('rm -rf /')"`,
+    `python3 --check-hash-based-pycs default -c "import os; os.system('rm -rf /')"`,
     `node -e "require('node:child_process').execSync('rm -rf /')"`,
     `node --title pico -e "require('node:child_process').execSync('rm -rf /')"`,
     `node -r ./bootstrap.js -e "require('node:child_process').execSync('rm -rf /')"`,
+    `node --conditions development -e "require('node:child_process').execSync('rm -rf /')"`,
+    `node --input-type module -e "require('node:child_process').execSync('rm -rf /')"`,
+    `node --inspect-port 0 -e "require('node:child_process').execSync('rm -rf /')"`,
     `perl -e "system('rm -rf /')"`,
     `perl -I ./lib -e "system('rm -rf /')"`,
+    `perl -wI ./lib -e "system('rm -rf /')"`,
     `ruby -e "system('rm -rf /')"`,
     `ruby -I ./lib -e "system('rm -rf /')"`,
     `ruby3.1 -I ./lib -e "system('rm -rf /')"`,
+    `ruby -wI ./lib -e "system('rm -rf /')"`,
     "{ rm -rf /; }",
     "(rm -rf /)",
     "if true; then rm -rf /; fi",
@@ -441,20 +467,28 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
     `rm --recursive --force -- ${JSON.stringify(`${workDir}/tmp/generated`)}`,
     "printf '%s\\n' 'rm -rf /'",
     "bash --version",
+    "command -v sh",
+    "command -V sh",
     "sh -c 'printf ok'",
     "ash -c 'printf ok'",
     "busybox ash -c 'printf ok'",
     "ash --version",
     "pwsh --version",
     "zsh -ocorrect -c 'printf ok'",
+    "zsh -focorrect -c 'printf ok'",
     "bash -c 'printf ok' --rcfile ./script-argument",
     "BASH_ENV=./evil printf safe",
     "env BASH_ENV=./evil printf safe",
     "time -f BASH_ENV=./evil bash -c 'printf ok'",
     "env bash -c 'printf ok'",
+    "env -iC /tmp sh -c 'printf ok'",
     "timeout 1 sh -c 'printf ok'",
     "stdbuf -oL sh -c 'printf ok'",
+    "stdbuf -oeL sh -c 'printf ok'",
     "ionice -c2 ash -c 'printf ok'",
+    "ionice -tc2 ash -c 'printf ok'",
+    "printf 'printf marker\\n' | bash -n",
+    "bash -n -c 'rm -rf /'",
     `python3 -c "print('rm -rf ./dist')"`,
     `python3 ./ordinary.py -c "rm -rf /"`,
     `python3 -W ignore ./ordinary.py -c "rm -rf /"`,
@@ -502,6 +536,49 @@ test(
 
     const visibleInvocation = `printf '%s' ${JSON.stringify(script)} | sh`;
     assert.equal(isHardlineBashCommand(visibleInvocation, process.cwd()), true);
+  },
+);
+
+test(
+  "Bash host shell ignores ambient profile and exported-function code",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-shell-startup-safety-"));
+    const home = join(root, "home");
+    const profileMarker = join(root, "profile-marker");
+    const environmentMarker = join(root, "environment-marker");
+    const functionMarker = join(root, "function-marker");
+    const startupScript = join(root, "startup.sh");
+    await mkdir(home);
+    context.after(() => rm(root, { recursive: true, force: true }));
+    await writeFile(
+      join(home, ".bash_profile"),
+      `printf profile > ${JSON.stringify(profileMarker)}\n`,
+    );
+    await writeFile(startupScript, `printf environment > ${JSON.stringify(environmentMarker)}\n`);
+
+    const environment = sanitizeShellProcessEnvironment({
+      ...process.env,
+      HOME: home,
+      BASH_ENV: startupScript,
+      ENV: startupScript,
+      "BASH_FUNC_pico_startup_probe%%": `() { printf function > ${JSON.stringify(
+        functionMarker,
+      )}; }`,
+    });
+    const shell = resolveShell();
+    const execution = spawnSync(
+      shell,
+      shellCommandArgs(shell, "pico_startup_probe || printf fallback"),
+      { cwd: root, encoding: "utf8", env: environment },
+    );
+
+    assert.equal(execution.error, undefined);
+    assert.equal(execution.status, 0, execution.stderr);
+    assert.equal(execution.stdout, "fallback");
+    await assert.rejects(access(profileMarker));
+    await assert.rejects(access(environmentMarker));
+    await assert.rejects(access(functionMarker));
   },
 );
 
