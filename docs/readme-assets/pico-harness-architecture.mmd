@@ -1,0 +1,59 @@
+%%{init: {"theme":"base","themeVariables":{"background":"#F8F9FA","fontFamily":"Arial, PingFang SC, sans-serif","lineColor":"#64748B","primaryTextColor":"#2F2B42"},"flowchart":{"curve":"basis","nodeSpacing":38,"rankSpacing":52}}}%%
+flowchart TB
+  TUI["命令行 / TUI 终端"]
+  DESKTOP["桌面 Renderer 界面"]
+
+  BRIDGE["Preload / Main IPC<br/>本机 Runtime 客户端"]
+  DAEMON["认证本机守护进程"]
+  DRS["桌面 Runtime 控制服务"]
+  TRUST["工作区信任 / 配置"]
+  WRS["工作区 Runtime 服务"]
+
+  RUNTIME["Agent Runtime 核心"]
+  ENGINE["Agent Engine / 工具调度器"]
+  CONTEXT["上下文 / 会话"]
+  PROVIDER["模型路由 / Provider 适配器"]
+  REGISTRY["工具注册表"]
+  GATES{"模式化门禁<br/>YOLO / Default / Auto / Plan / 后台"}
+
+  EXT["受信 Runtime 扩展快照<br/>Skill / Agent / Hook<br/>MCP / LSP"]
+  COMMANDS["TUI Markdown 命令"]
+  TASKS["任务控制<br/>TUI：TaskHost<br/>Daemon：周期任务"]
+  PROJECT["项目工作区"]
+  DATABASE[("runtime.sqlite<br/>Agent 事实 / 控制面")]
+  SIDECAR[("文件历史 / 产物")]
+
+  TUI --> TRUST
+  DESKTOP --> BRIDGE --> DAEMON --> DRS --> TRUST
+  TRUST -->|TUI 进程内| RUNTIME
+  TRUST -->|桌面入口| WRS --> RUNTIME
+
+  RUNTIME --> ENGINE
+  RUNTIME --> CONTEXT
+  RUNTIME --> PROVIDER
+  ENGINE <--> CONTEXT
+  ENGINE <--> PROVIDER
+  ENGINE --> REGISTRY --> GATES --> PROJECT
+
+  RUNTIME -.->|加载扩展| EXT
+  TUI -.->|加载命令| COMMANDS
+  RUNTIME -->|前台任务宿主| TASKS
+  DAEMON -->|周期任务生命周期| TASKS
+  RUNTIME --> DATABASE
+  TASKS --> DATABASE
+  REGISTRY --> SIDECAR
+
+  classDef input fill:#d3f9d8,stroke:#2f9e44,color:#1a1a1a
+  classDef process fill:#e5dbff,stroke:#5f3dc4,color:#1a1a1a
+  classDef decision fill:#ffe3e3,stroke:#c92a2a,color:#1a1a1a
+  classDef action fill:#ffe8cc,stroke:#d9480f,color:#1a1a1a
+  classDef output fill:#c5f6fa,stroke:#0c8599,color:#1a1a1a
+  classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
+  classDef meta fill:#e7f5ff,stroke:#1971c2,color:#1a1a1a
+  class TUI,DESKTOP input
+  class RUNTIME,ENGINE,CONTEXT,PROVIDER process
+  class GATES decision
+  class REGISTRY,EXT,COMMANDS action
+  class PROJECT output
+  class DATABASE,TASKS,SIDECAR storage
+  class BRIDGE,DAEMON,DRS,TRUST,WRS meta
