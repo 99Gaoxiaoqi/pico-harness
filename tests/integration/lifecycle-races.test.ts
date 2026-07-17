@@ -1166,10 +1166,13 @@ test("Hook reloader replaces watcher path sets after a same-directory script cha
       swaps++;
     },
   });
+  // 先让磁盘配置与 initial snapshot 分叉，再启动旧路径 watcher。若在 watcher
+  // 启动后写配置又手动 reload，会把同一变更同时排入 debounce 队列，掩盖本例
+  // 真正要验证的“swap 后 callback 闭包必须改用 changed.js exactPaths”。
+  await writeCommandHook(configPath, "node changed.js");
   context.after(async () => await reloader.stop());
   await reloader.start();
 
-  await writeCommandHook(configPath, "node changed.js");
   assert.equal(await reloader.reload([configPath]), true);
   assert.equal(swaps, 1);
 
