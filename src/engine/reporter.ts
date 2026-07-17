@@ -103,6 +103,8 @@ export interface Reporter {
   onInterrupted?(): void;
   /** 流式输出:模型每生成一段文本就调用(仅 generateStream 时触发) */
   onTextDelta?(delta: string): void;
+  /** Provider 返回可展示的思考过程时调用；与最终回答正文分开投影。 */
+  onReasoningDelta?(delta: string): void;
   /** 控制流否决本轮模型正文时，撤销宿主已投影的临时流。 */
   onAssistantResponseSuppressed?(reason: AssistantResponseSuppressionReason): void;
 }
@@ -160,6 +162,11 @@ export class TerminalReporter implements Reporter {
   onTextDelta(delta: string): void {
     this.stopSpinner();
     process.stdout.write(delta);
+  }
+
+  onReasoningDelta(delta: string): void {
+    this.stopSpinner();
+    process.stdout.write(pc.dim(delta));
   }
 
   /** 启动 spinner:每 80ms 刷一帧,思考时给视觉反馈。 */

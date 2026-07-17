@@ -11,6 +11,8 @@ export interface LLMProviderRequestOptions {
   signal?: AbortSignal;
   /** 请求用途，供计费、审计与可观测层区分普通 Agent 与 Hook 判定。 */
   purpose?: "hook";
+  /** Provider 返回可展示的 reasoning/thinking 增量时调用；不得混入最终回答正文。 */
+  onReasoningDelta?: (delta: string) => void;
 }
 
 /** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */

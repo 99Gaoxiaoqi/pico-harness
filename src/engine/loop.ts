@@ -648,7 +648,13 @@ export class AgentEngine implements AgentRunner {
           (delta: string) => {
             if (!signal?.aborted) reporter.onTextDelta?.(delta);
           },
-          options,
+          {
+            ...options,
+            onReasoningDelta: (delta: string) => {
+              if (!signal?.aborted) reporter.onReasoningDelta?.(delta);
+              options?.onReasoningDelta?.(delta);
+            },
+          },
         ),
       get modelName() {
         return provider.modelName;

@@ -544,17 +544,17 @@ export function formatSessionReasoningStatus(
 ): string {
   if (!router) {
     return [
-      `Route: legacy/${settings.provider}/${settings.model}`,
-      "Reasoning controls: legacy",
-      "Supported levels: off, low, medium, high",
-      "Default level: high",
-      `Current level: ${settings.thinkingEffort}`,
-      "Usage: /thinking <off|low|medium|high>",
+      `路由：legacy/${settings.provider}/${settings.model}`,
+      "推理控制：旧版兼容模式",
+      "支持档位：off、low、medium、high",
+      "默认档位：high",
+      `当前档位：${settings.thinkingEffort}`,
+      "用法：/thinking <off|low|medium|high>",
     ].join("\n");
   }
   const route = resolveSessionModelRoute(settings, router);
   if (!route) {
-    return `Reasoning controls unavailable: model route ${settings.modelRouteId ?? settings.model} was not found.`;
+    return `推理控制不可用：找不到模型路由 ${settings.modelRouteId ?? settings.model}。`;
   }
   return formatRouteReasoningStatus(
     route.id,
@@ -632,28 +632,25 @@ function formatRouteReasoningStatus(
   capability: ResolvedModelReasoningCapability,
   storedLevel?: string,
 ): string {
-  const lines = [`Route: ${routeId}`];
+  const lines = [`路由：${routeId}`];
   if (capability.enabled === false) {
-    lines.push("Reasoning: disabled for this model.", "Selectable levels: none");
+    lines.push("推理：此模型已禁用。", "可选档位：无");
     return lines.join("\n");
   }
   if (capability.enabled === "unknown") {
-    lines.push(
-      "Reasoning controls: unknown (the model advertises no reasoning metadata).",
-      "Selectable levels: none",
-    );
+    lines.push("推理控制：未知（模型未提供推理元数据）。", "可选档位：无");
     return lines.join("\n");
   }
   if (capability.levels.length === 0) {
-    lines.push("Reasoning: fixed/model-controlled.", "Selectable levels: none");
+    lines.push("推理：由模型固定控制。", "可选档位：无");
     return lines.join("\n");
   }
   const selection = coordinateReasoningLevel(capability, storedLevel);
   lines.push(
-    `Supported levels: ${capability.levels.join(", ")}`,
-    `Default level: ${capability.defaultLevel ?? capability.levels[0]}`,
-    `Current level: ${selection.level ?? "none"}`,
-    `Usage: ${formatThinkingUsage(capability)}`,
+    `支持档位：${capability.levels.join("、")}`,
+    `默认档位：${capability.defaultLevel ?? capability.levels[0]}`,
+    `当前档位：${selection.level ?? "无"}`,
+    `用法：${formatThinkingUsage(capability)}`,
   );
   return lines.join("\n");
 }

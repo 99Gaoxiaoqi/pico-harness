@@ -1,8 +1,57 @@
 {
   "version": 1,
   "commandsDir": ".pico/commands",
-  "model": "volcengine/deepseek-v4-pro-260425",
+  "model": "codex-oauth/gpt-5.4",
   "providers": {
+    "codex-oauth": {
+      "protocol": "openai",
+      "baseURL": "http://localhost:3000/openai-codex-oauth/v1",
+      "apiKeyEnv": "OPENAI_CODEX_OAUTH_API_KEY",
+      "discoverModels": false,
+      "models": [
+        "gpt-5.3-codex-spark",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.3-codex-spark-fast",
+        "gpt-5.4-fast",
+        "gpt-5.4-mini-fast",
+        "gpt-5.5-fast",
+        "gpt-5.6-luna-fast",
+        "gpt-5.6-sol-fast",
+        "gpt-5.6-terra-fast"
+      ],
+      "modelCapabilities": {
+        "gpt-5.4": {
+          "toolCall": true,
+          "reasoning": {
+            "enabled": true,
+            "defaultLevel": "medium",
+            "levels": ["low", "medium", "high"],
+            "providerOptionsByLevel": {
+              "low": {
+                "openai": {
+                  "set": [{ "path": ["reasoning_effort"], "value": "low" }]
+                }
+              },
+              "medium": {
+                "openai": {
+                  "set": [{ "path": ["reasoning_effort"], "value": "medium" }]
+                }
+              },
+              "high": {
+                "openai": {
+                  "set": [{ "path": ["reasoning_effort"], "value": "high" }]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "volcengine": {
       "protocol": "openai",
       "baseURL": "https://ark.cn-beijing.volces.com/api/coding/v3",
