@@ -8,6 +8,7 @@ export interface StatusBarProps {
   sessionMode?: string;
   forkFrom?: string;
   permissionMode?: string;
+  mcpSummary?: string;
   contextSummary?: string;
   taskSummary?: string;
   summaryMaxLength?: number;
@@ -21,6 +22,7 @@ export function buildStatusItems({
   sessionMode = "new",
   forkFrom,
   permissionMode = "yolo",
+  mcpSummary,
   contextSummary,
   taskSummary,
   summaryMaxLength = 32,
@@ -33,6 +35,7 @@ export function buildStatusItems({
     items.push(["forkFrom", shortSessionId(forkFrom)]);
   }
   if (permissionMode !== sessionMode) items.push(["perm", permissionMode]);
+  if (mcpSummary) items.push(["mcp", mcpSummary]);
   if (contextSummary) {
     items.push(["context", truncateLogoCwd(contextSummary, summaryMaxLength)]);
   }
@@ -59,11 +62,13 @@ export function buildStatusBarText(props: StatusBarProps): string {
   const sessionMode = itemByLabel.get("mode") ?? props.sessionMode ?? "new";
   const forkFrom = itemByLabel.get("forkFrom");
   const permissionMode = itemByLabel.get("perm");
+  const mcpSummary = itemByLabel.get("mcp");
   const modeText = forkFrom === undefined ? sessionMode : `${sessionMode} from ${forkFrom}`;
   const candidates = [
     `phase ${phase}`,
     `mode ${modeText}`,
     ...(permissionMode ? [`perm ${permissionMode}`] : []),
+    ...(mcpSummary ? [mcpSummary] : []),
     ...(itemByLabel.has("context") ? [`ctx ${itemByLabel.get("context")}`] : []),
     ...(itemByLabel.has("task") ? [`task ${itemByLabel.get("task")}`] : []),
   ];

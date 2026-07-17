@@ -1039,6 +1039,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
 
 class LineModeReporter implements Reporter {
   private wroteStreamingText = false;
+  private wroteReasoningText = false;
 
   constructor(private readonly output: NodeJS.WriteStream) {}
 
@@ -1077,8 +1078,17 @@ class LineModeReporter implements Reporter {
   onFinish(): void {}
 
   onTextDelta(delta: string): void {
+    if (this.wroteReasoningText) {
+      this.output.write("\n");
+      this.wroteReasoningText = false;
+    }
     this.wroteStreamingText = true;
     this.output.write(delta);
+  }
+
+  onReasoningDelta(delta: string): void {
+    this.wroteReasoningText = true;
+    this.output.write(this.output.isTTY ? `\u001b[2m${delta}\u001b[22m` : delta);
   }
 }
 

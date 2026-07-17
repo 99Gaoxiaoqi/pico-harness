@@ -24,7 +24,7 @@ import { LayoutShell } from "./layout-shell.js";
 import { MessageList } from "./message-list.js";
 import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
-import { effectiveTuiRows } from "./viewport-rows.js";
+import { effectiveTuiRows, transcriptContentRows } from "./viewport-rows.js";
 import { resolveKeybinding, type UserKeybindingConfig } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
@@ -224,7 +224,7 @@ export function App({
   );
   const runtimeModelSummary = [
     modelRouteId ?? model,
-    ...(provider ? [`provider ${provider}`] : []),
+    ...(!modelRouteId && provider ? [`provider ${provider}`] : []),
     ...(thinkingEffort ? [`think ${thinkingEffort}`] : []),
   ].join(" · ");
   const transcriptEntries = useMemo<TuiEntry[]>(
@@ -233,22 +233,10 @@ export function App({
         kind: "logo",
         model: runtimeModelSummary,
         cwd: workDir,
-        sessionMode,
-        permissionMode,
-        mcpSummary,
-        taskSummary,
       },
       ...mainEntries,
     ],
-    [
-      mainEntries,
-      mcpSummary,
-      permissionMode,
-      runtimeModelSummary,
-      sessionMode,
-      taskSummary,
-      workDir,
-    ],
+    [mainEntries, runtimeModelSummary, workDir],
   );
   const transcriptLayout = useMemo(
     () =>
@@ -268,6 +256,11 @@ export function App({
     activeAgent ? 4 : inputDisabled ? 0 : 6,
     rows - 8 - genericDialogRows - transcriptLayout.approvalRows - agentSwitcherRows,
   );
+  // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
+  const isStreaming = running && isActivelyStreaming(mainEntries);
+  // spinner 阶段:据末尾条目状态选
+  const spinnerMode = pickSpinnerMode(mainEntries, isStreaming);
+  const showSpinner = running && !inputDisabled && spinnerMode !== "responding";
   const focusedToolItem = transcriptLayout.items.find((item) => item.focusedTool);
   const focusedToolKey = focusedToolItem?.key ?? null;
   const focusedToolCallId =
@@ -292,7 +285,10 @@ export function App({
   const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({ mode: "follow" });
   const previousEntries = useRef(mainEntries);
   const newMessageCount = transcriptView.mode === "manual" ? transcriptView.newMessageCount : 0;
-  const transcriptViewportRows = Math.max(1, transcriptRows - (newMessageCount > 0 ? 1 : 0));
+  const transcriptViewportRows = transcriptContentRows(transcriptRows, {
+    newMessageNotice: newMessageCount > 0,
+    spinner: showSpinner,
+  });
   const agentSwitcherLayout = buildAgentSwitcherLayout({
     items: navigationItems,
     selectedId: agentNavigation.selectedId,
@@ -459,12 +455,6 @@ export function App({
     setApprovalDiffExpanded(true);
   }, [approvalNotice?.taskId]);
 
-  // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
-  const isStreaming = running && isActivelyStreaming(mainEntries);
-  // spinner 阶段:据末尾条目状态选
-  const spinnerMode = pickSpinnerMode(mainEntries, isStreaming);
-  const showSpinner = running && !inputDisabled && spinnerMode !== "responding";
-
   // 诊断:记录每次渲染的 entries 状态
   dbg(workDir, `render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
   mainEntries.forEach((e, i) => {
@@ -485,49 +475,42 @@ export function App({
       phase={phase}
       sessionMode={sessionMode}
       permissionMode={permissionMode}
+      mcpSummary={mcpSummary}
       contextSummary={undefined}
       taskSummary={runtimeTaskSummary}
       renderWidth={Math.max(1, columns - 2)}
     />
   );
   const transcript = (
-    <>
-      {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
-      <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
-        {activeAgent ? (
-          <AgentDetailView
-            agent={activeAgent}
-            renderWidth={transcriptWrapWidth}
-            timelineLimit={Math.max(1, transcriptRows - 8)}
-            visibleRows={transcriptRows}
-          />
-        ) : (
-          <>
-            {newMessageCount > 0 && <Text color="cyan">↓ {newMessageCount} new messages</Text>}
-            <ToolCardFocusProvider expanded={focusedToolExpanded}>
-              <MessageList
-                layout={transcriptLayout}
-                isStreaming={isStreaming}
-                viewportRows={transcriptViewportRows}
-                scrollOffsetRows={transcriptView.mode === "follow" ? 0 : transcriptView.offsetRows}
-                estimatedRowHeight={3}
-                overscanRows={0}
-                virtualizeThreshold={0}
-                scrollToBottom={transcriptView.mode === "follow"}
-                preserveVirtualSpacers={false}
-              />
-            </ToolCardFocusProvider>
-          </>
-        )}
-      </Box>
-
-      {/* 思考/spinner:据末尾状态显示对应 mode */}
-      {showSpinner && (
-        <Box paddingX={1}>
-          <Spinner mode={spinnerMode} />
-        </Box>
+    /* 消息列表和 spinner 共用固定高度容器，避免状态漂浮到视口底部。 */
+    <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
+      {activeAgent ? (
+        <AgentDetailView
+          agent={activeAgent}
+          renderWidth={transcriptWrapWidth}
+          timelineLimit={Math.max(1, transcriptRows - 8)}
+          visibleRows={transcriptRows}
+        />
+      ) : (
+        <>
+          {newMessageCount > 0 && <Text color="cyan">↓ {newMessageCount} new messages</Text>}
+          <ToolCardFocusProvider expanded={focusedToolExpanded}>
+            <MessageList
+              layout={transcriptLayout}
+              isStreaming={isStreaming}
+              viewportRows={transcriptViewportRows}
+              scrollOffsetRows={transcriptView.mode === "follow" ? 0 : transcriptView.offsetRows}
+              estimatedRowHeight={3}
+              overscanRows={0}
+              virtualizeThreshold={0}
+              scrollToBottom={transcriptView.mode === "follow"}
+              preserveVirtualSpacers={false}
+            />
+          </ToolCardFocusProvider>
+          {showSpinner && <Spinner mode={spinnerMode} />}
+        </>
       )}
-    </>
+    </Box>
   );
   const bottom = (
     <Box flexDirection="column">

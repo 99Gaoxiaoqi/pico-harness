@@ -105,7 +105,7 @@ export function MessageList({
         const entryVisibleRows = Math.max(0, visibleRows - (showSeparator ? separatorRows : 0));
         return (
           <React.Fragment key={item?.key ?? originalIndex}>
-            {showSeparator && <Separator />}
+            {showSeparator && <Separator width={layout.wrapWidth} />}
             <MessageRow
               entry={visibleEntry}
               isStatic={shouldRenderStatically(visibleEntry, isLast, isStreaming)}
@@ -132,7 +132,12 @@ function clipEntryTopRows(
   wrapWidth: number | undefined,
 ): TuiEntry {
   if (rowsToSkip <= 0) return entry;
-  if (entry.kind !== "assistant" && entry.kind !== "user" && entry.kind !== "system") {
+  if (
+    entry.kind !== "assistant" &&
+    entry.kind !== "thinking" &&
+    entry.kind !== "user" &&
+    entry.kind !== "system"
+  ) {
     return entry;
   }
 
@@ -140,7 +145,12 @@ function clipEntryTopRows(
   // 让长流式回复优先保住最新尾行。
   const contentRowsToSkip = rowsToSkip;
   const contentRowsToKeep = Math.max(1, (visibleRows ?? 1) - 1);
-  const content = clipTextTopRows(entry.content, contentRowsToSkip, contentRowsToKeep, wrapWidth);
+  const content = clipTextTopRows(
+    entry.content ?? "",
+    contentRowsToSkip,
+    contentRowsToKeep,
+    wrapWidth,
+  );
   return { ...entry, content };
 }
 
@@ -175,12 +185,16 @@ function normalizeNonNegativeRows(value: number | undefined, fallback: number): 
 }
 
 /** 轮次分隔:淡色虚线,让多轮对话结构清晰 */
-function Separator(): React.ReactNode {
+function Separator({ width }: { width: number }): React.ReactNode {
   return (
     <Box marginTop={1}>
-      <Text dimColor>─</Text>
+      <Text dimColor>{buildSeparatorLine(width)}</Text>
     </Box>
   );
+}
+
+export function buildSeparatorLine(width: number): string {
+  return "─".repeat(Math.max(1, Math.min(24, Math.floor(width))));
 }
 
 /**

@@ -5,11 +5,11 @@
 // 本组件按最后一个换行符分割:
 //   - stable = 最后一个 \n 及之前的内容(已完成的行,不再变化)
 //   - unstable = 最后一个 \n 之后的内容(当前进行中的行,每次 delta 变化)
-// stable 部分 React.memo 化,只在 unstable 增长到出现新换行时才推进边界、重渲染。
-// 这样每次 delta 只重渲染最后一行,长文本也不会卡顿。
+// stable 部分 React.memo 化；普通 delta 只重解析当前行，出现新换行时才推进稳定区。
 
-import React, { memo, useMemo } from "react";
-import { Box, Text } from "ink";
+import React, { memo } from "react";
+import { Box } from "ink";
+import { MarkdownText } from "./markdown-text.js";
 
 export function StreamingText({ content }: { content: string }): React.ReactNode {
   const { stable, unstable } = splitAtLastNewline(content);
@@ -23,12 +23,12 @@ export function StreamingText({ content }: { content: string }): React.ReactNode
 
 /** 已固化的行:memo 化,text 不变时跳过重渲染 */
 const StableLines = memo(function StableLines({ text }: { text: string }) {
-  return <Text wrap="wrap">{text}</Text>;
+  return <MarkdownText content={text} />;
 });
 
 /** 当前进行中的行:每次 delta 重渲染(只处理这一行,代价小) */
 const UnstableLine = memo(function UnstableLine({ text }: { text: string }) {
-  return <Text wrap="wrap">{text}</Text>;
+  return <MarkdownText content={text} />;
 });
 
 /**
@@ -54,10 +54,10 @@ export function getStableBoundary(text: string): number {
   return lastNl === -1 ? 0 : lastNl + 1;
 }
 
-// 保持代码块检测能力(从原 message-list.tsx 的 splitCodeBlocks 移植,用于已固化的消息)
+// 兼容保留旧的代码块拆分导出；实际渲染统一走 MarkdownText。
 export type Segment = { text: string; code: boolean };
 
-/** 把文本按 ``` 代码围栏拆段(用于已完成的 assistant 消息,非流式路径) */
+/** 把文本按 ``` 代码围栏拆段。 */
 export function splitCodeBlocks(text: string): Segment[] {
   if (!text.includes("```")) {
     return [{ text, code: false }];
@@ -80,24 +80,7 @@ function stripFenceLang(code: string): string {
   return code;
 }
 
-/** 渲染已完成的 assistant 文本(含代码块检测),非流式 */
+/** 渲染已完成的 assistant Markdown 文本。 */
 export function CompletedText({ content }: { content: string }): React.ReactNode {
-  const segments = useMemo(() => splitCodeBlocks(content), [content]);
-  return (
-    <Box flexDirection="column">
-      {segments.map((seg, i) =>
-        seg.code ? (
-          <Box key={i} marginLeft={2}>
-            <Text color="cyan" wrap="wrap">
-              {seg.text}
-            </Text>
-          </Box>
-        ) : (
-          <Text key={i} wrap="wrap">
-            {seg.text}
-          </Text>
-        ),
-      )}
-    </Box>
-  );
+  return <MarkdownText content={content} />;
 }
