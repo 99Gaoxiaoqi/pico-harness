@@ -66,7 +66,8 @@
 - `npm pack --dry-run --json` 为 1248 files、解包 7,811,409 bytes；macOS arm64 Desktop unsigned package 在新增 `prepackage` 自举协议产物后通过。Linux Desktop 不属于实现声明的支持平台，未把 Electron/native addon 的 Linux 打包失败记为成功。
 - 完整依赖与生产依赖的 `npm audit --audit-level=low` 均为 0 漏洞。Desktop 打包只有 Vite `inlineDynamicImports` 弃用提示，没有失败或审计漏洞。
 - 无 `.env`、无 protocol dist 的 clean copy 可通过 `npm run dev -- --help` 自动构建协议并正常输出帮助；Windows 与真实模型测试入口也各自具有显式协议前置构建，不再依赖 CI 命令偶然排序。
-- 最终代码 head `6543d26` 的 GitHub Actions run `29551867749` / `29551867757` 四项门禁全部通过：Ubuntu 全量 `test` 为 169 / 164 pass / 0 fail / 5 skip，两个 root 文件发布阶段各为 2/2；macOS Desktop 为 169 / 161 / 0 / 8。Windows 安全套件为 13/13 / 0 fail / 0 skip，覆盖 6 条文件安全、6 条 Hook 和 1 条真实 `ComSpec` hardline 场景；低权限本地用户在空暂存和有内容暂存阶段均无法持有或读取文件，用户清理成功。Windows Desktop 另确认 Node `22.23.1` / `win32-x64`、ABI 127、SQLite 3.53.2、原生 transaction/WAL 与 unsigned package，并通过根项目/Desktop typecheck、lint 和相同 13/13 安全套件。
+- 闭环文档 head `f46dd07` 的原始 CI run `29552144193` 暴露出唯一一条 Linux 测试失败：Hook reloader 路径替换用例在 watcher 已启动后写配置，同时又手动 `reload()`，debounce 自动 reload 与手动 reload 会把预期的两次 swap 放大为三次，并存在配置事件提前满足等待条件的假绿窗口。修复 `c14dae7` 在 watcher 启动前建立 initial snapshot 与磁盘配置的分叉，再以一次手动 reload 替换 callback 闭包，随后只由 `changed.js` 事件证明第二次 swap；目标用例压力复测 50/50、macOS 全量集成 169 / 161 pass / 0 fail / 8 skip、typecheck、lint、全量格式和 `git diff --check` 均通过，非作者复审未发现 P0-P2。
+- 最终行为代码 head `c14dae7` 的 GitHub Actions run `29552480527` / `29552480548` 四项门禁全部通过：Ubuntu 全量 `test` 为 169 / 164 pass / 0 fail / 5 skip，两个 root 文件发布阶段各为 2/2；macOS Desktop 为 169 / 161 / 0 / 8。Windows 安全套件为 13/13 / 0 fail / 0 skip，覆盖 6 条文件安全、6 条 Hook 和 1 条真实 `ComSpec` hardline 场景；低权限本地用户在空暂存和有内容暂存阶段均无法持有或读取文件，用户清理成功。Windows Desktop 另确认 Node `22.23.1` / `win32-x64`、ABI 127、SQLite 3.53.2、原生 transaction/WAL 与 unsigned package，并通过根项目/Desktop typecheck、lint、相同 13/13 安全套件和 unsigned package。
 
 ## 已知边界
 
