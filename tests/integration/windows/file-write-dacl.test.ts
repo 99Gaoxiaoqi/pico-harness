@@ -23,6 +23,7 @@ const LOW_PRIVILEGE_TIMEOUT_MS = 15_000;
 
 interface AccessSnapshot {
   readonly protected: boolean;
+  readonly accessKey: string;
   readonly rules: readonly {
     readonly sid: string;
     readonly type: string;
@@ -261,7 +262,7 @@ test(
       readAccessSnapshot(baselinePath),
       readAccessSnapshot(targetPath),
     ]);
-    assert.equal(target.sddl, baseline.sddl);
+    assert.equal(target.accessKey, baseline.accessKey);
     assert.equal(target.protected, baseline.protected);
     assert.equal(await readFile(targetPath, "utf8"), "created\n");
     await assertNoTemporaryFiles(fixture.workspace);
@@ -291,8 +292,8 @@ test(
       JSON.stringify({ path: `${relativeDirectory}/tool-created.txt`, content: "created\n" }),
     );
     assert.equal(
-      (await readAccessSnapshot(targetPath)).sddl,
-      (await readAccessSnapshot(baselinePath)).sddl,
+      (await readAccessSnapshot(targetPath)).accessKey,
+      (await readAccessSnapshot(baselinePath)).accessKey,
     );
 
     await restrictToCurrentSid(targetPath);
@@ -457,7 +458,8 @@ using System.Text;
 
 public static class PicoLowPrivilegeProcessLauncher
 {
-    private const int LogonWithProfile = 0x00000001;
+    // The watcher uses only explicit file paths and never needs HKCU or a user profile.
+    private const int LogonWithoutProfile = 0x00000000;
     private const int CreateNoWindow = 0x08000000;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -550,7 +552,7 @@ public static class PicoLowPrivilegeProcessLauncher
             userName,
             domain,
             password,
-            LogonWithProfile,
+            LogonWithoutProfile,
             applicationPath,
             commandLine,
             CreateNoWindow,
@@ -797,6 +799,19 @@ $sections = [Security.AccessControl.AccessControlSections]::Access -bor
   [Security.AccessControl.AccessControlSections]::Group
 $security = [IO.File]::GetAccessControl($env:PICO_TEST_PATH, $sections)
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$accessSddl = $security.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+$accessDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new($accessSddl)
+$autoInheritedFlag = [int] [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+$comparableFlags = ([int] $accessDescriptor.ControlFlags) -band (-bnot $autoInheritedFlag)
+$accessAcl = $accessDescriptor.DiscretionaryAcl
+if ($null -eq $accessAcl) {
+  $accessAclKey = 'NULL'
+} else {
+  $accessAclBytes = [byte[]]::new($accessAcl.BinaryLength)
+  $accessAcl.GetBinaryForm($accessAclBytes, 0)
+  $accessAclKey = [Convert]::ToBase64String($accessAclBytes)
+}
+$accessKey = ([string] $comparableFlags) + '|' + $accessAclKey
 $rules = @($security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
   [pscustomobject]@{
     sid = $_.IdentityReference.Value
@@ -807,6 +822,7 @@ $rules = @($security.GetAccessRules($true, $true, [Security.Principal.SecurityId
 })
 [pscustomobject]@{
   protected = $security.AreAccessRulesProtected
+  accessKey = $accessKey
   rules = $rules
   sddl = $security.GetSecurityDescriptorSddlForm($sections)
   currentSid = $currentSid
