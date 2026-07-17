@@ -86,10 +86,15 @@ waitForApproval(taskId, toolName, args, notify, diff?) → Promise<ApprovalResul
 再检查当前 Session 的结构化授权范围；仍需人工确认时才交给 ApprovalManager。
 会话授权不会作为一条独立 Policy 提前短路后续安全检查。
 
-### 危险命令两层正则
+### 危险命令与 YOLO hardline
 
-- **DANGEROUS_PATTERNS**（需审批）：rm/find -delete/sudo/drop/truncate/mkfs/dd/chmod 777/git push --force...
-- **HARDLINE_PATTERNS**（不可逆，直接 deny）：`rm -rf /`、`mkfs /dev/`、`dd of=/dev/`、fork bomb、shutdown、`git push --force main`
+- **普通危险操作**在非 YOLO 模式仍进入审批策略；YOLO 只有通过 hardline 后才按当前 OS 用户权限直通。
+- **YOLO hardline** 是不可审批绕过的纯判定器。它解析 Shell 词、引号、展开、重定向、子 Shell、`eval`、`xargs/find`、常见命令转发器、已知 Shell 组合选项和已审计解释器入口，并传播静态工作目录；系统根、用户根、设备、关机、受保护 Git 远端以及无法证明目标安全的动态破坏操作直接 deny。
+- `cd`、wrapper `-C/--chdir/--directory`、子 Shell 和条件分支会更新各自的目录上下文；目录来自动态展开、命令替换或不能静态确定时，后续相对破坏目标 fail-closed。工作区内可静态证明的普通操作仍保留 YOLO 直通语义。
+- Pico 自己启动的 Bash 使用 `--noprofile --norc -c`，并移除环境中的 Shell 启动脚本、导出函数和相关调试入口。命令文本内跨语句设置的 `BASH_ENV`、`ENV`、`ZDOTDIR` 与 Bash 导出函数会继续传播到已建模 Shell 调用并 fail-closed。
+- 已建模的 POSIX Shell 只有静态 `-c` 文本、静态 no-exec 解析或纯帮助/版本查询可以继续分析；脚本文件、stdin、`source`/`.`、启动文件和环境注入入口直接 fail-closed。语法不兼容的已知 Shell 只允许帮助/版本查询。Python、Node、Perl、Ruby 的内联入口会先解析已审计的前置选项，再保留系统级破坏字面量拒绝底线。
+- hardline 不是任意 executable、动态 loader、任意程序自己的配置文件或子进程行为的能力沙箱。它只保证宿主 Shell 启动边界、可见命令文本及已建模入口的拒绝底线；YOLO 主 Agent 的其他程序仍以当前 OS 用户权限执行。
+- 判定测试只传入命令文本和临时路径，绝不执行真实删除、设备写入或远端推送。
 
 ### diff 预览 (`diff.ts`)
 
@@ -195,6 +200,10 @@ new CostTracker(provider, modelRoute, session)
 Docker、公开 headless CLI 和远程 Runtime API 不在当前支持范围。TUI 和 Desktop 共享本机
 Plugin/Skill/Agent Catalog；周期任务写入本机账本，并由用户级 daemon 在同一安全策略边界内
 执行。daemon 不构成远程入口。
+
+daemon 的关闭 API 保持 deadline 有界，但有界返回不等于立即交出所有权：忽略 abort 的 workspace executor 或 worktree runner 会先被冻结为终态，其 TaskHost、RuntimeStore 与进程单例锁继续由 shutdown ownership fence 持有，直到真实执行排空。WorktreeSupervisor 会在 TaskRegistry 发布 pending 前登记 admission gate，关闭快照同时等待准入窗口和已登记 runner，避免同步订阅者重入 close 时漏出任务。
+
+Cron 关闭先停止新 tick 与定时器，再有界等待活动 tick；超时后通过独立 fence 持有 Cron 账本，daemon 同时关闭 service 以传播 abort，最后聚合 Cron 与 service 的释放信号。注销 workspace 时，Cron close 失败会保留 sticky ownership，但后续 reconcile 仍可处理其他 workspace；自定义 runtime 声明 pending 却不提供 release fence 时显式 fail-closed。start/stop 串行化；daemon、Cron、service、runner 或 fence 无法证明安全关闭时保留锁而不是允许新 daemon 重叠。若执行永不结束，活进程持续持锁；进程退出后才由 PID stale recovery 接管。
 
 ### 环境变量
 
