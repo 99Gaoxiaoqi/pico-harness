@@ -1,227 +1,245 @@
 # pico-harness
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
+![Node](https://img.shields.io/badge/node-%3E%3D22.12%20%3C23-339933.svg)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)
 
-用 TypeScript 从零实现的工业级 Agent Harness 引擎,对标课程《从 0 开始构建 Agent Harness》中的 `go-pico`。
+![pico-harness：面向本地工程的 Agent Runtime](./docs/readme-assets/pico-harness-cover.png)
 
-## 核心理念
+一个面向本地工程、用 TypeScript 实现的 Agent Harness。它把模型调用、上下文、工具、安全门禁、会话状态和后台任务装配成同一套 Runtime，并为 TUI 与 Desktop 提供一致的执行语义。
 
-**`Agent = Model + Harness`**。本工程不写业务框架,而是为大模型(CPU)编写一个微型 OS:管理 Context(内存)、调度极简工具(外设)、拦截危险操作(中断)。
+> **Agent = Model + Harness**
+>
+> 模型负责决策，Harness 负责把决策变成可约束、可恢复、可追踪的工程动作。
 
-## ✨ 特性
+## 当前产品面
 
-- **单阶段 ReAct**:每轮一次模型调用完成推理与行动；思考档位由所选 Provider 的原生能力控制
-- **双协议 Provider**:OpenAI 兼容 + Claude 原生,统一 Message Schema 双向翻译
-- **分层工具集**:read_file / write_file / edit_file / bash 是核心文件原语，其余工具按宿主能力注册并渐进披露
-- **资源感知并行**:单 Agent 单轮按 ToolAccesses 调度,不同文件可并发,冲突路径自动串行
-- **Session 运行态隔离**:每个 Session 独立维护协议历史与运行状态；同一工作区仍共享项目文件、配置与 Runtime 数据库
-- **Token 水位 Compaction**:输入预算 85% 时先缩短旧 ToolResult,再按完整工具批次摘要旧前缀
-- **Plan Mode 状态外部化**:PLAN.md / TODO.md 持久化记忆,断点续传 + 零成本人机协同
-- **ErrorRecovery 锦囊**:工具报错时按类型注入恢复建议,引导模型走向正确排障 SOP
-- **SystemReminders 防死循环**:按参数和结果指纹监控连续失败，分级提醒并在达到阻断阈值后停止重复调用
-- **Middleware 高危审批**:rm/sudo 等命令挂起执行流,在 TUI 中展示审批提示
-- **Subagent 任务委派**:Explore 保持只读；可写 Worker 只在独立 Git worktree 与沙箱中运行，隔离能力不可用时拒绝启动
-- **CostTracker 成本追踪**:装饰器模式无侵入拦截 Token 消耗与耗时,按模型计费
-- **Tracing 链路追踪**:决策树导出 JSON,逐帧复盘 Agent 失败时的全量决策路径
+| 入口        | 状态              | 说明                                                                                 |
+| ----------- | ----------------- | ------------------------------------------------------------------------------------ |
+| CLI / TUI   | 主要公开入口      | 源码运行使用 `npm run dev`；构建并 `npm link` 后使用 `pico`                          |
+| Desktop     | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
+| 本机 daemon | 内部 Runtime 宿主 | 承载 Desktop 和持久 Cron，通过本机 IPC 通信，不监听网络端口                          |
 
-## 📦 安装
+当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。
+
+## 架构概览
+
+![pico-harness 运行时架构：入口、宿主、执行内核、能力与状态](./docs/readme-assets/pico-harness-architecture.png)
+
+[查看 Mermaid 源图](./docs/readme-assets/pico-harness-architecture.mmd)
+
+两类前台入口最终复用同一个 [`executeAgentRuntime`](./src/runtime/agent-runtime.ts)：
+
+- TUI：`CLI → TUI → 工作区信任/配置 → AgentRuntime`，前台执行不需要绕行 daemon。
+- Desktop：`Renderer → sandbox preload bridge → Electron IPC allowlist → LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
+
+Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧上限；端点是 POSIX socket 或 Windows named pipe，并带本机认证。它是同一用户边界内的内部协议，不是网络服务。
+
+### 一次运行如何闭环
+
+1. **解析入口与信任**：按工作区真实路径建立信任并读取设备级/项目级配置。模型路由按 Run 固定；TUI 在宿主启动时复用 Plugin 快照，Desktop 未由宿主注入时按 Run 加载和释放；Hook 可热重载但单次 dispatch 使用一致快照；后台 Job 不加载 Plugin，并使用创建时冻结的策略。
+2. **组装上下文**：`PromptComposer` 汇总系统约束、`AGENTS.md`、Skills、会话历史与当前状态；接近预算时先压缩 ToolResult，再摘要完整工具批次。
+3. **模型决策**：Engine 通过统一 Message Schema 调用选定模型；单阶段 ReAct 在一轮响应里返回文本和工具调用。
+4. **受控执行**：Engine 的 `ToolScheduler` 根据 Registry 提供的资源访问声明决定并发。每次执行先过 hardline/Plan 门禁，再运行 `PreToolUse`；Hook 改写输入后重跑前置门禁，最后进入模式对应的权限/审批并调用文件、Bash、MCP 或委派能力。
+5. **事实落盘并续跑**：运行事件、文件历史、工具产物和任务状态分别写入对应存储；Engine 将结果加入会话，继续下一轮或生成最终回复。
+
+### 模块地图
+
+| 路径                                                               | 职责                                                           |
+| ------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `src/runtime/`                                                     | 共用装配入口、运行策略、Agent 事件事实/投影与子代理编排        |
+| `src/engine/`                                                      | ReAct 主循环、Session、ToolScheduler、Reporter、Reminder       |
+| `src/context/`                                                     | Prompt、Skills、Compaction、Goal/Todo、恢复提示与上下文预算    |
+| `src/provider/`                                                    | OpenAI、Claude、Gemini 协议适配，模型路由、能力与凭证解析      |
+| `src/tools/`                                                       | Registry、文件/Bash/网络工具、资源访问声明与子代理工具         |
+| `src/safety/`、`src/security/`、`src/approval/`                    | hardline、路径与文件安全、权限判定、人工审批                   |
+| `src/hooks/`、`src/mcp/`、`src/plugins/`、`src/code-intelligence/` | Hooks、MCP、受信 Plugin 快照、LSP/Repo Map                     |
+| `src/tasks/`、`src/daemon/`                                        | RuntimeStore、Job、Cron、后台策略、本机 daemon 与通知          |
+| `src/storage/`、`src/memory/`                                      | 原子存储、文件历史、产物与长期记忆                             |
+| `src/input/`、`src/tui/`、`src/cli/`                               | 输入协议、交互式终端和公开 CLI 外壳                            |
+| `apps/desktop/`、`packages/protocol/`                              | Electron UI，以及 renderer/preload/main/client/daemon 共用协议 |
+| `src/paths/`                                                       | `PICO_HOME`、工作区和 Runtime 数据路径的统一解析               |
+
+### 状态所有权
+
+状态不是写进一张“万能表”。Agent 事实与任务控制面可以位于同一个物理 `runtime.sqlite`，但使用不同逻辑账本和所有者：
+
+- `RuntimeEventStore` 以 `agent_runtime_events` 保存 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
+- `RuntimeStore` 保存 Job、Cron、daemon 通知与调度状态；其中 `runtime_events` 是 daemon 通知账本，不是 Agent 事实表。
+- 文件历史、计划/待办、Skill 结果和大体积工具输出使用独立 sidecar/artifact 存储，避免污染模型消息协议。
+
+## 核心能力
+
+- **三类 Provider 协议**：OpenAI（含兼容端点）、Claude、Gemini，共用 Message Schema 与模型能力描述。
+- **资源感知工具调度**：Engine 的 `ToolScheduler` 按 Registry 暴露的 `ToolAccesses` 判断并发；冲突路径自动串行，不相关资源可并行。
+- **可恢复会话**：Session 隔离运行态；`/rewind` 可恢复代码、对话或两者，旧事件仍保留在追加式账本中。
+- **渐进式上下文**：Skills 只先披露元数据，按需加载正文；Compaction、ErrorRecovery 与 SystemReminders 控制预算和重复失败。
+- **多代理隔离**：Explore 保持只读；可写 Worker 只有在独立 Git worktree 和平台沙箱都可用时才启动，否则 fail-closed。
+- **后台任务**：自然语言或 `/cron` 创建持久 Job，由当前 OS 用户的本机 daemon 执行；模型路由、凭证引用和网络策略在创建时冻结。
+- **可扩展能力**：Hooks、MCP、LSP 与 Agent/Skill Catalog 由 Runtime 装配；Markdown Command 当前属于 TUI 输入层能力。
+- **受信 Plugin 快照**：Pico/Claude manifest 会先解析、校验并冻结为纯数据，可贡献 Skill、Command、Agent、Hook、MCP 与 LSP；TUI 在宿主生命周期复用快照，Desktop 默认按 Run 加载和释放，后台 Job 不加载。任意 Plugin 代码不会直接载入 Runtime 进程，但已授权 Hook、MCP 或 LSP 可以按各自边界启动子进程。
+- **可观测性**：usage/成本、结构化日志、追踪、运行事件和诊断命令覆盖主要执行链。
+
+## 快速开始
+
+### 前置条件
+
+- Node.js `>=22.12 <23`
+- npm
+- Windows 使用 Bash 工具时需要 Git for Windows，或让 `PICO_SHELL_PATH` 指向可信的 `bash.exe`
+
+### 从源码运行 TUI
 
 ```bash
-# 需要 Node.js >= 22
 git clone <repo-url> pico-harness
 cd pico-harness
-npm install
+npm ci
+
+# OpenAI 兼容入口示例；也可改用共享 Provider 配置
+export LLM_BASE_URL=https://your-provider.example/v1
+export LLM_API_KEY=your-api-key
+export LLM_MODEL=your-model
+
+npm run dev
+```
+
+指定工作区、协议和模型：
+
+```bash
+npm run dev -- \
+  --dir /path/to/project \
+  --provider openai \
+  --model your-model
+```
+
+构建并在其他项目目录使用 `pico`：
+
+```bash
 npm run build
 npm link
 
-# 复制环境变量模板并填入你的 API Key
-cp .env.example .env
+cd /path/to/project
+pico
 ```
 
-## 🚀 快速开始
+仓库内 `npm run dev` 会在存在时读取仓库根目录 `.env`；已安装的 `pico` 不会自动读取目标工作区 `.env`。生产密钥不要写入仓库，请通过进程环境或可用的凭证后端提供。
 
-Pico 的 Agent Runtime 同时服务于 TUI 和 Desktop。`pico` / `npm run dev` 启动 TUI；Desktop 当前作为仓库内开发入口。
+### 启动 Desktop
 
 ```bash
-# 在当前项目目录启动 TUI
-npm run dev
-
-# 指定工作区 / provider / model
-npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
-  --dir /path/to/project \
-  --provider openai \
-  --model glm-5.2
-
-# 启动 Desktop 开发版
 npm run desktop:dev
 ```
 
-想像 Claude Code 一样在任意项目目录启动交互式 Pico,见 [Pico Claude Code 风格交互启动指南](./docs/tui-claude-code-parity.md)。
+首次打开工作区时，TUI/Desktop 都会在读取项目 `AGENTS.md`、Skills、`.pico/config.json`、`.pico/mcp.json` 之前请求信任。非交互环境不会默认放行未知工作区。
 
-### 当前范围
+## 配置与凭证
 
-- `src/runtime/agent-runtime.ts` 中的 `executeAgentRuntime` 是 TUI 与 daemon 共用的 Runtime 入口，不是可支持的 one-shot/headless CLI 外壳。
-- `/rewind` 按用户消息列出提示词、时间和该轮文件变化；恢复后切换有效对话分支，并把原提示词放回输入框。旧事件仍保留在追加式账本中；`/snapshots` 保留为诊断入口。
-- 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作/可写委派守卫和显式 Hook deny。hardline 只分析可见命令文本和已建模的常见执行入口，不是任意 executable 的能力沙箱；需要逐次确认高风险操作时使用 `/mode default`。
-- `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
-- `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
-- REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
-- 周期任务优先通过自然语言创建，例如“请创建一个每个工作日上午 9 点生成日报的任务”。Pico 会展示时区、工作区、模型、凭证、daemon、联网范围和未来三次运行时间；只有确认后才写入 Job。第一版不支持一次性定时任务。
-- `/cron` 保留为高级入口；任务由当前 OS 用户的本机 daemon 执行，不新增 one-shot/headless 公共 CLI。持久 Cron 仅接受可信工作区的 YOLO Job，并固定创建时的模型路由与 `credentialRef`。自然语言草案会在确认时尝试导入当前环境凭证；Desktop 和 `/cron add` 则要求凭证已存在，SQLite 始终只保存非秘密引用。
-- 新任务默认允许所有符合后台资格的工具联网；该策略覆盖 `fetch_url`、`web_search`、Bash、严格后台 Hook 与固定配置 MCP，但不改变工作区、敏感文件、hardline、Hook deny 和 SSRF 边界。可用 `/cron add --tool-network=allow|disabled|allowlist:host1,host2 ...` 显式覆盖；模型 Provider 网络是独立通道。
-- Docker 部署和 Plugin runtime 不在当前产品范围。
+TUI 与 Desktop 共用 `$PICO_HOME`，默认是 `~/.pico`：
 
-## 🏗️ 架构概览
+| 路径/变量                            | 用途                                                           |
+| ------------------------------------ | -------------------------------------------------------------- |
+| `$PICO_HOME/config.json`             | 设备级 Provider 元数据、模型列表和默认路由，不保存 API Key     |
+| `$PICO_HOME/trusted-workspaces.json` | 按 `realpath` 记录的工作区信任                                 |
+| `.pico/config.json`                  | 受信项目的 Provider、模型、兼容项、LSP 与沙箱配置              |
+| `.pico/mcp.json`                     | 受信项目的 MCP 配置；`.claw/mcp.json` 仅作旧版只读回退         |
+| `PICO_HOME`                          | 切换整套配置、Session、daemon endpoint 与本地 Runtime 命名空间 |
 
-```
-pico-harness/
-├── src/
-│   ├── cli/              # TUI 启动外壳 + TUI 内部 run-agent 装配
-│   ├── tui/              # 交互式终端界面
-│   ├── engine/           # 核心引擎层:Main Loop (ReAct) / Session / Reporter / Reminder
-│   ├── provider/         # 模型适配层:OpenAI 兼容 / Claude 原生 + 工厂
-│   ├── schema/           # 公共数据结构:Message / ToolCall / Usage
-│   ├── context/          # 上下文工程层:Prompt 组装 / Compaction / Recovery / Skill
-│   ├── tools/            # 工具执行层:Registry + Middleware + Read/Write/Edit/Bash + Subagent
-│   ├── approval/         # 安全防线:高危命令拦截 + 人工审批管理器
-│   ├── observability/    # 可观测性:CostTracker 成本追踪 + Tracing 链路追踪 + Logger
-├── AGENTS.md             # 动态系统提示词来源(PromptComposer 自动加载)
-├── .env.example          # 环境变量模板
-└── package.json
-```
+非秘密模型路由优先级为：当前 Session/CLI 显式选择 → 受信项目配置 → 用户默认 → 旧环境变量。Provider ID 若在不同来源指向冲突的协议或 Endpoint，会 fail-closed。
 
-## 🔐 工作区信任
+常用的旧环境变量入口仍可用：
 
-首次在一个工作区启动 `pico` 时，会在进入 TUI 前询问是否信任该真实目录。只有明确选择信任后，Pico 才会读取项目 `AGENTS.md` / Skills / Session，启用项目 `.pico/config.json` 中的 Provider 与 LSP，以及 `.pico/mcp.json` 中的 MCP。旧 `.claw/mcp.json` 仅作为只读兼容回退。
+| 变量                                                     | 说明                                                     |
+| -------------------------------------------------------- | -------------------------------------------------------- |
+| `LLM_BASE_URL`                                           | 旧 Provider Endpoint；协议由 `--provider` 决定           |
+| `LLM_API_KEY` / `LLM_API_KEYS`                           | 单 Key / 多 Key 轮换                                     |
+| `LLM_MODEL` / `LLM_MODELS`                               | 默认模型 / 额外模型列表                                  |
+| `SEARCH_API_BASE` / `SEARCH_API_KEY`                     | 可选的 `web_search` 服务                                 |
+| `AUX_LLM_PROVIDER` / `AUX_LLM_BASE_URL` / `...KEY/MODEL` | 可选的 Compaction 辅助模型；URL、Key、Model 必须同时配置 |
+| `PICO_TRACE`                                             | 开启运行追踪                                             |
+| `PICO_SHELL_PATH`                                        | 覆盖 Bash 可执行文件；Windows 必须指向 Bash              |
 
-信任记录按 `realpath` 持久化到 `$PICO_HOME/trusted-workspaces.json`（默认 `~/.pico/trusted-workspaces.json`）；项目内文件不能自行声明信任。未信任工作区在非交互环境中会直接停止，不会默认放行。
+TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `silent`；用户可见错误仍通过 UI Reporter 呈现。
 
-## 🔧 共享 Provider 配置
+密钥与 JSON 配置、Session、IPC 响应和日志分离。当前发布构建默认禁用不安全的持久密钥兼容后端；没有受支持的凭证后端时，应使用前台进程环境，也不能创建依赖持久密钥的 Automation。详见[部署与凭证边界](./docs/deployment.md)。
 
-Desktop 和 TUI 使用同一份设备级配置：`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）。Provider 的协议、Endpoint、模型列表和用户默认值写入该文件；API Key 不进入 JSON、Session、IPC 响应或日志。发布构建默认禁用持久密钥，等待签名的 Pico Credential Broker/XPC 后端。
+## 安全模型
 
-- Desktop：在 `Providers` 页面添加 Provider、通过只写请求保存凭证并选择默认模型；Renderer 无法读取已经保存的密钥。
-- TUI：用 `/provider list` 查看来源；可先设置旧 `LLM_*` 变量，再用 `/provider import-env <id>` 预览、`/provider import-env <id> --confirm` 确认导入。
-- 非秘密模型路由的选择优先级是：当前 Session / CLI 显式选择 > 已信任项目配置 > 用户默认 > 旧环境变量。
-- 项目配置在工作区通过信任门之前不会读取。同一 Provider ID 若在不同来源指向不同协议或 Endpoint，Runtime 会 fail-closed，不会静默混用凭证。
+| 模式/边界      | 行为                                                                                                             |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `yolo`（默认） | 以当前 OS 用户权限执行普通工具，不增加工作区/网络/敏感写沙箱或日常审批；hardline 与显式 `PreToolUse` deny 仍生效 |
+| `default`      | 外部路径、高风险动作和 Hook `ask/defer` 进入结构化权限或显式审批；使用 `/mode default` 切换                      |
+| `auto`         | 自动接受普通编辑；外部路径、危险命令、MCP 及 Hook `ask/defer` 仍进入权限或审批                                   |
+| `plan`         | 在 hardline 之外额外拒绝写操作、可写委派及无法证明只读的外部副作用                                               |
+| 后台 Job       | 使用独立 strict runner 和创建时冻结的工作区、工具、网络、模型与凭证引用                                          |
 
-密钥使用独立优先级：当前进程为该 Provider 声明的环境变量 > 匹配 Provider authority 的 v2 系统凭证 > 旧项目路由的 v1 凭证。环境变量存在时会暂时遮蔽持久凭证，但不会改写它。当前 `/usr/bin/security` Keychain 适配只可通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式用于本地开发；它不能隔离同一用户下的 Agent Shell，禁止用于发布。安全后端补齐前，各平台均只能使用前台环境变量，不能导入持久密钥或创建持久 Automation。
+前台工具调用的主要防线顺序是：**hardline / Plan → `PreToolUse` → 改写后重跑 hardline / Plan → 模式对应的 PermissionRequest / 审批 → 执行 → 有界 Post Hook**。YOLO 通常跳过权限链，但 Hook 的 `ask/defer` 可以强制审批；工作区外路径检查属于非 YOLO 权限链，不是 YOLO 沙箱。
 
-App 与 TUI 也共用 `PICO_HOME` 命名空间中的信任记录、Session 和 Runtime 数据。Desktop 的窗口大小、主题和更新状态仍是界面私有数据，不影响 TUI。修改 `PICO_HOME` 会得到一个独立的配置、状态与本地 Runtime 命名空间；OS 凭证则仍按 Provider 身份管理，不因 `PICO_HOME` 复制密钥。
+`command`、`http`、`mcp_tool` 等可执行 Hook 需要显式信任；其定义变化会回到 pending。`command` Hook 的脚本字节或 executable identity 变化同样失效。`prompt` / `agent` Hook 不使用这套 executable 信任状态。
 
-### 环境变量兼容入口
+这些机制用于降低误操作和扩展供应链风险，但不是完整 OS 沙箱：
 
-| 变量                           | 要求 | 说明                                      |
-| ------------------------------ | ---- | ----------------------------------------- |
-| `LLM_BASE_URL`                 | 兼容 | 旧 OpenAI 兼容端点                        |
-| `LLM_API_KEY` / `LLM_API_KEYS` | 兼容 | 旧单 key / 多 key 轮换入口                |
-| `LLM_MODEL`                    | 兼容 | 旧默认模型名（如 `glm-5.2`）              |
-| `PICO_HOME`                    | 可选 | 覆盖设备级配置与 Runtime 数据根目录       |
-| `LOG_LEVEL`                    | 可选 | 日志级别:debug/info/warn/error(默认 info) |
+- 主 Agent 的 YOLO 与 daemon 都运行在当前用户权限下。
+- hardline 只能分析可见命令及已建模入口，不能证明任意 executable 的全部行为。
+- 路径、文件元数据和原子写入会尽量复核，但同一用户下仍存在不可彻底消除的 TOCTOU 边界。
+- Explore/Worker 的隔离能力与平台有关；所需沙箱不可用时，可写 Worker 必须拒绝启动。
 
-### 多模型路由
+更多细节见[基础设施安全](./docs/architecture/05-infra-safety.md)、[Hook 信任模型](./docs/architecture/07-hooks.md)和[本机 IPC 安全](./docs/architecture/local-ipc-security.md)。
 
-旧的 `LLM_BASE_URL` / `LLM_API_KEY[S]` / `LLM_MODEL` 配置继续可用；Pico 会把它们视为 `legacy/<model>` 路由。建议导入为上述设备级共享配置。只希望为某个已信任项目声明路由时，仍可在工作区 `.pico/config.json` 配置 provider map：
+## 平台与发布边界
 
-```json
-{
-  "version": 1,
-  "model": "deepseek/deepseek-v4-pro",
-  "providers": {
-    "deepseek": {
-      "protocol": "openai",
-      "baseURL": "https://your-deepseek-gateway.example/v1",
-      "apiKeyEnv": "DEEPSEEK_API_KEY",
-      "models": ["deepseek-v4-pro", "deepseek-v4-flash"]
-    },
-    "zhipu": {
-      "protocol": "openai",
-      "baseURL": "https://your-glm-gateway.example/v1",
-      "apiKeyEnv": "ZHIPU_API_KEY",
-      "models": ["glm-5.2"]
-    }
-  }
-}
-```
+| 平台    | TUI / Runtime                                           | Desktop                                             |
+| ------- | ------------------------------------------------------- | --------------------------------------------------- |
+| macOS   | 支持并运行完整确定性集成测试                            | CI 未签名打包；arm64/x64 有签名、公证发布工作流     |
+| Windows | 支持；Bash 依赖 Git for Windows，并运行独立安全集成测试 | CI 类型检查、安全集成与未签名打包；暂不公开签名发布 |
+| Linux   | 支持；主 CI、构建与包内容验证在 Ubuntu 执行             | 当前没有 Desktop CI 或发布入口                      |
 
-把密钥导出到启动 `pico` 的进程环境，配置文件只保存环境变量名：
+Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin` 等系统工具；CI 会显式安装它们。
+
+## 开发与验证
+
+| 命令                               | 验证内容                                              |
+| ---------------------------------- | ----------------------------------------------------- |
+| `npm run check:storage`            | Node ABI、`better-sqlite3`、SQLite 事务/WAL 能力      |
+| `npm run typecheck`                | Runtime、TUI 与共享 TypeScript 类型                   |
+| `npm run desktop:typecheck`        | Desktop main、preload、renderer 类型边界              |
+| `npm run lint`                     | 根项目、Desktop、测试与脚本的 ESLint 检查             |
+| `npm run format`                   | Prettier 格式检查，不会改写文件                       |
+| `npm run test:integration`         | 不访问真实模型的确定性集成测试                        |
+| `npm run test:integration:windows` | Windows Hook、ACL 与 YOLO shell hardline 安全集成测试 |
+| `npm run build`                    | 构建 `dist/` 与可执行 `dist/cli/main.js`              |
+| `npm pack --dry-run`               | 检查根包内容和 `pico` bin 映射                        |
+| `npm run desktop:package`          | 生成当前平台的未签名 Desktop smoke 包                 |
+| `npm run test:llm-e2e`             | 使用真实 Provider、凭证和网络验证 Runtime 闭环        |
+
+推荐的本地确定性门禁：
 
 ```bash
-export DEEPSEEK_API_KEY=your-deepseek-key
-export ZHIPU_API_KEY=your-zhipu-key
+npm ci
+npm run check:storage
+npm run typecheck
+npm run desktop:typecheck
+npm run lint
+npm run format
+npm run test:integration
+npm run build
+npm pack --dry-run
 ```
 
-已安装的 `pico` 不会自动读取当前工作区的 `.env`。仓库内的 `npm run dev` 会通过 `--env-file-if-exists=.env` 在文件存在时加载 Pico 仓库根目录的 `.env`；文件不存在时仍可使用已 `export` 的环境变量启动。其他入口请先 `export`，或使用自己的环境加载工具。
+主 CI 的 Ubuntu job 执行依赖审计、存储能力、类型、格式、确定性集成、构建与包验证；独立 Windows job 执行 Hook、ACL 和 shell hardline 安全集成。Desktop 源码变化还会触发 macOS/Windows 类型检查与未签名打包 smoke；真实模型 E2E 需要外部凭证，不在无凭证 CI 中强制运行。
 
-`/model` 使用 `providerID/modelID` 作为稳定标识。OpenAI 兼容 provider 默认请求 `GET /models`；显式 `models` 是允许列表，也是端点不支持模型发现时的可靠后备。可用 `"discoverModels": false` 完全关闭发现。当前产品入口不会自动跨模型切换；重试和凭证轮换始终留在已经选择的模型路由。密钥值不会写入 SessionSettings、状态栏或命令输出。
+## 深入阅读
 
-### 模型能力、worker 沙箱与代码智能
+- [架构总览](./docs/architecture/00-overview.md)
+- [Engine 与会话](./docs/architecture/01-engine.md)
+- [工具系统](./docs/architecture/02-tools.md)
+- [上下文工程](./docs/architecture/03-context.md)
+- [Provider 与产品入口](./docs/architecture/04-provider-entry.md)
+- [完整数据流](./docs/architecture/06-data-flow.md)
+- [多 Agent 并发](./docs/architecture/08-multi-agent-concurrency.md)
+- [Desktop 架构](./docs/desktop-architecture.md)
+- [TUI 交互指南](./docs/tui-claude-code-parity.md)
+- [课程章节索引](./docs/README.md)
 
-需要请求前能力预检时，可把 `models` 从字符串数组改为 OpenCode 风格的模型能力对象。未显式声明的 vision/reasoning/tool-call/cache 会显示为 `unknown`，不会根据兼容协议擅自推断：
-
-```json
-{
-  "version": 1,
-  "model": "zhipu/glm-5.2",
-  "providers": {
-    "zhipu": {
-      "protocol": "openai",
-      "baseURL": "https://your-glm-gateway.example/v1",
-      "apiKeyEnv": "ZHIPU_API_KEY",
-      "discoverModels": false,
-      "models": {
-        "glm-5.2": {
-          "context": 131072,
-          "output": 8192,
-          "vision": false,
-          "reasoning": true,
-          "toolCall": true,
-          "cache": false,
-          "price": {
-            "inputPerMillion": 0.5,
-            "outputPerMillion": 0.5,
-            "cacheReadPerMillion": null,
-            "cacheWritePerMillion": null
-          }
-        }
-      }
-    }
-  },
-  "sandbox": { "network": "deny" },
-  "lsp": {
-    "servers": [
-      {
-        "id": "typescript",
-        "command": "typescript-language-server",
-        "args": ["--stdio"],
-        "languages": ["typescript", "javascript"]
-      }
-    ]
-  }
-}
-```
-
-`sandbox.network` 只约束 Pico 创建的 explore/worker 子代理，不约束主 TUI 的 YOLO。Explore 始终只读；可写 Worker 当前只支持独立 Git worktree 与沙箱这一条路径，任一隔离条件不可用时按 fail-closed 拒绝启动。默认禁止 Worker Bash 联网，需要时可将 `sandbox.network` 设为 `allow`。macOS 使用 `sandbox-exec`；当前 Linux 没有等价后端时，受策略约束的 Worker Bash 同样拒绝执行，主 Agent 的 YOLO 不受影响。
-
-Worker 完成后可由宿主在最小环境中提交，禁用 Git hooks、fsmonitor、签名和凭据助手；仓库启用自定义 filter/merge driver 时拒绝自动提交/合并。当前没有 Shared Worker、写范围声明或跨 Agent 文件 OCC。任务关联和合并队列是主 Agent 的内部能力，不向用户暴露 task ID 命令。
-
-代码智能优先使用项目配置的 LSP server，其次发现 PATH 中已安装的 TypeScript/Python/Rust/Go server；不可用时快速降级为渐进式 Repo Map。当前每个 TUI Session 只启动第一个匹配的 LSP，`languages` 尚未实现多 server 路由；混合语言 server pool 已列入后续收口。`lsp.servers[].command` 是宿主直接启动的 language-server 可执行文件，`args` 是其参数；它不是 shell 脚本，也不是 TUI slash command。`code_definition`、`code_references`、`code_symbols`、`code_diagnostics`、`code_call_hierarchy` 和 `repo_map` 属于模型按需激活的内部工具，用户无需手动执行 `/lsp`。
-
-## 🧪 质量检查
-
-```bash
-npm run typecheck  # TypeScript 类型检查
-npm run lint       # ESLint 代码检查
-npm run build      # 编译到 dist/
-npm pack --dry-run # 验证发布包内容与 pico bin
-```
-
-## 📖 课程进度
-
-跟随《从 0 开始构建 Agent Harness》22 讲螺旋增量推进,全部实现完毕。详见 [AGENTS.md](./AGENTS.md)。
-
-## 📄 License
+## License
 
 [MIT](./LICENSE)
