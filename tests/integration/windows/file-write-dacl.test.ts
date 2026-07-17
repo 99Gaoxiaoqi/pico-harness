@@ -46,6 +46,11 @@ interface LowPrivilegeWatcherOptions {
   readonly stopPath: string;
 }
 
+interface WindowsProcessIdentity {
+  readonly pid: number;
+  readonly startedAtUtcTicks: string;
+}
+
 test(
   "Windows staging DACL is protected and grants access only to the current SID",
   WINDOWS_ONLY,
@@ -141,10 +146,12 @@ test(
     const targetPath = join(fixture.workspace, "private.txt");
     await mkdir(resultDirectory);
     await writeFile(targetPath, "old-content\n");
+    const stopPath = join(resultDirectory, "stop");
 
     const userName = `pico_acl_${randomBytes(4).toString("hex")}`;
     const password = `Pico!${randomBytes(18).toString("base64url")}aA9`;
-    let watcherPid: number | undefined;
+    let watcher: WindowsProcessIdentity | undefined;
+    let primaryError: unknown;
     try {
       const watcherSid = await createTemporaryLocalUser(userName, password);
       await grantDirectoryAccess(fixture.root, watcherSid, "ReadAndExecute");
@@ -156,8 +163,7 @@ test(
       const earlyPath = join(resultDirectory, "early");
       const contentReadyPath = join(resultDirectory, "content-ready");
       const finalPath = join(resultDirectory, "final");
-      const stopPath = join(resultDirectory, "stop");
-      watcherPid = await startLowPrivilegeWatcher({
+      watcher = await startLowPrivilegeWatcher({
         userName,
         password,
         workspace: fixture.workspace,
@@ -202,10 +208,38 @@ test(
       assert.equal(await readFile(targetPath, "utf8"), "concurrent-change\n");
       await assertNoTemporaryFiles(fixture.workspace);
       await writeFile(stopPath, "STOP");
-    } finally {
-      if (watcherPid !== undefined) await stopWindowsProcess(watcherPid);
-      await removeTemporaryLocalUser(userName);
+    } catch (error) {
+      primaryError = error;
     }
+
+    const cleanupErrors: unknown[] = [];
+    try {
+      await writeFile(stopPath, "STOP");
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (watcher !== undefined) {
+      try {
+        await stopWindowsProcess(watcher);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      await removeTemporaryLocalUser(userName);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+
+    if (primaryError !== undefined && cleanupErrors.length > 0) {
+      context.diagnostic(
+        `Windows 低权限 DACL 测试清理也失败: ${cleanupErrors.map(formatError).join("; ")}`,
+      );
+      throw primaryError;
+    }
+    if (primaryError !== undefined) throw primaryError;
+    if (cleanupErrors.length > 0)
+      throw new AggregateError(cleanupErrors, "Windows 低权限 DACL 测试清理失败");
   },
 );
 
@@ -357,12 +391,21 @@ async function removeTemporaryLocalUser(userName: string): Promise<void> {
   await runPowerShell(
     String.raw`
 $ErrorActionPreference = 'Stop'
-$user = Get-LocalUser -Name $env:PICO_TEST_USER -ErrorAction SilentlyContinue
-if ($null -ne $user) {
-  Remove-LocalUser -SID $user.SID -Confirm:$false
+$deadline = [DateTime]::UtcNow.AddSeconds(15)
+while ($true) {
+  $user = Get-LocalUser -Name $env:PICO_TEST_USER -ErrorAction SilentlyContinue
+  if ($null -eq $user) { break }
+  try {
+    Remove-LocalUser -SID $user.SID -Confirm:$false -ErrorAction Stop
+    break
+  } catch {
+    if ([DateTime]::UtcNow -ge $deadline) { throw }
+    Start-Sleep -Milliseconds 200
+  }
 }
 `,
     { PICO_TEST_USER: userName },
+    20_000,
   );
 }
 
@@ -392,7 +435,9 @@ $security.SetAccessRule($rule)
   );
 }
 
-async function startLowPrivilegeWatcher(options: LowPrivilegeWatcherOptions): Promise<number> {
+async function startLowPrivilegeWatcher(
+  options: LowPrivilegeWatcherOptions,
+): Promise<WindowsProcessIdentity> {
   const watcherCommand = Buffer.from(buildLowPrivilegeWatcherScript(options), "utf16le").toString(
     "base64",
   );
@@ -412,7 +457,7 @@ $arguments = @(
   $env:PICO_WATCHER_COMMAND
 )
 $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Credential $credential -UseNewEnvironment -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -PassThru
-[Console]::Out.Write([string]$process.Id)
+[Console]::Out.Write(([string]$process.Id) + '|' + ([string]$process.StartTime.ToUniversalTime().Ticks))
 `,
     {
       PICO_TEST_USER: options.userName,
@@ -420,9 +465,11 @@ $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Argumen
       PICO_WATCHER_COMMAND: watcherCommand,
     },
   );
-  const pid = Number(output);
+  const [pidText, startedAtUtcTicks] = output.split("|");
+  const pid = Number(pidText);
   assert.equal(Number.isSafeInteger(pid) && pid > 0, true, `invalid watcher pid: ${output}`);
-  return pid;
+  assert.match(startedAtUtcTicks ?? "", /^\d+$/u, `invalid watcher start time: ${output}`);
+  return { pid, startedAtUtcTicks: startedAtUtcTicks ?? "" };
 }
 
 function buildLowPrivilegeWatcherScript(options: LowPrivilegeWatcherOptions): string {
@@ -502,19 +549,32 @@ try {
 `;
 }
 
-async function stopWindowsProcess(pid: number): Promise<void> {
+async function stopWindowsProcess(processIdentity: WindowsProcessIdentity): Promise<void> {
   await runPowerShell(
     String.raw`
 $ErrorActionPreference = 'Stop'
 $process = Get-Process -Id ([int]$env:PICO_TEST_PID) -ErrorAction SilentlyContinue
 if ($null -ne $process) {
-  Stop-Process -InputObject $process -Force
-  if (-not $process.WaitForExit(5000)) {
-    throw 'watcher process did not exit'
+  $actualStart = [string]$process.StartTime.ToUniversalTime().Ticks
+  if ($actualStart -ne $env:PICO_TEST_PROCESS_START) { return }
+  try {
+    Stop-Process -InputObject $process -Force
+    if (-not $process.WaitForExit(5000)) {
+      throw 'watcher process did not exit'
+    }
+  } catch {
+    $current = Get-Process -Id ([int]$env:PICO_TEST_PID) -ErrorAction SilentlyContinue
+    if ($null -eq $current) { return }
+    $currentStart = [string]$current.StartTime.ToUniversalTime().Ticks
+    if ($currentStart -ne $env:PICO_TEST_PROCESS_START) { return }
+    throw
   }
 }
 `,
-    { PICO_TEST_PID: String(pid) },
+    {
+      PICO_TEST_PID: String(processIdentity.pid),
+      PICO_TEST_PROCESS_START: processIdentity.startedAtUtcTicks,
+    },
   );
 }
 
@@ -618,6 +678,7 @@ async function assertNoTemporaryFiles(directory: string): Promise<void> {
 async function runPowerShell(
   script: string,
   environment: Readonly<Record<string, string>>,
+  timeoutMilliseconds = 15_000,
 ): Promise<string> {
   const child = spawnPowerShell(script, environment);
   let stdout = "";
@@ -631,11 +692,17 @@ async function runPowerShell(
     stderr += chunk;
   });
   child.stdin.end();
-  const exitCode = await waitForExit(child);
+  const exitCode = await waitForExit(child, timeoutMilliseconds);
   if (exitCode !== 0) {
-    throw new Error(`PowerShell test helper failed (${String(exitCode)}): ${stderr}`);
+    throw new Error(
+      `PowerShell test helper failed (${String(exitCode)}): stdout=${stdout}; stderr=${stderr}`,
+    );
   }
   return stdout.trim();
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
 function spawnPowerShell(

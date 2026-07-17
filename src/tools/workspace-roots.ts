@@ -61,7 +61,7 @@ export class WorkspaceRoots {
     if (!info.isDirectory()) {
       throw new Error(`工作区路径不是目录: ${absolutePath}`);
     }
-    const normalizedPrimary = realpathSync(absolutePath);
+    const normalizedPrimary = realpathSync.native(absolutePath);
     return new WorkspaceRoots(normalizedPrimary, [normalizedPrimary]);
   }
 
@@ -244,7 +244,9 @@ function canonicalizeTargetSync(path: string): string {
   while (true) {
     try {
       statSync(candidate);
-      const canonicalAncestor = realpathSync(candidate);
+      // promises.realpath 使用原生解析；同步入口也必须使用 native，避免 Windows
+      // 的 8.3、subst 与长路径别名在两次安全校验中得到不同表示。
+      const canonicalAncestor = realpathSync.native(candidate);
       return resolve(canonicalAncestor, relative(candidate, path));
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT") && !hasErrnoCode(error, "ENOTDIR")) {

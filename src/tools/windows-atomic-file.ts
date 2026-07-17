@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lstat, realpath, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, resolve, toNamespacedPath } from "node:path";
@@ -60,6 +60,7 @@ type WindowsHelperOperation =
 
 const WINDOWS_HELPER_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
 function Convert-PicoExtendedPath([string] $Path) {
@@ -75,9 +76,9 @@ function Convert-PicoExtendedPath([string] $Path) {
 function New-PicoPrivateSecurity {
   $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
   if ($null -eq $sid) { throw [Security.SecurityException]::new('PICO_CURRENT_SID_MISSING') }
-  $security = New-Object Security.AccessControl.FileSecurity
+  $security = [Security.AccessControl.FileSecurity]::new()
   $security.SetAccessRuleProtection($true, $false)
-  $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+  $rule = [Security.AccessControl.FileSystemAccessRule]::new(
     $sid,
     [Security.AccessControl.FileSystemRights]::FullControl,
     [Security.AccessControl.AccessControlType]::Allow
@@ -247,7 +248,7 @@ try {
             [IO.FileShare]::ReadWrite
           )
           $sections = [Security.AccessControl.AccessControlSections]::Access
-          $normalSecurity = New-Object Security.AccessControl.FileSecurity
+          $normalSecurity = [Security.AccessControl.FileSecurity]::new()
           $normalSecurity.SetSecurityDescriptorSddlForm($normalSddl, $sections)
           [IO.File]::SetAccessControl($target, $normalSecurity)
           if ((Get-PicoAccessSddl $target) -ne $normalSddl) {
@@ -467,10 +468,10 @@ async function publishWindowsExistingFile(
       input.targetPath,
       input.temporaryIdentity,
     );
-    if (removedReplacement && backupIdentity) {
+    if (removedReplacement && sameOptionalWindowsIdentity(backupIdentity, input.existingIdentity)) {
       try {
         await rename(backupPath, input.targetPath);
-        await assertWindowsIdentity(input.targetPath, backupIdentity, "恢复并发替换目标后");
+        await assertWindowsIdentity(input.targetPath, input.existingIdentity, "恢复并发替换目标后");
         throw new WindowsAtomicPublicationError(
           `Windows 原子替换命中并发目标，已移除待发布内容并恢复被替换文件: ${input.targetPath}`,
           { cause: operationError, published: false },
@@ -536,24 +537,35 @@ async function publishWindowsNewFile(
     readWindowsFileIdentity(input.temporaryPath),
   ]);
 
-  if (
-    sameOptionalWindowsIdentity(targetIdentity, input.temporaryIdentity) &&
-    temporaryIdentity === undefined
-  ) {
-    if (!operationError) return { published: true };
+  if (sameOptionalWindowsIdentity(targetIdentity, input.temporaryIdentity)) {
+    if (!operationError && temporaryIdentity === undefined) return { published: true };
 
-    const secured = await secureAndRemoveWindowsTemporary(
-      input.targetPath,
+    await secureAndRemoveWindowsTemporary(input.targetPath, input.temporaryIdentity);
+    if (sameOptionalWindowsIdentity(temporaryIdentity, input.temporaryIdentity)) {
+      await secureAndRemoveWindowsTemporary(input.temporaryPath, input.temporaryIdentity);
+    }
+    const [targetAfterRollback, temporaryAfterRollback] = await Promise.all([
+      readWindowsFileIdentity(input.targetPath),
+      readWindowsFileIdentity(input.temporaryPath),
+    ]);
+    const stagedStillAtTarget = sameOptionalWindowsIdentity(
+      targetAfterRollback,
+      input.temporaryIdentity,
+    );
+    const stagedStillAtTemporary = sameOptionalWindowsIdentity(
+      temporaryAfterRollback,
       input.temporaryIdentity,
     );
     throw new WindowsAtomicPublicationError(
-      secured
-        ? `Windows 新文件发布失败，已回滚创建: ${input.targetPath}`
-        : `Windows 新文件已发布，但最终 DACL 无法确认: ${input.targetPath}`,
+      !stagedStillAtTarget && !stagedStillAtTemporary
+        ? `Windows 新文件发布失败，已回滚所有已知暂存路径: ${input.targetPath}`
+        : stagedStillAtTarget
+          ? `Windows 新文件已发布，但最终 DACL 无法确认: ${input.targetPath}`
+          : `Windows 新文件发布失败，目标已回滚但暂存路径无法清理: ${input.targetPath}`,
       {
         cause: operationError,
-        published: !secured,
-        preserveTemporary: !secured,
+        published: stagedStillAtTarget,
+        preserveTemporary: stagedStillAtTemporary,
       },
     );
   }
@@ -664,7 +676,7 @@ async function runWindowsHelper(
   if (paths.probePath) environment.PICO_WINDOWS_PROBE = prepareWindowsHelperPath(paths.probePath);
 
   try {
-    const { stdout, stderr } = await execFileAsync(
+    const execution = execFileAsync(
       trusted.command,
       [
         "-NoLogo",
@@ -683,13 +695,34 @@ async function runWindowsHelper(
         timeout: WINDOWS_HELPER_TIMEOUT_MS,
         windowsHide: true,
       },
-    );
-    if (stdout.trim() !== "OK" || stderr.trim().length > 0) {
+    ) as ReturnType<typeof execFileAsync> & { readonly child: ChildProcess };
+    // Windows PowerShell may wait for stdin EOF even when all commands came from
+    // -EncodedCommand. The promisified execFile promise exposes its child process.
+    execution.child.stdin?.end();
+    const { stdout } = (await execution) as { readonly stdout: string };
+    if (stdout.trim() !== "OK") {
       throw new Error("Windows 文件安全 helper 返回了非预期输出");
     }
   } catch (error) {
-    throw new Error(`Windows 文件安全 helper 执行失败: ${operation}`, { cause: error });
+    throw new Error(
+      `Windows 文件安全 helper 执行失败: ${operation} (${windowsHelperFailureSummary(error)})`,
+      { cause: error },
+    );
   }
+}
+
+function windowsHelperFailureSummary(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "unknown";
+  const details: string[] = [];
+  if ("code" in error && error.code !== undefined) details.push(`code=${String(error.code)}`);
+  if ("signal" in error && error.signal !== undefined)
+    details.push(`signal=${String(error.signal)}`);
+  if ("killed" in error && error.killed === true) details.push("killed=true");
+  if ("stderr" in error && typeof error.stderr === "string") {
+    const diagnostic = error.stderr.trim().replace(/\s+/gu, " ");
+    if (diagnostic.length > 0) details.push(`stderr=${diagnostic.slice(0, 256)}`);
+  }
+  return details.join(",") || "unknown";
 }
 
 async function resolveTrustedWindowsPowerShell(): Promise<TrustedWindowsPowerShell> {
