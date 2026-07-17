@@ -15,6 +15,27 @@ import {
   shellCommandArgs,
 } from "../../src/os/shell.js";
 
+test("host shell argv 只接受受 Bash hardline 保护的解释器", () => {
+  const command = "printf safe";
+  const expected = ["--noprofile", "--norc", "-c", command];
+  assert.deepEqual(shellCommandArgs("/bin/bash", command), expected);
+  assert.deepEqual(shellCommandArgs("C:\\Program Files\\Git\\bin\\bash.exe", command), expected);
+
+  const unsupportedShells = [
+    "C:\\Windows\\System32\\cmd.exe",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "/bin/zsh",
+  ];
+  for (const shell of unsupportedShells) {
+    assert.throws(
+      () => shellCommandArgs(shell, "rd /s /q C:\\Windows\\System32"),
+      /拒绝使用不受 Bash hardline 保护的 shell/u,
+      shell,
+    );
+  }
+});
+
 test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
   const workDir = process.cwd();
   const dangerous = [

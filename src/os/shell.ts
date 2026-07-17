@@ -7,7 +7,7 @@
 // 策略(借鉴 kimi-code 的 kaos 层):始终优先 POSIX bash。
 // - macOS/Linux:直接用 /bin/bash
 // - Windows:探测 Git Bash(git.exe 推断 + 硬编码候选 + 环境变量覆盖),
-//           探测不到时回退系统默认 shell(Comspec),不硬崩。
+//           探测不到时明确失败，绝不把 Bash 命令交给其他语法的 shell。
 //
 // 探测结果在进程内缓存,避免每次 exec 都走一遍文件系统。
 
@@ -38,7 +38,7 @@ let cachedShell: string | undefined;
 /**
  * 解析当前平台应使用的 shell 路径。
  * - POSIX:返回 /bin/bash
- * - Windows:返回探测到的 Git Bash 路径;探测失败回退 Comspec(cmd.exe),仍保证能跑。
+ * - Windows:返回探测到的 Git Bash 路径；探测失败或 override 不是 Bash 时 fail closed。
  */
 export function resolveShell(): string {
   if (cachedShell !== undefined) {
@@ -57,6 +57,11 @@ function resolveWindowsShell(): string {
   // 1) 环境变量显式覆盖
   const override = process.env[SHELL_PATH_ENV]?.trim();
   if (override && existsSync(override)) {
+    if (!isBashShell(override)) {
+      throw new Error(
+        `${SHELL_PATH_ENV} 必须指向 bash 或 bash.exe，拒绝使用不受 Bash hardline 保护的 shell: ${override}`,
+      );
+    }
     return override;
   }
 
@@ -90,9 +95,11 @@ function resolveWindowsShell(): string {
     }
   }
 
-  // 4) 回退:用系统默认 shell(cmd.exe),宁可降级也不硬崩。
-  //    调用方拿到的仍是可执行的 shell,只是 POSIX 语义会丢失。
-  return process.env.Comspec ?? "cmd.exe";
+  // 4) 当前安全分类器只建模 Bash；回退到 cmd/PowerShell 会让分类语义与
+  //    实际执行语义分裂，因此缺少 Git Bash 时必须在 spawn 前失败。
+  throw new Error(
+    `未找到 Git Bash。请安装 Git for Windows，或将 ${SHELL_PATH_ENV} 指向 bash.exe。`,
+  );
 }
 
 /**
@@ -149,14 +156,25 @@ export function execOptions(extra?: ExecOptions): Utf8ExecOptions {
 
 /** 以当前平台 shell 执行一段命令文本时使用的 argv。 */
 export function shellCommandArgs(shell: string, command: string): string[] {
-  const name = basename(shell).toLowerCase();
-  if (isWindows && name === "cmd.exe") {
-    return ["/d", "/s", "/c", command];
-  }
-  if (name === "bash" || name === "bash.exe") {
+  if (isBashShell(shell)) {
     return ["--noprofile", "--norc", "-c", command];
   }
-  return ["-c", command];
+  throw new Error(`拒绝使用不受 Bash hardline 保护的 shell: ${shell}`);
+}
+
+/** 当前 hardline 分类器能够安全绑定的 host shell。 */
+export function isBashShell(shell: string): boolean {
+  const name = basename(shell.replaceAll("\\", "/")).toLowerCase();
+  return name === "bash" || name === "bash.exe";
+}
+
+/** 安全门使用：解析失败或不是 Bash 时一律视为不可执行。 */
+export function hasSupportedHostShell(): boolean {
+  try {
+    return isBashShell(resolveShell());
+  } catch {
+    return false;
+  }
 }
 
 /** Keep ordinary user variables while removing ambient code-loading inputs for the host shell. */
