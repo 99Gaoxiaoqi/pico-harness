@@ -58,12 +58,12 @@
 
 - macOS 使用 Node `22.23.0`、npm `10.9.8`：lint、全量格式检查、根项目与 Desktop 类型检查、build 均通过。最终确定性集成测试在 Desktop 打包前、后各独占运行一次，均为 168 tests / 160 pass / 0 fail / 8 Linux-only skip。
 - Linux 使用 `node:22-bookworm`（Node `22.23.1`，`linux/arm64`）的两个独立 clean copy。root 在 `npm ci` 后、protocol dist 初始不存在时直接运行测试，为 168 / 162 pass / 0 fail / 6 skip；非 root `node` 用户使用独立可写 HOME/cache，为 168 / 163 / 0 / 5。两者均证明 `pretest:integration` 可从干净安装自举协议产物。
-- Linux root 文件发布测试分两阶段常驻 CI：明确确认 `getfattr` 不存在时，新文件 default ACL/watcher 与 missing-file 最终复核 2/2 通过；安装 `attr` 后，已有文件 ACL/xattr 保真与 ACL-denied reader 2/2 通过。Linux storage、typecheck、lint、build 和完整依赖审计均通过。
+- Linux root 文件发布测试分两阶段常驻 CI：明确确认 `getfattr` 不存在时，新文件 default ACL/watcher 与 missing-file 最终复核 2/2 通过；安装 `attr` 后，已有文件 ACL/xattr 保真与 ACL-denied reader 2/2 通过。同一矩阵在 `linux/arm64` 与 CI 对齐的 `linux/amd64` 上都为 0 fail/0 skip。Linux storage、typecheck、lint、build 和完整依赖审计均通过。
 - Hook 间接入口整文件回归为 80/80；stdin 提前关闭修复在 macOS 与 Docker Linux 的目标测试均为 3/3。Windows 专属入口收集 5 条测试，本机与 Linux 按平台跳过；真实 Windows 执行由本分支 PR CI 完成后补记。
 - 多轮复审继续收口了静态 `cd` 后 YOLO cwd 传播、Shell 组合选项与启动注入、旧 OpenAI 直连猜测互斥输出字段、目录附件验证后按路径重开、关闭超时后过早释放 daemon 单例、Cron 注销失败丢失所有权、活动 Cron tick 阻塞 host stop、TaskHost runner 超时后提前关闭 store、不完整 Cron fence 被当作已释放，以及 Task pending 同步订阅者重入 close 的准入窗口。最终非作者复审未发现遗留 P0-P2。
 - 真实模型 E2E 使用临时 OpenRouter/Qwen 路由验证 3/3 通过，覆盖 Prompt Hook、RuntimeRun、SQLite 上下文与 Usage 恢复。一次 512 token 临时上限只返回模型内部推理、正文为空；把测试专用上限调整为 4096 后完整通过。每次测试后 `.pico/config.json` 均恢复到原始 SHA-256 `efa56dac6289c7cdf1938bbef273d9382e63cab070a70e24492e6558d1fb493c`，未进入差异。
 - Storage capability 在 macOS Desktop 打包前后均通过：Node ABI 127、SQLite 3.53.2、原生 transaction/WAL。Linux clean copy 得到相同 ABI、SQLite 和事务/WAL 结论。
-- `npm pack --dry-run --json` 为 1244 files、1,691,859 bytes、解包 7,752,669 bytes；macOS arm64 Desktop unsigned package 在新增 `prepackage` 自举协议产物后通过。Linux Desktop 不属于实现声明的支持平台，未把 Electron/native addon 的 Linux 打包失败记为成功。
+- `npm pack --dry-run --json` 为 1244 files、解包 7,752,669 bytes；macOS arm64 Desktop unsigned package 在新增 `prepackage` 自举协议产物后通过。Linux Desktop 不属于实现声明的支持平台，未把 Electron/native addon 的 Linux 打包失败记为成功。
 - 完整依赖与生产依赖的 `npm audit --audit-level=low` 均为 0 漏洞。Desktop 打包只有 Vite `inlineDynamicImports` 弃用提示，没有失败或审计漏洞。
 - 无 `.env`、无 protocol dist 的 clean copy 可通过 `npm run dev -- --help` 自动构建协议并正常输出帮助；Windows 与真实模型测试入口也各自具有显式协议前置构建，不再依赖 CI 命令偶然排序。
 
