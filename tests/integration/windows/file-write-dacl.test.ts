@@ -1,0 +1,745 @@
+import assert from "node:assert/strict";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import {
+  captureAtomicFilePrecondition,
+  writeAtomicWorkspaceFile,
+} from "../../../src/tools/atomic-workspace-file.js";
+import { EditFileTool, WriteFileTool } from "../../../src/tools/registry-impl.js";
+
+const WINDOWS_ONLY = { skip: process.platform !== "win32" } as const;
+const LOW_PRIVILEGE_WINDOWS_ONLY = {
+  skip:
+    process.platform === "win32" && process.env.PICO_WINDOWS_LOW_PRIVILEGE_TEST === "1"
+      ? false
+      : "requires PICO_WINDOWS_LOW_PRIVILEGE_TEST=1 on an ephemeral Windows runner",
+} as const;
+const TEMPORARY_PREFIXES = [".pico-write-", ".pico-metadata-probe-"] as const;
+const LOW_PRIVILEGE_TIMEOUT_MS = 15_000;
+
+interface AccessSnapshot {
+  readonly protected: boolean;
+  readonly rules: readonly {
+    readonly sid: string;
+    readonly type: string;
+    readonly rights: number;
+    readonly inherited: boolean;
+  }[];
+  readonly sddl: string;
+  readonly currentSid: string;
+  readonly ownerSid: string;
+  readonly groupSid: string;
+}
+
+interface LowPrivilegeWatcherOptions {
+  readonly userName: string;
+  readonly password: string;
+  readonly workspace: string;
+  readonly readyPath: string;
+  readonly earlyPath: string;
+  readonly contentReadyPath: string;
+  readonly finalPath: string;
+  readonly stopPath: string;
+}
+
+test(
+  "Windows staging DACL is protected and grants access only to the current SID",
+  WINDOWS_ONLY,
+  async (context) => {
+    const fixture = await createFixture("private-staging");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "private.txt");
+    await writeFile(targetPath, "old-content\n");
+    await restrictToCurrentSid(targetPath);
+    const precondition = await captureAtomicFilePrecondition(targetPath);
+    let revalidationCount = 0;
+    let inspectedEmptyStage = false;
+    let inspectedContentStage = false;
+
+    await assert.rejects(
+      writeAtomicWorkspaceFile({
+        targetPath,
+        content: "UNPUBLISHED-WINDOWS-SECRET\n",
+        precondition,
+        revalidateTarget: async () => {
+          revalidationCount++;
+          if (revalidationCount !== 2 && revalidationCount !== 3) return;
+          const temporaryName = (await readdir(fixture.workspace)).find((entry) =>
+            entry.startsWith(".pico-write-"),
+          );
+          assert.ok(temporaryName, "写入前后复核都必须观察到临时文件");
+          const temporaryPath = join(fixture.workspace, temporaryName);
+          const expectedBytes =
+            revalidationCount === 2
+              ? 0n
+              : BigInt(Buffer.byteLength("UNPUBLISHED-WINDOWS-SECRET\n"));
+          assert.equal((await stat(temporaryPath, { bigint: true })).size, expectedBytes);
+          assertPrivateAccess(await readAccessSnapshot(temporaryPath));
+          if (revalidationCount === 2) {
+            inspectedEmptyStage = true;
+            return;
+          }
+          inspectedContentStage = true;
+          await writeFile(targetPath, "concurrent-change\n");
+        },
+      }),
+      /目标文件已被替换或修改/u,
+    );
+
+    assert.equal(inspectedEmptyStage, true);
+    assert.equal(inspectedContentStage, true);
+    assert.equal(await readFile(targetPath, "utf8"), "concurrent-change\n");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "Windows write_file and edit_file preserve a protected DACL and alternate data stream",
+  WINDOWS_ONLY,
+  async (context) => {
+    const fixture = await createFixture("preserve-dacl");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const relativePath = "quoted ' ; $() 中文.txt";
+    const targetPath = join(fixture.workspace, relativePath);
+    const streamPath = `${targetPath}:pico-preserve`;
+    await writeFile(targetPath, "alpha\nbeta\n");
+    await restrictToCurrentSid(targetPath);
+    await writeFile(streamPath, "preserved-stream\n");
+    const before = await readAccessSnapshot(targetPath);
+
+    await new WriteFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: relativePath, content: "gamma\ndelta\n" }),
+    );
+    const afterWrite = await readAccessSnapshot(targetPath);
+    assert.equal(afterWrite.protected, true);
+    assert.equal(afterWrite.sddl, before.sddl);
+    assert.equal(await readFile(streamPath, "utf8"), "preserved-stream\n");
+
+    await new EditFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: relativePath, old_text: "delta", new_text: "epsilon" }),
+    );
+    const afterEdit = await readAccessSnapshot(targetPath);
+    assert.equal(afterEdit.protected, true);
+    assert.equal(afterEdit.sddl, before.sddl);
+    assert.equal(await readFile(targetPath, "utf8"), "gamma\nepsilon\n");
+    assert.equal(await readFile(streamPath, "utf8"), "preserved-stream\n");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "Windows low-privilege reader cannot hold or read a named staging file",
+  LOW_PRIVILEGE_WINDOWS_ONLY,
+  async (context) => {
+    const fixture = await createFixture("low-privilege-staging");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const resultDirectory = join(fixture.root, "watcher-results");
+    const targetPath = join(fixture.workspace, "private.txt");
+    await mkdir(resultDirectory);
+    await writeFile(targetPath, "old-content\n");
+
+    const userName = `pico_acl_${randomBytes(4).toString("hex")}`;
+    const password = `Pico!${randomBytes(18).toString("base64url")}aA9`;
+    let watcherPid: number | undefined;
+    try {
+      const watcherSid = await createTemporaryLocalUser(userName, password);
+      await grantDirectoryAccess(fixture.root, watcherSid, "ReadAndExecute");
+      await grantDirectoryAccess(fixture.workspace, watcherSid, "ReadAndExecute");
+      await grantDirectoryAccess(resultDirectory, watcherSid, "Modify");
+      await restrictToCurrentSid(targetPath);
+
+      const readyPath = join(resultDirectory, "ready");
+      const earlyPath = join(resultDirectory, "early");
+      const contentReadyPath = join(resultDirectory, "content-ready");
+      const finalPath = join(resultDirectory, "final");
+      const stopPath = join(resultDirectory, "stop");
+      watcherPid = await startLowPrivilegeWatcher({
+        userName,
+        password,
+        workspace: fixture.workspace,
+        readyPath,
+        earlyPath,
+        contentReadyPath,
+        finalPath,
+        stopPath,
+      });
+      assert.equal(await waitForFileContent(readyPath), "READY");
+
+      const precondition = await captureAtomicFilePrecondition(targetPath);
+      let revalidationCount = 0;
+      await assert.rejects(
+        writeAtomicWorkspaceFile({
+          targetPath,
+          content: "UNPUBLISHED-LOW-PRIVILEGE-SECRET\n",
+          precondition,
+          revalidateTarget: async () => {
+            revalidationCount++;
+            if (revalidationCount === 2) {
+              assert.equal(
+                await waitForFileContent(earlyPath),
+                "DENIED",
+                "低权限主体不能在临时文件为空时持有读句柄",
+              );
+              return;
+            }
+            if (revalidationCount !== 3) return;
+            await writeFile(contentReadyPath, "READY");
+            assert.equal(
+              await waitForFileContent(finalPath),
+              "SAFE",
+              "低权限主体不能读取已写入但未发布的内容",
+            );
+            await writeFile(targetPath, "concurrent-change\n");
+          },
+        }),
+        /目标文件已被替换或修改/u,
+      );
+
+      assert.equal(await readFile(targetPath, "utf8"), "concurrent-change\n");
+      await assertNoTemporaryFiles(fixture.workspace);
+      await writeFile(stopPath, "STOP");
+    } finally {
+      if (watcherPid !== undefined) await stopWindowsProcess(watcherPid);
+      await removeTemporaryLocalUser(userName);
+    }
+  },
+);
+
+test(
+  "Windows new files receive the same inherited access DACL as a normal sibling",
+  WINDOWS_ONLY,
+  async (context) => {
+    const fixture = await createFixture("new-file-inheritance");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const baselinePath = join(fixture.workspace, "normal-sibling.txt");
+    const targetPath = join(fixture.workspace, "tool-created.txt");
+    await writeFile(baselinePath, "baseline\n");
+
+    await new WriteFileTool(fixture.workspace).execute(
+      JSON.stringify({ path: "tool-created.txt", content: "created\n" }),
+    );
+
+    const [baseline, target] = await Promise.all([
+      readAccessSnapshot(baselinePath),
+      readAccessSnapshot(targetPath),
+    ]);
+    assert.equal(target.sddl, baseline.sddl);
+    assert.equal(target.protected, baseline.protected);
+    assert.equal(await readFile(targetPath, "utf8"), "created\n");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "Windows creates and replaces files beyond the legacy MAX_PATH limit",
+  WINDOWS_ONLY,
+  async (context) => {
+    const fixture = await createFixture("long-path");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const segments = Array.from(
+      { length: 9 },
+      (_, index) => `segment-${String(index)}-${"x".repeat(24)}`,
+    );
+    const relativeDirectory = segments.join("/");
+    const directory = join(fixture.workspace, ...segments);
+    const baselinePath = join(directory, "normal-sibling.txt");
+    const targetPath = join(directory, "tool-created.txt");
+    await mkdir(directory, { recursive: true });
+    assert.ok(targetPath.length > 260, `test path must exceed MAX_PATH: ${targetPath.length}`);
+    await writeFile(baselinePath, "baseline\n");
+
+    const tool = new WriteFileTool(fixture.workspace);
+    await tool.execute(
+      JSON.stringify({ path: `${relativeDirectory}/tool-created.txt`, content: "created\n" }),
+    );
+    assert.equal(
+      (await readAccessSnapshot(targetPath)).sddl,
+      (await readAccessSnapshot(baselinePath)).sddl,
+    );
+
+    await restrictToCurrentSid(targetPath);
+    const restricted = await readAccessSnapshot(targetPath);
+    await tool.execute(
+      JSON.stringify({ path: `${relativeDirectory}/tool-created.txt`, content: "replaced\n" }),
+    );
+    assert.equal(await readFile(targetPath, "utf8"), "replaced\n");
+    assert.equal((await readAccessSnapshot(targetPath)).sddl, restricted.sddl);
+    await assertNoTemporaryFiles(directory);
+  },
+);
+
+test(
+  "Windows replacement failure keeps the original content and DACL without residue",
+  WINDOWS_ONLY,
+  async (context) => {
+    const fixture = await createFixture("locked-target");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "locked.txt");
+    await writeFile(targetPath, "old-content\n");
+    await restrictToCurrentSid(targetPath);
+    const before = await readAccessSnapshot(targetPath);
+    const holder = spawnPowerShell(
+      String.raw`
+$ErrorActionPreference = 'Stop'
+$stream = [IO.File]::Open($env:PICO_TEST_PATH, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+  [Console]::Out.WriteLine('READY')
+  [Console]::Out.Flush()
+  [void][Console]::In.ReadLine()
+} finally {
+  $stream.Dispose()
+}
+`,
+      { PICO_TEST_PATH: targetPath },
+    );
+    let holderError = "";
+    holder.stderr.setEncoding("utf8");
+    holder.stderr.on("data", (chunk: string) => {
+      holderError += chunk;
+    });
+    try {
+      await waitForOutput(holder, "READY");
+      const precondition = await captureAtomicFilePrecondition(targetPath);
+      let revalidationCount = 0;
+      let reachedPublicationBoundary = false;
+      await assert.rejects(
+        writeAtomicWorkspaceFile({
+          targetPath,
+          content: "replacement\n",
+          precondition,
+          revalidateTarget: async () => {
+            revalidationCount++;
+            if (revalidationCount !== 4) return;
+            const temporaryName = (await readdir(fixture.workspace)).find((entry) =>
+              entry.startsWith(".pico-write-"),
+            );
+            assert.ok(temporaryName, "最终复核必须仍有待发布临时文件");
+            const temporaryPath = join(fixture.workspace, temporaryName);
+            assert.equal((await stat(temporaryPath)).size, Buffer.byteLength("replacement\n"));
+            assertPrivateAccess(await readAccessSnapshot(temporaryPath));
+            reachedPublicationBoundary = true;
+          },
+        }),
+      );
+      assert.equal(reachedPublicationBoundary, true, "测试必须实际到达原子发布边界");
+    } finally {
+      await stopChild(holder);
+    }
+    assert.equal(holder.exitCode, 0, holderError);
+
+    assert.equal(await readFile(targetPath, "utf8"), "old-content\n");
+    assert.equal((await readAccessSnapshot(targetPath)).sddl, before.sddl);
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+async function createTemporaryLocalUser(userName: string, password: string): Promise<string> {
+  const sid = await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$password = ConvertTo-SecureString $env:PICO_TEST_PASSWORD -AsPlainText -Force
+$user = New-LocalUser -Name $env:PICO_TEST_USER -Password $password -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description 'pico-harness temporary ACL integration user'
+$usersSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+Add-LocalGroupMember -SID $usersSid -Member $user
+[Console]::Out.Write($user.SID.Value)
+`,
+    { PICO_TEST_USER: userName, PICO_TEST_PASSWORD: password },
+  );
+  assert.match(sid, /^S-\d+(?:-\d+)+$/u);
+  return sid;
+}
+
+async function removeTemporaryLocalUser(userName: string): Promise<void> {
+  await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$user = Get-LocalUser -Name $env:PICO_TEST_USER -ErrorAction SilentlyContinue
+if ($null -ne $user) {
+  Remove-LocalUser -SID $user.SID -Confirm:$false
+}
+`,
+    { PICO_TEST_USER: userName },
+  );
+}
+
+async function grantDirectoryAccess(
+  path: string,
+  sid: string,
+  rights: "Modify" | "ReadAndExecute",
+): Promise<void> {
+  await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$sid = New-Object Security.Principal.SecurityIdentifier($env:PICO_TEST_SID)
+$security = [IO.Directory]::GetAccessControl($env:PICO_TEST_PATH)
+$inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+$rights = [Enum]::Parse([Security.AccessControl.FileSystemRights], $env:PICO_TEST_RIGHTS)
+$rule = New-Object Security.AccessControl.FileSystemAccessRule(
+  $sid,
+  $rights,
+  $inheritance,
+  [Security.AccessControl.PropagationFlags]::None,
+  [Security.AccessControl.AccessControlType]::Allow
+)
+$security.SetAccessRule($rule)
+[IO.Directory]::SetAccessControl($env:PICO_TEST_PATH, $security)
+`,
+    { PICO_TEST_PATH: path, PICO_TEST_SID: sid, PICO_TEST_RIGHTS: rights },
+  );
+}
+
+async function startLowPrivilegeWatcher(options: LowPrivilegeWatcherOptions): Promise<number> {
+  const watcherCommand = Buffer.from(buildLowPrivilegeWatcherScript(options), "utf16le").toString(
+    "base64",
+  );
+  const output = await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$password = ConvertTo-SecureString $env:PICO_TEST_PASSWORD -AsPlainText -Force
+$credentialName = '.\' + $env:PICO_TEST_USER
+$credential = New-Object System.Management.Automation.PSCredential($credentialName, $password)
+$arguments = @(
+  '-NoLogo',
+  '-NoProfile',
+  '-NonInteractive',
+  '-ExecutionPolicy',
+  'Bypass',
+  '-EncodedCommand',
+  $env:PICO_WATCHER_COMMAND
+)
+$process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Credential $credential -UseNewEnvironment -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -PassThru
+[Console]::Out.Write([string]$process.Id)
+`,
+    {
+      PICO_TEST_USER: options.userName,
+      PICO_TEST_PASSWORD: options.password,
+      PICO_WATCHER_COMMAND: watcherCommand,
+    },
+  );
+  const pid = Number(output);
+  assert.equal(Number.isSafeInteger(pid) && pid > 0, true, `invalid watcher pid: ${output}`);
+  return pid;
+}
+
+function buildLowPrivilegeWatcherScript(options: LowPrivilegeWatcherOptions): string {
+  const encodedPath = (path: string): string => Buffer.from(path, "utf8").toString("base64");
+  return String.raw`
+$ErrorActionPreference = 'Stop'
+function Decode-Path([string]$encoded) {
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+}
+$workspace = Decode-Path '${encodedPath(options.workspace)}'
+$readyPath = Decode-Path '${encodedPath(options.readyPath)}'
+$earlyPath = Decode-Path '${encodedPath(options.earlyPath)}'
+$contentReadyPath = Decode-Path '${encodedPath(options.contentReadyPath)}'
+$finalPath = Decode-Path '${encodedPath(options.finalPath)}'
+$stopPath = Decode-Path '${encodedPath(options.stopPath)}'
+$deadline = [DateTime]::UtcNow.AddSeconds(12)
+$temporaryPath = $null
+$heldStream = $null
+try {
+  [IO.File]::WriteAllText($readyPath, 'READY')
+  while ([DateTime]::UtcNow -lt $deadline -and -not [IO.File]::Exists($stopPath)) {
+    if ($null -eq $temporaryPath) {
+      $temporaryFiles = [IO.Directory]::GetFiles($workspace, '.pico-write-*')
+      if ($temporaryFiles.Length -eq 0) {
+        Start-Sleep -Milliseconds 2
+        continue
+      }
+      $temporaryPath = $temporaryFiles[0]
+    }
+
+    if ($null -eq $heldStream) {
+      try {
+        $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+        $heldStream = New-Object IO.FileStream(
+          $temporaryPath,
+          [IO.FileMode]::Open,
+          [IO.FileAccess]::Read,
+          $share
+        )
+        if (-not [IO.File]::Exists($earlyPath)) {
+          [IO.File]::WriteAllText($earlyPath, 'HELD')
+        }
+      } catch [UnauthorizedAccessException] {
+        if (-not [IO.File]::Exists($earlyPath)) {
+          [IO.File]::WriteAllText($earlyPath, 'DENIED')
+        }
+        if ([IO.File]::Exists($contentReadyPath)) {
+          [IO.File]::WriteAllText($finalPath, 'SAFE')
+          exit 0
+        }
+      } catch [IO.IOException] {
+        # Retry sharing and disappearance races while the writer remains paused.
+      }
+    }
+
+    if ($null -ne $heldStream -and [IO.File]::Exists($contentReadyPath)) {
+      $heldStream.Position = 0
+      $buffer = [Array]::CreateInstance([byte], 4096)
+      $bytesRead = $heldStream.Read($buffer, 0, $buffer.Length)
+      if ($bytesRead -gt 0) {
+        $leaked = [Convert]::ToBase64String($buffer, 0, $bytesRead)
+        [IO.File]::WriteAllText($finalPath, 'LEAK:' + $leaked)
+        exit 2
+      }
+    }
+    Start-Sleep -Milliseconds 2
+  }
+  if (-not [IO.File]::Exists($finalPath)) {
+    [IO.File]::WriteAllText($finalPath, 'TIMEOUT')
+  }
+  exit 3
+} finally {
+  if ($null -ne $heldStream) {
+    $heldStream.Dispose()
+  }
+}
+`;
+}
+
+async function stopWindowsProcess(pid: number): Promise<void> {
+  await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$process = Get-Process -Id ([int]$env:PICO_TEST_PID) -ErrorAction SilentlyContinue
+if ($null -ne $process) {
+  Stop-Process -InputObject $process -Force
+  if (-not $process.WaitForExit(5000)) {
+    throw 'watcher process did not exit'
+  }
+}
+`,
+    { PICO_TEST_PID: String(pid) },
+  );
+}
+
+async function waitForFileContent(
+  path: string,
+  timeoutMilliseconds = LOW_PRIVILEGE_TIMEOUT_MS,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    try {
+      const content = (await readFile(path, "utf8")).trim();
+      if (content.length > 0) return content;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "EACCES" && code !== "EBUSY") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for low-privilege watcher result: ${path}`);
+}
+
+async function createFixture(label: string): Promise<{
+  root: string;
+  workspace: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), `pico-windows-dacl-${label}-`));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  return { root, workspace };
+}
+
+async function restrictToCurrentSid(path: string): Promise<void> {
+  await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$security = New-Object Security.AccessControl.FileSecurity
+$security.SetAccessRuleProtection($true, $false)
+$rule = New-Object Security.AccessControl.FileSystemAccessRule(
+  $sid,
+  [Security.AccessControl.FileSystemRights]::FullControl,
+  [Security.AccessControl.AccessControlType]::Allow
+)
+[void]$security.AddAccessRule($rule)
+[IO.File]::SetAccessControl($env:PICO_TEST_PATH, $security)
+`,
+    { PICO_TEST_PATH: path },
+  );
+}
+
+async function readAccessSnapshot(path: string): Promise<AccessSnapshot> {
+  const output = await runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$sections = [Security.AccessControl.AccessControlSections]::Access -bor
+  [Security.AccessControl.AccessControlSections]::Owner -bor
+  [Security.AccessControl.AccessControlSections]::Group
+$security = [IO.File]::GetAccessControl($env:PICO_TEST_PATH, $sections)
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$rules = @($security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
+  [pscustomobject]@{
+    sid = $_.IdentityReference.Value
+    type = $_.AccessControlType.ToString()
+    rights = [int]$_.FileSystemRights
+    inherited = $_.IsInherited
+  }
+})
+[pscustomobject]@{
+  protected = $security.AreAccessRulesProtected
+  rules = $rules
+  sddl = $security.GetSecurityDescriptorSddlForm($sections)
+  currentSid = $currentSid
+  ownerSid = $security.GetOwner([Security.Principal.SecurityIdentifier]).Value
+  groupSid = $security.GetGroup([Security.Principal.SecurityIdentifier]).Value
+} | ConvertTo-Json -Compress -Depth 4
+`,
+    { PICO_TEST_PATH: path },
+  );
+  return JSON.parse(output) as AccessSnapshot;
+}
+
+function assertPrivateAccess(snapshot: AccessSnapshot): void {
+  assert.equal(snapshot.protected, true);
+  assert.equal(snapshot.rules.length, 1);
+  const [rule] = snapshot.rules;
+  assert.ok(rule);
+  assert.equal(rule.sid, snapshot.currentSid);
+  assert.equal(rule.type, "Allow");
+  assert.equal(rule.rights, 2_032_127);
+  assert.equal(rule.inherited, false);
+}
+
+async function assertNoTemporaryFiles(directory: string): Promise<void> {
+  const entries = await readdir(directory);
+  assert.deepEqual(
+    entries.filter((entry) => TEMPORARY_PREFIXES.some((prefix) => entry.startsWith(prefix))),
+    [],
+  );
+}
+
+async function runPowerShell(
+  script: string,
+  environment: Readonly<Record<string, string>>,
+): Promise<string> {
+  const child = spawnPowerShell(script, environment);
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.stdin.end();
+  const exitCode = await waitForExit(child);
+  if (exitCode !== 0) {
+    throw new Error(`PowerShell test helper failed (${String(exitCode)}): ${stderr}`);
+  }
+  return stdout.trim();
+}
+
+function spawnPowerShell(
+  script: string,
+  environment: Readonly<Record<string, string>>,
+): ChildProcessWithoutNullStreams {
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
+  const powershell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return spawn(
+    powershell,
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    {
+      cwd: join(systemRoot, "System32"),
+      env: { ...process.env, ...environment },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+}
+
+async function waitForOutput(
+  child: ChildProcessWithoutNullStreams,
+  expected: string,
+): Promise<void> {
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      child.stdin.end();
+      child.kill("SIGKILL");
+      reject(new Error(`PowerShell holder did not emit ${JSON.stringify(expected)}`));
+    }, 10_000);
+    const onData = (chunk: string): void => {
+      output += chunk;
+      if (!output.includes(expected)) return;
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = (code: number | null): void => {
+      cleanup();
+      reject(new Error(`PowerShell holder exited before readiness (${String(code)})`));
+    };
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      child.stdout.off("data", onData);
+      child.off("error", onError);
+      child.off("close", onClose);
+    };
+    child.stdout.on("data", onData);
+    child.on("error", onError);
+    child.on("close", onClose);
+  });
+}
+
+async function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMilliseconds = 15_000,
+): Promise<number | null> {
+  if (child.exitCode !== null) return child.exitCode;
+  return await new Promise<number | null>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      child.stdin.end();
+      child.kill("SIGKILL");
+      reject(new Error(`PowerShell test helper exceeded ${timeoutMilliseconds}ms`));
+    }, timeoutMilliseconds);
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = (code: number | null): void => {
+      cleanup();
+      resolve(code);
+    };
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      child.off("error", onError);
+      child.off("close", onClose);
+    };
+    child.once("error", onError);
+    child.once("close", onClose);
+  });
+}
+
+async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.stdin.end("\n");
+  try {
+    await waitForExit(child, 5_000);
+  } catch {
+    child.kill("SIGKILL");
+    await waitForExit(child, 5_000).catch(() => undefined);
+  }
+}

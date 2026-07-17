@@ -64,10 +64,20 @@ jobs:
         if: runner.os == 'macOS'
         run: npm run test:integration
 
-      - name: Run Windows Hook security integration subset
+      - name: Run Windows security integration suite
         if: runner.os == 'Windows'
-        timeout-minutes: 2
+        timeout-minutes: 5
+        env:
+          PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
         run: npm run test:integration:windows
+
+      - name: Cleanup temporary Windows ACL users
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Get-LocalUser | Where-Object { $_.Name -like 'pico_acl_*' } | ForEach-Object {
+            Remove-LocalUser -SID $_.SID -Confirm:$false
+          }
 
       - name: Package unsigned desktop smoke build
         run: npm run desktop:package

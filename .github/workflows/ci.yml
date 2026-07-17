@@ -85,8 +85,8 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
-  windows-hooks:
-    name: Windows Hook integration
+  windows-security:
+    name: Windows security integration
     runs-on: windows-latest
     timeout-minutes: 15
 
@@ -104,5 +104,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run Windows Hook integration suite
+      - name: Run Windows security integration suite
+        env:
+          PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
         run: npm run test:integration:windows
+
+      - name: Cleanup temporary Windows ACL users
+        if: always()
+        shell: powershell
+        run: |
+          Get-LocalUser | Where-Object { $_.Name -like 'pico_acl_*' } | ForEach-Object {
+            Remove-LocalUser -SID $_.SID -Confirm:$false
+          }
