@@ -323,6 +323,42 @@ test("OpenAI stream requests and consumes the terminal Usage-only chunk", async 
   });
 });
 
+test("OpenAI stream keeps reasoning separate from the final answer", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async () =>
+    new Response(
+      [
+        'data: {"choices":[{"delta":{"reasoning_content":"先检查"}}]}',
+        "",
+        'data: {"choices":[{"delta":{"reasoning_content":"配置。"}}]}',
+        "",
+        'data: {"choices":[{"delta":{"content":"已完成"}}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n"),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+
+  const textDeltas: string[] = [];
+  const reasoningDeltas: string[] = [];
+  const response = await new OpenAIProvider({
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "test-key",
+    model: "test-model",
+  }).generateStream([{ role: "user", content: "test" }], [], (delta) => textDeltas.push(delta), {
+    onReasoningDelta: (delta) => reasoningDeltas.push(delta),
+  });
+
+  assert.deepEqual(reasoningDeltas, ["先检查", "配置。"]);
+  assert.deepEqual(textDeltas, ["已完成"]);
+  assert.equal(response.reasoning, "先检查配置。");
+  assert.equal(response.content, "已完成");
+});
+
 test("OpenAI-compatible routes omit stream_options unless explicitly enabled", async (context) => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;

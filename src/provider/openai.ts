@@ -348,6 +348,9 @@ export class OpenAIProvider implements LLMProvider {
           const ast: Record<string, unknown> = { role: "assistant" };
           ast.content =
             this.profile.assistantContent === "null_when_empty" ? msg.content || null : msg.content;
+          if (msg.reasoning && this.profile.supportsReasoningContent) {
+            ast.reasoning_content = msg.reasoning;
+          }
           if (msg.toolCalls && msg.toolCalls.length > 0) {
             ast.tool_calls = msg.toolCalls.map((tc) => ({
               id: tc.id,
@@ -407,6 +410,7 @@ export class OpenAIProvider implements LLMProvider {
 
     // 解析 SSE 流
     let fullContent = "";
+    let fullReasoning = "";
     const toolCallAccumulator = new Map<
       number,
       { id?: string; name?: string; arguments: string }
@@ -421,6 +425,7 @@ export class OpenAIProvider implements LLMProvider {
           choices?: {
             delta?: {
               content?: string;
+              reasoning_content?: string;
               tool_calls?: Array<{
                 index: number;
                 id?: string;
@@ -463,6 +468,12 @@ export class OpenAIProvider implements LLMProvider {
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) return true;
 
+        // Provider 可展示的 reasoning 独立回传，不能混入最终回答正文。
+        if (delta.reasoning_content) {
+          fullReasoning += delta.reasoning_content;
+          options?.onReasoningDelta?.(delta.reasoning_content);
+        }
+
         // 文本 delta
         if (delta.content) {
           fullContent += delta.content;
@@ -504,6 +515,7 @@ export class OpenAIProvider implements LLMProvider {
       content: fullContent,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
+      reasoning: fullReasoning || undefined,
     };
   }
 
