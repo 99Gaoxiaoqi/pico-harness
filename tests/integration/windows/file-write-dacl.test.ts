@@ -709,37 +709,62 @@ async function stopWindowsProcess(processIdentity: WindowsProcessIdentity): Prom
   await runPowerShell(
     String.raw`
 $ErrorActionPreference = 'Stop'
-$process = Get-Process -Id ([int]$env:PICO_TEST_PID) -ErrorAction SilentlyContinue
-if ($null -ne $process) {
+function Stop-PicoWindowsProcess([int]$targetProcessId, [string]$expectedStart) {
   try {
-    # 缓存原生进程句柄；即使随后 PID 被复用，Kill 仍绑定原进程对象。
-    $processHandle = $process.Handle
-    $actualStart = [string]$process.StartTime.ToUniversalTime().Ticks
-  } catch [InvalidOperationException] {
-    return
-  } catch [ComponentModel.Win32Exception] {
-    return
-  }
-  if ($actualStart -ne $env:PICO_TEST_PROCESS_START) { return }
-  try {
-    $process.Kill()
-    if (-not $process.WaitForExit(5000)) {
-      throw 'watcher process did not exit'
-    }
-  } catch [InvalidOperationException] {
-    return
-  } catch [ComponentModel.Win32Exception] {
-    try {
-      if ($process.HasExited) { return }
-    } catch [InvalidOperationException] {
-      return
+    $process = [Diagnostics.Process]::GetProcessById($targetProcessId)
+  } catch {
+    $exception = $_.Exception
+    while ($null -ne $exception) {
+      if ($exception -is [ArgumentException]) { return }
+      $exception = $exception.InnerException
     }
     throw
+  }
+
+  $processHandle = $null
+  try {
+    try {
+      # 缓存原生进程句柄；即使随后 PID 被复用，Kill 仍绑定原进程对象。
+      $processHandle = $process.Handle
+      $actualStart = [string]$process.StartTime.ToUniversalTime().Ticks
+    } catch [InvalidOperationException] {
+      return
+    } catch [ComponentModel.Win32Exception] {
+      try {
+        if ($process.HasExited) { return }
+      } catch [InvalidOperationException] {
+        return
+      }
+      throw
+    }
+
+    if ($actualStart -ne $expectedStart) { return }
+    try {
+      $process.Kill()
+      if (-not $process.WaitForExit(5000)) {
+        throw 'watcher process did not exit'
+      }
+    } catch [InvalidOperationException] {
+      return
+    } catch [ComponentModel.Win32Exception] {
+      try {
+        if ($process.HasExited) { return }
+      } catch [InvalidOperationException] {
+        return
+      }
+      throw
+    }
   } finally {
-    [GC]::KeepAlive($processHandle)
+    if ($null -ne $processHandle) {
+      [GC]::KeepAlive($processHandle)
+    }
     $process.Dispose()
   }
 }
+
+[void](Stop-PicoWindowsProcess ([int]$env:PICO_TEST_PID) $env:PICO_TEST_PROCESS_START)
+[Console]::Out.Write('OK')
+exit 0
 `,
     {
       PICO_TEST_PID: String(processIdentity.pid),
