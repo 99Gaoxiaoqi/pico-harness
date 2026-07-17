@@ -91,7 +91,10 @@ function entryRows(
   isLast: boolean,
   focusedTool: boolean,
 ): number {
-  if (entry.kind === "thinking") return 0;
+  // 兼容旧会话中仅用于 spinner 的空 thinking 占位；新 reasoning 条目按正文计高。
+  if (entry.kind === "thinking") {
+    return entry.content ? visualRows(entry.content, wrapWidth).length + 1 : 0;
+  }
   if (entry.kind === "tool") {
     return buildToolCardVisualRows({
       ...entry,

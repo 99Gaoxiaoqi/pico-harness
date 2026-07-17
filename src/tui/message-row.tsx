@@ -12,7 +12,7 @@
 //   - error     : 黄色 ! + 结构化错误信息
 //   - logo      : 会话启动摘要,作为 transcript 首项
 //   - tool      : 渲染 <ToolCard>(自带折叠/展开)
-//   - thinking  : 返回 null(spinner 由 App 层渲染,不在此重复)
+//   - thinking  : 浅色显示 Provider 返回的可展示思考过程
 
 import React, { memo } from "react";
 import { Box, Text } from "ink";
@@ -22,6 +22,7 @@ import { ToolCard } from "./tool-card.js";
 import { LogoPanel } from "./logo-panel.js";
 import { SubagentActivityCard } from "./subagent-activity-card.js";
 import { visualRows } from "./terminal-width.js";
+import { MarkdownText } from "./markdown-text.js";
 
 export interface MessageRowProps {
   /** 本条消息数据 */
@@ -134,8 +135,12 @@ function MessageRowImpl({
       );
 
     case "thinking":
-      // thinking 占位由 App 层的 <Spinner> 渲染,这里不重复显示
-      return null;
+      if (!entry.content) return null;
+      return (
+        <MessageFrame marker="∴" markerColor="gray">
+          <MarkdownText content={entry.content} dimColor />
+        </MessageFrame>
+      );
 
     default:
       return null;
@@ -302,8 +307,7 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
         a.summary === b.summary
       );
     case "thinking":
-      // thinking 永远是非静态的(见 shouldRenderStatically),不会走到这里
-      return true;
+      return a.kind === "thinking" && a.content === b.content;
     default:
       return false;
   }

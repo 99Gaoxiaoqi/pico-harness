@@ -10,3 +10,13 @@ export function effectiveTuiRows(
   const rows = Math.max(1, Math.floor(terminalRows));
   return platform === "win32" && rows > 1 ? rows - 1 : rows;
 }
+
+/** Reserve transient transcript chrome without pushing it to the bottom of a fixed-height box. */
+export function transcriptContentRows(
+  transcriptRows: number,
+  options: { newMessageNotice: boolean; spinner: boolean },
+): number {
+  const rows = Math.max(1, Math.floor(transcriptRows));
+  const reserved = Number(options.newMessageNotice) + Number(options.spinner);
+  return Math.max(1, rows - reserved);
+}

@@ -80,6 +80,7 @@ export interface TuiReporterOptions {
  */
 export class TuiReporter implements Reporter {
   private currentStream: { entryId: string; streamId: string } | null = null;
+  private currentReasoningStream: { entryId: string; streamId: string } | null = null;
   /** 本轮刚完成的模型正文；若随后确认是 required 委派，则从主 transcript 定向撤销。 */
   private currentTurnAssistantEntryId: string | null = null;
   /**
@@ -232,11 +233,13 @@ export class TuiReporter implements Reporter {
 
   onThinking(): void {
     this.appendPhase("thinking");
+    // 保留零高度占位，让尚未收到 reasoning delta 的模型也能驱动“思考中”状态。
     this.appendEntry({ kind: "thinking" });
     this.emit();
   }
 
   onToolCall(toolName: string, args: string, providerCallId?: string): void {
+    this.completeReasoningStream();
     if (isRequiredDelegation(toolName, args)) {
       this.suppressCurrentTurnAssistantResponse("required-delegation");
     }
@@ -421,6 +424,7 @@ export class TuiReporter implements Reporter {
   }
 
   onMessage(content: string): void {
+    this.completeReasoningStream();
     if (this.currentStream) {
       this.currentTurnAssistantEntryId = this.currentStream.entryId;
       const projectedContent = this.projectedStreamContent(this.currentStream);
@@ -464,6 +468,7 @@ export class TuiReporter implements Reporter {
   }
 
   onTextDelta(delta: string): void {
+    this.completeReasoningStream();
     this.appendPhase("responding");
     if (this.currentStream) {
       this.eventStore.append({
@@ -479,6 +484,30 @@ export class TuiReporter implements Reporter {
       this.eventStore.append({
         type: "assistant.stream.started",
         ...this.currentStream,
+        delta,
+      });
+    }
+    this.emit();
+  }
+
+  onReasoningDelta(delta: string): void {
+    if (!delta) return;
+    this.appendPhase("thinking");
+    if (this.currentReasoningStream) {
+      this.eventStore.append({
+        type: "assistant.stream.delta",
+        ...this.currentReasoningStream,
+        delta,
+      });
+    } else {
+      this.currentReasoningStream = {
+        entryId: this.eventStore.createId("entry"),
+        streamId: this.eventStore.createId("stream"),
+      };
+      this.eventStore.append({
+        type: "assistant.stream.started",
+        ...this.currentReasoningStream,
+        entryKind: "thinking",
         delta,
       });
     }
@@ -542,6 +571,16 @@ export class TuiReporter implements Reporter {
       this.eventStore.append({ type: "assistant.stream.completed", ...stream });
     }
     this.currentStream = null;
+    this.currentReasoningStream = null;
+  }
+
+  private completeReasoningStream(): void {
+    if (!this.currentReasoningStream) return;
+    this.eventStore.append({
+      type: "assistant.stream.completed",
+      ...this.currentReasoningStream,
+    });
+    this.currentReasoningStream = null;
   }
 
   private interruptActiveStreams(reason: "new-request" | "clear" | "truncate" | "abort"): void {
@@ -553,6 +592,7 @@ export class TuiReporter implements Reporter {
 
   private clearRuntimeTracking(): void {
     this.currentStream = null;
+    this.currentReasoningStream = null;
     this.currentTurnAssistantEntryId = null;
     this.pendingToolIdsByName.clear();
     this.pendingToolIdsByProviderCallId.clear();
@@ -567,7 +607,11 @@ export class TuiReporter implements Reporter {
       if (projected.streamId !== undefined) {
         const stream = projection.streams[projected.streamId];
         if (stream?.status === "streaming") {
-          this.currentStream = { entryId: stream.entryId, streamId: stream.id };
+          if (projected.entry.kind === "thinking") {
+            this.currentReasoningStream = { entryId: stream.entryId, streamId: stream.id };
+          } else {
+            this.currentStream = { entryId: stream.entryId, streamId: stream.id };
+          }
         }
       }
       if (projected.toolCallId !== undefined) {

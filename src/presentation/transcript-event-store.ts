@@ -83,7 +83,7 @@ export type TranscriptEntryData =
       thinkingEffort?: string;
       modelSelectionSource?: SubagentActivityEvent["modelSelectionSource"];
     }
-  | { kind: "thinking" };
+  | { kind: "thinking"; content?: string };
 
 /** 仅供渲染边界使用；事件正文仍由 TranscriptProjectedEntry 持有权威身份。 */
 export interface TranscriptRenderIdentity {
@@ -251,6 +251,8 @@ export type TranscriptEvent =
       readonly entryId: string;
       readonly streamId: string;
       readonly delta: string;
+      /** 旧事件缺省为 assistant；reasoning 使用 thinking 独立投影。 */
+      readonly entryKind?: "assistant" | "thinking";
     })
   | (TranscriptEventBase & {
       readonly type: "assistant.stream.delta";
@@ -390,6 +392,16 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
       transcriptRecord(value, "entry");
       return;
     case "assistant.stream.started":
+      transcriptStrings(value, "entryId", "streamId", "delta");
+      transcriptOptionalString(value, "entryKind");
+      if (
+        value["entryKind"] !== undefined &&
+        value["entryKind"] !== "assistant" &&
+        value["entryKind"] !== "thinking"
+      ) {
+        throw new Error("Transcript stream entryKind is invalid");
+      }
+      return;
     case "assistant.stream.delta":
       transcriptStrings(value, "entryId", "streamId", "delta");
       return;
@@ -787,14 +799,15 @@ export function reduceTranscriptEvent(
       entries = [...entries, projectedEntry(event.entryId, event.entry)];
       break;
 
-    case "assistant.stream.started":
+    case "assistant.stream.started": {
       assertNewEntryId(entries, event.entryId);
       assertNewIdentity(streams, event.streamId, "stream");
+      const entryKind = event.entryKind ?? "assistant";
       entries = [
         ...entries,
         projectedEntry(
           event.entryId,
-          { kind: "assistant", content: event.delta },
+          { kind: entryKind, content: event.delta },
           {
             streamId: event.streamId,
           },
@@ -809,17 +822,19 @@ export function reduceTranscriptEvent(
         }),
       };
       break;
+    }
 
     case "assistant.stream.delta": {
       const stream = streams[event.streamId];
       assertStreamTarget(stream, event.entryId, "streaming");
       entries = replaceProjectedEntry(entries, event.entryId, (current) => {
-        if (current.entry.kind !== "assistant") {
-          throw new Error(`Transcript stream ${event.streamId} points to a non-assistant entry`);
+        if (current.entry.kind !== "assistant" && current.entry.kind !== "thinking") {
+          throw new Error(`Transcript stream ${event.streamId} points to a non-text entry`);
         }
+        const entryKind = current.entry.kind;
         return projectedEntry(
           current.id,
-          { kind: "assistant", content: current.entry.content + event.delta },
+          { kind: entryKind, content: current.entry.content + event.delta },
           { streamId: event.streamId },
         );
       });
@@ -831,13 +846,16 @@ export function reduceTranscriptEvent(
       assertStreamTarget(stream, event.entryId, "streaming");
       const completedContent = event.content;
       if (completedContent !== undefined) {
-        entries = replaceProjectedEntry(entries, event.entryId, (current) =>
-          projectedEntry(
+        entries = replaceProjectedEntry(entries, event.entryId, (current) => {
+          if (current.entry.kind !== "assistant" && current.entry.kind !== "thinking") {
+            throw new Error(`Transcript stream ${event.streamId} points to a non-text entry`);
+          }
+          return projectedEntry(
             current.id,
-            { kind: "assistant", content: completedContent },
+            { kind: current.entry.kind, content: completedContent },
             { streamId: event.streamId },
-          ),
-        );
+          );
+        });
       }
       streams = {
         ...streams,

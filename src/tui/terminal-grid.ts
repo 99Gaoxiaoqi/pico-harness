@@ -135,6 +135,7 @@ export async function createTuiTerminalGridSession(
     stdout,
     frontendGrid ?? initialConservativeGrid(stdout),
     timeoutMs,
+    frontendGrid !== null,
   );
 }
 
@@ -173,10 +174,12 @@ function createResizeAwareSession(
   stdout: NodeJS.WriteStream,
   initialFrontendGrid: TerminalGrid,
   timeoutMs: number,
+  initialFrontendGridTrusted: boolean,
 ): TuiTerminalGridSession {
   const resizeEvents = new EventEmitter();
   let frontendGrid = normalizeGrid(initialFrontendGrid, { columns: 80, rows: 24 });
   let publishedGrid = effectiveTerminalGrid(stdout, frontendGrid);
+  let hasTrustedFrontendGrid = initialFrontendGridTrusted;
   let mouseTrackingRequested = false;
   let disposed = false;
   let resizeGeneration = 0;
@@ -277,9 +280,11 @@ function createResizeAwareSession(
       }
       if (refreshed) {
         frontendGrid = normalizeGrid(refreshed, frontendGrid);
-      } else {
-        // A failed probe must never keep a height larger than the only live
-        // size we can observe. A later successful resize probe can expand it.
+        hasTrustedFrontendGrid = true;
+      } else if (!hasTrustedFrontendGrid) {
+        // 只有从未获得过前端 CPR 时才退回 PTY 尺寸。嵌入式终端的 PTY
+        // winsize 可能滞后；用一次瞬时探测失败覆盖已验证网格，会让 Ink
+        // 缩短当前帧并在旧输入框位置留下无法清除的残影。
         frontendGrid = conservativeFallbackGrid(stdout, frontendGrid);
       }
       publishIfChanged();
