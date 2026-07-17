@@ -133,6 +133,34 @@ function Get-PicoAccessSddl([string] $Path) {
   return $security.GetSecurityDescriptorSddlForm($sections)
 }
 
+function Test-PicoEquivalentAccessSddl([string] $Expected, [string] $Actual) {
+  $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new($Expected)
+  $actualDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new($Actual)
+
+  # SE_DACL_AUTO_INHERITED 只记录 ACL 是否经过自动继承处理，不改变 ACE 的访问语义。
+  # 除该位外的任何控制位（包括 DACL 保护位）差异都必须拒绝。
+  $flagDifference = ([int] $expectedDescriptor.ControlFlags) -bxor ([int] $actualDescriptor.ControlFlags)
+  $autoInheritedFlag = [int] [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+  if ($flagDifference -ne 0 -and $flagDifference -ne $autoInheritedFlag) {
+    return $false
+  }
+
+  $expectedAcl = $expectedDescriptor.DiscretionaryAcl
+  $actualAcl = $actualDescriptor.DiscretionaryAcl
+  if (($null -eq $expectedAcl) -xor ($null -eq $actualAcl)) { return $false }
+  if ($null -eq $expectedAcl) { return $true }
+  if ($expectedAcl.BinaryLength -ne $actualAcl.BinaryLength) { return $false }
+
+  $expectedBytes = [byte[]]::new($expectedAcl.BinaryLength)
+  $actualBytes = [byte[]]::new($actualAcl.BinaryLength)
+  $expectedAcl.GetBinaryForm($expectedBytes, 0)
+  $actualAcl.GetBinaryForm($actualBytes, 0)
+  for ($index = 0; $index -lt $expectedBytes.Length; $index++) {
+    if ($expectedBytes[$index] -ne $actualBytes[$index]) { return $false }
+  }
+  return $true
+}
+
 function Get-PicoOwnerGroupKey([string] $Path) {
   $sections = [Security.AccessControl.AccessControlSections]::Owner -bor
     [Security.AccessControl.AccessControlSections]::Group
@@ -271,10 +299,8 @@ try {
           Set-PicoInheritedAccess $target
           $stage = 'publish-new/dacl-verify'
           $actualSddl = Get-PicoAccessSddl $target
-          if ($actualSddl -ne $normalSddl) {
-            throw [Security.SecurityException]::new(
-              'PICO_NEW_DACL_MISMATCH expected=' + $normalSddl + ' actual=' + $actualSddl
-            )
+          if (-not (Test-PicoEquivalentAccessSddl $normalSddl $actualSddl)) {
+            throw [Security.SecurityException]::new('PICO_NEW_DACL_MISMATCH')
           }
           $stage = 'publish-new/owner-group-verify'
           if ((Get-PicoOwnerGroupKey $target) -ne $normalOwnerGroup) {
@@ -749,7 +775,7 @@ function windowsHelperFailureSummary(error: unknown): string {
   if ("killed" in error && error.killed === true) details.push("killed=true");
   if ("stderr" in error && typeof error.stderr === "string") {
     const diagnostic = error.stderr.trim().replace(/\s+/gu, " ");
-    if (diagnostic.length > 0) details.push(`stderr=${diagnostic.slice(0, 768)}`);
+    if (diagnostic.length > 0) details.push(`stderr=${diagnostic.slice(0, 256)}`);
   }
   return details.join(",") || "unknown";
 }
