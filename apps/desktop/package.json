@@ -5,8 +5,11 @@
   "type": "module",
   "main": ".vite/build/main.cjs",
   "scripts": {
+    "prestart": "npm run build --workspace @pico/protocol",
     "start": "electron-forge start",
+    "prepackage": "npm run build --workspace @pico/protocol",
     "package": "electron-forge package",
+    "premake": "npm run build --workspace @pico/protocol",
     "make": "electron-forge make",
     "pretypecheck": "npm run build --workspace @pico/protocol",
     "typecheck": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.preload.json && tsc --noEmit -p tsconfig.renderer.json"

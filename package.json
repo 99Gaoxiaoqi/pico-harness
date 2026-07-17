@@ -18,7 +18,8 @@
     "@pico/protocol"
   ],
   "scripts": {
-    "dev": "tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts",
+    "predev": "npm run build:protocol",
+    "dev": "tsx --env-file-if-exists=.env --import ./src/tui/preload-env.ts src/cli/main.ts",
     "desktop:dev": "npm run start --workspace @pico/desktop",
     "desktop:package": "npm run package --workspace @pico/desktop",
     "desktop:make": "npm run make --workspace @pico/desktop",
