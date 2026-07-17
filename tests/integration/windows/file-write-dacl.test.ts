@@ -555,19 +555,24 @@ async function stopWindowsProcess(processIdentity: WindowsProcessIdentity): Prom
 $ErrorActionPreference = 'Stop'
 $process = Get-Process -Id ([int]$env:PICO_TEST_PID) -ErrorAction SilentlyContinue
 if ($null -ne $process) {
-  $actualStart = [string]$process.StartTime.ToUniversalTime().Ticks
+  try {
+    # 缓存原生进程句柄；即使随后 PID 被复用，Kill 仍绑定原进程对象。
+    $processHandle = $process.Handle
+    $actualStart = [string]$process.StartTime.ToUniversalTime().Ticks
+  } catch [InvalidOperationException] {
+    return
+  }
   if ($actualStart -ne $env:PICO_TEST_PROCESS_START) { return }
   try {
-    Stop-Process -InputObject $process -Force
+    $process.Kill()
     if (-not $process.WaitForExit(5000)) {
       throw 'watcher process did not exit'
     }
-  } catch {
-    $current = Get-Process -Id ([int]$env:PICO_TEST_PID) -ErrorAction SilentlyContinue
-    if ($null -eq $current) { return }
-    $currentStart = [string]$current.StartTime.ToUniversalTime().Ticks
-    if ($currentStart -ne $env:PICO_TEST_PROCESS_START) { return }
-    throw
+  } catch [InvalidOperationException] {
+    return
+  } finally {
+    [GC]::KeepAlive($processHandle)
+    $process.Dispose()
   }
 }
 `,
