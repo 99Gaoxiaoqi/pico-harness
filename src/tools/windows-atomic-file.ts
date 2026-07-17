@@ -259,13 +259,13 @@ try {
         [IO.File]::Move($temporary, $target)
         $targetLock = $null
         try {
-          # DACL 应用期间拒绝 delete sharing，避免 final path 在验证前被换名。
+          # DACL 应用与验证期间独占数据句柄，阻止 final path 被换名或新主体抢先读取。
           $stage = 'publish-new/target-open'
           $targetLock = [IO.FileStream]::new(
             $target,
             [IO.FileMode]::Open,
             [IO.FileAccess]::Read,
-            [IO.FileShare]::ReadWrite
+            [IO.FileShare]::None
           )
           $stage = 'publish-new/dacl-apply'
           Set-PicoInheritedAccess $target
