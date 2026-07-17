@@ -120,6 +120,52 @@ test(
 );
 
 test(
+  "Windows command Hooks accept valid output when the child closes stdin early",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "stdin-closed");
+    const entryPath = join(fixture.workspace, "close-stdin.cjs");
+    await writeFile(
+      entryPath,
+      [
+        'const fs = require("node:fs");',
+        "fs.closeSync(0);",
+        'process.stdout.write(JSON.stringify({ additionalContext: "stdin-closed" }));',
+        "setTimeout(() => undefined, 100);",
+        "",
+      ].join("\n"),
+    );
+    const handler = {
+      type: "command",
+      command: process.execPath,
+      args: ["./close-stdin.cjs"],
+    } as const satisfies CommandHookHandler;
+    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    context.after(async () => await executor.dispose());
+
+    const output = await executor.execute(
+      {
+        id: "windows-stdin-closed",
+        event: "Stop",
+        source: fixture.source,
+        order: 0,
+        handler,
+        trusted: true,
+      },
+      {
+        session_id: "windows-stdin-closed",
+        cwd: fixture.workspace,
+        hook_event_name: "Stop",
+        payload: { content: "x".repeat(2 * 1024 * 1024) },
+      },
+      {},
+    );
+
+    assert.equal(output.additionalContext, "stdin-closed", JSON.stringify(output));
+  },
+);
+
+test(
   "Windows command cancellation waits until the entire child process tree is terminated",
   { skip: WINDOWS_ONLY, timeout: 20_000 },
   async (context) => {
