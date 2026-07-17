@@ -725,6 +725,17 @@ function spawnPowerShell(
 ): ChildProcessWithoutNullStreams {
   const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
   const powershell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const childEnvironment: NodeJS.ProcessEnv = { ...process.env, ...environment };
+  for (const name of Object.keys(childEnvironment)) {
+    if (name.toLocaleLowerCase("en-US") === "psmodulepath") delete childEnvironment[name];
+  }
+  childEnvironment.PSModulePath = join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "Modules",
+  );
   return spawn(
     powershell,
     [
@@ -738,7 +749,7 @@ function spawnPowerShell(
     ],
     {
       cwd: join(systemRoot, "System32"),
-      env: { ...process.env, ...environment },
+      env: childEnvironment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     },
