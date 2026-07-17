@@ -445,7 +445,7 @@ async function startLowPrivilegeWatcher(
     String.raw`
 $ErrorActionPreference = 'Stop'
 $password = ConvertTo-SecureString $env:PICO_TEST_PASSWORD -AsPlainText -Force
-$credentialName = '.\' + $env:PICO_TEST_USER
+$credentialName = [Environment]::MachineName + '\' + $env:PICO_TEST_USER
 $credential = New-Object System.Management.Automation.PSCredential($credentialName, $password)
 $arguments = @(
   '-NoLogo',
@@ -456,7 +456,7 @@ $arguments = @(
   '-EncodedCommand',
   $env:PICO_WATCHER_COMMAND
 )
-$process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Credential $credential -UseNewEnvironment -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -PassThru
+$process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Credential $credential -LoadUserProfile -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -PassThru
 [Console]::Out.Write(([string]$process.Id) + '|' + ([string]$process.StartTime.ToUniversalTime().Ticks))
 `,
     {
