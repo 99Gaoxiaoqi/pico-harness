@@ -403,7 +403,10 @@ function startCommand(
     child.stdout?.on("data", (chunk: Buffer) => append(chunk, "stdout"));
     child.stderr?.on("data", (chunk: Buffer) => append(chunk, "stderr"));
     const handleStdinError = (err: unknown) => {
-      if (!isClosedStdinError(err)) requestTermination(err);
+      if (isClosedStdinError(err)) return;
+      requestTermination(
+        new Error(`Hook command stdin 写入失败: ${errorDiagnostic(err)}`, { cause: err }),
+      );
     };
     child.stdin?.once("error", handleStdinError);
     child.once("close", (code) => {
@@ -423,7 +426,7 @@ function startCommand(
             fail(
               new AggregateError(
                 [terminationReason, terminationError],
-                "Hook command 失败且进程树终止无法确认",
+                `Hook command 失败且进程树终止无法确认: ${errorDiagnostic(terminationReason)}`,
               ),
             );
           },
@@ -449,7 +452,12 @@ function startCommand(
 
 function isClosedStdinError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === "EPIPE" || code === "ECONNRESET" || code === "ERR_STREAM_DESTROYED";
+  return (
+    code === "EPIPE" ||
+    code === "ECONNRESET" ||
+    code === "ERR_STREAM_DESTROYED" ||
+    (process.platform === "win32" && code === "EOF")
+  );
 }
 
 function interpretCommandExit(
@@ -696,4 +704,15 @@ function abortReason(signal: AbortSignal): Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorDiagnostic(error: unknown): string {
+  const message = errorMessage(error);
+  const errno = error as NodeJS.ErrnoException | undefined;
+  const details = [
+    errno?.code ? `code=${errno.code}` : undefined,
+    errno?.errno !== undefined ? `errno=${String(errno.errno)}` : undefined,
+    errno?.syscall ? `syscall=${errno.syscall}` : undefined,
+  ].filter((value): value is string => value !== undefined);
+  return details.length > 0 ? `${message} (${details.join(", ")})` : message;
 }
