@@ -156,7 +156,7 @@ test(
         session_id: "windows-stdin-closed",
         cwd: fixture.workspace,
         hook_event_name: "Stop",
-        payload: { content: "x".repeat(2 * 1024 * 1024) },
+        payload: { reason: "x".repeat(2 * 1024 * 1024) },
       },
       {},
     );
