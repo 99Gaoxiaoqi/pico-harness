@@ -37,7 +37,8 @@ export class WindowsAtomicPublicationError extends Error {
       readonly preserveTemporary?: boolean;
     },
   ) {
-    super(message, options);
+    const causeMessage = options.cause instanceof Error ? options.cause.message.trim() : "";
+    super(causeMessage.length > 0 ? `${message}; ${causeMessage}` : message, options);
     this.name = "WindowsAtomicPublicationError";
     this.published = options.published;
     this.preserveTemporary = options.preserveTemporary ?? false;
@@ -129,7 +130,9 @@ function Get-PicoOwnerGroupKey([string] $Path) {
 }
 
 try {
+  $stage = 'initialize'
   $operation = $env:PICO_WINDOWS_OPERATION
+  $stage = $operation
   $temporary = if ($env:PICO_WINDOWS_TEMPORARY) {
     Convert-PicoExtendedPath $env:PICO_WINDOWS_TEMPORARY
   } else { $null }
@@ -223,6 +226,7 @@ try {
     'publish-new' {
       $probeStream = $null
       try {
+        $stage = 'publish-new/probe-create'
         $probeStream = [IO.FileStream]::new(
           $probe,
           [IO.FileMode]::CreateNew,
@@ -232,28 +236,34 @@ try {
           [IO.FileOptions]::DeleteOnClose
         )
         # 保持拒绝 delete sharing 的句柄直到安全描述符捕获完成，阻止 probe 被换名。
+        $stage = 'publish-new/probe-security'
         $normalOwnerGroup = Get-PicoOwnerGroupKey $probe
         $normalSddl = Get-PicoAccessSddl $probe
         $probeStream.Dispose()
         $probeStream = $null
 
+        $stage = 'publish-new/move'
         [IO.File]::Move($temporary, $target)
         $targetLock = $null
         try {
           # DACL 应用期间拒绝 delete sharing，避免 final path 在验证前被换名。
+          $stage = 'publish-new/target-open'
           $targetLock = [IO.FileStream]::new(
             $target,
             [IO.FileMode]::Open,
             [IO.FileAccess]::Read,
             [IO.FileShare]::ReadWrite
           )
+          $stage = 'publish-new/dacl-apply'
           $sections = [Security.AccessControl.AccessControlSections]::Access
           $normalSecurity = [Security.AccessControl.FileSecurity]::new()
           $normalSecurity.SetSecurityDescriptorSddlForm($normalSddl, $sections)
           [IO.File]::SetAccessControl($target, $normalSecurity)
+          $stage = 'publish-new/dacl-verify'
           if ((Get-PicoAccessSddl $target) -ne $normalSddl) {
             throw [Security.SecurityException]::new('PICO_NEW_DACL_MISMATCH')
           }
+          $stage = 'publish-new/owner-group-verify'
           if ((Get-PicoOwnerGroupKey $target) -ne $normalOwnerGroup) {
             throw [Security.SecurityException]::new('PICO_NEW_OWNER_GROUP_MISMATCH')
           }
@@ -276,7 +286,13 @@ try {
   exit 0
 } catch {
   $exception = $_.Exception
-  [Console]::Error.Write($exception.GetType().FullName + '|0x' + $exception.HResult.ToString('X8'))
+  $message = $exception.Message -replace '[\r\n|]+', ' '
+  [Console]::Error.Write(
+    $exception.GetType().FullName +
+    '|0x' + $exception.HResult.ToString('X8') +
+    '|' + $stage +
+    '|' + $message
+  )
   exit 1
 }
 `;
