@@ -270,8 +270,11 @@ try {
           $stage = 'publish-new/dacl-apply'
           Set-PicoInheritedAccess $target
           $stage = 'publish-new/dacl-verify'
-          if ((Get-PicoAccessSddl $target) -ne $normalSddl) {
-            throw [Security.SecurityException]::new('PICO_NEW_DACL_MISMATCH')
+          $actualSddl = Get-PicoAccessSddl $target
+          if ($actualSddl -ne $normalSddl) {
+            throw [Security.SecurityException]::new(
+              'PICO_NEW_DACL_MISMATCH expected=' + $normalSddl + ' actual=' + $actualSddl
+            )
           }
           $stage = 'publish-new/owner-group-verify'
           if ((Get-PicoOwnerGroupKey $target) -ne $normalOwnerGroup) {
@@ -746,7 +749,7 @@ function windowsHelperFailureSummary(error: unknown): string {
   if ("killed" in error && error.killed === true) details.push("killed=true");
   if ("stderr" in error && typeof error.stderr === "string") {
     const diagnostic = error.stderr.trim().replace(/\s+/gu, " ");
-    if (diagnostic.length > 0) details.push(`stderr=${diagnostic.slice(0, 256)}`);
+    if (diagnostic.length > 0) details.push(`stderr=${diagnostic.slice(0, 768)}`);
   }
   return details.join(",") || "unknown";
 }

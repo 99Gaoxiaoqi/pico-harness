@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   captureAtomicFilePrecondition,
@@ -438,31 +438,180 @@ $security.SetAccessRule($rule)
 async function startLowPrivilegeWatcher(
   options: LowPrivilegeWatcherOptions,
 ): Promise<WindowsProcessIdentity> {
-  const watcherCommand = Buffer.from(buildLowPrivilegeWatcherScript(options), "utf16le").toString(
-    "base64",
+  // CreateProcessWithLogonW limits its command line to 1,024 characters. Keep the watcher body
+  // in a fixture script instead of passing the much larger EncodedCommand.
+  const watcherScriptPath = join(
+    dirname(options.workspace),
+    `.pico-low-privilege-watcher-${randomBytes(8).toString("hex")}.ps1`,
   );
+  await writeFile(watcherScriptPath, buildLowPrivilegeWatcherScript(options), { flag: "wx" });
   const output = await runPowerShell(
     String.raw`
 $ErrorActionPreference = 'Stop'
-$password = ConvertTo-SecureString $env:PICO_TEST_PASSWORD -AsPlainText -Force
-$credentialName = [Environment]::MachineName + '\' + $env:PICO_TEST_USER
-$credential = New-Object System.Management.Automation.PSCredential($credentialName, $password)
-$arguments = @(
-  '-NoLogo',
-  '-NoProfile',
-  '-NonInteractive',
-  '-ExecutionPolicy',
-  'Bypass',
-  '-EncodedCommand',
-  $env:PICO_WATCHER_COMMAND
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class PicoLowPrivilegeProcessLauncher
+{
+    private const int LogonWithProfile = 0x00000001;
+    private const int CreateNoWindow = 0x08000000;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public int dwX;
+        public int dwY;
+        public int dwXSize;
+        public int dwYSize;
+        public int dwXCountChars;
+        public int dwYCountChars;
+        public int dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public int dwProcessId;
+        public int dwThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public uint dwLowDateTime;
+        public uint dwHighDateTime;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessWithLogonW(
+        string userName,
+        string domain,
+        string password,
+        int logonFlags,
+        string applicationName,
+        StringBuilder commandLine,
+        int creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(
+        IntPtr process,
+        out FileTime creationTime,
+        out FileTime exitTime,
+        out FileTime kernelTime,
+        out FileTime userTime);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static string Start(
+        string userName,
+        string domain,
+        string password,
+        string applicationPath,
+        string scriptPath,
+        string currentDirectory)
+    {
+        var startupInfo = new StartupInfo();
+        startupInfo.cb = Marshal.SizeOf(typeof(StartupInfo));
+        var processInformation = new ProcessInformation();
+        var commandLine = new StringBuilder(
+            "\"" + applicationPath + "\" -NoLogo -NoProfile -NonInteractive " +
+            "-ExecutionPolicy Bypass -File \"" + scriptPath + "\"");
+
+        if (!CreateProcessWithLogonW(
+            userName,
+            domain,
+            password,
+            LogonWithProfile,
+            applicationPath,
+            commandLine,
+            CreateNoWindow,
+            IntPtr.Zero,
+            currentDirectory,
+            ref startupInfo,
+            out processInformation))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        try
+        {
+            FileTime creationTime;
+            FileTime exitTime;
+            FileTime kernelTime;
+            FileTime userTime;
+            if (!GetProcessTimes(
+                processInformation.hProcess,
+                out creationTime,
+                out exitTime,
+                out kernelTime,
+                out userTime))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var windowsTicks =
+                ((long)creationTime.dwHighDateTime << 32) | creationTime.dwLowDateTime;
+            var utcTicks = DateTime.FromFileTimeUtc(windowsTicks).Ticks;
+            return processInformation.dwProcessId.ToString(CultureInfo.InvariantCulture) +
+                "|" + utcTicks.ToString(CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            TerminateProcess(processInformation.hProcess, 1);
+            throw;
+        }
+        finally
+        {
+            CloseHandle(processInformation.hThread);
+            CloseHandle(processInformation.hProcess);
+        }
+    }
+}
+'@
+
+$output = [PicoLowPrivilegeProcessLauncher]::Start(
+  $env:PICO_TEST_USER,
+  [Environment]::MachineName,
+  $env:PICO_TEST_PASSWORD,
+  (Join-Path $PSHOME 'powershell.exe'),
+  $env:PICO_WATCHER_SCRIPT,
+  $env:SystemRoot
 )
-$process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Credential $credential -LoadUserProfile -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -PassThru
-[Console]::Out.Write(([string]$process.Id) + '|' + ([string]$process.StartTime.ToUniversalTime().Ticks))
+[Console]::Out.Write($output)
 `,
     {
       PICO_TEST_USER: options.userName,
       PICO_TEST_PASSWORD: options.password,
-      PICO_WATCHER_COMMAND: watcherCommand,
+      PICO_WATCHER_SCRIPT: watcherScriptPath,
     },
   );
   const [pidText, startedAtUtcTicks] = output.split("|");
