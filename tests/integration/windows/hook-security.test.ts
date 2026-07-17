@@ -9,7 +9,7 @@ import {
   sanitizeCommandHookEnvironment,
 } from "../../../src/hooks/config/referenced-scripts.js";
 import { DefaultHookExecutor } from "../../../src/hooks/executors/executor.js";
-import type { CommandHookHandler } from "../../../src/hooks/types.js";
+import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
 
 const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";
@@ -94,6 +94,37 @@ test(
 );
 
 test(
+  "Windows Node Hooks accept literal tildes in absolute code paths",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "absolute-tilde");
+    const entryDirectory = join(fixture.workspace, "RUNNER~1");
+    const entryPath = join(entryDirectory, "entry.cjs");
+    await mkdir(entryDirectory);
+    await writeFile(
+      entryPath,
+      'process.stdout.write(JSON.stringify({ additionalContext: "absolute-tilde" }));\n',
+    );
+    const handler = {
+      type: "command",
+      command: process.execPath,
+      args: [entryPath],
+    } as const satisfies CommandHookHandler;
+
+    const invocation = await resolveCommandHookExecution(handler, fixture.workspace);
+    assert.equal(
+      invocation.pathBindings.some((binding) => binding.logicalPath === entryPath),
+      true,
+    );
+
+    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    context.after(async () => await executor.dispose());
+    const output = await executeStopHook(executor, fixture, handler, "windows-absolute-tilde");
+    assert.equal(output.additionalContext, "absolute-tilde", JSON.stringify(output));
+  },
+);
+
+test(
   "Windows command timeout waits until the entire child process tree is terminated",
   { skip: WINDOWS_ONLY, timeout: 30_000 },
   async (context) => {
@@ -106,7 +137,11 @@ test(
       "windows-process-tree-timeout",
     );
 
-    const tree = await waitForProcessTree(processFixture.treePath, processFixture.heartbeatPath);
+    const tree = await waitForProcessTree(
+      processFixture.treePath,
+      processFixture.heartbeatPath,
+      execution,
+    );
     const output = await execution;
 
     assert.equal(output.decision, "allow");
@@ -179,7 +214,11 @@ test(
       controller.signal,
     );
 
-    const tree = await waitForProcessTree(processFixture.treePath, processFixture.heartbeatPath);
+    const tree = await waitForProcessTree(
+      processFixture.treePath,
+      processFixture.heartbeatPath,
+      execution,
+    );
     assert.equal(isProcessRunning(tree.parent), true);
     assert.equal(isProcessRunning(tree.child), true);
 
@@ -329,14 +368,46 @@ async function executeStopHook(
   );
 }
 
-async function waitForProcessTree(treePath: string, heartbeatPath: string): Promise<ProcessTree> {
+async function waitForProcessTree(
+  treePath: string,
+  heartbeatPath: string,
+  execution: Promise<HookOutput>,
+): Promise<ProcessTree> {
+  let completion:
+    | { readonly status: "fulfilled"; readonly output: HookOutput }
+    | { readonly status: "rejected"; readonly reason: unknown }
+    | undefined;
+  void execution.then(
+    (output) => {
+      completion = { status: "fulfilled", output };
+    },
+    (reason: unknown) => {
+      completion = { status: "rejected", reason };
+    },
+  );
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const tree = await readProcessTree(treePath);
-    if (tree && (await exists(heartbeatPath))) return tree;
+    const heartbeatExists = await exists(heartbeatPath);
+    if (tree && heartbeatExists) return tree;
+    const completed = completion;
+    if (completed?.status === "fulfilled") {
+      throw new Error(
+        `Windows Hook completed before process tree became ready (tree=${String(Boolean(tree))}, heartbeat=${String(heartbeatExists)}): ${JSON.stringify(completed.output)}`,
+      );
+    }
+    if (completed?.status === "rejected") {
+      throw completed.reason instanceof Error
+        ? completed.reason
+        : new Error(
+            `Windows Hook rejected before process tree became ready: ${String(completed.reason)}`,
+          );
+    }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("Windows Hook process tree did not become ready within 5000ms");
+  throw new Error(
+    `Windows Hook process tree did not become ready within 5000ms (tree=${String(Boolean(await readProcessTree(treePath)))}, heartbeat=${String(await exists(heartbeatPath))})`,
+  );
 }
 
 async function readProcessTree(path: string): Promise<ProcessTree | undefined> {

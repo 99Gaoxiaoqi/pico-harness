@@ -770,7 +770,13 @@ function isBareModuleReference(value: string): boolean {
 }
 
 function isDynamicCodeReference(value: string): boolean {
-  return /[$`*?[\]{}~\r\n]/u.test(value) || /^(?:data|node|file|https?):/iu.test(value);
+  const hasExpandableTilde =
+    value.includes("~") && !(process.platform === "win32" && isAbsolute(value));
+  return (
+    /[$`*?[\]{}\r\n]/u.test(value) ||
+    hasExpandableTilde ||
+    /^(?:data|node|file|https?):/iu.test(value)
+  );
 }
 
 async function canonicalExistingPaths(paths: readonly string[]): Promise<readonly string[]> {
