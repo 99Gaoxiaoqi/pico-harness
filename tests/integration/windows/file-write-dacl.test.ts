@@ -217,19 +217,21 @@ test(
     try {
       await writeFile(stopPath, "STOP");
     } catch (error) {
-      cleanupErrors.push(error);
+      cleanupErrors.push(
+        new Error(`写入 watcher 停止信号: ${formatError(error)}`, { cause: error }),
+      );
     }
     if (watcher !== undefined) {
       try {
         await stopWindowsProcess(watcher);
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(new Error(`停止 watcher 进程: ${formatError(error)}`, { cause: error }));
       }
     }
     try {
       await removeTemporaryLocalUser(userName);
     } catch (error) {
-      cleanupErrors.push(error);
+      cleanupErrors.push(new Error(`删除临时本地用户: ${formatError(error)}`, { cause: error }));
     }
 
     if (primaryError !== undefined && cleanupErrors.length > 0) {
@@ -240,7 +242,10 @@ test(
     }
     if (primaryError !== undefined) throw primaryError;
     if (cleanupErrors.length > 0)
-      throw new AggregateError(cleanupErrors, "Windows 低权限 DACL 测试清理失败");
+      throw new AggregateError(
+        cleanupErrors,
+        `Windows 低权限 DACL 测试清理失败: ${cleanupErrors.map(formatError).join("; ")}`,
+      );
   },
 );
 
