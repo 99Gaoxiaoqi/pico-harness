@@ -27,7 +27,7 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin python3-venv
 
       - name: Install dependencies
         run: npm ci
@@ -53,8 +53,56 @@ jobs:
       - name: Run deterministic integration suite
         run: npm run test:integration
 
+      - name: Verify root-only Linux publication ordering in container
+        run: |
+          git archive HEAD | docker run --rm -i node:22-bookworm bash -lc '
+            set -euo pipefail
+            mkdir /workspace
+            tar -x -C /workspace
+            cd /workspace
+            apt-get update
+            apt-get install --no-install-recommends -y acl libcap2-bin
+            npm ci
+            npm run build:protocol
+            if command -v getfattr >/dev/null; then
+              echo "getfattr must be absent during the new-file compatibility check" >&2
+              exit 1
+            fi
+            node --import tsx --import ./src/tui/preload-env.ts \
+              --test --test-concurrency=1 \
+              --test-name-pattern="(Linux new-file staging|Linux missing-file revalidation)" \
+              tests/integration/file-write-safety.test.ts
+            apt-get install --no-install-recommends -y attr
+            node --import tsx --import ./src/tui/preload-env.ts \
+              --test --test-concurrency=1 \
+              --test-name-pattern="(preserve Linux ACLs|Linux ACL-denied readers)" \
+              tests/integration/file-write-safety.test.ts
+          '
+
       - name: Build distributable
         run: npm run build
 
       - name: Verify package contents
         run: npm pack --dry-run
+
+  windows-hooks:
+    name: Windows Hook integration
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Windows Hook integration suite
+        run: npm run test:integration:windows
