@@ -62,12 +62,12 @@ export class ToolRegistry implements Registry {
 
 UNIX 只有几十个系统调用，但能组合出无限可能。pico-harness 只有四个工具：
 
-| 工具         | 能力            | 为什么只读/写         |
-| ------------ | --------------- | --------------------- |
-| `read_file`  | 读取文件内容    | 只读，加行号前缀      |
-| `write_file` | 创建或覆盖文件  | 自动创建父目录        |
-| `edit_file`  | 局部字符串替换  | 四级模糊匹配          |
-| `bash`       | 执行 Shell 命令 | 超时控制 + 工作区锁定 |
+| 工具         | 能力            | 为什么只读/写             |
+| ------------ | --------------- | ------------------------- |
+| `read_file`  | 读取文件内容    | 只读，加行号前缀          |
+| `write_file` | 创建或覆盖文件  | 自动创建父目录            |
+| `edit_file`  | 局部字符串替换  | 四级模糊匹配              |
+| `bash`       | 执行 Shell 命令 | 超时、输出边界 + 权限策略 |
 
 选择这四个工具，是因为观察了 Agent 的实际行为模式。Agent 做任何代码相关任务时，只会做四件事：读文件、写新文件、改已有文件、跑命令。没有第五种。给多了反而让它困惑——它会在"该用 replace 还是 edit"之间犹豫。
 
@@ -123,28 +123,24 @@ await writeFile(fullPath, content, "utf8");
 
 这样模型不需要先 `bash mkdir -p` 再 `write_file`——一步到位。减少不必要的工具调用就是减少出错机会和 Token 消耗。
 
-### bash：四条底线
+### bash：执行边界
 
-Shell 是功能最强大的工具，也是最危险的。我给它设了四条硬底线：
+Shell 是功能最强大的工具，也是最危险的。前台执行有这些固定边界：
 
-1. **超时控制**：30 秒超时。超过则 SIGTERM 杀死进程，防止 Agent 在无限循环的命令上卡死。
-2. **工作区锁定**：`cwd` 强制绑定到工作区目录，Agent 不能跳出沙箱。
-3. **错误原样回传**：合并 stdout 和 stderr。Agent 需要看到完整的输出才能判断成功还是失败。
-4. **长度截断**：输出上限 8000 字节，超出截断并标注。
+1. **超时控制**：30 秒超时。超过后先 SIGTERM、再 SIGKILL 收口完整子进程树，防止 Agent 在无限循环或遗留孙进程上卡死。
+2. **工作目录绑定**：`cwd` 从工作区启动，但这不是 OS 沙箱；主 Agent 的 YOLO 仍拥有当前 OS 用户权限。需要隔离的 Worker 由独立 worktree 与 OS 沙箱负责，隔离不可用时拒绝启动。
+3. **宿主 Shell 启动收口**：Bash 使用 `--noprofile --norc -c`，进程环境移除 `BASH_ENV`、`ENV`、导出函数等启动代码入口；YOLO hardline 仍会先拒绝可见文本中已建模的高危入口。
+4. **错误与退出状态回传**：stdout、stderr 按到达顺序合并；无输出的非零退出也会返回明确错误。
+5. **有界输出**：执行缓冲上限为 10 MiB，越界时终止完整子进程树。超过 30,000 字符的已捕获结果由 observation 层完整落盘，只向模型返回摘要和可分页回读的 artifact 引用。
 
 ```typescript
-// bash 的核心逻辑
-const { stdout, stderr } = await execAsync(command, {
-  ...execOptions,
-  cwd: this.workDir, // 锁定工作区
-  timeout: 30_000, // 30 秒超时
-  maxBuffer: 10 * 1024 * 1024,
+const shell = resolveShell();
+const child = spawn(shell, shellCommandArgs(shell, command), {
+  cwd: this.workDir,
+  detached: process.platform !== "win32",
+  env: sanitizeShellProcessEnvironment(process.env),
+  stdio: ["ignore", "pipe", "pipe"],
 });
-
-let output = stdout + (stderr ? `\n[stderr]\n${stderr}` : "");
-if (output.length > MAX_BYTES) {
-  output = output.slice(0, MAX_BYTES) + "\n... (输出已截断)";
-}
 ```
 
 ---
@@ -351,7 +347,7 @@ const results = await Promise.all(
 - **read_file**：安全读取，路径校验 + 大小截断 + 行号标注
 - **write_file**：原子覆盖，自动 mkdir
 - **edit_file**：四级模糊匹配 + EditHint 智能定位 + 缩进重对齐
-- **bash**：30 秒超时 + 工作区锁定 + 错误回传
+- **bash**：30 秒超时 + 工作目录绑定 + 权限策略 + 错误回传
 
 加上 **ToolAccesses** 冲突模型和 **ToolScheduler** 贪心调度器，Agent 可以在同一轮中安全地并行执行多个不冲突的工具，在冲突时自动串行。
 

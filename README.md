@@ -64,7 +64,7 @@ npm run desktop:dev
 
 - `src/runtime/agent-runtime.ts` 中的 `executeAgentRuntime` 是 TUI 与 daemon 共用的 Runtime 入口，不是可支持的 one-shot/headless CLI 外壳。
 - `/rewind` 按用户消息列出提示词、时间和该轮文件变化；恢复后切换有效对话分支，并把原提示词放回输入框。旧事件仍保留在追加式账本中；`/snapshots` 保留为诊断入口。
-- 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作/可写委派守卫和显式 Hook deny。需要逐次确认高风险操作时使用 `/mode default`。
+- 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作/可写委派守卫和显式 Hook deny。hardline 只分析可见命令文本和已建模的常见执行入口，不是任意 executable 的能力沙箱；需要逐次确认高风险操作时使用 `/mode default`。
 - `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
 - `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
@@ -153,7 +153,7 @@ export DEEPSEEK_API_KEY=your-deepseek-key
 export ZHIPU_API_KEY=your-zhipu-key
 ```
 
-已安装的 `pico` 不会自动读取当前工作区的 `.env`。仓库内的 `npm run dev` 会通过 `--env-file=.env` 加载 Pico 仓库根目录的 `.env`；其他启动方式请先 `export`，或使用自己的环境加载工具。
+已安装的 `pico` 不会自动读取当前工作区的 `.env`。仓库内的 `npm run dev` 会通过 `--env-file-if-exists=.env` 在文件存在时加载 Pico 仓库根目录的 `.env`；文件不存在时仍可使用已 `export` 的环境变量启动。其他入口请先 `export`，或使用自己的环境加载工具。
 
 `/model` 使用 `providerID/modelID` 作为稳定标识。OpenAI 兼容 provider 默认请求 `GET /models`；显式 `models` 是允许列表，也是端点不支持模型发现时的可靠后备。可用 `"discoverModels": false` 完全关闭发现。当前产品入口不会自动跨模型切换；重试和凭证轮换始终留在已经选择的模型路由。密钥值不会写入 SessionSettings、状态栏或命令输出。
 

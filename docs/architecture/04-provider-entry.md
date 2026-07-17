@@ -34,6 +34,10 @@ interface LLMProvider {
 | **assistant 角色** | `assistant`                                            | `assistant`                       | `model`（注意不是 assistant）     |
 | **工具调用参数**   | JSON 字符串                                            | 对象（input）                     | 对象（args）                      |
 
+带显式模型能力的 OpenAI 兼容路由把 `output` 作为线上请求硬上限，不只用于上下文预算。`https://api.openai.com` 官方端点默认写入 `max_completion_tokens`，其他兼容端点默认写入 `max_tokens`；模型配置的 `outputTokenField` 可显式覆盖默认值。Reasoning level 的请求 patch 最后还会被该上限覆盖，不能删除、抬高或同时写入两个互斥字段。生成与流式请求共用同一收口逻辑。旧环境变量直连没有端点能力元数据，适配器不会猜测这两个互斥字段，以保留任意兼容端点的原有 wire 行为；需要硬上限时应迁移到显式 route。
+
+流式解析按 SSE 行协议增量消费 `LF`、`CRLF` 和 bare `CR`，支持跨网络 chunk 的行分隔符、多行 `data:` 与 EOF 前没有空行的最后事件。Usage-only 终态 chunk 会先落账再判断内容 delta；`[DONE]` 后主动取消并释放 reader。
+
 ### Provider 工厂 (`factory.ts`)
 
 - `createProvider(kind, config, thinkingEffort?)`：只根据显式配置创建协议适配器

@@ -116,7 +116,18 @@ Engine 为每批 toolCalls 创建 `ToolScheduler`：
 
 ---
 
-## 4. EditFileTool 四级模糊匹配
+## 4. 文件 I/O 边界
+
+- `read_file` 只接受普通文件，通过 `O_NOFOLLOW | O_NONBLOCK` 打开同一文件描述符；FIFO 等特殊文件立即拒绝。读取容量从 `stat size + 1` 起按需增长，硬上限为 16 MiB + 1，因此小文件不会预分配整段上限，读取期间增长也不能突破边界。
+- `@` 文件附件同样先检查普通文件和字节上限。目录附件必须绑定已验证的目录句柄：Linux 通过 `/proc/self/fd/<fd>` 复核 dev/ino 后用 `opendir` 流式采样，最多消费 `limit + 1` 个条目；macOS、Windows 或无 procfs 环境明确标记“安全枚举不可用”且不列条目，不会退回可被替换的原路径。
+- `write_file` / `edit_file` 使用同目录独占临时文件、完整写入、`fsync`、发布前版本复核和原子 `rename`。复核能够观察到的目标、父目录或临时文件替换会使发布失败；成功发布不会把半写文件暴露为目标。
+- 覆盖已有文件时保留普通权限位和可保真的 owner。Linux 通过 `O_PATH` 与经 procfs 类型、符号链接和 dev/ino 验证的 `/proc/<pid>/fd` 绑定源、目标 inode；`getfattr` / `setfattr` 的 stdout、stderr 和最终属性集合都要复核。实现只显式迁移当前身份可观察的 `user.*` 与 POSIX ACL：临时 inode 保持 `0600`，先移除继承 ACL；源 ACL 存在时由一次 `setxattr` 原子建立最终 ACL 与 mode，不存在时先移除 ACL 再恢复 mode。内容改变后有意清除 `security.capability`。其他可观察的 `security.*`、`system.*`、`trusted.*` 只在临时 inode 从同目录自然继承了完全相同值时放行，绝不重新附加。已有文件缺少 procfs、GNU attr 工具、读取不完整或遇到无法保真的属性时 fail-closed。
+- Linux 新建文件不依赖 GNU attr。实现先以 `0666` 创建空的 `O_TMPFILE` probe；文件系统不支持时退回瞬时可见但立即解绑、始终为空的具名 probe，只读取 umask/default ACL 共同决定的最终普通权限位。真正承载内容的具名临时 inode 从创建起保持 `0600`，同目录 default ACL 只以受限 mask 继承；完整写入、同步和最后一次业务路径复核之后，一次 `chmod` 原子恢复 ACL mask/mode，再完成版本复核与 `rename`。失败清理会先把 Linux 临时 inode 收紧为 mode `000`。
+- macOS 目标含扩展 ACL、未知 xattr，或 provenance 无法逐字保真时同样 fail-closed；不会以“成功写入”为代价静默丢失元数据。
+- 非特权 Linux 进程无法列出内核对该身份完全隐藏的特权 xattr，因而也不能证明这类不可观察属性不存在；这是 OS 权限模型边界，不能把“当前身份可见属性已精确保真”表述成所有特权元数据均可探测。
+- Node 未暴露 `openat/renameat/linkat` 的 dirfd/匿名 inode 发布组合，因此同一用户恶意进程仍可能在最后一次路径复核与 `rename` 之间替换父目录、目标路径或临时路径；具名临时 inode 恢复最终权限后，最终被授权的目录扫描者也可能在极短的 rename 前窗口看到它。实现通过重复 realpath、目录 inode 和文件版本复核缩小但不能从 OS 层消除这些窗口。Docker Desktop bind/virtiofs 的文件版本字段可能在无业务修改时变化，严格复核会按 fail-closed 拒绝发布；Docker 本就不在当前支持范围。
+
+## 5. EditFileTool 四级模糊匹配
 
 ```
 L1 精确匹配
@@ -129,7 +140,7 @@ L4 逐行去缩进 + 缩进重对齐
 
 ---
 
-## 5. 子代理机制
+## 6. 子代理机制
 
 ### 防污染设计
 
@@ -154,7 +165,7 @@ L4 逐行去缩进 + 缩进重对齐
 
 ---
 
-## 6. 渐进披露
+## 7. 渐进披露
 
 ```
 模型默认看到: CORE_TOOLS + search_tools
@@ -170,7 +181,7 @@ L4 逐行去缩进 + 缩进重对齐
 
 ---
 
-## 7. 会话级 Hooks (`src/hooks/`)
+## 8. 会话级 Hooks (`src/hooks/`)
 
 对标 Claude Code / Codex / Kimi Code 协议：
 
