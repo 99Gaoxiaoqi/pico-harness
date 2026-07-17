@@ -4,6 +4,14 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, rename, stat, statfs, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import {
+  assertPrivateWindowsTemporary,
+  createPrivateWindowsTemporary,
+  publishWindowsAtomicFile,
+  restorePrivateWindowsTemporary,
+  WindowsAtomicPublicationError,
+  type WindowsFileIdentity,
+} from "./windows-atomic-file.js";
 
 const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
 // Node 未暴露 Linux O_PATH；该稳定 ABI 标志让覆盖绑定目标 inode 而不额外要求读权限。
@@ -19,9 +27,12 @@ const LINUX_PROC_SUPER_MAGIC = 0x9fa0n;
 const METADATA_PROBE_MAX_BYTES = 256 * 1024;
 const execFileAsync = promisify(execFile);
 
-interface FileVersion {
+interface FileIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
+}
+
+interface FileVersion extends FileIdentity {
   readonly mode: bigint;
   readonly uid: bigint;
   readonly gid: bigint;
@@ -173,18 +184,38 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
   const bytes = Buffer.from(input.content, "utf8");
   let handle: FileHandle | undefined;
   let temporaryIdentity: FileVersion | undefined;
+  let windowsCleanupIdentity: WindowsFileIdentity | undefined;
   let finalizedTemporaryVersion: FileVersion | undefined;
   let published = false;
+  let preserveTemporary = false;
 
   try {
-    handle = await open(
-      temporaryPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW_FLAG,
-      0o600,
-    );
-    const temporaryInfo = await handle.stat({ bigint: true });
+    let temporaryInfo: BigIntStats;
+    if (process.platform === "win32") {
+      const createdIdentity = await createPrivateWindowsTemporary(temporaryPath);
+      windowsCleanupIdentity = createdIdentity;
+      const createdInfo = await lstat(temporaryPath, { bigint: true });
+      assertRegularNonSymlink(createdInfo, temporaryPath);
+      const createdVersion = toFileVersion(createdInfo);
+      if (!sameFileIdentity(createdIdentity, createdVersion)) {
+        throw new Error(`Windows 私有临时文件创建后已被替换: ${temporaryPath}`);
+      }
+      temporaryIdentity = createdVersion;
+      handle = await open(temporaryPath, constants.O_WRONLY | NO_FOLLOW_FLAG);
+      temporaryInfo = await handle.stat({ bigint: true });
+      if (!sameFileIdentity(createdVersion, toFileVersion(temporaryInfo))) {
+        throw new Error(`Windows 私有临时文件打开时已被替换: ${temporaryPath}`);
+      }
+    } else {
+      handle = await open(
+        temporaryPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW_FLAG,
+        0o600,
+      );
+      temporaryInfo = await handle.stat({ bigint: true });
+      temporaryIdentity = toFileVersion(temporaryInfo);
+    }
     assertRegularNonSymlink(temporaryInfo, temporaryPath);
-    temporaryIdentity = toFileVersion(temporaryInfo);
     const publishedPermissionMode =
       input.precondition.kind === "file"
         ? input.precondition.permissionMode
@@ -215,22 +246,26 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     await assertTargetPrecondition(input.targetPath, input.precondition);
     await assertTemporaryVersion(temporaryPath, stagedTemporaryVersion);
 
-    if (input.precondition.kind === "file") {
-      await preserveOwnership(handle, input.precondition.version, temporaryPath);
-    }
-    // Linux 仍在 0600 时先移除临时 inode 的继承 ACL；源 ACL 存在时由单次
-    // setxattr 原子建立最终 ACL/mode，避免先恢复宽 mode 再补拒绝 ACL 的暴露窗口。
-    if (linuxMetadataSource) {
-      await finalizeLinuxExtendedMetadata(handle, linuxMetadataSource, temporaryPath);
-      if (linuxMetadataSource.attributes.has(LINUX_POSIX_ACL_ATTRIBUTE)) {
-        await assertPublishedPermissionMode(handle, publishedPermissionMode, temporaryPath);
+    if (process.platform === "win32") {
+      await assertPrivateWindowsTemporary(temporaryPath, temporaryIdentity);
+    } else {
+      if (input.precondition.kind === "file") {
+        await preserveOwnership(handle, input.precondition.version, temporaryPath);
+      }
+      // Linux 仍在 0600 时先移除临时 inode 的继承 ACL；源 ACL 存在时由单次
+      // setxattr 原子建立最终 ACL/mode，避免先恢复宽 mode 再补拒绝 ACL 的暴露窗口。
+      if (linuxMetadataSource) {
+        await finalizeLinuxExtendedMetadata(handle, linuxMetadataSource, temporaryPath);
+        if (linuxMetadataSource.attributes.has(LINUX_POSIX_ACL_ATTRIBUTE)) {
+          await assertPublishedPermissionMode(handle, publishedPermissionMode, temporaryPath);
+        } else {
+          await handle.chmod(publishedPermissionMode);
+        }
       } else {
+        // Linux 新建 inode 已在 0600 下继承完整 default ACL；一次 chmod 原子恢复其
+        // ACL mask/mode。其他平台只发布普通 rwx 位，不复活特殊权限位。
         await handle.chmod(publishedPermissionMode);
       }
-    } else {
-      // Linux 新建 inode 已在 0600 下继承完整 default ACL；一次 chmod 原子恢复其
-      // ACL mask/mode。其他平台只发布普通 rwx 位，不复活特殊权限位。
-      await handle.chmod(publishedPermissionMode);
     }
     await handle.sync();
     const beforeMetadataVerification = await handle.stat({ bigint: true });
@@ -242,14 +277,23 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     ) {
       throw new Error(`验证扩展元数据时临时文件发生并发变化: ${temporaryPath}`);
     }
-    assertPreparedTemporary(
-      finalizedTemporary,
-      temporaryIdentity,
-      input.precondition,
-      publishedPermissionMode,
-      bytes.length,
-      temporaryPath,
-    );
+    if (process.platform === "win32") {
+      assertPreparedWindowsTemporary(
+        finalizedTemporary,
+        temporaryIdentity,
+        bytes.length,
+        temporaryPath,
+      );
+    } else {
+      assertPreparedTemporary(
+        finalizedTemporary,
+        temporaryIdentity,
+        input.precondition,
+        publishedPermissionMode,
+        bytes.length,
+        temporaryPath,
+      );
+    }
     finalizedTemporaryVersion = toFileVersion(finalizedTemporary);
     if (!hasPrivateLinuxStaging) {
       await handle.close();
@@ -260,14 +304,37 @@ export async function writeAtomicWorkspaceFile(input: AtomicWorkspaceFileWrite):
     await assertDirectoryIdentity(directory, directoryIdentity);
     await assertTargetPrecondition(input.targetPath, input.precondition);
     await assertTemporaryVersion(temporaryPath, finalizedTemporaryVersion);
-    await rename(temporaryPath, input.targetPath);
-    published = true;
+    if (process.platform === "win32") {
+      try {
+        const result = await publishWindowsAtomicFile({
+          targetPath: input.targetPath,
+          temporaryPath,
+          temporaryIdentity: finalizedTemporaryVersion,
+          existingIdentity:
+            input.precondition.kind === "file" ? input.precondition.version : undefined,
+        });
+        published = result.published;
+      } catch (error) {
+        if (error instanceof WindowsAtomicPublicationError) {
+          published = error.published;
+          preserveTemporary = error.preserveTemporary;
+        }
+        throw error;
+      }
+    } else {
+      await rename(temporaryPath, input.targetPath);
+      published = true;
+    }
   } finally {
     if (!published && hasPrivateLinuxStaging) await handle?.chmod(0).catch(() => undefined);
     await handle?.close().catch(() => undefined);
     await linuxMetadataSource?.handle.close().catch(() => undefined);
-    if (!published && temporaryIdentity) {
-      await unlinkIfSameFile(temporaryPath, temporaryIdentity);
+    const cleanupIdentity = temporaryIdentity ?? windowsCleanupIdentity;
+    if (!published && !preserveTemporary && process.platform === "win32" && cleanupIdentity) {
+      await restorePrivateWindowsTemporary(temporaryPath, cleanupIdentity).catch(() => undefined);
+    }
+    if (!published && !preserveTemporary && cleanupIdentity) {
+      await unlinkIfSameFile(temporaryPath, cleanupIdentity);
     }
   }
 }
@@ -838,6 +905,21 @@ function assertPreparedTemporary(
   }
 }
 
+function assertPreparedWindowsTemporary(
+  info: BigIntStats,
+  created: WindowsFileIdentity,
+  expectedBytes: number,
+  path: string,
+): void {
+  assertRegularNonSymlink(info, path);
+  if (!sameFileIdentity(created, toFileVersion(info))) {
+    throw new Error(`Windows 临时文件身份校验失败，已拒绝发布: ${path}`);
+  }
+  if (info.size !== BigInt(expectedBytes)) {
+    throw new Error(`Windows 临时文件大小校验失败: ${path}`);
+  }
+}
+
 async function assertTemporaryVersion(path: string, expected: FileVersion): Promise<void> {
   const current = await lstat(path, { bigint: true });
   assertRegularNonSymlink(current, path);
@@ -846,7 +928,7 @@ async function assertTemporaryVersion(path: string, expected: FileVersion): Prom
   }
 }
 
-async function unlinkIfSameFile(path: string, expected: FileVersion): Promise<void> {
+async function unlinkIfSameFile(path: string, expected: FileIdentity): Promise<void> {
   try {
     const current = await lstat(path, { bigint: true });
     if (
@@ -891,7 +973,7 @@ function toFileVersion(info: BigIntStats): FileVersion {
   };
 }
 
-function sameFileIdentity(left: FileVersion, right: FileVersion): boolean {
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
