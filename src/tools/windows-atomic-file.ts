@@ -92,6 +92,19 @@ function Set-PicoPrivate([string] $Path) {
   [IO.File]::SetAccessControl($Path, (New-PicoPrivateSecurity))
 }
 
+function Set-PicoInheritedAccess([string] $Path) {
+  $sections = [Security.AccessControl.AccessControlSections]::Access
+  $security = [IO.File]::GetAccessControl($Path, $sections)
+  $explicitRules = @(
+    $security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])
+  )
+  foreach ($rule in $explicitRules) {
+    [void] $security.RemoveAccessRuleSpecific($rule)
+  }
+  $security.SetAccessRuleProtection($false, $false)
+  [IO.File]::SetAccessControl($Path, $security)
+}
+
 function Assert-PicoPrivate([string] $Path) {
   $sections = [Security.AccessControl.AccessControlSections]::Access
   $security = [IO.File]::GetAccessControl($Path, $sections)
@@ -255,10 +268,7 @@ try {
             [IO.FileShare]::ReadWrite
           )
           $stage = 'publish-new/dacl-apply'
-          $sections = [Security.AccessControl.AccessControlSections]::Access
-          $normalSecurity = [Security.AccessControl.FileSecurity]::new()
-          $normalSecurity.SetSecurityDescriptorSddlForm($normalSddl, $sections)
-          [IO.File]::SetAccessControl($target, $normalSecurity)
+          Set-PicoInheritedAccess $target
           $stage = 'publish-new/dacl-verify'
           if ((Get-PicoAccessSddl $target) -ne $normalSddl) {
             throw [Security.SecurityException]::new('PICO_NEW_DACL_MISMATCH')
