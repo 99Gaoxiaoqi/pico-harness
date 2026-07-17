@@ -561,6 +561,8 @@ if ($null -ne $process) {
     $actualStart = [string]$process.StartTime.ToUniversalTime().Ticks
   } catch [InvalidOperationException] {
     return
+  } catch [ComponentModel.Win32Exception] {
+    return
   }
   if ($actualStart -ne $env:PICO_TEST_PROCESS_START) { return }
   try {
@@ -570,6 +572,13 @@ if ($null -ne $process) {
     }
   } catch [InvalidOperationException] {
     return
+  } catch [ComponentModel.Win32Exception] {
+    try {
+      if ($process.HasExited) { return }
+    } catch [InvalidOperationException] {
+      return
+    }
+    throw
   } finally {
     [GC]::KeepAlive($processHandle)
     $process.Dispose()
