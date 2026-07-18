@@ -5,6 +5,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type {
   PluginCompatibility,
+  PluginCapabilityDeclaration,
   PluginConfigContribution,
   PluginConfigDeclaration,
   PluginContributionKind,
@@ -339,6 +340,11 @@ async function resolveManifest(pluginPath: string): Promise<ManifestResolution> 
   validateConfigDeclaration(parsed.hooks, "hooks", candidate.path, diagnostics);
   validateConfigDeclaration(parsed.mcpServers, "mcpServers", candidate.path, diagnostics);
   validateConfigDeclaration(parsed.lspServers, "lspServers", candidate.path, diagnostics);
+  const capabilities = normalizeCapabilityDeclarations(
+    parsed.capabilities,
+    candidate.path,
+    diagnostics,
+  );
 
   const manifest = {
     ...parsed,
@@ -350,6 +356,7 @@ async function resolveManifest(pluginPath: string): Promise<ManifestResolution> 
     ...(optionalNonEmptyString(parsed.description)
       ? { description: optionalNonEmptyString(parsed.description) }
       : {}),
+    ...(capabilities ? { capabilities } : {}),
   } as PluginManifest;
   const identity: ResolvedPluginIdentity = Object.freeze({
     id: name,
@@ -364,6 +371,101 @@ async function resolveManifest(pluginPath: string): Promise<ManifestResolution> 
     manifestSource: candidate.source,
   });
   return { identity, manifest, diagnostics };
+}
+
+/**
+ * Capabilities are intentionally stricter than legacy resource declarations:
+ * they are data-only requests and may not smuggle a module/command/factory into
+ * the manifest. Malformed declarations block the plugin at resolver boundary.
+ */
+function normalizeCapabilityDeclarations(
+  value: unknown,
+  manifestPath: string,
+  diagnostics: PluginDiagnostic[],
+): readonly PluginCapabilityDeclaration[] | undefined {
+  if (value === undefined) return undefined;
+  const entries: readonly unknown[] = Array.isArray(value) ? value : [value];
+  const normalized: PluginCapabilityDeclaration[] = [];
+  for (const entry of entries) {
+    if (!isRecord(entry)) {
+      diagnostics.push(
+        diagnostic(
+          "error",
+          "blocked",
+          "manifest_capabilities_type_invalid",
+          "Plugin manifest capabilities must be an object or an array of objects.",
+          manifestPath,
+          "capability",
+        ),
+      );
+      continue;
+    }
+    const unknownKeys = Object.keys(entry).filter(
+      (key) => !["id", "version", "config"].includes(key),
+    );
+    if (unknownKeys.length > 0) {
+      diagnostics.push(
+        diagnostic(
+          "error",
+          "blocked",
+          "manifest_capability_fields_invalid",
+          `Plugin capability may only declare id, version and config; found ${unknownKeys.join(", ")}.`,
+          manifestPath,
+          "capability",
+        ),
+      );
+      continue;
+    }
+    const id = optionalNonEmptyString(entry.id);
+    const version = optionalNonEmptyString(entry.version);
+    if (!id || !/^[a-z][a-z0-9._-]*$/u.test(id)) {
+      diagnostics.push(
+        diagnostic(
+          "error",
+          "blocked",
+          "manifest_capability_id_invalid",
+          "Plugin capability id must start with a lowercase letter and contain only lowercase letters, numbers, dot, underscore or hyphen.",
+          manifestPath,
+          "capability",
+        ),
+      );
+      continue;
+    }
+    if (!version) {
+      diagnostics.push(
+        diagnostic(
+          "error",
+          "blocked",
+          "manifest_capability_version_invalid",
+          "Plugin capability version must be a non-empty string.",
+          manifestPath,
+          "capability",
+        ),
+      );
+      continue;
+    }
+    if (entry.config !== undefined && !isRecord(entry.config)) {
+      diagnostics.push(
+        diagnostic(
+          "error",
+          "blocked",
+          "manifest_capability_config_invalid",
+          "Plugin capability config must be a JSON object.",
+          manifestPath,
+          "capability",
+        ),
+      );
+      continue;
+    }
+    normalized.push(
+      Object.freeze({
+        id,
+        version,
+        ...(entry.config !== undefined ? { config: deepFreezeClone(entry.config) } : {}),
+      }),
+    );
+  }
+  return Object.freeze(normalized);
 }
 
 async function collectContributions(

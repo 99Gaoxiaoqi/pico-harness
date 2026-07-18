@@ -17,6 +17,7 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { MessageRow } from "./message-row.js";
 import { computeVirtualTranscript } from "./virtual-transcript.js";
 import { visualRows, type TranscriptLayout } from "./transcript-layout.js";
+import { TerminalMarkdownModel } from "./terminal-markdown-model.js";
 
 export interface MessageListProps {
   /** App 预先生成的聚合条目与行高。 */
@@ -145,12 +146,7 @@ function clipEntryTopRows(
   // 让长流式回复优先保住最新尾行。
   const contentRowsToSkip = rowsToSkip;
   const contentRowsToKeep = Math.max(1, (visibleRows ?? 1) - 1);
-  const content = clipTextTopRows(
-    entry.content ?? "",
-    contentRowsToSkip,
-    contentRowsToKeep,
-    wrapWidth,
-  );
+  const content = clipTextTopRows(entry, contentRowsToSkip, contentRowsToKeep, wrapWidth);
   return { ...entry, content };
 }
 
@@ -164,13 +160,18 @@ function canClipInsideMessageRow(entry: TuiEntry): boolean {
 }
 
 function clipTextTopRows(
-  text: string,
+  entry: Extract<TuiEntry, { kind: "assistant" | "thinking" | "user" | "system" }>,
   rowsToSkip: number,
   rowsToKeep: number,
   wrapWidth: number | undefined,
 ): string {
+  const text = entry.content ?? "";
   if (rowsToSkip <= 0) return text;
-  const rows = visualRows(text, normalizeWrapWidth(wrapWidth));
+  const width = normalizeWrapWidth(wrapWidth);
+  if (entry.kind === "assistant" || entry.kind === "thinking") {
+    return new TerminalMarkdownModel(text).clip(rowsToSkip, rowsToKeep, width).join("\n");
+  }
+  const rows = visualRows(text, width);
   return rows.slice(rowsToSkip, rowsToSkip + rowsToKeep).join("\n");
 }
 

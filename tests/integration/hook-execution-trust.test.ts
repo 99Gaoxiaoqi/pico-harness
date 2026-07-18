@@ -521,7 +521,9 @@ class RedirectAfterStatusHookTrustStore extends HookTrustStore {
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+// Filesystem watcher delivery can be delayed on a busy macOS CI/desktop host;
+// keep the assertion bounded while leaving enough room for debounce + reload.
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("等待 Hook alias watcher 刷新超时");

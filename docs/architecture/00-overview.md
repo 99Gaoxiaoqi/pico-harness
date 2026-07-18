@@ -30,18 +30,20 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 
 ## 模块地图
 
-| 模块                          | 职责                                                             |
-| ----------------------------- | ---------------------------------------------------------------- |
-| `src/runtime/`                | `AgentRuntime` composition root、RuntimeRun、RuntimeEvent 及投影 |
-| `src/engine/`                 | ReAct 循环、Session、预算、Reporter、Goal 与 Steer               |
-| `src/provider/`               | Provider 协议、ModelRouter、凭证轮换、重试和计费能力             |
-| `src/tools/`                  | 工具 Registry、中间件、调度器、子代理与渐进披露                  |
-| `src/context/`                | Prompt 组装、请求投影、模型摘要、Artifact 和 Evidence            |
-| `src/tasks/`                  | RuntimeStore、后台 Job、Cron、租约、Usage 和完成通知             |
-| `src/daemon/`                 | 本机 IPC、认证、Desktop/Workspace Runtime 服务                   |
-| `packages/protocol/`          | daemon 协议契约、运行时校验和 Desktop 方法白名单                 |
-| `apps/desktop/`               | Electron Main/Preload/Renderer 和平台集成                        |
-| `src/safety/`、`src/storage/` | FileHistory、CAS、rewind/fork journal、lease 与原子写入          |
+| 模块                          | 职责                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------ |
+| `src/runtime/`                | `AgentRuntime` composition root、RuntimeRun 及 Runtime adapters                      |
+| `src/storage/`                | RuntimeEventStore 等 durable storage 实现                                            |
+| `src/engine/`                 | ReAct 循环、Session、预算、Reporter、Goal 与 Steer                                   |
+| `src/provider/`               | Provider 协议、ModelRouter、凭证轮换、重试和计费能力                                 |
+| `src/tools/`                  | 工具 Registry、中间件、调度器、子代理与渐进披露                                      |
+| `src/context/`                | Prompt 组装、请求投影、模型摘要、Artifact 和 Evidence                                |
+| `src/tasks/`                  | RuntimeStore、后台 Job、Cron、租约、Usage 和完成通知                                 |
+| `src/daemon/`                 | 本机 IPC、认证、Desktop/Workspace Runtime 服务；typed request router 与领域 handlers |
+| `src/plugins/`                | Plugin Manager、scope/winner、snapshot、Hook trust、受限 capability 与统一诊断       |
+| `packages/protocol/`          | daemon 协议契约、运行时校验和 Desktop 方法白名单                                     |
+| `apps/desktop/`               | Electron Main/Preload/Renderer 和平台集成                                            |
+| `src/safety/`、`src/storage/` | FileHistory、CAS、rewind/fork journal、lease 与原子写入                              |
 
 ## 状态边界
 
@@ -78,16 +80,19 @@ Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，
 
 ## 文档索引
 
-| 文档                                             | 内容                                        |
-| ------------------------------------------------ | ------------------------------------------- |
-| [01-engine.md](./01-engine.md)                   | Engine、Session、RuntimeEvent 与 Reporter   |
-| [02-tools.md](./02-tools.md)                     | Registry、调度、子代理、渐进披露与 Hooks    |
-| [03-context.md](./03-context.md)                 | Prompt、投影、压缩、Artifact 与摘要 sidecar |
-| [04-provider-entry.md](./04-provider-entry.md)   | Provider、AgentRuntime、TUI 与 Desktop 入口 |
-| [05-infra-safety.md](./05-infra-safety.md)       | FileHistory、审批、MCP、可观测性与部署边界  |
-| [06-data-flow.md](./06-data-flow.md)             | TUI/Desktop 到 Runtime 的关键数据流         |
-| [07-hooks.md](./07-hooks.md)                     | Hook 来源、信任、热重载和前后台边界         |
-| [local-ipc-security.md](./local-ipc-security.md) | Desktop 与 daemon 本机 IPC 安全             |
+| 文档                                                                             | 内容                                                   |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| [01-engine.md](./01-engine.md)                                                   | Engine、Session、RuntimeEvent 与 Reporter              |
+| [02-tools.md](./02-tools.md)                                                     | Registry、调度、子代理、渐进披露与 Hooks               |
+| [03-context.md](./03-context.md)                                                 | Prompt、投影、压缩、Artifact 与摘要 sidecar            |
+| [04-provider-entry.md](./04-provider-entry.md)                                   | Provider、AgentRuntime、TUI 与 Desktop 入口            |
+| [05-infra-safety.md](./05-infra-safety.md)                                       | FileHistory、审批、MCP、可观测性与部署边界             |
+| [06-data-flow.md](./06-data-flow.md)                                             | TUI/Desktop 到 Runtime 的关键数据流                    |
+| [07-hooks.md](./07-hooks.md)                                                     | Hook 来源、信任、热重载和前后台边界                    |
+| [09-architecture-debt-remediation.md](./09-architecture-debt-remediation.md)     | Durable transcript、Markdown 与 Runtime 窄拆债务修整   |
+| [10-architecture-quality-assessment.md](./10-architecture-quality-assessment.md) | 分层、模块化、可测试性与插件化质量评估及验收标准       |
+| [plugin-scope-contract.md](./plugin-scope-contract.md)                           | Plugin scope 物理根目录、优先级与 workspace-local 限制 |
+| [local-ipc-security.md](./local-ipc-security.md)                                 | Desktop 与 daemon 本机 IPC 安全                        |
 
 ## 技术栈
 

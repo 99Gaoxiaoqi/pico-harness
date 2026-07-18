@@ -7,12 +7,21 @@ import {
 } from "../schema/message.js";
 import type { TuiEntry } from "./tui-reporter.js";
 import type { TuiReporter } from "./tui-reporter.js";
+import {
+  projectTranscriptEntriesForRendering,
+  projectTranscriptEvents,
+} from "../presentation/transcript-event-store.js";
 
 /**
  * RuntimeEventStore 是模型上下文的权威源，TUI EventStore 是当前界面 segment。
  * 恢复/热切换时从前者重建最小可见 transcript，不暴露 system injection。
  */
 export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[] {
+  // 结构化 transcript 是稳定 ID、reasoning、Skill/system 及子代理终态的权威源。
+  // 仅保留旧 Session（尚未写入 transcriptEvents）的 messages fallback。
+  if (snapshot.transcriptEvents.length > 0) {
+    return projectHydratedTranscriptEntries(snapshot.transcriptEvents);
+  }
   const toolResults = indexToolResults(snapshot.messages);
   const entries: TuiEntry[] = [];
 
@@ -32,6 +41,8 @@ export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[
     }
 
     const content = visibleText(message.content);
+    const reasoning = visibleText(message.reasoning ?? "");
+    if (reasoning) entries.push({ kind: "thinking", content: reasoning });
     if (content) entries.push({ kind: "assistant", content });
     for (const call of message.toolCalls ?? []) {
       entries.push(hydrateToolEntry(call, shiftToolResult(toolResults, call.id)));
@@ -48,40 +59,68 @@ export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[
 export function hydrateTuiReporter(
   reporter: Pick<
     TuiReporter,
-    "pushUserMessage" | "onMessage" | "onToolCall" | "onToolResult" | "onFinish"
-  >,
+    | "pushUserMessage"
+    | "onMessage"
+    | "onReasoningDelta"
+    | "onToolCall"
+    | "onToolResult"
+    | "onFinish"
+  > & {
+    hydrateTranscriptEvents?: (events: SessionHydrationSnapshot["transcriptEvents"]) => void;
+    withoutDurableTranscript?: (callback: () => void) => void;
+  },
   snapshot: SessionHydrationSnapshot,
 ): void {
-  const toolResults = indexToolResults(snapshot.messages);
-  for (const message of snapshot.messages) {
-    if (
-      message.role === "system" ||
-      message.toolCallId !== undefined ||
-      isMessageHiddenFromTranscript(message)
-    ) {
-      continue;
-    }
-
-    if (message.role === "user") {
-      const content = visibleText(message.content);
-      if (content) reporter.pushUserMessage(content);
-      continue;
-    }
-
-    const content = visibleText(message.content);
-    if (content) reporter.onMessage(content);
-    for (const call of message.toolCalls ?? []) {
-      const result = shiftToolResult(toolResults, call.id);
-      reporter.onToolCall(call.name, call.arguments, call.id);
-      reporter.onToolResult(
-        call.name,
-        result?.content ?? "Interrupted before a result was recorded.",
-        result === undefined || isHydratedToolError(result),
-        call.id,
-      );
-    }
+  // Reporter 在 Repl 中已用 initialEvents 水合；避免再次从 messages 双写。
+  if (snapshot.transcriptEvents.length > 0) {
+    reporter.hydrateTranscriptEvents?.(snapshot.transcriptEvents);
+    return;
   }
-  reporter.onFinish();
+  const hydrateLegacyMessages = (): void => {
+    const toolResults = indexToolResults(snapshot.messages);
+    for (const message of snapshot.messages) {
+      if (
+        message.role === "system" ||
+        message.toolCallId !== undefined ||
+        isMessageHiddenFromTranscript(message)
+      ) {
+        continue;
+      }
+
+      if (message.role === "user") {
+        const content = visibleText(message.content);
+        if (content) reporter.pushUserMessage(content);
+        continue;
+      }
+
+      const content = visibleText(message.content);
+      const reasoning = visibleText(message.reasoning ?? "");
+      if (reasoning && reporter.onReasoningDelta) reporter.onReasoningDelta(reasoning);
+      if (content) reporter.onMessage(content);
+      for (const call of message.toolCalls ?? []) {
+        const result = shiftToolResult(toolResults, call.id);
+        reporter.onToolCall(call.name, call.arguments, call.id);
+        reporter.onToolResult(
+          call.name,
+          result?.content ?? "Interrupted before a result was recorded.",
+          result === undefined || isHydratedToolError(result),
+          call.id,
+        );
+      }
+    }
+    reporter.onFinish();
+  };
+  if (reporter.withoutDurableTranscript) {
+    reporter.withoutDurableTranscript(hydrateLegacyMessages);
+  } else {
+    hydrateLegacyMessages();
+  }
+}
+
+function projectHydratedTranscriptEntries(
+  events: SessionHydrationSnapshot["transcriptEvents"],
+): TuiEntry[] {
+  return projectTranscriptEntriesForRendering(projectTranscriptEvents(events));
 }
 
 function indexToolResults(messages: readonly Message[]): Map<string, Message[]> {

@@ -44,7 +44,10 @@ import {
   type CliSessionSelection,
 } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
-import type { EffectiveConfigDefaults } from "../input/effective-config.js";
+import {
+  EffectiveConfigResolver,
+  type EffectiveConfigDefaults,
+} from "../input/effective-config.js";
 import { UserConfigStore } from "../input/user-config-store.js";
 import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
@@ -138,7 +141,8 @@ import {
 } from "../runtime/session-runtime.js";
 import { createTuiTerminalGridSession } from "./terminal-grid.js";
 import { hydrateTuiReporter } from "./session-hydration.js";
-import { projectTuiEntriesForRendering } from "./tui-event-store.js";
+import { TuiEventStore, projectTuiEntriesForRendering } from "./tui-event-store.js";
+import { createSessionTranscriptSink } from "../presentation/transcript-durability.js";
 import { AskUserHandler } from "../tools/ask-user.js";
 import { bindAskUserDialogs } from "./ask-user-dialog.js";
 import { bindMcpElicitationDialogs } from "./mcp-elicitation-dialog.js";
@@ -172,6 +176,7 @@ import {
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -858,6 +863,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   });
   const credentialVault = createPlatformCredentialVault();
   const userConfigStore = new UserConfigStore();
+  const effectiveConfigResolver = new EffectiveConfigResolver({ userConfigStore });
   const loadCurrentModelRuntime = () =>
     loadEffectiveModelRuntime({
       workDir: opts.workDir,
@@ -867,6 +873,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       legacyModelExplicit: opts.modelExplicit,
       credentialVault,
       userConfigStore,
+      configResolver: effectiveConfigResolver,
     });
   let effectiveModelRuntime = await loadCurrentModelRuntime();
   let modelRouter = effectiveModelRuntime.router;
@@ -1094,7 +1101,9 @@ class LineModeReporter implements Reporter {
 
 /** 启动 TUI REPL 循环 */
 export async function startTuiRepl(opts: ReplOptions): Promise<void> {
-  await reconcileUnfinishedSessionForksOrThrow(opts.workDir);
+  await reconcileUnfinishedSessionForksOrThrow(opts.workDir, {
+    runtimePort: createSessionForkRuntimePort(),
+  });
   if (requiresTuiLineMode()) {
     await startLineModeRepl(opts);
     return;
@@ -1131,6 +1140,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const claudeCompatibility = picoConfig.compatibility.claude;
   const credentialVault = createPlatformCredentialVault();
   const userConfigStore = new UserConfigStore();
+  const effectiveConfigResolver = new EffectiveConfigResolver({ userConfigStore });
   const loadCurrentModelRuntime = () =>
     loadEffectiveModelRuntime({
       workDir: opts.workDir,
@@ -1140,6 +1150,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       legacyModelExplicit: opts.modelExplicit,
       credentialVault,
       userConfigStore,
+      configResolver: effectiveConfigResolver,
     });
   let effectiveModelRuntime = await loadCurrentModelRuntime();
   let modelRouter = effectiveModelRuntime.router;
@@ -1263,7 +1274,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           workDir: opts.workDir,
           store: runtimeEventStore,
         });
-        await new SessionForkService({ workDir: opts.workDir }).fork({
+        await new SessionForkService({
+          workDir: opts.workDir,
+          runtimePort: createSessionForkRuntimePort(),
+        }).fork({
           sourceSessionId: selection.sourceSessionId,
           targetSessionId: selection.sessionId,
           targetMode: DEFAULT_INTERACTION_MODE,
@@ -1467,6 +1481,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         if (activeBundle?.reporter === reporterRef.current) setProjection(next);
       }, 33);
       const reporter = new TuiReporter(() => undefined, [], {
+        eventStore:
+          hydration.transcriptEvents.length > 0
+            ? new TuiEventStore({ initialEvents: hydration.transcriptEvents })
+            : undefined,
+        durableTranscriptSink: createSessionTranscriptSink(session),
+        durableTranscriptSequence: hydration.transcriptEvents.reduce(
+          (max, event) => Math.max(max, event.sequence),
+          0,
+        ),
         onProjectionUpdate: scheduleProjectionUpdate,
       });
       reporterRef.current = reporter;
@@ -1740,6 +1763,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           // 切换前先取消并等待旧 runtime 的 background/delegation 收口，
           // 防止旧子代理在新会话已可见后继续写入共享工作区。
           await current.runtimeState.dispose();
+          await current.reporter
+            .flushDurableTranscript()
+            .catch((error: unknown) => appendTuiRunError(current.reporter, error));
           await current.session
             .flushPersistence()
             .catch((error: unknown) => appendTuiRunError(current.reporter, error));
@@ -2272,6 +2298,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       const finalBundle = activeBundle;
       if (finalBundle) {
         await finalBundle.runtimeState.dispose();
+        await finalBundle.reporter
+          .flushDurableTranscript()
+          .catch((error: unknown) => appendTuiRunError(finalBundle.reporter, error));
         await finalBundle.session.flushPersistence();
       }
       unsubscribeTaskCompletion?.();
@@ -2290,6 +2319,7 @@ async function disposeUnpublishedTuiBundle(
   workDir: string,
 ): Promise<void> {
   await bundle.runtimeState.dispose();
+  await bundle.reporter.flushDurableTranscript().catch(() => undefined);
   if (bundle.selection.mode === "fork") {
     await discardFailedTuiFork(bundle.sessionId, workDir);
     return;

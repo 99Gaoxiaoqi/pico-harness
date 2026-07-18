@@ -6,6 +6,7 @@ import {
 } from "./plugin-management-service.js";
 import type { PluginTrustProposal } from "./plugin-trust.js";
 import type { PluginScope } from "./plugin-types.js";
+import { formatPluginDiagnostics, fromPluginDiagnostics } from "./plugin-diagnostics.js";
 
 const USAGE =
   "/plugin [list|install <path>|inspect <id>|trust <id>|enable <id>|disable <id>] [--scope user|project|local]";
@@ -248,9 +249,13 @@ function formatPluginInspection(inspection: ManagedPluginInspection): string {
     `MCP ${contributions.mcpServers.length}`,
     `LSP ${contributions.lspServers.length}`,
   ].join(", ");
-  const diagnostics = contributions.diagnostics.length
-    ? contributions.diagnostics.map((item) => `- ${item.severity}: ${item.message}`)
-    : ["- none"];
+  const diagnostics = formatPluginDiagnostics(
+    fromPluginDiagnostics(
+      installed.id,
+      [...installed.diagnostics, ...contributions.diagnostics],
+      installed.scope,
+    ),
+  );
   return [
     `Plugin ${installed.id} [${installed.scope}]`,
     `Version: ${installed.manifest.version ?? "<none>"}`,

@@ -2,7 +2,7 @@
 
 pico-harness 的本地 Agent Runtime 同时支持 TUI 与 Desktop。`pico` → TUI 仍是已安装命令的公开启动方式；Desktop 当前从仓库开发脚本启动。
 
-REST/WebSocket、ACP、飞书和 one-shot CLI 外壳曾在历史阶段完成，后已退役。`executeAgentRuntime` 是 TUI 与 daemon 共用的内部 Runtime 入口，不构成公开 headless API。持久 Cron 通过 TUI 创建并由当前 OS 用户的本机 daemon 执行；daemon 是内部 Runtime 宿主，不是公开 headless CLI。Docker 部署和 Plugin runtime 仍不在当前支持范围。
+REST/WebSocket、ACP、飞书和 one-shot CLI 外壳曾在历史阶段完成，后已退役。`executeAgentRuntime` 是 TUI 与 daemon 共用的内部 Runtime 入口，不构成公开 headless API。持久 Cron 通过 TUI 创建并由当前 OS 用户的本机 daemon 执行；daemon 是内部 Runtime 宿主，不是公开 headless CLI。Docker 部署、公开 Plugin 安装/市场 UI 和任意代码插件仍不在当前支持范围；已安装且明确受信的资源型 Plugin 会通过 host-private snapshot 供 TUI/daemon 内部运行时使用。
 
 ## 本地开发启动
 

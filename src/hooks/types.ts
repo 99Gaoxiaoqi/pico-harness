@@ -1,4 +1,6 @@
 /** Pico 前台 Hook 的公开事件集合。暂未具备宿主生命周期的事件仍保留类型但不伪造触发。 */
+import type { HookTrustAuthority } from "./trust/store.js";
+
 export const HOOK_EVENTS = [
   "SessionStart",
   "Setup",
@@ -50,6 +52,8 @@ export interface HookSource {
   /** 同一路径重载时递增，便于诊断在途事件使用了哪个不可变快照。 */
   version: number;
   componentId?: string;
+  /** Host-owned authority for executable extension sources; never discovered from config. */
+  trustAuthority?: HookTrustAuthority;
 }
 
 interface HookHandlerBase {

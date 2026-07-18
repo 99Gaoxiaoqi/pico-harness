@@ -22,6 +22,18 @@ export interface AssistantMessageItemView extends ConversationItemBase {
   readonly streaming?: boolean | undefined;
 }
 
+export interface ThinkingItemView extends ConversationItemBase {
+  readonly kind: "thinking";
+  readonly text: string;
+}
+
+export interface SkillItemView extends ConversationItemBase {
+  readonly kind: "skill";
+  readonly name: string;
+  readonly args: string;
+  readonly trigger: "user-slash" | "model-tool";
+}
+
 export interface RunBoundaryItemView extends ConversationItemBase {
   readonly kind: "runBoundary";
   readonly status: ConversationRunStatus;
@@ -98,6 +110,8 @@ export interface GoalItemView extends ConversationItemBase {
 export type ConversationItemView =
   | UserMessageItemView
   | AssistantMessageItemView
+  | ThinkingItemView
+  | SkillItemView
   | RunBoundaryItemView
   | PlanItemView
   | ToolItemView

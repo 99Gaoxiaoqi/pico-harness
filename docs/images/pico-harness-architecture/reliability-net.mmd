@@ -1,0 +1,28 @@
+flowchart TB
+    A[一次 Agent 执行] --> B[可控]
+    A --> C[可恢复]
+    A --> E[可理解]
+    A --> D[可复盘]
+
+    B --> B1[宿主沙箱]
+    B --> B2[中断预算]
+
+    C --> C1[Session 日志]
+    C --> C2[原子 Rewind]
+
+    E --> E1[LSP 导航]
+    E --> E2[Repo Map]
+
+    D --> D1[Usage Context]
+    D --> D2[Trace Changes]
+
+    classDef process fill:#e5dbff,stroke:#5f3dc4,color:#1a1a1a
+    classDef action fill:#ffe8cc,stroke:#d9480f,color:#1a1a1a
+    classDef output fill:#c5f6fa,stroke:#0c8599,color:#1a1a1a
+    classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
+
+    class A process
+    class B,B1,B2 action
+    class C,C1,C2 storage
+    class E,E1,E2 process
+    class D,D1,D2 output

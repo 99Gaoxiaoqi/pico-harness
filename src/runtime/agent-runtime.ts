@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
@@ -26,12 +26,10 @@ import { createProvider, createRawProvider, type ProviderKind } from "../provide
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
-import type { CredentialRef, CredentialResolver } from "../provider/credential-vault.js";
+import type { CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider } from "../provider/interface.js";
-import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
 import { CredentialPool } from "../provider/credential-pool.js";
 import { resolveProviderProfile } from "../provider/profile.js";
-import type { ImagePart, Message } from "../schema/message.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { AskUserHandler } from "../tools/ask-user.js";
@@ -54,11 +52,7 @@ import {
 } from "../tools/tool-result-observation.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
-import type { BillingRoute } from "../observability/pricing.js";
-import {
-  resolveModelRouteCapabilities,
-  type ModelRouteCapabilities,
-} from "../provider/model-capabilities.js";
+import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { ModelRouter } from "../provider/model-router.js";
 import { Tracer } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
@@ -104,7 +98,6 @@ import {
   type SessionSettings,
 } from "../input/session-settings.js";
 import { loadPicoConfig } from "../input/pico-config.js";
-import { loadImage } from "../input/prepare-prompt.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
@@ -116,7 +109,6 @@ import {
   buildBackgroundYoloMiddleware,
   prepareBackgroundYoloPolicy,
   type BackgroundWorkspaceTrustVerifier,
-  type BackgroundYoloPolicySnapshot,
   type PreparedBackgroundYoloPolicy,
 } from "../safety/background-yolo-policy.js";
 import { resolveSubagentModelSelection } from "./subagent-model-selection.js";
@@ -125,93 +117,37 @@ import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
+import type { PluginCapabilityRegistry } from "../plugins/plugin-capability.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "./runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
-
-export type RuntimeExecution =
-  | { readonly kind: "foreground" }
-  | { readonly kind: "background"; readonly policy: BackgroundYoloPolicySnapshot };
-
-export interface RunAgentCliOptions {
-  prompt: string;
-  /** 默认 foreground；daemon/Cron 必须显式提供完整 background policy。 */
-  execution?: RuntimeExecution;
-  dir?: string;
-  /** 兼容旧 --session:按指定 id 恢复会话 */
-  session?: string;
-  /** Continue the latest session in the current project. */
-  continueSession?: boolean;
-  /** Resume a specific session. */
-  resumeSession?: string;
-  /** 从指定会话派生一个新会话 */
-  forkSession?: string;
-  /** 已解析的 session 选择结果(TUI/宿主可复用,避免每轮重新生成 id) */
-  sessionSelection?: CliSessionSelection;
-  provider?: ProviderKind;
-  baseURL?: string;
-  apiKey?: string;
-  /** 后台执行只持有非秘密引用；明文由 Runtime Host 在系统凭证库边界解析。 */
-  credentialRef?: CredentialRef;
-  model?: string;
-  modelRouteId?: string;
-  modelCapabilities?: ModelRouteCapabilities;
-  /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
-  thinkingEffort?: string;
-  planMode?: boolean;
-  /** Enable per-request JSON trace export. Also enabled by PICO_TRACE=1. */
-  trace?: boolean;
-  /** MCP 配置文件路径(--mcp-config)。提供则启动时连接所有 MCP server 并注册工具 */
-  mcpConfigPath?: string;
-  /** Steer text injected once before the run starts. */
-  steer?: string;
-  /** 图片附件路径:读取为 ImagePart 附到本轮 user 消息。 */
-  imagePath?: string;
-  /** TUI/宿主已解析好的图片附件。 */
-  images?: ImagePart[];
-  /** Claude Code 风格附加工作目录；可重复传入，当前会话内生效。 */
-  addDirs?: string[];
-  /** Per-run command restriction. Unknown names fail before the first provider call. */
-  allowedTools?: readonly string[];
-  /** TUI 中用户实际发送的文本，用作 /rewind 的可见名称。 */
-  rewindPrompt?: string;
-  /** 用户消息写入可见 transcript 前的条目下标。 */
-  rewindTranscriptIndex?: number;
-  /** 宿主可选记录该消息发送时的交互模式。 */
-  rewindInteractionMode?: SessionSettings["mode"];
-  /** 该消息在 plan 模式下发送时，记录进入 plan 前的模式。 */
-  rewindPrePlanMode?: NonNullable<SessionSettings["prePlanMode"]>;
-}
+import { RuntimeCleanupScope } from "./runtime-cleanup.js";
+import { RuntimeRunExecutor } from "./runtime-run-executor.js";
+import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
+import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
+import {
+  assembleRuntimeProvider,
+  billingRouteForProvider,
+  type RuntimeProviderFactory,
+} from "./runtime-assembly.js";
+import type {
+  RunAgentCliOptions,
+  RunAgentCliResult,
+  RuntimeExecution,
+  RuntimeLifecycleEvent,
+} from "./runtime-contract.js";
+export type {
+  RunAgentCliOptions,
+  RunAgentCliResult,
+  RunAgentUsage,
+  RuntimeExecution,
+  RuntimeLifecycleEvent,
+} from "./runtime-contract.js";
 
 export { loadImage } from "../input/prepare-prompt.js";
 
-export interface RunAgentUsage {
-  promptTokens: number;
-  completionTokens: number;
-  costCNY: number;
-}
-
-export interface RunAgentCliResult {
-  sessionId: string;
-  sessionSelection: CliSessionSelection;
-  workDir: string;
-  finalMessage: string;
-  usage: RunAgentUsage;
-  messages: readonly Message[];
-  tracePath?: string;
-}
-
 export type RunAgentEnv = Record<string, string | undefined>;
-export type RunAgentProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
-
-/** A UI-neutral lifecycle event for a runtime host. */
-export interface RuntimeLifecycleEvent {
-  type: "run.started" | "run.finished" | "run.failed";
-  sessionId?: string;
-  workDir?: string;
-  at: number;
-  detail?: string;
-}
+export type RunAgentProviderFactory = RuntimeProviderFactory;
 
 /**
  * Host-provided effects. The runtime never renders an Ink component or assumes a terminal.
@@ -261,6 +197,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   scheduleDraftCoordinator?: ScheduleDraftCoordinator;
   /** TUI/宿主已冻结的受信 Plugin 快照；未注入时前台运行自行加载。 */
   pluginSnapshot?: PluginRuntimeSnapshot;
+  /** Host-owned restricted capability factories used when loading a fresh snapshot. */
+  pluginCapabilityRegistry?: PluginCapabilityRegistry;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -292,10 +230,13 @@ export async function executeAgentRuntime(
     PICO_HOME: picoHome,
   });
   const resumeExistingSession = dependencies.resumeExistingSession === true;
-  let prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
+  const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
-  await reconcileUnfinishedSessionForksOrThrow(workDir, { picoHome });
+  await reconcileUnfinishedSessionForksOrThrow(workDir, {
+    picoHome,
+    runtimePort: createSessionForkRuntimePort(),
+  });
   const execution = options.execution ?? ({ kind: "foreground" } as const);
   const backgroundPolicy =
     execution.kind === "background"
@@ -396,9 +337,41 @@ export async function executeAgentRuntime(
         workDir,
         env: runtimeEnv,
         picoHome,
+        ...(dependencies.pluginCapabilityRegistry
+          ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
+          : {}),
       })));
   const ownsPluginSnapshot =
     pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
+  const cleanupScope = new RuntimeCleanupScope((resource, error) => {
+    logger.warn(
+      { resource, error: error instanceof Error ? error.message : String(error) },
+      "[Runtime] 资源释放失败",
+    );
+  });
+  cleanupScope.register("Session 组件 Hook", () => cleanupRuntimeState?.clearComponentHooks());
+  cleanupScope.register("MCP 状态订阅", () => unsubscribeMcpStatus?.());
+  cleanupScope.register("MCP manager", async () => {
+    if (!cleanupMcpManager || !ownsMcpManager) return;
+    await cleanupMcpManager.closeAll();
+    dependencies.mcpStatusSink?.(cleanupMcpManager.getStatusSnapshot());
+  });
+  cleanupScope.register("SessionRuntime", () =>
+    ownsRuntimeState ? cleanupRuntimeState?.dispose() : undefined,
+  );
+  cleanupScope.register("Plugin runtime snapshot", () =>
+    ownsPluginSnapshot ? pluginSnapshot?.dispose() : undefined,
+  );
+  cleanupScope.register("Runtime usage ledger", () => ownedUsageStore?.close());
+  if (pluginSnapshot?.diagnostics.length) {
+    logger.warn(
+      {
+        workDir,
+        diagnostics: pluginSnapshot.diagnostics,
+      },
+      "[Plugin] Runtime snapshot contains unavailable contributions",
+    );
+  }
   const skillLoaderFactory = (root: string): SkillLoader =>
     new SkillLoader(root, {
       includeUserResources: true,
@@ -551,33 +524,17 @@ export async function executeAgentRuntime(
             };
           }
         : undefined;
-    const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
-      new CostTracker(
-        providerFactory(kind, config),
-        trackingRoute(kind, config),
-        session,
-        trackerOptions,
-      );
-    let trackedProvider: LLMProvider;
-    let rebuildProvider: (() => LLMProvider | undefined) | undefined;
-    if (dependencies.provider !== undefined) {
-      trackedProvider = new CostTracker(
-        dependencies.provider,
-        trackingRoute(kind, providerConfig),
-        session,
-        trackerOptions,
-      );
-    } else if (credentialPool && credentialPool.size > 1) {
-      const rotation = new CredentialRotationCoordinator(
-        credentialPool,
-        currentConfig,
-        buildTrackedProvider,
-      );
-      trackedProvider = rotation.provider;
-      rebuildProvider = () => rotation.rotate();
-    } else {
-      trackedProvider = buildTrackedProvider(currentConfig);
-    }
+    const providerAssembly = assembleRuntimeProvider({
+      kind,
+      config: currentConfig,
+      session,
+      trackerOptions,
+      ...(dependencies.provider !== undefined ? { provider: dependencies.provider } : {}),
+      providerFactory,
+      ...(credentialPool ? { credentialPool } : {}),
+    });
+    const trackedProvider = providerAssembly.provider;
+    const rebuildProvider = providerAssembly.rebuildProvider;
     let activeMcpManager = dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
@@ -597,6 +554,7 @@ export async function executeAgentRuntime(
             provider: hookPurposeProvider(trackedProvider),
             registry: new ToolRegistry(),
             workDir,
+            runtimePort: createEngineRuntimePort(),
             workspaceRoots,
             usageSession: session,
             goalManager: runtimeState.goalManager,
@@ -723,6 +681,7 @@ export async function executeAgentRuntime(
       provider: trackedProvider,
       registry,
       workDir,
+      runtimePort: createEngineRuntimePort(),
       workspaceRoots,
       usageSession: session,
       ...(effectiveOptions.thinkingEffort !== undefined
@@ -915,105 +874,40 @@ export async function executeAgentRuntime(
     }
 
     // 阶段 4：在当前 Session 内串行执行一次 RuntimeRun。
-    const result = await session.serialize(async () => {
-      await RuntimeRun.reconcileIncompleteRuns({
-        sessionId: session.id,
-        workDir,
-        store: runtimeEventStore,
-        writeGuard: session,
-      });
-      await RuntimeRun.repairSessionProjection(session, {
-        workDir,
-        store: runtimeEventStore,
-      });
-      const runtimeRun = await RuntimeRun.start({
-        sessionId: session.id,
-        workDir,
-        store: runtimeEventStore,
-        writeGuard: session,
-      });
-      dependencies.onEvent?.({
-        type: "run.started",
-        sessionId: session.id,
-        workDir,
-        at: Date.now(),
-      });
-      return runtimeRun.run(async () => {
-        dependencies.signal?.throwIfAborted();
-        if (!resumeExistingSession) {
-          const submittedPrompt = prompt;
-          const submitDecision = await runtimeState.dispatchHook(
-            "UserPromptSubmit",
-            { prompt: submittedPrompt },
-            { signal: dependencies.signal },
-          );
-          if (submitDecision.decision === "deny") {
-            throw new Error(
-              `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
-            );
-          }
-          prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
-          const expansionDecision = await runtimeState.dispatchHook(
-            "UserPromptExpansion",
-            {
-              prompt: effectiveOptions.rewindPrompt ?? submittedPrompt,
-              expandedPrompt: prompt,
-            },
-            { signal: dependencies.signal },
-          );
-          if (expansionDecision.decision === "deny") {
-            throw new Error(
-              `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
-            );
-          }
-          prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
-          const images: ImagePart[] | undefined =
-            effectiveOptions.images ??
-            (effectiveOptions.imagePath
-              ? [loadImage(effectiveOptions.imagePath, workDir)]
-              : undefined);
-          const rewindPointId = await session.beginRewindPoint({
-            userPrompt: effectiveOptions.rewindPrompt ?? prompt,
-            ...(effectiveOptions.rewindTranscriptIndex !== undefined
-              ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
-              : {}),
-            ...(effectiveOptions.rewindInteractionMode !== undefined
-              ? { interactionMode: effectiveOptions.rewindInteractionMode }
-              : {}),
-            ...(effectiveOptions.rewindPrePlanMode !== undefined
-              ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
-              : {}),
-          });
-          dependencies.rewindPointSink?.(rewindPointId);
-          const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
-            role: "user",
-            content: prompt,
-            ...(images ? { images } : {}),
-          });
-          await session.bindRewindPointSource(rewindPointId, userReceipt);
-        }
-
-        const messages = await engine.run(session, undefined, undefined, dependencies.signal);
-        return {
-          sessionId: session.id,
-          sessionSelection,
-          workDir,
-          finalMessage: findFinalMessage(messages),
-          usage: snapshotUsage(session),
-          messages,
-          ...(traceEnabled
-            ? { tracePath: await findTracePath(workDir, session.id, picoHome) }
-            : {}),
-        } satisfies RunAgentCliResult;
-      }, dependencies.signal);
-    });
-
-    dependencies.onEvent?.({
-      type: "run.finished",
-      sessionId: session.id,
+    // RuntimeRunExecutor 不拥有任何资源；本函数仍负责阶段 3 的装配和 finally 清理。
+    const result = await new RuntimeRunExecutor({
+      session,
+      runtimeEventStore,
+      runtimeState,
+      engine,
+      sessionSelection,
       workDir,
-      at: Date.now(),
-    });
+      picoHome,
+      prompt,
+      resumeExistingSession,
+      traceEnabled,
+      options: {
+        ...(effectiveOptions.rewindPrompt !== undefined
+          ? { rewindPrompt: effectiveOptions.rewindPrompt }
+          : {}),
+        ...(effectiveOptions.rewindTranscriptIndex !== undefined
+          ? { rewindTranscriptIndex: effectiveOptions.rewindTranscriptIndex }
+          : {}),
+        ...(effectiveOptions.rewindInteractionMode !== undefined
+          ? { rewindInteractionMode: effectiveOptions.rewindInteractionMode }
+          : {}),
+        ...(effectiveOptions.rewindPrePlanMode !== undefined
+          ? { rewindPrePlanMode: effectiveOptions.rewindPrePlanMode }
+          : {}),
+        ...(effectiveOptions.imagePath !== undefined
+          ? { imagePath: effectiveOptions.imagePath }
+          : {}),
+        ...(effectiveOptions.images !== undefined ? { images: effectiveOptions.images } : {}),
+      },
+      ...(dependencies.signal ? { signal: dependencies.signal } : {}),
+      ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
+      ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
+    }).execute();
     return result;
   } catch (error) {
     if (cleanupRuntimeState?.hookService && !dependencies.signal?.aborted) {
@@ -1036,26 +930,8 @@ export async function executeAgentRuntime(
     throw error;
   } finally {
     // 阶段 5：只释放本次调用持有的资源。
-    await bestEffortRuntimeCleanup("Session 组件 Hook", () =>
-      cleanupRuntimeState?.clearComponentHooks(),
-    );
-    await bestEffortRuntimeCleanup("MCP 状态订阅", () => unsubscribeMcpStatus?.());
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
-    if (cleanupMcpManager && ownsMcpManager) {
-      await bestEffortRuntimeCleanup("MCP manager", async () => {
-        await cleanupMcpManager?.closeAll();
-        if (cleanupMcpManager) {
-          dependencies.mcpStatusSink?.(cleanupMcpManager.getStatusSnapshot());
-        }
-      });
-    }
-    if (ownsRuntimeState && cleanupRuntimeState) {
-      await bestEffortRuntimeCleanup("SessionRuntime", () => cleanupRuntimeState?.dispose());
-    }
-    if (ownsPluginSnapshot) {
-      await bestEffortRuntimeCleanup("Plugin runtime snapshot", () => pluginSnapshot.dispose());
-    }
-    await bestEffortRuntimeCleanup("Runtime usage ledger", () => ownedUsageStore?.close());
+    await cleanupScope.dispose();
   }
 }
 
@@ -1095,6 +971,7 @@ async function acquireRuntimeSession({
         {
           persistence: true,
           picoHome,
+          runtimePort: createEngineRuntimePort(),
         },
       );
       await RuntimeRun.repairSessionProjection(sourceSession, {
@@ -1104,6 +981,7 @@ async function acquireRuntimeSession({
       await new SessionForkService({
         workDir,
         picoHome,
+        runtimePort: createSessionForkRuntimePort(),
       }).fork({
         sourceSessionId: sessionSelection.sourceSessionId,
         targetSessionId: sessionSelection.sessionId,
@@ -1131,6 +1009,7 @@ async function acquireRuntimeSession({
       (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir, {
         persistence: true,
         picoHome,
+        runtimePort: createEngineRuntimePort(),
       })));
   if (!session) {
     throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
@@ -1141,38 +1020,6 @@ async function acquireRuntimeSession({
   await runtimeEventStore.initializeSession({ sessionId: session.id, workDir });
   await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
   return { session, runtimeEventStore };
-}
-
-async function bestEffortRuntimeCleanup(
-  resource: string,
-  cleanup: () => void | Promise<void> | undefined,
-): Promise<void> {
-  try {
-    await cleanup();
-  } catch (error) {
-    logger.warn(
-      { resource, error: error instanceof Error ? error.message : String(error) },
-      "[Runtime] 资源释放失败",
-    );
-  }
-}
-
-function applyPromptHookDecision(
-  prompt: string,
-  decision: import("../hooks/types.js").HookOutput,
-): string {
-  let next = prompt;
-  if (typeof decision.modifiedInput === "string") {
-    next = decision.modifiedInput;
-  } else if (
-    typeof decision.modifiedInput === "object" &&
-    decision.modifiedInput !== null &&
-    "prompt" in decision.modifiedInput &&
-    typeof Reflect.get(decision.modifiedInput, "prompt") === "string"
-  ) {
-    next = String(Reflect.get(decision.modifiedInput, "prompt"));
-  }
-  return decision.additionalContext ? `${next}\n\n${decision.additionalContext}` : next;
 }
 
 function classifyStopFailure(error: unknown): string {
@@ -1496,7 +1343,7 @@ function loadAuxProvider(
   if (!resolved) return undefined;
   return new CostTracker(
     createProvider(resolved.kind, resolved.config),
-    trackingRoute(resolved.kind, resolved.config),
+    billingRouteForProvider(resolved.kind, resolved.config),
     session,
     trackerOptions,
   );
@@ -1910,26 +1757,6 @@ function resolveProviderConfig(
   };
 }
 
-function trackingRoute(kind: ProviderKind, config: ProviderConfig): BillingRoute | string {
-  const price = config.capabilities?.price;
-  if (!config.capabilities) return config.model;
-  return {
-    provider: kind,
-    model: config.model,
-    baseUrl: config.baseURL,
-    pricing:
-      price?.source === "config"
-        ? {
-            inputPerMillion: price.inputPerMillion,
-            outputPerMillion: price.outputPerMillion,
-            cacheReadPerMillion: price.cacheReadPerMillion,
-            cacheWritePerMillion: price.cacheWritePerMillion,
-            source: "configured",
-          }
-        : null,
-  };
-}
-
 function firstApiKey(value: string | undefined): string | undefined {
   return value
     ?.split(",")
@@ -1972,52 +1799,6 @@ function defaultModel(kind: ProviderKind): string {
   }
 }
 
-function findFinalMessage(messages: readonly Message[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
-    if (message.role === "assistant" && (message.toolCalls?.length ?? 0) === 0) {
-      return message.content;
-    }
-  }
-
-  return "";
-}
-
-function snapshotUsage(session: Session): RunAgentUsage {
-  return {
-    promptTokens: session.totalPromptTokens,
-    completionTokens: session.totalCompletionTokens,
-    costCNY: session.totalCostCNY,
-  };
-}
-
 function isTruthyEnv(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "on";
-}
-
-async function findTracePath(
-  workDir: string,
-  sessionId: string,
-  picoHome: string,
-): Promise<string | undefined> {
-  const traceDir = resolvePicoPaths(workDir, { picoHome }).workspace.traces;
-  let files: string[];
-
-  try {
-    files = await readdir(traceDir);
-  } catch {
-    return undefined;
-  }
-
-  const prefix = `trace_${sanitizeTracePart(sessionId)}_`;
-  const traceFile = files
-    .filter((file) => file.startsWith(prefix) && file.endsWith(".json"))
-    .sort()
-    .at(-1);
-
-  return traceFile ? join(traceDir, traceFile) : undefined;
-}
-
-function sanitizeTracePart(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
 }

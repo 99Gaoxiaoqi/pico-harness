@@ -12,6 +12,7 @@ import {
   ShieldQuestion,
   Sparkles,
   TerminalSquare,
+  WandSparkles,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type {
@@ -20,6 +21,7 @@ import type {
   RunBoundaryItemView,
 } from "./types.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
+import { MarkdownText } from "./MarkdownText.js";
 
 export interface ConversationTranscriptProps {
   readonly items: readonly ConversationItemView[];
@@ -111,6 +113,31 @@ function renderDefaultItem(
             </span>
           )}
         </article>
+      );
+    case "thinking":
+      return (
+        <section className="conversation-thinking" aria-label="思考过程">
+          <div className="conversation-thinking__label">
+            <Sparkles aria-hidden="true" /> 思考过程
+          </div>
+          {renderText(item.text, item)}
+        </section>
+      );
+    case "skill":
+      return (
+        <section className="conversation-inline-card conversation-inline-card--skill">
+          <header className="conversation-inline-card__header">
+            <WandSparkles aria-hidden="true" />
+            <div>
+              <span className="conversation-kicker">Skill</span>
+              <strong>{item.name}</strong>
+            </div>
+            <span className="conversation-item-state">
+              {item.trigger === "model-tool" ? "模型调用" : "手动触发"}
+            </span>
+          </header>
+          {item.args && <code className="conversation-skill-args">{item.args}</code>}
+        </section>
       );
     case "runBoundary":
       return <RunBoundary item={item} />;
@@ -257,7 +284,7 @@ export function ConversationTranscript({
   label = "会话记录",
   emptyState,
   onOpenItem,
-  renderText = (text) => <p>{text}</p>,
+  renderText = (text, item) => <MarkdownText text={text} dim={item.kind === "thinking"} />,
   renderItem,
 }: ConversationTranscriptProps) {
   const visibleItems = mergeConversationItemGroups(items).filter(

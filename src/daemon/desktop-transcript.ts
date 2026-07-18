@@ -94,6 +94,17 @@ export class TranscriptRevisionConflict extends Error {
 
 function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConversationItem[] {
   const toolResults = indexToolResults(snapshot.messages);
+  const structuredItems = projectStructuredItems(snapshot);
+  const structuredThinking = new Map<string, number>();
+  for (const { item } of structuredItems) {
+    if (item.kind !== "thinking") continue;
+    const key = item.content.trim();
+    if (key) structuredThinking.set(key, (structuredThinking.get(key) ?? 0) + 1);
+  }
+  const structuredThinkingPlacement = new Map<
+    string,
+    { readonly sequence: number; readonly ordinal: number }
+  >();
   const items: OrderedConversationItem[] = [];
   let ordinal = 0;
 
@@ -131,6 +142,26 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
         );
       }
       return;
+    }
+
+    const reasoning = message.role === "assistant" ? message.reasoning?.trim() : undefined;
+    if (reasoning) {
+      const structuredCount = structuredThinking.get(reasoning) ?? 0;
+      if (structuredCount > 0) {
+        structuredThinking.set(reasoning, structuredCount - 1);
+        // Runtime message commits happen before the async reporter sink. Keep the durable
+        // structured entry ID while anchoring matched reasoning before its assistant answer.
+        structuredThinkingPlacement.set(reasoning, { sequence, ordinal: ordinal - 0.5 });
+      } else {
+        append(
+          {
+            id: stableItemId(snapshot.sessionId, messageIndex, "thinking", reasoning),
+            kind: "thinking",
+            content: reasoning,
+          },
+          sequence,
+        );
+      }
     }
 
     if (content) {
@@ -177,7 +208,13 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
       Number.MAX_SAFE_INTEGER,
     );
   }
-  items.push(...projectStructuredItems(snapshot));
+  items.push(
+    ...structuredItems.map((ordered) => {
+      if (ordered.item.kind !== "thinking") return ordered;
+      const placement = structuredThinkingPlacement.get(ordered.item.content.trim());
+      return placement === undefined ? ordered : { ...ordered, ...placement };
+    }),
+  );
   items.sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
   return items.map(({ item }) => item);
 }
@@ -205,11 +242,16 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
       );
     }
   }
-  const messageToolSignatures = new Set(
-    snapshot.messages.flatMap((message) =>
-      (message.toolCalls ?? []).map((call) => `${call.name}\0${call.arguments}`),
-    ),
-  );
+  // Deduplicate only the number of structured tool entries already represented by
+  // message tool calls. A Set would incorrectly drop a second legitimate invocation
+  // when two calls happen to use the same name and arguments.
+  const messageToolSignatures = new Map<string, number>();
+  for (const message of snapshot.messages) {
+    for (const call of message.toolCalls ?? []) {
+      const signature = `${call.name}\0${call.arguments}`;
+      messageToolSignatures.set(signature, (messageToolSignatures.get(signature) ?? 0) + 1);
+    }
+  }
   const items: OrderedConversationItem[] = [];
   const coalescedIndexes = new Map<string, number>();
   for (const [projectedIndex, projected] of projection.entries.entries()) {
@@ -306,7 +348,15 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
         );
         break;
       case "tool":
-        if (messageToolSignatures.has(`${entry.name}\0${entry.args}`)) break;
+        {
+          const signature = `${entry.name}\0${entry.args}`;
+          const representedCount = messageToolSignatures.get(signature) ?? 0;
+          if (representedCount > 0) {
+            if (representedCount === 1) messageToolSignatures.delete(signature);
+            else messageToolSignatures.set(signature, representedCount - 1);
+            break;
+          }
+        }
         items.push(
           ordered({
             id: projected.id,
@@ -329,12 +379,34 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
           }),
         );
         break;
+      case "thinking":
+        if (entry.content?.trim()) {
+          items.push(
+            ordered({
+              id: projected.id,
+              kind: "thinking",
+              content: entry.content,
+              ...(at === undefined ? {} : { at }),
+            }),
+          );
+        }
+        break;
+      case "system":
+        if (entry.content.trim()) {
+          items.push(
+            ordered({
+              id: projected.id,
+              kind: "systemNotice",
+              content: entry.content,
+              ...(at === undefined ? {} : { at }),
+            }),
+          );
+        }
+        break;
       case "logo":
       case "user":
-      case "system":
       case "assistant":
-      case "thinking":
-        // 消息正文由同一 RuntimeEvent ledger 中的 message events 投影；系统注入不对 Renderer 暴露。
+        // 消息正文由同一 RuntimeEvent ledger 中的 message events 投影，避免重复。
         break;
     }
   }
@@ -485,6 +557,7 @@ function truncateConversationItem(
     case "assistantMessage":
     case "systemNotice":
     case "error":
+    case "thinking":
       return { ...item, id, content: text(item.content) ?? "", ...metadata };
     case "skill":
       return {

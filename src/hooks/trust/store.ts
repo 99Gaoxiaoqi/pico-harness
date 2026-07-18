@@ -25,6 +25,23 @@ export interface HookTrustSubject {
   handler: HookHandler;
 }
 
+/**
+ * 可插拔的 Hook 可执行信任权威。
+ *
+ * 默认实现是 HookTrustStore；宿主可以为已经完成独立签名/指纹校验的资源快照提供
+ * 更窄的 authority。实现必须在 status 与 authorizeCommandExecution 中保持同一绑定，
+ * 并在快照失效后返回 pending/undefined。
+ */
+export interface HookTrustAuthority {
+  readonly filePath?: string;
+  /** Optional host-owned identity (for example a plugin id + immutable resource digest). */
+  readonly identity?: Readonly<Record<string, string>>;
+  status(subject: HookTrustSubject): Promise<HookTrustStatus>;
+  authorizeCommandExecution(
+    subject: HookTrustSubject,
+  ): Promise<ResolvedCommandHookInvocation | undefined>;
+}
+
 export interface HookTrustFingerprint {
   id: string;
   workspace: string;

@@ -87,7 +87,7 @@ export async function createSessionHookRuntime(
     workDir: options.workDir,
     ...(options.env ? { env: options.env } : {}),
     authorizeCommandExecution: async (entry) =>
-      await trustStore.authorizeCommandExecution({
+      await (entry.source.trustAuthority ?? trustStore).authorizeCommandExecution({
         workspace: options.workDir,
         source: entry.source,
         handler: entry.handler,
@@ -99,7 +99,7 @@ export async function createSessionHookRuntime(
     executor,
     snapshot: initial.snapshot,
     revalidateExecutableTrust: async (entry) =>
-      (await trustStore.status({
+      (await (entry.source.trustAuthority ?? trustStore).status({
         workspace: options.workDir,
         source: entry.source,
         handler: entry.handler,

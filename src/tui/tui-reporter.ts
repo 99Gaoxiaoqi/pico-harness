@@ -19,6 +19,11 @@ import type {
   SubagentTraceEvent,
 } from "../engine/reporter.js";
 import { formatOutputPreview } from "./diff-preview.js";
+import {
+  defaultTranscriptDurabilityPolicy,
+  type DurableTranscriptSink,
+  type TranscriptDurabilityPolicy,
+} from "../presentation/transcript-durability.js";
 import type { ToolCardStatus } from "./tool-card.js";
 import {
   TUI_SUBAGENT_MESSAGE_LIMIT_CHARS,
@@ -70,6 +75,11 @@ export interface TuiReporterOptions {
   eventStore?: TuiEventStore;
   /** 11.4/11.5 可直接消费带稳定 ID 的投影，旧 UI 无需立即改造。 */
   onProjectionUpdate?: (projection: TuiProjection) => void;
+  /** 将语义 transcript 事件串行写入 Session；不持久化逐 token delta。 */
+  durableTranscriptSink?: DurableTranscriptSink;
+  durableTranscriptPolicy?: TranscriptDurabilityPolicy;
+  /** 已持久化 transcript 的最大 sequence，用于续写时保持连续。 */
+  durableTranscriptSequence?: number;
 }
 
 /**
@@ -94,6 +104,13 @@ export class TuiReporter implements Reporter {
   private readonly eventStore: TuiEventStore;
   private readonly legacyEntries: TuiEntry[];
   private readonly onProjectionUpdate?: (projection: TuiProjection) => void;
+  private readonly durableTranscriptSink?: DurableTranscriptSink;
+  private readonly durableTranscriptPolicy: TranscriptDurabilityPolicy;
+  private durableTranscriptSequence: number;
+  private durableTranscriptTail: Promise<void> = Promise.resolve();
+  private durableTranscriptFailure: unknown;
+  private durableTranscriptSuppressed = false;
+  private readonly removeAppendListener: () => void;
 
   constructor(
     /** 由 App.tsx 注册:收到新 entries 快照后 setState 触发重渲染 */
@@ -105,12 +122,21 @@ export class TuiReporter implements Reporter {
     this.eventStore = options.eventStore ?? new TuiEventStore();
     this.legacyEntries = entries;
     this.onProjectionUpdate = options.onProjectionUpdate;
+    this.durableTranscriptSink = options.durableTranscriptSink;
+    this.durableTranscriptPolicy =
+      options.durableTranscriptPolicy ?? defaultTranscriptDurabilityPolicy;
+    this.durableTranscriptSequence = Math.max(0, options.durableTranscriptSequence ?? 0);
 
     // 旧调用方可以传入已有 transcript。仅当 store 为空时将它转换为
     // 初始 append 事件；已有事件的 store 始终是权威源。
     if (this.eventStore.size === 0) {
       for (const entry of entries) this.appendEntry(entry);
     }
+    // Initial entries/events are already a snapshot; only subsequent appends
+    // belong to the durable sink.
+    this.removeAppendListener = this.eventStore.addAppendListener((event, projection) => {
+      this.enqueueDurableTranscript(event, projection);
+    });
     this.rebuildRuntimeTracking();
     this.syncLegacyEntries(this.eventStore.getProjection());
   }
@@ -142,6 +168,35 @@ export class TuiReporter implements Reporter {
 
   getEventStore(): TuiEventStore {
     return this.eventStore;
+  }
+
+  /** 供独立 hydration 调用方装载结构化事件；重复装载同一快照是幂等的。 */
+  hydrateTranscriptEvents(events: readonly TuiEvent[]): void {
+    this.eventStore.loadInitialEvents(events);
+    this.rebuildRuntimeTracking();
+    this.syncLegacyEntries(this.eventStore.getProjection());
+  }
+
+  /** 旧 messages fallback 只用于显示，不应在启动时被当成新事件再次落盘。 */
+  withoutDurableTranscript(callback: () => void): void {
+    const previous = this.durableTranscriptSuppressed;
+    this.durableTranscriptSuppressed = true;
+    try {
+      callback();
+    } finally {
+      this.durableTranscriptSuppressed = previous;
+    }
+  }
+
+  /** 等待当前 Reporter 已提交的 durable transcript。 */
+  async flushDurableTranscript(): Promise<void> {
+    await this.durableTranscriptTail;
+    if (this.durableTranscriptFailure) throw this.durableTranscriptFailure;
+  }
+
+  /** 释放 reporter 对 EventStore 的追加监听。 */
+  dispose(): void {
+    this.removeAppendListener();
   }
 
   /**
@@ -333,12 +388,9 @@ export class TuiReporter implements Reporter {
       return;
     }
     const externalized = parseExternalizedToolResult(result);
-    const streamedResult = tool.output;
     const oversizedWithoutArtifact =
       externalized === undefined && result.length > TUI_INLINE_TOOL_RESULT_LIMIT_CHARS;
     const truncated = externalized !== undefined || oversizedWithoutArtifact;
-    const canReuseStreamedResult =
-      !truncated && !tool.outputTruncated && streamedResult.length > 0 && streamedResult === result;
     const summary = externalized
       ? formatExternalizedResultSummary(externalized)
       : summarizeResult(toolName, tool.args, result, isError);
@@ -347,7 +399,8 @@ export class TuiReporter implements Reporter {
       toolCallId: internalToolCallId,
       status: resolveToolStatus(toolName, result, isError),
       summary,
-      ...(!truncated && !canReuseStreamedResult ? { inlineResult: result } : {}),
+      // stdout/stderr 增量不落盘；小结果必须由 completion 自包含，保证重启可恢复。
+      ...(!truncated ? { inlineResult: result } : {}),
       ...(externalized?.artifactRef !== undefined ? { artifactRef: externalized.artifactRef } : {}),
       ...(externalized?.artifactPath !== undefined
         ? { artifactPath: externalized.artifactPath }
@@ -427,11 +480,11 @@ export class TuiReporter implements Reporter {
     this.completeReasoningStream();
     if (this.currentStream) {
       this.currentTurnAssistantEntryId = this.currentStream.entryId;
-      const projectedContent = this.projectedStreamContent(this.currentStream);
       this.eventStore.append({
         type: "assistant.stream.completed",
         ...this.currentStream,
-        ...(projectedContent !== content ? { content } : {}),
+        // durable policy 会过滤中间 delta，因此 completion 必须携带最终正文。
+        content,
       });
     } else {
       this.currentTurnAssistantEntryId = this.appendEntry({ kind: "assistant", content });
@@ -568,7 +621,12 @@ export class TuiReporter implements Reporter {
 
   private completeActiveStreams(): void {
     for (const stream of this.activeStreams()) {
-      this.eventStore.append({ type: "assistant.stream.completed", ...stream });
+      const content = this.projectedStreamContent(stream);
+      this.eventStore.append({
+        type: "assistant.stream.completed",
+        ...stream,
+        ...(content !== undefined ? { content } : {}),
+      });
     }
     this.currentStream = null;
     this.currentReasoningStream = null;
@@ -576,9 +634,11 @@ export class TuiReporter implements Reporter {
 
   private completeReasoningStream(): void {
     if (!this.currentReasoningStream) return;
+    const content = this.projectedStreamContent(this.currentReasoningStream);
     this.eventStore.append({
       type: "assistant.stream.completed",
       ...this.currentReasoningStream,
+      ...(content !== undefined ? { content } : {}),
     });
     this.currentReasoningStream = null;
   }
@@ -636,7 +696,9 @@ export class TuiReporter implements Reporter {
     const projected = this.eventStore
       .getProjection()
       .entries.find((entry) => entry.id === stream.entryId);
-    return projected?.entry.kind === "assistant" ? projected.entry.content : undefined;
+    return projected?.entry.kind === "assistant" || projected?.entry.kind === "thinking"
+      ? projected.entry.content
+      : undefined;
   }
 
   private registerPendingTool(tool: TuiToolCallProjection): void {
@@ -736,6 +798,26 @@ export class TuiReporter implements Reporter {
     this.syncLegacyEntries(projection);
     this.onProjectionUpdate?.(projection);
     this.onUpdate(projection.entries.map(({ entry }) => entry));
+  }
+
+  private enqueueDurableTranscript(event: TuiEvent, projection: TuiProjection): void {
+    if (
+      this.durableTranscriptSuppressed ||
+      !this.durableTranscriptSink ||
+      !this.durableTranscriptPolicy(event, projection)
+    )
+      return;
+    const durableEvent = {
+      ...event,
+      sequence: ++this.durableTranscriptSequence,
+    } as TuiEvent;
+    this.durableTranscriptTail = this.durableTranscriptTail
+      .then(() => this.durableTranscriptSink!.append(durableEvent))
+      .catch((error: unknown) => {
+        this.durableTranscriptFailure ??= error;
+        // Session.recordTranscriptEvent 自身会进入 write-uncertain；这里保留
+        // 队列可排空，让 shutdown 的 flushPersistence 观察真实错误。
+      });
   }
 
   private syncLegacyEntries(projection: TuiProjection): void {

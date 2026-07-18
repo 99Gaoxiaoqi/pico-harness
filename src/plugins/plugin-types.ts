@@ -10,7 +10,30 @@ export type PluginCompatibility = "compatible" | "degraded" | "blocked";
 
 export type PluginDiagnosticSeverity = "info" | "warning" | "error";
 
-export type PluginContributionKind = "skill" | "command" | "agent" | "hook" | "mcp" | "lsp";
+export type PluginContributionKind =
+  | "skill"
+  | "command"
+  | "agent"
+  | "hook"
+  | "mcp"
+  | "lsp"
+  | "capability";
+
+/**
+ * Declarative extension only. A plugin never supplies a module path or
+ * executable here; the host resolves the id/version through a trusted factory.
+ */
+export interface PluginCapabilityDeclaration {
+  readonly id: string;
+  readonly version: string;
+  readonly config?: Readonly<Record<string, unknown>>;
+}
+
+export type PluginCapabilityKind = "provider" | "tool";
+
+export type PluginCapabilityDeclarationInput =
+  | PluginCapabilityDeclaration
+  | readonly PluginCapabilityDeclaration[];
 
 export interface PluginDiagnostic {
   readonly severity: PluginDiagnosticSeverity;
@@ -39,6 +62,7 @@ export interface PluginManifest {
   readonly hooks?: PluginConfigDeclaration;
   readonly mcpServers?: PluginConfigDeclaration;
   readonly lspServers?: PluginConfigDeclaration;
+  readonly capabilities?: PluginCapabilityDeclarationInput;
   readonly [key: string]: unknown;
 }
 
