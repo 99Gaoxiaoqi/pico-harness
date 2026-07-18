@@ -1,0 +1,32 @@
+flowchart LR
+    A[可信运行态]
+
+    subgraph SAFE[安全]
+        Y1[YOLO 策略] --> Y2[宿主沙箱] --> Y3[越界拒绝]
+    end
+
+    subgraph MODEL[模型]
+        M1[能力元数据] --> M2[请求预检] --> M3[Usage Context]
+    end
+
+    subgraph CODE[代码]
+        C1[LSP 发现] --> C2[LSP 服务]
+        C1 -.-> C3[Repo Map 降级]
+        C2 --> C4[按需披露]
+        C3 --> C4
+    end
+
+    A --> Y1
+    A --> M1
+    A --> C1
+
+    classDef input fill:#d3f9d8,stroke:#2f9e44,color:#1a1a1a
+    classDef process fill:#e5dbff,stroke:#5f3dc4,color:#1a1a1a
+    classDef action fill:#ffe8cc,stroke:#d9480f,color:#1a1a1a
+    classDef output fill:#c5f6fa,stroke:#0c8599,color:#1a1a1a
+    classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
+
+    class A input
+    class Y1,Y2,Y3 action
+    class M1,M2,M3 storage
+    class C1,C2,C3,C4 process

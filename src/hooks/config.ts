@@ -5,7 +5,7 @@ import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { emptyHookSnapshot } from "./service.js";
 import { HookLocalStateStore } from "./management/state.js";
-import { HookTrustStore, type HookTrustStatus } from "./trust/store.js";
+import { HookTrustStore, type HookTrustAuthority, type HookTrustStatus } from "./trust/store.js";
 import {
   HOOK_EVENTS,
   type AgentHookHandler,
@@ -37,6 +37,11 @@ export interface HookConfigSourceSpec {
   enabled?: boolean;
   /** Skill/Agent frontmatter 已由组件加载器解析时，以受信的内联值传入。 */
   inlineHooks?: unknown;
+  /**
+   * Host-only executable trust authority. This is intentionally injected by the runtime for
+   * immutable extension snapshots; config files cannot create one.
+   */
+  trustAuthority?: HookTrustAuthority;
 }
 
 export interface LoadHookSnapshotOptions {
@@ -197,6 +202,7 @@ export async function loadSource(
     path: await canonicalPath(spec.path),
     version,
     ...(spec.componentId === undefined ? {} : { componentId: spec.componentId }),
+    ...(spec.trustAuthority === undefined ? {} : { trustAuthority: spec.trustAuthority }),
   };
   if (spec.enabled === false) return { source, status: "disabled" };
   let parsed: unknown;
@@ -490,16 +496,16 @@ function snapshotId(
 
 async function executableTrustStatus(
   handler: HookHandler,
-  store: HookTrustStore,
+  store: HookTrustAuthority,
   workspace: string,
   source: HookSource,
 ): Promise<HookTrustStatus> {
   if (handler.type === "prompt" || handler.type === "agent") return "active";
   try {
-    return await store.status({ workspace, source, handler });
+    return await (source.trustAuthority ?? store).status({ workspace, source, handler });
   } catch (error) {
     logger.warn(
-      { error: errorMessage(error), path: store.filePath },
+      { error: errorMessage(error), path: store.filePath ?? "host trust authority" },
       "Hook 信任库不可用，handler 保持 pending",
     );
     return "pending";

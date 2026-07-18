@@ -51,6 +51,8 @@ import { LocalDaemonHost } from "./runtime-host.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
+import type { PluginCapabilityRegistry } from "../plugins/plugin-capability.js";
 
 export interface ProductionLocalDaemonHostOptions {
   endpoint?: LocalDaemonEndpoint;
@@ -60,6 +62,12 @@ export interface ProductionLocalDaemonHostOptions {
   credentialVault?: CredentialVault;
   userConfigStore?: UserConfigStore;
   effectiveConfigResolver?: EffectiveConfigResolver;
+  /** Host-owned registry shared by Desktop catalog and AgentRuntime activation. */
+  pluginRuntimeSnapshotRegistry?: PluginRuntimeSnapshotRegistry;
+  /** Optional host-owned, restricted Provider/Tool capability factories. */
+  pluginCapabilityRegistry?: PluginCapabilityRegistry;
+  /** Whether the production host releases an injected plugin registry on close. */
+  ownsPluginRuntimeSnapshotRegistry?: boolean;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -83,6 +91,18 @@ export function createProductionLocalDaemonHost(
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
+  const pluginRuntimeSnapshotRegistry =
+    options.pluginRuntimeSnapshotRegistry ??
+    new PluginRuntimeSnapshotRegistry({
+      env,
+      picoHome,
+      ...(options.pluginCapabilityRegistry
+        ? { capabilityRegistry: options.pluginCapabilityRegistry }
+        : {}),
+    });
+  const ownsPluginRuntimeSnapshotRegistry =
+    options.ownsPluginRuntimeSnapshotRegistry ??
+    options.pluginRuntimeSnapshotRegistry === undefined;
   const credentialVault =
     options.credentialVault ?? createPlatformCredentialVault(process.platform, env);
   const userConfigStore = options.userConfigStore ?? new UserConfigStore({ picoHome });
@@ -153,11 +173,18 @@ export function createProductionLocalDaemonHost(
         route.capabilities.reasoningProfile,
         persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
       ).level;
+      // Resolve the shared immutable snapshot before creating SessionRuntime as well as before
+      // AgentRuntime.execute. When a runtimeState is injected, AgentRuntime deliberately reuses
+      // it and cannot attach extension Hook sources retroactively.
+      const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
       const runtimeState = await createSessionRuntime({
         session,
         env,
         ...(workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
+          : {}),
+        ...(pluginSnapshot.hookSources.length
+          ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       });
       const broker = new DesktopInteractionBroker();
@@ -228,6 +255,7 @@ export function createProductionLocalDaemonHost(
             ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
             waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
+            pluginSnapshot,
             picoHome,
             env,
           },
@@ -337,6 +365,8 @@ export function createProductionLocalDaemonHost(
     userConfigStore,
     effectiveConfigResolver,
     credentialVault,
+    pluginRuntimeSnapshotRegistry,
+    ownsPluginRuntimeSnapshotRegistry,
     interactions: {
       respondApproval: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);

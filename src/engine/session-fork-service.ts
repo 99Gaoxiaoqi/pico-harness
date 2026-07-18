@@ -4,14 +4,8 @@ import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../paths/pico-paths.js";
-import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
-import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
-import {
-  deriveRuntimeForkBootstrapRunId,
-  RuntimeRun,
-  type RuntimeForkModelCheckpointSeed,
-} from "../runtime/runtime-run.js";
-import { projectRuntimeSessionMessageEntries } from "../runtime/runtime-session-projection.js";
+import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import type { RuntimeForkModelCheckpointSeed } from "../runtime/runtime-run.js";
 import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
@@ -44,6 +38,10 @@ import {
   type DurableSessionForkSnapshot,
   type SessionManager,
 } from "./session.js";
+import type {
+  SessionForkRuntimePort,
+  SessionForkRuntimeStore,
+} from "./session-fork-runtime-port.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const LEGACY_FROZEN_FORK_BUNDLE_VERSION = 1 as const;
@@ -70,6 +68,8 @@ export interface SessionForkServiceOptions {
   readonly artifactBaseDir?: string;
   readonly hooks?: SessionForkServiceHooks;
   readonly createOperationId?: () => string;
+  /** Runtime-owned fork lifecycle; keeps the coordinator independent of RuntimeRun. */
+  readonly runtimePort: SessionForkRuntimePort;
 }
 
 export interface ForkSessionInput {
@@ -147,6 +147,7 @@ export class SessionForkService {
   private readonly artifactBaseDir: string;
   private readonly hooks?: SessionForkServiceHooks;
   private readonly createOperationId: () => string;
+  private readonly runtimePort: SessionForkRuntimePort;
   private readonly coordinator: ForkOperationCoordinator;
 
   constructor(options: SessionForkServiceOptions) {
@@ -169,6 +170,7 @@ export class SessionForkService {
     this.artifactBaseDir = options.artifactBaseDir ?? this.workspacePaths.artifacts;
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
+    this.runtimePort = options.runtimePort;
     this.coordinator = new ForkOperationCoordinator({
       journal: this.journal,
       callbacks: this.createCallbacks(),
@@ -191,17 +193,17 @@ export class SessionForkService {
     }
     return source.serialize(async () => {
       await assertTargetNotPublished(this.runtimeStore, input.targetSessionId);
-      await RuntimeRun.reconcileIncompleteRuns({
+      await this.runtimePort.reconcileIncompleteRuns({
         sessionId: source.id,
         workDir: this.workDir,
-        store: sourceRuntimeStore,
+        store: sourceRuntimeStore as SessionForkRuntimeStore,
         writeGuard: source,
       });
-      await RuntimeRun.repairSessionProjection(source, {
+      await this.runtimePort.repairSessionProjection(source, {
         workDir: this.workDir,
-        store: sourceRuntimeStore,
+        store: sourceRuntimeStore as SessionForkRuntimeStore,
       });
-      materializeRuntimeHistory(await sourceRuntimeStore.readSession(source.id));
+      this.runtimePort.validateModelHistory(await sourceRuntimeStore.readSession(source.id));
       const snapshot = await source.readDurableForkSnapshot();
       const operationId = this.createOperationId();
       const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
@@ -358,11 +360,15 @@ export class SessionForkService {
       operation,
       prepared,
     );
-    const sourceThroughEventId = await resolveFrozenSourceThroughEventId(this.runtimeStore, frozen);
+    const sourceThroughEventId = await resolveFrozenSourceThroughEventId(
+      this.runtimeStore,
+      frozen,
+      this.runtimePort,
+    );
 
     await this.hooks?.beforeRuntimeBootstrap?.(operation);
     try {
-      await RuntimeRun.bootstrapFork({
+      await this.runtimePort.bootstrapFork({
         sourceSessionId: operation.sourceSessionId,
         targetSessionId: operation.targetSessionId,
         operationId: operation.operationId,
@@ -371,7 +377,7 @@ export class SessionForkService {
         ...(modelCheckpoint ? { modelCheckpoint } : {}),
         ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
         workDir: this.workDir,
-        store: this.runtimeStore,
+        store: this.runtimeStore as SessionForkRuntimeStore,
       });
 
       const runtimePatch = filteredRuntimePatch(
@@ -401,7 +407,7 @@ export class SessionForkService {
     const events = await this.runtimeStore.readSession(operation.targetSessionId);
     if (events.length === 0) return;
     const { messages, modelCheckpoint } = await this.readRuntimePublication(operation, prepared);
-    const expectedRunId = deriveRuntimeForkBootstrapRunId({
+    const expectedRunId = this.runtimePort.deriveBootstrapRunId({
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
       operationId: operation.operationId,
@@ -520,15 +526,25 @@ export class SessionForkService {
 
 export async function reconcileUnfinishedSessionForks(
   workDir: string,
-  options: ForkReconciliationOptions & { readonly picoHome?: string } = {},
+  options: ForkReconciliationOptions & {
+    readonly picoHome?: string;
+    readonly runtimePort: SessionForkRuntimePort;
+  },
 ): Promise<ForkReconciliationResult[]> {
   const { picoHome, ...reconciliation } = options;
-  return new SessionForkService({ workDir, picoHome }).reconcileUnfinished(reconciliation);
+  return new SessionForkService({
+    workDir,
+    picoHome,
+    runtimePort: options.runtimePort,
+  }).reconcileUnfinished(reconciliation);
 }
 
 export async function reconcileUnfinishedSessionForksOrThrow(
   workDir: string,
-  options: ForkReconciliationOptions & { readonly picoHome?: string } = {},
+  options: ForkReconciliationOptions & {
+    readonly picoHome?: string;
+    readonly runtimePort: SessionForkRuntimePort;
+  },
 ): Promise<void> {
   const results = await reconcileUnfinishedSessionForks(workDir, options);
   const blocked = results.filter(
@@ -868,6 +884,7 @@ function runtimeStateEventId(operationId: string): string {
 async function resolveFrozenSourceThroughEventId(
   store: RuntimeEventStore,
   frozen: FrozenForkBundle,
+  runtimePort: SessionForkRuntimePort,
 ): Promise<string | undefined> {
   const entries = await store.readSessionEntries(frozen.sourceSessionId);
   const cursorEntry = entries.find((entry) => entry.sequence === frozen.sourceCursor.seq);
@@ -882,7 +899,7 @@ async function resolveFrozenSourceThroughEventId(
     );
   }
   const bounded = entries.filter((entry) => entry.sequence <= frozen.sourceCursor.seq);
-  const projected = projectRuntimeSessionMessageEntries(bounded.map(({ event }) => event));
+  const projected = runtimePort.projectModelMessages(bounded.map(({ event }) => event));
   const messages = projected.map(({ message }) => stripMessageUsage(message));
   if (!isDeepStrictEqual(messages, frozen.messages)) {
     throw new ForkOperationConflictError(

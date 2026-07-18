@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { parseUserConfig, type PicoUserConfig } from "../input/user-config-store.js";
+import type { PicoUserConfig } from "../input/user-config-store.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   assertCredentialRefMatchesProvider,
   parseProviderCredentialRef,
   type CredentialRef,
 } from "./credential-vault.js";
+import type { ProviderUserConfigParser } from "./model-runtime-config-contract.js";
 
 const SCHEMA_VERSION = 1 as const;
 const DIRECTORY_MODE = 0o700;
@@ -55,6 +56,8 @@ export interface ProviderOperationUpdate {
 }
 
 export interface ProviderOperationJournalOptions {
+  /** Pure user-config schema parser supplied by the input composition root. */
+  readonly parseUserConfig: ProviderUserConfigParser;
   readonly picoHome?: string;
   readonly lockTimeoutMs?: number;
   readonly staleLockMs?: number;
@@ -124,8 +127,10 @@ export class ProviderOperationJournal {
   readonly lockPath: string;
   private readonly lockTimeoutMs: number;
   private readonly staleLockMs: number;
+  private readonly parseUserConfig: ProviderUserConfigParser;
 
-  constructor(options: ProviderOperationJournalOptions = {}) {
+  constructor(options: ProviderOperationJournalOptions) {
+    this.parseUserConfig = options.parseUserConfig;
     this.directoryPath = options.picoHome ?? resolvePicoHome();
     this.filePath = join(this.directoryPath, "provider-operation.json");
     this.lockPath = join(this.directoryPath, ".provider-operation.json.lock");
@@ -151,8 +156,16 @@ export class ProviderOperationJournal {
       ],
       this.filePath,
     );
-    const previousUserConfig = strictUserConfig(input.previousUserConfig, this.filePath);
-    const targetUserConfig = strictUserConfig(input.targetUserConfig, this.filePath);
+    const previousUserConfig = strictUserConfig(
+      input.previousUserConfig,
+      this.filePath,
+      this.parseUserConfig,
+    );
+    const targetUserConfig = strictUserConfig(
+      input.targetUserConfig,
+      this.filePath,
+      this.parseUserConfig,
+    );
     const credentialRef = parseProviderCredentialRef(input.credentialRef).ref;
     const configRevision = parseRevision(input.configRevision, "configRevision");
     const kind = parseKind(input.kind);
@@ -209,6 +222,7 @@ export class ProviderOperationJournal {
           updatedAt: Math.max(Date.now(), current.updatedAt),
         },
         this.filePath,
+        this.parseUserConfig,
       );
       await this.writeAtomic(updated, async () => {
         await this.assertOwnedLock(lock);
@@ -272,7 +286,7 @@ export class ProviderOperationJournal {
       } catch (error) {
         throw new Error(`Provider 操作日志 JSON 已损坏: ${this.filePath}`, { cause: error });
       }
-      return parseRecord(value, this.filePath);
+      return parseRecord(value, this.filePath, this.parseUserConfig);
     } finally {
       await handle?.close().catch(() => undefined);
     }
@@ -475,7 +489,11 @@ export class ProviderOperationJournal {
   }
 }
 
-function parseRecord(value: unknown, path: string): ProviderOperationRecord {
+function parseRecord(
+  value: unknown,
+  path: string,
+  parseUserConfig: ProviderUserConfigParser,
+): ProviderOperationRecord {
   assertExactObject(
     value,
     [
@@ -501,8 +519,8 @@ function parseRecord(value: unknown, path: string): ProviderOperationRecord {
   const kind = parseKind(value["kind"]);
   const phase = parsePhase(value["phase"]);
   assertPhaseForKind(kind, phase);
-  const previousUserConfig = strictUserConfig(value["previousUserConfig"], path);
-  const targetUserConfig = strictUserConfig(value["targetUserConfig"], path);
+  const previousUserConfig = strictUserConfig(value["previousUserConfig"], path, parseUserConfig);
+  const targetUserConfig = strictUserConfig(value["targetUserConfig"], path, parseUserConfig);
   if (typeof value["credentialRef"] !== "string") {
     throw journalError(path, "credentialRef 必须是字符串");
   }
@@ -536,7 +554,11 @@ function parseRecord(value: unknown, path: string): ProviderOperationRecord {
   };
 }
 
-function strictUserConfig(value: unknown, path: string): PicoUserConfig {
+function strictUserConfig(
+  value: unknown,
+  path: string,
+  parseUserConfig: ProviderUserConfigParser,
+): PicoUserConfig {
   let json: string | undefined;
   try {
     json = JSON.stringify(value);

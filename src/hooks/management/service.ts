@@ -48,6 +48,12 @@ export class HookManagementService {
   async review(handlerId: string): Promise<HookManagementReview> {
     const entry = this.requireEntry(handlerId);
     const item = toItem(entry);
+    // Plugin hooks are authenticated by the host-owned Plugin snapshot authority. Their
+    // materialized path is intentionally ephemeral, so creating a HookTrustStore fingerprint
+    // here would produce a misleading pending record tied to a disposable directory.
+    if (entry.source.trustAuthority?.identity?.kind === "plugin") {
+      return { ...item, handler: entry.handler };
+    }
     if (entry.handler.type === "prompt" || entry.handler.type === "agent") {
       return { ...item, handler: entry.handler };
     }
@@ -61,6 +67,7 @@ export class HookManagementService {
 
   async trust(handlerId: string): Promise<void> {
     const entry = this.requireEntry(handlerId);
+    if (entry.source.trustAuthority?.identity?.kind === "plugin") return;
     if (entry.handler.type === "prompt" || entry.handler.type === "agent") return;
     await this.trustStore.trustResolved(this.options.workDir, entry);
     await this.options.reload();

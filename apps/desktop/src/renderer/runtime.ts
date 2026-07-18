@@ -117,6 +117,26 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       ...meta,
     };
   }
+  if (item.kind === "thinking") {
+    const text = stringValue(item.content);
+    if (!text) return undefined;
+    return {
+      id,
+      kind: "thinking",
+      text,
+      ...meta,
+    };
+  }
+  if (item.kind === "skill") {
+    return {
+      id,
+      kind: "skill",
+      name: stringValue(item.name, "Skill"),
+      args: stringValue(item.args),
+      trigger: item.trigger === "model-tool" ? "model-tool" : "user-slash",
+      ...meta,
+    };
+  }
   if (item.kind === "tool") {
     return {
       id,

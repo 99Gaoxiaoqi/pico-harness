@@ -4,6 +4,7 @@ import { buildToolCardVisualRows } from "./tool-card.js";
 import { buildLogoPanelRows } from "./logo-panel.js";
 import { buildErrorEntryRows } from "./message-row.js";
 import { buildSubagentActivityCardRows } from "./subagent-activity-card.js";
+import { TerminalMarkdownModel } from "./terminal-markdown-model.js";
 export { terminalWidth, visualRows } from "./terminal-width.js";
 import { visualRows } from "./terminal-width.js";
 
@@ -93,7 +94,7 @@ function entryRows(
 ): number {
   // 兼容旧会话中仅用于 spinner 的空 thinking 占位；新 reasoning 条目按正文计高。
   if (entry.kind === "thinking") {
-    return entry.content ? visualRows(entry.content, wrapWidth).length + 1 : 0;
+    return entry.content ? new TerminalMarkdownModel(entry.content).measure(wrapWidth) + 1 : 0;
   }
   if (entry.kind === "tool") {
     return buildToolCardVisualRows({
@@ -121,6 +122,9 @@ function entryRows(
     return visualRows([entry.title, entry.detail].filter(Boolean).join("\n"), wrapWidth).length + 1;
   }
   if (entry.kind === "run-boundary") return 1;
+  if (entry.kind === "assistant") {
+    return new TerminalMarkdownModel(entry.content).measure(wrapWidth) + 1;
+  }
   return "content" in entry ? visualRows(entry.content, wrapWidth).length + 1 : 1;
 }
 

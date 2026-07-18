@@ -82,6 +82,8 @@ import {
   type RuntimeEventStoreEntry,
 } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
+import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -115,6 +117,7 @@ import {
   type LegacyDesktopSessionTitleMetadata,
 } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
+import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
 import {
   projectRuntimeTranscriptEntries,
   TranscriptRevisionConflict,
@@ -149,6 +152,10 @@ import {
   ingestDesktopRuntimeNotification,
   isDesktopTranscriptNotification,
 } from "./desktop-transcript-persistence.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
+import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
+import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -177,6 +184,10 @@ export interface DesktopRuntimeServiceOptions {
   readonly providerFactory?: typeof createProvider;
   readonly createSessionId?: () => string;
   readonly now?: () => number;
+  /** Shared immutable Plugin projection used by catalog and session activation. */
+  readonly pluginRuntimeSnapshotRegistry?: PluginRuntimeSnapshotRegistry;
+  /** Whether this service releases the injected registry after runtime shutdown. */
+  readonly ownsPluginRuntimeSnapshotRegistry?: boolean;
 }
 
 export interface DesktopRuntimeInteractions {
@@ -222,6 +233,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly providerRecoveryReady: Promise<void>;
   private readonly createSessionId: () => string;
   private readonly now: () => number;
+  private readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
+  private readonly ownsPluginRuntimeSnapshotRegistry: boolean;
+  private readonly requestRouter: DesktopRequestRouter;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly userConfigWatchListener = () => this.scheduleUserConfigRefresh();
   private readonly userConfigWatchReady: Promise<void>;
@@ -271,9 +285,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.credentialVault =
       options.credentialVault ?? createPlatformCredentialVault(process.platform, this.env);
     this.providerOperationJournal =
-      options.providerOperationJournal ?? new ProviderOperationJournal({ picoHome: this.picoHome });
+      options.providerOperationJournal ??
+      new ProviderOperationJournal({ picoHome: this.picoHome, parseUserConfig });
     this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
+    this.pluginRuntimeSnapshotRegistry =
+      options.pluginRuntimeSnapshotRegistry ??
+      new PluginRuntimeSnapshotRegistry({ env: this.env, picoHome: this.picoHome });
+    this.ownsPluginRuntimeSnapshotRegistry =
+      options.ownsPluginRuntimeSnapshotRegistry ??
+      options.pluginRuntimeSnapshotRegistry === undefined;
     this.providerRecoveryReady = this.recoverProviderOperation().catch((error: unknown) => {
       this.providerRecoveryError = error;
     });
@@ -309,6 +330,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         }
       });
     });
+    this.requestRouter = new DesktopRequestRouter({
+      handlers: this.createRequestHandlers(),
+      unsupportedMethods: UNSUPPORTED_DESKTOP_METHODS,
+      fallback: (request) => this.options.runtimeService.handle(request),
+      methodNotFound: (method) =>
+        new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+          `${method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
+        ),
+    });
   }
 
   handle(request: RuntimeRequest): Promise<JsonValue> {
@@ -330,186 +361,120 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return operation;
   }
 
-  private async dispatchRequest(request: RuntimeRequest): Promise<JsonValue> {
-    switch (request.method) {
-      case "workspace.init":
-        return this.initializeWorkspace(request.params.workspacePath);
-      case "diagnostics.run":
-        return this.runDiagnostics(request.params.workspacePath);
-      case "diagnostics.resources":
-        return this.runResourceDiagnostics(request.params.workspacePath);
-      case "workspace.list":
-        return this.listWorkspaces();
-      case "workspace.trustStatus":
-        return this.trustStatus(request.params.workspacePath);
-      case "workspace.trust":
-        return this.setTrust(request.params.workspacePath, request.params.trusted);
-      case "session.list":
-        return this.listSessions(request.params.workspacePath, request.params.includeArchived);
-      case "session.get":
-        return this.getSession(request.params.workspacePath, request.params.sessionId);
-      case "session.create":
-        return this.createSession(request.params.workspacePath, request.params.title);
-      case "session.archive":
-        return this.setSessionArchived(
-          request.params.workspacePath,
-          request.params.sessionId,
-          true,
-        );
-      case "session.restore":
-        return this.setSessionArchived(
-          request.params.workspacePath,
-          request.params.sessionId,
-          false,
-        );
-      case "session.rename":
-        return this.renameSession(
-          request.params.workspacePath,
-          request.params.sessionId,
-          request.params.title,
-        );
-      case "session.fork":
-        return this.forkSession(request.params.workspacePath, request.params.sessionId);
-      case "session.compact":
-        return this.compactSession(request.params.workspacePath, request.params.sessionId);
-      case "session.settings.get":
-        return this.getRuntimeSessionSettings(
-          request.params.workspacePath,
-          request.params.sessionId,
-        );
-      case "session.settings.update":
-        return this.updateRuntimeSessionSettings(request.params);
-      case "goal.get":
-        return this.getGoal(request.params.workspacePath, request.params.sessionId);
-      case "session.send":
-        return this.withProviderDependencyLock(() => this.sendSession(request.params));
-      case "session.transcript":
-        return this.getSessionTranscript(request.params);
-      case "run.cancel":
-        return this.cancelRun(
-          request.params.workspacePath,
-          request.params.runId,
-          request.params.reason,
-        );
-      case "run.start":
-        return this.withProviderDependencyLock(() => this.options.runtimeService.handle(request));
-      case "config.get":
-        return this.getConfig(request.params.workspacePath);
-      case "config.providers":
-        return this.listProviders(request.params.workspacePath);
-      case "config.user.get":
-        return this.getUserConfig(request.params);
-      case "config.user.update":
-        return this.withProviderDependencyLock(() => this.updateUserConfig(request.params));
-      case "config.effective.get":
-        return this.getEffectiveConfig(request.params);
-      case "provider.list":
-        return this.listUserProviders(request.params);
-      case "provider.upsert":
-        return this.withProviderDependencyLock(() => this.upsertUserProvider(request.params));
-      case "provider.importEnvironment":
-        return this.withProviderDependencyLock(() =>
-          this.importEnvironmentProvider(request.params),
-        );
-      case "provider.delete":
-        return this.withProviderDependencyLock(() => this.deleteUserProvider(request.params));
-      case "provider.credential.status":
-        return this.getProviderCredentialStatus(request.params);
-      case "provider.credential.set":
-        return this.withProviderDependencyLock(() => this.setProviderCredential(request.params));
-      case "provider.credential.delete":
-        return this.withProviderDependencyLock(() => this.deleteProviderCredential(request.params));
-      case "catalog.agents":
-        return this.listAgents(request.params.workspacePath);
-      case "catalog.skills":
-        return this.listSkills(request.params.workspacePath, true);
-      case "config.skills":
-        return this.listSkills(request.params.workspacePath, false);
-      case "config.mcpServers":
-        return this.listMcpServers(request.params.workspacePath);
-      case "usage.get":
-        return this.getUsage(request.params);
-      case "changes.list":
-        return this.listChanges(request.params.workspacePath, request.params.runId);
-      case "changes.diff":
-        return this.getChangeDiff(
-          request.params.workspacePath,
-          request.params.runId,
-          request.params.path,
-        );
-      case "changes.review":
-        return this.reviewChanges(request.params);
-      case "changes.apply":
-        return this.applyChanges(
+  private createRequestHandlers(): DesktopRequestHandlers {
+    return {
+      "diagnostics.run": (request) => this.runDiagnostics(request.params.workspacePath),
+      "diagnostics.resources": (request) =>
+        this.runResourceDiagnostics(request.params.workspacePath),
+      "config.get": (request) => this.getConfig(request.params.workspacePath),
+      "config.providers": (request) => this.listProviders(request.params.workspacePath),
+      "config.effective.get": (request) => this.getEffectiveConfig(request.params),
+      "catalog.agents": (request) => this.listAgents(request.params.workspacePath),
+      "catalog.skills": (request) => this.listSkills(request.params.workspacePath, true),
+      "config.skills": (request) => this.listSkills(request.params.workspacePath, false),
+      "config.mcpServers": (request) => this.listMcpServers(request.params.workspacePath),
+      "usage.get": (request) => this.getUsage(request.params),
+      "changes.list": (request) =>
+        this.listChanges(request.params.workspacePath, request.params.runId),
+      "changes.diff": (request) =>
+        this.getChangeDiff(request.params.workspacePath, request.params.runId, request.params.path),
+      "changes.review": (request) => this.reviewChanges(request.params),
+      "changes.apply": (request) =>
+        this.applyChanges(
           request.params.workspacePath,
           request.params.runId,
           request.params.expectedFingerprint,
-        );
-      case "rewind.list":
-        return this.listRewindPoints(request.params.workspacePath, request.params.sessionId);
-      case "rewind.preview":
-        return this.previewRewind(
+        ),
+      "rewind.list": (request) =>
+        this.listRewindPoints(request.params.workspacePath, request.params.sessionId),
+      "rewind.preview": (request) =>
+        this.previewRewind(
           request.params.workspacePath,
           request.params.sessionId,
           request.params.checkpointId,
-        );
-      case "rewind.apply":
-        return this.applyRewind(request.params);
-      case "jobs.list":
-        return this.listJobs(request.params.workspacePath);
-      case "jobs.create":
-        return this.withProviderDependencyLock(() => this.createJob(request.params));
-      case "jobs.update":
-        return this.updateJob(request.params);
-      case "jobs.delete":
-        return this.deleteJob(request.params.workspacePath, request.params.jobId);
-      case "jobs.setEnabled":
-        return this.withProviderDependencyLock(() =>
+        ),
+      "rewind.apply": (request) => this.applyRewind(request.params),
+      "jobs.list": (request) => this.listJobs(request.params.workspacePath),
+      "jobs.create": (request) =>
+        this.withProviderDependencyLock(() => this.createJob(request.params)),
+      "jobs.update": (request) => this.updateJob(request.params),
+      "jobs.delete": (request) =>
+        this.deleteJob(request.params.workspacePath, request.params.jobId),
+      "jobs.setEnabled": (request) =>
+        this.withProviderDependencyLock(() =>
           this.setJobEnabled(
             request.params.workspacePath,
             request.params.jobId,
             request.params.enabled,
           ),
-        );
-      case "jobs.runNow":
-        return this.withProviderDependencyLock(() =>
+        ),
+      "jobs.runNow": (request) =>
+        this.withProviderDependencyLock(() =>
           this.runJobNow(request.params.workspacePath, request.params.jobId),
-        );
-      case "jobs.history":
-        return this.jobHistory(
-          request.params.workspacePath,
-          request.params.jobId,
-          request.params.limit,
-        );
-      case "automation.credential.import":
-        return this.withProviderDependencyLock(() =>
-          this.importAutomationCredential(request.params),
-        );
-      case "automation.create":
-        return this.withProviderDependencyLock(() => this.createTrustedAutomation(request.params));
-      case "approval.respond":
-        if (this.options.interactions) {
-          return this.options.interactions.respondApproval(request.params);
+        ),
+      "jobs.history": (request) =>
+        this.jobHistory(request.params.workspacePath, request.params.jobId, request.params.limit),
+      "automation.credential.import": (request) =>
+        this.withProviderDependencyLock(() => this.importAutomationCredential(request.params)),
+      "automation.create": (request) =>
+        this.withProviderDependencyLock(() => this.createTrustedAutomation(request.params)),
+      "approval.respond": (request) => {
+        if (!this.options.interactions) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+            `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
+          );
         }
-        break;
-      case "prompt.respond":
-        if (this.options.interactions) {
-          return this.options.interactions.respondPrompt(request.params);
+        return this.options.interactions.respondApproval(request.params);
+      },
+      "prompt.respond": (request) => {
+        if (!this.options.interactions) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+            `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
+          );
         }
-        break;
-      case "workspace.unregister":
-        return this.withProviderDependencyLock(() =>
-          this.unregisterWorkspace(request.params.workspacePath),
-        );
-      default:
-        if (!UNSUPPORTED_DESKTOP_METHODS.has(request.method)) {
-          return this.options.runtimeService.handle(request);
-        }
-    }
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-      `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
-    );
+        return this.options.interactions.respondPrompt(request.params);
+      },
+      ...createDesktopProviderRequestHandlers({
+        getUserConfig: this.getUserConfig.bind(this),
+        updateUserConfig: this.updateUserConfig.bind(this),
+        listUserProviders: this.listUserProviders.bind(this),
+        upsertUserProvider: this.upsertUserProvider.bind(this),
+        importEnvironmentProvider: this.importEnvironmentProvider.bind(this),
+        deleteUserProvider: this.deleteUserProvider.bind(this),
+        getProviderCredentialStatus: this.getProviderCredentialStatus.bind(this),
+        setProviderCredential: this.setProviderCredential.bind(this),
+        deleteProviderCredential: this.deleteProviderCredential.bind(this),
+        withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
+      }),
+      ...createDesktopSessionRequestHandlers({
+        initializeWorkspace: this.initializeWorkspace.bind(this),
+        listWorkspaces: this.listWorkspaces.bind(this),
+        trustStatus: this.trustStatus.bind(this),
+        setTrust: this.setTrust.bind(this),
+        unregisterWorkspace: this.unregisterWorkspace.bind(this),
+        listSessions: this.listSessions.bind(this),
+        getSession: this.getSession.bind(this),
+        createSession: this.createSession.bind(this),
+        setSessionArchived: this.setSessionArchived.bind(this),
+        renameSession: this.renameSession.bind(this),
+        forkSession: this.forkSession.bind(this),
+        compactSession: this.compactSession.bind(this),
+        getRuntimeSessionSettings: this.getRuntimeSessionSettings.bind(this),
+        updateRuntimeSessionSettings: this.updateRuntimeSessionSettings.bind(this),
+        getGoal: this.getGoal.bind(this),
+        sendSession: this.sendSession.bind(this),
+        getSessionTranscript: this.getSessionTranscript.bind(this),
+        cancelRun: this.cancelRun.bind(this),
+        withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
+        runStart: (request) => this.options.runtimeService.handle(request),
+      }),
+    };
+  }
+
+  private dispatchRequest(request: RuntimeRequest): Promise<JsonValue> {
+    return this.requestRouter.dispatch(request);
   }
 
   replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
@@ -551,6 +516,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       try {
         await this.options.runtimeService.close();
       } finally {
+        if (this.ownsPluginRuntimeSnapshotRegistry) {
+          await this.pluginRuntimeSnapshotRegistry.dispose();
+        }
         this.lifecycleState = "closed";
       }
     }
@@ -627,9 +595,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       workDir: canonical,
       picoHome: this.picoHome,
     }).scan();
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
+    const pluginDiagnostics = pluginSnapshot.diagnostics.map((diagnostic) => ({
+      pluginId: diagnostic.pluginId,
+      sourcePath: diagnostic.sourcePath,
+      message: diagnostic.message,
+      ...(diagnostic.code ? { code: diagnostic.code } : {}),
+      ...(diagnostic.scope ? { scope: diagnostic.scope } : {}),
+      ...(diagnostic.severity ? { severity: diagnostic.severity } : {}),
+      ...(diagnostic.compatibility ? { compatibility: diagnostic.compatibility } : {}),
+    }));
     return toJsonValue({
       ...report,
-      output: renderResourceDoctorReport(report).join("\n"),
+      ...(pluginDiagnostics.length > 0 ? { pluginDiagnostics } : {}),
+      output: [
+        ...renderResourceDoctorReport(report),
+        ...(pluginDiagnostics.length > 0
+          ? pluginDiagnostics.map(
+              (diagnostic) =>
+                `Plugin finding: ${diagnostic.pluginId}${diagnostic.scope ? ` [${diagnostic.scope}]` : ""}${diagnostic.code ? ` · ${diagnostic.code}` : ""} · ${diagnostic.sourcePath} · ${diagnostic.message}`,
+            )
+          : []),
+      ].join("\n"),
     });
   }
 
@@ -679,6 +666,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = new Session(sessionId, canonical, {
       persistence: true,
       picoHome: this.picoHome,
+      runtimePort: createEngineRuntimePort(),
     });
     try {
       await session.recover();
@@ -784,6 +772,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await new SessionForkService({
       workDir: canonical,
       picoHome: this.picoHome,
+      runtimePort: createSessionForkRuntimePort(),
     }).fork({
       sourceSessionId: sessionId,
       targetSessionId,
@@ -1371,6 +1360,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         sessionId,
         resolved.prompt,
         runtimeInputDisplay(input),
+        input,
         identity.inputKey,
       );
       return requireJsonRecord(
@@ -1397,6 +1387,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
     prompt: string,
     displayText: string,
+    input: RuntimeUserInput,
     idempotencyKey: string,
   ): Promise<void> {
     const digest = createHash("sha256")
@@ -1404,29 +1395,30 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       .digest("hex");
     const messageId = `desktop-input:${digest}`;
     await this.withSession(workspacePath, sessionId, async (session) => {
-      if (
-        session
-          .getHistory()
-          .some(
-            (message) =>
-              message.role === "user" && message.providerData?.["picoDesktopInputId"] === messageId,
-          )
-      ) {
-        return;
+      const hasMessage = session
+        .getHistory()
+        .some(
+          (message) =>
+            message.role === "user" && message.providerData?.["picoDesktopInputId"] === messageId,
+        );
+      if (!hasMessage) {
+        if (!session.fileHistory.snapshots.some((snapshot) => snapshot.messageId === messageId)) {
+          await session.beginRewindPoint({ userPrompt: displayText, messageId });
+        }
+        const receipt = await session.commitMessageOnce(`user-message:${messageId}`, {
+          role: "user",
+          content: prompt,
+          providerData: {
+            picoKind: "desktop_user_input",
+            picoDesktopInputId: messageId,
+            displayText,
+          },
+        });
+        await session.bindRewindPointSource(messageId, receipt);
       }
-      if (!session.fileHistory.snapshots.some((snapshot) => snapshot.messageId === messageId)) {
-        await session.beginRewindPoint({ userPrompt: displayText, messageId });
+      if (input.kind === "skill") {
+        await ensureDesktopSkillTranscriptEntry(session, input, messageId);
       }
-      const receipt = await session.commitMessageOnce(`user-message:${messageId}`, {
-        role: "user",
-        content: prompt,
-        providerData: {
-          picoKind: "desktop_user_input",
-          picoDesktopInputId: messageId,
-          displayText,
-        },
-      });
-      await session.bindRewindPointSource(messageId, receipt);
       await session.flushPersistence();
     });
     this.publishTranscriptUpdate(workspacePath, sessionId, "reload");
@@ -1461,6 +1453,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<ResolvedRuntimeUserInput> {
     if (input.kind === undefined || input.kind === "text") return { prompt: input.text };
     const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
     const config = await loadPicoConfig(canonical);
     const compatibility = config.compatibility.claude;
     if (input.kind === "agent") {
@@ -1469,6 +1462,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         includeBuiltins: true,
         includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
         includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+        ...(pluginSnapshot.agentSources ? { externalSources: pluginSnapshot.agentSources } : {}),
         env: this.env,
         picoHome: this.picoHome,
       });
@@ -1490,6 +1484,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       includeUserResources: true,
       includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
       includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+      ...(pluginSnapshot.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
       env: this.env,
       picoHome: this.picoHome,
     });
@@ -2418,9 +2413,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listAgents(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
     const agents = await listDesktopAgents(canonical, {
       env: this.env,
       picoHome: this.picoHome,
+      pluginSnapshot,
     });
     return { agents: toJsonValue(agents) };
   }
@@ -2430,9 +2427,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     includeUserResources: boolean,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
     const skills = await listDesktopSkills(canonical, includeUserResources, {
       env: this.env,
       picoHome: this.picoHome,
+      pluginSnapshot,
     });
     return { skills: toJsonValue(skills) };
   }
@@ -3659,6 +3658,32 @@ function requireText(value: unknown, label: string): string {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是非空字符串`);
   }
   return value.trim();
+}
+
+/** Persist a user-triggered Skill card beside the display-only input message. */
+async function ensureDesktopSkillTranscriptEntry(
+  session: Session,
+  input: Extract<RuntimeUserInput, { kind: "skill" }>,
+  messageId: string,
+): Promise<void> {
+  const eventId = `desktop-skill:${messageId}`;
+  const snapshot = await session.readHydrationSnapshot();
+  if (snapshot.transcriptEvents.some((event) => event.eventId === eventId)) return;
+  const sequence = (snapshot.transcriptEvents.at(-1)?.sequence ?? 0) + 1;
+  const event: TranscriptEvent = {
+    eventId,
+    sequence,
+    createdAt: Date.now(),
+    type: "entry.appended",
+    entryId: `desktop-skill-entry:${messageId}`,
+    entry: {
+      kind: "skill",
+      name: input.name,
+      args: input.args ?? "",
+      trigger: "user-slash",
+    },
+  };
+  await session.recordTranscriptEvent(event, { eventId: `desktop-transcript:${eventId}` });
 }
 
 function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {

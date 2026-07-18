@@ -1,14 +1,13 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { type RuntimeJob, type RuntimeProviderInput } from "@pico/protocol";
+import { LocalRuntimeClient } from "../daemon/client.js";
+import { createUserDaemonInstaller } from "../daemon/user-daemon-installer.js";
 import {
-  createUserDaemonInstaller,
-  LocalRuntimeClient,
   resolveCanonicalPicoHome,
   resolveLocalDaemonEndpoint,
   resolveLocalDaemonServiceName,
-  type RuntimeJob,
-  type RuntimeProviderInput,
-} from "../daemon/index.js";
+} from "../daemon/endpoint.js";
 
 /** The small boundary between TUI commands and the local Runtime daemon. */
 export interface CronDaemonBridge {

@@ -1,0 +1,50 @@
+flowchart TB
+    U[用户任务] --> T[pico TUI]
+
+    subgraph HOST[TUI 宿主]
+        T --> C[上下文与能力装配]
+        C --> M[主 Agent 推理]
+        E[Session] --> C
+        E --> DB[JSONL / Memory / Artifact]
+        MC[MCP 常驻连接]
+        CI[LSP / Repo Map]
+    end
+
+    M --> D{回答或行动}
+    D -- 回答 --> O[最终回答]
+    D -- 普通工具 --> S[Tool Scheduler]
+    D -- required 委派 --> W[隔离 worker]
+
+    subgraph EXEC[执行层]
+        S --> R[安全执行]
+        W --> I[独立 worktree / OS 沙箱]
+        I --> J[结果聚合与串行合并]
+        R --> B[Observation]
+        J --> B
+        X[工具注册表]
+        G[权限 / 沙箱 / 文件历史]
+    end
+
+    B ==> C
+    P[模型能力预检] -.-> M
+    MC -.-> X
+    CI -.-> X
+    X -.-> S
+    G -.-> R
+    G -.-> W
+
+    classDef input fill:#d3f9d8,stroke:#2f9e44,color:#1a1a1a
+    classDef process fill:#e5dbff,stroke:#5f3dc4,color:#1a1a1a
+    classDef decision fill:#ffe3e3,stroke:#c92a2a,color:#1a1a1a
+    classDef action fill:#ffe8cc,stroke:#d9480f,color:#1a1a1a
+    classDef output fill:#c5f6fa,stroke:#0c8599,color:#1a1a1a
+    classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
+    classDef meta fill:#e7f5ff,stroke:#1971c2,color:#1a1a1a
+
+    class U input
+    class T,C,M,B,W,J process
+    class D decision
+    class S,R,X,I action
+    class O output
+    class E,DB storage
+    class P,G,MC,CI,HOST,EXEC meta

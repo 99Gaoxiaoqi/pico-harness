@@ -1,9 +1,5 @@
-import {
-  EffectiveConfigResolver,
-  type ConfigSource,
-  type EffectiveConfigSnapshot,
-} from "../input/effective-config.js";
-import { UserConfigStore, type PicoUserConfig } from "../input/user-config-store.js";
+import type { ConfigSource, EffectiveConfigSnapshot } from "../input/effective-config.js";
+import type { PicoUserConfig } from "../input/user-config-store.js";
 import {
   createPlatformCredentialVault,
   CredentialNotFoundError,
@@ -19,6 +15,10 @@ import {
   type ModelRouter,
   type ResolvedModelSecrets,
 } from "./model-router.js";
+import type {
+  ModelRuntimeConfigResolver,
+  ModelRuntimeUserConfigStore,
+} from "./model-runtime-config-contract.js";
 
 export type EffectiveCredentialState = "environment" | "keychain" | "missing" | "unsupported";
 
@@ -41,9 +41,10 @@ export interface LoadEffectiveModelRuntimeOptions {
   readonly legacyModel: string;
   readonly legacyModelExplicit?: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly picoHome?: string;
-  readonly userConfigStore?: UserConfigStore;
-  readonly configResolver?: EffectiveConfigResolver;
+  /** Read-only durable config dependency supplied by the host composition root. */
+  readonly userConfigStore: ModelRuntimeUserConfigStore;
+  /** Effective config resolver supplied by the host composition root. */
+  readonly configResolver: ModelRuntimeConfigResolver;
   readonly credentialVault?: CredentialVault;
   readonly fetch?: typeof fetch;
   readonly discoveryTimeoutMs?: number;
@@ -58,16 +59,9 @@ export async function loadEffectiveModelRuntime(
   options: LoadEffectiveModelRuntimeOptions,
 ): Promise<EffectiveModelRuntime> {
   const env = options.env ?? process.env;
-  const userConfigStore =
-    options.userConfigStore ?? new UserConfigStore({ picoHome: options.picoHome });
-  const resolver =
-    options.configResolver ??
-    new EffectiveConfigResolver({
-      userConfigStore,
-    });
   const { config, userConfig } = await resolveStableConfiguration(
-    resolver,
-    userConfigStore,
+    options.configResolver,
+    options.userConfigStore,
     options,
     env,
   );
@@ -99,30 +93,11 @@ export async function loadEffectiveModelRuntime(
 }
 
 async function resolveStableConfiguration(
-  resolver: EffectiveConfigResolver,
-  userConfigStore: UserConfigStore,
+  resolver: ModelRuntimeConfigResolver,
+  userConfigStore: ModelRuntimeUserConfigStore,
   options: LoadEffectiveModelRuntimeOptions,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<{ config: EffectiveConfigSnapshot; userConfig: PicoUserConfig }> {
-  if (options.configResolver && !options.userConfigStore) {
-    const config = await resolver.resolve({
-      workDir: options.workDir,
-      projectTrusted: options.projectTrusted,
-      env,
-      legacyProvider: options.legacyProvider,
-    });
-    return {
-      config,
-      userConfig: {
-        version: 1,
-        providers: Object.fromEntries(
-          Object.entries(config.providers).filter(
-            ([providerId]) => config.sources[`providers.${providerId}`] === "user",
-          ),
-        ),
-      },
-    };
-  }
   for (let attempt = 0; attempt < 3; attempt++) {
     const config = await resolver.resolve({
       workDir: options.workDir,

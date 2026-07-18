@@ -7,10 +7,20 @@ import type { HookConfigSourceSpec } from "../hooks/config.js";
 import type { McpConfigSource } from "../mcp/manager.js";
 import type { McpConfig, McpServerConfig } from "../mcp/types.js";
 import { PluginManagementService } from "./plugin-management-service.js";
+import {
+  createBuiltinPluginCapabilityRegistry,
+  type PluginCapabilityDescriptor,
+  type PluginCapabilityRegistry,
+} from "./plugin-capability.js";
+import { createPluginHookTrustAuthority } from "./plugin-hook-trust.js";
 import { createPluginVariableMap, substitutePluginVariablesDeep } from "./plugin-resolver.js";
 import type {
+  PluginCompatibility,
+  PluginCapabilityDeclaration,
+  PluginCapabilityDeclarationInput,
   PluginConfigContribution,
   PluginContributionSet,
+  PluginDiagnosticSeverity,
   PluginPathContribution,
   PluginScope,
 } from "./plugin-types.js";
@@ -20,6 +30,8 @@ const MAX_PLUGIN_CONFIG_BYTES = 1024 * 1024;
 export interface PluginRuntimeSnapshotOptions {
   readonly workDir: string;
   readonly service?: PluginManagementService;
+  /** Host-owned factories; plugin manifests can never provide or replace this registry. */
+  readonly capabilityRegistry?: PluginCapabilityRegistry;
   readonly picoHome?: string;
   readonly homeDir?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -29,6 +41,10 @@ export interface PluginRuntimeDiagnostic {
   readonly pluginId: string;
   readonly sourcePath: string;
   readonly message: string;
+  readonly code?: string;
+  readonly scope?: PluginScope;
+  readonly severity?: PluginDiagnosticSeverity;
+  readonly compatibility?: PluginCompatibility;
 }
 
 /** One immutable startup projection of already enabled and trusted plugins. */
@@ -40,6 +56,8 @@ export interface PluginRuntimeSnapshot {
   readonly hookSources: readonly HookConfigSourceSpec[];
   readonly mcpSources: readonly McpConfigSource[];
   readonly lspServers: readonly LspServerConfig[];
+  /** Data-only capabilities resolved by the host-owned registry. */
+  readonly capabilities: readonly PluginCapabilityDescriptor[];
   readonly diagnostics: readonly PluginRuntimeDiagnostic[];
   /** Release the host-private immutable Plugin tree. Safe to call more than once. */
   dispose(): Promise<void>;
@@ -49,6 +67,7 @@ export async function loadPluginRuntimeSnapshot(
   options: PluginRuntimeSnapshotOptions,
 ): Promise<PluginRuntimeSnapshot> {
   const service = options.service ?? new PluginManagementService(options);
+  const capabilityRegistry = options.capabilityRegistry ?? createBuiltinPluginCapabilityRegistry();
   const materialization = await service.materializeRuntimePlugins();
   const active = materialization.plugins;
   const skillSources: ExternalResourceCatalogSource[] = [];
@@ -57,12 +76,29 @@ export async function loadPluginRuntimeSnapshot(
   const hookSources: HookConfigSourceSpec[] = [];
   const mcpSources: McpConfigSource[] = [];
   const lspServers: LspServerConfig[] = [];
+  const capabilities: PluginCapabilityDescriptor[] = [];
   const diagnostics: PluginRuntimeDiagnostic[] = [...materialization.diagnostics];
+  const revokeHookAuthorities: Array<() => void> = [];
+  let disposed = false;
 
   try {
     for (const inspection of active) {
       const { contributions, installed } = inspection;
       const priority = pluginPriority(installed.scope);
+      const capabilityResolution = capabilityRegistry.resolve(
+        contributions.plugin,
+        normalizeCapabilityDeclarations(contributions.manifest.capabilities),
+        { resourceDigest: installed.resourceFingerprint.digest },
+      );
+      capabilities.push(...capabilityResolution.capabilities);
+      diagnostics.push(
+        ...capabilityResolution.diagnostics.map((item) => ({
+          pluginId: installed.id,
+          sourcePath: contributions.plugin.manifestPath ?? contributions.plugin.root,
+          code: item.code,
+          message: item.message,
+        })),
+      );
       skillSources.push(...pathSources(contributions, contributions.skills, "skill", priority));
       commandSources.push(
         ...pathSources(contributions, contributions.commands, "command", priority),
@@ -72,6 +108,14 @@ export async function loadPluginRuntimeSnapshot(
         ...options,
         scope: installed.scope,
       });
+      const hookTrust = createPluginHookTrustAuthority({
+        pluginId: installed.id,
+        runtimeRoot: contributions.plugin.root,
+        resourceDigest: installed.resourceFingerprint.digest,
+        ...(options.env ? { env: options.env } : {}),
+        isActive: () => !disposed,
+      });
+      revokeHookAuthorities.push(hookTrust.revoke);
 
       for (const contribution of contributions.hooks) {
         try {
@@ -81,6 +125,7 @@ export async function loadPluginRuntimeSnapshot(
             path: contribution.sourcePath,
             componentId: contributions.plugin.id,
             inlineHooks: value,
+            trustAuthority: hookTrust.authority,
           });
         } catch (error) {
           diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
@@ -121,13 +166,29 @@ export async function loadPluginRuntimeSnapshot(
       hookSources: Object.freeze(hookSources),
       mcpSources: Object.freeze(mcpSources),
       lspServers: Object.freeze(lspServers),
+      capabilities: Object.freeze(capabilities),
       diagnostics: Object.freeze(diagnostics),
-      dispose: materialization.dispose,
+      async dispose(): Promise<void> {
+        if (disposed) return;
+        disposed = true;
+        for (const revoke of revokeHookAuthorities) revoke();
+        await materialization.dispose();
+      },
     });
   } catch (error) {
+    disposed = true;
+    for (const revoke of revokeHookAuthorities) revoke();
     await materialization.dispose();
     throw error;
   }
+}
+
+function normalizeCapabilityDeclarations(
+  value: PluginCapabilityDeclarationInput | undefined,
+): readonly PluginCapabilityDeclaration[] {
+  if (value === undefined) return [];
+  if (Array.isArray(value)) return [...value] as PluginCapabilityDeclaration[];
+  return [value as PluginCapabilityDeclaration];
 }
 
 function pathSources(

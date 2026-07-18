@@ -3,10 +3,13 @@ import { SkillLoader } from "../context/skill.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
 import { McpConnectionManager } from "../mcp/manager.js";
+import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
 
-interface DesktopResourceCatalogOptions {
+export interface DesktopResourceCatalogOptions {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly picoHome: string;
+  /** The caller-owned immutable plugin projection for this workspace. */
+  readonly pluginSnapshot?: PluginRuntimeSnapshot;
 }
 
 export async function listDesktopAgents(
@@ -20,6 +23,9 @@ export async function listDesktopAgents(
     includeBuiltins: true,
     includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
     includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+    ...(options.pluginSnapshot?.agentSources
+      ? { externalSources: options.pluginSnapshot.agentSources }
+      : {}),
     env: options.env,
     picoHome: options.picoHome,
   });
@@ -33,7 +39,11 @@ export async function listDesktopSkills(
 ) {
   const loader = includeUserResources
     ? await loadDesktopSkillLoader(workspacePath, options)
-    : new SkillLoader(workspacePath);
+    : new SkillLoader(workspacePath, {
+        ...(options.pluginSnapshot?.skillSources
+          ? { externalSources: options.pluginSnapshot.skillSources }
+          : {}),
+      });
   const skills = await loader.list();
   return skills.map((skill) => ({
     name: skill.name,
@@ -65,6 +75,9 @@ async function loadDesktopSkillLoader(
     includeUserResources: true,
     includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
     includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+    ...(options.pluginSnapshot?.skillSources
+      ? { externalSources: options.pluginSnapshot.skillSources }
+      : {}),
     env: options.env,
     picoHome: options.picoHome,
   });

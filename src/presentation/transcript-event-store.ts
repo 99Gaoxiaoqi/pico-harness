@@ -533,6 +533,8 @@ export interface TranscriptEventStoreOptions {
   initialSnapshot?: TranscriptEventStoreSnapshot;
   /** 当前事件段最大长度；达到后投影折叠为新 checkpoint。 */
   maxSegmentEvents?: number;
+  /** 事件追加后的只读通知；用于将语义事件接入 durable sink。 */
+  onAppend?: (event: TranscriptEvent, projection: TranscriptProjection) => void;
 }
 
 export interface TranscriptEventStoreSnapshot {
@@ -561,6 +563,9 @@ export class TranscriptEventStore {
   private readonly usedPhaseIds = new Set<string>();
   private readonly usedStreamIds = new Set<string>();
   private readonly usedToolIds = new Set<string>();
+  private readonly appendListeners = new Set<
+    (event: TranscriptEvent, projection: TranscriptProjection) => void
+  >();
 
   constructor(options: TranscriptEventStoreOptions = {}) {
     if (options.initialEvents !== undefined && options.initialSnapshot !== undefined) {
@@ -571,6 +576,7 @@ export class TranscriptEventStore {
     this.idFactory = options.idFactory ?? createTranscriptIdFactory();
     this.now = options.now ?? Date.now;
     this.maxSegmentEvents = normalizeSegmentLimit(options.maxSegmentEvents);
+    if (options.onAppend) this.appendListeners.add(options.onAppend);
     this.checkpoint = cloneProjection(
       options.initialSnapshot?.checkpoint ?? initialTranscriptProjection(),
     );
@@ -607,7 +613,27 @@ export class TranscriptEventStore {
     ) {
       this.rollover();
     }
+    for (const listener of this.appendListeners) listener(event, this.projection);
     return event;
+  }
+
+  /** 注册追加通知；返回取消订阅函数。 */
+  addAppendListener(
+    listener: (event: TranscriptEvent, projection: TranscriptProjection) => void,
+  ): () => void {
+    this.appendListeners.add(listener);
+    return () => this.appendListeners.delete(listener);
+  }
+
+  /** 在空 store 上一次性加载持久化事件；不会触发追加监听。 */
+  loadInitialEvents(events: readonly TranscriptEvent[]): void {
+    if (events.length === 0) return;
+    if (this.projection.sequence !== 0 || this.events.length > 0) {
+      if (events.at(-1)?.sequence === this.projection.sequence) return;
+      throw new Error("TranscriptEventStore can hydrate initial events only once");
+    }
+    for (const event of events) this.loadInitialEvent(event);
+    if (this.events.length >= this.maxSegmentEvents) this.rollover();
   }
 
   /** 只返回 checkpoint 之后的当前有界事件段。 */

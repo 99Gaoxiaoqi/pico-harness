@@ -38,7 +38,6 @@ import {
   type SessionRuntimeStateSnapshot,
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
-import { hasIncompleteToolExchange } from "../context/safe-compaction-boundary.js";
 import type { SessionSummaryStore } from "../memory/memory-store.js";
 import { createSessionSummaryStore } from "../memory/summary-store.js";
 import {
@@ -71,10 +70,10 @@ import {
 } from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
-  currentRuntimeRun,
-  RuntimeRun,
-  type RuntimeEventWriteGuard,
-} from "../runtime/runtime-run.js";
+  getDefaultEngineRuntimePort,
+  type EngineRuntimePort,
+  type EngineRuntimeWriteGuard,
+} from "./runtime-port.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   runtimeEventHasModelMessage,
@@ -82,46 +81,27 @@ import {
   type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
   type RuntimeMessageCommittedEvent,
-} from "../runtime/runtime-event.js";
-import { materializeRuntimeHistoryEntries } from "../runtime/runtime-event-read-model.js";
+} from "./session-runtime-event.js";
+import { materializeRuntimeHistoryEntries } from "./session-runtime-read-model.js";
 import {
   RuntimeEventStore,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeSessionManifest,
   type RuntimeSessionProjectionSnapshot,
-} from "../runtime/runtime-event-store.js";
+} from "../storage/runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
   projectRuntimeSessionTranscriptEventEntries,
-} from "../runtime/runtime-session-projection.js";
+} from "./session-runtime-projection.js";
 import { OwnerLease } from "../storage/owner-lease.js";
-
-/** 进程级 per-key drain 表，让不同 SessionManager 实例也不会越过旧 tail。 */
-const sessionDrains = new Map<string, Promise<void>>();
+import { SessionMessageLedger } from "./session-message-ledger.js";
 const summaryStorePool = new Map<string, { store: SessionSummaryStore; refCount: number }>();
-
-function sessionEntryKey(id: string, workDir: string, picoHome?: string): string {
-  return `${resolvePicoPaths(workDir, { picoHome }).workspace.root}\0${id}`;
-}
-
-function registerSessionDrain(key: string, drain: Promise<void>): Promise<void> {
-  const previous = sessionDrains.get(key);
-  const tracked = previous ? Promise.all([previous, drain]).then(() => undefined) : drain;
-  sessionDrains.set(key, tracked);
-  void tracked.then(
-    () => {
-      if (sessionDrains.get(key) === tracked) sessionDrains.delete(key);
-    },
-    () => {
-      if (sessionDrains.get(key) === tracked) sessionDrains.delete(key);
-    },
-  );
-  return tracked;
-}
+import { configureDefaultSessionFactory, SessionManager } from "./session-manager.js";
+import { registerSessionDrain, sessionEntryKey } from "./session-manager-state.js";
 
 function acquireSummaryStore(filePath: string): SessionSummaryStore {
   const existing = summaryStorePool.get(filePath);
@@ -153,6 +133,8 @@ export interface SessionOptions {
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   picoHome?: string;
   identity?: SessionIdentity;
+  /** Runtime adapter used for ambient/external durable commits. */
+  runtimePort?: EngineRuntimePort;
 }
 
 /** fork 只读边界：hydration 与父日志游标必须指向同一次 durable flush。 */
@@ -187,7 +169,7 @@ export interface DurableTuiRewindHandoff {
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供模型投影副本。
  */
-export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuard {
+export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGuard {
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
   readonly id: string;
   /** 该会话绑定的物理工作区 */
@@ -227,26 +209,8 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   totalIncludedCostReports = 0;
   totalUnknownCostReports = 0;
 
-  private history: Message[] = [];
-
-  /**
-   * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 判断
-   * 缓存年龄 + 使用率。不改 Message schema,只在 Session 层维护。
-   * - cachedAt:首次 append 该 ToolResult 的时间戳
-   * - accessCount:被 getModelContext 投影给模型的次数
-   */
-  private toolResultMeta = new Map<string, { cachedAt: number; accessCount: number }>();
-
-  /**
-   * deferredMessages:tool 调用顺序完整性保证(3.4)。
-   * 当 assistant 发出 toolCalls 但 results 尚未到齐时,后续到达的非 ToolResult 消息
-   * 暂存于此,不入 history;待 pendingToolCallIds 清空后逐条重新走 append 入 history。
-   * 避免出现"assistant 发起 toolCalls → user 闲聊 → toolResult"的乱序,
-   * 模型 API 要求 toolCalls 紧跟 toolResults。
-   */
-  private deferredMessages: Message[] = [];
-  /** 正在等待 ToolResult 的 toolCallId 集合。非空表示有 toolCalls 尚未配对。 */
-  private pendingToolCallIds: Set<string> = new Set();
+  /** Disposable message ordering/projection state; durable ownership remains in Session. */
+  private readonly messageLedger = new SessionMessageLedger();
   private readonly inMemoryCommitReceipts = new Map<
     string,
     { readonly message: Message; readonly receipt: CommitReceipt }
@@ -269,6 +233,8 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   private runtimeProjectionBranchId?: string;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
+  /** Runtime lifecycle is injected; absent only for legacy in-memory/direct test hosts. */
+  private readonly runtimePort?: EngineRuntimePort;
   private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
   private persistenceFailure?: SessionWriteUncertainError;
   private closePromise?: Promise<void>;
@@ -312,6 +278,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         sessionProjectDir: workDir,
       });
     this.conversationId = id;
+    this.runtimePort = options?.runtimePort ?? getDefaultEngineRuntimePort();
     this.createdAt = new Date();
     this.updatedAt = new Date();
     fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(workDir));
@@ -435,10 +402,9 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   }
 
   private applyRuntimeHistoryProjection(projection: RuntimeSessionProjectionSnapshot): void {
-    this.history = projectRuntimeSessionMessages(projection.entries.map(({ event }) => event));
-    this.deferredMessages = [];
-    this.rebuildPendingToolState();
-    this.rebuildToolResultMeta();
+    this.messageLedger.replace(
+      projectRuntimeSessionMessages(projection.entries.map(({ event }) => event)),
+    );
     const cursor = projection.cursor;
     this.runtimeProjectionCursor = cursor ? { ...cursor } : undefined;
     this.runtimeProjectionBranchId = projection.activeBranchId;
@@ -461,69 +427,11 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     activeBranchId: string,
     updatedAt: string,
   ): void {
-    for (const message of messages) {
-      this.history.push(message);
-      this.applyRuntimeMessageState(message);
-    }
+    this.messageLedger.appendProjected(messages);
     this.runtimeProjectionCursor = { ...cursor };
     this.runtimeProjectionBranchId = activeBranchId;
     this.conversationId = `${cursor.logId}:${cursor.epoch}`;
     this.updatedAt = new Date(updatedAt);
-  }
-
-  private applyRuntimeMessageState(message: Message): void {
-    if (message.role === "assistant") {
-      for (const toolCall of message.toolCalls ?? []) this.pendingToolCallIds.add(toolCall.id);
-      return;
-    }
-    if (message.role !== "user" || !message.toolCallId) return;
-    this.pendingToolCallIds.delete(message.toolCallId);
-    if (!this.toolResultMeta.has(message.toolCallId)) {
-      this.toolResultMeta.set(message.toolCallId, { cachedAt: Date.now(), accessCount: 0 });
-    }
-  }
-
-  /**
-   * 从当前 history 重建 toolResultMeta 表(用于 recover 后或需要重置时)。
-   * cachedAt 用当前时间(原始时间未持久化),accessCount 归零。
-   */
-  private rebuildToolResultMeta(): void {
-    this.toolResultMeta = new Map();
-    const now = Date.now();
-    for (const msg of this.history) {
-      if (msg.role === "user" && msg.toolCallId) {
-        if (!this.toolResultMeta.has(msg.toolCallId)) {
-          this.toolResultMeta.set(msg.toolCallId, { cachedAt: now, accessCount: 0 });
-        }
-      }
-    }
-  }
-
-  private rebuildPendingToolState(): void {
-    this.pendingToolCallIds.clear();
-    for (const message of this.history) {
-      if (message.role === "assistant") {
-        for (const toolCall of message.toolCalls ?? []) this.pendingToolCallIds.add(toolCall.id);
-      } else if (message.role === "user" && message.toolCallId) {
-        this.pendingToolCallIds.delete(message.toolCallId);
-      }
-    }
-  }
-
-  /**
-   * 清理 history 中已不存在的 ToolResult 对应的 meta 条目。
-   * 在 truncate / undo / rewind / compaction 等缩短 history 的操作后调用,
-   * 防止 toolResultMeta 无限增长。
-   */
-  private pruneToolResultMeta(): void {
-    if (this.toolResultMeta.size === 0) return;
-    const live = new Set<string>();
-    for (const msg of this.history) {
-      if (msg.role === "user" && msg.toolCallId) live.add(msg.toolCallId);
-    }
-    for (const id of this.toolResultMeta.keys()) {
-      if (!live.has(id)) this.toolResultMeta.delete(id);
-    }
   }
 
   private async recoverFileHistory(): Promise<void> {
@@ -738,8 +646,8 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         identity: structuredClone(this.identity),
         createdAt: this.createdAt.toISOString(),
         updatedAt: this.updatedAt.toISOString(),
-        messages: structuredClone(this.history),
-        messageSequences: this.history.map((_, index) => index + 1),
+        messages: structuredClone([...this.messageLedger.readHistory()]),
+        messageSequences: this.messageLedger.readHistory().map((_, index) => index + 1),
         transcriptEvents: [],
         transcriptEventSequences: [],
         runtime: this.getRuntimeStateSnapshot(),
@@ -879,16 +787,20 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       for (const msg of msgs) this.appendOneInMemory(msg);
       return;
     }
-    const runtimeRun = currentRuntimeRun();
     await this.enqueuePersistence("messages", async () => {
       await this.ensureRuntimeSession();
+      const runtimeRun = this.runtimePort?.currentRun();
       if (runtimeRun?.claimsSession(this)) {
         await runtimeRun.commitMessages(this, msgs);
         return;
       }
-      if (!(await RuntimeRun.commitExternalMessages(this, msgs))) {
-        throw new Error(`Runtime session ${this.id} is not initialized`);
+      if (this.runtimePort) {
+        if (!(await this.runtimePort.commitExternalMessages(this, msgs))) {
+          throw new Error(`Runtime session ${this.id} is not initialized`);
+        }
+        return;
       }
+      await this.commitExternalMessagesWithoutRuntime(msgs);
     });
   }
 
@@ -900,16 +812,64 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
     if (!this.store) return this.commitProjectionMessageOnce(eventId, message);
-    const runtimeRun = currentRuntimeRun();
     return this.enqueuePersistence("message", async () => {
       await this.ensureRuntimeSession();
+      const runtimeRun = this.runtimePort?.currentRun();
       if (runtimeRun?.claimsSession(this)) {
         return runtimeRun.commitMessageOnce(this, eventId, message);
       }
-      const receipt = await RuntimeRun.commitExternalMessageOnce(this, eventId, message);
-      if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
-      return receipt;
+      if (this.runtimePort) {
+        const receipt = await this.runtimePort.commitExternalMessageOnce(this, eventId, message);
+        if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
+        return receipt;
+      }
+      return this.commitExternalMessageOnceWithoutRuntime(eventId, message);
     });
+  }
+
+  /**
+   * Legacy hosts may construct Session without a Runtime adapter. Keep that
+   * path durable and serialized, but intentionally do not synthesize a second
+   * RuntimeRun lifecycle; production hosts inject the adapter above.
+   */
+  private async commitExternalMessagesWithoutRuntime(messages: readonly Message[]): Promise<void> {
+    if (messages.length === 0) return;
+    const store = this.store;
+    if (!store) throw new Error("Session persistence is disabled");
+    const events: RuntimeMessageCommittedEvent[] = messages.map((message) => ({
+      ...this.runtimeEventBase(`session-external:${randomUUID()}`, "session-external", "model"),
+      kind: "message.committed",
+      data: { message: structuredClone(message) },
+    }));
+    await this.commitRuntimeProjectionBatch(await store.appendBatch(events));
+  }
+
+  private async commitExternalMessageOnceWithoutRuntime(
+    eventId: string,
+    message: Message,
+  ): Promise<CommitReceipt> {
+    const store = this.store;
+    if (!store) throw new Error("Session persistence is disabled");
+    const existing = await store.readSessionEvent(this.id, eventId);
+    if (existing) {
+      if (
+        existing.event.kind !== "message.committed" ||
+        !isDeepStrictEqual(existing.event.data.message, message)
+      ) {
+        throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
+      }
+      const persisted = await store.append(existing.event);
+      await this.commitRuntimeProjectionBatch([persisted]);
+      return commitReceiptFromAppend(persisted);
+    }
+    const event: RuntimeMessageCommittedEvent = {
+      ...this.runtimeEventBase(eventId, "session-external", "model"),
+      kind: "message.committed",
+      data: { message: structuredClone(message) },
+    };
+    const persisted = await store.append(event);
+    await this.commitRuntimeProjectionBatch([persisted]);
+    return commitReceiptFromAppend(persisted);
   }
 
   /** Advances the disposable in-memory Session projection once for one durable append batch. */
@@ -936,7 +896,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     if (
       !previousCursor ||
       !previousBranchId ||
-      this.deferredMessages.length > 0 ||
+      this.messageLedger.deferredCount > 0 ||
       !commitsAreFreshAndOrdered
     ) {
       await this.replayRuntimeHistoryProjection();
@@ -997,11 +957,10 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         }
         return { ...existing.receipt, inserted: false };
       }
-      const prepared = this.prepareAppend(message);
-      if (prepared.deferred) {
+      if (this.messageLedger.wouldDefer(message)) {
         throw new Error("Exactly-once message cannot be deferred behind incomplete tool results");
       }
-      this.doAppend(message);
+      this.appendOneInMemory(message);
       const committedAt = new Date().toISOString();
       const receipt: CommitReceipt = {
         eventId,
@@ -1019,15 +978,6 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         message: structuredClone(message),
         receipt,
       });
-      if (
-        prepared.toolResult &&
-        this.pendingToolCallIds.size === 0 &&
-        this.deferredMessages.length > 0
-      ) {
-        const pending = this.deferredMessages;
-        this.deferredMessages = [];
-        for (const deferred of pending) this.appendOneInMemory(deferred);
-      }
       return receipt;
     }
     await this.ensureRuntimeSession();
@@ -1053,10 +1003,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.assertWritable();
     if (!projectionEventId.trim()) throw new Error("Runtime projection eventId 不能为空");
     if (!this.store) {
-      this.history = structuredClone([...messages]);
-      this.deferredMessages = [];
-      this.rebuildPendingToolState();
-      this.rebuildToolResultMeta();
+      this.messageLedger.replace(messages);
       this.updatedAt = new Date();
       return;
     }
@@ -1091,64 +1038,9 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.updatedAt = new Date(events.at(-1)?.at ?? this.updatedAt);
   }
 
-  private prepareAppend(msg: Message): {
-    readonly deferred: boolean;
-    readonly toolResult: boolean;
-  } {
-    const hasToolCalls =
-      msg.role === "assistant" && msg.toolCalls !== undefined && msg.toolCalls.length > 0;
-    const isToolResult = msg.role === "user" && msg.toolCallId !== undefined;
-
-    // 1. assistant 带 toolCalls:登记 pendingToolCallIds,然后正常入 history
-    //    (toolCalls 消息是配对的源头,绝不能延迟,否则 ToolResult 变孤儿)
-    if (hasToolCalls && msg.toolCalls) {
-      for (const tc of msg.toolCalls) {
-        this.pendingToolCallIds.add(tc.id);
-      }
-    }
-
-    // 2. ToolResult 到达:从 pending 删除;记录 toolResultMeta
-    if (isToolResult && msg.toolCallId) {
-      this.pendingToolCallIds.delete(msg.toolCallId);
-      // 记录元数据(cachedAt = 当前时间,accessCount 后续 bump)
-      if (!this.toolResultMeta.has(msg.toolCallId)) {
-        this.toolResultMeta.set(msg.toolCallId, {
-          cachedAt: Date.now(),
-          accessCount: 0,
-        });
-      }
-    }
-
-    // 3. 决定是否暂存:普通消息(非 ToolResult、非带 toolCalls 的 assistant)
-    //    且 pendingToolCallIds 非空 → 暂存,不入 history
-    //    ToolResult 与 带 toolCalls 的 assistant 永远直接入 history
-    const isDeferredCandidate = !isToolResult && !hasToolCalls;
-    if (isDeferredCandidate && this.pendingToolCallIds.size > 0) {
-      this.deferredMessages.push(msg);
-      return { deferred: true, toolResult: isToolResult };
-    }
-    return { deferred: false, toolResult: isToolResult };
-  }
-
   private appendOneInMemory(msg: Message): void {
-    const prepared = this.prepareAppend(msg);
-    if (prepared.deferred) return;
-    this.doAppend(msg);
-    if (
-      prepared.toolResult &&
-      this.pendingToolCallIds.size === 0 &&
-      this.deferredMessages.length > 0
-    ) {
-      const pending = this.deferredMessages;
-      this.deferredMessages = [];
-      for (const deferred of pending) this.appendOneInMemory(deferred);
-    }
-  }
-
-  /** persistence:false 兼容路径。 */
-  private doAppend(msg: Message): void {
-    this.history.push(msg);
-    this.updatedAt = new Date();
+    const result = this.messageLedger.append(msg);
+    if (result.appended.length > 0) this.updatedAt = new Date();
   }
 
   /**
@@ -1160,13 +1052,13 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   async truncateTo(fromIndex: number): Promise<void> {
     this.assertWritable();
     if (fromIndex < 0) fromIndex = 0;
-    const nextHistory = fromIndex >= this.history.length ? [] : this.history.slice(fromIndex);
+    const history = this.messageLedger.readHistory();
+    const nextHistory = fromIndex >= history.length ? [] : history.slice(fromIndex);
     if (this.store) {
       await this.replaceRuntimeHistory(nextHistory, "truncate");
       return;
     }
-    this.history = nextHistory;
-    this.pruneToolResultMeta();
+    this.messageLedger.truncateTo(fromIndex);
     this.updatedAt = new Date();
   }
 
@@ -1178,19 +1070,14 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   async undo(count: number): Promise<void> {
     this.assertWritable();
     if (count <= 0) return;
-    const { cutIndex, removedCount } = findUndoCut(this.history, count);
+    const { cutIndex, removedCount } = findUndoCut(this.messageLedger.readHistory(), count);
     if (removedCount === 0) return;
     const runtimeBranchId = `undo:${randomUUID()}`;
     if (this.store) {
       await this.commitRuntimeRewind(cutIndex, runtimeBranchId);
       return;
     }
-    const nextHistory = this.history.slice(0, cutIndex);
-    this.history = nextHistory;
-    this.pruneToolResultMeta();
-    // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
-    this.deferredMessages = [];
-    this.pendingToolCallIds.clear();
+    this.messageLedger.retainPrefix(cutIndex, { resetOrderingState: true });
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
   }
@@ -1214,7 +1101,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
       {
         messageId,
         userPrompt: input.userPrompt,
-        messageIndex: this.history.length,
+        messageIndex: this.messageLedger.length,
         ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
@@ -1260,11 +1147,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     this.assertWritable();
     const runtimeBranchId = eventId ?? `rewind:${randomUUID()}`;
     if (this.store) return this.commitRuntimeRewind(messageIndex, runtimeBranchId);
-    const nextHistory = this.history.slice(0, messageIndex);
-    this.history = nextHistory;
-    this.pruneToolResultMeta();
-    this.deferredMessages = [];
-    this.pendingToolCallIds.clear();
+    this.messageLedger.retainPrefix(messageIndex, { resetOrderingState: true });
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
     return undefined;
@@ -1306,7 +1189,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     await this.executeRewindOperation(
       "code",
       snapshot,
-      snapshot.messageIndex ?? this.history.length,
+      snapshot.messageIndex ?? this.messageLedger.length,
       randomUUID(),
       expectedCurrentFingerprints,
     );
@@ -1383,7 +1266,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
         mode,
         precondition: {
           sessionLastSeq: Math.max(0, head?.seq ?? 0),
-          effectiveHistoryDigest: sessionHistoryDigest(this.history),
+          effectiveHistoryDigest: sessionHistoryDigest(this.messageLedger.readHistory()),
           fileHistoryRevision: this.fileHistory.revision,
         },
         target: {
@@ -1584,7 +1467,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
     }
 
     const currentSeq = Math.max(0, (await this.store?.getHeadCursor(this.id))?.seq ?? 0);
-    const currentDigest = sessionHistoryDigest(this.history);
+    const currentDigest = sessionHistoryDigest(this.messageLedger.readHistory());
     const mismatches = [
       ...(currentSeq !== operation.precondition.sessionLastSeq
         ? [`session seq ${currentSeq} != ${operation.precondition.sessionLastSeq}`]
@@ -1629,22 +1512,19 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
   ): Promise<void> {
     this.assertWritable();
     if (compactedCount < 0) compactedCount = 0;
-    if (compactedCount > this.history.length) compactedCount = this.history.length;
-    const retained = this.history.slice(compactedCount);
     // 摘要消息:role=assistant(对标 kimi-code compaction_summary)
     const summaryMsg: Message = {
       role: "assistant",
       content: summary,
       providerData: { ...options.summaryProviderData, picoKind: "compaction_summary" },
     };
-    const nextHistory = [summaryMsg, ...retained];
     if (this.store) {
-      await this.replaceRuntimeHistory(nextHistory, "compaction");
+      const count = Math.max(0, Math.min(this.messageLedger.length, Math.trunc(compactedCount)));
+      const retained = this.messageLedger.readHistory().slice(count);
+      await this.replaceRuntimeHistory([summaryMsg, ...retained], "compaction");
       return;
     }
-    this.history = nextHistory;
-    // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
-    this.pruneToolResultMeta();
+    this.messageLedger.compact(summaryMsg, compactedCount);
     this.updatedAt = new Date();
   }
 
@@ -1691,12 +1571,12 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
 
   /** 全量历史深拷贝，供宿主投影、诊断与压缩读取，不作为 Provider 的直接投影策略。 */
   getHistory(): Message[] {
-    return structuredClone(this.history);
+    return structuredClone([...this.messageLedger.readHistory()]);
   }
 
   /** 当前历史消息条数 */
   get length(): number {
-    return this.history.length;
+    return this.messageLedger.length;
   }
 
   /**
@@ -1705,18 +1585,12 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
    * belongs to the projection/compaction layer.
    */
   getModelContext(): Message[] {
-    const context = this.history.map((message) => ({ ...message }));
-    for (const message of context) {
-      if (message.role !== "user" || message.toolCallId === undefined) continue;
-      const meta = this.toolResultMeta.get(message.toolCallId);
-      if (meta) meta.accessCount++;
-    }
-    return context;
+    return this.messageLedger.getModelContext();
   }
 
   /** True only while the tail tool exchange is still waiting for results. */
   hasPendingToolResults(): boolean {
-    return hasIncompleteToolExchange(this.history);
+    return this.messageLedger.hasPendingToolResults();
   }
 
   /**
@@ -1724,7 +1598,7 @@ export class Session implements SessionRuntimePersistence, RuntimeEventWriteGuar
    * 读取缓存年龄与使用率。返回只读视图。
    */
   getToolResultMeta(): ReadonlyMap<string, { cachedAt: number; accessCount: number }> {
-    return this.toolResultMeta;
+    return this.messageLedger.getToolResultMeta();
   }
 
   saveMemorySummary(summary: string, messageCount: number): void {
@@ -2200,239 +2074,8 @@ function restorePersistedInteractionMode(
   return next;
 }
 
-/**
- * SessionManager:全局会话管理器,负责多用户 / 多终端的物理隔离。
- * 以 sessionId 为 key,O(1) 路由到对应 Session 实例。
- *
- * 【内存治理】LRU + TTL 双重驱逐,防长跑内存膨胀:
- * - LRU:maxSessions 上限(默认 128)。超出时驱逐"最近最少使用"的 Session,
- *   驱逐前调 session.close() 释放 SQLite 句柄(防 fd 泄漏)。
- * - TTL:空闲超时(默认 24h)。每次 getOrCreate 惰性扫描,驱逐长期闲置 Session。
- *   飞书多群场景下,沉默群的历史不再常驻内存,被再次唤醒时从 RuntimeEvent recover 重建。
- * - MRU 提升:get/getOrCreate/delete+set 把目标提到 Map 末尾(最近使用),
- *   Map 的迭代序即 LRU 序,首个元素即最旧。对标 hermes GatewaySession 的容量管理。
- *
- * 注意:驱逐只释放内存实例 + SQLite 句柄;runtime.sqlite 事件不删,
- * 被 recover 唤醒即可续传。
- */
-export class SessionManager {
-  /** 默认最大常驻会话数(对标 hermes gateway 的会话池上限量级) */
-  static readonly DEFAULT_MAX_SESSIONS = 128;
-  /** 默认空闲超时 24h:超过未访问的会话被惰性驱逐 */
-  static readonly DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+/** SessionManager is kept as a public re-export for existing consumers. */
+export { SessionManager } from "./session-manager.js";
 
-  private readonly entries = new Map<
-    string,
-    { session: Session; lastAccessMs: number; pinCount: number }
-  >();
-  /** 合并同 key 的并发 recover，避免 drain 结束后同时创建两个实例。 */
-  private readonly openingByKey = new Map<string, Promise<Session>>();
-  private readonly maxSessions: number;
-  private readonly ttlMs: number;
-
-  constructor(options?: { maxSessions?: number; ttlMs?: number }) {
-    this.maxSessions = options?.maxSessions ?? SessionManager.DEFAULT_MAX_SESSIONS;
-    this.ttlMs = options?.ttlMs ?? SessionManager.DEFAULT_TTL_MS;
-  }
-
-  /**
-   * 获取或创建一个会话(同 id + 同 workDir 复用,否则物理隔离)。
-   * 新建时自动投影 runtime.sqlite 事件恢复历史。返回 Promise 以支持异步恢复。
-   * persistence 显式透传给 Session(测试场景精确控制,避免环境变量并行污染)。
-   *
-   * 命中时做 MRU 提升(删除后重新 set 到末尾);新建后触发 LRU 驱赶 + TTL 惰性清理。
-   */
-  async getOrCreate(id: string, workDir: string, options?: SessionOptions): Promise<Session> {
-    // TTL 惰性清理:借这次访问顺带扫一遍过期项(低频,不阻塞主流程)。
-    this.evictExpired();
-
-    const key = this.entryKey(id, workDir, options?.picoHome);
-    const existing = this.entries.get(key);
-    if (existing) {
-      existing.lastAccessMs = Date.now();
-      this.touch(key); // MRU 提升
-      return existing.session;
-    }
-
-    const opening = this.openingByKey.get(key);
-    if (opening) return opening;
-
-    const created = this.openAfterDrain(key, id, workDir, options);
-    this.openingByKey.set(key, created);
-    try {
-      return await created;
-    } finally {
-      if (this.openingByKey.get(key) === created) this.openingByKey.delete(key);
-    }
-  }
-
-  /**
-   * 获取已存在的会话(不创建)。命中时做 MRU 提升与 lastAccess 更新。
-   * 不触发 TTL 清理(get 应轻量;清理在 getOrCreate 路径做)。
-   */
-  get(
-    id: string,
-    workDir?: string,
-    options: { readonly picoHome?: string } = {},
-  ): Session | undefined {
-    const key = this.findEntryKey(id, workDir, options.picoHome);
-    if (!key) return undefined;
-    const entry = this.entries.get(key);
-    if (!entry) return undefined;
-    entry.lastAccessMs = Date.now();
-    this.touch(key);
-    return entry.session;
-  }
-
-  /**
-   * Pins the exact managed Session for a long-lived SessionRuntime. The returned release
-   * is idempotent; the final release starts a fresh idle window without weakening identity checks.
-   */
-  pin(session: Session): () => void {
-    const key = this.entryKey(session.id, session.workDir, session.picoHome);
-    const entry = this.entries.get(key);
-    if (!entry) {
-      throw new Error(`SessionManager cannot pin unmanaged Session: ${session.id}`);
-    }
-    if (entry.session !== session) {
-      throw new Error(`SessionManager cannot pin a different Session instance: ${session.id}`);
-    }
-    entry.pinCount++;
-    entry.lastAccessMs = Date.now();
-    this.touch(key);
-
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      entry.pinCount--;
-      if (entry.pinCount < 0) {
-        throw new Error(`SessionManager pin underflow: ${session.id}`);
-      }
-      if (entry.pinCount === 0 && this.entries.get(key) === entry) {
-        entry.lastAccessMs = Date.now();
-        this.touch(key);
-      }
-    };
-  }
-
-  /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined。释放底层资源。 */
-  delete(
-    id: string,
-    workDir?: string,
-    options: { readonly picoHome?: string } = {},
-  ): Session | undefined {
-    const key = this.findEntryKey(id, workDir, options.picoHome);
-    if (!key) return undefined;
-    return this.deleteByKey(key);
-  }
-
-  /** 当前管理的会话总数 */
-  get size(): number {
-    return this.entries.size;
-  }
-
-  /** 清空所有会话(主要用于测试)。释放每个 Session 的底层资源。 */
-  clear(): void {
-    for (const key of [...this.entries.keys()]) this.deleteByKey(key);
-  }
-
-  /** MRU 提升:把 key 移到 Map 末尾(最近使用),保持迭代序 = LRU 序。 */
-  private touch(key: string): void {
-    const entry = this.entries.get(key);
-    if (!entry) return;
-    this.entries.delete(key);
-    this.entries.set(key, entry);
-  }
-
-  /** LRU 驱赶:超出 maxSessions 时驱逐最旧项,直到回到上限内。 */
-  private evictLru(protectedKey?: string): void {
-    while (this.entries.size > this.maxSessions) {
-      const oldestInactive = [...this.entries].find(
-        ([key, entry]) =>
-          key !== protectedKey && entry.pinCount === 0 && !entry.session.hasPendingTasks,
-      )?.[0];
-      if (oldestInactive === undefined) break;
-      this.deleteByKey(oldestInactive);
-    }
-  }
-
-  /** TTL 惰性清理:驱逐空闲超过 ttlMs 的会话。每次 getOrCreate 调一次。 */
-  private evictExpired(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.entries) {
-      if (
-        entry.pinCount === 0 &&
-        !entry.session.hasPendingTasks &&
-        now - entry.lastAccessMs > this.ttlMs
-      ) {
-        this.deleteByKey(key);
-      }
-    }
-  }
-
-  private deleteByKey(key: string): Session | undefined {
-    const entry = this.entries.get(key);
-    if (!entry) return undefined;
-    this.entries.delete(key);
-    this.startDrain(key, entry.session);
-    return entry.session;
-  }
-
-  private async openAfterDrain(
-    key: string,
-    id: string,
-    workDir: string,
-    options?: SessionOptions,
-  ): Promise<Session> {
-    await sessionDrains.get(key);
-
-    // drain 等待期间可能已有其他路径完成创建，再检查一次。
-    const existing = this.entries.get(key);
-    if (existing) {
-      existing.lastAccessMs = Date.now();
-      this.touch(key);
-      return existing.session;
-    }
-
-    const session = new Session(id, workDir, options);
-    try {
-      await session.recover();
-    } catch (error) {
-      await session.close().catch(() => undefined);
-      throw error;
-    }
-    this.entries.set(key, { session, lastAccessMs: Date.now(), pinCount: 0 });
-    // A newly returned Session must not be immediately closed when older entries are pinned.
-    this.evictLru(key);
-    return session;
-  }
-
-  private startDrain(key: string, session: Session): void {
-    void session.close().catch((error: unknown) => {
-      logger.warn({ key, error: String(error) }, "[session] 驱逐时持久化 drain 失败");
-    });
-  }
-
-  private entryKey(id: string, workDir: string, picoHome?: string): string {
-    return sessionEntryKey(id, workDir, picoHome);
-  }
-
-  private findEntryKey(id: string, workDir?: string, picoHome?: string): string | undefined {
-    if (workDir !== undefined) {
-      const key = this.entryKey(id, workDir, picoHome);
-      return this.entries.has(key) ? key : undefined;
-    }
-
-    for (const [key, entry] of [...this.entries].reverse()) {
-      if (entry.session.id === id) return key;
-    }
-    return undefined;
-  }
-}
-
-/**
- * 全局 SessionManager 单例。
- * 飞书后台无论收到多少群聊,都通过分配不同的 sessionId 各自安好。
- */
+configureDefaultSessionFactory((id, workDir, options) => new Session(id, workDir, options));
 export const globalSessionManager = new SessionManager();

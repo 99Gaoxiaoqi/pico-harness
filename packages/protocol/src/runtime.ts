@@ -187,6 +187,13 @@ export type RuntimeConversationItem = (
     })
   | (JsonObject & {
       readonly id: string;
+      /** Provider explicitly returned reasoning/thinking content. */
+      readonly kind: "thinking";
+      readonly content: string;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
       readonly kind: "skill";
       readonly name: string;
       readonly args: string;
@@ -314,7 +321,19 @@ export type RuntimeResourceDiagnosticsReport = {
   readonly workspaceStateRoot: string;
   readonly entries: readonly RuntimeResourceDiagnosticEntry[];
   readonly findings: readonly string[];
+  /** Plugin snapshot diagnostics are surfaced by the host; they are not resource entries. */
+  readonly pluginDiagnostics?: readonly RuntimePluginDiagnostic[];
   readonly output: string;
+};
+
+export type RuntimePluginDiagnostic = {
+  readonly pluginId: string;
+  readonly sourcePath: string;
+  readonly message: string;
+  readonly code?: string;
+  readonly scope?: "user" | "project" | "local";
+  readonly severity?: "error" | "warning" | "info";
+  readonly compatibility?: "compatible" | "degraded" | "blocked";
 };
 
 export type RuntimeMethodMap = {
@@ -1848,6 +1867,7 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
         "assistantMessage",
         "systemNotice",
         "error",
+        "thinking",
         "skill",
         "plan",
         "tool",
@@ -1869,7 +1889,8 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     kind === "userMessage" ||
     kind === "assistantMessage" ||
     kind === "systemNotice" ||
-    kind === "error"
+    kind === "error" ||
+    kind === "thinking"
   ) {
     resultShape({ content: resultString })(value, path);
     return;

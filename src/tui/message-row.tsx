@@ -7,7 +7,7 @@
 // 分发逻辑(按 entry.kind):
 //   - user      : 绿色 ❯ + 内容(提交即固定)
 //   - assistant : isStatic 用 CompletedText(代码块着色,非流式);
-//                 否则用 StreamingText(末条流式中,按行增量渲染)
+//                 否则用 StreamingText(完整 Markdown 文档流式渲染)
 //   - system    : 淡色 • + 内容(本地控制面反馈)
 //   - error     : 黄色 ! + 结构化错误信息
 //   - logo      : 会话启动摘要,作为 transcript 首项
@@ -84,13 +84,13 @@ function MessageRowImpl({
 
     case "assistant":
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
-      // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
+      // 否则(末条流式中)走 StreamingText(完整 token tree 渲染)
       return (
         <MessageFrame marker="✦" markerColor="cyan">
           {isStatic ? (
-            <CompletedText content={entry.content} />
+            <CompletedText content={entry.content} width={wrapWidth} />
           ) : (
-            <StreamingText content={entry.content} />
+            <StreamingText content={entry.content} width={wrapWidth} />
           )}
         </MessageFrame>
       );
@@ -138,7 +138,7 @@ function MessageRowImpl({
       if (!entry.content) return null;
       return (
         <MessageFrame marker="∴" markerColor="gray">
-          <MarkdownText content={entry.content} dimColor />
+          <MarkdownText content={entry.content} dimColor width={wrapWidth} />
         </MessageFrame>
       );
 

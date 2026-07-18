@@ -131,7 +131,7 @@ generateWithRetry (内层:普通重试)
 - **增量投影**：正常提交读取 canonical suffix；首次恢复、rewind、重复事件或游标/分支错位才做全量 replay
 - **LRU + TTL 双重驱逐**：maxSessions=128，TTL=24h；活跃 `SessionRuntime` 会 pin Session，关闭时 release
 
-### RuntimeEventStore (`src/runtime/runtime-event-store.ts`)
+### RuntimeEventStore (`src/storage/runtime-event-store.ts`)
 
 SQLite 追加事件表是会话与运行时的唯一事实源：`message.committed`、
 `session.state.committed`、`history.rewound`、`session.forked` 与 run/tool/model 事实共享一条全序列。

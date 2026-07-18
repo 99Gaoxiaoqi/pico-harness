@@ -106,6 +106,7 @@ import {
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -828,6 +829,7 @@ function createOperationsCommand(options: PicoCommandRegistryOptions): SlashComm
     (fallback ??= new SessionForkService({
       workDir: options.workDir,
       ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+      runtimePort: createSessionForkRuntimePort(),
     }));
   const subcommands: readonly SlashArgumentCandidate[] = [
     { value: "list", description: "List operations requiring manual disposition" },

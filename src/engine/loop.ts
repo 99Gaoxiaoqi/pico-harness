@@ -66,16 +66,11 @@ import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
+import type { EngineRuntimePort } from "./runtime-port.js";
 import type { HookService } from "../hooks/service.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
-import {
-  currentRuntimeRun,
-  currentRuntimeToolCallId,
-  RuntimeRun,
-  runWithRuntimeToolCall,
-} from "../runtime/runtime-run.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   delegationTaskCountFromArguments,
@@ -507,6 +502,8 @@ export interface AgentEngineOptions {
   hookService?: HookService;
   /** 为主工作区及隔离 worktree 构建同策略 Skill Catalog。 */
   skillLoaderFactory?: (workDir: string) => SkillLoader;
+  /** Runtime-owned lifecycle port; the engine never imports the durable implementation. */
+  runtimePort?: EngineRuntimePort;
 }
 
 export interface SubagentExecutionRuntime {
@@ -579,6 +576,7 @@ export class AgentEngine implements AgentRunner {
   private readonly rebuildProvider?: () => LLMProvider | undefined;
   private readonly hookService?: HookService;
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
+  private readonly runtimePort?: EngineRuntimePort;
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -623,6 +621,7 @@ export class AgentEngine implements AgentRunner {
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
     this.skillLoaderFactory = opts.skillLoaderFactory;
+    this.runtimePort = opts.runtimePort;
   }
 
   /**
@@ -776,13 +775,13 @@ export class AgentEngine implements AgentRunner {
 
   /** RuntimeEvent is the source of truth for production model history; Session is its UI projection. */
   private async readModelHistory(session: Session): Promise<Message[]> {
-    const runtimeRun = currentRuntimeRun();
+    const runtimeRun = this.runtimePort?.currentRun();
     if (runtimeRun?.claimsSession(session)) return runtimeRun.readModelHistory();
     return session.getModelContext();
   }
 
   private isRuntimeSession(session: Session): boolean {
-    return currentRuntimeRun()?.claimsSession(session) === true;
+    return this.runtimePort?.currentRun()?.claimsSession(session) === true;
   }
 
   /**
@@ -794,7 +793,7 @@ export class AgentEngine implements AgentRunner {
     request: FullCompactionRequest,
     signal?: AbortSignal,
   ): Promise<FullCompactionPreview | undefined> {
-    const runtimeRun = currentRuntimeRun();
+    const runtimeRun = this.runtimePort?.currentRun();
     if (!runtimeRun?.claimsSession(session) || !this.fullCompactor) {
       return undefined;
     }
@@ -843,7 +842,7 @@ export class AgentEngine implements AgentRunner {
     session: Session,
     currentRequestSessionIndex: number,
   ): Promise<void> {
-    const runtimeRun = currentRuntimeRun();
+    const runtimeRun = this.runtimePort?.currentRun();
     if (!runtimeRun?.claimsSession(session)) {
       throw new Error("Runtime hard reset requires the active canonical run");
     }
@@ -1089,7 +1088,7 @@ export class AgentEngine implements AgentRunner {
         this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal),
       );
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
-    const ambientRun = currentRuntimeRun();
+    const ambientRun = this.runtimePort?.currentRun();
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
     if (!session.runtimeEventStore) {
       if (ambientRun && !ambientRun.claimsSession(session)) {
@@ -1116,17 +1115,21 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     const runtimeStore = session.runtimeEventStore;
-    await RuntimeRun.reconcileIncompleteRuns({
+    const runtimePort = this.runtimePort;
+    if (!runtimePort) {
+      throw new Error("Durable AgentEngine execution requires an injected runtimePort");
+    }
+    await runtimePort.reconcileIncompleteRuns({
       sessionId: session.id,
       workDir: session.workDir,
       ...(runtimeStore ? { store: runtimeStore } : {}),
       writeGuard: session,
     });
-    await RuntimeRun.repairSessionProjection(session, {
+    await runtimePort.repairSessionProjection(session, {
       workDir: session.workDir,
       ...(runtimeStore ? { store: runtimeStore } : {}),
     });
-    const runtimeRun = await RuntimeRun.start({
+    const runtimeRun = await runtimePort.startRun({
       sessionId: session.id,
       workDir: session.workDir,
       ...(runtimeStore ? { store: runtimeStore } : {}),
@@ -1210,7 +1213,7 @@ export class AgentEngine implements AgentRunner {
           );
           break;
         }
-        await currentRuntimeRun()?.recordTurnStarted(turnCount);
+        await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         const currentMessageId =
@@ -1717,9 +1720,11 @@ export class AgentEngine implements AgentRunner {
                         settleOnAbort: fileSideEffectKinds[index] !== "none",
                         start: async () => {
                           signal?.throwIfAborted();
-                          return runWithRuntimeToolCall(tc.id, () =>
-                            this.runOneTool(tc, reporter, session.id, turnSpan, signal),
-                          );
+                          return this.runtimePort
+                            ? this.runtimePort.runWithToolCall(tc.id, () =>
+                                this.runOneTool(tc, reporter, session.id, turnSpan, signal),
+                              )
+                            : this.runOneTool(tc, reporter, session.id, turnSpan, signal);
                         },
                       });
                 scheduled.push(
@@ -1962,7 +1967,7 @@ export class AgentEngine implements AgentRunner {
       signal?.throwIfAborted();
       reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
-      const runtimeRun = currentRuntimeRun();
+      const runtimeRun = this.runtimePort?.currentRun();
       let result: ToolResult;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
@@ -2377,7 +2382,8 @@ export class AgentEngine implements AgentRunner {
       withProviderCallContext({ purpose: "subagent", ...(opts.usageAttribution ?? {}) }, () =>
         runtime.compactor ? runtime.compactor.runInIsolatedScope(run) : run(),
       );
-    const parentRun = currentRuntimeRun();
+    const runtimePort = this.runtimePort;
+    const parentRun = runtimePort?.currentRun();
     if (!parentRun) return runAttributed();
     const writeGuard = parentRun.runtimeEventWriteGuard;
     if (!writeGuard) {
@@ -2386,13 +2392,17 @@ export class AgentEngine implements AgentRunner {
       );
     }
 
-    const childRun = await RuntimeRun.start({
+    if (!runtimePort) {
+      throw new Error("Nested Runtime run requires an injected runtimePort");
+    }
+    const parentToolCallId = runtimePort.currentToolCallId();
+    const childRun = await runtimePort.startRun({
       sessionId: parentRun.sessionId,
       // The parent Session owns the durable run directory even when the child operates
       // in an isolated worktree. This keeps one recoverable session ledger.
       workDir: parentRun.workDir,
       parentRunId: parentRun.runId,
-      ...(currentRuntimeToolCallId() ? { parentToolCallId: currentRuntimeToolCallId() } : {}),
+      ...(parentToolCallId ? { parentToolCallId } : {}),
       store: parentRun.store,
       writeGuard,
     });
@@ -2496,7 +2506,7 @@ export class AgentEngine implements AgentRunner {
       { role: "system", content: subSystemPrompt },
       { role: "user", content: effectiveTaskPrompt },
     ];
-    await currentRuntimeRun()?.recordTranscriptMessage(contextHistory[1]!);
+    await this.runtimePort?.currentRun()?.recordTranscriptMessage(contextHistory[1]!);
 
     // maxTurns 可由调用方覆盖(默认 10)。最后一轮始终预留为 tools=[] 收口，
     // 不通过提高上限隐藏控制流问题。
@@ -2569,7 +2579,7 @@ export class AgentEngine implements AgentRunner {
       }
       const budgetDecision = this.consumeSubagentResponseBudget(runtime, actionResp, costBefore);
       contextHistory.push(actionResp);
-      await currentRuntimeRun()?.recordTranscriptMessage(actionResp);
+      await this.runtimePort?.currentRun()?.recordTranscriptMessage(actionResp);
 
       if (actionResp.content) {
         rep.onMessage(`[Subagent] ${actionResp.content}`);
@@ -2702,11 +2712,13 @@ export class AgentEngine implements AgentRunner {
           start: async () => {
             signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
-            const runtimeRun = currentRuntimeRun();
+            const runtimeRun = this.runtimePort?.currentRun();
             await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
-            const result = await runWithRuntimeToolCall(tc.id, () =>
-              readOnlyRegistry.execute(tc, { signal }),
-            );
+            const result = await (this.runtimePort
+              ? this.runtimePort.runWithToolCall(tc.id, () =>
+                  readOnlyRegistry.execute(tc, { signal }),
+                )
+              : readOnlyRegistry.execute(tc, { signal }));
             let finalOutput = result.output;
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);

@@ -12,10 +12,12 @@ import type {
   PersistedSessionSettings,
   SessionUsageSnapshot,
 } from "../../src/engine/session-runtime.js";
+import { EffectiveConfigResolver } from "../../src/input/effective-config.js";
 import {
   forgetSessionSettings,
   resolveRestoredSessionModelRoute,
 } from "../../src/input/session-settings.js";
+import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import {
   loadEffectiveModelRuntime,
@@ -175,6 +177,9 @@ test(
 
 async function configuredRealModel(): Promise<RealModel> {
   realModelPromise ??= (async () => {
+    const modelConfigHome = await MODEL_CONFIG_HOME;
+    const userConfigStore = new UserConfigStore({ picoHome: modelConfigHome });
+    const configResolver = new EffectiveConfigResolver({ userConfigStore });
     const runtime = await loadEffectiveModelRuntime({
       workDir: PROJECT_ROOT,
       projectTrusted: true,
@@ -182,7 +187,8 @@ async function configuredRealModel(): Promise<RealModel> {
       legacyModel: process.env.LLM_MODEL?.trim() || "unused-real-model-e2e-legacy-route",
       legacyModelExplicit: false,
       env: process.env,
-      picoHome: await MODEL_CONFIG_HOME,
+      userConfigStore,
+      configResolver,
     });
     const configured = runtime.router.providerConfig(runtime.config.defaultModelRouteId);
     return { runtime, ...configured };

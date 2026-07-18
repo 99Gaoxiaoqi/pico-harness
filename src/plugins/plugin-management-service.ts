@@ -13,6 +13,12 @@ import {
   type PluginTrustProposal,
   type PluginTrustStatus,
 } from "./plugin-trust.js";
+import {
+  inspectPluginInstallPath,
+  resolvePluginScopeRoots,
+  selectPluginScopeWinners,
+  type PluginScopeRoots,
+} from "./plugin-scope.js";
 import type { PluginContributionSet, PluginScope } from "./plugin-types.js";
 
 export interface PluginReference {
@@ -44,8 +50,11 @@ export interface MaterializedRuntimePlugin {
 
 export interface PluginRuntimeMaterializationDiagnostic {
   readonly pluginId: string;
+  readonly scope?: PluginScope;
   readonly sourcePath: string;
   readonly message: string;
+  readonly code?: string;
+  readonly severity?: "error" | "warning" | "info";
 }
 
 export interface PluginRuntimeMaterialization {
@@ -59,9 +68,11 @@ export class PluginManagementService {
   private readonly trustStore: PluginTrustStore;
   private readonly workDir: string;
   private readonly runtimeParent: string;
+  private readonly scopeRoots: PluginScopeRoots;
 
   constructor(options: PluginManagementServiceOptions) {
     this.workDir = resolve(options.workDir);
+    this.scopeRoots = resolvePluginScopeRoots(this.workDir, options);
     this.runtimeParent = join(
       resolvePicoPaths(this.workDir, options).workspace.root,
       "plugin-runtime",
@@ -136,7 +147,9 @@ export class PluginManagementService {
    * A changed or untrusted winner blocks fallback to a lower scope for the same id.
    */
   async materializeRuntimePlugins(): Promise<PluginRuntimeMaterialization> {
-    const winners = highestPriorityEnabledPlugins(await this.manager.list());
+    const winners = selectPluginScopeWinners(
+      (await this.manager.list()).filter((item) => item.enabled),
+    );
     const plugins: MaterializedRuntimePlugin[] = [];
     const diagnostics: PluginRuntimeMaterializationDiagnostic[] = [];
     let hostRoot: string | undefined;
@@ -144,6 +157,14 @@ export class PluginManagementService {
 
     for (const installed of winners) {
       try {
+        const scopePath = await inspectPluginInstallPath(
+          installed.scope,
+          installed.installPath,
+          this.scopeRoots,
+        );
+        if (!scopePath.valid) {
+          throw new Error(scopePath.diagnostic?.message ?? "Plugin scope root validation failed");
+        }
         if ((await this.trustStore.status(installed)) !== "active") {
           throw new Error("Plugin is not trusted for its installed fingerprint");
         }
@@ -167,7 +188,10 @@ export class PluginManagementService {
       } catch (error) {
         diagnostics.push({
           pluginId: installed.id,
+          scope: installed.scope,
           sourcePath: installed.installPath,
+          code: installed.diagnostics.find((item) => item.compatibility === "blocked")?.code,
+          severity: "error",
           message: error instanceof Error ? error.message : String(error),
         });
       }
@@ -196,6 +220,7 @@ export class PluginManagementService {
       changedSinceInstall,
       active:
         plugin.enabled &&
+        plugin.compatibility !== "blocked" &&
         trust === "active" &&
         !changedSinceInstall &&
         contributions.compatibility !== "blocked",
@@ -209,24 +234,4 @@ export class PluginManagementService {
     if (!plugin) throw new Error(`Plugin ${reference.id} is not installed in ${reference.scope}`);
     return plugin;
   }
-}
-
-function highestPriorityEnabledPlugins(
-  installed: readonly InstalledPlugin[],
-): readonly InstalledPlugin[] {
-  const winners = new Map<string, InstalledPlugin>();
-  for (const plugin of installed) {
-    if (!plugin.enabled) continue;
-    const current = winners.get(plugin.id);
-    if (!current || scopePriority(plugin.scope) > scopePriority(current.scope)) {
-      winners.set(plugin.id, plugin);
-    }
-  }
-  return [...winners.values()].sort((left, right) => left.id.localeCompare(right.id));
-}
-
-function scopePriority(scope: PluginScope): number {
-  if (scope === "local") return 3;
-  if (scope === "project") return 2;
-  return 1;
 }
