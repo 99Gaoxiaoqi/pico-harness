@@ -1086,30 +1086,6 @@ export function useRuntimeStore(): RuntimeStore {
         notices.providerRegistry ?? notices.userConfig ?? notices.effectiveConfig ?? "";
       if (!notices.providers) delete notices.providers;
     }
-    const loadedRuns = isRecord(values.runs) ? recordArray(values.runs.runs) : [];
-    const runId = stringValue(loadedRuns[0]?.runId);
-    if (runId) {
-      const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
-      if ("error" in changeList) {
-        notices.changes = changeList.error ?? "Runtime 未返回变更列表。";
-      } else {
-        const listValue = changeList.value;
-        const changes = recordArray(listValue.changes);
-        const hydrated = await Promise.all(
-          changes.map(async (change) => {
-            const path = stringValue(change.path);
-            if (!path) return change;
-            const diff = await optionalInvoke(bridge, "changes.diff", {
-              workspacePath,
-              runId,
-              path,
-            });
-            return { ...change, patch: stringValue(diff.value?.patch) || undefined };
-          }),
-        );
-        values.changes = { ...listValue, changes: hydrated };
-      }
-    }
     const trustResult = await optionalInvoke(bridge, "workspace.trustStatus", params);
     let launchAtLogin: boolean | undefined;
     try {
