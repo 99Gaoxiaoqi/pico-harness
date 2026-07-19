@@ -5,8 +5,9 @@
   "type": "module",
   "main": ".vite/build/main.cjs",
   "scripts": {
-    "prestart": "npm run build --workspace @pico/protocol",
-    "start": "electron-forge start",
+    "native:prepare": "electron-rebuild -f -m . -o better-sqlite3-electron",
+    "prestart": "npm run build --workspace @pico/protocol && npm run native:prepare",
+    "start": "node --env-file-if-exists=../../.env ../../node_modules/@electron-forge/cli/dist/electron-forge.js start",
     "prepackage": "npm run build --workspace @pico/protocol",
     "package": "electron-forge package",
     "premake": "npm run build --workspace @pico/protocol",
@@ -18,13 +19,14 @@
     "@pico/protocol": "*",
     "@radix-ui/react-dialog": "^1.1.19",
     "@radix-ui/react-tooltip": "^1.2.12",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3-electron": "npm:better-sqlite3@12.11.1",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
     "@electron-forge/cli": "^7.11.2",
     "@electron-forge/maker-dmg": "^7.11.2",
     "@electron-forge/maker-squirrel": "^7.11.2",
