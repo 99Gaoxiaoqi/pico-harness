@@ -2,12 +2,14 @@ import type {
   MobileConversationItem,
   MobileProject,
   MobileProjectId,
+  MobileRealtimeEvent,
   MobileRun,
   MobileSendMessageBody,
   MobileSendMessageResult,
   MobileSession,
   MobileTranscript,
   RuntimeConversationItem,
+  RuntimeNotification,
   RuntimeRun,
   RuntimeSession,
   SessionId,
@@ -29,10 +31,19 @@ export interface MobileGatewayApi {
   ): Promise<MobileSendMessageResult>;
 }
 
+export interface MobileGatewayRealtimeApi {
+  subscribeEvents(
+    projectId: MobileProjectId,
+    sessionId: SessionId,
+    listener: (event: MobileRealtimeEvent) => void,
+  ): Promise<{ readonly dispose: () => void }>;
+}
+
 export class MobileGatewayService implements MobileGatewayApi {
   constructor(
     private readonly authority: Pick<MobileProjectAuthority, "listProjects" | "resolveProjectPath">,
-    private readonly runtime: Pick<RuntimeClient, "request">,
+    private readonly runtime: Pick<RuntimeClient, "request"> &
+      Partial<Pick<RuntimeClient, "subscribe">>,
   ) {}
 
   listProjects(): Promise<readonly MobileProject[]> {
@@ -105,6 +116,28 @@ export class MobileGatewayService implements MobileGatewayApi {
       ...(result.run ? { run: toMobileRun(result.run, workspacePath, session.sessionId) } : {}),
       disposition: result.disposition,
     };
+  }
+
+  async subscribeEvents(
+    projectId: MobileProjectId,
+    sessionId: SessionId,
+    listener: (event: MobileRealtimeEvent) => void,
+  ): Promise<{ readonly dispose: () => void }> {
+    if (!this.runtime.subscribe) throw new Error("Runtime event subscription is unavailable");
+    const workspacePath = await this.authority.resolveProjectPath(projectId);
+    const current = await this.runtime.request("session.get", { workspacePath, sessionId });
+    const session = toMobileSession(current.session, workspacePath);
+    if (session.sessionId !== sessionId) {
+      throw new Error("Runtime returned another session before Mobile subscription");
+    }
+
+    const deliver = (notification: RuntimeNotification) => {
+      const event = safeProjectRealtimeEvent(notification, workspacePath, sessionId);
+      if (event) listener(event);
+    };
+    const subscription = await this.runtime.subscribe({ workspacePath }, deliver);
+    for (const notification of subscription.replay.events) deliver(notification);
+    return { dispose: subscription.dispose };
   }
 }
 
@@ -218,5 +251,58 @@ function toMobileConversationItem(item: RuntimeConversationItem): MobileConversa
         ...(item.detail ? { detail: item.detail } : {}),
         ...(item.state ? { state: item.state } : {}),
       };
+  }
+}
+
+function safeProjectRealtimeEvent(
+  notification: RuntimeNotification,
+  workspacePath: string,
+  sessionId: SessionId,
+): MobileRealtimeEvent | undefined {
+  if (
+    notification.scope.workspacePath !== workspacePath ||
+    notification.scope.sessionId !== sessionId
+  ) {
+    return undefined;
+  }
+  try {
+    switch (notification.topic) {
+      case "run.started":
+      case "run.updated":
+      case "run.finished": {
+        const typed = notification as RuntimeNotification<
+          "run.started" | "run.updated" | "run.finished"
+        >;
+        return { type: "run", run: toMobileRun(typed.payload.run, workspacePath, sessionId) };
+      }
+      case "run.live": {
+        const typed = notification as RuntimeNotification<"run.live">;
+        return {
+          type: "live",
+          runId: typed.payload.runId,
+          item: {
+            kind: typed.payload.item.kind,
+            operation: typed.payload.item.operation,
+            ...(typed.payload.item.streamId ? { streamId: typed.payload.item.streamId } : {}),
+            ...(typed.payload.item.turnId ? { turnId: typed.payload.item.turnId } : {}),
+            ...(typed.payload.item.delta !== undefined ? { delta: typed.payload.item.delta } : {}),
+            ...(typed.payload.item.truncated === true ? { truncated: true } : {}),
+          },
+        };
+      }
+      case "session.transcriptUpdated": {
+        const typed = notification as RuntimeNotification<"session.transcriptUpdated">;
+        if (typed.payload.sessionId !== sessionId) return undefined;
+        return {
+          type: "transcriptUpdated",
+          sessionId,
+          ...(typed.payload.revision ? { revision: typed.payload.revision } : {}),
+        };
+      }
+      default:
+        return undefined;
+    }
+  } catch {
+    return { type: "resync", reason: "unknown" };
   }
 }

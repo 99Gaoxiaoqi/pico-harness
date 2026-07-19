@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   MobileProjectId,
+  MobileRealtimeEvent,
   RuntimeConversationItem,
+  RuntimeNotification,
   RuntimeRun,
   RuntimeSession,
   SessionId,
@@ -207,6 +209,69 @@ test("mobile gateway service rejects a cross-project session before sending", as
   assert.equal(sendCalls, 0);
 });
 
+test("mobile gateway service projects only one session realtime events", async () => {
+  const events: MobileRealtimeEvent[] = [];
+  let runtimeListener: ((notification: RuntimeNotification) => void) | undefined;
+  let disposed = false;
+  const runtime = {
+    async request() {
+      return { session: runtimeSession() };
+    },
+    async subscribe(_params: unknown, listener: (notification: RuntimeNotification) => void) {
+      runtimeListener = listener;
+      return {
+        replay: {
+          subscribed: true,
+          events: [runNotification("run.started")],
+          hasMore: false,
+        },
+        dispose: () => {
+          disposed = true;
+        },
+      };
+    },
+  } as unknown as Pick<RuntimeClient, "request" | "subscribe">;
+  const service = new MobileGatewayService(
+    { listProjects: async () => [], resolveProjectPath: async () => workspacePath },
+    runtime,
+  );
+
+  const subscription = await service.subscribeEvents(projectId, "session-1", (event) =>
+    events.push(event),
+  );
+  assert.ok(runtimeListener);
+  runtimeListener(liveNotification(workspacePath));
+  runtimeListener(liveNotification("/private/workspaces/other"));
+
+  assert.deepEqual(events, [
+    {
+      type: "run",
+      run: {
+        runId: "run-1",
+        sessionId: "session-1",
+        description: "Continue",
+        status: "running",
+        startedAt: 21,
+        updatedAt: 22,
+      },
+    },
+    {
+      type: "live",
+      runId: "run-1",
+      item: {
+        kind: "assistantMessage",
+        operation: "append",
+        streamId: "assistant:run-1:1",
+        turnId: "turn:run-1:1",
+        delta: "Hello",
+      },
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(events), /workspacePath|\/private\/workspaces/);
+  subscription.dispose();
+  assert.equal(disposed, true);
+});
+
 function runtimeSession(path = workspacePath): RuntimeSession {
   return {
     sessionId: "session-1",
@@ -229,5 +294,40 @@ function runtimeRun(path = workspacePath): RuntimeRun {
     startedAt: 21,
     updatedAt: 22,
     version: 1,
+  };
+}
+
+function runNotification(
+  topic: "run.started" | "run.updated" | "run.finished",
+): RuntimeNotification {
+  return {
+    protocolVersion: 1,
+    eventId: "event-run-1",
+    topic,
+    scope: { workspacePath, sessionId: "session-1", runId: "run-1" },
+    resourceVersion: 1,
+    at: 22,
+    payload: { run: runtimeRun() },
+  };
+}
+
+function liveNotification(path: string): RuntimeNotification {
+  return {
+    protocolVersion: 1,
+    eventId: "event-live-1",
+    topic: "run.live",
+    scope: { workspacePath: path, sessionId: "session-1", runId: "run-1" },
+    resourceVersion: 2,
+    at: 23,
+    payload: {
+      runId: "run-1",
+      item: {
+        kind: "assistantMessage",
+        operation: "append",
+        streamId: "assistant:run-1:1",
+        turnId: "turn:run-1:1",
+        delta: "Hello",
+      },
+    },
   };
 }
