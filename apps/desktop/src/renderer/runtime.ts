@@ -49,6 +49,7 @@ import type {
   ConversationProgressState,
 } from "./conversation/types.js";
 import {
+  applyLiveAssistantUpdate,
   applyLiveReasoningUpdate,
   conversationItemKey,
   mergeHydratedConversationItems,
@@ -128,6 +129,12 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       id,
       kind: item.kind,
       text,
+      ...(item.kind === "assistantMessage" && stringValue(item.runId)
+        ? { runId: stringValue(item.runId) }
+        : {}),
+      ...(item.kind === "assistantMessage" && stringValue(item.turnId)
+        ? { turnId: stringValue(item.turnId) }
+        : {}),
       ...meta,
     };
   }
@@ -1457,7 +1464,9 @@ export function useRuntimeStore(): RuntimeStore {
                       runId,
                       items: (current.conversations[conversationKey]?.items ?? []).filter(
                         (candidate) =>
-                          candidate.kind !== "thinking" || candidate.streaming !== true,
+                          (candidate.kind !== "thinking" &&
+                            candidate.kind !== "assistantMessage") ||
+                          candidate.streaming !== true,
                       ),
                     },
                   },
@@ -1479,12 +1488,20 @@ export function useRuntimeStore(): RuntimeStore {
           : undefined;
         const item = isRecord(payload.item) ? payload.item : {};
         const operation = stringValue(item.operation);
+        const liveOperation =
+          operation === "append"
+            ? "append"
+            : operation === "complete"
+              ? "complete"
+              : operation === "clear"
+                ? "clear"
+                : undefined;
         if (
           sessionId &&
           conversationKey &&
           runId &&
-          item.kind === "thinking" &&
-          (operation === "append" || operation === "complete" || operation === "clear")
+          (item.kind === "thinking" || item.kind === "assistantMessage") &&
+          liveOperation
         ) {
           setData((current) => {
             const conversation = current.conversations[conversationKey] ?? {
@@ -1508,28 +1525,37 @@ export function useRuntimeStore(): RuntimeStore {
                     ...conversation,
                     runId,
                     items: conversation.items.filter(
-                      (candidate) => candidate.kind !== "thinking" || candidate.streaming !== true,
+                      (candidate) =>
+                        (candidate.kind !== "thinking" && candidate.kind !== "assistantMessage") ||
+                        candidate.streaming !== true,
                     ),
                   };
+            const update = {
+              runId,
+              operation: liveOperation,
+              ...(stringValue(item.streamId) ? { streamId: stringValue(item.streamId) } : {}),
+              ...(stringValue(item.turnId) ? { turnId: stringValue(item.turnId) } : {}),
+              ...(stringValue(item.delta) ? { delta: stringValue(item.delta) } : {}),
+              ...(item.truncated === true ? { truncated: true } : {}),
+              at: numberValue(event.at, Date.now()),
+            } as const;
             return {
               ...current,
               conversations: {
                 ...current.conversations,
                 [conversationKey]: {
                   ...runConversation,
-                  items: applyLiveReasoningUpdate(runConversation.items, {
-                    runId,
-                    operation,
-                    ...(stringValue(item.streamId) ? { streamId: stringValue(item.streamId) } : {}),
-                    ...(stringValue(item.turnId) ? { turnId: stringValue(item.turnId) } : {}),
-                    ...(stringValue(item.delta) ? { delta: stringValue(item.delta) } : {}),
-                    ...(item.truncated === true ? { truncated: true } : {}),
-                    at: numberValue(event.at, Date.now()),
-                  }),
+                  items:
+                    item.kind === "thinking"
+                      ? applyLiveReasoningUpdate(runConversation.items, update)
+                      : applyLiveAssistantUpdate(runConversation.items, update),
                 },
               },
             };
           });
+          if (item.kind === "assistantMessage" && operation === "complete") {
+            scheduleHydration(sessionId);
+          }
         }
       } else if (topic === "config.updated") {
         scheduleHydration();

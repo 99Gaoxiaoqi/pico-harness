@@ -767,6 +767,38 @@ export function publishDesktopReporterEvent(
     );
     return;
   }
+  if (event.type === "assistant.delta") {
+    const delta = firstString(event.payload["delta"]);
+    if (!delta) return;
+    const turn =
+      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+        ? event.payload["turn"]
+        : 0;
+    service.publishEphemeralNotification(
+      createRuntimeNotification({
+        topic: "run.live",
+        scope: {
+          workspacePath,
+          runId: event.runId,
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        },
+        resourceVersion: nextResourceVersion(),
+        at: event.at,
+        payload: {
+          runId: event.runId,
+          item: {
+            kind: "assistantMessage",
+            operation: "append",
+            streamId: liveAssistantStreamId(event.runId, turn),
+            turnId: runtimeTurnId(event.runId, turn),
+            delta,
+            ...(event.payload["truncated"] === true ? { truncated: true } : {}),
+          },
+        },
+      }),
+    );
+    return;
+  }
   if (
     event.type === "assistant.suppressed" ||
     event.type === "assistant.message" ||
@@ -799,6 +831,60 @@ export function publishDesktopReporterEvent(
                 ? "complete"
                 : "clear",
             ...(turn === undefined ? {} : { streamId: liveReasoningStreamId(event.runId, turn) }),
+            ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
+          },
+        },
+      }),
+    );
+  }
+  if (event.type === "assistant.message") {
+    const turn =
+      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+        ? event.payload["turn"]
+        : 0;
+    service.publishEphemeralNotification(
+      createRuntimeNotification({
+        topic: "run.live",
+        scope: {
+          workspacePath,
+          runId: event.runId,
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        },
+        resourceVersion: nextResourceVersion(),
+        at: event.at,
+        payload: {
+          runId: event.runId,
+          item: {
+            kind: "assistantMessage",
+            operation: "complete",
+            streamId: liveAssistantStreamId(event.runId, turn),
+            turnId: runtimeTurnId(event.runId, turn),
+          },
+        },
+      }),
+    );
+  }
+  if (event.type === "assistant.suppressed" || event.type === "run.interrupted") {
+    const turn =
+      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+        ? event.payload["turn"]
+        : undefined;
+    service.publishEphemeralNotification(
+      createRuntimeNotification({
+        topic: "run.live",
+        scope: {
+          workspacePath,
+          runId: event.runId,
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        },
+        resourceVersion: nextResourceVersion(),
+        at: event.at,
+        payload: {
+          runId: event.runId,
+          item: {
+            kind: "assistantMessage",
+            operation: "clear",
+            ...(turn === undefined ? {} : { streamId: liveAssistantStreamId(event.runId, turn) }),
             ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
           },
         },
@@ -840,6 +926,10 @@ export function publishDesktopReporterEvent(
 
 function liveReasoningStreamId(runId: string, turn: number): string {
   return `thinking:live:${runId}:${turn}`;
+}
+
+function liveAssistantStreamId(runId: string, turn: number): string {
+  return `assistant:live:${runId}:${turn}`;
 }
 
 function runtimeTurnId(runId: string, turn: number): string {

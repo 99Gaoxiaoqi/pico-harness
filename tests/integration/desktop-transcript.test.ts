@@ -26,7 +26,7 @@ function snapshot(
   };
 }
 
-test("Desktop transcript carries the Runtime turn identity for durable reasoning", () => {
+test("Desktop transcript carries the Runtime turn identity for durable reasoning and answers", () => {
   const page = projectRuntimeTranscript(
     snapshot(
       [{ role: "assistant", content: "完成。", reasoning: "检查配置。" }],
@@ -40,6 +40,13 @@ test("Desktop transcript carries the Runtime turn identity for durable reasoning
     id: page.items[0]?.id,
     kind: "thinking",
     content: "检查配置。",
+    runId: "run-1",
+    turnId: "turn:run-1:2",
+  });
+  assert.deepEqual(page.items[1], {
+    id: page.items[1]?.id,
+    kind: "assistantMessage",
+    content: "完成。",
     runId: "run-1",
     turnId: "turn:run-1:2",
   });

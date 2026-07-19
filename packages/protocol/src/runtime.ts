@@ -182,8 +182,17 @@ export type RuntimeQueuedInput = JsonObject & {
 export type RuntimeConversationItem = (
   | (JsonObject & {
       readonly id: string;
-      readonly kind: "userMessage" | "assistantMessage" | "systemNotice" | "error";
+      readonly kind: "userMessage" | "systemNotice" | "error";
       readonly content: string;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "assistantMessage";
+      readonly content: string;
+      /** Present when the durable answer can be tied to one Runtime model turn. */
+      readonly runId?: RunId;
+      readonly turnId?: string;
       readonly at?: number;
     })
   | (JsonObject & {
@@ -994,7 +1003,7 @@ export type RuntimeNotificationMap = {
   readonly "run.live": {
     readonly runId: RunId;
     readonly item: {
-      readonly kind: "thinking";
+      readonly kind: "thinking" | "assistantMessage";
       readonly operation: "append" | "complete" | "clear";
       readonly streamId?: string;
       readonly turnId?: string;
@@ -1420,7 +1429,9 @@ export function isRunLiveRuntimeNotification(
   const scope = value.scope;
   if (!isJsonObject(scope) || scope.runId !== payload.runId) return false;
   const item = payload.item;
-  if (!isJsonObject(item) || item.kind !== "thinking") return false;
+  if (!isJsonObject(item) || (item.kind !== "thinking" && item.kind !== "assistantMessage")) {
+    return false;
+  }
   if (item.operation !== "append" && item.operation !== "complete" && item.operation !== "clear") {
     return false;
   }
@@ -1979,16 +1990,11 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
       originalBytes: resultFiniteNumber,
     },
   )(value, path);
-  if (
-    kind === "userMessage" ||
-    kind === "assistantMessage" ||
-    kind === "systemNotice" ||
-    kind === "error"
-  ) {
+  if (kind === "userMessage" || kind === "systemNotice" || kind === "error") {
     resultShape({ content: resultString })(value, path);
     return;
   }
-  if (kind === "thinking") {
+  if (kind === "assistantMessage" || kind === "thinking") {
     resultShape({ content: resultString }, { runId: resultString, turnId: resultString })(
       value,
       path,

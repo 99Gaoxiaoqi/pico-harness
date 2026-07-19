@@ -290,7 +290,7 @@ export function ConversationTranscript({
   const visibleItems = mergeConversationItemGroups(items).filter(
     (item) =>
       (item.kind !== "runBoundary" || item.status !== "started") &&
-      (item.kind !== "thinking" || item.cleared !== true),
+      ((item.kind !== "thinking" && item.kind !== "assistantMessage") || item.cleared !== true),
   );
 
   if (visibleItems.length === 0) {
