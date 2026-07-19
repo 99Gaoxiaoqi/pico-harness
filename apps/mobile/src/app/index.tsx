@@ -1,4 +1,4 @@
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useState } from "react";
 import {
@@ -22,6 +22,7 @@ const DEFAULT_GATEWAY_ORIGIN =
 type ConnectionPhase = "idle" | "connecting" | "connected" | "error";
 
 export default function ProjectsScreen() {
+  const router = useRouter();
   const [origin, setOrigin] = useState(DEFAULT_GATEWAY_ORIGIN);
   const [token, setToken] = useState("");
   const [projects, setProjects] = useState<readonly MobileProject[]>([]);
@@ -193,7 +194,24 @@ export default function ProjectsScreen() {
                       <Text style={styles.emptySessions}>暂无可用会话</Text>
                     ) : (
                       sessions.map((session) => (
-                        <View key={session.sessionId} style={styles.sessionRow}>
+                        <Pressable
+                          accessibilityRole="button"
+                          key={session.sessionId}
+                          onPress={() =>
+                            router.push({
+                              pathname: "/session",
+                              params: {
+                                projectId: project.projectId,
+                                sessionId: session.sessionId,
+                                title: session.title,
+                              },
+                            })
+                          }
+                          style={({ pressed }) => [
+                            styles.sessionRow,
+                            pressed && styles.projectPressed,
+                          ]}
+                        >
                           <View style={styles.sessionCopy}>
                             <Text numberOfLines={1} style={styles.sessionTitle}>
                               {session.pinned ? "★ " : ""}
@@ -203,7 +221,8 @@ export default function ProjectsScreen() {
                               {new Date(session.updatedAt).toLocaleString()}
                             </Text>
                           </View>
-                        </View>
+                          <Text style={styles.sessionDisclosure}>›</Text>
+                        </Pressable>
                       ))
                     )}
                   </View>
@@ -301,8 +320,15 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   emptySessions: { color: "#77777D", fontSize: 13, padding: 10 },
-  sessionRow: { borderRadius: 10, flexDirection: "row", paddingHorizontal: 10, paddingVertical: 9 },
+  sessionRow: {
+    alignItems: "center",
+    borderRadius: 10,
+    flexDirection: "row",
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
   sessionCopy: { flex: 1, gap: 3 },
   sessionTitle: { color: "#2A2A2E", fontSize: 14, fontWeight: "600" },
   sessionMeta: { color: "#85858B", fontSize: 12 },
+  sessionDisclosure: { color: "#A0A0A5", fontSize: 21, marginLeft: 8 },
 });
