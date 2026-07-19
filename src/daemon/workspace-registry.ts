@@ -148,6 +148,35 @@ export async function canonicalizeWorkspacePath(workspacePath: string): Promise<
   return gitTopLevel ? realpath(resolve(gitTopLevel)) : physicalPath;
 }
 
+export function resolveGitBranch(workspacePath: string): Promise<string | undefined> {
+  return new Promise((resolveResult, reject) => {
+    execFile(
+      "git",
+      ["branch", "--show-current"],
+      {
+        cwd: workspacePath,
+        encoding: "utf8",
+        env: gitDiscoveryEnvironment(process.env),
+        maxBuffer: 64 * 1024,
+        timeout: 5_000,
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const detail = stderr.trim() || error.message;
+          if (error.code === "ENOENT" || /not a git repository/iu.test(detail)) {
+            resolveResult(undefined);
+            return;
+          }
+          reject(new Error(`Pico 无法解析 Git 分支 ${workspacePath}：${detail}`, { cause: error }));
+          return;
+        }
+        resolveResult(stdout.trim() || undefined);
+      },
+    );
+  });
+}
+
 function resolveGitTopLevel(workspacePath: string): Promise<string | undefined> {
   return new Promise((resolveResult, reject) => {
     execFile(

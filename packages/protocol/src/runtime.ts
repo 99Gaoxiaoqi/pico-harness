@@ -1,7 +1,7 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 2;
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 3;
 export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v2";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
@@ -274,6 +274,7 @@ export type RuntimeSession = JsonObject & {
   readonly workspacePath: string;
   readonly title: string;
   readonly status: RuntimeSessionStatus;
+  readonly pinned: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
 };
@@ -393,6 +394,18 @@ export type RuntimeMethodMap = {
   readonly "session.restore": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.pin": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.unpin": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.delete": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly sessionId: SessionId; readonly deleted: true };
   };
   readonly "session.rename": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly title: string };
@@ -814,6 +827,9 @@ export const RUNTIME_METHODS = [
   "session.create",
   "session.archive",
   "session.restore",
+  "session.pin",
+  "session.unpin",
+  "session.delete",
   "session.rename",
   "session.fork",
   "session.compact",
@@ -896,6 +912,9 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.create",
   "session.archive",
   "session.restore",
+  "session.pin",
+  "session.unpin",
+  "session.delete",
   "session.rename",
   "session.fork",
   "session.compact",
@@ -1070,6 +1089,7 @@ export interface WorkspaceStatusResult extends JsonObject {
   registered: boolean;
   schedulerStatus: "unknown";
   mode: "folder" | "git";
+  branch: string;
   capabilities: {
     readonly foregroundRuns: boolean;
     readonly fileHistory: boolean;
@@ -1601,6 +1621,9 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "session.create": exactParamShape({ workspacePath: stringParam }, { title: stringParam }),
   "session.archive": workspaceSessionParams,
   "session.restore": workspaceSessionParams,
+  "session.pin": workspaceSessionParams,
+  "session.unpin": workspaceSessionParams,
+  "session.delete": workspaceSessionParams,
   "session.rename": exactParamShape({
     workspacePath: stringParam,
     sessionId: stringParam,
@@ -1918,6 +1941,7 @@ const workspaceStatusResultRule = resultShape({
   registered: resultBoolean,
   schedulerStatus: resultOneOf(["unknown"]),
   mode: resultOneOf(["folder", "git"]),
+  branch: resultString,
   capabilities: resultShape({
     foregroundRuns: resultBoolean,
     fileHistory: resultBoolean,

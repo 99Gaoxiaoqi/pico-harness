@@ -24,6 +24,12 @@ export interface DesktopSessionRequestContext {
     sessionId: string,
     archived: boolean,
   ) => Awaitable<JsonValue>;
+  readonly setSessionPinned: (
+    workspacePath: string,
+    sessionId: string,
+    pinned: boolean,
+  ) => Awaitable<JsonValue>;
+  readonly deleteSession: (workspacePath: string, sessionId: string) => Awaitable<JsonValue>;
   readonly renameSession: (
     workspacePath: string,
     sessionId: string,
@@ -67,6 +73,9 @@ export function createDesktopSessionRequestHandlers(
   | "session.create"
   | "session.archive"
   | "session.restore"
+  | "session.pin"
+  | "session.unpin"
+  | "session.delete"
   | "session.rename"
   | "session.fork"
   | "session.compact"
@@ -98,6 +107,12 @@ export function createDesktopSessionRequestHandlers(
       context.setSessionArchived(request.params.workspacePath, request.params.sessionId, true),
     "session.restore": (request) =>
       context.setSessionArchived(request.params.workspacePath, request.params.sessionId, false),
+    "session.pin": (request) =>
+      context.setSessionPinned(request.params.workspacePath, request.params.sessionId, true),
+    "session.unpin": (request) =>
+      context.setSessionPinned(request.params.workspacePath, request.params.sessionId, false),
+    "session.delete": (request) =>
+      context.deleteSession(request.params.workspacePath, request.params.sessionId),
     "session.rename": (request) =>
       context.renameSession(
         request.params.workspacePath,

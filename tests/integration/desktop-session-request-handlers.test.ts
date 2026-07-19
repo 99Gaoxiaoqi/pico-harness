@@ -19,6 +19,8 @@ test("desktop session handlers keep protocol mapping separate from the service o
     getSession: async () => ({ session: {} }),
     createSession: async () => ({ session: {} }),
     setSessionArchived: async (_workspacePath, _sessionId, archived) => ({ archived }),
+    setSessionPinned: async (_workspacePath, _sessionId, pinned) => ({ pinned }),
+    deleteSession: async (_workspacePath, sessionId) => ({ sessionId, deleted: true }),
     renameSession: async (_workspacePath, _sessionId, title) => ({ title }),
     forkSession: async () => ({ session: {}, sourceSessionId: "source" }),
     compactSession: async () => ({ session: {}, compacted: true }),
@@ -60,5 +62,29 @@ test("desktop session handlers keep protocol mapping separate from the service o
       }),
     ),
     { archived: true },
+  );
+
+  const pin = handlers["session.pin"] as DesktopRequestHandlers["session.pin"];
+  assert.ok(pin);
+  assert.deepEqual(
+    await pin(
+      createTypedRuntimeRequest("session.pin", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+      }),
+    ),
+    { pinned: true },
+  );
+
+  const remove = handlers["session.delete"] as DesktopRequestHandlers["session.delete"];
+  assert.ok(remove);
+  assert.deepEqual(
+    await remove(
+      createTypedRuntimeRequest("session.delete", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+      }),
+    ),
+    { sessionId: "session-1", deleted: true },
   );
 });

@@ -11,6 +11,7 @@ export interface DesktopSessionMetadata {
   readonly workspacePath: string;
   readonly sessionId: string;
   readonly archivedAt?: number;
+  readonly pinnedAt?: number;
   readonly updatedAt: number;
 }
 
@@ -93,7 +94,7 @@ export class DesktopSessionStateStore {
   async update(
     workspacePath: string,
     sessionId: string,
-    patch: { readonly archived?: boolean },
+    patch: { readonly archived?: boolean; readonly pinned?: boolean },
   ): Promise<DesktopSessionMetadata> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalizedId = requireNonEmpty(sessionId, "sessionId");
@@ -103,16 +104,23 @@ export class DesktopSessionStateStore {
         (entry) => entry.workspacePath === canonical && entry.sessionId === normalizedId,
       );
       const now = this.now();
+      const archivedAt =
+        patch.archived === true
+          ? (current?.archivedAt ?? now)
+          : patch.archived === false
+            ? undefined
+            : current?.archivedAt;
+      const pinnedAt =
+        patch.pinned === true
+          ? (current?.pinnedAt ?? now)
+          : patch.pinned === false
+            ? undefined
+            : current?.pinnedAt;
       result = {
         workspacePath: canonical,
         sessionId: normalizedId,
-        ...(patch.archived === true
-          ? { archivedAt: current?.archivedAt ?? now }
-          : patch.archived === false
-            ? {}
-            : current?.archivedAt !== undefined
-              ? { archivedAt: current.archivedAt }
-              : {}),
+        ...(archivedAt !== undefined ? { archivedAt } : {}),
+        ...(pinnedAt !== undefined ? { pinnedAt } : {}),
         updatedAt: now,
       };
       return {
@@ -127,6 +135,20 @@ export class DesktopSessionStateStore {
     });
     if (!result) throw new Error("Desktop session metadata update did not produce a result");
     return result;
+  }
+
+  async remove(workspacePath: string, sessionId: string): Promise<boolean> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedId = requireNonEmpty(sessionId, "sessionId");
+    let removed = false;
+    await this.mutate(async (state) => {
+      const sessions = state.sessions.filter(
+        (entry) => entry.workspacePath !== canonical || entry.sessionId !== normalizedId,
+      );
+      removed = sessions.length !== state.sessions.length;
+      return { version: DESKTOP_SESSION_STATE_VERSION, sessions };
+    });
+    return removed;
   }
 
   private async mutate(
@@ -248,7 +270,9 @@ function parseMetadata(value: unknown, filePath: string): DesktopSessionMetadata
     !Number.isFinite(value["updatedAt"]) ||
     value["title"] !== undefined ||
     (value["archivedAt"] !== undefined &&
-      (typeof value["archivedAt"] !== "number" || !Number.isFinite(value["archivedAt"])))
+      (typeof value["archivedAt"] !== "number" || !Number.isFinite(value["archivedAt"]))) ||
+    (value["pinnedAt"] !== undefined &&
+      (typeof value["pinnedAt"] !== "number" || !Number.isFinite(value["pinnedAt"])))
   ) {
     throw new Error(`Desktop session state contains an invalid entry: ${filePath}`);
   }
@@ -256,6 +280,7 @@ function parseMetadata(value: unknown, filePath: string): DesktopSessionMetadata
     workspacePath: normalizeWorkspacePath(value["workspacePath"]),
     sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
     ...(value["archivedAt"] !== undefined ? { archivedAt: value["archivedAt"] } : {}),
+    ...(value["pinnedAt"] !== undefined ? { pinnedAt: value["pinnedAt"] } : {}),
     updatedAt: value["updatedAt"],
   };
 }
