@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  type NativeScrollEvent,
   Platform,
   Pressable,
   RefreshControl,
@@ -192,12 +193,14 @@ export default function SessionScreen() {
           onContentSizeChange={() => {
             if (shouldFollowOutput.current) scrollViewRef.current?.scrollToEnd({ animated: false });
           }}
-          onScroll={({ nativeEvent }) => {
-            const distanceFromBottom =
-              nativeEvent.contentSize.height -
-              nativeEvent.layoutMeasurement.height -
-              nativeEvent.contentOffset.y;
-            shouldFollowOutput.current = distanceFromBottom < 80;
+          onMomentumScrollEnd={({ nativeEvent }) => {
+            shouldFollowOutput.current = isNearBottom(nativeEvent);
+          }}
+          onScrollBeginDrag={() => {
+            shouldFollowOutput.current = false;
+          }}
+          onScrollEndDrag={({ nativeEvent }) => {
+            shouldFollowOutput.current = isNearBottom(nativeEvent);
           }}
           ref={scrollViewRef}
           refreshControl={
@@ -209,7 +212,6 @@ export default function SessionScreen() {
               refreshing={refreshing}
             />
           }
-          scrollEventThrottle={100}
         >
           {transcript?.activeRun && (
             <View style={styles.runBanner}>
@@ -369,6 +371,10 @@ function applyRealtimeRun(transcript: MobileTranscript, run: MobileRun): MobileT
     ...(transcript.nextBefore ? { nextBefore: transcript.nextBefore } : {}),
     revision: transcript.revision,
   };
+}
+
+function isNearBottom(event: NativeScrollEvent): boolean {
+  return event.contentSize.height - event.layoutMeasurement.height - event.contentOffset.y < 80;
 }
 
 function singleParam(value: string | string[] | undefined): string | undefined {
