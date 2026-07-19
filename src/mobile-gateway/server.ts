@@ -8,6 +8,8 @@ import {
   type SessionId,
 } from "@pico/protocol";
 import type { MobileGatewayApi } from "./service.js";
+import { attachMobileRealtimeServer } from "./realtime-server.js";
+import type { MobileGatewayRealtimeApi } from "./service.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -15,7 +17,7 @@ const MIN_TOKEN_BYTES = 32;
 const MAX_MOBILE_REQUEST_BODY_BYTES = MAX_MOBILE_MESSAGE_BYTES + 4 * 1024;
 
 export interface MobileGatewayServerOptions {
-  readonly api: MobileGatewayApi;
+  readonly api: MobileGatewayApi & Partial<MobileGatewayRealtimeApi>;
   readonly host?: string;
   readonly port?: number;
   readonly token?: string;
@@ -119,6 +121,7 @@ export async function startMobileGateway(
 
     sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
   });
+  const realtime = attachMobileRealtimeServer({ server, api: options.api, token, host });
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   server.requestTimeout = requirePositiveTimeout(requestTimeoutMs);
   server.headersTimeout = Math.min(server.requestTimeout, 10_000);
@@ -139,6 +142,7 @@ export async function startMobileGateway(
 
   const address = server.address() as AddressInfo | null;
   if (!address || address.address !== host) {
+    await realtime.close();
     await closeServer(server);
     throw new Error("Mobile Gateway failed to bind the expected loopback address");
   }
@@ -146,7 +150,10 @@ export async function startMobileGateway(
   return {
     origin: `http://${host}:${address.port}`,
     token,
-    close: () => closeServer(server),
+    close: async () => {
+      await realtime.close();
+      await closeServer(server);
+    },
   };
 }
 

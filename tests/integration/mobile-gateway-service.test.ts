@@ -245,17 +245,6 @@ test("mobile gateway service projects only one session realtime events", async (
 
   assert.deepEqual(events, [
     {
-      type: "run",
-      run: {
-        runId: "run-1",
-        sessionId: "session-1",
-        description: "Continue",
-        status: "running",
-        startedAt: 21,
-        updatedAt: 22,
-      },
-    },
-    {
       type: "live",
       runId: "run-1",
       item: {
