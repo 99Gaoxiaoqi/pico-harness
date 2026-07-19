@@ -126,7 +126,12 @@ export class DesktopReporter implements Reporter {
 
   onTextDelta(delta: string): void {
     this.onThinkingEnd();
-    this.emit("assistant.delta", { delta: boundedText(delta).value });
+    const bounded = boundedText(delta);
+    this.emit("assistant.delta", {
+      delta: bounded.value,
+      truncated: bounded.truncated,
+      turn: this.turn,
+    });
   }
 
   onReasoningDelta(delta: string): void {
@@ -152,7 +157,7 @@ export class DesktopReporter implements Reporter {
 
   onInterrupted(): void {
     this.onThinkingEnd();
-    this.emit("run.interrupted", {});
+    this.emit("run.interrupted", { turn: this.turn });
   }
 
   private emit(type: string, payload: Readonly<Record<string, unknown>>): void {

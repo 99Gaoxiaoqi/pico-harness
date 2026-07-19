@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  applyLiveAssistantUpdate,
   MAX_LIVE_REASONING_CHARS,
   applyLiveReasoningUpdate,
   mergeHydratedConversationItems,
@@ -18,6 +19,86 @@ import {
   RuntimeNotificationBuffer,
 } from "../../src/daemon/protocol.js";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
+
+test("Desktop answer deltas grow before durable hydration replaces the live item", () => {
+  const streamId = "assistant:live:run-1:1";
+  const initial = applyLiveAssistantUpdate([], {
+    runId: "run-1",
+    turnId: "turn:run-1:1",
+    operation: "append",
+    streamId,
+    delta: "正在",
+    at: 1,
+  });
+  const appended = applyLiveAssistantUpdate(initial, {
+    runId: "run-1",
+    operation: "append",
+    streamId,
+    delta: "回答。",
+  });
+  assert.deepEqual(appended, [
+    {
+      id: streamId,
+      kind: "assistantMessage",
+      text: "正在回答。",
+      streaming: true,
+      runId: "run-1",
+      turnId: "turn:run-1:1",
+      at: 1,
+    },
+  ]);
+
+  const user = { id: "user:current", kind: "userMessage" as const, text: "继续" };
+  assert.deepEqual(mergeHydratedConversationItems([user], [user, ...appended], "run-1"), [
+    user,
+    ...appended,
+  ]);
+  const durable = {
+    id: "assistant:durable",
+    kind: "assistantMessage" as const,
+    text: "正在回答。",
+    runId: "run-1",
+    turnId: "turn:run-1:1",
+  };
+  assert.deepEqual(mergeHydratedConversationItems([user, durable], [user, ...appended], "run-1"), [
+    user,
+    durable,
+  ]);
+  assert.deepEqual(
+    applyLiveAssistantUpdate([durable], {
+      runId: "run-1",
+      turnId: "turn:run-1:1",
+      operation: "append",
+      streamId,
+      delta: "迟到增量",
+    }),
+    [durable],
+  );
+  assert.deepEqual(
+    applyLiveAssistantUpdate([durable], {
+      runId: "run-1",
+      operation: "complete",
+      streamId,
+    }),
+    [durable],
+  );
+
+  const completed = applyLiveAssistantUpdate(appended, {
+    runId: "run-1",
+    operation: "complete",
+    streamId,
+  });
+  assert.equal(completed[0]?.kind === "assistantMessage" ? completed[0].streaming : true, false);
+  assert.deepEqual(
+    applyLiveAssistantUpdate(completed, {
+      runId: "run-1",
+      operation: "append",
+      streamId,
+      delta: "迟到内容",
+    }),
+    completed,
+  );
+});
 
 test("Desktop reasoning uses a bounded live item that can be completed or cleared", () => {
   const streamId = "thinking:live:run-1:1";
@@ -225,6 +306,7 @@ test("DesktopReporter separates provider reasoning from the durable timeline pay
   });
   reporter.onTurnStart(3);
   reporter.onReasoningDelta("检查配置");
+  reporter.onTextDelta("正在回答");
   reporter.onAssistantResponseSuppressed("required-delegation");
 
   assert.equal(events[1]?.type, "assistant.reasoning.delta");
@@ -233,7 +315,13 @@ test("DesktopReporter separates provider reasoning from the durable timeline pay
     truncated: false,
     turn: 3,
   });
-  assert.deepEqual(events[2]?.payload, { reason: "required-delegation", turn: 3 });
+  assert.equal(events[2]?.type, "assistant.delta");
+  assert.deepEqual(events[2]?.payload, {
+    delta: "正在回答",
+    truncated: false,
+    turn: 3,
+  });
+  assert.deepEqual(events[3]?.payload, { reason: "required-delegation", turn: 3 });
 });
 
 test("durable replay result rejects ephemeral run.live events", () => {
@@ -271,6 +359,13 @@ test("session transcript rejects invalid durable reasoning identities", () => {
         runId: "run-1",
         turnId: "turn:run-1:1",
       },
+      {
+        id: "assistant-1",
+        kind: "assistantMessage",
+        content: "检查完成",
+        runId: "run-1",
+        turnId: "turn:run-1:1",
+      },
     ],
     queuedInputs: [],
     revision: "revision-1",
@@ -280,7 +375,7 @@ test("session transcript rejects invalid durable reasoning identities", () => {
     () =>
       parseDesktopRuntimeResult("session.transcript", {
         ...result,
-        items: [{ ...result.items[0], runId: 123, turnId: { invalid: true } }],
+        items: [{ ...result.items[1], runId: 123, turnId: { invalid: true } }],
       }),
     /runId|turnId/u,
   );
@@ -312,6 +407,23 @@ test("run.live rejects mismatched Run identity and terminal payload fields", () 
   assert.equal(isRunLiveRuntimeNotification(invalidTerminal), false);
   assert.equal(buffer.push(invalidTerminal), true);
   assert.equal(buffer.size, 0);
+  const assistantAppend = createRuntimeNotification({
+    topic: "run.live",
+    scope: { workspacePath: "/workspace", sessionId: "session-1", runId: "run-1" },
+    resourceVersion: 2,
+    at: 2,
+    payload: {
+      runId: "run-1",
+      item: {
+        kind: "assistantMessage",
+        operation: "append",
+        streamId: "assistant:live:run-1:1",
+        turnId: "turn:run-1:1",
+        delta: "回答",
+      },
+    },
+  });
+  assert.equal(isRunLiveRuntimeNotification(assistantAppend), true);
 });
 
 test("pending Runtime buffer coalesces live deltas and refuses to drop durable events", () => {
@@ -501,12 +613,16 @@ test("run.live is delivered but never persisted or replayed", async (context) =>
   });
   const observed: string[] = [];
   const liveOperations: string[] = [];
+  const liveKinds: string[] = [];
   const liveTruncation: boolean[] = [];
   service.subscribe((event) => {
     observed.push(event.topic);
     if (event.topic === "run.live") {
-      const payload = event.payload as { item?: { operation?: string; truncated?: boolean } };
+      const payload = event.payload as {
+        item?: { kind?: string; operation?: string; truncated?: boolean };
+      };
       if (payload.item?.operation) liveOperations.push(payload.item.operation);
+      if (payload.item?.kind) liveKinds.push(payload.item.kind);
       if (payload.item?.operation === "append") {
         liveTruncation.push(payload.item.truncated === true);
       }
@@ -577,13 +693,36 @@ test("run.live is delivered but never persisted or replayed", async (context) =>
     delta: "过长内容",
     truncated: true,
   });
+  publishReporter("assistant.delta", { turn: 1, delta: "正在回答" });
+  publishReporter("assistant.message", { turn: 1, content: "正在回答" });
   publishReporter("run.interrupted", { turn: 1 });
   publishReporter("run.finished", {});
-  assert.deepEqual(liveOperations, ["append", "append", "append", "clear", "complete"]);
-  assert.deepEqual(liveTruncation, [false, false, true]);
+  assert.deepEqual(liveOperations, [
+    "append",
+    "append",
+    "append",
+    "append",
+    "complete",
+    "complete",
+    "clear",
+    "clear",
+    "complete",
+  ]);
+  assert.deepEqual(liveKinds.slice(3, 6), ["assistantMessage", "thinking", "assistantMessage"]);
+  assert.deepEqual(liveTruncation, [false, false, true, false]);
 
   publishReporter("assistant.reasoning.delta", { turn: 1, delta: "迟到思考" });
-  assert.deepEqual(liveOperations, ["append", "append", "append", "clear", "complete"]);
+  assert.deepEqual(liveOperations, [
+    "append",
+    "append",
+    "append",
+    "append",
+    "complete",
+    "complete",
+    "clear",
+    "clear",
+    "complete",
+  ]);
 
   publishDesktopReporterEvent(
     service,

@@ -185,14 +185,21 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
     }
 
     if (content) {
-      append(
-        {
-          id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
-          kind: "assistantMessage",
-          content,
-        },
-        sequence,
-      );
+      const item: RuntimeConversationItem =
+        runId && turnId
+          ? {
+              id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
+              kind: "assistantMessage",
+              content,
+              runId,
+              turnId,
+            }
+          : {
+              id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
+              kind: "assistantMessage",
+              content,
+            };
+      append(item, sequence);
     }
     for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
       // The structured transcript entry owns the stable UI identity when it references the

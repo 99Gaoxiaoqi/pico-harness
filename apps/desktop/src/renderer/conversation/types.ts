@@ -20,6 +20,11 @@ export interface AssistantMessageItemView extends ConversationItemBase {
   readonly kind: "assistantMessage";
   readonly text: string;
   readonly streaming?: boolean | undefined;
+  readonly runId?: string | undefined;
+  readonly turnId?: string | undefined;
+  readonly liveTerminal?: boolean | undefined;
+  readonly terminalRun?: boolean | undefined;
+  readonly cleared?: boolean | undefined;
 }
 
 export interface ThinkingItemView extends ConversationItemBase {
