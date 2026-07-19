@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  MobileGatewayClient,
+  normalizeGatewayOrigin,
+} from "../../apps/mobile/src/lib/mobile-gateway-client.js";
+
+test("mobile client only allows simulator loopback origins", () => {
+  assert.equal(normalizeGatewayOrigin("http://127.0.0.1:47831"), "http://127.0.0.1:47831");
+  assert.equal(normalizeGatewayOrigin("http://10.0.2.2:47831"), "http://10.0.2.2:47831");
+  assert.throws(() => normalizeGatewayOrigin("http://192.168.1.12:47831"), /仅支持本机模拟器/);
+  assert.throws(() => normalizeGatewayOrigin("https://example.com"), /仅支持本机模拟器/);
+});
+
+test("mobile client authenticates project reads and validates the response", async () => {
+  const calls: Array<{ input: string; init?: RequestInit }> = [];
+  const client = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+    async (input, init) => {
+      calls.push({ input: String(input), ...(init ? { init } : {}) });
+      return Response.json({ projects: [{ projectId: "opaque", name: "pico-harness" }] });
+    },
+  );
+
+  assert.deepEqual(await client.listProjects(), [{ projectId: "opaque", name: "pico-harness" }]);
+  assert.equal(calls[0]?.input, "http://127.0.0.1:47831/v1/projects");
+  assert.deepEqual(calls[0]?.init?.headers, { Authorization: "Bearer temporary-token" });
+  assert.equal(calls[0]?.init?.redirect, "error");
+});
+
+test("mobile client does not include the token in authorization errors", async () => {
+  const client = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "do-not-leak" },
+    async () => new Response("unauthorized", { status: 401 }),
+  );
+  await assert.rejects(
+    () => client.listProjects(),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(error.message, /do-not-leak/);
+      assert.match(error.message, /Token 无效/);
+      return true;
+    },
+  );
+});

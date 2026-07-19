@@ -7,8 +7,10 @@ await client.connect();
 
 const authority = new MobileProjectAuthority(createMobileProjectAuthorityPort(client));
 const configuredToken = process.env["PICO_MOBILE_GATEWAY_TOKEN"];
+const configuredPort = Number(process.env["PICO_MOBILE_GATEWAY_PORT"] ?? "47831");
 const gateway = await startMobileGateway({
   authority,
+  port: configuredPort,
   ...(configuredToken ? { token: configuredToken } : {}),
 });
 
