@@ -6,7 +6,13 @@ import {
 } from "./plugin-management-service.js";
 import type { PluginTrustProposal } from "./plugin-trust.js";
 import type { PluginScope } from "./plugin-types.js";
-import { formatPluginDiagnostics, fromPluginDiagnostics } from "./plugin-diagnostics.js";
+import type { PluginCapabilityDescriptor } from "./plugin-capability.js";
+import {
+  formatPluginDiagnostics,
+  fromPluginDiagnostics,
+  fromRuntimeDiagnostics,
+  type PluginRuntimeDiagnosticLike,
+} from "./plugin-diagnostics.js";
 
 const USAGE =
   "/plugin [list|install <path>|inspect <id>|trust <id>|enable <id>|disable <id>] [--scope user|project|local]";
@@ -19,6 +25,8 @@ export type PluginManagementCommandService = Pick<
 export interface CreatePluginCommandOptions {
   readonly workDir: string;
   readonly service?: PluginManagementCommandService;
+  readonly runtimeDiagnostics?: readonly PluginRuntimeDiagnosticLike[];
+  readonly runtimeCapabilities?: readonly PluginCapabilityDescriptor[];
 }
 
 /**
@@ -52,7 +60,14 @@ export function createPluginCommand(options: CreatePluginCommandOptions): SlashC
           case "install":
             return message(await installPlugin(service, args, parsed.scope));
           case "inspect":
-            return message(await inspectPlugin(service, reference(args, parsed.scope, "inspect")));
+            return message(
+              await inspectPlugin(
+                service,
+                reference(args, parsed.scope, "inspect"),
+                options.runtimeDiagnostics ?? [],
+                options.runtimeCapabilities ?? [],
+              ),
+            );
           case "trust":
             return message(await trustPlugin(service, pendingTrust, args, parsed.scope));
           case "enable": {
@@ -108,8 +123,19 @@ async function installPlugin(
 async function inspectPlugin(
   service: PluginManagementCommandService,
   reference: PluginReference,
+  runtimeDiagnostics: readonly PluginRuntimeDiagnosticLike[],
+  runtimeCapabilities: readonly PluginCapabilityDescriptor[],
 ): Promise<string> {
-  return formatPluginInspection(await service.inspect(reference));
+  return formatPluginInspection(
+    await service.inspect(reference),
+    runtimeDiagnostics.filter(
+      (diagnostic) => diagnostic.pluginId === reference.id && diagnostic.scope === reference.scope,
+    ),
+    runtimeCapabilities.filter(
+      (capability) =>
+        capability.pluginId === reference.id && capability.pluginScope === reference.scope,
+    ),
+  );
 }
 
 async function trustPlugin(
@@ -239,7 +265,11 @@ function formatPluginListItem(inspection: ManagedPluginInspection): string {
   return `- ${plugin.id} [${plugin.scope}] · ${state} · trust ${inspection.trust} · ${inspection.contributions.compatibility}${changed}`;
 }
 
-function formatPluginInspection(inspection: ManagedPluginInspection): string {
+function formatPluginInspection(
+  inspection: ManagedPluginInspection,
+  runtimeDiagnostics: readonly PluginRuntimeDiagnosticLike[],
+  runtimeCapabilities: readonly PluginCapabilityDescriptor[],
+): string {
   const { installed, contributions } = inspection;
   const counts = [
     `skills ${contributions.skills.length}`,
@@ -249,13 +279,14 @@ function formatPluginInspection(inspection: ManagedPluginInspection): string {
     `MCP ${contributions.mcpServers.length}`,
     `LSP ${contributions.lspServers.length}`,
   ].join(", ");
-  const diagnostics = formatPluginDiagnostics(
-    fromPluginDiagnostics(
+  const diagnostics = formatPluginDiagnostics([
+    ...fromPluginDiagnostics(
       installed.id,
       [...installed.diagnostics, ...contributions.diagnostics],
       installed.scope,
     ),
-  );
+    ...fromRuntimeDiagnostics(runtimeDiagnostics),
+  ]);
   return [
     `Plugin ${installed.id} [${installed.scope}]`,
     `Version: ${installed.manifest.version ?? "<none>"}`,
@@ -266,6 +297,16 @@ function formatPluginInspection(inspection: ManagedPluginInspection): string {
     `Installed fingerprint: ${installed.resourceFingerprint.digest}`,
     `Current fingerprint: ${contributions.fingerprint?.digest ?? "<unavailable>"}`,
     `Contributions: ${counts}`,
+    `Active capabilities: ${
+      runtimeCapabilities.length === 0
+        ? "<none>"
+        : runtimeCapabilities
+            .map(
+              (capability, index) =>
+                `${index + 1}. ${capability.kind}:${capability.id}@${capability.version}`,
+            )
+            .join(", ")
+    }`,
     "Diagnostics:",
     ...diagnostics,
   ].join("\n");

@@ -10,7 +10,10 @@ import {
   createRuntimeNotification,
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   DESKTOP_RUNTIME_SCHEMA_REVISION,
+  isEphemeralRuntimeNotificationTopic,
+  isRunLiveRuntimeNotification,
   isJsonObject,
+  encodeRuntimeFrame,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
   MAX_RUNTIME_FRAME_BYTES,
   RUNTIME_ERROR_CODES,
@@ -56,6 +59,7 @@ export interface DaemonRunExecution {
     readonly name: string;
     readonly sourcePath?: string;
     readonly hooks?: unknown;
+    readonly sourceId?: string;
   };
 }
 
@@ -81,6 +85,7 @@ const MAX_REPLAY_EVENT_LIMIT = 9_999;
 const MAX_REPLAY_QUERY_LIMIT = 10_000;
 const REPLAY_RESPONSE_METADATA_RESERVE_BYTES = 64 * 1024;
 const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADATA_RESERVE_BYTES;
+const MAX_LIVE_TERMINAL_STREAMS = 10_000;
 
 /**
  * Concrete daemon-facing owner for workspace Runs. It has no TUI dependency and is
@@ -90,6 +95,7 @@ const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADA
 export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private readonly registry: WorkspaceRuntimeRegistry<WorkspaceTaskRuntime>;
   private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
+  private readonly terminalLiveStreams = new Set<string>();
   private readonly unsubscribers = new Map<string, () => void>();
   private readonly eventStores = new Map<string, RuntimeStore>();
   private readonly registrationStore: WorkspaceRegistrationStore;
@@ -156,6 +162,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           "catalog-activation-v1",
           "workspace-diagnostics-v1",
           "runtime-events-v1",
+          "desktop-live-reasoning-v1",
         ],
       };
     }
@@ -189,6 +196,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         }),
       );
       await this.registrationChanged?.();
+      await this.releaseWorkspaceResources(registered);
       return { workspacePath: registered, registered: false };
     }
     if (request.method === "workspace.status") {
@@ -335,6 +343,21 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   async replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
     const workspacePath = await canonicalizeWorkspacePath(cursor.workspacePath);
     const store = this.eventStore(workspacePath);
+    if (cursor.afterEventId && !store.hasRuntimeEvent(cursor.afterEventId, workspacePath)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "Runtime replay afterEventId 已失效，请重置 cursor 后重新回放",
+      );
+    }
+    if (
+      cursor.highWatermarkEventId &&
+      !store.hasRuntimeEvent(cursor.highWatermarkEventId, workspacePath)
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "Runtime replay highWatermarkEventId 已失效，请重新捕获回放边界",
+      );
+    }
     const highWatermarkEventId =
       cursor.highWatermarkEventId ?? store.getRuntimeEventHighWatermark(workspacePath)?.eventId;
     if (!highWatermarkEventId) {
@@ -357,9 +380,24 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         limit: Math.min(eventLimit + 1, MAX_REPLAY_QUERY_LIMIT),
       })
       .map(runtimeNotificationFromLedger);
+    if (
+      cursor.afterEventId &&
+      cursor.afterEventId !== highWatermarkEventId &&
+      candidates.length === 0
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "Runtime replay afterEventId 位于 high-watermark 之后",
+      );
+    }
     const events: RuntimeNotification[] = [];
     let eventsBytes = 2;
+    let nextAfterEventId = cursor.afterEventId;
     for (const event of candidates.slice(0, eventLimit)) {
+      if (isEphemeralRuntimeNotificationTopic(event.topic)) {
+        nextAfterEventId = event.eventId;
+        continue;
+      }
       const eventBytes = Buffer.byteLength(
         JSON.stringify(serializeRuntimeNotification(event)),
         "utf8",
@@ -375,12 +413,12 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         break;
       }
       events.push(event);
+      nextAfterEventId = event.eventId;
       eventsBytes = nextBytes;
     }
-    const nextAfterEventId = events.at(-1)?.eventId ?? cursor.afterEventId;
     return {
       events,
-      hasMore: events.length < candidates.length,
+      hasMore: nextAfterEventId !== highWatermarkEventId,
       ...(nextAfterEventId ? { nextAfterEventId } : {}),
       highWatermarkEventId,
     };
@@ -435,7 +473,44 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
 
   /** Persists and broadcasts events projected by non-Run desktop adapters. */
   publishDesktopNotification(notification: RuntimeNotification): void {
+    if (isEphemeralRuntimeNotificationTopic(notification.topic)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `Ephemeral Runtime notification ${notification.topic} cannot be persisted`,
+      );
+    }
     this.publish(notification);
+  }
+
+  /**
+   * Broadcast a bounded best-effort live update without adding it to RuntimeStore.
+   * Only protocol-declared ephemeral topics are accepted so callers cannot accidentally bypass
+   * durable delivery for ordinary lifecycle facts.
+   */
+  publishEphemeralNotification(notification: RuntimeNotification<"run.live">): void {
+    if (!isRunLiveRuntimeNotification(notification)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "Invalid run.live Runtime notification",
+      );
+    }
+    const item = notification.payload.item;
+    const streamKey = liveStreamKey(notification, item.streamId);
+    const runKey = liveStreamKey(notification);
+    if (
+      item.operation === "append" &&
+      (this.terminalLiveStreams.has(streamKey) || this.terminalLiveStreams.has(runKey))
+    ) {
+      return;
+    }
+    if (item.operation === "complete" || item.operation === "clear") {
+      this.terminalLiveStreams.add(streamKey);
+      if (this.terminalLiveStreams.size > MAX_LIVE_TERMINAL_STREAMS) {
+        const oldest = this.terminalLiveStreams.values().next().value;
+        if (oldest !== undefined) this.terminalLiveStreams.delete(oldest);
+      }
+    }
+    this.notifyListeners(notification, "ephemeral");
   }
 
   closeRuntimes(): Promise<void> {
@@ -491,40 +566,67 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.listeners.clear();
+    this.terminalLiveStreams.clear();
     for (const store of this.eventStores.values()) store.close();
     this.eventStores.clear();
   }
 
+  private async releaseWorkspaceResources(workspacePath: string): Promise<void> {
+    this.unsubscribers.get(workspacePath)?.();
+    this.unsubscribers.delete(workspacePath);
+    await this.registry.release(workspacePath);
+    const store = this.eventStores.get(workspacePath);
+    store?.close();
+    this.eventStores.delete(workspacePath);
+    for (const key of [...this.terminalLiveStreams]) {
+      if (key.startsWith(`${workspacePath}\0`)) this.terminalLiveStreams.delete(key);
+    }
+  }
+
   private publish(notification: RuntimeNotification, run?: DaemonRunRecord): void {
-    this.eventStore(notification.scope.workspacePath).appendRuntimeEvent(
+    if (isEphemeralRuntimeNotificationTopic(notification.topic)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `Ephemeral Runtime notification ${notification.topic} cannot enter the durable ledger`,
+      );
+    }
+    const transportNotification = transportSafeRuntimeNotification(notification);
+    this.eventStore(transportNotification.scope.workspacePath).appendRuntimeEvent(
       {
-        eventId: notification.eventId,
-        topic: notification.topic,
-        workspacePath: notification.scope.workspacePath,
-        createdAt: notification.at,
+        eventId: transportNotification.eventId,
+        topic: transportNotification.topic,
+        workspacePath: transportNotification.scope.workspacePath,
+        createdAt: transportNotification.at,
         payload: {
-          scope: notification.scope,
-          resourceVersion: notification.resourceVersion,
-          payload: notification.payload,
+          scope: transportNotification.scope,
+          resourceVersion: transportNotification.resourceVersion,
+          payload: transportNotification.payload,
         },
       },
       run ? { daemonRun: run } : undefined,
     );
     if (this.deferredNotifications) {
-      this.deferredNotifications.push(notification);
+      this.deferredNotifications.push(transportNotification);
       return;
     }
-    this.notifyPersisted(notification);
+    this.notifyPersisted(transportNotification);
   }
 
   private notifyPersisted(notification: RuntimeNotification): void {
+    this.notifyListeners(notification, "durable");
+  }
+
+  private notifyListeners(
+    notification: RuntimeNotification,
+    delivery: "durable" | "ephemeral",
+  ): void {
     for (const listener of this.listeners) {
       try {
         listener(notification);
       } catch (error) {
         logger.warn(
-          { error, eventId: notification.eventId, topic: notification.topic },
-          "Runtime notification listener failed after durable commit",
+          { error, eventId: notification.eventId, topic: notification.topic, delivery },
+          `Runtime ${delivery} notification listener failed`,
         );
       }
     }
@@ -601,6 +703,68 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   }
 }
 
+function transportSafeRuntimeNotification(notification: RuntimeNotification): RuntimeNotification {
+  if (runtimeNotificationFitsFrame(notification)) return notification;
+  for (const budget of [
+    { maxString: 64 * 1024, maxArray: 256, maxKeys: 256 },
+    { maxString: 16 * 1024, maxArray: 128, maxKeys: 128 },
+    { maxString: 4 * 1024, maxArray: 64, maxKeys: 64 },
+    { maxString: 512, maxArray: 16, maxKeys: 32 },
+  ]) {
+    const candidate = {
+      ...notification,
+      payload: boundedNotificationValue(notification.payload as JsonValue, budget, 0),
+    } as RuntimeNotification;
+    if (runtimeNotificationFitsFrame(candidate)) return candidate;
+  }
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+    `Runtime notification ${notification.eventId} cannot be represented within the IPC frame limit`,
+  );
+}
+
+function runtimeNotificationFitsFrame(notification: RuntimeNotification): boolean {
+  try {
+    encodeRuntimeFrame({
+      kind: "event",
+      protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+      event: notification,
+    });
+    return true;
+  } catch (error) {
+    if (
+      error instanceof RuntimeProtocolError &&
+      error.code === RUNTIME_ERROR_CODES.FRAME_TOO_LARGE
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function boundedNotificationValue(
+  value: JsonValue,
+  budget: { readonly maxString: number; readonly maxArray: number; readonly maxKeys: number },
+  depth: number,
+): JsonValue {
+  if (typeof value === "string") {
+    if (value.length <= budget.maxString) return value;
+    return `${value.slice(0, Math.max(0, budget.maxString - 32))}…[truncated ${value.length} chars]`;
+  }
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (depth >= 32) return "[truncated nested value]";
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, budget.maxArray)
+      .map((item) => boundedNotificationValue(item, budget, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .slice(0, budget.maxKeys)
+      .map(([key, item]) => [key, boundedNotificationValue(item, budget, depth + 1)]),
+  );
+}
+
 export function workspaceStatusResult(
   runtime: WorkspaceTaskRuntime,
   registered: boolean,
@@ -665,6 +829,15 @@ function eventPayload(
         }
       : {}),
   };
+}
+
+function liveStreamKey(notification: RuntimeNotification<"run.live">, streamId?: string): string {
+  return [
+    notification.scope.workspacePath,
+    notification.scope.sessionId ?? "",
+    notification.payload.runId,
+    streamId ?? "*",
+  ].join("\0");
 }
 
 function runPayload(run: {

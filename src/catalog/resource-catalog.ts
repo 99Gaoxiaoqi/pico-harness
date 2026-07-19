@@ -1,3 +1,5 @@
+import type { HookTrustAuthority } from "../hooks/trust/store.js";
+
 export type ResourceCatalogScope = "project" | "user" | "builtin" | "external";
 
 export type ResourceCatalogFormat =
@@ -14,6 +16,8 @@ export interface ResourceCatalogSource {
   readonly root: string;
   readonly priority: number;
   readonly namespace?: string;
+  /** Host-only authority attached to immutable managed Plugin sources. */
+  readonly hookTrustAuthority?: HookTrustAuthority;
 }
 
 /**

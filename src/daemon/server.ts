@@ -202,8 +202,17 @@ export class LocalRuntimeDaemon {
   }
 
   private writeEvent(socket: Socket, event: RuntimeNotification): void {
-    if (!socket.destroyed) {
-      socket.write(encodeRuntimeFrame({ kind: "event", protocolVersion: 1, event }));
+    if (socket.destroyed) return;
+    try {
+      const frame = encodeRuntimeFrame({ kind: "event", protocolVersion: 1, event });
+      socket.write(frame, (error) => {
+        if (error && !socket.destroyed) socket.destroy(error);
+      });
+    } catch (error) {
+      // A durable event that cannot be delivered must fence this subscriber.
+      // Keeping the socket alive would let a later event advance the client cursor
+      // beyond the missing fact and permanently diverge from replay.
+      socket.destroy(error instanceof Error ? error : new Error(String(error)));
     }
   }
 }

@@ -42,7 +42,10 @@ type RuntimeTranscriptSnapshot = Pick<
   | "transcriptEvents"
   | "transcriptEventSequences"
   | "runtime"
->;
+> & {
+  readonly messageRunIds?: readonly (string | undefined)[];
+  readonly messageTurnIds?: readonly (string | undefined)[];
+};
 
 /** Builds the Desktop transcript read model directly from canonical RuntimeEvent facts. */
 export function projectRuntimeTranscriptEntries(
@@ -59,6 +62,8 @@ export function projectRuntimeTranscriptEntries(
       sessionId,
       messages: messages.map(({ message }) => message),
       messageSequences: messages.map(({ sequence }) => sequence),
+      messageRunIds: messages.map(({ runId }) => runId),
+      messageTurnIds: messages.map(({ turnId }) => turnId),
       transcriptEvents: transcript.map(({ event }) => event),
       transcriptEventSequences: transcript.map(({ sequence }) => sequence),
       runtime: projectRuntimeSessionState(events),
@@ -94,16 +99,18 @@ export class TranscriptRevisionConflict extends Error {
 
 function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConversationItem[] {
   const toolResults = indexToolResults(snapshot.messages);
-  const structuredItems = projectStructuredItems(snapshot);
-  const structuredThinking = new Map<string, number>();
-  for (const { item } of structuredItems) {
-    if (item.kind !== "thinking") continue;
-    const key = item.content.trim();
-    if (key) structuredThinking.set(key, (structuredThinking.get(key) ?? 0) + 1);
-  }
-  const structuredThinkingPlacement = new Map<
+  const structured = projectStructuredItems(snapshot);
+  const structuredItems = structured.items;
+  const representedMessageToolKeys = structured.representedMessageToolKeys;
+  const structuredThinkingMatches = matchStructuredThinkingMessages(snapshot, structuredItems);
+  const structuredThinkingPlacements = new Map<
     string,
-    { readonly sequence: number; readonly ordinal: number }
+    {
+      readonly sequence: number;
+      readonly ordinal: number;
+      readonly runId?: string;
+      readonly turnId?: string;
+    }
   >();
   const items: OrderedConversationItem[] = [];
   let ordinal = 0;
@@ -130,6 +137,9 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
         ? desktopDisplayText.trim()
         : message.content.trim();
     const sequence = snapshot.messageSequences[messageIndex] ?? messageIndex + 1;
+    const runId = snapshot.messageRunIds?.[messageIndex];
+    const turnId = snapshot.messageTurnIds?.[messageIndex];
+    const reasoningIdentity = runId && turnId ? { runId, turnId } : {};
     if (message.role === "user") {
       if (content) {
         append(
@@ -146,21 +156,31 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
 
     const reasoning = message.role === "assistant" ? message.reasoning?.trim() : undefined;
     if (reasoning) {
-      const structuredCount = structuredThinking.get(reasoning) ?? 0;
-      if (structuredCount > 0) {
-        structuredThinking.set(reasoning, structuredCount - 1);
+      const structuredMatch = structuredThinkingMatches.get(messageIndex);
+      if (structuredMatch) {
         // Runtime message commits happen before the async reporter sink. Keep the durable
         // structured entry ID while anchoring matched reasoning before its assistant answer.
-        structuredThinkingPlacement.set(reasoning, { sequence, ordinal: ordinal - 0.5 });
-      } else {
-        append(
-          {
-            id: stableItemId(snapshot.sessionId, messageIndex, "thinking", reasoning),
-            kind: "thinking",
-            content: reasoning,
-          },
+        structuredThinkingPlacements.set(structuredMatch.item.id, {
           sequence,
-        );
+          ordinal: ordinal - 0.5,
+          ...reasoningIdentity,
+        });
+      } else {
+        const item: RuntimeConversationItem =
+          runId && turnId
+            ? {
+                id: stableItemId(snapshot.sessionId, messageIndex, "thinking", reasoning),
+                kind: "thinking",
+                content: reasoning,
+                runId,
+                turnId,
+              }
+            : {
+                id: stableItemId(snapshot.sessionId, messageIndex, "thinking", reasoning),
+                kind: "thinking",
+                content: reasoning,
+              };
+        append(item, sequence);
       }
     }
 
@@ -174,8 +194,14 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
         sequence,
       );
     }
-    for (const call of message.toolCalls ?? []) {
+    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
+      // The structured transcript entry owns the stable UI identity when it references the
+      // exact Provider call occurrence. Consume its result even when the structured entry is
+      // rendered so a reused Provider call ID cannot shift the following synthetic summary.
       const result = toolResults.get(call.id)?.shift();
+      if (representedMessageToolKeys.has(messageToolOccurrenceKey(messageIndex, callIndex))) {
+        continue;
+      }
       const failed = result === undefined || isToolResultErrorMessage(result);
       append(
         {
@@ -211,12 +237,69 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
   items.push(
     ...structuredItems.map((ordered) => {
       if (ordered.item.kind !== "thinking") return ordered;
-      const placement = structuredThinkingPlacement.get(ordered.item.content.trim());
-      return placement === undefined ? ordered : { ...ordered, ...placement };
+      const placement = structuredThinkingPlacements.get(ordered.item.id);
+      if (placement === undefined) return ordered;
+      const { runId, turnId, ...order } = placement;
+      return {
+        ...ordered,
+        ...order,
+        item: {
+          ...ordered.item,
+          ...(runId && turnId ? { runId, turnId } : {}),
+        },
+      };
     }),
   );
   items.sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
   return items.map(({ item }) => item);
+}
+
+function matchStructuredThinkingMessages(
+  snapshot: RuntimeTranscriptSnapshot,
+  structuredItems: readonly OrderedConversationItem[],
+): ReadonlyMap<number, OrderedConversationItem> {
+  const matches = new Map<number, OrderedConversationItem>();
+  const claimedMessages = new Set<number>();
+  const candidates = structuredItems
+    .filter(
+      (
+        ordered,
+      ): ordered is OrderedConversationItem & {
+        readonly item: Extract<RuntimeConversationItem, { kind: "thinking" }>;
+      } => ordered.item.kind === "thinking" && Boolean(ordered.item.content.trim()),
+    )
+    .toSorted((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
+
+  for (const candidate of candidates) {
+    const eligible = snapshot.messages.flatMap((message, messageIndex) => {
+      if (
+        claimedMessages.has(messageIndex) ||
+        message.role !== "assistant" ||
+        message.reasoning?.trim() !== candidate.item.content.trim()
+      ) {
+        return [];
+      }
+      const sequence = snapshot.messageSequences[messageIndex] ?? messageIndex + 1;
+      const runId = snapshot.messageRunIds?.[messageIndex];
+      const turnId = snapshot.messageTurnIds?.[messageIndex];
+      const identityMatch =
+        candidate.item.runId !== undefined && candidate.item.turnId !== undefined
+          ? candidate.item.runId === runId && candidate.item.turnId === turnId
+          : false;
+      return [{ messageIndex, sequence, identityMatch }];
+    });
+    const selected = eligible.toSorted(
+      (left, right) =>
+        Number(right.identityMatch) - Number(left.identityMatch) ||
+        Math.abs(left.sequence - candidate.sequence) -
+          Math.abs(right.sequence - candidate.sequence) ||
+        right.sequence - left.sequence,
+    )[0];
+    if (!selected) continue;
+    claimedMessages.add(selected.messageIndex);
+    matches.set(selected.messageIndex, candidate);
+  }
+  return matches;
 }
 
 interface OrderedConversationItem {
@@ -225,8 +308,17 @@ interface OrderedConversationItem {
   readonly ordinal: number;
 }
 
-function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedConversationItem[] {
-  if (snapshot.transcriptEvents.length === 0) return [];
+interface StructuredConversationProjection {
+  readonly items: readonly OrderedConversationItem[];
+  readonly representedMessageToolKeys: ReadonlySet<string>;
+}
+
+function projectStructuredItems(
+  snapshot: RuntimeTranscriptSnapshot,
+): StructuredConversationProjection {
+  if (snapshot.transcriptEvents.length === 0) {
+    return { items: [], representedMessageToolKeys: new Set() };
+  }
   const projection = projectTranscriptEvents(snapshot.transcriptEvents);
   const createdAtByEntryId = new Map<string, number>();
   const sequenceByEntryId = new Map<string, number>();
@@ -242,12 +334,19 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
       );
     }
   }
+  const representedMessageToolKeys = matchStructuredProviderCalls(
+    snapshot,
+    projection,
+    sequenceByEntryId,
+  );
   // Deduplicate only the number of structured tool entries already represented by
   // message tool calls. A Set would incorrectly drop a second legitimate invocation
   // when two calls happen to use the same name and arguments.
   const messageToolSignatures = new Map<string, number>();
-  for (const message of snapshot.messages) {
-    for (const call of message.toolCalls ?? []) {
+  for (const [messageIndex, message] of snapshot.messages.entries()) {
+    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
+      if (representedMessageToolKeys.has(messageToolOccurrenceKey(messageIndex, callIndex)))
+        continue;
       const signature = `${call.name}\0${call.arguments}`;
       messageToolSignatures.set(signature, (messageToolSignatures.get(signature) ?? 0) + 1);
     }
@@ -322,6 +421,7 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
           ordered({
             id: projected.id,
             kind: "subagent",
+            ...(entry.agentName ? { name: entry.agentName } : {}),
             title: entry.agentName ? `${entry.agentName}: ${entry.task}` : entry.task,
             ...((entry.summary ?? entry.currentAction)
               ? { detail: entry.summary ?? entry.currentAction }
@@ -348,7 +448,10 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
         );
         break;
       case "tool":
-        {
+        if (
+          projected.toolCallId === undefined ||
+          projection.toolCalls[projected.toolCallId]?.providerCallId === undefined
+        ) {
           const signature = `${entry.name}\0${entry.args}`;
           const representedCount = messageToolSignatures.get(signature) ?? 0;
           if (representedCount > 0) {
@@ -410,7 +513,73 @@ function projectStructuredItems(snapshot: RuntimeTranscriptSnapshot): OrderedCon
         break;
     }
   }
-  return items;
+  return { items, representedMessageToolKeys };
+}
+
+interface MessageToolOccurrence {
+  readonly key: string;
+  readonly providerCallId: string;
+  readonly sequence: number;
+  readonly ordinal: number;
+}
+
+interface StructuredProviderCallOccurrence {
+  readonly providerCallId: string;
+  readonly sequence: number;
+  readonly ordinal: number;
+}
+
+function matchStructuredProviderCalls(
+  snapshot: RuntimeTranscriptSnapshot,
+  projection: ReturnType<typeof projectTranscriptEvents>,
+  sequenceByEntryId: ReadonlyMap<string, number>,
+): ReadonlySet<string> {
+  const messages: MessageToolOccurrence[] = [];
+  for (const [messageIndex, message] of snapshot.messages.entries()) {
+    const sequence = snapshot.messageSequences[messageIndex] ?? messageIndex + 1;
+    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
+      messages.push({
+        key: messageToolOccurrenceKey(messageIndex, callIndex),
+        providerCallId: call.id,
+        sequence,
+        ordinal: messageIndex * 1_000_000 + callIndex,
+      });
+    }
+  }
+
+  const structured: StructuredProviderCallOccurrence[] = [];
+  for (const [projectedIndex, projected] of projection.entries.entries()) {
+    if (projected.entry.kind !== "tool" || projected.toolCallId === undefined) continue;
+    const providerCallId = projection.toolCalls[projected.toolCallId]?.providerCallId;
+    if (!providerCallId) continue;
+    structured.push({
+      providerCallId,
+      sequence: sequenceByEntryId.get(projected.id) ?? Number.MAX_SAFE_INTEGER - 1,
+      ordinal: projectedIndex,
+    });
+  }
+  structured.sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
+
+  const matched = new Set<string>();
+  for (const occurrence of structured) {
+    const candidates = messages.filter(
+      (message) =>
+        message.providerCallId === occurrence.providerCallId && !matched.has(message.key),
+    );
+    const preceding = candidates
+      .filter((message) => message.sequence <= occurrence.sequence)
+      .sort((left, right) => right.sequence - left.sequence || right.ordinal - left.ordinal)[0];
+    const following = candidates
+      .filter((message) => message.sequence > occurrence.sequence)
+      .sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal)[0];
+    const selected = preceding ?? following;
+    if (selected) matched.add(selected.key);
+  }
+  return matched;
+}
+
+function messageToolOccurrenceKey(messageIndex: number, callIndex: number): string {
+  return `${messageIndex}:${callIndex}`;
 }
 
 function structuredItemKey(
@@ -600,6 +769,9 @@ function truncateConversationItem(
       return {
         ...item,
         id,
+        ...(item.kind === "subagent" && item.name !== undefined
+          ? { name: text(item.name) ?? "" }
+          : {}),
         title: text(item.title) ?? "",
         ...(item.detail === undefined ? {} : { detail: text(item.detail) ?? "" }),
         ...(item.state === undefined ? {} : { state: text(item.state) ?? "" }),

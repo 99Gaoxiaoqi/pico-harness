@@ -116,9 +116,9 @@ function renderDefaultItem(
       );
     case "thinking":
       return (
-        <section className="conversation-thinking" aria-label="思考过程">
+        <section className="conversation-thinking" aria-label="推理摘要">
           <div className="conversation-thinking__label">
-            <Sparkles aria-hidden="true" /> 思考过程
+            <Sparkles aria-hidden="true" /> 推理摘要
           </div>
           {renderText(item.text, item)}
         </section>
@@ -288,7 +288,9 @@ export function ConversationTranscript({
   renderItem,
 }: ConversationTranscriptProps) {
   const visibleItems = mergeConversationItemGroups(items).filter(
-    (item) => item.kind !== "runBoundary" || item.status !== "started",
+    (item) =>
+      (item.kind !== "runBoundary" || item.status !== "started") &&
+      (item.kind !== "thinking" || item.cleared !== true),
   );
 
   if (visibleItems.length === 0) {

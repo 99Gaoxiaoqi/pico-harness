@@ -37,10 +37,9 @@ export interface ChangesCommandData {
   messageId: string;
 }
 
-export interface ResumeSessionCommandData {
-  sessionId: string;
-  mode: "resume" | "fork";
-}
+export type ResumeSessionCommandData =
+  | { readonly mode: "new" }
+  | { readonly mode: "resume" | "fork"; readonly sessionId: string };
 
 export interface LocalCommandResult {
   type: "local";

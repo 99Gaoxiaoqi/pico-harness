@@ -272,6 +272,8 @@ export type TranscriptEvent =
       readonly entryId: string;
       readonly streamId: string;
       readonly reason: "new-request" | "clear" | "truncate" | "abort";
+      /** delta 不落盘时携带中断前的最终投影，保证恢复结果等于 live UI。 */
+      readonly content?: string;
     })
   | (TranscriptEventBase & {
       readonly type: "assistant.response.suppressed";
@@ -349,6 +351,8 @@ export type TranscriptEvent =
   | (TranscriptEventBase & {
       readonly type: "transcript.truncated";
       readonly entryCount: number;
+      /** Rewind saga 的稳定幂等关联键；旧事件可以缺省。 */
+      readonly operationId?: string;
     })
   | (TranscriptEventBase & {
       readonly type: "transcript.cleared";
@@ -411,6 +415,7 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
       return;
     case "assistant.stream.interrupted":
       transcriptStrings(value, "entryId", "streamId", "reason");
+      transcriptOptionalString(value, "content");
       return;
     case "assistant.response.suppressed":
       transcriptStrings(value, "entryId", "reason");
@@ -455,6 +460,7 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
       return;
     case "transcript.truncated":
       transcriptNonNegativeInteger(value, "entryCount");
+      transcriptOptionalString(value, "operationId");
       return;
     case "transcript.cleared":
       return;
@@ -632,6 +638,16 @@ export class TranscriptEventStore {
       if (events.at(-1)?.sequence === this.projection.sequence) return;
       throw new Error("TranscriptEventStore can hydrate initial events only once");
     }
+    for (const event of events) this.loadInitialEvent(event);
+    if (this.events.length >= this.maxSegmentEvents) this.rollover();
+  }
+
+  /** Replace the local projection from one authoritative hydration snapshot. */
+  replaceEvents(events: readonly TranscriptEvent[]): void {
+    this.events.length = 0;
+    this.checkpoint = initialTranscriptProjection();
+    this.projection = this.checkpoint;
+    this.rebuildIdentityReservations();
     for (const event of events) this.loadInitialEvent(event);
     if (this.events.length >= this.maxSegmentEvents) this.rollover();
   }
@@ -893,6 +909,18 @@ export function reduceTranscriptEvent(
     case "assistant.stream.interrupted": {
       const stream = streams[event.streamId];
       assertStreamTarget(stream, event.entryId, "streaming");
+      if (event.content !== undefined) {
+        entries = replaceProjectedEntry(entries, event.entryId, (current) => {
+          if (current.entry.kind !== "assistant" && current.entry.kind !== "thinking") {
+            throw new Error(`Transcript stream ${event.streamId} points to a non-text entry`);
+          }
+          return projectedEntry(
+            current.id,
+            { kind: current.entry.kind, content: event.content! },
+            { streamId: event.streamId },
+          );
+        });
+      }
       streams = {
         ...streams,
         [event.streamId]: Object.freeze({ ...stream, status: "interrupted" as const }),

@@ -1119,21 +1119,21 @@ export class AgentEngine implements AgentRunner {
     if (!runtimePort) {
       throw new Error("Durable AgentEngine execution requires an injected runtimePort");
     }
+    if (!runtimeStore) {
+      throw new Error("Durable AgentEngine execution requires the Session runtime store");
+    }
+    const runtimeCapability = session.runtimeEventCapability;
+    if (!runtimeCapability) {
+      throw new Error("Durable AgentEngine execution requires the Session runtime capability");
+    }
     await runtimePort.reconcileIncompleteRuns({
-      sessionId: session.id,
-      workDir: session.workDir,
-      ...(runtimeStore ? { store: runtimeStore } : {}),
-      writeGuard: session,
+      capability: runtimeCapability,
     });
     await runtimePort.repairSessionProjection(session, {
-      workDir: session.workDir,
-      ...(runtimeStore ? { store: runtimeStore } : {}),
+      capability: runtimeCapability,
     });
     const runtimeRun = await runtimePort.startRun({
-      sessionId: session.id,
-      workDir: session.workDir,
-      ...(runtimeStore ? { store: runtimeStore } : {}),
-      writeGuard: session,
+      capability: runtimeCapability,
     });
     return runtimeRun.run(execute, signal);
   }
@@ -1359,6 +1359,7 @@ export class AgentEngine implements AgentRunner {
           let responseMsg: Message;
           const costBefore = session.totalCostCNY;
           try {
+            reporter.onThinking();
             responseMsg = await this.generateWithOverflowRetry(
               session,
               systemPrompt,
@@ -1407,6 +1408,7 @@ export class AgentEngine implements AgentRunner {
             }
             throw err;
           } finally {
+            reporter.onThinkingEnd?.();
             actionSpan?.end();
           }
 
@@ -1885,6 +1887,9 @@ export class AgentEngine implements AgentRunner {
         signal?.throwIfAborted();
         await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan, signal);
       }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) reporter.onInterrupted?.();
+      throw error;
     } finally {
       if (runFileJournal && userRewindPointId) {
         const changedPaths = await commitFileJournal(session, runFileJournal, userRewindPointId);
@@ -2385,8 +2390,8 @@ export class AgentEngine implements AgentRunner {
     const runtimePort = this.runtimePort;
     const parentRun = runtimePort?.currentRun();
     if (!parentRun) return runAttributed();
-    const writeGuard = parentRun.runtimeEventWriteGuard;
-    if (!writeGuard) {
+    const runtimeCapability = parentRun.runtimeCapability;
+    if (!runtimeCapability) {
       throw new Error(
         `Nested Runtime run ${parentRun.runId} does not hold a live Session write capability`,
       );
@@ -2397,14 +2402,11 @@ export class AgentEngine implements AgentRunner {
     }
     const parentToolCallId = runtimePort.currentToolCallId();
     const childRun = await runtimePort.startRun({
-      sessionId: parentRun.sessionId,
       // The parent Session owns the durable run directory even when the child operates
       // in an isolated worktree. This keeps one recoverable session ledger.
-      workDir: parentRun.workDir,
       parentRunId: parentRun.runId,
       ...(parentToolCallId ? { parentToolCallId } : {}),
-      store: parentRun.store,
-      writeGuard,
+      capability: runtimeCapability,
     });
     return childRun.run(async () => {
       const result = await runAttributed();

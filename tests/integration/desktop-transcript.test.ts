@@ -8,17 +8,42 @@ import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
 import type { TranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import type { Message } from "../../src/schema/message.js";
 
-function snapshot(messages: readonly Message[], transcriptEvents: readonly TranscriptEvent[] = []) {
+function snapshot(
+  messages: readonly Message[],
+  transcriptEvents: readonly TranscriptEvent[] = [],
+  identities: readonly { readonly runId: string; readonly turnId: string }[] = [],
+) {
   return {
     persistenceSequence: messages.length + transcriptEvents.length,
     sessionId: "desktop-session",
     messages: [...messages],
     messageSequences: messages.map((_, index) => transcriptEvents.length + index + 1),
+    messageRunIds: messages.map((_, index) => identities[index]?.runId),
+    messageTurnIds: messages.map((_, index) => identities[index]?.turnId),
     transcriptEvents,
     transcriptEventSequences: transcriptEvents.map((event) => event.sequence),
     runtime: { stateVersion: 1 as const, usage: createEmptyUsageSnapshot() },
   };
 }
+
+test("Desktop transcript carries the Runtime turn identity for durable reasoning", () => {
+  const page = projectRuntimeTranscript(
+    snapshot(
+      [{ role: "assistant", content: "完成。", reasoning: "检查配置。" }],
+      [],
+      [{ runId: "run-1", turnId: "turn:run-1:2" }],
+    ),
+    {},
+  );
+
+  assert.deepEqual(page.items[0], {
+    id: page.items[0]?.id,
+    kind: "thinking",
+    content: "检查配置。",
+    runId: "run-1",
+    turnId: "turn:run-1:2",
+  });
+});
 
 test("Desktop transcript projects provider reasoning before the answer", () => {
   const page = projectRuntimeTranscript(
@@ -93,6 +118,95 @@ test("Desktop transcript restores structured thinking, Skill and system entries 
     ["skill-entry", "system-entry", "thinking-entry"],
   );
   assert.match(page.items[3]?.id ?? "", /^item_[0-9a-f]{20}$/);
+});
+
+test("Desktop transcript places repeated identical reasoning before its matching answer", () => {
+  const events: TranscriptEvent[] = [
+    {
+      eventId: "thinking-start-1",
+      sequence: 1,
+      createdAt: 1,
+      type: "assistant.stream.started",
+      entryId: "thinking-entry-1",
+      streamId: "thinking-stream-1",
+      entryKind: "thinking",
+      delta: "同样的分析",
+    },
+    {
+      eventId: "thinking-complete-1",
+      sequence: 2,
+      createdAt: 2,
+      type: "assistant.stream.completed",
+      entryId: "thinking-entry-1",
+      streamId: "thinking-stream-1",
+      content: "同样的分析",
+    },
+    {
+      eventId: "thinking-start-2",
+      sequence: 3,
+      createdAt: 3,
+      type: "assistant.stream.started",
+      entryId: "thinking-entry-2",
+      streamId: "thinking-stream-2",
+      entryKind: "thinking",
+      delta: "同样的分析",
+    },
+    {
+      eventId: "thinking-complete-2",
+      sequence: 4,
+      createdAt: 4,
+      type: "assistant.stream.completed",
+      entryId: "thinking-entry-2",
+      streamId: "thinking-stream-2",
+      content: "同样的分析",
+    },
+  ];
+  const page = projectRuntimeTranscript(
+    snapshot(
+      [
+        { role: "assistant", content: "第一次回答", reasoning: "同样的分析" },
+        { role: "assistant", content: "第二次回答", reasoning: "同样的分析" },
+      ],
+      events,
+    ),
+    {},
+  );
+
+  assert.deepEqual(
+    page.items.map((item) =>
+      item.kind === "thinking" || item.kind === "assistantMessage" ? item.content : item.kind,
+    ),
+    ["同样的分析", "第一次回答", "同样的分析", "第二次回答"],
+  );
+  assert.deepEqual(
+    page.items.filter((item) => item.kind === "thinking").map((item) => item.id),
+    ["thinking-entry-1", "thinking-entry-2"],
+  );
+});
+
+test("Desktop transcript preserves the subagent display name as structured data", () => {
+  const events: TranscriptEvent[] = [
+    {
+      eventId: "subagent-update",
+      sequence: 1,
+      createdAt: 1,
+      type: "subagent.activity.updated",
+      entryId: "subagent-entry",
+      activityId: "activity-1",
+      activity: {
+        task: "检查架构边界",
+        status: "running",
+        agentName: "Explore",
+        mode: "explore",
+      },
+    },
+  ];
+  const page = projectRuntimeTranscript(snapshot([], events), {});
+  const item = page.items[0];
+
+  assert.equal(item?.kind, "subagent");
+  assert.equal(item?.kind === "subagent" ? item.name : undefined, "Explore");
+  assert.equal(item?.kind === "subagent" ? item.title : undefined, "Explore: 检查架构边界");
 });
 
 test("Desktop Markdown renders structure while blocking raw HTML and unsafe links", () => {
@@ -172,4 +286,143 @@ test("Desktop transcript preserves repeated structured tool calls during dedupe"
   assert.equal(tools.length, 2);
   assert.equal(tools[0]?.id, "tool-entry-2");
   assert.match(tools[1]?.id ?? "", /^item_[0-9a-f]{20}$/);
+});
+
+test("Desktop transcript matches structured tools by providerCallId before legacy signatures", () => {
+  const args = '{"path":"README.md"}';
+  const events: TranscriptEvent[] = [
+    {
+      eventId: "tool-start-b",
+      sequence: 1,
+      createdAt: 1,
+      type: "tool.started",
+      entryId: "tool-entry-b",
+      toolCallId: "tool-call-b",
+      providerCallId: "provider-call-b",
+      name: "read_file",
+      args,
+    },
+    {
+      eventId: "tool-start-a",
+      sequence: 2,
+      createdAt: 2,
+      type: "tool.started",
+      entryId: "tool-entry-a",
+      toolCallId: "tool-call-a",
+      providerCallId: "provider-call-a",
+      name: "read_file",
+      args,
+    },
+  ];
+  const page = projectRuntimeTranscript(
+    snapshot(
+      [
+        {
+          role: "assistant",
+          content: "done",
+          toolCalls: [{ id: "provider-call-a", name: "read_file", arguments: args }],
+        },
+      ],
+      events,
+    ),
+    {},
+  );
+
+  assert.deepEqual(
+    page.items.filter((item) => item.kind === "tool").map((item) => item.id),
+    ["tool-entry-b", "tool-entry-a"],
+  );
+});
+
+test("Desktop transcript matches a reused providerCallId to the nearest preceding call", () => {
+  const args = '{"path":"README.md"}';
+  const messages: Message[] = [
+    {
+      role: "assistant",
+      content: "first",
+      toolCalls: [{ id: "reused-call", name: "read_file", arguments: args }],
+    },
+    { role: "user", content: "1", toolCallId: "reused-call" },
+    {
+      role: "assistant",
+      content: "second",
+      toolCalls: [{ id: "reused-call", name: "read_file", arguments: args }],
+    },
+    { role: "user", content: "22", toolCallId: "reused-call" },
+  ];
+  const events: TranscriptEvent[] = [
+    {
+      eventId: "tool-start-reused",
+      sequence: 1,
+      createdAt: 5,
+      type: "tool.started",
+      entryId: "tool-entry-reused",
+      toolCallId: "tool-call-reused",
+      providerCallId: "reused-call",
+      name: "read_file",
+      args,
+    },
+  ];
+  const page = projectRuntimeTranscript(
+    {
+      ...snapshot(messages, events),
+      persistenceSequence: 5,
+      messageSequences: [1, 2, 3, 4],
+      transcriptEventSequences: [5],
+    },
+    {},
+  );
+
+  const tools = page.items.filter((item) => item.kind === "tool");
+  assert.equal(tools.length, 2);
+  assert.match(tools[0]?.id ?? "", /^item_[0-9a-f]{20}$/u);
+  assert.match(tools[0]?.kind === "tool" ? (tools[0].summary ?? "") : "", /1 bytes/u);
+  assert.equal(tools[1]?.id, "tool-entry-reused");
+});
+
+test("Desktop transcript binds duplicate reasoning text to the nearest structured turn", () => {
+  const messages: Message[] = [
+    { role: "assistant", content: "old answer", reasoning: "same" },
+    { role: "user", content: "next" },
+    { role: "assistant", content: "new answer", reasoning: "same" },
+  ];
+  const events: TranscriptEvent[] = [
+    {
+      eventId: "thinking-start-new",
+      sequence: 1,
+      createdAt: 5,
+      type: "assistant.stream.started",
+      entryId: "thinking-new",
+      streamId: "thinking-stream-new",
+      entryKind: "thinking",
+      delta: "same",
+    },
+    {
+      eventId: "thinking-complete-new",
+      sequence: 2,
+      createdAt: 6,
+      type: "assistant.stream.completed",
+      entryId: "thinking-new",
+      streamId: "thinking-stream-new",
+      content: "same",
+    },
+  ];
+  const page = projectRuntimeTranscript(
+    {
+      ...snapshot(messages, events),
+      persistenceSequence: 6,
+      messageSequences: [1, 2, 4],
+      messageRunIds: ["run-old", "run-user", "run-new"],
+      messageTurnIds: ["turn-old", "turn-user", "turn-new"],
+      transcriptEventSequences: [5, 6],
+    },
+    {},
+  );
+
+  const thinking = page.items.filter((item) => item.kind === "thinking");
+  assert.equal(thinking.length, 2);
+  assert.notEqual(thinking[0]?.id, "thinking-new");
+  assert.equal(thinking[1]?.id, "thinking-new");
+  assert.equal(thinking[1]?.runId, "run-new");
+  assert.equal(thinking[1]?.turnId, "turn-new");
 });

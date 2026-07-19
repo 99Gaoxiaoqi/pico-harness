@@ -7,9 +7,9 @@ import type { HookOutput } from "../hooks/types.js";
 import type { ImagePart, Message } from "../schema/message.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CliSessionSelection } from "../cli/session-resolver.js";
+import { logger } from "../observability/logger.js";
 import type { SessionRuntime } from "./session-runtime.js";
 import { RuntimeRun } from "./runtime-run.js";
-import type { RuntimeEventStore } from "./runtime-event-store.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -25,7 +25,6 @@ import type {
  */
 export interface RuntimeRunExecutorInput {
   readonly session: Session;
-  readonly runtimeEventStore: RuntimeEventStore;
   readonly runtimeState: SessionRuntime;
   readonly engine: AgentEngine;
   readonly sessionSelection: CliSessionSelection;
@@ -51,7 +50,6 @@ export class RuntimeRunExecutor {
   async execute(): Promise<RunAgentCliResult> {
     const {
       session,
-      runtimeEventStore,
       runtimeState,
       engine,
       sessionSelection,
@@ -66,23 +64,20 @@ export class RuntimeRunExecutor {
     let prompt = initialPrompt;
 
     const result = await session.serialize(async () => {
+      const runtimeCapability = session.runtimeEventCapability;
+      if (!runtimeCapability) {
+        throw new Error(`RuntimeRunExecutor requires a durable Session: ${session.id}`);
+      }
       await RuntimeRun.reconcileIncompleteRuns({
-        sessionId: session.id,
-        workDir,
-        store: runtimeEventStore,
-        writeGuard: session,
+        capability: runtimeCapability,
       });
       await RuntimeRun.repairSessionProjection(session, {
-        workDir,
-        store: runtimeEventStore,
+        capability: runtimeCapability,
       });
       const runtimeRun = await RuntimeRun.start({
-        sessionId: session.id,
-        workDir,
-        store: runtimeEventStore,
-        writeGuard: session,
+        capability: runtimeCapability,
       });
-      onEvent?.({
+      emitRuntimeLifecycleEvent(onEvent, {
         type: "run.started",
         sessionId: session.id,
         workDir,
@@ -156,13 +151,29 @@ export class RuntimeRunExecutor {
       }, signal);
     });
 
-    onEvent?.({
+    emitRuntimeLifecycleEvent(onEvent, {
       type: "run.finished",
       sessionId: session.id,
       workDir,
       at: Date.now(),
     });
     return result;
+  }
+}
+
+export function emitRuntimeLifecycleEvent(
+  sink: RuntimeRunExecutorInput["onEvent"],
+  event: RuntimeLifecycleEvent,
+): void {
+  try {
+    sink?.(event);
+  } catch (error) {
+    // Lifecycle events are observational. A UI/telemetry callback must not leave
+    // the canonical RuntimeRun without a terminal fact or turn success into failure.
+    logger.warn(
+      { error: String(error), lifecycleEvent: event.type, sessionId: event.sessionId },
+      "Runtime lifecycle observer failed",
+    );
   }
 }
 

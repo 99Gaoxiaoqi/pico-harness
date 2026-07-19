@@ -5,9 +5,9 @@ import {
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
 import { toCanonicalUsage, type Message } from "../schema/message.js";
-import type { RuntimeEvent, RuntimeMessageCommittedEvent } from "../runtime/runtime-event.js";
-import type { RuntimeHistoryProjectionEntry } from "../runtime/runtime-event-read-model.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { RuntimeEvent, RuntimeMessageCommittedEvent } from "./session-runtime-event.js";
+import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
 
 export interface SequencedRuntimeEvent {
   readonly sequence: number;
@@ -16,6 +16,8 @@ export interface SequencedRuntimeEvent {
 
 export interface RuntimeSessionSequencedMessageEntry extends RuntimeHistoryProjectionEntry {
   readonly sequence: number;
+  readonly runId: string;
+  readonly turnId: string;
 }
 
 export interface RuntimeSessionTranscriptEventEntry {
@@ -50,20 +52,19 @@ export function projectRuntimeSessionSequencedMessageEntries(
     eventId: event.eventId,
     message: structuredClone(event.data.message),
     sequence: entries[eventIndex]!.sequence,
+    runId: event.runId,
+    turnId: event.turnId,
   }));
 }
 
 export function projectRuntimeSessionTranscriptEventEntries(
   entries: readonly SequencedRuntimeEvent[],
 ): RuntimeSessionTranscriptEventEntry[] {
-  return projectBranchEventIndexes(
-    entries.map(({ event }) => event),
-    (event): event is Extract<RuntimeEvent, { kind: "transcript.event.recorded" }> =>
-      event.kind === "transcript.event.recorded",
-  ).map(({ eventIndex, event }) => ({
-    sequence: entries[eventIndex]!.sequence,
-    event: structuredClone(event.data.event),
-  }));
+  return entries.flatMap(({ sequence, event }) =>
+    event.kind === "transcript.event.recorded"
+      ? [{ sequence, event: structuredClone(event.data.event) }]
+      : [],
+  );
 }
 
 export function projectRuntimeSessionState(

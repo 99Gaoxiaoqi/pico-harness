@@ -70,18 +70,12 @@ export async function resolveCliSession(
 
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
-    await assertRuntimeSessionExists(options.workDir, sessionId, "resume", true, options.picoHome);
+    await assertRuntimeSessionExists(options.workDir, sessionId, "resume", options.picoHome);
     return rememberSelection({ mode: "resume", sessionId }, options.workDir, options.picoHome);
   }
 
   if (options.session) {
-    await assertRuntimeSessionExists(
-      options.workDir,
-      options.session,
-      "resume",
-      false,
-      options.picoHome,
-    );
+    await assertRuntimeSessionExists(options.workDir, options.session, "resume", options.picoHome);
     return rememberSelection(
       { mode: "resume", sessionId: options.session },
       options.workDir,
@@ -94,7 +88,6 @@ export async function resolveCliSession(
       options.workDir,
       options.forkSession,
       "fork",
-      true,
       options.picoHome,
     );
     return rememberSelection(
@@ -228,14 +221,12 @@ async function assertRuntimeSessionExists(
   workDir: string,
   sessionId: string,
   action: "resume" | "fork",
-  required: boolean,
   picoHome?: string,
 ): Promise<void> {
   const prefix = action === "fork" ? "无法 fork" : "无法恢复";
   const store = createRuntimeEventStore(workDir, picoHome);
   const manifest = await store.readSessionManifest(sessionId);
   if (!manifest) {
-    if (!required) return;
     throw new Error(`${prefix} session ${sessionId}: runtime.sqlite 中不存在`);
   }
   const entries = await store.readSessionEntries(sessionId);

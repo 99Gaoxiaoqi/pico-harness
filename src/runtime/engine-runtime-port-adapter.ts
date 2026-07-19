@@ -13,7 +13,6 @@ import {
   runWithRuntimeToolCall,
   RuntimeRun,
 } from "./runtime-run.js";
-import type { RuntimeEventStore } from "./runtime-event-store.js";
 import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
 
 /**
@@ -28,28 +27,21 @@ export function createEngineRuntimePort(): EngineRuntimePort {
     runWithToolCall: (toolCallId, execute) => runWithRuntimeToolCall(toolCallId, execute),
     reconcileIncompleteRuns: (options: EngineRuntimeReconcileOptions) =>
       RuntimeRun.reconcileIncompleteRuns({
-        sessionId: options.sessionId,
-        workDir: options.workDir,
-        ...(options.store ? { store: options.store as RuntimeEventStore } : {}),
-        writeGuard: options.writeGuard,
+        capability: options.capability,
       }),
     repairSessionProjection: (
       session,
       options: EngineRuntimeRepairProjectionOptions,
     ): Promise<boolean> =>
       RuntimeRun.repairSessionProjection(session, {
-        workDir: options.workDir,
-        ...(options.store ? { store: options.store as RuntimeEventStore } : {}),
+        capability: options.capability,
       }),
     startRun: (options: EngineRuntimeRunStartOptions): Promise<EngineRuntimeRun> =>
       RuntimeRun.start({
-        sessionId: options.sessionId,
-        workDir: options.workDir,
         ...(options.runId ? { runId: options.runId } : {}),
         ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
-        ...(options.store ? { store: options.store as RuntimeEventStore } : {}),
-        writeGuard: options.writeGuard,
+        capability: options.capability,
       }),
     commitExternalMessages: (session, messages) =>
       RuntimeRun.commitExternalMessages(session, messages),

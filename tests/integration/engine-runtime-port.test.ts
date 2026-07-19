@@ -15,12 +15,9 @@ test("engine runtime port preserves the canonical run and nested tool context", 
   try {
     await session.recover();
     const port = createEngineRuntimePort();
-    const run = await port.startRun({
-      sessionId: session.id,
-      workDir: session.workDir,
-      store: session.runtimeEventStore,
-      writeGuard: session,
-    });
+    const capability = session.runtimeEventCapability!;
+    const run = await port.startRun({ capability });
+    assert.strictEqual(run.runtimeCapability, capability);
 
     const result = await run.run(async () => {
       assert.equal(port.currentRun(), run);

@@ -13,7 +13,6 @@ export interface LocalUiDialogHostContext {
   models?: readonly ModelOption[];
   currentModelId?: string;
   sessions?: readonly SessionBrowserSession[];
-  currentProjectCwd?: string;
   rewindSessionId?: string;
   rewindSnapshots?: readonly FileHistorySnapshotSummary[];
   onClose?: (id: string) => void;
@@ -59,12 +58,7 @@ export function createLocalUiDialogContent(
         <ModelSelector currentModelId={context.currentModelId} models={context.models ?? []} />
       );
     case "session":
-      return (
-        <SessionBrowser
-          currentProjectCwd={context.currentProjectCwd}
-          sessions={context.sessions ?? []}
-        />
-      );
+      return <SessionBrowser sessions={context.sessions ?? []} />;
     case "rewind":
       return (
         <RewindSelector

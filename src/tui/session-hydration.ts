@@ -10,18 +10,22 @@ import type { TuiReporter } from "./tui-reporter.js";
 import {
   projectTranscriptEntriesForRendering,
   projectTranscriptEvents,
+  type TranscriptEvent,
 } from "../presentation/transcript-event-store.js";
+
+type HydrationEventDraft<Event extends TranscriptEvent = TranscriptEvent> = Event extends unknown
+  ? Omit<Event, "eventId" | "sequence" | "createdAt">
+  : never;
 
 /**
  * RuntimeEventStore 是模型上下文的权威源，TUI EventStore 是当前界面 segment。
  * 恢复/热切换时从前者重建最小可见 transcript，不暴露 system injection。
  */
 export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[] {
-  // 结构化 transcript 是稳定 ID、reasoning、Skill/system 及子代理终态的权威源。
-  // 仅保留旧 Session（尚未写入 transcriptEvents）的 messages fallback。
-  if (snapshot.transcriptEvents.length > 0) {
-    return projectHydratedTranscriptEntries(snapshot.transcriptEvents);
-  }
+  const hydrationEvents = combinedHydrationEvents(snapshot);
+  if (hydrationEvents.length > 0) return projectHydratedTranscriptEntries(hydrationEvents);
+
+  // 防御旧的非结构化快照；正常 SessionHydrationSnapshot 会由上面的兼容事件覆盖。
   const toolResults = indexToolResults(snapshot.messages);
   const entries: TuiEntry[] = [];
 
@@ -67,13 +71,19 @@ export function hydrateTuiReporter(
     | "onFinish"
   > & {
     hydrateTranscriptEvents?: (events: SessionHydrationSnapshot["transcriptEvents"]) => void;
+    replaceTranscriptEvents?: (events: SessionHydrationSnapshot["transcriptEvents"]) => void;
     withoutDurableTranscript?: (callback: () => void) => void;
   },
   snapshot: SessionHydrationSnapshot,
+  options: { readonly replace?: boolean } = {},
 ): void {
-  // Reporter 在 Repl 中已用 initialEvents 水合；避免再次从 messages 双写。
-  if (snapshot.transcriptEvents.length > 0) {
-    reporter.hydrateTranscriptEvents?.(snapshot.transcriptEvents);
+  const hydrationEvents = combinedHydrationEvents(snapshot);
+  if (options.replace && reporter.replaceTranscriptEvents) {
+    reporter.replaceTranscriptEvents(hydrationEvents);
+    if (hydrationEvents.length > 0) return;
+  }
+  if (reporter.hydrateTranscriptEvents && hydrationEvents.length > 0) {
+    reporter.hydrateTranscriptEvents(hydrationEvents);
     return;
   }
   const hydrateLegacyMessages = (): void => {
@@ -115,6 +125,120 @@ export function hydrateTuiReporter(
   } else {
     hydrateLegacyMessages();
   }
+}
+
+/**
+ * 旧 Session 在第一次结构化写入后会形成 legacy messages + transcript events 的混合快照。
+ * 只把首条结构化 RuntimeEvent 之前的 message 前缀合成为稳定事件，再接上真实事件；
+ * 本地 sequence 只服务 reducer，durable sequence 仍由 Session 账本保存。
+ */
+function combinedHydrationEvents(snapshot: SessionHydrationSnapshot): TranscriptEvent[] {
+  const structured = snapshot.transcriptEvents;
+  const sequencesAligned =
+    snapshot.messageSequences.length === snapshot.messages.length &&
+    snapshot.transcriptEventSequences.length === structured.length;
+  if (!sequencesAligned)
+    return structured.map((event, index) => ({ ...event, sequence: index + 1 }));
+
+  const firstStructuredSequence =
+    structured.length > 0
+      ? Math.min(...snapshot.transcriptEventSequences)
+      : Number.POSITIVE_INFINITY;
+  const legacyMessageIndexes = snapshot.messageSequences.flatMap((sequence, index) =>
+    sequence < firstStructuredSequence ? [index] : [],
+  );
+  const legacy = synthesizeLegacyTranscriptEvents(snapshot, legacyMessageIndexes);
+  return [...legacy, ...structured].map((event, index) => ({ ...event, sequence: index + 1 }));
+}
+
+function synthesizeLegacyTranscriptEvents(
+  snapshot: SessionHydrationSnapshot,
+  messageIndexes: readonly number[],
+): TranscriptEvent[] {
+  const events: TranscriptEvent[] = [];
+  const toolResults = indexToolResults(snapshot.messages);
+  const selected = new Set(messageIndexes);
+  const baseCreatedAt = Number.isFinite(Date.parse(snapshot.createdAt))
+    ? Date.parse(snapshot.createdAt)
+    : 0;
+  const append = (draft: HydrationEventDraft): TranscriptEvent => {
+    const event = {
+      ...draft,
+      eventId: `legacy:${snapshot.sessionId}:event:${events.length + 1}`,
+      sequence: events.length + 1,
+      createdAt: baseCreatedAt + events.length,
+    } as TranscriptEvent;
+    events.push(event);
+    return event;
+  };
+
+  for (const [messageIndex, message] of snapshot.messages.entries()) {
+    if (!selected.has(messageIndex)) continue;
+    if (
+      message.role === "system" ||
+      message.toolCallId !== undefined ||
+      isMessageHiddenFromTranscript(message)
+    ) {
+      continue;
+    }
+    const runtimeSequence = snapshot.messageSequences[messageIndex]!;
+    const entryId = (kind: string, ordinal = 0): string =>
+      `legacy:${snapshot.sessionId}:message:${runtimeSequence}:${kind}:${ordinal}`;
+
+    if (message.role === "user") {
+      const content = visibleText(message.content);
+      if (content) {
+        append({
+          type: "entry.appended",
+          entryId: entryId("user"),
+          entry: { kind: "user", content },
+        });
+      }
+      continue;
+    }
+
+    const reasoning = visibleText(message.reasoning ?? "");
+    const content = visibleText(message.content);
+    if (reasoning) {
+      append({
+        type: "entry.appended",
+        entryId: entryId("thinking"),
+        entry: { kind: "thinking", content: reasoning },
+      });
+    }
+    if (content) {
+      append({
+        type: "entry.appended",
+        entryId: entryId("assistant"),
+        entry: { kind: "assistant", content },
+      });
+    }
+    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
+      const result = shiftToolResult(toolResults, call.id);
+      const toolCallId = entryId("tool-call", callIndex);
+      append({
+        type: "tool.started",
+        entryId: entryId("tool", callIndex),
+        toolCallId,
+        providerCallId: call.id,
+        name: call.name,
+        args: call.arguments,
+      });
+      const failed = result === undefined || isHydratedToolError(result);
+      const rawResult = result?.content ?? "Interrupted before a result was recorded.";
+      const summary = compactToolResult(rawResult);
+      append({
+        type: "tool.completed",
+        toolCallId,
+        status: failed ? "error" : "success",
+        summary,
+        inlineResult: summary,
+        size: rawResult.length,
+        truncated: summary.length < rawResult.length,
+      });
+    }
+  }
+  return events;
 }
 
 function projectHydratedTranscriptEntries(

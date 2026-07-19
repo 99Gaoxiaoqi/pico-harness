@@ -9,6 +9,7 @@ import {
 import {
   parseDesktopRuntimeResult,
   parseStrictRuntimeParams,
+  RuntimeNotificationBuffer,
   RuntimeProtocolError,
   type RuntimeMethod,
   type RuntimeNotification,
@@ -69,13 +70,14 @@ export function registerDesktopIpcHandlers(options: {
     let managedSubscription: RuntimeSubscription | undefined;
     let ready = false;
     let disposed = false;
-    const pendingNotifications: RuntimeNotification[] = [];
+    const pendingNotifications = new RuntimeNotificationBuffer();
+    let pendingOverflow = false;
     let subscriptionId: string | undefined;
 
     const dispose = () => {
       if (disposed) return;
       disposed = true;
-      pendingNotifications.length = 0;
+      pendingNotifications.clear();
       event.sender.removeListener("destroyed", dispose);
       subscription?.dispose();
       if (subscriptionId && subscriptions.get(subscriptionId) === managedSubscription) {
@@ -98,7 +100,7 @@ export function registerDesktopIpcHandlers(options: {
       };
       subscription = await runtime.subscribe(params, (notification) => {
         if (disposed || event.sender.isDestroyed()) return;
-        if (!ready) pendingNotifications.push(notification);
+        if (!ready) pendingOverflow ||= !pendingNotifications.push(notification);
         else sendNotification(notification);
       });
       if (disposed || event.sender.isDestroyed()) {
@@ -109,6 +111,13 @@ export function registerDesktopIpcHandlers(options: {
           true,
         );
       }
+      if (pendingOverflow) {
+        throw new RuntimeClientError(
+          "RUNTIME_PENDING_OVERFLOW",
+          "Desktop Runtime 订阅建立期间 durable 事件超过缓冲预算，请重新加载会话",
+          true,
+        );
+      }
       const replay = parseDesktopRuntimeResult("events.subscribe", subscription.replay);
       managedSubscription = {
         ownerId: event.sender.id,
@@ -116,7 +125,7 @@ export function registerDesktopIpcHandlers(options: {
       };
       subscriptions.set(envelope.subscriptionId, managedSubscription);
       ready = true;
-      for (const notification of pendingNotifications.splice(0)) sendNotification(notification);
+      for (const notification of pendingNotifications.drain()) sendNotification(notification);
       return success(replay);
     } catch (error) {
       dispose();

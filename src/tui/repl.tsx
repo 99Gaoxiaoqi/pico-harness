@@ -79,6 +79,7 @@ import { defaultIsRetryableError } from "../provider/retry.js";
 import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation.js";
 import type { ToolRegistry } from "../tools/registry-impl.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
@@ -93,10 +94,12 @@ import {
   setSessionTools,
   toolStatusFromRegistry,
   type SessionSettings,
+  type SessionToolStatus,
 } from "../input/session-settings.js";
 import { forgetSessionPolicyState } from "../input/session-policy.js";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import type { SessionManagerLease } from "../engine/session-manager.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import {
   reconcileUnfinishedSessionForksOrThrow,
@@ -106,6 +109,7 @@ import type { Reporter } from "../engine/reporter.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
+import { qualifyMcpToolName } from "../mcp/types.js";
 import { createHookedElicitationHandler, McpElicitationUiHandler } from "../mcp/elicitation-ui.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
 import {
@@ -141,7 +145,7 @@ import {
 } from "../runtime/session-runtime.js";
 import { createTuiTerminalGridSession } from "./terminal-grid.js";
 import { hydrateTuiReporter } from "./session-hydration.js";
-import { TuiEventStore, projectTuiEntriesForRendering } from "./tui-event-store.js";
+import { projectTuiEntriesForRendering } from "./tui-event-store.js";
 import { createSessionTranscriptSink } from "../presentation/transcript-durability.js";
 import { AskUserHandler } from "../tools/ask-user.js";
 import { bindAskUserDialogs } from "./ask-user-dialog.js";
@@ -173,6 +177,11 @@ import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
+import {
+  createBuiltinPluginCapabilityRegistry,
+  PluginCapabilityActivationScope,
+  type PluginCapabilityRegistry,
+} from "../plugins/plugin-capability.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
@@ -195,6 +204,13 @@ export interface ReplOptions {
   sessionSelection?: CliSessionSelection;
   /** CLI --add-dir 提供的附加工作目录。 */
   addDirs?: string[];
+  /** Host-owned capability factories shared by snapshot resolution and runtime activation. */
+  pluginCapabilityRegistry?: PluginCapabilityRegistry;
+}
+
+export interface TuiReplDependencies {
+  /** Host/test seam; the returned snapshot remains owned by this TUI invocation. */
+  readonly loadPluginSnapshot?: typeof loadPluginRuntimeSnapshot;
 }
 
 /** Resolve durable startup defaults while keeping an explicit CLI thinking value authoritative. */
@@ -384,6 +400,7 @@ interface TuiSessionBundle {
   readonly sessionId: string;
   readonly session: Session;
   readonly runtimeState: TuiRuntimeState;
+  readonly pluginActivationScope: PluginCapabilityActivationScope;
   readonly settings: SessionSettings;
   readonly workspaceRoots: WorkspaceRoots;
   readonly toolRegistry: ToolRegistry;
@@ -394,7 +411,35 @@ interface TuiSessionBundle {
   readonly mcpElicitationHandler: McpElicitationUiHandler;
   readonly skillLoader: SkillLoader;
   readonly recoveredRewindInputText?: string;
+  /** Immutable foreground non-MCP inventory; per-run allowlists must never overwrite it. */
+  readonly baselineToolSnapshot: readonly SessionToolStatus[];
   latestMcpStatus?: McpStatusSnapshot;
+  latestToolSnapshot: readonly SessionToolStatus[];
+}
+
+export function mergeTuiToolSnapshot(
+  baseline: readonly SessionToolStatus[],
+  current: readonly SessionToolStatus[],
+): SessionToolStatus[] {
+  const nonMcp = baseline.filter((tool) => !tool.name.startsWith("mcp__"));
+  const currentMcp = current.filter((tool) => tool.name.startsWith("mcp__"));
+  return [...nonMcp, ...currentMcp];
+}
+
+function backgroundToolSnapshot(
+  registry: ToolRegistry,
+  mcpStatus: McpStatusSnapshot,
+): SessionToolStatus[] {
+  const pluginMcpTools = new Set(
+    mcpStatus.servers
+      .filter((server) => server.sourceId !== "project")
+      .flatMap((server) =>
+        server.toolNames.map((toolName) => qualifyMcpToolName(server.name, toolName)),
+      ),
+  );
+  return toolStatusFromRegistry(registry).filter(
+    (tool) => registry.getToolOwner(tool.name)?.kind !== "plugin" && !pluginMcpTools.has(tool.name),
+  );
 }
 
 interface TuiScheduleDraftRuntime {
@@ -858,9 +903,6 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
  */
 async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   const provider = opts.provider ?? "openai";
-  const runtimeEventStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(opts.workDir).workspace.runtimeDatabase,
-  });
   const credentialVault = createPlatformCredentialVault();
   const userConfigStore = new UserConfigStore();
   const effectiveConfigResolver = new EffectiveConfigResolver({ userConfigStore });
@@ -920,47 +962,53 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
     // 第二轮开始读取会话已持久化的模型选择，与完整 TUI 的 bundle 装配保持一致。
     // fork 首轮由 executeAgentRuntime 先执行 Saga，此时目标会话尚不可安全预创建。
     if (selection.mode !== "fork") {
-      const session =
-        globalSessionManager.get(selection.sessionId, opts.workDir) ??
-        (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir, {
-          persistence: true,
-        }));
-      if (!session.runtimeEventStore) {
-        throw new Error(`TUI requires a durable Session: ${selection.sessionId}`);
+      const lease = await globalSessionManager.getOrCreatePinned(
+        selection.sessionId,
+        opts.workDir,
+        { persistence: true },
+      );
+      try {
+        const session = lease.session;
+        const runtimeCapability = session.runtimeEventCapability;
+        const runtimeStore = session.runtimeEventStore;
+        if (!runtimeCapability || !runtimeStore) {
+          throw new Error(`TUI requires a durable Session: ${selection.sessionId}`);
+        }
+        await runtimeStore.initializeSession({
+          sessionId: session.id,
+          workDir: opts.workDir,
+        });
+        await RuntimeRun.repairSessionProjection(session, {
+          capability: runtimeCapability,
+        });
+        const restoredSettings = (await session.readHydrationSnapshot()).runtime.settings;
+        const route = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
+          cliModel: opts.model,
+          modelExplicit: opts.modelExplicit,
+          projectDefaultRouteId: effectiveModelRuntime.config.defaultModelRouteId,
+        });
+        const settings = getOrCreateSessionSettings(
+          {
+            sessionId: selection.sessionId,
+            sessionMode: selection.mode,
+            cwd: opts.workDir,
+            provider: route.provider,
+            model: route.model,
+            modelRouteId: route.id,
+            ...startupDefaults,
+          },
+          { persistence: session },
+        );
+        const thinkingEffort = coordinateTuiStartupSettings(
+          settings,
+          modelRouter,
+          route,
+          opts.thinkingEffort,
+        );
+        return modelRouter.providerConfig(route.id, thinkingEffort);
+      } finally {
+        lease.release();
       }
-      await runtimeEventStore.initializeSession({
-        sessionId: session.id,
-        workDir: opts.workDir,
-      });
-      await RuntimeRun.repairSessionProjection(session, {
-        workDir: opts.workDir,
-        store: runtimeEventStore,
-      });
-      const restoredSettings = (await session.readHydrationSnapshot()).runtime.settings;
-      const route = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
-        cliModel: opts.model,
-        modelExplicit: opts.modelExplicit,
-        projectDefaultRouteId: effectiveModelRuntime.config.defaultModelRouteId,
-      });
-      const settings = getOrCreateSessionSettings(
-        {
-          sessionId: selection.sessionId,
-          sessionMode: selection.mode,
-          cwd: opts.workDir,
-          provider: route.provider,
-          model: route.model,
-          modelRouteId: route.id,
-          ...startupDefaults,
-        },
-        { persistence: session },
-      );
-      const thinkingEffort = coordinateTuiStartupSettings(
-        settings,
-        modelRouter,
-        route,
-        opts.thinkingEffort,
-      );
-      return modelRouter.providerConfig(route.id, thinkingEffort);
     }
     const route = modelRouter.require(
       opts.modelExplicit
@@ -1023,6 +1071,9 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
             reporter: new LineModeReporter(process.stdout),
             signal: abortController.signal,
             modelRouter,
+            ...(opts.pluginCapabilityRegistry
+              ? { pluginCapabilityRegistry: opts.pluginCapabilityRegistry }
+              : {}),
           },
         );
         selection = { mode: "resume", sessionId: result.sessionId };
@@ -1100,7 +1151,10 @@ class LineModeReporter implements Reporter {
 }
 
 /** 启动 TUI REPL 循环 */
-export async function startTuiRepl(opts: ReplOptions): Promise<void> {
+export async function startTuiRepl(
+  opts: ReplOptions,
+  dependencies: TuiReplDependencies = {},
+): Promise<void> {
   await reconcileUnfinishedSessionForksOrThrow(opts.workDir, {
     runtimePort: createSessionForkRuntimePort(),
   });
@@ -1167,6 +1221,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       configurationChanged: effectiveRuntimeConfigurationChanged(previous, current),
     };
   };
+  // Both constructors are preflights without long-lived handles. Run them before acquiring
+  // Plugin/Task/Cron/MCP resources so invalid socket/SQLite paths have nothing to unwind.
+  const cronDaemonBridge = new LocalCronDaemonBridge();
+  const runtimeEventStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(opts.workDir).workspace.runtimeDatabase,
+  });
+  const pluginCapabilityRegistry =
+    opts.pluginCapabilityRegistry ?? createBuiltinPluginCapabilityRegistry();
+  const pluginSnapshot = await (dependencies.loadPluginSnapshot ?? loadPluginRuntimeSnapshot)({
+    workDir: opts.workDir,
+    service: pluginManagement,
+    capabilityRegistry: pluginCapabilityRegistry,
+  });
   let cronRuntimeDiagnostic: string | undefined;
   const cronService = (() => {
     try {
@@ -1177,15 +1244,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     }
   })();
   // 只在用户创建或启用任务时短连接 daemon；TUI 不接管后台 Runtime 生命周期。
-  const cronDaemonBridge = new LocalCronDaemonBridge();
   let taskRuntimeDiagnostic: string | undefined;
   const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch((error) => {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
     return undefined;
-  });
-  const pluginSnapshot = await loadPluginRuntimeSnapshot({
-    workDir: opts.workDir,
-    service: pluginManagement,
   });
   const createRuntimeSkillLoader = (workDir: string): SkillLoader =>
     new SkillLoader(workDir, {
@@ -1207,8 +1269,38 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       })(request, context);
     },
   });
+  let hostResourcesDisposed = false;
+  const disposeHostResources = async (): Promise<void> => {
+    if (hostResourcesDisposed) return;
+    hostResourcesDisposed = true;
+    const results = await Promise.allSettled([
+      taskHostRuntime?.close() ?? Promise.resolve(),
+      Promise.resolve().then(() => cronService?.close()),
+      sharedMcpManager.closeAll(),
+      pluginSnapshot.dispose(),
+    ]);
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "TUI host resource cleanup failed");
+    }
+  };
   const defaultMcpConfig =
-    opts.mcpConfigPath === undefined ? await resolveProjectMcpConfigPath(opts.workDir) : undefined;
+    opts.mcpConfigPath === undefined
+      ? await resolveProjectMcpConfigPath(opts.workDir).catch(async (error: unknown) => {
+          try {
+            await disposeHostResources();
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              "TUI configuration and resource cleanup both failed",
+              { cause: cleanupError },
+            );
+          }
+          throw error;
+        })
+      : undefined;
   const mcpConfigPath =
     opts.mcpConfigPath ?? defaultMcpConfig?.path ?? join(opts.workDir, ".pico", "mcp.json");
   let mcpInitialized = false;
@@ -1217,14 +1309,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     mode: "new",
     sessionId: createCliSessionId(),
   };
-  const runtimeEventStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(opts.workDir).workspace.runtimeDatabase,
-  });
   // ink render 需要 setState 驱动重渲染。Reporter 回调只更新当前活跃 bundle，
   // 旧 session 的延迟事件不会穿透到新 transcript。
   let setProjection: (projection: TuiProjection) => void = () => {};
   let nextBundleGeneration = 0;
   let shuttingDown = false;
+  let terminalRuntimeFailure: unknown;
   const pendingSessionSwitches = new Set<Promise<void>>();
   const pendingTuiSubmissions = new Set<Promise<void>>();
   const pendingDelegationWakes = new Set<Promise<void>>();
@@ -1236,7 +1326,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       snapshot.configPath !== undefined || (snapshot.configSources?.length ?? 0) > 0;
     if (!activeBundle) return;
     activeBundle.latestMcpStatus = snapshot;
-    setSessionTools(activeBundle.settings, toolStatusFromRegistry(activeBundle.toolRegistry));
+    activeBundle.latestToolSnapshot = mergeTuiToolSnapshot(
+      activeBundle.baselineToolSnapshot,
+      toolStatusFromRegistry(activeBundle.toolRegistry),
+    );
+    setSessionTools(activeBundle.settings, activeBundle.latestToolSnapshot);
   });
   const unsubscribeTaskCompletion = taskHostRuntime?.supervisor.subscribeCompletion((task) => {
     const current = activeBundle;
@@ -1258,30 +1352,38 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     // App/TUI edits and key rotation are visible without replacing an in-flight Provider.
     const { runtime: bundleModelRuntime } = await reloadModelRuntimeAtSafeBoundary();
     const bundleModelRouter = bundleModelRuntime.router;
-    let session = globalSessionManager.get(selection.sessionId, opts.workDir);
     if (selection.mode === "fork" && selection.sourceSessionId) {
       const sourceManifest = await runtimeEventStore.readSessionManifest(selection.sourceSessionId);
       if (!sourceManifest) {
         throw new Error(`无法 fork session ${selection.sourceSessionId}: runtime.sqlite 中不存在`);
       }
       if (!(await runtimeEventStore.readSessionManifest(selection.sessionId))) {
-        const sourceSession = await globalSessionManager.getOrCreate(
+        const sourceLease = await globalSessionManager.getOrCreatePinned(
           selection.sourceSessionId,
           opts.workDir,
           { persistence: true },
         );
-        await RuntimeRun.repairSessionProjection(sourceSession, {
-          workDir: opts.workDir,
-          store: runtimeEventStore,
-        });
-        await new SessionForkService({
-          workDir: opts.workDir,
-          runtimePort: createSessionForkRuntimePort(),
-        }).fork({
-          sourceSessionId: selection.sourceSessionId,
-          targetSessionId: selection.sessionId,
-          targetMode: DEFAULT_INTERACTION_MODE,
-        });
+        try {
+          const sourceCapability = sourceLease.session.runtimeEventCapability;
+          if (!sourceCapability) {
+            throw new Error(
+              `TUI fork requires a durable source Session: ${sourceLease.session.id}`,
+            );
+          }
+          await RuntimeRun.repairSessionProjection(sourceLease.session, {
+            capability: sourceCapability,
+          });
+          await new SessionForkService({
+            workDir: opts.workDir,
+            runtimePort: createSessionForkRuntimePort(),
+          }).fork({
+            sourceSessionId: selection.sourceSessionId,
+            targetSessionId: selection.sessionId,
+            targetMode: DEFAULT_INTERACTION_MODE,
+          });
+        } finally {
+          sourceLease.release();
+        }
       }
       const forkEvent = (await runtimeEventStore.readSession(selection.sessionId)).findLast(
         (event) => event.kind === "session.forked",
@@ -1295,53 +1397,60 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         );
       }
     }
-    session ??= await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir, {
-      persistence: true,
-    });
-    if (!session.runtimeEventStore) {
-      throw new Error(`TUI requires a durable Session: ${selection.sessionId}`);
-    }
-    await runtimeEventStore.initializeSession({
-      sessionId: session.id,
-      workDir: opts.workDir,
-    });
-    await RuntimeRun.repairSessionProjection(session, {
-      workDir: opts.workDir,
-      store: runtimeEventStore,
-    });
-
-    // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
-    const hydration = await session.readHydrationSnapshot();
-    const restoredSettings = hydration.runtime.settings;
-    // 已有 route ID 必须精确恢复；真正没有 route ID 的 legacy session
-    // 只有在 provider + model 唯一匹配时才会迁移，避免跨 Provider 静默切换。
-    const initialRoute = resolveTuiStartupModelRoute(bundleModelRouter, restoredSettings, {
-      cliModel: opts.model,
-      modelExplicit: opts.modelExplicit,
-      projectDefaultRouteId: bundleModelRuntime.config.defaultModelRouteId,
-    });
-    const startupDefaults = resolveTuiStartupSettingDefaults(
-      bundleModelRuntime.config.defaults,
-      opts.thinkingEffort,
-    );
-    const workspaceRoots = await WorkspaceRoots.create(
+    const sessionLease: SessionManagerLease = await globalSessionManager.getOrCreatePinned(
+      selection.sessionId,
       opts.workDir,
-      selection.mode === "fork"
-        ? []
-        : [
-            ...picoConfig.additionalDirectories,
-            ...(opts.addDirs ?? []),
-            ...(restoredSettings?.additionalDirectories ?? []),
-          ],
+      { persistence: true },
     );
-    const runtimeState = await createTuiRuntimeState({
-      session,
-      lspServers: [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
-      hookExtensionSources: pluginSnapshot.hookSources,
-      ...(taskHostRuntime ? { taskHostRuntime } : {}),
-    });
-
+    const session = sessionLease.session;
+    let runtimeState: TuiRuntimeState | undefined;
+    const pluginActivationScope = new PluginCapabilityActivationScope();
     try {
+      const runtimeCapability = session.runtimeEventCapability;
+      const sessionRuntimeStore = session.runtimeEventStore;
+      if (!runtimeCapability || !sessionRuntimeStore) {
+        throw new Error(`TUI requires a durable Session: ${selection.sessionId}`);
+      }
+      await sessionRuntimeStore.initializeSession({
+        sessionId: session.id,
+        workDir: opts.workDir,
+      });
+      await RuntimeRun.repairSessionProjection(session, {
+        capability: runtimeCapability,
+      });
+
+      // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
+      const hydration = await session.readHydrationSnapshot();
+      const restoredSettings = hydration.runtime.settings;
+      // 已有 route ID 必须精确恢复；真正没有 route ID 的 legacy session
+      // 只有在 provider + model 唯一匹配时才会迁移，避免跨 Provider 静默切换。
+      const initialRoute = resolveTuiStartupModelRoute(bundleModelRouter, restoredSettings, {
+        cliModel: opts.model,
+        modelExplicit: opts.modelExplicit,
+        projectDefaultRouteId: bundleModelRuntime.config.defaultModelRouteId,
+      });
+      const startupDefaults = resolveTuiStartupSettingDefaults(
+        bundleModelRuntime.config.defaults,
+        opts.thinkingEffort,
+      );
+      const workspaceRoots = await WorkspaceRoots.create(
+        opts.workDir,
+        selection.mode === "fork"
+          ? []
+          : [
+              ...picoConfig.additionalDirectories,
+              ...(opts.addDirs ?? []),
+              ...(restoredSettings?.additionalDirectories ?? []),
+            ],
+      );
+      runtimeState = await createTuiRuntimeState({
+        session,
+        sessionLease,
+        lspServers: [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
+        hookExtensionSources: pluginSnapshot.hookSources,
+        ...(taskHostRuntime ? { taskHostRuntime } : {}),
+      });
+
       const { toolDisclosure, fileIndex, codeIntelligence } = runtimeState;
       const askUserHandler = new AskUserHandler();
       const mcpElicitationHandler = new McpElicitationUiHandler();
@@ -1353,6 +1462,13 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         codeIntelligence,
         skillLoader,
       });
+      registerPluginCapabilityTools(
+        toolRegistry,
+        pluginSnapshot,
+        pluginCapabilityRegistry,
+        opts.workDir,
+        pluginActivationScope,
+      );
       sharedMcpManager.attachRegistry(toolRegistry);
       if (!mcpInitialized) {
         mcpInitialized = true;
@@ -1403,7 +1519,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             cronService,
             workspacePath: opts.workDir,
             resolveModelRoute: () => modelRouter.require(settings.modelRouteId),
-            listAllowedTools: () => settings.tools.map((tool) => tool.name),
+            listAllowedTools: () =>
+              backgroundToolSnapshot(toolRegistry, sharedMcpManager.getStatusSnapshot()).map(
+                (tool) => tool.name,
+              ),
             credentialVault,
             resolveCredentialTarget: async (route) => {
               const userProvider = (await userConfigStore.read()).config.providers[
@@ -1441,6 +1560,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         thinkingEffort: settings.thinkingEffort,
         permissionMode: settings.permissionMode,
         tools: settings.tools,
+        backgroundTools: () =>
+          backgroundToolSnapshot(toolRegistry, sharedMcpManager.getStatusSnapshot()),
         mcpStatus: () => bundleRef.current?.latestMcpStatus,
         mcpControl: sharedMcpManager,
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
@@ -1459,6 +1580,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
         hookCommands: runtimeState.hookCommands,
         pluginManagement,
+        pluginRuntimeDiagnostics: pluginSnapshot.diagnostics,
+        pluginSnapshot,
+        pluginCapabilityRegistry,
         includeUserSkillResources: true,
         includeClaudeProjectResources:
           claudeCompatibility.enabled && claudeCompatibility.projectResources,
@@ -1481,10 +1605,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         if (activeBundle?.reporter === reporterRef.current) setProjection(next);
       }, 33);
       const reporter = new TuiReporter(() => undefined, [], {
-        eventStore:
-          hydration.transcriptEvents.length > 0
-            ? new TuiEventStore({ initialEvents: hydration.transcriptEvents })
-            : undefined,
         durableTranscriptSink: createSessionTranscriptSink(session),
         durableTranscriptSequence: hydration.transcriptEvents.reduce(
           (max, event) => Math.max(max, event.sequence),
@@ -1496,9 +1616,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       hydrateTuiReporter(reporter, hydration);
       const recoveredRewind = await session.getPendingTuiRewindHandoff();
       if (recoveredRewind) {
-        reporter.pushSystemMessage(
-          `Recovered rewind ${recoveredRewind.operationId}. Original prompt is ready to edit.`,
-        );
+        reporter.withoutDurableTranscript(() => {
+          reporter.pushSystemMessage(
+            `Recovered rewind ${recoveredRewind.operationId}. Original prompt is ready to edit.`,
+          );
+        });
       }
       if (taskRuntimeDiagnostic) {
         reporter.pushSystemMessage(
@@ -1514,6 +1636,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         sessionId: selection.sessionId,
         session,
         runtimeState,
+        pluginActivationScope,
         settings,
         workspaceRoots,
         toolRegistry,
@@ -1525,11 +1648,24 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         skillLoader,
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
+        baselineToolSnapshot: toolStatusFromRegistry(toolRegistry),
+        latestToolSnapshot: toolStatusFromRegistry(toolRegistry),
       };
       bundleRef.current = bundle;
       return bundle;
     } catch (error) {
-      await runtimeState.dispose();
+      const cleanup = await Promise.allSettled([
+        pluginActivationScope.dispose(),
+        runtimeState ? runtimeState.dispose() : Promise.resolve(sessionLease.release()),
+      ]);
+      const failures = cleanup.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      if (failures.length > 0) {
+        throw new AggregateError([error, ...failures], "TUI bundle assembly cleanup failed", {
+          cause: error,
+        });
+      }
       throw error;
     }
   };
@@ -1539,14 +1675,80 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       return await buildSessionBundleUnsafe(selection);
     } catch (error) {
       if (activeBundle) sharedMcpManager.attachRegistry(activeBundle.toolRegistry);
-      if (selection.mode === "fork") {
-        await discardFailedTuiFork(selection.sessionId, opts.workDir);
+      if (selection.mode === "fork" || selection.mode === "new") {
+        await discardUnpublishedTuiSession(selection.sessionId, opts.workDir);
       }
       throw error;
     }
   };
 
-  const initialBundle = await buildSessionBundle(tuiSessionSelection);
+  type TerminalGridSession = Awaited<ReturnType<typeof createTuiTerminalGridSession>>;
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanupTuiResources = (terminalGrid?: TerminalGridSession): Promise<void> => {
+    cleanupPromise ??= (async () => {
+      shuttingDown = true;
+      const failures: unknown[] = [];
+      const attempt = async (dispose: () => void | Promise<void>): Promise<void> => {
+        try {
+          await dispose();
+        } catch (error) {
+          failures.push(error);
+        }
+      };
+      await attempt(async () => {
+        await terminalGrid?.dispose();
+      });
+      activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
+      while (pendingTuiSubmissions.size > 0) {
+        await Promise.allSettled([...pendingTuiSubmissions]);
+      }
+      while (pendingDelegationWakes.size > 0) {
+        await Promise.allSettled([...pendingDelegationWakes]);
+      }
+      while (pendingHookWakes.size > 0) {
+        await Promise.allSettled([...pendingHookWakes]);
+      }
+      while (pendingSessionSwitches.size > 0) {
+        await Promise.allSettled([...pendingSessionSwitches]);
+      }
+      while (pendingTuiDialogActions.size > 0) {
+        await Promise.allSettled([...pendingTuiDialogActions]);
+      }
+      const finalBundle = activeBundle;
+      if (finalBundle) {
+        await attempt(async () => finalBundle.runtimeState.dispose());
+        await attempt(async () => finalBundle.pluginActivationScope.dispose());
+        await attempt(async () => {
+          await finalBundle.reporter
+            .flushDurableTranscript()
+            .catch((error: unknown) => appendTuiRunError(finalBundle.reporter, error));
+        });
+        await attempt(async () => finalBundle.session.flushPersistence());
+      }
+      await attempt(() => unsubscribeTaskCompletion?.());
+      await attempt(() => unsubscribeMcpStatus());
+      await attempt(disposeHostResources);
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "TUI resource cleanup failed");
+      }
+    })();
+    return cleanupPromise;
+  };
+
+  const initialBundle = await buildSessionBundle(tuiSessionSelection).catch(
+    async (error: unknown) => {
+      try {
+        await cleanupTuiResources();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "TUI startup and resource cleanup both failed",
+          { cause: cleanupError },
+        );
+      }
+      throw error;
+    },
+  );
   activeBundle = initialBundle;
 
   // 包装组件:管理 entries 状态 + QueryGuard 派生 running,把 setter 暴露给外部
@@ -1636,7 +1838,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               await deps.runAgent("", { resumeExistingSession: true });
             } finally {
               sharedMcpManager.attachRegistry(current.toolRegistry);
-              setSessionTools(current.settings, toolStatusFromRegistry(current.toolRegistry));
+              current.latestToolSnapshot = mergeTuiToolSnapshot(
+                current.baselineToolSnapshot,
+                toolStatusFromRegistry(current.toolRegistry),
+              );
+              setSessionTools(current.settings, current.latestToolSnapshot);
               current.runtimeState.fileIndex.markDirty();
               if (guard.end(generation)) await drainQueuedTuiInputs(deps);
             }
@@ -1686,7 +1892,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               await deps.runAgent("", { resumeExistingSession: true });
             } finally {
               sharedMcpManager.attachRegistry(current.toolRegistry);
-              setSessionTools(current.settings, toolStatusFromRegistry(current.toolRegistry));
+              current.latestToolSnapshot = mergeTuiToolSnapshot(
+                current.baselineToolSnapshot,
+                toolStatusFromRegistry(current.toolRegistry),
+              );
+              setSessionTools(current.settings, current.latestToolSnapshot);
               current.runtimeState.fileIndex.markDirty();
               if (guard.end(generation)) await drainQueuedTuiInputs(deps);
             }
@@ -1718,6 +1928,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         const current = activeBundleRef.current;
         const currentGeneration = current.generation;
         if (shuttingDown) return;
+        if (terminalRuntimeFailure) {
+          appendTuiRunError(current.reporter, terminalRuntimeFailure);
+          return;
+        }
         if (
           guard.getSnapshot() !== "idle" ||
           historyPreparationRef.current ||
@@ -1738,15 +1952,18 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
         switchingRef.current = true;
         let next: TuiSessionBundle | undefined;
+        let oldCleanupStarted = false;
         try {
           const selection: CliSessionSelection =
-            request.mode === "fork"
-              ? {
-                  mode: "fork",
-                  sessionId: createCliSessionId(),
-                  sourceSessionId: request.sessionId,
-                }
-              : { mode: "resume", sessionId: request.sessionId };
+            request.mode === "new"
+              ? { mode: "new", sessionId: createCliSessionId() }
+              : request.mode === "fork"
+                ? {
+                    mode: "fork",
+                    sessionId: createCliSessionId(),
+                    sourceSessionId: request.sessionId,
+                  }
+                : { mode: "resume", sessionId: request.sessionId };
           next = await buildSessionBundle(selection);
 
           if (
@@ -1762,13 +1979,34 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
           // 切换前先取消并等待旧 runtime 的 background/delegation 收口，
           // 防止旧子代理在新会话已可见后继续写入共享工作区。
-          await current.runtimeState.dispose();
-          await current.reporter
-            .flushDurableTranscript()
-            .catch((error: unknown) => appendTuiRunError(current.reporter, error));
-          await current.session
-            .flushPersistence()
-            .catch((error: unknown) => appendTuiRunError(current.reporter, error));
+          oldCleanupStarted = true;
+          let oldCleanupError: unknown;
+          try {
+            await disposePublishedTuiBundle(current);
+          } catch (error) {
+            oldCleanupError = error;
+          }
+
+          if (oldCleanupError) {
+            let nextCleanupError: unknown;
+            try {
+              await disposeUnpublishedTuiBundle(next, opts.workDir);
+            } catch (error) {
+              nextCleanupError = error;
+            }
+            terminalRuntimeFailure = nextCleanupError
+              ? new AggregateError(
+                  [oldCleanupError, nextCleanupError],
+                  `Session ${current.sessionId} did not stop cleanly; switch aborted and restart is required`,
+                )
+              : new AggregateError(
+                  [oldCleanupError],
+                  `Session ${current.sessionId} did not stop cleanly; switch aborted and restart is required`,
+                );
+            appendTuiRunError(current.reporter, terminalRuntimeFailure);
+            next = undefined;
+            return;
+          }
 
           if (shuttingDown) {
             await disposeUnpublishedTuiBundle(next, opts.workDir);
@@ -1795,15 +2033,25 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           setProjection(next.reporter.getProjection());
           setBundle(next);
           next.reporter.pushSystemMessage(
-            request.mode === "fork"
-              ? `Forked as “${next.settings.title ?? next.sessionId}”. Workspace files are shared with the source session.`
-              : `Resumed session ${next.sessionId}.`,
+            request.mode === "new"
+              ? `Started new session ${next.sessionId}.`
+              : request.mode === "fork"
+                ? `Forked as “${next.settings.title ?? next.sessionId}”. Workspace files are shared with the source session.`
+                : `Resumed session ${next.sessionId}.`,
           );
         } catch (error) {
+          let cleanupError: unknown;
           if (next && activeBundleRef.current !== next) {
-            await disposeUnpublishedTuiBundle(next, opts.workDir).catch(() => undefined);
+            try {
+              await disposeUnpublishedTuiBundle(next, opts.workDir);
+            } catch (disposeError) {
+              cleanupError = disposeError;
+            }
           }
-          appendTuiRunError(current.reporter, error);
+          const failure = cleanupError
+            ? new AggregateError([error, cleanupError], "Session switch and cleanup both failed")
+            : error;
+          appendTuiRunError(oldCleanupStarted && next ? next.reporter : current.reporter, failure);
         } finally {
           switchingRef.current = false;
         }
@@ -1820,6 +2068,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const handleSubmit = async (submission: InputBoxSubmission): Promise<void> => {
       const { text, attachments } = submission;
       const current = activeBundleRef.current;
+      if (terminalRuntimeFailure) {
+        appendTuiRunError(current.reporter, terminalRuntimeFailure);
+        return;
+      }
       const isCurrentGeneration = (): boolean =>
         !shuttingDown &&
         !switchingRef.current &&
@@ -1998,6 +2250,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             const componentId = metadata["skillName"];
             const path = metadata["skillSourcePath"];
             const inlineHooks = metadata["skillHookConfig"];
+            const sourceId = metadata["skillSourceId"];
             if (
               typeof componentId !== "string" ||
               typeof path !== "string" ||
@@ -2005,11 +2258,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             ) {
               return;
             }
+            const trustAuthority =
+              typeof sourceId === "string"
+                ? pluginSnapshot.skillSources.find((source) => source.id === sourceId)
+                    ?.hookTrustAuthority
+                : undefined;
             await runtimeState.activateComponentHooks({
               kind: "skill",
               path,
               componentId,
               inlineHooks,
+              ...(trustAuthority ? { trustAuthority } : {}),
             });
           },
           clearComponentHooks: async () => runtimeState.clearComponentHooks(),
@@ -2118,6 +2377,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               toolDisclosure,
               runtimeState,
               pluginSnapshot,
+              pluginCapabilityRegistry,
               askUserHandler: current.askUserHandler,
               mcpElicitationHandler: current.mcpElicitationHandler,
               openDialog: (request) => {
@@ -2134,7 +2394,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               mcpManager: sharedMcpManager,
               ...(current.scheduleDraft ? { scheduleDraft: current.scheduleDraft } : {}),
               toolStatusSink: (tools) => {
-                setSessionTools(settings, tools);
+                current.latestToolSnapshot = mergeTuiToolSnapshot(
+                  current.baselineToolSnapshot,
+                  tools,
+                );
+                setSessionTools(settings, current.latestToolSnapshot);
               },
               abortControllerRef,
               ...(resumeExistingSession ? { resumeExistingSession: true } : {}),
@@ -2151,7 +2415,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         appendTuiRunError(reporter, err);
       } finally {
         sharedMcpManager.attachRegistry(current.toolRegistry);
-        setSessionTools(settings, toolStatusFromRegistry(current.toolRegistry));
+        current.latestToolSnapshot = mergeTuiToolSnapshot(
+          current.baselineToolSnapshot,
+          toolStatusFromRegistry(current.toolRegistry),
+        );
+        setSessionTools(settings, current.latestToolSnapshot);
         if (preparesHistoryDialog) {
           historyPreparationRef.current = false;
           setDialogRequests((items) =>
@@ -2258,59 +2526,26 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // ChatGPT.app 可能先改变 xterm 网格、后端 PTY 却仍上报旧宽度。
   // Ink 接管 alt-screen 前先查询前端光标边界，避免隐式换行让擦行记账失步。
-  const terminalGrid = await createTuiTerminalGridSession(process.stdin, process.stdout);
-  const renderStdout = terminalGrid.stdout;
-
-  // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
-  // 留在首屏,造成 Logo/Header 看起来重复。
-  if (renderStdout.isTTY) {
-    renderStdout.write("\x1b[2J\x1b[H");
-  }
-
-  // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁。
-  // 根布局保留右侧 1 列，避免中文、Emoji 和长行在右边界立即换行时失配。
-  // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
-  // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
+  let terminalGrid: TerminalGridSession | undefined;
   try {
+    terminalGrid = await createTuiTerminalGridSession(process.stdin, process.stdout);
+    const renderStdout = terminalGrid.stdout;
+
+    // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
+    // 留在首屏,造成 Logo/Header 看起来重复。
+    if (renderStdout.isTTY) {
+      renderStdout.write("\x1b[2J\x1b[H");
+    }
+
+    // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁。
+    // 根布局保留右侧 1 列，避免中文、Emoji 和长行在右边界立即换行时失配。
+    // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
+    // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
     const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
     instanceRef.current = instance;
     await instance.waitUntilExit();
   } finally {
-    shuttingDown = true;
-    try {
-      await terminalGrid.dispose();
-      activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
-      while (pendingTuiSubmissions.size > 0) {
-        await Promise.allSettled([...pendingTuiSubmissions]);
-      }
-      while (pendingDelegationWakes.size > 0) {
-        await Promise.allSettled([...pendingDelegationWakes]);
-      }
-      while (pendingHookWakes.size > 0) {
-        await Promise.allSettled([...pendingHookWakes]);
-      }
-      while (pendingSessionSwitches.size > 0) {
-        await Promise.allSettled([...pendingSessionSwitches]);
-      }
-      while (pendingTuiDialogActions.size > 0) {
-        await Promise.allSettled([...pendingTuiDialogActions]);
-      }
-      const finalBundle = activeBundle;
-      if (finalBundle) {
-        await finalBundle.runtimeState.dispose();
-        await finalBundle.reporter
-          .flushDurableTranscript()
-          .catch((error: unknown) => appendTuiRunError(finalBundle.reporter, error));
-        await finalBundle.session.flushPersistence();
-      }
-      unsubscribeTaskCompletion?.();
-      unsubscribeMcpStatus();
-      await taskHostRuntime?.close();
-      cronService?.close();
-      await sharedMcpManager.closeAll();
-    } finally {
-      await pluginSnapshot.dispose();
-    }
+    await cleanupTuiResources(terminalGrid);
   }
 }
 
@@ -2318,16 +2553,49 @@ async function disposeUnpublishedTuiBundle(
   bundle: TuiSessionBundle,
   workDir: string,
 ): Promise<void> {
-  await bundle.runtimeState.dispose();
-  await bundle.reporter.flushDurableTranscript().catch(() => undefined);
-  if (bundle.selection.mode === "fork") {
-    await discardFailedTuiFork(bundle.sessionId, workDir);
-    return;
+  const failures: unknown[] = [];
+  const attempt = async (cleanup: () => void | Promise<void>): Promise<void> => {
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  await attempt(() => bundle.runtimeState.dispose());
+  await attempt(() => bundle.pluginActivationScope.dispose());
+  await attempt(() => bundle.reporter.flushDurableTranscript());
+  if (bundle.selection.mode === "fork" || bundle.selection.mode === "new") {
+    await attempt(() => discardUnpublishedTuiSession(bundle.sessionId, workDir));
+  } else {
+    await attempt(() => bundle.session.flushPersistence());
   }
-  await bundle.session.flushPersistence();
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `Unpublished TUI session ${bundle.sessionId} cleanup failed`,
+    );
+  }
 }
 
-async function discardFailedTuiFork(sessionId: string, workDir: string): Promise<void> {
+async function disposePublishedTuiBundle(bundle: TuiSessionBundle): Promise<void> {
+  const failures: unknown[] = [];
+  const attempt = async (cleanup: () => void | Promise<void>): Promise<void> => {
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  await attempt(() => bundle.runtimeState.dispose());
+  await attempt(() => bundle.pluginActivationScope.dispose());
+  await attempt(() => bundle.reporter.flushDurableTranscript());
+  await attempt(() => bundle.session.flushPersistence());
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `TUI session ${bundle.sessionId} cleanup failed`);
+  }
+}
+
+async function discardUnpublishedTuiSession(sessionId: string, workDir: string): Promise<void> {
   const orphan = globalSessionManager.delete(sessionId, workDir);
   await orphan?.close();
   await removeCliSessionFile(workDir, sessionId);
@@ -2469,8 +2737,10 @@ function isHistoryDialogCommand(text: string): boolean {
 }
 
 function resumeSessionCommandData(value: unknown): ResumeSessionCommandData | undefined {
-  if (!isRecord(value) || typeof value.sessionId !== "string") return undefined;
-  if (value.mode !== "resume" && value.mode !== "fork") return undefined;
+  if (!isRecord(value)) return undefined;
+  if (value.mode === "new") return { mode: "new" };
+  if ((value.mode !== "resume" && value.mode !== "fork") || typeof value.sessionId !== "string")
+    return undefined;
   const sessionId = value.sessionId.trim();
   return sessionId ? { sessionId, mode: value.mode } : undefined;
 }
@@ -2534,6 +2804,7 @@ export async function runTuiAgentPrompt(
     toolDisclosure?: ToolDisclosure;
     runtimeState?: TuiRuntimeState;
     pluginSnapshot?: PluginRuntimeSnapshot;
+    pluginCapabilityRegistry?: PluginCapabilityRegistry;
     askUserHandler?: AskUserHandler;
     scheduleDraft?: TuiScheduleDraftRuntime;
     mcpElicitationHandler?: McpElicitationUiHandler;
@@ -2612,6 +2883,9 @@ export async function runTuiAgentPrompt(
       ...(deps.modelRouter ? { modelRouter: deps.modelRouter } : {}),
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
       ...(deps.pluginSnapshot ? { pluginSnapshot: deps.pluginSnapshot } : {}),
+      ...(deps.pluginCapabilityRegistry
+        ? { pluginCapabilityRegistry: deps.pluginCapabilityRegistry }
+        : {}),
       ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
       ...(deps.scheduleDraft ? { scheduleDraftCoordinator: deps.scheduleDraft.coordinator } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
@@ -2817,17 +3091,12 @@ function InteractiveModelSelector({
 
 interface TuiSessionBrowserDialogProps {
   sessions: readonly SessionBrowserSession[];
-  currentProjectCwd: string;
-  onSelect: (
-    session: SessionBrowserSession,
-    mode: ResumeSessionCommandData["mode"],
-  ) => Promise<void> | void;
+  onSelect: (session: SessionBrowserSession, mode: "resume" | "fork") => Promise<void> | void;
   onCancel?: () => void;
 }
 
 function TuiSessionBrowserDialog({
   sessions,
-  currentProjectCwd,
   onSelect,
   onCancel,
 }: TuiSessionBrowserDialogProps): React.ReactNode {
@@ -2854,16 +3123,12 @@ function TuiSessionBrowserDialog({
     }
 
     if (key.upArrow) {
-      setState((current) =>
-        moveSessionBrowserSelection(current, visibleSessions, -1, currentProjectCwd),
-      );
+      setState((current) => moveSessionBrowserSelection(current, visibleSessions, -1));
       return;
     }
 
     if (key.downArrow) {
-      setState((current) =>
-        moveSessionBrowserSelection(current, visibleSessions, 1, currentProjectCwd),
-      );
+      setState((current) => moveSessionBrowserSelection(current, visibleSessions, 1));
       return;
     }
 
@@ -2875,7 +3140,7 @@ function TuiSessionBrowserDialog({
     if (key.return || input === "f") {
       const mode = input === "f" ? "fork" : "resume";
       setState((current) =>
-        confirmSessionBrowserSelection(current, visibleSessions, currentProjectCwd, {
+        confirmSessionBrowserSelection(current, visibleSessions, {
           onConfirm: (session) => void onSelect(session, mode),
         }),
       );
@@ -2897,11 +3162,7 @@ function TuiSessionBrowserDialog({
             : "/ search"}
         {" · Enter resume · f fork · current workspace"}
       </Text>
-      <SessionBrowser
-        currentProjectCwd={currentProjectCwd}
-        sessions={visibleSessions}
-        state={state}
-      />
+      <SessionBrowser sessions={visibleSessions} state={state} />
     </>
   );
 }
@@ -2934,7 +3195,6 @@ function createSessionSelectorDialogRequest(
     priority: SELECTOR_DIALOG_PRIORITY,
     content: (
       <TuiSessionBrowserDialog
-        currentProjectCwd={deps.workDir}
         sessions={sessions}
         onCancel={() => deps.closeDialog?.(SESSION_SELECTOR_DIALOG_ID)}
         onSelect={async (session, mode) => {

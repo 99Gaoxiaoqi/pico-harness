@@ -1,6 +1,8 @@
 import type { Message } from "../schema/message.js";
 import type { Session } from "./session.js";
-import type { RuntimeEvent } from "../runtime/runtime-event.js";
+import type { RuntimeEvent } from "./session-runtime-event.js";
+import type { EngineRuntimeCapability } from "./runtime-port.js";
+import type { SessionRuntimeStateWritePatch } from "./session-runtime.js";
 
 /**
  * Engine-side contract for the durable fork lifecycle.
@@ -9,11 +11,13 @@ import type { RuntimeEvent } from "../runtime/runtime-event.js";
  * event-store implementation details.  Keep the store opaque here so the
  * engine does not import RuntimeRun or any other runtime implementation.
  */
-export type SessionForkRuntimeStore = object;
+export type SessionForkRuntimeAuthority = object;
 
 export interface SessionForkRuntimeWriteGuard {
   assertRuntimeEventWriteAllowed(): Promise<void>;
 }
+
+export type SessionForkRuntimeCapability = EngineRuntimeCapability;
 
 export interface SessionForkModelCheckpoint {
   readonly coveredMessageCount: number;
@@ -25,7 +29,23 @@ export interface SessionForkProjectedMessage {
   readonly message: Message;
 }
 
-export interface SessionForkBootstrapOptions {
+export interface SessionForkPublicationCapability {
+  assertOwned(): Promise<void>;
+}
+
+/** A durable target fact conflicts with the frozen fork payload. */
+export class SessionForkRuntimeConflictError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "staging_corrupt" | "target_conflict",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "SessionForkRuntimeConflictError";
+  }
+}
+
+export interface SessionForkBootstrapSeed {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly operationId?: string;
@@ -34,7 +54,16 @@ export interface SessionForkBootstrapOptions {
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceThroughEventId?: string;
   readonly workDir: string;
-  readonly store?: SessionForkRuntimeStore;
+  readonly runtimeAuthority: SessionForkRuntimeAuthority;
+}
+
+export interface SessionForkBootstrapOptions extends SessionForkBootstrapSeed {
+  readonly publication: SessionForkPublicationCapability;
+  readonly statePublication?: {
+    readonly patch: SessionRuntimeStateWritePatch;
+    readonly eventId: string;
+    readonly at: string;
+  };
 }
 
 export interface SessionForkRuntimePort {
@@ -45,18 +74,15 @@ export interface SessionForkRuntimePort {
   projectModelMessages(events: readonly RuntimeEvent[]): readonly SessionForkProjectedMessage[];
 
   reconcileIncompleteRuns(options: {
-    readonly sessionId: string;
-    readonly workDir: string;
-    readonly store?: SessionForkRuntimeStore;
-    readonly writeGuard: SessionForkRuntimeWriteGuard;
+    readonly capability: SessionForkRuntimeCapability;
   }): Promise<readonly string[]>;
 
   repairSessionProjection(
     session: Session,
-    options: { readonly workDir: string; readonly store?: SessionForkRuntimeStore },
+    options: { readonly capability: SessionForkRuntimeCapability },
   ): Promise<boolean>;
 
   bootstrapFork(options: SessionForkBootstrapOptions): Promise<void>;
 
-  deriveBootstrapRunId(options: SessionForkBootstrapOptions): string;
+  deriveBootstrapRunId(options: SessionForkBootstrapSeed): string;
 }

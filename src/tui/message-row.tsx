@@ -35,6 +35,8 @@ export interface MessageRowProps {
   toolFocused?: boolean;
   toolStartOffsetRows?: number;
   toolVisibleRows?: number;
+  textStartOffsetRows?: number;
+  textVisibleRows?: number;
   wrapWidth?: number;
 }
 
@@ -48,6 +50,8 @@ function MessageRowImpl({
   toolFocused,
   toolStartOffsetRows,
   toolVisibleRows,
+  textStartOffsetRows,
+  textVisibleRows,
   wrapWidth,
 }: MessageRowProps): React.ReactNode {
   switch (entry.kind) {
@@ -86,13 +90,29 @@ function MessageRowImpl({
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(完整 token tree 渲染)
       return (
-        <MessageFrame marker="✦" markerColor="cyan">
-          {isStatic ? (
-            <CompletedText content={entry.content} width={wrapWidth} />
-          ) : (
-            <StreamingText content={entry.content} width={wrapWidth} />
-          )}
-        </MessageFrame>
+        <MarkdownMessageFrame
+          marker="✦"
+          markerColor="cyan"
+          startOffsetRows={textStartOffsetRows}
+          visibleRows={textVisibleRows}
+          renderContent={(startRow, rows) =>
+            isStatic ? (
+              <CompletedText
+                content={entry.content}
+                width={wrapWidth}
+                startRow={startRow}
+                rows={rows}
+              />
+            ) : (
+              <StreamingText
+                content={entry.content}
+                width={wrapWidth}
+                startRow={startRow}
+                rows={rows}
+              />
+            )
+          }
+        />
       );
 
     case "error":
@@ -134,17 +154,69 @@ function MessageRowImpl({
         />
       );
 
-    case "thinking":
-      if (!entry.content) return null;
+    case "thinking": {
+      const content = entry.content;
+      if (!content) return null;
       return (
-        <MessageFrame marker="∴" markerColor="gray">
-          <MarkdownText content={entry.content} dimColor width={wrapWidth} />
-        </MessageFrame>
+        <MarkdownMessageFrame
+          marker="∴"
+          markerColor="gray"
+          startOffsetRows={textStartOffsetRows}
+          visibleRows={textVisibleRows}
+          renderContent={(startRow, rows) => (
+            <MarkdownText
+              content={content}
+              dimColor
+              width={wrapWidth}
+              startRow={startRow}
+              rows={rows}
+            />
+          )}
+        />
       );
+    }
 
     default:
       return null;
   }
+}
+
+function MarkdownMessageFrame({
+  marker,
+  markerColor,
+  startOffsetRows = 0,
+  visibleRows,
+  renderContent,
+}: {
+  marker: string;
+  markerColor: "cyan" | "gray";
+  startOffsetRows?: number;
+  visibleRows?: number;
+  renderContent: (startRow: number, rows?: number) => React.ReactNode;
+}): React.ReactNode {
+  const start = Math.max(0, Math.floor(startOffsetRows));
+  const visible = visibleRows === undefined ? undefined : Math.max(0, Math.floor(visibleRows));
+  if (visible === 0) return null;
+  if (start === 0) {
+    if (visible === 1) return <Text> </Text>;
+    return (
+      <MessageFrame marker={marker} markerColor={markerColor}>
+        {renderContent(0, visible === undefined ? undefined : visible - 1)}
+      </MessageFrame>
+    );
+  }
+
+  const contentStart = start - 1;
+  return (
+    <Box>
+      <Box width={2}>
+        <Text color={markerColor}>{contentStart === 0 ? marker : ""}</Text>
+      </Box>
+      <Box flexDirection="column" flexGrow={1}>
+        {renderContent(contentStart, visible)}
+      </Box>
+    </Box>
+  );
 }
 
 function MessageFrame({
@@ -246,6 +318,8 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
     prev.toolFocused !== next.toolFocused ||
     prev.toolStartOffsetRows !== next.toolStartOffsetRows ||
     prev.toolVisibleRows !== next.toolVisibleRows ||
+    prev.textStartOffsetRows !== next.textStartOffsetRows ||
+    prev.textVisibleRows !== next.textVisibleRows ||
     prev.wrapWidth !== next.wrapWidth
   ) {
     return false;

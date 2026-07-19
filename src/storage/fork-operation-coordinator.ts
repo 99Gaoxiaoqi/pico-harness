@@ -38,6 +38,11 @@ export interface ForkPreparedBundle {
   readonly sizeBytes: number;
 }
 
+/** Short-lived authority issued only while the coordinator owns the target lease. */
+export interface ForkRuntimePublicationCapability {
+  assertOwned(): Promise<void>;
+}
+
 export interface ForkOperationCallbacks {
   /** 返回已经冻结的不可变 fork payload；不得在此后重新读取 source。 */
   prepareTargetBundle(
@@ -54,12 +59,18 @@ export interface ForkOperationCallbacks {
   /** 克隆 File History / Summary / Artifact；必须以 operationId 幂等。 */
   cloneSidecars(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
   /** 向 RuntimeEventStore 发布消息、fork marker 与过滤后的 Session state。 */
-  publishRuntime(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
+  publishRuntime(
+    operation: ForkStorageOperation,
+    bundle: ForkPreparedBundle,
+    publication: ForkRuntimePublicationCapability,
+  ): Promise<void>;
 }
 
 export interface ForkOperationCoordinatorOptions {
   readonly journal: StorageOperationJournal;
   readonly callbacks: ForkOperationCallbacks;
+  /** 必须与普通 Session 初始化使用同一 target owner lease。 */
+  readonly targetLeaseDirectory: (targetSessionId: string) => string;
   readonly leaseAcquisitionTimeoutMs?: number;
   readonly leaseRetryInitialMs?: number;
   readonly leaseRetryMaxMs?: number;
@@ -113,8 +124,9 @@ export class ForkOperationConflictError extends Error {
     message: string,
     readonly reason: ForkOperationConflictReason,
     readonly conflictingPaths: readonly string[] = [],
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "ForkOperationConflictError";
   }
 }
@@ -140,6 +152,7 @@ export class ForkOperationLeaseTimeoutError extends Error {
 export class ForkOperationCoordinator {
   private readonly journal: StorageOperationJournal;
   private readonly callbacks: ForkOperationCallbacks;
+  private readonly resolveTargetLeaseDirectory: (targetSessionId: string) => string;
   private readonly leaseAcquisitionTimeoutMs: number;
   private readonly leaseRetryInitialMs: number;
   private readonly leaseRetryMaxMs: number;
@@ -148,6 +161,7 @@ export class ForkOperationCoordinator {
   constructor(options: ForkOperationCoordinatorOptions) {
     this.journal = options.journal;
     this.callbacks = options.callbacks;
+    this.resolveTargetLeaseDirectory = options.targetLeaseDirectory;
     this.leaseAcquisitionTimeoutMs = assertNonNegativeFinite(
       options.leaseAcquisitionTimeoutMs ?? DEFAULT_FORK_LEASE_ACQUISITION_TIMEOUT_MS,
       "leaseAcquisitionTimeoutMs",
@@ -304,7 +318,7 @@ export class ForkOperationCoordinator {
         ? Number.POSITIVE_INFINITY
         : assertFinite(options.deadlineAt, "deadlineAt"),
     );
-    const leaseDirectory = this.targetLeaseDirectory(operation.targetSessionId);
+    const leaseDirectory = this.resolveTargetLeaseDirectory(operation.targetSessionId);
     let attempts = 0;
     let lastOwner: OwnerLeaseRecord | undefined;
     for (;;) {
@@ -377,7 +391,22 @@ export class ForkOperationCoordinator {
         await this.assertTargetOwner(operation);
         await this.callbacks.assertRuntimeTargetOwned(operation, bundle);
         await lease.assertOwnership();
-        await this.callbacks.publishRuntime(operation, bundle);
+        let publicationActive = true;
+        const publication: ForkRuntimePublicationCapability = {
+          async assertOwned() {
+            if (!publicationActive) {
+              throw new Error(
+                `Fork Runtime publication capability expired: ${operation.operationId}`,
+              );
+            }
+            await lease.assertOwnership();
+          },
+        };
+        try {
+          await this.callbacks.publishRuntime(operation, bundle, publication);
+        } finally {
+          publicationActive = false;
+        }
         await lease.assertOwnership();
         operation = await this.advance(operation, "completed");
         await this.cleanupStaging(operation);
@@ -410,11 +439,6 @@ export class ForkOperationCoordinator {
       throw new Error(`Fork operation identity changed: ${initial.operationId}`);
     }
     return current;
-  }
-
-  private targetLeaseDirectory(targetSessionId: string): string {
-    const targetDigest = createHash("sha256").update(targetSessionId).digest("hex");
-    return join(this.journal.directory, ".fork-target-leases", targetDigest);
   }
 
   private assertOperation(operation: ForkStorageOperation): void {

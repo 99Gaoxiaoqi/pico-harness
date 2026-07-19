@@ -52,7 +52,10 @@ import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
-import type { PluginCapabilityRegistry } from "../plugins/plugin-capability.js";
+import {
+  createBuiltinPluginCapabilityRegistry,
+  type PluginCapabilityRegistry,
+} from "../plugins/plugin-capability.js";
 
 export interface ProductionLocalDaemonHostOptions {
   endpoint?: LocalDaemonEndpoint;
@@ -91,14 +94,25 @@ export function createProductionLocalDaemonHost(
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
+  if (
+    options.pluginRuntimeSnapshotRegistry &&
+    options.pluginCapabilityRegistry &&
+    options.pluginRuntimeSnapshotRegistry.capabilityRegistry !== options.pluginCapabilityRegistry
+  ) {
+    throw new Error(
+      "Production Plugin snapshot and activation must share the exact capability registry",
+    );
+  }
+  const pluginCapabilityRegistry =
+    options.pluginRuntimeSnapshotRegistry?.capabilityRegistry ??
+    options.pluginCapabilityRegistry ??
+    createBuiltinPluginCapabilityRegistry();
   const pluginRuntimeSnapshotRegistry =
     options.pluginRuntimeSnapshotRegistry ??
     new PluginRuntimeSnapshotRegistry({
       env,
       picoHome,
-      ...(options.pluginCapabilityRegistry
-        ? { capabilityRegistry: options.pluginCapabilityRegistry }
-        : {}),
+      capabilityRegistry: pluginCapabilityRegistry,
     });
   const ownsPluginRuntimeSnapshotRegistry =
     options.ownsPluginRuntimeSnapshotRegistry ??
@@ -148,130 +162,148 @@ export function createProductionLocalDaemonHost(
       }
       const targetSessionId = sessionId ?? createCliSessionId();
       context.bindSession(targetSessionId);
-      const session =
-        globalSessionManager.get(targetSessionId, workspacePath, { picoHome }) ??
-        (await globalSessionManager.getOrCreate(targetSessionId, workspacePath, {
+      const sessionLease = await globalSessionManager.getOrCreatePinned(
+        targetSessionId,
+        workspacePath,
+        {
           persistence: true,
           picoHome,
-        }));
-      if (!session.runtimeEventStore) {
-        throw new Error(
-          `Production daemon requires durable Session persistence: ${targetSessionId}`,
-        );
-      }
-      const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
-      const route = await resolveDesktopModelRoute(
-        workspacePath,
-        credentialVault,
-        userConfigStore,
-        effectiveConfigResolver,
-        execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
-        persistedSettings?.provider,
-        env,
+        },
       );
-      const reasoningLevel = coordinateReasoningLevel(
-        route.capabilities.reasoningProfile,
-        persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
-      ).level;
-      // Resolve the shared immutable snapshot before creating SessionRuntime as well as before
-      // AgentRuntime.execute. When a runtimeState is injected, AgentRuntime deliberately reuses
-      // it and cannot attach extension Hook sources retroactively.
-      const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
-      const runtimeState = await createSessionRuntime({
-        session,
-        env,
-        ...(workspaceRuntime.taskHostRuntime
-          ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
-          : {}),
-        ...(pluginSnapshot.hookSources.length
-          ? { hookExtensionSources: pluginSnapshot.hookSources }
-          : {}),
-      });
-      const broker = new DesktopInteractionBroker();
-      const interaction: PendingInteraction = {
-        broker,
-        workspacePath,
-        runId: context.run.runId,
-        sessionId: targetSessionId,
-      };
-      const unsubscribeInteractions = broker.subscribe((event) => {
-        publishInteractionEvent(
-          service,
-          interaction,
-          event,
-          pendingApprovals,
-          pendingPrompts,
-          resolvedApprovals,
-          resolvedPrompts,
-          nextDesktopResourceVersion,
-        );
-      });
-      const reporter = new DesktopReporter({
-        runId: context.run.runId,
-        sessionId: targetSessionId,
-        publish: (event) =>
-          publishTimelineEvent(service, workspacePath, event, nextDesktopResourceVersion),
-      });
-      for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
-      const unsubscribeSteer = context.onSteer((message) => runtimeState.steerQueue.push(message));
+      const session = sessionLease.session;
+      let sessionLeaseTransferred = false;
       try {
-        const skillActivation = execution?.skillActivation;
-        if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
-          await runtimeState.activateComponentHooks({
-            kind: "skill",
-            path: skillActivation.sourcePath,
-            componentId: skillActivation.name,
-            inlineHooks: skillActivation.hooks,
-          });
+        if (!session.runtimeEventStore) {
+          throw new Error(
+            `Production daemon requires durable Session persistence: ${targetSessionId}`,
+          );
         }
-        const result = await agentRuntime.execute(
-          {
-            prompt,
-            dir: workspacePath,
-            session: targetSessionId,
-            provider: route.provider,
-            baseURL: route.baseURL,
-            apiKey: route.apiKey,
-            model: route.model,
-            modelRouteId: route.modelRouteId,
-            modelCapabilities: route.capabilities,
-            ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-            ...(persistedSettings?.mode === "plan" ? { planMode: true } : {}),
-            ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
-            ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
-              ? { rewindPrePlanMode: persistedSettings.prePlanMode }
-              : {}),
-            ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
-            ...(await existingMcpConfig(workspacePath)),
-          },
-          {
-            signal: context.signal,
-            runtimeState,
-            reporter,
-            modelRouter: route.modelRouter,
-            approvalNotifier: broker.notifyApproval,
-            approvalManager: broker.approvalManager,
-            askUserHandler: broker.askUserHandler,
-            ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
-            waitAtSafeBoundary: context.waitAtSafeBoundary,
-            rewindPointSink: context.bindCheckpoint,
-            pluginSnapshot,
-            picoHome,
-            env,
-          },
+        const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
+        const route = await resolveDesktopModelRoute(
+          workspacePath,
+          credentialVault,
+          userConfigStore,
+          effectiveConfigResolver,
+          execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
+          persistedSettings?.provider,
+          env,
         );
-        return {
-          sessionId: result.sessionId,
-          finalMessage: result.finalMessage,
-          usage: result.usage,
+        const reasoningLevel = coordinateReasoningLevel(
+          route.capabilities.reasoningProfile,
+          persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
+        ).level;
+        // Resolve the shared immutable snapshot before creating SessionRuntime as well as before
+        // AgentRuntime.execute. When a runtimeState is injected, AgentRuntime deliberately reuses
+        // it and cannot attach extension Hook sources retroactively.
+        const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
+        const runtimeState = await createSessionRuntime({
+          session,
+          sessionLease,
+          env,
+          ...(workspaceRuntime.taskHostRuntime
+            ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
+            : {}),
+          ...(pluginSnapshot.hookSources.length
+            ? { hookExtensionSources: pluginSnapshot.hookSources }
+            : {}),
+        });
+        sessionLeaseTransferred = true;
+        const broker = new DesktopInteractionBroker();
+        const interaction: PendingInteraction = {
+          broker,
+          workspacePath,
+          runId: context.run.runId,
+          sessionId: targetSessionId,
         };
+        const unsubscribeInteractions = broker.subscribe((event) => {
+          publishInteractionEvent(
+            service,
+            interaction,
+            event,
+            pendingApprovals,
+            pendingPrompts,
+            resolvedApprovals,
+            resolvedPrompts,
+            nextDesktopResourceVersion,
+          );
+        });
+        const reporter = new DesktopReporter({
+          runId: context.run.runId,
+          sessionId: targetSessionId,
+          publish: (event) =>
+            publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion),
+        });
+        for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
+        const unsubscribeSteer = context.onSteer((message) =>
+          runtimeState.steerQueue.push(message),
+        );
+        try {
+          const skillActivation = execution?.skillActivation;
+          if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
+            const trustAuthority = skillActivation.sourceId
+              ? pluginSnapshot.skillSources.find((source) => source.id === skillActivation.sourceId)
+                  ?.hookTrustAuthority
+              : undefined;
+            await runtimeState.activateComponentHooks({
+              kind: "skill",
+              path: skillActivation.sourcePath,
+              componentId: skillActivation.name,
+              inlineHooks: skillActivation.hooks,
+              ...(trustAuthority ? { trustAuthority } : {}),
+            });
+          }
+          const result = await agentRuntime.execute(
+            {
+              prompt,
+              dir: workspacePath,
+              session: targetSessionId,
+              provider: route.provider,
+              baseURL: route.baseURL,
+              apiKey: route.apiKey,
+              model: route.model,
+              modelRouteId: route.modelRouteId,
+              modelCapabilities: route.capabilities,
+              ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
+              ...(persistedSettings?.mode === "plan" ? { planMode: true } : {}),
+              ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
+              ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
+                ? { rewindPrePlanMode: persistedSettings.prePlanMode }
+                : {}),
+              ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
+              ...(await existingMcpConfig(workspacePath)),
+            },
+            {
+              signal: context.signal,
+              runtimeState,
+              reporter,
+              modelRouter: route.modelRouter,
+              approvalNotifier: broker.notifyApproval,
+              approvalManager: broker.approvalManager,
+              askUserHandler: broker.askUserHandler,
+              ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
+              waitAtSafeBoundary: context.waitAtSafeBoundary,
+              rewindPointSink: context.bindCheckpoint,
+              pluginSnapshot,
+              pluginCapabilityRegistry,
+              picoHome,
+              env,
+            },
+          );
+          return {
+            sessionId: result.sessionId,
+            finalMessage: result.finalMessage,
+            usage: result.usage,
+          };
+        } finally {
+          unsubscribeSteer();
+          unsubscribeInteractions();
+          broker.close();
+          removeBrokerInteractions(pendingApprovals, broker);
+          removeBrokerInteractions(pendingPrompts, broker);
+          await runtimeState.dispose();
+        }
       } finally {
-        unsubscribeSteer();
-        unsubscribeInteractions();
-        broker.close();
-        removeBrokerInteractions(pendingApprovals, broker);
-        removeBrokerInteractions(pendingPrompts, broker);
-        await runtimeState.dispose();
+        if (!sessionLeaseTransferred) sessionLease.release();
       }
     },
   });
@@ -697,12 +729,82 @@ async function existingMcpConfig(
   return resolution.exists ? { mcpConfigPath: resolution.path } : {};
 }
 
-function publishTimelineEvent(
+export function publishDesktopReporterEvent(
   service: WorkspaceRuntimeService,
   workspacePath: string,
   event: DesktopReporterEvent,
   nextResourceVersion: () => number,
 ): void {
+  if (event.type === "assistant.reasoning.delta") {
+    const delta = firstString(event.payload["delta"]);
+    if (!delta) return;
+    const turn =
+      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+        ? event.payload["turn"]
+        : 0;
+    service.publishEphemeralNotification(
+      createRuntimeNotification({
+        topic: "run.live",
+        scope: {
+          workspacePath,
+          runId: event.runId,
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        },
+        resourceVersion: nextResourceVersion(),
+        at: event.at,
+        payload: {
+          runId: event.runId,
+          item: {
+            kind: "thinking",
+            operation: "append",
+            streamId: liveReasoningStreamId(event.runId, turn),
+            turnId: runtimeTurnId(event.runId, turn),
+            delta,
+            ...(event.payload["truncated"] === true ? { truncated: true } : {}),
+          },
+        },
+      }),
+    );
+    return;
+  }
+  if (
+    event.type === "assistant.suppressed" ||
+    event.type === "assistant.message" ||
+    event.type === "tool.started" ||
+    event.type === "run.interrupted" ||
+    event.type === "run.finished"
+  ) {
+    const turn =
+      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+        ? event.payload["turn"]
+        : undefined;
+    service.publishEphemeralNotification(
+      createRuntimeNotification({
+        topic: "run.live",
+        scope: {
+          workspacePath,
+          runId: event.runId,
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        },
+        resourceVersion: nextResourceVersion(),
+        at: event.at,
+        payload: {
+          runId: event.runId,
+          item: {
+            kind: "thinking",
+            operation:
+              event.type === "run.finished" ||
+              event.type === "assistant.message" ||
+              event.type === "tool.started"
+                ? "complete"
+                : "clear",
+            ...(turn === undefined ? {} : { streamId: liveReasoningStreamId(event.runId, turn) }),
+            ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
+          },
+        },
+      }),
+    );
+  }
   // WorkspaceRuntime is the sole lifecycle authority. Stream chunks and final assistant/tool
   // bodies already belong to the canonical transcript; without a separate bounded live channel,
   // duplicating them into the durable timeline only creates an unbounded second event stream.
@@ -712,6 +814,7 @@ function publishTimelineEvent(
       "run.finished",
       "run.interrupted",
       "assistant.delta",
+      "assistant.reasoning.delta",
       "assistant.message",
       "tool.output",
     ].includes(event.type)
@@ -735,15 +838,29 @@ function publishTimelineEvent(
   );
 }
 
+function liveReasoningStreamId(runId: string, turn: number): string {
+  return `thinking:live:${runId}:${turn}`;
+}
+
+function runtimeTurnId(runId: string, turn: number): string {
+  return `turn:${runId}:${turn}`;
+}
+
 function timelineItem(event: DesktopReporterEvent): JsonObject {
   const kind = event.type.startsWith("tool.")
     ? "tool"
     : event.type.startsWith("subagent.")
       ? "agent"
       : "status";
-  const state =
-    event.type.endsWith("completed") || event.type === "run.finished" ? "done" : "active";
   const safePayload = safeTimelinePayload(event.type, event.payload);
+  const thinkingStatus = event.type === "assistant.thinking";
+  const state = thinkingStatus
+    ? safePayload["active"] === false
+      ? "done"
+      : "active"
+    : event.type.endsWith("completed") || event.type === "run.finished"
+      ? "done"
+      : "active";
   const detail = firstString(
     safePayload["content"],
     safePayload["resultSummary"],
@@ -751,6 +868,7 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
     safePayload["summary"],
   );
   return jsonObject({
+    ...(thinkingStatus ? { id: thinkingStatusId(event.runId, safePayload["turn"]) } : {}),
     kind,
     title: timelineTitle(event.type, safePayload),
     ...(detail ? { detail } : {}),
@@ -758,6 +876,11 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
     eventType: event.type,
     data: safePayload,
   });
+}
+
+function thinkingStatusId(runId: string, turn: unknown): string {
+  const safeTurn = typeof turn === "number" && Number.isSafeInteger(turn) ? turn : 0;
+  return `status:thinking:${runId}:${safeTurn}`;
 }
 
 function safeTimelinePayload(

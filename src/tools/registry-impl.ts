@@ -58,6 +58,19 @@ export interface ToolRegistryOptions {
   truncateResults?: boolean;
 }
 
+export interface ToolRegistrationOwner {
+  readonly kind: "plugin" | "mcp" | "host";
+  readonly id: string;
+  readonly token: symbol;
+}
+
+export function createToolRegistrationOwner(
+  kind: ToolRegistrationOwner["kind"],
+  id: string,
+): ToolRegistrationOwner {
+  return Object.freeze({ kind, id, token: Symbol(`${kind}:${id}`) });
+}
+
 /**
  * 路径安全检查:确保路径在 workDir 之内,防路径穿越。
  * 返回规范化的绝对路径;越界则抛错。
@@ -111,6 +124,7 @@ function exactPathSideEffects(args: string): ToolFileSideEffects {
  */
 export class ToolRegistry implements Registry {
   private readonly tools = new Map<string, BaseTool>();
+  private readonly toolOwners = new Map<string, ToolRegistrationOwner>();
   private readonly defaultResultSizeChars: number;
   private readonly truncateResults: boolean;
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
@@ -138,18 +152,60 @@ export class ToolRegistry implements Registry {
   register(tool: BaseTool): void {
     const name = tool.name();
     if (this.tools.has(name)) {
+      const owner = this.toolOwners.get(name);
+      if (owner) {
+        throw new Error(
+          `Tool '${name}' is owned by ${owner.kind}:${owner.id} and cannot be overwritten`,
+        );
+      }
       logger.warn({ tool: name }, `[Warning] 工具 '${name}' 已被注册,将被覆盖。`);
     }
     this.tools.set(name, tool);
+    this.toolOwners.delete(name);
     logger.info({ tool: name }, `[Registry] 成功挂载工具: ${name}`);
   }
 
+  registerOwned(tool: BaseTool, owner: ToolRegistrationOwner): void {
+    const name = tool.name();
+    const existingOwner = this.toolOwners.get(name);
+    if (this.tools.has(name)) {
+      const ownerLabel = existingOwner
+        ? `${existingOwner.kind}:${existingOwner.id}`
+        : "an existing host tool";
+      throw new Error(`Tool '${name}' conflicts with ${ownerLabel}`);
+    }
+    this.tools.set(name, tool);
+    this.toolOwners.set(name, owner);
+    logger.info({ tool: name, owner: `${owner.kind}:${owner.id}` }, `[Registry] 成功挂载工具`);
+  }
+
   unregister(name: string): boolean {
+    if (this.toolOwners.has(name)) return false;
+    return this.unregisterForHostPolicy(name);
+  }
+
+  /** Explicit host policy boundary for pruning any tool from this per-run projection. */
+  unregisterForHostPolicy(name: string): boolean {
     const removed = this.tools.delete(name);
+    this.toolOwners.delete(name);
     if (removed) {
       logger.info({ tool: name }, `[Registry] 已卸载工具: ${name}`);
     }
     return removed;
+  }
+
+  unregisterOwned(name: string, owner: ToolRegistrationOwner): boolean {
+    if (this.toolOwners.get(name) !== owner) return false;
+    this.toolOwners.delete(name);
+    const removed = this.tools.delete(name);
+    if (removed) {
+      logger.info({ tool: name, owner: `${owner.kind}:${owner.id}` }, `[Registry] 已卸载工具`);
+    }
+    return removed;
+  }
+
+  getToolOwner(name: string): ToolRegistrationOwner | undefined {
+    return this.toolOwners.get(name);
   }
 
   /** 挂载一个安全拦截中间件 (第 16 讲) */

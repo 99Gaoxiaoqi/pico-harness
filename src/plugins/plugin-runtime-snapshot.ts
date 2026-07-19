@@ -13,6 +13,7 @@ import {
   type PluginCapabilityRegistry,
 } from "./plugin-capability.js";
 import { createPluginHookTrustAuthority } from "./plugin-hook-trust.js";
+import type { HookTrustAuthority } from "../hooks/trust/store.js";
 import { createPluginVariableMap, substitutePluginVariablesDeep } from "./plugin-resolver.js";
 import type {
   PluginCompatibility,
@@ -70,6 +71,11 @@ export async function loadPluginRuntimeSnapshot(
   const capabilityRegistry = options.capabilityRegistry ?? createBuiltinPluginCapabilityRegistry();
   const materialization = await service.materializeRuntimePlugins();
   const active = materialization.plugins;
+  const orderedActive = [...active].sort(
+    (left, right) =>
+      pluginPriority(right.installed.scope) - pluginPriority(left.installed.scope) ||
+      left.installed.id.localeCompare(right.installed.id),
+  );
   const skillSources: ExternalResourceCatalogSource[] = [];
   const commandSources: ExternalResourceCatalogSource[] = [];
   const agentSources: AgentExternalCatalogSource[] = [];
@@ -82,13 +88,16 @@ export async function loadPluginRuntimeSnapshot(
   let disposed = false;
 
   try {
-    for (const inspection of active) {
+    for (const inspection of orderedActive) {
       const { contributions, installed } = inspection;
       const priority = pluginPriority(installed.scope);
       const capabilityResolution = capabilityRegistry.resolve(
         contributions.plugin,
         normalizeCapabilityDeclarations(contributions.manifest.capabilities),
-        { resourceDigest: installed.resourceFingerprint.digest },
+        {
+          resourceDigest: installed.resourceFingerprint.digest,
+          pluginScope: installed.scope,
+        },
       );
       capabilities.push(...capabilityResolution.capabilities);
       diagnostics.push(
@@ -97,13 +106,9 @@ export async function loadPluginRuntimeSnapshot(
           sourcePath: contributions.plugin.manifestPath ?? contributions.plugin.root,
           code: item.code,
           message: item.message,
+          scope: installed.scope,
         })),
       );
-      skillSources.push(...pathSources(contributions, contributions.skills, "skill", priority));
-      commandSources.push(
-        ...pathSources(contributions, contributions.commands, "command", priority),
-      );
-      agentSources.push(...(await agentPathSources(contributions, contributions.agents, priority)));
       const variables = createPluginVariableMap(contributions.plugin, options.workDir, {
         ...options,
         scope: installed.scope,
@@ -116,6 +121,26 @@ export async function loadPluginRuntimeSnapshot(
         isActive: () => !disposed,
       });
       revokeHookAuthorities.push(hookTrust.revoke);
+      skillSources.push(
+        ...pathSources(contributions, contributions.skills, "skill", priority, hookTrust.authority),
+      );
+      commandSources.push(
+        ...pathSources(
+          contributions,
+          contributions.commands,
+          "command",
+          priority,
+          hookTrust.authority,
+        ),
+      );
+      agentSources.push(
+        ...(await agentPathSources(
+          contributions,
+          contributions.agents,
+          priority,
+          hookTrust.authority,
+        )),
+      );
 
       for (const contribution of contributions.hooks) {
         try {
@@ -128,7 +153,7 @@ export async function loadPluginRuntimeSnapshot(
             trustAuthority: hookTrust.authority,
           });
         } catch (error) {
-          diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
+          diagnostics.push(runtimeDiagnostic(contributions, contribution, installed.scope, error));
         }
       }
       for (const contribution of contributions.mcpServers) {
@@ -141,7 +166,7 @@ export async function loadPluginRuntimeSnapshot(
             ),
           });
         } catch (error) {
-          diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
+          diagnostics.push(runtimeDiagnostic(contributions, contribution, installed.scope, error));
         }
       }
       for (const contribution of contributions.lspServers) {
@@ -153,13 +178,13 @@ export async function loadPluginRuntimeSnapshot(
             ),
           );
         } catch (error) {
-          diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
+          diagnostics.push(runtimeDiagnostic(contributions, contribution, installed.scope, error));
         }
       }
     }
 
     return Object.freeze({
-      pluginIds: Object.freeze(active.map(({ installed }) => installed.id)),
+      pluginIds: Object.freeze(orderedActive.map(({ installed }) => installed.id)),
       skillSources: Object.freeze(skillSources),
       commandSources: Object.freeze(commandSources),
       agentSources: Object.freeze(agentSources),
@@ -196,6 +221,7 @@ function pathSources(
   contributions: readonly PluginPathContribution[],
   kind: "skill" | "command",
   priority: number,
+  hookTrustAuthority: HookTrustAuthority,
 ): ExternalResourceCatalogSource[] {
   return contributions.map((contribution, index) => ({
     id: contributionId(plugin.plugin.id, kind, contribution, index),
@@ -204,6 +230,7 @@ function pathSources(
     root: contribution.path,
     priority,
     namespace: contribution.namespace,
+    hookTrustAuthority,
   }));
 }
 
@@ -217,6 +244,7 @@ async function agentPathSources(
   plugin: PluginContributionSet,
   contributions: readonly PluginPathContribution[],
   priority: number,
+  hookTrustAuthority: HookTrustAuthority,
 ): Promise<AgentExternalCatalogSource[]> {
   return await Promise.all(
     contributions.map(async (contribution, index) => ({
@@ -226,6 +254,7 @@ async function agentPathSources(
       root: contribution.path,
       priority,
       namespace: contribution.namespace,
+      hookTrustAuthority,
       adapter: (await isYamlFile(contribution.path))
         ? ("pico-agent-yaml" as const)
         : ("claude-agent-directory" as const),
@@ -317,12 +346,14 @@ function contributionId(
 function runtimeDiagnostic(
   plugin: PluginContributionSet,
   contribution: PluginConfigContribution,
+  scope: PluginScope,
   error: unknown,
 ): PluginRuntimeDiagnostic {
   return {
     pluginId: plugin.plugin.id,
     sourcePath: contribution.path ?? contribution.sourcePath,
     message: error instanceof Error ? error.message : String(error),
+    scope,
   };
 }
 

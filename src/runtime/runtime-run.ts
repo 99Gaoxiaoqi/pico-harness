@@ -3,9 +3,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
-import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
+import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
+import { SessionForkRuntimeConflictError } from "../engine/session-fork-runtime-port.js";
+import {
+  assertIssuedEngineRuntimeCapability,
+  type EngineRuntimeCapability,
+  type EngineRuntimeWriteGuard,
+} from "../engine/runtime-port.js";
+import type { SessionRuntimeStateWritePatch } from "../engine/session-runtime.js";
 import { PICO_TOOL_RESULT_ERROR_KEY, type Message, type ToolCall } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -28,9 +35,9 @@ import {
 import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
 import {
   RuntimeEventStore,
+  RuntimeEventStoreIntegrityError,
   createRuntimeEventId,
   type RuntimeEventStoreAppendResult,
-  type RuntimeEventStoreOptions,
 } from "./runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
@@ -38,7 +45,12 @@ import {
   projectRuntimeSessionState,
 } from "./runtime-session-projection.js";
 
-const runtimeRunContext = new AsyncLocalStorage<RuntimeRun>();
+interface RuntimeRunContext {
+  readonly run: RuntimeRun;
+  active: boolean;
+}
+
+const runtimeRunContext = new AsyncLocalStorage<RuntimeRunContext>();
 const runtimeToolCallContext = new AsyncLocalStorage<string>();
 const externalMessageCommitTails = new Map<string, Promise<void>>();
 const forkBootstrapTails = new Map<string, Promise<void>>();
@@ -55,18 +67,25 @@ interface RuntimeRunBaseOptions {
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
-  readonly store?: RuntimeEventStore;
 }
 
-export interface RuntimeRunStartOptions extends RuntimeRunBaseOptions {
-  /** Exact live Session capability; generic live starts cannot omit ownership validation. */
+export interface RuntimeRunStartOptions extends Omit<
+  RuntimeRunBaseOptions,
+  "sessionId" | "workDir"
+> {
+  /** Inseparable live Session scope; identity, workspace, store, and lease cannot be mixed. */
+  readonly capability: EngineRuntimeCapability;
+}
+
+type DetachedRuntimeRunStartOptions = RuntimeRunBaseOptions & {
+  readonly store: RuntimeEventStore;
   readonly writeGuard: RuntimeEventWriteGuard;
-}
-
-type DetachedRuntimeRunStartOptions = RuntimeRunBaseOptions;
+};
 
 type RuntimeRunConstructionOptions = RuntimeRunBaseOptions & {
-  readonly writeGuard?: RuntimeEventWriteGuard;
+  readonly store: RuntimeEventStore;
+  readonly writeGuard: RuntimeEventWriteGuard;
+  readonly runtimeCapability?: EngineRuntimeCapability;
 };
 
 /** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
@@ -75,20 +94,15 @@ export interface RuntimeEventWriteGuard {
 }
 
 export interface ReconcileRuntimeRunsOptions {
-  readonly sessionId: string;
-  readonly workDir: string;
   readonly now?: () => Date;
-  readonly store?: RuntimeEventStore;
-  /** Live reconciliation always uses its exact Session capability. */
-  readonly writeGuard: RuntimeEventWriteGuard;
+  readonly capability: EngineRuntimeCapability;
 }
 
 export interface RepairRuntimeSessionProjectionOptions {
-  readonly workDir: string;
-  readonly store?: RuntimeEventStore;
+  readonly capability: EngineRuntimeCapability;
 }
 
-export interface BootstrapRuntimeForkOptions {
+export interface RuntimeForkBootstrapSeed {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   /** Durable fork operation identity used to make a crash retry reuse the same Runtime facts. */
@@ -102,7 +116,16 @@ export interface BootstrapRuntimeForkOptions {
   /** Last source message included in the frozen seed, before target-side rewrites. */
   readonly sourceThroughEventId?: string;
   readonly workDir: string;
-  readonly store?: RuntimeEventStore;
+  readonly store: RuntimeEventStore;
+}
+
+export interface BootstrapRuntimeForkOptions extends RuntimeForkBootstrapSeed {
+  readonly writeGuard: RuntimeEventWriteGuard;
+  readonly statePublication?: {
+    readonly patch: SessionRuntimeStateWritePatch;
+    readonly eventId: string;
+    readonly at: string;
+  };
 }
 
 export interface RuntimeForkModelCheckpointSeed {
@@ -161,7 +184,8 @@ interface PendingRuntimeToolCall {
 
 /** The canonical run bound to the current asynchronous Agent execution. */
 export function currentRuntimeRun(): RuntimeRun | undefined {
-  return runtimeRunContext.getStore();
+  const context = runtimeRunContext.getStore();
+  return context?.active ? context.run : undefined;
 }
 
 /** The tool that caused the current nested Agent work, including a delegated child run. */
@@ -170,7 +194,7 @@ export function currentRuntimeToolCallId(): string | undefined {
 }
 
 /** Pure identity helper used by fork recovery before it trusts target Runtime facts. */
-export function deriveRuntimeForkBootstrapRunId(options: BootstrapRuntimeForkOptions): string {
+export function deriveRuntimeForkBootstrapRunId(options: RuntimeForkBootstrapSeed): string {
   const messages = options.messages.map(stripMessageUsage);
   const completion: RuntimeForkBootstrapCompletion = {
     sourceDigest: forkSeedDigest(messages),
@@ -192,11 +216,12 @@ export class RuntimeRun {
   readonly runId: string;
   readonly invocationId: string;
   readonly store: RuntimeEventStore;
+  readonly runtimeCapability?: EngineRuntimeCapability;
   private readonly canonicalWorkDir: string;
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
   private readonly terminalEventId?: string;
-  private readonly writeGuard?: RuntimeEventWriteGuard;
+  private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
   private turnId: string;
@@ -211,11 +236,8 @@ export class RuntimeRun {
   ) {
     this.runId = options.runId ?? randomUUID();
     this.invocationId = options.invocationId ?? `invocation:${randomUUID()}`;
-    this.store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
-      } satisfies RuntimeEventStoreOptions);
+    this.store = options.store;
+    this.runtimeCapability = options.runtimeCapability;
     this.canonicalWorkDir = canonicalizeWorkspacePath(workDir);
     this.now = options.now ?? (() => new Date());
     this.runStartedEventId = options.runStartedEventId;
@@ -230,7 +252,16 @@ export class RuntimeRun {
   }
 
   static async start(options: RuntimeRunStartOptions): Promise<RuntimeRun> {
-    return RuntimeRun.startInternal(options);
+    const { capability, ...metadata } = options;
+    const store = runtimeEventStoreFromCapability(capability);
+    return RuntimeRun.startInternal({
+      ...metadata,
+      sessionId: capability.sessionId,
+      workDir: capability.workDir,
+      store,
+      writeGuard: capability.writeGuard,
+      runtimeCapability: capability,
+    });
   }
 
   /** Detached writes are confined to the durable fork publication path. */
@@ -239,11 +270,7 @@ export class RuntimeRun {
   }
 
   private static async startInternal(options: RuntimeRunConstructionOptions): Promise<RuntimeRun> {
-    const store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
-      });
+    const store = options.store;
     const run = new RuntimeRun(options.sessionId, options.workDir, { ...options, store });
     await run.writeCanonicalEvent(() =>
       store.initializeSession({
@@ -258,18 +285,21 @@ export class RuntimeRun {
 
   /** Completes old canonical runs that reached neither a terminal event nor a clean stop. */
   static async reconcileIncompleteRuns(options: ReconcileRuntimeRunsOptions): Promise<string[]> {
-    const store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
-      });
-    const manifest = await store.readSessionManifest(options.sessionId);
+    const { capability } = options;
+    const store = runtimeEventStoreFromCapability(capability);
+    const { sessionId } = capability;
+    const manifest = await store.readSessionManifest(sessionId);
     if (!manifest) return [];
+    const activeMessageEventIds = new Set(
+      projectRuntimeSessionMessageEntries(await store.readSession(sessionId)).map(
+        ({ eventId }) => eventId,
+      ),
+    );
 
     const reconciled: string[] = [];
-    for (const runId of await store.listRunIds(options.sessionId)) {
+    for (const runId of await store.listRunIds(sessionId)) {
       if (runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)) continue;
-      const events = await store.readRun(options.sessionId, runId);
+      const events = await store.readRun(sessionId, runId);
       const started = events.find((event) => event.kind === "run.started");
       if (!started) continue;
       const existingTerminal = events.find(
@@ -277,14 +307,22 @@ export class RuntimeRun {
       );
       const last = events.at(-1) ?? started;
       const recoveryAt = existingTerminal?.at ?? last.at;
-      const syntheticToolResults = findDanglingRuntimeToolCalls(events).map((pending) =>
-        buildInterruptedToolResultEvent(events, pending, recoveryAt),
+      const syntheticToolResults = findDanglingRuntimeToolCalls(events, activeMessageEventIds).map(
+        (pending) => buildInterruptedToolResultEvent(events, pending, recoveryAt),
       );
       if (existingTerminal && syntheticToolResults.length === 0) continue;
+      const recoveryEvents = existingTerminal
+        ? buildInterruptedToolRecoveryRun({
+            sourceStarted: started,
+            sourceTerminal: existingTerminal,
+            toolResults: syntheticToolResults,
+            at: recoveryAt,
+          })
+        : undefined;
       const terminal: RuntimeRunTerminalEvent = {
         schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-        eventId: runtimeInterruptionRecoveryEventId("terminal", [options.sessionId, runId]),
-        sessionId: options.sessionId,
+        eventId: runtimeInterruptionRecoveryEventId("terminal", [sessionId, runId]),
+        sessionId,
         invocationId: last.invocationId,
         runId,
         turnId: last.turnId,
@@ -300,12 +338,9 @@ export class RuntimeRun {
         },
       };
       const results = await writeWithRuntimeEventGuard(
-        options.writeGuard,
-        () =>
-          store.appendBatch(
-            existingTerminal ? syntheticToolResults : [...syntheticToolResults, terminal],
-          ),
-        `Runtime reconciliation for session ${options.sessionId}`,
+        capability.writeGuard,
+        () => store.appendBatch(recoveryEvents ?? [...syntheticToolResults, terminal]),
+        `Runtime reconciliation for session ${sessionId}`,
       );
       if (results.some((result) => result.inserted)) reconciled.push(runId);
     }
@@ -317,29 +352,31 @@ export class RuntimeRun {
     session: Session,
     options: RepairRuntimeSessionProjectionOptions,
   ): Promise<boolean> {
-    const store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
-      });
-    if (!(await store.readSessionManifest(session.id))) return false;
-    const events = await store.readSession(session.id);
-    const projected = projectRuntimeSessionMessages(events);
-    const usage = projectRuntimeSessionState(events).usage;
-    const messagesStale = !isDeepStrictEqual(session.getModelContext(), projected);
-    const usageStale = !isDeepStrictEqual(session.getRuntimeStateSnapshot().usage, usage);
-    if (!messagesStale && !usageStale) return false;
+    return session.withSerializedExecution(async () => {
+      const { capability } = options;
+      const store = runtimeEventStoreFromCapability(capability);
+      if (capability.writeGuard !== session) {
+        throw new Error(`Runtime capability does not belong to Session ${session.id}`);
+      }
+      if (!(await store.readSessionManifest(session.id))) return false;
+      const events = await store.readSession(session.id);
+      const projected = projectRuntimeSessionMessages(events);
+      const usage = projectRuntimeSessionState(events).usage;
+      const messagesStale = !isDeepStrictEqual(session.getModelContext(), projected);
+      const usageStale = !isDeepStrictEqual(session.getRuntimeStateSnapshot().usage, usage);
+      if (!messagesStale && !usageStale) return false;
 
-    const digest = createHash("sha256")
-      .update(events.map((event) => event.eventId).join("\n"))
-      .digest("hex");
-    if (messagesStale) {
-      await session.replaceRuntimeProjection(projected, `runtime-projection:${digest}`);
-    }
-    if (usageStale) {
-      await session.replaceRuntimeUsage(usage, `runtime-usage:${digest}`);
-    }
-    return true;
+      const digest = createHash("sha256")
+        .update(events.map((event) => event.eventId).join("\n"))
+        .digest("hex");
+      if (messagesStale) {
+        await session.replaceRuntimeProjection(projected, `runtime-projection:${digest}`);
+      }
+      if (usageStale) {
+        await session.replaceRuntimeUsage(usage, `runtime-usage:${digest}`);
+      }
+      return true;
+    });
   }
 
   /**
@@ -351,11 +388,7 @@ export class RuntimeRun {
     if (options.sourceSessionId === options.targetSessionId) {
       throw new Error("Runtime fork source 与 target sessionId 不能相同");
     }
-    const store =
-      options.store ??
-      new RuntimeEventStore({
-        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
-      });
+    const store = options.store;
     const messages = options.messages.map(stripMessageUsage);
     const modelCheckpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
     const completion: RuntimeForkBootstrapCompletion = {
@@ -369,7 +402,7 @@ export class RuntimeRun {
       options.targetSessionId,
     );
 
-    return serializeForkBootstrap(targetSessionKey, async () => {
+    return serializeForkBootstrap(targetSessionKey, options.writeGuard, async (writeGuard) => {
       const existingEvents = await store.readSession(options.targetSessionId);
       const forkMarkers = existingEvents.filter(
         (event): event is RuntimeSessionForkedEvent => event.kind === "session.forked",
@@ -378,7 +411,7 @@ export class RuntimeRun {
         (event) => event.data.parentSessionId !== options.sourceSessionId,
       );
       if (conflictingMarker) {
-        throw new Error(
+        throw runtimeForkConflict(
           `Runtime fork target ${options.targetSessionId} is already bound to parent ${conflictingMarker.data.parentSessionId}`,
         );
       }
@@ -388,18 +421,19 @@ export class RuntimeRun {
           completedMarker.data.sourceDigest !== completion.sourceDigest ||
           completedMarker.data.messageCount !== completion.messageCount
         ) {
-          throw new Error(
+          throw runtimeForkConflict(
             `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
           );
         }
         if (modelCheckpoint && completedMarker.runId !== identity.runId) {
-          throw new Error(
+          throw runtimeForkConflict(
             `Runtime fork target ${options.targetSessionId} has a conflicting checkpoint seed`,
           );
         }
         if (completedMarker.runId === identity.runId) {
           assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint);
-          await RuntimeRun.ensureForkTerminal(options, store, existingEvents, identity);
+          await RuntimeRun.ensureForkTerminal(options, store, existingEvents, identity, writeGuard);
+          await RuntimeRun.ensureForkState(options, store, writeGuard);
         }
         return false;
       }
@@ -408,13 +442,14 @@ export class RuntimeRun {
         stripMessageUsage(message),
       );
       if (!isMessagePrefix(imported, messages)) {
-        throw new Error(
+        throw runtimeForkConflict(
           `Runtime fork target ${options.targetSessionId} has incomplete facts that diverge from its frozen Session seed`,
         );
       }
       // Compatibility: old bootstrap wrote session.forked before its copied messages.
       // A complete old fork is already a usable history; only incomplete prefixes resume.
       if (!modelCheckpoint && forkMarkers.length > 0 && imported.length === messages.length) {
+        await RuntimeRun.ensureForkState(options, store, writeGuard);
         return false;
       }
 
@@ -431,6 +466,7 @@ export class RuntimeRun {
         terminalEventId: identity.terminalEventId,
         now: () => new Date(bootstrapAt),
         store,
+        writeGuard,
       });
       const throughEventId =
         options.sourceThroughEventId ??
@@ -452,8 +488,9 @@ export class RuntimeRun {
           summary: modelCheckpoint.summary,
         });
       }
-      // This is the publication marker. A failed bootstrap deliberately has no terminal fact;
-      // the same operation can replay its stable event IDs and complete the one logical run.
+      // State is part of the published fork payload. Persist it before the marker so every
+      // consumer that observes session.forked also observes messages, checkpoint, and state.
+      await RuntimeRun.ensureForkState(options, store, writeGuard);
       await forkRun.recordSessionForked(
         options.sourceSessionId,
         throughEventId,
@@ -462,6 +499,16 @@ export class RuntimeRun {
       );
       await forkRun.finish("completed");
       return true;
+    }).catch((error: unknown) => {
+      if (
+        error instanceof SessionForkRuntimeConflictError ||
+        !(error instanceof RuntimeEventStoreIntegrityError)
+      ) {
+        throw error;
+      }
+      throw new SessionForkRuntimeConflictError(error.message, "target_conflict", {
+        cause: error,
+      });
     });
   }
 
@@ -470,6 +517,7 @@ export class RuntimeRun {
     store: RuntimeEventStore,
     events: readonly RuntimeEvent[],
     identity: RuntimeForkBootstrapIdentity,
+    writeGuard: RuntimeEventWriteGuard,
   ): Promise<void> {
     const terminal = events.find(
       (event): event is RuntimeRunTerminalEvent =>
@@ -477,7 +525,9 @@ export class RuntimeRun {
     );
     if (terminal) {
       if (terminal.eventId !== identity.terminalEventId || terminal.data.status !== "completed") {
-        throw new Error(`Runtime fork run ${identity.runId} has a conflicting terminal fact`);
+        throw runtimeForkConflict(
+          `Runtime fork run ${identity.runId} has a conflicting terminal fact`,
+        );
       }
       return;
     }
@@ -487,7 +537,9 @@ export class RuntimeRun {
         event.kind === "run.started" && event.runId === identity.runId,
     );
     if (!started || started.eventId !== identity.runStartedEventId) {
-      throw new Error(`Runtime fork run ${identity.runId} is missing its stable start fact`);
+      throw runtimeForkConflict(
+        `Runtime fork run ${identity.runId} is missing its stable start fact`,
+      );
     }
     const run = await RuntimeRun.startDetached({
       sessionId: options.targetSessionId,
@@ -498,8 +550,41 @@ export class RuntimeRun {
       terminalEventId: identity.terminalEventId,
       now: () => new Date(started.at),
       store,
+      writeGuard,
     });
     await run.finish("completed");
+  }
+
+  private static async ensureForkState(
+    options: BootstrapRuntimeForkOptions,
+    store: RuntimeEventStore,
+    writeGuard: RuntimeEventWriteGuard,
+  ): Promise<void> {
+    const publication = options.statePublication;
+    if (!publication) return;
+    const existing = await store.readSessionEvent(options.targetSessionId, publication.eventId);
+    if (existing) {
+      if (
+        existing.event.kind !== "session.state.committed" ||
+        existing.event.at !== publication.at ||
+        !isDeepStrictEqual(existing.event.data.patch, publication.patch)
+      ) {
+        throw new SessionForkRuntimeConflictError(
+          `Runtime fork state event ${publication.eventId} is already bound to another payload`,
+          "target_conflict",
+        );
+      }
+      return;
+    }
+    await writeWithRuntimeEventGuard(
+      writeGuard,
+      () =>
+        store.appendSessionState(options.targetSessionId, publication.patch, {
+          eventId: publication.eventId,
+          now: () => new Date(publication.at),
+        }),
+      `Runtime fork state publication ${publication.eventId}`,
+    );
   }
 
   /**
@@ -512,15 +597,11 @@ export class RuntimeRun {
     messages: readonly Message[],
   ): Promise<boolean> {
     if (messages.length === 0) return true;
-    const store = session.runtimeEventStore;
-    if (!store) return false;
+    const capability = session.runtimeEventCapability;
+    if (!capability) return false;
+    const store = runtimeEventStoreFromCapability(capability);
     if (!(await store.readSessionManifest(session.id))) return false;
-    const run = await RuntimeRun.start({
-      sessionId: session.id,
-      workDir: session.workDir,
-      store,
-      writeGuard: session,
-    });
+    const run = await RuntimeRun.start({ capability });
     await run.run(() => run.commitMessages(session, messages));
     return true;
   }
@@ -535,8 +616,9 @@ export class RuntimeRun {
     message: Message,
   ): Promise<CommitReceipt | undefined> {
     const canonicalMessage = canonicalizeRuntimeMessage(message);
-    const store = session.runtimeEventStore;
-    if (!store) return undefined;
+    const capability = session.runtimeEventCapability;
+    if (!capability) return undefined;
+    const store = runtimeEventStoreFromCapability(capability);
     if (!(await store.readSessionManifest(session.id))) return undefined;
     const sessionKey = runtimeSessionKey(store.databasePath, session.workDir, session.id);
     return serializeExternalMessageCommit(sessionKey, eventId, async () => {
@@ -556,12 +638,7 @@ export class RuntimeRun {
         await session.commitRuntimeProjectionBatch([persisted]);
         return runtimeCommitReceipt(persisted);
       }
-      const run = await RuntimeRun.start({
-        sessionId: session.id,
-        workDir: session.workDir,
-        store,
-        writeGuard: session,
-      });
+      const run = await RuntimeRun.start({ capability });
       return run.run(() => run.commitMessageOnce(session, eventId, canonicalMessage));
     });
   }
@@ -573,19 +650,22 @@ export class RuntimeRun {
 
   /** True only when this run owns the Session's canonical workspace and durable store. */
   claimsSession(session: Session): boolean {
-    if (
-      session.id !== this.sessionId ||
-      canonicalizeWorkspacePath(session.workDir) !== this.canonicalWorkDir
-    ) {
+    if (!this.runtimeCapability || this.runtimeCapability.writeGuard !== session) return false;
+    try {
+      assertIssuedEngineRuntimeCapability(this.runtimeCapability);
+      return (
+        this.runtimeCapability.sessionId === session.id &&
+        this.runtimeCapability.runtimeAuthority === this.store &&
+        canonicalizeWorkspacePath(session.workDir) === this.canonicalWorkDir
+      );
+    } catch {
       return false;
     }
-    const sessionStore = session.runtimeEventStore;
-    return sessionStore !== undefined && sessionStore.databasePath === this.store.databasePath;
   }
 
   /** Allows a nested live run to inherit the same narrow Session write capability. */
-  get runtimeEventWriteGuard(): RuntimeEventWriteGuard | undefined {
-    return this.writeGuard;
+  get runtimeEventWriteGuard(): EngineRuntimeWriteGuard | undefined {
+    return this.runtimeCapability?.writeGuard;
   }
 
   async readModelHistoryEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
@@ -599,7 +679,8 @@ export class RuntimeRun {
   }
 
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
-    return runtimeRunContext.run(this, async () => {
+    const context: RuntimeRunContext = { run: this, active: true };
+    return runtimeRunContext.run(context, async () => {
       try {
         const result = await execute();
         await this.finish("completed");
@@ -617,6 +698,8 @@ export class RuntimeRun {
           );
         }
         throw error;
+      } finally {
+        context.active = false;
       }
     });
   }
@@ -897,12 +980,10 @@ export class RuntimeRun {
 }
 
 async function writeWithRuntimeEventGuard<Result>(
-  guard: RuntimeEventWriteGuard | undefined,
+  guard: RuntimeEventWriteGuard,
   write: () => Promise<Result>,
   operation: string,
 ): Promise<Result> {
-  if (!guard) return write();
-
   await guard.assertRuntimeEventWriteAllowed();
   let result: Result;
   try {
@@ -923,12 +1004,18 @@ async function writeWithRuntimeEventGuard<Result>(
   return result;
 }
 
-function findDanglingRuntimeToolCalls(events: readonly RuntimeEvent[]): PendingRuntimeToolCall[] {
+function findDanglingRuntimeToolCalls(
+  events: readonly RuntimeEvent[],
+  activeMessageEventIds: ReadonlySet<string>,
+): PendingRuntimeToolCall[] {
   const pending: PendingRuntimeToolCall[] = [];
   const unresolvedByToolCallId = new Map<string, PendingRuntimeToolCall[]>();
 
   for (const event of events) {
     if (!runtimeEventHasModelMessage(event)) continue;
+    // Rewind keeps canonical facts but removes them from the active Session projection.
+    // Both a call and its result must be matched inside that same active projection.
+    if (!activeMessageEventIds.has(event.eventId)) continue;
     const message = event.data.message;
     if (message.role === "assistant") {
       for (const [callIndex, toolCall] of (message.toolCalls ?? []).entries()) {
@@ -1003,8 +1090,67 @@ function buildInterruptedToolResultEvent(
   };
 }
 
+function buildInterruptedToolRecoveryRun(options: {
+  readonly sourceStarted: RuntimeRunStartedEvent;
+  readonly sourceTerminal: RuntimeRunTerminalEvent;
+  readonly toolResults: readonly RuntimeMessageCommittedEvent[];
+  readonly at: string;
+}): RuntimeEvent[] {
+  const { sourceStarted, sourceTerminal, toolResults, at } = options;
+  const recoveryRunId = runtimeInterruptionRecoveryEventId("run", [
+    sourceStarted.sessionId,
+    sourceStarted.runId,
+    ...toolResults.map((event) => event.eventId),
+  ]);
+  const invocationId = `invocation:${recoveryRunId}`;
+  const turnId = `turn:${recoveryRunId}:repair`;
+  const parentRefs = { parentRunId: sourceStarted.runId } as const;
+  const started: RuntimeRunStartedEvent = {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: runtimeInterruptionRecoveryEventId("run-started", [recoveryRunId]),
+    sessionId: sourceStarted.sessionId,
+    invocationId,
+    runId: recoveryRunId,
+    turnId,
+    at,
+    partial: false,
+    visibility: "internal",
+    refs: parentRefs,
+    kind: "run.started",
+    data: { workDir: sourceStarted.data.workDir },
+  };
+  const recoveredResults = toolResults.map(
+    (event): RuntimeMessageCommittedEvent => ({
+      ...event,
+      invocationId,
+      runId: recoveryRunId,
+      turnId,
+      refs: { ...(event.refs ?? {}), ...parentRefs },
+    }),
+  );
+  const terminal: RuntimeRunTerminalEvent = {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: runtimeInterruptionRecoveryEventId("terminal", [recoveryRunId]),
+    sessionId: sourceStarted.sessionId,
+    invocationId,
+    runId: recoveryRunId,
+    turnId,
+    at,
+    partial: false,
+    visibility: "internal",
+    refs: parentRefs,
+    kind: "run.terminal",
+    data: {
+      status: "completed",
+      reason: `recovered_interrupted_tool_results_after_${sourceTerminal.data.status}`,
+      recovered: true,
+    },
+  };
+  return [started, ...recoveredResults, terminal];
+}
+
 function runtimeInterruptionRecoveryEventId(
-  kind: "terminal" | "tool-result",
+  kind: "run" | "run-started" | "terminal" | "tool-result",
   identity: readonly (number | string)[],
 ): string {
   const digest = createHash("sha256")
@@ -1040,10 +1186,16 @@ function serializeExternalMessageCommit<Result>(
 
 function serializeForkBootstrap<Result>(
   sessionKey: string,
-  operation: () => Promise<Result>,
+  writeGuard: RuntimeEventWriteGuard,
+  operation: (writeGuard: RuntimeEventWriteGuard) => Promise<Result>,
 ): Promise<Result> {
   const previous = forkBootstrapTails.get(sessionKey) ?? Promise.resolve();
-  const result = previous.then(operation);
+  const result = previous.then(async () => {
+    await writeGuard.assertRuntimeEventWriteAllowed();
+    const value = await operation(writeGuard);
+    await writeGuard.assertRuntimeEventWriteAllowed();
+    return value;
+  });
   const tail = result.then(
     () => undefined,
     () => undefined,
@@ -1054,12 +1206,20 @@ function serializeForkBootstrap<Result>(
   });
 }
 
+function runtimeEventStoreFromCapability(capability: EngineRuntimeCapability): RuntimeEventStore {
+  assertIssuedEngineRuntimeCapability(capability);
+  if (!(capability.runtimeAuthority instanceof RuntimeEventStore)) {
+    throw new Error(`Runtime capability for Session ${capability.sessionId} has no event store`);
+  }
+  return capability.runtimeAuthority;
+}
+
 function runtimeSessionKey(databasePath: string, workDir: string, sessionId: string): string {
   return `${resolve(databasePath)}\0${canonicalizeWorkspacePath(workDir)}\0${sessionId}`;
 }
 
 function runtimeForkBootstrapIdentity(
-  options: BootstrapRuntimeForkOptions,
+  options: RuntimeForkBootstrapSeed,
   completion: RuntimeForkBootstrapCompletion,
   modelCheckpoint: RuntimeForkModelCheckpointSeed | undefined,
 ): RuntimeForkBootstrapIdentity {
@@ -1117,7 +1277,9 @@ function assertRuntimeForkCheckpoint(
   const existing = events.find((event) => event.eventId === identity.checkpointEventId);
   if (!checkpoint) {
     if (existing) {
-      throw new Error(`Runtime fork run ${identity.runId} has an unexpected checkpoint fact`);
+      throw runtimeForkConflict(
+        `Runtime fork run ${identity.runId} has an unexpected checkpoint fact`,
+      );
     }
     return;
   }
@@ -1134,8 +1296,14 @@ function assertRuntimeForkCheckpoint(
     existing.data.throughEventId !== coveredEventIds.at(-1) ||
     !isDeepStrictEqual(existing.data.summary, checkpoint.summary)
   ) {
-    throw new Error(`Runtime fork run ${identity.runId} has a conflicting checkpoint fact`);
+    throw runtimeForkConflict(
+      `Runtime fork run ${identity.runId} has a conflicting checkpoint fact`,
+    );
   }
+}
+
+function runtimeForkConflict(message: string): SessionForkRuntimeConflictError {
+  return new SessionForkRuntimeConflictError(message, "target_conflict");
 }
 
 function runtimeEventIdDigest(eventIds: readonly string[]): string {

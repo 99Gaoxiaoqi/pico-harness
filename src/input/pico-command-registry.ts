@@ -103,10 +103,14 @@ import {
   createPluginCommand,
   type PluginManagementCommandService,
 } from "../plugins/plugin-commands.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
+import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
+import {
+  PluginCapabilityActivationScope,
+  type PluginCapabilityRegistry,
+} from "../plugins/plugin-capability.js";
+import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -160,6 +164,8 @@ export interface PicoCommandRegistryOptions {
   thinkingEffort?: string;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
+  /** Current tools that can actually be reconstructed by the background Runtime. */
+  backgroundTools?: () => readonly SessionToolStatus[];
   mcpStatus?: McpStatusProvider;
   additionalDirectories?: readonly string[];
   additionalDirectoryManager?: AdditionalDirectoryManager;
@@ -190,6 +196,9 @@ export interface PicoCommandRegistryOptions {
   mcpControl?: McpConnectionManager;
   /** Plugin 管理命令可注入测试/宿主单例；未注入时按 workDir 创建。 */
   pluginManagement?: PluginManagementCommandService;
+  pluginRuntimeDiagnostics?: readonly import("../plugins/plugin-diagnostics.js").PluginRuntimeDiagnosticLike[];
+  pluginSnapshot?: PluginRuntimeSnapshot;
+  pluginCapabilityRegistry?: PluginCapabilityRegistry;
   picoHome?: string;
   homeDir?: string;
   includeUserSkillResources?: boolean;
@@ -261,8 +270,15 @@ export async function createPicoCommandRegistry(
     createPluginCommand({
       workDir: options.workDir,
       ...(options.pluginManagement ? { service: options.pluginManagement } : {}),
+      ...(options.pluginRuntimeDiagnostics
+        ? { runtimeDiagnostics: options.pluginRuntimeDiagnostics }
+        : {}),
+      ...(options.pluginSnapshot
+        ? { runtimeCapabilities: options.pluginSnapshot.capabilities }
+        : {}),
     }),
     createAgentsCommand(options),
+    createNewSessionCommand(),
     createSessionsCommand(options),
     createRenameCommand(settings),
     createResumeCommand(options),
@@ -602,6 +618,7 @@ function createCompactCommand(
         };
       }
 
+      const pluginActivationScope = new PluginCapabilityActivationScope();
       try {
         const before = session.length;
         const model = activeConfig?.model ?? settings.model;
@@ -611,11 +628,16 @@ function createCompactCommand(
         );
         const budget = createContextBudget(profile);
         const historyTokens = estimateMessagesTokens(session.getHistory());
-        const rawProvider = createProvider(activeProvider, {
-          baseURL,
-          apiKey,
-          model,
-        });
+        const rawProvider = activatePluginProviderCapabilities(
+          options.pluginSnapshot,
+          options.pluginCapabilityRegistry,
+          createProvider(activeProvider, {
+            baseURL,
+            apiKey,
+            model,
+          }),
+          pluginActivationScope,
+        );
         const jobs = options.taskRuntime?.jobService;
         if (jobs) ensureSessionUsageBaseline(jobs, session);
         const runtimeEventStore = session.runtimeEventStore;
@@ -655,12 +677,11 @@ function createCompactCommand(
           ),
           trigger: "manual" as const,
         };
-        const runtimeRun = await RuntimeRun.start({
-          sessionId: session.id,
-          workDir: session.workDir,
-          store: runtimeEventStore,
-          writeGuard: session,
-        });
+        const runtimeCapability = session.runtimeEventCapability;
+        if (!runtimeCapability) {
+          throw new Error(`Manual compaction requires a durable Session: ${session.id}`);
+        }
+        const runtimeRun = await RuntimeRun.start({ capability: runtimeCapability });
         const preview = await runtimeRun.run(async () => {
           const entries = await runtimeRun.readModelHistoryEntries();
           const runtimeHistoryTokens = estimateMessagesTokens(
@@ -725,6 +746,8 @@ function createCompactCommand(
           action: "message",
           message: `Compact failed: ${error instanceof Error ? error.message : String(error)}`,
         };
+      } finally {
+        await pluginActivationScope.dispose();
       }
     },
   };
@@ -1627,6 +1650,23 @@ function formatAgentSource(source: AgentCatalogSource | undefined): string {
   return "user/claude";
 }
 
+function createNewSessionCommand(): SlashCommand {
+  return {
+    name: "new",
+    description: "Start a new session in the current workspace",
+    usage: "/new",
+    category: "session",
+    kind: "local",
+    availability: "idle",
+    execute: (): LocalCommandResult => ({
+      type: "local",
+      action: "resume",
+      message: "Starting a new session in the current workspace.",
+      data: { mode: "new" },
+    }),
+  };
+}
+
 function createSessionsCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "sessions",
@@ -1703,7 +1743,7 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
         };
       }
 
-      if (!(await sessionExists(options.workDir, sessionId, options.picoHome))) {
+      if (!(await publishedSessionExists(options.workDir, sessionId, options.picoHome))) {
         return {
           type: "local",
           action: "message",
@@ -1744,7 +1784,7 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
           message: "Usage: /fork <session-id>",
         };
       }
-      if (!(await sessionExists(options.workDir, sessionId, options.picoHome))) {
+      if (!(await publishedSessionExists(options.workDir, sessionId, options.picoHome))) {
         return {
           type: "local",
           action: "message",
@@ -1761,15 +1801,14 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
   };
 }
 
-async function sessionExists(
+async function publishedSessionExists(
   workDir: string,
   sessionId: string,
   picoHome?: string,
 ): Promise<boolean> {
-  const store = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
-  });
-  return Boolean(await store.readSessionManifest(sessionId));
+  return (await listCliSessionSummaries(workDir, { picoHome })).some(
+    (session) => session.id === sessionId,
+  );
 }
 
 function createRunningInputCommands(): SlashCommand[] {
@@ -1828,14 +1867,18 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
     kind: "local",
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
-      const session = await resolveCommandSession(options);
-      const summaries = listFileHistorySnapshotSummaries(session);
-      return {
-        type: "local",
-        action: "message",
-        message: formatRewindSelector(session.id, summaries),
-        data: summaries,
-      };
+      const resolved = await resolveCommandSession(options);
+      try {
+        const summaries = listFileHistorySnapshotSummaries(resolved.session);
+        return {
+          type: "local",
+          action: "message",
+          message: formatRewindSelector(resolved.session.id, summaries),
+          data: summaries,
+        };
+      } finally {
+        resolved.release();
+      }
     },
   };
 }
@@ -1850,37 +1893,45 @@ function createChangesCommand(options: PicoCommandRegistryOptions): SlashCommand
     kind: "local",
     availability: "idle",
     argumentCompleter: async (query) => {
-      const session = await resolveCommandSession(options);
-      return filterArgumentCandidates(
-        listFileHistorySnapshotSummaries(session).map((snapshot) => ({
-          value: snapshot.messageId,
-          description: snapshot.userPrompt ?? snapshot.changeSummary,
-        })),
-        query,
-      );
+      const resolved = await resolveCommandSession(options);
+      try {
+        return filterArgumentCandidates(
+          listFileHistorySnapshotSummaries(resolved.session).map((snapshot) => ({
+            value: snapshot.messageId,
+            description: snapshot.userPrompt ?? snapshot.changeSummary,
+          })),
+          query,
+        );
+      } finally {
+        resolved.release();
+      }
     },
     execute: async (input): Promise<LocalCommandResult> => {
-      const session = await resolveCommandSession(options);
-      const snapshots = listFileHistorySnapshotSummaries(session);
-      const requested = input.argv[0];
-      const target = requested
-        ? snapshots.find((snapshot) => snapshot.messageId === requested)
-        : (snapshots.findLast((snapshot) => !snapshot.legacy) ?? snapshots.at(-1));
-      if (!target) {
+      const resolved = await resolveCommandSession(options);
+      try {
+        const snapshots = listFileHistorySnapshotSummaries(resolved.session);
+        const requested = input.argv[0];
+        const target = requested
+          ? snapshots.find((snapshot) => snapshot.messageId === requested)
+          : (snapshots.findLast((snapshot) => !snapshot.legacy) ?? snapshots.at(-1));
+        if (!target) {
+          return {
+            type: "local",
+            action: "message",
+            message: requested
+              ? `Cannot open Changes: checkpoint ${requested} was not found.`
+              : "No message checkpoint is available yet.",
+          };
+        }
         return {
           type: "local",
-          action: "message",
-          message: requested
-            ? `Cannot open Changes: checkpoint ${requested} was not found.`
-            : "No message checkpoint is available yet.",
+          action: "changes",
+          message: `Opening partial rewind preview for ${target.messageId}.`,
+          data: { messageId: target.messageId },
         };
+      } finally {
+        resolved.release();
       }
-      return {
-        type: "local",
-        action: "changes",
-        message: `Opening partial rewind preview for ${target.messageId}.`,
-        data: { messageId: target.messageId },
-      };
     },
   };
 }
@@ -1895,47 +1946,56 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
     kind: "local",
     availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => {
-      const session = await resolveCommandSession(options);
-      const summaries = listFileHistorySnapshotSummaries(session);
-      return {
-        type: "local",
-        action: "message",
-        message:
-          input.argv.length === 0
-            ? formatRewindUsage(session.id, summaries)
-            : `直接 message-id 回滚已收敛到交互菜单。请在列表中选择目标消息。\n${formatRewindUsage(session.id, summaries)}`,
-        ui: { kind: "open-selector", selector: "rewind" },
-      };
+      const resolved = await resolveCommandSession(options);
+      try {
+        const summaries = listFileHistorySnapshotSummaries(resolved.session);
+        return {
+          type: "local",
+          action: "message",
+          message:
+            input.argv.length === 0
+              ? formatRewindUsage(resolved.session.id, summaries)
+              : `直接 message-id 回滚已收敛到交互菜单。请在列表中选择目标消息。\n${formatRewindUsage(resolved.session.id, summaries)}`,
+          ui: { kind: "open-selector", selector: "rewind" },
+        };
+      } finally {
+        resolved.release();
+      }
     },
   };
 }
 
-async function resolveCommandSession(options: PicoCommandRegistryOptions): Promise<Session> {
-  const session =
-    options.session ??
-    (await globalSessionManager.getOrCreate(
-      options.sessionId ?? defaultCliSessionId(options.workDir),
-      options.workDir,
-      {
-        persistence: true,
-        ...(options.picoHome ? { picoHome: options.picoHome } : {}),
-      },
-    ));
-  const runtimeEventStore =
-    session.runtimeEventStore ??
-    new RuntimeEventStore({
-      databasePath: resolvePicoPaths(session.workDir, { picoHome: session.picoHome }).workspace
-        .runtimeDatabase,
+async function resolveCommandSession(
+  options: PicoCommandRegistryOptions,
+): Promise<{ readonly session: Session; release(): void }> {
+  const lease = options.session
+    ? { session: options.session, release: (): void => undefined }
+    : await globalSessionManager.getOrCreatePinned(
+        options.sessionId ?? defaultCliSessionId(options.workDir),
+        options.workDir,
+        {
+          persistence: true,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+        },
+      );
+  try {
+    const runtimeCapability = lease.session.runtimeEventCapability;
+    const runtimeStore = lease.session.runtimeEventStore;
+    if (!runtimeCapability || !runtimeStore) {
+      throw new Error(`Command requires a durable Session: ${lease.session.id}`);
+    }
+    await runtimeStore.initializeSession({
+      sessionId: lease.session.id,
+      workDir: lease.session.workDir,
     });
-  await runtimeEventStore.initializeSession({
-    sessionId: session.id,
-    workDir: session.workDir,
-  });
-  await RuntimeRun.repairSessionProjection(session, {
-    workDir: session.workDir,
-    store: runtimeEventStore,
-  });
-  return session;
+    await RuntimeRun.repairSessionProjection(lease.session, {
+      capability: runtimeCapability,
+    });
+    return lease;
+  } catch (error) {
+    lease.release();
+    throw error;
+  }
 }
 
 function createSkillsCommand(loader: SkillLoader): SlashCommand {
@@ -1995,6 +2055,7 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
         metadata: {
           ...activation.metadata,
           ...(skill?.hooks === undefined ? {} : { skillHookConfig: skill.hooks }),
+          ...(skill?.source?.id ? { skillSourceId: skill.source.id } : {}),
         },
         ...(skill && (skill.model !== undefined || skill.allowedTools !== undefined)
           ? {
@@ -2068,7 +2129,7 @@ function createCronCommand(
           const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
           const credential = await requireCronCredential(options, settings);
           const allowedTools = filterBackgroundEligibleTools(
-            settings.tools.map((tool) => tool.name),
+            (options.backgroundTools?.() ?? settings.tools).map((tool) => tool.name),
           );
           const daemon = options.cronDaemonBridge;
           if (!daemon?.createAutomation) {
@@ -2413,6 +2474,7 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
         ...(command.source === "skill" && command.hooks !== undefined
           ? { skillHookConfig: command.hooks }
           : {}),
+        ...(command.catalogSource?.id ? { skillSourceId: command.catalogSource.id } : {}),
       };
       if (command.source === "skill") {
         const activation = renderSkillActivation({

@@ -16,8 +16,8 @@ const IMPORT_DECLARATION =
  */
 const BASELINE_PATH = resolve(REPOSITORY_ROOT, "scripts/architecture-boundaries-baseline.json");
 
-function normalizeRelativePath(path) {
-  return relative(REPOSITORY_ROOT, path).split(sep).join("/");
+function normalizeRelativePath(path, repositoryRoot = REPOSITORY_ROOT) {
+  return relative(repositoryRoot, path).split(sep).join("/");
 }
 
 function stripComments(source) {
@@ -56,8 +56,8 @@ function resolveImportPath(importer, specifier) {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
-function sourceArea(path) {
-  const normalized = normalizeRelativePath(path);
+function sourceArea(path, repositoryRoot) {
+  const normalized = normalizeRelativePath(path, repositoryRoot);
   if (normalized.startsWith("src/input/")) return "input";
   if (normalized.startsWith("src/provider/")) return "provider";
   if (normalized.startsWith("src/engine/")) return "engine";
@@ -66,26 +66,28 @@ function sourceArea(path) {
   return undefined;
 }
 
-function isDaemonBarrel(path) {
-  return normalizeRelativePath(path) === "src/daemon/index.ts";
+function isDaemonBarrel(path, repositoryRoot) {
+  return normalizeRelativePath(path, repositoryRoot) === "src/daemon/index.ts";
 }
 
 function isPureTypeImport(declaration) {
   return declaration.typeOnly;
 }
 
-function classifyViolation(importer, target, declaration) {
-  const from = sourceArea(importer);
-  const to = sourceArea(target);
+function classifyViolation(importer, target, declaration, repositoryRoot) {
+  const from = sourceArea(importer, repositoryRoot);
+  const to = sourceArea(target, repositoryRoot);
   if (!from || !to) return undefined;
 
-  if (from === "input" && to === "daemon" && isDaemonBarrel(target)) {
+  if (from === "input" && to === "daemon" && isDaemonBarrel(target, repositoryRoot)) {
     return "input-to-daemon-barrel";
   }
-  // A pure type-only import is a contract dependency and does not couple runtime implementations.
+  // Engine may not reach into Runtime even for types: contracts belong to Engine or neutral
+  // storage. Type-only imports are exempt only after directional implementation rules run.
+  if (from === "engine" && to === "runtime") return "engine-to-runtime-implementation";
+  // Other pure type imports express contract dependencies without loading implementations.
   if (isPureTypeImport(declaration)) return undefined;
   if (from === "provider" && to === "input") return "provider-to-input-concrete";
-  if (from === "engine" && to === "runtime") return "engine-to-runtime-implementation";
   return undefined;
 }
 
@@ -126,12 +128,12 @@ export function scanArchitectureBoundaries({ repositoryRoot = REPOSITORY_ROOT } 
     for (const declaration of parseImports(importer)) {
       const target = resolveImportPath(importer, declaration.specifier);
       if (!target) continue;
-      const rule = classifyViolation(importer, target, declaration);
+      const rule = classifyViolation(importer, target, declaration, repositoryRoot);
       if (!rule) continue;
       violations.push({
         rule,
-        source: normalizeRelativePath(importer),
-        target: normalizeRelativePath(target),
+        source: normalizeRelativePath(importer, repositoryRoot),
+        target: normalizeRelativePath(target, repositoryRoot),
         specifier: declaration.specifier,
       });
     }

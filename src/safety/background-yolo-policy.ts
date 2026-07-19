@@ -84,6 +84,7 @@ export type BackgroundPolicyViolationCode =
   | "workspace_untrusted"
   | "mcp_config_invalid"
   | "mcp_unavailable"
+  | "tool_unavailable"
   | "hook_config_invalid"
   | "hook_unavailable";
 

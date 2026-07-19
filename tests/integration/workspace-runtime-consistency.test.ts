@@ -12,6 +12,7 @@ import {
   RuntimeProtocolError,
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
+import type { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { DesktopRuntimeService } from "../../src/daemon/desktop-runtime-service.js";
@@ -553,6 +554,54 @@ test(
     assert.equal(restartedFinished[0]?.eventId, recoveryEventId);
   },
 );
+
+test("workspace unregister releases its runtime subscription and cached store", async (context) => {
+  const fixture = await createFixture("unregister-release");
+  let creates = 0;
+  let closes = 0;
+  let unsubscribes = 0;
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+    createWorkspaceRuntime: async (workspacePath) => {
+      creates++;
+      return {
+        workspace: workspacePath,
+        subscribe: () => () => {
+          unsubscribes++;
+        },
+        close: async () => {
+          closes++;
+        },
+        hasPendingOwnership: () => false,
+        waitForOwnershipRelease: async () => undefined,
+      } as unknown as WorkspaceTaskRuntime;
+    },
+  });
+  context.after(async () => {
+    await service.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  await service.handle(
+    createRuntimeRequest("workspace.register", { workspacePath: fixture.workspace }),
+  );
+  await service.handle(
+    createRuntimeRequest("workspace.unregister", { workspacePath: fixture.workspace }),
+  );
+  assert.equal(closes, 1);
+  assert.equal(unsubscribes, 1);
+  const replay = await service.replayEvents({ workspacePath: fixture.workspace });
+  assert.deepEqual(
+    replay.events.map((event) => event.topic),
+    ["workspace.registered", "workspace.unregistered"],
+  );
+
+  await service.handle(
+    createRuntimeRequest("workspace.register", { workspacePath: fixture.workspace }),
+  );
+  assert.equal(creates, 2);
+});
 
 async function createFixture(label: string): Promise<{
   root: string;

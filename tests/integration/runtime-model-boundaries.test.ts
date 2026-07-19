@@ -4,12 +4,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Session } from "../../src/engine/session.js";
+import { createEngineRuntimeCapability } from "../../src/engine/runtime-port.js";
 import { DefaultHookExecutor } from "../../src/hooks/executors/index.js";
 import type { HookInput, ResolvedHookHandler } from "../../src/hooks/types.js";
 import { CostTracker } from "../../src/observability/tracker.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { projectRuntimeSessionUsage } from "../../src/runtime/runtime-session-projection.js";
+
+test("CostTracker preserves provider retry classification", () => {
+  const retryable = new Error("provider-specific retry");
+  const tracker = new CostTracker(
+    {
+      async generate() {
+        return { role: "assistant", content: "unused" };
+      },
+      isRetryableError: (error) => error === retryable,
+    },
+    "unknown-model",
+  );
+
+  assert.equal(tracker.isRetryableError(retryable), true);
+  assert.equal(tracker.isRetryableError(new Error("fatal")), false);
+});
 
 test("durable CostTracker requires and records the matching host RuntimeRun", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-cost-tracker-boundary-"));
@@ -43,28 +61,53 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
   );
   assert.equal(providerCalls, 0);
 
-  const mismatchedRun = await RuntimeRun.start({
-    sessionId: session.id,
-    workDir,
-    store,
-    writeGuard: {
-      assertRuntimeEventWriteAllowed: () => session.assertRuntimeEventWriteAllowed(),
-    },
+  const capability = session.runtimeEventCapability!;
+  await assert.rejects(
+    RuntimeRun.start({
+      capability: {
+        ...capability,
+        writeGuard: {
+          assertRuntimeEventAuthority: (authority) =>
+            session.assertRuntimeEventAuthority(authority),
+          assertRuntimeEventWriteAllowed: () => session.assertRuntimeEventWriteAllowed(),
+        },
+      },
+    }),
+    /was not issued/u,
+  );
+  const foreignStore = new RuntimeEventStore({
+    databasePath: join(root, "foreign-runtime.sqlite"),
   });
-  await mismatchedRun.run(async () => {
-    await assert.rejects(
-      tracked.generate([{ role: "user", content: "mismatched" }], []),
-      /matching host-owned RuntimeRun/u,
-    );
-  });
+  assert.throws(
+    () =>
+      createEngineRuntimeCapability({
+        owner: session,
+        runtimeAuthority: foreignStore,
+      }),
+    /not owned by Session/u,
+  );
+  assert.throws(
+    () =>
+      createEngineRuntimeCapability({
+        owner: {
+          id: session.id,
+          workDir: session.workDir,
+          assertRuntimeEventAuthority: () => undefined,
+          assertRuntimeEventWriteAllowed: async () => undefined,
+        } as unknown as Session,
+        runtimeAuthority: foreignStore,
+      }),
+    /actual Session/u,
+  );
+  await assert.rejects(
+    RuntimeRun.start({
+      capability: { ...capability, runtimeAuthority: foreignStore },
+    }),
+    /was not issued/u,
+  );
   assert.equal(providerCalls, 0);
 
-  const run = await RuntimeRun.start({
-    sessionId: session.id,
-    workDir,
-    store,
-    writeGuard: session,
-  });
+  const run = await RuntimeRun.start({ capability });
   const response = await run.run(() => tracked.generate([{ role: "user", content: "inside" }], []));
   assert.equal(response.content, "tracked");
   assert.equal(providerCalls, 1);

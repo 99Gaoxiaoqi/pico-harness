@@ -54,11 +54,21 @@ export async function listDesktopSkills(
   }));
 }
 
-export async function listDesktopMcpServers(workspacePath: string) {
+export async function listDesktopMcpServers(
+  workspacePath: string,
+  options: DesktopResourceCatalogOptions,
+) {
   const manager = new McpConnectionManager(undefined, { stdioCwd: workspacePath });
   try {
     const resolution = await resolveProjectMcpConfigPath(workspacePath);
-    await manager.loadConfig(resolution.path);
+    await manager.replaceSources([
+      {
+        id: "project",
+        path: resolution.path,
+        optional: !resolution.exists,
+      },
+      ...(options.pluginSnapshot?.mcpSources ?? []),
+    ]);
     return manager.getStatusSnapshot().servers;
   } finally {
     await manager.closeAll();
