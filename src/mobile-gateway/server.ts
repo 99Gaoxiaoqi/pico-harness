@@ -1,12 +1,18 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { MobileProjectId, SessionId } from "@pico/protocol";
+import {
+  MAX_MOBILE_MESSAGE_BYTES,
+  parseMobileSendMessageBody,
+  type MobileProjectId,
+  type SessionId,
+} from "@pico/protocol";
 import type { MobileGatewayApi } from "./service.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const MIN_TOKEN_BYTES = 32;
+const MAX_MOBILE_REQUEST_BODY_BYTES = MAX_MOBILE_MESSAGE_BYTES + 4 * 1024;
 
 export interface MobileGatewayServerOptions {
   readonly api: MobileGatewayApi;
@@ -80,6 +86,33 @@ export async function startMobileGateway(
         sendJson(response, 200, await options.api.getTranscript(projectId, sessionId, before));
       } catch {
         sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
+      }
+      return;
+    }
+
+    const messagesMatch = /^\/v1\/projects\/([^/]+)\/messages$/u.exec(url.pathname);
+    if (request.method === "POST" && messagesMatch && !url.search) {
+      try {
+        const projectId = decodePathSegment(messagesMatch[1]) as MobileProjectId;
+        const body = parseMessageBody(await readJsonBody(request));
+        sendJson(response, 200, await options.api.sendMessage(projectId, body));
+      } catch (error) {
+        const statusCode = mobileGatewayErrorStatus(error);
+        sendJson(response, statusCode, {
+          error: {
+            code:
+              statusCode === 400
+                ? "INVALID_REQUEST"
+                : statusCode === 413
+                  ? "TOO_LARGE"
+                  : statusCode === 409
+                    ? "CONFLICT"
+                    : statusCode === 404
+                      ? "NOT_FOUND"
+                      : "GATEWAY_FAILURE",
+            message: statusCode >= 500 ? "Mobile Gateway request failed" : "Request rejected",
+          },
+        });
       }
       return;
     }
@@ -162,6 +195,53 @@ function singleOptionalQuery(url: URL, name: string): string | undefined {
     throw new Error("Invalid Mobile Gateway query value");
   }
   return value;
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+    throw new MobileGatewayRequestError(400);
+  }
+  const declaredLength = Number(request.headers["content-length"] ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_MOBILE_REQUEST_BODY_BYTES) {
+    throw new MobileGatewayRequestError(413);
+  }
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > MAX_MOBILE_REQUEST_BODY_BYTES) throw new MobileGatewayRequestError(413);
+    chunks.push(buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } catch {
+    throw new MobileGatewayRequestError(400);
+  }
+}
+
+function parseMessageBody(value: unknown) {
+  try {
+    return parseMobileSendMessageBody(value);
+  } catch {
+    throw new MobileGatewayRequestError(400);
+  }
+}
+
+function mobileGatewayErrorStatus(error: unknown): number {
+  if (error instanceof MobileGatewayRequestError) return error.statusCode;
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "PROJECT_NOT_FOUND" || code === "NOT_FOUND") return 404;
+    if (code === "CONFLICT") return 409;
+  }
+  return 500;
+}
+
+class MobileGatewayRequestError extends Error {
+  constructor(readonly statusCode: 400 | 413) {
+    super("Mobile Gateway request rejected");
+  }
 }
 
 function closeServer(server: ReturnType<typeof createServer>): Promise<void> {

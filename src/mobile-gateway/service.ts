@@ -3,6 +3,8 @@ import type {
   MobileProject,
   MobileProjectId,
   MobileRun,
+  MobileSendMessageBody,
+  MobileSendMessageResult,
   MobileSession,
   MobileTranscript,
   RuntimeConversationItem,
@@ -21,6 +23,10 @@ export interface MobileGatewayApi {
     sessionId: SessionId,
     before?: string,
   ): Promise<MobileTranscript>;
+  sendMessage(
+    projectId: MobileProjectId,
+    body: MobileSendMessageBody,
+  ): Promise<MobileSendMessageResult>;
 }
 
 export class MobileGatewayService implements MobileGatewayApi {
@@ -66,6 +72,38 @@ export class MobileGatewayService implements MobileGatewayApi {
         : {}),
       ...(result.nextBefore ? { nextBefore: result.nextBefore } : {}),
       revision: result.revision,
+    };
+  }
+
+  async sendMessage(
+    projectId: MobileProjectId,
+    body: MobileSendMessageBody,
+  ): Promise<MobileSendMessageResult> {
+    const workspacePath = await this.authority.resolveProjectPath(projectId);
+    if (body.sessionId) {
+      const current = await this.runtime.request("session.get", {
+        workspacePath,
+        sessionId: body.sessionId,
+      });
+      const session = toMobileSession(current.session, workspacePath);
+      if (session.sessionId !== body.sessionId) {
+        throw new Error("Runtime returned another session before Mobile send");
+      }
+    }
+    const result = await this.runtime.request("session.send", {
+      workspacePath,
+      ...(body.sessionId ? { sessionId: body.sessionId } : {}),
+      input: { kind: "text", text: body.text },
+      idempotencyKey: body.idempotencyKey,
+    });
+    const session = toMobileSession(result.session, workspacePath);
+    if (body.sessionId && session.sessionId !== body.sessionId) {
+      throw new Error("Runtime returned another session after Mobile send");
+    }
+    return {
+      session,
+      ...(result.run ? { run: toMobileRun(result.run, workspacePath, session.sessionId) } : {}),
+      disposition: result.disposition,
     };
   }
 }
