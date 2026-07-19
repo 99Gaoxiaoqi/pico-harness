@@ -190,7 +190,7 @@ export default function SessionScreen() {
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
           onContentSizeChange={() => {
-            if (shouldFollowOutput.current) scrollViewRef.current?.scrollToEnd({ animated: true });
+            if (shouldFollowOutput.current) scrollViewRef.current?.scrollToEnd({ animated: false });
           }}
           onScroll={({ nativeEvent }) => {
             const distanceFromBottom =
