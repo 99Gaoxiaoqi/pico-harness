@@ -136,7 +136,6 @@ export class MobileGatewayService implements MobileGatewayApi {
       if (event) listener(event);
     };
     const subscription = await this.runtime.subscribe({ workspacePath }, deliver);
-    for (const notification of subscription.replay.events) deliver(notification);
     return { dispose: subscription.dispose };
   }
 }
