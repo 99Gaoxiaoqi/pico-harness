@@ -1,16 +1,21 @@
 import type { MobileConversationItem, MobileTranscript } from "@pico/protocol";
 import { Stack, useLocalSearchParams } from "expo-router";
 import * as SecureStore from "expo-secure-store";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
-import { MobileGatewayClient } from "../lib/mobile-gateway-client";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { MobileGatewayClient, type MobileGatewayConnection } from "../lib/mobile-gateway-client";
 
 const GATEWAY_ORIGIN_KEY = "pico.mobile.gatewayOrigin";
 const GATEWAY_TOKEN_KEY = "pico.mobile.gatewayToken";
@@ -28,6 +33,13 @@ export default function SessionScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>();
+  const [connection, setConnection] = useState<MobileGatewayConnection>();
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string>();
+  const pendingSend = useRef<
+    { readonly text: string; readonly idempotencyKey: string } | undefined
+  >(undefined);
 
   const load = useCallback(async () => {
     if (!projectId || !sessionId) {
@@ -41,8 +53,10 @@ export default function SessionScreen() {
         SecureStore.getItemAsync(GATEWAY_TOKEN_KEY),
       ]);
       if (!origin || !token) throw new Error("请先返回项目页连接 Desktop Gateway");
+      const nextConnection = { origin, token };
+      setConnection(nextConnection);
       setTranscript(
-        await new MobileGatewayClient({ origin, token }).getTranscript(projectId, sessionId),
+        await new MobileGatewayClient(nextConnection).getTranscript(projectId, sessionId),
       );
       setError(undefined);
     } catch (loadError) {
@@ -57,47 +71,115 @@ export default function SessionScreen() {
     void load();
   }, [load]);
 
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || !projectId || !sessionId || !connection || sending) return;
+    const request =
+      pendingSend.current?.text === text
+        ? pendingSend.current
+        : { text, idempotencyKey: createIdempotencyKey() };
+    pendingSend.current = request;
+    setSending(true);
+    setSendError(undefined);
+    try {
+      await new MobileGatewayClient(connection).sendMessage(projectId, {
+        sessionId,
+        text: request.text,
+        idempotencyKey: request.idempotencyKey,
+      });
+      pendingSend.current = undefined;
+      setDraft("");
+      await load();
+    } catch (sendFailure) {
+      setSendError(sendFailure instanceof Error ? sendFailure.message : "消息发送失败");
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <>
       <Stack.Screen options={{ headerLargeTitle: false, title }} />
-      <ScrollView
-        contentContainerStyle={styles.content}
-        refreshControl={
-          <RefreshControl
-            onRefresh={() => {
-              setRefreshing(true);
-              void load();
-            }}
-            refreshing={refreshing}
-          />
-        }
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
+        style={styles.screen}
       >
-        {transcript?.activeRun && (
-          <View style={styles.runBanner}>
-            <ActivityIndicator color="#176FB8" size="small" />
-            <Text style={styles.runText}>正在运行·{transcript.activeRun.description}</Text>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardDismissMode="interactive"
+          keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl
+              onRefresh={() => {
+                setRefreshing(true);
+                void load();
+              }}
+              refreshing={refreshing}
+            />
+          }
+        >
+          {transcript?.activeRun && (
+            <View style={styles.runBanner}>
+              <ActivityIndicator color="#176FB8" size="small" />
+              <Text style={styles.runText}>正在运行·{transcript.activeRun.description}</Text>
+            </View>
+          )}
+          {loading ? (
+            <View style={styles.centerState}>
+              <ActivityIndicator color="#208AEF" />
+              <Text style={styles.mutedText}>正在读取会话…</Text>
+            </View>
+          ) : error ? (
+            <View style={styles.errorCard}>
+              <Text style={styles.errorTitle}>无法读取会话</Text>
+              <Text selectable style={styles.errorText}>
+                {error}
+              </Text>
+            </View>
+          ) : transcript?.items.length ? (
+            transcript.items.map((item) => <TranscriptItem key={item.id} item={item} />)
+          ) : (
+            <View style={styles.centerState}>
+              <Text style={styles.mutedText}>这个会话还没有消息</Text>
+            </View>
+          )}
+        </ScrollView>
+        <SafeAreaView edges={["bottom"]} style={styles.composerSafeArea}>
+          {sendError ? <Text style={styles.sendError}>{sendError}</Text> : null}
+          <View style={styles.composer}>
+            <TextInput
+              accessibilityLabel="消息"
+              editable={!sending && Boolean(connection)}
+              multiline
+              onChangeText={(value) => {
+                setDraft(value);
+                if (pendingSend.current?.text !== value.trim()) pendingSend.current = undefined;
+              }}
+              placeholder={connection ? "继续这个会话…" : "连接 Gateway 后可发送"}
+              style={styles.composerInput}
+              value={draft}
+            />
+            <Pressable
+              accessibilityLabel="发送消息"
+              accessibilityRole="button"
+              disabled={sending || !draft.trim() || !connection}
+              onPress={() => void send()}
+              style={({ pressed }) => [
+                styles.sendButton,
+                (sending || !draft.trim() || !connection) && styles.sendButtonDisabled,
+                pressed && styles.sendButtonPressed,
+              ]}
+            >
+              {sending ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.sendButtonText}>↑</Text>
+              )}
+            </Pressable>
           </View>
-        )}
-        {loading ? (
-          <View style={styles.centerState}>
-            <ActivityIndicator color="#208AEF" />
-            <Text style={styles.mutedText}>正在读取会话…</Text>
-          </View>
-        ) : error ? (
-          <View style={styles.errorCard}>
-            <Text style={styles.errorTitle}>无法读取会话</Text>
-            <Text selectable style={styles.errorText}>
-              {error}
-            </Text>
-          </View>
-        ) : transcript?.items.length ? (
-          transcript.items.map((item) => <TranscriptItem key={item.id} item={item} />)
-        ) : (
-          <View style={styles.centerState}>
-            <Text style={styles.mutedText}>这个会话还没有消息</Text>
-          </View>
-        )}
-      </ScrollView>
+        </SafeAreaView>
+      </KeyboardAvoidingView>
     </>
   );
 }
@@ -169,7 +251,12 @@ function singleParam(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function createIdempotencyKey(): string {
+  return `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
   content: { gap: 10, padding: 16, paddingBottom: 48 },
   runBanner: {
     alignItems: "center",
@@ -197,4 +284,29 @@ const styles = StyleSheet.create({
   eventCard: { backgroundColor: "#F8F8F9", borderRadius: 11, gap: 4, padding: 10 },
   eventLabel: { color: "#63636A", fontSize: 11, fontWeight: "700", letterSpacing: 0.4 },
   eventDetail: { color: "#77777D", fontSize: 12, lineHeight: 17 },
+  composerSafeArea: { backgroundColor: "#FFFFFF", borderTopColor: "#E8E8EB", borderTopWidth: 1 },
+  sendError: { color: "#B42323", fontSize: 12, paddingHorizontal: 16, paddingTop: 8 },
+  composer: { alignItems: "flex-end", flexDirection: "row", gap: 8, padding: 12 },
+  composerInput: {
+    backgroundColor: "#F3F3F5",
+    borderRadius: 18,
+    color: "#202024",
+    flex: 1,
+    fontSize: 15,
+    maxHeight: 120,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  sendButton: {
+    alignItems: "center",
+    backgroundColor: "#208AEF",
+    borderRadius: 22,
+    height: 44,
+    justifyContent: "center",
+    width: 44,
+  },
+  sendButtonDisabled: { backgroundColor: "#B9D8F5" },
+  sendButtonPressed: { opacity: 0.78 },
+  sendButtonText: { color: "#FFFFFF", fontSize: 24, fontWeight: "700", lineHeight: 26 },
 });
