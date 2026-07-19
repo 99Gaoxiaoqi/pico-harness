@@ -3,7 +3,11 @@ import { unwatchFile, watchFile } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
-import { createCliSessionId, listCliSessionSummaries } from "../cli/session-resolver.js";
+import {
+  createCliSessionId,
+  listCliSessionSummaries,
+  removeCliSessionFile,
+} from "../cli/session-resolver.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
@@ -122,7 +126,7 @@ import {
   projectRuntimeTranscriptEntries,
   TranscriptRevisionConflict,
 } from "./desktop-transcript.js";
-import { canonicalizeWorkspacePath } from "./workspace-registry.js";
+import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import {
   WorkspaceRuntimeService,
@@ -461,6 +465,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         getSession: this.getSession.bind(this),
         createSession: this.createSession.bind(this),
         setSessionArchived: this.setSessionArchived.bind(this),
+        setSessionPinned: this.setSessionPinned.bind(this),
+        deleteSession: this.deleteSession.bind(this),
         renameSession: this.renameSession.bind(this),
         forkSession: this.forkSession.bind(this),
         compactSession: this.compactSession.bind(this),
@@ -537,12 +543,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listWorkspaces(): Promise<JsonValue> {
     const workspaces = await Promise.all(
-      (await this.registrationStore.list()).map(async (workspacePath) =>
-        workspaceStatusResult(
-          await this.options.runtimeService.getWorkspaceRuntime(workspacePath),
+      (await this.registrationStore.list()).map(async (workspacePath) => {
+        const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
+        return workspaceStatusResult(
+          runtime,
           true,
-        ),
-      ),
+          runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
+        );
+      }),
     );
     return { workspaces };
   }
@@ -709,6 +717,31 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
+  }
+
+  private async setSessionPinned(
+    workspacePath: string,
+    sessionId: string,
+    pinned: boolean,
+  ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    await this.requireSession(canonical, sessionId);
+    await this.sessionStateStore.update(canonical, sessionId, { pinned });
+    const session = await this.requireSession(canonical, sessionId);
+    this.publishSession(session);
+    return { session };
+  }
+
+  private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
+    const managed = globalSessionManager.delete(sessionId, canonical, { picoHome: this.picoHome });
+    await managed?.close();
+    await Promise.all([
+      removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
+      this.sessionStateStore.remove(canonical, sessionId),
+      this.conversationStateStore.clearQueued(canonical, sessionId),
+    ]);
+    return { sessionId, deleted: true };
   }
 
   private async renameSession(
@@ -3143,6 +3176,7 @@ function sessionPayload(
     workspacePath: summary.cwd,
     title: summary.title ?? summary.firstMessage ?? "未命名会话",
     status: metadata?.archivedAt === undefined ? "active" : "archived",
+    pinned: metadata?.pinnedAt !== undefined,
     createdAt: summary.createdAt.getTime(),
     updatedAt: Math.max(summary.updatedAt.getTime(), metadata?.updatedAt ?? 0),
     messageCount: summary.messageCount,

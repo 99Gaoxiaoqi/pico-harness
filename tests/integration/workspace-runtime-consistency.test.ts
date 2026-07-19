@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   canonicalizeWorkspacePath,
   createRuntimeRequest,
+  resolveGitBranch,
   WorkspaceRegistrationStore,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
@@ -16,6 +17,14 @@ import type { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.j
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { DesktopRuntimeService } from "../../src/daemon/desktop-runtime-service.js";
+
+test("workspace branch discovery reports the current Git branch", async (context) => {
+  const fixture = await createFixture("workspace-branch-discovery");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  await runGit(["init", "--quiet", "--initial-branch=mobile-test"], fixture.workspace);
+
+  assert.equal(await resolveGitBranch(fixture.workspace), "mobile-test");
+});
 
 test("linked Git worktree keeps its own canonical Runtime identity", async (context) => {
   const fixture = await createFixture("linked-worktree-identity");

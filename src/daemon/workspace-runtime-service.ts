@@ -36,7 +36,11 @@ import {
   type DaemonIdempotentCommandResult,
 } from "../tasks/runtime-store.js";
 import type { DaemonRunRecord, RuntimeEventRecord } from "../tasks/runtime-types.js";
-import { canonicalizeWorkspacePath, WorkspaceRuntimeRegistry } from "./workspace-registry.js";
+import {
+  canonicalizeWorkspacePath,
+  resolveGitBranch,
+  WorkspaceRuntimeRegistry,
+} from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 
 export interface DaemonRunExecutor {
@@ -202,13 +206,18 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     if (request.method === "workspace.status") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       const registered = (await this.registrationStore.list()).includes(runtime.workspace);
-      const result = workspaceStatusResult(runtime, registered);
+      const result = workspaceStatusResult(
+        runtime,
+        registered,
+        runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
+      );
       return {
         workspacePath: result.workspacePath,
         registered,
         schedulerStatus: result.schedulerStatus,
         mode: result.mode,
         capabilities: result.capabilities,
+        branch: result.branch,
       };
     }
     if (request.method === "run.start") {
@@ -768,6 +777,7 @@ function boundedNotificationValue(
 export function workspaceStatusResult(
   runtime: WorkspaceTaskRuntime,
   registered: boolean,
+  branch?: string,
 ): WorkspaceStatusResult {
   return {
     workspacePath: runtime.workspace,
@@ -777,6 +787,7 @@ export function workspaceStatusResult(
     schedulerStatus: "unknown",
     mode: runtime.mode,
     capabilities: { ...runtime.capabilities },
+    branch: branch ?? "",
   };
 }
 
