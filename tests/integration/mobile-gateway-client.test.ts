@@ -43,3 +43,35 @@ test("mobile client does not include the token in authorization errors", async (
     },
   );
 });
+
+test("mobile client reads project sessions without accepting workspace paths", async () => {
+  const client = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+    async (input) => {
+      assert.equal(String(input), "http://127.0.0.1:47831/v1/projects/opaque/sessions");
+      return Response.json({
+        sessions: [
+          {
+            sessionId: "session-1",
+            title: "Mobile foundation",
+            status: "active",
+            pinned: false,
+            createdAt: 10,
+            updatedAt: 20,
+          },
+        ],
+      });
+    },
+  );
+
+  assert.deepEqual(await client.listSessions("opaque"), [
+    {
+      sessionId: "session-1",
+      title: "Mobile foundation",
+      status: "active",
+      pinned: false,
+      createdAt: 10,
+      updatedAt: 20,
+    },
+  ]);
+});

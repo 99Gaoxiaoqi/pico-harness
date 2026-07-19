@@ -11,7 +11,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { MobileProject } from "@pico/protocol";
+import type { MobileProject, MobileProjectId, MobileSession } from "@pico/protocol";
 import { MobileGatewayClient } from "../lib/mobile-gateway-client";
 
 const GATEWAY_ORIGIN_KEY = "pico.mobile.gatewayOrigin";
@@ -25,6 +25,9 @@ export default function ProjectsScreen() {
   const [origin, setOrigin] = useState(DEFAULT_GATEWAY_ORIGIN);
   const [token, setToken] = useState("");
   const [projects, setProjects] = useState<readonly MobileProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<MobileProjectId>();
+  const [sessions, setSessions] = useState<readonly MobileSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [phase, setPhase] = useState<ConnectionPhase>("idle");
   const [message, setMessage] = useState("输入 Desktop Gateway 的临时 Token 后连接。");
 
@@ -54,6 +57,8 @@ export default function ProjectsScreen() {
         SecureStore.setItemAsync(GATEWAY_TOKEN_KEY, token),
       ]);
       setProjects(nextProjects);
+      setSelectedProjectId(undefined);
+      setSessions([]);
       setPhase("connected");
       setMessage(
         nextProjects.length > 0
@@ -64,6 +69,23 @@ export default function ProjectsScreen() {
       setProjects([]);
       setPhase("error");
       setMessage(error instanceof Error ? error.message : "Gateway 连接失败");
+    }
+  };
+
+  const openProject = async (project: MobileProject) => {
+    setSelectedProjectId(project.projectId);
+    setSessionsLoading(true);
+    try {
+      const nextSessions = await new MobileGatewayClient({ origin, token }).listSessions(
+        project.projectId,
+      );
+      setSessions(nextSessions);
+    } catch (error) {
+      setSessions([]);
+      setPhase("error");
+      setMessage(error instanceof Error ? error.message : "会话列表读取失败");
+    } finally {
+      setSessionsLoading(false);
     }
   };
 
@@ -142,18 +164,50 @@ export default function ProjectsScreen() {
           <View style={styles.projectSection}>
             <Text style={styles.sectionTitle}>项目</Text>
             {projects.map((project) => (
-              <View key={project.projectId} style={styles.projectCard}>
-                <View style={styles.projectMark}>
-                  <Text style={styles.projectMarkText}>
-                    {project.name.slice(0, 1).toUpperCase()}
-                  </Text>
-                </View>
-                <View style={styles.projectCopy}>
-                  <Text numberOfLines={1} style={styles.projectName}>
-                    {project.name}
-                  </Text>
-                  <Text style={styles.projectMeta}>已信任·可从手机访问</Text>
-                </View>
+              <View key={project.projectId} style={styles.projectGroup}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => void openProject(project)}
+                  style={({ pressed }) => [styles.projectCard, pressed && styles.projectPressed]}
+                >
+                  <View style={styles.projectMark}>
+                    <Text style={styles.projectMarkText}>
+                      {project.name.slice(0, 1).toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={styles.projectCopy}>
+                    <Text numberOfLines={1} style={styles.projectName}>
+                      {project.name}
+                    </Text>
+                    <Text style={styles.projectMeta}>已信任·点击查看会话</Text>
+                  </View>
+                  {sessionsLoading && selectedProjectId === project.projectId ? (
+                    <ActivityIndicator color="#208AEF" size="small" />
+                  ) : (
+                    <Text style={styles.disclosure}>›</Text>
+                  )}
+                </Pressable>
+                {selectedProjectId === project.projectId && !sessionsLoading && (
+                  <View style={styles.sessionList}>
+                    {sessions.length === 0 ? (
+                      <Text style={styles.emptySessions}>暂无可用会话</Text>
+                    ) : (
+                      sessions.map((session) => (
+                        <View key={session.sessionId} style={styles.sessionRow}>
+                          <View style={styles.sessionCopy}>
+                            <Text numberOfLines={1} style={styles.sessionTitle}>
+                              {session.pinned ? "★ " : ""}
+                              {session.title}
+                            </Text>
+                            <Text style={styles.sessionMeta}>
+                              {new Date(session.updatedAt).toLocaleString()}
+                            </Text>
+                          </View>
+                        </View>
+                      ))
+                    )}
+                  </View>
+                )}
               </View>
             ))}
           </View>
@@ -213,6 +267,7 @@ const styles = StyleSheet.create({
   message: { color: "#68686E", fontSize: 13, lineHeight: 18 },
   errorMessage: { color: "#B42323" },
   projectSection: { gap: 10 },
+  projectGroup: { gap: 8 },
   sectionTitle: { color: "#29292D", fontSize: 18, fontWeight: "700" },
   projectCard: {
     alignItems: "center",
@@ -224,6 +279,7 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 14,
   },
+  projectPressed: { opacity: 0.72 },
   projectMark: {
     alignItems: "center",
     backgroundColor: "#E7F2FD",
@@ -236,4 +292,17 @@ const styles = StyleSheet.create({
   projectCopy: { flex: 1, gap: 3 },
   projectName: { color: "#202024", fontSize: 16, fontWeight: "700" },
   projectMeta: { color: "#77777D", fontSize: 13 },
+  disclosure: { color: "#8B8B91", fontSize: 28, fontWeight: "300", marginLeft: 4 },
+  sessionList: {
+    backgroundColor: "#F8F8F9",
+    borderRadius: 14,
+    gap: 2,
+    marginLeft: 18,
+    padding: 8,
+  },
+  emptySessions: { color: "#77777D", fontSize: 13, padding: 10 },
+  sessionRow: { borderRadius: 10, flexDirection: "row", paddingHorizontal: 10, paddingVertical: 9 },
+  sessionCopy: { flex: 1, gap: 3 },
+  sessionTitle: { color: "#2A2A2E", fontSize: 14, fontWeight: "600" },
+  sessionMeta: { color: "#85858B", fontSize: 12 },
 });
