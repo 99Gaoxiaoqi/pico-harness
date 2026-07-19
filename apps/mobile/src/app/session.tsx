@@ -151,6 +151,14 @@ export default function SessionScreen() {
     [liveItems, transcript?.items],
   );
 
+  useEffect(() => {
+    if (!shouldFollowOutput.current) return;
+    const frame = requestAnimationFrame(() =>
+      scrollViewRef.current?.scrollToEnd({ animated: false }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [conversationItems]);
+
   const send = async () => {
     const text = draft.trim();
     if (!text || !projectId || !sessionId || !connection || sending) return;
