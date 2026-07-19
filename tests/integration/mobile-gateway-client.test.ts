@@ -75,3 +75,65 @@ test("mobile client reads project sessions without accepting workspace paths", a
     },
   ]);
 });
+
+test("mobile client reads a sanitized session transcript", async () => {
+  const client = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+    async (input) => {
+      assert.equal(
+        String(input),
+        "http://127.0.0.1:47831/v1/projects/opaque/sessions/session-1/transcript",
+      );
+      return Response.json({
+        session: {
+          sessionId: "session-1",
+          title: "Mobile foundation",
+          status: "active",
+          pinned: false,
+          createdAt: 10,
+          updatedAt: 20,
+        },
+        items: [
+          { id: "user-1", kind: "userMessage", content: "Continue" },
+          { id: "assistant-1", kind: "assistantMessage", content: "Done" },
+        ],
+        revision: "revision-1",
+      });
+    },
+  );
+
+  const transcript = await client.getTranscript("opaque", "session-1");
+  assert.deepEqual(transcript.items, [
+    { id: "user-1", kind: "userMessage", content: "Continue" },
+    { id: "assistant-1", kind: "assistantMessage", content: "Done" },
+  ]);
+  assert.equal(transcript.revision, "revision-1");
+});
+
+test("mobile client rejects private Runtime fields in transcript items", async () => {
+  const client = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+    async () =>
+      Response.json({
+        session: {
+          sessionId: "session-1",
+          title: "Mobile foundation",
+          status: "active",
+          pinned: false,
+          createdAt: 10,
+          updatedAt: 20,
+        },
+        items: [
+          {
+            id: "goal-1",
+            kind: "goal",
+            title: "Ship",
+            data: { workspacePath: "/private/workspace" },
+          },
+        ],
+        revision: "revision-1",
+      }),
+  );
+
+  await assert.rejects(() => client.getTranscript("opaque", "session-1"), /会话条目响应格式无效/);
+});
