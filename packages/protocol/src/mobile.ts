@@ -1,6 +1,5 @@
 import type {
   RunId,
-  RuntimeConversationItem,
   RuntimeRunStatus,
   RuntimeSessionStatus,
   SessionId,
@@ -41,7 +40,74 @@ export interface MobileRun {
   readonly error?: string;
 }
 
-export type MobileConversationItem = RuntimeConversationItem;
+interface MobileConversationItemBase {
+  readonly id: string;
+  readonly at?: number;
+  readonly truncated?: true;
+  readonly originalBytes?: number;
+}
+
+export type MobileConversationItem = MobileConversationItemBase &
+  (
+    | {
+        readonly kind: "userMessage" | "systemNotice" | "error";
+        readonly content: string;
+      }
+    | {
+        readonly kind: "assistantMessage" | "thinking";
+        readonly content: string;
+        readonly runId?: RunId;
+        readonly turnId?: string;
+      }
+    | {
+        readonly kind: "skill";
+        readonly name: string;
+        readonly args: string;
+        readonly trigger: "user-slash" | "model-tool";
+      }
+    | {
+        readonly kind: "plan";
+        readonly title: string;
+        readonly detail?: string;
+        readonly state?: "waiting" | "active" | "done" | "failed";
+      }
+    | {
+        readonly kind: "tool";
+        readonly name: string;
+        readonly args: string;
+        readonly status: "running" | "success" | "error";
+        readonly summary?: string;
+      }
+    | {
+        readonly kind: "runBoundary";
+        readonly runId?: RunId;
+        readonly status: RuntimeRunStatus;
+        readonly startedAt: number;
+        readonly finishedAt?: number;
+        readonly error?: string;
+      }
+    | {
+        readonly kind: "approval" | "prompt" | "changes" | "goal";
+        readonly title: string;
+        readonly detail?: string;
+        readonly state?: string;
+      }
+    | {
+        readonly kind: "subagent";
+        readonly name?: string;
+        readonly title: string;
+        readonly detail?: string;
+        readonly state?: string;
+      }
+  );
+
+export interface MobileTranscript {
+  readonly session: MobileSession;
+  readonly items: readonly MobileConversationItem[];
+  readonly activeRun?: MobileRun;
+  readonly nextBefore?: string;
+  readonly revision: string;
+}
 
 export interface MobileGatewayRouteMap {
   readonly "GET /v1/projects": {
@@ -58,13 +124,7 @@ export interface MobileGatewayRouteMap {
       readonly sessionId: SessionId;
       readonly before?: string;
     };
-    readonly result: {
-      readonly session: MobileSession;
-      readonly items: readonly MobileConversationItem[];
-      readonly activeRun?: MobileRun;
-      readonly nextBefore?: string;
-      readonly revision: string;
-    };
+    readonly result: MobileTranscript;
   };
   readonly "POST /v1/projects/:projectId/messages": {
     readonly params: {

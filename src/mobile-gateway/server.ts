@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { MobileProjectId } from "@pico/protocol";
+import type { MobileProjectId, SessionId } from "@pico/protocol";
 import type { MobileGatewayApi } from "./service.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -61,8 +61,23 @@ export async function startMobileGateway(
     const sessionsMatch = /^\/v1\/projects\/([^/]+)\/sessions$/u.exec(url.pathname);
     if (request.method === "GET" && sessionsMatch && !url.search) {
       try {
-        const projectId = decodeURIComponent(sessionsMatch[1] ?? "") as MobileProjectId;
+        const projectId = decodePathSegment(sessionsMatch[1]) as MobileProjectId;
         sendJson(response, 200, { sessions: await options.api.listSessions(projectId) });
+      } catch {
+        sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
+      }
+      return;
+    }
+
+    const transcriptMatch = /^\/v1\/projects\/([^/]+)\/sessions\/([^/]+)\/transcript$/u.exec(
+      url.pathname,
+    );
+    if (request.method === "GET" && transcriptMatch) {
+      try {
+        const before = singleOptionalQuery(url, "before");
+        const projectId = decodePathSegment(transcriptMatch[1]) as MobileProjectId;
+        const sessionId = decodePathSegment(transcriptMatch[2]) as SessionId;
+        sendJson(response, 200, await options.api.getTranscript(projectId, sessionId, before));
       } catch {
         sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
       }
@@ -125,6 +140,26 @@ function sendJson(response: ServerResponse, statusCode: number, body: unknown): 
 function requirePositiveTimeout(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error("Mobile Gateway request timeout must be positive");
+  }
+  return value;
+}
+
+function decodePathSegment(value: string | undefined): string {
+  const decoded = decodeURIComponent(value ?? "");
+  if (!decoded || decoded.length > 256 || decoded.includes("/") || decoded.includes("\\")) {
+    throw new Error("Invalid Mobile Gateway path segment");
+  }
+  return decoded;
+}
+
+function singleOptionalQuery(url: URL, name: string): string | undefined {
+  const names = [...url.searchParams.keys()];
+  if (names.some((entry) => entry !== name) || url.searchParams.getAll(name).length > 1) {
+    throw new Error("Invalid Mobile Gateway query");
+  }
+  const value = url.searchParams.get(name) ?? undefined;
+  if (value !== undefined && (!value || value.length > 1024)) {
+    throw new Error("Invalid Mobile Gateway query value");
   }
   return value;
 }

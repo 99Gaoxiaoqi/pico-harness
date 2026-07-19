@@ -1,18 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { MobileGatewayApi } from "../../src/mobile-gateway/service.js";
 import { startMobileGateway } from "../../src/mobile-gateway/server.js";
 
 const token = "t".repeat(32);
 
-function createApi(
-  overrides: {
-    readonly listProjects?: () => Promise<readonly { projectId: string; name: string }[]>;
-    readonly listSessions?: (projectId: string) => Promise<readonly never[]>;
-  } = {},
-) {
+function createApi(overrides: Partial<MobileGatewayApi> = {}): MobileGatewayApi {
   return {
     listProjects: overrides.listProjects ?? (async () => []),
     listSessions: overrides.listSessions ?? (async () => []),
+    getTranscript:
+      overrides.getTranscript ??
+      (async () => ({ session: mobileSession(), items: [], revision: "revision-1" })),
   };
 }
 
@@ -102,3 +101,42 @@ test("mobile gateway exposes authenticated project sessions", async (context) =>
   assert.deepEqual(await response.json(), { sessions: [] });
   assert.deepEqual(requestedProjects, ["opaque-project"]);
 });
+
+test("mobile gateway exposes one authenticated session transcript", async (context) => {
+  const requests: Array<{ projectId: string; sessionId: string; before?: string }> = [];
+  const gateway = await startMobileGateway({
+    token,
+    api: createApi({
+      async getTranscript(projectId, sessionId, before) {
+        requests.push({ projectId, sessionId, ...(before ? { before } : {}) });
+        return { session: mobileSession(), items: [], revision: "revision-1" };
+      },
+    }),
+  });
+  context.after(() => gateway.close());
+
+  const response = await fetch(
+    `${gateway.origin}/v1/projects/opaque-project/sessions/session-1/transcript?before=cursor-1`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    session: mobileSession(),
+    items: [],
+    revision: "revision-1",
+  });
+  assert.deepEqual(requests, [
+    { projectId: "opaque-project", sessionId: "session-1", before: "cursor-1" },
+  ]);
+});
+
+function mobileSession() {
+  return {
+    sessionId: "session-1",
+    title: "Mobile foundation",
+    status: "active" as const,
+    pinned: false,
+    createdAt: 10,
+    updatedAt: 20,
+  };
+}
