@@ -6,6 +6,7 @@ export interface ConversationSurfaceProps {
   readonly composer?: ReactNode | undefined;
   readonly header?: ReactNode | undefined;
   readonly className?: string | undefined;
+  readonly inspectorMode?: "rail" | "panel" | undefined;
 }
 
 export function ConversationSurface({
@@ -14,6 +15,7 @@ export function ConversationSurface({
   composer,
   header,
   className = "",
+  inspectorMode = "rail",
 }: ConversationSurfaceProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const shouldFollowRef = useRef(true);
@@ -35,6 +37,7 @@ export function ConversationSurface({
     <section
       className={`conversation-surface ${className}`.trim()}
       data-inspector-open={Boolean(inspector) || undefined}
+      data-inspector-mode={inspector ? inspectorMode : undefined}
       aria-label="Pico 会话"
     >
       <div className="conversation-surface__main">

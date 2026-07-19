@@ -5,6 +5,7 @@ import {
   Box,
   BrainCircuit,
   CheckCircle2,
+  ChevronDown,
   CircleDollarSign,
   Clock3,
   Code2,
@@ -13,14 +14,18 @@ import {
   Folder,
   FolderGit2,
   Gauge,
+  GitBranch,
   GitFork,
   History,
   Home,
   Layers3,
+  Laptop,
   Minimize2,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pin,
   Plus,
   Pencil,
@@ -984,6 +989,135 @@ function NewTaskPage() {
   return <ConversationPage />;
 }
 
+interface ConversationEnvironmentPanelProps {
+  readonly workspacePath: string;
+  readonly mode: WorkspaceMode;
+  readonly branch?: string | undefined;
+  readonly changes: readonly ChangeView[];
+  readonly active: boolean;
+  readonly model?: string | undefined;
+  readonly permissionMode?: "default" | "plan" | "auto" | "yolo" | undefined;
+  readonly onReview: () => void;
+}
+
+function ConversationEnvironmentPanel({
+  workspacePath,
+  mode,
+  branch,
+  changes,
+  active,
+  model,
+  permissionMode,
+  onReview,
+}: ConversationEnvironmentPanelProps) {
+  const [worktreeExpanded, setWorktreeExpanded] = useState(false);
+  const [branchExpanded, setBranchExpanded] = useState(false);
+  const additions = changes.reduce((total, change) => total + change.additions, 0);
+  const deletions = changes.reduce((total, change) => total + change.deletions, 0);
+  const permissionLabels = {
+    default: "默认权限",
+    plan: "计划模式",
+    auto: "自动模式",
+    yolo: "完全访问",
+  } as const;
+
+  return (
+    <aside className="conversation-environment-shell" aria-label="当前会话环境">
+      <section className="conversation-environment-panel">
+        <header className="conversation-environment-panel__header">
+          <h2>Environment</h2>
+        </header>
+        <div className="conversation-environment-panel__rows">
+          <button
+            type="button"
+            className="conversation-environment-row conversation-environment-row--changes"
+            disabled={changes.length === 0}
+            onClick={onReview}
+          >
+            <FileDiff aria-hidden="true" />
+            <span>Changes</span>
+            <span className="conversation-change-stats">
+              {active && changes.length === 0 ? (
+                <small>运行中</small>
+              ) : changes.length === 0 ? (
+                <small>0</small>
+              ) : (
+                <>
+                  <b>+{additions.toLocaleString()}</b>
+                  <em>-{deletions.toLocaleString()}</em>
+                </>
+              )}
+            </span>
+          </button>
+          <button
+            type="button"
+            className="conversation-environment-row"
+            aria-expanded={worktreeExpanded}
+            onClick={() => setWorktreeExpanded((expanded) => !expanded)}
+          >
+            <Laptop aria-hidden="true" />
+            <span>{mode === "git" ? "Local worktree" : "Local folder"}</span>
+            <ChevronDown
+              className={worktreeExpanded ? "is-expanded" : undefined}
+              aria-hidden="true"
+            />
+          </button>
+          {worktreeExpanded && (
+            <div className="conversation-environment-detail">
+              <dl>
+                <div>
+                  <dt>路径</dt>
+                  <dd title={workspacePath}>{workspacePath}</dd>
+                </div>
+                <div>
+                  <dt>Runtime</dt>
+                  <dd>
+                    <i aria-hidden="true" /> 已连接
+                  </dd>
+                </div>
+                {model && (
+                  <div>
+                    <dt>模型</dt>
+                    <dd>{model}</dd>
+                  </div>
+                )}
+                {permissionMode && (
+                  <div>
+                    <dt>权限</dt>
+                    <dd>{permissionLabels[permissionMode]}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          )}
+          {mode === "git" && (
+            <>
+              <button
+                type="button"
+                className="conversation-environment-row"
+                aria-expanded={branchExpanded}
+                onClick={() => setBranchExpanded((expanded) => !expanded)}
+              >
+                <GitBranch aria-hidden="true" />
+                <span>{branch ?? "Detached HEAD"}</span>
+                <ChevronDown
+                  className={branchExpanded ? "is-expanded" : undefined}
+                  aria-hidden="true"
+                />
+              </button>
+              {branchExpanded && (
+                <div className="conversation-environment-detail conversation-environment-detail--branch">
+                  当前工作树分支；切换与合并操作仍由项目 Git 工具负责。
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+    </aside>
+  );
+}
+
 function ConversationPage() {
   const { sessionId } = useParams();
   const { data, actions, busy, preview } = useRuntime();
@@ -1002,6 +1136,9 @@ function ConversationPage() {
   const [selectedApprovalId, setSelectedApprovalId] = useState<string>();
   const [selectedPromptId, setSelectedPromptId] = useState<string>();
   const [inspector, setInspector] = useState<ConversationInspectorView>();
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(
+    () => window.localStorage.getItem("pico.environment-panel-open") !== "false",
+  );
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmCompact, setConfirmCompact] = useState(false);
@@ -1047,6 +1184,10 @@ function ConversationPage() {
     if (!editingTitle) setTitleDraft(session?.title ?? "");
   }, [editingTitle, session?.title]);
 
+  useEffect(() => {
+    window.localStorage.setItem("pico.environment-panel-open", String(environmentPanelOpen));
+  }, [environmentPanelOpen]);
+
   const items = useMemo<readonly ConversationItemView[]>(() => {
     const persisted = conversation?.items ?? [];
     const live = activeRun
@@ -1078,24 +1219,11 @@ function ConversationPage() {
           }),
         ),
     ];
-    const changes: ConversationItemView[] =
-      conversation?.runId && conversation.changes && conversation.changes.length > 0
-        ? [
-            {
-              id: `changes:${conversation.runId}`,
-              kind: "changes",
-              title: "本轮文件更改",
-              detail: "在应用前审阅 Runtime 生成的差异。",
-              files: conversation.changes.map((change) => change.path),
-              state: "pending",
-            },
-          ]
-        : [];
     const goal =
       conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
         ? [conversation.goalItem]
         : [];
-    return mergeConversationItemGroups(persisted, goal, live, decisions, changes);
+    return mergeConversationItemGroups(persisted, goal, live, decisions);
   }, [
     activeRun,
     data.approvals,
@@ -1318,9 +1446,25 @@ function ConversationPage() {
                 </button>
               </div>
             )}
+            {workspacePath && (
+              <button
+                type="button"
+                className="conversation-panel-toggle"
+                aria-label={environmentPanelOpen ? "收起环境面板" : "打开环境面板"}
+                aria-expanded={environmentPanelOpen}
+                onClick={() => setEnvironmentPanelOpen((open) => !open)}
+              >
+                {environmentPanelOpen ? (
+                  <PanelRightClose aria-hidden="true" />
+                ) : (
+                  <PanelRightOpen aria-hidden="true" />
+                )}
+              </button>
+            )}
           </div>
         </div>
       }
+      inspectorMode={inspector ? "rail" : "panel"}
       inspector={
         inspector ? (
           <ConversationInspector
@@ -1331,6 +1475,21 @@ function ConversationPage() {
           >
             {inspector.content}
           </ConversationInspector>
+        ) : environmentPanelOpen && workspacePath ? (
+          <ConversationEnvironmentPanel
+            workspacePath={workspacePath}
+            mode={data.workspaceMode ?? "folder"}
+            branch={data.workspaceBranch}
+            changes={conversation?.changes ?? []}
+            active={Boolean(activeRun)}
+            model={conversation?.settings?.model}
+            permissionMode={conversation?.settings?.mode}
+            onReview={() => {
+              const params = new URLSearchParams({ workspace: workspacePath });
+              if (sessionId) params.set("sessionId", sessionId);
+              navigate(`/review?${params.toString()}`);
+            }}
+          />
         ) : undefined
       }
       composer={
