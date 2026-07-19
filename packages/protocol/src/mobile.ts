@@ -109,6 +109,12 @@ export interface MobileTranscript {
   readonly revision: string;
 }
 
+export interface MobileSendMessageResult {
+  readonly session: MobileSession;
+  readonly run?: MobileRun;
+  readonly disposition: SessionSendDisposition;
+}
+
 export interface MobileGatewayRouteMap {
   readonly "GET /v1/projects": {
     readonly params: Record<string, never>;
@@ -131,11 +137,7 @@ export interface MobileGatewayRouteMap {
       readonly projectId: MobileProjectId;
       readonly body: MobileSendMessageBody;
     };
-    readonly result: {
-      readonly session: MobileSession;
-      readonly run?: MobileRun;
-      readonly disposition: SessionSendDisposition;
-    };
+    readonly result: MobileSendMessageResult;
   };
 }
 

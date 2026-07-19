@@ -128,6 +128,85 @@ test("mobile gateway service strips private fields from transcripts and active r
   assert.doesNotMatch(JSON.stringify(transcript), /workspacePath|sourcePath|\/private\/workspaces/);
 });
 
+test("mobile gateway service validates the session before forwarding text input", async () => {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const runtime = {
+    async request(method: string, params: unknown) {
+      requests.push({ method, params });
+      if (method === "session.get") return { session: runtimeSession() };
+      return { session: runtimeSession(), run: runtimeRun(), disposition: "started" };
+    },
+  } as unknown as Pick<RuntimeClient, "request">;
+  const service = new MobileGatewayService(
+    { listProjects: async () => [], resolveProjectPath: async () => workspacePath },
+    runtime,
+  );
+
+  const result = await service.sendMessage(projectId, {
+    sessionId: "session-1",
+    text: "Continue",
+    idempotencyKey: "mobile-message-1",
+  });
+
+  assert.deepEqual(requests, [
+    { method: "session.get", params: { workspacePath, sessionId: "session-1" } },
+    {
+      method: "session.send",
+      params: {
+        workspacePath,
+        sessionId: "session-1",
+        input: { kind: "text", text: "Continue" },
+        idempotencyKey: "mobile-message-1",
+      },
+    },
+  ]);
+  assert.deepEqual(result, {
+    session: {
+      sessionId: "session-1",
+      title: "Mobile foundation",
+      status: "active",
+      pinned: true,
+      createdAt: 10,
+      updatedAt: 20,
+    },
+    run: {
+      runId: "run-1",
+      sessionId: "session-1",
+      description: "Continue",
+      status: "running",
+      startedAt: 21,
+      updatedAt: 22,
+    },
+    disposition: "started",
+  });
+  assert.doesNotMatch(JSON.stringify(result), /workspacePath|\/private\/workspaces/);
+});
+
+test("mobile gateway service rejects a cross-project session before sending", async () => {
+  let sendCalls = 0;
+  const runtime = {
+    async request(method: string) {
+      if (method === "session.send") sendCalls += 1;
+      return { session: runtimeSession("/private/workspaces/other") };
+    },
+  } as unknown as Pick<RuntimeClient, "request">;
+  const service = new MobileGatewayService(
+    { listProjects: async () => [], resolveProjectPath: async () => workspacePath },
+    runtime,
+  );
+
+  await assert.rejects(
+    () =>
+      service.sendMessage(projectId, {
+        sessionId: "session-1",
+        text: "Continue",
+        idempotencyKey: "mobile-message-1",
+      }),
+    /outside the authorized project/,
+  );
+  assert.equal(sendCalls, 0);
+});
+
 function runtimeSession(path = workspacePath): RuntimeSession {
   return {
     sessionId: "session-1",

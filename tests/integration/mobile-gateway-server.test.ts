@@ -12,6 +12,8 @@ function createApi(overrides: Partial<MobileGatewayApi> = {}): MobileGatewayApi 
     getTranscript:
       overrides.getTranscript ??
       (async () => ({ session: mobileSession(), items: [], revision: "revision-1" })),
+    sendMessage:
+      overrides.sendMessage ?? (async () => ({ session: mobileSession(), disposition: "started" })),
   };
 }
 
@@ -128,6 +130,54 @@ test("mobile gateway exposes one authenticated session transcript", async (conte
   assert.deepEqual(requests, [
     { projectId: "opaque-project", sessionId: "session-1", before: "cursor-1" },
   ]);
+});
+
+test("mobile gateway accepts only bounded text message bodies", async (context) => {
+  const messages: unknown[] = [];
+  const gateway = await startMobileGateway({
+    token,
+    api: createApi({
+      async sendMessage(_projectId, body) {
+        messages.push(body);
+        return { session: mobileSession(), disposition: "started" };
+      },
+    }),
+  });
+  context.after(() => gateway.close());
+
+  const accepted = await fetch(`${gateway.origin}/v1/projects/opaque-project/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "session-1",
+      text: "Continue",
+      idempotencyKey: "mobile-message-1",
+    }),
+  });
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(messages, [
+    { sessionId: "session-1", text: "Continue", idempotencyKey: "mobile-message-1" },
+  ]);
+
+  const rejected = await fetch(`${gateway.origin}/v1/projects/opaque-project/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: "Continue",
+      idempotencyKey: "mobile-message-2",
+      workspacePath: "/private/workspace",
+    }),
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(messages.length, 1);
+
+  const tooLarge = await fetch(`${gateway.origin}/v1/projects/opaque-project/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "x".repeat(40_000), idempotencyKey: "mobile-message-3" }),
+  });
+  assert.equal(tooLarge.status, 413);
+  assert.equal(messages.length, 1);
 });
 
 function mobileSession() {
