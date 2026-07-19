@@ -12,7 +12,13 @@ const appleIdPassword = process.env.PICO_APPLE_ID_PASSWORD;
 const appleTeamId = process.env.PICO_APPLE_TEAM_ID;
 const updateBaseUrl = readOptionalHttpsUrl("PICO_UPDATE_BASE_URL");
 const workspaceRoot = resolve(import.meta.dirname, "../..");
-const nativeRuntimePackages = ["better-sqlite3", "bindings", "file-uri-to-path"] as const;
+// Keep Electron's native binary separate from the Node/TUI copy. Rebuilding the
+// shared package for either ABI would otherwise break the other runtime.
+const nativeRuntimePackages = [
+  { source: "better-sqlite3-electron", target: "better-sqlite3-electron" },
+  { source: "bindings", target: "bindings" },
+  { source: "file-uri-to-path", target: "file-uri-to-path" },
+] as const;
 
 const macNotarization =
   appleId && appleIdPassword && appleTeamId
@@ -34,13 +40,18 @@ const config = {
       const target = join(buildPath, "node_modules");
       await mkdir(target, { recursive: true });
       for (const packageName of nativeRuntimePackages) {
-        await cp(join(workspaceRoot, "node_modules", packageName), join(target, packageName), {
-          recursive: true,
-        });
+        await cp(
+          join(workspaceRoot, "node_modules", packageName.source),
+          join(target, packageName.target),
+          { recursive: true },
+        );
       }
     },
   },
-  rebuildConfig: { force: true },
+  rebuildConfig: {
+    force: true,
+    onlyModules: ["better-sqlite3-electron"],
+  },
   makers: [
     new MakerZIP(updateBaseUrl ? { macUpdateManifestBaseUrl: `${updateBaseUrl}/darwin` } : {}, [
       "darwin",
