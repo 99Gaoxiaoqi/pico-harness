@@ -14,6 +14,7 @@ Modes:
   start, run          Start the Expo dev server
   --ios, ios          Start Expo and open iOS
   --android, android  Start Expo and open Android
+  --gateway, gateway  Start the loopback Mobile Gateway
   --web, web          Start Expo for web
   --doctor, doctor    Run Expo diagnostics
   --help, help        Show this help
@@ -33,6 +34,9 @@ case "$MODE" in
     ;;
   --android|android)
     exec npx expo start --android
+    ;;
+  --gateway|gateway)
+    exec npm run mobile:gateway --prefix "$ROOT_DIR/../.."
     ;;
   --web|web)
     exec npx expo start --web
