@@ -333,6 +333,26 @@ function TranscriptItem({ item }: { readonly item: MobileRenderedConversationIte
     );
   }
 
+  if (item.kind === "runBoundary") {
+    const summary = summarizeItem(item);
+    return (
+      <View style={styles.runBoundary}>
+        <View
+          style={[
+            styles.runBoundaryDot,
+            item.status === "failed" ? styles.runBoundaryFailed : styles.runBoundaryComplete,
+          ]}
+        />
+        <Text style={styles.runBoundaryLabel}>{summary.label}</Text>
+        {summary.detail ? (
+          <Text numberOfLines={1} selectable style={styles.runBoundaryDetail}>
+            {summary.detail}
+          </Text>
+        ) : null}
+      </View>
+    );
+  }
+
   const summary = summarizeItem(item);
   return (
     <View style={styles.eventCard}>
@@ -540,6 +560,16 @@ const styles = StyleSheet.create({
     fontSize: mobileTheme.type.caption,
     lineHeight: 16,
   },
+  runBoundary: { alignItems: "center", flexDirection: "row", gap: 7, minHeight: 22 },
+  runBoundaryDot: { borderRadius: 3, height: 6, width: 6 },
+  runBoundaryComplete: { backgroundColor: mobileTheme.colors.lineStrong },
+  runBoundaryFailed: { backgroundColor: mobileTheme.colors.danger },
+  runBoundaryLabel: {
+    color: mobileTheme.colors.inkSecondary,
+    fontSize: mobileTheme.type.caption,
+    fontWeight: "600",
+  },
+  runBoundaryDetail: { color: mobileTheme.colors.inkTertiary, flex: 1, fontSize: 10 },
   composerSafeArea: {
     backgroundColor: mobileTheme.colors.canvas,
     borderTopColor: mobileTheme.colors.line,

@@ -223,7 +223,10 @@ export default function ProjectsScreen() {
                     style={({ pressed }) => [styles.projectRow, pressed && styles.projectPressed]}
                   >
                     <View style={styles.projectMark}>
-                      <Text style={styles.projectMarkText}>⌘</Text>
+                      <View style={styles.folderIcon}>
+                        <View style={styles.folderTab} />
+                        <View style={styles.folderBody} />
+                      </View>
                     </View>
                     <View style={styles.projectCopy}>
                       <Text numberOfLines={1} style={styles.projectName}>
@@ -459,7 +462,26 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     width: 30,
   },
-  projectMarkText: { color: mobileTheme.colors.inkSecondary, fontSize: 13, fontWeight: "700" },
+  folderIcon: { height: 14, position: "relative", width: 16 },
+  folderTab: {
+    backgroundColor: mobileTheme.colors.inkSecondary,
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+    height: 4,
+    left: 1,
+    position: "absolute",
+    top: 0,
+    width: 7,
+  },
+  folderBody: {
+    backgroundColor: mobileTheme.colors.inkSecondary,
+    borderRadius: 2,
+    bottom: 0,
+    height: 11,
+    left: 0,
+    position: "absolute",
+    width: 16,
+  },
   projectCopy: { flex: 1, gap: 1 },
   projectName: { color: mobileTheme.colors.ink, fontSize: 13, fontWeight: "700" },
   projectMeta: { color: mobileTheme.colors.inkTertiary, fontSize: 10 },
