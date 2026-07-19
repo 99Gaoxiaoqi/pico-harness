@@ -115,6 +115,42 @@ export interface MobileSendMessageResult {
   readonly disposition: SessionSendDisposition;
 }
 
+export interface MobileRealtimeAuthenticate {
+  readonly type: "authenticate";
+  readonly token: string;
+}
+
+export type MobileRealtimeEvent =
+  | {
+      readonly type: "ready";
+      readonly sessionId: SessionId;
+    }
+  | {
+      readonly type: "run";
+      readonly run: MobileRun;
+    }
+  | {
+      readonly type: "live";
+      readonly runId: RunId;
+      readonly item: {
+        readonly kind: "thinking" | "assistantMessage";
+        readonly operation: "append" | "complete" | "clear";
+        readonly streamId?: string;
+        readonly turnId?: string;
+        readonly delta?: string;
+        readonly truncated?: boolean;
+      };
+    }
+  | {
+      readonly type: "transcriptUpdated";
+      readonly sessionId: SessionId;
+      readonly revision?: string;
+    }
+  | {
+      readonly type: "resync";
+      readonly reason: "overflow" | "runtime-reconnect" | "unknown";
+    };
+
 export interface MobileGatewayRouteMap {
   readonly "GET /v1/projects": {
     readonly params: Record<string, never>;

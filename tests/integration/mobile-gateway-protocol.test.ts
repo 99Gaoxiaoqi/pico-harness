@@ -4,6 +4,7 @@ import {
   MAX_MOBILE_IDEMPOTENCY_KEY_LENGTH,
   MAX_MOBILE_MESSAGE_BYTES,
   parseMobileSendMessageBody,
+  type MobileRealtimeEvent,
 } from "@pico/protocol";
 
 test("mobile message parser accepts only the narrow text contract", () => {
@@ -63,4 +64,31 @@ test("mobile message parser enforces content and idempotency bounds", () => {
       }),
     /exceeds 128 characters/,
   );
+});
+
+test("mobile realtime events expose only narrow session projections", () => {
+  const event: MobileRealtimeEvent = {
+    type: "live",
+    runId: "run-1",
+    item: {
+      kind: "assistantMessage",
+      operation: "append",
+      streamId: "assistant:run-1:1",
+      turnId: "turn:run-1:1",
+      delta: "Hello",
+    },
+  };
+
+  assert.deepEqual(event, {
+    type: "live",
+    runId: "run-1",
+    item: {
+      kind: "assistantMessage",
+      operation: "append",
+      streamId: "assistant:run-1:1",
+      turnId: "turn:run-1:1",
+      delta: "Hello",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(event), /workspacePath|sourcePath|data/);
 });
