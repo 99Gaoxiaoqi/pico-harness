@@ -1,15 +1,17 @@
 import { LocalRuntimeClient } from "../daemon/client.js";
 import { createMobileProjectAuthorityPort, MobileProjectAuthority } from "./project-authority.js";
 import { startMobileGateway } from "./server.js";
+import { MobileGatewayService } from "./service.js";
 
 const client = new LocalRuntimeClient();
 await client.connect();
 
 const authority = new MobileProjectAuthority(createMobileProjectAuthorityPort(client));
+const api = new MobileGatewayService(authority, client);
 const configuredToken = process.env["PICO_MOBILE_GATEWAY_TOKEN"];
 const configuredPort = Number(process.env["PICO_MOBILE_GATEWAY_PORT"] ?? "47831");
 const gateway = await startMobileGateway({
-  authority,
+  api,
   port: configuredPort,
   ...(configuredToken ? { token: configuredToken } : {}),
 });

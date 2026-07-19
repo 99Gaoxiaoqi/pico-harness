@@ -1,14 +1,15 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { MobileProjectAuthority } from "./project-authority.js";
+import type { MobileProjectId } from "@pico/protocol";
+import type { MobileGatewayApi } from "./service.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const MIN_TOKEN_BYTES = 32;
 
 export interface MobileGatewayServerOptions {
-  readonly authority: Pick<MobileProjectAuthority, "listProjects">;
+  readonly api: MobileGatewayApi;
   readonly host?: string;
   readonly port?: number;
   readonly token?: string;
@@ -48,11 +49,22 @@ export async function startMobileGateway(
     const url = new URL(request.url ?? "/", `http://${host}`);
     if (request.method === "GET" && url.pathname === "/v1/projects" && !url.search) {
       try {
-        sendJson(response, 200, { projects: await options.authority.listProjects() });
+        sendJson(response, 200, { projects: await options.api.listProjects() });
       } catch {
         sendJson(response, 500, {
           error: { code: "GATEWAY_FAILURE", message: "Mobile Gateway request failed" },
         });
+      }
+      return;
+    }
+
+    const sessionsMatch = /^\/v1\/projects\/([^/]+)\/sessions$/u.exec(url.pathname);
+    if (request.method === "GET" && sessionsMatch && !url.search) {
+      try {
+        const projectId = decodeURIComponent(sessionsMatch[1] ?? "") as MobileProjectId;
+        sendJson(response, 200, { sessions: await options.api.listSessions(projectId) });
+      } catch {
+        sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
       }
       return;
     }
