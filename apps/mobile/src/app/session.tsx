@@ -1,7 +1,7 @@
-import type { MobileConversationItem, MobileTranscript } from "@pico/protocol";
+import type { MobileRun, MobileTranscript } from "@pico/protocol";
 import { Stack, useLocalSearchParams } from "expo-router";
 import * as SecureStore from "expo-secure-store";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -16,6 +16,17 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MobileGatewayClient, type MobileGatewayConnection } from "../lib/mobile-gateway-client";
+import {
+  applyMobileLiveEvent,
+  mergeMobileConversationItems,
+  reconcileMobileLiveItems,
+  type MobileLiveConversationItem,
+  type MobileRenderedConversationItem,
+} from "../lib/mobile-live-transcript";
+import {
+  MobileGatewayRealtimeClient,
+  type MobileRealtimeState,
+} from "../lib/mobile-gateway-realtime";
 
 const GATEWAY_ORIGIN_KEY = "pico.mobile.gatewayOrigin";
 const GATEWAY_TOKEN_KEY = "pico.mobile.gatewayToken";
@@ -37,6 +48,11 @@ export default function SessionScreen() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string>();
+  const [liveItems, setLiveItems] = useState<readonly MobileLiveConversationItem[]>([]);
+  const [realtimeState, setRealtimeState] = useState<MobileRealtimeState>();
+  const [realtimeError, setRealtimeError] = useState<string>();
+  const transcriptRef = useRef<MobileTranscript | undefined>(undefined);
+  const hydrationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingSend = useRef<
     { readonly text: string; readonly idempotencyKey: string } | undefined
   >(undefined);
@@ -54,10 +70,16 @@ export default function SessionScreen() {
       ]);
       if (!origin || !token) throw new Error("请先返回项目页连接 Desktop Gateway");
       const nextConnection = { origin, token };
-      setConnection(nextConnection);
-      setTranscript(
-        await new MobileGatewayClient(nextConnection).getTranscript(projectId, sessionId),
+      setConnection((current) =>
+        current?.origin === origin && current.token === token ? current : nextConnection,
       );
+      const nextTranscript = await new MobileGatewayClient(nextConnection).getTranscript(
+        projectId,
+        sessionId,
+      );
+      transcriptRef.current = nextTranscript;
+      setTranscript(nextTranscript);
+      setLiveItems((current) => reconcileMobileLiveItems(nextTranscript.items, current));
       setError(undefined);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "会话记录读取失败");
@@ -70,6 +92,61 @@ export default function SessionScreen() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const scheduleHydration = useCallback(() => {
+    if (hydrationTimer.current) clearTimeout(hydrationTimer.current);
+    hydrationTimer.current = setTimeout(() => void load(), 120);
+  }, [load]);
+
+  useEffect(() => {
+    if (!connection || !projectId || !sessionId) return;
+    const subscription = new MobileGatewayRealtimeClient(connection).subscribe(
+      projectId,
+      sessionId,
+      {
+        onEvent(event) {
+          switch (event.type) {
+            case "ready":
+              void load();
+              break;
+            case "live":
+              setLiveItems((current) =>
+                applyMobileLiveEvent(current, event, transcriptRef.current?.items ?? []),
+              );
+              break;
+            case "run":
+              setTranscript((current) =>
+                current ? applyRealtimeRun(current, event.run) : current,
+              );
+              if (!isActiveRun(event.run)) scheduleHydration();
+              break;
+            case "transcriptUpdated":
+              scheduleHydration();
+              break;
+            case "resync":
+              void load();
+              break;
+          }
+        },
+        onStateChange(state) {
+          setRealtimeState(state);
+          if (state === "connected") setRealtimeError(undefined);
+        },
+        onError(realtimeFailure) {
+          setRealtimeError(realtimeFailure.message);
+        },
+      },
+    );
+    return () => {
+      subscription.dispose();
+      if (hydrationTimer.current) clearTimeout(hydrationTimer.current);
+    };
+  }, [connection, load, projectId, scheduleHydration, sessionId]);
+
+  const conversationItems = useMemo(
+    () => mergeMobileConversationItems(transcript?.items ?? [], liveItems),
+    [liveItems, transcript?.items],
+  );
 
   const send = async () => {
     const text = draft.trim();
@@ -125,6 +202,13 @@ export default function SessionScreen() {
               <Text style={styles.runText}>正在运行·{transcript.activeRun.description}</Text>
             </View>
           )}
+          {connection && realtimeState === "disconnected" ? (
+            <View style={styles.realtimeWarning}>
+              <Text style={styles.realtimeWarningText}>
+                实时更新已断开{realtimeError ? ` · ${realtimeError}` : ""}，下拉可重新同步
+              </Text>
+            </View>
+          ) : null}
           {loading ? (
             <View style={styles.centerState}>
               <ActivityIndicator color="#208AEF" />
@@ -137,8 +221,8 @@ export default function SessionScreen() {
                 {error}
               </Text>
             </View>
-          ) : transcript?.items.length ? (
-            transcript.items.map((item) => <TranscriptItem key={item.id} item={item} />)
+          ) : conversationItems.length ? (
+            conversationItems.map((item) => <TranscriptItem key={item.id} item={item} />)
           ) : (
             <View style={styles.centerState}>
               <Text style={styles.mutedText}>这个会话还没有消息</Text>
@@ -184,25 +268,29 @@ export default function SessionScreen() {
   );
 }
 
-function TranscriptItem({ item }: { readonly item: MobileConversationItem }) {
+function TranscriptItem({ item }: { readonly item: MobileRenderedConversationItem }) {
   if (item.kind === "userMessage" || item.kind === "assistantMessage") {
     const user = item.kind === "userMessage";
+    const streaming = "streaming" in item && item.streaming;
     return (
       <View style={[styles.messageRow, user && styles.userMessageRow]}>
         <View style={[styles.messageBubble, user ? styles.userBubble : styles.assistantBubble]}>
           <Text selectable style={[styles.messageText, user && styles.userMessageText]}>
             {item.content}
+            {streaming ? <Text style={styles.streamingCursor}> ▍</Text> : null}
           </Text>
         </View>
       </View>
     );
   }
   if (item.kind === "thinking") {
+    const streaming = "streaming" in item && item.streaming;
     return (
       <View style={styles.thinkingCard}>
         <Text style={styles.eventLabel}>思考</Text>
         <Text selectable style={styles.thinkingText}>
           {item.content}
+          {streaming ? <Text style={styles.streamingCursor}> ▍</Text> : null}
         </Text>
       </View>
     );
@@ -221,7 +309,7 @@ function TranscriptItem({ item }: { readonly item: MobileConversationItem }) {
   );
 }
 
-function summarizeItem(item: MobileConversationItem): { label: string; detail?: string } {
+function summarizeItem(item: MobileRenderedConversationItem): { label: string; detail?: string } {
   switch (item.kind) {
     case "userMessage":
     case "assistantMessage":
@@ -247,6 +335,27 @@ function summarizeItem(item: MobileConversationItem): { label: string; detail?: 
   }
 }
 
+function isActiveRun(run: MobileRun): boolean {
+  return (
+    run.status === "queued" ||
+    run.status === "running" ||
+    run.status === "pause_requested" ||
+    run.status === "paused" ||
+    run.status === "cancelling"
+  );
+}
+
+function applyRealtimeRun(transcript: MobileTranscript, run: MobileRun): MobileTranscript {
+  if (isActiveRun(run)) return { ...transcript, activeRun: run };
+  if (transcript.activeRun?.runId !== run.runId) return transcript;
+  return {
+    session: transcript.session,
+    items: transcript.items,
+    ...(transcript.nextBefore ? { nextBefore: transcript.nextBefore } : {}),
+    revision: transcript.revision,
+  };
+}
+
 function singleParam(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -267,6 +376,8 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   runText: { color: "#176FB8", flex: 1, fontSize: 13, fontWeight: "600" },
+  realtimeWarning: { backgroundColor: "#FFF4E5", borderRadius: 12, padding: 11 },
+  realtimeWarningText: { color: "#865B16", fontSize: 12, lineHeight: 17 },
   centerState: { alignItems: "center", gap: 10, paddingVertical: 64 },
   mutedText: { color: "#77777D", fontSize: 14 },
   errorCard: { backgroundColor: "#FFF0F0", borderRadius: 14, gap: 5, padding: 14 },
@@ -278,6 +389,7 @@ const styles = StyleSheet.create({
   userBubble: { backgroundColor: "#208AEF", borderBottomRightRadius: 5 },
   assistantBubble: { backgroundColor: "#F1F1F3", borderBottomLeftRadius: 5 },
   messageText: { color: "#252529", fontSize: 15, lineHeight: 22 },
+  streamingCursor: { color: "#208AEF" },
   userMessageText: { color: "#FFFFFF" },
   thinkingCard: { borderLeftColor: "#C8C8CD", borderLeftWidth: 2, gap: 5, padding: 10 },
   thinkingText: { color: "#696970", fontSize: 13, fontStyle: "italic", lineHeight: 19 },
