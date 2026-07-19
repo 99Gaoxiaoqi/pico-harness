@@ -53,6 +53,8 @@ export default function SessionScreen() {
   const [realtimeError, setRealtimeError] = useState<string>();
   const transcriptRef = useRef<MobileTranscript | undefined>(undefined);
   const hydrationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const scrollViewRef = useRef<ScrollView | null>(null);
+  const shouldFollowOutput = useRef(true);
   const pendingSend = useRef<
     { readonly text: string; readonly idempotencyKey: string } | undefined
   >(undefined);
@@ -166,6 +168,7 @@ export default function SessionScreen() {
       });
       pendingSend.current = undefined;
       setDraft("");
+      shouldFollowOutput.current = true;
       await load();
     } catch (sendFailure) {
       setSendError(sendFailure instanceof Error ? sendFailure.message : "消息发送失败");
@@ -186,6 +189,17 @@ export default function SessionScreen() {
           contentContainerStyle={styles.content}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => {
+            if (shouldFollowOutput.current) scrollViewRef.current?.scrollToEnd({ animated: true });
+          }}
+          onScroll={({ nativeEvent }) => {
+            const distanceFromBottom =
+              nativeEvent.contentSize.height -
+              nativeEvent.layoutMeasurement.height -
+              nativeEvent.contentOffset.y;
+            shouldFollowOutput.current = distanceFromBottom < 80;
+          }}
+          ref={scrollViewRef}
           refreshControl={
             <RefreshControl
               onRefresh={() => {
@@ -195,6 +209,7 @@ export default function SessionScreen() {
               refreshing={refreshing}
             />
           }
+          scrollEventThrottle={100}
         >
           {transcript?.activeRun && (
             <View style={styles.runBanner}>
