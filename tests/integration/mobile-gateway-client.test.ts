@@ -137,3 +137,55 @@ test("mobile client rejects private Runtime fields in transcript items", async (
 
   await assert.rejects(() => client.getTranscript("opaque", "session-1"), /会话条目响应格式无效/);
 });
+
+test("mobile client posts one idempotent text message", async () => {
+  const calls: Array<{ input: string; init?: RequestInit }> = [];
+  const client = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+    async (input, init) => {
+      calls.push({ input: String(input), ...(init ? { init } : {}) });
+      return Response.json({
+        session: {
+          sessionId: "session-1",
+          title: "Mobile foundation",
+          status: "active",
+          pinned: false,
+          createdAt: 10,
+          updatedAt: 20,
+        },
+        run: {
+          runId: "run-1",
+          sessionId: "session-1",
+          description: "Continue",
+          status: "running",
+          startedAt: 21,
+          updatedAt: 22,
+        },
+        disposition: "started",
+      });
+    },
+  );
+
+  const result = await client.sendMessage("opaque", {
+    sessionId: "session-1",
+    text: "Continue",
+    idempotencyKey: "mobile-message-1",
+  });
+
+  assert.equal(result.run?.runId, "run-1");
+  assert.equal(result.disposition, "started");
+  assert.equal(calls[0]?.input, "http://127.0.0.1:47831/v1/projects/opaque/messages");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.deepEqual(calls[0]?.init?.headers, {
+    Authorization: "Bearer temporary-token",
+    "Content-Type": "application/json",
+  });
+  assert.equal(
+    calls[0]?.init?.body,
+    JSON.stringify({
+      sessionId: "session-1",
+      text: "Continue",
+      idempotencyKey: "mobile-message-1",
+    }),
+  );
+});

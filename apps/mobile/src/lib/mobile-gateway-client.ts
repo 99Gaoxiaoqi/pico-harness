@@ -3,6 +3,8 @@ import type {
   MobileProject,
   MobileProjectId,
   MobileRun,
+  MobileSendMessageBody,
+  MobileSendMessageResult,
   MobileSession,
   MobileTranscript,
   SessionId,
@@ -57,17 +59,44 @@ export class MobileGatewayClient {
     );
   }
 
+  async sendMessage(
+    projectId: MobileProjectId,
+    body: MobileSendMessageBody,
+  ): Promise<MobileSendMessageResult> {
+    return this.request(
+      `/v1/projects/${encodeURIComponent(projectId)}/messages`,
+      "POST",
+      parseSendMessageResult,
+      JSON.stringify(body),
+    );
+  }
+
   private async get<Result>(path: string, parse: (value: unknown) => Result): Promise<Result> {
+    return this.request(path, "GET", parse);
+  }
+
+  private async request<Result>(
+    path: string,
+    method: "GET" | "POST",
+    parse: (value: unknown) => Result,
+    body?: string,
+  ): Promise<Result> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
     try {
       const response = await this.fetcher(`${this.origin}${path}`, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${this.connection.token}` },
+        method,
+        headers: {
+          Authorization: `Bearer ${this.connection.token}`,
+          ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body } : {}),
         redirect: "error",
         signal: controller.signal,
       });
       if (response.status === 401) throw new Error("Gateway Token 无效或已过期");
+      if (response.status === 409) throw new Error("消息请求与已有幂等记录冲突");
+      if (response.status === 413) throw new Error("消息内容超出 Gateway 限制");
       if (!response.ok) throw new Error(`Gateway 连接失败 (${response.status})`);
       return parse(await response.json());
     } catch (error) {
@@ -130,6 +159,22 @@ function parseTranscript(value: unknown): MobileTranscript {
     ...(value["activeRun"] !== undefined ? { activeRun: parseRun(value["activeRun"]) } : {}),
     ...(typeof value["nextBefore"] === "string" ? { nextBefore: value["nextBefore"] } : {}),
     revision: value["revision"],
+  };
+}
+
+function parseSendMessageResult(value: unknown): MobileSendMessageResult {
+  const dispositions = new Set(["started", "steered", "queued", "replaced"]);
+  if (
+    !isRecord(value) ||
+    typeof value["disposition"] !== "string" ||
+    !dispositions.has(value["disposition"])
+  ) {
+    throw new Error("Gateway 发送响应格式无效");
+  }
+  return {
+    session: parseSession(value["session"]),
+    ...(value["run"] !== undefined ? { run: parseRun(value["run"]) } : {}),
+    disposition: value["disposition"] as MobileSendMessageResult["disposition"],
   };
 }
 
