@@ -17,9 +17,11 @@ import {
   History,
   Home,
   Layers3,
-  MessageSquareMore,
   Minimize2,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Pin,
   Plus,
   Pencil,
   RefreshCw,
@@ -29,12 +31,14 @@ import {
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  Trash2,
   WandSparkles,
   Workflow,
 } from "lucide-react";
 import {
   Component,
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -61,7 +65,6 @@ import {
   CapabilityList,
   EmptyState,
   InlineNotice,
-  PathButton,
   PromptDialog,
   StatusPill,
 } from "./components.js";
@@ -78,8 +81,10 @@ import {
 import type {
   CapabilityView,
   ChangeView,
+  RunView,
   SessionView,
   TimelineItem,
+  WorkspaceView,
   WorkspaceMode,
 } from "./model.js";
 import { ProviderPage } from "./ProviderPage.js";
@@ -472,12 +477,7 @@ function TrustWorkspace({ workspacePath }: { readonly workspacePath: string }) {
   );
 }
 
-const primaryNav = [
-  { to: "/", label: "开始", icon: Home, end: true },
-  { to: "/sessions", label: "会话", icon: MessageSquareMore },
-  { to: "/automations", label: "自动化", icon: Workflow, scoped: true },
-  { to: "/review", label: "更改", icon: FileDiff, scoped: true },
-] as const;
+const primaryNav = [{ to: "/automations", label: "自动化", icon: Workflow, scoped: true }] as const;
 
 const resourceNav = [
   { to: "/skills", label: "Skills", icon: WandSparkles, scoped: true },
@@ -487,8 +487,12 @@ const resourceNav = [
 ] as const;
 
 function AppShell() {
-  const { data, preview, message, actions } = useRuntime();
+  const { data, preview, message, actions, busy } = useRuntime();
   const location = useLocation();
+  const navigate = useNavigate();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => window.localStorage.getItem("pico.sidebar-collapsed") === "true",
+  );
   const routeWorkspacePath = workspacePathFromSearch(location.search);
   const pageTitle = routeTitle(location.pathname);
   const conversationRoute =
@@ -511,37 +515,109 @@ function AppShell() {
             : (current - 1 + links.length) % links.length;
     links[next]?.focus();
   };
+  useEffect(() => {
+    window.localStorage.setItem("pico.sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+  const handleAddWorkspace = useCallback(() => {
+    void actions.chooseWorkspace();
+  }, [actions]);
+  const handleArchiveSession = useCallback(
+    (session: SessionView) => {
+      void actions.setSessionArchived(
+        { workspacePath: session.workspacePath, sessionId: session.id },
+        true,
+      );
+    },
+    [actions],
+  );
+  const handlePinSession = useCallback(
+    (session: SessionView) => {
+      void actions.setSessionPinned(
+        { workspacePath: session.workspacePath, sessionId: session.id },
+        !session.pinned,
+      );
+    },
+    [actions],
+  );
+  const handleDeleteSession = useCallback(
+    async (session: SessionView) => {
+      const confirmed = window.confirm(
+        `永久删除“${session.title}”？\n\n会话记录和运行历史将被移除，且无法恢复。`,
+      );
+      if (!confirmed) return;
+      const deleted = await actions.deleteSession({
+        workspacePath: session.workspacePath,
+        sessionId: session.id,
+      });
+      if (deleted && location.pathname === `/session/${session.id}`) {
+        navigate(newSessionHref(session.workspacePath));
+      }
+    },
+    [actions, location.pathname, navigate],
+  );
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
       <a className="skip-link" href="#main-content">
         跳到主要内容
       </a>
-      <aside className="sidebar" onKeyDown={handleNavKeys}>
-        <div className="sidebar__brand">
-          <span className="brand-mark" aria-hidden="true">
-            P
-          </span>
-          <span>Pico</span>
-          {preview && <span className="preview-dot" title="视觉预览模式" />}
+      <aside
+        className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
+        onKeyDown={handleNavKeys}
+      >
+        <div className="sidebar__header">
+          <Link className="sidebar__brand" to="/" aria-label="Pico 开始页">
+            <span className="brand-mark" aria-hidden="true">
+              P
+            </span>
+            <span className="sidebar__label">Pico</span>
+            {preview && <span className="preview-dot" title="视觉预览模式" />}
+          </Link>
+          <button
+            type="button"
+            className="sidebar__collapse"
+            aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+            title={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+          >
+            {sidebarCollapsed ? (
+              <PanelLeftOpen aria-hidden="true" />
+            ) : (
+              <PanelLeftClose aria-hidden="true" />
+            )}
+          </button>
         </div>
-        {routeWorkspacePath && data.workspacePath === routeWorkspacePath && (
-          <PathButton path={routeWorkspacePath} onClick={() => void actions.openWorkspace()} />
-        )}
-        <SidebarNav items={primaryNav} label="主要导航" workspacePath={routeWorkspacePath} />
-        <SidebarNav
-          items={resourceNav}
-          label="能力与设置"
-          caption="配置"
-          workspacePath={routeWorkspacePath}
-        />
+        <Link className="sidebar-new-task" to={newSessionHref()} data-nav-link aria-label="新任务">
+          <Plus aria-hidden="true" />
+          <span>新任务</span>
+        </Link>
+        <div className="sidebar__body">
+          <SidebarNav items={primaryNav} label="主要导航" workspacePath={routeWorkspacePath} />
+          <SidebarTasks
+            sessions={data.sessions}
+            workspaces={data.workspaces}
+            runs={data.runs}
+            busy={busy === "session-state" || busy === "choose-workspace"}
+            onAddWorkspace={handleAddWorkspace}
+            onArchiveSession={handleArchiveSession}
+            onDeleteSession={handleDeleteSession}
+            onPinSession={handlePinSession}
+          />
+          <SidebarNav
+            items={resourceNav}
+            label="能力与设置"
+            caption="工具"
+            workspacePath={routeWorkspacePath}
+          />
+        </div>
         <div className="sidebar__footer">
           <NavLink
             to={routeWorkspacePath ? workspaceHref("/settings", routeWorkspacePath) : "/settings"}
             data-nav-link
+            aria-label="设置"
             className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
           >
             <Settings aria-hidden="true" />
-            <span>设置</span>
+            <span className="sidebar__label">设置</span>
           </NavLink>
           <div className="runtime-health">
             <span /> Runtime 已连接
@@ -584,6 +660,171 @@ function AppShell() {
   );
 }
 
+function SidebarTasks({
+  sessions,
+  workspaces,
+  runs,
+  busy,
+  onAddWorkspace,
+  onArchiveSession,
+  onDeleteSession,
+  onPinSession,
+}: {
+  readonly sessions: readonly SessionView[];
+  readonly workspaces: readonly WorkspaceView[];
+  readonly runs: readonly RunView[];
+  readonly busy: boolean;
+  readonly onAddWorkspace: () => void;
+  readonly onArchiveSession: (session: SessionView) => void;
+  readonly onDeleteSession: (session: SessionView) => void;
+  readonly onPinSession: (session: SessionView) => void;
+}) {
+  const visibleSessions = sessions.filter((session) => session.status !== "archived");
+  const workspacePaths = Array.from(
+    new Set([
+      ...workspaces.map((workspace) => workspace.path),
+      ...visibleSessions.map((session) => session.workspacePath),
+    ]),
+  );
+  const groups = workspacePaths
+    .map((workspacePath) => ({
+      workspace: workspaces.find((candidate) => candidate.path === workspacePath),
+      workspacePath,
+      sessions: visibleSessions
+        .filter((session) => session.workspacePath === workspacePath)
+        .sort(
+          (left, right) =>
+            Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) ||
+            right.updatedAt - left.updatedAt,
+        ),
+    }))
+    .filter((group) => group.sessions.length > 0 || group.workspace);
+
+  return (
+    <section className="sidebar-tasks" aria-labelledby="sidebar-tasks-title">
+      <div className="sidebar-section-heading">
+        <span id="sidebar-tasks-title">项目</span>
+        <button
+          type="button"
+          aria-label="添加工作区"
+          title="添加工作区"
+          disabled={busy}
+          onClick={onAddWorkspace}
+        >
+          <Plus aria-hidden="true" />
+        </button>
+      </div>
+      {groups.length === 0 ? (
+        <p className="sidebar-tasks__empty">新任务会按项目显示在这里。</p>
+      ) : (
+        groups.map(({ workspace, workspacePath, sessions: workspaceSessions }) => (
+          <div className="sidebar-project" key={workspacePath}>
+            <Link
+              className="sidebar-project__header"
+              to={newSessionHref(workspacePath)}
+              data-nav-link
+              title={`在 ${workspace?.name ?? workspaceName(workspacePath)} 中新建任务`}
+            >
+              {workspace?.mode === "git" ? (
+                <FolderGit2 aria-hidden="true" />
+              ) : (
+                <Folder aria-hidden="true" />
+              )}
+              <span>{workspace?.name ?? workspaceName(workspacePath)}</span>
+              <Plus aria-hidden="true" />
+            </Link>
+            <div className="sidebar-project__sessions">
+              {workspaceSessions.map((session) => (
+                <SidebarSessionRow
+                  key={workspaceSessionKey({ workspacePath, sessionId: session.id })}
+                  session={session}
+                  running={runs.some(
+                    (run) => run.sessionId === session.id && !isTerminalRun(run.status),
+                  )}
+                  busy={busy}
+                  onArchive={onArchiveSession}
+                  onDelete={onDeleteSession}
+                  onPin={onPinSession}
+                />
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+    </section>
+  );
+}
+
+function SidebarSessionRow({
+  session,
+  running,
+  busy,
+  onArchive,
+  onDelete,
+  onPin,
+}: {
+  readonly session: SessionView;
+  readonly running: boolean;
+  readonly busy: boolean;
+  readonly onArchive: (session: SessionView) => void;
+  readonly onDelete: (session: SessionView) => void;
+  readonly onPin: (session: SessionView) => void;
+}) {
+  const archiveSession = () => onArchive(session);
+  const deleteSession = () => onDelete(session);
+  const pinSession = () => onPin(session);
+  return (
+    <div className="sidebar-session-row">
+      <NavLink
+        className={({ isActive }) =>
+          `sidebar-task-link ${isActive ? "is-active" : ""} ${session.pinned ? "is-pinned" : ""}`
+        }
+        to={sessionHref({ workspacePath: session.workspacePath, sessionId: session.id })}
+        data-nav-link
+      >
+        <span
+          className={`sidebar-task-link__status ${running ? "is-running" : ""}`}
+          aria-label={running ? "运行中" : session.pinned ? "已置顶" : "会话"}
+        />
+        <span>{session.title}</span>
+        <time dateTime={new Date(session.updatedAt).toISOString()}>
+          {formatRelative(session.updatedAt)}
+        </time>
+      </NavLink>
+      <div className="sidebar-task-actions" aria-label="会话操作">
+        <button
+          type="button"
+          aria-label={`归档 ${session.title}`}
+          title="归档"
+          disabled={busy}
+          onClick={archiveSession}
+        >
+          <Archive aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label={`删除 ${session.title}`}
+          title={running ? "运行中的会话不能删除" : "删除"}
+          disabled={busy || running}
+          onClick={deleteSession}
+        >
+          <Trash2 aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className={session.pinned ? "is-active" : ""}
+          aria-label={`${session.pinned ? "取消置顶" : "置顶"} ${session.title}`}
+          title={session.pinned ? "取消置顶" : "置顶"}
+          disabled={busy}
+          onClick={pinSession}
+        >
+          <Pin aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SidebarNav({
   items,
   label,
@@ -610,6 +851,7 @@ function SidebarNav({
           to={scoped && workspacePath ? workspaceHref(to, workspacePath) : to}
           {...(end === undefined ? {} : { end })}
           data-nav-link
+          aria-label={itemLabel}
           className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
         >
           <Icon aria-hidden="true" />

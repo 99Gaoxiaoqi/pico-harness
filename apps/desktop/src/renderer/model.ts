@@ -13,6 +13,7 @@ export interface SessionView {
   readonly workspacePath: string;
   readonly title: string;
   readonly status: "active" | "archived";
+  readonly pinned?: boolean | undefined;
   readonly updatedAt: number;
   readonly summary?: string | undefined;
 }
