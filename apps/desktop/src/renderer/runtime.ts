@@ -731,10 +731,17 @@ function parseSessions(value: unknown, workspacePath: string): readonly SessionV
       workspacePath,
       title: stringValue(item.title, "未命名任务"),
       status: item.status === "archived" ? ("archived" as const) : ("active" as const),
+      pinned: booleanValue(item.pinned),
       updatedAt: numberValue(item.updatedAt, Date.now()),
       summary: stringValue(item.summary),
     }))
-    .sort((left, right) => right.updatedAt - left.updatedAt);
+    .sort(compareSessions);
+}
+
+function compareSessions(left: SessionView, right: SessionView): number {
+  return (
+    Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) || right.updatedAt - left.updatedAt
+  );
 }
 
 function parseRuns(value: unknown, workspacePath: string): readonly RunView[] {
@@ -814,7 +821,7 @@ function mergeLoadedData(
         workspacePath,
         parseSessions(results.sessions, workspacePath),
       ),
-    ].sort((left, right) => right.updatedAt - left.updatedAt),
+    ].sort(compareSessions),
     runs: [
       ...replaceWorkspaceItems(base.runs, workspacePath, parseRuns(results.runs, workspacePath)),
     ].sort((left, right) => right.updatedAt - left.updatedAt),
@@ -893,6 +900,8 @@ export interface RuntimeActions {
     }>,
   ): Promise<void>;
   setSessionArchived(ref: WorkspaceSessionRef, archived: boolean): Promise<void>;
+  setSessionPinned(ref: WorkspaceSessionRef, pinned: boolean): Promise<void>;
+  deleteSession(ref: WorkspaceSessionRef): Promise<boolean>;
   pauseRun(runId: string): Promise<void>;
   resumeRun(runId: string): Promise<void>;
   stopRun(runId: string): Promise<void>;
@@ -1014,9 +1023,7 @@ export function useRuntimeStore(): RuntimeStore {
         }),
       );
       const workspaces = indexed.map((item) => item.workspace);
-      const sessions = indexed
-        .flatMap((item) => item.sessions)
-        .sort((left, right) => right.updatedAt - left.updatedAt);
+      const sessions = indexed.flatMap((item) => item.sessions).sort(compareSessions);
       const runs = indexed
         .flatMap((item) => item.runs)
         .sort((left, right) => right.updatedAt - left.updatedAt);
@@ -1914,6 +1921,49 @@ export function useRuntimeStore(): RuntimeStore {
                 : session,
             ),
           }));
+        });
+      },
+      async setSessionPinned(ref, pinned) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath) return;
+        await perform("session-state", async (bridge) => {
+          if (!preview)
+            await invoke(bridge, pinned ? "session.pin" : "session.unpin", {
+              workspacePath,
+              sessionId,
+            });
+          setData((current) => ({
+            ...current,
+            sessions: current.sessions
+              .map((session) =>
+                session.workspacePath === workspacePath && session.id === sessionId
+                  ? { ...session, pinned }
+                  : session,
+              )
+              .sort(compareSessions),
+          }));
+        });
+      },
+      async deleteSession(ref) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath) return false;
+        const key = workspaceSessionKey(ref);
+        return await perform("session-state", async (bridge) => {
+          if (!preview) await invoke(bridge, "session.delete", { workspacePath, sessionId });
+          setData((current) => {
+            const conversations = { ...current.conversations };
+            delete conversations[key];
+            return {
+              ...current,
+              sessions: current.sessions.filter(
+                (session) => session.workspacePath !== workspacePath || session.id !== sessionId,
+              ),
+              runs: current.runs.filter(
+                (run) => run.workspacePath !== workspacePath || run.sessionId !== sessionId,
+              ),
+              conversations,
+            };
+          });
         });
       },
       async pauseRun(runId) {
