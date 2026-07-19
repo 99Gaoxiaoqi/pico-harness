@@ -21,6 +21,11 @@ icon = "run"
 command = "./script/build_and_run.sh --android"
 
 [[actions]]
+name = "Mobile Gateway"
+icon = "run"
+command = "./script/build_and_run.sh --gateway"
+
+[[actions]]
 name = "Expo Doctor"
 icon = "tool"
 command = "./script/build_and_run.sh --doctor"
