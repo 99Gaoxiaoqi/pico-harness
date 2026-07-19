@@ -28,6 +28,7 @@ import {
   MobileGatewayRealtimeClient,
   type MobileRealtimeState,
 } from "../lib/mobile-gateway-realtime";
+import { mobileTheme } from "../lib/mobile-theme";
 
 const GATEWAY_ORIGIN_KEY = "pico.mobile.gatewayOrigin";
 const GATEWAY_TOKEN_KEY = "pico.mobile.gatewayToken";
@@ -188,7 +189,18 @@ export default function SessionScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ headerLargeTitle: false, title }} />
+      <Stack.Screen
+        options={{
+          headerLargeTitle: false,
+          headerRight: () => (
+            <View accessibilityLabel={realtimeLabel(realtimeState)} style={styles.headerStatus}>
+              <View style={[styles.headerStatusDot, realtimeStatusStyle(realtimeState)]} />
+              <Text style={styles.headerStatusText}>实时</Text>
+            </View>
+          ),
+          title,
+        }}
+      />
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
@@ -223,7 +235,7 @@ export default function SessionScreen() {
         >
           {transcript?.activeRun && (
             <View style={styles.runBanner}>
-              <ActivityIndicator color="#176FB8" size="small" />
+              <ActivityIndicator color={mobileTheme.colors.accent} size="small" />
               <Text style={styles.runText}>正在运行·{transcript.activeRun.description}</Text>
             </View>
           )}
@@ -236,7 +248,7 @@ export default function SessionScreen() {
           ) : null}
           {loading ? (
             <View style={styles.centerState}>
-              <ActivityIndicator color="#208AEF" />
+              <ActivityIndicator color={mobileTheme.colors.accent} />
               <Text style={styles.mutedText}>正在读取会话…</Text>
             </View>
           ) : error ? (
@@ -281,7 +293,7 @@ export default function SessionScreen() {
               ]}
             >
               {sending ? (
-                <ActivityIndicator color="#FFFFFF" size="small" />
+                <ActivityIndicator color={mobileTheme.colors.white} size="small" />
               ) : (
                 <Text style={styles.sendButtonText}>↑</Text>
               )}
@@ -393,61 +405,187 @@ function createIdempotencyKey(): string {
   return `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+function realtimeLabel(state: MobileRealtimeState | undefined): string {
+  switch (state) {
+    case "connected":
+      return "实时更新已连接";
+    case "connecting":
+      return "实时更新连接中";
+    case "disconnected":
+      return "实时更新已断开";
+    default:
+      return "实时更新尚未连接";
+  }
+}
+
+function realtimeStatusStyle(state: MobileRealtimeState | undefined) {
+  switch (state) {
+    case "connected":
+      return styles.realtimeConnected;
+    case "connecting":
+      return styles.realtimeConnecting;
+    case "disconnected":
+      return styles.realtimeDisconnected;
+    default:
+      return styles.realtimeIdle;
+  }
+}
+
 const styles = StyleSheet.create({
-  screen: { flex: 1 },
-  content: { gap: 10, padding: 16, paddingBottom: 48 },
+  screen: { backgroundColor: mobileTheme.colors.canvas, flex: 1 },
+  content: {
+    gap: 20,
+    paddingBottom: 56,
+    paddingHorizontal: mobileTheme.spacing.large,
+    paddingTop: mobileTheme.spacing.xlarge,
+  },
+  headerStatus: { alignItems: "center", flexDirection: "row", gap: 5 },
+  headerStatusDot: { borderRadius: 3, height: 6, width: 6 },
+  headerStatusText: { color: mobileTheme.colors.inkTertiary, fontSize: 10 },
+  realtimeIdle: { backgroundColor: mobileTheme.colors.lineStrong },
+  realtimeConnecting: { backgroundColor: mobileTheme.colors.warning },
+  realtimeConnected: { backgroundColor: mobileTheme.colors.accent },
+  realtimeDisconnected: { backgroundColor: mobileTheme.colors.danger },
   runBanner: {
     alignItems: "center",
-    backgroundColor: "#E7F2FD",
-    borderRadius: 12,
+    backgroundColor: mobileTheme.colors.accentSoft,
+    borderRadius: mobileTheme.radius.small,
     flexDirection: "row",
-    gap: 8,
-    padding: 12,
+    gap: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
-  runText: { color: "#176FB8", flex: 1, fontSize: 13, fontWeight: "600" },
-  realtimeWarning: { backgroundColor: "#FFF4E5", borderRadius: 12, padding: 11 },
-  realtimeWarningText: { color: "#865B16", fontSize: 12, lineHeight: 17 },
+  runText: {
+    color: mobileTheme.colors.accentStrong,
+    flex: 1,
+    fontSize: mobileTheme.type.small,
+    fontWeight: "600",
+  },
+  realtimeWarning: {
+    backgroundColor: mobileTheme.colors.warningSoft,
+    borderRadius: mobileTheme.radius.small,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  realtimeWarningText: {
+    color: mobileTheme.colors.warning,
+    fontSize: mobileTheme.type.caption,
+    lineHeight: 16,
+  },
   centerState: { alignItems: "center", gap: 10, paddingVertical: 64 },
-  mutedText: { color: "#77777D", fontSize: 14 },
-  errorCard: { backgroundColor: "#FFF0F0", borderRadius: 14, gap: 5, padding: 14 },
-  errorTitle: { color: "#9A2525", fontSize: 15, fontWeight: "700" },
-  errorText: { color: "#A13D3D", fontSize: 13, lineHeight: 19 },
+  mutedText: { color: mobileTheme.colors.inkTertiary, fontSize: mobileTheme.type.body },
+  errorCard: {
+    backgroundColor: mobileTheme.colors.dangerSoft,
+    borderRadius: mobileTheme.radius.medium,
+    gap: 5,
+    padding: 14,
+  },
+  errorTitle: {
+    color: mobileTheme.colors.danger,
+    fontSize: mobileTheme.type.body,
+    fontWeight: "700",
+  },
+  errorText: { color: mobileTheme.colors.danger, fontSize: mobileTheme.type.small, lineHeight: 18 },
   messageRow: { alignItems: "flex-start" },
   userMessageRow: { alignItems: "flex-end" },
-  messageBubble: { borderRadius: 16, maxWidth: "88%", paddingHorizontal: 14, paddingVertical: 11 },
-  userBubble: { backgroundColor: "#208AEF", borderBottomRightRadius: 5 },
-  assistantBubble: { backgroundColor: "#F1F1F3", borderBottomLeftRadius: 5 },
-  messageText: { color: "#252529", fontSize: 15, lineHeight: 22 },
-  streamingCursor: { color: "#208AEF" },
-  userMessageText: { color: "#FFFFFF" },
-  thinkingCard: { borderLeftColor: "#C8C8CD", borderLeftWidth: 2, gap: 5, padding: 10 },
-  thinkingText: { color: "#696970", fontSize: 13, fontStyle: "italic", lineHeight: 19 },
-  eventCard: { backgroundColor: "#F8F8F9", borderRadius: 11, gap: 4, padding: 10 },
-  eventLabel: { color: "#63636A", fontSize: 11, fontWeight: "700", letterSpacing: 0.4 },
-  eventDetail: { color: "#77777D", fontSize: 12, lineHeight: 17 },
-  composerSafeArea: { backgroundColor: "#FFFFFF", borderTopColor: "#E8E8EB", borderTopWidth: 1 },
-  sendError: { color: "#B42323", fontSize: 12, paddingHorizontal: 16, paddingTop: 8 },
-  composer: { alignItems: "flex-end", flexDirection: "row", gap: 8, padding: 12 },
+  messageBubble: {
+    borderRadius: mobileTheme.radius.large,
+    maxWidth: "88%",
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+  },
+  userBubble: {
+    backgroundColor: mobileTheme.colors.surfaceMuted,
+    borderBottomRightRadius: 4,
+  },
+  assistantBubble: {
+    backgroundColor: "transparent",
+    borderRadius: 0,
+    maxWidth: "100%",
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+  },
+  messageText: { color: mobileTheme.colors.ink, fontSize: mobileTheme.type.body, lineHeight: 23 },
+  streamingCursor: { color: mobileTheme.colors.accent },
+  userMessageText: { color: mobileTheme.colors.ink },
+  thinkingCard: {
+    borderLeftColor: mobileTheme.colors.lineStrong,
+    borderLeftWidth: 2,
+    gap: 5,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+  },
+  thinkingText: {
+    color: mobileTheme.colors.inkTertiary,
+    fontSize: mobileTheme.type.small,
+    lineHeight: 18,
+  },
+  eventCard: {
+    backgroundColor: mobileTheme.colors.surface,
+    borderColor: mobileTheme.colors.line,
+    borderRadius: mobileTheme.radius.small,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  eventLabel: {
+    color: mobileTheme.colors.inkSecondary,
+    fontSize: mobileTheme.type.caption,
+    fontWeight: "700",
+    letterSpacing: 0.2,
+  },
+  eventDetail: {
+    color: mobileTheme.colors.inkTertiary,
+    fontSize: mobileTheme.type.caption,
+    lineHeight: 16,
+  },
+  composerSafeArea: {
+    backgroundColor: mobileTheme.colors.canvas,
+    borderTopColor: mobileTheme.colors.line,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  sendError: {
+    color: mobileTheme.colors.danger,
+    fontSize: mobileTheme.type.caption,
+    paddingHorizontal: 16,
+    paddingTop: 7,
+  },
+  composer: {
+    alignItems: "flex-end",
+    flexDirection: "row",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
   composerInput: {
-    backgroundColor: "#F3F3F5",
-    borderRadius: 18,
-    color: "#202024",
+    backgroundColor: mobileTheme.colors.canvas,
+    borderColor: mobileTheme.colors.lineStrong,
+    borderRadius: mobileTheme.radius.medium,
+    borderWidth: StyleSheet.hairlineWidth,
+    color: mobileTheme.colors.ink,
     flex: 1,
-    fontSize: 15,
+    fontSize: mobileTheme.type.body,
     maxHeight: 120,
-    minHeight: 44,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
+    minHeight: 40,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
   },
   sendButton: {
     alignItems: "center",
-    backgroundColor: "#208AEF",
-    borderRadius: 22,
-    height: 44,
+    backgroundColor: mobileTheme.colors.accent,
+    borderRadius: mobileTheme.radius.small,
+    height: 36,
     justifyContent: "center",
-    width: 44,
+    marginBottom: 2,
+    width: 36,
   },
-  sendButtonDisabled: { backgroundColor: "#B9D8F5" },
+  sendButtonDisabled: { backgroundColor: mobileTheme.colors.surfaceStrong },
   sendButtonPressed: { opacity: 0.78 },
-  sendButtonText: { color: "#FFFFFF", fontSize: 24, fontWeight: "700", lineHeight: 26 },
+  sendButtonText: {
+    color: mobileTheme.colors.white,
+    fontSize: 20,
+    fontWeight: "700",
+    lineHeight: 22,
+  },
 });
