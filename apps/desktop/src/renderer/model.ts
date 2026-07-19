@@ -202,6 +202,7 @@ export interface AppData {
   readonly workspaces: readonly WorkspaceView[];
   readonly workspacePath?: string | undefined;
   readonly workspaceMode?: WorkspaceMode | undefined;
+  readonly workspaceBranch?: string | undefined;
   readonly workspaceCapabilities: WorkspaceCapabilities;
   readonly trusted: boolean;
   readonly sessions: readonly SessionView[];

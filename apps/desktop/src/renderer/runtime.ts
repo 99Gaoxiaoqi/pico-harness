@@ -810,6 +810,7 @@ function mergeLoadedData(
   return {
     ...base,
     workspaceMode,
+    workspaceBranch: stringValue(workspaceResult.branch) || undefined,
     workspaceCapabilities: parseWorkspaceCapabilities(
       workspaceResult.capabilities,
       workspaceMode,
