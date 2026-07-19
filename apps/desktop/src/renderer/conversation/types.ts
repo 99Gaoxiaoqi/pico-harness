@@ -25,6 +25,14 @@ export interface AssistantMessageItemView extends ConversationItemBase {
 export interface ThinkingItemView extends ConversationItemBase {
   readonly kind: "thinking";
   readonly text: string;
+  readonly streaming?: boolean | undefined;
+  /** Durable and live identities meet here so hydration never guesses by content. */
+  readonly runId?: string | undefined;
+  readonly turnId?: string | undefined;
+  /** Internal live-stream tombstone; transcript rendering omits cleared placeholders. */
+  readonly liveTerminal?: boolean | undefined;
+  readonly terminalRun?: boolean | undefined;
+  readonly cleared?: boolean | undefined;
 }
 
 export interface SkillItemView extends ConversationItemBase {

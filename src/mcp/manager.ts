@@ -5,7 +5,11 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
-import type { ToolRegistry } from "../tools/registry-impl.js";
+import {
+  createToolRegistrationOwner,
+  type ToolRegistrationOwner,
+  type ToolRegistry,
+} from "../tools/registry-impl.js";
 import { HttpMcpClient } from "./http-client.js";
 import { McpToolBridge } from "./mcp-tool.js";
 import { redactSensitiveText } from "./redact.js";
@@ -38,6 +42,7 @@ interface ServerEntry {
   closingClient?: McpClient;
   tools: McpTool[];
   toolNames: string[];
+  toolOwner?: ToolRegistrationOwner;
   error?: string;
 }
 
@@ -145,9 +150,35 @@ export class McpConnectionManager {
       this.emitSnapshot();
       return;
     }
-    this.detachRegistry();
+    this.assertRegistryAttachable(registry);
+    const previousRegistry = this.registry;
+    if (previousRegistry) {
+      for (const entry of this.entries.values()) {
+        this.unregisterEntryTools(entry, previousRegistry);
+      }
+    }
     this.registry = registry;
-    for (const entry of this.entries.values()) this.registerEntryTools(entry);
+    try {
+      for (const entry of this.entries.values()) this.registerEntryTools(entry);
+    } catch (error) {
+      for (const entry of this.entries.values()) this.unregisterEntryTools(entry, registry);
+      this.registry = previousRegistry;
+      if (previousRegistry) {
+        try {
+          for (const entry of this.entries.values()) this.registerEntryTools(entry);
+        } catch (rollbackError) {
+          this.registry = undefined;
+          this.emitSnapshot();
+          throw new AggregateError(
+            [error, rollbackError],
+            "MCP registry switch and rollback both failed",
+            { cause: rollbackError },
+          );
+        }
+      }
+      this.emitSnapshot();
+      throw error;
+    }
     this.emitSnapshot();
   }
 
@@ -168,28 +199,31 @@ export class McpConnectionManager {
     });
   }
 
-  /** Atomically replace the project and enabled Plugin MCP contribution snapshot. */
+  /**
+   * Validate the complete replacement before fail-closed teardown of the active generation.
+   * If an external client cannot close, the replacement is not committed and the affected
+   * old entry remains visible as failed with no callable tool bridges.
+   */
   async replaceSources(sources: readonly McpConfigSource[]): Promise<void> {
     return this.enqueueLifecycle(async () => {
       if (this.options.expectedConfigFingerprint !== undefined && sources.length !== 1) {
         throw new Error("带冻结指纹的后台 MCP 只允许加载一个项目配置源");
       }
+      const stagedEntries = new Map<string, ServerEntry>();
+      let stagedConfigPath: string | undefined;
+      for (const source of sources) {
+        const staged = await this.readConfigSource(source);
+        if (!staged) continue;
+        if (staged.path) stagedConfigPath = staged.path;
+        this.addValidatedConfigTo(stagedEntries, staged.config, source.id);
+      }
+
       await this.closeEntries();
       this.entries.clear();
-      this.configPath = undefined;
+      for (const [name, entry] of stagedEntries) this.entries.set(name, entry);
+      this.configPath = stagedConfigPath;
       this.configSources = Object.freeze(sources.map((source) => source.id));
       this.loadError = undefined;
-      this.emitSnapshot();
-      for (const source of sources) {
-        if ((source.path === undefined) === (source.config === undefined)) {
-          throw new Error(`MCP source ${source.id} 必须且只能声明 path 或 config`);
-        }
-        if (source.path !== undefined) {
-          await this.loadConfigInternal(source.path, source.id, source.optional === true);
-        } else {
-          this.addValidatedConfig(source.config, source.id);
-        }
-      }
       this.emitSnapshot();
     });
   }
@@ -435,17 +469,25 @@ export class McpConnectionManager {
   }
 
   private addValidatedConfig(config: McpConfig | undefined, sourceId: string): void {
+    this.addValidatedConfigTo(this.entries, config, sourceId);
+  }
+
+  private addValidatedConfigTo(
+    target: Map<string, ServerEntry>,
+    config: McpConfig | undefined,
+    sourceId: string,
+  ): void {
     if (!config) throw new Error(`MCP source ${sourceId} 缺少 config`);
     const normalized = this.validateConfig(config, sourceId);
     for (const [name, serverConfig] of Object.entries(normalized.mcpServers)) {
-      const current = this.entries.get(name);
+      const current = target.get(name);
       if (current) {
         throw new Error(
           `MCP server "${name}" 同时来自 ${current.sourceId} 与 ${sourceId}，拒绝静默覆盖`,
         );
       }
       const disabled = serverConfig.enabled === false;
-      this.entries.set(name, {
+      target.set(name, {
         name,
         sourceId,
         config: { ...serverConfig, name },
@@ -454,6 +496,41 @@ export class McpConnectionManager {
         toolNames: [],
       });
     }
+  }
+
+  private async readConfigSource(
+    source: McpConfigSource,
+  ): Promise<{ readonly config: McpConfig; readonly path?: string } | undefined> {
+    if ((source.path === undefined) === (source.config === undefined)) {
+      throw new Error(`MCP source ${source.id} 必须且只能声明 path 或 config`);
+    }
+    if (source.config !== undefined) return { config: source.config };
+
+    const baseDir = this.options.stdioCwd ?? process.cwd();
+    const absPath = isAbsolute(source.path!) ? source.path! : resolve(baseDir, source.path!);
+    let content: Buffer;
+    try {
+      content = await readFile(absPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && source.optional === true) {
+        return undefined;
+      }
+      throw new Error(redactSensitiveText(`读取 MCP 配置失败: ${absPath}`), { cause: error });
+    }
+    const expectedFingerprint = this.options.expectedConfigFingerprint;
+    if (
+      expectedFingerprint !== undefined &&
+      createHash("sha256").update(content).digest("hex") !== expectedFingerprint
+    ) {
+      throw new Error("后台 MCP 配置已变化，必须重新确认定时任务");
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(content.toString("utf8"));
+    } catch (error) {
+      throw new Error(`MCP 配置不是合法 JSON: ${absPath}`, { cause: error });
+    }
+    return { config: this.validateConfig(data, absPath), path: absPath };
   }
 
   private async connectAllInternal(): Promise<void> {
@@ -538,10 +615,15 @@ export class McpConnectionManager {
   private async closeEntries(): Promise<void> {
     const results = await Promise.allSettled(
       [...this.entries.values()].map(async (entry) => {
-        await this.closeEntryClient(entry);
-        this.clearEntryTools(entry);
-        entry.status = entry.config.enabled === false ? "disabled" : "pending";
-        entry.error = undefined;
+        try {
+          await this.closeEntryClient(entry);
+          entry.status = entry.config.enabled === false ? "disabled" : "pending";
+          entry.error = undefined;
+        } finally {
+          // closeEntryClient unregisters bridges before touching the external client. Keep the
+          // read model consistent even when client.close() itself fails.
+          this.clearEntryTools(entry);
+        }
       }),
     );
     this.emitSnapshot();
@@ -580,20 +662,43 @@ export class McpConnectionManager {
     entry.toolNames = [];
   }
 
+  private assertRegistryAttachable(registry: ToolRegistry): void {
+    const seen = new Set<string>();
+    for (const entry of this.entries.values()) {
+      if (!entry.client || entry.status !== "connected") continue;
+      for (const toolName of entry.toolNames) {
+        const qualifiedName = qualifyMcpToolName(entry.name, toolName);
+        if (seen.has(qualifiedName)) {
+          throw new Error(`MCP registry switch contains duplicate tool '${qualifiedName}'`);
+        }
+        seen.add(qualifiedName);
+        const existing = registry.getTool(qualifiedName);
+        if (!existing) continue;
+        const owner = registry.getToolOwner(qualifiedName);
+        const ownerLabel = owner ? `${owner.kind}:${owner.id}` : "an existing host tool";
+        throw new Error(`Tool '${qualifiedName}' conflicts with ${ownerLabel}`);
+      }
+    }
+  }
+
   private registerEntryTools(entry: ServerEntry): void {
     const registry = this.registry;
     const client = entry.client;
     if (!registry || !client || entry.status !== "connected") return;
+    const owner = createToolRegistrationOwner("mcp", entry.name);
+    entry.toolOwner = owner;
     for (const tool of entry.tools) {
-      registry.register(new McpToolBridge(client, entry.name, tool));
+      registry.registerOwned(new McpToolBridge(client, entry.name, tool), owner);
     }
   }
 
   private unregisterEntryTools(entry: ServerEntry, registry = this.registry): void {
-    if (!registry) return;
+    const owner = entry.toolOwner;
+    if (!registry || !owner) return;
     for (const toolName of entry.toolNames) {
-      registry.unregister(qualifyMcpToolName(entry.name, toolName));
+      registry.unregisterOwned(qualifyMcpToolName(entry.name, toolName), owner);
     }
+    entry.toolOwner = undefined;
   }
 
   private attachLifecycle(entry: ServerEntry, client: McpClient): void {

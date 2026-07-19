@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session, type SessionManager } from "../engine/session.js";
+import type { SessionManagerLease } from "../engine/session-manager.js";
 import { SteerQueue } from "../engine/steer-queue.js";
 import type { Message } from "../schema/message.js";
 import { FileIndex } from "../input/file-index.js";
@@ -45,6 +46,8 @@ export interface SessionRuntimeOptions {
   session: Session;
   /** Manager that owns the exact Session; defaults to the product-wide manager. */
   sessionManager?: SessionManager;
+  /** Atomic acquisition pin transferred into this runtime's dispose lifecycle. */
+  sessionLease?: SessionManagerLease;
   /** Host-owned environment inherited by the session Hook executor. */
   env?: Readonly<NodeJS.ProcessEnv>;
   toolDisclosure?: ToolDisclosure;
@@ -390,7 +393,12 @@ function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): bool
 export async function createSessionRuntime(
   options: SessionRuntimeOptions,
 ): Promise<SessionRuntime> {
-  const releaseSessionPin = (options.sessionManager ?? globalSessionManager).pin(options.session);
+  if (options.sessionLease && options.sessionLease.session !== options.session) {
+    throw new Error("sessionLease must own the exact Session used by SessionRuntime");
+  }
+  const releaseSessionPin =
+    options.sessionLease?.release ??
+    (options.sessionManager ?? globalSessionManager).pin(options.session);
   try {
     return await createPinnedSessionRuntime(options, releaseSessionPin);
   } catch (error) {
@@ -863,40 +871,56 @@ class DefaultSessionRuntime implements SessionRuntime {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposePromise) return this.disposePromise;
-    this.disposePromise = (async () => {
-      this.stopDelegationCompletionPolling();
-      this.unsubscribeTaskHooks();
-      this.unsubscribeWorktreeHooks?.();
-      try {
-        await this.clearComponentHooks();
-        await this.hookRuntime?.clearComponentSources();
-        this.ensureSessionStart();
-        await this.drainHookEvents();
-        const runningTasks = this.backgroundManager
-          .list()
-          .filter((task) => task.status === "running");
-        await Promise.allSettled([
-          this.delegationManager.dispose(),
-          this.codeIntelligenceManager.close(),
-          ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
-        ]);
-        await this.drainHookEvents();
-        if (this._hookService) {
-          await this._hookService.dispatch("SessionEnd", { reason: "runtime_dispose" });
-        }
-      } finally {
-        try {
-          await this.hookRuntime?.dispose();
-          this.delegationCompletionQueue.close();
-          this.hookRewakeQueue.close();
-          this.unbindGoalManager();
-        } finally {
-          this.releaseSessionPin();
-        }
-      }
-    })();
+    this.disposePromise ??= this.disposeOnce();
     return this.disposePromise;
+  }
+
+  private async disposeOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    const attempt = async (cleanup: () => unknown | Promise<unknown>): Promise<void> => {
+      try {
+        await cleanup();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+
+    await attempt(() => this.stopDelegationCompletionPolling());
+    await attempt(() => this.unsubscribeTaskHooks());
+    await attempt(() => this.unsubscribeWorktreeHooks?.());
+    await attempt(() => this.clearComponentHooks());
+    await attempt(() => this.hookRuntime?.clearComponentSources());
+    await attempt(() => this.ensureSessionStart());
+    await attempt(() => this.drainHookEvents());
+
+    let runningTasks: ReturnType<BackgroundManager["list"]> = [];
+    await attempt(() => {
+      runningTasks = this.backgroundManager.list().filter((task) => task.status === "running");
+    });
+    const ownedCleanup = await Promise.allSettled([
+      this.delegationManager.dispose(),
+      this.codeIntelligenceManager.close(),
+      ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
+    ]);
+    for (const result of ownedCleanup) {
+      if (result.status === "rejected") failures.push(result.reason);
+    }
+    await attempt(() => this.drainHookEvents());
+    if (this._hookService) {
+      await attempt(() => this._hookService!.dispatch("SessionEnd", { reason: "runtime_dispose" }));
+    }
+
+    await attempt(() => this.hookRuntime?.dispose());
+    // Finalizers are terminal ownership transitions. They must all run even when
+    // an earlier owned resource failed to close; callers generally discard this
+    // runtime after dispose() settles and cannot safely retry a retained pin.
+    await attempt(() => this.delegationCompletionQueue.close());
+    await attempt(() => this.hookRewakeQueue.close());
+    await attempt(() => this.unbindGoalManager());
+    await attempt(() => this.releaseSessionPin());
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `SessionRuntime ${this.sessionId} cleanup failed`);
+    }
   }
 
   private onTaskTransition(snapshot: TaskSnapshot): void {

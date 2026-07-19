@@ -1334,6 +1334,15 @@ export class RuntimeStore {
     ).map(mapRuntimeEvent);
   }
 
+  hasRuntimeEvent(eventId: string, workspacePath?: string): boolean {
+    const row = workspacePath
+      ? this.db
+          .prepare("SELECT 1 FROM runtime_events WHERE event_id = ? AND workspace_path = ? LIMIT 1")
+          .get(eventId, workspacePath)
+      : this.db.prepare("SELECT 1 FROM runtime_events WHERE event_id = ? LIMIT 1").get(eventId);
+    return row !== undefined;
+  }
+
   getRuntimeEventHighWatermark(workspacePath?: string): RuntimeEventRecord | undefined {
     const row = workspacePath
       ? (this.db

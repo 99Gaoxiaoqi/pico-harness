@@ -5,7 +5,7 @@ import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/a
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
-import type { RuntimeForkModelCheckpointSeed } from "../runtime/runtime-run.js";
+import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
 import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
@@ -18,6 +18,7 @@ import {
   type ForkPreparedBundle,
   type ForkReconciliationOptions,
   type ForkReconciliationResult,
+  type ForkRuntimePublicationCapability,
   type ForkSourceCursor,
 } from "../storage/fork-operation-coordinator.js";
 import {
@@ -39,9 +40,10 @@ import {
   type SessionManager,
 } from "./session.js";
 import type {
+  SessionForkModelCheckpoint,
   SessionForkRuntimePort,
-  SessionForkRuntimeStore,
 } from "./session-fork-runtime-port.js";
+import { SessionForkRuntimeConflictError } from "./session-fork-runtime-port.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const LEGACY_FROZEN_FORK_BUNDLE_VERSION = 1 as const;
@@ -113,7 +115,7 @@ interface FrozenForkBundle {
   readonly targetSessionId: string;
   readonly sourceCursor: ForkSourceCursor;
   readonly messages: readonly Message[];
-  readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
+  readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
   readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
@@ -173,6 +175,8 @@ export class SessionForkService {
     this.runtimePort = options.runtimePort;
     this.coordinator = new ForkOperationCoordinator({
       journal: this.journal,
+      targetLeaseDirectory: (sessionId) =>
+        sessionOwnerLeaseDirectory(this.workspacePaths, sessionId),
       callbacks: this.createCallbacks(),
     });
   }
@@ -191,17 +195,22 @@ export class SessionForkService {
     if (!sourceRuntimeStore) {
       throw new Error(`Fork requires a durable source Session: ${input.sourceSessionId}`);
     }
+    if (resolve(sourceRuntimeStore.databasePath) !== resolve(this.runtimeStore.databasePath)) {
+      throw new Error(
+        `Fork Runtime store does not match source Session store: ${input.sourceSessionId}`,
+      );
+    }
     return source.serialize(async () => {
       await assertTargetNotPublished(this.runtimeStore, input.targetSessionId);
+      const runtimeCapability = source.runtimeEventCapability;
+      if (!runtimeCapability) {
+        throw new Error(`Fork requires a durable source Session: ${source.id}`);
+      }
       await this.runtimePort.reconcileIncompleteRuns({
-        sessionId: source.id,
-        workDir: this.workDir,
-        store: sourceRuntimeStore as SessionForkRuntimeStore,
-        writeGuard: source,
+        capability: runtimeCapability,
       });
       await this.runtimePort.repairSessionProjection(source, {
-        workDir: this.workDir,
-        store: sourceRuntimeStore as SessionForkRuntimeStore,
+        capability: runtimeCapability,
       });
       this.runtimePort.validateModelHistory(await sourceRuntimeStore.readSession(source.id));
       const snapshot = await source.readDurableForkSnapshot();
@@ -309,7 +318,8 @@ export class SessionForkService {
         await this.ensureSidecars(operation);
         await this.hooks?.afterSidecars?.(operation);
       },
-      publishRuntime: async (operation, bundle) => this.publishRuntime(operation, bundle),
+      publishRuntime: async (operation, bundle, publication) =>
+        this.publishRuntime(operation, bundle, publication),
     };
   }
 
@@ -355,6 +365,7 @@ export class SessionForkService {
   private async publishRuntime(
     operation: ForkStorageOperation,
     prepared: ForkPreparedBundle,
+    publication: ForkRuntimePublicationCapability,
   ): Promise<void> {
     const { frozen, messages, modelCheckpoint } = await this.readRuntimePublication(
       operation,
@@ -368,6 +379,11 @@ export class SessionForkService {
 
     await this.hooks?.beforeRuntimeBootstrap?.(operation);
     try {
+      const runtimePatch = filteredRuntimePatch(
+        frozen,
+        operation.targetMode ?? "yolo",
+        operation.createdAt,
+      );
       await this.runtimePort.bootstrapFork({
         sourceSessionId: operation.sourceSessionId,
         targetSessionId: operation.targetSessionId,
@@ -377,23 +393,23 @@ export class SessionForkService {
         ...(modelCheckpoint ? { modelCheckpoint } : {}),
         ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
         workDir: this.workDir,
-        store: this.runtimeStore as SessionForkRuntimeStore,
+        runtimeAuthority: this.runtimeStore,
+        publication,
+        ...(runtimePatch
+          ? {
+              statePublication: {
+                patch: runtimePatch,
+                eventId: runtimeStateEventId(operation.operationId),
+                at: operation.createdAt,
+              },
+            }
+          : {}),
       });
-
-      const runtimePatch = filteredRuntimePatch(
-        frozen,
-        operation.targetMode ?? "yolo",
-        operation.createdAt,
-      );
-      if (runtimePatch) {
-        const createdAt = parseForkCreatedAt(operation.createdAt);
-        await this.runtimeStore.appendSessionState(operation.targetSessionId, runtimePatch, {
-          eventId: runtimeStateEventId(operation.operationId),
-          now: () => new Date(createdAt),
-        });
-      }
     } catch (error) {
       if (error instanceof ForkOperationConflictError) throw error;
+      if (error instanceof SessionForkRuntimeConflictError) {
+        throw new ForkOperationConflictError(error.message, error.reason, [], { cause: error });
+      }
       await this.assertRuntimeTargetOwned(operation, prepared);
       throw error;
     }
@@ -415,6 +431,7 @@ export class SessionForkService {
       messages,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
       workDir: this.workDir,
+      runtimeAuthority: this.runtimeStore,
     });
     const ownsRuntime = events.every(
       (event) =>
@@ -435,7 +452,7 @@ export class SessionForkService {
   ): Promise<{
     readonly frozen: FrozenForkBundle;
     readonly messages: readonly Message[];
-    readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
+    readonly modelCheckpoint?: SessionForkModelCheckpoint;
   }> {
     const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
     const sidecars = await this.readSidecars(operation);
@@ -707,7 +724,7 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     !isForkSourceCursor(value["sourceCursor"]) ||
     !Array.isArray(value["messages"]) ||
     !value["messages"].every(isMessageValue) ||
-    !isRuntimeForkModelCheckpointSeed(value["modelCheckpoint"]) ||
+    !isSessionForkModelCheckpoint(value["modelCheckpoint"]) ||
     (value["schemaVersion"] === LEGACY_FROZEN_FORK_BUNDLE_VERSION &&
       value["modelCheckpoint"] !== undefined) ||
     (value["sourceTitle"] !== undefined && typeof value["sourceTitle"] !== "string")
@@ -830,9 +847,9 @@ function isMessageValue(value: unknown): value is Message {
   );
 }
 
-function isRuntimeForkModelCheckpointSeed(
+function isSessionForkModelCheckpoint(
   value: unknown,
-): value is RuntimeForkModelCheckpointSeed | undefined {
+): value is SessionForkModelCheckpoint | undefined {
   return (
     value === undefined ||
     (isRecord(value) &&

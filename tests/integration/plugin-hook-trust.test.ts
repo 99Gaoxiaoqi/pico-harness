@@ -16,6 +16,7 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   const marker = join(root, "marker.txt");
   await mkdir(join(pluginRoot, ".pico"), { recursive: true });
   await mkdir(join(pluginRoot, "hooks"), { recursive: true });
+  await mkdir(join(pluginRoot, "skills", "component"), { recursive: true });
   await mkdir(picoHome, { recursive: true });
   const scopeRoots = resolvePluginScopeRoots(workspace, { picoHome });
   assert.equal(scopeRoots.user, join(picoHome, "plugins"));
@@ -43,6 +44,10 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
     }),
   );
   await writeHookScript(join(pluginRoot, "hook.cjs"), "trusted");
+  await writeFile(
+    join(pluginRoot, "skills", "component", "SKILL.md"),
+    "---\nname: component\ndescription: component hook fixture\n---\nfixture\n",
+  );
   context.after(() => rm(root, { recursive: true, force: true }));
 
   const service = new PluginManagementService({ workDir: workspace, picoHome });
@@ -56,6 +61,7 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   const env = { ...process.env, PATH: process.env.PATH ?? "" };
   const first = await loadPluginRuntimeSnapshot({ workDir: workspace, picoHome, env });
   assert.equal(first.hookSources.length, 1);
+  assert.equal(first.skillSources.length, 1);
   const firstSource = first.hookSources[0]!;
   assert.equal(
     firstSource.trustAuthority?.identity?.resourceDigest,
@@ -72,6 +78,44 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   context.after(async () => await firstRuntime.dispose());
   assert.equal(firstRuntime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted, true);
   await firstRuntime.service.dispatch("PreToolUse", { tool_name: "read_file", tool_input: {} });
+  assert.equal(await readFile(marker, "utf8"), "trusted");
+  await rm(marker);
+
+  const skillSource = first.skillSources[0]!;
+  const skillTrustAuthority = skillSource.hookTrustAuthority;
+  assert.ok(skillTrustAuthority);
+  assert.equal(skillTrustAuthority.identity?.resourceDigest, proposal.resourceDigest);
+  const componentRuntime = await createSessionHookRuntime({
+    workDir: workspace,
+    picoHome,
+    sessionId: "plugin-component-hook",
+    env,
+  });
+  await componentRuntime.activateComponentSource({
+    kind: "skill",
+    path: join(skillSource.root, "component", "SKILL.md"),
+    componentId: "component",
+    inlineHooks: {
+      PreToolUse: [
+        {
+          hooks: [
+            {
+              type: "command",
+              command: "node",
+              args: [join(skillSource.root, "..", "hook.cjs"), marker],
+            },
+          ],
+        },
+      ],
+    },
+    trustAuthority: skillTrustAuthority,
+  });
+  context.after(async () => await componentRuntime.dispose());
+  assert.equal(componentRuntime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted, true);
+  await componentRuntime.service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
   assert.equal(await readFile(marker, "utf8"), "trusted");
   await rm(marker);
 
@@ -98,6 +142,12 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   });
   assert.equal(await exists(marker), false, "disposed snapshot must fail closed before execution");
   assert.ok(disposedResult.diagnostics?.some((item) => /信任已失效/u.test(item.message)));
+  const disposedComponent = await componentRuntime.service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
+  assert.equal(await exists(marker), false);
+  assert.ok(disposedComponent.diagnostics?.some((item) => /信任已失效/u.test(item.message)));
 
   const installedPlugin = (await service.inspect(reference)).installed;
   await writeHookScript(join(installedPlugin.installPath, "hook.cjs"), "changed");

@@ -1,6 +1,7 @@
 import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
 import type { Session } from "../engine/session.js";
 import type { TuiReporter } from "./tui-reporter.js";
+import { hydrateTuiReporter } from "./session-hydration.js";
 
 export interface TuiRewindResult {
   inputText?: string;
@@ -50,8 +51,8 @@ export async function applyTuiRewind(input: {
       "This legacy checkpoint has no TUI transcript boundary. Restore code only, or choose a newer user-message checkpoint.",
     );
   }
-  const transcriptIndex =
-    snapshot.transcriptIndex <= reporter.getEntryCount() ? snapshot.transcriptIndex : 0;
+  // Rewind saga 必须在此前的 transcript 写入全部落盘后才能确定截断边界。
+  await reporter.flushDurableTranscript();
 
   if (mode === "both") {
     await session.rewindBoth(snapshot.messageId, snapshot.messageIndex);
@@ -59,7 +60,13 @@ export async function applyTuiRewind(input: {
     await session.rewindConversation(snapshot.messageIndex, snapshot.messageId);
   }
 
-  reporter.truncateTo(transcriptIndex);
+  // Rehydrate from the durable branch instead of applying an absolute historical
+  // index to the current local segment. `/clear` deliberately changes only that
+  // segment, so local truncation cannot identify the durable rewind boundary.
+  const hydration = await session.readHydrationSnapshot();
+  reporter.withoutDurableTranscript(() => {
+    hydrateTuiReporter(reporter, hydration, { replace: true });
+  });
   if (snapshot.interactionMode) {
     input.onRestoreInteractionMode?.(snapshot.interactionMode, snapshot.prePlanMode);
   }

@@ -292,6 +292,7 @@ const MCP_NAME_PREFIX = "mcp__";
 const MCP_NAME_SEPARATOR = "__";
 /** 多数 LLM 厂商限制工具名 ≤ 64 字符,给前缀和分隔符留余量 */
 const MAX_QUALIFIED_LENGTH = 64;
+const QUALIFIED_HASH_SUFFIX_LENGTH = 9;
 
 /** 判断一个工具名是否由 MCP 桥接产生 */
 export function isMcpToolName(name: string): boolean {
@@ -316,8 +317,25 @@ export function qualifyMcpToolName(serverName: string, toolName: string): string
   const full = `${MCP_NAME_PREFIX}${sanitizeMcpNamePart(serverName)}${MCP_NAME_SEPARATOR}${sanitizeMcpNamePart(toolName)}`;
   if (full.length <= MAX_QUALIFIED_LENGTH) return full;
   const hash = stableHash8(full);
-  const head = full.slice(0, MAX_QUALIFIED_LENGTH - hash.length - 1);
+  const head = full.slice(0, MAX_QUALIFIED_LENGTH - QUALIFIED_HASH_SUFFIX_LENGTH);
   return `${head}_${hash}`;
+}
+
+/**
+ * Conservative foreground-policy check for a qualified tool name.
+ *
+ * Names longer than the Provider limit retain only a shared prefix plus a hash of the complete
+ * server/tool pair. Without source metadata that hash cannot prove which long server owned it, so
+ * an ambiguous retained prefix deliberately returns true (fail-closed), not exact ownership.
+ */
+export function mcpToolNameMayBelongToServer(name: string, serverName: string): boolean {
+  if (!isMcpToolName(name)) return false;
+  const prefix = `${MCP_NAME_PREFIX}${sanitizeMcpNamePart(serverName)}${MCP_NAME_SEPARATOR}`;
+  const retainedHeadLength = MAX_QUALIFIED_LENGTH - QUALIFIED_HASH_SUFFIX_LENGTH;
+  if (prefix.length <= retainedHeadLength) return name.startsWith(prefix);
+  return (
+    name.length === MAX_QUALIFIED_LENGTH && name.startsWith(prefix.slice(0, retainedHeadLength))
+  );
 }
 
 /** 32-bit FNV-1a 哈希,取低 32 位转 8 位十六进制。非加密,仅用于截断后防冲突。 */

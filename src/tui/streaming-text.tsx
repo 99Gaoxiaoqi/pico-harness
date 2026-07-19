@@ -10,11 +10,15 @@ import { MarkdownText } from "./markdown-text.js";
 export function StreamingText({
   content,
   width,
+  startRow,
+  rows,
 }: {
   content: string;
   width?: number;
+  startRow?: number;
+  rows?: number;
 }): React.ReactNode {
-  return <MarkdownText content={content} width={width} />;
+  return <MarkdownText content={content} width={width} startRow={startRow} rows={rows} />;
 }
 
 // 兼容保留旧的代码块拆分导出；实际渲染统一走 MarkdownText。
@@ -47,9 +51,13 @@ function stripFenceLang(code: string): string {
 export function CompletedText({
   content,
   width,
+  startRow,
+  rows,
 }: {
   content: string;
   width?: number;
+  startRow?: number;
+  rows?: number;
 }): React.ReactNode {
-  return <MarkdownText content={content} width={width} />;
+  return <MarkdownText content={content} width={width} startRow={startRow} rows={rows} />;
 }

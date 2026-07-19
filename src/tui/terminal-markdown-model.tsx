@@ -4,7 +4,7 @@ import { Box, Text } from "ink";
 import { lexer, type Token, type Tokens } from "marked";
 import wrapAnsi from "wrap-ansi";
 import { isSafeMarkdownHref, sanitizeMarkdownText } from "@pico/protocol";
-import { terminalWidth, truncateTerminalText, visualRows } from "./terminal-width.js";
+import { terminalWidth, truncateTerminalText } from "./terminal-width.js";
 
 /**
  * The single semantic representation used by terminal Markdown rendering.
@@ -18,6 +18,7 @@ import { terminalWidth, truncateTerminalText, visualRows } from "./terminal-widt
 export class TerminalMarkdownModel {
   readonly content: string;
   readonly parsed: ParsedMarkdown;
+  private readonly rowsByWidth = new Map<number, readonly StyledVisualRow[]>();
 
   constructor(content: string) {
     this.content = sanitizeTerminalText(content);
@@ -25,51 +26,58 @@ export class TerminalMarkdownModel {
   }
 
   /** Render the token tree as Ink nodes. Width constrains the root when given. */
-  render(width?: number, dimColor = false): React.ReactNode {
-    if (this.parsed.kind === "fallback") {
-      return (
-        <Text dimColor={dimColor} wrap="wrap">
-          {this.parsed.content}
-        </Text>
-      );
-    }
-
-    const normalizedWidth = width === undefined ? undefined : normalizeWrapWidth(width);
-    // Very narrow Ink flex layouts can insert an extra blank row when marker
-    // and child boxes overflow by one cell. Use the already-derived visual
-    // rows as plain terminal lines in that regime so the render contract
-    // remains exact (and the transcript can still scroll deterministically).
-    if (normalizedWidth !== undefined && normalizedWidth < 16) {
-      return (
-        <Box flexDirection="column" width={normalizedWidth}>
-          {markdownVisualRows(this.parsed, normalizedWidth).map((line, index) => (
-            <Text key={`narrow-${index}`} dimColor={dimColor} wrap="truncate">
-              {line}
-            </Text>
-          ))}
-        </Box>
-      );
-    }
+  render(width?: number, dimColor = false, startRow = 0, rows?: number): React.ReactNode {
+    const normalizedWidth = normalizeWrapWidth(width ?? 80);
+    const allRows = this.visualRows(normalizedWidth);
+    const start = Math.max(0, Math.floor(Number.isFinite(startRow) ? startRow : 0));
+    const end = rows === undefined ? undefined : start + Math.max(0, Math.floor(rows));
+    const visualRows = allRows.slice(start, end);
     return (
       <Box flexDirection="column" width={normalizedWidth}>
-        {this.parsed.tokens.map((token, index) =>
-          renderBlock(token, `${token.type}-${index}`, dimColor),
-        )}
+        {visualRows.map((line, index) => (
+          <Text key={`${start + index}:${line.text}`} dimColor={dimColor} wrap="truncate">
+            {line.spans.length === 0
+              ? " "
+              : line.spans.map((span, spanIndex) => (
+                  <Text
+                    key={spanIndex}
+                    bold={span.bold}
+                    italic={span.italic}
+                    underline={span.underline}
+                    strikethrough={span.strikethrough}
+                    color={span.color}
+                  >
+                    {span.text}
+                  </Text>
+                ))}
+          </Text>
+        ))}
       </Box>
     );
   }
 
   /** Number of terminal rows produced at the supplied content width. */
   measure(width: number): number {
-    return markdownVisualRows(this.parsed, width).length;
+    return this.visualRows(width).length;
   }
 
   /** Return the visual terminal rows in a viewport slice. */
   clip(startRow: number, rows: number | undefined, width: number): string[] {
-    const allRows = markdownVisualRows(this.parsed, width);
+    const allRows = this.visualRows(width);
     const start = Math.max(0, Math.floor(Number.isFinite(startRow) ? startRow : 0));
     const end = rows === undefined ? undefined : start + Math.max(0, Math.floor(rows));
-    return allRows.slice(start, end);
+    return allRows.slice(start, end).map((row) => row.text);
+  }
+
+  private visualRows(width: number): readonly StyledVisualRow[] {
+    const normalizedWidth = normalizeWrapWidth(width);
+    const cached = this.rowsByWidth.get(normalizedWidth);
+    if (cached) return cached;
+    // Render uses a literal space to allocate blank rows, while Ink's emitted
+    // terminal line is empty. The IR therefore keeps the observable empty row.
+    const projected = Object.freeze(markdownVisualRows(this.parsed, normalizedWidth));
+    this.rowsByWidth.set(normalizedWidth, projected);
+    return projected;
   }
 }
 
@@ -79,6 +87,23 @@ export function createTerminalMarkdownModel(content: string): TerminalMarkdownMo
 
 type ParsedMarkdown = { kind: "tokens"; tokens: Token[] } | { kind: "fallback"; content: string };
 
+interface InlineStyle {
+  readonly bold?: boolean;
+  readonly italic?: boolean;
+  readonly underline?: boolean;
+  readonly strikethrough?: boolean;
+  readonly color?: "cyan" | "yellow" | "gray";
+}
+
+interface StyledSpan extends InlineStyle {
+  readonly text: string;
+}
+
+interface StyledVisualRow {
+  readonly text: string;
+  readonly spans: readonly StyledSpan[];
+}
+
 function parseMarkdown(content: string): ParsedMarkdown {
   try {
     return { kind: "tokens", tokens: lexer(content, { gfm: true, breaks: false }) };
@@ -87,251 +112,6 @@ function parseMarkdown(content: string): ParsedMarkdown {
     // fallback for malformed custom extensions or a future parser failure.
     return { kind: "fallback", content };
   }
-}
-
-function renderBlock(token: Token, key: string, dimColor: boolean): React.ReactNode {
-  switch (token.type) {
-    case "space":
-      return <Text key={key}> </Text>;
-    case "hr":
-      return (
-        <Text key={key} dimColor>
-          ────────────
-        </Text>
-      );
-    case "code":
-      return renderCode(token as Tokens.Code, key, dimColor);
-    case "heading": {
-      const heading = token as Tokens.Heading;
-      return (
-        <Text key={key} bold color={dimColor ? undefined : "cyan"} dimColor={dimColor} wrap="wrap">
-          {renderInlines(heading.tokens, dimColor, key)}
-        </Text>
-      );
-    }
-    case "paragraph": {
-      const paragraph = token as Tokens.Paragraph;
-      return (
-        <Text key={key} dimColor={dimColor} wrap="wrap">
-          {renderInlines(paragraph.tokens, dimColor, key)}
-        </Text>
-      );
-    }
-    case "text": {
-      const text = token as Tokens.Text;
-      return (
-        <Text key={key} dimColor={dimColor} wrap="wrap">
-          {text.tokens
-            ? renderInlines(text.tokens, dimColor, key)
-            : sanitizeTerminalText(text.text)}
-        </Text>
-      );
-    }
-    case "blockquote": {
-      const blockquote = token as Tokens.Blockquote;
-      return (
-        <Box key={key} flexDirection="row">
-          <Text dimColor={dimColor} color={dimColor ? undefined : "gray"}>
-            │{" "}
-          </Text>
-          <Box flexDirection="column">
-            {blockquote.tokens.map((child, index) =>
-              renderBlock(child, `${key}-${child.type}-${index}`, dimColor),
-            )}
-          </Box>
-        </Box>
-      );
-    }
-    case "list":
-      return renderList(token as Tokens.List, key, dimColor);
-    case "table":
-      return renderTable(token as Tokens.Table, key, dimColor);
-    case "html":
-    case "def":
-      // Never pass HTML to a renderer and never echo tags or script content.
-      return null;
-    default:
-      return renderUnknownBlock(token, key, dimColor);
-  }
-}
-
-function renderCode(token: Tokens.Code, key: string, dimColor: boolean): React.ReactNode {
-  return (
-    <Box key={key} marginLeft={2} flexDirection="column">
-      {token.lang && (
-        <Text dimColor={dimColor} color="gray">
-          {token.lang}
-        </Text>
-      )}
-      <Text dimColor={dimColor} color="cyan" wrap="wrap">
-        {sanitizeTerminalText(token.text)}
-      </Text>
-    </Box>
-  );
-}
-
-function renderList(token: Tokens.List, key: string, dimColor: boolean): React.ReactNode {
-  const start = typeof token.start === "number" ? token.start : 1;
-  return (
-    <Box key={key} flexDirection="column">
-      {token.items.map((item, index) => {
-        const marker = item.task
-          ? item.checked
-            ? "☑"
-            : "☐"
-          : token.ordered
-            ? `${start + index}.`
-            : "•";
-        const children = item.tokens.filter((child) => child.type !== "checkbox");
-        return (
-          <Box key={`${key}-item-${index}`} flexDirection="row">
-            <Text dimColor={dimColor}>{marker} </Text>
-            <Box flexDirection="column" flexGrow={1}>
-              {children.map((child, childIndex) =>
-                renderBlock(child, `${key}-item-${index}-${child.type}-${childIndex}`, dimColor),
-              )}
-            </Box>
-          </Box>
-        );
-      })}
-    </Box>
-  );
-}
-
-function renderTable(token: Tokens.Table, key: string, dimColor: boolean): React.ReactNode {
-  return (
-    <Box key={key} flexDirection="column">
-      <Text dimColor={dimColor} wrap="wrap">
-        │{" "}
-        {token.header.map((cell, index) => (
-          <React.Fragment key={`${key}-header-${index}`}>
-            {index > 0 && " │ "}
-            <Text bold>{renderInlines(cell.tokens, dimColor, `${key}-header-${index}`)}</Text>
-          </React.Fragment>
-        ))}
-        {" │"}
-      </Text>
-      <Text dimColor>
-        ├{token.header.map((_, index) => `${index > 0 ? "┼" : ""}───`).join("")}┤
-      </Text>
-      {token.rows.map((row, rowIndex) => (
-        <Text key={`${key}-row-${rowIndex}`} dimColor={dimColor} wrap="wrap">
-          │{" "}
-          {row.map((cell, cellIndex) => (
-            <React.Fragment key={`${key}-row-${rowIndex}-${cellIndex}`}>
-              {cellIndex > 0 && " │ "}
-              {renderInlines(cell.tokens, dimColor, `${key}-row-${rowIndex}-${cellIndex}`)}
-            </React.Fragment>
-          ))}
-          {" │"}
-        </Text>
-      ))}
-    </Box>
-  );
-}
-
-function renderUnknownBlock(token: Token, key: string, dimColor: boolean): React.ReactNode {
-  const children = tokenChildren(token);
-  if (children) {
-    return (
-      <Box key={key} flexDirection="column">
-        {children.map((child, index) =>
-          renderBlock(child, `${key}-${child.type}-${index}`, dimColor),
-        )}
-      </Box>
-    );
-  }
-  const text = tokenText(token);
-  return text ? (
-    <Text key={key} dimColor={dimColor} wrap="wrap">
-      {text}
-    </Text>
-  ) : null;
-}
-
-function renderInlines(
-  tokens: readonly Token[],
-  dimColor: boolean,
-  keyPrefix: string,
-): React.ReactNode {
-  return tokens.map((token, index) => {
-    const key = `${keyPrefix}-inline-${token.type}-${index}`;
-    switch (token.type) {
-      case "text":
-        return (token as Tokens.Text).tokens ? (
-          <React.Fragment key={key}>
-            {renderInlines((token as Tokens.Text).tokens!, dimColor, key)}
-          </React.Fragment>
-        ) : (
-          sanitizeTerminalText((token as Tokens.Text).text)
-        );
-      case "escape":
-        return sanitizeTerminalText((token as Tokens.Escape).text);
-      case "strong": {
-        const strong = token as Tokens.Strong;
-        return (
-          <Text key={key} bold dimColor={dimColor}>
-            {renderInlines(strong.tokens, dimColor, key)}
-          </Text>
-        );
-      }
-      case "em": {
-        const emphasis = token as Tokens.Em;
-        return (
-          <Text key={key} italic dimColor={dimColor}>
-            {renderInlines(emphasis.tokens, dimColor, key)}
-          </Text>
-        );
-      }
-      case "del": {
-        const deletion = token as Tokens.Del;
-        return (
-          <Text key={key} strikethrough dimColor={dimColor}>
-            {renderInlines(deletion.tokens, dimColor, key)}
-          </Text>
-        );
-      }
-      case "codespan":
-        return (
-          <Text key={key} color={dimColor ? undefined : "yellow"} dimColor={dimColor}>
-            {sanitizeTerminalText((token as Tokens.Codespan).text)}
-          </Text>
-        );
-      case "br":
-        return "\n";
-      case "link":
-        return renderLink(token as Tokens.Link, key, dimColor);
-      case "image":
-        return (
-          <Text key={key} dimColor={dimColor}>
-            [图片: {sanitizeTerminalText((token as Tokens.Image).text) || "未命名"}]
-          </Text>
-        );
-      case "html":
-        return null;
-      default:
-        if (tokenChildren(token)) {
-          return (
-            <React.Fragment key={key}>
-              {renderInlines(tokenChildren(token)!, dimColor, key)}
-            </React.Fragment>
-          );
-        }
-        return tokenText(token) || null;
-    }
-  });
-}
-
-function renderLink(token: Tokens.Link, key: string, dimColor: boolean): React.ReactNode {
-  const label = renderInlines(token.tokens, dimColor, key);
-  const href = sanitizeTerminalText(token.href).trim();
-  if (!isSafeLinkTarget(href)) return <React.Fragment key={key}>{label}</React.Fragment>;
-
-  return (
-    <Text key={key} underline color={dimColor ? undefined : "cyan"} dimColor={dimColor}>
-      {label} ({href})
-    </Text>
-  );
 }
 
 function isSafeLinkTarget(href: string): boolean {
@@ -349,19 +129,15 @@ function tokenText(token: Token): string {
 }
 
 /** Build the plain terminal projection used for both measuring and clipping. */
-function markdownVisualRows(parsed: ParsedMarkdown, wrapWidth: number): string[] {
+function markdownVisualRows(parsed: ParsedMarkdown, wrapWidth: number): StyledVisualRow[] {
   const normalizedWidth = normalizeWrapWidth(wrapWidth);
   if (parsed.kind === "fallback") {
-    const rows = wrapTextRows(parsed.content, normalizedWidth);
-    return normalizedWidth < 16
-      ? rows.map((row) => truncateTerminalText(row, normalizedWidth))
-      : rows;
+    return wrapStyledSpans([{ text: parsed.content }], normalizedWidth);
   }
   const rows = parsed.tokens.flatMap((token) => visualRowsForBlock(token, normalizedWidth));
-  if (normalizedWidth < 16) {
-    return (rows.length > 0 ? rows : [""]).map((row) => truncateTerminalText(row, normalizedWidth));
-  }
-  return rows.length > 0 ? rows : [""];
+  return (rows.length > 0 ? rows : [visualRow("")]).map((row) =>
+    truncateStyledRow(row, normalizedWidth),
+  );
 }
 
 /**
@@ -370,35 +146,50 @@ function markdownVisualRows(parsed: ParsedMarkdown, wrapWidth: number): string[]
  * an x-offset to continuation rows; modelling those two details here keeps
  * measure/clip in lock-step with render for lists, quotes, and code blocks.
  */
-function visualRowsForBlock(token: Token, width: number, listDepth = 0): string[] {
+function visualRowsForBlock(token: Token, width: number): StyledVisualRow[] {
   switch (token.type) {
     case "space":
-      return [""];
+      return [visualRow("")];
     case "hr":
-      return wrapTextRows("────────────", width);
+      return wrapStyledSpans([{ text: "────────────", color: "gray" }], width);
     case "code": {
       const code = token as Tokens.Code;
       const lines = sanitizeTerminalText(code.text).split("\n");
-      const contentWidth = Math.max(1, width - 2);
+      const prefix = width >= 3 ? "  " : "";
+      const contentWidth = Math.max(1, width - terminalTextWidth(prefix));
       const rows = [...(code.lang ? [sanitizeTerminalText(code.lang)] : []), ...lines].flatMap(
-        (line) => wrapTextRows(line, contentWidth),
+        (line) => wrapStyledSpans([{ text: line, color: "cyan" }], contentWidth),
       );
-      return rows.map((line) => `  ${line}`);
+      return rows.map((line) => prefixStyledRow(line, prefix));
     }
     case "heading":
-      return wrapTextRows(inlineText((token as Tokens.Heading).tokens), width);
+      return wrapStyledSpans(
+        inlineSpans((token as Tokens.Heading).tokens, { bold: true, color: "cyan" }),
+        width,
+      );
     case "paragraph":
-      return wrapTextRows(inlineText((token as Tokens.Paragraph).tokens), width);
+      return wrapStyledSpans(inlineSpans((token as Tokens.Paragraph).tokens), width);
     case "text": {
       const text = token as Tokens.Text;
-      return wrapTextRows(text.tokens ? inlineText(text.tokens) : text.text, width);
+      return wrapStyledSpans(
+        text.tokens ? inlineSpans(text.tokens) : [{ text: sanitizeTerminalText(text.text) }],
+        width,
+      );
     }
     case "blockquote": {
       const blockquote = token as Tokens.Blockquote;
+      const quotePrefix = "│ ";
+      const prefixWidth = terminalTextWidth(quotePrefix);
+      const showPrefix = prefixWidth < width;
       const childRows = blockquote.tokens.flatMap((child) =>
-        visualRowsForBlock(child, Math.max(1, width - 2)),
+        visualRowsForBlock(child, showPrefix ? width - prefixWidth : width),
       );
-      return childRows.map((line, index) => `${index === 0 ? "│ " : "  "}${line}`);
+      if (!showPrefix) return childRows;
+      return childRows.map((line, index) =>
+        prefixStyledRow(line, index === 0 ? quotePrefix : " ".repeat(prefixWidth), {
+          color: "gray",
+        }),
+      );
     }
     case "list": {
       const list = token as Tokens.List;
@@ -411,31 +202,37 @@ function visualRowsForBlock(token: Token, width: number, listDepth = 0): string[
           : list.ordered
             ? `${start + index}.`
             : "•";
+        const markerPrefix = `${marker} `;
+        const prefixWidth = terminalTextWidth(markerPrefix);
+        const showPrefix = prefixWidth < width;
         const childRows = item.tokens
           .filter((child) => child.type !== "checkbox")
-          .flatMap((child) =>
-            visualRowsForBlock(
-              child,
-              Math.max(1, width - terminalTextWidth(`${marker} `) + (listDepth === 0 ? 1 : 0)),
-              child.type === "list" ? listDepth + 1 : listDepth,
-            ),
-          );
-        if (childRows.length === 0) return [`${marker} `];
-        const indent = " ".repeat(terminalTextWidth(`${marker} `));
+          .flatMap((child) => visualRowsForBlock(child, showPrefix ? width - prefixWidth : width));
+        if (childRows.length === 0) return [visualRow(showPrefix ? markerPrefix : "")];
+        if (!showPrefix) return childRows;
+        const indent = " ".repeat(prefixWidth);
         return childRows.map((line, childIndex) =>
-          childIndex === 0 ? `${marker} ${line}` : `${indent}${line}`,
+          prefixStyledRow(line, childIndex === 0 ? markerPrefix : indent, { color: "cyan" }),
         );
       });
     }
     case "table": {
       const table = token as Tokens.Table;
       const row = (cells: readonly Tokens.TableCell[]) =>
-        `│ ${cells.map((cell) => inlineText(cell.tokens)).join(" │ ")} │`;
+        wrapStyledSpans(tableRowSpans(cells), width);
       return [
-        row(table.header),
-        `├${table.header.map((_, index) => `${index > 0 ? "┼" : ""}───`).join("")}┤`,
-        ...table.rows.map((cells) => row(cells)),
-      ].flatMap((line) => wrapTextRows(line, width));
+        ...row(table.header),
+        ...wrapStyledSpans(
+          [
+            {
+              text: `├${table.header.map((_, index) => `${index > 0 ? "┼" : ""}───`).join("")}┤`,
+              color: "gray",
+            },
+          ],
+          width,
+        ),
+        ...table.rows.flatMap((cells) => row(cells)),
+      ];
     }
     case "html":
     case "def":
@@ -444,9 +241,174 @@ function visualRowsForBlock(token: Token, width: number, listDepth = 0): string[
       const children = tokenChildren(token);
       if (children) return children.flatMap((child) => visualRowsForBlock(child, width));
       const text = tokenText(token);
-      return text ? wrapTextRows(text, width) : [];
+      return text ? wrapStyledSpans([{ text }], width) : [];
     }
   }
+}
+
+function visualRow(text: string, spans: readonly StyledSpan[] = []): StyledVisualRow {
+  const normalized = coalesceSpans(spans.length > 0 ? spans : text ? [{ text }] : []);
+  return { text, spans: normalized };
+}
+
+function prefixStyledRow(
+  row: StyledVisualRow,
+  prefix: string,
+  style: InlineStyle = {},
+): StyledVisualRow {
+  if (!prefix) return row;
+  return visualRow(`${prefix}${row.text}`, [{ text: prefix, ...style }, ...row.spans]);
+}
+
+function truncateStyledRow(row: StyledVisualRow, width: number): StyledVisualRow {
+  const text = truncateTerminalText(row.text, width);
+  if (text === row.text) return row;
+  const first = row.spans[0];
+  const style: InlineStyle = first
+    ? {
+        bold: first.bold,
+        italic: first.italic,
+        underline: first.underline,
+        strikethrough: first.strikethrough,
+        color: first.color,
+      }
+    : {};
+  return visualRow(text, text ? [{ text, ...style }] : []);
+}
+
+function wrapStyledSpans(input: readonly StyledSpan[], width: number): StyledVisualRow[] {
+  const spans = coalesceSpans(
+    input.flatMap((span) => {
+      const text = sanitizeTerminalText(span.text);
+      return text ? [{ ...span, text }] : [];
+    }),
+  );
+  const text = spans.map((span) => span.text).join("");
+  const rows = wrapTextRows(text, width);
+  let cursor = 0;
+  return rows.map((rowText) => {
+    if (rowText === "") {
+      if (text[cursor] === "\n") cursor++;
+      return visualRow("");
+    }
+    const found = text.indexOf(rowText, cursor);
+    const start = found >= cursor ? found : cursor;
+    const end = start + rowText.length;
+    cursor = end;
+    return visualRow(rowText, sliceStyledSpans(spans, start, end));
+  });
+}
+
+function sliceStyledSpans(spans: readonly StyledSpan[], start: number, end: number): StyledSpan[] {
+  const sliced: StyledSpan[] = [];
+  let offset = 0;
+  for (const span of spans) {
+    const spanStart = offset;
+    const spanEnd = offset + span.text.length;
+    offset = spanEnd;
+    const overlapStart = Math.max(start, spanStart);
+    const overlapEnd = Math.min(end, spanEnd);
+    if (overlapStart >= overlapEnd) continue;
+    sliced.push({
+      ...span,
+      text: span.text.slice(overlapStart - spanStart, overlapEnd - spanStart),
+    });
+  }
+  return coalesceSpans(sliced);
+}
+
+function inlineSpans(tokens: readonly Token[], inherited: InlineStyle = {}): StyledSpan[] {
+  return coalesceSpans(tokens.flatMap((token) => inlineTokenSpans(token, inherited)));
+}
+
+function inlineTokenSpans(token: Token, inherited: InlineStyle): StyledSpan[] {
+  switch (token.type) {
+    case "text": {
+      const text = token as Tokens.Text;
+      return text.tokens
+        ? inlineSpans(text.tokens, inherited)
+        : [{ text: sanitizeTerminalText(text.text), ...inherited }];
+    }
+    case "escape":
+      return [{ text: sanitizeTerminalText((token as Tokens.Escape).text), ...inherited }];
+    case "strong":
+      return inlineSpans((token as Tokens.Strong).tokens, { ...inherited, bold: true });
+    case "em":
+      return inlineSpans((token as Tokens.Em).tokens, { ...inherited, italic: true });
+    case "del":
+      return inlineSpans((token as Tokens.Del).tokens, { ...inherited, strikethrough: true });
+    case "codespan":
+      return [
+        {
+          text: sanitizeTerminalText((token as Tokens.Codespan).text),
+          ...inherited,
+          color: "yellow",
+        },
+      ];
+    case "br":
+      return [{ text: "\n", ...inherited }];
+    case "link": {
+      const link = token as Tokens.Link;
+      const href = sanitizeTerminalText(link.href).trim();
+      return [
+        ...inlineSpans(link.tokens, { ...inherited, color: "cyan", underline: true }),
+        ...(isSafeLinkTarget(href)
+          ? [{ text: ` (${href})`, ...inherited, color: "gray" as const }]
+          : []),
+      ];
+    }
+    case "image":
+      return [
+        {
+          text: `[图片: ${sanitizeTerminalText((token as Tokens.Image).text) || "未命名"}]`,
+          ...inherited,
+          color: "yellow",
+        },
+      ];
+    case "html":
+      return [];
+    default: {
+      const children = tokenChildren(token);
+      return children
+        ? inlineSpans(children, inherited)
+        : [{ text: tokenText(token), ...inherited }];
+    }
+  }
+}
+
+function tableRowSpans(cells: readonly Tokens.TableCell[]): StyledSpan[] {
+  return coalesceSpans([
+    { text: "│ ", color: "gray" },
+    ...cells.flatMap((cell, index) => [
+      ...(index > 0 ? ([{ text: " │ ", color: "gray" }] satisfies StyledSpan[]) : []),
+      ...inlineSpans(cell.tokens),
+    ]),
+    { text: " │", color: "gray" },
+  ]);
+}
+
+function coalesceSpans(spans: readonly StyledSpan[]): StyledSpan[] {
+  const result: StyledSpan[] = [];
+  for (const span of spans) {
+    if (!span.text) continue;
+    const previous = result.at(-1);
+    if (previous && sameStyle(previous, span)) {
+      result[result.length - 1] = { ...previous, text: previous.text + span.text };
+    } else {
+      result.push(span);
+    }
+  }
+  return result;
+}
+
+function sameStyle(left: InlineStyle, right: InlineStyle): boolean {
+  return (
+    left.bold === right.bold &&
+    left.italic === right.italic &&
+    left.underline === right.underline &&
+    left.strikethrough === right.strikethrough &&
+    left.color === right.color
+  );
 }
 
 function wrapTextRows(text: string, width: number): string[] {
@@ -455,59 +417,14 @@ function wrapTextRows(text: string, width: number): string[] {
     .split("\n")
     .flatMap((line) => {
       if (line.length === 0) return [""];
-      return wrapAnsi(line, normalizedWidth, { trim: false, hard: false })
+      return wrapAnsi(line, normalizedWidth, { trim: false, hard: true })
         .split("\n")
-        .flatMap((row) => {
-          const trimmed = row.trimEnd();
-          // Ink keeps an over-wide word intact when it contains spaces, but
-          // hard-wraps an unbreakable token (URLs, CJK runs, code symbols).
-          return terminalWidth(trimmed) > normalizedWidth && !/\s/u.test(trimmed)
-            ? visualRows(trimmed, normalizedWidth)
-            : [trimmed];
-        });
+        .map((row) => row.trimEnd());
     });
 }
 
 function terminalTextWidth(text: string): number {
   return terminalWidth(text);
-}
-
-function inlineText(tokens: readonly Token[]): string {
-  return tokens.map((token) => inlineTokenText(token)).join("");
-}
-
-function inlineTokenText(token: Token): string {
-  switch (token.type) {
-    case "text": {
-      const text = token as Tokens.Text;
-      return text.tokens ? inlineText(text.tokens) : sanitizeTerminalText(text.text);
-    }
-    case "escape":
-      return sanitizeTerminalText((token as Tokens.Escape).text);
-    case "strong":
-      return inlineText((token as Tokens.Strong).tokens);
-    case "em":
-      return inlineText((token as Tokens.Em).tokens);
-    case "del":
-      return inlineText((token as Tokens.Del).tokens);
-    case "codespan":
-      return sanitizeTerminalText((token as Tokens.Codespan).text);
-    case "br":
-      return "\n";
-    case "link": {
-      const link = token as Tokens.Link;
-      const href = sanitizeTerminalText(link.href).trim();
-      return `${inlineText(link.tokens)}${isSafeLinkTarget(href) ? ` (${href})` : ""}`;
-    }
-    case "image":
-      return `[图片: ${sanitizeTerminalText((token as Tokens.Image).text) || "未命名"}]`;
-    case "html":
-      return "";
-    default: {
-      const children = tokenChildren(token);
-      return children ? inlineText(children) : tokenText(token);
-    }
-  }
 }
 
 /** Remove ANSI/OSC sequences and non-printing controls, preserving Markdown newlines. */

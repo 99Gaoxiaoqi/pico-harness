@@ -10,6 +10,7 @@ export type ConnectionState =
 
 export interface SessionView {
   readonly id: string;
+  readonly workspacePath: string;
   readonly title: string;
   readonly status: "active" | "archived";
   readonly updatedAt: number;
@@ -18,6 +19,7 @@ export interface SessionView {
 
 export interface RunView {
   readonly id: string;
+  readonly workspacePath: string;
   readonly sessionId?: string | undefined;
   readonly description: string;
   readonly status: string;
@@ -39,6 +41,7 @@ export interface TimelineItem {
 
 export interface ConversationView {
   readonly sessionId: string;
+  readonly workspacePath: string;
   readonly items: readonly ConversationItemView[];
   readonly revision?: string | undefined;
   readonly nextBefore?: string | undefined;
@@ -172,6 +175,14 @@ export interface UsageView {
 
 export type WorkspaceMode = "folder" | "git";
 
+export interface WorkspaceView {
+  readonly path: string;
+  readonly name: string;
+  readonly mode: WorkspaceMode;
+  readonly registered: boolean;
+  readonly trusted: boolean;
+}
+
 export interface WorkspaceCapabilities {
   readonly foregroundRuns: boolean;
   readonly fileHistory: boolean;
@@ -187,6 +198,7 @@ export const folderWorkspaceCapabilities: WorkspaceCapabilities = {
 };
 
 export interface AppData {
+  readonly workspaces: readonly WorkspaceView[];
   readonly workspacePath?: string | undefined;
   readonly workspaceMode?: WorkspaceMode | undefined;
   readonly workspaceCapabilities: WorkspaceCapabilities;
@@ -214,6 +226,7 @@ export interface AppData {
 }
 
 export const emptyData: AppData = {
+  workspaces: [],
   workspaceCapabilities: folderWorkspaceCapabilities,
   trusted: false,
   sessions: [],

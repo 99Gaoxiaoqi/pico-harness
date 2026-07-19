@@ -17,7 +17,6 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { MessageRow } from "./message-row.js";
 import { computeVirtualTranscript } from "./virtual-transcript.js";
 import { visualRows, type TranscriptLayout } from "./transcript-layout.js";
-import { TerminalMarkdownModel } from "./terminal-markdown-model.js";
 
 export interface MessageListProps {
   /** App 预先生成的聚合条目与行高。 */
@@ -95,12 +94,10 @@ export function MessageList({
             : Math.max(0, estimatedRows - rowsToSkip);
         const visibleRows = Math.min(remainingItemRows, remainingWindowRows);
         remainingWindowRows = Math.max(0, remainingWindowRows - visibleRows);
-        const visibleEntry = clipEntryTopRows(
-          entry,
-          contentRowsToSkip,
-          visibleRows,
-          layout.wrapWidth,
-        );
+        const markdownTextEntry = entry.kind === "assistant" || entry.kind === "thinking";
+        const visibleEntry = markdownTextEntry
+          ? entry
+          : clipEntryTopRows(entry, contentRowsToSkip, visibleRows, layout.wrapWidth);
         // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
         const showSeparator = entry.kind === "user" && prev !== undefined && rowsToSkip === 0;
         const entryVisibleRows = Math.max(0, visibleRows - (showSeparator ? separatorRows : 0));
@@ -114,6 +111,8 @@ export function MessageList({
               toolFocused={item?.focusedTool ?? false}
               toolStartOffsetRows={canClipInsideMessageRow(entry) ? contentRowsToSkip : undefined}
               toolVisibleRows={canClipInsideMessageRow(entry) ? entryVisibleRows : undefined}
+              textStartOffsetRows={virtualized && markdownTextEntry ? contentRowsToSkip : undefined}
+              textVisibleRows={virtualized && markdownTextEntry ? entryVisibleRows : undefined}
               wrapWidth={layout.wrapWidth}
             />
           </React.Fragment>
@@ -133,12 +132,7 @@ function clipEntryTopRows(
   wrapWidth: number | undefined,
 ): TuiEntry {
   if (rowsToSkip <= 0) return entry;
-  if (
-    entry.kind !== "assistant" &&
-    entry.kind !== "thinking" &&
-    entry.kind !== "user" &&
-    entry.kind !== "system"
-  ) {
+  if (entry.kind !== "user" && entry.kind !== "system") {
     return entry;
   }
 
@@ -160,7 +154,7 @@ function canClipInsideMessageRow(entry: TuiEntry): boolean {
 }
 
 function clipTextTopRows(
-  entry: Extract<TuiEntry, { kind: "assistant" | "thinking" | "user" | "system" }>,
+  entry: Extract<TuiEntry, { kind: "user" | "system" }>,
   rowsToSkip: number,
   rowsToKeep: number,
   wrapWidth: number | undefined,
@@ -168,9 +162,6 @@ function clipTextTopRows(
   const text = entry.content ?? "";
   if (rowsToSkip <= 0) return text;
   const width = normalizeWrapWidth(wrapWidth);
-  if (entry.kind === "assistant" || entry.kind === "thinking") {
-    return new TerminalMarkdownModel(text).clip(rowsToSkip, rowsToKeep, width).join("\n");
-  }
   const rows = visualRows(text, width);
   return rows.slice(rowsToSkip, rowsToSkip + rowsToKeep).join("\n");
 }

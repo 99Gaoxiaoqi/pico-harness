@@ -27,6 +27,8 @@ export interface DesktopReporterOptions {
 export class DesktopReporter implements Reporter {
   private readonly now: () => number;
   private resourceVersion = 0;
+  private turn = 0;
+  private thinkingActive = false;
 
   constructor(private readonly options: DesktopReporterOptions) {
     this.now = options.now ?? Date.now;
@@ -37,20 +39,31 @@ export class DesktopReporter implements Reporter {
   }
 
   onTurnStart(turn: number): void {
+    this.turn = turn;
     this.emit("turn.started", { turn });
   }
 
   onThinking(): void {
+    if (this.thinkingActive) return;
+    this.thinkingActive = true;
     // Status only: never project private reasoning content into the host event stream.
-    this.emit("assistant.thinking", {});
+    this.emit("assistant.thinking", { active: true, turn: this.turn });
+  }
+
+  onThinkingEnd(): void {
+    if (!this.thinkingActive) return;
+    this.thinkingActive = false;
+    this.emit("assistant.thinking", { active: false, turn: this.turn });
   }
 
   onToolCall(toolName: string, args: string, providerCallId?: string): void {
+    this.onThinkingEnd();
     const bounded = boundedText(args);
     this.emit("tool.started", {
       toolName,
       args: bounded.value,
       truncated: bounded.truncated,
+      turn: this.turn,
       ...(providerCallId ? { providerCallId } : {}),
     });
   }
@@ -102,23 +115,43 @@ export class DesktopReporter implements Reporter {
   }
 
   onMessage(content: string): void {
+    this.onThinkingEnd();
     const bounded = boundedText(content);
-    this.emit("assistant.message", { content: bounded.value, truncated: bounded.truncated });
+    this.emit("assistant.message", {
+      content: bounded.value,
+      truncated: bounded.truncated,
+      turn: this.turn,
+    });
   }
 
   onTextDelta(delta: string): void {
+    this.onThinkingEnd();
     this.emit("assistant.delta", { delta: boundedText(delta).value });
   }
 
+  onReasoningDelta(delta: string): void {
+    if (!delta) return;
+    this.onThinkingEnd();
+    const bounded = boundedText(delta);
+    this.emit("assistant.reasoning.delta", {
+      delta: bounded.value,
+      truncated: bounded.truncated,
+      turn: this.turn,
+    });
+  }
+
   onAssistantResponseSuppressed(reason: AssistantResponseSuppressionReason): void {
-    this.emit("assistant.suppressed", { reason });
+    this.onThinkingEnd();
+    this.emit("assistant.suppressed", { reason, turn: this.turn });
   }
 
   onFinish(): void {
+    this.onThinkingEnd();
     this.emit("run.finished", {});
   }
 
   onInterrupted(): void {
+    this.onThinkingEnd();
     this.emit("run.interrupted", {});
   }
 

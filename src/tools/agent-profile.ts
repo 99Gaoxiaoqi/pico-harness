@@ -15,6 +15,7 @@ import { join } from "node:path";
 import * as yaml from "js-yaml";
 import { logger } from "../observability/logger.js";
 import { MAX_SUBAGENT_TURNS } from "./subagent-spec.js";
+import type { HookTrustAuthority } from "../hooks/trust/store.js";
 
 const MAX_AGENT_PROFILE_FILE_BYTES = 512 * 1024;
 
@@ -54,6 +55,8 @@ export interface AgentProfile {
   readonly hooks?: unknown;
   /** Hook 信任与热加载使用的稳定来源路径。 */
   readonly sourcePath?: string;
+  /** Host-only authority inherited from an immutable managed Plugin source. */
+  readonly hookTrustAuthority?: HookTrustAuthority;
 }
 
 export interface AgentProfileLoadResult {

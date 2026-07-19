@@ -60,8 +60,10 @@ export type SubagentTraceEvent =
 
 /** Agent 引擎向外界输出信息的规范 */
 export interface Reporter {
-  /** 当 provider 输出原生 thinking/reasoning 时调用 */
+  /** Provider 推理开始时调用；只表示运行状态，不携带私有思考内容。 */
   onThinking(): void;
+  /** Provider 调用结束时收口临时推理状态；不影响已返回的 reasoning 摘要。 */
+  onThinkingEnd?(): void;
   /** 当模型决定调用工具时调用 */
   /**
    * providerCallId 是 provider 响应内的关联键，跨轮可能重复。
@@ -129,6 +131,10 @@ export class TerminalReporter implements Reporter {
     this.startSpinner();
   }
 
+  onThinkingEnd(): void {
+    this.stopSpinner();
+  }
+
   onToolCall(toolName: string, args: string): void {
     this.stopSpinner();
     console.log(`    -> 🛠️ 执行工具: ${toolName}, 参数: ${args}`);
@@ -157,6 +163,10 @@ export class TerminalReporter implements Reporter {
   onFinish(): void {
     this.stopSpinner();
     console.log("[Engine] 模型未请求调用工具,任务宣告完成。");
+  }
+
+  onInterrupted(): void {
+    this.stopSpinner();
   }
 
   onTextDelta(delta: string): void {

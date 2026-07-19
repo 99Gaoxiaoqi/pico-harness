@@ -2,6 +2,7 @@ import type { IpcRenderer } from "electron";
 import {
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
+  RuntimeNotificationBuffer,
   RuntimeProtocolError,
   type RuntimeNotification,
   type RuntimeParams,
@@ -59,7 +60,8 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           });
         }
         const subscriptionId = crypto.randomUUID();
-        const pendingEvents: RuntimeNotification[] = [];
+        const pendingEvents = new RuntimeNotificationBuffer();
+        let pendingOverflow = false;
         const seenEventIds = new Set<string>();
         let readySettled = false;
         let disposed = false;
@@ -83,7 +85,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           )
             return;
           if (readySettled) dispatch(envelope.event);
-          else pendingEvents.push(envelope.event);
+          else pendingOverflow ||= !pendingEvents.push(envelope.event);
         };
         ipcRenderer.on(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
         const ready = (
@@ -93,12 +95,38 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           }) as Promise<DesktopResult<RuntimeResult<"events.subscribe">>>
         )
           .then((result) => {
-            if (result.ok) {
-              for (const event of result.value.events) dispatch(event);
+            if (pendingOverflow) {
+              disposed = true;
+              pendingEvents.clear();
+              ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
+              unsubscribe();
+              return validationFailure(
+                new RuntimeProtocolError(
+                  RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+                  "Desktop preload durable 事件超过缓冲预算，请重新加载会话",
+                ),
+              );
             }
+            if (!result.ok) {
+              disposed = true;
+              readySettled = true;
+              pendingEvents.clear();
+              ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
+              unsubscribe();
+              return result;
+            }
+            for (const event of result.value.events) dispatch(event);
             readySettled = true;
-            for (const event of pendingEvents.splice(0)) dispatch(event);
+            for (const event of pendingEvents.drain()) dispatch(event);
             return result;
+          })
+          .catch((error: unknown) => {
+            disposed = true;
+            readySettled = true;
+            pendingEvents.clear();
+            ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
+            unsubscribe();
+            return validationFailure(error);
           })
           .finally(() => {
             // dispose() may race ahead of Main finishing runtimeSubscribe. The first
@@ -111,7 +139,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           dispose() {
             if (disposed) return;
             disposed = true;
-            pendingEvents.splice(0);
+            pendingEvents.clear();
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
             unsubscribe();
           },

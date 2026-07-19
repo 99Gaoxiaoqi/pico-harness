@@ -39,7 +39,11 @@ export function createPluginHookTrustAuthority(
 
   const matches = async (subject: HookTrustSubject): Promise<boolean> => {
     if (!active || options.isActive?.() === false) return false;
-    if (subject.source.kind !== "plugin" || subject.source.componentId !== options.pluginId) {
+    const pluginManifestSource =
+      subject.source.kind === "plugin" && subject.source.componentId === options.pluginId;
+    const pluginComponentSource =
+      subject.source.kind === "skill" || subject.source.kind === "agent";
+    if (!pluginManifestSource && !pluginComponentSource) {
       return false;
     }
     try {

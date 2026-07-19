@@ -70,7 +70,9 @@ import {
 } from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
+  createEngineRuntimeCapability,
   getDefaultEngineRuntimePort,
+  type EngineRuntimeCapability,
   type EngineRuntimePort,
   type EngineRuntimeWriteGuard,
 } from "./runtime-port.js";
@@ -98,6 +100,7 @@ import {
   projectRuntimeSessionTranscriptEventEntries,
 } from "./session-runtime-projection.js";
 import { OwnerLease } from "../storage/owner-lease.js";
+import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
 import { SessionMessageLedger } from "./session-message-ledger.js";
 const summaryStorePool = new Map<string, { store: SessionSummaryStore; refCount: number }>();
 import { configureDefaultSessionFactory, SessionManager } from "./session-manager.js";
@@ -165,11 +168,57 @@ export interface DurableTuiRewindHandoff {
   readonly prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>;
 }
 
+interface SerializedExecutionLease {
+  readonly nestedTasks: Set<Promise<void>>;
+  readonly nestedErrors: unknown[];
+}
+
+interface SerializedExecutionContext {
+  active: boolean;
+  readonly lease: SerializedExecutionLease;
+}
+
+async function drainSerializedExecutionLease(
+  lease: SerializedExecutionLease,
+): Promise<readonly unknown[]> {
+  while (lease.nestedTasks.size > 0) {
+    await Promise.all([...lease.nestedTasks]);
+  }
+  return lease.nestedErrors;
+}
+
+function throwSerializedExecutionErrors(
+  hasPrimary: boolean,
+  primary: unknown,
+  nested: readonly unknown[],
+): never {
+  const nestedWithoutPrimary = hasPrimary
+    ? nested.filter((error) => !Object.is(error, primary))
+    : nested;
+  if (hasPrimary) {
+    if (nestedWithoutPrimary.length > 0) {
+      throw new AggregateError(
+        [primary, ...nestedWithoutPrimary],
+        "Session serialized task and nested work both failed",
+      );
+    }
+    throw primary;
+  }
+  if (nestedWithoutPrimary.length === 1) throw nestedWithoutPrimary[0];
+  throw new AggregateError(nestedWithoutPrimary, "Session nested serialized work failed");
+}
+
 /**
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供模型投影副本。
  */
 export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGuard {
+  #runtimeCapabilityOwnerBrand = true;
+
+  static isRuntimeCapabilityOwner(value: unknown): value is Session {
+    return typeof value === "object" && value !== null && #runtimeCapabilityOwnerBrand in value;
+  }
+
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
   readonly id: string;
   /** 该会话绑定的物理工作区 */
@@ -241,8 +290,8 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   /** close() seals task admission before the durable/resource drain starts. */
   private acceptingSerializedTasks = true;
   private pendingSerializedTasks = 0;
-  /** Nested admission for the same Session is unsafe and would otherwise self-deadlock. */
-  private readonly serializedTask = new AsyncLocalStorage<boolean>();
+  /** Nested work shares one tracked lease so detached children cannot outlive serialization. */
+  private readonly serializedTask = new AsyncLocalStorage<SerializedExecutionContext>();
   /** close 前已接纳的任务/持久化操作在该 token 有效期内可完成写入。 */
   private readonly writeAdmission = new AsyncLocalStorage<{ active: boolean }>();
 
@@ -363,9 +412,8 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     if (this.runtimeOwnershipPromise) return this.runtimeOwnershipPromise;
 
     const paths = resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace;
-    const scope = createHash("sha256").update(`${paths.id}\0${this.id}`).digest("hex");
     const acquisition = OwnerLease.acquire({
-      leaseDirectory: join(paths.root, "session-owners", scope),
+      leaseDirectory: sessionOwnerLeaseDirectory(paths, this.id),
       ownerId: `runtime-session:${this.id}`,
     }).then((lease) => {
       this.runtimeOwnership = lease;
@@ -492,7 +540,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
    * 返回任务的 Promise(结果需调用方 await)。
    */
   serialize<T>(task: () => Promise<T>): Promise<T> {
-    if (this.serializedTask.getStore()) {
+    if (this.serializedTask.getStore()?.active) {
       return Promise.reject(
         new Error(`Session ${this.id} does not support re-entrant serialized execution`),
       );
@@ -502,16 +550,33 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       return Promise.reject(new Error(`Session ${this.id} is ${state}`));
     }
     this.pendingSerializedTasks++;
-    const runTask = (): Promise<T> =>
-      this.serializedTask.run(true, () =>
-        this.runWithWriteAdmission(async () => {
+    const runTask = (): Promise<T> => {
+      const lease: SerializedExecutionLease = { nestedTasks: new Set(), nestedErrors: [] };
+      const context: SerializedExecutionContext = { active: true, lease };
+      return this.serializedTask.run(context, () =>
+        this.runWithWriteAdmission(async (): Promise<T> => {
+          let result: T | undefined;
+          let hasPrimaryError = false;
+          let primaryError: unknown;
           try {
-            return await task();
+            result = await task();
+          } catch (error) {
+            hasPrimaryError = true;
+            primaryError = error;
           } finally {
+            // Seal this exact parent before yielding to drain. Already-running children keep
+            // their own active context and may still attach grandchildren to the shared lease.
+            context.active = false;
+            const nestedErrors = await drainSerializedExecutionLease(lease);
             this.pendingSerializedTasks--;
+            if (hasPrimaryError || nestedErrors.length > 0) {
+              throwSerializedExecutionErrors(hasPrimaryError, primaryError, nestedErrors);
+            }
           }
+          return result as T;
         }),
       );
+    };
     const result = this.runQueue.then(runTask, runTask);
     // 无论成功失败,都更新队列链;吞掉错误让调用方自己的 catch 处理
     this.runQueue = result.then(
@@ -519,6 +584,56 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       () => undefined,
     );
     return result;
+  }
+
+  /**
+   * Enter this Session's serialization capability, or reuse the exact active one.
+   * Infrastructure repairs use this boundary so standalone callers cannot mutate the
+   * in-memory projection concurrently, while callers already inside serialize() do not deadlock.
+   */
+  withSerializedExecution<T>(task: () => Promise<T>): Promise<T> {
+    const context = this.serializedTask.getStore();
+    if (!context?.active) return this.serialize(task);
+    return this.startSerializedChild(context, task, false);
+  }
+
+  /**
+   * Start detached work owned by the active serialized scope. Its completion delays queue
+   * release and an uncaught failure is surfaced by the parent serialize() result.
+   */
+  spawnSerializedExecution(task: () => Promise<unknown>): void {
+    const context = this.serializedTask.getStore();
+    if (!context?.active) {
+      throw new Error(`Session ${this.id} has no active serialized scope for detached work`);
+    }
+    void this.startSerializedChild(context, task, true);
+  }
+
+  private startSerializedChild<T>(
+    parent: SerializedExecutionContext,
+    task: () => Promise<T>,
+    propagateFailure: boolean,
+  ): Promise<T> {
+    const child: SerializedExecutionContext = { active: true, lease: parent.lease };
+    const execution = this.serializedTask.run(child, () => Promise.resolve().then(task));
+    const observed = execution
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          if (
+            propagateFailure &&
+            !parent.lease.nestedErrors.some((existing) => Object.is(existing, error))
+          ) {
+            parent.lease.nestedErrors.push(error);
+          }
+        },
+      )
+      .finally(() => {
+        child.active = false;
+        parent.lease.nestedTasks.delete(observed);
+      });
+    parent.lease.nestedTasks.add(observed);
+    return execution;
   }
 
   /** True while an already-admitted serialize task is queued or running. */
@@ -1322,6 +1437,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
           if (operation.mode !== "code") {
             await this.rewindOnce(operation.operationId, operation.target.messageIndex);
             await this.commitRewindRuntimeMode(operation);
+            await this.commitRewindTranscript(operation);
           }
         },
         commitSidecars: async (operation) => {
@@ -1408,6 +1524,21 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     }
     this.persistedSettings = settings;
     this.updatedAt = new Date();
+  }
+
+  private async commitRewindTranscript(operation: RewindStorageOperation): Promise<void> {
+    if (operation.target.transcriptIndex === undefined || !this.store) return;
+    await this.recordTranscriptEvent(
+      {
+        eventId: `rewind:${operation.operationId}:transcript`,
+        sequence: 1,
+        createdAt: Date.parse(operation.createdAt),
+        type: "transcript.truncated",
+        entryCount: operation.target.transcriptIndex,
+        operationId: operation.operationId,
+      },
+      { eventId: `transcript-rewind:${operation.operationId}` },
+    );
   }
 
   private commitRuntimeStateOnce(
@@ -1611,6 +1742,23 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     return this.store;
   }
 
+  /** One inseparable Runtime scope: Session identity, workspace, store, and owner guard. */
+  get runtimeEventCapability(): EngineRuntimeCapability | undefined {
+    const store = this.store;
+    if (!store) return undefined;
+    return createEngineRuntimeCapability({
+      owner: this,
+      runtimeAuthority: store,
+    });
+  }
+
+  /** Capability issuance must use the exact durable authority owned by this Session. */
+  assertRuntimeEventAuthority(authority: object): void {
+    if (!this.store || authority !== this.store) {
+      throw new Error(`Runtime authority is not owned by Session ${this.id}`);
+    }
+  }
+
   /** RuntimeRun's only authority over Session ownership; the lease itself stays private here. */
   async assertRuntimeEventWriteAllowed(): Promise<void> {
     this.assertWritable();
@@ -1630,20 +1778,23 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     event: TranscriptEvent,
     options: { readonly eventId?: string } = {},
   ): Promise<CommitReceipt> {
-    const durableEvent = structuredClone(event);
+    let durableEvent = structuredClone(event);
     return this.enqueuePersistence("transcript event", async (store) => {
       await this.ensureRuntimeSession();
       const runtimeEventId = options.eventId ?? `transcript:${durableEvent.eventId}`;
       const entries = await store.readSessionEntries(this.id);
       const existing = entries.find((entry) => entry.event.eventId === runtimeEventId);
-      if (!existing) {
-        const projected = projectRuntimeSessionTranscriptEventEntries(entries);
-        const expectedSequence = (projected.at(-1)?.event.sequence ?? 0) + 1;
-        if (durableEvent.sequence !== expectedSequence) {
-          throw new Error(
-            `Transcript event sequence mismatch: ${durableEvent.sequence}, expected ${expectedSequence}`,
-          );
+      if (existing) {
+        if (existing.event.kind !== "transcript.event.recorded") {
+          throw new Error(`Runtime event ID ${runtimeEventId} is already bound to another payload`);
         }
+        durableEvent = { ...durableEvent, sequence: existing.event.data.event.sequence };
+      } else {
+        const projected = projectRuntimeSessionTranscriptEventEntries(entries);
+        durableEvent = {
+          ...durableEvent,
+          sequence: (projected.at(-1)?.event.sequence ?? 0) + 1,
+        };
       }
       return commitReceiptFromAppend(
         await store.appendTranscriptEvent(this.id, durableEvent, { eventId: runtimeEventId }),

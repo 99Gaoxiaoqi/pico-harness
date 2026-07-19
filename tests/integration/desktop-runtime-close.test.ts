@@ -15,6 +15,49 @@ import {
 } from "../../src/daemon/index.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import type { PluginRuntimeSnapshotRegistry } from "../../src/plugins/plugin-runtime-snapshot-registry.js";
+
+test("Desktop close aggregates cleanup failures and always reaches the closed state", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-close-aggregate-"));
+  const picoHome = join(root, "pico-home");
+  await mkdir(picoHome, { recursive: true });
+  const runtime = new WorkspaceRuntimeService({
+    env: { PICO_HOME: picoHome },
+    execute: async () => undefined,
+  });
+  runtime.closeRuntimes = async () => {
+    throw new Error("runtime close failed");
+  };
+  runtime.close = async () => {
+    throw new Error("runtime resource close failed");
+  };
+  const pluginRegistry = {
+    dispose: async () => {
+      throw new Error("plugin close failed");
+    },
+  } as unknown as PluginRuntimeSnapshotRegistry;
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    env: { PICO_HOME: picoHome },
+    pluginRuntimeSnapshotRegistry: pluginRegistry,
+    ownsPluginRuntimeSnapshotRegistry: true,
+  });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(desktop.close(), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors.map(String), [
+      "Error: runtime close failed",
+      "Error: runtime resource close failed",
+      "Error: plugin close failed",
+    ]);
+    return true;
+  });
+  await assert.rejects(
+    desktop.handle(createRuntimeRequest("runtime.ping", {})),
+    /Runtime daemon 已关闭/u,
+  );
+});
 
 test(
   "Desktop close fences new handles and drains an already-admitted request",

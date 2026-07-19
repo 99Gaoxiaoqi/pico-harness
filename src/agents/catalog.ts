@@ -201,6 +201,7 @@ function adaptClaudeAgent(agent: ClaudeAgent, source: ResourceCatalogSource): Ca
           ? "user-claude"
           : "external",
     sourcePath: agent.sourcePath,
+    ...(source.hookTrustAuthority ? { hookTrustAuthority: source.hookTrustAuthority } : {}),
     catalogSource: source,
   };
 }
@@ -245,6 +246,7 @@ async function loadAgentSource(
         ...profile,
         source: profileSource,
         sourcePath: source.root,
+        ...(source.hookTrustAuthority ? { hookTrustAuthority: source.hookTrustAuthority } : {}),
         catalogSource: source,
       } satisfies CatalogAgentProfile,
     })),

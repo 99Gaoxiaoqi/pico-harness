@@ -9,6 +9,7 @@ import type { BillingRoute } from "../observability/pricing.js";
 
 /** Runtime-owned provider factory. Network configuration stays outside this assembly boundary. */
 export type RuntimeProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
+export type RuntimeProviderDecorator = (provider: LLMProvider) => LLMProvider;
 
 /**
  * The smallest input required to assemble the provider used by an AgentEngine.
@@ -24,6 +25,7 @@ export interface RuntimeProviderAssemblyContext {
   readonly trackerOptions: CostTrackerOptions;
   readonly provider?: LLMProvider;
   readonly providerFactory?: RuntimeProviderFactory;
+  readonly providerDecorator?: RuntimeProviderDecorator;
   readonly credentialPool?: CredentialPool;
 }
 
@@ -45,9 +47,10 @@ export function assembleRuntimeProvider(
   context: RuntimeProviderAssemblyContext,
 ): RuntimeProviderAssembly {
   const providerFactory = context.providerFactory ?? createRawProvider;
+  const decorate = context.providerDecorator ?? ((provider: LLMProvider) => provider);
   const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
     new CostTracker(
-      providerFactory(context.kind, config),
+      decorate(providerFactory(context.kind, config)),
       billingRouteForProvider(context.kind, config),
       context.session,
       context.trackerOptions,
@@ -56,7 +59,7 @@ export function assembleRuntimeProvider(
   if (context.provider !== undefined) {
     return {
       provider: new CostTracker(
-        context.provider,
+        decorate(context.provider),
         billingRouteForProvider(context.kind, context.config),
         context.session,
         context.trackerOptions,

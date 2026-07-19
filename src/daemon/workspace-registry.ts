@@ -18,16 +18,18 @@ export interface WorkspaceRuntimeFactory<T extends WorkspaceRuntime> {
 /** Owns one runtime per canonical Git worktree or physical folder. */
 export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
   private readonly runtimes = new Map<string, Promise<T>>();
+  private readonly releases = new Map<string, Promise<void>>();
   private lifecycleState: "open" | "closing" | "closed" = "open";
   private closePromise?: Promise<void>;
-  private ownershipReleasePending = false;
-  private ownershipReleasePromise: Promise<void> = Promise.resolve();
+  private readonly pendingOwnershipReleases = new Set<Promise<void>>();
 
   constructor(private readonly factory: WorkspaceRuntimeFactory<T>) {}
 
   async get(workspacePath: string): Promise<T> {
     this.assertOpen();
     const canonicalPath = await canonicalizeWorkspacePath(workspacePath);
+    const activeRelease = this.releases.get(canonicalPath);
+    if (activeRelease) await activeRelease;
     this.assertOpen();
     let runtime = this.runtimes.get(canonicalPath);
     if (!runtime) {
@@ -47,51 +49,86 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
     }
   }
 
+  /** Release one workspace without closing the process-wide registry. */
+  async release(workspacePath: string): Promise<void> {
+    this.assertOpen();
+    let canonicalPath: string;
+    try {
+      canonicalPath = await canonicalizeWorkspacePath(workspacePath);
+    } catch (error) {
+      if (!isNodeCode(error, "ENOENT")) throw error;
+      // Registrations store canonical absolute paths. A workspace may be deleted
+      // before unregister, so release the previously indexed key without realpath.
+      canonicalPath = resolve(workspacePath);
+    }
+    const activeRelease = this.releases.get(canonicalPath);
+    if (activeRelease) return activeRelease;
+    const runtime = this.runtimes.get(canonicalPath);
+    if (!runtime) return;
+    if (this.runtimes.get(canonicalPath) === runtime) this.runtimes.delete(canonicalPath);
+    const release = this.closeRuntimes([runtime], true);
+    this.releases.set(canonicalPath, release);
+    // On rejection the line below is not reached, intentionally keeping a failed
+    // fence: ownership was not proven released, so replacement must fail closed.
+    await release;
+    if (this.releases.get(canonicalPath) === release) this.releases.delete(canonicalPath);
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.lifecycleState = "closing";
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
-    this.closePromise = this.closeRuntimes(runtimes).finally(() => {
-      this.lifecycleState = "closed";
-    });
+    this.closePromise = Promise.allSettled([...this.releases.values()])
+      .then(async (releases) => {
+        const releaseFailure = releases.find((result) => result.status === "rejected");
+        await this.closeRuntimes(runtimes);
+        if (releaseFailure?.status === "rejected") throw releaseFailure.reason;
+      })
+      .finally(() => {
+        this.lifecycleState = "closed";
+      });
     return this.closePromise;
   }
 
-  private async closeRuntimes(runtimes: readonly Promise<T>[]): Promise<void> {
+  private async closeRuntimes(
+    runtimes: readonly Promise<T>[],
+    waitForOwnership = false,
+  ): Promise<void> {
     const resolutions = await Promise.allSettled(runtimes);
     const resolved = resolutions.flatMap((result) =>
       result.status === "fulfilled" ? [result.value] : [],
     );
     const closes = await Promise.allSettled(resolved.map(async (runtime) => runtime.close?.()));
     const closeFailure = closes.find((result) => result.status === "rejected");
-    this.ownershipReleasePending =
-      closeFailure !== undefined || resolved.some((runtime) => runtime.hasPendingOwnership?.());
     const ownershipRelease = Promise.all(
       resolved.map(async (runtime) => runtime.waitForOwnershipRelease?.()),
     ).then(() => {
       if (closeFailure?.status === "rejected") throw closeFailure.reason;
     });
-    this.ownershipReleasePromise = ownershipRelease;
-    ownershipRelease.then(
-      () => {
-        this.ownershipReleasePending = false;
-      },
-      () => undefined,
-    );
+    this.pendingOwnershipReleases.add(ownershipRelease);
+    void ownershipRelease
+      .finally(() => this.pendingOwnershipReleases.delete(ownershipRelease))
+      .catch(() => undefined);
     void ownershipRelease.catch(() => undefined);
 
     const resolutionFailure = resolutions.find((result) => result.status === "rejected");
     if (resolutionFailure?.status === "rejected") throw resolutionFailure.reason;
+    if (waitForOwnership) {
+      await ownershipRelease;
+      return;
+    }
     if (closeFailure?.status === "rejected") throw closeFailure.reason;
   }
 
   hasPendingOwnership(): boolean {
-    return this.ownershipReleasePending;
+    return this.pendingOwnershipReleases.size > 0;
   }
 
-  waitForOwnershipRelease(): Promise<void> {
-    return this.ownershipReleasePromise;
+  async waitForOwnershipRelease(): Promise<void> {
+    while (this.pendingOwnershipReleases.size > 0) {
+      await Promise.all([...this.pendingOwnershipReleases]);
+    }
   }
 
   private assertOpen(): void {
@@ -99,6 +136,10 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
       throw new Error("Workspace Runtime registry 正在关闭");
     }
   }
+}
+
+function isNodeCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 export async function canonicalizeWorkspacePath(workspacePath: string): Promise<string> {

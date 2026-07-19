@@ -4,6 +4,7 @@ import {
   type DesktopRuntimeMethod,
   type RuntimeProviderInput,
   type RuntimeParams,
+  type RuntimeNotification,
   type RuntimeResult,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
@@ -26,23 +27,36 @@ import {
   type ProviderOrigin,
   type ProviderProtocol,
   type ProviderView,
+  type RunView,
+  type SessionView,
   type SessionSettingsView,
   type UserDefaultsView,
   type UsageView,
   type WorkspaceCapabilities,
   type WorkspaceMode,
+  type WorkspaceView,
 } from "./model.js";
 import { previewData } from "./fixture.js";
+import {
+  replaceWorkspaceItems,
+  workspaceName,
+  workspaceSessionKey,
+  type WorkspaceSessionRef,
+} from "./workspace-session.js";
 import type {
   ComposerBehavior,
   ConversationItemView,
   ConversationProgressState,
 } from "./conversation/types.js";
-import { conversationItemKey } from "./conversation/items.js";
+import {
+  applyLiveReasoningUpdate,
+  conversationItemKey,
+  mergeHydratedConversationItems,
+} from "./conversation/items.js";
+import { applyTimelineNotification } from "./timeline.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
-const MAX_RENDERER_TIMELINE_ITEMS = 2_000;
 
 function getBridge(): DesktopBridge | undefined {
   return window.pico;
@@ -124,6 +138,8 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       id,
       kind: "thinking",
       text,
+      ...(stringValue(item.runId) ? { runId: stringValue(item.runId) } : {}),
+      ...(stringValue(item.turnId) ? { turnId: stringValue(item.turnId) } : {}),
       ...meta,
     };
   }
@@ -269,9 +285,14 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   return undefined;
 }
 
-function parseConversation(value: unknown, sessionId: string): ConversationView {
+function parseConversation(
+  value: unknown,
+  workspacePath: string,
+  sessionId: string,
+): ConversationView {
   const result = isRecord(value) ? value : {};
   return {
+    workspacePath,
     sessionId,
     items: recordArray(result.items)
       .map(conversationItem)
@@ -288,11 +309,13 @@ function isTerminalRunStatus(status: string): boolean {
 
 function interactionSessionId(
   data: AppData,
+  workspacePath: string,
   explicitSessionId: string,
   runId: string,
 ): string | undefined {
   if (explicitSessionId) return explicitSessionId;
-  return data.runs.find((run) => run.id === runId)?.sessionId;
+  return data.runs.find((run) => run.workspacePath === workspacePath && run.id === runId)
+    ?.sessionId;
 }
 
 function resolveApprovalState(
@@ -300,6 +323,7 @@ function resolveApprovalState(
   input: {
     readonly approvalId: string;
     readonly decision: string;
+    readonly workspacePath: string;
     readonly sessionId: string;
     readonly runId: string;
   },
@@ -307,14 +331,18 @@ function resolveApprovalState(
   const pending = current.approvals.find((approval) => approval.id === input.approvalId);
   const sessionId = interactionSessionId(
     current,
+    input.workspacePath,
     input.sessionId,
     input.runId || pending?.runId || "",
   );
-  const conversation = sessionId ? current.conversations[sessionId] : undefined;
+  const conversationKey = sessionId
+    ? workspaceSessionKey({ workspacePath: input.workspacePath, sessionId })
+    : undefined;
+  const conversation = conversationKey ? current.conversations[conversationKey] : undefined;
   const state: "allowed" | "denied" =
     input.decision === "deny" || input.decision === "denied" ? "denied" : "allowed";
 
-  if (!sessionId || !conversation) {
+  if (!sessionId || !conversationKey || !conversation) {
     return {
       ...current,
       approvals: current.approvals.filter((approval) => approval.id !== input.approvalId),
@@ -347,7 +375,7 @@ function resolveApprovalState(
     approvals: current.approvals.filter((approval) => approval.id !== input.approvalId),
     conversations: {
       ...current.conversations,
-      [sessionId]: { ...conversation, items: resolvedItems },
+      [conversationKey]: { ...conversation, items: resolvedItems },
     },
   };
 }
@@ -356,6 +384,7 @@ function resolvePromptState(
   current: AppData,
   input: {
     readonly promptId: string;
+    readonly workspacePath: string;
     readonly sessionId: string;
     readonly runId: string;
   },
@@ -363,12 +392,16 @@ function resolvePromptState(
   const pending = current.prompts.find((prompt) => prompt.id === input.promptId);
   const sessionId = interactionSessionId(
     current,
+    input.workspacePath,
     input.sessionId,
     input.runId || pending?.runId || "",
   );
-  const conversation = sessionId ? current.conversations[sessionId] : undefined;
+  const conversationKey = sessionId
+    ? workspaceSessionKey({ workspacePath: input.workspacePath, sessionId })
+    : undefined;
+  const conversation = conversationKey ? current.conversations[conversationKey] : undefined;
 
-  if (!sessionId || !conversation) {
+  if (!sessionId || !conversationKey || !conversation) {
     return {
       ...current,
       prompts: current.prompts.filter((prompt) => prompt.id !== input.promptId),
@@ -400,7 +433,7 @@ function resolvePromptState(
     prompts: current.prompts.filter((prompt) => prompt.id !== input.promptId),
     conversations: {
       ...current.conversations,
-      [sessionId]: { ...conversation, items: resolvedItems },
+      [conversationKey]: { ...conversation, items: resolvedItems },
     },
   };
 }
@@ -690,6 +723,35 @@ function parseWorkspaceList(value: unknown): readonly JsonRecord[] {
   return recordArray(value.workspaces);
 }
 
+function parseSessions(value: unknown, workspacePath: string): readonly SessionView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.sessions)
+    .map((item, index) => ({
+      id: stringValue(item.sessionId ?? item.id, `session-${index}`),
+      workspacePath,
+      title: stringValue(item.title, "未命名任务"),
+      status: item.status === "archived" ? ("archived" as const) : ("active" as const),
+      updatedAt: numberValue(item.updatedAt, Date.now()),
+      summary: stringValue(item.summary),
+    }))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function parseRuns(value: unknown, workspacePath: string): readonly RunView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.runs)
+    .map((item, index) => ({
+      id: stringValue(item.runId ?? item.id, `run-${index}`),
+      workspacePath,
+      sessionId: stringValue(item.sessionId) || undefined,
+      description: stringValue(item.description, "任务运行"),
+      status: stringValue(item.status, "unknown"),
+      startedAt: numberValue(item.startedAt, Date.now()),
+      updatedAt: numberValue(item.updatedAt, Date.now()),
+    }))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 function parseWorkspaceMode(value: unknown, fallback?: WorkspaceMode): WorkspaceMode | undefined {
   return value === "git" || value === "folder" ? value : fallback;
 }
@@ -719,11 +781,13 @@ function parseWorkspaceCapabilities(
   };
 }
 
-function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown>>): AppData {
+function mergeLoadedData(
+  base: AppData,
+  workspacePath: string,
+  results: Readonly<Record<string, unknown>>,
+): AppData {
   const workspaceResult = isRecord(results.workspace) ? results.workspace : {};
   const workspaceMode = parseWorkspaceMode(workspaceResult.mode, base.workspaceMode);
-  const sessionResult = isRecord(results.sessions) ? results.sessions : {};
-  const runResult = isRecord(results.runs) ? results.runs : {};
   const jobResult = isRecord(results.jobs) ? results.jobs : {};
   const skillResult = isRecord(results.skills) ? results.skills : {};
   const mcpResult = isRecord(results.mcp) ? results.mcp : {};
@@ -744,21 +808,16 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
       workspaceMode,
       base.workspaceCapabilities,
     ),
-    sessions: recordArray(sessionResult.sessions).map((item, index) => ({
-      id: stringValue(item.sessionId ?? item.id, `session-${index}`),
-      title: stringValue(item.title, "未命名任务"),
-      status: item.status === "archived" ? "archived" : "active",
-      updatedAt: numberValue(item.updatedAt, Date.now()),
-      summary: stringValue(item.summary),
-    })),
-    runs: recordArray(runResult.runs).map((item, index) => ({
-      id: stringValue(item.runId ?? item.id, `run-${index}`),
-      sessionId: stringValue(item.sessionId) || undefined,
-      description: stringValue(item.description, "任务运行"),
-      status: stringValue(item.status, "unknown"),
-      startedAt: numberValue(item.startedAt, Date.now()),
-      updatedAt: numberValue(item.updatedAt, Date.now()),
-    })),
+    sessions: [
+      ...replaceWorkspaceItems(
+        base.sessions,
+        workspacePath,
+        parseSessions(results.sessions, workspacePath),
+      ),
+    ].sort((left, right) => right.updatedAt - left.updatedAt),
+    runs: [
+      ...replaceWorkspaceItems(base.runs, workspacePath, parseRuns(results.runs, workspacePath)),
+    ].sort((left, right) => right.updatedAt - left.updatedAt),
     jobs: recordArray(jobResult.jobs).map((item, index) => ({
       id: stringValue(item.jobId ?? item.id, `job-${index}`),
       name: stringValue(item.name, "未命名自动化"),
@@ -802,12 +861,14 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
 }
 
 export interface RuntimeActions {
-  chooseWorkspace(): Promise<void>;
-  trustWorkspace(trusted: boolean): Promise<void>;
+  chooseWorkspace(): Promise<string | undefined>;
+  selectWorkspace(workspacePath: string): Promise<void>;
+  trustWorkspace(workspacePath: string, trusted: boolean): Promise<void>;
   reload(): Promise<void>;
-  loadSession(sessionId: string): Promise<void>;
-  loadEarlierSession(sessionId: string): Promise<void>;
+  loadSession(ref: WorkspaceSessionRef): Promise<void>;
+  loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
   sendMessage(input: {
+    readonly workspacePath: string;
     readonly sessionId?: string;
     readonly text: string;
     readonly behavior?: ComposerBehavior;
@@ -817,20 +878,21 @@ export interface RuntimeActions {
       | { readonly kind: "agent"; readonly name: string };
   }): Promise<{
     readonly succeeded: boolean;
+    readonly workspacePath?: string | undefined;
     readonly sessionId?: string | undefined;
   }>;
-  renameSession(sessionId: string, title: string): Promise<void>;
-  forkSession(sessionId: string): Promise<string | undefined>;
-  compactSession(sessionId: string): Promise<void>;
+  renameSession(ref: WorkspaceSessionRef, title: string): Promise<void>;
+  forkSession(ref: WorkspaceSessionRef): Promise<WorkspaceSessionRef | undefined>;
+  compactSession(ref: WorkspaceSessionRef): Promise<void>;
   updateSessionSettings(
-    sessionId: string,
+    ref: WorkspaceSessionRef,
     patch: Readonly<{
       modelRouteId?: string;
       mode?: "default" | "plan" | "auto" | "yolo";
       thinkingEffort?: string;
     }>,
   ): Promise<void>;
-  setSessionArchived(sessionId: string, archived: boolean): Promise<void>;
+  setSessionArchived(ref: WorkspaceSessionRef, archived: boolean): Promise<void>;
   pauseRun(runId: string): Promise<void>;
   resumeRun(runId: string): Promise<void>;
   stopRun(runId: string): Promise<void>;
@@ -843,7 +905,7 @@ export interface RuntimeActions {
     target?: { readonly runId: string; readonly fingerprint: string },
   ): Promise<void>;
   applyChanges(target?: { readonly runId: string; readonly fingerprint: string }): Promise<void>;
-  previewRewind(sessionId: string): Promise<
+  previewRewind(ref: WorkspaceSessionRef): Promise<
     | {
         readonly checkpointId: string;
         readonly fingerprint: string;
@@ -851,7 +913,7 @@ export interface RuntimeActions {
       }
     | undefined
   >;
-  applyRewind(sessionId: string, checkpointId: string, fingerprint: string): Promise<void>;
+  applyRewind(ref: WorkspaceSessionRef, checkpointId: string, fingerprint: string): Promise<void>;
   toggleJob(id: string, enabled: boolean): Promise<void>;
   createJob(input: {
     readonly name: string;
@@ -913,6 +975,68 @@ export function useRuntimeStore(): RuntimeStore {
   const reportFailure = useCallback((error: unknown) => {
     setMessage(errorMessage(error));
   }, []);
+
+  const loadWorkspaceIndex = useCallback(
+    async (bridge: DesktopBridge, reset = false): Promise<readonly WorkspaceView[]> => {
+      const workspaceValue = await invoke(bridge, "workspace.list", {});
+      const indexed = await Promise.all(
+        parseWorkspaceList(workspaceValue).flatMap((workspace) => {
+          const workspacePath = stringValue(workspace.workspacePath);
+          if (!workspacePath || !booleanValue(workspace.registered, true)) return [];
+          return [
+            (async () => {
+              const trust = await optionalInvoke(bridge, "workspace.trustStatus", {
+                workspacePath,
+              });
+              const trusted = booleanValue(trust.value?.trusted);
+              const [sessions, runs] = trusted
+                ? await Promise.all([
+                    optionalInvoke(bridge, "session.list", {
+                      workspacePath,
+                      includeArchived: true,
+                    }),
+                    optionalInvoke(bridge, "runs.list", { workspacePath }),
+                  ])
+                : [{ value: { sessions: [] } }, { value: { runs: [] } }];
+              return {
+                workspace: {
+                  path: workspacePath,
+                  name: workspaceName(workspacePath),
+                  mode: parseWorkspaceMode(workspace.mode, "folder") ?? "folder",
+                  registered: true,
+                  trusted,
+                } satisfies WorkspaceView,
+                sessions: parseSessions(sessions.value, workspacePath),
+                runs: parseRuns(runs.value, workspacePath),
+              };
+            })(),
+          ];
+        }),
+      );
+      const workspaces = indexed.map((item) => item.workspace);
+      const sessions = indexed
+        .flatMap((item) => item.sessions)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+      const runs = indexed
+        .flatMap((item) => item.runs)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+      setData((current) => {
+        const base = reset ? emptyData : current;
+        return {
+          ...base,
+          workspaces,
+          sessions,
+          runs,
+          providerConfig: {
+            ...base.providerConfig,
+            supported: runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY),
+          },
+        };
+      });
+      return workspaces;
+    },
+    [],
+  );
 
   const loadWorkspace = useCallback(async (bridge: DesktopBridge, workspacePath: string) => {
     const generation = workspaceLoadGenerationRef.current + 1;
@@ -990,28 +1114,57 @@ export function useRuntimeStore(): RuntimeStore {
     }
     if (!isCurrentLoad()) return;
     if (trustResult.error) notices.trust = trustResult.error;
-    setData((current) =>
-      mergeLoadedData(
+    setData((current) => {
+      const trusted = booleanValue(trustResult.value?.trusted);
+      const switchingWorkspace = current.workspacePath !== workspacePath;
+      const workspaceMode = parseWorkspaceMode(
+        isRecord(values.workspace) ? values.workspace.mode : undefined,
+        "folder",
+      );
+      const selectedWorkspace: WorkspaceView = {
+        path: workspacePath,
+        name: workspaceName(workspacePath),
+        mode: workspaceMode ?? "folder",
+        registered: true,
+        trusted,
+      };
+      const workspaces = [
+        selectedWorkspace,
+        ...current.workspaces.filter((workspace) => workspace.path !== workspacePath),
+      ];
+      return mergeLoadedData(
         {
           ...current,
+          workspaces,
           workspacePath,
-          trusted: booleanValue(trustResult.value?.trusted),
+          trusted,
           launchAtLogin,
           notices,
+          ...(switchingWorkspace
+            ? {
+                timeline: [],
+                approvals: [],
+                prompts: [],
+                changes: [],
+                changeFingerprint: undefined,
+              }
+            : {}),
           providerConfig: {
             ...current.providerConfig,
             supported: sharedConfigSupported,
           },
         },
+        workspacePath,
         values,
-      ),
-    );
+      );
+    });
   }, []);
 
   const loadConversation = useCallback(
     async (bridge: DesktopBridge, workspacePath: string, sessionId: string) => {
       if (preview) return;
-      const loadKey = `${workspacePath}\0${sessionId}`;
+      const conversationKey = workspaceSessionKey({ workspacePath, sessionId });
+      const loadKey = conversationKey;
       const generation = (conversationLoadGenerationsRef.current.get(loadKey) ?? 0) + 1;
       conversationLoadGenerationsRef.current.set(loadKey, generation);
       const isCurrentLoad = () =>
@@ -1029,7 +1182,8 @@ export function useRuntimeStore(): RuntimeStore {
           ...current,
           conversations: {
             ...current.conversations,
-            [sessionId]: {
+            [conversationKey]: {
+              workspacePath,
               sessionId,
               items: [],
               queuedCount: 0,
@@ -1042,10 +1196,14 @@ export function useRuntimeStore(): RuntimeStore {
       if (!isCurrentLoad()) return;
       const record = isRecord(value) ? value : {};
       const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
-      const runId =
-        stringValue(activeRun?.runId) ||
+      const activeRunId = stringValue(activeRun?.runId) || undefined;
+      const changeRunId =
+        activeRunId ||
         dataRef.current.runs.find(
-          (run) => run.sessionId === sessionId && isTerminalRunStatus(run.status),
+          (run) =>
+            run.workspacePath === workspacePath &&
+            run.sessionId === sessionId &&
+            isTerminalRunStatus(run.status),
         )?.id;
       const [sessionUsage, settingsResult, goalResult] = await Promise.all([
         optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
@@ -1054,13 +1212,17 @@ export function useRuntimeStore(): RuntimeStore {
       ]);
       if (!isCurrentLoad()) return;
       let conversation: ConversationView = {
-        ...parseConversation(record, sessionId),
+        ...parseConversation(record, workspacePath, sessionId),
+        ...(activeRunId ? { runId: activeRunId } : {}),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
         ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
         ...(!goalResult.error ? { goalItem: parseGoalItem(goalResult.value) } : {}),
       };
-      if (runId) {
-        const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
+      if (changeRunId) {
+        const changeList = await optionalInvoke(bridge, "changes.list", {
+          workspacePath,
+          runId: changeRunId,
+        });
         if (!isCurrentLoad()) return;
         if (!changeList.error && changeList.value) {
           const listValue = changeList.value;
@@ -1070,7 +1232,7 @@ export function useRuntimeStore(): RuntimeStore {
               if (!path) return change;
               const diff = await optionalInvoke(bridge, "changes.diff", {
                 workspacePath,
-                runId,
+                runId: changeRunId,
                 path,
               });
               return { ...change, patch: stringValue(diff.value?.patch) || undefined };
@@ -1080,7 +1242,6 @@ export function useRuntimeStore(): RuntimeStore {
           const parsed = parseChanges({ ...listValue, changes });
           conversation = {
             ...conversation,
-            runId,
             changes: parsed.changes,
             changeFingerprint: parsed.fingerprint,
           };
@@ -1089,21 +1250,38 @@ export function useRuntimeStore(): RuntimeStore {
       if (!isCurrentLoad()) return;
       setData((current) => ({
         ...current,
-        conversations: { ...current.conversations, [sessionId]: conversation },
+        conversations: {
+          ...current.conversations,
+          [conversationKey]: {
+            ...conversation,
+            items: mergeHydratedConversationItems(
+              conversation.items,
+              current.conversations[conversationKey]?.items ?? [],
+              activeRunId,
+            ),
+          },
+        },
         runs: activeRun
           ? [
               {
                 id: stringValue(activeRun.runId),
+                workspacePath,
                 sessionId: stringValue(activeRun.sessionId, sessionId),
                 description: stringValue(activeRun.description, "会话运行"),
                 status: stringValue(activeRun.status, "running"),
                 startedAt: numberValue(activeRun.startedAt, Date.now()),
                 updatedAt: numberValue(activeRun.updatedAt, Date.now()),
               },
-              ...current.runs.filter((run) => run.id !== stringValue(activeRun.runId)),
+              ...current.runs.filter(
+                (run) =>
+                  run.workspacePath !== workspacePath || run.id !== stringValue(activeRun.runId),
+              ),
             ]
           : current.runs.filter(
-              (run) => run.sessionId !== sessionId || isTerminalRunStatus(run.status),
+              (run) =>
+                run.workspacePath !== workspacePath ||
+                run.sessionId !== sessionId ||
+                isTerminalRunStatus(run.status),
             ),
       }));
     },
@@ -1129,45 +1307,61 @@ export function useRuntimeStore(): RuntimeStore {
       if (!capabilities.includes("session-conversation-v1")) {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
-      const workspaceValue = await invoke(bridge, "workspace.list", {});
-      const workspaces = parseWorkspaceList(workspaceValue);
-      const workspacePath = stringValue(
-        workspaces.find(
-          (workspace) =>
-            booleanValue(workspace.registered, true) &&
-            Boolean(stringValue(workspace.workspacePath)),
-        )?.workspacePath,
-      );
-      if (workspacePath) await loadWorkspace(bridge, workspacePath);
-      else setData(emptyData);
+      await loadWorkspaceIndex(bridge, true);
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
     }
-  }, [loadWorkspace, preview]);
+  }, [loadWorkspaceIndex, preview]);
 
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
 
   useEffect(() => {
-    if (preview || connection.kind !== "ready" || !data.workspacePath) return;
+    if (preview || connection.kind !== "ready") return;
     const bridge = getBridge();
     if (!bridge) return;
     const refreshOnFocus = () => {
       const workspacePath = dataRef.current.workspacePath;
-      if (workspacePath) void loadWorkspace(bridge, workspacePath).catch(reportFailure);
+      void loadWorkspaceIndex(bridge)
+        .then(() => (workspacePath ? loadWorkspace(bridge, workspacePath) : undefined))
+        .catch(reportFailure);
     };
     window.addEventListener("focus", refreshOnFocus);
     return () => window.removeEventListener("focus", refreshOnFocus);
-  }, [connection.kind, data.workspacePath, loadWorkspace, preview, reportFailure]);
+  }, [connection.kind, loadWorkspace, loadWorkspaceIndex, preview, reportFailure]);
 
   useEffect(() => {
     if (preview || connection.kind !== "ready" || !data.workspacePath) return;
     const bridge = getBridge();
     if (!bridge) return;
     seenEventIdsRef.current.clear();
-    const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
+    const workspacePath = data.workspacePath;
+    let disposed = false;
+    let subscription: ReturnType<DesktopBridge["events"]["subscribe"]> | undefined;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const dirtySessions = new Set<string>();
+    const scheduleHydration = (sessionId?: string) => {
+      if (sessionId) dirtySessions.add(sessionId);
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        if (disposed) return;
+        const currentWorkspace = dataRef.current.workspacePath;
+        if (!currentWorkspace) return;
+        const sessions = [...dirtySessions];
+        dirtySessions.clear();
+        void loadWorkspace(bridge, currentWorkspace)
+          .then(() =>
+            Promise.all(
+              sessions.map((candidate) => loadConversation(bridge, currentWorkspace, candidate)),
+            ),
+          )
+          .catch(reportFailure);
+      }, 25);
+    };
+    const handleEvent = (event: RuntimeNotification) => {
       const scope = event.scope;
       const scopedWorkspacePath = stringValue(scope.workspacePath);
       if (scopedWorkspacePath && scopedWorkspacePath !== dataRef.current.workspacePath) return;
@@ -1226,6 +1420,7 @@ export function useRuntimeStore(): RuntimeStore {
           resolveApprovalState(current, {
             approvalId,
             decision: stringValue(payload.decision),
+            workspacePath,
             sessionId: stringValue(scope.sessionId),
             runId: stringValue(scope.runId ?? payload.runId),
           }),
@@ -1235,49 +1430,155 @@ export function useRuntimeStore(): RuntimeStore {
         setData((current) =>
           resolvePromptState(current, {
             promptId,
+            workspacePath,
             sessionId: stringValue(scope.sessionId),
             runId: stringValue(scope.runId ?? payload.runId),
           }),
         );
+      } else if (topic === "run.started") {
+        const run = isRecord(payload.run) ? payload.run : {};
+        const runId = stringValue(scope.runId ?? run.runId);
+        const sessionId = stringValue(scope.sessionId ?? run.sessionId);
+        const conversationKey = sessionId
+          ? workspaceSessionKey({ workspacePath, sessionId })
+          : undefined;
+        if (runId) {
+          setData((current) => ({
+            ...current,
+            runs: [
+              {
+                id: runId,
+                workspacePath,
+                sessionId: sessionId || undefined,
+                description: stringValue(run.description, "会话运行"),
+                status: stringValue(run.status, "running"),
+                startedAt: numberValue(run.startedAt, event.at),
+                updatedAt: numberValue(run.updatedAt, event.at),
+              },
+              ...current.runs.filter(
+                (candidate) => candidate.workspacePath !== workspacePath || candidate.id !== runId,
+              ),
+            ],
+            ...(sessionId && conversationKey
+              ? {
+                  conversations: {
+                    ...current.conversations,
+                    [conversationKey]: {
+                      ...(current.conversations[conversationKey] ?? {
+                        workspacePath,
+                        sessionId,
+                        items: [],
+                        queuedCount: 0,
+                      }),
+                      runId,
+                      items: (current.conversations[conversationKey]?.items ?? []).filter(
+                        (candidate) =>
+                          candidate.kind !== "thinking" || candidate.streaming !== true,
+                      ),
+                    },
+                  },
+                }
+              : {}),
+          }));
+        }
+        scheduleHydration(sessionId || undefined);
       } else if (topic === "run.timeline") {
-        const item = isRecord(payload.item) ? payload.item : {};
         setData((current) => ({
           ...current,
-          timeline: [
-            ...current.timeline,
-            {
-              id: stringValue(item.id ?? event.eventId, `timeline-${Date.now()}`),
-              kind:
-                item.kind === "plan" || item.kind === "tool" || item.kind === "agent"
-                  ? item.kind
-                  : "status",
-              title: stringValue(item.title ?? item.message, "运行状态已更新"),
-              detail: stringValue(item.detail),
-              state: item.state === "failed" ? "failed" : item.state === "done" ? "done" : "active",
-              at: numberValue(event.at, Date.now()),
-              sessionId: stringValue(scope.sessionId) || undefined,
-              runId: stringValue(scope.runId ?? payload.runId) || undefined,
-              eventType: stringValue(item.eventType) || undefined,
-            } satisfies AppData["timeline"][number],
-          ].slice(-MAX_RENDERER_TIMELINE_ITEMS),
+          timeline: applyTimelineNotification(current.timeline, event),
         }));
-      } else if (topic === "config.updated") {
-        const workspace = dataRef.current.workspacePath;
-        if (workspace) void loadWorkspace(bridge, workspace).catch(reportFailure);
-      } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
-        const workspace = dataRef.current.workspacePath;
-        if (workspace) {
-          const sessionId = stringValue(scope.sessionId);
-          void loadWorkspace(bridge, workspace)
-            .then(() => (sessionId ? loadConversation(bridge, workspace, sessionId) : undefined))
-            .catch(reportFailure);
+      } else if (topic === "run.live") {
+        const sessionId = stringValue(scope.sessionId);
+        const runId = stringValue(scope.runId ?? payload.runId);
+        const conversationKey = sessionId
+          ? workspaceSessionKey({ workspacePath, sessionId })
+          : undefined;
+        const item = isRecord(payload.item) ? payload.item : {};
+        const operation = stringValue(item.operation);
+        if (
+          sessionId &&
+          conversationKey &&
+          runId &&
+          item.kind === "thinking" &&
+          (operation === "append" || operation === "complete" || operation === "clear")
+        ) {
+          setData((current) => {
+            const conversation = current.conversations[conversationKey] ?? {
+              workspacePath,
+              sessionId,
+              items: [],
+              queuedCount: 0,
+              runId,
+            };
+            const activeRun = current.runs.find(
+              (candidate) =>
+                candidate.workspacePath === workspacePath &&
+                candidate.sessionId === sessionId &&
+                !isTerminalRunStatus(candidate.status),
+            );
+            if (activeRun && activeRun.id !== runId) return current;
+            const runConversation =
+              conversation.runId === runId
+                ? conversation
+                : {
+                    ...conversation,
+                    runId,
+                    items: conversation.items.filter(
+                      (candidate) => candidate.kind !== "thinking" || candidate.streaming !== true,
+                    ),
+                  };
+            return {
+              ...current,
+              conversations: {
+                ...current.conversations,
+                [conversationKey]: {
+                  ...runConversation,
+                  items: applyLiveReasoningUpdate(runConversation.items, {
+                    runId,
+                    operation,
+                    ...(stringValue(item.streamId) ? { streamId: stringValue(item.streamId) } : {}),
+                    ...(stringValue(item.turnId) ? { turnId: stringValue(item.turnId) } : {}),
+                    ...(stringValue(item.delta) ? { delta: stringValue(item.delta) } : {}),
+                    ...(item.truncated === true ? { truncated: true } : {}),
+                    at: numberValue(event.at, Date.now()),
+                  }),
+                },
+              },
+            };
+          });
         }
+      } else if (topic === "config.updated") {
+        scheduleHydration();
+      } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
+        scheduleHydration(stringValue(scope.sessionId) || undefined);
       }
+    };
+    void (async () => {
+      // Capture the durable boundary first, hydrate current state once, then only
+      // subscribe after that high-watermark. Historical events never enter the
+      // Main/preload pending buffers or trigger one refresh per old event.
+      const boundary = await bridge.runtime["events.replay"]({ workspacePath, limit: 1 });
+      if (!boundary.ok) throw new Error(boundary.error.message);
+      await loadWorkspace(bridge, workspacePath);
+      if (disposed) return;
+      const highWatermarkEventId = boundary.value.highWatermarkEventId;
+      subscription = bridge.events.subscribe(
+        {
+          workspacePath,
+          ...(highWatermarkEventId ? { afterEventId: highWatermarkEventId } : {}),
+        },
+        handleEvent,
+      );
+      const result = await subscription.ready;
+      if (!result.ok && !disposed) setMessage(`事件订阅失败：${result.error.message}`);
+    })().catch((error: unknown) => {
+      if (!disposed) reportFailure(error);
     });
-    void subscription.ready.then((result) => {
-      if (!result.ok) setMessage(`事件订阅失败：${result.error.message}`);
-    });
-    return () => subscription.dispose();
+    return () => {
+      disposed = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      subscription?.dispose();
+    };
   }, [
     connection.kind,
     data.workspacePath,
@@ -1337,37 +1638,69 @@ export function useRuntimeStore(): RuntimeStore {
   const actions = useMemo<RuntimeActions>(
     () => ({
       async chooseWorkspace() {
+        let selectedWorkspacePath: string | undefined;
         await perform("choose-workspace", async (bridge) => {
           const result = await bridge.platform.chooseWorkspace();
           if (!result.ok) throw new Error(result.error.message);
           if (!result.value) return;
+          if (preview) {
+            selectedWorkspacePath = result.value;
+            setData(previewData);
+            return;
+          }
           const registeredValue = await invoke(bridge, "workspace.register", {
             workspacePath: result.value,
           });
           const workspacePath = stringValue(registeredValue.workspacePath, result.value);
-          setData({ ...emptyData, workspacePath });
-          if (!preview) await loadWorkspace(bridge, workspacePath);
+          selectedWorkspacePath = workspacePath;
+          await loadWorkspaceIndex(bridge);
+          await loadWorkspace(bridge, workspacePath);
+        });
+        return selectedWorkspacePath;
+      },
+      async selectWorkspace(workspacePath) {
+        if (!workspacePath) return;
+        if (preview) {
+          setData(previewData);
+          return;
+        }
+        await perform("select-workspace", async (bridge) => {
+          await loadWorkspace(bridge, workspacePath);
         });
       },
-      async trustWorkspace(trusted) {
-        const workspacePath = dataRef.current.workspacePath;
+      async trustWorkspace(workspacePath, trusted) {
         if (!workspacePath) return;
         await perform("trust-workspace", async (bridge) => {
           if (!preview) await invoke(bridge, "workspace.trust", { workspacePath, trusted });
-          setData((current) => ({ ...current, trusted }));
+          if (!preview) {
+            await loadWorkspaceIndex(bridge);
+            await loadWorkspace(bridge, workspacePath);
+            return;
+          }
+          setData((current) => ({
+            ...current,
+            trusted,
+            workspaces: current.workspaces.map((workspace) =>
+              workspace.path === workspacePath ? { ...workspace, trusted } : workspace,
+            ),
+          }));
         });
       },
       reload: bootstrap,
-      async loadSession(sessionId) {
-        const workspacePath = dataRef.current.workspacePath;
-        if (!workspacePath || !sessionId) return;
+      async loadSession(ref) {
+        if (!ref.workspacePath || !ref.sessionId) return;
         await perform("load-session", async (bridge) => {
-          if (!preview) await loadConversation(bridge, workspacePath, sessionId);
+          if (preview) return;
+          if (dataRef.current.workspacePath !== ref.workspacePath) {
+            await loadWorkspace(bridge, ref.workspacePath);
+          }
+          await loadConversation(bridge, ref.workspacePath, ref.sessionId);
         });
       },
-      async loadEarlierSession(sessionId) {
-        const workspacePath = dataRef.current.workspacePath;
-        const conversation = dataRef.current.conversations[sessionId];
+      async loadEarlierSession(ref) {
+        const { workspacePath, sessionId } = ref;
+        const conversationKey = workspaceSessionKey(ref);
+        const conversation = dataRef.current.conversations[conversationKey];
         const before = conversation?.nextBefore;
         const expectedRevision = conversation?.revision;
         if (!workspacePath || !before || !expectedRevision) return;
@@ -1390,17 +1723,17 @@ export function useRuntimeStore(): RuntimeStore {
             }
             throw error;
           }
-          const page = parseConversation(value, sessionId);
+          const page = parseConversation(value, workspacePath, sessionId);
           if (
             page.revision !== expectedRevision ||
-            dataRef.current.conversations[sessionId]?.revision !== expectedRevision
+            dataRef.current.conversations[conversationKey]?.revision !== expectedRevision
           ) {
             await loadConversation(bridge, workspacePath, sessionId);
             setMessage("会话历史已更新，已从最新版本重新加载。");
             return;
           }
           setData((current) => {
-            const latest = current.conversations[sessionId];
+            const latest = current.conversations[conversationKey];
             if (!latest || latest.revision !== expectedRevision) return current;
             const existingIds = new Set(latest.items.map((item) => item.id));
             const olderItems = page.items.filter((item) => !existingIds.has(item.id));
@@ -1408,7 +1741,7 @@ export function useRuntimeStore(): RuntimeStore {
               ...current,
               conversations: {
                 ...current.conversations,
-                [sessionId]: {
+                [conversationKey]: {
                   ...latest,
                   items: [...olderItems, ...latest.items],
                   nextBefore: page.nextBefore,
@@ -1420,7 +1753,7 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       async sendMessage(input) {
-        const workspacePath = dataRef.current.workspacePath;
+        const workspacePath = input.workspacePath;
         if (!workspacePath || !input.text.trim()) return { succeeded: false };
         let resolvedSessionId = input.sessionId;
         const sendIdentity = JSON.stringify({
@@ -1441,8 +1774,10 @@ export function useRuntimeStore(): RuntimeStore {
             resolvedSessionId ??= "session-atlas";
             const sessionId = resolvedSessionId;
             if (!sessionId) return;
+            const conversationKey = workspaceSessionKey({ workspacePath, sessionId });
             setData((current) => {
-              const conversation = current.conversations[sessionId] ?? {
+              const conversation = current.conversations[conversationKey] ?? {
+                workspacePath,
                 sessionId,
                 items: [],
                 queuedCount: 0,
@@ -1451,7 +1786,7 @@ export function useRuntimeStore(): RuntimeStore {
                 ...current,
                 conversations: {
                   ...current.conversations,
-                  [sessionId]: {
+                  [conversationKey]: {
                     ...conversation,
                     items: [
                       ...conversation.items,
@@ -1493,11 +1828,12 @@ export function useRuntimeStore(): RuntimeStore {
         }
         return {
           succeeded,
+          ...(succeeded ? { workspacePath } : {}),
           ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
         };
       },
-      async renameSession(sessionId, title) {
-        const workspacePath = dataRef.current.workspacePath;
+      async renameSession(ref, title) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath || !title.trim()) return;
         await perform("rename-session", async (bridge) => {
           if (!preview) {
@@ -1512,13 +1848,15 @@ export function useRuntimeStore(): RuntimeStore {
           setData((current) => ({
             ...current,
             sessions: current.sessions.map((session) =>
-              session.id === sessionId ? { ...session, title: title.trim() } : session,
+              session.workspacePath === workspacePath && session.id === sessionId
+                ? { ...session, title: title.trim() }
+                : session,
             ),
           }));
         });
       },
-      async forkSession(sessionId) {
-        const workspacePath = dataRef.current.workspacePath;
+      async forkSession(ref) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath) return undefined;
         let forkedSessionId: string | undefined;
         await perform("fork-session", async (bridge) => {
@@ -1532,10 +1870,10 @@ export function useRuntimeStore(): RuntimeStore {
           await loadWorkspace(bridge, workspacePath);
           if (forkedSessionId) await loadConversation(bridge, workspacePath, forkedSessionId);
         });
-        return forkedSessionId;
+        return forkedSessionId ? { workspacePath, sessionId: forkedSessionId } : undefined;
       },
-      async compactSession(sessionId) {
-        const workspacePath = dataRef.current.workspacePath;
+      async compactSession(ref) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath) return;
         await perform("compact-session", async (bridge) => {
           if (!preview) {
@@ -1545,8 +1883,8 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage("会话上下文已压缩，可见历史已从 Runtime 重新加载。");
         });
       },
-      async updateSessionSettings(sessionId, patch) {
-        const workspacePath = dataRef.current.workspacePath;
+      async updateSessionSettings(ref, patch) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath) return;
         await perform("session-settings", async (bridge) => {
           if (!preview) {
@@ -1559,8 +1897,8 @@ export function useRuntimeStore(): RuntimeStore {
           }
         });
       },
-      async setSessionArchived(sessionId, archived) {
-        const workspacePath = dataRef.current.workspacePath;
+      async setSessionArchived(ref, archived) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath) return;
         await perform("session-state", async (bridge) => {
           if (!preview)
@@ -1571,7 +1909,7 @@ export function useRuntimeStore(): RuntimeStore {
           setData((current) => ({
             ...current,
             sessions: current.sessions.map((session) =>
-              session.id === sessionId
+              session.workspacePath === workspacePath && session.id === sessionId
                 ? { ...session, status: archived ? "archived" : "active" }
                 : session,
             ),
@@ -1586,7 +1924,9 @@ export function useRuntimeStore(): RuntimeStore {
           setData((current) => ({
             ...current,
             runs: current.runs.map((run) =>
-              run.id === runId ? { ...run, status: "pause_requested" } : run,
+              run.workspacePath === workspacePath && run.id === runId
+                ? { ...run, status: "pause_requested" }
+                : run,
             ),
           }));
         });
@@ -1599,7 +1939,9 @@ export function useRuntimeStore(): RuntimeStore {
           setData((current) => ({
             ...current,
             runs: current.runs.map((run) =>
-              run.id === runId ? { ...run, status: "running" } : run,
+              run.workspacePath === workspacePath && run.id === runId
+                ? { ...run, status: "running" }
+                : run,
             ),
           }));
         });
@@ -1612,7 +1954,9 @@ export function useRuntimeStore(): RuntimeStore {
           setData((current) => ({
             ...current,
             runs: current.runs.map((run) =>
-              run.id === runId ? { ...run, status: "cancelling" } : run,
+              run.workspacePath === workspacePath && run.id === runId
+                ? { ...run, status: "cancelling" }
+                : run,
             ),
           }));
         });
@@ -1645,6 +1989,7 @@ export function useRuntimeStore(): RuntimeStore {
             resolveApprovalState(current, {
               approvalId: id,
               decision,
+              workspacePath,
               sessionId: "",
               runId: current.approvals.find((approval) => approval.id === id)?.runId ?? "",
             }),
@@ -1665,6 +2010,7 @@ export function useRuntimeStore(): RuntimeStore {
           setData((current) =>
             resolvePromptState(current, {
               promptId: id,
+              workspacePath,
               sessionId: "",
               runId: current.prompts.find((prompt) => prompt.id === id)?.runId ?? "",
             }),
@@ -1673,7 +2019,9 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async reviewChanges(decision, reviewMessage, target) {
         const workspacePath = dataRef.current.workspacePath;
-        const runId = target?.runId ?? dataRef.current.runs[0]?.id;
+        const runId =
+          target?.runId ??
+          dataRef.current.runs.find((run) => run.workspacePath === workspacePath)?.id;
         const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
         if (!workspacePath || !runId || !expectedFingerprint) return;
         await perform("review", async (bridge) => {
@@ -1690,7 +2038,9 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async applyChanges(target) {
         const workspacePath = dataRef.current.workspacePath;
-        const runId = target?.runId ?? dataRef.current.runs[0]?.id;
+        const runId =
+          target?.runId ??
+          dataRef.current.runs.find((run) => run.workspacePath === workspacePath)?.id;
         const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
         if (!workspacePath || !runId || !expectedFingerprint) return;
         await perform("apply", async (bridge) => {
@@ -1699,8 +2049,8 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage("更改已应用到工作区。");
         });
       },
-      async previewRewind(sessionId) {
-        const workspacePath = dataRef.current.workspacePath;
+      async previewRewind(ref) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath) return undefined;
         let previewResult:
           | {
@@ -1738,8 +2088,8 @@ export function useRuntimeStore(): RuntimeStore {
         });
         return previewResult;
       },
-      async applyRewind(sessionId, checkpointId, fingerprint) {
-        const workspacePath = dataRef.current.workspacePath;
+      async applyRewind(ref, checkpointId, fingerprint) {
+        const { workspacePath, sessionId } = ref;
         if (!workspacePath || !fingerprint) return;
         await perform("rewind-apply", async (bridge) => {
           if (!preview)
@@ -2064,7 +2414,7 @@ export function useRuntimeStore(): RuntimeStore {
         return output;
       },
     }),
-    [bootstrap, loadConversation, loadWorkspace, perform, preview],
+    [bootstrap, loadConversation, loadWorkspace, loadWorkspaceIndex, perform, preview],
   );
 
   return { preview, connection, data, busy, message, actions };

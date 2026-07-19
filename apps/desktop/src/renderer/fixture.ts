@@ -1,9 +1,24 @@
 import type { AppData } from "./model.js";
+import { workspaceSessionKey } from "./workspace-session.js";
 
 const now = Date.now();
+const previewWorkspacePath = "/Users/chen/Projects/atlas-notes";
+const previewSessionKey = workspaceSessionKey({
+  workspacePath: previewWorkspacePath,
+  sessionId: "session-atlas",
+});
 
 export const previewData: AppData = {
-  workspacePath: "/Users/chen/Projects/atlas-notes",
+  workspaces: [
+    {
+      path: previewWorkspacePath,
+      name: "atlas-notes",
+      mode: "git",
+      registered: true,
+      trusted: true,
+    },
+  ],
+  workspacePath: previewWorkspacePath,
   workspaceMode: "git",
   workspaceCapabilities: {
     foregroundRuns: true,
@@ -15,6 +30,7 @@ export const previewData: AppData = {
   sessions: [
     {
       id: "session-atlas",
+      workspacePath: previewWorkspacePath,
       title: "修复同步冲突并补充回归测试",
       status: "active",
       updatedAt: now - 90_000,
@@ -22,6 +38,7 @@ export const previewData: AppData = {
     },
     {
       id: "session-editor",
+      workspacePath: previewWorkspacePath,
       title: "重构编辑器快捷键",
       status: "active",
       updatedAt: now - 86_400_000,
@@ -29,6 +46,7 @@ export const previewData: AppData = {
     },
     {
       id: "session-export",
+      workspacePath: previewWorkspacePath,
       title: "导出模块性能排查",
       status: "archived",
       updatedAt: now - 518_400_000,
@@ -37,6 +55,7 @@ export const previewData: AppData = {
   runs: [
     {
       id: "run-atlas",
+      workspacePath: previewWorkspacePath,
       sessionId: "session-atlas",
       description: "修复同步冲突，并为关键失败路径补一条集成测试",
       status: "running",
@@ -77,8 +96,9 @@ export const previewData: AppData = {
     },
   ],
   conversations: {
-    "session-atlas": {
+    [previewSessionKey]: {
       sessionId: "session-atlas",
+      workspacePath: previewWorkspacePath,
       revision: "preview.1",
       queuedCount: 0,
       settings: {

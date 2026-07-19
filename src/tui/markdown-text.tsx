@@ -10,13 +10,17 @@ export function MarkdownText({
   content,
   dimColor = false,
   width,
+  startRow,
+  rows,
 }: {
   content: string;
   dimColor?: boolean;
   width?: number;
+  startRow?: number;
+  rows?: number;
 }): React.ReactNode {
   const model = useMemo(() => new TerminalMarkdownModel(content), [content]);
-  return model.render(width, dimColor);
+  return model.render(width, dimColor, startRow, rows);
 }
 
 export { TerminalMarkdownModel } from "./terminal-markdown-model.js";

@@ -21,6 +21,7 @@ import { estimateCost, type BillingRoute } from "./pricing.js";
 import { logger } from "./logger.js";
 import { getProviderCallContext, type ProviderCallContext } from "./provider-call-context.js";
 import { currentRuntimeRun } from "../runtime/runtime-run.js";
+import { defaultIsRetryableError } from "../provider/retry.js";
 
 export interface ProviderCallLedger {
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
@@ -53,6 +54,10 @@ export class CostTracker implements LLMProvider {
   /** 暴露模型名供重试/日志打点;计费路由可能是 BillingRoute 对象,取其 model 字段。 */
   get modelName(): string {
     return typeof this.modelRoute === "string" ? this.modelRoute : this.modelRoute.model;
+  }
+
+  isRetryableError(error: unknown): boolean {
+    return this.next.isRetryableError?.(error) ?? defaultIsRetryableError(error);
   }
 
   async generate(

@@ -11,7 +11,10 @@ import type {
   RuntimeLifecycleEvent,
   RuntimeRunOptions,
 } from "../../src/runtime/runtime-contract.js";
-import { RuntimeRunExecutor } from "../../src/runtime/runtime-run-executor.js";
+import {
+  emitRuntimeLifecycleEvent,
+  RuntimeRunExecutor,
+} from "../../src/runtime/runtime-run-executor.js";
 
 test("RuntimeRunExecutor executes one assembled turn without owning its resources", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-executor-"));
@@ -41,7 +44,6 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     const lifecycleEvents: RuntimeLifecycleEvent[] = [];
     const result = await new RuntimeRunExecutor({
       session,
-      runtimeEventStore: session.runtimeEventStore!,
       runtimeState,
       engine,
       sessionSelection: { mode: "new", sessionId: session.id },
@@ -70,4 +72,66 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     await session.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("RuntimeRunExecutor isolates lifecycle observer failures from canonical run success", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-observer-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-run-observer", workDir, { persistence: true, picoHome });
+  try {
+    await session.recover();
+    const runtimeState = {
+      dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+    } as unknown as SessionRuntime;
+    const engine = {
+      run: async (target: Session) => {
+        await target.commitMessages({ role: "assistant", content: "observer-safe" });
+        return target.getHistory();
+      },
+    } as unknown as AgentEngine;
+
+    const result = await new RuntimeRunExecutor({
+      session,
+      runtimeState,
+      engine,
+      sessionSelection: { mode: "new", sessionId: session.id },
+      workDir,
+      picoHome,
+      prompt: "hello",
+      resumeExistingSession: false,
+      traceEnabled: false,
+      options: {},
+      onEvent: () => {
+        throw new Error("observer unavailable");
+      },
+    }).execute();
+
+    assert.equal(result.finalMessage, "observer-safe");
+    const runEvents = await session.runtimeEventStore!.readSession(session.id);
+    assert.equal(
+      runEvents.some((event) => event.kind === "run.terminal" && event.data.status === "completed"),
+      true,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run.failed lifecycle observers cannot replace the original Runtime failure", () => {
+  assert.doesNotThrow(() =>
+    emitRuntimeLifecycleEvent(
+      () => {
+        throw new Error("observer unavailable");
+      },
+      {
+        type: "run.failed",
+        sessionId: "failed-session",
+        workDir: "/workspace",
+        at: 1,
+        detail: "original failure",
+      },
+    ),
+  );
 });

@@ -4,6 +4,7 @@ export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 export const DESKTOP_RUNTIME_SCHEMA_REVISION = 2;
 export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v2";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
+export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
 
 export type JsonScalar = boolean | null | number | string;
 export type JsonObject = { readonly [key: string]: JsonValue };
@@ -190,6 +191,9 @@ export type RuntimeConversationItem = (
       /** Provider explicitly returned reasoning/thinking content. */
       readonly kind: "thinking";
       readonly content: string;
+      /** Present when the durable message can be tied to one Runtime model turn. */
+      readonly runId?: RunId;
+      readonly turnId?: string;
       readonly at?: number;
     })
   | (JsonObject & {
@@ -229,7 +233,17 @@ export type RuntimeConversationItem = (
     })
   | (JsonObject & {
       readonly id: string;
-      readonly kind: "approval" | "prompt" | "changes" | "subagent" | "goal";
+      readonly kind: "approval" | "prompt" | "changes" | "goal";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state?: string;
+      readonly at?: number;
+      readonly data?: JsonObject;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "subagent";
+      readonly name?: string;
       readonly title: string;
       readonly detail?: string;
       readonly state?: string;
@@ -957,6 +971,19 @@ export type RuntimeNotificationMap = {
   readonly "run.started": { readonly run: RuntimeRun };
   readonly "run.updated": { readonly run: RuntimeRun };
   readonly "run.finished": { readonly run: RuntimeRun };
+  /** Best-effort live projection. It is never stored or returned by events.replay. */
+  readonly "run.live": {
+    readonly runId: RunId;
+    readonly item: {
+      readonly kind: "thinking";
+      readonly operation: "append" | "complete" | "clear";
+      readonly streamId?: string;
+      readonly turnId?: string;
+      readonly delta?: string;
+      /** True when an intermediary retained only a bounded prefix of the live stream. */
+      readonly truncated?: boolean;
+    };
+  };
   readonly "run.timeline": { readonly runId: RunId; readonly item: JsonObject };
   readonly "approval.requested": {
     readonly approvalId: ApprovalId;
@@ -997,6 +1024,14 @@ export type RuntimeNotificationMap = {
 };
 
 export type RuntimeNotificationTopic = keyof RuntimeNotificationMap;
+export type EphemeralRuntimeNotificationTopic =
+  (typeof EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS)[number];
+
+export function isEphemeralRuntimeNotificationTopic(
+  topic: string,
+): topic is EphemeralRuntimeNotificationTopic {
+  return (EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS as readonly string[]).includes(topic);
+}
 type NotificationPayload<Topic extends string> = Topic extends RuntimeNotificationTopic
   ? RuntimeNotificationMap[Topic]
   : JsonValue;
@@ -1328,7 +1363,7 @@ function assertNotificationMessage(value: Record<string, unknown>): RuntimeNotif
   return value as unknown as RuntimeNotificationMessage;
 }
 
-function isRuntimeNotification(value: Record<string, unknown>): boolean {
+function isRuntimeNotificationEnvelope(value: Record<string, unknown>): boolean {
   const scope = value.scope;
   return (
     value.protocolVersion === LOCAL_RUNTIME_PROTOCOL_VERSION &&
@@ -1346,6 +1381,41 @@ function isRuntimeNotification(value: Record<string, unknown>): boolean {
     Number.isFinite(value.at) &&
     isJsonValue(value.payload)
   );
+}
+
+function isRuntimeNotification(value: Record<string, unknown>): boolean {
+  if (!isRuntimeNotificationEnvelope(value)) return false;
+  return value.topic !== "run.live" || isRunLiveRuntimeNotification(value);
+}
+
+/** Strict guard for the only ephemeral Runtime event accepted by buffering clients. */
+export function isRunLiveRuntimeNotification(
+  value: unknown,
+): value is RuntimeNotification<"run.live"> {
+  if (!isJsonObject(value) || !isRuntimeNotificationEnvelope(value) || value.topic !== "run.live") {
+    return false;
+  }
+  const payload = value.payload;
+  if (!isJsonObject(payload) || typeof payload.runId !== "string" || !payload.runId) return false;
+  const scope = value.scope;
+  if (!isJsonObject(scope) || scope.runId !== payload.runId) return false;
+  const item = payload.item;
+  if (!isJsonObject(item) || item.kind !== "thinking") return false;
+  if (item.operation !== "append" && item.operation !== "complete" && item.operation !== "clear") {
+    return false;
+  }
+  if (item.streamId !== undefined && typeof item.streamId !== "string") return false;
+  if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
+  if (item.delta !== undefined && typeof item.delta !== "string") return false;
+  if (item.truncated !== undefined && typeof item.truncated !== "boolean") return false;
+  if (item.operation === "append") {
+    return (
+      typeof item.streamId === "string" &&
+      item.streamId.length > 0 &&
+      typeof item.delta === "string"
+    );
+  }
+  return item.delta === undefined && item.truncated === undefined;
 }
 
 function optionalStringField(value: Record<string, unknown>, key: string): boolean {
@@ -1889,10 +1959,16 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     kind === "userMessage" ||
     kind === "assistantMessage" ||
     kind === "systemNotice" ||
-    kind === "error" ||
-    kind === "thinking"
+    kind === "error"
   ) {
     resultShape({ content: resultString })(value, path);
+    return;
+  }
+  if (kind === "thinking") {
+    resultShape({ content: resultString }, { runId: resultString, turnId: resultString })(
+      value,
+      path,
+    );
     return;
   }
   if (kind === "skill") {
@@ -1907,10 +1983,14 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     kind === "plan" ||
     ["approval", "prompt", "changes", "subagent", "goal"].includes(String(kind))
   ) {
-    resultShape({ title: resultString }, { detail: resultString, state: resultString })(
-      value,
-      path,
-    );
+    resultShape(
+      { title: resultString },
+      {
+        detail: resultString,
+        state: resultString,
+        ...(kind === "subagent" ? { name: resultString } : {}),
+      },
+    )(value, path);
     return;
   }
   if (kind === "tool") {
@@ -1950,6 +2030,13 @@ const runtimeChangeResult = resultShape({
 const runtimeNotificationResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value) || !isRuntimeNotification(value)) {
     throw invalidResult(`${path} 不是有效的 Runtime event`);
+  }
+};
+
+const durableRuntimeNotificationResult: RuntimeResultRule = (value, path) => {
+  runtimeNotificationResult(value, path);
+  if (isJsonObject(value) && isEphemeralRuntimeNotificationTopic(String(value["topic"] ?? ""))) {
+    throw invalidResult(`${path} 不能包含 ephemeral Runtime event`);
   }
 };
 
@@ -2017,13 +2104,13 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     fingerprint: resultString,
   }),
   "events.replay": resultShape(
-    { events: resultArray(runtimeNotificationResult), hasMore: resultBoolean },
+    { events: resultArray(durableRuntimeNotificationResult), hasMore: resultBoolean },
     { nextAfterEventId: resultString, highWatermarkEventId: resultString },
   ),
   "events.subscribe": resultShape(
     {
       subscribed: resultOneOf([true]),
-      events: resultArray(runtimeNotificationResult),
+      events: resultArray(durableRuntimeNotificationResult),
       hasMore: resultBoolean,
     },
     { nextAfterEventId: resultString, highWatermarkEventId: resultString },

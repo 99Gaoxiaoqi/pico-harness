@@ -177,6 +177,15 @@ export class TuiReporter implements Reporter {
     this.syncLegacyEntries(this.eventStore.getProjection());
   }
 
+  /** Rebuild the visible projection from Session after a durable branch change. */
+  replaceTranscriptEvents(events: readonly TuiEvent[]): void {
+    this.clearRuntimeTracking();
+    this.eventStore.replaceEvents(events);
+    this.rebuildRuntimeTracking();
+    this.syncLegacyEntries(this.eventStore.getProjection());
+    this.emit();
+  }
+
   /** 旧 messages fallback 只用于显示，不应在启动时被当成新事件再次落盘。 */
   withoutDurableTranscript(callback: () => void): void {
     const previous = this.durableTranscriptSuppressed;
@@ -219,11 +228,15 @@ export class TuiReporter implements Reporter {
   }
 
   /** 对话 rewind 后让可见 transcript 与 Session 使用同一截断边界。 */
-  truncateTo(entryIndex: number): void {
+  truncateTo(entryIndex: number, options: { readonly operationId?: string } = {}): void {
     const entryCount = this.eventStore.getProjection().entries.length;
     const safeIndex = Math.min(Math.max(0, entryIndex), entryCount);
     this.interruptActiveStreams("truncate");
-    this.eventStore.append({ type: "transcript.truncated", entryCount: safeIndex });
+    this.eventStore.append({
+      type: "transcript.truncated",
+      entryCount: safeIndex,
+      ...(options.operationId ? { operationId: options.operationId } : {}),
+    });
     this.clearRuntimeTracking();
     this.appendPhase("idle", true);
     this.emit();
@@ -645,9 +658,16 @@ export class TuiReporter implements Reporter {
 
   private interruptActiveStreams(reason: "new-request" | "clear" | "truncate" | "abort"): void {
     for (const stream of this.activeStreams()) {
-      this.eventStore.append({ type: "assistant.stream.interrupted", ...stream, reason });
+      const content = this.projectedStreamContent(stream);
+      this.eventStore.append({
+        type: "assistant.stream.interrupted",
+        ...stream,
+        reason,
+        ...(content !== undefined ? { content } : {}),
+      });
     }
     this.currentStream = null;
+    this.currentReasoningStream = null;
   }
 
   private clearRuntimeTracking(): void {

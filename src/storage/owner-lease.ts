@@ -13,6 +13,8 @@ export interface OwnerLeaseOptions {
   heartbeatIntervalMs?: number;
   staleAfterMs?: number;
   now?: () => number;
+  /** Host filesystem seam; production defaults to recursive rm. */
+  removeLeaseDirectory?: (leaseDirectory: string) => Promise<void>;
 }
 
 export interface OwnerLeaseRecord {
@@ -45,6 +47,8 @@ export class OwnerLease {
   private readonly lostController = new AbortController();
   private heartbeatTimer?: NodeJS.Timeout;
   private released = false;
+  private releasePromise?: Promise<void>;
+  private releaseCleanupStarted = false;
 
   private constructor(private readonly options: OwnerLeaseOptions) {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 5_000;
@@ -94,13 +98,42 @@ export class OwnerLease {
 
   async release(): Promise<void> {
     if (this.released) return;
-    this.released = true;
+    if (this.releasePromise) return this.releasePromise;
+    const release = this.releaseOnce();
+    this.releasePromise = release;
+    try {
+      await release;
+    } catch (error) {
+      if (this.releasePromise === release) this.releasePromise = undefined;
+      if (!this.released && !this.lostSignal.aborted) this.startHeartbeat();
+      throw error;
+    }
+  }
+
+  private async releaseOnce(): Promise<void> {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
 
-    const current = await readLeaseRecord(this.ownerPath).catch(() => undefined);
-    if (current?.leaseId !== this.leaseId) return;
-    await rm(this.options.leaseDirectory, { recursive: true, force: true });
+    const current = await readLeaseRecord(this.ownerPath);
+    if (current && current.leaseId !== this.leaseId) {
+      this.released = true;
+      return;
+    }
+    if (!current && !(await pathExists(this.options.leaseDirectory))) {
+      this.released = true;
+      return;
+    }
+    if (!current && !this.releaseCleanupStarted) {
+      this.released = true;
+      this.markLost(new LeaseConflictError("Lease ownership can no longer be verified"));
+      return;
+    }
+    const remove =
+      this.options.removeLeaseDirectory ??
+      ((leaseDirectory: string) => rm(leaseDirectory, { recursive: true, force: true }));
+    this.releaseCleanupStarted = true;
+    await remove(this.options.leaseDirectory);
+    this.released = true;
   }
 
   private async prepareCandidate(): Promise<string> {
@@ -154,6 +187,7 @@ export class OwnerLease {
   }
 
   private startHeartbeat(): void {
+    if (this.heartbeatTimer || this.released || this.lostSignal.aborted) return;
     this.heartbeatTimer = setInterval(() => {
       void this.heartbeat().catch((error: unknown) => {
         this.markLost(error);

@@ -46,6 +46,8 @@ export interface DesktopAutomationAuthorityDependencies {
   readonly effectiveConfigResolver: EffectiveConfigResolver;
   readonly userConfigStore: UserConfigStore;
   readonly env: Readonly<Record<string, string | undefined>>;
+  /** Foreground-only Plugin tools rejected before an Automation is persisted. */
+  readonly foregroundOnlyTools?: ReadonlySet<string>;
   readonly now?: () => number;
 }
 
@@ -339,6 +341,23 @@ export async function createTrustedDesktopAutomation(
   input: DesktopTrustedAutomationInput,
   dependencies: DesktopAutomationAuthorityDependencies,
 ): Promise<RuntimeJob> {
+  const requestedTools = uniqueNonEmptyStrings(input.allowedTools, "allowedTools");
+  const foregroundOnlyTools = requestedTools.filter((tool) =>
+    dependencies.foregroundOnlyTools?.has(tool),
+  );
+  if (foregroundOnlyTools.length > 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.FORBIDDEN,
+      `Automation 不支持前台 Plugin 工具: ${foregroundOnlyTools.join(", ")}`,
+    );
+  }
+  const eligibleTools = filterBackgroundEligibleTools(requestedTools);
+  if (!sameStringValues(requestedTools, eligibleTools)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.FORBIDDEN,
+      "Automation 包含不允许在后台运行的交互式工具",
+    );
+  }
   const target = await resolveDesktopAutomationTarget(
     workspacePath,
     input.modelRouteId,
@@ -354,14 +373,6 @@ export async function createTrustedDesktopAutomation(
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,
       `模型路由 ${input.modelRouteId} 尚未导入系统凭证库`,
-    );
-  }
-  const requestedTools = uniqueNonEmptyStrings(input.allowedTools, "allowedTools");
-  const eligibleTools = filterBackgroundEligibleTools(requestedTools);
-  if (!sameStringValues(requestedTools, eligibleTools)) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.FORBIDDEN,
-      "Automation 包含不允许在后台运行的交互式工具",
     );
   }
   const allowedHosts = uniqueNonEmptyStrings(

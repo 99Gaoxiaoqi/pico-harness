@@ -84,6 +84,16 @@ import type {
 } from "./model.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
+import {
+  newSessionHref,
+  sessionHref,
+  workspaceHref,
+  workspaceName,
+  workspaceParent,
+  workspacePathFromSearch,
+  workspaceSessionKey,
+  type WorkspaceSessionRef,
+} from "./workspace-session.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
 
@@ -134,33 +144,178 @@ export function DesktopApp() {
 }
 
 function AppStateRouter() {
-  const runtime = useRuntime();
-  const { connection, data } = runtime;
+  const { connection } = useRuntime();
   if (connection.kind === "loading") return <LoadingScreen />;
   if (connection.kind === "unavailable" || connection.kind === "error") {
     return <ConnectionScreen />;
   }
-  if (!data.workspacePath) return <Onboarding />;
-  if (!data.trusted) return <TrustWorkspace />;
   return (
     <Routes>
       <Route path="/onboarding" element={<Onboarding />} />
       <Route element={<AppShell />}>
         <Route index element={<HomePage />} />
-        <Route path="task/new" element={<NewTaskPage />} />
-        <Route path="task/:runId" element={<TaskPage />} />
-        <Route path="session/:sessionId" element={<ConversationPage />} />
-        <Route path="review" element={<ReviewPage />} />
         <Route path="sessions" element={<SessionsPage />} />
-        <Route path="automations" element={<AutomationsPage />} />
-        <Route path="skills" element={<CapabilityPage kind="skills" />} />
-        <Route path="mcp" element={<CapabilityPage kind="mcp" />} />
-        <Route path="providers" element={<ProviderPageRoute />} />
-        <Route path="usage" element={<UsagePage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route
+          path="task/new"
+          element={
+            <WorkspaceRoute>
+              <NewTaskPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="task/:runId"
+          element={
+            <WorkspaceRoute>
+              <TaskPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="session/:sessionId"
+          element={
+            <WorkspaceRoute>
+              <ConversationPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="review"
+          element={
+            <WorkspaceRoute>
+              <ReviewPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="automations"
+          element={
+            <WorkspaceRoute>
+              <AutomationsPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="skills"
+          element={
+            <WorkspaceRoute>
+              <CapabilityPage kind="skills" />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="mcp"
+          element={
+            <WorkspaceRoute>
+              <CapabilityPage kind="mcp" />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="providers"
+          element={
+            <WorkspaceRoute>
+              <ProviderPageRoute />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="usage"
+          element={
+            <WorkspaceRoute>
+              <UsagePage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="settings"
+          element={
+            <WorkspaceRoute>
+              <SettingsPage />
+            </WorkspaceRoute>
+          }
+        />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
+  );
+}
+
+function WorkspaceRoute({ children }: { readonly children: ReactNode }) {
+  const { data, actions } = useRuntime();
+  const location = useLocation();
+  const workspacePath = workspacePathFromSearch(location.search);
+  const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
+
+  useEffect(() => {
+    if (workspacePath && workspace && data.workspacePath !== workspacePath) {
+      void actions.selectWorkspace(workspacePath);
+    }
+  }, [actions, data.workspacePath, workspace, workspacePath]);
+
+  if (!workspacePath || !workspace) return <WorkspacePicker />;
+  if (data.workspacePath !== workspacePath) {
+    return (
+      <div className="workspace-route-loading" aria-busy="true">
+        <RefreshCw aria-hidden="true" />
+        <p>正在载入 {workspace.name}…</p>
+      </div>
+    );
+  }
+  if (!data.trusted) return <TrustWorkspace workspacePath={workspacePath} />;
+  return children;
+}
+
+function WorkspacePicker() {
+  const { data, actions, busy } = useRuntime();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const addWorkspace = async () => {
+    const workspacePath = await actions.chooseWorkspace();
+    if (workspacePath) navigate(workspaceHref(location.pathname, workspacePath));
+  };
+  return (
+    <section className="workspace-picker" aria-labelledby="workspace-picker-title">
+      <span className="eyebrow">会话工作区</span>
+      <h2 id="workspace-picker-title">选择这个会话要使用的项目</h2>
+      <p>工作区只绑定到这个会话，不会把整个 App 锁定在一个目录。</p>
+      {data.workspaces.length > 0 ? (
+        <div className="workspace-picker__list">
+          {data.workspaces.map((workspace) => (
+            <Link
+              className="workspace-picker__item"
+              key={workspace.path}
+              to={workspaceHref(location.pathname, workspace.path)}
+            >
+              <span className="workspace-picker__icon">
+                {workspace.mode === "git" ? (
+                  <FolderGit2 aria-hidden="true" />
+                ) : (
+                  <Folder aria-hidden="true" />
+                )}
+              </span>
+              <span>
+                <strong>{workspace.name}</strong>
+                <small>{workspaceParent(workspace.path)}</small>
+              </span>
+              <span className="workspace-picker__state">
+                {workspace.trusted ? "已信任" : "待信任"}
+              </span>
+            </Link>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={<Folder />}
+          title="还没有项目"
+          detail="先添加一个本地文件夹，再开始会话。"
+        />
+      )}
+      <Button variant="primary" disabled={Boolean(busy)} onClick={() => void addWorkspace()}>
+        <Plus aria-hidden="true" size={16} />
+        添加项目文件夹
+      </Button>
+    </section>
   );
 }
 
@@ -202,7 +357,12 @@ function ConnectionScreen() {
 
 function Onboarding() {
   const { data, actions, busy, preview } = useRuntime();
+  const navigate = useNavigate();
   const selected = Boolean(data.workspacePath);
+  const chooseWorkspace = async () => {
+    const workspacePath = await actions.chooseWorkspace();
+    if (workspacePath) navigate(newSessionHref(workspacePath));
+  };
   return (
     <main className="onboarding">
       {preview && <PreviewBadge />}
@@ -248,13 +408,16 @@ function Onboarding() {
             <Button
               variant="primary"
               disabled={Boolean(busy)}
-              onClick={() => void actions.chooseWorkspace()}
+              onClick={() => void chooseWorkspace()}
             >
               {selected ? "更换文件夹" : "选择文件夹"}
             </Button>
             {selected && (
-              <Button disabled={Boolean(busy)} onClick={() => void actions.trustWorkspace(true)}>
-                查看并信任此工作区
+              <Button
+                disabled={Boolean(busy)}
+                onClick={() => data.workspacePath && navigate(newSessionHref(data.workspacePath))}
+              >
+                继续并检查工作区
               </Button>
             )}
           </div>
@@ -267,18 +430,19 @@ function Onboarding() {
   );
 }
 
-function TrustWorkspace() {
+function TrustWorkspace({ workspacePath }: { readonly workspacePath: string }) {
   const { data, actions, busy } = useRuntime();
+  const navigate = useNavigate();
   return (
-    <main className="trust-screen">
+    <section className="trust-screen" aria-labelledby="trust-workspace-title">
       <section className="trust-card">
         <div className="setup-icon">
           <ShieldCheck aria-hidden="true" />
         </div>
         <span className="eyebrow">工作区信任</span>
-        <h1>你信任这个项目的内容吗？</h1>
+        <h1 id="trust-workspace-title">你信任这个项目的内容吗？</h1>
         <p>Pico 可能会读取文件、运行项目命令，并根据任务修改代码。危险或越界操作仍需要单独审批。</p>
-        <code className="trust-path">{data.workspacePath}</code>
+        <code className="trust-path">{workspacePath}</code>
         <WorkspaceModeCard mode={data.workspaceMode} />
         <ul className="trust-facts">
           <li>
@@ -292,39 +456,40 @@ function TrustWorkspace() {
           </li>
         </ul>
         <div className="button-row">
-          <Button disabled={Boolean(busy)} onClick={() => void actions.chooseWorkspace()}>
-            返回选择
+          <Button disabled={Boolean(busy)} onClick={() => navigate("/sessions")}>
+            返回会话库
           </Button>
           <Button
             variant="primary"
             disabled={Boolean(busy)}
-            onClick={() => void actions.trustWorkspace(true)}
+            onClick={() => void actions.trustWorkspace(workspacePath, true)}
           >
             信任并继续
           </Button>
         </div>
       </section>
-    </main>
+    </section>
   );
 }
 
 const primaryNav = [
   { to: "/", label: "开始", icon: Home, end: true },
   { to: "/sessions", label: "会话", icon: MessageSquareMore },
-  { to: "/automations", label: "自动化", icon: Workflow },
-  { to: "/review", label: "更改", icon: FileDiff },
+  { to: "/automations", label: "自动化", icon: Workflow, scoped: true },
+  { to: "/review", label: "更改", icon: FileDiff, scoped: true },
 ] as const;
 
 const resourceNav = [
-  { to: "/skills", label: "Skills", icon: WandSparkles },
-  { to: "/mcp", label: "MCP", icon: Network },
-  { to: "/providers", label: "模型", icon: BrainCircuit },
-  { to: "/usage", label: "用量", icon: Gauge },
+  { to: "/skills", label: "Skills", icon: WandSparkles, scoped: true },
+  { to: "/mcp", label: "MCP", icon: Network, scoped: true },
+  { to: "/providers", label: "模型", icon: BrainCircuit, scoped: true },
+  { to: "/usage", label: "用量", icon: Gauge, scoped: true },
 ] as const;
 
 function AppShell() {
   const { data, preview, message, actions } = useRuntime();
   const location = useLocation();
+  const routeWorkspacePath = workspacePathFromSearch(location.search);
   const pageTitle = routeTitle(location.pathname);
   const conversationRoute =
     location.pathname === "/task/new" || location.pathname.startsWith("/session/");
@@ -359,14 +524,19 @@ function AppShell() {
           <span>Pico</span>
           {preview && <span className="preview-dot" title="视觉预览模式" />}
         </div>
-        {data.workspacePath && (
-          <PathButton path={data.workspacePath} onClick={() => void actions.openWorkspace()} />
+        {routeWorkspacePath && data.workspacePath === routeWorkspacePath && (
+          <PathButton path={routeWorkspacePath} onClick={() => void actions.openWorkspace()} />
         )}
-        <SidebarNav items={primaryNav} label="主要导航" />
-        <SidebarNav items={resourceNav} label="能力与设置" caption="配置" />
+        <SidebarNav items={primaryNav} label="主要导航" workspacePath={routeWorkspacePath} />
+        <SidebarNav
+          items={resourceNav}
+          label="能力与设置"
+          caption="配置"
+          workspacePath={routeWorkspacePath}
+        />
         <div className="sidebar__footer">
           <NavLink
-            to="/settings"
+            to={routeWorkspacePath ? workspaceHref("/settings", routeWorkspacePath) : "/settings"}
             data-nav-link
             className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
           >
@@ -384,12 +554,14 @@ function AppShell() {
         {!conversationRoute && (
           <header className="titlebar">
             <div>
-              <span className="titlebar__context">{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
+              <span className="titlebar__context">
+                {routeWorkspacePath ? workspaceName(routeWorkspacePath) : "全部项目"}
+              </span>
               <h1>{pageTitle}</h1>
             </div>
             <div className="titlebar__actions">
               {preview && <PreviewBadge />}
-              <Link className="button button--primary" to="/task/new">
+              <Link className="button button--primary" to={newSessionHref()}>
                 <Plus aria-hidden="true" size={16} /> 新任务
               </Link>
             </div>
@@ -416,23 +588,26 @@ function SidebarNav({
   items,
   label,
   caption,
+  workspacePath,
 }: {
   readonly items: readonly {
     readonly to: string;
     readonly label: string;
     readonly icon: typeof Home;
     readonly end?: boolean;
+    readonly scoped?: boolean;
   }[];
   readonly label: string;
   readonly caption?: string;
+  readonly workspacePath?: string;
 }) {
   return (
     <nav className="sidebar-nav" aria-label={label}>
       {caption && <span className="sidebar-nav__caption">{caption}</span>}
-      {items.map(({ to, label: itemLabel, icon: Icon, end }) => (
+      {items.map(({ to, label: itemLabel, icon: Icon, end, scoped }) => (
         <NavLink
           key={to}
-          to={to}
+          to={scoped && workspacePath ? workspaceHref(to, workspacePath) : to}
           {...(end === undefined ? {} : { end })}
           data-nav-link
           className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
@@ -484,20 +659,23 @@ function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined 
 
 function HomePage() {
   const { data } = useRuntime();
-  const latestRun = data.runs[0];
+  const latestRun = data.runs.find((run) => !isTerminalRun(run.status));
   return (
     <div className="page-stack home-page">
       <section className="welcome-block">
-        <span className="eyebrow">本地 Agent 工作区</span>
+        <span className="eyebrow">本地 Agent</span>
         <h2>今天想推进什么？</h2>
-        <p>描述结果，Pico 会先理解项目、给出计划，再在需要时请求你的决定。</p>
-        {data.workspaceMode === "folder" && (
-          <div className="workspace-mode-notice" role="note">
-            <WorkspaceModeBadge mode={data.workspaceMode} />
-            <span>共享文件夹支持对话、工具和并行分析；可写子代理的隔离与合并目前需要 Git。</span>
-          </div>
-        )}
-        <TaskComposer compact />
+        <p>每个会话都会记住自己的项目边界。新建会话时选择工作区，已有会话会回到它原来的目录。</p>
+        <div className="button-row">
+          <Link className="button button--primary" to={newSessionHref()}>
+            <Plus aria-hidden="true" size={16} /> 新建会话
+          </Link>
+          {data.workspaces.length === 0 && (
+            <Link className="button" to="/onboarding">
+              添加第一个项目
+            </Link>
+          )}
+        </div>
       </section>
       <div className="dashboard-grid">
         <section className="panel panel--wide">
@@ -511,7 +689,13 @@ function HomePage() {
           ) : (
             <div className="session-list session-list--compact">
               {data.sessions.slice(0, 4).map((session) => (
-                <SessionRow key={session.id} session={session} />
+                <SessionRow
+                  key={workspaceSessionKey({
+                    workspacePath: session.workspacePath,
+                    sessionId: session.id,
+                  })}
+                  session={session}
+                />
               ))}
             </div>
           )}
@@ -521,7 +705,14 @@ function HomePage() {
           {latestRun ? (
             <Link
               className="active-run-card"
-              to={latestRun.sessionId ? `/session/${latestRun.sessionId}` : `/task/${latestRun.id}`}
+              to={
+                latestRun.sessionId
+                  ? sessionHref({
+                      workspacePath: latestRun.workspacePath,
+                      sessionId: latestRun.sessionId,
+                    })
+                  : workspaceHref(`/task/${latestRun.id}`, latestRun.workspacePath)
+              }
             >
               <span className="active-run-card__icon">
                 <Bot aria-hidden="true" />
@@ -537,21 +728,10 @@ function HomePage() {
           )}
         </section>
         <section className="panel metric-panel">
-          <PanelHeader
-            title="本月用量"
-            detail="仅来自 Runtime"
-            action={<Link to="/usage">详情</Link>}
-          />
-          <strong>{formatCompact(data.usage.inputTokens ?? 0)}</strong>
-          <span>输入 tokens</span>
-          <div className="metric-bar">
-            <span
-              style={{
-                width: `${Math.min(100, ((data.usage.inputTokens ?? 0) / 200_000) * 100)}%`,
-              }}
-            />
-          </div>
-          <p>缓存命中 {formatCompact(data.usage.cachedTokens ?? 0)}</p>
+          <PanelHeader title="项目" detail="已注册的本地工作区" />
+          <strong>{data.workspaces.length}</strong>
+          <span>个可用项目</span>
+          <p>{data.workspaces.filter((workspace) => workspace.trusted).length} 个已信任</p>
         </section>
       </div>
     </div>
@@ -562,51 +742,17 @@ function NewTaskPage() {
   return <ConversationPage />;
 }
 
-function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
-  const { actions, busy, data } = useRuntime();
-  const navigate = useNavigate();
-  const [prompt, setPrompt] = useState("");
-  const sendingRef = useRef(false);
-  const submit = async (text: string) => {
-    if (sendingRef.current) return;
-    sendingRef.current = true;
-    try {
-      const result = await actions.sendMessage({ text });
-      if (!result.succeeded) return;
-      setPrompt("");
-      if (result.sessionId) navigate(`/session/${result.sessionId}`);
-    } finally {
-      sendingRef.current = false;
-    }
-  };
-  return (
-    <div className={`home-conversation-composer ${compact ? "is-compact" : ""}`}>
-      <ConversationComposer
-        value={prompt}
-        onValueChange={setPrompt}
-        onSubmit={(value) => void submit(value.text)}
-        status="idle"
-        busy={busy === "send-message"}
-        placeholder="向 Pico 描述你想推进的事情…"
-        leadingAccessory={
-          <span className="conversation-context-label">
-            {data.workspaceMode === "git" ? (
-              <FolderGit2 aria-hidden="true" size={15} />
-            ) : (
-              <Folder aria-hidden="true" size={15} />
-            )}
-            <span>{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
-          </span>
-        }
-      />
-    </div>
-  );
-}
-
 function ConversationPage() {
   const { sessionId } = useParams();
   const { data, actions, busy, preview } = useRuntime();
+  const location = useLocation();
   const navigate = useNavigate();
+  const workspacePath = workspacePathFromSearch(location.search) ?? "";
+  const sessionRef = useMemo<WorkspaceSessionRef | undefined>(
+    () => (sessionId && workspacePath ? { workspacePath, sessionId } : undefined),
+    [sessionId, workspacePath],
+  );
+  const conversationKey = sessionRef ? workspaceSessionKey(sessionRef) : undefined;
   const [draft, setDraft] = useState("");
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [approvalOpen, setApprovalOpen] = useState(false);
@@ -624,8 +770,8 @@ function ConversationPage() {
   const sendingRef = useRef(false);
 
   useEffect(() => {
-    if (sessionId) void actions.loadSession(sessionId);
-  }, [actions, sessionId]);
+    if (sessionRef) void actions.loadSession(sessionRef);
+  }, [actions, sessionRef]);
 
   useEffect(() => {
     setDraft("");
@@ -637,11 +783,15 @@ function ConversationPage() {
     setEditingTitle(false);
     setConfirmCompact(false);
     setActivation(undefined);
-  }, [sessionId]);
+  }, [sessionId, workspacePath]);
 
-  const session = data.sessions.find((item) => item.id === sessionId);
-  const conversation = sessionId ? data.conversations[sessionId] : undefined;
-  const sessionRuns = data.runs.filter((run) => run.sessionId === sessionId);
+  const session = data.sessions.find(
+    (item) => item.workspacePath === workspacePath && item.id === sessionId,
+  );
+  const conversation = conversationKey ? data.conversations[conversationKey] : undefined;
+  const sessionRuns = data.runs.filter(
+    (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
+  );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
   const selectedApproval = data.approvals.find((item) => item.id === selectedApprovalId);
   const selectedPrompt = data.prompts.find((item) => item.id === selectedPromptId);
@@ -719,6 +869,7 @@ function ConversationPage() {
     sendingRef.current = true;
     try {
       const result = await actions.sendMessage({
+        workspacePath,
         ...(sessionId ? { sessionId } : {}),
         text,
         behavior: nextBehavior,
@@ -729,7 +880,13 @@ function ConversationPage() {
       setDraft("");
       setActivation(undefined);
       if (!sessionId && result.sessionId) {
-        navigate(`/session/${result.sessionId}`, { replace: true });
+        navigate(
+          sessionHref({
+            workspacePath: result.workspacePath ?? workspacePath,
+            sessionId: result.sessionId,
+          }),
+          { replace: true },
+        );
       }
     } finally {
       sendingRef.current = false;
@@ -805,7 +962,9 @@ function ConversationPage() {
       return;
     }
     if (item.kind === "changes") {
-      navigate(`/review${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`);
+      const params = new URLSearchParams({ workspace: workspacePath });
+      if (sessionId) params.set("sessionId", sessionId);
+      navigate(`/review?${params.toString()}`);
       return;
     }
     if (item.kind === "tool") {
@@ -835,13 +994,13 @@ function ConversationPage() {
       header={
         <div className="conversation-session-header">
           <div>
-            {editingTitle && sessionId ? (
+            {editingTitle && sessionRef ? (
               <form
                 className="conversation-title-editor"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void actions
-                    .renameSession(sessionId, titleDraft)
+                    .renameSession(sessionRef, titleDraft)
                     .then(() => setEditingTitle(false));
                 }}
               >
@@ -882,7 +1041,7 @@ function ConversationPage() {
               </span>
             )}
             {activeRun && <StatusPill status={activeRun.status} />}
-            {sessionId && (
+            {sessionRef && (
               <div className="conversation-session-actions" aria-label="会话操作">
                 <button
                   type="button"
@@ -896,8 +1055,8 @@ function ConversationPage() {
                   disabled={Boolean(activeRun) || Boolean(busy)}
                   onClick={() =>
                     void actions
-                      .forkSession(sessionId)
-                      .then((forkedId) => forkedId && navigate(`/session/${forkedId}`))
+                      .forkSession(sessionRef)
+                      .then((forked) => forked && navigate(sessionHref(forked)))
                   }
                 >
                   <GitFork aria-hidden="true" /> 分叉
@@ -910,7 +1069,7 @@ function ConversationPage() {
                       setConfirmCompact(true);
                       return;
                     }
-                    void actions.compactSession(sessionId).then(() => setConfirmCompact(false));
+                    void actions.compactSession(sessionRef).then(() => setConfirmCompact(false));
                   }}
                 >
                   <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
@@ -952,9 +1111,7 @@ function ConversationPage() {
                   : "向 Pico 发送消息…"
           }
           statusText={
-            data.conversations[sessionId ?? ""]?.queuedCount
-              ? `${data.conversations[sessionId ?? ""]?.queuedCount} 条消息正在排队`
-              : undefined
+            conversation?.queuedCount ? `${conversation.queuedCount} 条消息正在排队` : undefined
           }
           onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
           onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
@@ -980,9 +1137,9 @@ function ConversationPage() {
                 ) : (
                   <Folder aria-hidden="true" />
                 )}
-                {data.workspacePath?.split(/[\\/]/).at(-1)}
+                {workspaceName(workspacePath)}
               </span>
-              {sessionId && conversation?.settings && (
+              {sessionRef && conversation?.settings && (
                 <>
                   <label className="conversation-context-option">
                     <span className="conversation-sr-only">模型</span>
@@ -992,7 +1149,7 @@ function ConversationPage() {
                       value={conversation.settings.modelRouteId ?? ""}
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onChange={(event) =>
-                        void actions.updateSessionSettings(sessionId, {
+                        void actions.updateSessionSettings(sessionRef, {
                           modelRouteId: event.target.value,
                         })
                       }
@@ -1019,7 +1176,7 @@ function ConversationPage() {
                       value={conversation.settings.mode}
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onChange={(event) =>
-                        void actions.updateSessionSettings(sessionId, {
+                        void actions.updateSessionSettings(sessionRef, {
                           mode: event.target.value as "default" | "plan" | "auto" | "yolo",
                         })
                       }
@@ -1039,7 +1196,7 @@ function ConversationPage() {
                         value={conversation.settings.thinkingEffort}
                         disabled={Boolean(activeRun) || Boolean(busy)}
                         onChange={(event) =>
-                          void actions.updateSessionSettings(sessionId, {
+                          void actions.updateSessionSettings(sessionRef, {
                             thinkingEffort: event.target.value,
                           })
                         }
@@ -1066,19 +1223,19 @@ function ConversationPage() {
           <p>{conversation.loadError}</p>
           <Button
             disabled={Boolean(busy)}
-            onClick={() => sessionId && actions.loadSession(sessionId)}
+            onClick={() => sessionRef && actions.loadSession(sessionRef)}
           >
             重新载入
           </Button>
         </div>
       ) : (
         <>
-          {sessionId && conversation?.nextBefore && (
+          {sessionRef && conversation?.nextBefore && (
             <div className="conversation-history-pagination">
               <Button
                 variant="quiet"
                 disabled={Boolean(busy)}
-                onClick={() => void actions.loadEarlierSession(sessionId)}
+                onClick={() => void actions.loadEarlierSession(sessionRef)}
               >
                 {busy === "load-earlier-session" ? "正在加载…" : "加载更早记录"}
               </Button>
@@ -1177,10 +1334,19 @@ function isTerminalRun(status: string): boolean {
 function TaskPage() {
   const { runId } = useParams();
   const { data } = useRuntime();
-  const run = data.runs.find((item) => item.id === runId);
+  const location = useLocation();
+  const workspacePath = workspacePathFromSearch(location.search);
+  const run = data.runs.find((item) => item.workspacePath === workspacePath && item.id === runId);
   if (!run)
     return <EmptyState title="找不到这次运行" detail="它可能已被归档，或 Runtime 尚未同步完成。" />;
-  if (run.sessionId) return <Navigate replace to={`/session/${run.sessionId}`} />;
+  if (run.sessionId) {
+    return (
+      <Navigate
+        replace
+        to={sessionHref({ workspacePath: run.workspacePath, sessionId: run.sessionId })}
+      />
+    );
+  }
   return (
     <EmptyState
       icon={<History />}
@@ -1198,12 +1364,20 @@ function TaskPage() {
 function ReviewPage() {
   const { data, actions, busy } = useRuntime();
   const location = useLocation();
-  const sessionId = new URLSearchParams(location.search).get("sessionId") ?? undefined;
-  const conversation = sessionId ? data.conversations[sessionId] : undefined;
+  const searchParams = new URLSearchParams(location.search);
+  const workspacePath = workspacePathFromSearch(location.search) ?? "";
+  const sessionId = searchParams.get("sessionId") ?? undefined;
+  const sessionRef =
+    workspacePath && sessionId
+      ? ({ workspacePath, sessionId } satisfies WorkspaceSessionRef)
+      : undefined;
+  const conversation = sessionRef ? data.conversations[workspaceSessionKey(sessionRef)] : undefined;
   const changes = conversation?.changes ?? (sessionId ? [] : data.changes);
   const fingerprint =
     conversation?.changeFingerprint ?? (sessionId ? undefined : data.changeFingerprint);
-  const runId = conversation?.runId ?? (sessionId ? undefined : data.runs[0]?.id);
+  const runId =
+    conversation?.runId ??
+    (sessionId ? undefined : data.runs.find((run) => run.workspacePath === workspacePath)?.id);
   const target = runId && fingerprint ? { runId, fingerprint } : undefined;
   const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
   const [comment, setComment] = useState("");
@@ -1285,9 +1459,9 @@ function ReviewPage() {
                 variant="danger"
                 disabled={Boolean(busy)}
                 onClick={() => {
-                  if (sessionId)
+                  if (sessionRef)
                     void actions.applyRewind(
-                      sessionId,
+                      sessionRef,
                       rewindPreview.checkpointId,
                       rewindPreview.fingerprint,
                     );
@@ -1297,9 +1471,9 @@ function ReviewPage() {
               </Button>
             ) : (
               <Button
-                disabled={Boolean(busy) || !sessionId}
+                disabled={Boolean(busy) || !sessionRef}
                 onClick={() => {
-                  if (sessionId) void actions.previewRewind(sessionId).then(setRewindPreview);
+                  if (sessionRef) void actions.previewRewind(sessionRef).then(setRewindPreview);
                 }}
               >
                 预览 Rewind
@@ -1364,7 +1538,9 @@ function SessionsPage() {
   const sessions = data.sessions.filter(
     (item) =>
       (showArchived || item.status !== "archived") &&
-      item.title.toLowerCase().includes(query.toLowerCase()),
+      `${item.title} ${workspaceName(item.workspacePath)} ${item.workspacePath}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
   );
   return (
     <div className="page-stack">
@@ -1374,7 +1550,7 @@ function SessionsPage() {
           <h2>会话工作库</h2>
           <p>每个会话保留任务上下文、运行记录和检查点。</p>
         </div>
-        <Link className="button button--primary" to="/task/new">
+        <Link className="button button--primary" to={newSessionHref()}>
           <Plus aria-hidden="true" size={16} />
           新任务
         </Link>
@@ -1407,14 +1583,20 @@ function SessionsPage() {
           <div className="session-list">
             {sessions.map((session) => (
               <SessionRow
-                key={session.id}
+                key={workspaceSessionKey({
+                  workspacePath: session.workspacePath,
+                  sessionId: session.id,
+                })}
                 session={session}
                 action={
                   <Button
                     variant="quiet"
                     disabled={busy === "session-state"}
                     onClick={() =>
-                      void actions.setSessionArchived(session.id, session.status !== "archived")
+                      void actions.setSessionArchived(
+                        { workspacePath: session.workspacePath, sessionId: session.id },
+                        session.status !== "archived",
+                      )
                     }
                   >
                     {session.status === "archived" ? "恢复" : "归档"}
@@ -1438,7 +1620,10 @@ function SessionRow({
 }) {
   return (
     <div className="session-row-wrap">
-      <Link className="session-row" to={`/session/${session.id}`}>
+      <Link
+        className="session-row"
+        to={sessionHref({ workspacePath: session.workspacePath, sessionId: session.id })}
+      >
         <span className="session-row__icon">
           {session.status === "archived" ? (
             <Archive aria-hidden="true" />
@@ -1452,7 +1637,12 @@ function SessionRow({
             <StatusPill status={session.status} />
           </div>
           {session.summary && <p>{session.summary}</p>}
-          <time>{formatRelative(session.updatedAt)}</time>
+          <div className="session-row__meta">
+            <span>
+              <Folder aria-hidden="true" /> {workspaceName(session.workspacePath)}
+            </span>
+            <time>{formatRelative(session.updatedAt)}</time>
+          </div>
         </div>
       </Link>
       {action && <div className="session-row-action">{action}</div>}
@@ -1807,7 +1997,9 @@ function SettingsPage() {
             <Button
               variant="danger"
               disabled={Boolean(busy)}
-              onClick={() => void actions.trustWorkspace(false)}
+              onClick={() =>
+                data.workspacePath && void actions.trustWorkspace(data.workspacePath, false)
+              }
             >
               撤销信任
             </Button>

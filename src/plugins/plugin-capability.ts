@@ -1,8 +1,11 @@
 import type {
   PluginCapabilityDeclaration,
   PluginCapabilityKind,
+  PluginScope,
   ResolvedPluginIdentity,
 } from "./plugin-types.js";
+import type { LLMProvider } from "../provider/interface.js";
+import type { BaseTool } from "../tools/registry.js";
 
 /**
  * Host-owned capability factory boundary.
@@ -18,25 +21,116 @@ export interface PluginCapabilityFactoryRequest {
   readonly resourceDigest?: string;
 }
 
-export interface PluginCapabilityDescriptor {
+export interface PluginCapabilityFactoryDescriptor {
   readonly id: string;
   readonly version: string;
   readonly kind: PluginCapabilityKind;
   readonly config: Readonly<Record<string, unknown>>;
 }
 
-export interface PluginCapabilityFactory {
+export interface PluginCapabilityDescriptor extends PluginCapabilityFactoryDescriptor {
+  readonly pluginId: string;
+  readonly pluginVersion?: string;
+  readonly pluginScope?: PluginScope;
+  readonly resourceDigest?: string;
+}
+
+interface PluginCapabilityFactoryBase {
   /** Stable host capability id (for example `provider` or `tool`). */
   readonly id: string;
   /** Exact versions supported by this factory. `*` accepts every manifest version. */
   readonly versions: readonly string[];
-  /** Capability family selected by the host, never by the manifest. */
-  readonly kind: PluginCapabilityKind;
   /** Only built-in or explicitly trusted host factories may enter the registry. */
   readonly trust: PluginCapabilityFactoryTrust;
   /** Pure host-owned projection; it must not return Runtime-private objects. */
-  readonly resolve: (request: PluginCapabilityFactoryRequest) => PluginCapabilityDescriptor;
+  readonly resolve: (request: PluginCapabilityFactoryRequest) => PluginCapabilityFactoryDescriptor;
 }
+
+export interface PluginProviderCapabilityActivationRequest {
+  readonly descriptor: PluginCapabilityDescriptor;
+  /** The already assembled provider. Provider capabilities are ordered decorators, not routes. */
+  readonly provider: LLMProvider;
+}
+
+export interface PluginToolCapabilityActivationRequest {
+  readonly descriptor: PluginCapabilityDescriptor;
+  readonly workDir: string;
+}
+
+export interface PluginToolCapabilityMetadataRequest {
+  readonly descriptor: PluginCapabilityDescriptor;
+}
+
+export interface PluginCapabilityActivation<Value> {
+  readonly value: Value;
+  /** Release resources acquired by activate(); the host scope calls this exactly once. */
+  readonly dispose: () => void | Promise<void>;
+}
+
+/** Owns concrete capability activations for one host/runtime lifetime. */
+export class PluginCapabilityActivationScope {
+  private readonly disposers: Array<{
+    readonly label: string;
+    readonly dispose: () => void | Promise<void>;
+  }> = [];
+  private disposePromise?: Promise<void>;
+  private accepting = true;
+
+  assertAccepting(label: string): void {
+    if (!this.accepting) throw new Error(`Plugin activation scope is already disposing: ${label}`);
+  }
+
+  register<Value>(label: string, activation: PluginCapabilityActivation<Value>): Value {
+    this.assertAccepting(label);
+    this.disposers.push({ label, dispose: activation.dispose });
+    return activation.value;
+  }
+
+  dispose(): Promise<void> {
+    if (!this.disposePromise) {
+      this.accepting = false;
+      this.disposePromise = Promise.resolve().then(() => this.disposeOnce());
+    }
+    return this.disposePromise;
+  }
+
+  private async disposeOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    for (const entry of this.disposers.toReversed()) {
+      try {
+        await entry.dispose();
+      } catch (error) {
+        failures.push(
+          new Error(`Plugin activation cleanup failed: ${entry.label}`, { cause: error }),
+        );
+      }
+    }
+    this.disposers.length = 0;
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Plugin capability activation cleanup failed");
+    }
+  }
+}
+
+export interface PluginProviderCapabilityFactory extends PluginCapabilityFactoryBase {
+  readonly kind: "provider";
+  /** Host-owned decorator. It cannot be supplied or named as a module by a plugin manifest. */
+  readonly activate: (
+    request: PluginProviderCapabilityActivationRequest,
+  ) => PluginCapabilityActivation<LLMProvider>;
+}
+
+export interface PluginToolCapabilityFactory extends PluginCapabilityFactoryBase {
+  readonly kind: "tool";
+  /** Pure metadata projection used by policy/preflight paths; it must not allocate Runtime resources. */
+  readonly toolNames: (request: PluginToolCapabilityMetadataRequest) => readonly string[];
+  /** Host-owned tool construction. Returned tools still pass through the normal registry policy. */
+  readonly activate: (
+    request: PluginToolCapabilityActivationRequest,
+  ) => PluginCapabilityActivation<readonly BaseTool[]>;
+}
+
+export type PluginCapabilityFactory = PluginProviderCapabilityFactory | PluginToolCapabilityFactory;
 
 export type PluginCapabilityFactoryTrust = "builtin" | "trusted-host";
 
@@ -61,7 +155,10 @@ export interface PluginCapabilityResolution {
  * factory function supplied by host code; plugin manifests never carry one.
  */
 export function defineTrustedPluginCapabilityFactory(
-  factory: Omit<PluginCapabilityFactory, "trust"> & {
+  factory: (
+    | Omit<PluginProviderCapabilityFactory, "trust">
+    | Omit<PluginToolCapabilityFactory, "trust">
+  ) & {
     readonly trust?: PluginCapabilityFactoryTrust;
   },
 ): PluginCapabilityFactory {
@@ -78,6 +175,7 @@ export function defineTrustedPluginCapabilityFactory(
  */
 export class PluginCapabilityRegistry {
   private readonly factories = new Map<string, PluginCapabilityFactory>();
+  private readonly issuedDescriptors = new WeakSet<object>();
 
   constructor(factories: readonly PluginCapabilityFactory[] = []) {
     for (const factory of factories) this.register(factory);
@@ -99,10 +197,118 @@ export class PluginCapabilityRegistry {
     return this.factories.has(id);
   }
 
+  activateProvider(
+    descriptors: readonly PluginCapabilityDescriptor[],
+    provider: LLMProvider,
+    scope: PluginCapabilityActivationScope,
+  ): LLMProvider {
+    return descriptors
+      .filter((descriptor) => descriptor.kind === "provider")
+      .reduce((current, descriptor) => {
+        const factory = this.requireFactory(descriptor);
+        if (factory.kind !== "provider") {
+          throw new Error(`Plugin capability '${descriptor.id}' is not a provider capability`);
+        }
+        const activationLabel = `${descriptor.pluginId}:${descriptor.id}@${descriptor.version}`;
+        scope.assertAccepting(activationLabel);
+        const activation = factory.activate({ descriptor, provider: current });
+        if (!isActivation(activation)) {
+          throw new Error(
+            `Plugin provider capability '${descriptor.id}@${descriptor.version}' returned an invalid activation lease`,
+          );
+        }
+        const activated = scope.register(activationLabel, activation);
+        if (!isProvider(activated)) {
+          throw new Error(
+            `Plugin provider capability '${descriptor.id}@${descriptor.version}' returned an invalid provider`,
+          );
+        }
+        if (
+          typeof current.generateStream === "function" &&
+          typeof activated.generateStream !== "function"
+        ) {
+          throw new Error(
+            `Plugin provider capability '${descriptor.pluginId}:${descriptor.id}@${descriptor.version}' removed generateStream`,
+          );
+        }
+        return activated;
+      }, provider);
+  }
+
+  activateTools(
+    descriptors: readonly PluginCapabilityDescriptor[],
+    options: { readonly workDir: string },
+    scope: PluginCapabilityActivationScope,
+  ): readonly BaseTool[] {
+    const tools: BaseTool[] = [];
+    const names = new Set<string>();
+    this.toolNames(descriptors);
+    for (const descriptor of descriptors) {
+      if (descriptor.kind !== "tool") continue;
+      const factory = this.requireFactory(descriptor);
+      if (factory.kind !== "tool") {
+        throw new Error(`Plugin capability '${descriptor.id}' is not a tool capability`);
+      }
+      const advertisedNames = validateToolNames(
+        factory.toolNames({ descriptor }),
+        descriptor,
+        names,
+      );
+      const activationLabel = `${descriptor.pluginId}:${descriptor.id}@${descriptor.version}`;
+      scope.assertAccepting(activationLabel);
+      const activation = factory.activate({ descriptor, workDir: options.workDir });
+      if (!isActivation(activation)) {
+        throw new Error(
+          `Plugin tool capability '${descriptor.id}@${descriptor.version}' returned an invalid activation lease`,
+        );
+      }
+      const activated = scope.register(activationLabel, activation);
+      if (!Array.isArray(activated)) {
+        throw new Error(
+          `Plugin tool capability '${descriptor.id}@${descriptor.version}' must return a tool array`,
+        );
+      }
+      const activatedNames: string[] = [];
+      for (const tool of activated) {
+        if (!isTool(tool)) {
+          throw new Error(
+            `Plugin tool capability '${descriptor.id}@${descriptor.version}' returned an invalid tool`,
+          );
+        }
+        const name = tool.name();
+        activatedNames.push(name);
+        tools.push(tool);
+      }
+      if (!sameStrings(activatedNames, advertisedNames)) {
+        throw new Error(
+          `Plugin tool capability '${descriptor.id}@${descriptor.version}' activated tools that do not match toolNames()`,
+        );
+      }
+      for (const name of advertisedNames) names.add(name);
+    }
+    return Object.freeze(tools);
+  }
+
+  /** Read tool names without constructing tools or acquiring plugin-owned resources. */
+  toolNames(descriptors: readonly PluginCapabilityDescriptor[]): readonly string[] {
+    const names = new Set<string>();
+    for (const descriptor of descriptors) {
+      if (descriptor.kind !== "tool") continue;
+      const factory = this.requireFactory(descriptor);
+      if (factory.kind !== "tool") {
+        throw new Error(`Plugin capability '${descriptor.id}' is not a tool capability`);
+      }
+      validateToolNames(factory.toolNames({ descriptor }), descriptor, names).forEach((name) =>
+        names.add(name),
+      );
+    }
+    return Object.freeze([...names]);
+  }
+
   resolve(
     plugin: Pick<ResolvedPluginIdentity, "id" | "version">,
     declarations: readonly PluginCapabilityDeclaration[],
-    options: { readonly resourceDigest?: string } = {},
+    options: { readonly resourceDigest?: string; readonly pluginScope?: PluginScope } = {},
   ): PluginCapabilityResolution {
     const capabilities: PluginCapabilityDescriptor[] = [];
     const diagnostics: PluginCapabilityResolutionDiagnostic[] = [];
@@ -147,7 +353,9 @@ export class PluginCapabilityRegistry {
           declaration: freezeDeclaration(declaration),
           ...(options.resourceDigest ? { resourceDigest: options.resourceDigest } : {}),
         });
-        capabilities.push(validateDescriptor(factory, declaration, descriptor));
+        const validated = validateDescriptor(factory, declaration, descriptor, plugin, options);
+        this.issuedDescriptors.add(validated);
+        capabilities.push(validated);
       } catch (error) {
         diagnostics.push({
           code: "plugin_capability_factory_failed",
@@ -162,6 +370,26 @@ export class PluginCapabilityRegistry {
       capabilities: Object.freeze(capabilities),
       diagnostics: Object.freeze(diagnostics),
     });
+  }
+
+  private requireFactory(descriptor: PluginCapabilityDescriptor): PluginCapabilityFactory {
+    if (!this.issuedDescriptors.has(descriptor)) {
+      throw new Error(
+        `Plugin capability '${descriptor.pluginId}:${descriptor.id}@${descriptor.version}' was not issued by this registry`,
+      );
+    }
+    const factory = this.factories.get(descriptor.id);
+    if (!factory) {
+      throw new Error(
+        `Plugin capability '${descriptor.id}@${descriptor.version}' has no host activation factory`,
+      );
+    }
+    if (!supportsVersion(factory, descriptor.version) || factory.kind !== descriptor.kind) {
+      throw new Error(
+        `Plugin capability '${descriptor.id}@${descriptor.version}' does not match its host activation factory`,
+      );
+    }
+    return factory;
   }
 }
 
@@ -191,6 +419,40 @@ function validateFactoryShape(factory: PluginCapabilityFactory): void {
   if (typeof factory.resolve !== "function") {
     throw new Error(`Plugin capability factory ${factory.id} must provide resolve()`);
   }
+  if (typeof factory.activate !== "function") {
+    throw new Error(`Plugin capability factory ${factory.id} must provide activate()`);
+  }
+  if (factory.kind === "tool" && typeof factory.toolNames !== "function") {
+    throw new Error(`Plugin tool capability factory ${factory.id} must provide toolNames()`);
+  }
+}
+
+function validateToolNames(
+  projected: readonly string[],
+  descriptor: PluginCapabilityDescriptor,
+  existing: ReadonlySet<string>,
+): readonly string[] {
+  if (!Array.isArray(projected)) {
+    throw new Error(
+      `Plugin tool capability '${descriptor.id}@${descriptor.version}' toolNames() must return an array`,
+    );
+  }
+  const local = new Set<string>();
+  for (const name of projected) {
+    if (typeof name !== "string" || !name.trim() || local.has(name) || existing.has(name)) {
+      throw new Error(
+        `Plugin tool capability produced a duplicate or empty tool name: ${String(name)}`,
+      );
+    }
+    local.add(name);
+  }
+  return Object.freeze([...local]);
+}
+
+function sameStrings(actual: readonly string[], expected: readonly string[]): boolean {
+  return (
+    actual.length === expected.length && actual.every((value, index) => value === expected[index])
+  );
 }
 
 function supportsVersion(factory: PluginCapabilityFactory, version: string): boolean {
@@ -200,7 +462,9 @@ function supportsVersion(factory: PluginCapabilityFactory, version: string): boo
 function validateDescriptor(
   factory: PluginCapabilityFactory,
   declaration: PluginCapabilityDeclaration,
-  descriptor: PluginCapabilityDescriptor,
+  descriptor: PluginCapabilityFactoryDescriptor,
+  plugin: Pick<ResolvedPluginIdentity, "id" | "version">,
+  options: { readonly resourceDigest?: string; readonly pluginScope?: PluginScope },
 ): PluginCapabilityDescriptor {
   if (!isRecord(descriptor)) throw new Error("factory result must be an object");
   const keys = Object.keys(descriptor);
@@ -222,6 +486,10 @@ function validateDescriptor(
     version: descriptor.version,
     kind: descriptor.kind,
     config: deepFreezeClone(descriptor.config),
+    pluginId: plugin.id,
+    ...(plugin.version ? { pluginVersion: plugin.version } : {}),
+    ...(options.pluginScope ? { pluginScope: options.pluginScope } : {}),
+    ...(options.resourceDigest ? { resourceDigest: options.resourceDigest } : {}),
   });
 }
 
@@ -257,6 +525,23 @@ function isCapabilityKind(value: unknown): value is PluginCapabilityKind {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isProvider(value: unknown): value is LLMProvider {
+  return isRecord(value) && typeof value.generate === "function";
+}
+
+function isActivation<Value>(value: unknown): value is PluginCapabilityActivation<Value> {
+  return isRecord(value) && Object.hasOwn(value, "value") && typeof value.dispose === "function";
+}
+
+function isTool(value: unknown): value is BaseTool {
+  return (
+    isRecord(value) &&
+    typeof value.name === "function" &&
+    typeof value.definition === "function" &&
+    typeof value.execute === "function"
+  );
 }
 
 function errorMessage(error: unknown): string {

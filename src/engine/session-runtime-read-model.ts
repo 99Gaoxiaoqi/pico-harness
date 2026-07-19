@@ -3,7 +3,7 @@ import type {
   RuntimeCheckpointRecordedEvent,
   RuntimeEvent,
   RuntimeRollingCheckpointData,
-} from "../runtime/runtime-event.js";
+} from "./session-runtime-event.js";
 
 export interface RuntimeHistoryProjectionEntry {
   /** The immutable event that currently contributes this model-visible message. */

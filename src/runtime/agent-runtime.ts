@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import type { SessionManagerLease } from "../engine/session-manager.js";
 import {
   reconcileUnfinishedSessionForksOrThrow,
   SessionForkService,
@@ -117,12 +118,17 @@ import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
-import type { PluginCapabilityRegistry } from "../plugins/plugin-capability.js";
+import {
+  PluginCapabilityActivationScope,
+  type PluginCapabilityRegistry,
+} from "../plugins/plugin-capability.js";
+import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation.js";
+import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "./runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
-import { RuntimeRunExecutor } from "./runtime-run-executor.js";
+import { emitRuntimeLifecycleEvent, RuntimeRunExecutor } from "./runtime-run-executor.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 import {
@@ -197,7 +203,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   scheduleDraftCoordinator?: ScheduleDraftCoordinator;
   /** TUI/宿主已冻结的受信 Plugin 快照；未注入时前台运行自行加载。 */
   pluginSnapshot?: PluginRuntimeSnapshot;
-  /** Host-owned restricted capability factories used when loading a fresh snapshot. */
+  /** Host-owned restricted capability factories used for snapshot resolution and activation. */
   pluginCapabilityRegistry?: PluginCapabilityRegistry;
 }
 
@@ -259,136 +265,150 @@ export async function executeAgentRuntime(
   const defaultConfigModel = options.model ?? runtimeEnv.LLM_MODEL ?? defaultModel(kind);
 
   // 阶段 2：获取持久化 Session，并推导会话级有效配置。
-  const { session, runtimeEventStore } = await acquireRuntimeSession({
+  const sessionLease = await acquireRuntimeSession({
     sessionSelection,
     workDir,
     picoHome,
     resumeExistingSession,
     planMode: options.planMode === true,
   });
-  if (resumeExistingSession && dependencies.runtimeState === undefined) {
-    throw new Error("resumeExistingSession requires an existing runtimeState.");
-  }
-  dependencies.runtimeState?.assertCompatible(session);
-  const settings = getOrCreateSessionSettings(
-    {
-      sessionId: sessionSelection.sessionId,
-      sessionMode: sessionSelection.mode,
-      ...(sessionSelection.sourceSessionId !== undefined
-        ? { forkFrom: sessionSelection.sourceSessionId }
-        : {}),
-      cwd: workDir,
-      picoHome: session.picoHome,
-      provider: kind,
-      ...(backgroundPolicy ? { mode: "yolo" as const } : {}),
-      model: defaultConfigModel,
-      ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
-      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-    },
-    { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
-  );
-  const workspaceRoots = await WorkspaceRoots.create(
-    workDir,
-    backgroundPolicy || sessionSelection.mode === "fork"
-      ? []
-      : [
-          ...configuredAdditionalDirectories,
-          ...(options.addDirs ?? []),
-          ...settings.additionalDirectories,
-        ],
-  );
-  setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
-  const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
-  const effectiveOptions: RunAgentCliOptions = {
-    ...options,
-    ...(backgroundApiKey !== undefined ? { apiKey: backgroundApiKey } : {}),
-    dir: workDir,
-    session: sessionSelection.sessionId,
-    sessionSelection,
-    model: options.model ?? settings.model,
-    planMode: backgroundPolicy ? false : (options.planMode ?? settings.mode === "plan"),
-    trace: traceEnabled,
-    addDirs: backgroundPolicy ? [] : [...settings.additionalDirectories],
-    ...(options.thinkingEffort !== undefined
-      ? { thinkingEffort: options.thinkingEffort }
-      : settings.thinkingEffortExplicit
-        ? { thinkingEffort: settings.thinkingEffort }
-        : {}),
-  };
-  const providerConfig = resolveProviderConfig(
-    effectiveOptions,
-    runtimeEnv,
-    dependencies.provider !== undefined,
-  );
-  const credentialPool =
-    effectiveOptions.apiKey === undefined && dependencies.provider === undefined
-      ? createRuntimeCredentialPool(runtimeEnv)
-      : undefined;
+  const session = sessionLease.session;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
+  let sessionLeaseTransferred = false;
   let cleanupRuntimeState: SessionRuntime | undefined;
   let ownedUsageStore: RuntimeStore | undefined;
   let ownsMcpManager = false;
   let cleanupMcpManager: McpConnectionManager | undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
-  const pluginSnapshot = backgroundPolicy
-    ? undefined
-    : (dependencies.pluginSnapshot ??
-      (await loadPluginRuntimeSnapshot({
-        workDir,
-        env: runtimeEnv,
-        picoHome,
-        ...(dependencies.pluginCapabilityRegistry
-          ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
-          : {}),
-      })));
-  const ownsPluginSnapshot =
-    pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
   const cleanupScope = new RuntimeCleanupScope((resource, error) => {
     logger.warn(
       { resource, error: error instanceof Error ? error.message : String(error) },
       "[Runtime] 资源释放失败",
     );
   });
-  cleanupScope.register("Session 组件 Hook", () => cleanupRuntimeState?.clearComponentHooks());
-  cleanupScope.register("MCP 状态订阅", () => unsubscribeMcpStatus?.());
-  cleanupScope.register("MCP manager", async () => {
-    if (!cleanupMcpManager || !ownsMcpManager) return;
-    await cleanupMcpManager.closeAll();
-    dependencies.mcpStatusSink?.(cleanupMcpManager.getStatusSnapshot());
+  cleanupScope.register("Session acquisition lease", () => {
+    if (!sessionLeaseTransferred) sessionLease.release();
   });
-  cleanupScope.register("SessionRuntime", () =>
-    ownsRuntimeState ? cleanupRuntimeState?.dispose() : undefined,
-  );
-  cleanupScope.register("Plugin runtime snapshot", () =>
-    ownsPluginSnapshot ? pluginSnapshot?.dispose() : undefined,
-  );
-  cleanupScope.register("Runtime usage ledger", () => ownedUsageStore?.close());
-  if (pluginSnapshot?.diagnostics.length) {
-    logger.warn(
-      {
-        workDir,
-        diagnostics: pluginSnapshot.diagnostics,
-      },
-      "[Plugin] Runtime snapshot contains unavailable contributions",
-    );
-  }
-  const skillLoaderFactory = (root: string): SkillLoader =>
-    new SkillLoader(root, {
-      includeUserResources: true,
-      includeClaudeProjectResources:
-        claudeCompatibility.enabled && claudeCompatibility.projectResources,
-      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
-      ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
-      env: runtimeEnv,
-      picoHome,
-    });
 
-  // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
   try {
+    if (resumeExistingSession && dependencies.runtimeState === undefined) {
+      throw new Error("resumeExistingSession requires an existing runtimeState.");
+    }
+    dependencies.runtimeState?.assertCompatible(session);
+    if (dependencies.runtimeState) {
+      sessionLease.release();
+      sessionLeaseTransferred = true;
+    }
+    const settings = getOrCreateSessionSettings(
+      {
+        sessionId: sessionSelection.sessionId,
+        sessionMode: sessionSelection.mode,
+        ...(sessionSelection.sourceSessionId !== undefined
+          ? { forkFrom: sessionSelection.sourceSessionId }
+          : {}),
+        cwd: workDir,
+        picoHome: session.picoHome,
+        provider: kind,
+        ...(backgroundPolicy ? { mode: "yolo" as const } : {}),
+        model: defaultConfigModel,
+        ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
+        ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+      },
+      { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
+    );
+    const workspaceRoots = await WorkspaceRoots.create(
+      workDir,
+      backgroundPolicy || sessionSelection.mode === "fork"
+        ? []
+        : [
+            ...configuredAdditionalDirectories,
+            ...(options.addDirs ?? []),
+            ...settings.additionalDirectories,
+          ],
+    );
+    setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
+    const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
+    const effectiveOptions: RunAgentCliOptions = {
+      ...options,
+      ...(backgroundApiKey !== undefined ? { apiKey: backgroundApiKey } : {}),
+      dir: workDir,
+      session: sessionSelection.sessionId,
+      sessionSelection,
+      model: options.model ?? settings.model,
+      planMode: backgroundPolicy ? false : (options.planMode ?? settings.mode === "plan"),
+      trace: traceEnabled,
+      addDirs: backgroundPolicy ? [] : [...settings.additionalDirectories],
+      ...(options.thinkingEffort !== undefined
+        ? { thinkingEffort: options.thinkingEffort }
+        : settings.thinkingEffortExplicit
+          ? { thinkingEffort: settings.thinkingEffort }
+          : {}),
+    };
+    const providerConfig = resolveProviderConfig(
+      effectiveOptions,
+      runtimeEnv,
+      dependencies.provider !== undefined,
+    );
+    const credentialPool =
+      effectiveOptions.apiKey === undefined && dependencies.provider === undefined
+        ? createRuntimeCredentialPool(runtimeEnv)
+        : undefined;
+    const pluginSnapshot = backgroundPolicy
+      ? undefined
+      : (dependencies.pluginSnapshot ??
+        (await loadPluginRuntimeSnapshot({
+          workDir,
+          env: runtimeEnv,
+          picoHome,
+          ...(dependencies.pluginCapabilityRegistry
+            ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
+            : {}),
+        })));
+    const ownsPluginSnapshot =
+      pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
+    const pluginActivationScope = new PluginCapabilityActivationScope();
+    cleanupScope.register("Session 组件 Hook", () => cleanupRuntimeState?.clearComponentHooks());
+    cleanupScope.register("MCP 状态订阅", () => unsubscribeMcpStatus?.());
+    cleanupScope.register("MCP manager", async () => {
+      if (!cleanupMcpManager || !ownsMcpManager) return;
+      await cleanupMcpManager.closeAll();
+      dependencies.mcpStatusSink?.(cleanupMcpManager.getStatusSnapshot());
+    });
+    cleanupScope.register("SessionRuntime", () =>
+      ownsRuntimeState ? cleanupRuntimeState?.dispose() : undefined,
+    );
+    cleanupScope.register("Plugin capability activations", () => pluginActivationScope.dispose());
+    cleanupScope.register("Plugin runtime snapshot", () =>
+      ownsPluginSnapshot ? pluginSnapshot?.dispose() : undefined,
+    );
+    cleanupScope.register("Runtime usage ledger", () => ownedUsageStore?.close());
+    if (pluginSnapshot?.diagnostics.length) {
+      logger.warn(
+        {
+          workDir,
+          diagnostics: pluginSnapshot.diagnostics,
+        },
+        "[Plugin] Runtime snapshot contains unavailable contributions",
+      );
+    }
+    const skillLoaderFactory = (root: string): SkillLoader =>
+      new SkillLoader(root, {
+        includeUserResources: true,
+        includeClaudeProjectResources:
+          claudeCompatibility.enabled && claudeCompatibility.projectResources,
+        includeClaudeUserResources:
+          claudeCompatibility.enabled && claudeCompatibility.userResources,
+        ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
+        env: runtimeEnv,
+        picoHome,
+      });
+
+    // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
     const runtimeState =
       dependencies.runtimeState ??
       (await createSessionRuntime({
         session,
+        sessionLease,
         env: runtimeEnv,
         ...(dependencies.toolDisclosure !== undefined
           ? { toolDisclosure: dependencies.toolDisclosure }
@@ -407,6 +427,7 @@ export async function executeAgentRuntime(
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       }));
+    if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
     if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
     if (
@@ -461,6 +482,13 @@ export async function executeAgentRuntime(
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
+    const providerDecorator = (provider: LLMProvider): LLMProvider =>
+      activatePluginProviderCapabilities(
+        pluginSnapshot,
+        dependencies.pluginCapabilityRegistry,
+        provider,
+        pluginActivationScope,
+      );
     const subagentModelRouter =
       dependencies.modelRouter ??
       (effectiveOptions.modelRouteId && dependencies.provider === undefined
@@ -511,6 +539,7 @@ export async function executeAgentRuntime(
               selection,
               session,
               providerFactory,
+              providerDecorator,
               trackerOptions,
             });
             return {
@@ -531,6 +560,7 @@ export async function executeAgentRuntime(
       trackerOptions,
       ...(dependencies.provider !== undefined ? { provider: dependencies.provider } : {}),
       providerFactory,
+      providerDecorator,
       ...(credentialPool ? { credentialPool } : {}),
     });
     const trackedProvider = providerAssembly.provider;
@@ -539,8 +569,7 @@ export async function executeAgentRuntime(
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
       modelRuntime: {
-        run: (execute, signal) =>
-          runHostOwnedRuntimeOperation(session, runtimeEventStore, execute, signal),
+        run: (execute, signal) => runHostOwnedRuntimeOperation(session, execute, signal),
       },
       mcpInvoker: {
         async invokeConnectedTool(server, tool, input, context) {
@@ -625,12 +654,22 @@ export async function executeAgentRuntime(
           path: skill.sourcePath,
           componentId: skill.name,
           inlineHooks: skill.hooks,
+          ...(skill.source?.hookTrustAuthority
+            ? { trustAuthority: skill.source.hookTrustAuthority }
+            : {}),
         });
       },
       skillLoaderFactory(workDir),
       approvalManager,
       artifactBaseDir,
       runtimeEnv,
+    );
+    registerPluginCapabilityTools(
+      registry,
+      pluginSnapshot,
+      dependencies.pluginCapabilityRegistry,
+      workDir,
+      pluginActivationScope,
     );
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
@@ -669,7 +708,7 @@ export async function executeAgentRuntime(
     };
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-    const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions);
+    const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions, providerDecorator);
     const evidenceArchive = new EvidenceArchive({
       baseDir: resolvePicoPaths(workDir, { picoHome }).workspace.evidence,
     });
@@ -783,6 +822,7 @@ export async function executeAgentRuntime(
           path: profile.sourcePath,
           componentId: profile.name,
           inlineHooks: profile.hooks,
+          ...(profile.hookTrustAuthority ? { trustAuthority: profile.hookTrustAuthority } : {}),
         });
       },
     );
@@ -856,17 +896,21 @@ export async function executeAgentRuntime(
       dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
       if (backgroundPolicy) {
         pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
-        const missingMcpTools = [...backgroundPolicy.allowedTools].filter(
-          (tool) => isMcpToolName(tool) && registry.getTool(tool) === undefined,
-        );
-        if (missingMcpTools.length > 0) {
-          throw new BackgroundPolicyViolationError(
-            "mcp_unavailable",
-            `后台 MCP 工具不可用: ${missingMcpTools.join(", ")}`,
-          );
-        }
       }
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+    }
+    if (backgroundPolicy) {
+      pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
+      const missingTools = [...backgroundPolicy.allowedTools].filter(
+        (tool) => registry.getTool(tool) === undefined,
+      );
+      if (missingTools.length > 0) {
+        const onlyMcp = missingTools.every(isMcpToolName);
+        throw new BackgroundPolicyViolationError(
+          onlyMcp ? "mcp_unavailable" : "tool_unavailable",
+          `后台工具不可用: ${missingTools.join(", ")}`,
+        );
+      }
     }
     if (effectiveOptions.allowedTools !== undefined) {
       pruneRegistryToCommandAllowlist(registry, effectiveOptions.allowedTools);
@@ -877,7 +921,6 @@ export async function executeAgentRuntime(
     // RuntimeRunExecutor 不拥有任何资源；本函数仍负责阶段 3 的装配和 finally 清理。
     const result = await new RuntimeRunExecutor({
       session,
-      runtimeEventStore,
       runtimeState,
       engine,
       sessionSelection,
@@ -920,7 +963,7 @@ export async function executeAgentRuntime(
           logger.warn({ hookError: String(hookError) }, "[Hook] StopFailure 事件执行失败"),
         );
     }
-    dependencies.onEvent?.({
+    emitRuntimeLifecycleEvent(dependencies.onEvent, {
       type: "run.failed",
       sessionId: session.id,
       workDir,
@@ -947,10 +990,7 @@ async function acquireRuntimeSession({
   picoHome: string;
   resumeExistingSession: boolean;
   planMode: boolean;
-}): Promise<{ session: Session; runtimeEventStore: RuntimeEventStore }> {
-  const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir, {
-    picoHome,
-  });
+}): Promise<SessionManagerLease> {
   const runtimeEventStore = new RuntimeEventStore({
     databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
   });
@@ -965,7 +1005,7 @@ async function acquireRuntimeSession({
       );
     }
     if (!targetManifest) {
-      const sourceSession = await globalSessionManager.getOrCreate(
+      const sourceLease = await globalSessionManager.getOrCreatePinned(
         sessionSelection.sourceSessionId,
         workDir,
         {
@@ -974,20 +1014,27 @@ async function acquireRuntimeSession({
           runtimePort: createEngineRuntimePort(),
         },
       );
-      await RuntimeRun.repairSessionProjection(sourceSession, {
-        workDir,
-        store: runtimeEventStore,
-      });
-      await new SessionForkService({
-        workDir,
-        picoHome,
-        runtimePort: createSessionForkRuntimePort(),
-      }).fork({
-        sourceSessionId: sessionSelection.sourceSessionId,
-        targetSessionId: sessionSelection.sessionId,
-        targetMode: planMode ? "plan" : DEFAULT_INTERACTION_MODE,
-      });
-      targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
+      try {
+        const sourceCapability = sourceLease.session.runtimeEventCapability;
+        if (!sourceCapability) {
+          throw new Error(`Fork source requires a durable Session: ${sourceLease.session.id}`);
+        }
+        await RuntimeRun.repairSessionProjection(sourceLease.session, {
+          capability: sourceCapability,
+        });
+        await new SessionForkService({
+          workDir,
+          picoHome,
+          runtimePort: createSessionForkRuntimePort(),
+        }).fork({
+          sourceSessionId: sessionSelection.sourceSessionId,
+          targetSessionId: sessionSelection.sessionId,
+          targetMode: planMode ? "plan" : DEFAULT_INTERACTION_MODE,
+        });
+        targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
+      } finally {
+        sourceLease.release();
+      }
     }
     const forkEvent = (await runtimeEventStore.readSession(sessionSelection.sessionId)).findLast(
       (event) => event.kind === "session.forked",
@@ -1001,25 +1048,35 @@ async function acquireRuntimeSession({
       );
     }
   }
-  const session = resumeExistingSession
-    ? globalSessionManager.get(sessionSelection.sessionId, workDir, {
-        picoHome,
-      })
-    : (existingSession ??
-      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir, {
-        persistence: true,
-        picoHome,
-        runtimePort: createEngineRuntimePort(),
-      })));
-  if (!session) {
+  let lease: SessionManagerLease | undefined;
+  if (resumeExistingSession) {
+    const session = globalSessionManager.get(sessionSelection.sessionId, workDir, { picoHome });
+    if (session) {
+      lease = { session, release: globalSessionManager.pin(session) };
+    }
+  } else {
+    lease = await globalSessionManager.getOrCreatePinned(sessionSelection.sessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+  }
+  if (!lease) {
     throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
   }
-  if (!session.runtimeEventStore) {
-    throw new Error(`AgentRuntime requires a durable Session: ${sessionSelection.sessionId}`);
+  try {
+    const runtimeCapability = lease.session.runtimeEventCapability;
+    const runtimeStore = lease.session.runtimeEventStore;
+    if (!runtimeCapability || !runtimeStore) {
+      throw new Error(`AgentRuntime requires a durable Session: ${sessionSelection.sessionId}`);
+    }
+    await runtimeStore.initializeSession({ sessionId: lease.session.id, workDir });
+    await RuntimeRun.repairSessionProjection(lease.session, { capability: runtimeCapability });
+    return lease;
+  } catch (error) {
+    lease.release();
+    throw error;
   }
-  await runtimeEventStore.initializeSession({ sessionId: session.id, workDir });
-  await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
-  return { session, runtimeEventStore };
 }
 
 function classifyStopFailure(error: unknown): string {
@@ -1118,7 +1175,7 @@ function pruneRegistryToBackgroundAllowlist(
   policy: PreparedBackgroundYoloPolicy,
 ): void {
   for (const tool of registry.getAvailableTools()) {
-    if (!policy.allowedTools.has(tool.name)) registry.unregister(tool.name);
+    if (!policy.allowedTools.has(tool.name)) registry.unregisterForHostPolicy(tool.name);
   }
   const fetchUrl = registry.getTool("fetch_url");
   if (policy.snapshot.toolNetworkPolicy === "allowlist" && fetchUrl instanceof FetchURLTool) {
@@ -1151,7 +1208,7 @@ function pruneRegistryToCommandAllowlist(
   }
   const allowed = new Set(normalized);
   for (const tool of registry.getAvailableTools()) {
-    if (!allowed.has(tool.name)) registry.unregister(tool.name);
+    if (!allowed.has(tool.name)) registry.unregisterForHostPolicy(tool.name);
   }
 }
 
@@ -1266,7 +1323,6 @@ function hookPurposeProvider(provider: LLMProvider): LLMProvider {
 
 async function runHostOwnedRuntimeOperation<Result>(
   session: Session,
-  store: RuntimeEventStore,
   execute: () => Promise<Result>,
   signal: AbortSignal,
 ): Promise<Result> {
@@ -1281,21 +1337,18 @@ async function runHostOwnedRuntimeOperation<Result>(
   }
 
   return session.serialize(async () => {
+    const runtimeCapability = session.runtimeEventCapability;
+    if (!runtimeCapability) {
+      throw new Error(`Hook model handler requires a durable Session: ${session.id}`);
+    }
     await RuntimeRun.reconcileIncompleteRuns({
-      sessionId: session.id,
-      workDir: session.workDir,
-      store,
-      writeGuard: session,
+      capability: runtimeCapability,
     });
     await RuntimeRun.repairSessionProjection(session, {
-      workDir: session.workDir,
-      store,
+      capability: runtimeCapability,
     });
     const runtimeRun = await RuntimeRun.start({
-      sessionId: session.id,
-      workDir: session.workDir,
-      store,
-      writeGuard: session,
+      capability: runtimeCapability,
     });
     return runtimeRun.run(execute, signal);
   });
@@ -1338,11 +1391,12 @@ function loadAuxProvider(
   env: RunAgentEnv,
   session: Session,
   trackerOptions: CostTrackerOptions,
+  decorateProvider: (provider: LLMProvider) => LLMProvider,
 ): LLMProvider | undefined {
   const resolved = resolveAuxProviderConfig(env);
   if (!resolved) return undefined;
   return new CostTracker(
-    createProvider(resolved.kind, resolved.config),
+    decorateProvider(createProvider(resolved.kind, resolved.config)),
     billingRouteForProvider(resolved.kind, resolved.config),
     session,
     trackerOptions,

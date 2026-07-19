@@ -154,6 +154,9 @@ import {
 } from "./desktop-transcript-persistence.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
+import { PluginCapabilityActivationScope } from "../plugins/plugin-capability.js";
+import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
+import { mcpToolNameMayBelongToServer } from "../mcp/types.js";
 import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 
@@ -497,6 +500,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async closeOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    const attempt = async (cleanup: () => void | Promise<void>): Promise<void> => {
+      try {
+        await cleanup();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
     this.userConfigWatchClosed = true;
     if (this.userConfigWatchTimer) clearTimeout(this.userConfigWatchTimer);
     unwatchFile(this.userConfigStore.filePath, this.userConfigWatchListener);
@@ -509,18 +520,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
     // Keep the projection subscriber and RuntimeStore alive until those events are projected.
     try {
-      await this.options.runtimeService.closeRuntimes();
-      await this.transcriptPersistenceTail.catch(() => undefined);
-    } finally {
+      await attempt(() => this.options.runtimeService.closeRuntimes());
+      await attempt(() => this.transcriptPersistenceTail);
       this.unsubscribeRuntimeEvents();
-      try {
-        await this.options.runtimeService.close();
-      } finally {
-        if (this.ownsPluginRuntimeSnapshotRegistry) {
-          await this.pluginRuntimeSnapshotRegistry.dispose();
-        }
-        this.lifecycleState = "closed";
+      await attempt(() => this.options.runtimeService.close());
+      if (this.ownsPluginRuntimeSnapshotRegistry) {
+        await attempt(() => this.pluginRuntimeSnapshotRegistry.dispose());
       }
+    } finally {
+      this.lifecycleState = "closed";
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Desktop Runtime cleanup failed");
     }
   }
 
@@ -764,20 +775,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async forkSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "分叉");
-    const source = await globalSessionManager.getOrCreate(sessionId, canonical, {
+    const sourceLease = await globalSessionManager.getOrCreatePinned(sessionId, canonical, {
       persistence: true,
       picoHome: this.picoHome,
     });
     const targetSessionId = this.createSessionId();
-    await new SessionForkService({
-      workDir: canonical,
-      picoHome: this.picoHome,
-      runtimePort: createSessionForkRuntimePort(),
-    }).fork({
-      sourceSessionId: sessionId,
-      targetSessionId,
-      targetMode: source.getRuntimeStateSnapshot().settings?.mode ?? DEFAULT_INTERACTION_MODE,
-    });
+    try {
+      await new SessionForkService({
+        workDir: canonical,
+        picoHome: this.picoHome,
+        runtimePort: createSessionForkRuntimePort(),
+      }).fork({
+        sourceSessionId: sessionId,
+        targetSessionId,
+        targetMode:
+          sourceLease.session.getRuntimeStateSnapshot().settings?.mode ?? DEFAULT_INTERACTION_MODE,
+      });
+    } finally {
+      sourceLease.release();
+    }
     const session = await this.requireSession(canonical, targetSessionId);
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
@@ -887,29 +903,37 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const settings = await this.getSessionSettings(canonical, session);
       const effective = await this.loadSessionModelRuntime(canonical, settings);
       const active = effective.router.providerConfig(settings.modelRouteId ?? settings.model);
-      const rawProvider = this.providerFactory(active.provider, active.config);
-      const ledger = new RuntimeStore({
-        workDir: canonical,
-        picoHome: this.picoHome,
-        now: this.now,
-      });
+      const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
+      const pluginActivationScope = new PluginCapabilityActivationScope();
+      let ledger: RuntimeStore | undefined;
+      let compactResult:
+        | { readonly beforeMessageCount: number; readonly afterMessageCount: number }
+        | undefined;
+      let operationError: unknown;
       try {
-        const runtimeEventStore = session.runtimeEventStore;
-        if (!runtimeEventStore) {
+        const rawProvider = activatePluginProviderCapabilities(
+          pluginSnapshot,
+          this.pluginRuntimeSnapshotRegistry.capabilityRegistry,
+          this.providerFactory(active.provider, active.config),
+          pluginActivationScope,
+        );
+        ledger = new RuntimeStore({
+          workDir: canonical,
+          picoHome: this.picoHome,
+          now: this.now,
+        });
+        const runtimeCapability = session.runtimeEventCapability;
+        if (!runtimeCapability) {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.CONFLICT,
             "当前会话没有 durable RuntimeEvent store，无法压缩",
           );
         }
         await RuntimeRun.reconcileIncompleteRuns({
-          sessionId: session.id,
-          workDir: session.workDir,
-          store: runtimeEventStore,
-          writeGuard: session,
+          capability: runtimeCapability,
         });
         await RuntimeRun.repairSessionProjection(session, {
-          workDir: session.workDir,
-          store: runtimeEventStore,
+          capability: runtimeCapability,
         });
         ensureSessionUsageBaseline(ledger, session);
         const provider = new CostTracker(
@@ -934,10 +958,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const profile = resolveProviderProfile(active.provider, active.config.model);
         const budget = createContextBudget(profile);
         const runtimeRun = await RuntimeRun.start({
-          sessionId: session.id,
-          workDir: session.workDir,
-          store: runtimeEventStore,
-          writeGuard: session,
+          capability: runtimeCapability,
         });
         await runtimeRun.run(async () => {
           const result = await new FullCompactor({ provider }).compact(session, {
@@ -957,10 +978,34 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           await session.flushPersistence();
           return true;
         });
-        return { beforeMessageCount, afterMessageCount: session.length };
-      } finally {
-        ledger.close();
+        compactResult = { beforeMessageCount, afterMessageCount: session.length };
+      } catch (error) {
+        operationError = error;
       }
+      const cleanupFailures: unknown[] = [];
+      try {
+        ledger?.close();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      try {
+        await pluginActivationScope.dispose();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      if (operationError !== undefined && cleanupFailures.length > 0) {
+        throw new AggregateError(
+          [operationError, ...cleanupFailures],
+          "Desktop compaction and cleanup failed",
+          { cause: operationError },
+        );
+      }
+      if (operationError !== undefined) throw operationError;
+      if (cleanupFailures.length > 0) {
+        throw new AggregateError(cleanupFailures, "Desktop compaction cleanup failed");
+      }
+      if (!compactResult) throw new Error("Desktop compaction completed without a result");
+      return compactResult;
     });
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
@@ -1512,6 +1557,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               name: skill.name,
               sourcePath: skill.sourcePath,
               hooks: skill.hooks,
+              ...(skill.source?.id ? { sourceId: skill.source.id } : {}),
             },
           }
         : {}),
@@ -2438,7 +2484,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listMcpServers(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    return { servers: toJsonValue(await listDesktopMcpServers(canonical)) };
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
+    return {
+      servers: toJsonValue(
+        await listDesktopMcpServers(canonical, {
+          env: this.env,
+          picoHome: this.picoHome,
+          pluginSnapshot,
+        }),
+      ),
+    };
   }
 
   private async getUsage(params: {
@@ -2759,11 +2814,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
     operation: (session: Session) => Promise<T>,
   ): Promise<T> {
-    const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
+    const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
       persistence: true,
       picoHome: this.picoHome,
     });
-    return session.serialize(() => operation(session));
+    try {
+      return await lease.session.withSerializedExecution(() => operation(lease.session));
+    } finally {
+      lease.release();
+    }
   }
 
   private async listJobs(workspacePath: string): Promise<JsonValue> {
@@ -2803,11 +2862,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly enabled?: boolean;
   }): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
+    const foregroundOnlyTools = new Set(
+      this.pluginRuntimeSnapshotRegistry.capabilityRegistry.toolNames(
+        pluginSnapshot.capabilities.filter((capability) => capability.kind === "tool"),
+      ),
+    );
+    const pluginMcpServers = pluginSnapshot.mcpSources.flatMap((source) =>
+      Object.keys(source.config?.mcpServers ?? {}),
+    );
+    for (const toolName of params.allowedTools) {
+      if (pluginMcpServers.some((server) => mcpToolNameMayBelongToServer(toolName, server))) {
+        foregroundOnlyTools.add(toolName);
+      }
+    }
     const job = await createTrustedDesktopAutomation(this.requireAutomations(), canonical, params, {
       credentialVault: this.credentialVault,
       effectiveConfigResolver: this.effectiveConfigResolver,
       userConfigStore: this.userConfigStore,
       env: this.env,
+      foregroundOnlyTools,
       now: this.now,
     });
     this.publishJob(job);

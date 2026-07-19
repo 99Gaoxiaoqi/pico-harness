@@ -1,6 +1,6 @@
 import type { Message } from "../schema/message.js";
 import type { CommitReceipt } from "./session-persistence.js";
-import type { Session } from "./session.js";
+import { Session } from "./session.js";
 
 /**
  * Engine-facing view of the durable runtime store.
@@ -10,13 +10,68 @@ import type { Session } from "./session.js";
  * the concrete adapter and validates this structural capability at the
  * boundary.
  */
-export interface EngineRuntimeStore {
-  readonly databasePath: string;
-}
+export type EngineRuntimeAuthority = object;
+
+const engineRuntimeCapabilityBrand: unique symbol = Symbol("EngineRuntimeCapability");
+const issuedEngineRuntimeCapabilities = new WeakSet<object>();
 
 /** The narrow write capability required by a live canonical run. */
 export interface EngineRuntimeWriteGuard {
+  /** Bind issuance to the durable authority actually owned by this guard. */
+  assertRuntimeEventAuthority(authority: EngineRuntimeAuthority): void;
   assertRuntimeEventWriteAllowed(): Promise<void>;
+}
+
+export interface EngineRuntimeCapability {
+  readonly [engineRuntimeCapabilityBrand]: true;
+  readonly sessionId: string;
+  readonly workDir: string;
+  readonly runtimeAuthority: EngineRuntimeAuthority;
+  readonly writeGuard: EngineRuntimeWriteGuard;
+  assertBound(scope: EngineRuntimeCapability): void;
+}
+
+export interface EngineRuntimeCapabilityInput {
+  readonly owner: Session;
+  readonly runtimeAuthority: EngineRuntimeAuthority;
+}
+
+/** Issue an exact-identity capability that cannot be recreated by object spread. */
+export function createEngineRuntimeCapability(
+  input: EngineRuntimeCapabilityInput,
+): EngineRuntimeCapability {
+  if (!Session.isRuntimeCapabilityOwner(input.owner)) {
+    throw new Error("Runtime capability owner must be an actual Session");
+  }
+  const sessionId = input.owner.id;
+  const workDir = input.owner.workDir;
+  const assertAuthority = (): void => {
+    Session.prototype.assertRuntimeEventAuthority.call(input.owner, input.runtimeAuthority);
+  };
+  assertAuthority();
+  const capability: EngineRuntimeCapability = Object.freeze({
+    [engineRuntimeCapabilityBrand]: true as const,
+    sessionId,
+    workDir,
+    runtimeAuthority: input.runtimeAuthority,
+    writeGuard: input.owner,
+    assertBound: (scope: EngineRuntimeCapability): void => {
+      if (scope !== capability) {
+        throw new Error(`Runtime capability is not bound to Session ${sessionId}`);
+      }
+      assertAuthority();
+    },
+  });
+  issuedEngineRuntimeCapabilities.add(capability);
+  return capability;
+}
+
+/** Runtime adapters must reject structural lookalikes before using their authority. */
+export function assertIssuedEngineRuntimeCapability(capability: EngineRuntimeCapability): void {
+  if (!issuedEngineRuntimeCapabilities.has(capability)) {
+    throw new Error(`Runtime capability for Session ${capability.sessionId} was not issued`);
+  }
+  capability.assertBound(capability);
 }
 
 export interface EngineRuntimeHistoryEntry {
@@ -45,8 +100,8 @@ export interface EngineRuntimeRun {
   readonly invocationId: string;
   readonly sessionId: string;
   readonly workDir: string;
-  readonly store: EngineRuntimeStore;
   readonly runtimeEventWriteGuard?: EngineRuntimeWriteGuard;
+  readonly runtimeCapability?: EngineRuntimeCapability;
 
   claimsSession(session: Session): boolean;
   commitMessages(session: Session, messages: readonly Message[]): Promise<void>;
@@ -63,25 +118,18 @@ export interface EngineRuntimeRun {
 }
 
 export interface EngineRuntimeRunStartOptions {
-  readonly sessionId: string;
-  readonly workDir: string;
   readonly runId?: string;
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
-  readonly store?: EngineRuntimeStore;
-  readonly writeGuard: EngineRuntimeWriteGuard;
+  readonly capability: EngineRuntimeCapability;
 }
 
 export interface EngineRuntimeReconcileOptions {
-  readonly sessionId: string;
-  readonly workDir: string;
-  readonly store?: EngineRuntimeStore;
-  readonly writeGuard: EngineRuntimeWriteGuard;
+  readonly capability: EngineRuntimeCapability;
 }
 
 export interface EngineRuntimeRepairProjectionOptions {
-  readonly workDir: string;
-  readonly store?: EngineRuntimeStore;
+  readonly capability: EngineRuntimeCapability;
 }
 
 /**
