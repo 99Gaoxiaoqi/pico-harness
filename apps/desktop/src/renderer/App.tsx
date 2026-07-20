@@ -93,6 +93,7 @@ import type {
   WorkspaceMode,
 } from "./model.js";
 import { ProviderPage } from "./ProviderPage.js";
+import { MemoryPage } from "./MemoryPage.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 import {
   newSessionHref,
@@ -202,6 +203,14 @@ function AppStateRouter() {
           element={
             <WorkspaceRoute>
               <AutomationsPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route
+          path="memory"
+          element={
+            <WorkspaceRoute>
+              <MemoryPageRoute />
             </WorkspaceRoute>
           }
         />
@@ -485,6 +494,7 @@ function TrustWorkspace({ workspacePath }: { readonly workspacePath: string }) {
 const primaryNav = [{ to: "/automations", label: "自动化", icon: Workflow, scoped: true }] as const;
 
 const resourceNav = [
+  { to: "/memory", label: "记忆", icon: BrainCircuit, scoped: true },
   { to: "/skills", label: "Skills", icon: WandSparkles, scoped: true },
   { to: "/mcp", label: "MCP", icon: Network, scoped: true },
   { to: "/providers", label: "模型", icon: BrainCircuit, scoped: true },
@@ -2188,6 +2198,10 @@ function ProviderPageRoute() {
   return <ProviderPage runtime={useRuntime()} />;
 }
 
+function MemoryPageRoute() {
+  return <MemoryPage runtime={useRuntime()} />;
+}
+
 function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
   const { data } = useRuntime();
   const config = {
@@ -2548,6 +2562,7 @@ function routeTitle(pathname: string): string {
         "/sessions": "会话",
         "/automations": "自动化",
         "/review": "更改审阅",
+        "/memory": "记忆",
         "/skills": "Skills",
         "/mcp": "MCP",
         "/providers": "模型",
