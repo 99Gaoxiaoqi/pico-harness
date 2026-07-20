@@ -1,6 +1,10 @@
+/// <reference lib="dom" />
+/// <reference lib="dom.iterable" />
+
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import type {} from "../../apps/desktop/src/preload/global.js";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryPage, nextMemoryTabIndex } from "../../apps/desktop/src/renderer/MemoryPage.js";
