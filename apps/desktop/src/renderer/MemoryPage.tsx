@@ -160,20 +160,18 @@ export function MemoryPage({
 
   const resolveProposal = async (proposal: RuntimeMemoryProposal, edited = false) => {
     const resolution = "accepted" as const;
+    const patch =
+      edited && editor?.type === "proposal" && editor.id === proposal.proposalId
+        ? { title: editor.title.trim(), content: editor.content.trim() }
+        : undefined;
     const result = await actions.resolveMemoryProposal(
       proposal.proposalId,
       proposal.version,
       resolution,
+      patch,
     );
     if (!result) return;
-    let fact = result.fact;
-    if (edited && fact && editor?.type === "proposal" && editor.id === proposal.proposalId) {
-      fact =
-        (await actions.updateMemoryFact(fact.factId, fact.version, {
-          title: editor.title.trim(),
-          content: editor.content.trim(),
-        })) ?? fact;
-    }
+    const fact = result.fact;
     setEditor(undefined);
     if (fact) {
       const acceptedFact = fact;

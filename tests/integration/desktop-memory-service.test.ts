@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 import { DesktopMemoryService, mapMemoryError } from "../../src/daemon/desktop-memory-service.js";
 import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../src/daemon/protocol.js";
 import { MemoryRepository } from "../../src/memory/memory-repository.js";
@@ -85,6 +86,17 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
     () => service.get(fixture.workspace, "missing-fact"),
     RUNTIME_ERROR_CODES.NOT_FOUND,
   );
+  const settings = service.getSettings(fixture.workspace).settings;
+  assertRuntimeError(
+    () =>
+      service.updateSettings(fixture.workspace, {
+        workspacePath: fixture.workspace,
+        expectedVersion: settings.version,
+        idempotencyKey: "reject-auto-commit",
+        autoCommit: true,
+      } as never),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
   const internal = mapMemoryError(new Error("failed at /private/secret/memory.sqlite"));
   assert.equal(internal.code, RUNTIME_ERROR_CODES.INTERNAL_ERROR);
   assert.equal(internal.message.includes("/private/secret"), false);
@@ -93,6 +105,101 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
   const mappedPendingDelete = mapMemoryError(pendingDelete);
   assert.equal(mappedPendingDelete.code, RUNTIME_ERROR_CODES.CONFLICT);
   assert.equal(mappedPendingDelete.message.includes("/private/secret"), false);
+});
+
+test("edited approval is one atomic CAS and never activates the original body", async (context) => {
+  const fixture = await createFixture("atomic-review");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  const proposal = repository.createProposal({
+    proposalId: "proposal-atomic",
+    kind: "reference",
+    title: "Original title",
+    content: "Original body",
+    reason: "Original reason",
+  });
+  repository.close();
+
+  let disconnect = true;
+  const service = new DesktopMemoryService({
+    picoHome: fixture.picoHome,
+    publish: () => {
+      if (disconnect) throw new Error("renderer disconnected");
+    },
+  });
+  context.after(() => service.close());
+
+  assertRuntimeError(
+    () =>
+      service.resolveReview(fixture.workspace, {
+        workspacePath: fixture.workspace,
+        proposalId: proposal.proposalId,
+        resolution: "accepted",
+        expectedVersion: proposal.version + 1,
+        idempotencyKey: "atomic-stale",
+        patch: { title: "Edited title", content: "Edited body" },
+      }),
+    RUNTIME_ERROR_CODES.CONFLICT,
+  );
+  assert.equal(
+    service.listReviews(fixture.workspace, {
+      workspacePath: fixture.workspace,
+      statuses: ["pending"],
+    }).proposals.length,
+    1,
+  );
+  assert.equal(
+    service.list(fixture.workspace, { workspacePath: fixture.workspace }).facts.length,
+    0,
+  );
+
+  assertRuntimeError(
+    () =>
+      service.resolveReview(fixture.workspace, {
+        workspacePath: fixture.workspace,
+        proposalId: proposal.proposalId,
+        resolution: "accepted",
+        expectedVersion: proposal.version,
+        idempotencyKey: "atomic-approve",
+        patch: {
+          kind: "project_fact",
+          title: "Edited title",
+          content: "Edited body",
+          reason: "Human corrected the proposal",
+          confidence: 1,
+        },
+      }),
+    RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+  );
+  disconnect = false;
+
+  const verify = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  context.after(() => verify.close());
+  const accepted = verify.getProposal(proposal.proposalId)!;
+  const fact = verify.getFact(accepted.resolvedFactId!)!;
+  assert.equal(accepted.status, "accepted");
+  assert.equal(accepted.version, proposal.version + 1);
+  assert.equal(accepted.content, "Edited body");
+  assert.equal(fact.kind, "project_fact");
+  assert.equal(fact.title, "Edited title");
+  assert.equal(fact.content, "Edited body");
+  assert.equal(
+    verify
+      .listFacts({ states: ["active"], limit: 500 })
+      .some((item) => item.content === "Original body"),
+    false,
+  );
+  assert.deepEqual(
+    verify.listMutations({ entityId: fact.factId }).map((mutation) => mutation.action),
+    ["fact.created"],
+  );
 });
 
 test("session deletion and rewind invalidate sources and pending proposals but retain facts", async (context) => {
@@ -192,6 +299,154 @@ test("session deletion and rewind invalidate sources and pending proposals but r
   assert.ok(events.every((event) => !("content" in event.payload) && !("reason" in event.payload)));
 });
 
+test("session lifecycle compensation invalidates more than 500 sources without overriding success", async (context) => {
+  const fixture = await createFixture("lifecycle-pagination");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  for (let index = 0; index < 510; index++) {
+    const suffix = index.toString().padStart(4, "0");
+    const source = repository.createSource({
+      sourceId: `bulk-source-${suffix}`,
+      sessionId: "bulk-session",
+      digest: `sha256:bulk-${suffix}`,
+    });
+    repository.createProposal({
+      proposalId: `bulk-proposal-${suffix}`,
+      kind: "project_fact",
+      title: `Bulk ${suffix}`,
+      content: `Body ${suffix}`,
+      reason: "Lifecycle pagination fixture",
+      sourceId: source.sourceId,
+    });
+  }
+  repository.close();
+
+  const degraded: string[] = [];
+  let failFirstPublish = true;
+  const service = new DesktopMemoryService({
+    picoHome: fixture.picoHome,
+    publish: () => {
+      if (failFirstPublish) {
+        failFirstPublish = false;
+        throw new Error("notification transport unavailable");
+      }
+    },
+    onDegraded: (event) => degraded.push(event.code),
+  });
+  context.after(() => service.close());
+  assert.doesNotThrow(() =>
+    service.invalidateSessionSources(fixture.workspace, "bulk-session", {
+      availability: "unavailable",
+      code: "session_deleted",
+    }),
+  );
+  assert.deepEqual(degraded, ["notification_delivery_deferred"]);
+
+  // Any later memory access retries the durable lifecycle job.
+  service.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
+  const inspection = new Database(paths.workspace.memoryDatabase, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  context.after(() => inspection.close());
+  assert.deepEqual(
+    inspection
+      .prepare(
+        "SELECT availability, COUNT(*) AS count FROM memory_sources WHERE session_id = ? GROUP BY availability",
+      )
+      .all("bulk-session"),
+    [{ availability: "unavailable", count: 510 }],
+  );
+  assert.deepEqual(
+    inspection
+      .prepare(
+        "SELECT status, COUNT(*) AS count FROM memory_proposals WHERE proposal_id LIKE 'bulk-proposal-%' GROUP BY status",
+      )
+      .all(),
+    [{ status: "deleted", count: 510 }],
+  );
+  assert.deepEqual(
+    inspection
+      .prepare(
+        "SELECT status, COUNT(*) AS count FROM memory_jobs WHERE type = 'source-lifecycle-invalidation' GROUP BY status",
+      )
+      .all(),
+    [{ status: "succeeded", count: 1 }],
+  );
+});
+
+test("busy secure-delete forget durably outboxes a body-free notification", async (context) => {
+  const fixture = await createFixture("forget-outbox");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  const secret = "forget-outbox-sensitive-body";
+  const fact = repository.createFact({
+    factId: "forget-outbox-fact",
+    kind: "reference",
+    title: secret,
+    content: secret,
+  });
+  repository.close();
+
+  const events: Array<{ readonly topic: string; readonly payload: Record<string, unknown> }> = [];
+  const degraded: string[] = [];
+  const service = new DesktopMemoryService({
+    picoHome: fixture.picoHome,
+    repositoryBusyTimeoutMs: 1,
+    publish: (_workspacePath, topic, payload) => events.push({ topic, payload }),
+    onDegraded: (event) => degraded.push(event.code),
+  });
+  context.after(() => service.close());
+  service.get(fixture.workspace, fact.factId);
+  const reader = holdFactReadSnapshot(paths.workspace.memoryDatabase, fact.factId, secret);
+  assertRuntimeError(
+    () =>
+      service.forget(fixture.workspace, {
+        workspacePath: fixture.workspace,
+        factId: fact.factId,
+        expectedVersion: fact.version,
+        idempotencyKey: "forget-outbox-request",
+      }),
+    RUNTIME_ERROR_CODES.CONFLICT,
+  );
+  assert.equal(
+    events.some((event) => event.topic === "memory.forgotten"),
+    true,
+  );
+  assert.ok(events.every((event) => !("content" in event.payload) && !("title" in event.payload)));
+  releaseReadSnapshot(reader);
+
+  const replay = service.forget(fixture.workspace, {
+    workspacePath: fixture.workspace,
+    factId: fact.factId,
+    expectedVersion: fact.version,
+    idempotencyKey: "forget-outbox-request",
+  });
+  assert.equal(replay.fact.state, "forgotten");
+  const inspection = new Database(paths.workspace.memoryDatabase, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  context.after(() => inspection.close());
+  assert.deepEqual(
+    inspection
+      .prepare(
+        "SELECT status, COUNT(*) AS count FROM memory_jobs WHERE type = 'notification.memory.forgotten' GROUP BY status",
+      )
+      .all(),
+    [{ status: "succeeded", count: 1 }],
+  );
+  assert.ok(degraded.includes("notification_delivery_deferred"));
+});
+
 test("context preview matches the first recall policy and reports an 800-token budget", async (context) => {
   const fixture = await createFixture("preview");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -280,4 +535,25 @@ function assertRuntimeError(operation: () => unknown, code: string): void {
     assert.equal(error.code, code);
     return true;
   });
+}
+
+function holdFactReadSnapshot(
+  databasePath: string,
+  factId: string,
+  expectedContent: string,
+): Database.Database {
+  const reader = new Database(databasePath, { readonly: true, fileMustExist: true });
+  reader.pragma("busy_timeout = 0");
+  reader.exec("BEGIN");
+  const row = reader.prepare("SELECT content FROM memory_facts WHERE fact_id = ?").get(factId) as {
+    readonly content: string;
+  };
+  assert.equal(row.content, expectedContent);
+  return reader;
+}
+
+function releaseReadSnapshot(reader: Database.Database): void {
+  if (!reader.open) return;
+  reader.exec("ROLLBACK");
+  reader.close();
 }

@@ -709,6 +709,13 @@ export type RuntimeMethodMap = {
       readonly expectedVersion: number;
       readonly idempotencyKey: string;
       readonly factId?: string;
+      readonly patch?: {
+        readonly kind?: RuntimeMemoryKind;
+        readonly title?: string;
+        readonly content?: string;
+        readonly reason?: string;
+        readonly confidence?: number;
+      };
     };
     readonly result: {
       readonly proposal: RuntimeMemoryProposal;
@@ -725,7 +732,7 @@ export type RuntimeMethodMap = {
       readonly idempotencyKey: string;
       readonly enabled?: boolean;
       readonly autoPropose?: boolean;
-      readonly autoCommit?: boolean;
+      readonly autoCommit?: false;
       readonly injectionEnabled?: boolean;
     };
     readonly result: { readonly settings: RuntimeMemorySettings };
@@ -1930,7 +1937,9 @@ function memorySettingsUpdateParams(value: Record<string, unknown>): void {
     {
       enabled: booleanParam,
       autoPropose: booleanParam,
-      autoCommit: booleanParam,
+      autoCommit: (candidate, path) => {
+        if (candidate !== false) throw invalidParams(`${path} 首版只允许为 false`);
+      },
       injectionEnabled: booleanParam,
     },
   )(value);
@@ -1940,6 +1949,41 @@ function memorySettingsUpdateParams(value: Record<string, unknown>): void {
     )
   ) {
     throw invalidParams("memory.settings.update 至少需要一个更新字段");
+  }
+}
+
+function memoryReviewResolveParams(value: Record<string, unknown>): void {
+  exactParamShape(
+    {
+      workspacePath: stringParam,
+      proposalId: boundedNonEmptyStringParam(512),
+      resolution: oneOfParam(["accepted", "rejected"]),
+      expectedVersion: positiveIntegerParam,
+      idempotencyKey: boundedNonEmptyStringParam(512),
+    },
+    {
+      factId: boundedNonEmptyStringParam(512),
+      patch: (candidate, path) => {
+        assertNestedShape(
+          candidate,
+          path,
+          {},
+          {
+            kind: oneOfParam(["preference", "correction", "project_fact", "reference"]),
+            title: boundedNonEmptyStringParam(512),
+            content: boundedNonEmptyStringParam(32_000),
+            reason: boundedNonEmptyStringParam(4_000),
+            confidence: confidenceParam,
+          },
+        );
+        if (Object.keys(candidate as Record<string, unknown>).length === 0) {
+          throw invalidParams(`${path} 至少需要一个更新字段`);
+        }
+      },
+    },
+  )(value);
+  if (value["resolution"] === "rejected" && value["patch"] !== undefined) {
+    throw invalidParams("params.patch 仅能用于批准建议");
   }
 }
 
@@ -2080,16 +2124,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       limit: positiveIntegerParam,
     },
   ),
-  "memory.review.resolve": exactParamShape(
-    {
-      workspacePath: stringParam,
-      proposalId: boundedNonEmptyStringParam(512),
-      resolution: oneOfParam(["accepted", "rejected"]),
-      expectedVersion: positiveIntegerParam,
-      idempotencyKey: boundedNonEmptyStringParam(512),
-    },
-    { factId: boundedNonEmptyStringParam(512) },
-  ),
+  "memory.review.resolve": memoryReviewResolveParams,
   "memory.settings.get": workspaceParams,
   "memory.settings.update": memorySettingsUpdateParams,
   "memory.context.preview": exactParamShape(
