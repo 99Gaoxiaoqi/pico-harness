@@ -135,3 +135,150 @@ test("run.failed lifecycle observers cannot replace the original Runtime failure
     ),
   );
 });
+
+test("Memory enqueue failure cannot replace completed terminal state or streamed result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-enqueue-failure-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-memory-enqueue-failure", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  try {
+    await session.recover();
+    const runtimeState = {
+      dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+    } as unknown as SessionRuntime;
+    const engine = {
+      run: async (target: Session) => {
+        await target.commitMessages({ role: "assistant", content: "streamed answer" });
+        return target.getHistory();
+      },
+    } as unknown as AgentEngine;
+    let enqueued = 0;
+    const result = await new RuntimeRunExecutor({
+      session,
+      runtimeState,
+      engine,
+      sessionSelection: { mode: "new", sessionId: session.id },
+      workDir,
+      picoHome,
+      prompt: "hello",
+      resumeExistingSession: false,
+      traceEnabled: false,
+      options: {},
+      memoryReviewScheduler: {
+        enqueue(input) {
+          enqueued++;
+          assert.equal(input.sessionId, session.id);
+          assert.match(input.userMessageEventId, /^user-message:/u);
+          assert.ok(input.runId);
+          assert.ok(input.terminalEventId);
+          throw new Error("memory queue unavailable");
+        },
+      },
+    }).execute();
+    assert.equal(result.finalMessage, "streamed answer");
+    assert.equal(enqueued, 1);
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    assert.equal(
+      events.some((event) => event.kind === "run.terminal" && event.data.status === "completed"),
+      true,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed, cancelled and resumed Runtime executions never enqueue Memory review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-ineligible-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimeState = {
+    dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+  } as unknown as SessionRuntime;
+  let enqueued = 0;
+  const scheduler = { enqueue: () => void enqueued++ };
+  try {
+    const failed = new Session("runtime-memory-failed", workDir, { persistence: true, picoHome });
+    await failed.recover();
+    await assert.rejects(
+      new RuntimeRunExecutor({
+        session: failed,
+        runtimeState,
+        engine: {
+          run: async () => Promise.reject(new Error("model failed")),
+        } as unknown as AgentEngine,
+        sessionSelection: { mode: "new", sessionId: failed.id },
+        workDir,
+        picoHome,
+        prompt: "failure",
+        resumeExistingSession: false,
+        traceEnabled: false,
+        options: {},
+        memoryReviewScheduler: scheduler,
+      }).execute(),
+      /model failed/u,
+    );
+    assert.equal(enqueued, 0);
+    await failed.close();
+
+    const cancelled = new Session("runtime-memory-cancelled", workDir, {
+      persistence: true,
+      picoHome,
+    });
+    await cancelled.recover();
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      new RuntimeRunExecutor({
+        session: cancelled,
+        runtimeState,
+        engine: { run: async () => [] } as unknown as AgentEngine,
+        sessionSelection: { mode: "new", sessionId: cancelled.id },
+        workDir,
+        picoHome,
+        prompt: "cancel",
+        resumeExistingSession: false,
+        traceEnabled: false,
+        options: {},
+        signal: controller.signal,
+        memoryReviewScheduler: scheduler,
+      }).execute(),
+      /abort/iu,
+    );
+    assert.equal(enqueued, 0);
+    const cancelledEvents = await cancelled.runtimeEventStore!.readSession(cancelled.id);
+    assert.equal(
+      cancelledEvents.some(
+        (event) => event.kind === "run.terminal" && event.data.status === "cancelled",
+      ),
+      true,
+    );
+    await cancelled.close();
+
+    const resumed = new Session("runtime-memory-resumed", workDir, {
+      persistence: true,
+      picoHome,
+    });
+    await resumed.recover();
+    await new RuntimeRunExecutor({
+      session: resumed,
+      runtimeState,
+      engine: { run: async () => [] } as unknown as AgentEngine,
+      sessionSelection: { mode: "resume", sessionId: resumed.id },
+      workDir,
+      picoHome,
+      prompt: "unused",
+      resumeExistingSession: true,
+      traceEnabled: false,
+      options: {},
+      memoryReviewScheduler: scheduler,
+    }).execute();
+    assert.equal(enqueued, 0);
+    await resumed.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

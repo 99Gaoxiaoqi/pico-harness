@@ -32,12 +32,14 @@ export function migrateRuntimeStoreSchema(db: Database.Database, now: () => numb
         `runtime.sqlite schema ${current} 新于当前支持版本 ${RUNTIME_SCHEMA_VERSION}`,
       );
     }
-    if (current === 6) {
-      const migration = db.prepare("SELECT name FROM schema_migrations WHERE version = 6").get() as
-        | { name: string }
-        | undefined;
+    if (current === RUNTIME_SCHEMA_VERSION) {
+      const migration = db
+        .prepare("SELECT name FROM schema_migrations WHERE version = ?")
+        .get(RUNTIME_SCHEMA_VERSION) as { name: string } | undefined;
       if (migration?.name !== RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME) {
-        throw new Error(`runtime.sqlite schema 6 migration ${migration?.name ?? "缺失"} 不受支持`);
+        throw new Error(
+          `runtime.sqlite schema ${RUNTIME_SCHEMA_VERSION} migration ${migration?.name ?? "缺失"} 不受支持`,
+        );
       }
     }
     applyMigration(db, now, current, 1, "runtime_control_plane", SCHEMA_V1);
@@ -45,7 +47,8 @@ export function migrateRuntimeStoreSchema(db: Database.Database, now: () => numb
     applyMigration(db, now, current, 3, "cron_job_run_ledger", SCHEMA_V3);
     applyMigration(db, now, current, 4, "cron_provider_credential_ref", SCHEMA_V4);
     applyMigration(db, now, current, 5, "provider_call_hook_purpose", SCHEMA_V5);
-    applyMigration(db, now, current, 6, RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME, SCHEMA_V6);
+    applyMigration(db, now, current, 6, "daemon_run_projection_and_idempotency", SCHEMA_V6);
+    applyMigration(db, now, current, 7, RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME, SCHEMA_V7);
     ensureCronJobDisplayNameColumn(db);
     ensureCronJobModelRouteColumn(db);
   });
@@ -399,4 +402,49 @@ const SCHEMA_V6 = `
   );
   CREATE INDEX IF NOT EXISTS daemon_commands_resource_idx
     ON daemon_commands(command_type, resource_id);
+`;
+
+/**
+ * Memory review is a distinct provider purpose. Queue authority remains in workspace
+ * memory.sqlite.memory_jobs; runtime.sqlite stores cost/audit semantics only.
+ */
+const SCHEMA_V7 = `
+  DROP INDEX IF EXISTS provider_calls_session_idx;
+  DROP INDEX IF EXISTS provider_calls_goal_idx;
+  DROP INDEX IF EXISTS provider_calls_job_idx;
+  ALTER TABLE provider_calls RENAME TO provider_calls_v6;
+  CREATE TABLE provider_calls (
+    call_id TEXT PRIMARY KEY,
+    session_id TEXT,
+    conversation_id TEXT,
+    goal_id TEXT,
+    job_id TEXT REFERENCES jobs(job_id) ON DELETE SET NULL,
+    attempt_id TEXT REFERENCES job_attempts(attempt_id) ON DELETE SET NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN (${sqlValues(PROVIDER_CALL_PURPOSES)})),
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    route TEXT,
+    status TEXT NOT NULL CHECK (status IN (${sqlValues(PROVIDER_CALL_STATUSES)})),
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+    cache_write_tokens INTEGER NOT NULL CHECK (cache_write_tokens >= 0),
+    cost REAL NOT NULL CHECK (cost >= 0),
+    reported_json TEXT,
+    created_at INTEGER NOT NULL
+  );
+  INSERT INTO provider_calls (
+    call_id, session_id, conversation_id, goal_id, job_id, attempt_id, purpose,
+    provider, model, route, status, input_tokens, output_tokens, cache_read_tokens,
+    cache_write_tokens, cost, reported_json, created_at
+  )
+  SELECT
+    call_id, session_id, conversation_id, goal_id, job_id, attempt_id, purpose,
+    provider, model, route, status, input_tokens, output_tokens, cache_read_tokens,
+    cache_write_tokens, cost, reported_json, created_at
+  FROM provider_calls_v6;
+  DROP TABLE provider_calls_v6;
+  CREATE INDEX provider_calls_session_idx ON provider_calls(session_id, created_at);
+  CREATE INDEX provider_calls_goal_idx ON provider_calls(goal_id, created_at);
+  CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
 `;
