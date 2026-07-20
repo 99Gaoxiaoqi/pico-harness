@@ -11,8 +11,9 @@ import {
   SOURCE_AVAILABILITIES,
 } from "./domain.js";
 
-export const MEMORY_SCHEMA_VERSION = 1;
-export const MEMORY_SCHEMA_CURRENT_MIGRATION_NAME = "workspace_memory_foundation" as const;
+export const MEMORY_SCHEMA_VERSION = 2;
+export const MEMORY_SCHEMA_CURRENT_MIGRATION_NAME = "secure_delete_checkpoint_state" as const;
+const MEMORY_SCHEMA_V1_MIGRATION_NAME = "workspace_memory_foundation" as const;
 
 export class MemorySchemaVersionError extends Error {
   constructor(message: string) {
@@ -59,10 +60,8 @@ export function migrateMemorySchema(
         `memory.sqlite schema ${current} is newer than supported version ${MEMORY_SCHEMA_VERSION}`,
       );
     }
-    if (
-      current === MEMORY_SCHEMA_VERSION &&
-      latest?.name !== MEMORY_SCHEMA_CURRENT_MIGRATION_NAME
-    ) {
+    const expectedName = migrationNameForVersion(current);
+    if (expectedName && latest?.name !== expectedName) {
       throw new MemorySchemaVersionError(
         `memory.sqlite schema ${current} migration ${String(latest?.name)} is unsupported`,
       );
@@ -72,7 +71,13 @@ export function migrateMemorySchema(
       db.exec(SCHEMA_V1);
       db.prepare(
         "INSERT INTO memory_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
-      ).run(1, MEMORY_SCHEMA_CURRENT_MIGRATION_NAME, now());
+      ).run(1, MEMORY_SCHEMA_V1_MIGRATION_NAME, now());
+    }
+    if (current < 2) {
+      db.exec(SCHEMA_V2);
+      db.prepare(
+        "INSERT INTO memory_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+      ).run(2, MEMORY_SCHEMA_CURRENT_MIGRATION_NAME, now());
     }
 
     bindWorkspace(db, workspaceId, now);
@@ -110,6 +115,17 @@ function bindWorkspace(db: Database.Database, workspaceId: WorkspaceId, now: () 
        ) VALUES (?, 1, 1, 0, 1, 1, ?)`,
     ).run(workspaceId, now());
   }
+  db.prepare(
+    `INSERT OR IGNORE INTO memory_maintenance(
+       workspace_id, secure_delete_pending, requested_at, updated_at
+     ) VALUES (?, 0, NULL, ?)`,
+  ).run(workspaceId, now());
+}
+
+function migrationNameForVersion(version: number): string | undefined {
+  if (version === 1) return MEMORY_SCHEMA_V1_MIGRATION_NAME;
+  if (version === 2) return MEMORY_SCHEMA_CURRENT_MIGRATION_NAME;
+  return undefined;
 }
 
 function hasTable(db: Database.Database, name: string): boolean {
@@ -270,5 +286,19 @@ const SCHEMA_V1 = `
     result_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (workspace_id, operation, idempotency_key_hash)
+  );
+`;
+
+const SCHEMA_V2 = `
+  CREATE TABLE memory_maintenance (
+    workspace_id TEXT PRIMARY KEY REFERENCES memory_workspace(workspace_id) ON DELETE RESTRICT,
+    secure_delete_pending INTEGER NOT NULL CHECK (secure_delete_pending IN (0, 1)),
+    requested_at TEXT,
+    updated_at TEXT NOT NULL,
+    CHECK (
+      (secure_delete_pending = 0 AND requested_at IS NULL)
+      OR
+      (secure_delete_pending = 1 AND requested_at IS NOT NULL)
+    )
   );
 `;
