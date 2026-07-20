@@ -96,6 +96,6 @@ Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，
 
 ## 技术栈
 
-- TypeScript ESM，Node.js 22.x，strict type checking
+- TypeScript ESM，Node.js 22.13+/24.3+/26，strict type checking
 - better-sqlite3、Ink/React、Electron、pino、gpt-tokenizer、js-yaml
 - tsx、TypeScript、ESLint、Prettier

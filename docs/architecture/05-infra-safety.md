@@ -179,15 +179,15 @@ new CostTracker(provider, modelRoute, session)
 
 ### 技术栈
 
-| 维度     | 选择                                           |
-| -------- | ---------------------------------------------- |
-| 语言     | TypeScript ESM, target ES2024, **全开 strict** |
-| 运行时   | Node.js 22.x                                   |
-| 原生模块 | better-sqlite3（需 node-gyp 编译）             |
-| TUI      | ink 7 + React 19                               |
-| Desktop  | Electron + React                               |
-| 日志     | pino + pino-pretty                             |
-| 产品外壳 | `pico` TUI + Pico Desktop                      |
+| 维度     | 选择                                            |
+| -------- | ----------------------------------------------- |
+| 语言     | TypeScript ESM, target ES2024, **全开 strict**  |
+| 运行时   | Node.js 22.13+/24.3+/26                         |
+| 原生模块 | better-sqlite3（按 Node/Electron ABI 独立安装） |
+| TUI      | ink 7 + React 19                                |
+| Desktop  | Electron + React                                |
+| 日志     | pino + pino-pretty                              |
+| 产品外壳 | `pico` TUI + Pico Desktop                       |
 
 ### tsconfig 关键项
 

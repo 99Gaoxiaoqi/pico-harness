@@ -79,7 +79,7 @@ npm pack --dry-run
 npm run desktop:package
 ```
 
-`test:integration` 覆盖 Runtime、daemon、持久化和安全边界的本地集成路径；`check:storage` 单独验证 Node 22.12+ ABI、`better-sqlite3` 与 SQLite 事务/WAL 能力。`build` 和 `npm pack --dry-run` 检查 CLI 可发布产物，`desktop:package` 生成当前平台的未签名 Desktop smoke 包；它不替代安装、签名或公证验证。
+`test:integration` 覆盖 Runtime、daemon、持久化和安全边界的本地集成路径；`check:storage` 单独验证受支持的 Node 22.13+/24.3+/26 运行时、当前 ABI 的 `better-sqlite3` 与 SQLite 事务/WAL 能力。切换 Node 主版本后运行 `npm ci`，或用 `npm run repair:storage` 重建 Node/TUI 的原生模块；Electron 使用独立别名和 ABI，不会覆盖这份模块。`build` 和 `npm pack --dry-run` 检查 CLI 可发布产物，`desktop:package` 生成当前平台的未签名 Desktop smoke 包；它不替代安装、签名或公证验证。
 
 真实模型闭环需要可用的 Provider 配置、凭证与网络，只在受控环境执行，不在无凭证 CI 中强制运行：
 

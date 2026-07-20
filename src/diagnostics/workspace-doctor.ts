@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  isSupportedNodeVersion,
+  NODE_RUNTIME_SUPPORT_LABEL,
+} from "../runtime/node-version-policy.js";
+import {
   STORAGE_DOCTOR_COMPONENTS,
   StorageDoctor,
   type StorageDoctorFinding,
@@ -50,8 +54,8 @@ export async function runWorkspaceDoctor(
 ): Promise<WorkspaceDoctorReport> {
   const env = options.env ?? process.env;
   const envPath = join(options.workDir, ".env");
-  const nodeMajor = Number(process.versions.node.split(".")[0] ?? "0");
-  const nodeOk = nodeMajor >= 22;
+  const nodeOk = isSupportedNodeVersion(process.versions.node);
+  const nodeSummary = `${process.version} (${nodeOk ? "ok" : `requires ${NODE_RUNTIME_SUPPORT_LABEL}`})`;
   const cwdOk = existsSync(options.workDir);
   const apiKeys = readApiKeys(env);
   const effectiveProviderCount = Object.keys(options.configuration?.providerSources ?? {}).length;
@@ -90,12 +94,7 @@ export async function runWorkspaceDoctor(
           ? `${effectiveCredentialCount} available from effective configuration`
           : "missing",
     ),
-    check(
-      "node",
-      "Node",
-      nodeOk ? "ok" : "error",
-      `${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
-    ),
+    check("node", "Node", nodeOk ? "ok" : "error", nodeSummary),
     runtimeLedgerCheck(storage.report, storage.error),
     check(
       "task-runtime",
@@ -126,7 +125,7 @@ export async function runWorkspaceDoctor(
           ? `${effectiveCredentialCount} available from effective configuration`
           : "missing"
     }`,
-    `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
+    `Node: ${nodeSummary}`,
     ...renderRuntimeLedger(storage.report, storage.error),
     `Task runtime: ${options.taskRuntimeAvailable ? "healthy" : "unavailable"}`,
     ...(options.taskRuntimeDiagnostic

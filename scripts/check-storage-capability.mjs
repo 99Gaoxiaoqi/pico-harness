@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 
-const EXPECTED_NODE_MAJOR = 22;
+const SUPPORTED_NODE_RELEASES = new Map([
+  [22, 13],
+  [24, 3],
+  [26, 0],
+]);
+const SUPPORTED_NODE_LABEL = "Node 22.13+、24.3+ 或 26.x";
 const runtime = [
   `Node ${process.version}`,
   `ABI ${process.versions.modules}`,
@@ -15,18 +20,19 @@ function fail(summary, error) {
   console.error(`[storage-check] ${summary}`);
   console.error(`[storage-check] 当前运行时: ${runtime}`);
   if (detail) console.error(`[storage-check] 详情: ${detail}`);
+  console.error(`[storage-check] 请使用 ${SUPPORTED_NODE_LABEL}，并确保依赖由当前 Node 版本安装。`);
   console.error(
-    "[storage-check] 请切换到 Node 22，确保当前 worktree 使用独立的 node_modules，然后运行 npm ci。",
-  );
-  console.error(
-    "[storage-check] 若刚切换过 Node 版本，可在 Node 22 下运行 npm rebuild better-sqlite3。",
+    "[storage-check] 若刚切换过 Node 版本，请运行 npm run repair:storage；需要完全重装时运行 npm ci。",
   );
   process.exitCode = 1;
 }
 
-const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
-if (nodeMajor !== EXPECTED_NODE_MAJOR) {
-  fail(`项目固定使用 Node ${EXPECTED_NODE_MAJOR}，检测到 Node ${nodeMajor}。`, "Node 版本不匹配");
+const [nodeMajor = Number.NaN, nodeMinor = Number.NaN] = process.versions.node
+  .split(".")
+  .map((part) => Number.parseInt(part, 10));
+const minimumMinor = SUPPORTED_NODE_RELEASES.get(nodeMajor);
+if (minimumMinor === undefined || nodeMinor < minimumMinor) {
+  fail(`项目支持 ${SUPPORTED_NODE_LABEL}，检测到 ${process.version}。`, "Node 版本不受支持");
 } else {
   let db;
   let probeDirectory;
