@@ -10,6 +10,7 @@ import type { CliSessionSelection } from "../cli/session-resolver.js";
 import { logger } from "../observability/logger.js";
 import type { SessionRuntime } from "./session-runtime.js";
 import { RuntimeRun } from "./runtime-run.js";
+import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -37,6 +38,8 @@ export interface RuntimeRunExecutorInput {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: RuntimeLifecycleEvent) => void;
   readonly rewindPointSink?: (checkpointId: string) => void;
+  /** Eligible foreground-only durable post-terminal memory scheduler. */
+  readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
 }
 
 /**
@@ -60,6 +63,7 @@ export class RuntimeRunExecutor {
       signal,
       onEvent,
       rewindPointSink,
+      memoryReviewScheduler,
     } = this.input;
     let prompt = initialPrompt;
 
@@ -83,7 +87,8 @@ export class RuntimeRunExecutor {
         workDir,
         at: Date.now(),
       });
-      return runtimeRun.run(async () => {
+      let userMessageEventId: string | undefined;
+      const runResult = await runtimeRun.run(async () => {
         signal?.throwIfAborted();
         if (!resumeExistingSession) {
           const submittedPrompt = prompt;
@@ -133,6 +138,7 @@ export class RuntimeRunExecutor {
             content: prompt,
             ...(images ? { images } : {}),
           });
+          userMessageEventId = userReceipt.eventId;
           await session.bindRewindPointSource(rewindPointId, userReceipt);
         }
 
@@ -149,6 +155,36 @@ export class RuntimeRunExecutor {
             : {}),
         } satisfies RunAgentCliResult;
       }, signal);
+      if (memoryReviewScheduler && userMessageEventId) {
+        try {
+          const terminal = (await runtimeRun.store.readSession(session.id)).find(
+            (event) =>
+              event.kind === "run.terminal" &&
+              event.runId === runtimeRun.runId &&
+              event.data.status === "completed" &&
+              event.data.recovered !== true,
+          );
+          if (terminal?.kind === "run.terminal") {
+            await memoryReviewScheduler.enqueue({
+              sessionId: session.id,
+              runId: runtimeRun.runId,
+              terminalEventId: terminal.eventId,
+              userMessageEventId,
+            });
+          }
+        } catch (error) {
+          // The completed terminal fact is canonical. Memory scheduling is degraded-only.
+          logger.warn(
+            {
+              sessionId: session.id,
+              runId: runtimeRun.runId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "[Memory] post-terminal enqueue failed",
+          );
+        }
+      }
+      return runResult;
     });
 
     emitRuntimeLifecycleEvent(onEvent, {

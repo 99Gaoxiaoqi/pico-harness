@@ -111,6 +111,8 @@ import {
   type PluginCapabilityRegistry,
 } from "../plugins/plugin-capability.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
+import { createMemoryCommand } from "../memory/memory-command.js";
+import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -207,6 +209,8 @@ export interface PicoCommandRegistryOptions {
   skillSources?: readonly ExternalResourceCatalogSource[];
   commandSources?: readonly ExternalResourceCatalogSource[];
   agentSources?: readonly AgentExternalCatalogSource[];
+  /** Explicit trust authority for workspace memory commands. */
+  memoryTrustStore?: WorkspaceTrustStore;
 }
 
 export async function createPicoCommandRegistry(
@@ -289,6 +293,11 @@ export async function createPicoCommandRegistry(
     createRewindCommand(options),
     createAgentCommand(options),
     createCronCommand(options, settings),
+    createMemoryCommand({
+      workDir: options.workDir,
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+      ...(options.memoryTrustStore ? { trustStore: options.memoryTrustStore } : {}),
+    }),
     createSkillsCommand(skillLoader),
     createSkillCommand(skillLoader),
   ]);
