@@ -11,7 +11,10 @@ import {
   MEMORY_CONTEXT_CANDIDATE_LIMIT,
   MEMORY_CONTEXT_MAX_TOKENS,
 } from "../../src/memory/context-builder.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import {
+  MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
+  MemoryRepository,
+} from "../../src/memory/memory-repository.js";
 import { MemoryRepositoryProposalStore } from "../../src/memory/proposal-engine.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
@@ -207,7 +210,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   untrusted.close();
 });
 
-test("self-owned worker consumes the durable T2 job without retaining foreground provider", async (context) => {
+test("proposal notification outbox retries across workers without repeating extraction", async (context) => {
   const fixture = await createFixture("worker");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
@@ -243,62 +246,63 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
     },
   } satisfies BillingRoute;
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const modelFactory = () => {
+    const ledger = new RuntimeStore({
+      workDir: fixture.workspace,
+      picoHome: fixture.picoHome,
+    });
+    const provider = new CostTracker(
+      {
+        modelName: billingRoute.model,
+        async generate(messages) {
+          modelCalls++;
+          const evidence = JSON.parse(messages[1]?.content ?? "{}") as {
+            evidenceEventId?: string;
+          };
+          return {
+            role: "assistant" as const,
+            content: "",
+            toolCalls: [
+              {
+                id: "memory-call",
+                name: "submit_memory_proposals",
+                arguments: JSON.stringify({
+                  proposals: [
+                    {
+                      kind: "project_fact",
+                      title: "Build command",
+                      content: "Use npm run build-memory",
+                      reason: "The user explicitly stated a stable project command.",
+                      confidence: 0.99,
+                      evidenceEventIds: [evidence.evidenceEventId],
+                    },
+                  ],
+                }),
+              },
+            ],
+            usage: { promptTokens: 12, completionTokens: 8 },
+          };
+        },
+      },
+      billingRoute,
+      undefined,
+      { ledger, context: { purpose: "memory_review" } },
+    );
+    return {
+      model: new ProviderMemoryProposalModel(provider, billingRoute),
+      dispose: () => {
+        disposals++;
+        ledger.close();
+      },
+    };
+  };
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryDatabasePath: paths.workspace.memoryDatabase,
     runtimeDatabasePath: paths.workspace.runtimeDatabase,
     trustStore,
-    modelFactory: () => {
-      const ledger = new RuntimeStore({
-        workDir: fixture.workspace,
-        picoHome: fixture.picoHome,
-      });
-      const provider = new CostTracker(
-        {
-          modelName: billingRoute.model,
-          async generate(messages) {
-            modelCalls++;
-            const evidence = JSON.parse(messages[1]?.content ?? "{}") as {
-              evidenceEventId?: string;
-            };
-            return {
-              role: "assistant",
-              content: "",
-              toolCalls: [
-                {
-                  id: "memory-call",
-                  name: "submit_memory_proposals",
-                  arguments: JSON.stringify({
-                    proposals: [
-                      {
-                        kind: "project_fact",
-                        title: "Build command",
-                        content: "Use npm run build-memory",
-                        reason: "The user explicitly stated a stable project command.",
-                        confidence: 0.99,
-                        evidenceEventIds: [evidence.evidenceEventId],
-                      },
-                    ],
-                  }),
-                },
-              ],
-              usage: { promptTokens: 12, completionTokens: 8 },
-            };
-          },
-        },
-        billingRoute,
-        undefined,
-        { ledger, context: { purpose: "memory_review" } },
-      );
-      return {
-        model: new ProviderMemoryProposalModel(provider, billingRoute),
-        dispose: () => {
-          disposals++;
-          ledger.close();
-        },
-      };
-    },
+    modelFactory,
     proposalSink: async (notice) => {
       notices.push(notice);
       await Promise.resolve();
@@ -313,10 +317,17 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
   assert.deepEqual(Object.keys(notices[0] ?? {}).sort(), ["kind", "proposalId", "version"]);
 
   const repository = openRepository(fixture);
-  const completedJob = repository.listJobs()[0];
+  const completedJob = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0];
   assert.equal(completedJob?.status, "succeeded");
   assert.ok((completedJob?.costUsd ?? 0) > 0);
-  assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
+  const proposal = repository.listProposals({ statuses: ["pending"] })[0];
+  assert.ok(proposal);
+  const queuedNotice = repository.listJobs({ type: MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE })[0];
+  assert.equal(queuedNotice?.status, "queued");
+  assert.equal(queuedNotice?.cursor.eventId, proposal.proposalId);
+  assert.equal(queuedNotice?.cursor.sequence, proposal.version);
+  assert.equal(JSON.stringify(queuedNotice).includes("Use npm run build-memory"), false);
+  assert.equal(JSON.stringify(queuedNotice).includes("Build command"), false);
   repository.close();
   const usageLedger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
   const memoryCall = usageLedger
@@ -328,9 +339,29 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
     Math.abs((memoryCall?.cost ?? 0) - (completedJob?.costUsd ?? 0) * 7.2) < 1e-12,
     "memory job USD and provider-call CNY must derive from the same estimate",
   );
-  await worker.drain();
+  const recoveredNotices: MemoryProposalPublishedNotice[] = [];
+  const recoveredWorker = new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory,
+    proposalSink: (notice) => {
+      recoveredNotices.push(notice);
+    },
+  });
+  assert.deepEqual(await recoveredWorker.drain(), []);
   assert.equal(modelCalls, 1, "succeeded jobs are exactly-once");
-  assert.equal(notices.length, 1, "already-succeeded jobs must not republish proposals");
+  assert.equal(disposals, 1, "notification delivery must not acquire a model lease");
+  assert.deepEqual(recoveredNotices, [notices[0]]);
+  const recoveredRepository = openRepository(fixture);
+  assert.equal(
+    recoveredRepository.listJobs({ type: MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE })[0]?.status,
+    "succeeded",
+  );
+  assert.equal(recoveredRepository.listProposals().length, 1);
+  recoveredRepository.close();
 });
 
 test("production adapter publishes a durable body-free memory.proposed notification", async (context) => {
@@ -482,7 +513,7 @@ test("two workers racing the same queued review have one model call and one prop
   assert.equal(modelCalls, 1);
   assert.equal(outcomes.flat().filter((result) => result.status === "succeeded").length, 1);
   const repository = openRepository(fixture);
-  assert.equal(repository.listJobs()[0]?.status, "succeeded");
+  assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status, "succeeded");
   assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
   repository.close();
 });
