@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   RuntimeMemoryFact,
   RuntimeMemoryProposal,
@@ -9,13 +9,19 @@ import type {
   RuntimeResult,
 } from "./protocol.js";
 import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "./protocol.js";
-import type { Fact, Proposal, Settings, Source } from "../memory/domain.js";
+import type { Fact, Job, Proposal, Settings, Source } from "../memory/domain.js";
 import {
+  MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE,
+  MEMORY_FORGOTTEN_NOTIFICATION_VERSION,
+  MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
+  MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION,
+  MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
   MemoryConflictError,
   MemoryIdempotencyConflictError,
   MemoryNotFoundError,
   MemoryRepository,
 } from "../memory/memory-repository.js";
+import { sanitizeMemoryProposalCandidate } from "../memory/proposal-sanitizer.js";
 import { MemorySchemaVersionError, MemoryWorkspaceMismatchError } from "../memory/memory-schema.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 
@@ -30,11 +36,31 @@ export interface DesktopMemoryServiceOptions {
   readonly picoHome: string;
   readonly publish: MemoryNotificationPublisher;
   readonly now?: () => number;
+  /** Test/embedding override; production uses the repository default. */
+  readonly repositoryBusyTimeoutMs?: number;
+  readonly onDegraded?: (event: {
+    readonly code: "lifecycle_deferred" | "notification_delivery_deferred";
+    readonly workspaceId: string;
+    readonly operationId: string;
+    readonly error: unknown;
+  }) => void;
 }
+
+export interface PreparedMemorySourceInvalidation {
+  readonly workspacePath: string;
+  readonly workspaceId: string;
+  readonly jobId: string;
+}
+
+const MEMORY_LIFECYCLE_JOB_TYPE = "source-lifecycle-invalidation" as const;
+const MEMORY_LIFECYCLE_UNAVAILABLE_VERSION = "memory-source-lifecycle-v1:unavailable" as const;
+const MEMORY_LIFECYCLE_REWOUND_VERSION = "memory-source-lifecycle-v1:rewound" as const;
+const MEMORY_LIFECYCLE_BATCH_SIZE = 250;
 
 /** Host-owned workspace repository boundary. Database paths never cross this service. */
 export class DesktopMemoryService {
   private readonly repositories = new Map<string, MemoryRepository>();
+  private readonly preparedLifecycleJobs = new Set<string>();
 
   constructor(private readonly options: DesktopMemoryServiceOptions) {}
 
@@ -101,19 +127,14 @@ export class DesktopMemoryService {
   ): RuntimeResult<"memory.forget"> {
     return this.safely(() => {
       const repository = this.repository(workspacePath);
-      const replay = hasIdempotentMutation(
-        repository,
-        "fact",
-        params.factId,
-        params.idempotencyKey,
-      );
-      const fact = repository.forgetFact(params);
-      if (!replay) {
-        this.options.publish(workspacePath, "memory.forgotten", {
-          factId: fact.factId,
-          version: fact.version,
-        });
+      let fact: Fact;
+      try {
+        fact = repository.forgetFact(params);
+      } catch (error) {
+        this.deliverForgottenNotificationsBestEffort(repository, workspacePath);
+        throw error;
       }
+      this.deliverForgottenNotificationsBestEffort(repository, workspacePath);
       return { fact: projectFact(repository, fact) };
     });
   }
@@ -141,12 +162,39 @@ export class DesktopMemoryService {
         params.proposalId,
         params.idempotencyKey,
       );
+      let patch = params.patch;
+      if (params.resolution === "accepted") {
+        const current = repository.getProposal(params.proposalId);
+        if (!current) throw new MemoryNotFoundError("proposal", params.proposalId);
+        const sanitized = sanitizeMemoryProposalCandidate({
+          kind: patch?.kind ?? current.kind,
+          title: patch?.title ?? requireProposalBody(current.title),
+          content: patch?.content ?? requireProposalBody(current.content),
+          reason: patch?.reason ?? requireProposalBody(current.reason),
+          confidence: patch?.confidence ?? current.confidence,
+          evidenceEventIds: [],
+        });
+        if (sanitized.disposition !== "allow") {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "审核编辑内容未通过记忆安全扫描",
+          );
+        }
+        patch = {
+          kind: sanitized.kind,
+          title: sanitized.title,
+          content: sanitized.content,
+          reason: sanitized.reason,
+          confidence: sanitized.confidence,
+        };
+      }
       const result = repository.resolveProposal({
         proposalId: params.proposalId,
         resolution: params.resolution,
         expectedVersion: params.expectedVersion,
         idempotencyKey: params.idempotencyKey,
         ...(params.factId !== undefined ? { factId: params.factId } : {}),
+        ...(patch !== undefined ? { patch } : {}),
       });
       if (!replay) {
         this.options.publish(workspacePath, "memory.changed", {
@@ -182,6 +230,12 @@ export class DesktopMemoryService {
     params: RuntimeParams<"memory.settings.update">,
   ): RuntimeResult<"memory.settings.update"> {
     return this.safely(() => {
+      if ((params as { readonly autoCommit?: boolean }).autoCommit === true) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          "首版记忆不支持自动批准",
+        );
+      }
       const repository = this.repository(workspacePath);
       const replay = hasIdempotentMutation(
         repository,
@@ -253,47 +307,73 @@ export class DesktopMemoryService {
       | { readonly availability: "unavailable"; readonly code: string }
       | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
   ): void {
-    this.safely(() => {
+    const prepared = this.prepareSessionSourceInvalidation(workspacePath, sessionId, reason);
+    this.commitSessionSourceInvalidation(prepared);
+  }
+
+  prepareSessionSourceInvalidation(
+    workspacePath: string,
+    sessionId: string,
+    reason:
+      | { readonly availability: "unavailable"; readonly code: string }
+      | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+  ): PreparedMemorySourceInvalidation {
+    return this.safely(() => {
       const repository = this.repository(workspacePath);
-      const sources = repository
-        .listSources(500)
-        .filter(
-          (source) =>
-            source.sessionId === sessionId &&
-            source.availability === "available" &&
-            (reason.availability !== "rewound" ||
-              sourceFallsAfterSequence(source, reason.afterSequence)),
-        );
-      const changedSources: Array<{ readonly sourceId: string; readonly version: number }> = [];
-      repository.transaction(() => {
-        for (const source of sources) {
-          const updated = repository.updateSourceAvailability({
-            sourceId: source.sourceId,
-            expectedVersion: source.version,
-            availability: reason.availability,
-            invalidationCode: reason.code,
-            idempotencyKey: `${reason.code}:${source.sourceId}:${source.version}`,
-          });
-          for (const proposal of repository.listProposals({ statuses: ["pending"], limit: 500 })) {
-            if (proposal.sourceId !== source.sourceId) continue;
-            repository.deleteProposal({
-              proposalId: proposal.proposalId,
-              expectedVersion: proposal.version,
-              idempotencyKey: `${reason.code}:${proposal.proposalId}:${proposal.version}`,
-            });
-          }
-          changedSources.push({ sourceId: updated.sourceId, version: updated.version });
-        }
+      assertLifecycleReason(reason);
+      const operationId = lifecycleOperationId(sessionId, reason, randomUUID());
+      const job = repository.transaction(() => {
+        const queued = repository.createJob({
+          jobId: `lifecycle:${operationId}`,
+          type: MEMORY_LIFECYCLE_JOB_TYPE,
+          terminalEventId: operationId,
+          extractorVersion:
+            reason.availability === "rewound"
+              ? MEMORY_LIFECYCLE_REWOUND_VERSION
+              : MEMORY_LIFECYCLE_UNAVAILABLE_VERSION,
+          cursor: {
+            sessionId,
+            eventId: reason.code,
+            ...(reason.availability === "rewound" ? { sequence: reason.afterSequence } : {}),
+          },
+          maxAttempts: 1,
+          idempotencyKey: `lifecycle-enqueue:${operationId}`,
+        });
+        return repository.updateJob({
+          jobId: queued.jobId,
+          expectedVersion: queued.version,
+          status: "running",
+          idempotencyKey: `${queued.jobId}:prepared:${queued.version}`,
+        });
       });
-      for (const source of changedSources) {
-        this.options.publish(workspacePath, "memory.changed", {
-          entityType: "source",
-          entityId: source.sourceId,
-          version: source.version,
-          change: reason.availability === "rewound" ? "source_rewound" : "source_unavailable",
+      this.preparedLifecycleJobs.add(job.jobId);
+      return {
+        workspacePath,
+        workspaceId: repository.workspaceId,
+        jobId: job.jobId,
+      };
+    });
+  }
+
+  commitSessionSourceInvalidation(prepared: PreparedMemorySourceInvalidation): void {
+    this.preparedLifecycleJobs.delete(prepared.jobId);
+    try {
+      const repository = this.repositoryWithoutMaintenance(prepared.workspacePath);
+      const job = repository.getJob(prepared.jobId);
+      if (!job) throw new MemoryNotFoundError("job", prepared.jobId);
+      if (job.status === "running") {
+        repository.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          status: "queued",
+          idempotencyKey: `${job.jobId}:committed:${job.version}`,
         });
       }
-    });
+      this.reconcileLifecycleJobs(repository);
+      this.deliverSourceNotificationsBestEffort(repository, prepared.workspacePath);
+    } catch (error) {
+      this.reportDegraded("lifecycle_deferred", prepared.workspaceId, prepared.jobId, error);
+    }
   }
 
   close(): void {
@@ -302,15 +382,250 @@ export class DesktopMemoryService {
   }
 
   private repository(workspacePath: string): MemoryRepository {
+    const repository = this.repositoryWithoutMaintenance(workspacePath);
+    this.runMaintenance(repository, workspacePath);
+    return repository;
+  }
+
+  private repositoryWithoutMaintenance(workspacePath: string): MemoryRepository {
     const existing = this.repositories.get(workspacePath);
     if (existing) return existing;
     const paths = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome });
     const repository = new MemoryRepository({
       databasePath: paths.workspace.memoryDatabase,
       workspaceId: paths.workspace.id,
+      ...(this.options.repositoryBusyTimeoutMs !== undefined
+        ? { busyTimeoutMs: this.options.repositoryBusyTimeoutMs }
+        : {}),
     });
     this.repositories.set(workspacePath, repository);
     return repository;
+  }
+
+  private runMaintenance(repository: MemoryRepository, workspacePath: string): void {
+    this.deliverForgottenNotificationsBestEffort(repository, workspacePath);
+    this.deliverSourceNotificationsBestEffort(repository, workspacePath);
+    try {
+      this.reconcileLifecycleJobs(repository);
+    } catch (error) {
+      this.reportDegraded(
+        "lifecycle_deferred",
+        repository.workspaceId,
+        "lifecycle-reconcile",
+        error,
+      );
+    }
+    this.deliverSourceNotificationsBestEffort(repository, workspacePath);
+  }
+
+  private deliverForgottenNotificationsBestEffort(
+    repository: MemoryRepository,
+    workspacePath: string,
+  ): void {
+    try {
+      this.deliverForgottenNotifications(repository, workspacePath);
+    } catch (error) {
+      this.reportDegraded(
+        "notification_delivery_deferred",
+        repository.workspaceId,
+        "forgotten-outbox",
+        error,
+      );
+    }
+  }
+
+  private deliverForgottenNotifications(repository: MemoryRepository, workspacePath: string): void {
+    while (true) {
+      const jobs = repository.listJobs({
+        statuses: ["queued"],
+        type: MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE,
+        extractorVersion: MEMORY_FORGOTTEN_NOTIFICATION_VERSION,
+        limit: 500,
+      });
+      if (jobs.length === 0) return;
+      for (const job of jobs) {
+        const factId = job.cursor.eventId;
+        const fact = factId ? repository.getFact(factId) : undefined;
+        if (!fact || fact.state !== "forgotten") {
+          repository.updateJob({
+            jobId: job.jobId,
+            expectedVersion: job.version,
+            status: "failed",
+            errorCode: "notification_fact_missing",
+            idempotencyKey: `${job.jobId}:invalid:${job.version}`,
+          });
+          continue;
+        }
+        this.options.publish(workspacePath, "memory.forgotten", {
+          factId: fact.factId,
+          version: fact.version,
+        });
+        repository.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          status: "succeeded",
+          errorCode: null,
+          idempotencyKey: `${job.jobId}:delivered:${job.version}`,
+        });
+      }
+    }
+  }
+
+  private deliverSourceNotificationsBestEffort(
+    repository: MemoryRepository,
+    workspacePath: string,
+  ): void {
+    try {
+      this.deliverSourceNotifications(repository, workspacePath);
+    } catch (error) {
+      this.reportDegraded(
+        "notification_delivery_deferred",
+        repository.workspaceId,
+        "source-notification-outbox",
+        error,
+      );
+    }
+  }
+
+  private deliverSourceNotifications(repository: MemoryRepository, workspacePath: string): void {
+    while (true) {
+      const jobs = repository.listJobs({
+        statuses: ["queued"],
+        type: MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
+        limit: 500,
+      });
+      if (jobs.length === 0) return;
+      for (const job of jobs) {
+        const sourceId = job.cursor.eventId;
+        const sourceVersion = job.cursor.sequence;
+        const change =
+          job.extractorVersion === MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
+            ? "source_rewound"
+            : job.extractorVersion === MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION
+              ? "source_unavailable"
+              : undefined;
+        const source = sourceId ? repository.getSource(sourceId) : undefined;
+        if (!source || sourceVersion === undefined || !change) {
+          repository.updateJob({
+            jobId: job.jobId,
+            expectedVersion: job.version,
+            status: "failed",
+            errorCode: "notification_source_invalid",
+            idempotencyKey: `${job.jobId}:invalid:${job.version}`,
+          });
+          continue;
+        }
+        this.options.publish(workspacePath, "memory.changed", {
+          entityType: "source",
+          entityId: source.sourceId,
+          version: sourceVersion,
+          change,
+        });
+        repository.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          status: "succeeded",
+          errorCode: null,
+          idempotencyKey: `${job.jobId}:delivered:${job.version}`,
+        });
+      }
+    }
+  }
+
+  private reconcileLifecycleJobs(repository: MemoryRepository): void {
+    while (true) {
+      const jobs = [
+        ...repository.listJobs({
+          statuses: ["queued"],
+          type: MEMORY_LIFECYCLE_JOB_TYPE,
+          limit: 500,
+        }),
+        ...repository
+          .listJobs({ statuses: ["running"], type: MEMORY_LIFECYCLE_JOB_TYPE, limit: 500 })
+          .filter((job) => !this.preparedLifecycleJobs.has(job.jobId)),
+      ];
+      if (jobs.length === 0) return;
+      // A running lifecycle job not owned by this process survived a cross-store crash.
+      // Recover fail-closed for privacy: pending proposals may be deleted and sources marked
+      // unavailable, while user-approved Facts are deliberately retained.
+      for (const job of jobs) this.applyLifecycleJob(repository, job);
+    }
+  }
+
+  private applyLifecycleJob(repository: MemoryRepository, job: Job): void {
+    const availability =
+      job.extractorVersion === MEMORY_LIFECYCLE_REWOUND_VERSION
+        ? "rewound"
+        : job.extractorVersion === MEMORY_LIFECYCLE_UNAVAILABLE_VERSION
+          ? "unavailable"
+          : undefined;
+    const invalidationCode = job.cursor.eventId;
+    if (!availability || !invalidationCode) {
+      repository.updateJob({
+        jobId: job.jobId,
+        expectedVersion: job.version,
+        status: "failed",
+        errorCode: "lifecycle_job_invalid",
+        idempotencyKey: `${job.jobId}:invalid:${job.version}`,
+      });
+      return;
+    }
+
+    let afterSourceId: string | undefined;
+    while (true) {
+      const sources = repository.listSessionSources(job.cursor.sessionId, {
+        availability: "available",
+        ...(availability === "rewound" ? { afterSequence: job.cursor.sequence ?? 0 } : {}),
+        ...(afterSourceId ? { afterSourceId } : {}),
+        limit: MEMORY_LIFECYCLE_BATCH_SIZE,
+      });
+      if (sources.length === 0) break;
+      repository.transaction(() => {
+        const proposals = repository.listPendingProposalsForSources(
+          sources.map((source) => source.sourceId),
+        );
+        for (const proposal of proposals) {
+          repository.deleteProposal({
+            proposalId: proposal.proposalId,
+            expectedVersion: proposal.version,
+            idempotencyKey: `${job.jobId}:proposal:${proposal.proposalId}:${proposal.version}`,
+          });
+        }
+        for (const source of sources) {
+          const updated = repository.updateSourceAvailability({
+            sourceId: source.sourceId,
+            expectedVersion: source.version,
+            availability,
+            invalidationCode,
+            idempotencyKey: `${job.jobId}:source:${source.sourceId}:${source.version}`,
+          });
+          if (updated.availability !== availability) {
+            throw new MemoryConflictError("Source lifecycle update did not persist");
+          }
+        }
+      });
+      afterSourceId = sources.at(-1)?.sourceId;
+      if (sources.length < MEMORY_LIFECYCLE_BATCH_SIZE) break;
+    }
+
+    const current = repository.getJob(job.jobId);
+    if (!current || (current.status !== "queued" && current.status !== "running")) return;
+    repository.updateJob({
+      jobId: current.jobId,
+      expectedVersion: current.version,
+      status: "succeeded",
+      errorCode: null,
+      idempotencyKey: `${current.jobId}:complete:${current.version}`,
+    });
+  }
+
+  private reportDegraded(
+    code: "lifecycle_deferred" | "notification_delivery_deferred",
+    workspaceId: string,
+    operationId: string,
+    error: unknown,
+  ): void {
+    this.options.onDegraded?.({ code, workspaceId, operationId, error });
   }
 
   private safely<Result>(operation: () => Result): Result {
@@ -320,12 +635,6 @@ export class DesktopMemoryService {
       throw mapMemoryError(error);
     }
   }
-}
-
-function sourceFallsAfterSequence(source: Source, sequence: number): boolean {
-  if (source.endSequence !== undefined) return source.endSequence > sequence;
-  if (source.startSequence !== undefined) return source.startSequence > sequence;
-  return false;
 }
 
 export function mapMemoryError(error: unknown): RuntimeProtocolError {
@@ -457,4 +766,45 @@ function hasIdempotentMutation(
   return repository
     .listMutations({ entityType, entityId, limit: 500 })
     .some((mutation) => mutation.idempotencyKeyHash === keyHash);
+}
+
+function requireProposalBody(value: string | null): string {
+  if (value === null) throw new MemoryConflictError("Proposal body is no longer available");
+  return value;
+}
+
+function lifecycleOperationId(
+  sessionId: string,
+  reason:
+    | { readonly availability: "unavailable"; readonly code: string }
+    | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+  nonce: string,
+): string {
+  return createHash("sha256")
+    .update(
+      `${sessionId}\0${reason.availability}\0${reason.code}\0${
+        reason.availability === "rewound" ? reason.afterSequence : ""
+      }\0${nonce}`,
+    )
+    .digest("hex");
+}
+
+function assertLifecycleReason(
+  reason:
+    | { readonly availability: "unavailable"; readonly code: string }
+    | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+): void {
+  if (
+    reason.code.length === 0 ||
+    reason.code.length > 256 ||
+    !/^[A-Za-z0-9._:-]+$/u.test(reason.code)
+  ) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "记忆生命周期失效代码无效");
+  }
+  if (
+    reason.availability === "rewound" &&
+    (!Number.isSafeInteger(reason.afterSequence) || reason.afterSequence < 0)
+  ) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "记忆回退序列边界无效");
+  }
 }

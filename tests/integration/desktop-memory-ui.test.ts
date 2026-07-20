@@ -115,6 +115,25 @@ test("memory notifications use the dedicated refetch path and conflicts are dete
   assert.match(source, /if \(isMemoryNotificationTopic\(topic\)\) \{\s*scheduleMemoryRefresh\(\);/);
 });
 
+test("edited proposal approval is a single atomic renderer action", async () => {
+  const source = await readFile(
+    new URL("../../apps/desktop/src/renderer/MemoryPage.tsx", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("const resolveProposal = async");
+  const end = source.indexOf("const updateSetting = async", start);
+  assert.ok(start >= 0 && end > start);
+  const implementation = source.slice(start, end);
+  assert.equal(implementation.match(/actions\.resolveMemoryProposal\(/gu)?.length, 1);
+  assert.equal(
+    implementation.match(/actions\.updateMemoryFact\(/gu)?.length,
+    1,
+    "the only follow-up write is the explicit undo action",
+  );
+  assert.doesNotMatch(implementation, /updateMemoryFact[\s\S]*title:\s*editor\.title/u);
+  assert.match(implementation, /patch,/u);
+});
+
 test("memory page renders degraded, source-unavailable, and conflict alert states", () => {
   const runtime = previewRuntime();
   const {
