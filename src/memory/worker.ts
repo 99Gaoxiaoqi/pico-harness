@@ -6,7 +6,11 @@ import type { WorkspaceId } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { Job } from "./domain.js";
-import { MemoryRepository } from "./memory-repository.js";
+import {
+  MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
+  MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX,
+  MemoryRepository,
+} from "./memory-repository.js";
 import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "./proposal-engine.js";
 import type {
   MemoryProposalExtractionRequest,
@@ -58,6 +62,12 @@ export class MemoryReviewWorker {
       workspaceId: this.options.workspaceId,
     });
     try {
+      const attemptedNotificationJobIds = new Set<string>();
+      await deliverProposalNotices(
+        repository,
+        this.options.proposalSink,
+        attemptedNotificationJobIds,
+      );
       const settings = repository.getSettings();
       if (!settings.enabled || !settings.autoPropose) return [];
       const scheduler = new MemoryReviewScheduler(repository, {
@@ -107,16 +117,6 @@ export class MemoryReviewWorker {
               ...(this.options.signal ? { signal: this.options.signal } : {}),
             });
             results.push(result);
-            if (result.status === "succeeded") {
-              for (const proposal of result.proposals) {
-                if (proposal.status !== "pending") continue;
-                publishProposalNotice(this.options.proposalSink, {
-                  proposalId: proposal.proposalId,
-                  version: proposal.version,
-                  kind: proposal.kind,
-                });
-              }
-            }
           } catch (error) {
             const latest = repository.getJob(job.jobId);
             // A running snapshot can belong to another process that won the CAS. T2 records
@@ -135,6 +135,11 @@ export class MemoryReviewWorker {
       } finally {
         eventStore.close();
       }
+      await deliverProposalNotices(
+        repository,
+        this.options.proposalSink,
+        attemptedNotificationJobIds,
+      );
       return results;
     } finally {
       repository.close();
@@ -271,18 +276,79 @@ function safeErrorCode(error: unknown): string {
   );
 }
 
-function publishProposalNotice(
+async function deliverProposalNotices(
+  repository: MemoryRepository,
   sink: MemoryProposalPublishedSink | undefined,
-  notice: MemoryProposalPublishedNotice,
-): void {
+  attemptedJobIds: Set<string>,
+): Promise<void> {
   if (!sink) return;
-  try {
-    const pending = sink(notice);
-    if (pending) {
-      void pending.catch((error: unknown) => logProposalNoticeFailure(notice.proposalId, error));
+  const jobs = repository.listJobs({
+    statuses: ["queued"],
+    type: MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
+    limit: 500,
+  });
+  for (const job of jobs) {
+    if (attemptedJobIds.has(job.jobId)) continue;
+    attemptedJobIds.add(job.jobId);
+    const notice = proposalNoticeForJob(job);
+    if (!notice) {
+      tryUpdateNotificationJob(repository, job, {
+        status: "failed",
+        errorCode: "notification_proposal_invalid",
+        idempotencyKey: `${job.jobId}:invalid:${job.version}`,
+      });
+      continue;
     }
+    try {
+      await sink(notice);
+      tryUpdateNotificationJob(repository, job, {
+        status: "succeeded",
+        errorCode: null,
+        idempotencyKey: `${job.jobId}:delivered:${job.version}`,
+      });
+    } catch (error) {
+      logProposalNoticeFailure(notice.proposalId, error);
+    }
+  }
+}
+
+function proposalNoticeForJob(job: Job): MemoryProposalPublishedNotice | undefined {
+  const proposalId = job.cursor.eventId;
+  const version = job.cursor.sequence;
+  const kind = job.extractorVersion.startsWith(MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX)
+    ? job.extractorVersion.slice(MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX.length)
+    : undefined;
+  if (
+    !proposalId ||
+    version === undefined ||
+    (kind !== "preference" &&
+      kind !== "correction" &&
+      kind !== "project_fact" &&
+      kind !== "reference")
+  ) {
+    return undefined;
+  }
+  return { proposalId, version, kind };
+}
+
+function tryUpdateNotificationJob(
+  repository: MemoryRepository,
+  job: Job,
+  patch: Pick<
+    Parameters<MemoryRepository["updateJob"]>[0],
+    "status" | "errorCode" | "idempotencyKey"
+  >,
+): void {
+  try {
+    repository.updateJob({
+      jobId: job.jobId,
+      expectedVersion: job.version,
+      ...patch,
+    });
   } catch (error) {
-    logProposalNoticeFailure(notice.proposalId, error);
+    const latest = repository.getJob(job.jobId);
+    if (latest && latest.version !== job.version) return;
+    throw error;
   }
 }
 

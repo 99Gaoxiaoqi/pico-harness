@@ -36,6 +36,9 @@ const MAX_LIST_LIMIT = 500;
 
 export const MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE = "notification.memory.forgotten" as const;
 export const MEMORY_FORGOTTEN_NOTIFICATION_VERSION = "memory-forgotten-notification-v1" as const;
+export const MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE = "notification.memory.proposed" as const;
+export const MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX =
+  "memory-proposed-notification-v1:" as const;
 export const MEMORY_SOURCE_NOTIFICATION_JOB_TYPE = "notification.memory.source-changed" as const;
 export const MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION =
   "memory-source-notification-v1:unavailable" as const;
@@ -1337,6 +1340,41 @@ export class MemoryRepository {
       },
       (marker) => this.requireJob(readMarkerId(marker, "jobId")),
     );
+  }
+
+  enqueueProposedNotification(proposal: Proposal, idempotencyKey?: string): Job {
+    if (proposal.workspaceId !== this.workspaceId || proposal.status !== "pending") {
+      throw new Error("Only a pending proposal in this workspace can be published");
+    }
+    const identity = hashOpaqueKey(`${proposal.proposalId}\0${proposal.version}\0${proposal.kind}`);
+    const jobId = `notification:proposed:${identity}`;
+    const at = this.timestamp();
+    const inserted = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO memory_jobs(
+           job_id, workspace_id, type, status, terminal_event_id, extractor_version,
+           cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
+           input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
+         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, 0, 1, NULL, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
+      )
+      .run(
+        jobId,
+        this.workspaceId,
+        MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
+        identity,
+        `${MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX}${proposal.kind}`,
+        JSON.stringify({
+          sessionId: "memory-service",
+          eventId: proposal.proposalId,
+          sequence: proposal.version,
+        }),
+        at,
+        at,
+      );
+    if (inserted.changes === 1) {
+      this.recordMutation("job", jobId, "job.created", undefined, 1, idempotencyKey, at);
+    }
+    return this.requireJob(jobId);
   }
 
   private insertFact(input: {

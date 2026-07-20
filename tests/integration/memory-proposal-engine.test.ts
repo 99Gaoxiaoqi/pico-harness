@@ -273,7 +273,7 @@ test("terminal event and extractor version are idempotent after success", async 
   assert.equal(replay.job.jobId, first.job.jobId);
   assert.equal(replay.proposals.length, 1);
   assert.equal(model.calls.length, 1);
-  assert.equal(fixture.repository.listJobs().length, 1);
+  assert.equal(fixture.repository.listJobs({ type: "terminal-extraction" }).length, 1);
   assert.equal(fixture.repository.listProposals().length, 1);
 });
 
