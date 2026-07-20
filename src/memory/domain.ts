@@ -154,7 +154,7 @@ export interface Job {
   readonly terminalAt?: string;
 }
 
-/** Workspace-only opt-in state. No global or team scope exists in Foundation. */
+/** Workspace-only behavior settings. Runtime trust gating remains an upper-layer responsibility. */
 export interface Settings {
   readonly workspaceId: WorkspaceId;
   readonly enabled: boolean;
