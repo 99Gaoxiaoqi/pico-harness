@@ -33,6 +33,8 @@ import { projectRuntimeSessionUsage } from "../../src/runtime/runtime-session-pr
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TEST_TIMEOUT_MS = 5 * 60_000;
+const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
+const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 const MODEL_CONFIG_HOME = mkdtemp(join(tmpdir(), "pico-real-llm-config-"));
 
 after(async () => {
@@ -55,7 +57,7 @@ interface TestSandbox {
 
 let realModelPromise: Promise<RealModel> | undefined;
 
-test(
+realModelTest(
   "restored session route is fail-closed before any real-model call",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
@@ -77,7 +79,7 @@ test(
   },
 );
 
-test(
+realModelTest(
   "real prompt Hook model call is enclosed by the canonical RuntimeRun",
   { timeout: TEST_TIMEOUT_MS },
   async (context) => {
@@ -112,7 +114,7 @@ test(
   },
 );
 
-test(
+realModelTest(
   "real model recovers context and Usage only from runtime.sqlite facts",
   { timeout: TEST_TIMEOUT_MS },
   async (context) => {
