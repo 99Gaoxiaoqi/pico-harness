@@ -270,30 +270,53 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
   assert.equal(modelCalls, 1, "succeeded jobs are exactly-once");
 });
 
-test("stale running review jobs recover by lease CAS after restart and unsupported jobs stay untouched", async (context) => {
+test("supported queued and stale-running reviews are not starved by over 500 unsupported jobs", async (context) => {
   const fixture = await createFixture("worker-recovery");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
-  await enqueueCompletedReview(fixture, trustStore, "memory-recovery-session");
+  await enqueueCompletedReview(fixture, trustStore, "memory-recovery-stale-session");
+  await enqueueCompletedReview(fixture, trustStore, "memory-recovery-queued-session");
 
   let repository = openRepository(fixture);
-  const queued = repository.listJobs()[0];
-  assert.ok(queued);
-  const running = new MemoryRepositoryProposalStore(repository).markJobRunning(queued);
-  const unsupportedType = repository.createJob({
-    type: "future-terminal-extraction",
-    terminalEventId: "future-type-terminal",
-    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
-    cursor: { sessionId: "future", eventId: "future-user" },
-    maxAttempts: 3,
-  });
-  const unsupportedVersion = repository.createJob({
+  const supported = repository.listJobs({
     type: MEMORY_PROPOSAL_JOB_TYPE,
-    terminalEventId: "future-version-terminal",
-    extractorVersion: "memory-proposal-v2",
-    cursor: { sessionId: "future", eventId: "future-user" },
-    maxAttempts: 3,
+    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+    limit: 10,
   });
+  const staleCandidate = supported.find(
+    (job) => job.cursor.sessionId === "memory-recovery-stale-session",
+  );
+  const queuedCandidate = supported.find(
+    (job) => job.cursor.sessionId === "memory-recovery-queued-session",
+  );
+  assert.ok(staleCandidate);
+  assert.ok(queuedCandidate);
+  const running = new MemoryRepositoryProposalStore(repository).markJobRunning(staleCandidate);
+  for (let index = 0; index < 501; index++) {
+    const suffix = String(index).padStart(3, "0");
+    repository.createJob({
+      jobId: `zz-unsupported-queued-${suffix}`,
+      type: MEMORY_PROPOSAL_JOB_TYPE,
+      terminalEventId: `unsupported-queued-terminal-${suffix}`,
+      extractorVersion: "memory-proposal-v2",
+      cursor: { sessionId: "future", eventId: `unsupported-queued-user-${suffix}` },
+      maxAttempts: 3,
+    });
+    const unsupportedRunning = repository.createJob({
+      jobId: `zz-unsupported-running-${suffix}`,
+      type: "future-terminal-extraction",
+      terminalEventId: `unsupported-running-terminal-${suffix}`,
+      extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+      cursor: { sessionId: "future", eventId: `unsupported-running-user-${suffix}` },
+      maxAttempts: 3,
+    });
+    repository.updateJob({
+      jobId: unsupportedRunning.jobId,
+      expectedVersion: unsupportedRunning.version,
+      status: "running",
+      attemptCount: 1,
+    });
+  }
   repository.close();
 
   let modelCalls = 0;
@@ -312,16 +335,19 @@ test("stale running review jobs recover by lease CAS after restart and unsupport
     }),
   });
   const results = await worker.drain();
-  assert.equal(results[0]?.status, "succeeded");
-  assert.equal(modelCalls, 1);
+  assert.equal(results.filter((result) => result.status === "succeeded").length, 2);
+  assert.equal(modelCalls, 2);
 
   repository = openRepository(fixture);
   const recovered = repository.getJob(running.jobId);
   assert.equal(recovered?.status, "succeeded");
   assert.equal(recovered?.attemptCount, 2, "recovery preserves the crashed attempt before retry");
-  assert.equal(repository.getJob(unsupportedType.jobId)?.status, "queued");
-  assert.equal(repository.getJob(unsupportedVersion.jobId)?.status, "queued");
-  assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
+  assert.equal(repository.getJob(queuedCandidate.jobId)?.status, "succeeded");
+  assert.equal(repository.getJob(queuedCandidate.jobId)?.attemptCount, 1);
+  assert.equal(repository.getJob("zz-unsupported-queued-000")?.status, "queued");
+  assert.equal(repository.getJob("zz-unsupported-queued-500")?.status, "queued");
+  assert.equal(repository.getJob("zz-unsupported-running-000")?.status, "running");
+  assert.equal(repository.getJob("zz-unsupported-running-500")?.status, "running");
   repository.close();
 });
 
