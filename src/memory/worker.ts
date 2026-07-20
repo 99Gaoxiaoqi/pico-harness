@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { LLMProvider } from "../provider/interface.js";
 import { logger } from "../observability/logger.js";
+import { estimateCost, type BillingRoute } from "../observability/pricing.js";
 import type { WorkspaceId } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
@@ -24,6 +25,16 @@ export type MemoryProposalModelFactory = () =>
   | MemoryProposalModelLease
   | Promise<MemoryProposalModelLease>;
 
+export interface MemoryProposalPublishedNotice {
+  readonly proposalId: string;
+  readonly version: number;
+  readonly kind: "preference" | "correction" | "project_fact" | "reference";
+}
+
+export type MemoryProposalPublishedSink = (
+  notice: MemoryProposalPublishedNotice,
+) => void | Promise<void>;
+
 export interface MemoryReviewWorkerOptions {
   readonly workDir: string;
   readonly workspaceId: WorkspaceId;
@@ -31,6 +42,7 @@ export interface MemoryReviewWorkerOptions {
   readonly runtimeDatabasePath: string;
   readonly trustStore: WorkspaceTrustStore;
   readonly modelFactory: MemoryProposalModelFactory;
+  readonly proposalSink?: MemoryProposalPublishedSink;
   readonly signal?: AbortSignal;
   readonly now?: () => Date;
 }
@@ -95,6 +107,16 @@ export class MemoryReviewWorker {
               ...(this.options.signal ? { signal: this.options.signal } : {}),
             });
             results.push(result);
+            if (result.status === "succeeded") {
+              for (const proposal of result.proposals) {
+                if (proposal.status !== "pending") continue;
+                publishProposalNotice(this.options.proposalSink, {
+                  proposalId: proposal.proposalId,
+                  version: proposal.version,
+                  kind: proposal.kind,
+                });
+              }
+            }
           } catch (error) {
             const latest = repository.getJob(job.jobId);
             // A running snapshot can belong to another process that won the CAS. T2 records
@@ -122,7 +144,10 @@ export class MemoryReviewWorker {
 
 /** Model-only adapter. The declared proposal tool is output schema, never executable authority. */
 export class ProviderMemoryProposalModel implements MemoryProposalModelPort {
-  constructor(private readonly provider: LLMProvider) {}
+  constructor(
+    private readonly provider: LLMProvider,
+    private readonly billingRoute?: BillingRoute | string,
+  ) {}
 
   async extract(request: MemoryProposalExtractionRequest, signal?: AbortSignal) {
     const response = await this.provider.generate(
@@ -147,11 +172,13 @@ export class ProviderMemoryProposalModel implements MemoryProposalModelPort {
       [request.tool],
       signal ? { signal } : undefined,
     );
+    const billingRoute = this.billingRoute ?? this.provider.modelName;
     return {
       response,
       inputTokens: response.usage?.promptTokens ?? 0,
       outputTokens: response.usage?.completionTokens ?? 0,
-      costUsd: 0,
+      costUsd:
+        response.usage && billingRoute ? estimateCost(billingRoute, response.usage).costUSD : 0,
     };
   }
 }
@@ -241,5 +268,30 @@ function safeErrorCode(error: unknown): string {
       .toLowerCase()
       .replaceAll(/[^a-z0-9_-]+/gu, "_")
       .slice(0, 120) || "memory_review_failed"
+  );
+}
+
+function publishProposalNotice(
+  sink: MemoryProposalPublishedSink | undefined,
+  notice: MemoryProposalPublishedNotice,
+): void {
+  if (!sink) return;
+  try {
+    const pending = sink(notice);
+    if (pending) {
+      void pending.catch((error: unknown) => logProposalNoticeFailure(notice.proposalId, error));
+    }
+  } catch (error) {
+    logProposalNoticeFailure(notice.proposalId, error);
+  }
+}
+
+function logProposalNoticeFailure(proposalId: string, error: unknown): void {
+  logger.warn(
+    {
+      proposalId,
+      error: error instanceof Error ? error.message : String(error),
+    },
+    "[Memory] proposal notification failed after durable commit",
   );
 }

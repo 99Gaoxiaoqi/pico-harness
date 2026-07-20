@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,14 +19,21 @@ import {
   type MemoryProposalModelPort,
 } from "../../src/memory/proposal-contracts.js";
 import { MEMORY_REVIEW_LEASE_TTL_MS } from "../../src/memory/runtime-scheduler.js";
-import { MemoryReviewWorker } from "../../src/memory/worker.js";
+import {
+  MemoryReviewWorker,
+  ProviderMemoryProposalModel,
+  type MemoryProposalPublishedNotice,
+} from "../../src/memory/worker.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { CostTracker } from "../../src/observability/tracker.js";
+import type { BillingRoute } from "../../src/observability/pricing.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { publishDesktopMemoryProposal } from "../../src/daemon/production-host.js";
+import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
 import {
   RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME,
   RUNTIME_SCHEMA_VERSION,
@@ -113,6 +120,14 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
     { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
   );
   assert.equal(result.finalMessage, "done");
+  const beforeDetachedEnqueue = openRepository(fixture);
+  assert.equal(
+    beforeDetachedEnqueue.listJobs().length,
+    0,
+    "foreground result must resolve before the detached durable enqueue runs",
+  );
+  beforeDetachedEnqueue.close();
+  await waitForImmediate();
   assert.match(captured[0]?.[0]?.content ?? "", /Use npm run verify-memory/u);
   assert.equal(
     result.messages.some((message) => message.content.includes("verify-memory")),
@@ -201,7 +216,7 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
       return { role: "assistant", content: "foreground complete" };
     },
   };
-  await executeAgentRuntime(
+  const foreground = await executeAgentRuntime(
     {
       prompt: "请记住：这个项目固定使用 npm run build-memory 进行构建。",
       dir: fixture.workspace,
@@ -210,39 +225,23 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
     },
     { provider: foregroundProvider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
   );
+  await waitForImmediate();
 
   let modelCalls = 0;
   let disposals = 0;
-  const model: MemoryProposalModelPort = {
-    async extract(request) {
-      modelCalls++;
-      return {
-        response: {
-          role: "assistant",
-          content: "",
-          toolCalls: [
-            {
-              id: "memory-call",
-              name: "submit_memory_proposals",
-              arguments: JSON.stringify({
-                proposals: [
-                  {
-                    kind: "project_fact",
-                    title: "Build command",
-                    content: "Use npm run build-memory",
-                    reason: "The user explicitly stated a stable project command.",
-                    confidence: 0.99,
-                    evidenceEventIds: [request.evidence.userMessageEventId],
-                  },
-                ],
-              }),
-            },
-          ],
-          usage: { promptTokens: 12, completionTokens: 8 },
-        },
-      };
+  const notices: MemoryProposalPublishedNotice[] = [];
+  const billingRoute = {
+    provider: "openai",
+    model: "memory-priced-fixture",
+    baseUrl: "https://example.test",
+    pricing: {
+      inputPerMillion: 1,
+      outputPerMillion: 2,
+      cacheReadPerMillion: 0,
+      cacheWritePerMillion: 0,
+      source: "configured",
     },
-  };
+  } satisfies BillingRoute;
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
@@ -250,24 +249,128 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
     memoryDatabasePath: paths.workspace.memoryDatabase,
     runtimeDatabasePath: paths.workspace.runtimeDatabase,
     trustStore,
-    modelFactory: () => ({
-      model,
-      dispose: () => {
-        disposals++;
-      },
-    }),
+    modelFactory: () => {
+      const ledger = new RuntimeStore({
+        workDir: fixture.workspace,
+        picoHome: fixture.picoHome,
+      });
+      const provider = new CostTracker(
+        {
+          modelName: billingRoute.model,
+          async generate(messages) {
+            modelCalls++;
+            const evidence = JSON.parse(messages[1]?.content ?? "{}") as {
+              evidenceEventId?: string;
+            };
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "memory-call",
+                  name: "submit_memory_proposals",
+                  arguments: JSON.stringify({
+                    proposals: [
+                      {
+                        kind: "project_fact",
+                        title: "Build command",
+                        content: "Use npm run build-memory",
+                        reason: "The user explicitly stated a stable project command.",
+                        confidence: 0.99,
+                        evidenceEventIds: [evidence.evidenceEventId],
+                      },
+                    ],
+                  }),
+                },
+              ],
+              usage: { promptTokens: 12, completionTokens: 8 },
+            };
+          },
+        },
+        billingRoute,
+        undefined,
+        { ledger, context: { purpose: "memory_review" } },
+      );
+      return {
+        model: new ProviderMemoryProposalModel(provider, billingRoute),
+        dispose: () => {
+          disposals++;
+          ledger.close();
+        },
+      };
+    },
+    proposalSink: async (notice) => {
+      notices.push(notice);
+      await Promise.resolve();
+      throw new Error("notification transport unavailable");
+    },
   });
   const results = await worker.drain();
   assert.equal(results[0]?.status, "succeeded");
   assert.equal(modelCalls, 1);
   assert.equal(disposals, 1);
+  assert.equal(foreground.usage.costCNY, 0, "memory review must not enter main Session usage");
+  assert.deepEqual(Object.keys(notices[0] ?? {}).sort(), ["kind", "proposalId", "version"]);
 
   const repository = openRepository(fixture);
-  assert.equal(repository.listJobs()[0]?.status, "succeeded");
+  const completedJob = repository.listJobs()[0];
+  assert.equal(completedJob?.status, "succeeded");
+  assert.ok((completedJob?.costUsd ?? 0) > 0);
   assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
   repository.close();
+  const usageLedger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+  const memoryCall = usageLedger
+    .listProviderCalls()
+    .find((call) => call.purpose === "memory_review");
+  usageLedger.close();
+  assert.ok((memoryCall?.cost ?? 0) > 0);
+  assert.ok(
+    Math.abs((memoryCall?.cost ?? 0) - (completedJob?.costUsd ?? 0) * 7.2) < 1e-12,
+    "memory job USD and provider-call CNY must derive from the same estimate",
+  );
   await worker.drain();
   assert.equal(modelCalls, 1, "succeeded jobs are exactly-once");
+  assert.equal(notices.length, 1, "already-succeeded jobs must not republish proposals");
+});
+
+test("production adapter publishes a durable body-free memory.proposed notification", async (context) => {
+  const fixture = await createFixture("proposal-notification");
+  const workspace = await realpath(fixture.workspace);
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+  });
+  context.after(async () => {
+    await service.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  const received: unknown[] = [];
+  service.subscribe((notification) => received.push(notification));
+
+  publishDesktopMemoryProposal(
+    service,
+    workspace,
+    { proposalId: "proposal-notice", version: 3, kind: "project_fact" },
+    () => 9,
+    () => 123,
+  );
+
+  assert.equal(received.length, 1);
+  assert.deepEqual(received[0], {
+    eventId: (received[0] as { eventId: string }).eventId,
+    protocolVersion: 1,
+    topic: "memory.proposed",
+    scope: { workspacePath: workspace },
+    resourceVersion: 9,
+    at: 123,
+    payload: { proposalId: "proposal-notice", version: 3, kind: "project_fact" },
+  });
+  assert.equal(JSON.stringify(received).includes("content"), false);
+  const replay = await service.replayEvents({ workspacePath: workspace });
+  assert.equal(
+    replay.events.some((event) => event.topic === "memory.proposed"),
+    true,
+  );
 });
 
 test("supported queued and stale-running reviews are not starved by over 500 unsupported jobs", async (context) => {
@@ -563,6 +666,11 @@ async function enqueueCompletedReview(
       memoryTrustStore: trustStore,
     },
   );
+  await waitForImmediate();
+}
+
+function waitForImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function createSuccessfulModel(onExtract: () => void): MemoryProposalModelPort {
