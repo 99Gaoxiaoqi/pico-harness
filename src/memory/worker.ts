@@ -32,6 +32,7 @@ export interface MemoryReviewWorkerOptions {
   readonly trustStore: WorkspaceTrustStore;
   readonly modelFactory: MemoryProposalModelFactory;
   readonly signal?: AbortSignal;
+  readonly now?: () => Date;
 }
 
 /** Self-owned worker: every drain opens its own repository/evidence/model resources. */
@@ -47,7 +48,9 @@ export class MemoryReviewWorker {
     try {
       const settings = repository.getSettings();
       if (!settings.enabled || !settings.autoPropose) return [];
-      const scheduler = new MemoryReviewScheduler(repository);
+      const scheduler = new MemoryReviewScheduler(repository, {
+        ...(this.options.now ? { now: this.options.now } : {}),
+      });
       const jobs = [...scheduler.pending()];
       const results: MemoryProposalProcessResult[] = [];
       const eventStore = new RuntimeEventStore({ databasePath: this.options.runtimeDatabasePath });
@@ -58,7 +61,7 @@ export class MemoryReviewWorker {
           const currentSettings = repository.getSettings();
           if (!currentSettings.enabled || !currentSettings.autoPropose) break;
           if (!job.cursor.eventId) {
-            failUnprocessableJob(repository, job, "missing_user_message_event_id", true);
+            tryFailUnprocessableJob(repository, job, "missing_user_message_event_id", true);
             continue;
           }
           const terminal = await eventStore.readSessionEvent(
@@ -71,7 +74,7 @@ export class MemoryReviewWorker {
             terminal.event.data.status !== "completed" ||
             terminal.event.data.recovered === true
           ) {
-            failUnprocessableJob(repository, job, "terminal_not_completed", true);
+            tryFailUnprocessableJob(repository, job, "terminal_not_completed", true);
             continue;
           }
 
@@ -94,19 +97,10 @@ export class MemoryReviewWorker {
             results.push(result);
           } catch (error) {
             const latest = repository.getJob(job.jobId);
-            if (
-              latest &&
-              latest.status !== "succeeded" &&
-              latest.status !== "cancelled" &&
-              // T2 already committed a retryable failure; do not count the attempt twice.
-              latest.status !== "failed"
-            ) {
-              failUnprocessableJob(
-                repository,
-                latest,
-                safeErrorCode(error),
-                latest.status !== "running",
-              );
+            // A running snapshot can belong to another process that won the CAS. T2 records
+            // provider failures itself, so the outer worker must never mutate running/failed jobs.
+            if (latest?.status === "queued") {
+              tryFailUnprocessableJob(repository, latest, safeErrorCode(error), true);
             }
             logger.warn(
               { jobId: job.jobId, error: error instanceof Error ? error.message : String(error) },
@@ -218,6 +212,21 @@ function failUnprocessableJob(
     errorCode: safeErrorCode(errorCode),
     idempotencyKey: `memory-worker-failure:${job.jobId}:${job.version}`,
   });
+}
+
+function tryFailUnprocessableJob(
+  repository: MemoryRepository,
+  job: Job,
+  errorCode: string,
+  incrementAttempt: boolean,
+): void {
+  try {
+    failUnprocessableJob(repository, job, errorCode, incrementAttempt);
+  } catch (error) {
+    const latest = repository.getJob(job.jobId);
+    if (latest && latest.version !== job.version) return;
+    throw error;
+  }
 }
 
 function safeErrorCode(error: unknown): string {

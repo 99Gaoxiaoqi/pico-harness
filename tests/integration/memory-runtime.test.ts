@@ -8,10 +8,17 @@ import type { Message } from "../../src/schema/message.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import {
   MemoryContextBuilder,
+  MEMORY_CONTEXT_CANDIDATE_LIMIT,
   MEMORY_CONTEXT_MAX_TOKENS,
 } from "../../src/memory/context-builder.js";
 import { MemoryRepository } from "../../src/memory/memory-repository.js";
-import type { MemoryProposalModelPort } from "../../src/memory/proposal-contracts.js";
+import { MemoryRepositoryProposalStore } from "../../src/memory/proposal-engine.js";
+import {
+  MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+  MEMORY_PROPOSAL_JOB_TYPE,
+  type MemoryProposalModelPort,
+} from "../../src/memory/proposal-contracts.js";
+import { MEMORY_REVIEW_LEASE_TTL_MS } from "../../src/memory/runtime-scheduler.js";
 import { MemoryReviewWorker } from "../../src/memory/worker.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { CostTracker } from "../../src/observability/tracker.js";
@@ -47,6 +54,7 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   const second = await new MemoryContextBuilder(repository, () => now).build();
   assert.equal(first.block, second.block);
   assert.ok(first.tokenCount <= MEMORY_CONTEXT_MAX_TOKENS);
+  assert.equal(MEMORY_CONTEXT_CANDIDATE_LIMIT, 500);
   assert.ok(first.facts.length <= 6);
   assert.deepEqual(
     first.facts.slice(0, 3).map((fact) => fact.factId),
@@ -262,6 +270,94 @@ test("self-owned worker consumes the durable T2 job without retaining foreground
   assert.equal(modelCalls, 1, "succeeded jobs are exactly-once");
 });
 
+test("stale running review jobs recover by lease CAS after restart and unsupported jobs stay untouched", async (context) => {
+  const fixture = await createFixture("worker-recovery");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  await enqueueCompletedReview(fixture, trustStore, "memory-recovery-session");
+
+  let repository = openRepository(fixture);
+  const queued = repository.listJobs()[0];
+  assert.ok(queued);
+  const running = new MemoryRepositoryProposalStore(repository).markJobRunning(queued);
+  const unsupportedType = repository.createJob({
+    type: "future-terminal-extraction",
+    terminalEventId: "future-type-terminal",
+    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+    cursor: { sessionId: "future", eventId: "future-user" },
+    maxAttempts: 3,
+  });
+  const unsupportedVersion = repository.createJob({
+    type: MEMORY_PROPOSAL_JOB_TYPE,
+    terminalEventId: "future-version-terminal",
+    extractorVersion: "memory-proposal-v2",
+    cursor: { sessionId: "future", eventId: "future-user" },
+    maxAttempts: 3,
+  });
+  repository.close();
+
+  let modelCalls = 0;
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const worker = new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    now: () => new Date(Date.parse(running.updatedAt) + MEMORY_REVIEW_LEASE_TTL_MS + 1),
+    modelFactory: () => ({
+      model: createSuccessfulModel(() => {
+        modelCalls++;
+      }),
+    }),
+  });
+  const results = await worker.drain();
+  assert.equal(results[0]?.status, "succeeded");
+  assert.equal(modelCalls, 1);
+
+  repository = openRepository(fixture);
+  const recovered = repository.getJob(running.jobId);
+  assert.equal(recovered?.status, "succeeded");
+  assert.equal(recovered?.attemptCount, 2, "recovery preserves the crashed attempt before retry");
+  assert.equal(repository.getJob(unsupportedType.jobId)?.status, "queued");
+  assert.equal(repository.getJob(unsupportedVersion.jobId)?.status, "queued");
+  assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
+  repository.close();
+});
+
+test("two workers racing the same queued review have one model call and one proposal", async (context) => {
+  const fixture = await createFixture("worker-cas-race");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trusted = await trustFixture(fixture);
+  await enqueueCompletedReview(fixture, trusted, "memory-race-session");
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const rendezvous = createRendezvous(2);
+  let modelCalls = 0;
+  const model = createSuccessfulModel(() => {
+    modelCalls++;
+  });
+  const createWorker = () =>
+    new MemoryReviewWorker({
+      workDir: fixture.workspace,
+      workspaceId: paths.workspace.id,
+      memoryDatabasePath: paths.workspace.memoryDatabase,
+      runtimeDatabasePath: paths.workspace.runtimeDatabase,
+      trustStore: new SecondCanonicalizeBarrierTrustStore(
+        { userStateDirectory: fixture.picoHome },
+        rendezvous,
+      ),
+      modelFactory: () => ({ model }),
+    });
+
+  const outcomes = await Promise.all([createWorker().drain(), createWorker().drain()]);
+  assert.equal(modelCalls, 1);
+  assert.equal(outcomes.flat().filter((result) => result.status === "succeeded").length, 1);
+  const repository = openRepository(fixture);
+  assert.equal(repository.listJobs()[0]?.status, "succeeded");
+  assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
+  repository.close();
+});
+
 test("/memory command uses trust, sanitizer, idempotency, CAS and executable undo", async (context) => {
   const fixture = await createFixture("command");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -303,17 +399,27 @@ test("/memory command uses trust, sanitizer, idempotency, CAS and executable und
     rejected.type === "local" ? (rejected.message ?? "") : "",
     /rejected by the safety scan/u,
   );
+  repository = openRepository(fixture);
+  const settings = repository.getSettings();
+  repository.updateSettings({
+    expectedVersion: settings.version,
+    autoPropose: false,
+    idempotencyKey: "test-disable-auto-propose",
+  });
+  repository.close();
   await execute(["off"]);
   repository = openRepository(fixture);
   assert.equal(repository.getSettings().enabled, false);
   assert.equal(repository.getSettings().injectionEnabled, false);
   repository.close();
-  await execute(["on"]);
+  const enabled = await execute(["on"]);
+  assert.match(enabled.type === "local" ? (enabled.message ?? "") : "", /review remains off/u);
   await execute(["undo", undoCommand]);
   repository = openRepository(fixture);
   assert.equal(repository.listFacts({ states: ["active"] }).length, 0);
   assert.equal(repository.listFacts({ states: ["disabled"] }).length, 1);
   assert.equal(repository.getSettings().enabled, true);
+  assert.equal(repository.getSettings().autoPropose, false);
   repository.close();
 });
 
@@ -336,9 +442,7 @@ test("memory review provider calls are accepted by schema v7 and audited with a 
   });
   const databasePath = ledger.databasePath;
   ledger.close();
-  const downgraded = new Database(databasePath);
-  downgraded.prepare("DELETE FROM schema_migrations WHERE version = ?").run(RUNTIME_SCHEMA_VERSION);
-  downgraded.close();
+  downgradeRuntimeDatabaseToV6(databasePath);
   ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
   const provider = new CostTracker(
     {
@@ -373,6 +477,30 @@ test("memory review provider calls are accepted by schema v7 and audited with a 
   assert.equal(migration.name, RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME);
 });
 
+test("runtime v6 migration name is verified before the v7 provider purpose upgrade", async (context) => {
+  const fixture = await createFixture("provider-purpose-v6-name");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+  const databasePath = ledger.databasePath;
+  ledger.close();
+  downgradeRuntimeDatabaseToV6(databasePath, "tampered_v6");
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome }),
+    /schema 6 migration tampered_v6 不受支持/u,
+  );
+  const inspected = new Database(databasePath, { readonly: true });
+  const current = inspected
+    .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+    .get() as { version: number };
+  const providerTable = inspected
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_calls'")
+    .get() as { sql: string };
+  inspected.close();
+  assert.equal(current.version, 6, "fail-closed validation must not partially apply v7");
+  assert.equal(providerTable.sql.includes("memory_review"), false);
+});
+
 async function createFixture(name: string) {
   const root = await mkdtemp(join(tmpdir(), `pico-memory-runtime-${name}-`));
   const workspace = join(root, "workspace");
@@ -385,6 +513,154 @@ async function trustFixture(fixture: { workspace: string; picoHome: string }) {
   const store = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
   await store.trust(await store.canonicalize(fixture.workspace));
   return store;
+}
+
+async function enqueueCompletedReview(
+  fixture: { workspace: string; picoHome: string },
+  trustStore: WorkspaceTrustStore,
+  sessionId: string,
+): Promise<void> {
+  await executeAgentRuntime(
+    {
+      prompt: "请记住：这个项目固定使用 npm run memory-recovery 进行构建。",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+    },
+    {
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "foreground complete" };
+        },
+      },
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+    },
+  );
+}
+
+function createSuccessfulModel(onExtract: () => void): MemoryProposalModelPort {
+  return {
+    async extract(request) {
+      onExtract();
+      return {
+        response: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "memory-success-call",
+              name: "submit_memory_proposals",
+              arguments: JSON.stringify({
+                proposals: [
+                  {
+                    kind: "project_fact",
+                    title: "Recovery build command",
+                    content: "Use npm run memory-recovery",
+                    reason: "The user explicitly stated a stable project command.",
+                    confidence: 0.99,
+                    evidenceEventIds: [request.evidence.userMessageEventId],
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      };
+    },
+  };
+}
+
+function createRendezvous(parties: number): () => Promise<void> {
+  let arrivals = 0;
+  let release = (): void => undefined;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return async () => {
+    arrivals++;
+    if (arrivals === parties) release();
+    await ready;
+  };
+}
+
+class SecondCanonicalizeBarrierTrustStore extends WorkspaceTrustStore {
+  private canonicalizeCalls = 0;
+
+  constructor(
+    options: ConstructorParameters<typeof WorkspaceTrustStore>[0],
+    private readonly rendezvous: () => Promise<void>,
+  ) {
+    super(options);
+  }
+
+  override async canonicalize(workspacePath: string): Promise<string> {
+    const canonical = await super.canonicalize(workspacePath);
+    this.canonicalizeCalls++;
+    if (this.canonicalizeCalls === 2) await this.rendezvous();
+    return canonical;
+  }
+
+  override async isTrusted(_canonicalWorkspacePath: string): Promise<boolean> {
+    return true;
+  }
+}
+
+function downgradeRuntimeDatabaseToV6(
+  databasePath: string,
+  migrationName = "daemon_run_projection_and_idempotency",
+): void {
+  const database = new Database(databasePath);
+  try {
+    database.transaction(() => {
+      database.exec(`
+        DROP INDEX IF EXISTS provider_calls_session_idx;
+        DROP INDEX IF EXISTS provider_calls_goal_idx;
+        DROP INDEX IF EXISTS provider_calls_job_idx;
+        ALTER TABLE provider_calls RENAME TO provider_calls_v7_fixture;
+        CREATE TABLE provider_calls (
+          call_id TEXT PRIMARY KEY,
+          session_id TEXT,
+          conversation_id TEXT,
+          goal_id TEXT,
+          job_id TEXT REFERENCES jobs(job_id) ON DELETE SET NULL,
+          attempt_id TEXT REFERENCES job_attempts(attempt_id) ON DELETE SET NULL,
+          purpose TEXT NOT NULL CHECK (purpose IN ('main','subagent','compaction','aux','grace','hook')),
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          route TEXT,
+          status TEXT NOT NULL CHECK (status IN ('succeeded','failed','cancelled')),
+          input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+          output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+          cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+          cache_write_tokens INTEGER NOT NULL CHECK (cache_write_tokens >= 0),
+          cost REAL NOT NULL CHECK (cost >= 0),
+          reported_json TEXT,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO provider_calls (
+          call_id, session_id, conversation_id, goal_id, job_id, attempt_id, purpose,
+          provider, model, route, status, input_tokens, output_tokens, cache_read_tokens,
+          cache_write_tokens, cost, reported_json, created_at
+        )
+        SELECT
+          call_id, session_id, conversation_id, goal_id, job_id, attempt_id, purpose,
+          provider, model, route, status, input_tokens, output_tokens, cache_read_tokens,
+          cache_write_tokens, cost, reported_json, created_at
+        FROM provider_calls_v7_fixture;
+        DROP TABLE provider_calls_v7_fixture;
+        CREATE INDEX provider_calls_session_idx ON provider_calls(session_id, created_at);
+        CREATE INDEX provider_calls_goal_idx ON provider_calls(goal_id, created_at);
+        CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
+      `);
+      database.prepare("DELETE FROM schema_migrations WHERE version = 7").run();
+      database
+        .prepare("UPDATE schema_migrations SET name = ? WHERE version = 6")
+        .run(migrationName);
+    })();
+  } finally {
+    database.close();
+  }
 }
 
 function openRepository(fixture: { workspace: string; picoHome: string }) {

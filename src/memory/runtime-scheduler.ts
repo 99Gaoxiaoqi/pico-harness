@@ -1,5 +1,5 @@
 import type { Job } from "./domain.js";
-import type { MemoryRepository } from "./memory-repository.js";
+import { MemoryConflictError, type MemoryRepository } from "./memory-repository.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -7,6 +7,13 @@ import {
 } from "./proposal-contracts.js";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
+export const MEMORY_REVIEW_LEASE_TTL_MS = 15 * 60 * 1_000;
+export const MEMORY_REVIEW_PENDING_LIMIT = 500;
+
+export interface MemoryReviewSchedulerOptions {
+  readonly now?: () => Date;
+  readonly leaseTtlMs?: number;
+}
 
 export interface MemoryReviewSchedulerPort {
   enqueue(input: TerminalMemoryEvidenceRef): Promise<void> | void;
@@ -18,7 +25,11 @@ export interface MemoryReviewSchedulerPort {
  */
 export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   constructor(
-    private readonly repository: Pick<MemoryRepository, "createJob" | "listJobs" | "getSettings">,
+    private readonly repository: Pick<
+      MemoryRepository,
+      "createJob" | "listJobs" | "getSettings" | "updateJob"
+    >,
+    private readonly options: MemoryReviewSchedulerOptions = {},
   ) {}
 
   enqueue(input: TerminalMemoryEvidenceRef): void {
@@ -36,8 +47,49 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   }
 
   pending(): readonly Job[] {
-    return this.repository.listJobs({ statuses: ["queued", "failed"], limit: 500 });
+    this.recoverStaleRunningJobs();
+    return this.repository
+      .listJobs({ statuses: ["queued", "failed"], limit: MEMORY_REVIEW_PENDING_LIMIT })
+      .filter(isSupportedReviewJob)
+      .filter((job) => job.attemptCount < job.maxAttempts);
   }
+
+  private recoverStaleRunningJobs(): void {
+    const now = (this.options.now ?? (() => new Date()))().getTime();
+    const leaseTtlMs = this.options.leaseTtlMs ?? MEMORY_REVIEW_LEASE_TTL_MS;
+    if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
+      throw new Error("Memory review lease TTL must be positive");
+    }
+    for (const job of this.repository.listJobs({
+      statuses: ["running"],
+      limit: MEMORY_REVIEW_PENDING_LIMIT,
+    })) {
+      if (!isSupportedReviewJob(job)) continue;
+      const updatedAt = Date.parse(job.updatedAt);
+      if (!Number.isFinite(updatedAt) || updatedAt > now - leaseTtlMs) continue;
+      try {
+        this.repository.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          status: "failed",
+          attemptCount: job.attemptCount,
+          errorCode: "stale_worker_recovered",
+          idempotencyKey: `memory-review-recover:${job.jobId}:${job.version}`,
+        });
+      } catch (error) {
+        // Another process renewed or completed the job after this snapshot.
+        if (error instanceof MemoryConflictError) continue;
+        throw error;
+      }
+    }
+  }
+}
+
+function isSupportedReviewJob(job: Job): boolean {
+  return (
+    job.type === MEMORY_PROPOSAL_JOB_TYPE &&
+    job.extractorVersion === MEMORY_PROPOSAL_EXTRACTOR_VERSION
+  );
 }
 
 function normalizeRef(input: TerminalMemoryEvidenceRef): TerminalMemoryEvidenceRef {
