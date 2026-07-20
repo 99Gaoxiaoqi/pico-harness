@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
 import type { WorkspaceId } from "../paths/pico-paths.js";
@@ -34,10 +34,17 @@ const MAX_CONTENT_LENGTH = 32_000;
 const MAX_REASON_LENGTH = 4_000;
 const MAX_LIST_LIMIT = 500;
 
+type RejectAsyncTransactionArguments<Result> = [Result] extends [never]
+  ? []
+  : Result extends PromiseLike<unknown>
+    ? ["MemoryRepository.transaction callback must be synchronous"]
+    : [];
+
 export interface MemoryRepositoryOptions {
   readonly databasePath: string;
   readonly workspaceId: WorkspaceId;
   readonly now?: () => Date;
+  readonly busyTimeoutMs?: number;
 }
 
 export interface IdempotentWriteOptions {
@@ -298,6 +305,16 @@ interface IdempotencyRow {
   readonly result_json: string;
 }
 
+interface MaintenanceRow {
+  readonly secure_delete_pending: number;
+}
+
+interface WalCheckpointResult {
+  readonly busy: number;
+  readonly log: number;
+  readonly checkpointed: number;
+}
+
 export class MemoryConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -322,6 +339,20 @@ export class MemoryIdempotencyConflictError extends MemoryConflictError {
   }
 }
 
+export class MemorySecureDeletePendingError extends Error {
+  constructor(message = "Memory secure deletion is committed but its WAL checkpoint is pending") {
+    super(message);
+    this.name = "MemorySecureDeletePendingError";
+  }
+}
+
+export class MemoryAsyncTransactionError extends TypeError {
+  constructor() {
+    super("MemoryRepository.transaction callback must return synchronously");
+    this.name = "MemoryAsyncTransactionError";
+  }
+}
+
 /**
  * Workspace-scoped authority for long-term memory. All text-bearing records, body-free audit
  * mutations and idempotency claims share one SQLite transaction boundary.
@@ -332,23 +363,32 @@ export class MemoryRepository {
   private readonly db: Database.Database;
   private readonly now: () => Date;
   private transactionDepth = 0;
-  private secureCheckpointRequested = false;
 
   constructor(options: MemoryRepositoryOptions) {
     this.databasePath = resolve(options.databasePath);
     this.workspaceId = options.workspaceId;
     this.now = options.now ?? (() => new Date());
-    mkdirSync(dirname(this.databasePath), { recursive: true, mode: 0o700 });
-    chmodSync(dirname(this.databasePath), 0o700);
+    const busyTimeoutMs = normalizeNonNegativeInteger(
+      options.busyTimeoutMs ?? 5_000,
+      "busyTimeoutMs",
+    );
+    const databaseDirectory = dirname(this.databasePath);
+    const databaseDirectoryExisted = existsSync(databaseDirectory);
+    mkdirSync(databaseDirectory, { recursive: true, mode: 0o700 });
+    if (!statSync(databaseDirectory).isDirectory()) {
+      throw new Error(`Memory database parent is not a directory: ${databaseDirectory}`);
+    }
+    if (!databaseDirectoryExisted) chmodSync(databaseDirectory, 0o700);
     this.db = new Database(this.databasePath);
     try {
-      this.db.pragma("busy_timeout = 5000");
+      this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
       this.db.pragma("foreign_keys = ON");
       this.db.pragma("secure_delete = ON");
       migrateMemorySchema(this.db, this.workspaceId, () => this.timestamp());
       chmodSync(this.databasePath, 0o600);
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("synchronous = FULL");
+      this.completePendingSecureDelete();
     } catch (error) {
       this.db.close();
       throw error;
@@ -356,31 +396,41 @@ export class MemoryRepository {
   }
 
   close(): void {
-    if (this.db.open) this.db.close();
+    if (!this.db.open) return;
+    let checkpointError: unknown;
+    try {
+      this.completePendingSecureDelete();
+    } catch (error) {
+      checkpointError = error;
+    } finally {
+      this.db.close();
+    }
+    if (checkpointError) throw checkpointError;
   }
 
-  transaction<Result>(operation: (repository: this) => Result): Result {
-    if (this.transactionDepth > 0) return operation(this);
-    const checkpointWasPending = this.secureCheckpointRequested;
-    try {
-      const run = this.db.transaction(() => {
-        this.transactionDepth += 1;
-        try {
-          return operation(this);
-        } finally {
-          this.transactionDepth -= 1;
-        }
-      });
-      const result = run.immediate();
-      if (this.secureCheckpointRequested) {
-        this.db.pragma("wal_checkpoint(TRUNCATE)");
-        this.secureCheckpointRequested = false;
-      }
-      return result;
-    } catch (error) {
-      this.secureCheckpointRequested = checkpointWasPending;
-      throw error;
+  transaction<Result>(
+    operation: (repository: this) => Result,
+    ..._rejectAsync: RejectAsyncTransactionArguments<Result>
+  ): Result {
+    return this.runTransaction(operation);
+  }
+
+  private runTransaction<Result>(operation: (repository: this) => Result): Result {
+    if (this.transactionDepth > 0) {
+      return requireSynchronousTransactionResult(operation(this));
     }
+    this.completePendingSecureDelete();
+    const run = this.db.transaction(() => {
+      this.transactionDepth += 1;
+      try {
+        return requireSynchronousTransactionResult(operation(this));
+      } finally {
+        this.transactionDepth -= 1;
+      }
+    });
+    const result = run.immediate();
+    this.completePendingSecureDelete();
+    return result;
   }
 
   getSettings(): Settings {
@@ -740,7 +790,7 @@ export class MemoryRepository {
           input.idempotencyKey,
           at,
         );
-        this.secureCheckpointRequested = true;
+        this.markSecureDeletePending(at);
         return { value: forgotten, marker: { factId } };
       },
       (marker) => this.requireFact(readMarkerId(marker, "factId")),
@@ -930,7 +980,7 @@ export class MemoryRepository {
           input.idempotencyKey,
           at,
         );
-        this.secureCheckpointRequested = true;
+        this.markSecureDeletePending(at);
         return { value: deleted, marker: { proposalId } };
       },
       (marker) => this.requireProposal(readMarkerId(marker, "proposalId")),
@@ -1052,7 +1102,6 @@ export class MemoryRepository {
       input.idempotencyKey,
       normalized.request,
       () => {
-        if (normalized.sourceId) this.requireSource(normalized.sourceId);
         const existing = this.db
           .prepare(
             `SELECT * FROM memory_jobs
@@ -1063,13 +1112,9 @@ export class MemoryRepository {
           | undefined;
         if (existing) {
           const job = mapJob(existing, this.workspaceId);
-          if (!sameJobIdentity(job, normalized)) {
-            throw new MemoryConflictError(
-              `Terminal event ${normalized.terminalEventId} and extractor ${normalized.extractorVersion} already identify another memory job`,
-            );
-          }
           return { value: job, marker: { jobId: job.jobId } };
         }
+        if (normalized.sourceId) this.requireSource(normalized.sourceId);
         const jobId = normalizeId(input.jobId ?? `memory-job:${randomUUID()}`, "jobId");
         const at = this.timestamp();
         this.db
@@ -1289,6 +1334,64 @@ export class MemoryRepository {
       );
   }
 
+  private markSecureDeletePending(at: string): void {
+    const changed = this.db
+      .prepare(
+        `UPDATE memory_maintenance
+         SET secure_delete_pending = 1, requested_at = COALESCE(requested_at, ?), updated_at = ?
+         WHERE workspace_id = ?`,
+      )
+      .run(at, at, this.workspaceId);
+    if (changed.changes !== 1) {
+      throw new Error(`Memory maintenance state is missing for workspace ${this.workspaceId}`);
+    }
+  }
+
+  private completePendingSecureDelete(): void {
+    const state = this.db
+      .prepare(`SELECT secure_delete_pending FROM memory_maintenance WHERE workspace_id = ?`)
+      .get(this.workspaceId) as MaintenanceRow | undefined;
+    if (!state) {
+      throw new Error(`Memory maintenance state is missing for workspace ${this.workspaceId}`);
+    }
+    if (state.secure_delete_pending === 0) return;
+    if (state.secure_delete_pending !== 1) {
+      throw new Error("Memory secure-delete pending state is invalid");
+    }
+
+    let checkpoint: WalCheckpointResult;
+    try {
+      checkpoint = parseWalCheckpointResult(this.db.pragma("wal_checkpoint(TRUNCATE)"));
+    } catch (error) {
+      if (error instanceof MemorySecureDeletePendingError) throw error;
+      throw new MemorySecureDeletePendingError(
+        `Memory secure-delete WAL checkpoint failed: ${errorMessage(error)}`,
+      );
+    }
+    if (checkpoint.busy !== 0 || checkpoint.log !== 0) {
+      throw new MemorySecureDeletePendingError(
+        `Memory secure-delete WAL checkpoint is busy (busy=${checkpoint.busy}, log=${checkpoint.log}, checkpointed=${checkpoint.checkpointed})`,
+      );
+    }
+
+    try {
+      const cleared = this.db
+        .prepare(
+          `UPDATE memory_maintenance
+           SET secure_delete_pending = 0, requested_at = NULL, updated_at = ?
+           WHERE workspace_id = ? AND secure_delete_pending = 1`,
+        )
+        .run(this.timestamp(), this.workspaceId);
+      if (cleared.changes !== 1) {
+        throw new Error("Memory secure-delete pending state changed during checkpoint");
+      }
+    } catch (error) {
+      throw new MemorySecureDeletePendingError(
+        `Memory secure-delete checkpoint completed but state clearing failed: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   private idempotentWrite<Result>(
     operation: string,
     idempotencyKey: string | undefined,
@@ -1296,7 +1399,7 @@ export class MemoryRepository {
     execute: () => { readonly value: Result; readonly marker: Readonly<Record<string, string>> },
     replay: (marker: Readonly<Record<string, unknown>>) => Result,
   ): Result {
-    return this.transaction(() => {
+    return this.runTransaction(() => {
       if (!idempotencyKey) return execute().value;
       const key = normalizeIdempotencyKey(idempotencyKey);
       const keyHash = hashOpaqueKey(key);
@@ -1643,16 +1746,6 @@ function mapJob(row: JobRow, workspaceId: WorkspaceId): Job {
   };
 }
 
-function sameJobIdentity(job: Job, expected: ReturnType<typeof normalizeCreateJobInput>): boolean {
-  return (
-    job.type === expected.type &&
-    job.sourceId === expected.sourceId &&
-    job.maxAttempts === expected.maxAttempts &&
-    job.nextAttemptAt === expected.nextAttemptAt &&
-    canonicalJson(job.cursor) === canonicalJson(expected.cursor)
-  );
-}
-
 function normalizeJobCursor(cursor: MemoryJobCursor): MemoryJobCursor {
   const sessionId = normalizeId(cursor.sessionId, "cursor.sessionId");
   const sequence = normalizeOptionalNonNegativeInteger(cursor.sequence, "cursor.sequence");
@@ -1896,6 +1989,43 @@ function hashCanonicalJson(value: unknown): string {
 
 function hashOpaqueKey(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function requireSynchronousTransactionResult<Result>(result: Result): Result {
+  if (
+    result !== null &&
+    (typeof result === "object" || typeof result === "function") &&
+    typeof (result as { readonly then?: unknown }).then === "function"
+  ) {
+    throw new MemoryAsyncTransactionError();
+  }
+  return result;
+}
+
+function parseWalCheckpointResult(value: unknown): WalCheckpointResult {
+  if (!Array.isArray(value) || value.length !== 1) {
+    throw new Error("SQLite returned an invalid WAL checkpoint result");
+  }
+  const row = value[0];
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw new Error("SQLite returned an invalid WAL checkpoint row");
+  }
+  const record = row as Readonly<Record<string, unknown>>;
+  const busy = parseCheckpointInteger(record["busy"], "busy");
+  const log = parseCheckpointInteger(record["log"], "log");
+  const checkpointed = parseCheckpointInteger(record["checkpointed"], "checkpointed");
+  return { busy, log, checkpointed };
+}
+
+function parseCheckpointInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`SQLite WAL checkpoint ${field} is invalid`);
+  }
+  return value as number;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function canonicalJson(value: unknown): string {
