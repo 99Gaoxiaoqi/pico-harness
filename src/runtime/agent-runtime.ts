@@ -142,6 +142,18 @@ import type {
   RuntimeExecution,
   RuntimeLifecycleEvent,
 } from "./runtime-contract.js";
+import { MemoryContextBuilder } from "../memory/context-builder.js";
+import { MemoryRepository } from "../memory/memory-repository.js";
+import {
+  MemoryReviewScheduler,
+  type MemoryReviewSchedulerPort,
+} from "../memory/runtime-scheduler.js";
+import {
+  kickMemoryReviewWorker,
+  MemoryReviewWorker,
+  ProviderMemoryProposalModel,
+  type MemoryProposalModelFactory,
+} from "../memory/worker.js";
 export type {
   RunAgentCliOptions,
   RunAgentCliResult,
@@ -205,6 +217,10 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   pluginSnapshot?: PluginRuntimeSnapshot;
   /** Host-owned restricted capability factories used for snapshot resolution and activation. */
   pluginCapabilityRegistry?: PluginCapabilityRegistry;
+  /** Explicit user-level trust authority for memory recall and review. */
+  memoryTrustStore?: WorkspaceTrustStore;
+  /** Long-lived hosts with injected providers supply a fresh, self-owned worker model per claim. */
+  memoryProposalModelFactory?: MemoryProposalModelFactory;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -279,6 +295,10 @@ export async function executeAgentRuntime(
   let ownedUsageStore: RuntimeStore | undefined;
   let ownsMcpManager = false;
   let cleanupMcpManager: McpConnectionManager | undefined;
+  let memoryRepository: MemoryRepository | undefined;
+  let memoryContextBuilder: MemoryContextBuilder | undefined;
+  let memoryReviewScheduler: MemoryReviewSchedulerPort | undefined;
+  let kickMemoryWorker = (): void => undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
   const cleanupScope = new RuntimeCleanupScope((resource, error) => {
     logger.warn(
@@ -289,6 +309,7 @@ export async function executeAgentRuntime(
   cleanupScope.register("Session acquisition lease", () => {
     if (!sessionLeaseTransferred) sessionLease.release();
   });
+  cleanupScope.register("Workspace memory repository", () => memoryRepository?.close());
 
   try {
     if (resumeExistingSession && dependencies.runtimeState === undefined) {
@@ -316,6 +337,42 @@ export async function executeAgentRuntime(
       },
       { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
     );
+    const memoryTrustStore =
+      dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    if (!backgroundPolicy) {
+      try {
+        const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
+        if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
+          const memoryPaths = resolvePicoPaths(canonicalMemoryWorkspace, { picoHome });
+          memoryRepository = new MemoryRepository({
+            databasePath: memoryPaths.workspace.memoryDatabase,
+            workspaceId: memoryPaths.workspace.id,
+          });
+          memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
+          const memorySettings = memoryRepository.getSettings();
+          if (memorySettings.enabled && memorySettings.autoPropose && !resumeExistingSession) {
+            const scheduler = new MemoryReviewScheduler(memoryRepository);
+            memoryReviewScheduler = {
+              enqueue: async (input) => {
+                const canonical = await memoryTrustStore.canonicalize(workDir);
+                if (!(await memoryTrustStore.isTrusted(canonical))) return;
+                scheduler.enqueue(input);
+                kickMemoryWorker();
+              },
+            };
+          }
+        }
+      } catch (error) {
+        logger.warn(
+          { workDir, error: error instanceof Error ? error.message : String(error) },
+          "[Memory] workspace runtime unavailable; continuing without recall/review",
+        );
+        memoryRepository?.close();
+        memoryRepository = undefined;
+        memoryContextBuilder = undefined;
+        memoryReviewScheduler = undefined;
+      }
+    }
     const workspaceRoots = await WorkspaceRoots.create(
       workDir,
       backgroundPolicy || sessionSelection.mode === "fork"
@@ -565,6 +622,44 @@ export async function executeAgentRuntime(
     });
     const trackedProvider = providerAssembly.provider;
     const rebuildProvider = providerAssembly.rebuildProvider;
+    const memoryModelFactory =
+      dependencies.memoryProposalModelFactory ??
+      (dependencies.provider === undefined
+        ? async () => {
+            const ledger = new RuntimeStore({ workDir, picoHome });
+            const provider = new CostTracker(
+              providerFactory(kind, currentConfig),
+              billingRouteForProvider(kind, currentConfig),
+              undefined,
+              {
+                ledger,
+                context: { purpose: "memory_review" },
+              },
+            );
+            return {
+              model: new ProviderMemoryProposalModel(provider),
+              dispose: () => ledger.close(),
+            };
+          }
+        : undefined);
+    if (memoryReviewScheduler && memoryModelFactory) {
+      const memoryPaths = resolvePicoPaths(workDir, { picoHome });
+      kickMemoryWorker = () =>
+        kickMemoryReviewWorker(
+          memoryPaths.workspace.id,
+          () =>
+            new MemoryReviewWorker({
+              workDir,
+              workspaceId: memoryPaths.workspace.id,
+              memoryDatabasePath: memoryPaths.workspace.memoryDatabase,
+              runtimeDatabasePath: memoryPaths.workspace.runtimeDatabase,
+              trustStore: memoryTrustStore,
+              modelFactory: memoryModelFactory,
+            }),
+        );
+      // Recover durable jobs left by an earlier process before the next foreground completion.
+      kickMemoryWorker();
+    }
     let activeMcpManager = dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
@@ -697,14 +792,29 @@ export async function executeAgentRuntime(
           );
         },
       }).build();
+      let withMemory = composed;
+      if (memoryContextBuilder) {
+        try {
+          const canonical = await memoryTrustStore.canonicalize(workDir);
+          if (await memoryTrustStore.isTrusted(canonical)) {
+            const memory = await memoryContextBuilder.build();
+            if (memory.block) withMemory = `${composed}\n\n${memory.block}`;
+          }
+        } catch (error) {
+          logger.warn(
+            { workDir, error: error instanceof Error ? error.message : String(error) },
+            "[Memory] recall injection degraded",
+          );
+        }
+      }
       if (
         backgroundPolicy ||
         !dependencies.scheduleDraftCoordinator ||
         !looksLikeScheduleCreationIntent(prompt)
       ) {
-        return composed;
+        return withMemory;
       }
-      return `${composed}\n\n<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>`;
+      return `${withMemory}\n\n<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>`;
     };
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
@@ -950,6 +1060,7 @@ export async function executeAgentRuntime(
       ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
+      ...(memoryReviewScheduler ? { memoryReviewScheduler } : {}),
     }).execute();
     return result;
   } catch (error) {
