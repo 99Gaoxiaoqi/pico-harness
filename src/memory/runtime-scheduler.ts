@@ -49,8 +49,12 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   pending(): readonly Job[] {
     this.recoverStaleRunningJobs();
     return this.repository
-      .listJobs({ statuses: ["queued", "failed"], limit: MEMORY_REVIEW_PENDING_LIMIT })
-      .filter(isSupportedReviewJob)
+      .listJobs({
+        statuses: ["queued", "failed"],
+        type: MEMORY_PROPOSAL_JOB_TYPE,
+        extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+        limit: MEMORY_REVIEW_PENDING_LIMIT,
+      })
       .filter((job) => job.attemptCount < job.maxAttempts);
   }
 
@@ -62,9 +66,10 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
     }
     for (const job of this.repository.listJobs({
       statuses: ["running"],
+      type: MEMORY_PROPOSAL_JOB_TYPE,
+      extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
       limit: MEMORY_REVIEW_PENDING_LIMIT,
     })) {
-      if (!isSupportedReviewJob(job)) continue;
       const updatedAt = Date.parse(job.updatedAt);
       if (!Number.isFinite(updatedAt) || updatedAt > now - leaseTtlMs) continue;
       try {
@@ -83,13 +88,6 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
       }
     }
   }
-}
-
-function isSupportedReviewJob(job: Job): boolean {
-  return (
-    job.type === MEMORY_PROPOSAL_JOB_TYPE &&
-    job.extractorVersion === MEMORY_PROPOSAL_EXTRACTOR_VERSION
-  );
 }
 
 function normalizeRef(input: TerminalMemoryEvidenceRef): TerminalMemoryEvidenceRef {
