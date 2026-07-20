@@ -209,7 +209,7 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
             });
       const proposals = input.candidates.map((candidate) => {
         const identity = proposalIdentity(input.job, candidate);
-        return repository.createProposal({
+        const proposal = repository.createProposal({
           proposalId: `proposal:${identity}`,
           kind: candidate.kind,
           title: candidate.title,
@@ -221,6 +221,11 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
           ...(candidate.conflictFactId ? { conflictFactId: candidate.conflictFactId } : {}),
           idempotencyKey: `proposal-create:${identity}`,
         });
+        repository.enqueueProposedNotification(
+          proposal,
+          `proposal-notification:${proposal.proposalId}:${proposal.version}`,
+        );
+        return proposal;
       });
       const job = repository.updateJob({
         jobId: input.job.jobId,

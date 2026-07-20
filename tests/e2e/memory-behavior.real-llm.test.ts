@@ -342,7 +342,7 @@ async function waitForPendingProposal(workspace: string, picoHome: string) {
     try {
       const proposal = repository.listProposals({ statuses: ["pending"] })[0];
       if (proposal) return proposal;
-      const job = repository.listJobs()[0];
+      const job = repository.listJobs({ type: "terminal-extraction" })[0];
       if (job?.status === "failed") {
         throw new Error(`Memory review failed: ${job.errorCode ?? "unknown"}`);
       }

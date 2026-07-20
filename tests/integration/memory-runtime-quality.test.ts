@@ -6,10 +6,11 @@ import test from "node:test";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { MemoryRepository } from "../../src/memory/memory-repository.js";
-import type {
-  MemoryProposalExtractionRequest,
-  MemoryProposalExtractionResult,
-  MemoryProposalModelPort,
+import {
+  MEMORY_PROPOSAL_JOB_TYPE,
+  type MemoryProposalExtractionRequest,
+  type MemoryProposalExtractionResult,
+  type MemoryProposalModelPort,
 } from "../../src/memory/proposal-contracts.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
@@ -191,7 +192,9 @@ test("memory settings independently gate recall and review work", async (context
 
         if (settingCase.expectedReviewCalls > 0) {
           await waitForMemoryState(fixture, (current) =>
-            current.listJobs()[0]?.status === "succeeded" ? true : undefined,
+            current.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status === "succeeded"
+              ? true
+              : undefined,
           );
         } else {
           await flushAsyncWork();
@@ -262,7 +265,9 @@ test("foreground streaming completion does not wait for a blocked memory reviewe
 
     deferred.resolve(emptyExtractionResult());
     await waitForMemoryState(fixture, (repository) =>
-      repository.listJobs()[0]?.status === "succeeded" ? true : undefined,
+      repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status === "succeeded"
+        ? true
+        : undefined,
     );
   } finally {
     deferred.resolve(emptyExtractionResult());
@@ -300,7 +305,9 @@ test("memory reviewer failure cannot replace foreground terminal success", async
     );
     assert.equal(result.finalMessage, "foreground survived");
     await waitForMemoryState(fixture, (repository) =>
-      repository.listJobs()[0]?.status === "failed" ? true : undefined,
+      repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status === "failed"
+        ? true
+        : undefined,
     );
     assert.equal(reviewCalls, 1);
     const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -405,7 +412,9 @@ test("default priced worker records one memory_review without changing main Sess
     const usageBeforeReview = structuredClone(session.getRuntimeStateSnapshot().usage);
 
     await waitForMemoryState(fixture, (repository) =>
-      repository.listJobs()[0]?.status === "succeeded" ? true : undefined,
+      repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status === "succeeded"
+        ? true
+        : undefined,
     );
     await waitForProviderCalls(fixture, 2);
     const usageAfterReview = session.getRuntimeStateSnapshot().usage;
@@ -567,7 +576,7 @@ function openRepository(workspace: string, picoHome: string): MemoryRepository {
 function openJobStatus(fixture: RuntimeFixture): string | undefined {
   const repository = openRepository(fixture.workspace, fixture.picoHome);
   try {
-    return repository.listJobs()[0]?.status;
+    return repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status;
   } finally {
     repository.close();
   }
