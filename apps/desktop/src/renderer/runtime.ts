@@ -5,6 +5,9 @@ import {
   type RuntimeProviderInput,
   type RuntimeParams,
   type RuntimeNotification,
+  type RuntimeMemoryFact,
+  type RuntimeMemoryProposal,
+  type RuntimeMemorySettings,
   type RuntimeResult,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
@@ -20,6 +23,8 @@ import {
   type ConversationView,
   type JsonRecord,
   type ModelRouteView,
+  type MemoryFactPatch,
+  type MemorySettingsPatch,
   type ProviderConfigView,
   type ProviderCredentialSource,
   type ProviderCredentialStatus,
@@ -57,7 +62,16 @@ import {
 import { applyTimelineNotification } from "./timeline.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
+const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
 const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
+
+export function isMemoryNotificationTopic(topic: string): boolean {
+  return topic === "memory.proposed" || topic === "memory.changed" || topic === "memory.forgotten";
+}
+
+export function isMemoryConflict(error: unknown): boolean {
+  return error instanceof RuntimeInvocationError && error.code === "CONFLICT";
+}
 
 function getBridge(): DesktopBridge | undefined {
   return window.pico;
@@ -673,7 +687,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Runtime 返回了未知错误。";
 }
 
-class RuntimeInvocationError extends Error {
+export class RuntimeInvocationError extends Error {
   constructor(
     readonly code: string,
     message: string,
@@ -951,6 +965,28 @@ export interface RuntimeActions {
     providerId: string,
     expectedProviderFingerprint: string,
   ): Promise<boolean>;
+  refreshMemory(): Promise<void>;
+  updateMemoryFact(
+    factId: string,
+    expectedVersion: number,
+    patch: MemoryFactPatch,
+  ): Promise<RuntimeMemoryFact | undefined>;
+  forgetMemoryFact(factId: string, expectedVersion: number): Promise<boolean>;
+  resolveMemoryProposal(
+    proposalId: string,
+    expectedVersion: number,
+    resolution: "accepted" | "rejected",
+  ): Promise<
+    | {
+        readonly proposal: RuntimeMemoryProposal;
+        readonly fact?: RuntimeMemoryFact | undefined;
+      }
+    | undefined
+  >;
+  updateMemorySettings(
+    expectedVersion: number,
+    patch: MemorySettingsPatch,
+  ): Promise<RuntimeMemorySettings | undefined>;
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   setBackgroundMode(enabled: boolean): Promise<void>;
   openWorkspace(): Promise<void>;
@@ -976,9 +1012,12 @@ export function useRuntimeStore(): RuntimeStore {
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
-  const runtimeCapabilitiesRef = useRef(new Set<string>(preview ? [SHARED_CONFIG_CAPABILITY] : []));
+  const runtimeCapabilitiesRef = useRef(
+    new Set<string>(preview ? [SHARED_CONFIG_CAPABILITY, WORKSPACE_MEMORY_CAPABILITY] : []),
+  );
   const seenEventIdsRef = useRef(new Set<string>());
   const workspaceLoadGenerationRef = useRef(0);
+  const memoryLoadGenerationRef = useRef(0);
   const conversationLoadGenerationsRef = useRef(new Map<string, number>());
   const pendingSendRef = useRef<
     | {
@@ -1051,6 +1090,77 @@ export function useRuntimeStore(): RuntimeStore {
       return workspaces;
     },
     [],
+  );
+
+  const loadMemory = useCallback(
+    async (bridge: DesktopBridge, workspacePath: string) => {
+      const generation = memoryLoadGenerationRef.current + 1;
+      memoryLoadGenerationRef.current = generation;
+      const isCurrentLoad = () =>
+        memoryLoadGenerationRef.current === generation &&
+        dataRef.current.workspacePath === workspacePath;
+      if (!runtimeCapabilitiesRef.current.has(WORKSPACE_MEMORY_CAPABILITY)) {
+        setData((current) => ({
+          ...current,
+          memory: {
+            workspacePath,
+            facts: [],
+            proposals: [],
+            status: "degraded",
+            error: "当前 Runtime 未提供工作区记忆能力。请完整重启 Pico 后重试。",
+          },
+        }));
+        return;
+      }
+      if (preview) {
+        setData((current) => ({ ...current, memory: previewData.memory }));
+        return;
+      }
+      setData((current) => ({
+        ...current,
+        memory: { ...current.memory, workspacePath, status: "loading", error: undefined },
+      }));
+      try {
+        const [factsResult, proposalsResult, settingsResult] = await Promise.all([
+          invoke(bridge, "memory.list", {
+            workspacePath,
+            states: ["active", "disabled", "archived"],
+            limit: 500,
+          }),
+          invoke(bridge, "memory.review.list", {
+            workspacePath,
+            statuses: ["pending"],
+            limit: 500,
+          }),
+          invoke(bridge, "memory.settings.get", { workspacePath }),
+        ]);
+        if (!isCurrentLoad()) return;
+        setData((current) => ({
+          ...current,
+          memory: {
+            workspacePath,
+            facts: factsResult.facts,
+            proposals: proposalsResult.proposals,
+            settings: settingsResult.settings,
+            status: "ready",
+          },
+        }));
+      } catch (error) {
+        if (isCurrentLoad()) {
+          setData((current) => ({
+            ...current,
+            memory: {
+              ...current.memory,
+              workspacePath,
+              status: "error",
+              error: errorMessage(error),
+            },
+          }));
+        }
+        throw error;
+      }
+    },
+    [preview],
   );
 
   const loadWorkspace = useCallback(async (bridge: DesktopBridge, workspacePath: string) => {
@@ -1131,6 +1241,10 @@ export function useRuntimeStore(): RuntimeStore {
           trusted,
           launchAtLogin,
           notices,
+          memory:
+            trusted && !switchingWorkspace
+              ? current.memory
+              : { workspacePath, facts: [], proposals: [], status: "idle" },
           ...(switchingWorkspace
             ? {
                 timeline: [],
@@ -1332,6 +1446,7 @@ export function useRuntimeStore(): RuntimeStore {
     let disposed = false;
     let subscription: ReturnType<DesktopBridge["events"]["subscribe"]> | undefined;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let memoryRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     const dirtySessions = new Set<string>();
     const scheduleHydration = (sessionId?: string) => {
       if (sessionId) dirtySessions.add(sessionId);
@@ -1352,6 +1467,14 @@ export function useRuntimeStore(): RuntimeStore {
           .catch(reportFailure);
       }, 25);
     };
+    const scheduleMemoryRefresh = () => {
+      if (memoryRefreshTimer) return;
+      memoryRefreshTimer = setTimeout(() => {
+        memoryRefreshTimer = undefined;
+        if (disposed || dataRef.current.workspacePath !== workspacePath) return;
+        void loadMemory(bridge, workspacePath).catch(reportFailure);
+      }, 25);
+    };
     const handleEvent = (event: RuntimeNotification) => {
       const scope = event.scope;
       const scopedWorkspacePath = stringValue(scope.workspacePath);
@@ -1367,7 +1490,9 @@ export function useRuntimeStore(): RuntimeStore {
       }
       const payload = isRecord(event.payload) ? event.payload : {};
       const topic = stringValue(event.topic);
-      if (topic === "approval.requested") {
+      if (isMemoryNotificationTopic(topic)) {
+        scheduleMemoryRefresh();
+      } else if (topic === "approval.requested") {
         const request = isRecord(payload.request) ? payload.request : {};
         setData((current) => ({
           ...current,
@@ -1587,12 +1712,14 @@ export function useRuntimeStore(): RuntimeStore {
     return () => {
       disposed = true;
       if (refreshTimer) clearTimeout(refreshTimer);
+      if (memoryRefreshTimer) clearTimeout(memoryRefreshTimer);
       subscription?.dispose();
     };
   }, [
     connection.kind,
     data.workspacePath,
     loadConversation,
+    loadMemory,
     loadWorkspace,
     preview,
     reportFailure,
@@ -1615,6 +1742,20 @@ export function useRuntimeStore(): RuntimeStore {
         await operation(bridge);
         return true;
       } catch (error) {
+        if (!preview && label.startsWith("memory-") && isMemoryConflict(error)) {
+          const bridge = getBridge();
+          const workspacePath = dataRef.current.workspacePath;
+          if (bridge && workspacePath) {
+            try {
+              await loadMemory(bridge, workspacePath);
+            } catch (reloadError) {
+              reportFailure(reloadError);
+              return false;
+            }
+          }
+          setMessage("记忆已在另一处更新，已重新加载最新内容。请检查后重试本次操作。");
+          return false;
+        }
         if (
           !preview &&
           label.startsWith("provider-") &&
@@ -1642,7 +1783,7 @@ export function useRuntimeStore(): RuntimeStore {
         setBusy(undefined);
       }
     },
-    [loadWorkspace, preview, reportFailure],
+    [loadMemory, loadWorkspace, preview, reportFailure],
   );
 
   const actions = useMemo<RuntimeActions>(
@@ -2417,6 +2558,193 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage(`Provider ${providerId} 的系统凭证已删除。`);
         });
       },
+      async refreshMemory() {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !dataRef.current.trusted) return;
+        await perform("memory-refresh", async (bridge) => {
+          await loadMemory(bridge, workspacePath);
+        });
+      },
+      async updateMemoryFact(factId, expectedVersion, patch) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !dataRef.current.trusted) return undefined;
+        let updated: RuntimeMemoryFact | undefined;
+        await perform("memory-update", async (bridge) => {
+          if (preview) {
+            const fact = dataRef.current.memory.facts.find((item) => item.factId === factId);
+            if (!fact || fact.version !== expectedVersion) return;
+            const { expiresAt: oldExpiresAt, lastUsedAt: oldLastUsedAt, ...baseFact } = fact;
+            const { expiresAt, lastUsedAt, ...basePatch } = patch;
+            updated = {
+              ...baseFact,
+              ...basePatch,
+              ...(expiresAt === undefined
+                ? oldExpiresAt
+                  ? { expiresAt: oldExpiresAt }
+                  : {}
+                : expiresAt === null
+                  ? {}
+                  : { expiresAt }),
+              ...(lastUsedAt === undefined
+                ? oldLastUsedAt
+                  ? { lastUsedAt: oldLastUsedAt }
+                  : {}
+                : lastUsedAt === null
+                  ? {}
+                  : { lastUsedAt }),
+              version: fact.version + 1,
+              updatedAt: new Date().toISOString(),
+            };
+            const nextFact = updated;
+            setData((current) => {
+              return {
+                ...current,
+                memory: {
+                  ...current.memory,
+                  facts: current.memory.facts.map((item) =>
+                    item.factId === factId ? nextFact : item,
+                  ),
+                },
+              };
+            });
+          } else {
+            const result = await invoke(bridge, "memory.update", {
+              workspacePath,
+              factId,
+              expectedVersion,
+              idempotencyKey: crypto.randomUUID(),
+              ...patch,
+            });
+            updated = result.fact;
+            await loadMemory(bridge, workspacePath);
+          }
+          setMessage("记忆已更新。");
+        });
+        return updated;
+      },
+      async forgetMemoryFact(factId, expectedVersion) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !dataRef.current.trusted) return false;
+        return perform("memory-forget", async (bridge) => {
+          if (preview) {
+            setData((current) => ({
+              ...current,
+              memory: {
+                ...current.memory,
+                facts: current.memory.facts.filter((item) => item.factId !== factId),
+              },
+            }));
+          } else {
+            await invoke(bridge, "memory.forget", {
+              workspacePath,
+              factId,
+              expectedVersion,
+              idempotencyKey: crypto.randomUUID(),
+            });
+            await loadMemory(bridge, workspacePath);
+          }
+          setMessage("记忆已永久删除，无法撤销。");
+        });
+      },
+      async resolveMemoryProposal(proposalId, expectedVersion, resolution) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !dataRef.current.trusted) return undefined;
+        let resolved:
+          | { readonly proposal: RuntimeMemoryProposal; readonly fact?: RuntimeMemoryFact }
+          | undefined;
+        await perform("memory-review", async (bridge) => {
+          if (preview) {
+            const proposal = dataRef.current.memory.proposals.find(
+              (item) => item.proposalId === proposalId,
+            );
+            if (!proposal || proposal.version !== expectedVersion) return;
+            const reviewedProposal: RuntimeMemoryProposal = {
+              ...proposal,
+              status: resolution,
+              version: proposal.version + 1,
+              reviewedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              ...(resolution === "accepted" ? { resolvedFactId: `fact-${proposalId}` } : {}),
+            };
+            const fact: RuntimeMemoryFact | undefined =
+              resolution === "accepted"
+                ? {
+                    factId: `fact-${proposalId}`,
+                    kind: proposal.kind,
+                    title: proposal.title,
+                    content: proposal.content,
+                    confidence: proposal.confidence,
+                    state: "active",
+                    pinned: false,
+                    ...(proposal.sourceId ? { sourceId: proposal.sourceId } : {}),
+                    version: 1,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                  }
+                : undefined;
+            resolved = { proposal: reviewedProposal, ...(fact ? { fact } : {}) };
+            setData((current) => ({
+              ...current,
+              memory: {
+                ...current.memory,
+                proposals: current.memory.proposals.filter(
+                  (item) => item.proposalId !== proposalId,
+                ),
+                facts: fact ? [fact, ...current.memory.facts] : current.memory.facts,
+              },
+            }));
+          } else {
+            const result = await invoke(bridge, "memory.review.resolve", {
+              workspacePath,
+              proposalId,
+              resolution,
+              expectedVersion,
+              idempotencyKey: crypto.randomUUID(),
+            });
+            resolved = result;
+            await loadMemory(bridge, workspacePath);
+          }
+          setMessage(
+            resolution === "accepted"
+              ? "建议已批准并写入工作区记忆。"
+              : "建议已拒绝；当前协议不支持撤销拒绝。",
+          );
+        });
+        return resolved;
+      },
+      async updateMemorySettings(expectedVersion, patch) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !dataRef.current.trusted) return undefined;
+        let updated: RuntimeMemorySettings | undefined;
+        await perform("memory-settings", async (bridge) => {
+          if (preview) {
+            const settings = dataRef.current.memory.settings;
+            if (!settings || settings.version !== expectedVersion) return;
+            updated = {
+              ...settings,
+              ...patch,
+              autoCommit: false,
+              version: settings.version + 1,
+              updatedAt: new Date().toISOString(),
+            };
+            setData((current) => ({
+              ...current,
+              memory: { ...current.memory, settings: updated },
+            }));
+          } else {
+            const result = await invoke(bridge, "memory.settings.update", {
+              workspacePath,
+              expectedVersion,
+              idempotencyKey: crypto.randomUUID(),
+              ...patch,
+            });
+            updated = result.settings;
+            await loadMemory(bridge, workspacePath);
+          }
+          setMessage("记忆设置已更新。");
+        });
+        return updated;
+      },
       async setLaunchAtLogin(enabled) {
         await perform("launch-at-login", async (bridge) => {
           const result = await bridge.platform.setLaunchAtLogin(enabled);
@@ -2467,7 +2795,7 @@ export function useRuntimeStore(): RuntimeStore {
         return output;
       },
     }),
-    [bootstrap, loadConversation, loadWorkspace, loadWorkspaceIndex, perform, preview],
+    [bootstrap, loadConversation, loadMemory, loadWorkspace, loadWorkspaceIndex, perform, preview],
   );
 
   return { preview, connection, data, busy, message, actions };

@@ -1,4 +1,9 @@
 import type { ConversationItemView } from "./conversation/types.js";
+import type {
+  RuntimeMemoryFact,
+  RuntimeMemoryProposal,
+  RuntimeMemorySettings,
+} from "@pico/protocol";
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
 
@@ -224,8 +229,36 @@ export interface AppData {
   readonly usage: UsageView;
   readonly configVersion: number;
   readonly launchAtLogin?: boolean | undefined;
+  readonly memory: MemoryView;
   readonly notices: Readonly<Record<string, string>>;
 }
+
+export interface MemoryView {
+  readonly workspacePath?: string | undefined;
+  readonly facts: readonly RuntimeMemoryFact[];
+  readonly proposals: readonly RuntimeMemoryProposal[];
+  readonly settings?: RuntimeMemorySettings | undefined;
+  readonly status: "idle" | "loading" | "ready" | "degraded" | "error";
+  readonly error?: string | undefined;
+}
+
+export type MemoryFactPatch = Readonly<{
+  kind?: RuntimeMemoryFact["kind"];
+  title?: string;
+  content?: string;
+  confidence?: number;
+  state?: Exclude<RuntimeMemoryFact["state"], "forgotten">;
+  pinned?: boolean;
+  expiresAt?: string | null;
+  lastUsedAt?: string | null;
+}>;
+
+export type MemorySettingsPatch = Readonly<{
+  enabled?: boolean;
+  autoPropose?: boolean;
+  autoCommit?: false;
+  injectionEnabled?: boolean;
+}>;
 
 export const emptyData: AppData = {
   workspaces: [],
@@ -254,5 +287,6 @@ export const emptyData: AppData = {
   catalogSkills: [],
   usage: {},
   configVersion: 0,
+  memory: { facts: [], proposals: [], status: "idle" },
   notices: {},
 };
