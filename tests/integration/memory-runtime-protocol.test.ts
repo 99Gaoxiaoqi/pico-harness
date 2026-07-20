@@ -1,0 +1,137 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  createRuntimeNotification,
+  DESKTOP_RUNTIME_METHODS,
+  isMemoryRuntimeNotification,
+  isRuntimeMethod,
+  parseDesktopRuntimeResult,
+  parseStrictRuntimeParams,
+  RUNTIME_ERROR_CODES,
+  RUNTIME_METHODS,
+  RuntimeProtocolError,
+  type RuntimeMemoryFact,
+} from "../../packages/protocol/src/index.js";
+
+const memoryMethods = [
+  "memory.list",
+  "memory.get",
+  "memory.update",
+  "memory.forget",
+  "memory.review.list",
+  "memory.review.resolve",
+  "memory.settings.get",
+  "memory.settings.update",
+  "memory.context.preview",
+] as const;
+
+test("workspace memory methods are explicit Desktop capabilities with strict write contracts", () => {
+  for (const method of memoryMethods) {
+    assert.equal(RUNTIME_METHODS.includes(method), true);
+    assert.equal(DESKTOP_RUNTIME_METHODS.includes(method), true);
+    assert.equal(isRuntimeMethod(method), true);
+  }
+  assert.equal(isRuntimeMethod("memory.create"), false);
+
+  assert.deepEqual(
+    parseStrictRuntimeParams("memory.update", {
+      workspacePath: "/workspace",
+      factId: "fact-1",
+      expectedVersion: 1,
+      idempotencyKey: "request-1",
+      content: "new body",
+    }),
+    {
+      workspacePath: "/workspace",
+      factId: "fact-1",
+      expectedVersion: 1,
+      idempotencyKey: "request-1",
+      content: "new body",
+    },
+  );
+  assertProtocolError(
+    () =>
+      parseStrictRuntimeParams("memory.update", {
+        workspacePath: "/workspace",
+        factId: "fact-1",
+        expectedVersion: 1,
+        content: "missing idempotency key",
+      }),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
+  assertProtocolError(
+    () =>
+      parseStrictRuntimeParams("memory.settings.update", {
+        workspacePath: "/workspace",
+        expectedVersion: 1,
+        idempotencyKey: "request-2",
+        databasePath: "/private/memory.sqlite",
+      }),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
+});
+
+test("memory results reject undeclared storage fields", () => {
+  const fact = runtimeFact();
+  assert.deepEqual(parseDesktopRuntimeResult("memory.get", { fact }), { fact });
+  assertProtocolError(
+    () =>
+      parseDesktopRuntimeResult("memory.get", {
+        fact: { ...fact, databasePath: "/private/memory.sqlite" },
+      }),
+    RUNTIME_ERROR_CODES.INVALID_REQUEST,
+  );
+});
+
+test("durable memory notifications accept metadata and reject bodies or evidence", () => {
+  const valid = createRuntimeNotification({
+    topic: "memory.changed",
+    scope: { workspacePath: "/workspace" },
+    resourceVersion: 2,
+    at: 1,
+    payload: {
+      entityType: "fact",
+      entityId: "fact-1",
+      version: 2,
+      change: "updated",
+    },
+  });
+  assert.equal(isMemoryRuntimeNotification(valid), true);
+  assert.equal(
+    isMemoryRuntimeNotification({
+      ...valid,
+      payload: { ...valid.payload, content: "must not enter durable events" },
+    }),
+    false,
+  );
+  assert.equal(
+    isMemoryRuntimeNotification({
+      ...valid,
+      payload: { ...valid.payload, evidence: { quote: "raw transcript" } },
+    }),
+    false,
+  );
+});
+
+function runtimeFact(): RuntimeMemoryFact {
+  return {
+    factId: "fact-1",
+    kind: "project_fact",
+    title: "Build",
+    content: "Use npm run build",
+    confidence: 0.9,
+    state: "active",
+    pinned: false,
+    version: 1,
+    createdAt: "2026-07-20T00:00:00.000Z",
+    updatedAt: "2026-07-20T00:00:00.000Z",
+  };
+}
+
+function assertProtocolError(operation: () => unknown, code: string): void {
+  assert.throws(operation, (error: unknown) => {
+    assert.ok(error instanceof RuntimeProtocolError);
+    assert.equal(error.code, code);
+    return true;
+  });
+}
