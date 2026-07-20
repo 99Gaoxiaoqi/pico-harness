@@ -189,6 +189,8 @@ export interface UpdateJobInput extends IdempotentWriteOptions {
 
 export interface JobListOptions {
   readonly statuses?: readonly MemoryJobStatus[];
+  readonly type?: string;
+  readonly extractorVersion?: string;
   readonly limit?: number;
 }
 
@@ -1123,6 +1125,14 @@ export class MemoryRepository {
     const clauses = ["workspace_id = ?"];
     const params: Array<string | number> = [this.workspaceId];
     appendInFilter(clauses, params, "status", statuses);
+    if (options.type !== undefined) {
+      clauses.push("type = ?");
+      params.push(requireNonEmpty(options.type, "type", 128));
+    }
+    if (options.extractorVersion !== undefined) {
+      clauses.push("extractor_version = ?");
+      params.push(requireNonEmpty(options.extractorVersion, "extractorVersion", 128));
+    }
     params.push(normalizeLimit(options.limit));
     const rows = this.db
       .prepare(
