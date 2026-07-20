@@ -179,12 +179,75 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
       },
     }).execute();
     assert.equal(result.finalMessage, "streamed answer");
+    await waitForImmediate();
     assert.equal(enqueued, 1);
     const events = await session.runtimeEventStore!.readSession(session.id);
     assert.equal(
       events.some((event) => event.kind === "run.terminal" && event.data.status === "completed"),
       true,
     );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory scheduler starts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-enqueue-blocked-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-memory-enqueue-blocked", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  let schedulerStarted = false;
+  let markSchedulerStarted = (): void => undefined;
+  const started = new Promise<void>((resolve) => {
+    markSchedulerStarted = resolve;
+  });
+  const blocked = new Promise<void>(() => undefined);
+  try {
+    await session.recover();
+    const runtimeState = {
+      dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+    } as unknown as SessionRuntime;
+    const engine = {
+      run: async (target: Session) => {
+        await target.commitMessages({ role: "assistant", content: "fast foreground" });
+        return target.getHistory();
+      },
+    } as unknown as AgentEngine;
+
+    const result = await new RuntimeRunExecutor({
+      session,
+      runtimeState,
+      engine,
+      sessionSelection: { mode: "new", sessionId: session.id },
+      workDir,
+      picoHome,
+      prompt: "hello",
+      resumeExistingSession: false,
+      traceEnabled: false,
+      options: {},
+      memoryReviewScheduler: {
+        enqueue() {
+          schedulerStarted = true;
+          Atomics.wait(
+            new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)),
+            0,
+            0,
+            50,
+          );
+          markSchedulerStarted();
+          return blocked;
+        },
+      },
+    }).execute();
+
+    assert.equal(result.finalMessage, "fast foreground");
+    assert.equal(schedulerStarted, false, "detached observer must not run on the response path");
+    await started;
+    assert.equal(schedulerStarted, true);
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
@@ -282,3 +345,7 @@ test("failed, cancelled and resumed Runtime executions never enqueue Memory revi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+function waitForImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}

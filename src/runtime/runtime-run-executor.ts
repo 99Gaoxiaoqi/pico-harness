@@ -165,12 +165,16 @@ export class RuntimeRunExecutor {
               event.data.recovered !== true,
           );
           if (terminal?.kind === "run.terminal") {
-            await memoryReviewScheduler.enqueue({
-              sessionId: session.id,
-              runId: runtimeRun.runId,
-              terminalEventId: terminal.eventId,
-              userMessageEventId,
-            });
+            scheduleMemoryReviewEnqueue(
+              memoryReviewScheduler,
+              {
+                sessionId: session.id,
+                runId: runtimeRun.runId,
+                terminalEventId: terminal.eventId,
+                userMessageEventId,
+              },
+              { sessionId: session.id, runId: runtimeRun.runId },
+            );
           }
         } catch (error) {
           // The completed terminal fact is canonical. Memory scheduling is degraded-only.
@@ -195,6 +199,38 @@ export class RuntimeRunExecutor {
     });
     return result;
   }
+}
+
+function scheduleMemoryReviewEnqueue(
+  scheduler: MemoryReviewSchedulerPort,
+  input: Parameters<MemoryReviewSchedulerPort["enqueue"]>[0],
+  context: { readonly sessionId: string; readonly runId: string },
+): void {
+  // The terminal fact is already durable. Schedule the observer in a new host task so neither a
+  // slow Promise nor synchronous SQLite busy time can extend the foreground response path.
+  setImmediate(() => {
+    try {
+      const pending = scheduler.enqueue(input);
+      if (pending) {
+        void pending.catch((error: unknown) => logMemoryEnqueueFailure(context, error));
+      }
+    } catch (error) {
+      logMemoryEnqueueFailure(context, error);
+    }
+  });
+}
+
+function logMemoryEnqueueFailure(
+  context: { readonly sessionId: string; readonly runId: string },
+  error: unknown,
+): void {
+  logger.warn(
+    {
+      ...context,
+      error: error instanceof Error ? error.message : String(error),
+    },
+    "[Memory] post-terminal enqueue failed",
+  );
 }
 
 export function emitRuntimeLifecycleEvent(

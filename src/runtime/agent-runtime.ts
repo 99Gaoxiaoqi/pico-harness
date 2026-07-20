@@ -153,6 +153,7 @@ import {
   MemoryReviewWorker,
   ProviderMemoryProposalModel,
   type MemoryProposalModelFactory,
+  type MemoryProposalPublishedSink,
 } from "../memory/worker.js";
 export type {
   RunAgentCliOptions,
@@ -175,6 +176,8 @@ export interface RuntimeHost {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   onEvent?: (event: RuntimeLifecycleEvent) => void;
+  /** Metadata-only observer for newly committed pending memory proposals. */
+  memoryProposalSink?: MemoryProposalPublishedSink;
 }
 
 export interface RunAgentCliDependencies extends RuntimeHost {
@@ -351,12 +354,20 @@ export async function executeAgentRuntime(
           memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
           const memorySettings = memoryRepository.getSettings();
           if (memorySettings.enabled && memorySettings.autoPropose && !resumeExistingSession) {
-            const scheduler = new MemoryReviewScheduler(memoryRepository);
             memoryReviewScheduler = {
-              enqueue: async (input) => {
-                const canonical = await memoryTrustStore.canonicalize(workDir);
-                if (!(await memoryTrustStore.isTrusted(canonical))) return;
-                scheduler.enqueue(input);
+              enqueue: (input) => {
+                // This callback runs in RuntimeRunExecutor's detached host task, after the
+                // foreground result is available. Own the connection so AgentRuntime cleanup
+                // cannot close it before the durable enqueue begins.
+                const schedulerRepository = new MemoryRepository({
+                  databasePath: memoryPaths.workspace.memoryDatabase,
+                  workspaceId: memoryPaths.workspace.id,
+                });
+                try {
+                  new MemoryReviewScheduler(schedulerRepository).enqueue(input);
+                } finally {
+                  schedulerRepository.close();
+                }
                 kickMemoryWorker();
               },
             };
@@ -627,9 +638,10 @@ export async function executeAgentRuntime(
       (dependencies.provider === undefined
         ? async () => {
             const ledger = new RuntimeStore({ workDir, picoHome });
+            const billingRoute = billingRouteForProvider(kind, currentConfig);
             const provider = new CostTracker(
               providerFactory(kind, currentConfig),
-              billingRouteForProvider(kind, currentConfig),
+              billingRoute,
               undefined,
               {
                 ledger,
@@ -637,7 +649,7 @@ export async function executeAgentRuntime(
               },
             );
             return {
-              model: new ProviderMemoryProposalModel(provider),
+              model: new ProviderMemoryProposalModel(provider, billingRoute),
               dispose: () => ledger.close(),
             };
           }
@@ -655,6 +667,9 @@ export async function executeAgentRuntime(
               runtimeDatabasePath: memoryPaths.workspace.runtimeDatabase,
               trustStore: memoryTrustStore,
               modelFactory: memoryModelFactory,
+              ...(dependencies.memoryProposalSink
+                ? { proposalSink: dependencies.memoryProposalSink }
+                : {}),
             }),
         );
       // Recover durable jobs left by an earlier process before the next foreground completion.
