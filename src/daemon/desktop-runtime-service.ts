@@ -50,6 +50,7 @@ import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
 import { renderSkillActivation } from "../input/skill-activation.js";
 import { initializeProjectEntrypoints } from "../input/project-initializer.js";
 import { CostTracker } from "../observability/tracker.js";
+import { logger } from "../observability/logger.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import {
@@ -316,6 +317,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         picoHome: this.picoHome,
         publish: (workspacePath, topic, payload) =>
           this.publishMemoryNotification(workspacePath, topic, payload),
+        onDegraded: ({ code, workspaceId, operationId, error }) =>
+          logger.warn(
+            { code, workspaceId, operationId, error },
+            "Workspace memory maintenance deferred",
+          ),
       });
     this.ownsMemoryService = options.ownsMemoryService ?? options.memoryService === undefined;
     this.providerRecoveryReady = this.recoverProviderOperation().catch((error: unknown) => {
@@ -789,17 +795,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
-    const managed = globalSessionManager.delete(sessionId, canonical, { picoHome: this.picoHome });
-    await managed?.close();
-    await Promise.all([
-      removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
-      this.sessionStateStore.remove(canonical, sessionId),
-      this.conversationStateStore.clearQueued(canonical, sessionId),
-    ]);
-    this.memoryService.invalidateSessionSources(canonical, sessionId, {
-      availability: "unavailable",
-      code: "session_deleted",
-    });
+    const preparedMemory = this.memoryService.prepareSessionSourceInvalidation(
+      canonical,
+      sessionId,
+      { availability: "unavailable", code: "session_deleted" },
+    );
+    try {
+      const managed = globalSessionManager.delete(sessionId, canonical, {
+        picoHome: this.picoHome,
+      });
+      await managed?.close();
+      await Promise.all([
+        removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
+        this.sessionStateStore.remove(canonical, sessionId),
+        this.conversationStateStore.clearQueued(canonical, sessionId),
+      ]);
+    } catch (error) {
+      // Once destructive work starts, a rejection may represent partial durable success.
+      // Fail closed for privacy and converge source/proposal state through the prepared job.
+      this.memoryService.commitSessionSourceInvalidation(preparedMemory);
+      throw error;
+    }
+    this.memoryService.commitSessionSourceInvalidation(preparedMemory);
     return { sessionId, deleted: true };
   }
 
@@ -2787,15 +2804,29 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             "该检查点缺少可验证的会话序列边界，拒绝同步回退记忆来源",
           );
         }
-        await applyDesktopRewind(session, params.checkpointId, params.expectedFingerprint);
         return checkpoint.beforeSessionSeq;
       },
     );
-    this.memoryService.invalidateSessionSources(canonical, params.sessionId, {
-      availability: "rewound",
-      code: `rewind_${params.checkpointId}`,
-      afterSequence: rewindBoundarySequence,
-    });
+    const preparedMemory = this.memoryService.prepareSessionSourceInvalidation(
+      canonical,
+      params.sessionId,
+      {
+        availability: "rewound",
+        code: `rewind_${params.checkpointId}`,
+        afterSequence: rewindBoundarySequence,
+      },
+    );
+    try {
+      await this.withSession(canonical, params.sessionId, (session) =>
+        applyDesktopRewind(session, params.checkpointId, params.expectedFingerprint),
+      );
+    } catch (error) {
+      // Rewind spans workspace and Runtime stores; after execution starts, an error can be partial.
+      // The privacy-first lifecycle job never deletes approved Facts.
+      this.memoryService.commitSessionSourceInvalidation(preparedMemory);
+      throw error;
+    }
+    this.memoryService.commitSessionSourceInvalidation(preparedMemory);
     this.publish(
       createRuntimeNotification({
         topic: "rewind.completed",

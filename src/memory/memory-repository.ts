@@ -34,6 +34,14 @@ const MAX_CONTENT_LENGTH = 32_000;
 const MAX_REASON_LENGTH = 4_000;
 const MAX_LIST_LIMIT = 500;
 
+export const MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE = "notification.memory.forgotten" as const;
+export const MEMORY_FORGOTTEN_NOTIFICATION_VERSION = "memory-forgotten-notification-v1" as const;
+export const MEMORY_SOURCE_NOTIFICATION_JOB_TYPE = "notification.memory.source-changed" as const;
+export const MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION =
+  "memory-source-notification-v1:unavailable" as const;
+export const MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION =
+  "memory-source-notification-v1:rewound" as const;
+
 type RejectAsyncTransactionArguments<Result> = [Result] extends [never]
   ? []
   : Result extends PromiseLike<unknown>
@@ -150,6 +158,13 @@ export interface ResolveProposalInput extends IdempotentWriteOptions {
   readonly expectedVersion: number;
   readonly resolution: "accepted" | "rejected";
   readonly factId?: string;
+  readonly patch?: {
+    readonly kind?: MemoryKind;
+    readonly title?: string;
+    readonly content?: string;
+    readonly reason?: string;
+    readonly confidence?: number;
+  };
 }
 
 export interface ResolveProposalResult {
@@ -159,6 +174,13 @@ export interface ResolveProposalResult {
 
 export interface ProposalListOptions {
   readonly statuses?: readonly ProposalStatus[];
+  readonly limit?: number;
+}
+
+export interface SessionSourceListOptions {
+  readonly availability?: SourceAvailability;
+  readonly afterSequence?: number;
+  readonly afterSourceId?: string;
   readonly limit?: number;
 }
 
@@ -558,6 +580,32 @@ export class MemoryRepository {
     return rows.map((row) => mapSource(row, this.workspaceId));
   }
 
+  /** Bounded, SQL-filtered lifecycle scan; callers advance with the last sourceId. */
+  listSessionSources(sessionId: string, options: SessionSourceListOptions = {}): Source[] {
+    const clauses = ["workspace_id = ?", "session_id = ?"];
+    const params: Array<string | number> = [this.workspaceId, normalizeId(sessionId, "sessionId")];
+    if (options.availability !== undefined) {
+      clauses.push("availability = ?");
+      params.push(requireEnum(options.availability, SOURCE_AVAILABILITIES, "availability"));
+    }
+    if (options.afterSequence !== undefined) {
+      clauses.push("COALESCE(end_sequence, start_sequence, 0) > ?");
+      params.push(normalizeNonNegativeInteger(options.afterSequence, "afterSequence"));
+    }
+    if (options.afterSourceId !== undefined) {
+      clauses.push("source_id > ?");
+      params.push(normalizeId(options.afterSourceId, "afterSourceId"));
+    }
+    params.push(normalizeLimit(options.limit));
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_sources WHERE ${clauses.join(" AND ")}
+         ORDER BY source_id ASC LIMIT ?`,
+      )
+      .all(...params) as SourceRow[];
+    return rows.map((row) => mapSource(row, this.workspaceId));
+  }
+
   updateSourceAvailability(input: UpdateSourceAvailabilityInput): Source {
     requireExpectedVersion(input.expectedVersion);
     requireEnum(input.availability, SOURCE_AVAILABILITIES, "availability");
@@ -600,6 +648,9 @@ export class MemoryRepository {
           input.idempotencyKey,
           updatedAt,
         );
+        if (result.availability !== "available") {
+          this.enqueueSourceChangedNotification(result, input.idempotencyKey, updatedAt);
+        }
         return { value: result, marker: { sourceId: current.sourceId } };
       },
       (marker) => this.requireSource(readMarkerId(marker, "sourceId")),
@@ -792,6 +843,7 @@ export class MemoryRepository {
           input.idempotencyKey,
           at,
         );
+        this.enqueueForgottenNotification(forgotten, input.idempotencyKey, at);
         this.markSecureDeletePending(at);
         return { value: forgotten, marker: { factId } };
       },
@@ -873,6 +925,23 @@ export class MemoryRepository {
          ORDER BY created_at DESC, proposal_id DESC LIMIT ?`,
       )
       .all(...params) as ProposalRow[];
+    return rows.map((row) => mapProposal(row, this.workspaceId));
+  }
+
+  listPendingProposalsForSources(sourceIds: readonly string[]): Proposal[] {
+    if (sourceIds.length === 0) return [];
+    if (sourceIds.length > MAX_LIST_LIMIT) {
+      throw new Error(`sourceIds cannot exceed ${MAX_LIST_LIMIT}`);
+    }
+    const normalized = sourceIds.map((sourceId) => normalizeId(sourceId, "sourceId"));
+    const placeholders = normalized.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_proposals
+         WHERE workspace_id = ? AND status = 'pending' AND source_id IN (${placeholders})
+         ORDER BY proposal_id ASC`,
+      )
+      .all(this.workspaceId, ...normalized) as ProposalRow[];
     return rows.map((row) => mapProposal(row, this.workspaceId));
   }
 
@@ -996,10 +1065,14 @@ export class MemoryRepository {
     if (input.resolution !== "accepted" && input.resolution !== "rejected") {
       throw new Error("Proposal resolution must be accepted or rejected");
     }
+    if (input.resolution === "rejected" && input.patch !== undefined) {
+      throw new Error("Proposal patch is only valid for accepted resolutions");
+    }
+    const patch = normalizeResolveProposalPatch(input.patch);
     return this.idempotentWrite(
       "proposal.resolve",
       input.idempotencyKey,
-      input,
+      { ...input, proposalId, ...(patch ? { patch } : {}) },
       () => {
         const current = this.requireProposal(proposalId);
         if (current.status !== "pending") {
@@ -1007,15 +1080,21 @@ export class MemoryRepository {
         }
         assertVersion("proposal", proposalId, current.version, input.expectedVersion);
         const at = this.timestamp();
+        const finalKind = patch?.kind ?? current.kind;
+        const finalTitle = patch?.title ?? requireStoredText(current.title, "proposal title");
+        const finalContent =
+          patch?.content ?? requireStoredText(current.content, "proposal content");
+        const finalReason = patch?.reason ?? requireStoredText(current.reason, "proposal reason");
+        const finalConfidence = patch?.confidence ?? current.confidence;
         let fact: Fact | undefined;
         if (input.resolution === "accepted") {
           const factId = normalizeId(input.factId ?? `fact:${randomUUID()}`, "factId");
           this.insertFact({
             factId,
-            kind: current.kind,
-            title: requireStoredText(current.title, "proposal title"),
-            content: requireStoredText(current.content, "proposal content"),
-            confidence: current.confidence,
+            kind: finalKind,
+            title: finalTitle,
+            content: finalContent,
+            confidence: finalConfidence,
             sourceId: current.sourceId,
             state: "active",
             pinned: false,
@@ -1035,11 +1114,17 @@ export class MemoryRepository {
         const changed = this.db
           .prepare(
             `UPDATE memory_proposals
-             SET status = ?, resolved_fact_id = ?, version = version + 1,
+             SET kind = ?, title = ?, content = ?, reason = ?, confidence = ?,
+                 status = ?, resolved_fact_id = ?, version = version + 1,
                  updated_at = ?, reviewed_at = ?
              WHERE workspace_id = ? AND proposal_id = ? AND version = ? AND status = 'pending'`,
           )
           .run(
+            finalKind,
+            finalTitle,
+            finalContent,
+            finalReason,
+            finalConfidence,
             input.resolution,
             fact?.factId ?? null,
             at,
@@ -1289,6 +1374,72 @@ export class MemoryRepository {
         input.at,
         input.at,
       );
+  }
+
+  private enqueueForgottenNotification(
+    fact: Fact,
+    idempotencyKey: string | undefined,
+    at: string,
+  ): void {
+    const identity = hashOpaqueKey(`${fact.factId}\0${fact.version}`);
+    const jobId = `notification:forgotten:${identity}`;
+    const inserted = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO memory_jobs(
+           job_id, workspace_id, type, status, terminal_event_id, extractor_version,
+           cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
+           input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
+         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, 0, 1, NULL, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
+      )
+      .run(
+        jobId,
+        this.workspaceId,
+        MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE,
+        identity,
+        MEMORY_FORGOTTEN_NOTIFICATION_VERSION,
+        JSON.stringify({ sessionId: "memory-service", eventId: fact.factId }),
+        at,
+        at,
+      );
+    if (inserted.changes === 1) {
+      this.recordMutation("job", jobId, "job.created", undefined, 1, idempotencyKey, at);
+    }
+  }
+
+  private enqueueSourceChangedNotification(
+    source: Source,
+    idempotencyKey: string | undefined,
+    at: string,
+  ): void {
+    const identity = hashOpaqueKey(`${source.sourceId}\0${source.version}\0${source.availability}`);
+    const jobId = `notification:source:${identity}`;
+    const inserted = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO memory_jobs(
+           job_id, workspace_id, type, status, terminal_event_id, extractor_version,
+           cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
+           input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
+         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, 0, 1, NULL, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
+      )
+      .run(
+        jobId,
+        this.workspaceId,
+        MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
+        identity,
+        source.availability === "rewound"
+          ? MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
+          : MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
+        JSON.stringify({
+          sessionId: "memory-service",
+          eventId: source.sourceId,
+          sequence: source.version,
+        }),
+        at,
+        at,
+      );
+    if (inserted.changes === 1) {
+      this.recordMutation("job", jobId, "job.created", undefined, 1, idempotencyKey, at);
+    }
   }
 
   private requireSource(sourceId: string): Source {
@@ -1598,6 +1749,30 @@ function normalizeCreateProposalInput(input: CreateProposalInput) {
       conflictStatus,
       conflictFactId,
     },
+  };
+}
+
+function normalizeResolveProposalPatch(
+  patch: ResolveProposalInput["patch"],
+): ResolveProposalInput["patch"] {
+  if (patch === undefined) return undefined;
+  if (!hasDefinedPatch(patch, ["kind", "title", "content", "reason", "confidence"] as const)) {
+    throw new Error("Proposal resolution patch must include at least one field");
+  }
+  return {
+    ...(patch.kind !== undefined ? { kind: requireEnum(patch.kind, MEMORY_KINDS, "kind") } : {}),
+    ...(patch.title !== undefined
+      ? { title: requireText(patch.title, "title", MAX_TITLE_LENGTH) }
+      : {}),
+    ...(patch.content !== undefined
+      ? { content: requireText(patch.content, "content", MAX_CONTENT_LENGTH) }
+      : {}),
+    ...(patch.reason !== undefined
+      ? { reason: requireText(patch.reason, "reason", MAX_REASON_LENGTH) }
+      : {}),
+    ...(patch.confidence !== undefined
+      ? { confidence: normalizeConfidence(patch.confidence) }
+      : {}),
   };
 }
 
