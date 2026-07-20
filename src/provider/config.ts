@@ -1,5 +1,5 @@
 // Provider 共享配置:从环境变量读取 BaseURL / API Key / 模型名。
-// Node 22 通过 `node --env-file=.env` 或 `tsx --env-file=.env` 加载 .env。
+// 受支持的 Node 运行时通过 `node --env-file=.env` 或 `tsx --env-file=.env` 加载 .env。
 
 import type { ReasoningLevel } from "./reasoning-capability.js";
 import type { RateLimitInfo } from "./ratelimit.js";

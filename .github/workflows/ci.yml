@@ -85,6 +85,47 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
+  node-compatibility:
+    name: Node.js ${{ matrix.node }} compatibility
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: "npm"
+
+      - name: Install dependencies for this Node ABI
+        run: npm ci
+
+      - name: Verify native SQLite capabilities
+        run: npm run check:storage
+
+      - name: Typecheck runtime, Desktop, and Mobile packages
+        run: |
+          npm run typecheck
+          npm run desktop:typecheck
+          npm run typecheck --workspace @pico/mobile
+
+      - name: Run deterministic integration suite
+        run: npm run test:integration
+
+      - name: Build distributable and Mobile bundle
+        run: |
+          npm run build
+          npm exec --workspace @pico/mobile expo export -- \
+            --platform android \
+            --output-dir /tmp/pico-mobile-node-${{ matrix.node }}
+
   windows-security:
     name: Windows security integration
     runs-on: windows-latest
