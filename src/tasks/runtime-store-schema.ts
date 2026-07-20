@@ -32,15 +32,11 @@ export function migrateRuntimeStoreSchema(db: Database.Database, now: () => numb
         `runtime.sqlite schema ${current} 新于当前支持版本 ${RUNTIME_SCHEMA_VERSION}`,
       );
     }
+    if (current === 6) {
+      assertMigrationName(db, 6, "daemon_run_projection_and_idempotency");
+    }
     if (current === RUNTIME_SCHEMA_VERSION) {
-      const migration = db
-        .prepare("SELECT name FROM schema_migrations WHERE version = ?")
-        .get(RUNTIME_SCHEMA_VERSION) as { name: string } | undefined;
-      if (migration?.name !== RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME) {
-        throw new Error(
-          `runtime.sqlite schema ${RUNTIME_SCHEMA_VERSION} migration ${migration?.name ?? "缺失"} 不受支持`,
-        );
-      }
+      assertMigrationName(db, RUNTIME_SCHEMA_VERSION, RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME);
     }
     applyMigration(db, now, current, 1, "runtime_control_plane", SCHEMA_V1);
     applyMigration(db, now, current, 2, "merge_not_needed_status", SCHEMA_V2);
@@ -53,6 +49,17 @@ export function migrateRuntimeStoreSchema(db: Database.Database, now: () => numb
     ensureCronJobModelRouteColumn(db);
   });
   migrate();
+}
+
+function assertMigrationName(db: Database.Database, version: number, expectedName: string): void {
+  const migration = db
+    .prepare("SELECT name FROM schema_migrations WHERE version = ?")
+    .get(version) as { name: string } | undefined;
+  if (migration?.name !== expectedName) {
+    throw new Error(
+      `runtime.sqlite schema ${version} migration ${migration?.name ?? "缺失"} 不受支持`,
+    );
+  }
 }
 
 function applyMigration(

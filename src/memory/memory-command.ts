@@ -118,7 +118,7 @@ function setEnabled(repository: MemoryRepository, enabled: boolean) {
   if (current.enabled === enabled && current.injectionEnabled === enabled) {
     return message(`Memory is already ${enabled ? "on" : "off"}.`);
   }
-  repository.updateSettings({
+  const updated = repository.updateSettings({
     expectedVersion: current.version,
     enabled,
     injectionEnabled: enabled,
@@ -126,7 +126,9 @@ function setEnabled(repository: MemoryRepository, enabled: boolean) {
   });
   return message(
     enabled
-      ? "Memory enabled; controlled recall and post-run proposal review are active."
+      ? updated.autoPropose
+        ? "Memory enabled; controlled recall and post-run proposal review are active."
+        : "Memory enabled; controlled recall is active, while post-run proposal review remains off."
       : "Memory disabled; recall injection and post-run proposal extraction are off.",
   );
 }
