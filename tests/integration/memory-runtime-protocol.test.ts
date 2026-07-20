@@ -59,6 +59,56 @@ test("workspace memory methods are explicit Desktop capabilities with strict wri
       }),
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
   );
+  assert.deepEqual(
+    parseStrictRuntimeParams("memory.review.resolve", {
+      workspacePath: "/workspace",
+      proposalId: "proposal-1",
+      resolution: "accepted",
+      expectedVersion: 1,
+      idempotencyKey: "review-1",
+      patch: {
+        kind: "project_fact",
+        title: "Edited title",
+        content: "Edited content",
+        confidence: 0.95,
+      },
+    }),
+    {
+      workspacePath: "/workspace",
+      proposalId: "proposal-1",
+      resolution: "accepted",
+      expectedVersion: 1,
+      idempotencyKey: "review-1",
+      patch: {
+        kind: "project_fact",
+        title: "Edited title",
+        content: "Edited content",
+        confidence: 0.95,
+      },
+    },
+  );
+  assertProtocolError(
+    () =>
+      parseStrictRuntimeParams("memory.review.resolve", {
+        workspacePath: "/workspace",
+        proposalId: "proposal-1",
+        resolution: "rejected",
+        expectedVersion: 1,
+        idempotencyKey: "review-rejected-patch",
+        patch: { content: "must not apply" },
+      }),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
+  assertProtocolError(
+    () =>
+      parseStrictRuntimeParams("memory.settings.update", {
+        workspacePath: "/workspace",
+        expectedVersion: 1,
+        idempotencyKey: "auto-commit-true",
+        autoCommit: true,
+      }),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
   assertProtocolError(
     () =>
       parseStrictRuntimeParams("memory.settings.update", {

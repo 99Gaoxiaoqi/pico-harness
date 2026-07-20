@@ -260,6 +260,14 @@ export type MemorySettingsPatch = Readonly<{
   injectionEnabled?: boolean;
 }>;
 
+export type MemoryProposalPatch = Readonly<{
+  kind?: RuntimeMemoryProposal["kind"];
+  title?: string;
+  content?: string;
+  reason?: string;
+  confidence?: number;
+}>;
+
 export const emptyData: AppData = {
   workspaces: [],
   workspaceCapabilities: folderWorkspaceCapabilities,

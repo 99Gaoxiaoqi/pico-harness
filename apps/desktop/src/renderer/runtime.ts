@@ -24,6 +24,7 @@ import {
   type JsonRecord,
   type ModelRouteView,
   type MemoryFactPatch,
+  type MemoryProposalPatch,
   type MemorySettingsPatch,
   type ProviderConfigView,
   type ProviderCredentialSource,
@@ -976,6 +977,7 @@ export interface RuntimeActions {
     proposalId: string,
     expectedVersion: number,
     resolution: "accepted" | "rejected",
+    patch?: MemoryProposalPatch,
   ): Promise<
     | {
         readonly proposal: RuntimeMemoryProposal;
@@ -2646,7 +2648,7 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage("记忆已永久删除，无法撤销。");
         });
       },
-      async resolveMemoryProposal(proposalId, expectedVersion, resolution) {
+      async resolveMemoryProposal(proposalId, expectedVersion, resolution, patch) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !dataRef.current.trusted) return undefined;
         let resolved:
@@ -2660,6 +2662,7 @@ export function useRuntimeStore(): RuntimeStore {
             if (!proposal || proposal.version !== expectedVersion) return;
             const reviewedProposal: RuntimeMemoryProposal = {
               ...proposal,
+              ...patch,
               status: resolution,
               version: proposal.version + 1,
               reviewedAt: new Date().toISOString(),
@@ -2670,10 +2673,10 @@ export function useRuntimeStore(): RuntimeStore {
               resolution === "accepted"
                 ? {
                     factId: `fact-${proposalId}`,
-                    kind: proposal.kind,
-                    title: proposal.title,
-                    content: proposal.content,
-                    confidence: proposal.confidence,
+                    kind: patch?.kind ?? proposal.kind,
+                    title: patch?.title ?? proposal.title,
+                    content: patch?.content ?? proposal.content,
+                    confidence: patch?.confidence ?? proposal.confidence,
                     state: "active",
                     pinned: false,
                     ...(proposal.sourceId ? { sourceId: proposal.sourceId } : {}),
@@ -2700,6 +2703,7 @@ export function useRuntimeStore(): RuntimeStore {
               resolution,
               expectedVersion,
               idempotencyKey: crypto.randomUUID(),
+              ...(patch ? { patch } : {}),
             });
             resolved = result;
             await loadMemory(bridge, workspacePath);
