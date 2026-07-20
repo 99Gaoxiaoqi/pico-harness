@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
+import type { MemoryProposalPublishedNotice } from "../memory/worker.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoConfig } from "../input/pico-config.js";
@@ -287,6 +288,13 @@ export function createProductionLocalDaemonHost(
               pluginCapabilityRegistry,
               picoHome,
               env,
+              memoryProposalSink: (notice) =>
+                publishDesktopMemoryProposal(
+                  service,
+                  workspacePath,
+                  notice,
+                  nextDesktopResourceVersion,
+                ),
             },
           );
           return {
@@ -727,6 +735,29 @@ async function existingMcpConfig(
 ): Promise<{ readonly mcpConfigPath?: string }> {
   const resolution = await resolveProjectMcpConfigPath(workspacePath);
   return resolution.exists ? { mcpConfigPath: resolution.path } : {};
+}
+
+/** Production adapter from the worker's metadata-only sink to the durable Runtime channel. */
+export function publishDesktopMemoryProposal(
+  service: Pick<WorkspaceRuntimeService, "publishDesktopNotification">,
+  workspacePath: string,
+  notice: MemoryProposalPublishedNotice,
+  nextResourceVersion: () => number,
+  now: () => number = Date.now,
+): void {
+  service.publishDesktopNotification(
+    createRuntimeNotification({
+      topic: "memory.proposed",
+      scope: { workspacePath },
+      resourceVersion: nextResourceVersion(),
+      at: now(),
+      payload: {
+        proposalId: notice.proposalId,
+        version: notice.version,
+        kind: notice.kind,
+      },
+    }),
+  );
 }
 
 export function publishDesktopReporterEvent(
