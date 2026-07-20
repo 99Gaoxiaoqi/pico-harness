@@ -167,6 +167,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           "workspace-diagnostics-v1",
           "runtime-events-v1",
           "desktop-live-reasoning-v1",
+          "workspace-memory-v1",
         ],
       };
     }

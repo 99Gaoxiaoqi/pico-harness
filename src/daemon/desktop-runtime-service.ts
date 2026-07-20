@@ -106,7 +106,9 @@ import {
   type JsonValue,
   type JsonObject,
   type RuntimeNotification,
+  type RuntimeNotificationMap,
   type RuntimeNotificationPage,
+  type RuntimeNotificationTopic,
   type RuntimeRequest,
   type RuntimeProviderInput,
   type RuntimeUserInput,
@@ -163,6 +165,8 @@ import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-a
 import { mcpToolNameMayBelongToServer } from "../mcp/types.js";
 import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
+import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
+import { DesktopMemoryService } from "./desktop-memory-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -195,6 +199,8 @@ export interface DesktopRuntimeServiceOptions {
   readonly pluginRuntimeSnapshotRegistry?: PluginRuntimeSnapshotRegistry;
   /** Whether this service releases the injected registry after runtime shutdown. */
   readonly ownsPluginRuntimeSnapshotRegistry?: boolean;
+  readonly memoryService?: DesktopMemoryService;
+  readonly ownsMemoryService?: boolean;
 }
 
 export interface DesktopRuntimeInteractions {
@@ -242,6 +248,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly now: () => number;
   private readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
   private readonly ownsPluginRuntimeSnapshotRegistry: boolean;
+  private readonly memoryService: DesktopMemoryService;
+  private readonly ownsMemoryService: boolean;
   private readonly requestRouter: DesktopRequestRouter;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly userConfigWatchListener = () => this.scheduleUserConfigRefresh();
@@ -302,6 +310,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.ownsPluginRuntimeSnapshotRegistry =
       options.ownsPluginRuntimeSnapshotRegistry ??
       options.pluginRuntimeSnapshotRegistry === undefined;
+    this.memoryService =
+      options.memoryService ??
+      new DesktopMemoryService({
+        picoHome: this.picoHome,
+        publish: (workspacePath, topic, payload) =>
+          this.publishMemoryNotification(workspacePath, topic, payload),
+      });
+    this.ownsMemoryService = options.ownsMemoryService ?? options.memoryService === undefined;
     this.providerRecoveryReady = this.recoverProviderOperation().catch((error: unknown) => {
       this.providerRecoveryError = error;
     });
@@ -479,6 +495,44 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
         runStart: (request) => this.options.runtimeService.handle(request),
       }),
+      ...createDesktopMemoryRequestHandlers({
+        list: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.list(canonical, params),
+          ),
+        get: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.get(canonical, params.factId),
+          ),
+        update: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.update(canonical, params),
+          ),
+        forget: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.forget(canonical, params),
+          ),
+        listReviews: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.listReviews(canonical, params),
+          ),
+        resolveReview: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.resolveReview(canonical, params),
+          ),
+        getSettings: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.getSettings(canonical),
+          ),
+        updateSettings: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.updateSettings(canonical, params),
+          ),
+        previewContext: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.previewContext(canonical, params),
+          ),
+      }),
     };
   }
 
@@ -533,6 +587,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (this.ownsPluginRuntimeSnapshotRegistry) {
         await attempt(() => this.pluginRuntimeSnapshotRegistry.dispose());
       }
+      if (this.ownsMemoryService) await attempt(() => this.memoryService.close());
     } finally {
       this.lifecycleState = "closed";
     }
@@ -741,6 +796,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       this.sessionStateStore.remove(canonical, sessionId),
       this.conversationStateStore.clearQueued(canonical, sessionId),
     ]);
+    this.memoryService.invalidateSessionSources(canonical, sessionId, {
+      availability: "unavailable",
+      code: "session_deleted",
+    });
     return { sessionId, deleted: true };
   }
 
@@ -2715,9 +2774,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly expectedFingerprint: string;
   }): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
-    await this.withSession(canonical, params.sessionId, (session) =>
-      applyDesktopRewind(session, params.checkpointId, params.expectedFingerprint),
+    const rewindBoundarySequence = await this.withSession(
+      canonical,
+      params.sessionId,
+      async (session) => {
+        const checkpoint = session.fileHistory.snapshots.find(
+          (candidate) => candidate.messageId === params.checkpointId,
+        );
+        if (checkpoint?.beforeSessionSeq === undefined) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "该检查点缺少可验证的会话序列边界，拒绝同步回退记忆来源",
+          );
+        }
+        await applyDesktopRewind(session, params.checkpointId, params.expectedFingerprint);
+        return checkpoint.beforeSessionSeq;
+      },
     );
+    this.memoryService.invalidateSessionSources(canonical, params.sessionId, {
+      availability: "rewound",
+      code: `rewind_${params.checkpointId}`,
+      afterSequence: rewindBoundarySequence,
+    });
     this.publish(
       createRuntimeNotification({
         topic: "rewind.completed",
@@ -2984,6 +3062,51 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
       "Automations 尚未连接到 daemon Cron runtime",
+    );
+  }
+
+  private async withTrustedMemory<Result extends JsonValue>(
+    workspacePath: string,
+    operation: (canonicalWorkspacePath: string) => Result,
+  ): Promise<Result> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    return operation(canonical);
+  }
+
+  private publishMemoryNotification<
+    Topic extends Extract<RuntimeNotificationTopic, `memory.${string}`>,
+  >(workspacePath: string, topic: Topic, payload: RuntimeNotificationMap[Topic]): void {
+    const base = {
+      scope: { workspacePath },
+      resourceVersion: this.nextResourceVersion(),
+      at: this.now(),
+    };
+    if (topic === "memory.proposed") {
+      this.publish(
+        createRuntimeNotification({
+          ...base,
+          topic: "memory.proposed",
+          payload: payload as RuntimeNotificationMap["memory.proposed"],
+        }),
+      );
+      return;
+    }
+    if (topic === "memory.changed") {
+      this.publish(
+        createRuntimeNotification({
+          ...base,
+          topic: "memory.changed",
+          payload: payload as RuntimeNotificationMap["memory.changed"],
+        }),
+      );
+      return;
+    }
+    this.publish(
+      createRuntimeNotification({
+        ...base,
+        topic: "memory.forgotten",
+        payload: payload as RuntimeNotificationMap["memory.forgotten"],
+      }),
     );
   }
 

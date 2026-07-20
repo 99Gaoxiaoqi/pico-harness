@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 3;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v2";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 4;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v4";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
 
@@ -20,6 +20,76 @@ export type JobId = Identifier<"JobId">;
 export type ApprovalId = Identifier<"ApprovalId">;
 export type PromptId = Identifier<"PromptId">;
 export type CheckpointId = Identifier<"CheckpointId">;
+
+export type RuntimeMemoryKind = "preference" | "correction" | "project_fact" | "reference";
+export type RuntimeMemoryFactState = "active" | "disabled" | "archived" | "forgotten";
+export type RuntimeMemoryProposalStatus = "pending" | "accepted" | "rejected" | "deleted";
+export type RuntimeMemoryProposalConflictStatus = "none" | "potential" | "confirmed" | "resolved";
+
+export type RuntimeMemoryFact = JsonObject & {
+  readonly factId: string;
+  readonly kind: RuntimeMemoryKind;
+  readonly title: string | null;
+  readonly content: string | null;
+  readonly confidence: number;
+  readonly state: RuntimeMemoryFactState;
+  readonly pinned: boolean;
+  readonly sourceId?: string;
+  readonly source?: RuntimeMemorySourceMetadata;
+  readonly expiresAt?: string;
+  readonly lastUsedAt?: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly forgottenAt?: string;
+};
+
+export type RuntimeMemorySourceMetadata = JsonObject & {
+  readonly sourceId: string;
+  readonly sessionId: string;
+  readonly branchId?: string;
+  readonly availability: "available" | "unavailable" | "rewound";
+  readonly invalidatedAt?: string;
+  readonly invalidationCode?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type RuntimeMemoryProposal = JsonObject & {
+  readonly proposalId: string;
+  readonly kind: RuntimeMemoryKind;
+  readonly title: string | null;
+  readonly content: string | null;
+  readonly reason: string | null;
+  readonly confidence: number;
+  readonly status: RuntimeMemoryProposalStatus;
+  readonly conflictStatus: RuntimeMemoryProposalConflictStatus;
+  readonly sourceId?: string;
+  readonly conflictFactId?: string;
+  readonly resolvedFactId?: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly reviewedAt?: string;
+  readonly deletedAt?: string;
+};
+
+export type RuntimeMemorySettings = JsonObject & {
+  readonly enabled: boolean;
+  readonly autoPropose: boolean;
+  readonly autoCommit: boolean;
+  readonly injectionEnabled: boolean;
+  readonly version: number;
+  readonly updatedAt: string;
+};
+
+export type RuntimeMemoryContextBudget = JsonObject & {
+  readonly maxFacts: number;
+  readonly maxTokens: number;
+  readonly usedFacts: number;
+  readonly usedTokens: number;
+  readonly truncated: boolean;
+};
 
 export type EmptyParams = Record<string, never>;
 export type WorkspaceParams = { readonly workspacePath: string };
@@ -589,6 +659,87 @@ export type RuntimeMethodMap = {
     };
     readonly result: { readonly applied: boolean; readonly sessionId: SessionId };
   };
+  readonly "memory.list": {
+    readonly params: WorkspaceParams & {
+      readonly states?: readonly RuntimeMemoryFactState[];
+      readonly kinds?: readonly RuntimeMemoryKind[];
+      readonly limit?: number;
+    };
+    readonly result: { readonly facts: readonly RuntimeMemoryFact[] };
+  };
+  readonly "memory.get": {
+    readonly params: WorkspaceParams & { readonly factId: string };
+    readonly result: { readonly fact: RuntimeMemoryFact };
+  };
+  readonly "memory.update": {
+    readonly params: WorkspaceParams & {
+      readonly factId: string;
+      readonly expectedVersion: number;
+      readonly idempotencyKey: string;
+      readonly kind?: RuntimeMemoryKind;
+      readonly title?: string;
+      readonly content?: string;
+      readonly confidence?: number;
+      readonly state?: Exclude<RuntimeMemoryFactState, "forgotten">;
+      readonly pinned?: boolean;
+      readonly expiresAt?: string | null;
+      readonly lastUsedAt?: string | null;
+    };
+    readonly result: { readonly fact: RuntimeMemoryFact };
+  };
+  readonly "memory.forget": {
+    readonly params: WorkspaceParams & {
+      readonly factId: string;
+      readonly expectedVersion: number;
+      readonly idempotencyKey: string;
+    };
+    readonly result: { readonly fact: RuntimeMemoryFact };
+  };
+  readonly "memory.review.list": {
+    readonly params: WorkspaceParams & {
+      readonly statuses?: readonly RuntimeMemoryProposalStatus[];
+      readonly limit?: number;
+    };
+    readonly result: { readonly proposals: readonly RuntimeMemoryProposal[] };
+  };
+  readonly "memory.review.resolve": {
+    readonly params: WorkspaceParams & {
+      readonly proposalId: string;
+      readonly resolution: "accepted" | "rejected";
+      readonly expectedVersion: number;
+      readonly idempotencyKey: string;
+      readonly factId?: string;
+    };
+    readonly result: {
+      readonly proposal: RuntimeMemoryProposal;
+      readonly fact?: RuntimeMemoryFact;
+    };
+  };
+  readonly "memory.settings.get": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly settings: RuntimeMemorySettings };
+  };
+  readonly "memory.settings.update": {
+    readonly params: WorkspaceParams & {
+      readonly expectedVersion: number;
+      readonly idempotencyKey: string;
+      readonly enabled?: boolean;
+      readonly autoPropose?: boolean;
+      readonly autoCommit?: boolean;
+      readonly injectionEnabled?: boolean;
+    };
+    readonly result: { readonly settings: RuntimeMemorySettings };
+  };
+  readonly "memory.context.preview": {
+    readonly params: WorkspaceParams & {
+      readonly maxFacts?: number;
+      readonly maxTokens?: number;
+    };
+    readonly result: {
+      readonly facts: readonly RuntimeMemoryFact[];
+      readonly budget: RuntimeMemoryContextBudget;
+    };
+  };
   readonly "jobs.list": {
     readonly params: WorkspaceParams;
     readonly result: { readonly jobs: readonly RuntimeJob[] };
@@ -862,6 +1013,15 @@ export const RUNTIME_METHODS = [
   "rewind.list",
   "rewind.preview",
   "rewind.apply",
+  "memory.list",
+  "memory.get",
+  "memory.update",
+  "memory.forget",
+  "memory.review.list",
+  "memory.review.resolve",
+  "memory.settings.get",
+  "memory.settings.update",
+  "memory.context.preview",
   "jobs.list",
   "jobs.create",
   "jobs.update",
@@ -947,6 +1107,15 @@ export const DESKTOP_RUNTIME_METHODS = [
   "rewind.list",
   "rewind.preview",
   "rewind.apply",
+  "memory.list",
+  "memory.get",
+  "memory.update",
+  "memory.forget",
+  "memory.review.list",
+  "memory.review.resolve",
+  "memory.settings.get",
+  "memory.settings.update",
+  "memory.context.preview",
   "jobs.list",
   "jobs.create",
   "jobs.update",
@@ -1033,6 +1202,21 @@ export type RuntimeNotificationMap = {
   readonly "rewind.completed": {
     readonly sessionId: SessionId;
     readonly checkpointId: CheckpointId;
+  };
+  readonly "memory.proposed": {
+    readonly proposalId: string;
+    readonly version: number;
+    readonly kind: RuntimeMemoryKind;
+  };
+  readonly "memory.changed": {
+    readonly entityType: "fact" | "proposal" | "settings" | "source";
+    readonly entityId: string;
+    readonly version: number;
+    readonly change: "updated" | "resolved" | "source_unavailable" | "source_rewound";
+  };
+  readonly "memory.forgotten": {
+    readonly factId: string;
+    readonly version: number;
   };
   readonly "job.updated": { readonly job: RuntimeJob };
   readonly "job.runFinished": { readonly jobId: JobId; readonly run: RuntimeRun };
@@ -1414,7 +1598,61 @@ function isRuntimeNotificationEnvelope(value: Record<string, unknown>): boolean 
 
 function isRuntimeNotification(value: Record<string, unknown>): boolean {
   if (!isRuntimeNotificationEnvelope(value)) return false;
-  return value.topic !== "run.live" || isRunLiveRuntimeNotification(value);
+  if (value.topic === "run.live") return isRunLiveRuntimeNotification(value);
+  if (typeof value.topic === "string" && value.topic.startsWith("memory.")) {
+    return isMemoryRuntimeNotification(value);
+  }
+  return true;
+}
+
+/** Memory events are durable, so their payload is deliberately exact and body-free. */
+export function isMemoryRuntimeNotification(
+  value: unknown,
+): value is RuntimeNotification<"memory.proposed" | "memory.changed" | "memory.forgotten"> {
+  if (!isJsonObject(value) || !isRuntimeNotificationEnvelope(value)) return false;
+  const payload = value.payload;
+  if (!isJsonObject(payload)) return false;
+  if (value.topic === "memory.proposed") {
+    return (
+      hasExactKeys(payload, ["proposalId", "version", "kind"]) &&
+      nonEmptyString(payload.proposalId) &&
+      nonNegativeSafeInteger(payload.version) &&
+      ["preference", "correction", "project_fact", "reference"].includes(String(payload.kind))
+    );
+  }
+  if (value.topic === "memory.changed") {
+    return (
+      hasExactKeys(payload, ["entityType", "entityId", "version", "change"]) &&
+      ["fact", "proposal", "settings", "source"].includes(String(payload.entityType)) &&
+      nonEmptyString(payload.entityId) &&
+      nonNegativeSafeInteger(payload.version) &&
+      ["updated", "resolved", "source_unavailable", "source_rewound"].includes(
+        String(payload.change),
+      )
+    );
+  }
+  if (value.topic === "memory.forgotten") {
+    return (
+      hasExactKeys(payload, ["factId", "version"]) &&
+      nonEmptyString(payload.factId) &&
+      nonNegativeSafeInteger(payload.version)
+    );
+  }
+  return false;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** Strict guard for the only ephemeral Runtime event accepted by buffering clients. */
@@ -1489,6 +1727,39 @@ const finiteNumberParam: RuntimeParamRule = (value, path) => {
     throw invalidParams(`${path} 必须是有限数字`);
   }
 };
+const positiveIntegerParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw invalidParams(`${path} 必须是正安全整数`);
+  }
+};
+const confidenceParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw invalidParams(`${path} 必须是 0 到 1 之间的有限数字`);
+  }
+};
+function boundedNonEmptyStringParam(maxLength: number): RuntimeParamRule {
+  return (value, path) => {
+    if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) {
+      throw invalidParams(`${path} 必须是长度 1-${maxLength} 的非空字符串`);
+    }
+  };
+}
+function nullableParam(rule: RuntimeParamRule): RuntimeParamRule {
+  return (value, path) => {
+    if (value !== null) rule(value, path);
+  };
+}
+function enumArrayParam<const Values extends readonly string[]>(values: Values): RuntimeParamRule {
+  const allowed = new Set(values);
+  return (value, path) => {
+    if (
+      !Array.isArray(value) ||
+      !value.every((item) => typeof item === "string" && allowed.has(item))
+    ) {
+      throw invalidParams(`${path} 必须是 ${values.join(" | ")} 组成的数组`);
+    }
+  };
+}
 const jsonObjectParam: RuntimeParamRule = (value, path) => {
   if (!isJsonObject(value) || !isJsonValue(value)) {
     throw invalidParams(`${path} 必须是 JSON 对象`);
@@ -1618,6 +1889,59 @@ const workspaceSessionParams = exactParamShape({
 });
 const workspaceRunParams = exactParamShape({ workspacePath: stringParam, runId: stringParam });
 const workspaceJobParams = exactParamShape({ workspacePath: stringParam, jobId: stringParam });
+const memoryKindParam = oneOfParam(["preference", "correction", "project_fact", "reference"]);
+const memoryFactStateParam = oneOfParam(["active", "disabled", "archived"]);
+
+function memoryUpdateParams(value: Record<string, unknown>): void {
+  exactParamShape(
+    {
+      workspacePath: stringParam,
+      factId: boundedNonEmptyStringParam(512),
+      expectedVersion: positiveIntegerParam,
+      idempotencyKey: boundedNonEmptyStringParam(512),
+    },
+    {
+      kind: memoryKindParam,
+      title: boundedNonEmptyStringParam(512),
+      content: boundedNonEmptyStringParam(32_000),
+      confidence: confidenceParam,
+      state: memoryFactStateParam,
+      pinned: booleanParam,
+      expiresAt: nullableParam(boundedNonEmptyStringParam(128)),
+      lastUsedAt: nullableParam(boundedNonEmptyStringParam(128)),
+    },
+  )(value);
+  if (
+    !["kind", "title", "content", "confidence", "state", "pinned", "expiresAt", "lastUsedAt"].some(
+      (key) => Object.hasOwn(value, key),
+    )
+  ) {
+    throw invalidParams("memory.update 至少需要一个更新字段");
+  }
+}
+
+function memorySettingsUpdateParams(value: Record<string, unknown>): void {
+  exactParamShape(
+    {
+      workspacePath: stringParam,
+      expectedVersion: positiveIntegerParam,
+      idempotencyKey: boundedNonEmptyStringParam(512),
+    },
+    {
+      enabled: booleanParam,
+      autoPropose: booleanParam,
+      autoCommit: booleanParam,
+      injectionEnabled: booleanParam,
+    },
+  )(value);
+  if (
+    !["enabled", "autoPropose", "autoCommit", "injectionEnabled"].some((key) =>
+      Object.hasOwn(value, key),
+    )
+  ) {
+    throw invalidParams("memory.settings.update 至少需要一个更新字段");
+  }
+}
 
 const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "runtime.ping": noParams,
@@ -1730,6 +2054,48 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     checkpointId: stringParam,
     expectedFingerprint: stringParam,
   }),
+  "memory.list": exactParamShape(
+    { workspacePath: stringParam },
+    {
+      states: enumArrayParam(["active", "disabled", "archived", "forgotten"]),
+      kinds: enumArrayParam(["preference", "correction", "project_fact", "reference"]),
+      limit: positiveIntegerParam,
+    },
+  ),
+  "memory.get": exactParamShape({
+    workspacePath: stringParam,
+    factId: boundedNonEmptyStringParam(512),
+  }),
+  "memory.update": memoryUpdateParams,
+  "memory.forget": exactParamShape({
+    workspacePath: stringParam,
+    factId: boundedNonEmptyStringParam(512),
+    expectedVersion: positiveIntegerParam,
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
+  "memory.review.list": exactParamShape(
+    { workspacePath: stringParam },
+    {
+      statuses: enumArrayParam(["pending", "accepted", "rejected", "deleted"]),
+      limit: positiveIntegerParam,
+    },
+  ),
+  "memory.review.resolve": exactParamShape(
+    {
+      workspacePath: stringParam,
+      proposalId: boundedNonEmptyStringParam(512),
+      resolution: oneOfParam(["accepted", "rejected"]),
+      expectedVersion: positiveIntegerParam,
+      idempotencyKey: boundedNonEmptyStringParam(512),
+    },
+    { factId: boundedNonEmptyStringParam(512) },
+  ),
+  "memory.settings.get": workspaceParams,
+  "memory.settings.update": memorySettingsUpdateParams,
+  "memory.context.preview": exactParamShape(
+    { workspacePath: stringParam },
+    { maxFacts: positiveIntegerParam, maxTokens: positiveIntegerParam },
+  ),
   "jobs.list": workspaceParams,
   "jobs.create": exactParamShape(
     {
@@ -1913,6 +2279,94 @@ function resultShape(
     }
   };
 }
+
+function exactResultShape(
+  required: RuntimeResultShape,
+  optional: RuntimeResultShape = {},
+): RuntimeResultRule {
+  const validate = resultShape(required, optional);
+  const allowed = new Set([...Object.keys(required), ...Object.keys(optional)]);
+  return (value, path) => {
+    validate(value, path);
+    if (!isJsonObject(value)) return;
+    for (const key of Object.keys(value)) {
+      if (!allowed.has(key)) throw invalidResult(`${path} 不允许字段 ${key}`);
+    }
+  };
+}
+
+function resultNullable(rule: RuntimeResultRule): RuntimeResultRule {
+  return (value, path) => {
+    if (value !== null) rule(value, path);
+  };
+}
+
+const memoryFactResult = exactResultShape(
+  {
+    factId: resultString,
+    kind: resultOneOf(["preference", "correction", "project_fact", "reference"]),
+    title: resultNullable(resultString),
+    content: resultNullable(resultString),
+    confidence: resultFiniteNumber,
+    state: resultOneOf(["active", "disabled", "archived", "forgotten"]),
+    pinned: resultBoolean,
+    version: resultFiniteNumber,
+    createdAt: resultString,
+    updatedAt: resultString,
+  },
+  {
+    sourceId: resultString,
+    source: exactResultShape(
+      {
+        sourceId: resultString,
+        sessionId: resultString,
+        availability: resultOneOf(["available", "unavailable", "rewound"]),
+        createdAt: resultString,
+        updatedAt: resultString,
+      },
+      {
+        branchId: resultString,
+        invalidatedAt: resultString,
+        invalidationCode: resultString,
+      },
+    ),
+    expiresAt: resultString,
+    lastUsedAt: resultString,
+    forgottenAt: resultString,
+  },
+);
+
+const memoryProposalResult = exactResultShape(
+  {
+    proposalId: resultString,
+    kind: resultOneOf(["preference", "correction", "project_fact", "reference"]),
+    title: resultNullable(resultString),
+    content: resultNullable(resultString),
+    reason: resultNullable(resultString),
+    confidence: resultFiniteNumber,
+    status: resultOneOf(["pending", "accepted", "rejected", "deleted"]),
+    conflictStatus: resultOneOf(["none", "potential", "confirmed", "resolved"]),
+    version: resultFiniteNumber,
+    createdAt: resultString,
+    updatedAt: resultString,
+  },
+  {
+    sourceId: resultString,
+    conflictFactId: resultString,
+    resolvedFactId: resultString,
+    reviewedAt: resultString,
+    deletedAt: resultString,
+  },
+);
+
+const memorySettingsResult = exactResultShape({
+  enabled: resultBoolean,
+  autoPropose: resultBoolean,
+  autoCommit: resultBoolean,
+  injectionEnabled: resultBoolean,
+  version: resultFiniteNumber,
+  updatedAt: resultString,
+});
 
 const runtimeSessionResult = resultShape({
   sessionId: resultString,
@@ -2132,6 +2586,27 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     patch: resultString,
     truncated: resultBoolean,
     fingerprint: resultString,
+  }),
+  "memory.list": exactResultShape({ facts: resultArray(memoryFactResult) }),
+  "memory.get": exactResultShape({ fact: memoryFactResult }),
+  "memory.update": exactResultShape({ fact: memoryFactResult }),
+  "memory.forget": exactResultShape({ fact: memoryFactResult }),
+  "memory.review.list": exactResultShape({ proposals: resultArray(memoryProposalResult) }),
+  "memory.review.resolve": exactResultShape(
+    { proposal: memoryProposalResult },
+    { fact: memoryFactResult },
+  ),
+  "memory.settings.get": exactResultShape({ settings: memorySettingsResult }),
+  "memory.settings.update": exactResultShape({ settings: memorySettingsResult }),
+  "memory.context.preview": exactResultShape({
+    facts: resultArray(memoryFactResult),
+    budget: exactResultShape({
+      maxFacts: resultFiniteNumber,
+      maxTokens: resultFiniteNumber,
+      usedFacts: resultFiniteNumber,
+      usedTokens: resultFiniteNumber,
+      truncated: resultBoolean,
+    }),
   }),
   "events.replay": resultShape(
     { events: resultArray(durableRuntimeNotificationResult), hasMore: resultBoolean },
