@@ -40,6 +40,8 @@ export interface PicoWorkspacePaths {
   readonly root: string;
   readonly runtimeDatabase: string;
   readonly memory: string;
+  /** Workspace-private long-term memory authority, isolated from runtime.sqlite. */
+  readonly memoryDatabase: string;
   readonly summaries: string;
   readonly artifacts: string;
   /** Immutable raw tool exchanges removed from Session history by full compaction. */
@@ -137,6 +139,7 @@ export function resolvePicoPaths(
       root: workspaceRoot,
       runtimeDatabase: join(workspaceRoot, "runtime.sqlite"),
       memory: join(workspaceRoot, "memory"),
+      memoryDatabase: join(workspaceRoot, "memory", "memory.sqlite"),
       summaries: join(workspaceRoot, "memory", "summaries"),
       artifacts: join(workspaceRoot, "artifacts"),
       evidence: join(workspaceRoot, "evidence"),
