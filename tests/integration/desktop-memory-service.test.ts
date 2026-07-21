@@ -7,6 +7,10 @@ import Database from "better-sqlite3";
 import { DesktopMemoryService, mapMemoryError } from "../../src/daemon/desktop-memory-service.js";
 import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../src/daemon/protocol.js";
 import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import {
+  MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+  MEMORY_PROPOSAL_JOB_TYPE,
+} from "../../src/memory/proposal-contracts.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 test("Desktop memory service preserves CAS/idempotency and never exposes storage paths", async (context) => {
@@ -355,6 +359,33 @@ test("session deletion and rewind invalidate sources and pending proposals but r
     reason: "Source is before the checkpoint",
     sourceId: beforeRewindSource.sourceId,
   });
+  const deletedJob = repository.createJob({
+    jobId: "pending-delete-job",
+    type: MEMORY_PROPOSAL_JOB_TYPE,
+    terminalEventId: "pending-delete-terminal",
+    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+    cursor: { sessionId: "session-delete", eventId: "delete-user", sequence: 20 },
+  });
+  repository.updateJob({
+    jobId: deletedJob.jobId,
+    expectedVersion: deletedJob.version,
+    status: "failed",
+    attemptCount: 1,
+  });
+  repository.createJob({
+    jobId: "pending-rewind-job",
+    type: MEMORY_PROPOSAL_JOB_TYPE,
+    terminalEventId: "pending-rewind-terminal",
+    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+    cursor: { sessionId: "session-rewind", eventId: "rewind-user", sequence: 15 },
+  });
+  repository.createJob({
+    jobId: "pending-before-rewind-job",
+    type: MEMORY_PROPOSAL_JOB_TYPE,
+    terminalEventId: "pending-before-rewind-terminal",
+    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+    cursor: { sessionId: "session-rewind", eventId: "before-user", sequence: 10 },
+  });
   repository.close();
 
   const events: Array<{ readonly topic: string; readonly payload: Record<string, unknown> }> = [];
@@ -390,6 +421,9 @@ test("session deletion and rewind invalidate sources and pending proposals but r
   assert.equal(verify.getProposal("pending-before-rewind")?.status, "pending");
   assert.equal(verify.getFact("approved-fact")?.state, "active");
   assert.equal(verify.getFact("approved-fact")?.content, "Use npm run build");
+  assert.equal(verify.getJob("pending-delete-job")?.status, "cancelled");
+  assert.equal(verify.getJob("pending-rewind-job")?.status, "cancelled");
+  assert.equal(verify.getJob("pending-before-rewind-job")?.status, "queued");
   assert.equal(events.length, 2);
   assert.ok(events.every((event) => !("content" in event.payload) && !("reason" in event.payload)));
 });

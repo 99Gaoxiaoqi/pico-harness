@@ -10,6 +10,7 @@ import {
 } from "../../src/memory/proposal-contracts.js";
 import {
   MEMORY_REVIEW_DEBOUNCE_MS,
+  MEMORY_REVIEW_MAX_WAIT_MS,
   MEMORY_REVIEW_PENDING_LIMIT,
   MemoryReviewScheduler,
 } from "../../src/memory/runtime-scheduler.js";
@@ -33,10 +34,54 @@ test("memory review enqueue applies the durable workspace debounce", async (cont
     userMessageEventId: "debounce-user",
   });
   assert.deepEqual(scheduler.pending(), []);
-  now = new Date(now.getTime() + MEMORY_REVIEW_DEBOUNCE_MS - 1);
+  now = new Date(now.getTime() + MEMORY_REVIEW_DEBOUNCE_MS / 2);
+  scheduler.enqueue({
+    sessionId: "debounce-session",
+    runId: "debounce-run-2",
+    terminalEventId: "debounce-terminal-2",
+    userMessageEventId: "debounce-user-2",
+  });
+  now = new Date(now.getTime() + MEMORY_REVIEW_DEBOUNCE_MS / 2);
+  assert.deepEqual(scheduler.pending(), [], "new evidence extends the workspace quiet window");
+  now = new Date(now.getTime() + MEMORY_REVIEW_DEBOUNCE_MS / 2 - 1);
   assert.deepEqual(scheduler.pending(), []);
   now = new Date(now.getTime() + 1);
-  assert.equal(scheduler.pending()[0]?.terminalEventId, "debounce-terminal");
+  assert.deepEqual(
+    scheduler.pending().map((job) => job.terminalEventId),
+    ["debounce-terminal", "debounce-terminal-2"],
+  );
+});
+
+test("workspace debounce has a durable maximum wait", async (context) => {
+  const fixture = await createFixture("debounce-max-wait");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  let now = new Date("2026-07-22T00:00:00.000Z");
+  const repository = new MemoryRepository({
+    databasePath: fixture.databasePath,
+    workspaceId: fixture.workspaceId,
+    now: () => now,
+  });
+  context.after(() => repository.close());
+  const scheduler = new MemoryReviewScheduler(repository, { now: () => now });
+  scheduler.enqueue({
+    sessionId: "max-wait-session",
+    runId: "max-wait-run-1",
+    terminalEventId: "max-wait-terminal-1",
+    userMessageEventId: "max-wait-user-1",
+  });
+  now = new Date(now.getTime() + MEMORY_REVIEW_MAX_WAIT_MS - 10_000);
+  scheduler.enqueue({
+    sessionId: "max-wait-session",
+    runId: "max-wait-run-2",
+    terminalEventId: "max-wait-terminal-2",
+    userMessageEventId: "max-wait-user-2",
+  });
+  now = new Date("2026-07-22T00:10:00.000Z");
+  assert.deepEqual(
+    scheduler.pending().map((job) => job.terminalEventId),
+    ["max-wait-terminal-1"],
+    "the oldest job cannot be postponed forever by later activity",
+  );
 });
 
 test("memory review scheduling is due-aware, oldest-first and type isolated", async (context) => {

@@ -306,14 +306,43 @@ test("failed extraction keeps a retryable job and exposes no cursor advance", as
   assert.equal("advanceCursorTo" in failed, false);
   assert.equal(failed.job.status, "failed");
   assert.equal(failed.job.attemptCount, 1);
+  assert.equal(failed.job.modelCalls, 1);
+  assert.equal(failed.job.inputTokens, 12);
   assert.deepEqual(failed.job.cursor, input.cursor);
 
   const retried = await engine.process(input);
   assert.equal(retried.status, "succeeded");
   assert.equal(retried.job.attemptCount, 2);
+  assert.equal(retried.job.modelCalls, 2);
+  assert.equal(retried.job.inputTokens, 24);
+  assert.equal(retried.job.outputTokens, 10);
+  assert.equal(retried.job.costUsd, 0.002);
   assert.deepEqual(retried.advanceCursorTo, input.cursor);
   assert.equal(retried.proposals.length, 1);
   assert.equal(model.calls.length, 2, "ambiguous stable evidence must use the model fallback");
+});
+
+test("exhausted retries retain every model attempt in budget usage", async (context) => {
+  const fixture = await createFixture("retry-exhausted");
+  context.after(fixture.close);
+  const engine = fixture.engine(
+    new QueueModel([
+      { role: "assistant", content: "invalid one" },
+      { role: "assistant", content: "invalid two" },
+      { role: "assistant", content: "invalid three" },
+    ]),
+    new ContentEvidenceReader(),
+  );
+  const input = runInput("retry-exhausted", "以后默认用中文回复，并且保留技术术语原文");
+  await engine.process(input);
+  await engine.process(input);
+  const exhausted = await engine.process(input);
+  assert.equal(exhausted.status, "retryable_failure");
+  assert.equal(exhausted.job.attemptCount, exhausted.job.maxAttempts);
+  assert.equal(exhausted.job.modelCalls, 3);
+  assert.equal(exhausted.job.inputTokens, 36);
+  assert.equal(exhausted.job.outputTokens, 15);
+  assert.equal(exhausted.job.costUsd, 0.003);
 });
 
 test("terminal event and extractor version are idempotent after success", async (context) => {

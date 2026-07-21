@@ -157,14 +157,15 @@ export class RuntimeRunExecutor {
       }, signal);
       if (memoryReviewScheduler && userMessageEventId) {
         try {
-          const terminal = (await runtimeRun.store.readSession(session.id)).find(
-            (event) =>
+          const terminalEntry = (await runtimeRun.store.readSessionEntries(session.id)).find(
+            ({ event }) =>
               event.kind === "run.terminal" &&
               event.runId === runtimeRun.runId &&
               event.data.status === "completed" &&
               event.data.recovered !== true,
           );
-          if (terminal?.kind === "run.terminal") {
+          if (terminalEntry?.event.kind === "run.terminal") {
+            const terminal = terminalEntry.event;
             scheduleMemoryReviewEnqueue(
               memoryReviewScheduler,
               {
@@ -172,6 +173,7 @@ export class RuntimeRunExecutor {
                 runId: runtimeRun.runId,
                 terminalEventId: terminal.eventId,
                 userMessageEventId,
+                terminalSequence: terminalEntry.sequence,
               },
               { sessionId: session.id, runId: runtimeRun.runId },
             );
