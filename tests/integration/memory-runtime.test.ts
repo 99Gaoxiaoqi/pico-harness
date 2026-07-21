@@ -30,7 +30,7 @@ import {
 } from "../../src/memory/worker.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { CostTracker } from "../../src/observability/tracker.js";
-import type { BillingRoute } from "../../src/observability/pricing.js";
+import { estimateCost, type BillingRoute } from "../../src/observability/pricing.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
@@ -707,6 +707,103 @@ test("one drain reuses its model lease and a failed extraction does not advance 
   repository.close();
 });
 
+test("one provider call microbatches fuzzy reviews and isolates one malformed evidence", async (context) => {
+  const fixture = await createFixture("worker-model-microbatch");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  for (const [index, command] of ["alpha", "beta", "gamma"].entries()) {
+    await enqueueCompletedReview(
+      fixture,
+      trustStore,
+      `memory-model-microbatch-${index}`,
+      `请记住：这个项目固定使用 npm run ${command} 进行构建，并且延续对应的发布约定。`,
+    );
+  }
+
+  const billingRoute = {
+    provider: "openai",
+    model: "memory-microbatch-fixture",
+    baseUrl: "https://example.test",
+    pricing: {
+      inputPerMillion: 1,
+      outputPerMillion: 2,
+      cacheReadPerMillion: 0,
+      cacheWritePerMillion: 0,
+      source: "configured",
+    },
+  } satisfies BillingRoute;
+  let providerCalls = 0;
+  let disposals = 0;
+  const provider: LLMProvider = {
+    modelName: billingRoute.model,
+    async generate(messages) {
+      providerCalls++;
+      const payload = JSON.parse(messages[1]?.content ?? "{}") as {
+        evidences?: Array<{ evidenceEventId: string; userText: string }>;
+      };
+      assert.equal(payload.evidences?.length, 3);
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "memory-microbatch-call",
+            name: "submit_memory_proposals",
+            arguments: JSON.stringify({
+              proposals: payload.evidences?.map((evidence, index) => ({
+                kind: "project_fact",
+                title: `Build command ${index}`,
+                content: `Use npm run ${["alpha", "beta", "gamma"][index]}`,
+                reason: "The user explicitly stated a stable project command.",
+                confidence: index === 2 ? 2 : 0.99,
+                evidenceEventIds: [evidence.evidenceEventId],
+              })),
+            }),
+          },
+        ],
+        usage: { promptTokens: 101, completionTokens: 41 },
+      };
+    },
+  };
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const worker = new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory: () => ({
+      model: new ProviderMemoryProposalModel(provider, billingRoute),
+      dispose: () => {
+        disposals++;
+      },
+    }),
+  });
+  const results = await worker.drain();
+  assert.equal(providerCalls, 1, "three fuzzy reviews must share one provider.generate");
+  assert.equal(disposals, 1);
+  assert.equal(results.filter((result) => result.status === "succeeded").length, 2);
+  assert.equal(results.filter((result) => result.status === "retryable_failure").length, 1);
+
+  const repository = openRepository(fixture);
+  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+  assert.equal(jobs.filter((job) => job.status === "succeeded").length, 2);
+  assert.equal(jobs.filter((job) => job.status === "failed").length, 1);
+  assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 2);
+  assert.equal(jobs.reduce((sum, job) => sum + job.inputTokens, 0), 101);
+  assert.equal(jobs.reduce((sum, job) => sum + job.outputTokens, 0), 41);
+  const expectedCost = estimateCost(billingRoute, {
+    promptTokens: 101,
+    completionTokens: 41,
+  }).costUSD;
+  assert.ok(
+    Math.abs(jobs.reduce((sum, job) => sum + job.costUsd, 0) - expectedCost) < 1e-18,
+  );
+  const failed = jobs.find((job) => job.status === "failed");
+  assert.equal(failed?.sourceId, undefined);
+  repository.close();
+});
+
 test("/memory command uses trust, sanitizer, idempotency, CAS and executable undo", async (context) => {
   const fixture = await createFixture("command");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -868,10 +965,11 @@ async function enqueueCompletedReview(
   fixture: { workspace: string; picoHome: string },
   trustStore: WorkspaceTrustStore,
   sessionId: string,
+  prompt = "请记住：这个项目固定使用 npm run memory-recovery 进行构建，并且延续现有发布约定。",
 ): Promise<void> {
   await executeAgentRuntime(
     {
-      prompt: "请记住：这个项目固定使用 npm run memory-recovery 进行构建，并且延续现有发布约定。",
+      prompt,
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId },
       provider: "openai",

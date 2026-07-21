@@ -75,6 +75,11 @@ export interface MemoryProposalModelPort {
     request: MemoryProposalExtractionRequest,
     signal?: AbortSignal,
   ): Promise<MemoryProposalExtractionResult>;
+  /** Optional host-side optimization; each returned item still belongs to exactly one evidence. */
+  extractBatch?(
+    requests: readonly MemoryProposalExtractionRequest[],
+    signal?: AbortSignal,
+  ): Promise<readonly MemoryProposalExtractionResult[]>;
 }
 
 export interface MemoryEvidenceReaderPort {

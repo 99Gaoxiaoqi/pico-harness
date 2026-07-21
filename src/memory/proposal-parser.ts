@@ -47,6 +47,28 @@ export const MEMORY_PROPOSAL_TOOL: ToolDefinition = Object.freeze({
   },
 });
 
+export function memoryProposalToolForBatch(evidenceCount: number): ToolDefinition {
+  if (!Number.isInteger(evidenceCount) || evidenceCount < 1) {
+    throw new MemoryProposalParseError("batch_evidence_count");
+  }
+  if (evidenceCount === 1) return MEMORY_PROPOSAL_TOOL;
+  const properties = MEMORY_PROPOSAL_TOOL.inputSchema["properties"] as Record<string, unknown>;
+  const proposals = properties["proposals"] as Record<string, unknown>;
+  return {
+    ...MEMORY_PROPOSAL_TOOL,
+    inputSchema: {
+      ...MEMORY_PROPOSAL_TOOL.inputSchema,
+      properties: {
+        proposals: {
+          type: "array",
+          maxItems: MAX_CANDIDATES * evidenceCount,
+          items: proposals["items"],
+        },
+      },
+    },
+  };
+}
+
 export class MemoryProposalParseError extends Error {
   constructor(readonly code: string) {
     super(`Memory proposal response is invalid: ${code}`);
@@ -78,6 +100,67 @@ export function parseMemoryProposalResponse(
   }
   const allowed = new Set(allowedEvidenceEventIds);
   return proposals.map((candidate, index) => parseCandidate(candidate, index, allowed));
+}
+
+/**
+ * Splits one provider tool call into strict per-evidence responses. A malformed candidate that
+ * names one evidence is deliberately kept only in that slice, so its normal parser failure cannot
+ * prevent unrelated jobs from committing. Envelope errors remain batch-wide retryable failures.
+ */
+export function splitMemoryProposalBatchResponse(
+  response: Message,
+  evidenceGroups: readonly (readonly string[])[],
+): Message[] {
+  if (evidenceGroups.length === 0) return [];
+  if (response.role !== "assistant") throw new MemoryProposalParseError("response_role");
+  if (!response.toolCalls || response.toolCalls.length !== 1) {
+    throw new MemoryProposalParseError("tool_call_count");
+  }
+  const call = response.toolCalls[0]!;
+  if (call.name !== TOOL_NAME) throw new MemoryProposalParseError("tool_name");
+  let value: unknown;
+  try {
+    value = JSON.parse(call.arguments) as unknown;
+  } catch {
+    throw new MemoryProposalParseError("malformed_json");
+  }
+  const root = requireExactRecord(value, ["proposals"], "root_shape");
+  const proposals = root["proposals"];
+  if (!Array.isArray(proposals) || proposals.length > MAX_CANDIDATES * evidenceGroups.length) {
+    throw new MemoryProposalParseError("proposal_count");
+  }
+
+  const allowed = evidenceGroups.map((group) => new Set(group));
+  const slices: unknown[][] = evidenceGroups.map(() => []);
+  for (const candidate of proposals) {
+    const candidateRecord =
+      typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+        ? (candidate as Record<string, unknown>)
+        : undefined;
+    const rawEventIds = candidateRecord?.["evidenceEventIds"];
+    const eventIds = Array.isArray(rawEventIds)
+      ? rawEventIds.filter((eventId): eventId is string => typeof eventId === "string")
+      : [];
+    const matchingGroups = allowed
+      .map((group, index) => ({ group, index }))
+      .filter(({ group }) => eventIds.some((eventId) => group.has(eventId)));
+    if (matchingGroups.length === 0) {
+      throw new MemoryProposalParseError("batch_unassigned_evidence");
+    }
+    for (const { index } of matchingGroups) slices[index]!.push(candidate);
+  }
+
+  return slices.map((proposalsForEvidence, index) => ({
+    role: "assistant",
+    content: "",
+    toolCalls: [
+      {
+        id: `${call.id}:evidence-${index}`,
+        name: TOOL_NAME,
+        arguments: JSON.stringify({ proposals: proposalsForEvidence }),
+      },
+    ],
+  }));
 }
 
 function parseCandidate(
