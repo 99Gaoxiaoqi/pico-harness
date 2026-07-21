@@ -135,7 +135,7 @@ realModelTest(
 );
 
 realModelTest(
-  "reviewed real-model memory is recalled across sessions and disabled review stays silent",
+  "deterministic memory is recalled across sessions without review-model calls",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
     const configured = await configuredRealModel();
@@ -220,7 +220,7 @@ realModelTest(
         },
       );
       assert.match(recalled.finalMessage, new RegExp(canary, "u"));
-      assert.equal(reviewCalls, 1);
+      assert.equal(reviewCalls, 0);
 
       repository = openMemoryRepository(workspace, picoHome);
       assert.equal(repository.listJobs().length, jobsAfterReview);
@@ -248,7 +248,7 @@ realModelTest(
           reporter: new SilentReporter(),
         },
       );
-      assert.equal(reviewCalls, 1);
+      assert.equal(reviewCalls, 0);
       repository = openMemoryRepository(workspace, picoHome);
       assert.equal(repository.listJobs().length, jobsAfterReview);
       repository.close();
