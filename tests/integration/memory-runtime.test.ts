@@ -796,16 +796,23 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
   assert.equal(jobs.filter((job) => job.status === "succeeded").length, 2);
   assert.equal(jobs.filter((job) => job.status === "failed").length, 1);
   assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 2);
-  assert.equal(jobs.reduce((sum, job) => sum + job.inputTokens, 0), 101);
-  assert.equal(jobs.reduce((sum, job) => sum + job.outputTokens, 0), 41);
-  assert.equal(jobs.reduce((sum, job) => sum + job.modelCalls, 0), 1);
+  assert.equal(
+    jobs.reduce((sum, job) => sum + job.inputTokens, 0),
+    101,
+  );
+  assert.equal(
+    jobs.reduce((sum, job) => sum + job.outputTokens, 0),
+    41,
+  );
+  assert.equal(
+    jobs.reduce((sum, job) => sum + job.modelCalls, 0),
+    1,
+  );
   const expectedCost = estimateCost(billingRoute, {
     promptTokens: 101,
     completionTokens: 41,
   }).costUSD;
-  assert.ok(
-    Math.abs(jobs.reduce((sum, job) => sum + job.costUsd, 0) - expectedCost) < 1e-18,
-  );
+  assert.ok(Math.abs(jobs.reduce((sum, job) => sum + job.costUsd, 0) - expectedCost) < 1e-18);
   const failed = jobs.find((job) => job.status === "failed");
   assert.equal(failed?.sourceId, undefined);
   repository.close();
