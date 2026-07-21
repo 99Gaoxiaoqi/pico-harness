@@ -938,6 +938,22 @@ test("/memory command uses trust, sanitizer, idempotency, CAS and executable und
     /rejected by the safety scan/u,
   );
   repository = openRepository(fixture);
+  const reviewJob = repository.createJob({
+    type: "terminal-extraction",
+    terminalEventId: "memory-command-review",
+    extractorVersion: "memory-command-v1",
+    cursor: { sessionId: "memory-command-session" },
+  });
+  repository.updateJob({
+    jobId: reviewJob.jobId,
+    expectedVersion: reviewJob.version,
+    status: "succeeded",
+    modelCalls: 1,
+    inputTokens: 120,
+    outputTokens: 30,
+    costUsd: 0.0125,
+    idempotencyKey: "memory-command-review-complete",
+  });
   const settings = repository.getSettings();
   repository.updateSettings({
     expectedVersion: settings.version,
@@ -945,6 +961,24 @@ test("/memory command uses trust, sanitizer, idempotency, CAS and executable und
     idempotencyKey: "test-disable-auto-propose",
   });
   repository.close();
+  const balancedStatus = await execute(["status"]);
+  assert.match(
+    balancedStatus.type === "local" ? (balancedStatus.message ?? "") : "",
+    /Review mode: balanced[\s\S]*Review budget \(rolling 24h\): available[\s\S]*Review usage: 1\/8 calls, 120\/16000 input tokens, 30\/2000 output tokens, \$0\.0125\/\$0\.1000/u,
+  );
+  repository = openRepository(fixture);
+  const balancedSettings = repository.getSettings();
+  repository.updateSettings({
+    expectedVersion: balancedSettings.version,
+    reviewMode: "eco",
+    idempotencyKey: "memory-command-review-eco",
+  });
+  repository.close();
+  const ecoStatus = await execute(["status"]);
+  assert.match(
+    ecoStatus.type === "local" ? (ecoStatus.message ?? "") : "",
+    /Review mode: eco[\s\S]*Eco mode guarantees zero model review calls/u,
+  );
   await execute(["off"]);
   repository = openRepository(fixture);
   assert.equal(repository.getSettings().enabled, false);

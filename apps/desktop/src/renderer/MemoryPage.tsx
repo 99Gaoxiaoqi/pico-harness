@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import type {
   RuntimeMemoryFact,
   RuntimeMemoryProposal,
+  RuntimeMemoryReviewBudget,
   RuntimeMemorySettings,
 } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
@@ -433,6 +434,7 @@ export function MemoryPage({
 
       <MemorySettings
         settings={memory.settings}
+        reviewBudget={memory.reviewBudget}
         busy={Boolean(busy)}
         onChange={(key, value) => void updateSetting(key, value)}
         onReviewModeChange={(mode) => void updateReviewMode(mode)}
@@ -742,11 +744,13 @@ function SourceDetails({
 
 function MemorySettings({
   settings,
+  reviewBudget,
   busy,
   onChange,
   onReviewModeChange,
 }: {
   readonly settings: RuntimeStore["data"]["memory"]["settings"];
+  readonly reviewBudget: RuntimeStore["data"]["memory"]["reviewBudget"];
   readonly busy: boolean;
   readonly onChange: (
     key: "enabled" | "autoPropose" | "autoCommit" | "injectionEnabled",
@@ -782,6 +786,7 @@ function MemorySettings({
               : "自动提出建议已关闭；当前模式暂不生效。"}
           </p>
         </div>
+        {reviewBudget && <MemoryReviewBudgetSummary budget={reviewBudget} />}
         <label>
           <input
             type="radio"
@@ -864,4 +869,37 @@ function MemorySettings({
       </fieldset>
     </section>
   );
+}
+
+function MemoryReviewBudgetSummary({ budget }: { readonly budget: RuntimeMemoryReviewBudget }) {
+  const status =
+    budget.reason === "eco-mode"
+      ? "节能模式保证后台模型审核调用为 0。"
+      : budget.reason === "budget-exhausted"
+        ? `本工作区的滚动 24 小时模型审核预算已耗尽。${budget.nextRecoveryAt ? `预计 ${formatRecoveryTime(budget.nextRecoveryAt)} 恢复。` : ""}`
+        : "滚动 24 小时模型审核预算可用。";
+  return (
+    <div className={`memory-settings__budget${budget.allowed ? "" : " is-paused"}`} role="status">
+      <strong>当前用量</strong>
+      <p>{status}</p>
+      <small>
+        调用 {budget.calls}/{budget.maxCalls} · 输入 {budget.inputTokens.toLocaleString()}/
+        {budget.maxInputTokens.toLocaleString()} tokens · 输出{" "}
+        {budget.outputTokens.toLocaleString()}/{budget.maxOutputTokens.toLocaleString()} tokens · $
+        {budget.costUsd.toFixed(4)}/${budget.maxCostUsd.toFixed(4)}
+      </small>
+    </div>
+  );
+}
+
+function formatRecoveryTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(timestamp);
 }

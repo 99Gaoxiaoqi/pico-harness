@@ -7,6 +7,7 @@ import {
   type RuntimeNotification,
   type RuntimeMemoryFact,
   type RuntimeMemoryProposal,
+  type RuntimeMemoryReviewBudget,
   type RuntimeMemorySettings,
   type RuntimeResult,
   type RuntimeUserDefaults,
@@ -1144,6 +1145,7 @@ export function useRuntimeStore(): RuntimeStore {
             facts: factsResult.facts,
             proposals: proposalsResult.proposals,
             settings: settingsResult.settings,
+            reviewBudget: settingsResult.reviewBudget,
             status: "ready",
           },
         }));
@@ -2724,16 +2726,24 @@ export function useRuntimeStore(): RuntimeStore {
           if (preview) {
             const settings = dataRef.current.memory.settings;
             if (!settings || settings.version !== expectedVersion) return;
-            updated = {
+            const nextSettings: RuntimeMemorySettings = {
               ...settings,
               ...patch,
               autoCommit: false,
               version: settings.version + 1,
               updatedAt: new Date().toISOString(),
             };
+            updated = nextSettings;
             setData((current) => ({
               ...current,
-              memory: { ...current.memory, settings: updated },
+              memory: {
+                ...current.memory,
+                settings: nextSettings,
+                reviewBudget: previewReviewBudget(
+                  nextSettings.reviewMode,
+                  current.memory.reviewBudget,
+                ),
+              },
             }));
           } else {
             const result = await invoke(bridge, "memory.settings.update", {
@@ -2803,6 +2813,38 @@ export function useRuntimeStore(): RuntimeStore {
   );
 
   return { preview, connection, data, busy, message, actions };
+}
+
+function previewReviewBudget(
+  mode: RuntimeMemorySettings["reviewMode"],
+  current: RuntimeMemoryReviewBudget | undefined,
+): RuntimeMemoryReviewBudget {
+  const limits =
+    mode === "eco"
+      ? { maxCalls: 0, maxInputTokens: 0, maxOutputTokens: 0, maxCostUsd: 0 }
+      : mode === "balanced"
+        ? { maxCalls: 8, maxInputTokens: 16_000, maxOutputTokens: 2_000, maxCostUsd: 0.1 }
+        : { maxCalls: 16, maxInputTokens: 32_000, maxOutputTokens: 4_000, maxCostUsd: 0.25 };
+  const usage = {
+    calls: current?.calls ?? 0,
+    inputTokens: current?.inputTokens ?? 0,
+    outputTokens: current?.outputTokens ?? 0,
+    costUsd: current?.costUsd ?? 0,
+  };
+  const exhausted =
+    mode !== "eco" &&
+    (usage.calls >= limits.maxCalls ||
+      usage.inputTokens >= limits.maxInputTokens ||
+      usage.outputTokens >= limits.maxOutputTokens ||
+      usage.costUsd >= limits.maxCostUsd);
+  return {
+    mode,
+    allowed: mode !== "eco" && !exhausted,
+    reason: mode === "eco" ? "eco-mode" : exhausted ? "budget-exhausted" : "available",
+    ...usage,
+    ...limits,
+    ...(exhausted && current?.nextRecoveryAt ? { nextRecoveryAt: current.nextRecoveryAt } : {}),
+  };
 }
 
 function createPreviewBridge(): DesktopBridge {
