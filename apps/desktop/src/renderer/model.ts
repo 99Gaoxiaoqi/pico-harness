@@ -258,6 +258,7 @@ export type MemorySettingsPatch = Readonly<{
   autoPropose?: boolean;
   autoCommit?: false;
   injectionEnabled?: boolean;
+  reviewMode?: RuntimeMemorySettings["reviewMode"];
 }>;
 
 export type MemoryProposalPatch = Readonly<{
