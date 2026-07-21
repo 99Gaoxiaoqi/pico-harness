@@ -94,6 +94,8 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
     reviewMode: "quality",
   });
   assert.equal(quality.settings.reviewMode, "quality");
+  assert.equal(quality.reviewBudget.mode, "quality");
+  assert.equal(quality.reviewBudget.allowed, true);
   assert.equal(quality.settings.enabled, true);
   assert.equal(quality.settings.injectionEnabled, true);
   assert.deepEqual(
@@ -114,6 +116,10 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
   });
   assert.equal(proposalOff.settings.autoPropose, false);
   assert.equal(proposalOff.settings.reviewMode, "eco");
+  assert.equal(proposalOff.reviewBudget.mode, "eco");
+  assert.equal(proposalOff.reviewBudget.allowed, false);
+  assert.equal(proposalOff.reviewBudget.reason, "eco-mode");
+  assert.equal(proposalOff.reviewBudget.maxCalls, 0);
   assert.equal(proposalOff.settings.enabled, true);
   assert.equal(proposalOff.settings.injectionEnabled, true);
   assertRuntimeError(
@@ -134,6 +140,66 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
   const mappedPendingDelete = mapMemoryError(pendingDelete);
   assert.equal(mappedPendingDelete.code, RUNTIME_ERROR_CODES.CONFLICT);
   assert.equal(mappedPendingDelete.message.includes("/private/secret"), false);
+});
+
+test("Desktop memory settings expose only rolling actual terminal review usage", async (context) => {
+  const fixture = await createFixture("review-budget");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  let clock = new Date("2026-07-21T11:00:00.000Z");
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+    now: () => clock,
+  });
+  const complete = (type: string, suffix: string, modelCalls: number) => {
+    const job = repository.createJob({
+      type,
+      terminalEventId: `terminal-${suffix}`,
+      extractorVersion: "budget-observability-v1",
+      cursor: { sessionId: `session-${suffix}` },
+    });
+    repository.updateJob({
+      jobId: job.jobId,
+      expectedVersion: job.version,
+      status: "succeeded",
+      modelCalls,
+      inputTokens: modelCalls * 120,
+      outputTokens: modelCalls * 30,
+      costUsd: modelCalls * 0.0125,
+      idempotencyKey: `complete-${suffix}`,
+    });
+  };
+  complete("terminal-extraction", "actual", 8);
+  complete("future-terminal-extraction", "unrelated", 50);
+  clock = new Date("2026-07-20T09:00:00.000Z");
+  complete("terminal-extraction", "expired", 20);
+  repository.close();
+
+  const service = new DesktopMemoryService({
+    picoHome: fixture.picoHome,
+    now: () => Date.parse("2026-07-22T10:00:00.000Z"),
+    publish: () => undefined,
+  });
+  context.after(() => service.close());
+
+  const result = service.getSettings(fixture.workspace);
+  assert.deepEqual(result.reviewBudget, {
+    mode: "balanced",
+    allowed: false,
+    reason: "budget-exhausted",
+    calls: 8,
+    inputTokens: 960,
+    outputTokens: 240,
+    costUsd: 0.1,
+    maxCalls: 8,
+    maxInputTokens: 16_000,
+    maxOutputTokens: 2_000,
+    maxCostUsd: 0.1,
+    nextRecoveryAt: "2026-07-22T11:00:00.000Z",
+  });
+  assert.equal("databasePath" in result.reviewBudget, false);
+  assert.equal("content" in result.reviewBudget, false);
 });
 
 test("edited approval is one atomic CAS and never activates the original body", async (context) => {

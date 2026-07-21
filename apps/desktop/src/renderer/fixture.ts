@@ -39,6 +39,20 @@ export const previewData: AppData = {
       version: 3,
       updatedAt: new Date(now - 120_000).toISOString(),
     },
+    reviewBudget: {
+      mode: "balanced",
+      allowed: false,
+      reason: "budget-exhausted",
+      calls: 8,
+      inputTokens: 12_640,
+      outputTokens: 1_280,
+      costUsd: 0.084,
+      maxCalls: 8,
+      maxInputTokens: 16_000,
+      maxOutputTokens: 2_000,
+      maxCostUsd: 0.1,
+      nextRecoveryAt: new Date(now + 3_600_000).toISOString(),
+    },
     proposals: [
       {
         proposalId: "memory-proposal-1",
