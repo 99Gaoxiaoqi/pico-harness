@@ -224,7 +224,7 @@ export class MemoryReviewWorker {
             const budget = evaluateMemoryReviewBudgetForJobs(
               latestSettings.reviewMode,
               repository.listJobs({
-                statuses: ["succeeded", "failed"],
+                statuses: ["succeeded", "failed", "cancelled"],
                 type: "terminal-extraction",
                 withModelUsage: true,
                 order: "newest",
@@ -249,6 +249,7 @@ export class MemoryReviewWorker {
                   jobId: latest.jobId,
                   expectedVersion: latest.version,
                   nextAttemptAt,
+                  errorCode: "memory_review_budget_deferred",
                   idempotencyKey: `memory-budget-defer:${latest.jobId}:${latest.version}:${nextAttemptAt}`,
                 });
               }

@@ -84,6 +84,34 @@ test("workspace debounce has a durable maximum wait", async (context) => {
   );
 });
 
+test("workspace debounce preserves a budget recovery deadline", async (context) => {
+  const fixture = await createFixture("debounce-budget-deferred");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  let now = new Date("2026-07-22T00:00:00.000Z");
+  const repository = new MemoryRepository({
+    databasePath: fixture.databasePath,
+    workspaceId: fixture.workspaceId,
+    now: () => now,
+  });
+  context.after(() => repository.close());
+  const deferred = createExtractionJob(repository, "budget-deferred", {
+    nextAttemptAt: "2026-07-23T00:00:00.000Z",
+  });
+  repository.updateJob({
+    jobId: deferred.jobId,
+    expectedVersion: deferred.version,
+    errorCode: "memory_review_budget_deferred",
+  });
+  now = new Date("2026-07-22T00:01:00.000Z");
+  new MemoryReviewScheduler(repository, { now: () => now }).enqueue({
+    sessionId: "new-session",
+    runId: "new-run",
+    terminalEventId: "new-terminal",
+    userMessageEventId: "new-user",
+  });
+  assert.equal(repository.getJob(deferred.jobId)?.nextAttemptAt, "2026-07-23T00:00:00.000Z");
+});
+
 test("memory review scheduling is due-aware, oldest-first and type isolated", async (context) => {
   const fixture = await createFixture("due-order");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));

@@ -786,7 +786,11 @@ test("an in-flight review cannot commit after its rewind job is cancelled", asyn
   await draining;
 
   const verify = openRepository(fixture);
-  assert.equal(verify.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status, "cancelled");
+  const cancelled = verify.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0];
+  assert.equal(cancelled?.status, "cancelled");
+  assert.equal(cancelled?.modelCalls, 1, "rewind must retain actual provider usage");
+  assert.equal(cancelled?.inputTokens, 20);
+  assert.equal(cancelled?.outputTokens, 10);
   assert.equal(verify.listProposals({ statuses: ["pending"] }).length, 0);
   assert.equal(verify.listSessionSources(sessionId).length, 0);
   verify.close();

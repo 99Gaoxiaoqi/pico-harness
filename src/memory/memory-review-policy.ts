@@ -99,7 +99,7 @@ export function evaluateMemoryReviewBudgetForJobs(
     mode,
     jobs.flatMap((job) =>
       job.type === "terminal-extraction" &&
-      (job.status === "succeeded" || job.status === "failed") &&
+      (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") &&
       job.terminalAt
         ? [
             {

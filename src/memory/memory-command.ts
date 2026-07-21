@@ -101,7 +101,7 @@ function status(repository: MemoryRepository) {
     settings.reviewMode,
     repository.listJobs({
       type: "terminal-extraction",
-      statuses: ["succeeded", "failed"],
+      statuses: ["succeeded", "failed", "cancelled"],
       withModelUsage: true,
       limit: 500,
     }),
