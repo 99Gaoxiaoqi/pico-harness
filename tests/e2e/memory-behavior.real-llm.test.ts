@@ -109,11 +109,24 @@ realModelTest(
       }
 
       const score = scoreMemoryQuality(REAL_MODEL_MEMORY_QUALITY_CASES, actual);
-      assertMemoryQualityThresholds(score, {
-        minimumPrecision: 0.95,
-        minimumRecall: 0.9,
-        requiredCategories: ["explicit", "project_fact", "correction"],
-      });
+      try {
+        assertMemoryQualityThresholds(score, {
+          minimumPrecision: 0.95,
+          minimumRecall: 0.9,
+          requiredCategories: ["explicit", "project_fact", "correction"],
+        });
+      } catch (error) {
+        const diagnostic = actual.map(({ caseId, kind, content, conflictStatus }) => ({
+          caseId,
+          kind,
+          content,
+          conflictStatus,
+        }));
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; predictions=${JSON.stringify(diagnostic)}`,
+          { cause: error },
+        );
+      }
     } finally {
       repository.close();
       await rm(root, { recursive: true, force: true });
