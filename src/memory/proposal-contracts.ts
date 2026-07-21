@@ -54,8 +54,7 @@ export interface RejectedMemoryProposalCandidate {
 }
 
 export type MemoryProposalSanitization =
-  | SanitizedMemoryProposalCandidate
-  | RejectedMemoryProposalCandidate;
+  SanitizedMemoryProposalCandidate | RejectedMemoryProposalCandidate;
 
 export interface MemoryProposalExtractionRequest {
   readonly workspaceId: WorkspaceId;
@@ -132,6 +131,8 @@ export interface MemoryProposalStorePort {
 }
 
 export interface ProcessMemoryProposalInput extends TerminalMemoryEvidenceRef {
+  /** Host-preloaded evidence avoids duplicate runtime reads and permits lazy model acquisition. */
+  readonly evidence?: UserMemoryEvidence;
   /** Cursor is returned to the worker only after a fully committed success. */
   readonly cursor?: MemoryJobCursor;
   readonly maxAttempts?: number;

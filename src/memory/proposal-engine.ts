@@ -26,7 +26,7 @@ import {
   normalizeMemoryIdentityText,
   sanitizeMemoryProposalCandidate,
 } from "./proposal-sanitizer.js";
-import { detectStableMemorySignal } from "./proposal-signal.js";
+import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const QUARANTINE_PREFIX = "[SAFETY_REVIEW_REQUIRED]";
@@ -34,7 +34,8 @@ const QUARANTINE_PREFIX = "[SAFETY_REVIEW_REQUIRED]";
 export interface MemoryProposalEngineOptions {
   readonly store: MemoryProposalStorePort;
   readonly evidenceReader: MemoryEvidenceReaderPort;
-  readonly model: MemoryProposalModelPort;
+  /** Optional until evidence proves model extraction is required. */
+  readonly model?: MemoryProposalModelPort;
   readonly extractorVersion?: string;
 }
 
@@ -85,7 +86,7 @@ export class MemoryProposalEngine {
     let metrics = emptyMetrics();
     try {
       input.signal?.throwIfAborted();
-      const evidence = await this.options.evidenceReader.read(input);
+      const evidence = input.evidence ?? (await this.options.evidenceReader.read(input));
       const decision = detectStableMemorySignal(evidence.content);
       if (!decision.eligible) {
         const committed = this.options.store.commitExtraction({
@@ -97,30 +98,44 @@ export class MemoryProposalEngine {
         return successResult(committed, job.cursor, 0, 0);
       }
 
-      const extraction = await this.options.model.extract(
-        {
-          workspaceId: this.options.store.workspaceId,
-          evidence,
-          tool: MEMORY_PROPOSAL_TOOL,
-        },
-        input.signal,
-      );
-      metrics = {
-        inputTokens: nonNegativeInteger(extraction.inputTokens),
-        outputTokens: nonNegativeInteger(extraction.outputTokens),
-        costUsd: nonNegativeNumber(extraction.costUsd),
-      };
-      input.signal?.throwIfAborted();
       const activeFacts = this.options.store.listActiveFacts();
-      const parsed = parseMemoryProposalResponse(extraction.response, evidence.eventIds).map(
-        (candidate) =>
+      const deterministic = deriveDeterministicMemoryProposal(evidence.content, evidence.eventIds);
+      let parsed: readonly RawMemoryProposalCandidate[];
+      if (deterministic) {
+        parsed = [
           stabilizeCandidateKind(
-            candidate,
+            deterministic,
             evidence.content,
             decision.signals.includes("correction"),
             activeFacts,
           ),
-      );
+        ];
+      } else {
+        if (!this.options.model) throw new Error("memory_proposal_model_required");
+        const extraction = await this.options.model.extract(
+          {
+            workspaceId: this.options.store.workspaceId,
+            evidence,
+            tool: MEMORY_PROPOSAL_TOOL,
+          },
+          input.signal,
+        );
+        metrics = {
+          inputTokens: nonNegativeInteger(extraction.inputTokens),
+          outputTokens: nonNegativeInteger(extraction.outputTokens),
+          costUsd: nonNegativeNumber(extraction.costUsd),
+        };
+        input.signal?.throwIfAborted();
+        parsed = parseMemoryProposalResponse(extraction.response, evidence.eventIds).map(
+          (candidate) =>
+            stabilizeCandidateKind(
+              candidate,
+              evidence.content,
+              decision.signals.includes("correction"),
+              activeFacts,
+            ),
+        );
+      }
       const prepared = prepareCandidates(
         parsed.map(sanitizeMemoryProposalCandidate),
         activeFacts,
@@ -157,11 +172,16 @@ function stabilizeCandidateKind(
   activeFacts: readonly Fact[],
 ): RawMemoryProposalCandidate {
   const titleKey = normalizeMemoryIdentityText(candidate.title);
-  const updatesExistingKind = activeFacts.some(
+  const existingFact = activeFacts.find(
     (fact) => fact.title !== null && normalizeMemoryIdentityText(fact.title) === titleKey,
   );
-  if (explicitCorrection && !updatesExistingKind && candidate.kind !== "correction") {
-    return { ...candidate, kind: "correction" };
+  if (explicitCorrection) {
+    if (existingFact && candidate.kind !== existingFact.kind) {
+      return { ...candidate, kind: existingFact.kind };
+    }
+    if (!existingFact && candidate.kind !== "correction") {
+      return { ...candidate, kind: "correction" };
+    }
   }
   if (candidate.kind !== "project_fact" || !NAMED_BRANCH_REFERENCE_RE.test(evidence)) {
     return candidate;
