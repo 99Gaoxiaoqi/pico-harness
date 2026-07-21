@@ -223,6 +223,11 @@ export interface JobListOptions {
   readonly statuses?: readonly MemoryJobStatus[];
   readonly type?: string;
   readonly extractorVersion?: string;
+  /** Only return jobs whose retry delay has elapsed (or which have no delay). */
+  readonly readyAt?: string;
+  /** Exclude jobs which have already consumed their configured attempt budget. */
+  readonly attemptsRemaining?: true;
+  readonly order?: "newest" | "oldest";
   readonly limit?: number;
 }
 
@@ -1266,11 +1271,23 @@ export class MemoryRepository {
       clauses.push("extractor_version = ?");
       params.push(requireNonEmpty(options.extractorVersion, "extractorVersion", 128));
     }
+    if (options.readyAt !== undefined) {
+      clauses.push("(next_attempt_at IS NULL OR next_attempt_at <= ?)");
+      params.push(normalizeTimestamp(options.readyAt, "readyAt"));
+    }
+    if (options.attemptsRemaining === true) {
+      clauses.push("attempt_count < max_attempts");
+    }
+    const order = options.order ?? "newest";
+    if (order !== "newest" && order !== "oldest") {
+      throw new Error(`order has unsupported value ${String(order)}`);
+    }
+    const direction = order === "oldest" ? "ASC" : "DESC";
     params.push(normalizeLimit(options.limit));
     const rows = this.db
       .prepare(
         `SELECT * FROM memory_jobs WHERE ${clauses.join(" AND ")}
-         ORDER BY created_at DESC, job_id DESC LIMIT ?`,
+         ORDER BY created_at ${direction}, job_id ${direction} LIMIT ?`,
       )
       .all(...params) as JobRow[];
     return rows.map((row) => mapJob(row, this.workspaceId));
