@@ -447,7 +447,7 @@ test("busy secure-delete forget durably outboxes a body-free notification", asyn
   assert.ok(degraded.includes("notification_delivery_deferred"));
 });
 
-test("context preview matches the first recall policy and reports an 800-token budget", async (context) => {
+test("context preview reuses query-aware recall and reports the 3-fact/320-token hard budget", async (context) => {
   const fixture = await createFixture("preview");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -509,12 +509,13 @@ test("context preview matches the first recall policy and reports an 800-token b
   });
   assert.deepEqual(
     preview.facts.map((fact) => fact.factId),
-    ["pinned", "correction", "project", "reference"],
+    ["pinned", "correction"],
   );
-  assert.equal(preview.budget.maxFacts, 6);
-  assert.equal(preview.budget.maxTokens, 800);
-  assert.equal(preview.budget.usedFacts, 4);
-  assert.equal(preview.budget.truncated, true);
+  assert.equal(preview.budget.maxFacts, 3);
+  assert.equal(preview.budget.maxTokens, 320);
+  assert.equal(preview.budget.usedFacts, 2);
+  assert.ok(preview.budget.usedTokens <= 320);
+  assert.equal(preview.budget.truncated, false);
 });
 
 async function createFixture(name: string): Promise<{
