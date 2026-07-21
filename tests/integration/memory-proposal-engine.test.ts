@@ -33,7 +33,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { Message } from "../../src/schema/message.js";
 import type { RuntimeEventStoreEntry } from "../../src/storage/runtime-event-store.js";
 
-test("proposal engine gates stable preferences and skips one-time requests without a model call", async (context) => {
+test("proposal engine creates explicit proposals locally and skips one-time requests without a model call", async (context) => {
   const fixture = await createFixture("signals");
   context.after(fixture.close);
   const model = new QueueModel([
@@ -56,12 +56,15 @@ test("proposal engine gates stable preferences and skips one-time requests witho
   const preference = await engine.process(runInput("preference", "以后请始终用中文回复"));
   assert.equal(preference.status, "succeeded");
   assert.equal(preference.proposals.length, 1);
-  assert.equal(preference.proposals[0]?.content, "Reply in Chinese");
+  assert.equal(preference.proposals[0]?.content, "以后请始终用中文回复");
+  const sourceId = preference.proposals[0]?.sourceId;
+  assert.ok(sourceId);
+  assert.deepEqual(fixture.repository.getSource(sourceId)?.eventIds, ["user-1"]);
 
   const oneTime = await engine.process(runInput("once", "这次先用英文回复"));
   assert.equal(oneTime.status, "succeeded");
   assert.equal(oneTime.proposals.length, 0);
-  assert.equal(model.calls.length, 1, "one-time request must not call the extractor");
+  assert.equal(model.calls.length, 0, "explicit and one-time requests must not call the extractor");
 });
 
 test("proposal engine deterministically treats a named release branch as a reference", async (context) => {
@@ -96,6 +99,7 @@ test("proposal engine deterministically treats a named release branch as a refer
   );
   assert.equal(command.status, "succeeded");
   assert.equal(command.proposals[0]?.kind, "project_fact");
+  assert.equal(model.calls.length, 0);
 });
 
 test("proposal engine stabilizes a standalone correction without changing an existing fact kind", async (context) => {
@@ -239,7 +243,7 @@ test("proposal safety rejects secrets and injection while quarantining redacted 
   ]);
   const result = await fixture
     .engine(model, new ContentEvidenceReader())
-    .process(runInput("safety", "记住这个项目的稳定配置"));
+    .process(runInput("safety", "记住这个项目的稳定配置，并且保留现有团队约定"));
   assert.equal(result.status, "succeeded");
   assert.equal(result.rejectedCandidates, 5);
   assert.equal(result.quarantinedCandidates, 1);
@@ -275,7 +279,7 @@ test("proposal engine normalizes duplicates and marks active-fact conflicts", as
   ]);
   const result = await fixture
     .engine(model, new ContentEvidenceReader())
-    .process(runInput("conflict", "更正:以后默认用中文回复"));
+    .process(runInput("conflict", "更正:以后默认用中文回复，并且保留技术术语原文"));
   assert.equal(result.status, "succeeded");
   assert.equal(result.proposals.length, 1);
   assert.equal(result.proposals[0]?.kind, "preference");
@@ -294,7 +298,7 @@ test("failed extraction keeps a retryable job and exposes no cursor advance", as
   ]);
   const engine = fixture.engine(model, new ContentEvidenceReader());
   const input = {
-    ...runInput("retry", "以后默认用中文回复"),
+    ...runInput("retry", "以后默认用中文回复，并且保留技术术语原文"),
     cursor: { sessionId: "session-retry", sequence: 42, eventId: "terminal-retry" },
   };
   const failed = await engine.process(input);
@@ -309,6 +313,7 @@ test("failed extraction keeps a retryable job and exposes no cursor advance", as
   assert.equal(retried.job.attemptCount, 2);
   assert.deepEqual(retried.advanceCursorTo, input.cursor);
   assert.equal(retried.proposals.length, 1);
+  assert.equal(model.calls.length, 2, "ambiguous stable evidence must use the model fallback");
 });
 
 test("terminal event and extractor version are idempotent after success", async (context) => {
@@ -327,7 +332,7 @@ test("terminal event and extractor version are idempotent after success", async 
   assert.equal(replay.status, "already_succeeded");
   assert.equal(replay.job.jobId, first.job.jobId);
   assert.equal(replay.proposals.length, 1);
-  assert.equal(model.calls.length, 1);
+  assert.equal(model.calls.length, 0);
   assert.equal(fixture.repository.listJobs({ type: "terminal-extraction" }).length, 1);
   assert.equal(fixture.repository.listProposals().length, 1);
 });
