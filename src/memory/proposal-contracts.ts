@@ -64,6 +64,7 @@ export interface MemoryProposalExtractionRequest {
 
 export interface MemoryProposalExtractionResult {
   readonly response: Message;
+  readonly modelCalls?: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly costUsd?: number;
@@ -104,6 +105,7 @@ export interface CreateMemoryProposalJobInput {
 }
 
 export interface MemoryProposalJobMetrics {
+  readonly modelCalls: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly costUsd: number;
@@ -141,6 +143,8 @@ export interface ProcessMemoryProposalInput extends TerminalMemoryEvidenceRef {
   /** Cursor is returned to the worker only after a fully committed success. */
   readonly cursor?: MemoryJobCursor;
   readonly maxAttempts?: number;
+  /** Eco policy: commit an ambiguous signal as reviewed without acquiring a model. */
+  readonly skipModelReview?: boolean;
   readonly signal?: AbortSignal;
 }
 

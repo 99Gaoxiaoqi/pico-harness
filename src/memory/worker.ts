@@ -27,6 +27,7 @@ import {
 } from "./proposal-parser.js";
 import { RuntimeMemoryEvidenceReader } from "./runtime-evidence-reader.js";
 import { MemoryReviewScheduler } from "./runtime-scheduler.js";
+import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
 import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
 export interface MemoryProposalModelLease {
@@ -169,6 +170,7 @@ export class MemoryReviewWorker {
         const processReview = async (
           review: (typeof pendingModelReviews)[number],
           model?: MemoryProposalModelPort,
+          skipModelReview = false,
         ): Promise<void> => {
           try {
             const engine = new MemoryProposalEngine({
@@ -183,6 +185,7 @@ export class MemoryReviewWorker {
               userMessageEventId: review.evidenceRef.userMessageEventId,
               evidence: review.evidenceRef,
               cursor: review.job.cursor,
+              ...(skipModelReview ? { skipModelReview: true } : {}),
               ...(this.options.signal ? { signal: this.options.signal } : {}),
             });
           } catch (error) {
@@ -208,6 +211,38 @@ export class MemoryReviewWorker {
             const latestSettings = repository.getSettings();
             if (!latestSettings.enabled || !latestSettings.autoPropose) {
               await Promise.all(batch.map((review) => processReview(review)));
+              return;
+            }
+            const budget = evaluateMemoryReviewBudgetForJobs(
+              latestSettings.reviewMode,
+              repository.listJobs({
+                statuses: ["succeeded", "failed"],
+                type: "terminal-extraction",
+                withModelUsage: true,
+                order: "newest",
+                limit: 500,
+              }),
+              this.options.now?.() ?? new Date(),
+            );
+            if (!budget.allowed) {
+              if (budget.reason === "eco-mode") {
+                await Promise.all(batch.map((review) => processReview(review, undefined, true)));
+                return;
+              }
+              const nextAttemptAt =
+                budget.nextRecoveryAt ??
+                new Date((this.options.now?.() ?? new Date()).getTime() + 24 * 60 * 60 * 1_000)
+                  .toISOString();
+              for (const review of batch) {
+                const latest = repository.getJob(review.job.jobId);
+                if (latest?.status !== "queued") continue;
+                repository.updateJob({
+                  jobId: latest.jobId,
+                  expectedVersion: latest.version,
+                  nextAttemptAt,
+                  idempotencyKey: `memory-budget-defer:${latest.jobId}:${latest.version}:${nextAttemptAt}`,
+                });
+              }
               return;
             }
             if (!sharedLease) {
@@ -378,6 +413,7 @@ export class ProviderMemoryProposalModel implements MemoryProposalModelPort {
     }
     return responses.map((itemResponse, index) => ({
       response: itemResponse,
+      modelCalls: index === 0 ? 1 : 0,
       inputTokens: inputShares[index]!,
       outputTokens: outputShares[index]!,
       costUsd: costShares[index]!,

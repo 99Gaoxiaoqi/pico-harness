@@ -11,6 +11,7 @@ export interface MemoryReviewBudget {
 
 export interface MemoryReviewUsageEntry {
   readonly terminalAt: string;
+  readonly modelCalls: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly costUsd: number;
@@ -103,6 +104,7 @@ export function evaluateMemoryReviewBudgetForJobs(
         ? [
             {
               terminalAt: job.terminalAt,
+              modelCalls: job.modelCalls,
               inputTokens: job.inputTokens,
               outputTokens: job.outputTokens,
               costUsd: job.costUsd,
@@ -119,7 +121,7 @@ function summarize(
 ): MemoryReviewUsage {
   return entries.reduce<MemoryReviewUsage>(
     (usage, entry) => ({
-      calls: usage.calls + 1,
+      calls: usage.calls + entry.modelCalls,
       inputTokens: usage.inputTokens + entry.inputTokens,
       outputTokens: usage.outputTokens + entry.outputTokens,
       costUsd: usage.costUsd + entry.costUsd,

@@ -298,7 +298,7 @@ test("memory migration rejects future schemas and rolls back failed initializati
     `CREATE TABLE memory_schema_migrations (
        version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
      );
-     INSERT INTO memory_schema_migrations VALUES (4, 'future_memory', '2026-07-20T00:00:00.000Z');`,
+     INSERT INTO memory_schema_migrations VALUES (5, 'future_memory', '2026-07-20T00:00:00.000Z');`,
   );
   future.close();
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -313,7 +313,7 @@ test("memory migration rejects future schemas and rolls back failed initializati
   const futureInspection = new Database(futurePath, { readonly: true, fileMustExist: true });
   assert.deepEqual(
     futureInspection.prepare("SELECT version, name FROM memory_schema_migrations").all(),
-    [{ version: 4, name: "future_memory" }],
+    [{ version: 5, name: "future_memory" }],
   );
   assert.deepEqual(
     futureInspection
@@ -355,8 +355,9 @@ test("memory migration rejects future schemas and rolls back failed initializati
   }).close();
   const downgradeFixture = new Database(upgradePath);
   downgradeFixture.exec(
-    `DELETE FROM memory_schema_migrations WHERE version = 3;
-     ALTER TABLE memory_settings DROP COLUMN review_mode;`,
+    `DELETE FROM memory_schema_migrations WHERE version >= 3;
+     ALTER TABLE memory_settings DROP COLUMN review_mode;
+     ALTER TABLE memory_jobs DROP COLUMN model_calls;`,
   );
   downgradeFixture.close();
   const upgraded = new MemoryRepository({
@@ -374,7 +375,8 @@ test("memory migration rejects future schemas and rolls back failed initializati
     [
       { version: 1, name: "workspace_memory_foundation" },
       { version: 2, name: "secure_delete_checkpoint_state" },
-      { version: 3, name: MEMORY_SCHEMA_CURRENT_MIGRATION_NAME },
+      { version: 3, name: "workspace_memory_review_mode" },
+      { version: 4, name: MEMORY_SCHEMA_CURRENT_MIGRATION_NAME },
     ],
   );
   upgradeInspection.close();

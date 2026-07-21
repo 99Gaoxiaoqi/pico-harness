@@ -34,6 +34,7 @@ test("memory review modes expose bounded rolling budgets", () => {
 test("balanced review budget aggregates a rolling day and reports exact recovery", () => {
   const entries = Array.from({ length: 8 }, (_, index) => ({
     terminalAt: new Date(now.getTime() - (8 - index) * 60 * 60 * 1_000).toISOString(),
+    modelCalls: 1,
     inputTokens: 1_000,
     outputTokens: 100,
     costUsd: 0.01,
@@ -60,18 +61,26 @@ test("balanced review budget aggregates a rolling day and reports exact recovery
 
 test("job adapter counts only terminal extraction model metrics and stores no bodies", () => {
   const jobs = [
-    job({ jobId: "success", status: "succeeded", inputTokens: 16_000 }),
-    job({ jobId: "failed", status: "failed", inputTokens: 0, outputTokens: 0, costUsd: 0 }),
+    job({ jobId: "success", status: "succeeded", modelCalls: 1, inputTokens: 8_000 }),
+    job({ jobId: "batch-share", status: "succeeded", modelCalls: 0, inputTokens: 8_000 }),
+    job({
+      jobId: "deterministic",
+      status: "succeeded",
+      modelCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+    }),
     job({ jobId: "queued", status: "queued", inputTokens: 50_000 }),
     job({ jobId: "notification", type: "notification.memory.proposed", inputTokens: 50_000 }),
   ];
   const decision = evaluateMemoryReviewBudgetForJobs("balanced", jobs, now);
   assert.equal(decision.allowed, false);
   assert.deepEqual(decision.usage, {
-    calls: 2,
+    calls: 1,
     inputTokens: 16_000,
-    outputTokens: 50,
-    costUsd: 0.01,
+    outputTokens: 100,
+    costUsd: 0.02,
   });
   assert.equal(JSON.stringify(decision).includes("content"), false);
 });
@@ -88,6 +97,7 @@ function job(overrides: Partial<Job> & Pick<Job, "jobId">): Job {
     cursor: { sessionId: "session-1", sequence: 1 },
     attemptCount: 1,
     maxAttempts: 3,
+    modelCalls: 1,
     inputTokens: 100,
     outputTokens: 50,
     costUsd: 0.01,

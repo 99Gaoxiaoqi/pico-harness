@@ -217,6 +217,7 @@ export interface UpdateJobInput extends IdempotentWriteOptions {
   readonly maxAttempts?: number;
   readonly nextAttemptAt?: string | null;
   readonly errorCode?: string | null;
+  readonly modelCalls?: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly costUsd?: number;
@@ -230,6 +231,8 @@ export interface JobListOptions {
   readonly readyAt?: string;
   /** Exclude jobs which have already consumed their configured attempt budget. */
   readonly attemptsRemaining?: true;
+  /** Restrict to jobs carrying actual model-call usage, including zero-call batch shares. */
+  readonly withModelUsage?: true;
   readonly order?: "newest" | "oldest";
   readonly limit?: number;
 }
@@ -327,6 +330,7 @@ interface JobRow {
   readonly max_attempts: number;
   readonly next_attempt_at: string | null;
   readonly error_code: string | null;
+  readonly model_calls: number;
   readonly input_tokens: number;
   readonly output_tokens: number;
   readonly cost_usd: number;
@@ -1223,8 +1227,8 @@ export class MemoryRepository {
             `INSERT INTO memory_jobs(
                job_id, workspace_id, type, status, terminal_event_id, extractor_version,
                cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
-               input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
-             ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, 0, ?, ?, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
+               model_calls, input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
+             ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, 0, ?, ?, NULL, 0, 0, 0, 0, 1, ?, ?, NULL)`,
           )
           .run(
             jobId,
@@ -1284,6 +1288,9 @@ export class MemoryRepository {
     if (options.attemptsRemaining === true) {
       clauses.push("attempt_count < max_attempts");
     }
+    if (options.withModelUsage === true) {
+      clauses.push("(model_calls > 0 OR input_tokens > 0 OR output_tokens > 0 OR cost_usd > 0)");
+    }
     const order = options.order ?? "newest";
     if (order !== "newest" && order !== "oldest") {
       throw new Error(`order has unsupported value ${String(order)}`);
@@ -1324,7 +1331,7 @@ export class MemoryRepository {
           .prepare(
             `UPDATE memory_jobs
              SET status = ?, source_id = ?, attempt_count = ?, max_attempts = ?,
-                 next_attempt_at = ?, error_code = ?, input_tokens = ?, output_tokens = ?,
+                 next_attempt_at = ?, error_code = ?, model_calls = ?, input_tokens = ?, output_tokens = ?,
                  cost_usd = ?, version = version + 1, updated_at = ?, terminal_at = ?
              WHERE workspace_id = ? AND job_id = ? AND version = ?`,
           )
@@ -1339,6 +1346,7 @@ export class MemoryRepository {
             input.errorCode === undefined
               ? (current.errorCode ?? null)
               : normalizeOptionalCode(input.errorCode, "errorCode"),
+            normalizeNonNegativeInteger(input.modelCalls ?? current.modelCalls, "modelCalls"),
             normalizeNonNegativeInteger(input.inputTokens ?? current.inputTokens, "inputTokens"),
             normalizeNonNegativeInteger(input.outputTokens ?? current.outputTokens, "outputTokens"),
             normalizeNonNegativeNumber(input.costUsd ?? current.costUsd, "costUsd"),
@@ -1692,6 +1700,7 @@ const JOB_PATCH_KEYS = [
   "maxAttempts",
   "nextAttemptAt",
   "errorCode",
+  "modelCalls",
   "inputTokens",
   "outputTokens",
   "costUsd",
@@ -1983,6 +1992,7 @@ function mapJob(row: JobRow, workspaceId: WorkspaceId): Job {
     maxAttempts: row.max_attempts,
     ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}),
     ...(row.error_code ? { errorCode: row.error_code } : {}),
+    modelCalls: row.model_calls,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     costUsd: row.cost_usd,
