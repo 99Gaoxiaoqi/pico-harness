@@ -221,7 +221,7 @@ test("proposal notification outbox retries across workers without repeating extr
   };
   const foreground = await executeAgentRuntime(
     {
-      prompt: "请记住：这个项目固定使用 npm run build-memory 进行构建。",
+      prompt: "请记住：这个项目固定使用 npm run build-memory 进行构建，并且延续现有发布约定。",
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-worker-session" },
       provider: "openai",
@@ -404,6 +404,56 @@ test("production adapter publishes a durable body-free memory.proposed notificat
   );
 });
 
+test("explicit single-fact review commits without acquiring a model lease", async (context) => {
+  const fixture = await createFixture("worker-deterministic");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  await executeAgentRuntime(
+    {
+      prompt: "请记住：这个项目固定使用 pnpm 管理依赖。",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId: "memory-deterministic-session" },
+      provider: "openai",
+    },
+    {
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "foreground complete" };
+        },
+      },
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+    },
+  );
+  await waitForImmediate();
+
+  let factoryCalls = 0;
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const worker = new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory: () => {
+      factoryCalls++;
+      return { model: createSuccessfulModel(() => undefined) };
+    },
+  });
+  const results = await worker.drain();
+  assert.equal(results[0]?.status, "succeeded");
+  assert.equal(factoryCalls, 0);
+
+  const repository = openRepository(fixture);
+  const proposal = repository.listProposals({ statuses: ["pending"] })[0];
+  assert.equal(proposal?.content, "这个项目固定使用 pnpm 管理依赖。");
+  const source = proposal?.sourceId ? repository.getSource(proposal.sourceId) : undefined;
+  assert.deepEqual(source?.eventIds, [
+    repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.cursor.eventId,
+  ]);
+  repository.close();
+});
+
 test("supported queued and stale-running reviews are not starved by over 500 unsupported jobs", async (context) => {
   const fixture = await createFixture("worker-recovery");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -515,6 +565,80 @@ test("two workers racing the same queued review have one model call and one prop
   const repository = openRepository(fixture);
   assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status, "succeeded");
   assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 1);
+  repository.close();
+});
+
+test("one drain reuses its model lease and a failed extraction does not advance another job", async (context) => {
+  const fixture = await createFixture("worker-shared-lease");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  await enqueueCompletedReview(fixture, trustStore, "memory-shared-lease-a");
+  await enqueueCompletedReview(fixture, trustStore, "memory-shared-lease-b");
+
+  let factoryCalls = 0;
+  let modelCalls = 0;
+  let disposals = 0;
+  const model: MemoryProposalModelPort = {
+    async extract(request) {
+      modelCalls++;
+      if (modelCalls === 1) return { response: { role: "assistant", content: "invalid" } };
+      return {
+        response: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "memory-shared-lease-call",
+              name: "submit_memory_proposals",
+              arguments: JSON.stringify({
+                proposals: [
+                  {
+                    kind: "project_fact",
+                    title: "Recovery build command",
+                    content: "Use npm run memory-recovery",
+                    reason: "Stable project command",
+                    confidence: 0.99,
+                    evidenceEventIds: [request.evidence.userMessageEventId],
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      };
+    },
+  };
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const worker = new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory: () => {
+      factoryCalls++;
+      return {
+        model,
+        dispose: () => {
+          disposals++;
+        },
+      };
+    },
+  });
+  const results = await worker.drain();
+  assert.equal(factoryCalls, 1);
+  assert.equal(disposals, 1);
+  assert.equal(modelCalls, 2);
+  assert.equal(results.filter((result) => result.status === "retryable_failure").length, 1);
+  assert.equal(results.filter((result) => result.status === "succeeded").length, 1);
+
+  const repository = openRepository(fixture);
+  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+  const succeeded = jobs.find((job) => job.status === "succeeded");
+  const failed = jobs.find((job) => job.status === "failed");
+  assert.ok(succeeded?.sourceId);
+  assert.equal(failed?.sourceId, undefined);
+  assert.deepEqual(repository.getSource(succeeded.sourceId)?.eventIds, [succeeded.cursor.eventId]);
   repository.close();
 });
 
@@ -682,7 +806,7 @@ async function enqueueCompletedReview(
 ): Promise<void> {
   await executeAgentRuntime(
     {
-      prompt: "请记住：这个项目固定使用 npm run memory-recovery 进行构建。",
+      prompt: "请记住：这个项目固定使用 npm run memory-recovery 进行构建，并且延续现有发布约定。",
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId },
       provider: "openai",

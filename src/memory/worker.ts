@@ -19,6 +19,7 @@ import type {
 } from "./proposal-contracts.js";
 import { RuntimeMemoryEvidenceReader } from "./runtime-evidence-reader.js";
 import { MemoryReviewScheduler } from "./runtime-scheduler.js";
+import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
 export interface MemoryProposalModelLease {
   readonly model: MemoryProposalModelPort;
@@ -26,8 +27,7 @@ export interface MemoryProposalModelLease {
 }
 
 export type MemoryProposalModelFactory = () =>
-  | MemoryProposalModelLease
-  | Promise<MemoryProposalModelLease>;
+  MemoryProposalModelLease | Promise<MemoryProposalModelLease>;
 
 export interface MemoryProposalPublishedNotice {
   readonly proposalId: string;
@@ -76,7 +76,9 @@ export class MemoryReviewWorker {
       const jobs = [...scheduler.pending()];
       const results: MemoryProposalProcessResult[] = [];
       const eventStore = new RuntimeEventStore({ databasePath: this.options.runtimeDatabasePath });
+      let sharedLease: MemoryProposalModelLease | undefined;
       try {
+        const evidenceReader = new RuntimeMemoryEvidenceReader(eventStore);
         for (const job of jobs) {
           this.options.signal?.throwIfAborted();
           if (!(await isTrusted(this.options.trustStore, this.options.workDir))) break;
@@ -100,19 +102,29 @@ export class MemoryReviewWorker {
             continue;
           }
 
-          let lease: MemoryProposalModelLease | undefined;
           try {
-            lease = await this.options.modelFactory();
-            const engine = new MemoryProposalEngine({
-              store: new MemoryRepositoryProposalStore(repository),
-              evidenceReader: new RuntimeMemoryEvidenceReader(eventStore),
-              model: lease.model,
-            });
-            const result = await engine.process({
+            const evidenceRef = {
               sessionId: job.cursor.sessionId,
               runId: terminal.event.runId,
               terminalEventId: job.terminalEventId,
               userMessageEventId: job.cursor.eventId,
+            };
+            const evidence = await evidenceReader.read(evidenceRef);
+            const decision = detectStableMemorySignal(evidence.content);
+            const deterministic = decision.eligible
+              ? deriveDeterministicMemoryProposal(evidence.content, evidence.eventIds)
+              : undefined;
+            if (decision.eligible && !deterministic && !sharedLease) {
+              sharedLease = await this.options.modelFactory();
+            }
+            const engine = new MemoryProposalEngine({
+              store: new MemoryRepositoryProposalStore(repository),
+              evidenceReader,
+              ...(sharedLease ? { model: sharedLease.model } : {}),
+            });
+            const result = await engine.process({
+              ...evidenceRef,
+              evidence,
               cursor: job.cursor,
               ...(this.options.signal ? { signal: this.options.signal } : {}),
             });
@@ -128,11 +140,10 @@ export class MemoryReviewWorker {
               { jobId: job.jobId, error: error instanceof Error ? error.message : String(error) },
               "[Memory] review worker degraded",
             );
-          } finally {
-            await lease?.dispose?.();
           }
         }
       } finally {
+        await sharedLease?.dispose?.();
         eventStore.close();
       }
       await deliverProposalNotices(
