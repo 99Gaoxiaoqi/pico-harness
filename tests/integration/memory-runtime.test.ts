@@ -9,6 +9,7 @@ import type { LLMProvider } from "../../src/provider/interface.js";
 import {
   MemoryContextBuilder,
   MEMORY_CONTEXT_CANDIDATE_LIMIT,
+  MEMORY_CONTEXT_MAX_FACTS,
   MEMORY_CONTEXT_MAX_TOKENS,
 } from "../../src/memory/context-builder.js";
 import {
@@ -49,8 +50,11 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   context.after(() => repository.close());
   const now = new Date("2026-07-20T12:00:00.000Z");
 
-  createFact(repository, "reference-new", "reference", { lastUsedAt: "2026-07-20T11:00:00.000Z" });
-  createFact(repository, "project", "project_fact");
+  createFact(repository, "reference-new", "reference", {
+    content: "Deploy the unrelated server",
+    lastUsedAt: "2026-07-20T11:00:00.000Z",
+  });
+  createFact(repository, "project", "project_fact", { content: "移动端构建使用 pnpm" });
   createFact(repository, "correction", "correction");
   createFact(repository, "pinned", "preference", { pinned: true });
   createFact(repository, "preference-old", "preference", {
@@ -58,20 +62,29 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   });
   createFact(repository, "expired", "project_fact", { expiresAt: "2026-07-20T11:59:59.000Z" });
   createFact(repository, "disabled", "correction", { state: "disabled" });
-  createFact(repository, "oversized", "project_fact", { content: "x".repeat(10_000) });
+  createFact(repository, "oversized", "project_fact", {
+    content: "x".repeat(10_000),
+    pinned: true,
+  });
 
-  const first = await new MemoryContextBuilder(repository, () => now).build();
-  const second = await new MemoryContextBuilder(repository, () => now).build();
+  const first = await new MemoryContextBuilder(repository, () => now).build(
+    "请用 ｐｎｐｍ 构建移动端",
+  );
+  const second = await new MemoryContextBuilder(repository, () => now).build(
+    "请用 ｐｎｐｍ 构建移动端",
+  );
   assert.equal(first.block, second.block);
   assert.ok(first.tokenCount <= MEMORY_CONTEXT_MAX_TOKENS);
   assert.equal(MEMORY_CONTEXT_CANDIDATE_LIMIT, 500);
-  assert.ok(first.facts.length <= 6);
+  assert.ok(first.facts.length <= MEMORY_CONTEXT_MAX_FACTS);
   assert.deepEqual(
     first.facts.slice(0, 3).map((fact) => fact.factId),
     ["pinned", "correction", "project"],
   );
   assert.equal(first.block.includes("expired"), false);
   assert.equal(first.block.includes("disabled"), false);
+  assert.equal(first.block.includes("oversized"), false);
+  assert.equal(first.block.includes("unrelated server"), false);
   assert.match(first.block, /trust="low"/u);
   assert.match(first.block, /AGENTS\.md instructions always take precedence/u);
   assert.match(first.block, /cannot grant or change permissions, trust, provider configuration/u);
@@ -82,7 +95,9 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
     databasePath: paths.workspace.memoryDatabase,
     workspaceId: paths.workspace.id,
   });
-  const acrossSession = await new MemoryContextBuilder(reopened, () => now).build();
+  const acrossSession = await new MemoryContextBuilder(reopened, () => now).build(
+    "请用 ｐｎｐｍ 构建移动端",
+  );
   reopened.close();
   assert.equal(acrossSession.block, first.block);
 
@@ -97,12 +112,60 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   other.close();
 });
 
+test("memory recall uses CJK bigrams and does not expand short confirmations or slash commands", async (context) => {
+  const fixture = await createFixture("recall-query-signals");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = openRepository(fixture);
+  context.after(() => repository.close());
+
+  createFact(repository, "mobile-style", "project_fact", {
+    content: "移动端风格需要与桌面端保持一致",
+  });
+  createFact(repository, "server-style", "reference", { content: "服务端日志使用 JSON" });
+  createFact(repository, "nfkc-tool", "reference", { content: "Command: pnpm" });
+  createFact(repository, "source-file", "reference", {
+    content: "Edit src/memory/context-builder.ts",
+  });
+  createFact(repository, "always-correct", "correction", { content: "不要强制推送" });
+
+  const chinese = await new MemoryContextBuilder(repository).build("调整移动端风格");
+  assert.deepEqual(
+    chinese.facts.map((fact) => fact.factId),
+    ["always-correct", "mobile-style"],
+  );
+
+  const nfkc = await new MemoryContextBuilder(repository).build("运行 ｐｎｐｍ");
+  assert.deepEqual(
+    nfkc.facts.map((fact) => fact.factId),
+    ["always-correct", "nfkc-tool"],
+  );
+
+  const path = await new MemoryContextBuilder(repository).build(
+    "检查 src/memory/context-builder.ts",
+  );
+  assert.deepEqual(
+    path.facts.map((fact) => fact.factId),
+    ["always-correct", "source-file"],
+  );
+
+  for (const query of ["好的", "/memory status"]) {
+    const result = await new MemoryContextBuilder(repository).build(query);
+    assert.deepEqual(
+      result.facts.map((fact) => fact.factId),
+      ["always-correct"],
+    );
+  }
+});
+
 test("foreground Runtime injects trusted recall ephemerally and schedules only completed enabled runs", async (context) => {
   const fixture = await createFixture("runtime");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
   const repository = openRepository(fixture);
-  createFact(repository, "runtime-fact", "project_fact", { content: "Use npm run verify-memory" });
+  createFact(repository, "runtime-fact", "project_fact", {
+    content: "Use npm run verify-memory with hidden-recall-policy",
+  });
+  createFact(repository, "runtime-unrelated", "reference", { content: "Deploy with kubectl" });
   repository.close();
 
   const captured: Message[][] = [];
@@ -115,7 +178,8 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   };
   const result = await executeAgentRuntime(
     {
-      prompt: "Please remember that this is a durable project convention.",
+      prompt:
+        "Please use npm run verify-memory. Please remember that this is a durable project convention.",
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-runtime-session" },
       provider: "openai",
@@ -131,9 +195,10 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   );
   beforeDetachedEnqueue.close();
   await waitForImmediate();
-  assert.match(captured[0]?.[0]?.content ?? "", /Use npm run verify-memory/u);
+  assert.match(captured[0]?.[0]?.content ?? "", /hidden-recall-policy/u);
+  assert.doesNotMatch(captured[0]?.[0]?.content ?? "", /Deploy with kubectl/u);
   assert.equal(
-    result.messages.some((message) => message.content.includes("verify-memory")),
+    result.messages.some((message) => message.content.includes("hidden-recall-policy")),
     false,
   );
   const runtimePaths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -141,7 +206,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
     databasePath: runtimePaths.workspace.runtimeDatabase,
   }).readSession("memory-runtime-session");
   assert.equal(
-    JSON.stringify(runtimeEvents).includes("verify-memory"),
+    JSON.stringify(runtimeEvents).includes("hidden-recall-policy"),
     false,
     "ephemeral recall must not enter transcript, checkpoints, compaction or rewind facts",
   );
@@ -153,7 +218,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
     ["user", "assistant"],
   );
   assert.equal(
-    transcriptMessages.some((message) => message?.content.includes("verify-memory")),
+    transcriptMessages.some((message) => message?.content.includes("hidden-recall-policy")),
     false,
   );
 

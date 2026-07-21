@@ -23,6 +23,11 @@ import {
 } from "../memory/memory-repository.js";
 import { sanitizeMemoryProposalCandidate } from "../memory/proposal-sanitizer.js";
 import { MemorySchemaVersionError, MemoryWorkspaceMismatchError } from "../memory/memory-schema.js";
+import {
+  MEMORY_CONTEXT_MAX_FACTS,
+  MEMORY_CONTEXT_MAX_TOKENS,
+  MemoryContextBuilder,
+} from "../memory/context-builder.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 type MemoryNotificationTopic = Extract<RuntimeNotificationTopic, `memory.${string}`>;
@@ -271,30 +276,26 @@ export class DesktopMemoryService {
   ): RuntimeResult<"memory.context.preview"> {
     return this.safely(() => {
       const repository = this.repository(workspacePath);
-      const maxFacts = Math.min(params.maxFacts ?? 6, 6);
-      const maxTokens = Math.min(params.maxTokens ?? 800, 800);
-      const now = this.options.now?.() ?? Date.now();
-      const candidates = repository
-        .listFacts({ states: ["active"], limit: 500 })
-        .filter((fact) => !fact.expiresAt || Date.parse(fact.expiresAt) > now)
-        .toSorted(compareContextFacts);
-      const selected: RuntimeMemoryFact[] = [];
-      let usedTokens = 0;
-      for (const fact of candidates) {
-        if (selected.length >= maxFacts) break;
-        const tokens = conservativeTokenEstimate(fact);
-        if (usedTokens + tokens > maxTokens) continue;
-        selected.push(projectFact(repository, fact));
-        usedTokens += tokens;
-      }
+      const maxFacts = Math.min(
+        params.maxFacts ?? MEMORY_CONTEXT_MAX_FACTS,
+        MEMORY_CONTEXT_MAX_FACTS,
+      );
+      const maxTokens = Math.min(
+        params.maxTokens ?? MEMORY_CONTEXT_MAX_TOKENS,
+        MEMORY_CONTEXT_MAX_TOKENS,
+      );
+      const result = new MemoryContextBuilder(
+        repository,
+        () => new Date(this.options.now?.() ?? Date.now()),
+      ).buildSync(undefined, { maxFacts, maxTokens });
       return {
-        facts: selected,
+        facts: result.facts.map((fact) => projectFact(repository, fact)),
         budget: {
           maxFacts,
           maxTokens,
-          usedFacts: selected.length,
-          usedTokens,
-          truncated: selected.length < candidates.length,
+          usedFacts: result.facts.length,
+          usedTokens: result.tokenCount,
+          truncated: result.truncated,
         },
       };
     });
@@ -695,33 +696,6 @@ function runtimeSource(source: Source): RuntimeMemoryFact["source"] {
     createdAt: source.createdAt,
     updatedAt: source.updatedAt,
   };
-}
-
-function compareContextFacts(left: Fact, right: Fact): number {
-  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
-  const kindDifference = contextKindPriority(left.kind) - contextKindPriority(right.kind);
-  if (kindDifference !== 0) return kindDifference;
-  const lastUsedDifference = timestampValue(right.lastUsedAt) - timestampValue(left.lastUsedAt);
-  if (lastUsedDifference !== 0) return lastUsedDifference;
-  const updatedDifference = timestampValue(right.updatedAt) - timestampValue(left.updatedAt);
-  return updatedDifference !== 0 ? updatedDifference : left.factId.localeCompare(right.factId);
-}
-
-function contextKindPriority(kind: Fact["kind"]): number {
-  if (kind === "correction") return 0;
-  if (kind === "project_fact") return 1;
-  return 2;
-}
-
-function timestampValue(value: string | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/** One Unicode code point per token is intentionally conservative for mixed CJK/source text. */
-function conservativeTokenEstimate(fact: Fact): number {
-  return [...`${fact.title ?? ""}\n${fact.content ?? ""}`].length;
 }
 
 function runtimeProposal(proposal: Proposal): RuntimeMemoryProposal {
