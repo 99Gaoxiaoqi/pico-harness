@@ -257,6 +257,7 @@ export class DesktopMemoryService {
         ...(params.injectionEnabled !== undefined
           ? { injectionEnabled: params.injectionEnabled }
           : {}),
+        ...(params.reviewMode !== undefined ? { reviewMode: params.reviewMode } : {}),
       });
       if (!replay) {
         this.options.publish(workspacePath, "memory.changed", {
@@ -725,6 +726,7 @@ function runtimeSettings(settings: Settings): RuntimeMemorySettings {
     autoPropose: settings.autoPropose,
     autoCommit: settings.autoCommit,
     injectionEnabled: settings.injectionEnabled,
+    reviewMode: settings.reviewMode,
     version: settings.version,
     updatedAt: settings.updatedAt,
   };

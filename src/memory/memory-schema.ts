@@ -4,6 +4,7 @@ import {
   FACT_STATES,
   MEMORY_JOB_STATUSES,
   MEMORY_KINDS,
+  MEMORY_REVIEW_MODES,
   MUTATION_ACTIONS,
   MUTATION_ENTITY_TYPES,
   PROPOSAL_STATUSES,
@@ -11,9 +12,10 @@ import {
   SOURCE_AVAILABILITIES,
 } from "./domain.js";
 
-export const MEMORY_SCHEMA_VERSION = 2;
-export const MEMORY_SCHEMA_CURRENT_MIGRATION_NAME = "secure_delete_checkpoint_state" as const;
+export const MEMORY_SCHEMA_VERSION = 3;
+export const MEMORY_SCHEMA_CURRENT_MIGRATION_NAME = "workspace_memory_review_mode" as const;
 const MEMORY_SCHEMA_V1_MIGRATION_NAME = "workspace_memory_foundation" as const;
+const MEMORY_SCHEMA_V2_MIGRATION_NAME = "secure_delete_checkpoint_state" as const;
 
 export class MemorySchemaVersionError extends Error {
   constructor(message: string) {
@@ -77,7 +79,13 @@ export function migrateMemorySchema(
       db.exec(SCHEMA_V2);
       db.prepare(
         "INSERT INTO memory_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
-      ).run(2, MEMORY_SCHEMA_CURRENT_MIGRATION_NAME, now());
+      ).run(2, MEMORY_SCHEMA_V2_MIGRATION_NAME, now());
+    }
+    if (current < 3) {
+      db.exec(SCHEMA_V3);
+      db.prepare(
+        "INSERT INTO memory_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+      ).run(3, MEMORY_SCHEMA_CURRENT_MIGRATION_NAME, now());
     }
 
     bindWorkspace(db, workspaceId, now);
@@ -111,8 +119,9 @@ function bindWorkspace(db: Database.Database, workspaceId: WorkspaceId, now: () 
     );
     db.prepare(
       `INSERT INTO memory_settings(
-       workspace_id, enabled, auto_propose, auto_commit, injection_enabled, version, updated_at
-       ) VALUES (?, 1, 1, 0, 1, 1, ?)`,
+       workspace_id, enabled, auto_propose, auto_commit, injection_enabled, review_mode,
+       version, updated_at
+       ) VALUES (?, 1, 1, 0, 1, 'balanced', 1, ?)`,
     ).run(workspaceId, now());
   }
   db.prepare(
@@ -124,7 +133,8 @@ function bindWorkspace(db: Database.Database, workspaceId: WorkspaceId, now: () 
 
 function migrationNameForVersion(version: number): string | undefined {
   if (version === 1) return MEMORY_SCHEMA_V1_MIGRATION_NAME;
-  if (version === 2) return MEMORY_SCHEMA_CURRENT_MIGRATION_NAME;
+  if (version === 2) return MEMORY_SCHEMA_V2_MIGRATION_NAME;
+  if (version === 3) return MEMORY_SCHEMA_CURRENT_MIGRATION_NAME;
   return undefined;
 }
 
@@ -301,4 +311,10 @@ const SCHEMA_V2 = `
       (secure_delete_pending = 1 AND requested_at IS NOT NULL)
     )
   );
+`;
+
+const SCHEMA_V3 = `
+  ALTER TABLE memory_settings
+    ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'balanced'
+    CHECK (review_mode IN (${sqlValues(MEMORY_REVIEW_MODES)}));
 `;

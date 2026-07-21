@@ -11,7 +11,11 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import type { RuntimeMemoryFact, RuntimeMemoryProposal } from "@pico/protocol";
+import type {
+  RuntimeMemoryFact,
+  RuntimeMemoryProposal,
+  RuntimeMemorySettings,
+} from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type { RuntimeStore } from "./runtime.js";
 
@@ -226,6 +230,22 @@ export function MemoryPage({
     );
   };
 
+  const updateReviewMode = async (reviewMode: RuntimeMemorySettings["reviewMode"]) => {
+    const settings = memory.settings;
+    if (!settings || settings.reviewMode === reviewMode) return;
+    const updated = await actions.updateMemorySettings(settings.version, { reviewMode });
+    if (!updated) return;
+    announceUndo(
+      {
+        label: "撤销审核模式更改",
+        run: async () => {
+          await actions.updateMemorySettings(updated.version, { reviewMode: settings.reviewMode });
+        },
+      },
+      "自动审核模式已更新，可在 8 秒内撤销。",
+    );
+  };
+
   const permanentlyForget = async (fact: RuntimeMemoryFact) => {
     if (
       typeof window === "undefined" ||
@@ -415,6 +435,7 @@ export function MemoryPage({
         settings={memory.settings}
         busy={Boolean(busy)}
         onChange={(key, value) => void updateSetting(key, value)}
+        onReviewModeChange={(mode) => void updateReviewMode(mode)}
       />
     </section>
   );
@@ -723,6 +744,7 @@ function MemorySettings({
   settings,
   busy,
   onChange,
+  onReviewModeChange,
 }: {
   readonly settings: RuntimeStore["data"]["memory"]["settings"];
   readonly busy: boolean;
@@ -730,6 +752,7 @@ function MemorySettings({
     key: "enabled" | "autoPropose" | "autoCommit" | "injectionEnabled",
     value: boolean,
   ) => void;
+  readonly onReviewModeChange: (mode: RuntimeMemorySettings["reviewMode"]) => void;
 }) {
   if (!settings) return null;
   return (
@@ -749,6 +772,53 @@ function MemorySettings({
           <span>
             <strong>启用记忆</strong>
             <small>关闭后不会产生额外模型调用，也不会向会话注入记忆。</small>
+          </span>
+        </label>
+        <div className="memory-settings__review-mode">
+          <strong>自动审核模式</strong>
+          <p>
+            {settings.autoPropose
+              ? "只控制自动建议的模型预算，不影响记忆总开关或会话注入。"
+              : "自动提出建议已关闭；当前模式暂不生效。"}
+          </p>
+        </div>
+        <label>
+          <input
+            type="radio"
+            name="memory-review-mode"
+            value="eco"
+            checked={settings.reviewMode === "eco"}
+            onChange={() => onReviewModeChange("eco")}
+          />
+          <span>
+            <strong>节能</strong>
+            <small>仅生成规则提案，不调用模型审核模糊表达。</small>
+          </span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="memory-review-mode"
+            value="balanced"
+            checked={settings.reviewMode === "balanced"}
+            onChange={() => onReviewModeChange("balanced")}
+          />
+          <span>
+            <strong>均衡（推荐）</strong>
+            <small>滚动 24 小时内最多 8 次模型审核，兼顾成本与召回。</small>
+          </span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="memory-review-mode"
+            value="quality"
+            checked={settings.reviewMode === "quality"}
+            onChange={() => onReviewModeChange("quality")}
+          />
+          <span>
+            <strong>质量优先</strong>
+            <small>提高模糊表达的召回，滚动 24 小时内最多 16 次模型审核。</small>
           </span>
         </label>
         <label>

@@ -87,11 +87,40 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
     RUNTIME_ERROR_CODES.NOT_FOUND,
   );
   const settings = service.getSettings(fixture.workspace).settings;
+  const quality = service.updateSettings(fixture.workspace, {
+    workspacePath: fixture.workspace,
+    expectedVersion: settings.version,
+    idempotencyKey: "review-mode-quality",
+    reviewMode: "quality",
+  });
+  assert.equal(quality.settings.reviewMode, "quality");
+  assert.equal(quality.settings.enabled, true);
+  assert.equal(quality.settings.injectionEnabled, true);
+  assert.deepEqual(
+    service.updateSettings(fixture.workspace, {
+      workspacePath: fixture.workspace,
+      expectedVersion: settings.version,
+      idempotencyKey: "review-mode-quality",
+      reviewMode: "quality",
+    }),
+    quality,
+  );
+  const proposalOff = service.updateSettings(fixture.workspace, {
+    workspacePath: fixture.workspace,
+    expectedVersion: quality.settings.version,
+    idempotencyKey: "review-mode-eco-proposals-off",
+    autoPropose: false,
+    reviewMode: "eco",
+  });
+  assert.equal(proposalOff.settings.autoPropose, false);
+  assert.equal(proposalOff.settings.reviewMode, "eco");
+  assert.equal(proposalOff.settings.enabled, true);
+  assert.equal(proposalOff.settings.injectionEnabled, true);
   assertRuntimeError(
     () =>
       service.updateSettings(fixture.workspace, {
         workspacePath: fixture.workspace,
-        expectedVersion: settings.version,
+        expectedVersion: proposalOff.settings.version,
         idempotencyKey: "reject-auto-commit",
         autoCommit: true,
       } as never),
