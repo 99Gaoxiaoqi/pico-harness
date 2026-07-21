@@ -1334,7 +1334,8 @@ export class MemoryRepository {
       const rows = this.db
         .prepare(
           `SELECT * FROM memory_jobs
-           WHERE workspace_id = ? AND status = 'queued' AND type = ? AND extractor_version = ?
+           WHERE workspace_id = ? AND status = 'queued' AND error_code IS NULL
+             AND type = ? AND extractor_version = ?
            ORDER BY created_at ASC, job_id ASC`,
         )
         .all(this.workspaceId, type, extractorVersion) as JobRow[];

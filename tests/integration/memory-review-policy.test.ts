@@ -63,6 +63,7 @@ test("job adapter counts only terminal extraction model metrics and stores no bo
   const jobs = [
     job({ jobId: "success", status: "succeeded", modelCalls: 1, inputTokens: 8_000 }),
     job({ jobId: "batch-share", status: "succeeded", modelCalls: 0, inputTokens: 8_000 }),
+    job({ jobId: "rewound-after-call", status: "cancelled" }),
     job({
       jobId: "deterministic",
       status: "succeeded",
@@ -77,10 +78,10 @@ test("job adapter counts only terminal extraction model metrics and stores no bo
   const decision = evaluateMemoryReviewBudgetForJobs("balanced", jobs, now);
   assert.equal(decision.allowed, false);
   assert.deepEqual(decision.usage, {
-    calls: 1,
-    inputTokens: 16_000,
-    outputTokens: 100,
-    costUsd: 0.02,
+    calls: 2,
+    inputTokens: 16_100,
+    outputTokens: 150,
+    costUsd: 0.03,
   });
   assert.equal(JSON.stringify(decision).includes("content"), false);
 });

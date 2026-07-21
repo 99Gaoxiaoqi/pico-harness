@@ -234,16 +234,31 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
   }
 
   markJobFailed(job: Job, errorCode: string, metrics: MemoryProposalJobMetrics): Job {
-    return this.repository.updateJob({
-      jobId: job.jobId,
-      expectedVersion: job.version,
-      status: "failed",
-      errorCode,
-      modelCalls: job.modelCalls + metrics.modelCalls,
-      inputTokens: job.inputTokens + metrics.inputTokens,
-      outputTokens: job.outputTokens + metrics.outputTokens,
-      costUsd: job.costUsd + metrics.costUsd,
-    });
+    try {
+      return this.repository.updateJob({
+        jobId: job.jobId,
+        expectedVersion: job.version,
+        status: "failed",
+        errorCode,
+        modelCalls: job.modelCalls + metrics.modelCalls,
+        inputTokens: job.inputTokens + metrics.inputTokens,
+        outputTokens: job.outputTokens + metrics.outputTokens,
+        costUsd: job.costUsd + metrics.costUsd,
+      });
+    } catch (error) {
+      if (!(error instanceof MemoryConflictError)) throw error;
+      const cancelled = this.repository.getJob(job.jobId);
+      if (!cancelled || cancelled.status !== "cancelled") throw error;
+      return this.repository.updateJob({
+        jobId: cancelled.jobId,
+        expectedVersion: cancelled.version,
+        modelCalls: cancelled.modelCalls + metrics.modelCalls,
+        inputTokens: cancelled.inputTokens + metrics.inputTokens,
+        outputTokens: cancelled.outputTokens + metrics.outputTokens,
+        costUsd: cancelled.costUsd + metrics.costUsd,
+        idempotencyKey: `memory-cancelled-usage:${job.jobId}:${job.attemptCount}`,
+      });
+    }
   }
 
   listActiveFacts(): readonly Fact[] {
