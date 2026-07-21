@@ -12,10 +12,11 @@ import {
   SOURCE_AVAILABILITIES,
 } from "./domain.js";
 
-export const MEMORY_SCHEMA_VERSION = 3;
-export const MEMORY_SCHEMA_CURRENT_MIGRATION_NAME = "workspace_memory_review_mode" as const;
+export const MEMORY_SCHEMA_VERSION = 4;
+export const MEMORY_SCHEMA_CURRENT_MIGRATION_NAME = "memory_model_call_metrics" as const;
 const MEMORY_SCHEMA_V1_MIGRATION_NAME = "workspace_memory_foundation" as const;
 const MEMORY_SCHEMA_V2_MIGRATION_NAME = "secure_delete_checkpoint_state" as const;
+const MEMORY_SCHEMA_V3_MIGRATION_NAME = "workspace_memory_review_mode" as const;
 
 export class MemorySchemaVersionError extends Error {
   constructor(message: string) {
@@ -85,7 +86,13 @@ export function migrateMemorySchema(
       db.exec(SCHEMA_V3);
       db.prepare(
         "INSERT INTO memory_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
-      ).run(3, MEMORY_SCHEMA_CURRENT_MIGRATION_NAME, now());
+      ).run(3, MEMORY_SCHEMA_V3_MIGRATION_NAME, now());
+    }
+    if (current < 4) {
+      db.exec(SCHEMA_V4);
+      db.prepare(
+        "INSERT INTO memory_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+      ).run(4, MEMORY_SCHEMA_CURRENT_MIGRATION_NAME, now());
     }
 
     bindWorkspace(db, workspaceId, now);
@@ -134,7 +141,8 @@ function bindWorkspace(db: Database.Database, workspaceId: WorkspaceId, now: () 
 function migrationNameForVersion(version: number): string | undefined {
   if (version === 1) return MEMORY_SCHEMA_V1_MIGRATION_NAME;
   if (version === 2) return MEMORY_SCHEMA_V2_MIGRATION_NAME;
-  if (version === 3) return MEMORY_SCHEMA_CURRENT_MIGRATION_NAME;
+  if (version === 3) return MEMORY_SCHEMA_V3_MIGRATION_NAME;
+  if (version === 4) return MEMORY_SCHEMA_CURRENT_MIGRATION_NAME;
   return undefined;
 }
 
@@ -317,4 +325,9 @@ const SCHEMA_V3 = `
   ALTER TABLE memory_settings
     ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'balanced'
     CHECK (review_mode IN (${sqlValues(MEMORY_REVIEW_MODES)}));
+`;
+
+const SCHEMA_V4 = `
+  ALTER TABLE memory_jobs
+    ADD COLUMN model_calls INTEGER NOT NULL DEFAULT 0 CHECK (model_calls >= 0);
 `;

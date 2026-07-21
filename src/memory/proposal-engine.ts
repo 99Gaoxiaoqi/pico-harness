@@ -111,6 +111,15 @@ export class MemoryProposalEngine {
           ),
         ];
       } else {
+        if (input.skipModelReview) {
+          const committed = this.options.store.commitExtraction({
+            job,
+            evidence,
+            candidates: [],
+            metrics,
+          });
+          return successResult(committed, job.cursor, 0, 0);
+        }
         if (!this.options.model) throw new Error("memory_proposal_model_required");
         const extraction = await this.options.model.extract(
           {
@@ -121,6 +130,7 @@ export class MemoryProposalEngine {
           input.signal,
         );
         metrics = {
+          modelCalls: nonNegativeInteger(extraction.modelCalls ?? 1),
           inputTokens: nonNegativeInteger(extraction.inputTokens),
           outputTokens: nonNegativeInteger(extraction.outputTokens),
           costUsd: nonNegativeNumber(extraction.costUsd),
@@ -229,6 +239,7 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
       expectedVersion: job.version,
       status: "failed",
       errorCode,
+      modelCalls: metrics.modelCalls,
       inputTokens: metrics.inputTokens,
       outputTokens: metrics.outputTokens,
       costUsd: metrics.costUsd,
@@ -286,6 +297,7 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
         status: "succeeded",
         ...(source ? { sourceId: source.sourceId } : {}),
         errorCode: null,
+        modelCalls: input.metrics.modelCalls,
         inputTokens: input.metrics.inputTokens,
         outputTokens: input.metrics.outputTokens,
         costUsd: input.metrics.costUsd,
@@ -414,7 +426,7 @@ function normalizeErrorCode(value: string): string {
 }
 
 function emptyMetrics(): MemoryProposalJobMetrics {
-  return { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  return { modelCalls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
 }
 
 function nonNegativeInteger(value: number | undefined): number {

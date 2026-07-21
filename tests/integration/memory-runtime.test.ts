@@ -792,6 +792,7 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
   assert.equal(repository.listProposals({ statuses: ["pending"] }).length, 2);
   assert.equal(jobs.reduce((sum, job) => sum + job.inputTokens, 0), 101);
   assert.equal(jobs.reduce((sum, job) => sum + job.outputTokens, 0), 41);
+  assert.equal(jobs.reduce((sum, job) => sum + job.modelCalls, 0), 1);
   const expectedCost = estimateCost(billingRoute, {
     promptTokens: 101,
     completionTokens: 41,
@@ -802,6 +803,97 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
   const failed = jobs.find((job) => job.status === "failed");
   assert.equal(failed?.sourceId, undefined);
   repository.close();
+});
+
+test("eco review mode resolves fuzzy evidence without acquiring a model", async (context) => {
+  const fixture = await createFixture("worker-eco-mode");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  await enqueueCompletedReview(fixture, trustStore, "memory-eco-mode");
+  const repository = openRepository(fixture);
+  const settings = repository.getSettings();
+  repository.updateSettings({
+    expectedVersion: settings.version,
+    reviewMode: "eco",
+    idempotencyKey: "memory-eco-mode",
+  });
+  repository.close();
+
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  let factoryCalls = 0;
+  const results = await new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory: () => {
+      factoryCalls++;
+      return { model: createSuccessfulModel(() => undefined) };
+    },
+  }).drain();
+
+  assert.equal(factoryCalls, 0);
+  assert.equal(results.filter((result) => result.status === "succeeded").length, 1);
+  const inspection = openRepository(fixture);
+  const job = inspection.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0];
+  assert.equal(job?.status, "succeeded");
+  assert.equal(job?.modelCalls, 0);
+  assert.equal(inspection.listProposals({ statuses: ["pending"] }).length, 0);
+  inspection.close();
+});
+
+test("exhausted workspace review budget defers fuzzy jobs without consuming an attempt", async (context) => {
+  const fixture = await createFixture("worker-review-budget");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  await enqueueCompletedReview(fixture, trustStore, "memory-review-budget");
+  const repository = openRepository(fixture);
+  for (let index = 0; index < 8; index++) {
+    const historical = repository.createJob({
+      type: MEMORY_PROPOSAL_JOB_TYPE,
+      terminalEventId: `memory-budget-history-${index}`,
+      extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+      cursor: { sessionId: "memory-budget-history", sequence: index + 1 },
+      idempotencyKey: `memory-budget-history-create-${index}`,
+    });
+    repository.updateJob({
+      jobId: historical.jobId,
+      expectedVersion: historical.version,
+      status: "succeeded",
+      modelCalls: 1,
+      inputTokens: 100,
+      outputTokens: 10,
+      costUsd: 0.001,
+      idempotencyKey: `memory-budget-history-finish-${index}`,
+    });
+  }
+  repository.close();
+
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  let factoryCalls = 0;
+  const results = await new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory: () => {
+      factoryCalls++;
+      return { model: createSuccessfulModel(() => undefined) };
+    },
+  }).drain();
+
+  assert.equal(factoryCalls, 0);
+  assert.deepEqual(results, []);
+  const inspection = openRepository(fixture);
+  const pending = inspection
+    .listJobs({ statuses: ["queued"], type: MEMORY_PROPOSAL_JOB_TYPE })
+    .find((job) => job.cursor.sessionId === "memory-review-budget");
+  assert.ok(pending?.nextAttemptAt);
+  assert.equal(pending.attemptCount, 0);
+  assert.equal(pending.modelCalls, 0);
+  inspection.close();
 });
 
 test("/memory command uses trust, sanitizer, idempotency, CAS and executable undo", async (context) => {

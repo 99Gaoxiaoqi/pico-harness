@@ -145,6 +145,8 @@ export interface Job {
   readonly maxAttempts: number;
   readonly nextAttemptAt?: string;
   readonly errorCode?: string;
+  /** Actual provider calls attributed to this job; a microbatch records one call only once. */
+  readonly modelCalls: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly costUsd: number;
