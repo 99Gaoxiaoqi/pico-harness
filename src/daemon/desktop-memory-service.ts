@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   RuntimeMemoryFact,
   RuntimeMemoryProposal,
+  RuntimeMemoryReviewBudget,
   RuntimeMemorySettings,
   RuntimeNotificationMap,
   RuntimeNotificationTopic,
@@ -28,6 +29,7 @@ import {
   MEMORY_CONTEXT_MAX_TOKENS,
   MemoryContextBuilder,
 } from "../memory/context-builder.js";
+import { evaluateMemoryReviewBudgetForJobs } from "../memory/memory-review-policy.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 type MemoryNotificationTopic = Extract<RuntimeNotificationTopic, `memory.${string}`>;
@@ -225,9 +227,18 @@ export class DesktopMemoryService {
   }
 
   getSettings(workspacePath: string): RuntimeResult<"memory.settings.get"> {
-    return this.safely(() => ({
-      settings: runtimeSettings(this.repository(workspacePath).getSettings()),
-    }));
+    return this.safely(() => {
+      const repository = this.repository(workspacePath);
+      const settings = repository.getSettings();
+      return {
+        settings: runtimeSettings(settings),
+        reviewBudget: runtimeReviewBudget(
+          settings,
+          repository,
+          new Date(this.options.now?.() ?? Date.now()),
+        ),
+      };
+    });
   }
 
   updateSettings(
@@ -267,7 +278,14 @@ export class DesktopMemoryService {
           change: "updated",
         });
       }
-      return { settings: runtimeSettings(settings) };
+      return {
+        settings: runtimeSettings(settings),
+        reviewBudget: runtimeReviewBudget(
+          settings,
+          repository,
+          new Date(this.options.now?.() ?? Date.now()),
+        ),
+      };
     });
   }
 
@@ -729,6 +747,37 @@ function runtimeSettings(settings: Settings): RuntimeMemorySettings {
     reviewMode: settings.reviewMode,
     version: settings.version,
     updatedAt: settings.updatedAt,
+  };
+}
+
+function runtimeReviewBudget(
+  settings: Settings,
+  repository: MemoryRepository,
+  now: Date,
+): RuntimeMemoryReviewBudget {
+  const decision = evaluateMemoryReviewBudgetForJobs(
+    settings.reviewMode,
+    repository.listJobs({
+      type: "terminal-extraction",
+      statuses: ["succeeded", "failed"],
+      withModelUsage: true,
+      limit: 500,
+    }),
+    now,
+  );
+  return {
+    mode: decision.mode,
+    allowed: decision.allowed,
+    reason: decision.reason ?? "available",
+    calls: decision.usage.calls,
+    inputTokens: decision.usage.inputTokens,
+    outputTokens: decision.usage.outputTokens,
+    costUsd: decision.usage.costUsd,
+    maxCalls: decision.budget.maxCalls,
+    maxInputTokens: decision.budget.maxInputTokens,
+    maxOutputTokens: decision.budget.maxOutputTokens,
+    maxCostUsd: decision.budget.maxCostUsd,
+    ...(decision.nextRecoveryAt ? { nextRecoveryAt: decision.nextRecoveryAt } : {}),
   };
 }
 

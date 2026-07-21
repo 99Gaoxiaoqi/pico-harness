@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 4;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v4";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 5;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v5";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
 
@@ -82,6 +82,21 @@ export type RuntimeMemorySettings = JsonObject & {
   readonly reviewMode: "eco" | "balanced" | "quality";
   readonly version: number;
   readonly updatedAt: string;
+};
+
+export type RuntimeMemoryReviewBudget = JsonObject & {
+  readonly mode: RuntimeMemorySettings["reviewMode"];
+  readonly allowed: boolean;
+  readonly reason: "available" | "eco-mode" | "budget-exhausted";
+  readonly calls: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly costUsd: number;
+  readonly maxCalls: number;
+  readonly maxInputTokens: number;
+  readonly maxOutputTokens: number;
+  readonly maxCostUsd: number;
+  readonly nextRecoveryAt?: string;
 };
 
 export type RuntimeMemoryContextBudget = JsonObject & {
@@ -725,7 +740,10 @@ export type RuntimeMethodMap = {
   };
   readonly "memory.settings.get": {
     readonly params: WorkspaceParams;
-    readonly result: { readonly settings: RuntimeMemorySettings };
+    readonly result: {
+      readonly settings: RuntimeMemorySettings;
+      readonly reviewBudget: RuntimeMemoryReviewBudget;
+    };
   };
   readonly "memory.settings.update": {
     readonly params: WorkspaceParams & {
@@ -737,7 +755,10 @@ export type RuntimeMethodMap = {
       readonly injectionEnabled?: boolean;
       readonly reviewMode?: "eco" | "balanced" | "quality";
     };
-    readonly result: { readonly settings: RuntimeMemorySettings };
+    readonly result: {
+      readonly settings: RuntimeMemorySettings;
+      readonly reviewBudget: RuntimeMemoryReviewBudget;
+    };
   };
   readonly "memory.context.preview": {
     readonly params: WorkspaceParams & {
@@ -2276,6 +2297,14 @@ const resultFiniteNumber: RuntimeResultRule = (value, path) => {
     throw invalidResult(`${path} 必须是有限数字`);
   }
 };
+const resultNonNegativeNumber: RuntimeResultRule = (value, path) => {
+  resultFiniteNumber(value, path);
+  if ((value as number) < 0) throw invalidResult(`${path} 不能为负数`);
+};
+const resultNonNegativeInteger: RuntimeResultRule = (value, path) => {
+  resultNonNegativeNumber(value, path);
+  if (!Number.isSafeInteger(value)) throw invalidResult(`${path} 必须是安全整数`);
+};
 const resultJsonObject: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 JSON 对象`);
 };
@@ -2406,6 +2435,23 @@ const memorySettingsResult = exactResultShape({
   version: resultFiniteNumber,
   updatedAt: resultString,
 });
+
+const memoryReviewBudgetResult = exactResultShape(
+  {
+    mode: resultOneOf(["eco", "balanced", "quality"]),
+    allowed: resultBoolean,
+    reason: resultOneOf(["available", "eco-mode", "budget-exhausted"]),
+    calls: resultNonNegativeInteger,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    costUsd: resultNonNegativeNumber,
+    maxCalls: resultNonNegativeInteger,
+    maxInputTokens: resultNonNegativeInteger,
+    maxOutputTokens: resultNonNegativeInteger,
+    maxCostUsd: resultNonNegativeNumber,
+  },
+  { nextRecoveryAt: resultString },
+);
 
 const runtimeSessionResult = resultShape({
   sessionId: resultString,
@@ -2635,8 +2681,14 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     { proposal: memoryProposalResult },
     { fact: memoryFactResult },
   ),
-  "memory.settings.get": exactResultShape({ settings: memorySettingsResult }),
-  "memory.settings.update": exactResultShape({ settings: memorySettingsResult }),
+  "memory.settings.get": exactResultShape({
+    settings: memorySettingsResult,
+    reviewBudget: memoryReviewBudgetResult,
+  }),
+  "memory.settings.update": exactResultShape({
+    settings: memorySettingsResult,
+    reviewBudget: memoryReviewBudgetResult,
+  }),
   "memory.context.preview": exactResultShape({
     facts: resultArray(memoryFactResult),
     budget: exactResultShape({

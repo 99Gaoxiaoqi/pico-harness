@@ -157,6 +157,58 @@ test("memory results reject undeclared storage fields", () => {
   );
 });
 
+test("memory settings results strictly validate the rolling review budget", () => {
+  const settings = {
+    enabled: true,
+    autoPropose: true,
+    autoCommit: false,
+    injectionEnabled: true,
+    reviewMode: "balanced",
+    version: 1,
+    updatedAt: "2026-07-22T00:00:00.000Z",
+  } as const;
+  const reviewBudget = {
+    mode: "balanced",
+    allowed: false,
+    reason: "budget-exhausted",
+    calls: 8,
+    inputTokens: 12_000,
+    outputTokens: 1_000,
+    costUsd: 0.08,
+    maxCalls: 8,
+    maxInputTokens: 16_000,
+    maxOutputTokens: 2_000,
+    maxCostUsd: 0.1,
+    nextRecoveryAt: "2026-07-22T02:00:00.000Z",
+  } as const;
+  for (const method of ["memory.settings.get", "memory.settings.update"] as const) {
+    assert.deepEqual(parseDesktopRuntimeResult(method, { settings, reviewBudget }), {
+      settings,
+      reviewBudget,
+    });
+    assertProtocolError(
+      () => parseDesktopRuntimeResult(method, { settings }),
+      RUNTIME_ERROR_CODES.INVALID_REQUEST,
+    );
+    assertProtocolError(
+      () =>
+        parseDesktopRuntimeResult(method, {
+          settings,
+          reviewBudget: { ...reviewBudget, calls: -1 },
+        }),
+      RUNTIME_ERROR_CODES.INVALID_REQUEST,
+    );
+    assertProtocolError(
+      () =>
+        parseDesktopRuntimeResult(method, {
+          settings,
+          reviewBudget: { ...reviewBudget, databasePath: "/private/memory.sqlite" },
+        }),
+      RUNTIME_ERROR_CODES.INVALID_REQUEST,
+    );
+  }
+});
+
 test("durable memory notifications accept metadata and reject bodies or evidence", () => {
   const valid = createRuntimeNotification({
     topic: "memory.changed",

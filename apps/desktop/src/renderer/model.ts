@@ -2,6 +2,7 @@ import type { ConversationItemView } from "./conversation/types.js";
 import type {
   RuntimeMemoryFact,
   RuntimeMemoryProposal,
+  RuntimeMemoryReviewBudget,
   RuntimeMemorySettings,
 } from "@pico/protocol";
 
@@ -238,6 +239,7 @@ export interface MemoryView {
   readonly facts: readonly RuntimeMemoryFact[];
   readonly proposals: readonly RuntimeMemoryProposal[];
   readonly settings?: RuntimeMemorySettings | undefined;
+  readonly reviewBudget?: RuntimeMemoryReviewBudget | undefined;
   readonly status: "idle" | "loading" | "ready" | "degraded" | "error";
   readonly error?: string | undefined;
 }

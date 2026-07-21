@@ -3,6 +3,7 @@ import type { SlashCommand } from "../input/types.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import { MemoryRepository } from "./memory-repository.js";
+import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
 import { sanitizeMemoryProposalCandidate } from "./proposal-sanitizer.js";
 
 export interface MemoryCommandOptions {
@@ -96,6 +97,15 @@ function remember(repository: MemoryRepository, raw: string) {
 
 function status(repository: MemoryRepository) {
   const settings = repository.getSettings();
+  const reviewBudget = evaluateMemoryReviewBudgetForJobs(
+    settings.reviewMode,
+    repository.listJobs({
+      type: "terminal-extraction",
+      statuses: ["succeeded", "failed"],
+      withModelUsage: true,
+      limit: 500,
+    }),
+  );
   const activeFacts = repository.listFacts({ states: ["active"], limit: 500 }).length;
   const pendingProposals = repository.listProposals({ statuses: ["pending"], limit: 500 }).length;
   const pendingJobs = repository.listJobs({
@@ -106,6 +116,14 @@ function status(repository: MemoryRepository) {
     [
       `Memory: ${settings.enabled ? "on" : "off"}`,
       `Injection: ${settings.injectionEnabled ? "on" : "off"}`,
+      `Review mode: ${settings.reviewMode}`,
+      reviewBudget.reason === "eco-mode"
+        ? "Review budget (rolling 24h): Eco mode guarantees zero model review calls."
+        : `Review budget (rolling 24h): ${reviewBudget.allowed ? "available" : "exhausted"}`,
+      `Review usage: ${reviewBudget.usage.calls}/${reviewBudget.budget.maxCalls} calls, ${reviewBudget.usage.inputTokens}/${reviewBudget.budget.maxInputTokens} input tokens, ${reviewBudget.usage.outputTokens}/${reviewBudget.budget.maxOutputTokens} output tokens, $${reviewBudget.usage.costUsd.toFixed(4)}/$${reviewBudget.budget.maxCostUsd.toFixed(4)}`,
+      ...(reviewBudget.nextRecoveryAt
+        ? [`Review budget recovers at: ${reviewBudget.nextRecoveryAt}`]
+        : []),
       `Active facts: ${activeFacts}`,
       `Pending proposals: ${pendingProposals}`,
       `Review jobs: ${pendingJobs}`,

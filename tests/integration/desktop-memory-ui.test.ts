@@ -73,8 +73,9 @@ test("narrow memory layout exposes keyboard-operated ARIA tabs", () => {
 });
 
 test("memory settings explain off behavior and keep auto approval locked", () => {
+  const runtime = previewRuntime();
   const html = renderToStaticMarkup(
-    React.createElement(MemoryPage, { runtime: previewRuntime(), forceNarrow: false }),
+    React.createElement(MemoryPage, { runtime, forceNarrow: false }),
   );
   assert.match(html, /关闭后不会产生额外模型调用，也不会向会话注入记忆/);
   assert.match(html, /固定关闭，普通用户无法启用/);
@@ -83,9 +84,40 @@ test("memory settings explain off behavior and keep auto approval locked", () =>
   assert.match(html, /均衡（推荐）/);
   assert.match(html, /质量优先/);
   assert.match(html, /提高模糊表达的召回/);
+  assert.match(html, /当前用量/);
+  assert.match(html, /滚动 24 小时模型审核预算已耗尽/);
+  assert.match(html, /调用 8\/8/);
+  assert.match(html, /12,640\/16,000 tokens/);
+  assert.match(html, /\$0\.0840\/\$0\.1000/);
   assert.match(html, /type="checkbox" disabled=""/);
 
-  const runtime = previewRuntime();
+  const ecoRuntime: RuntimeStore = {
+    ...runtime,
+    data: {
+      ...runtime.data,
+      memory: {
+        ...runtime.data.memory,
+        settings: { ...runtime.data.memory.settings!, reviewMode: "eco" },
+        reviewBudget: {
+          ...runtime.data.memory.reviewBudget!,
+          mode: "eco",
+          allowed: false,
+          reason: "eco-mode",
+          maxCalls: 0,
+          maxInputTokens: 0,
+          maxOutputTokens: 0,
+          maxCostUsd: 0,
+        },
+      },
+    },
+  };
+  assert.match(
+    renderToStaticMarkup(
+      React.createElement(MemoryPage, { runtime: ecoRuntime, forceNarrow: false }),
+    ),
+    /节能模式保证后台模型审核调用为 0/,
+  );
+
   const unexpectedAutoCommit: RuntimeStore = {
     ...runtime,
     data: {
