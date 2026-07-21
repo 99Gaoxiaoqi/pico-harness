@@ -9,10 +9,35 @@ import {
   MEMORY_PROPOSAL_JOB_TYPE,
 } from "../../src/memory/proposal-contracts.js";
 import {
+  MEMORY_REVIEW_DEBOUNCE_MS,
   MEMORY_REVIEW_PENDING_LIMIT,
   MemoryReviewScheduler,
 } from "../../src/memory/runtime-scheduler.js";
 import { resolvePicoPaths, type WorkspaceId } from "../../src/paths/pico-paths.js";
+
+test("memory review enqueue applies the durable workspace debounce", async (context) => {
+  const fixture = await createFixture("enqueue-debounce");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  let now = new Date("2026-07-22T00:00:00.000Z");
+  const repository = new MemoryRepository({
+    databasePath: fixture.databasePath,
+    workspaceId: fixture.workspaceId,
+    now: () => now,
+  });
+  context.after(() => repository.close());
+  const scheduler = new MemoryReviewScheduler(repository, { now: () => now });
+  scheduler.enqueue({
+    sessionId: "debounce-session",
+    runId: "debounce-run",
+    terminalEventId: "debounce-terminal",
+    userMessageEventId: "debounce-user",
+  });
+  assert.deepEqual(scheduler.pending(), []);
+  now = new Date(now.getTime() + MEMORY_REVIEW_DEBOUNCE_MS - 1);
+  assert.deepEqual(scheduler.pending(), []);
+  now = new Date(now.getTime() + 1);
+  assert.equal(scheduler.pending()[0]?.terminalEventId, "debounce-terminal");
+});
 
 test("memory review scheduling is due-aware, oldest-first and type isolated", async (context) => {
   const fixture = await createFixture("due-order");
