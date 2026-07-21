@@ -812,7 +812,7 @@ export async function executeAgentRuntime(
         try {
           const canonical = await memoryTrustStore.canonicalize(workDir);
           if (await memoryTrustStore.isTrusted(canonical)) {
-            const memory = await memoryContextBuilder.build();
+            const memory = await memoryContextBuilder.build(prompt);
             if (memory.block) withMemory = `${composed}\n\n${memory.block}`;
           }
         } catch (error) {
