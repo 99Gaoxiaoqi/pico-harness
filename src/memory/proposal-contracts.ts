@@ -54,7 +54,8 @@ export interface RejectedMemoryProposalCandidate {
 }
 
 export type MemoryProposalSanitization =
-  SanitizedMemoryProposalCandidate | RejectedMemoryProposalCandidate;
+  | SanitizedMemoryProposalCandidate
+  | RejectedMemoryProposalCandidate;
 
 export interface MemoryProposalExtractionRequest {
   readonly workspaceId: WorkspaceId;

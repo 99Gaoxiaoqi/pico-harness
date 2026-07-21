@@ -26,10 +26,7 @@ import {
   splitMemoryProposalBatchResponse,
 } from "./proposal-parser.js";
 import { RuntimeMemoryEvidenceReader } from "./runtime-evidence-reader.js";
-import {
-  MEMORY_REVIEW_DEBOUNCE_MS,
-  MemoryReviewScheduler,
-} from "./runtime-scheduler.js";
+import { MEMORY_REVIEW_DEBOUNCE_MS, MemoryReviewScheduler } from "./runtime-scheduler.js";
 import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
 import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
@@ -39,7 +36,8 @@ export interface MemoryProposalModelLease {
 }
 
 export type MemoryProposalModelFactory = () =>
-  MemoryProposalModelLease | Promise<MemoryProposalModelLease>;
+  | MemoryProposalModelLease
+  | Promise<MemoryProposalModelLease>;
 
 export interface MemoryProposalPublishedNotice {
   readonly proposalId: string;
@@ -241,8 +239,9 @@ export class MemoryReviewWorker {
               }
               const nextAttemptAt =
                 budget.nextRecoveryAt ??
-                new Date((this.options.now?.() ?? new Date()).getTime() + 24 * 60 * 60 * 1_000)
-                  .toISOString();
+                new Date(
+                  (this.options.now?.() ?? new Date()).getTime() + 24 * 60 * 60 * 1_000,
+                ).toISOString();
               for (const review of batch) {
                 const latest = repository.getJob(review.job.jobId);
                 if (latest?.status !== "queued") continue;
@@ -453,9 +452,7 @@ export class ProviderMemoryProposalModel implements MemoryProposalModelPort {
 }
 
 function nonNegativeUsage(value: number | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
-    : 0;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 function allocateInteger(total: number, weights: readonly number[]): number[] {

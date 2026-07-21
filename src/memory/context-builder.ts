@@ -219,9 +219,7 @@ function commandIntentScore(query: QuerySignals, fact: QuerySignals): number {
     hasAny(query.tokens, ["build", "command", "script"]) ||
     hasAny(query.cjkBigrams, ["构建", "命令", "脚本"]);
   if (!asksForCommand) return 0;
-  return hasAny(fact.tokens, ["npm", "pnpm", "yarn", "bun", "make", "gradle", "command"])
-    ? 6
-    : 0;
+  return hasAny(fact.tokens, ["npm", "pnpm", "yarn", "bun", "make", "gradle", "command"]) ? 6 : 0;
 }
 
 function hasAny(values: ReadonlySet<string>, candidates: readonly string[]): boolean {
