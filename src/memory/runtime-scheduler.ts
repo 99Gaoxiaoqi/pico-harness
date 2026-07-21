@@ -10,6 +10,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 export const MEMORY_REVIEW_LEASE_TTL_MS = 15 * 60 * 1_000;
 export const MEMORY_REVIEW_PENDING_LIMIT = 500;
 export const MEMORY_REVIEW_DEBOUNCE_MS = 60_000;
+export const MEMORY_REVIEW_MAX_WAIT_MS = 10 * 60_000;
 
 export interface MemoryReviewSchedulerOptions {
   readonly now?: () => Date;
@@ -29,7 +30,7 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   constructor(
     private readonly repository: Pick<
       MemoryRepository,
-      "createJob" | "listJobs" | "getSettings" | "updateJob"
+      "createJob" | "listJobs" | "getSettings" | "rescheduleQueuedJobs" | "updateJob"
     >,
     private readonly options: MemoryReviewSchedulerOptions = {},
   ) {}
@@ -50,10 +51,22 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
       type: MEMORY_PROPOSAL_JOB_TYPE,
       terminalEventId: ref.terminalEventId,
       extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
-      cursor: { sessionId: ref.sessionId, eventId: ref.userMessageEventId },
+      cursor: {
+        sessionId: ref.sessionId,
+        eventId: ref.userMessageEventId,
+        ...(ref.terminalSequence !== undefined ? { sequence: ref.terminalSequence } : {}),
+      },
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
       ...(nextAttemptAt ? { nextAttemptAt } : {}),
       idempotencyKey: `memory-review:${ref.terminalEventId}:${ref.userMessageEventId}`,
+    });
+    if (!nextAttemptAt) return;
+    this.repository.rescheduleQueuedJobs({
+      type: MEMORY_PROPOSAL_JOB_TYPE,
+      extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+      requestedAt: nextAttemptAt,
+      maxWaitMs: MEMORY_REVIEW_MAX_WAIT_MS,
+      idempotencyKeyPrefix: `memory-review-debounce:${ref.terminalEventId}`,
     });
   }
 
@@ -110,7 +123,15 @@ function normalizeRef(input: TerminalMemoryEvidenceRef): TerminalMemoryEvidenceR
     runId: requireText(input.runId, "runId"),
     terminalEventId: requireText(input.terminalEventId, "terminalEventId"),
     userMessageEventId: requireText(input.userMessageEventId, "userMessageEventId"),
+    ...(input.terminalSequence !== undefined
+      ? { terminalSequence: requireSequence(input.terminalSequence) }
+      : {}),
   };
+}
+
+function requireSequence(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid terminalSequence");
+  return value;
 }
 
 function requireText(value: string, field: string): string {

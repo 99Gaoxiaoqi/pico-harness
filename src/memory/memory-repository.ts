@@ -237,6 +237,23 @@ export interface JobListOptions {
   readonly limit?: number;
 }
 
+export interface RescheduleQueuedJobsInput {
+  readonly type: string;
+  readonly extractorVersion: string;
+  readonly requestedAt: string;
+  readonly maxWaitMs: number;
+  readonly idempotencyKeyPrefix: string;
+}
+
+export interface CancelSessionJobsInput {
+  readonly sessionId: string;
+  readonly type: string;
+  readonly extractorVersion: string;
+  readonly afterSequence?: number;
+  readonly errorCode: string;
+  readonly idempotencyKeyPrefix: string;
+}
+
 interface SettingsRow {
   readonly workspace_id: string;
   readonly enabled: number;
@@ -1304,6 +1321,82 @@ export class MemoryRepository {
       )
       .all(...params) as JobRow[];
     return rows.map((row) => mapJob(row, this.workspaceId));
+  }
+
+  rescheduleQueuedJobs(input: RescheduleQueuedJobsInput): number {
+    const type = requireNonEmpty(input.type, "type", 128);
+    const extractorVersion = requireNonEmpty(input.extractorVersion, "extractorVersion", 128);
+    const requestedAt = normalizeTimestamp(input.requestedAt, "requestedAt");
+    const requestedTime = Date.parse(requestedAt);
+    const maxWaitMs = normalizePositiveInteger(input.maxWaitMs, "maxWaitMs");
+    const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
+    return this.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memory_jobs
+           WHERE workspace_id = ? AND status = 'queued' AND type = ? AND extractor_version = ?
+           ORDER BY created_at ASC, job_id ASC`,
+        )
+        .all(this.workspaceId, type, extractorVersion) as JobRow[];
+      let changed = 0;
+      for (const row of rows) {
+        const job = mapJob(row, this.workspaceId);
+        const deadline = new Date(
+          Math.min(requestedTime, Date.parse(job.createdAt) + maxWaitMs),
+        ).toISOString();
+        if (job.nextAttemptAt === deadline) continue;
+        this.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          nextAttemptAt: deadline,
+          idempotencyKey: `${prefix}:${job.jobId}:${job.version}:${deadline}`,
+        });
+        changed++;
+      }
+      return changed;
+    });
+  }
+
+  cancelSessionJobs(input: CancelSessionJobsInput): number {
+    const sessionId = requireNonEmpty(input.sessionId, "sessionId", MAX_ID_LENGTH);
+    const type = requireNonEmpty(input.type, "type", 128);
+    const extractorVersion = requireNonEmpty(input.extractorVersion, "extractorVersion", 128);
+    const afterSequence = normalizeOptionalNonNegativeInteger(input.afterSequence, "afterSequence");
+    const errorCode = normalizeOptionalCode(input.errorCode, "errorCode");
+    if (!errorCode) throw new Error("errorCode is required");
+    const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
+    return this.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memory_jobs
+           WHERE workspace_id = ? AND status IN ('queued', 'running', 'failed')
+             AND type = ? AND extractor_version = ?
+             AND json_extract(cursor_json, '$.sessionId') = ?
+           ORDER BY created_at ASC, job_id ASC`,
+        )
+        .all(this.workspaceId, type, extractorVersion, sessionId) as JobRow[];
+      let changed = 0;
+      for (const row of rows) {
+        const job = mapJob(row, this.workspaceId);
+        if (
+          afterSequence !== undefined &&
+          job.cursor.sequence !== undefined &&
+          job.cursor.sequence <= afterSequence
+        ) {
+          continue;
+        }
+        this.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          status: "cancelled",
+          nextAttemptAt: null,
+          errorCode,
+          idempotencyKey: `${prefix}:${job.jobId}:${job.version}`,
+        });
+        changed++;
+      }
+      return changed;
+    });
   }
 
   updateJob(input: UpdateJobInput): Job {

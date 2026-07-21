@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Fact, Job, Proposal } from "./domain.js";
-import { MemoryRepository } from "./memory-repository.js";
+import { MemoryConflictError, MemoryRepository } from "./memory-repository.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -239,10 +239,10 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
       expectedVersion: job.version,
       status: "failed",
       errorCode,
-      modelCalls: metrics.modelCalls,
-      inputTokens: metrics.inputTokens,
-      outputTokens: metrics.outputTokens,
-      costUsd: metrics.costUsd,
+      modelCalls: job.modelCalls + metrics.modelCalls,
+      inputTokens: job.inputTokens + metrics.inputTokens,
+      outputTokens: job.outputTokens + metrics.outputTokens,
+      costUsd: job.costUsd + metrics.costUsd,
     });
   }
 
@@ -258,6 +258,18 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
     input: CommitMemoryProposalExtractionInput,
   ): CommitMemoryProposalExtractionResult {
     return this.repository.transaction((repository) => {
+      const settings = repository.getSettings();
+      if (!settings.enabled || !settings.autoPropose) {
+        throw new Error("memory_proposal_disabled_before_commit");
+      }
+      const currentJob = repository.getJob(input.job.jobId);
+      if (
+        !currentJob ||
+        currentJob.status !== "running" ||
+        currentJob.version !== input.job.version
+      ) {
+        throw new MemoryConflictError("Memory proposal job changed before commit");
+      }
       const source =
         input.candidates.length === 0
           ? undefined
@@ -297,10 +309,10 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
         status: "succeeded",
         ...(source ? { sourceId: source.sourceId } : {}),
         errorCode: null,
-        modelCalls: input.metrics.modelCalls,
-        inputTokens: input.metrics.inputTokens,
-        outputTokens: input.metrics.outputTokens,
-        costUsd: input.metrics.costUsd,
+        modelCalls: input.job.modelCalls + input.metrics.modelCalls,
+        inputTokens: input.job.inputTokens + input.metrics.inputTokens,
+        outputTokens: input.job.outputTokens + input.metrics.outputTokens,
+        costUsd: input.job.costUsd + input.metrics.costUsd,
       });
       return { job, proposals };
     });

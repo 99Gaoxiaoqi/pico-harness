@@ -10,6 +10,8 @@ export interface TerminalMemoryEvidenceRef {
   readonly runId: string;
   readonly terminalEventId: string;
   readonly userMessageEventId: string;
+  /** Terminal event sequence used to cancel debounced work after rewind. */
+  readonly terminalSequence?: number;
 }
 
 /** Exact, user-authored evidence. Raw text stays in runtime.sqlite. */

@@ -713,6 +713,85 @@ test("one drain reuses its model lease and a failed extraction does not advance 
   repository.close();
 });
 
+test("an in-flight review cannot commit after its rewind job is cancelled", async (context) => {
+  const fixture = await createFixture("worker-rewind-cancel");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  const sessionId = "memory-rewind-cancel-session";
+  await enqueueCompletedReview(fixture, trustStore, sessionId);
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  let releaseModel!: () => void;
+  const released = new Promise<void>((resolve) => {
+    releaseModel = resolve;
+  });
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const worker = new MemoryReviewWorker({
+    workDir: fixture.workspace,
+    workspaceId: paths.workspace.id,
+    memoryDatabasePath: paths.workspace.memoryDatabase,
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    trustStore,
+    modelFactory: () => ({
+      model: {
+        async extract(request) {
+          signalStarted();
+          await released;
+          return {
+            response: {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "rewind-cancel-call",
+                  name: "submit_memory_proposals",
+                  arguments: JSON.stringify({
+                    proposals: [
+                      {
+                        kind: "project_fact",
+                        title: "Cancelled build command",
+                        content: "Use npm run cancelled-memory",
+                        reason: "Stable project command",
+                        confidence: 0.99,
+                        evidenceEventIds: [request.evidence.userMessageEventId],
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+            modelCalls: 1,
+            inputTokens: 20,
+            outputTokens: 10,
+          };
+        },
+      },
+    }),
+  });
+  const draining = worker.drain();
+  await started;
+  const repository = openRepository(fixture);
+  repository.cancelSessionJobs({
+    sessionId,
+    type: MEMORY_PROPOSAL_JOB_TYPE,
+    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+    afterSequence: 0,
+    errorCode: "memory_source_rewound",
+    idempotencyKeyPrefix: "test-rewind-cancel",
+  });
+  repository.close();
+  releaseModel();
+  await draining;
+
+  const verify = openRepository(fixture);
+  assert.equal(verify.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status, "cancelled");
+  assert.equal(verify.listProposals({ statuses: ["pending"] }).length, 0);
+  assert.equal(verify.listSessionSources(sessionId).length, 0);
+  verify.close();
+});
+
 test("one provider call microbatches fuzzy reviews and isolates one malformed evidence", async (context) => {
   const fixture = await createFixture("worker-model-microbatch");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));

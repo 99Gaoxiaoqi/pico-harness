@@ -23,6 +23,10 @@ import {
   MemoryRepository,
 } from "../memory/memory-repository.js";
 import { sanitizeMemoryProposalCandidate } from "../memory/proposal-sanitizer.js";
+import {
+  MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+  MEMORY_PROPOSAL_JOB_TYPE,
+} from "../memory/proposal-contracts.js";
 import { MemorySchemaVersionError, MemoryWorkspaceMismatchError } from "../memory/memory-schema.js";
 import {
   MEMORY_CONTEXT_MAX_FACTS,
@@ -590,6 +594,15 @@ export class DesktopMemoryService {
       });
       return;
     }
+
+    repository.cancelSessionJobs({
+      sessionId: job.cursor.sessionId,
+      type: MEMORY_PROPOSAL_JOB_TYPE,
+      extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+      ...(availability === "rewound" ? { afterSequence: job.cursor.sequence ?? 0 } : {}),
+      errorCode: availability === "rewound" ? "memory_source_rewound" : "memory_source_unavailable",
+      idempotencyKeyPrefix: `${job.jobId}:extraction-cancel`,
+    });
 
     let afterSourceId: string | undefined;
     while (true) {
