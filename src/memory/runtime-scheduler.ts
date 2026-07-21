@@ -47,19 +47,22 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   }
 
   pending(): readonly Job[] {
-    this.recoverStaleRunningJobs();
-    return this.repository
-      .listJobs({
-        statuses: ["queued", "failed"],
-        type: MEMORY_PROPOSAL_JOB_TYPE,
-        extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
-        limit: MEMORY_REVIEW_PENDING_LIMIT,
-      })
-      .filter((job) => job.attemptCount < job.maxAttempts);
+    const now = (this.options.now ?? (() => new Date()))();
+    this.recoverStaleRunningJobs(now.getTime());
+    // Failed reviews are retryable until maxAttempts; delayed retries stay dormant in SQLite so
+    // they cannot occupy the bounded page ahead of work that is ready now.
+    return this.repository.listJobs({
+      statuses: ["queued", "failed"],
+      type: MEMORY_PROPOSAL_JOB_TYPE,
+      extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+      readyAt: now.toISOString(),
+      attemptsRemaining: true,
+      order: "oldest",
+      limit: MEMORY_REVIEW_PENDING_LIMIT,
+    });
   }
 
-  private recoverStaleRunningJobs(): void {
-    const now = (this.options.now ?? (() => new Date()))().getTime();
+  private recoverStaleRunningJobs(now: number): void {
     const leaseTtlMs = this.options.leaseTtlMs ?? MEMORY_REVIEW_LEASE_TTL_MS;
     if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
       throw new Error("Memory review lease TTL must be positive");
