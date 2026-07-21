@@ -105,7 +105,7 @@ test("accepted Session A memory reaches Session B AgentRuntime prompt but not an
       },
     );
     assert.equal(otherPrompts[0]?.[0]?.content.includes(MEMORY_CANARY), false);
-    assert.equal(reviewCalls, 1);
+    assert.equal(reviewCalls, 0);
   } finally {
     await closeSessions(
       sessionIds,
@@ -136,7 +136,7 @@ test("memory settings independently gate recall and review work", async (context
       name: "injectionEnabled=false",
       settings: { injectionEnabled: false },
       expectedRecall: false,
-      expectedReviewCalls: 1,
+      expectedReviewCalls: 0,
       expectedJobs: 1,
     },
   ] as const;
@@ -190,7 +190,7 @@ test("memory settings independently gate recall and review work", async (context
         assert.equal(mainCalls, 1);
         assert.equal(prompts[0]?.[0]?.content.includes(MEMORY_CANARY), settingCase.expectedRecall);
 
-        if (settingCase.expectedReviewCalls > 0) {
+        if (settingCase.expectedJobs > 0) {
           await waitForMemoryState(fixture, (current) =>
             current.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })[0]?.status === "succeeded"
               ? true
@@ -201,7 +201,10 @@ test("memory settings independently gate recall and review work", async (context
         }
         assert.equal(reviewCalls, settingCase.expectedReviewCalls);
         const inspection = openRepository(fixture.workspace, fixture.picoHome);
-        assert.equal(inspection.listJobs().length, settingCase.expectedJobs);
+        assert.equal(
+          inspection.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length,
+          settingCase.expectedJobs,
+        );
         inspection.close();
       } finally {
         await closeSessions([sessionId], [fixture.workspace], fixture.picoHome);
@@ -239,7 +242,7 @@ test("foreground streaming completion does not wait for a blocked memory reviewe
       runtimeRequest(
         fixture.workspace,
         sessionId,
-        "请记住：本项目固定使用 npm run stream-memory。",
+        "请记住：本项目固定使用前面提到的 npm run stream-memory 流程。",
       ),
       {
         picoHome: fixture.picoHome,
@@ -286,7 +289,7 @@ test("memory reviewer failure cannot replace foreground terminal success", async
       runtimeRequest(
         fixture.workspace,
         sessionId,
-        "请记住：本项目固定使用 npm run failing-review。",
+        "请记住：本项目固定使用前面提到的 npm run failing-review 流程。",
       ),
       {
         picoHome: fixture.picoHome,
@@ -390,7 +393,7 @@ test("default priced worker records one memory_review without changing main Sess
         ...runtimeRequest(
           fixture.workspace,
           sessionId,
-          "请记住：这个项目固定使用 npm run priced-review。",
+          "请记住：这个项目固定使用前面提到的 npm run priced-review 流程。",
         ),
         baseURL: "https://quality.example.test/v1",
         apiKey: "quality-priced-key",

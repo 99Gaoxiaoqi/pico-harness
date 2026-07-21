@@ -209,8 +209,23 @@ function relevanceScore(fact: Fact, query: QuerySignals): number {
   return (
     intersectionSize(query.paths, factSignals.paths) * 8 +
     intersectionSize(query.tokens, factSignals.tokens) * 4 +
-    Math.min(intersectionSize(query.cjkBigrams, factSignals.cjkBigrams), 4)
+    Math.min(intersectionSize(query.cjkBigrams, factSignals.cjkBigrams), 4) +
+    commandIntentScore(query, factSignals)
   );
+}
+
+function commandIntentScore(query: QuerySignals, fact: QuerySignals): number {
+  const asksForCommand =
+    hasAny(query.tokens, ["build", "command", "script"]) ||
+    hasAny(query.cjkBigrams, ["构建", "命令", "脚本"]);
+  if (!asksForCommand) return 0;
+  return hasAny(fact.tokens, ["npm", "pnpm", "yarn", "bun", "make", "gradle", "command"])
+    ? 6
+    : 0;
+}
+
+function hasAny(values: ReadonlySet<string>, candidates: readonly string[]): boolean {
+  return candidates.some((candidate) => values.has(candidate));
 }
 
 function intersectionSize(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
