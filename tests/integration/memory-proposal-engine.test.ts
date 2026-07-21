@@ -64,6 +64,60 @@ test("proposal engine gates stable preferences and skips one-time requests witho
   assert.equal(model.calls.length, 1, "one-time request must not call the extractor");
 });
 
+test("proposal engine deterministically treats a named release branch as a reference", async (context) => {
+  const fixture = await createFixture("branch-reference");
+  context.after(fixture.close);
+  const model = new QueueModel([
+    toolResponse([
+      candidate(
+        "project_fact",
+        "Release branch",
+        "Releases are prepared from the release/next branch",
+        "Stable release convention",
+      ),
+    ]),
+    toolResponse([
+      candidate("project_fact", "Build command", "Use npm run build", "Stable build command"),
+    ]),
+  ]);
+  const engine = fixture.engine(model, new ContentEvidenceReader());
+
+  const branch = await engine.process(
+    runInput(
+      "branch-reference",
+      "Remember that releases are prepared from the release/next branch",
+    ),
+  );
+  assert.equal(branch.status, "succeeded");
+  assert.equal(branch.proposals[0]?.kind, "reference");
+
+  const command = await engine.process(
+    runInput("project-command", "This repository uses npm run build as its build command"),
+  );
+  assert.equal(command.status, "succeeded");
+  assert.equal(command.proposals[0]?.kind, "project_fact");
+});
+
+test("proposal engine stabilizes a standalone correction without changing an existing fact kind", async (context) => {
+  const fixture = await createFixture("correction-kind");
+  context.after(fixture.close);
+  const model = new QueueModel([
+    toolResponse([
+      candidate(
+        "preference",
+        "Indentation",
+        "Prefer two spaces instead of tabs",
+        "Explicit correction",
+      ),
+    ]),
+  ]);
+  const standalone = await fixture
+    .engine(model, new ContentEvidenceReader())
+    .process(runInput("standalone-correction", "Correction: I prefer two spaces, not tabs"));
+  assert.equal(standalone.status, "succeeded");
+  assert.equal(standalone.proposals[0]?.kind, "correction");
+});
+
 test("runtime evidence reader accepts only the exact completed run user message", async () => {
   const ref = eventRef("evidence");
   const terminal = entry(9, terminalEvent(ref));
@@ -224,6 +278,7 @@ test("proposal engine normalizes duplicates and marks active-fact conflicts", as
     .process(runInput("conflict", "更正:以后默认用中文回复"));
   assert.equal(result.status, "succeeded");
   assert.equal(result.proposals.length, 1);
+  assert.equal(result.proposals[0]?.kind, "preference");
   assert.equal(result.proposals[0]?.conflictStatus, "potential");
   assert.equal(result.proposals[0]?.conflictFactId, "fact-language");
 });

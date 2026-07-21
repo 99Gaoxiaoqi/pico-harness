@@ -23,7 +23,12 @@ export const MEMORY_PROPOSAL_TOOL: ToolDefinition = Object.freeze({
           type: "object",
           additionalProperties: false,
           properties: {
-            kind: { type: "string", enum: [...MEMORY_KINDS] },
+            kind: {
+              type: "string",
+              enum: [...MEMORY_KINDS],
+              description:
+                "Use preference for stable response/style choices, correction for explicit corrections, project_fact for repository rules or commands, and reference for durable pointers such as paths, documents, URLs, or named branches.",
+            },
             title: { type: "string", minLength: 1, maxLength: MAX_TITLE_LENGTH },
             content: { type: "string", minLength: 1, maxLength: MAX_CONTENT_LENGTH },
             reason: { type: "string", minLength: 1, maxLength: MAX_REASON_LENGTH },

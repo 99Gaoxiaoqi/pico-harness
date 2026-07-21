@@ -14,6 +14,7 @@ import {
   type MemoryProposalStorePort,
   type ProcessMemoryProposalInput,
   type ProposalWriteCandidate,
+  type RawMemoryProposalCandidate,
   type SanitizedMemoryProposalCandidate,
 } from "./proposal-contracts.js";
 import {
@@ -110,10 +111,19 @@ export class MemoryProposalEngine {
         costUsd: nonNegativeNumber(extraction.costUsd),
       };
       input.signal?.throwIfAborted();
-      const parsed = parseMemoryProposalResponse(extraction.response, evidence.eventIds);
+      const activeFacts = this.options.store.listActiveFacts();
+      const parsed = parseMemoryProposalResponse(extraction.response, evidence.eventIds).map(
+        (candidate) =>
+          stabilizeCandidateKind(
+            candidate,
+            evidence.content,
+            decision.signals.includes("correction"),
+            activeFacts,
+          ),
+      );
       const prepared = prepareCandidates(
         parsed.map(sanitizeMemoryProposalCandidate),
-        this.options.store.listActiveFacts(),
+        activeFacts,
         this.options.store.listPendingProposals(),
       );
       const committed = this.options.store.commitExtraction({
@@ -134,6 +144,29 @@ export class MemoryProposalEngine {
       return { status: "retryable_failure", job: failed, proposals: [], errorCode };
     }
   }
+}
+
+const NAMED_BRANCH_REFERENCE_RE =
+  /(?:\bfrom\s+(?:the\s+)?[A-Za-z0-9._/-]+\s+branch\b|(?:从|基于).{1,48}分支(?:发布|准备|构建)|(?:发布|发行).{0,24}(?:分支|branch))/iu;
+
+/** Keep a narrow class of durable pointers deterministic when the model chooses project_fact. */
+function stabilizeCandidateKind(
+  candidate: RawMemoryProposalCandidate,
+  evidence: string,
+  explicitCorrection: boolean,
+  activeFacts: readonly Fact[],
+): RawMemoryProposalCandidate {
+  const titleKey = normalizeMemoryIdentityText(candidate.title);
+  const updatesExistingKind = activeFacts.some(
+    (fact) => fact.title !== null && normalizeMemoryIdentityText(fact.title) === titleKey,
+  );
+  if (explicitCorrection && !updatesExistingKind && candidate.kind !== "correction") {
+    return { ...candidate, kind: "correction" };
+  }
+  if (candidate.kind !== "project_fact" || !NAMED_BRANCH_REFERENCE_RE.test(evidence)) {
+    return candidate;
+  }
+  return { ...candidate, kind: "reference" };
 }
 
 /** Foundation adapter. No model/runtime concern enters MemoryRepository. */
