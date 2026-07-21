@@ -35,6 +35,7 @@ export const previewData: AppData = {
       autoPropose: true,
       autoCommit: false,
       injectionEnabled: true,
+      reviewMode: "balanced",
       version: 3,
       updatedAt: new Date(now - 120_000).toISOString(),
     },

@@ -161,9 +161,13 @@ export interface Settings {
   readonly autoPropose: boolean;
   readonly autoCommit: boolean;
   readonly injectionEnabled: boolean;
+  readonly reviewMode: MemoryReviewMode;
   readonly version: number;
   readonly updatedAt: string;
 }
+
+export const MEMORY_REVIEW_MODES = ["eco", "balanced", "quality"] as const;
+export type MemoryReviewMode = (typeof MEMORY_REVIEW_MODES)[number];
 
 export type MemoryFact = Fact;
 export type MemoryProposal = Proposal;

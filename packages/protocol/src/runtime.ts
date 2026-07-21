@@ -79,6 +79,7 @@ export type RuntimeMemorySettings = JsonObject & {
   readonly autoPropose: boolean;
   readonly autoCommit: boolean;
   readonly injectionEnabled: boolean;
+  readonly reviewMode: "eco" | "balanced" | "quality";
   readonly version: number;
   readonly updatedAt: string;
 };
@@ -734,6 +735,7 @@ export type RuntimeMethodMap = {
       readonly autoPropose?: boolean;
       readonly autoCommit?: false;
       readonly injectionEnabled?: boolean;
+      readonly reviewMode?: "eco" | "balanced" | "quality";
     };
     readonly result: { readonly settings: RuntimeMemorySettings };
   };
@@ -1941,10 +1943,11 @@ function memorySettingsUpdateParams(value: Record<string, unknown>): void {
         if (candidate !== false) throw invalidParams(`${path} 首版只允许为 false`);
       },
       injectionEnabled: booleanParam,
+      reviewMode: oneOfParam(["eco", "balanced", "quality"]),
     },
   )(value);
   if (
-    !["enabled", "autoPropose", "autoCommit", "injectionEnabled"].some((key) =>
+    !["enabled", "autoPropose", "autoCommit", "injectionEnabled", "reviewMode"].some((key) =>
       Object.hasOwn(value, key),
     )
   ) {
@@ -2399,6 +2402,7 @@ const memorySettingsResult = exactResultShape({
   autoPropose: resultBoolean,
   autoCommit: resultBoolean,
   injectionEnabled: resultBoolean,
+  reviewMode: resultOneOf(["eco", "balanced", "quality"]),
   version: resultFiniteNumber,
   updatedAt: resultString,
 });

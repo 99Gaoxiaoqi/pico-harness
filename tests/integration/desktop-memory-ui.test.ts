@@ -78,6 +78,11 @@ test("memory settings explain off behavior and keep auto approval locked", () =>
   );
   assert.match(html, /关闭后不会产生额外模型调用，也不会向会话注入记忆/);
   assert.match(html, /固定关闭，普通用户无法启用/);
+  assert.match(html, /节能/);
+  assert.match(html, /仅生成规则提案，不调用模型审核模糊表达/);
+  assert.match(html, /均衡（推荐）/);
+  assert.match(html, /质量优先/);
+  assert.match(html, /提高模糊表达的召回/);
   assert.match(html, /type="checkbox" disabled=""/);
 
   const runtime = previewRuntime();
@@ -96,6 +101,23 @@ test("memory settings explain off behavior and keep auto approval locked", () =>
   );
   assert.match(warningHtml, /class="is-locked"><input type="checkbox" disabled="" checked=""/);
   assert.match(warningHtml, /立即关闭自动批准/);
+
+  const proposalsOff: RuntimeStore = {
+    ...runtime,
+    data: {
+      ...runtime.data,
+      memory: {
+        ...runtime.data.memory,
+        settings: { ...runtime.data.memory.settings!, autoPropose: false },
+      },
+    },
+  };
+  assert.match(
+    renderToStaticMarkup(
+      React.createElement(MemoryPage, { runtime: proposalsOff, forceNarrow: false }),
+    ),
+    /自动提出建议已关闭；当前模式暂不生效/,
+  );
 });
 
 test("memory notifications use the dedicated refetch path and conflicts are detectable", async () => {
