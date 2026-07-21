@@ -7,6 +7,7 @@ import {
   FACT_STATES,
   MEMORY_JOB_STATUSES,
   MEMORY_KINDS,
+  MEMORY_REVIEW_MODES,
   PROPOSAL_CONFLICT_STATUSES,
   PROPOSAL_STATUSES,
   SOURCE_AVAILABILITIES,
@@ -16,6 +17,7 @@ import {
   type MemoryJobCursor,
   type MemoryJobStatus,
   type MemoryKind,
+  type MemoryReviewMode,
   type Mutation,
   type MutationAction,
   type MutationEntityType,
@@ -68,6 +70,7 @@ export interface UpdateSettingsInput extends IdempotentWriteOptions {
   readonly autoPropose?: boolean;
   readonly autoCommit?: boolean;
   readonly injectionEnabled?: boolean;
+  readonly reviewMode?: MemoryReviewMode;
 }
 
 export interface CreateSourceInput extends IdempotentWriteOptions {
@@ -237,6 +240,7 @@ interface SettingsRow {
   readonly auto_propose: number;
   readonly auto_commit: number;
   readonly injection_enabled: number;
+  readonly review_mode: string;
   readonly version: number;
   readonly updated_at: string;
 }
@@ -479,7 +483,8 @@ export class MemoryRepository {
       input.enabled === undefined &&
       input.autoPropose === undefined &&
       input.autoCommit === undefined &&
-      input.injectionEnabled === undefined
+      input.injectionEnabled === undefined &&
+      input.reviewMode === undefined
     ) {
       throw new Error("Settings update must include at least one field");
     }
@@ -494,7 +499,7 @@ export class MemoryRepository {
         const changed = this.db
           .prepare(
             `UPDATE memory_settings
-             SET enabled = ?, auto_propose = ?, auto_commit = ?, injection_enabled = ?,
+             SET enabled = ?, auto_propose = ?, auto_commit = ?, injection_enabled = ?, review_mode = ?,
                  version = version + 1, updated_at = ?
              WHERE workspace_id = ? AND version = ?`,
           )
@@ -503,6 +508,7 @@ export class MemoryRepository {
             toSqlBoolean(input.autoPropose ?? current.autoPropose),
             toSqlBoolean(input.autoCommit ?? current.autoCommit),
             toSqlBoolean(input.injectionEnabled ?? current.injectionEnabled),
+            requireEnum(input.reviewMode ?? current.reviewMode, MEMORY_REVIEW_MODES, "reviewMode"),
             updatedAt,
             this.workspaceId,
             input.expectedVersion,
@@ -1870,6 +1876,7 @@ function mapSettings(row: SettingsRow, workspaceId: WorkspaceId): Settings {
     autoPropose: fromSqlBoolean(row.auto_propose, "autoPropose"),
     autoCommit: fromSqlBoolean(row.auto_commit, "autoCommit"),
     injectionEnabled: fromSqlBoolean(row.injection_enabled, "injectionEnabled"),
+    reviewMode: requireEnum(row.review_mode, MEMORY_REVIEW_MODES, "reviewMode"),
     version: row.version,
     updatedAt: row.updated_at,
   };
