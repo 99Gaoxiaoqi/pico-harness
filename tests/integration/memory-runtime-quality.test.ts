@@ -48,6 +48,7 @@ test("accepted Session A memory reaches Session B AgentRuntime prompt but not an
         memoryProposalModelFactory: () => ({
           model: successfulReviewModel(() => reviewCalls++),
         }),
+        memoryReviewDebounceMs: 0,
         reporter: new SilentReporter(),
       },
     );
@@ -184,6 +185,7 @@ test("memory settings independently gate recall and review work", async (context
             memoryProposalModelFactory: () => ({
               model: emptyReviewModel(() => reviewCalls++),
             }),
+            memoryReviewDebounceMs: 0,
             reporter: new SilentReporter(),
           },
         );
@@ -257,6 +259,7 @@ test("foreground streaming completion does not wait for a blocked memory reviewe
             },
           },
         }),
+        memoryReviewDebounceMs: 0,
         reporter,
       },
     );
@@ -303,6 +306,7 @@ test("memory reviewer failure cannot replace foreground terminal success", async
             },
           },
         }),
+        memoryReviewDebounceMs: 0,
         reporter: new SilentReporter(),
       },
     );
@@ -405,6 +409,7 @@ test("default priced worker records one memory_review without changing main Sess
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
         providerFactory,
+        memoryReviewDebounceMs: 0,
         reporter: new SilentReporter(),
       },
     );

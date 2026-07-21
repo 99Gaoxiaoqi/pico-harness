@@ -26,7 +26,10 @@ import {
   splitMemoryProposalBatchResponse,
 } from "./proposal-parser.js";
 import { RuntimeMemoryEvidenceReader } from "./runtime-evidence-reader.js";
-import { MemoryReviewScheduler } from "./runtime-scheduler.js";
+import {
+  MEMORY_REVIEW_DEBOUNCE_MS,
+  MemoryReviewScheduler,
+} from "./runtime-scheduler.js";
 import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
 import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
@@ -135,9 +138,16 @@ export interface MemoryReviewWorkerOptions {
 
 /** Self-owned worker: every drain opens its own repository/evidence/model resources. */
 export class MemoryReviewWorker {
+  private nextWakeAt: number | undefined;
+
   constructor(private readonly options: MemoryReviewWorkerOptions) {}
 
+  getNextWakeAt(): number | undefined {
+    return this.nextWakeAt;
+  }
+
   async drain(): Promise<readonly MemoryProposalProcessResult[]> {
+    this.nextWakeAt = undefined;
     if (!(await isTrusted(this.options.trustStore, this.options.workDir))) return [];
     const repository = new MemoryRepository({
       databasePath: this.options.memoryDatabasePath,
@@ -331,12 +341,33 @@ export class MemoryReviewWorker {
         this.options.proposalSink,
         attemptedNotificationJobIds,
       );
+      this.captureNextWakeAt(repository);
       return results.filter(
         (result): result is MemoryProposalProcessResult => result !== undefined,
       );
     } finally {
       repository.close();
     }
+  }
+
+  private captureNextWakeAt(repository: MemoryRepository): void {
+    const settings = repository.getSettings();
+    if (!settings.enabled || !settings.autoPropose) return;
+    const now = (this.options.now?.() ?? new Date()).getTime();
+    const candidates = repository.listJobs({
+      statuses: ["queued", "failed"],
+      type: "terminal-extraction",
+      attemptsRemaining: true,
+      order: "oldest",
+      limit: 500,
+    });
+    const wakeTimes = candidates.map((job) => {
+      const scheduled = job.nextAttemptAt ? Date.parse(job.nextAttemptAt) : Number.NaN;
+      return Number.isFinite(scheduled) && scheduled > now
+        ? scheduled
+        : now + MEMORY_REVIEW_DEBOUNCE_MS;
+    });
+    if (wakeTimes.length > 0) this.nextWakeAt = Math.min(...wakeTimes);
   }
 }
 
@@ -460,12 +491,18 @@ interface ActiveWorkerState {
 }
 
 const activeWorkers = new Map<string, ActiveWorkerState>();
+const scheduledWorkers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** Starts at most one worker per workspace in this process; durable jobs survive process exit. */
 export function kickMemoryReviewWorker(
   workspaceKey: string,
   factory: () => MemoryReviewWorker,
 ): void {
+  const scheduled = scheduledWorkers.get(workspaceKey);
+  if (scheduled) {
+    clearTimeout(scheduled);
+    scheduledWorkers.delete(workspaceKey);
+  }
   const active = activeWorkers.get(workspaceKey);
   if (active) {
     active.rerun = true;
@@ -477,7 +514,10 @@ export function kickMemoryReviewWorker(
     .then(async () => {
       do {
         state.rerun = false;
-        await factory().drain();
+        const worker = factory();
+        await worker.drain();
+        const nextWakeAt = worker.getNextWakeAt();
+        if (nextWakeAt !== undefined) scheduleMemoryReviewWorker(workspaceKey, factory, nextWakeAt);
       } while (state.rerun);
     })
     .catch((error: unknown) => {
@@ -487,6 +527,24 @@ export function kickMemoryReviewWorker(
       );
     })
     .finally(() => activeWorkers.delete(workspaceKey));
+}
+
+function scheduleMemoryReviewWorker(
+  workspaceKey: string,
+  factory: () => MemoryReviewWorker,
+  wakeAt: number,
+): void {
+  const current = scheduledWorkers.get(workspaceKey);
+  if (current) clearTimeout(current);
+  const timer = setTimeout(
+    () => {
+      scheduledWorkers.delete(workspaceKey);
+      kickMemoryReviewWorker(workspaceKey, factory);
+    },
+    Math.max(0, wakeAt - Date.now()),
+  );
+  timer.unref();
+  scheduledWorkers.set(workspaceKey, timer);
 }
 
 async function isTrusted(store: WorkspaceTrustStore, workDir: string): Promise<boolean> {

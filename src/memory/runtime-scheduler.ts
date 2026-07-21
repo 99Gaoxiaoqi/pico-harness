@@ -9,10 +9,12 @@ import {
 const DEFAULT_MAX_ATTEMPTS = 3;
 export const MEMORY_REVIEW_LEASE_TTL_MS = 15 * 60 * 1_000;
 export const MEMORY_REVIEW_PENDING_LIMIT = 500;
+export const MEMORY_REVIEW_DEBOUNCE_MS = 60_000;
 
 export interface MemoryReviewSchedulerOptions {
   readonly now?: () => Date;
   readonly leaseTtlMs?: number;
+  readonly debounceMs?: number;
 }
 
 export interface MemoryReviewSchedulerPort {
@@ -36,12 +38,21 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
     const settings = this.repository.getSettings();
     if (!settings.enabled || !settings.autoPropose) return;
     const ref = normalizeRef(input);
+    const debounceMs = this.options.debounceMs ?? MEMORY_REVIEW_DEBOUNCE_MS;
+    if (!Number.isFinite(debounceMs) || debounceMs < 0) {
+      throw new Error("Memory review debounce must be non-negative");
+    }
+    const nextAttemptAt =
+      debounceMs > 0
+        ? new Date((this.options.now ?? (() => new Date()))().getTime() + debounceMs).toISOString()
+        : undefined;
     this.repository.createJob({
       type: MEMORY_PROPOSAL_JOB_TYPE,
       terminalEventId: ref.terminalEventId,
       extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
       cursor: { sessionId: ref.sessionId, eventId: ref.userMessageEventId },
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      ...(nextAttemptAt ? { nextAttemptAt } : {}),
       idempotencyKey: `memory-review:${ref.terminalEventId}:${ref.userMessageEventId}`,
     });
   }

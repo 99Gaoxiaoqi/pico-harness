@@ -291,7 +291,12 @@ test("proposal notification outbox retries across workers without repeating extr
       sessionSelection: { mode: "new", sessionId: "memory-worker-session" },
       provider: "openai",
     },
-    { provider: foregroundProvider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
+    {
+      provider: foregroundProvider,
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
+    },
   );
   await waitForImmediate();
 
@@ -488,6 +493,7 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
       },
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
     },
   );
   await waitForImmediate();
@@ -1074,9 +1080,28 @@ async function enqueueCompletedReview(
       },
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
     },
   );
-  await waitForImmediate();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await waitForImmediate();
+    const repository = openRepository(fixture);
+    const jobs = repository.listJobs({ statuses: ["queued"], type: MEMORY_PROPOSAL_JOB_TYPE });
+    if (jobs.length > 0) {
+      for (const job of jobs) {
+        repository.updateJob({
+          jobId: job.jobId,
+          expectedVersion: job.version,
+          nextAttemptAt: null,
+          idempotencyKey: `memory-test-release-debounce:${job.jobId}:${job.version}`,
+        });
+      }
+      repository.close();
+      return;
+    }
+    repository.close();
+  }
+  throw new Error("Timed out waiting for the debounced memory review job");
 }
 
 function waitForImmediate(): Promise<void> {

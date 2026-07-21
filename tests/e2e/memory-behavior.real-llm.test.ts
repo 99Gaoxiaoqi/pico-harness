@@ -177,6 +177,7 @@ realModelTest(
           memoryTrustStore: trustStore,
           provider: createProvider(configured.provider, configured.config),
           memoryProposalModelFactory: reviewModelFactory,
+          memoryReviewDebounceMs: 0,
           reporter: new SilentReporter(),
         },
       );
@@ -214,6 +215,7 @@ realModelTest(
           memoryTrustStore: trustStore,
           provider: createProvider(configured.provider, configured.config),
           memoryProposalModelFactory: reviewModelFactory,
+          memoryReviewDebounceMs: 0,
           reporter: new SilentReporter(),
         },
       );
@@ -242,6 +244,7 @@ realModelTest(
           memoryTrustStore: trustStore,
           provider: createProvider(configured.provider, configured.config),
           memoryProposalModelFactory: reviewModelFactory,
+          memoryReviewDebounceMs: 0,
           reporter: new SilentReporter(),
         },
       );

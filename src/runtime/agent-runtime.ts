@@ -224,6 +224,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   memoryTrustStore?: WorkspaceTrustStore;
   /** Long-lived hosts with injected providers supply a fresh, self-owned worker model per claim. */
   memoryProposalModelFactory?: MemoryProposalModelFactory;
+  /** Test/host override; production automatic reviews wait for a short workspace debounce. */
+  memoryReviewDebounceMs?: number;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -364,7 +366,9 @@ export async function executeAgentRuntime(
                   workspaceId: memoryPaths.workspace.id,
                 });
                 try {
-                  new MemoryReviewScheduler(schedulerRepository).enqueue(input);
+                  new MemoryReviewScheduler(schedulerRepository, {
+                    debounceMs: dependencies.memoryReviewDebounceMs,
+                  }).enqueue(input);
                 } finally {
                   schedulerRepository.close();
                 }
