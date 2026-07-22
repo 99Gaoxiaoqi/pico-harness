@@ -24,10 +24,10 @@ const originLabels: Readonly<Record<ProviderOrigin, string>> = {
 };
 
 const credentialLabels: Readonly<Record<ProviderCredentialStatus, string>> = {
-  ready: "凭证已保存",
-  missing: "缺少凭证",
-  environment: "使用环境变量",
-  unsupported: "系统不支持",
+  ready: "API Key 已配置",
+  missing: "尚未配置 API Key",
+  environment: "环境变量（兼容）",
+  unsupported: "当前来源不可配置",
 };
 
 const defaultApiKeyEnvs: Readonly<Record<ProviderProtocol, string>> = {
@@ -52,11 +52,25 @@ function routeOptions(providers: readonly ProviderView[]) {
     );
 }
 
+function providerApiKeyEnv(
+  provider: ProviderView | undefined,
+  protocol: ProviderProtocol,
+): string {
+  if (!provider) return defaultApiKeyEnvs[protocol];
+  const current = provider.apiKeyEnv.trim();
+  return !current || current === defaultApiKeyEnvs[provider.protocol]
+    ? defaultApiKeyEnvs[protocol]
+    : current;
+}
+
 export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
   const { data, actions, busy } = runtime;
   const config = data.providerConfig;
   const [editor, setEditor] = useState<ProviderView | null>();
-  const [credentialProvider, setCredentialProvider] = useState<ProviderView>();
+  const [credentialEditor, setCredentialEditor] = useState<{
+    readonly provider: ProviderView;
+    readonly revision: string;
+  }>();
   const models = useMemo(() => routeOptions(config.providers), [config.providers]);
   const isBusy = Boolean(busy);
 
@@ -80,7 +94,10 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
         <div>
           <span className="eyebrow">推理能力</span>
           <h2>模型 Providers</h2>
-          <p>在 App 和 TUI 之间共用模型路由。密钥只保存在系统安全存储中。</p>
+          <p>
+            在 App 和 TUI 之间共用模型路由。API Key 保存在 ~/.pico/config.json，文件权限为
+            0600。
+          </p>
         </div>
         <Button
           variant="primary"
@@ -180,10 +197,12 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                           <Button
                             variant="quiet"
                             disabled={isBusy || !config.writable}
-                            onClick={() => setCredentialProvider(provider)}
+                            onClick={() =>
+                              setCredentialEditor({ provider, revision: config.revision })
+                            }
                           >
                             <KeyRound aria-hidden="true" size={15} />
-                            凭证
+                            API Key
                           </Button>
                           <Button
                             variant="quiet"
@@ -224,7 +243,9 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                         >
                           {credentialLabels[provider.credentialStatus]}
                         </span>
-                        {provider.apiKeyEnv && <code>{provider.apiKeyEnv}</code>}
+                        {provider.credentialSource === "environment" && provider.apiKeyEnv && (
+                          <code>{provider.apiKeyEnv}</code>
+                        )}
                       </dd>
                     </div>
                   </dl>
@@ -258,11 +279,12 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
         onSave={actions.upsertProvider}
       />
       <CredentialDialog
-        open={credentialProvider !== undefined}
-        provider={credentialProvider}
+        open={credentialEditor !== undefined}
+        provider={credentialEditor?.provider}
+        expectedRevision={credentialEditor?.revision}
         busy={isBusy}
         onOpenChange={(open) => {
-          if (!open) setCredentialProvider(undefined);
+          if (!open) setCredentialEditor(undefined);
         }}
         onSave={actions.setProviderCredential}
         onDelete={actions.deleteProviderCredential}
@@ -287,7 +309,6 @@ function ProviderEditorDialog({
   const [id, setId] = useState("");
   const [protocol, setProtocol] = useState<ProviderProtocol>("openai");
   const [baseURL, setBaseURL] = useState("");
-  const [apiKeyEnv, setApiKeyEnv] = useState(defaultApiKeyEnvs.openai);
   const [models, setModels] = useState("");
   const [discoverModels, setDiscoverModels] = useState(false);
 
@@ -296,7 +317,6 @@ function ProviderEditorDialog({
     setId(provider?.id ?? "");
     setProtocol(provider?.protocol ?? "openai");
     setBaseURL(provider?.baseURL ?? "");
-    setApiKeyEnv(provider?.apiKeyEnv ?? defaultApiKeyEnvs.openai);
     setModels(provider?.models.join("\n") ?? "");
     setDiscoverModels(provider?.discoverModels ?? false);
   }, [open, provider]);
@@ -304,9 +324,6 @@ function ProviderEditorDialog({
   const handleProtocolChange = (next: ProviderProtocol) => {
     setProtocol(next);
     if (next !== "openai") setDiscoverModels(false);
-    if (!apiKeyEnv || apiKeyEnv === defaultApiKeyEnvs[protocol]) {
-      setApiKeyEnv(defaultApiKeyEnvs[next]);
-    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -330,7 +347,7 @@ function ProviderEditorDialog({
       id: id.trim(),
       protocol,
       baseURL: baseURL.trim(),
-      apiKeyEnv: apiKeyEnv.trim(),
+      apiKeyEnv: providerApiKeyEnv(provider, protocol),
       models: normalizedModels,
       discoverModels: protocol === "openai" && discoverModels,
       ...(retainedModelCapabilities && Object.keys(retainedModelCapabilities).length > 0
@@ -350,7 +367,7 @@ function ProviderEditorDialog({
         >
           <Dialog.Title>{provider ? `编辑 ${provider.id}` : "添加 Provider"}</Dialog.Title>
           <Dialog.Description id="provider-editor-detail">
-            配置会保存到当前设备。密钥需要在保存 Provider 后单独添加。
+            模型配置会保存到当前设备。保存 Provider 后，可直接添加 API Key。
           </Dialog.Description>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭 Provider 编辑器">
@@ -390,15 +407,6 @@ function ProviderEditorDialog({
                 value={baseURL}
                 placeholder="https://api.example.com/v1"
                 onChange={(event) => setBaseURL(event.currentTarget.value)}
-              />
-            </label>
-            <label>
-              <span>环境变量名</span>
-              <input
-                required
-                value={apiKeyEnv}
-                placeholder="OPENAI_API_KEY"
-                onChange={(event) => setApiKeyEnv(event.currentTarget.value)}
               />
             </label>
             <label className="provider-discovery-toggle">
@@ -441,6 +449,7 @@ function ProviderEditorDialog({
 function CredentialDialog({
   open,
   provider,
+  expectedRevision,
   busy,
   onOpenChange,
   onSave,
@@ -448,14 +457,15 @@ function CredentialDialog({
 }: {
   readonly open: boolean;
   readonly provider?: ProviderView | undefined;
+  readonly expectedRevision?: string | undefined;
   readonly busy: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSave: (
     providerId: string,
     secret: string,
-    expectedProviderFingerprint: string,
+    expectedRevision: string,
   ) => Promise<boolean>;
-  readonly onDelete: (providerId: string, expectedProviderFingerprint: string) => Promise<boolean>;
+  readonly onDelete: (providerId: string, expectedRevision: string) => Promise<boolean>;
 }) {
   const secretInputRef = useRef<HTMLInputElement>(null);
 
@@ -475,9 +485,9 @@ function CredentialDialog({
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const secret = secretInputRef.current?.value ?? "";
-    if (!provider || !secret) return;
+    if (!provider || !expectedRevision || !secret) return;
     try {
-      const succeeded = await onSave(provider.id, secret, provider.fingerprint);
+      const succeeded = await onSave(provider.id, secret, expectedRevision);
       if (succeeded) handleOpenChange(false);
     } finally {
       clearSecret();
@@ -485,9 +495,9 @@ function CredentialDialog({
   };
 
   const handleDelete = async () => {
-    if (!provider) return;
+    if (!provider || !expectedRevision) return;
     try {
-      const succeeded = await onDelete(provider.id, provider.fingerprint);
+      const succeeded = await onDelete(provider.id, expectedRevision);
       if (succeeded) handleOpenChange(false);
     } finally {
       clearSecret();
@@ -495,7 +505,7 @@ function CredentialDialog({
   };
 
   if (!provider) return null;
-  const canDelete = provider.storedCredentialPresent;
+  const canDelete = provider.credentialSource === "config";
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
@@ -505,9 +515,10 @@ function CredentialDialog({
           className="dialog provider-dialog provider-credential-dialog"
           aria-describedby="provider-credential-detail"
         >
-          <Dialog.Title>{provider.id} 凭证</Dialog.Title>
+          <Dialog.Title>{provider.id} API Key</Dialog.Title>
           <Dialog.Description id="provider-credential-detail">
-            密钥会直接发送给本地 Runtime 并保存到系统安全存储，不会进入会话或 App 状态。
+            API Key 会保存到 ~/.pico/config.json，文件权限为 0600；不会进入会话或 App
+            渲染状态。
           </Dialog.Description>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭凭证编辑器">
@@ -520,10 +531,14 @@ function CredentialDialog({
           </div>
           {provider.credentialSource === "environment" && (
             <InlineNotice tone="neutral">
-              当前进程正在使用 {provider.apiKeyEnv}。从这里保存后，App 与 TUI
-              可在没有该环境变量时共用系统凭证。
-              {provider.storedCredentialPresent &&
-                " 系统安全存储中仍有一份凭证，可在下方单独删除。"}
+              当前仍从环境变量 {provider.apiKeyEnv} 读取旧配置。它仅作为只读兼容来源；在这里保存
+              API Key 后，用户配置将优先生效。
+            </InlineNotice>
+          )}
+          {provider.credentialSource === "keychain" && (
+            <InlineNotice tone="neutral">
+              当前仍在使用旧版系统安全存储中的凭证。它仅作为只读兼容来源；在这里保存 API Key
+              后，用户配置将优先生效。
             </InlineNotice>
           )}
           <form className="provider-credential-form" onSubmit={(event) => void handleSubmit(event)}>
@@ -540,7 +555,7 @@ function CredentialDialog({
             <div className="dialog__actions">
               {canDelete && (
                 <Button type="button" variant="danger" disabled={busy} onClick={handleDelete}>
-                  删除系统凭证
+                  删除配置中的 Key
                 </Button>
               )}
               <span className="provider-dialog-spacer" />

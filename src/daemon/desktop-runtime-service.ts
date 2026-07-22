@@ -1721,7 +1721,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const config = await loadPicoConfig(canonical);
     return {
       providers: toJsonValue(
-        Object.entries(config.providers).map(([id, provider]) => ({ id, ...provider })),
+        Object.entries(config.providers).map(([id, provider]) => runtimeProviderInput(id, provider)),
       ),
     };
   }
@@ -1788,7 +1788,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             (userProvider !== undefined &&
               userProvider.protocol === provider.protocol &&
               sameProviderEndpoint(userProvider.baseURL, provider.baseURL));
-          return this.projectProviderProfile(id, provider, origin, supportsSharedCredential);
+          return this.projectProviderProfile(
+            id,
+            provider,
+            origin,
+            supportsSharedCredential,
+            supportsSharedCredential && userProvider ? userProvider : provider,
+          );
         }),
     );
     return {
@@ -1838,11 +1844,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     ) {
       await this.assertNoStoredCredentialBeforeAuthorityChange(id, previousProvider);
     }
+    const nextProvider = retainConfiguredCredential(config, previousProvider);
     const next = validatedUserConfig(
       {
         version: 1,
         ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
-        providers: { ...current.config.providers, [id]: config },
+        providers: { ...current.config.providers, [id]: nextProvider },
       },
       "provider.upsert",
     );
@@ -2035,65 +2042,91 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async setProviderCredential(params: unknown): Promise<JsonValue> {
     const record = assertExactObjectKeys(
       params,
-      ["providerId", "secret", "expectedProviderFingerprint"],
+      ["providerId", "secret", "expectedRevision"],
       "provider.credential.set params",
     );
     const providerId = requireProviderId(record["providerId"]);
-    const provider = await this.requireUserProvider(providerId);
+    const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
+    const current = await this.userConfigStore.read();
+    this.assertUserConfigRevision(expectedRevision, current.revision);
+    const provider = requireProviderFromUserConfig(current.config, providerId);
     const fingerprint = providerFingerprint(providerId, provider);
-    this.assertProviderFingerprint(record["expectedProviderFingerprint"], fingerprint);
-    const capability = this.credentialVault.capability();
-    if (!capability.available) {
-      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
-    }
     const secret = requireSecret(record["secret"]);
-    await importProviderCredential({
-      provider: providerCredentialIdentity(providerId, provider),
-      secret,
-      vault: this.credentialVault,
-    });
-    const revision = (await this.userConfigStore.read()).revision;
-    await this.publishUserConfigUpdated(revision, [providerId]);
+    if (configuredCredential(provider) === secret) {
+      return {
+        providerId,
+        status: "ready",
+        source: "config",
+        storedCredentialPresent: true,
+        providerFingerprint: fingerprint,
+        revision: current.revision,
+      };
+    }
+    const nextProvider = withConfiguredCredential(provider, secret);
+    const next = validatedUserConfig(
+      {
+        version: 1,
+        ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
+        providers: { ...current.config.providers, [providerId]: nextProvider },
+      },
+      "provider.credential.set",
+    );
+    const written = await this.writeUserConfig(next, current.revision);
+    await this.publishUserConfigUpdated(written.revision, [providerId]);
     return {
       providerId,
       status: "ready",
-      source: "keychain",
+      source: "config",
       storedCredentialPresent: true,
       providerFingerprint: fingerprint,
+      revision: written.revision,
     };
   }
 
   private async deleteProviderCredential(params: unknown): Promise<JsonValue> {
     const record = assertExactObjectKeys(
       params,
-      ["providerId", "expectedProviderFingerprint"],
+      ["providerId", "expectedRevision"],
       "provider.credential.delete params",
     );
     const providerId = requireProviderId(record["providerId"]);
-    const provider = await this.requireUserProvider(providerId);
+    const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
+    const current = await this.userConfigStore.read();
+    this.assertUserConfigRevision(expectedRevision, current.revision);
+    const provider = requireProviderFromUserConfig(current.config, providerId);
     const fingerprint = providerFingerprint(providerId, provider);
-    this.assertProviderFingerprint(record["expectedProviderFingerprint"], fingerprint);
-    const capability = this.credentialVault.capability();
-    if (!capability.available && !capability.cleanupAvailable) {
-      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
-    }
     const workspacePaths = await this.registrationStore.list();
     await this.assertProviderDependenciesIdle(providerId, workspacePaths);
-    try {
-      await this.credentialVault.delete(
-        credentialRefForProvider(providerCredentialIdentity(providerId, provider)),
-      );
-    } catch (error) {
-      if (!(error instanceof CredentialNotFoundError)) throw error;
+    if (configuredCredential(provider) === undefined) {
+      const status = await this.projectCredentialStatus(providerId, provider);
+      return {
+        providerId,
+        status: status.credentialStatus,
+        source: status.credentialSource,
+        storedCredentialPresent: status.storedCredentialPresent,
+        providerFingerprint: fingerprint,
+        revision: current.revision,
+      };
     }
-    const revision = (await this.userConfigStore.read()).revision;
-    await this.publishUserConfigUpdated(revision, [providerId]);
+    const nextProvider = withoutConfiguredCredential(provider);
+    const next = validatedUserConfig(
+      {
+        version: 1,
+        ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
+        providers: { ...current.config.providers, [providerId]: nextProvider },
+      },
+      "provider.credential.delete",
+    );
+    const written = await this.writeUserConfig(next, current.revision);
+    await this.publishUserConfigUpdated(written.revision, [providerId]);
+    const status = await this.projectCredentialStatus(providerId, written.config.providers[providerId]!);
     return {
       providerId,
-      status: "missing",
-      source: "none",
-      storedCredentialPresent: false,
+      status: status.credentialStatus,
+      source: status.credentialSource,
+      storedCredentialPresent: status.storedCredentialPresent,
       providerFingerprint: fingerprint,
+      revision: written.revision,
     };
   }
 
@@ -2112,6 +2145,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     providerId: string,
     provider: ModelProviderConfig,
   ): Promise<void> {
+    if (configuredCredential(provider) !== undefined) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${providerId} 已在用户配置中保存 API Key，请先删除 API Key 再修改 Endpoint 或协议`,
+      );
+    }
     const capability = this.credentialVault.capability();
     if (!capability.available && !capability.cleanupAvailable) return;
     let stored: boolean;
@@ -2128,7 +2167,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (stored) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
-        `Provider ${providerId} 仍有系统凭证，请先删除凭证再修改 Endpoint/协议或删除 Provider`,
+        `Provider ${providerId} 仍有旧版系统凭证，请先清理后再修改 Endpoint 或协议`,
       );
     }
   }
@@ -2138,12 +2177,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     provider: ModelProviderConfig,
     origin: "user" | "project-legacy" | "environment",
     supportsSharedCredential = true,
+    credentialProvider = provider,
   ): Promise<JsonObject> {
     return {
       ...runtimeProviderInput(id, provider),
       origin,
       fingerprint: providerFingerprint(id, provider),
-      ...(await this.projectCredentialStatus(id, provider, supportsSharedCredential)),
+      ...(await this.projectCredentialStatus(id, credentialProvider, supportsSharedCredential)),
     };
   }
 
@@ -2153,9 +2193,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     supportsSharedCredential = true,
   ): Promise<{
     readonly credentialStatus: "ready" | "missing" | "environment" | "unsupported";
-    readonly credentialSource: "keychain" | "environment" | "none";
+    readonly credentialSource: "config" | "keychain" | "environment" | "none";
     readonly storedCredentialPresent: boolean;
   }> {
+    if (configuredCredential(provider) !== undefined) {
+      return {
+        credentialStatus: "ready",
+        credentialSource: "config",
+        storedCredentialPresent: true,
+      };
+    }
     const environmentCredentialPresent = Boolean(
       readEnvironmentSecret(this.env, provider.apiKeyEnv),
     );
@@ -2179,31 +2226,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         capability.available || capability.cleanupAvailable
           ? await this.credentialVault.has(ref)
           : false;
+      if (storedCredentialPresent) {
+        return {
+          credentialStatus: "ready",
+          credentialSource: "keychain",
+          storedCredentialPresent: true,
+        };
+      }
       if (environmentCredentialPresent) {
         return {
           credentialStatus: "environment",
           credentialSource: "environment",
-          storedCredentialPresent,
+          storedCredentialPresent: false,
         };
       }
-      if (!capability.available) {
-        return {
-          credentialStatus: "unsupported",
-          credentialSource: "none",
-          storedCredentialPresent,
-        };
-      }
-      return storedCredentialPresent
-        ? {
-            credentialStatus: "ready",
-            credentialSource: "keychain",
-            storedCredentialPresent: true,
-          }
-        : {
-            credentialStatus: "missing",
-            credentialSource: "none",
-            storedCredentialPresent: false,
-          };
+      return {
+        credentialStatus: capability.available ? "missing" : "unsupported",
+        credentialSource: "none",
+        storedCredentialPresent: false,
+      };
     } catch (error) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -2524,16 +2565,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       RUNTIME_ERROR_CODES.CONFLICT,
       this.lifecycleState === "closing" ? "Runtime daemon 正在关闭" : "Runtime daemon 已关闭",
     );
-  }
-
-  private assertProviderFingerprint(expected: unknown, actual: string): void {
-    const normalized = requireSha256(expected, "expectedProviderFingerprint");
-    if (normalized !== actual) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        "Provider 配置已变化，请刷新后重试",
-      );
-    }
   }
 
   private assertUserConfigRevision(expected: string, actual: string): void {
@@ -3365,6 +3396,48 @@ function runtimeProviderInput(id: string, provider: ModelProviderConfig): JsonOb
   } satisfies RuntimeProviderInput;
 }
 
+type ConfigCredentialProvider = ModelProviderConfig & { readonly apiKey?: string };
+
+function configuredCredential(provider: ModelProviderConfig): string | undefined {
+  const value = (provider as ConfigCredentialProvider).apiKey?.trim();
+  return value || undefined;
+}
+
+function withConfiguredCredential(
+  provider: ModelProviderConfig,
+  apiKey: string,
+): ModelProviderConfig {
+  return { ...provider, apiKey } as ConfigCredentialProvider;
+}
+
+function withoutConfiguredCredential(provider: ModelProviderConfig): ModelProviderConfig {
+  const next = { ...provider } as ModelProviderConfig & { apiKey?: string };
+  delete next.apiKey;
+  return next;
+}
+
+function retainConfiguredCredential(
+  provider: ModelProviderConfig,
+  previous: ModelProviderConfig | undefined,
+): ModelProviderConfig {
+  const apiKey = previous === undefined ? undefined : configuredCredential(previous);
+  return apiKey === undefined ? provider : withConfiguredCredential(provider, apiKey);
+}
+
+function requireProviderFromUserConfig(
+  config: PicoUserConfig,
+  providerId: string,
+): ModelProviderConfig {
+  const provider = config.providers[providerId];
+  if (!provider) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.NOT_FOUND,
+      `Provider ${providerId} 不存在`,
+    );
+  }
+  return provider;
+}
+
 function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   const record = assertExactObjectKeys(
     value,
@@ -3567,7 +3640,10 @@ function changedProviderIds(
       const before = previous?.[id];
       const after = current[id];
       if (!before || !after) return true;
-      return providerFingerprint(id, before) !== providerFingerprint(id, after);
+      return (
+        providerFingerprint(id, before) !== providerFingerprint(id, after) ||
+        configuredCredential(before) !== configuredCredential(after)
+      );
     })
     .toSorted();
 }
