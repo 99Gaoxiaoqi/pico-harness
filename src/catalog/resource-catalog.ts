@@ -51,6 +51,17 @@ export interface ResolvedResourceCatalog<T> {
   readonly conflicts: readonly ResourceCatalogConflict[];
 }
 
+export interface ProjectedResourceCatalogEntry<T> {
+  readonly candidate: ResourceCatalogCandidate<T> & { readonly value: T };
+  readonly effective: boolean;
+  readonly shadowedBy?: string;
+}
+
+export interface ProjectedResourceCatalog<T> {
+  readonly entries: readonly ProjectedResourceCatalogEntry<T>[];
+  readonly conflicts: readonly ResourceCatalogConflict[];
+}
+
 /** 所有用户可见资源名称共用同一大小写不敏感键。 */
 export function canonicalResourceName(name: string): string {
   return name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
@@ -63,6 +74,56 @@ export function canonicalResourceName(name: string): string {
 export function resolveResourceCatalog<T>(
   candidates: readonly ResourceCatalogCandidate<T>[],
 ): ResolvedResourceCatalog<T> {
+  const { selected, conflicts } = selectResourceCatalogCandidates(candidates);
+
+  const entries = [...selected.values()]
+    .filter(
+      (candidate): candidate is ResourceCatalogCandidate<T> & { readonly value: T } =>
+        candidate.tombstone !== true && candidate.value !== undefined,
+    )
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((candidate) => candidate.value);
+
+  return { entries, conflicts };
+}
+
+/**
+ * 保留全部可展示候选，同时复用运行时的整条资源优先级决议。
+ * 管理界面可据此解释当前生效项以及同名项被哪个来源遮蔽。
+ */
+export function projectResourceCatalog<T>(
+  candidates: readonly ResourceCatalogCandidate<T>[],
+): ProjectedResourceCatalog<T> {
+  const { selected, conflicts } = selectResourceCatalogCandidates(candidates);
+  const entries = candidates
+    .filter(
+      (candidate): candidate is ResourceCatalogCandidate<T> & { readonly value: T } =>
+        candidate.tombstone !== true && candidate.value !== undefined,
+    )
+    .map((candidate) => {
+      const winner = selected.get(canonicalResourceName(candidate.name));
+      const effective = winner === candidate && winner.tombstone !== true;
+      return {
+        candidate,
+        effective,
+        ...(effective || !winner ? {} : { shadowedBy: winner.source.id }),
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.candidate.name.localeCompare(right.candidate.name) ||
+        Number(right.effective) - Number(left.effective) ||
+        right.candidate.source.priority - left.candidate.source.priority ||
+        left.candidate.sourcePath.localeCompare(right.candidate.sourcePath),
+    );
+
+  return { entries, conflicts };
+}
+
+function selectResourceCatalogCandidates<T>(candidates: readonly ResourceCatalogCandidate<T>[]): {
+  readonly selected: ReadonlyMap<string, ResourceCatalogCandidate<T>>;
+  readonly conflicts: readonly ResourceCatalogConflict[];
+} {
   const selected = new Map<string, ResourceCatalogCandidate<T>>();
   const conflicts: ResourceCatalogConflict[] = [];
 
@@ -84,13 +145,5 @@ export function resolveResourceCatalog<T>(
     }
   }
 
-  const entries = [...selected.values()]
-    .filter(
-      (candidate): candidate is ResourceCatalogCandidate<T> & { readonly value: T } =>
-        candidate.tombstone !== true && candidate.value !== undefined,
-    )
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((candidate) => candidate.value);
-
-  return { entries, conflicts };
+  return { selected, conflicts };
 }
