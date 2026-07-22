@@ -35,7 +35,10 @@ import { estimateCost, type BillingRoute } from "../../src/observability/pricing
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import {
+  RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
+  RuntimeEventStore,
+} from "../../src/runtime/runtime-event-store.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
@@ -446,6 +449,19 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
     },
     {
       schemaVersion: 1,
+      eventId: "assistant-before-crash",
+      sessionId,
+      invocationId: "invocation-before-crash",
+      runId,
+      turnId: "turn-before-crash",
+      at,
+      partial: false,
+      visibility: "model",
+      kind: "message.committed",
+      data: { message: { role: "assistant", content: "foreground complete" } },
+    },
+    {
+      schemaVersion: 1,
       eventId: "terminal-before-crash",
       sessionId,
       invocationId: "invocation-before-crash",
@@ -494,6 +510,100 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
     if (recovered?.status === "succeeded") return;
   }
   assert.fail("startup did not rebuild and process the review lost after terminal commit");
+});
+
+test("startup does not recover a crash-gap terminal removed by a paged rewind", async (context) => {
+  const fixture = await createFixture("terminal-job-gap-rewind");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const runtimeStore = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const sessionId = "memory-terminal-job-gap-rewound";
+  const at = "2026-07-22T00:00:00.000Z";
+  const base = (eventId: string, runId: string, visibility: "internal" | "model") => ({
+    schemaVersion: 1 as const,
+    eventId,
+    sessionId,
+    invocationId: `invocation:${runId}`,
+    runId,
+    turnId: `turn:${runId}`,
+    at,
+    partial: false,
+    visibility,
+  });
+  await runtimeStore.initializeSession({ sessionId, workDir: fixture.workspace });
+  await runtimeStore.appendBatch([
+    {
+      ...base("retained-before-gap", "retained-run", "model"),
+      kind: "message.committed",
+      data: { message: { role: "user", content: "ordinary retained input" } },
+    },
+    ...Array.from({ length: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE }, (_, index) => ({
+      ...base(`paging-filler-${index}`, `paging-run-${index}`, "internal"),
+      kind: "run.started" as const,
+      data: { workDir: fixture.workspace },
+    })),
+    {
+      ...base("rewound-gap-started", "rewound-gap-run", "internal"),
+      kind: "run.started",
+      data: { workDir: fixture.workspace },
+    },
+    {
+      ...base("rewound-gap-user", "rewound-gap-run", "model"),
+      kind: "message.committed",
+      data: {
+        message: {
+          role: "user",
+          content: "请记住：以后使用 npm run removed-a，并且保留 npm run removed-b。",
+        },
+      },
+    },
+    {
+      ...base("rewound-gap-assistant", "rewound-gap-run", "model"),
+      kind: "message.committed",
+      data: { message: { role: "assistant", content: "foreground complete" } },
+    },
+    {
+      ...base("rewound-gap-terminal", "rewound-gap-run", "internal"),
+      kind: "run.terminal",
+      data: { status: "completed" },
+    },
+    {
+      ...base("rewind-after-gap", "session-rewind", "internal"),
+      kind: "history.rewound",
+      data: { branchId: "rewound-active-branch", throughEventId: "retained-before-gap" },
+    },
+  ]);
+  runtimeStore.close();
+
+  let memoryModelCalls = 0;
+  const result = await executeAgentRuntime(
+    {
+      prompt: "What is 2 + 2?",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId: "memory-rewind-restart-trigger" },
+      provider: "openai",
+    },
+    {
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "4" };
+        },
+      },
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
+      memoryProposalModelFactory: () => ({
+        model: createSuccessfulModel(() => memoryModelCalls++),
+      }),
+    },
+  );
+  assert.equal(result.finalMessage, "4");
+  for (let attempt = 0; attempt < 20; attempt++) await waitForImmediate();
+  const repository = openRepository(fixture);
+  assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length, 0);
+  repository.close();
+  assert.equal(memoryModelCalls, 0);
 });
 
 test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {
