@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { globalApprovalManager } from "../../src/approval/manager.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
@@ -12,37 +11,26 @@ import type {
   PersistedSessionSettings,
   SessionUsageSnapshot,
 } from "../../src/engine/session-runtime.js";
-import { EffectiveConfigResolver } from "../../src/input/effective-config.js";
 import {
   forgetSessionSettings,
   resolveRestoredSessionModelRoute,
 } from "../../src/input/session-settings.js";
-import { UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoHome, resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import {
-  loadEffectiveModelRuntime,
-  type EffectiveModelRuntime,
-} from "../../src/provider/effective-model-runtime.js";
-import type { ProviderConfig } from "../../src/provider/config.js";
-import type { ProviderKind } from "../../src/provider/factory.js";
+import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { ModelRoute } from "../../src/provider/model-router.js";
 import { AgentRuntime, type RunAgentCliOptions } from "../../src/runtime/agent-runtime.js";
 import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { projectRuntimeSessionUsage } from "../../src/runtime/runtime-session-projection.js";
+import {
+  configuredUserDefaultRealModel,
+  loadUserDefaultRealModel,
+  type RealModel,
+} from "./real-llm-user-model.js";
 
-const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TEST_TIMEOUT_MS = 5 * 60_000;
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
-const MODEL_CONFIG_HOME = resolvePicoHome();
-
-interface RealModel {
-  readonly runtime: EffectiveModelRuntime;
-  readonly provider: ProviderKind;
-  readonly config: ProviderConfig;
-  readonly route: ModelRoute;
-}
 
 interface TestSandbox {
   readonly root: string;
@@ -51,13 +39,57 @@ interface TestSandbox {
   readonly sessionId: string;
 }
 
-let realModelPromise: Promise<RealModel> | undefined;
+test("real-model configuration uses the user default without persisting credentials", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-real-llm-config-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const picoHome = join(root, "pico-home");
+  const workDir = join(root, "workspace");
+  await mkdir(join(workDir, ".pico"), { recursive: true });
+  const userConfigStore = new UserConfigStore({ picoHome });
+  await userConfigStore.write(
+    {
+      version: 1,
+      defaults: { modelRouteId: "user-provider/user-model" },
+      providers: {
+        "user-provider": {
+          protocol: "openai",
+          baseURL: "https://user-provider.invalid/v1",
+          apiKeyEnv: "PICO_REAL_LLM_TEST_KEY",
+          models: ["user-model"],
+          discoverModels: false,
+        },
+      },
+    },
+    { expectedRevision: EMPTY_USER_CONFIG_REVISION },
+  );
+  const projectConfigPath = join(workDir, ".pico", "config.json");
+  await writeFile(
+    projectConfigPath,
+    JSON.stringify({ version: 1, model: "project-provider/project-model" }),
+    "utf8",
+  );
+  const syntheticCredential = "synthetic-real-llm-test-credential";
+  const configured = await loadUserDefaultRealModel({
+    picoHome,
+    workDir,
+    env: { PICO_REAL_LLM_TEST_KEY: syntheticCredential },
+  });
+  assert.equal(configured.route.id, "user-provider/user-model");
+  if (configured.config.apiKey !== syntheticCredential) {
+    throw new Error("真实模型测试未从用户 Provider 的环境引用解析凭证");
+  }
+  const persisted = `${await readFile(userConfigStore.filePath, "utf8")}\n${await readFile(
+    projectConfigPath,
+    "utf8",
+  )}`;
+  assert.equal(persisted.includes(syntheticCredential), false);
+});
 
 realModelTest(
   "restored session route is fail-closed before any real-model call",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const model = await configuredRealModel();
+    const model = await configuredUserDefaultRealModel();
     const restored: PersistedSessionSettings = {
       provider: model.route.provider,
       model: model.route.model,
@@ -79,7 +111,7 @@ realModelTest(
   "real prompt Hook model call is enclosed by the canonical RuntimeRun",
   { timeout: TEST_TIMEOUT_MS },
   async (context) => {
-    const model = await configuredRealModel();
+    const model = await configuredUserDefaultRealModel();
     const sandbox = await createSandbox("hook-deny");
     context.after(() => cleanupSandbox(sandbox));
     await writePromptDenyHook(sandbox.workDir);
@@ -114,7 +146,7 @@ realModelTest(
   "real model recovers context and Usage only from runtime.sqlite facts",
   { timeout: TEST_TIMEOUT_MS },
   async (context) => {
-    const model = await configuredRealModel();
+    const model = await configuredUserDefaultRealModel();
     const sandbox = await createSandbox("runtime-recovery");
     context.after(() => cleanupSandbox(sandbox));
     const marker = `PICO_RUNTIME_${randomUUID().replaceAll("-", "").toUpperCase()}`;
@@ -173,33 +205,12 @@ realModelTest(
   },
 );
 
-async function configuredRealModel(): Promise<RealModel> {
-  realModelPromise ??= (async () => {
-    const userConfigStore = new UserConfigStore({ picoHome: MODEL_CONFIG_HOME });
-    const configResolver = new EffectiveConfigResolver({ userConfigStore });
-    const runtime = await loadEffectiveModelRuntime({
-      workDir: PROJECT_ROOT,
-      projectTrusted: true,
-      legacyProvider: "openai",
-      legacyModel: process.env.LLM_MODEL?.trim() || "unused-real-model-e2e-legacy-route",
-      legacyModelExplicit: false,
-      env: process.env,
-      userConfigStore,
-      configResolver,
-    });
-    const configured = runtime.router.providerConfig(runtime.config.defaultModelRouteId);
-    return { runtime, ...configured };
-  })();
-  return realModelPromise;
-}
-
 async function createSandbox(label: string): Promise<TestSandbox> {
   const root = await mkdtemp(join(tmpdir(), `pico-${label}-real-llm-`));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await mkdir(join(workDir, ".pico"), { recursive: true });
   await mkdir(picoHome, { recursive: true });
-  await copyFile(join(PROJECT_ROOT, ".pico", "config.json"), join(workDir, ".pico", "config.json"));
   return {
     root,
     workDir,
