@@ -2581,10 +2581,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const expectedBytes = Buffer.from(expected, "hex");
     const actualBytes = Buffer.from(this.projectUserConfigRevision(actual), "hex");
     if (!timingSafeEqual(expectedBytes, actualBytes)) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        "用户配置已更改，请刷新后重试",
-      );
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "用户配置已更改，请刷新后重试");
     }
   }
 

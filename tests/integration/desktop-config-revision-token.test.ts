@@ -37,9 +37,7 @@ test("Desktop projects user-config revisions into process-private tokens", async
   });
 
   const initialRawRevision = (await userConfigStore.read()).revision;
-  const initialList = asRecord(
-    await desktop.handle(createRuntimeRequest("provider.list", {})),
-  );
+  const initialList = asRecord(await desktop.handle(createRuntimeRequest("provider.list", {})));
   const initialToken = requiredSha256(initialList["revision"], "initial public revision");
   assert.notEqual(initialToken, initialRawRevision);
 
@@ -48,7 +46,9 @@ test("Desktop projects user-config revisions into process-private tokens", async
   );
   assert.equal(projectedUserConfig["revision"], initialToken);
   const effective = asRecord(
-    await desktop.handle(createRuntimeRequest("config.effective.get", { workspacePath: workspace })),
+    await desktop.handle(
+      createRuntimeRequest("config.effective.get", { workspacePath: workspace }),
+    ),
   );
   const effectiveRevisions = asRecord(asRecord(effective["config"])["revisions"]);
   assert.equal(effectiveRevisions["user"], initialToken);
@@ -141,9 +141,7 @@ test("Desktop projects user-config revisions into process-private tokens", async
   await desktop.close();
   runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });
   desktop = createDesktop(runtime, registrationStore, trustStore, userConfigStore, env);
-  const restarted = asRecord(
-    await desktop.handle(createRuntimeRequest("provider.list", {})),
-  );
+  const restarted = asRecord(await desktop.handle(createRuntimeRequest("provider.list", {})));
   const restartedToken = requiredSha256(restarted["revision"], "restarted public revision");
   assert.notEqual(restartedToken, credentialToken);
   assert.notEqual(restartedToken, credentialRawRevision);
