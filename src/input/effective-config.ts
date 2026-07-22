@@ -221,8 +221,11 @@ function unique(values: readonly string[]): string[] {
 
 function freezeProvider(provider: ModelProviderConfig): ModelProviderConfig {
   return Object.freeze({
-    ...provider,
+    protocol: provider.protocol,
+    baseURL: provider.baseURL,
+    apiKeyEnv: provider.apiKeyEnv,
     models: Object.freeze([...provider.models]),
+    discoverModels: provider.discoverModels,
     ...(provider.modelCapabilities !== undefined
       ? { modelCapabilities: Object.freeze({ ...provider.modelCapabilities }) }
       : {}),

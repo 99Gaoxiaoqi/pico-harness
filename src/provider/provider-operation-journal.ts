@@ -568,6 +568,12 @@ function strictUserConfig(
   if (json === undefined) throw journalError(path, "User config 不是 JSON");
   const jsonValue = JSON.parse(json) as unknown;
   const normalized = parseUserConfig(jsonValue, path);
+  if (Object.values(normalized.providers).some((provider) => provider.apiKey !== undefined)) {
+    throw journalError(
+      path,
+      "Provider operation journal 不得保存 apiKey；明文凭证仅允许存在于用户级 config.json",
+    );
+  }
   if (canonicalJson(jsonValue) !== canonicalJson(normalized)) {
     throw journalError(path, "User config 包含未知字段或非规范值");
   }
