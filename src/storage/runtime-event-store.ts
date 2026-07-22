@@ -24,6 +24,7 @@ import {
 } from "./runtime-event.js";
 
 const RUNTIME_SESSION_MANIFEST_VERSION = 1 as const;
+export const RUNTIME_EVENT_STORE_MAX_PAGE_SIZE = 250;
 
 export interface RuntimeSessionManifest {
   readonly schemaVersion: typeof RUNTIME_SESSION_MANIFEST_VERSION;
@@ -42,6 +43,16 @@ export interface InitializeRuntimeSessionOptions {
 
 export interface RuntimeEventStoreOptions {
   readonly databasePath: string;
+}
+
+export interface RuntimeEventStorePageOptions {
+  readonly offset?: number;
+  readonly limit?: number;
+}
+
+export interface RuntimeEventStoreEntryPageOptions {
+  readonly afterSequence?: number;
+  readonly limit?: number;
 }
 
 export interface ReadRuntimeSessionProjectionOptions extends RuntimeEventStoreOptions {
@@ -171,6 +182,27 @@ export class RuntimeEventStore {
       const rows = db
         .prepare("SELECT * FROM agent_sessions ORDER BY created_at DESC, session_id DESC")
         .all() as SessionRow[];
+      return rows.map(manifestFromRow);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Bounded manifest page for background maintenance that must not materialize the whole DB. */
+  async listSessionManifestsPage(
+    options: RuntimeEventStorePageOptions = {},
+  ): Promise<RuntimeSessionManifest[]> {
+    const offset = normalizePageOffset(options.offset);
+    const limit = normalizePageLimit(options.limit);
+    const db = this.openDatabase();
+    try {
+      const rows = db
+        .prepare(
+          `SELECT * FROM agent_sessions
+           ORDER BY created_at DESC, session_id DESC
+           LIMIT ? OFFSET ?`,
+        )
+        .all(limit, offset) as SessionRow[];
       return rows.map(manifestFromRow);
     } finally {
       db.close();
@@ -308,6 +340,30 @@ export class RuntimeEventStore {
            ORDER BY sequence`,
         )
         .all(sessionId) as EventRow[];
+      return rows.map((row) => decodeEventRow(row, sessionId));
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Bounded sequence page for cooperative background scans. */
+  async readSessionEntriesPage(
+    sessionId: string,
+    options: RuntimeEventStoreEntryPageOptions = {},
+  ): Promise<RuntimeEventStoreEntry[]> {
+    const afterSequence = normalizePageOffset(options.afterSequence, "afterSequence");
+    const limit = normalizePageLimit(options.limit);
+    const db = this.openDatabase();
+    try {
+      const rows = db
+        .prepare(
+          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+           FROM agent_runtime_events
+           WHERE session_id = ? AND sequence > ?
+           ORDER BY sequence
+           LIMIT ?`,
+        )
+        .all(sessionId, afterSequence, limit) as EventRow[];
       return rows.map((row) => decodeEventRow(row, sessionId));
     } finally {
       db.close();
@@ -766,6 +822,22 @@ function activeBranchForEntries(entries: readonly RuntimeEventStoreEntry[]): str
     }
   }
   return activeBranchId;
+}
+
+function normalizePageOffset(value = 0, field = "offset"): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Runtime event store ${field} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function normalizePageLimit(value = RUNTIME_EVENT_STORE_MAX_PAGE_SIZE): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > RUNTIME_EVENT_STORE_MAX_PAGE_SIZE) {
+    throw new Error(
+      `Runtime event store page limit must be between 1 and ${RUNTIME_EVENT_STORE_MAX_PAGE_SIZE}`,
+    );
+  }
+  return value;
 }
 
 function canonicalizeRuntimeEvent(event: RuntimeEvent): {
