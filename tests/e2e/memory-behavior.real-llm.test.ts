@@ -2,12 +2,9 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
-import { EffectiveConfigResolver } from "../../src/input/effective-config.js";
-import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { MemoryRepository } from "../../src/memory/memory-repository.js";
 import {
   MemoryProposalEngine,
@@ -22,15 +19,9 @@ import type {
   UserMemoryEvidence,
 } from "../../src/memory/proposal-contracts.js";
 import { ProviderMemoryProposalModel } from "../../src/memory/worker.js";
-import { resolvePicoHome, resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import {
-  loadEffectiveModelRuntime,
-  type EffectiveModelRuntime,
-} from "../../src/provider/effective-model-runtime.js";
-import { createProvider, type ProviderKind } from "../../src/provider/factory.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { createProvider } from "../../src/provider/factory.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
-import type { ModelRoute } from "../../src/provider/model-router.js";
-import type { ProviderConfig } from "../../src/provider/config.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import type { RunAgentCliOptions } from "../../src/runtime/runtime-contract.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
@@ -41,27 +32,17 @@ import {
   type MemoryQualityCase,
   type ScoredMemoryProposal,
 } from "../fixtures/memory-quality.js";
+import { configuredUserDefaultRealModel, type RealModel } from "./real-llm-user-model.js";
 
-const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TEST_TIMEOUT_MS = 10 * 60_000;
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
-const MODEL_CONFIG_HOME = resolvePicoHome();
-
-interface RealModel {
-  readonly runtime: EffectiveModelRuntime;
-  readonly provider: ProviderKind;
-  readonly config: ProviderConfig;
-  readonly route: ModelRoute;
-}
-
-let realModelPromise: Promise<RealModel> | undefined;
 
 realModelTest(
   "real model memory proposals meet the benign precision and recall baseline",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const configured = await configuredRealModel();
+    const configured = await configuredUserDefaultRealModel();
     const provider = createProvider(configured.provider, configured.config);
     const root = await mkdtemp(join(tmpdir(), "pico-memory-quality-real-llm-"));
     const workspace = join(root, "workspace");
@@ -134,7 +115,7 @@ realModelTest(
   "deterministic memory is recalled across sessions without review-model calls",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const configured = await configuredRealModel();
+    const configured = await configuredUserDefaultRealModel();
     const root = await mkdtemp(join(tmpdir(), "pico-memory-runtime-real-llm-"));
     const workspace = join(root, "workspace");
     const picoHome = join(root, "pico-home");
@@ -364,24 +345,4 @@ async function waitForPendingProposal(workspace: string, picoHome: string) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Timed out waiting for a real-model memory proposal");
-}
-
-async function configuredRealModel(): Promise<RealModel> {
-  realModelPromise ??= (async () => {
-    const userConfigStore = new UserConfigStore({ picoHome: MODEL_CONFIG_HOME });
-    const configResolver = new EffectiveConfigResolver({ userConfigStore });
-    const runtime = await loadEffectiveModelRuntime({
-      workDir: PROJECT_ROOT,
-      projectTrusted: true,
-      legacyProvider: "openai",
-      legacyModel: process.env.LLM_MODEL?.trim() || "unused-memory-quality-legacy-route",
-      legacyModelExplicit: false,
-      env: process.env,
-      userConfigStore,
-      configResolver,
-    });
-    const configured = runtime.router.providerConfig(runtime.config.defaultModelRouteId);
-    return { runtime, ...configured };
-  })();
-  return realModelPromise;
 }
