@@ -50,9 +50,27 @@ const SIGNAL_PATTERNS: ReadonlyArray<{
   },
 ];
 
+const EXPLICIT_DIRECTIVE_RE =
+  /^(?:(?:请)?(?:记住|记下)(?:这(?:一点|件事)?)?|(?:please\s+)?remember(?:\s+that)?|save\s+this\s+for\s+later)\s*[:：]?/iu;
+const NEGATED_MEMORY_RE =
+  /(?:(?:请)?(?:不要|别|无需|不必).{0,12}(?:记住|记下|保存|存为)|\b(?:do\s+not|don't|never|should\s+not|shouldn't)\b.{0,24}\b(?:remember|save)\b)/iu;
+const DISCUSSION_MEMORY_RE =
+  /(?:(?:如何|怎么|是否|能否|该不该|讨论|解释|示例|例如|引用|原话).{0,48}(?:记住|记下|记忆)|\b(?:how\s+(?:can|to)|whether|discuss|explain|example|quote)\b.{0,64}\b(?:remember|memory|save)\b)/iu;
+const QUOTED_MEMORY_RE = /(?:["“‘'].{0,80}(?:记住|记下|remember|save).{0,80}["”’'])/iu;
+
 /** Deterministic, deliberately conservative gate before any model call. */
 export function detectStableMemorySignal(content: string): MemorySignalDecision {
   const normalized = content.normalize("NFKC").replaceAll(/\s+/gu, " ").trim();
+  const explicitDirective = EXPLICIT_DIRECTIVE_RE.test(normalized);
+  if (
+    NEGATED_MEMORY_RE.test(normalized) ||
+    (!explicitDirective &&
+      (/[?？]/u.test(normalized) ||
+        DISCUSSION_MEMORY_RE.test(normalized) ||
+        QUOTED_MEMORY_RE.test(normalized)))
+  ) {
+    return { eligible: false, signals: [], reason: "no_stable_signal" };
+  }
   const signals = SIGNAL_PATTERNS.flatMap(({ kind, patterns }) =>
     patterns.some((pattern) => pattern.test(normalized)) ? [kind] : [],
   );
