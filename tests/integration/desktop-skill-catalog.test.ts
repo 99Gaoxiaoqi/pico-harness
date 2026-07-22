@@ -8,6 +8,8 @@ import {
   listDesktopUserSkills,
 } from "../../src/daemon/desktop-resource-catalog.js";
 import type { PluginRuntimeSnapshot } from "../../src/plugins/plugin-runtime-snapshot.js";
+import { SkillLoader } from "../../src/context/skill.js";
+import type { ExternalResourceCatalogSource } from "../../src/catalog/resource-catalog.js";
 
 test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-user-skill-catalog-"));
@@ -151,6 +153,61 @@ test("可信工作区有效 Skill 枚举复用优先级并标出项目遮蔽", a
   assert.equal(effective.skills.find(({ name }) => name === "plugin-only")?.source.effective, true);
 });
 
+test("Skill revision binds namespace and format but ignores Plugin materialization roots", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-skill-stable-revision-"));
+  const workspace = join(root, "workspace");
+  const firstRoot = join(root, "runtime-copy-random-a", "skills");
+  const secondRoot = join(root, "runtime-copy-random-b", "skills");
+  await mkdir(workspace, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+  for (const skillRoot of [firstRoot, secondRoot]) {
+    await writeSkill(skillRoot, "review", {
+      description: "Stable plugin skill",
+      body: "Review deterministically.",
+    });
+  }
+
+  const first = await externalSkillSnapshot(
+    workspace,
+    externalSkillSource(firstRoot, { namespace: "fixture:", format: "pico-native" }),
+  );
+  const rematerialized = await externalSkillSnapshot(
+    workspace,
+    externalSkillSource(secondRoot, { namespace: "fixture:", format: "pico-native" }),
+  );
+  assert.equal(rematerialized.revision, first.revision);
+
+  const renamedNamespace = await externalSkillSnapshot(
+    workspace,
+    externalSkillSource(secondRoot, { namespace: "renamed:", format: "pico-native" }),
+  );
+  assert.notEqual(renamedNamespace.revision, first.revision);
+  const changedFormat = await externalSkillSnapshot(
+    workspace,
+    externalSkillSource(secondRoot, { namespace: "fixture:", format: "claude-compat" }),
+  );
+  assert.notEqual(changedFormat.revision, first.revision);
+});
+
+test("Skill scan and same-priority conflict winner are deterministic", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-skill-deterministic-conflict-"));
+  const workspace = join(root, "workspace");
+  const firstRoot = join(root, "first");
+  const secondRoot = join(root, "second");
+  await mkdir(workspace, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeConflictSkill(firstRoot, "z-entry", "Z loses deterministically");
+  await writeConflictSkill(firstRoot, "a-entry", "A wins deterministically");
+  await writeConflictSkill(secondRoot, "a-entry", "A wins deterministically");
+  await writeConflictSkill(secondRoot, "z-entry", "Z loses deterministically");
+
+  const firstLoader = externalSkillLoader(workspace, externalSkillSource(firstRoot));
+  const secondLoader = externalSkillLoader(workspace, externalSkillSource(secondRoot));
+  assert.equal((await firstLoader.list())[0]?.description, "A wins deterministically");
+  assert.equal((await secondLoader.list())[0]?.description, "A wins deterministically");
+  assert.equal((await firstLoader.snapshot()).revision, (await secondLoader.snapshot()).revision);
+});
+
 async function writeSkill(
   root: string,
   name: string,
@@ -210,4 +267,46 @@ function pluginSnapshot(skillRoot: string): PluginRuntimeSnapshot {
     diagnostics: [],
     dispose: async () => undefined,
   };
+}
+
+function externalSkillSource(
+  root: string,
+  options: {
+    readonly namespace?: string;
+    readonly format?: ExternalResourceCatalogSource["format"];
+  } = {},
+): ExternalResourceCatalogSource {
+  return {
+    id: "plugin:fixture:skill:stable:0",
+    scope: "external",
+    format: options.format ?? "pico-native",
+    root,
+    priority: 38,
+    ...(options.namespace ? { namespace: options.namespace } : {}),
+  };
+}
+
+function externalSkillLoader(
+  workspace: string,
+  source: ExternalResourceCatalogSource,
+): SkillLoader {
+  return new SkillLoader(workspace, {
+    includeUserResources: false,
+    includeClaudeProjectResources: false,
+    externalSources: [source],
+  });
+}
+
+async function externalSkillSnapshot(workspace: string, source: ExternalResourceCatalogSource) {
+  return externalSkillLoader(workspace, source).snapshot();
+}
+
+async function writeConflictSkill(root: string, directory: string, description: string) {
+  const target = join(root, directory);
+  await mkdir(target, { recursive: true });
+  await writeFile(
+    join(target, "SKILL.md"),
+    await skillDocument("shared-conflict", { description, body: `${description}.` }),
+    "utf8",
+  );
 }
