@@ -2763,21 +2763,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const expectedRevision =
       params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
     try {
-      const snapshot = await this.userMcpConfigStore.upsert(toCoreMcpServer(params.server), {
+      const config = toCoreMcpServer(params.server);
+      const result = await this.userMcpConfigStore.upsert(config, {
         expectedRevision,
         idempotencyKey: params.idempotencyKey,
       });
-      const definition = userMcpDefinitions(snapshot).find(
-        (candidate) => candidate.name === params.server.name,
-      );
-      if (!definition) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.INTERNAL_ERROR,
-          "用户 MCP 配置写入后未找到目标 Server",
-        );
-      }
-      const revision = this.projectCapabilityRevision("mcp", "user", snapshot.revision);
-      await this.publishCapabilityConfigUpdated("mcp", revision);
+      const definition: EffectiveMcpServerDefinition = {
+        name: config.name,
+        config,
+        scope: "user",
+        sourceId: "user",
+        sourceLabel: "用户级",
+        readOnly: false,
+        effective: true,
+      };
+      const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
+      if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
       return toJsonValue({ server: projectPublicMcpServer(definition), revision });
     } catch (error) {
       throw publicMcpMutationError(error);
@@ -2794,12 +2795,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const expectedRevision =
       params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
     try {
-      const snapshot = await this.userMcpConfigStore.delete(params.serverName, {
+      const result = await this.userMcpConfigStore.delete(params.serverName, {
         expectedRevision,
         idempotencyKey: params.idempotencyKey,
       });
-      const revision = this.projectCapabilityRevision("mcp", "user", snapshot.revision);
-      await this.publishCapabilityConfigUpdated("mcp", revision);
+      const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
+      if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
       return { serverName: params.serverName, deleted: true, revision };
     } catch (error) {
       throw publicMcpMutationError(error);
@@ -2816,16 +2817,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }),
       this.pluginRuntimeSnapshotRegistry.get(canonical),
     ]);
+    const occupied = new Map<string, "user" | "project" | "plugin">(
+      resolution.definitions
+        .filter((definition) => definition.effective)
+        .map((definition) => [definition.name, definition.scope] as const),
+    );
     const pluginDefinitions = pluginSnapshot.mcpSources.flatMap((source) =>
-      Object.entries(source.config?.mcpServers ?? {}).map(([name, config]) => ({
-        name,
-        config,
-        scope: "plugin" as const,
-        sourceId: source.id,
-        sourceLabel: pluginMcpSourceLabel(source.id),
-        readOnly: true,
-        effective: true,
-      })),
+      Object.entries(source.config?.mcpServers ?? {}).map(([name, config]) => {
+        const shadowedBy = occupied.get(name);
+        if (!shadowedBy) occupied.set(name, "plugin");
+        return {
+          name,
+          config,
+          scope: "plugin" as const,
+          sourceId: source.id,
+          sourceLabel: pluginMcpSourceLabel(source.id),
+          readOnly: true,
+          effective: shadowedBy === undefined,
+          ...(shadowedBy ? { shadowedBy } : {}),
+        };
+      }),
     );
     const pluginRevision = createHash("sha256")
       .update(JSON.stringify(pluginSnapshot.mcpSources), "utf8")
@@ -4150,15 +4161,15 @@ function safeMcpCommandLabel(command: string | undefined): string {
 }
 
 function safeMcpEndpointLabel(rawUrl: string | undefined): string {
-  if (!rawUrl) return "https://invalid.invalid/";
+  if (!rawUrl) return "https://invalid.invalid";
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return "https://invalid.invalid/";
+      return "https://invalid.invalid";
     }
-    return `${parsed.origin}${parsed.pathname}`;
+    return parsed.origin;
   } catch {
-    return "https://invalid.invalid/";
+    return "https://invalid.invalid";
   }
 }
 

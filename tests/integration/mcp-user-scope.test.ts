@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  configuredMcpServerNames,
+  filterPluginMcpSources,
   McpWorkspaceNotTrustedError,
   resolveTrustedEffectiveMcpSources,
   userMcpDefinitions,
@@ -15,6 +17,7 @@ import {
   UserMcpIdempotencyConflictError,
   UserMcpRevisionConflictError,
 } from "../../src/mcp/user-config-store.js";
+import { McpConnectionManager } from "../../src/mcp/manager.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import {
@@ -34,7 +37,7 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
     { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
-  assert.equal(configured.config.mcpServers.docs?.command, "node");
+  assert.equal(configured.snapshot.config.mcpServers.docs?.command, "node");
   assert.equal((await stat(picoHome)).mode & 0o777, 0o700);
   assert.equal((await stat(join(picoHome, "mcp.json"))).mode & 0o777, 0o600);
 
@@ -42,11 +45,12 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
     { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
-  assert.equal(replayedAfterRestart.revision, configured.revision);
+  assert.equal(replayedAfterRestart.resultRevision, configured.resultRevision);
+  assert.equal(replayedAfterRestart.replayed, true);
   await assert.rejects(
     store.upsert(
       { name: "other", transport: "stdio", command: "node" },
-      { expectedRevision: configured.revision, idempotencyKey: "add-docs" },
+      { expectedRevision: configured.resultRevision, idempotencyKey: "add-docs" },
     ),
     UserMcpIdempotencyConflictError,
   );
@@ -56,10 +60,21 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   );
 
   const deleted = await store.delete("docs", {
-    expectedRevision: configured.revision,
+    expectedRevision: configured.resultRevision,
     idempotencyKey: "delete-docs",
   });
-  assert.deepEqual(deleted.config.mcpServers, {});
+  assert.deepEqual(deleted.snapshot.config.mcpServers, {});
+  const replayedAfterDelete = await new UserMcpConfigStore({ picoHome }).upsert(
+    { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },
+    { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
+  );
+  assert.equal(replayedAfterDelete.replayed, true);
+  assert.equal(replayedAfterDelete.resultRevision, configured.resultRevision);
+  assert.deepEqual(
+    replayedAfterDelete.snapshot.config.mcpServers,
+    {},
+    "replay must preserve later durable mutations while returning the original result revision",
+  );
 });
 
 test("MCP catalogs never spawn servers and untrusted effective lookup never reads project config", async (context) => {
@@ -79,7 +94,7 @@ test("MCP catalogs never spawn servers and untrusted effective lookup never read
     },
     { expectedRevision: EMPTY_USER_MCP_REVISION, idempotencyKey: "dangerous" },
   );
-  assert.equal(userMcpDefinitions(configured).length, 1);
+  assert.equal(userMcpDefinitions(configured.snapshot).length, 1);
   await assert.rejects(access(marker));
 
   await writeFile(join(workspace, ".pico", "mcp.json"), "{ definitely-invalid-json", "utf8");
@@ -133,7 +148,7 @@ test("trusted effective MCP applies whole project overrides and isolates workspa
   );
   await userStore.upsert(
     { name: "user-only", transport: "http", url: "https://user-only.invalid/mcp" },
-    { expectedRevision: first.revision, idempotencyKey: "user-only" },
+    { expectedRevision: first.resultRevision, idempotencyKey: "user-only" },
   );
   await writeProjectConfig(workspaceA, {
     shared: { name: "shared", transport: "http", url: "https://project-a.invalid/mcp" },
@@ -166,6 +181,107 @@ test("trusted effective MCP applies whole project overrides and isolates workspa
   );
   assert.ok(effectiveB.definitions.some((item) => item.name === "b-only"));
   assert.ok(!effectiveB.definitions.some((item) => item.name === "a-only"));
+});
+
+test("Plugin MCP filtering uses the same host-first precedence as the effective catalog", () => {
+  const hostSources = [
+    {
+      id: "project",
+      config: {
+        mcpServers: {
+          "plugin-a:shared": {
+            name: "plugin-a:shared",
+            transport: "stdio" as const,
+            command: "project-server",
+          },
+        },
+      },
+    },
+  ];
+  const filtered = filterPluginMcpSources(
+    [
+      {
+        id: "plugin-a",
+        config: {
+          mcpServers: {
+            "plugin-a:shared": {
+              name: "plugin-a:shared",
+              transport: "stdio",
+              command: "shadowed-plugin-server",
+            },
+            "plugin-a:unique": {
+              name: "plugin-a:unique",
+              transport: "stdio",
+              command: "unique-plugin-server",
+            },
+          },
+        },
+      },
+      {
+        id: "plugin-a-duplicate",
+        config: {
+          mcpServers: {
+            "plugin-a:unique": {
+              name: "plugin-a:unique",
+              transport: "stdio",
+              command: "duplicate-plugin-server",
+            },
+          },
+        },
+      },
+    ],
+    configuredMcpServerNames(hostSources),
+  );
+  assert.deepEqual(
+    filtered.flatMap((source) => Object.keys(source.config?.mcpServers ?? {})),
+    ["plugin-a:unique"],
+  );
+});
+
+test("ordered MCP assembly keeps a CLI path source ahead of colliding Plugin sources", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-mcp-path-precedence-"));
+  const configPath = join(root, "cli-mcp.json");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    configPath,
+    `${JSON.stringify({
+      mcpServers: {
+        "plugin-a:shared": { transport: "stdio", command: "cli-server" },
+      },
+    })}\n`,
+    "utf8",
+  );
+  const manager = new McpConnectionManager(undefined, {
+    duplicateServerPolicy: "keep-first",
+  });
+  context.after(() => manager.closeAll());
+  await manager.replaceSources([
+    { id: "cli", path: configPath },
+    {
+      id: "plugin-a",
+      config: {
+        mcpServers: {
+          "plugin-a:shared": {
+            name: "plugin-a:shared",
+            transport: "stdio",
+            command: "shadowed-plugin-server",
+          },
+          "plugin-a:unique": {
+            name: "plugin-a:unique",
+            transport: "stdio",
+            command: "unique-plugin-server",
+          },
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(
+    manager.getStatusSnapshot().servers.map((server) => [server.name, server.sourceId]),
+    [
+      ["plugin-a:shared", "cli"],
+      ["plugin-a:unique", "plugin-a"],
+    ],
+  );
 });
 
 test("background runs reject injected user MCP sources before model or tool execution", async (context) => {

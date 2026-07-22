@@ -140,7 +140,7 @@ test("scoped capability results expose opaque provenance without source paths or
   const pluginServer = {
     name: "github",
     transport: "http",
-    endpointLabel: "https://example.invalid/mcp",
+    endpointLabel: "https://example.invalid",
     headerKeys: ["Authorization"],
     source: pluginSource,
   } as const satisfies RuntimeScopedMcpServer;
@@ -220,6 +220,10 @@ test("scoped capability results expose opaque provenance without source paths or
       ...pluginServer,
       endpointLabel: `https://example.invalid/mcp?token=${secret}#private`,
     },
+    {
+      ...pluginServer,
+      endpointLabel: `https://example.invalid/mcp/${secret}`,
+    },
   ]) {
     const error = assertProtocolError(
       () =>
@@ -242,8 +246,8 @@ test("scoped capability results expose opaque provenance without source paths or
 });
 
 test("runtime schema and config notifications advertise scoped capabilities without secret data", () => {
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 7);
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v7");
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 8);
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v8");
   const ping = {
     pong: true,
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,

@@ -141,3 +141,31 @@ export function userMcpDefinitions(
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
+
+/**
+ * Apply the same host-first precedence used by the management catalog before Runtime connects.
+ * Plugin sources are data-only snapshots, so filtering never reads files or starts a client.
+ */
+export function filterPluginMcpSources(
+  sources: readonly McpConfigSource[],
+  occupiedServerNames: ReadonlySet<string>,
+): readonly McpConfigSource[] {
+  const occupied = new Set(occupiedServerNames);
+  return sources.flatMap((source) => {
+    if (!source.config) return [source];
+    const mcpServers = Object.fromEntries(
+      Object.entries(source.config.mcpServers).filter(([name]) => {
+        if (occupied.has(name)) return false;
+        occupied.add(name);
+        return true;
+      }),
+    );
+    return Object.keys(mcpServers).length > 0
+      ? [{ ...source, config: { mcpServers } } satisfies McpConfigSource]
+      : [];
+  });
+}
+
+export function configuredMcpServerNames(sources: readonly McpConfigSource[]): ReadonlySet<string> {
+  return new Set(sources.flatMap((source) => Object.keys(source.config?.mcpServers ?? {})));
+}

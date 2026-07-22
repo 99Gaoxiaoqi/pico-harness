@@ -15,17 +15,25 @@ const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_STALE_LOCK_MS = 30_000;
 const MAX_IDEMPOTENCY_RECORDS = 128;
 
-export const EMPTY_USER_MCP_REVISION = sha256("");
+export const EMPTY_USER_MCP_REVISION = configRevision({ mcpServers: {} });
 
 export interface UserMcpConfigSnapshot {
   readonly config: McpConfig;
-  /** SHA-256 of the exact persisted bytes, or SHA-256("") when absent. */
+  /** Stable SHA-256 of the semantic MCP config; internal operation metadata is excluded. */
   readonly revision: string;
 }
 
 export interface UserMcpMutationOptions {
   readonly expectedRevision: string;
   readonly idempotencyKey: string;
+}
+
+export interface UserMcpMutationResult {
+  /** Current durable snapshot. On replay it may contain later mutations. */
+  readonly snapshot: UserMcpConfigSnapshot;
+  /** Revision produced by the original committed request. */
+  readonly resultRevision: string;
+  readonly replayed: boolean;
 }
 
 export interface UserMcpConfigStoreOptions {
@@ -58,6 +66,7 @@ export class UserMcpIdempotencyConflictError extends Error {
 interface StoredOperation {
   readonly keyHash: string;
   readonly requestHash: string;
+  readonly resultRevision: string;
 }
 
 interface LockLease {
@@ -94,7 +103,7 @@ export class UserMcpConfigStore {
   async upsert(
     server: McpServerConfig,
     options: UserMcpMutationOptions,
-  ): Promise<UserMcpConfigSnapshot> {
+  ): Promise<UserMcpMutationResult> {
     const normalized = parseMcpConfig(
       { mcpServers: { [server.name]: server } },
       `MCP server ${server.name}`,
@@ -108,7 +117,7 @@ export class UserMcpConfigStore {
   async delete(
     serverName: string,
     options: UserMcpMutationOptions,
-  ): Promise<UserMcpConfigSnapshot> {
+  ): Promise<UserMcpMutationResult> {
     const name = requireServerName(serverName);
     return this.mutate({ kind: "delete", serverName: name }, options, (config) => {
       const mcpServers = { ...config.mcpServers };
@@ -121,7 +130,7 @@ export class UserMcpConfigStore {
     request: unknown,
     options: UserMcpMutationOptions,
     apply: (config: McpConfig) => McpConfig,
-  ): Promise<UserMcpConfigSnapshot> {
+  ): Promise<UserMcpMutationResult> {
     const idempotencyKey = requireIdempotencyKey(options.idempotencyKey);
     const keyHash = sha256(idempotencyKey);
     const requestHash = sha256(stableJson(request));
@@ -130,20 +139,29 @@ export class UserMcpConfigStore {
       const replay = current.operations.find((operation) => operation.keyHash === keyHash);
       if (replay) {
         if (replay.requestHash !== requestHash) throw new UserMcpIdempotencyConflictError();
-        return current.snapshot;
+        return {
+          snapshot: current.snapshot,
+          resultRevision: replay.resultRevision,
+          replayed: true,
+        };
       }
       if (options.expectedRevision !== current.snapshot.revision) {
         throw new UserMcpRevisionConflictError(options.expectedRevision, current.snapshot.revision);
       }
       const nextConfig = parseMcpConfig(apply(current.snapshot.config), this.filePath);
+      const resultRevision = configRevision(nextConfig);
       const operations = [
         ...current.operations.slice(-(MAX_IDEMPOTENCY_RECORDS - 1)),
-        { keyHash, requestHash },
+        { keyHash, requestHash, resultRevision },
       ];
       const content = `${JSON.stringify({ ...nextConfig, _pico: { operations } }, null, 2)}\n`;
       await this.assertOwnedLock(lease);
       await writePrivateFileAtomic(this.filePath, content);
-      return { config: nextConfig, revision: sha256(content) };
+      return {
+        snapshot: { config: nextConfig, revision: resultRevision },
+        resultRevision,
+        replayed: false,
+      };
     });
   }
 
@@ -173,7 +191,10 @@ export class UserMcpConfigStore {
         throw new Error(`用户 MCP 配置 JSON 已损坏: ${this.filePath}`, { cause: error });
       }
       const config = parseMcpConfig(parsed, this.filePath);
-      return { snapshot: { config, revision: sha256(raw) }, operations: parseOperations(parsed) };
+      return {
+        snapshot: { config, revision: configRevision(config) },
+        operations: parseOperations(parsed),
+      };
     } finally {
       await handle.close();
     }
@@ -253,8 +274,18 @@ function parseOperations(value: unknown): readonly StoredOperation[] {
     return [];
   }
   return value["_pico"]["operations"].flatMap((item) =>
-    isRecord(item) && typeof item["keyHash"] === "string" && typeof item["requestHash"] === "string"
-      ? [{ keyHash: item["keyHash"], requestHash: item["requestHash"] }]
+    isRecord(item) &&
+    typeof item["keyHash"] === "string" &&
+    typeof item["requestHash"] === "string" &&
+    typeof item["resultRevision"] === "string" &&
+    /^[a-f0-9]{64}$/u.test(item["resultRevision"])
+      ? [
+          {
+            keyHash: item["keyHash"],
+            requestHash: item["requestHash"],
+            resultRevision: item["resultRevision"],
+          },
+        ]
       : [],
   );
 }
@@ -284,6 +315,10 @@ function stableJson(value: unknown): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function configRevision(config: McpConfig): string {
+  return sha256(stableJson(config));
 }
 
 function delay(ms: number): Promise<void> {
