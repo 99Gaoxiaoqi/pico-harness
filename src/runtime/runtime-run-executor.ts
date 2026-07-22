@@ -12,7 +12,7 @@ import type { SessionRuntime } from "./session-runtime.js";
 import { RuntimeRun } from "./runtime-run.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import { detectStableMemorySignal } from "../memory/proposal-signal.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import { findPrecommittedDesktopMemoryEvidence } from "./memory-review-recovery.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -85,7 +85,7 @@ export class RuntimeRunExecutor {
       });
       let submittedUserMessage =
         memoryReviewScheduler && resumeExistingSession
-          ? findPrecommittedSubmittedUserMessage(
+          ? findPrecommittedDesktopMemoryEvidence(
               await runtimeRun.store.readSessionEntries(session.id),
               runtimeRun.runId,
               initialPrompt,
@@ -214,36 +214,6 @@ export class RuntimeRunExecutor {
     });
     return result;
   }
-}
-
-function findPrecommittedSubmittedUserMessage(
-  entries: readonly RuntimeEventStoreEntry[],
-  runId: string,
-  prompt: string,
-): { readonly eventId: string; readonly content: string } | undefined {
-  // Desktop commits visible input before starting the foreground run. Internal completion/hook
-  // continuations pass an empty prompt and therefore cannot replay an older user message.
-  if (!prompt.trim()) return undefined;
-  const startedSequence = entries.find(
-    (entry) => entry.event.kind === "run.started" && entry.event.runId === runId,
-  )?.sequence;
-  if (startedSequence === undefined) return undefined;
-  const latestModelMessage = entries.findLast(
-    (entry) =>
-      entry.sequence < startedSequence &&
-      entry.event.kind === "message.committed" &&
-      entry.event.visibility === "model" &&
-      !entry.event.partial,
-  );
-  if (
-    latestModelMessage?.event.kind !== "message.committed" ||
-    latestModelMessage.event.data.message.role !== "user" ||
-    latestModelMessage.event.data.message.toolCallId !== undefined ||
-    latestModelMessage.event.data.message.content !== prompt
-  ) {
-    return undefined;
-  }
-  return { eventId: latestModelMessage.event.eventId, content: prompt };
 }
 
 function scheduleMemoryReviewEnqueue(
