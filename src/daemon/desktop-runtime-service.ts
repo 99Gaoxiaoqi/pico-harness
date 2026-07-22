@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { access, readFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
@@ -110,8 +110,10 @@ import {
   type RuntimeNotificationMap,
   type RuntimeNotificationPage,
   type RuntimeNotificationTopic,
+  type RuntimeMcpServerInput,
   type RuntimeRequest,
   type RuntimeProviderInput,
+  type RuntimeScopedMcpServer,
   type RuntimeUserInput,
 } from "./protocol.js";
 import type {
@@ -165,7 +167,17 @@ import type { TranscriptEvent } from "../presentation/transcript-event-store.js"
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import { PluginCapabilityActivationScope } from "../plugins/plugin-capability.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
-import { mcpToolNameMayBelongToServer } from "../mcp/types.js";
+import { mcpToolNameMayBelongToServer, type McpServerConfig } from "../mcp/types.js";
+import {
+  resolveTrustedEffectiveMcpSources,
+  userMcpDefinitions,
+  type EffectiveMcpServerDefinition,
+} from "../mcp/effective-config.js";
+import {
+  UserMcpConfigStore,
+  UserMcpIdempotencyConflictError,
+  UserMcpRevisionConflictError,
+} from "../mcp/user-config-store.js";
 import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
@@ -191,6 +203,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly interactions?: DesktopRuntimeInteractions;
   readonly automations?: DesktopAutomationService;
   readonly userConfigStore?: UserConfigStore;
+  readonly userMcpConfigStore?: UserMcpConfigStore;
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
   readonly providerOperationJournal?: ProviderOperationJournal;
@@ -244,6 +257,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly picoHome: string;
   private readonly providerFactory: typeof createProvider;
   private readonly userConfigStore: UserConfigStore;
+  private readonly userMcpConfigStore: UserMcpConfigStore;
   private readonly effectiveConfigResolver: EffectiveConfigResolver;
   private readonly credentialVault: CredentialVault;
   private readonly providerOperationJournal: ProviderOperationJournal;
@@ -298,6 +312,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.providerFactory = options.providerFactory ?? createProvider;
     this.userConfigStore =
       options.userConfigStore ?? new UserConfigStore({ picoHome: this.picoHome });
+    this.userMcpConfigStore =
+      options.userMcpConfigStore ?? new UserMcpConfigStore({ picoHome: this.picoHome });
     this.effectiveConfigResolver =
       options.effectiveConfigResolver ??
       new EffectiveConfigResolver({ userConfigStore: this.userConfigStore });
@@ -407,6 +423,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "skills.user.list": () => this.listUserSkills(),
       "skills.effective.list": (request) => this.listEffectiveSkills(request.params.workspacePath),
       "config.mcpServers": (request) => this.listMcpServers(request.params.workspacePath),
+      "mcp.user.list": () => this.listUserMcpServers(),
+      "mcp.user.upsert": (request) => this.upsertUserMcpServer(request.params),
+      "mcp.user.delete": (request) => this.deleteUserMcpServer(request.params),
+      "mcp.effective.list": (request) => this.listEffectiveMcpServers(request.params.workspacePath),
       "usage.get": (request) => this.getUsage(request.params),
       "changes.list": (request) =>
         this.listChanges(request.params.workspacePath, request.params.runId),
@@ -2608,6 +2628,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       .digest("hex");
   }
 
+  private projectCapabilityRevision(
+    capability: "skills" | "mcp",
+    scope: "user" | "project",
+    revision: string,
+    workspacePath = "",
+  ): string {
+    return createHmac("sha256", this.userConfigRevisionTokenKey)
+      .update(`pico.desktop.capability-revision.v1\0${capability}\0${scope}\0`, "utf8")
+      .update(workspacePath, "utf8")
+      .update("\0", "utf8")
+      .update(revision, "utf8")
+      .digest("hex");
+  }
+
   private async publishUserConfigUpdated(
     revision: string,
     providerIds: readonly string[],
@@ -2623,6 +2657,27 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             scope: "user",
             revision: this.projectUserConfigRevision(revision),
             providerIds: [...providerIds],
+          },
+        }),
+      );
+    }
+  }
+
+  private async publishCapabilityConfigUpdated(
+    capability: "skills" | "mcp",
+    revision: string,
+  ): Promise<void> {
+    for (const workspacePath of await this.registrationStore.list()) {
+      this.publish(
+        createRuntimeNotification({
+          topic: "config.updated",
+          scope: { workspacePath },
+          resourceVersion: this.nextResourceVersion(),
+          at: this.now(),
+          payload: {
+            scope: "user",
+            revision,
+            capabilities: [capability],
           },
         }),
       );
@@ -2655,24 +2710,137 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async listUserSkills(): Promise<JsonValue> {
-    return toJsonValue(
-      await listDesktopUserSkills({
-        env: this.env,
-        picoHome: this.picoHome,
-      }),
-    );
+    const catalog = await listDesktopUserSkills({
+      env: this.env,
+      picoHome: this.picoHome,
+    });
+    return toJsonValue({
+      ...catalog,
+      revision: this.projectCapabilityRevision("skills", "user", catalog.revision),
+    });
   }
 
   private async listEffectiveSkills(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    return toJsonValue(
-      await listDesktopEffectiveSkills(canonical, {
-        env: this.env,
+    const catalog = await listDesktopEffectiveSkills(canonical, {
+      env: this.env,
+      picoHome: this.picoHome,
+      pluginSnapshot,
+    });
+    return toJsonValue({
+      ...catalog,
+      revisions: {
+        user: this.projectCapabilityRevision("skills", "user", catalog.revisions.user),
+        project: this.projectCapabilityRevision(
+          "skills",
+          "project",
+          catalog.revisions.project,
+          canonical,
+        ),
+      },
+    });
+  }
+
+  private async listUserMcpServers(): Promise<JsonValue> {
+    const snapshot = await this.userMcpConfigStore.read();
+    return toJsonValue({
+      servers: userMcpDefinitions(snapshot).map(projectPublicMcpServer),
+      revision: this.projectCapabilityRevision("mcp", "user", snapshot.revision),
+    });
+  }
+
+  private async upsertUserMcpServer(params: {
+    readonly server: RuntimeMcpServerInput;
+    readonly expectedRevision: string;
+    readonly idempotencyKey: string;
+  }): Promise<JsonValue> {
+    const current = await this.userMcpConfigStore.read();
+    const publicCurrent = this.projectCapabilityRevision("mcp", "user", current.revision);
+    const expectedRevision =
+      params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
+    try {
+      const snapshot = await this.userMcpConfigStore.upsert(toCoreMcpServer(params.server), {
+        expectedRevision,
+        idempotencyKey: params.idempotencyKey,
+      });
+      const definition = userMcpDefinitions(snapshot).find(
+        (candidate) => candidate.name === params.server.name,
+      );
+      if (!definition) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+          "用户 MCP 配置写入后未找到目标 Server",
+        );
+      }
+      const revision = this.projectCapabilityRevision("mcp", "user", snapshot.revision);
+      await this.publishCapabilityConfigUpdated("mcp", revision);
+      return toJsonValue({ server: projectPublicMcpServer(definition), revision });
+    } catch (error) {
+      throw publicMcpMutationError(error);
+    }
+  }
+
+  private async deleteUserMcpServer(params: {
+    readonly serverName: string;
+    readonly expectedRevision: string;
+    readonly idempotencyKey: string;
+  }): Promise<JsonValue> {
+    const current = await this.userMcpConfigStore.read();
+    const publicCurrent = this.projectCapabilityRevision("mcp", "user", current.revision);
+    const expectedRevision =
+      params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
+    try {
+      const snapshot = await this.userMcpConfigStore.delete(params.serverName, {
+        expectedRevision,
+        idempotencyKey: params.idempotencyKey,
+      });
+      const revision = this.projectCapabilityRevision("mcp", "user", snapshot.revision);
+      await this.publishCapabilityConfigUpdated("mcp", revision);
+      return { serverName: params.serverName, deleted: true, revision };
+    } catch (error) {
+      throw publicMcpMutationError(error);
+    }
+  }
+
+  private async listEffectiveMcpServers(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const [resolution, pluginSnapshot] = await Promise.all([
+      resolveTrustedEffectiveMcpSources(canonical, {
         picoHome: this.picoHome,
-        pluginSnapshot,
+        trustStore: this.trustStore,
+        userStore: this.userMcpConfigStore,
       }),
+      this.pluginRuntimeSnapshotRegistry.get(canonical),
+    ]);
+    const pluginDefinitions = pluginSnapshot.mcpSources.flatMap((source) =>
+      Object.entries(source.config?.mcpServers ?? {}).map(([name, config]) => ({
+        name,
+        config,
+        scope: "plugin" as const,
+        sourceId: source.id,
+        sourceLabel: pluginMcpSourceLabel(source.id),
+        readOnly: true,
+        effective: true,
+      })),
     );
+    const pluginRevision = createHash("sha256")
+      .update(JSON.stringify(pluginSnapshot.mcpSources), "utf8")
+      .digest("hex");
+    return toJsonValue({
+      servers: [...resolution.definitions, ...pluginDefinitions]
+        .map(projectPublicMcpServer)
+        .sort((left, right) => left.name.localeCompare(right.name)),
+      revisions: {
+        user: this.projectCapabilityRevision("mcp", "user", resolution.revisions.user),
+        project: this.projectCapabilityRevision(
+          "mcp",
+          "project",
+          `${resolution.revisions.project}:${pluginRevision}`,
+          canonical,
+        ),
+      },
+    });
   }
 
   private async listMcpServers(workspacePath: string): Promise<JsonValue> {
@@ -3921,6 +4089,108 @@ function safeConfig(config: PicoProjectConfig): JsonValue {
     sandbox: config.sandbox,
     lspServers: config.lspServers,
   });
+}
+
+type PublicMcpDefinition = Omit<
+  EffectiveMcpServerDefinition,
+  "scope" | "sourceId" | "shadowedBy"
+> & {
+  readonly scope: "user" | "project" | "plugin";
+  readonly sourceId: string;
+  readonly shadowedBy?: string;
+};
+
+/** Project MCP metadata without exposing credentials, arguments, or full local paths. */
+function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedMcpServer {
+  const common = {
+    name: definition.name,
+    ...(definition.config.startupTimeoutMs === undefined
+      ? {}
+      : { startupTimeoutMs: definition.config.startupTimeoutMs }),
+    ...(definition.config.toolTimeoutMs === undefined
+      ? {}
+      : { toolTimeoutMs: definition.config.toolTimeoutMs }),
+    ...(definition.config.enabled === undefined ? {} : { enabled: definition.config.enabled }),
+    source: {
+      scope: definition.scope,
+      sourceId: definition.sourceId,
+      sourceLabel: definition.sourceLabel,
+      readOnly: definition.readOnly,
+      effective: definition.effective,
+      ...(definition.shadowedBy ? { shadowedBy: definition.shadowedBy } : {}),
+    },
+  };
+  if (definition.config.transport === "stdio") {
+    return {
+      ...common,
+      transport: "stdio",
+      command: basename(definition.config.command ?? "unknown"),
+      ...(definition.config.env && Object.keys(definition.config.env).length > 0
+        ? { envKeys: Object.keys(definition.config.env).sort() }
+        : {}),
+    };
+  }
+  return {
+    ...common,
+    transport: definition.config.transport,
+    url: safeMcpEndpointLabel(definition.config.url),
+    ...(definition.config.headers && Object.keys(definition.config.headers).length > 0
+      ? { headerKeys: Object.keys(definition.config.headers).sort() }
+      : {}),
+  };
+}
+
+function safeMcpEndpointLabel(rawUrl: string | undefined): string {
+  if (!rawUrl) return "unknown";
+  try {
+    const parsed = new URL(rawUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "invalid-url";
+  }
+}
+
+function toCoreMcpServer(server: RuntimeMcpServerInput): McpServerConfig {
+  const common = {
+    name: server.name,
+    transport: server.transport,
+    ...(server.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: server.startupTimeoutMs }),
+    ...(server.toolTimeoutMs === undefined ? {} : { toolTimeoutMs: server.toolTimeoutMs }),
+    ...(server.enabled === undefined ? {} : { enabled: server.enabled }),
+  };
+  if (server.transport === "stdio") {
+    return {
+      ...common,
+      command: server.command,
+      ...(server.args ? { args: [...server.args] } : {}),
+      ...(server.env ? { env: { ...server.env } } : {}),
+    };
+  }
+  return {
+    ...common,
+    url: server.url,
+    ...(server.headers ? { headers: { ...server.headers } } : {}),
+  };
+}
+
+function publicMcpMutationError(error: unknown): Error {
+  if (error instanceof UserMcpRevisionConflictError) {
+    return new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      "用户 MCP 配置已更改，请刷新后重试",
+    );
+  }
+  if (error instanceof UserMcpIdempotencyConflictError) {
+    return new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "MCP 幂等键已用于不同请求");
+  }
+  return error instanceof Error
+    ? error
+    : new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "用户 MCP 配置更新失败");
+}
+
+function pluginMcpSourceLabel(sourceId: string): string {
+  const pluginId = sourceId.match(/^plugin:([^:]+)/)?.[1] ?? sourceId;
+  return `Plugin · ${pluginId}`;
 }
 
 async function configContentVersion(workspacePath: string): Promise<number> {
