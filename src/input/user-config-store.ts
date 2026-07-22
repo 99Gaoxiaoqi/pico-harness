@@ -25,7 +25,12 @@ export interface PicoUserConfigDefaults {
 export interface PicoUserConfigV1 {
   readonly version: typeof USER_CONFIG_VERSION;
   readonly defaults?: PicoUserConfigDefaults;
-  readonly providers: Readonly<Record<string, ModelProviderConfig>>;
+  readonly providers: Readonly<Record<string, UserModelProviderConfig>>;
+}
+
+/** User-file-only Provider shape. EffectiveConfig and ModelRoute never expose this secret. */
+export interface UserModelProviderConfig extends ModelProviderConfig {
+  readonly apiKey?: string;
 }
 
 export type PicoUserConfig = PicoUserConfigV1;
@@ -104,7 +109,8 @@ interface AcquiredUserConfigLock {
  * Device-local configuration shared by TUI and Desktop.
  *
  * Mutations hold a cooperative lock only while rechecking the revision and atomically replacing
- * config.json. Secrets never belong in this store.
+ * config.json. Plaintext Provider keys are accepted only in this user-owned 0600 file; callers
+ * must project Provider metadata through EffectiveConfig before exposing it to diagnostics or UI.
  */
 export class UserConfigStore {
   readonly directoryPath: string;
@@ -403,8 +409,29 @@ export function parseUserConfig(value: unknown, configPath: string): PicoUserCon
   return {
     version: USER_CONFIG_VERSION,
     ...(defaults !== undefined ? { defaults } : {}),
-    providers: parseModelProviderConfigs(value["providers"], configPath),
+    providers: parseUserModelProviderConfigs(value["providers"], configPath),
   };
+}
+
+function parseUserModelProviderConfigs(
+  value: unknown,
+  configPath: string,
+): Record<string, UserModelProviderConfig> {
+  const providers = parseModelProviderConfigs(value, configPath, "providers", {
+    allowPlaintextApiKey: true,
+  });
+  if (!isRecord(value)) return providers;
+  return Object.fromEntries(
+    Object.entries(providers).map(([id, provider]) => {
+      const rawProvider = value[id];
+      if (!isRecord(rawProvider) || rawProvider["apiKey"] === undefined) return [id, provider];
+      const apiKey = rawProvider["apiKey"];
+      if (typeof apiKey !== "string" || apiKey.trim().length === 0) {
+        throw configError(configPath, `providers.${id}.apiKey`, "must be a non-empty string");
+      }
+      return [id, { ...provider, apiKey: apiKey.trim() }];
+    }),
+  );
 }
 
 function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaults | undefined {

@@ -269,6 +269,7 @@ export function parseModelProviderConfigs(
   value: unknown,
   configPath: string,
   fieldPrefix = "providers",
+  options: { readonly allowPlaintextApiKey?: boolean } = {},
 ): Record<string, ModelProviderConfig> {
   if (value === undefined) return {};
   if (!isRecord(value)) throw configError(configPath, fieldPrefix, "must be an object");
@@ -284,6 +285,13 @@ export function parseModelProviderConfigs(
       throw configError(configPath, field, `duplicates normalized provider id ${id}`);
     }
     if (!isRecord(rawProvider)) throw configError(configPath, field, "must be an object");
+    if (Object.hasOwn(rawProvider, "apiKey") && !options.allowPlaintextApiKey) {
+      throw configError(
+        configPath,
+        `${field}.apiKey`,
+        "is only allowed in the user-level config.json",
+      );
+    }
     const protocol = rawProvider["protocol"] ?? "openai";
     if (!isProviderKind(protocol)) {
       throw configError(configPath, `${field}.protocol`, "must be openai, claude, or gemini");
