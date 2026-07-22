@@ -16,10 +16,48 @@ import pino from "pino";
 
 const level = process.env.LOG_LEVEL ?? "info";
 const usePrettyTransport = process.env.NODE_ENV !== "test" && !process.versions.electron;
+const REDACTED = "[REDACTED]";
+
+/**
+ * Credentials may enter process-local provider configuration, but must never cross the logging
+ * boundary. Keep these paths exact so metadata such as apiKeyEnv remains useful for diagnostics.
+ */
+const CREDENTIAL_REDACTION_PATHS = [
+  "apiKey",
+  "config.apiKey",
+  "config.providers.*.apiKey",
+  "providers.*.apiKey",
+  "data.apiKey",
+  "data.config.apiKey",
+  "data.config.providers.*.apiKey",
+  "data.providers.*.apiKey",
+  "req.apiKey",
+  "req.body.apiKey",
+  "req.body.config.apiKey",
+  "req.body.config.providers.*.apiKey",
+  "req.body.providers.*.apiKey",
+  "req.params.apiKey",
+  "res.apiKey",
+  "res.body.apiKey",
+  "res.body.config.apiKey",
+  "res.body.config.providers.*.apiKey",
+  "res.body.providers.*.apiKey",
+  "error.apiKey",
+  "error.data.apiKey",
+  "error.data.config.apiKey",
+  "error.data.config.providers.*.apiKey",
+  "error.data.providers.*.apiKey",
+  "err.apiKey",
+  "err.data.apiKey",
+  "err.data.config.apiKey",
+  "err.data.config.providers.*.apiKey",
+  "err.data.providers.*.apiKey",
+] as const;
 
 export const logger = pino({
   level,
   base: undefined, // 不附加 pid/hostname(教学项目精简输出)
+  redact: { paths: [...CREDENTIAL_REDACTION_PATHS], censor: REDACTED },
   ...(usePrettyTransport
     ? {
         transport: {
