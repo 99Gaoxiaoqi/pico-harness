@@ -13,8 +13,17 @@ export interface RecoverMemoryReviewJobsInput {
 }
 
 const RECOVERY_SESSION_PAGE_SIZE = 25;
+const RECOVERY_ENQUEUE_BATCH_SIZE = 25;
 const successfulRecoveryDatabases = new Set<string>();
 const recoveryFlights = new Map<string, Promise<number>>();
+const recoveryGenerations = new Map<string, number>();
+
+/** Invalidates only this process's successful-scan marker for one Runtime database. */
+export function invalidateMemoryReviewRecoverySuccess(runtimeDatabasePath: string): void {
+  const databasePath = resolve(runtimeDatabasePath);
+  successfulRecoveryDatabases.delete(databasePath);
+  recoveryGenerations.set(databasePath, (recoveryGenerations.get(databasePath) ?? 0) + 1);
+}
 
 /**
  * Replays canonical completed turns through the idempotent review scheduler. This closes the
@@ -25,12 +34,15 @@ export function recoverMemoryReviewJobs(input: RecoverMemoryReviewJobsInput): Pr
   if (successfulRecoveryDatabases.has(databasePath)) return Promise.resolve(0);
   const inFlight = recoveryFlights.get(databasePath);
   if (inFlight) return inFlight;
+  const generation = recoveryGenerations.get(databasePath) ?? 0;
 
   // Begin in a later host task so opening SQLite never extends the caller's synchronous path.
   const attempt = yieldToHost()
     .then(() => scanRuntimeLedger({ ...input, runtimeDatabasePath: databasePath }))
     .then((recovered) => {
-      successfulRecoveryDatabases.add(databasePath);
+      if ((recoveryGenerations.get(databasePath) ?? 0) === generation) {
+        successfulRecoveryDatabases.add(databasePath);
+      }
       return recovered;
     })
     .finally(() => {
@@ -44,21 +56,32 @@ async function scanRuntimeLedger(input: RecoverMemoryReviewJobsInput): Promise<n
   const store = new RuntimeEventStore({ databasePath: input.runtimeDatabasePath });
   let recovered = 0;
   try {
-    let manifestOffset = 0;
+    const upperBound = await store.getSessionManifestScanUpperBound();
+    if (!upperBound) return 0;
+    let before:
+      | {
+          readonly createdAt: string;
+          readonly sessionId: string;
+        }
+      | undefined;
     while (true) {
       const manifests = await store.listSessionManifestsPage({
-        offset: manifestOffset,
+        upperBound,
+        ...(before ? { before } : {}),
         limit: RECOVERY_SESSION_PAGE_SIZE,
       });
       if (manifests.length === 0) break;
       for (const manifest of manifests) {
         const activeEntries = await readCanonicalRecoveryEntries(store, manifest.sessionId);
-        for (const ref of findRecoverableMemoryReviewRefs(manifest.sessionId, activeEntries)) {
+        const refs = findRecoverableMemoryReviewRefs(manifest.sessionId, activeEntries);
+        for (const [index, ref] of refs.entries()) {
           await input.scheduler.enqueue(ref);
           recovered++;
+          if ((index + 1) % RECOVERY_ENQUEUE_BATCH_SIZE === 0) await yieldToHost();
         }
       }
-      manifestOffset += manifests.length;
+      const last = manifests.at(-1)!;
+      before = { createdAt: last.createdAt, sessionId: last.sessionId };
       await yieldToHost();
       if (manifests.length < RECOVERY_SESSION_PAGE_SIZE) break;
     }

@@ -129,7 +129,10 @@ import { RuntimeEventStore } from "./runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import { emitRuntimeLifecycleEvent, RuntimeRunExecutor } from "./runtime-run-executor.js";
-import { recoverMemoryReviewJobs } from "./memory-review-recovery.js";
+import {
+  invalidateMemoryReviewRecoverySuccess,
+  recoverMemoryReviewJobs,
+} from "./memory-review-recovery.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 import {
@@ -370,6 +373,9 @@ export async function executeAgentRuntime(
                   new MemoryReviewScheduler(schedulerRepository, {
                     debounceMs: dependencies.memoryReviewDebounceMs,
                   }).enqueue(input);
+                } catch (error) {
+                  invalidateMemoryReviewRecoverySuccess(memoryPaths.workspace.runtimeDatabase);
+                  throw error;
                 } finally {
                   schedulerRepository.close();
                 }

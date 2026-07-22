@@ -35,6 +35,7 @@ import { estimateCost, type BillingRoute } from "../../src/observability/pricing
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
+import { recoverMemoryReviewJobs } from "../../src/runtime/memory-review-recovery.js";
 import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
   RuntimeEventStore,
@@ -500,6 +501,181 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
     if (recovered?.status === "succeeded") return;
   }
   assert.fail("startup did not rebuild and process the review lost after terminal commit");
+});
+
+test("a direct enqueue failure invalidates a successful scan so the next Run rebuilds it", async (context) => {
+  const fixture = await createFixture("terminal-job-gap-cache-invalidation");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  const provider: LLMProvider = {
+    async generate() {
+      return { role: "assistant", content: "foreground complete" };
+    },
+  };
+  const execute = (sessionId: string, prompt: string, debounceMs: number) =>
+    executeAgentRuntime(
+      {
+        prompt,
+        dir: fixture.workspace,
+        sessionSelection: { mode: "new", sessionId },
+        provider: "openai",
+      },
+      {
+        provider,
+        picoHome: fixture.picoHome,
+        memoryTrustStore: trustStore,
+        memoryReviewDebounceMs: debounceMs,
+        memoryProposalModelFactory: () => ({ model: createSuccessfulModel(() => undefined) }),
+      },
+    );
+
+  await execute("memory-cache-prime", "What is 2 + 2?", -1);
+  for (let attempt = 0; attempt < 20; attempt++) await waitForImmediate();
+
+  const failedSessionId = "memory-cache-direct-enqueue-failure";
+  await execute(failedSessionId, "请记住：这个项目固定使用 npm run cache-recovery 。", -1);
+  for (let attempt = 0; attempt < 20; attempt++) await waitForImmediate();
+  let repository = openRepository(fixture);
+  assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length, 0);
+  repository.close();
+
+  const runtimeStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+      .runtimeDatabase,
+  });
+  const failedTerminal = (await runtimeStore.readSession(failedSessionId)).find(
+    (event) => event.kind === "run.terminal" && event.data.status === "completed",
+  );
+  runtimeStore.close();
+  assert.ok(failedTerminal);
+
+  await execute("memory-cache-recovery-trigger", "What is 3 + 3?", 0);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await waitForImmediate();
+    repository = openRepository(fixture);
+    const rebuilt = repository
+      .listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })
+      .find((job) => job.terminalEventId === failedTerminal.eventId);
+    repository.close();
+    if (rebuilt?.status === "succeeded") return;
+  }
+  assert.fail("the Run after a direct enqueue failure did not rebuild the missing review");
+});
+
+test("manifest pages keep a fixed upper bound and DESC keyset across concurrent mutations", async (context) => {
+  const fixture = await createFixture("manifest-keyset");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const originalIds = Array.from(
+    { length: 30 },
+    (_, index) => `keyset-${String(index).padStart(2, "0")}`,
+  );
+  for (const [index, sessionId] of originalIds.entries()) {
+    await store.initializeSession({
+      sessionId,
+      workDir: fixture.workspace,
+      now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, index)),
+    });
+  }
+  const upperBound = await store.getSessionManifestScanUpperBound();
+  assert.ok(upperBound);
+  const first = await store.listSessionManifestsPage({ upperBound, limit: 10 });
+  assert.equal(first.length, 10);
+  await store.deleteSession(first[0]!.sessionId);
+  await store.initializeSession({
+    sessionId: "keyset-newer-than-upper-bound",
+    workDir: fixture.workspace,
+    now: () => new Date("2026-01-02T00:00:00.000Z"),
+  });
+
+  const scanned = [...first];
+  let before = {
+    createdAt: first.at(-1)!.createdAt,
+    sessionId: first.at(-1)!.sessionId,
+  };
+  while (true) {
+    const page = await store.listSessionManifestsPage({ upperBound, before, limit: 10 });
+    if (page.length === 0) break;
+    scanned.push(...page);
+    const last = page.at(-1)!;
+    before = { createdAt: last.createdAt, sessionId: last.sessionId };
+  }
+  store.close();
+  assert.deepEqual(new Set(scanned.map((manifest) => manifest.sessionId)), new Set(originalIds));
+  assert.equal(
+    scanned.some((manifest) => manifest.sessionId === "keyset-newer-than-upper-bound"),
+    false,
+  );
+});
+
+test("recovery yields to the host after each fixed enqueue batch", async (context) => {
+  const fixture = await createFixture("review-enqueue-batch-yield");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const sessionId = "memory-review-enqueue-batch-yield";
+  await store.initializeSession({ sessionId, workDir: fixture.workspace });
+  const at = "2026-07-22T00:00:00.000Z";
+  await store.appendBatch(
+    Array.from({ length: 26 }, (_, index) => {
+      const runId = `batch-run-${index}`;
+      const base = {
+        schemaVersion: 1 as const,
+        sessionId,
+        invocationId: `invocation-${index}`,
+        runId,
+        turnId: `turn-${index}`,
+        at,
+        partial: false,
+      };
+      return [
+        {
+          ...base,
+          eventId: `batch-started-${index}`,
+          visibility: "internal" as const,
+          kind: "run.started" as const,
+          data: { workDir: fixture.workspace },
+        },
+        {
+          ...base,
+          eventId: `batch-user-${index}`,
+          visibility: "model" as const,
+          kind: "message.committed" as const,
+          data: { message: { role: "user" as const, content: `请记住：批次约定 ${index}` } },
+        },
+        {
+          ...base,
+          eventId: `batch-assistant-${index}`,
+          visibility: "model" as const,
+          kind: "message.committed" as const,
+          data: { message: { role: "assistant" as const, content: "done" } },
+        },
+        {
+          ...base,
+          eventId: `batch-terminal-${index}`,
+          visibility: "internal" as const,
+          kind: "run.terminal" as const,
+          data: { status: "completed" as const },
+        },
+      ];
+    }).flat(),
+  );
+  store.close();
+
+  let enqueued = 0;
+  let hostYielded = false;
+  await recoverMemoryReviewJobs({
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    scheduler: {
+      enqueue() {
+        enqueued++;
+        if (enqueued === 25) setImmediate(() => void (hostYielded = true));
+        if (enqueued === 26) assert.equal(hostYielded, true);
+      },
+    },
+  });
+  assert.equal(enqueued, 26);
 });
 
 test("startup does not recover a crash-gap terminal removed by a paged rewind", async (context) => {
