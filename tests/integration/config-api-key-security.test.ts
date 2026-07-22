@@ -94,12 +94,23 @@ test("credential delete is CAS protected and removes only the persisted API key"
     asRecord(upserted["provider"])["fingerprint"],
     "provider fingerprint",
   );
-  await fixture.desktop.handle(
-    createRuntimeRequest("provider.credential.set", {
-      providerId: PROVIDER_ID,
-      secret,
-      expectedProviderFingerprint: fingerprint,
-    }),
+  const setResult = asRecord(
+    await fixture.desktop.handle(
+      createRuntimeRequest("provider.credential.set", {
+        providerId: PROVIDER_ID,
+        secret,
+        expectedProviderFingerprint: fingerprint,
+      }),
+    ),
+  );
+  const credentialFingerprint = requiredString(
+    setResult["providerFingerprint"],
+    "credential-bearing provider fingerprint",
+  );
+  assert.notEqual(
+    credentialFingerprint,
+    fingerprint,
+    "the CAS token must advance when credential state changes",
   );
 
   let conflict: unknown;
@@ -107,7 +118,7 @@ test("credential delete is CAS protected and removes only the persisted API key"
     await fixture.desktop.handle(
       createRuntimeRequest("provider.credential.delete", {
         providerId: PROVIDER_ID,
-        expectedProviderFingerprint: "0".repeat(64),
+        expectedProviderFingerprint: fingerprint,
       }),
     );
   } catch (error) {
@@ -126,7 +137,7 @@ test("credential delete is CAS protected and removes only the persisted API key"
   const deleted = await fixture.desktop.handle(
     createRuntimeRequest("provider.credential.delete", {
       providerId: PROVIDER_ID,
-      expectedProviderFingerprint: fingerprint,
+      expectedProviderFingerprint: credentialFingerprint,
     }),
   );
   const raw = await readFile(fixture.userConfig.filePath, "utf8");
