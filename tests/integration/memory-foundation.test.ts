@@ -240,6 +240,268 @@ test("memory writes are idempotent, CAS guarded and transactionally rolled back"
   assert.equal(repository.listMutations().length, mutationsBeforeAsync);
 });
 
+test("accepting a conflict proposal atomically replaces the active fact", async (context) => {
+  const fixture = await createFixture("conflict-replace");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  const concurrentRepository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  context.after(() => repository.close());
+  context.after(() => concurrentRepository.close());
+
+  const originalSource = repository.createSource({
+    sourceId: "source-original",
+    sessionId: "session-original",
+    digest: "sha256:original",
+  });
+  const replacementSource = repository.createSource({
+    sourceId: "source-replacement",
+    sessionId: "session-replacement",
+    digest: "sha256:replacement",
+  });
+  const original = repository.createFact({
+    factId: "fact-language",
+    kind: "preference",
+    title: "Response language",
+    content: "Reply in English",
+    confidence: 0.8,
+    sourceId: originalSource.sourceId,
+    pinned: true,
+    expiresAt: "2027-01-01T00:00:00.000Z",
+  });
+  const proposal = repository.createProposal({
+    proposalId: "proposal-language-correction",
+    kind: "preference",
+    title: "Response language",
+    content: "Reply in Chinese",
+    reason: "The user explicitly corrected the language",
+    confidence: 0.95,
+    sourceId: replacementSource.sourceId,
+    conflictStatus: "potential",
+    conflictFactId: original.factId,
+  });
+
+  const approval = {
+    proposalId: proposal.proposalId,
+    expectedVersion: proposal.version,
+    resolution: "accepted" as const,
+    patch: {
+      kind: "correction",
+      title: "Preferred response language",
+      content: "Always reply in Chinese",
+      confidence: 0.99,
+    },
+    idempotencyKey: "accept-conflict",
+  } as const;
+  const faultInjection = new Database(paths.workspace.memoryDatabase);
+  faultInjection.exec(
+    `CREATE TRIGGER fail_conflict_proposal_resolution
+     BEFORE UPDATE ON memory_proposals
+     WHEN NEW.status = 'accepted'
+     BEGIN
+       SELECT RAISE(ABORT, 'injected proposal resolution failure');
+     END;`,
+  );
+  assert.throws(() => repository.resolveProposal(approval), /injected proposal resolution failure/);
+  assert.equal(repository.getFact(original.factId)?.version, original.version);
+  assert.equal(repository.getFact(original.factId)?.content, original.content);
+  assert.equal(repository.getProposal(proposal.proposalId)?.status, "pending");
+  assert.deepEqual(
+    repository
+      .listMutations({ entityType: "fact", entityId: original.factId })
+      .map((mutation) => mutation.action),
+    ["fact.created"],
+  );
+  faultInjection.exec("DROP TRIGGER fail_conflict_proposal_resolution");
+  faultInjection.close();
+
+  const accepted = repository.resolveProposal(approval);
+  assert.equal(accepted.fact?.factId, original.factId);
+  assert.equal(accepted.fact?.version, original.version + 1);
+  assert.equal(accepted.fact?.kind, "correction");
+  assert.equal(accepted.fact?.title, "Preferred response language");
+  assert.equal(accepted.fact?.content, "Always reply in Chinese");
+  assert.equal(accepted.fact?.confidence, 0.99);
+  assert.equal(accepted.fact?.sourceId, replacementSource.sourceId);
+  assert.equal(accepted.fact?.state, "active");
+  assert.equal(accepted.fact?.pinned, true);
+  assert.equal(accepted.fact?.expiresAt, "2027-01-01T00:00:00.000Z");
+  assert.equal(accepted.proposal.resolvedFactId, original.factId);
+  assert.equal(accepted.proposal.conflictStatus, "resolved");
+  assert.deepEqual(
+    repository.listFacts({ states: ["active"] }).map((fact) => fact.factId),
+    [original.factId],
+  );
+  assert.deepEqual(
+    repository
+      .listMutations({ entityType: "fact", entityId: original.factId })
+      .map((mutation) => mutation.action),
+    ["fact.created", "fact.updated"],
+  );
+
+  const mutationCount = repository.listMutations().length;
+  const replay = concurrentRepository.resolveProposal(approval);
+  assert.equal(replay.fact?.factId, original.factId);
+  assert.equal(replay.fact?.version, original.version + 1);
+  assert.equal(repository.listMutations().length, mutationCount);
+  assert.throws(
+    () =>
+      concurrentRepository.resolveProposal({
+        proposalId: proposal.proposalId,
+        expectedVersion: proposal.version,
+        resolution: "accepted",
+        idempotencyKey: "stale-conflict-approval",
+      }),
+    MemoryConflictError,
+  );
+
+  const forgotten = repository.forgetFact({
+    factId: original.factId,
+    expectedVersion: accepted.fact!.version,
+    idempotencyKey: "forget-replaced-conflict",
+  });
+  assert.equal(forgotten.state, "forgotten");
+  assert.equal(repository.getProposal(proposal.proposalId)?.status, "deleted");
+});
+
+test("conflict approval fails closed when its fact is stale or inactive", async (context) => {
+  const fixture = await createFixture("conflict-fail-closed");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  context.after(() => repository.close());
+
+  const staleFact = repository.createFact({
+    factId: "fact-stale",
+    kind: "preference",
+    title: "Language",
+    content: "Reply in English",
+  });
+  const staleProposal = repository.createProposal({
+    proposalId: "proposal-stale",
+    kind: "preference",
+    title: "Language",
+    content: "Reply in Chinese",
+    reason: "User correction",
+    conflictStatus: "potential",
+    conflictFactId: staleFact.factId,
+  });
+  const changedFact = repository.updateFact({
+    factId: staleFact.factId,
+    expectedVersion: staleFact.version,
+    pinned: true,
+  });
+  assert.throws(
+    () =>
+      repository.resolveProposal({
+        proposalId: staleProposal.proposalId,
+        expectedVersion: staleProposal.version,
+        resolution: "accepted",
+      }),
+    MemoryConflictError,
+  );
+  assert.equal(repository.getProposal(staleProposal.proposalId)?.status, "pending");
+  assert.equal(repository.getFact(staleFact.factId)?.version, changedFact.version);
+  assert.equal(repository.listFacts({ states: ["active"] }).length, 1);
+
+  const inactiveFact = repository.createFact({
+    factId: "fact-inactive",
+    kind: "project_fact",
+    title: "Build command",
+    content: "Use npm run build",
+  });
+  const inactiveProposal = repository.createProposal({
+    proposalId: "proposal-inactive",
+    kind: "project_fact",
+    title: "Build command",
+    content: "Use npm run compile",
+    reason: "User correction",
+    conflictStatus: "potential",
+    conflictFactId: inactiveFact.factId,
+  });
+  repository.updateFact({
+    factId: inactiveFact.factId,
+    expectedVersion: inactiveFact.version,
+    state: "disabled",
+  });
+  assert.throws(
+    () =>
+      repository.resolveProposal({
+        proposalId: inactiveProposal.proposalId,
+        expectedVersion: inactiveProposal.version,
+        resolution: "accepted",
+      }),
+    MemoryConflictError,
+  );
+  assert.equal(repository.getProposal(inactiveProposal.proposalId)?.status, "pending");
+
+  const rejectedFact = repository.createFact({
+    factId: "fact-rejected",
+    kind: "reference",
+    title: "Docs",
+    content: "Use the stable docs",
+  });
+  const rejectedProposal = repository.createProposal({
+    proposalId: "proposal-rejected",
+    kind: "reference",
+    title: "Docs",
+    content: "Use preview docs",
+    reason: "Unconfirmed change",
+    conflictStatus: "potential",
+    conflictFactId: rejectedFact.factId,
+  });
+  const rejected = repository.resolveProposal({
+    proposalId: rejectedProposal.proposalId,
+    expectedVersion: rejectedProposal.version,
+    resolution: "rejected",
+  });
+  assert.equal(rejected.fact, undefined);
+  assert.equal(repository.getFact(rejectedFact.factId)?.version, rejectedFact.version);
+  assert.equal(repository.getFact(rejectedFact.factId)?.content, rejectedFact.content);
+
+  const missingFact = repository.createFact({
+    factId: "fact-missing",
+    kind: "correction",
+    title: "Deleted target",
+    content: "Original target body",
+  });
+  const missingProposal = repository.createProposal({
+    proposalId: "proposal-missing",
+    kind: "correction",
+    title: "Deleted target",
+    content: "Replacement body",
+    reason: "Target later disappeared",
+    conflictStatus: "potential",
+    conflictFactId: missingFact.factId,
+  });
+  const corruption = new Database(paths.workspace.memoryDatabase);
+  corruption.pragma("foreign_keys = ON");
+  corruption.prepare("DELETE FROM memory_facts WHERE fact_id = ?").run(missingFact.factId);
+  corruption.close();
+  assert.equal(repository.getProposal(missingProposal.proposalId)?.conflictFactId, undefined);
+  const factCountBeforeMissingApproval = repository.listFacts().length;
+  assert.throws(
+    () =>
+      repository.resolveProposal({
+        proposalId: missingProposal.proposalId,
+        expectedVersion: missingProposal.version,
+        resolution: "accepted",
+      }),
+    MemoryConflictError,
+  );
+  assert.equal(repository.getProposal(missingProposal.proposalId)?.status, "pending");
+  assert.equal(repository.listFacts().length, factCountBeforeMissingApproval);
+});
+
 test("memory authority is isolated by workspace and rejects a mismatched database", async (context) => {
   const fixture = await createFixture("isolation");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
