@@ -247,8 +247,8 @@ function isStrongCandidate(fact: Fact): boolean {
 }
 
 /**
- * Strong facts remain first. One relevant fact is then protected before the single resident
- * preference slot, so a general preference cannot consume all query-aware capacity.
+ * Strong and query-aware facts keep their full priority. A single general preference is only a
+ * resident fallback when the bounded result still has capacity.
  */
 function selectCandidates(ranked: readonly RankedFact[]): readonly RankedFact[] {
   const strong = ranked.filter(({ fact }) => isStrongCandidate(fact));
@@ -260,8 +260,7 @@ function selectCandidates(ranked: readonly RankedFact[]): readonly RankedFact[] 
       !isStrongCandidate(fact) && fact.kind === "preference" && relevance === 0,
   );
   if (!residentPreference) return [...strong, ...relevant];
-  if (relevant.length === 0) return [...strong, residentPreference];
-  return [...strong, relevant[0]!, residentPreference, ...relevant.slice(1)];
+  return [...strong, ...relevant, residentPreference];
 }
 
 function compareCandidates(left: RankedFact, right: RankedFact): number {
