@@ -676,6 +676,9 @@ export async function executeAgentRuntime(
                 : {}),
             }),
         );
+      // Recover durable work left by an earlier process. The signal gate still controls whether
+      // this foreground turn creates a new job; recovery must not depend on a new stable prompt.
+      kickMemoryWorker();
     }
     let activeMcpManager = dependencies.mcpManager;
     runtimeState.bindHookRuntime({
