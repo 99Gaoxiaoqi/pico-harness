@@ -52,10 +52,7 @@ function routeOptions(providers: readonly ProviderView[]) {
     );
 }
 
-function providerApiKeyEnv(
-  provider: ProviderView | undefined,
-  protocol: ProviderProtocol,
-): string {
+function providerApiKeyEnv(provider: ProviderView | undefined, protocol: ProviderProtocol): string {
   if (!provider) return defaultApiKeyEnvs[protocol];
   const current = provider.apiKeyEnv.trim();
   return !current || current === defaultApiKeyEnvs[provider.protocol]
@@ -95,8 +92,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
           <span className="eyebrow">推理能力</span>
           <h2>模型 Providers</h2>
           <p>
-            在 App 和 TUI 之间共用模型路由。API Key 保存在 ~/.pico/config.json，文件权限为
-            0600。
+            在 App 和 TUI 之间共用模型路由。API Key 保存在 ~/.pico/config.json，文件权限为 0600。
           </p>
         </div>
         <Button
@@ -517,8 +513,7 @@ function CredentialDialog({
         >
           <Dialog.Title>{provider.id} API Key</Dialog.Title>
           <Dialog.Description id="provider-credential-detail">
-            API Key 会保存到 ~/.pico/config.json，文件权限为 0600；不会进入会话或 App
-            渲染状态。
+            API Key 会保存到 ~/.pico/config.json，文件权限为 0600；不会进入会话或 App 渲染状态。
           </Dialog.Description>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭凭证编辑器">
@@ -531,8 +526,8 @@ function CredentialDialog({
           </div>
           {provider.credentialSource === "environment" && (
             <InlineNotice tone="neutral">
-              当前仍从环境变量 {provider.apiKeyEnv} 读取旧配置。它仅作为只读兼容来源；在这里保存
-              API Key 后，用户配置将优先生效。
+              当前仍从环境变量 {provider.apiKeyEnv} 读取旧配置。它仅作为只读兼容来源；在这里保存 API
+              Key 后，用户配置将优先生效。
             </InlineNotice>
           )}
           {provider.credentialSource === "keychain" && (
