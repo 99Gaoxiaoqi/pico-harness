@@ -1721,7 +1721,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const config = await loadPicoConfig(canonical);
     return {
       providers: toJsonValue(
-        Object.entries(config.providers).map(([id, provider]) => runtimeProviderInput(id, provider)),
+        Object.entries(config.providers).map(([id, provider]) =>
+          runtimeProviderInput(id, provider),
+        ),
       ),
     };
   }
@@ -2119,7 +2121,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const written = await this.writeUserConfig(next, current.revision);
     await this.publishUserConfigUpdated(written.revision, [providerId]);
-    const status = await this.projectCredentialStatus(providerId, written.config.providers[providerId]!);
+    const status = await this.projectCredentialStatus(
+      providerId,
+      written.config.providers[providerId]!,
+    );
     return {
       providerId,
       status: status.credentialStatus,
@@ -3430,10 +3435,7 @@ function requireProviderFromUserConfig(
 ): ModelProviderConfig {
   const provider = config.providers[providerId];
   if (!provider) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.NOT_FOUND,
-      `Provider ${providerId} 不存在`,
-    );
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, `Provider ${providerId} 不存在`);
   }
   return provider;
 }
