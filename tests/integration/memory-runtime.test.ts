@@ -360,7 +360,11 @@ test("the second turn in one Session schedules Memory only when it carries a sta
     await session.commitMessageOnce(eventId, {
       role: "user",
       content: prompt,
-      providerData: { picoKind: "desktop_user_input" },
+      providerData: {
+        picoKind: "desktop_user_input",
+        picoDesktopInputId: eventId,
+        displayText: prompt,
+      },
     });
     await executeAgentRuntime(
       {
@@ -396,6 +400,100 @@ test("the second turn in one Session schedules Memory only when it carries a sta
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0]?.cursor.sessionId, sessionId);
   repository.close();
+});
+
+test("startup rebuilds a Memory job lost after a durable completed terminal", async (context) => {
+  const fixture = await createFixture("terminal-job-gap-recovery");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const runtimeStore = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const sessionId = "memory-terminal-job-gap";
+  const runId = "run-before-crash";
+  const at = "2026-07-22T00:00:00.000Z";
+  await runtimeStore.initializeSession({ sessionId, workDir: fixture.workspace });
+  await runtimeStore.appendBatch([
+    {
+      schemaVersion: 1,
+      eventId: "started-before-crash",
+      sessionId,
+      invocationId: "invocation-before-crash",
+      runId,
+      turnId: "turn-before-crash",
+      at,
+      partial: false,
+      visibility: "internal",
+      kind: "run.started",
+      data: { workDir: fixture.workspace },
+    },
+    {
+      schemaVersion: 1,
+      eventId: "user-before-crash",
+      sessionId,
+      invocationId: "invocation-before-crash",
+      runId,
+      turnId: "turn-before-crash",
+      at,
+      partial: false,
+      visibility: "model",
+      kind: "message.committed",
+      data: {
+        message: {
+          role: "user",
+          content: "请记住：这个项目固定使用 npm run recovered-gap 。",
+        },
+      },
+    },
+    {
+      schemaVersion: 1,
+      eventId: "terminal-before-crash",
+      sessionId,
+      invocationId: "invocation-before-crash",
+      runId,
+      turnId: "turn-before-crash",
+      at,
+      partial: false,
+      visibility: "internal",
+      kind: "run.terminal",
+      data: { status: "completed" },
+    },
+  ]);
+  runtimeStore.close();
+  const beforeRestart = openRepository(fixture);
+  assert.equal(beforeRestart.listJobs().length, 0);
+  beforeRestart.close();
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "What is 2 + 2?",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId: "memory-gap-restart-trigger" },
+      provider: "openai",
+    },
+    {
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "4" };
+        },
+      },
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
+      memoryProposalModelFactory: () => ({ model: createSuccessfulModel(() => undefined) }),
+    },
+  );
+  assert.equal(result.finalMessage, "4");
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await waitForImmediate();
+    const repository = openRepository(fixture);
+    const recovered = repository
+      .listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })
+      .find((job) => job.terminalEventId === "terminal-before-crash");
+    repository.close();
+    if (recovered?.status === "succeeded") return;
+  }
+  assert.fail("startup did not rebuild and process the review lost after terminal commit");
 });
 
 test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {

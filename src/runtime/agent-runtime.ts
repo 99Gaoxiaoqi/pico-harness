@@ -129,6 +129,7 @@ import { RuntimeEventStore } from "./runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import { emitRuntimeLifecycleEvent, RuntimeRunExecutor } from "./runtime-run-executor.js";
+import { recoverMemoryReviewJobs } from "./memory-review-recovery.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 import {
@@ -676,9 +677,19 @@ export async function executeAgentRuntime(
                 : {}),
             }),
         );
-      // Recover durable work left by an earlier process. The signal gate still controls whether
-      // this foreground turn creates a new job; recovery must not depend on a new stable prompt.
-      kickMemoryWorker();
+      // Rebuild jobs lost after a canonical terminal commit, then drain all durable work. Keep
+      // this detached from the foreground path: recovery degradation must not delay streaming.
+      void recoverMemoryReviewJobs({
+        runtimeDatabasePath: memoryPaths.workspace.runtimeDatabase,
+        scheduler: memoryReviewScheduler,
+      })
+        .catch((error: unknown) =>
+          logger.warn(
+            { workDir, error: error instanceof Error ? error.message : String(error) },
+            "[Memory] runtime-ledger recovery failed",
+          ),
+        )
+        .finally(kickMemoryWorker);
     }
     let activeMcpManager = dependencies.mcpManager;
     runtimeState.bindHookRuntime({

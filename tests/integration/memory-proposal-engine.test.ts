@@ -67,6 +67,19 @@ test("proposal engine creates explicit proposals locally and skips one-time requ
   assert.equal(model.calls.length, 0, "explicit and one-time requests must not call the extractor");
 });
 
+test("stable signal gate excludes questions, negation, discussion, and quoted examples", () => {
+  for (const content of [
+    "如何让 App 记住用户偏好？",
+    "Should the app remember this session?",
+    "请不要记住这个临时值",
+    "我们来讨论“请记住这个值”这句话",
+    'The quoted example says "remember this value".',
+  ]) {
+    assert.equal(detectStableMemorySignal(content).eligible, false, content);
+  }
+  assert.equal(detectStableMemorySignal("请记住：以后始终用中文回复").eligible, true);
+});
+
 test("proposal engine deterministically treats a named release branch as a reference", async (context) => {
   const fixture = await createFixture("branch-reference");
   context.after(fixture.close);
@@ -168,6 +181,55 @@ test("runtime evidence reader accepts only the exact completed run user message"
     eventId: ref.terminalEventId,
   });
   assert.match(evidence.digest, /^sha256:[a-f0-9]{64}$/u);
+
+  const desktopUser = entry(4, {
+    ...messageEvent(ref, {
+      role: "user",
+      content: "请记住：始终使用中文",
+      providerData: {
+        picoKind: "desktop_user_input",
+        displayText: "请记住：始终使用中文",
+      },
+    }),
+    runId: "desktop-input-run",
+  });
+  const desktopReader = new RuntimeMemoryEvidenceReader(
+    eventStore([
+      [ref.terminalEventId, terminal],
+      [ref.userMessageEventId, desktopUser],
+    ]),
+  );
+  assert.equal((await desktopReader.read(ref)).content, "请记住:始终使用中文");
+
+  for (const invalidMessage of [
+    {
+      role: "user" as const,
+      content: "请记住：内部续跑不是证据",
+      providerData: {
+        picoKind: "subagent_completion",
+        displayText: "请记住：内部续跑不是证据",
+      },
+    },
+    {
+      role: "user" as const,
+      content: "请记住：Skill 展开后的内容",
+      providerData: {
+        picoKind: "desktop_user_input",
+        displayText: "/skill remember",
+      },
+    },
+  ]) {
+    const invalidReader = new RuntimeMemoryEvidenceReader(
+      eventStore([
+        [ref.terminalEventId, terminal],
+        [
+          ref.userMessageEventId,
+          entry(4, { ...messageEvent(ref, invalidMessage), runId: "internal-input-run" }),
+        ],
+      ]),
+    );
+    await assert.rejects(() => invalidReader.read(ref), /user_message_identity/u);
+  }
 });
 
 test("strict model parser fails closed on text, extra fields and invented evidence", () => {

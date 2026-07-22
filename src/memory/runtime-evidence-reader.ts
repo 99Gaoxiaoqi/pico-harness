@@ -31,7 +31,12 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
     if (!terminalEntry) throw new MemoryEvidenceError("terminal_missing");
     if (!userEntry) throw new MemoryEvidenceError("user_message_missing");
     assertTerminal(terminalEntry.event, ref);
-    const content = assertUserMessage(userEntry.event, ref);
+    const content = assertUserMessage(
+      userEntry.event,
+      ref,
+      userEntry.sequence,
+      terminalEntry.sequence,
+    );
     const digestPayload = JSON.stringify({
       sessionId: ref.sessionId,
       runId: ref.runId,
@@ -74,11 +79,15 @@ function assertTerminal(event: RuntimeEvent, ref: TerminalMemoryEvidenceRef): vo
   }
 }
 
-function assertUserMessage(event: RuntimeEvent, ref: TerminalMemoryEvidenceRef): string {
+function assertUserMessage(
+  event: RuntimeEvent,
+  ref: TerminalMemoryEvidenceRef,
+  userSequence: number,
+  terminalSequence: number,
+): string {
   if (
     event.eventId !== ref.userMessageEventId ||
     event.sessionId !== ref.sessionId ||
-    event.runId !== ref.runId ||
     event.kind !== "message.committed" ||
     event.visibility !== "model" ||
     event.partial
@@ -92,6 +101,16 @@ function assertUserMessage(event: RuntimeEvent, ref: TerminalMemoryEvidenceRef):
     isMessageHiddenFromTranscript(message)
   ) {
     throw new MemoryEvidenceError("not_user_authored");
+  }
+  const desktopDisplayText = message.providerData?.["displayText"];
+  const isVerifiedPrecommittedDesktopInput =
+    message.providerData?.["picoKind"] === "desktop_user_input" &&
+    typeof desktopDisplayText === "string" &&
+    desktopDisplayText.trim().length > 0 &&
+    message.content === desktopDisplayText &&
+    userSequence < terminalSequence;
+  if (event.runId !== ref.runId && !isVerifiedPrecommittedDesktopInput) {
+    throw new MemoryEvidenceError("user_message_identity");
   }
   const content = message.content.normalize("NFKC").trim();
   if (!content) throw new MemoryEvidenceError("user_message_empty");

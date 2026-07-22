@@ -15,6 +15,7 @@ import {
   emitRuntimeLifecycleEvent,
   RuntimeRunExecutor,
 } from "../../src/runtime/runtime-run-executor.js";
+import { recoverMemoryReviewJobs } from "../../src/runtime/memory-review-recovery.js";
 
 test("RuntimeRunExecutor executes one assembled turn without owning its resources", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-executor-"));
@@ -246,7 +247,11 @@ test("a precommitted Desktop user message schedules once while an idle resume do
     const receipt = await session.commitMessageOnce("desktop-user-memory", {
       role: "user",
       content: prompt,
-      providerData: { picoKind: "desktop_user_input" },
+      providerData: {
+        picoKind: "desktop_user_input",
+        picoDesktopInputId: "desktop-user-memory",
+        displayText: prompt,
+      },
     });
     const enqueued: Array<{ readonly userMessageEventId: string }> = [];
     const engine = {
@@ -289,6 +294,84 @@ test("a precommitted Desktop user message schedules once while an idle resume do
       1,
       "an idle continuation must not replay the previous user input",
     );
+    const recovered: Array<{ readonly terminalEventId: string }> = [];
+    await recoverMemoryReviewJobs({
+      runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+      scheduler: { enqueue: (input) => void recovered.push(input) },
+    });
+    assert.equal(recovered.length, 1, "ledger recovery must not replay Desktop input on idle runs");
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Desktop resume rejects expanded, internal, and unverifiable Memory evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-desktop-evidence-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-memory-desktop-evidence", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  const stable = "请记住：这个项目固定使用 npm run desktop-evidence 。";
+  try {
+    await session.recover();
+    let enqueued = 0;
+    const execute = (prompt: string) =>
+      new RuntimeRunExecutor({
+        session,
+        runtimeState: {
+          dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+        } as unknown as SessionRuntime,
+        engine: {
+          run: async (target: Session) => {
+            await target.commitMessages({ role: "assistant", content: "done" });
+            return target.getHistory();
+          },
+        } as unknown as AgentEngine,
+        sessionSelection: { mode: "resume", sessionId: session.id },
+        workDir,
+        picoHome,
+        prompt,
+        resumeExistingSession: true,
+        traceEnabled: false,
+        options: {},
+        memoryReviewScheduler: { enqueue: () => void enqueued++ },
+      }).execute();
+
+    const cases = [
+      {
+        id: "desktop-expanded",
+        content: stable,
+        providerData: {
+          picoKind: "desktop_user_input",
+          displayText: "/skill remember-project",
+        },
+      },
+      {
+        id: "desktop-internal",
+        content: stable,
+        providerData: { picoKind: "subagent_completion", displayText: stable },
+      },
+      { id: "desktop-unverifiable", content: stable },
+    ];
+    for (const candidate of cases) {
+      await session.commitMessageOnce(candidate.id, {
+        role: "user",
+        content: candidate.content,
+        ...(candidate.providerData ? { providerData: candidate.providerData } : {}),
+      });
+      await execute(candidate.content);
+      await waitForImmediate();
+    }
+    assert.equal(enqueued, 0);
+    const recovered: Array<{ readonly terminalEventId: string }> = [];
+    await recoverMemoryReviewJobs({
+      runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+      scheduler: { enqueue: (input) => void recovered.push(input) },
+    });
+    assert.equal(recovered.length, 0, "ledger recovery must preserve Desktop fail-closed checks");
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
