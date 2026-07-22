@@ -167,11 +167,23 @@ export class SkillLoader {
     const skillFiles = (
       await Promise.all(
         sources.map(async (source) =>
-          (await walkForSkillMd(source.root)).map((file) => ({ file, source })),
+          (await walkForSkillMd(source.root)).map((file) => ({
+            file,
+            source,
+            relativePath: stableSourceRelativePath(source.root, file),
+          })),
         ),
       )
-    ).flat();
-    const signature = await skillFileSignature(skillFiles.map(({ file }) => file));
+    )
+      .flat()
+      .sort(
+        (left, right) =>
+          compareStableText(
+            stableSourceIdentity(left.source),
+            stableSourceIdentity(right.source),
+          ) || compareStableText(left.relativePath, right.relativePath),
+      );
+    const signature = await skillFileSignature(skillFiles);
     if (this.cache && this.cache.signature === signature) {
       return this.cache;
     }
@@ -181,7 +193,7 @@ export class SkillLoader {
       readonly part: string;
       readonly scope: ResourceCatalogSource["scope"];
     }> = [];
-    for (const { file, source } of skillFiles) {
+    for (const { file, source, relativePath } of skillFiles) {
       try {
         const content = await readBoundedUtf8(file, MAX_SKILL_FILE_BYTES);
         // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
@@ -191,7 +203,7 @@ export class SkillLoader {
         const allowedTools = normalizeAllowedTools(parsed.allowedTools, source.format, name, file);
         revisionParts.push({
           scope: source.scope,
-          part: `${source.id}\0${source.scope}\0${source.priority}\0${file}\0${createHash("sha256").update(content).digest("hex")}`,
+          part: `${stableSourceIdentity(source)}\0${relativePath}\0${createHash("sha256").update(content).digest("hex")}`,
         });
         candidates.push({
           name,
@@ -330,12 +342,20 @@ function normalizeAllowedTools(
   return [...mapped.tools, ...mapped.unknown];
 }
 
-async function skillFileSignature(files: readonly string[]): Promise<string> {
+interface SkillFileCandidate {
+  readonly file: string;
+  readonly source: ResourceCatalogSource;
+  readonly relativePath: string;
+}
+
+async function skillFileSignature(files: readonly SkillFileCandidate[]): Promise<string> {
   const parts: string[] = [];
-  for (const file of [...files].sort()) {
+  for (const { file, source, relativePath } of files) {
     try {
       const fileStat = await stat(file);
-      parts.push(`${file}:${fileStat.mtimeMs}:${fileStat.size}`);
+      parts.push(
+        `${stableSourceIdentity(source)}:${relativePath}:${file}:${fileStat.mtimeMs}:${fileStat.size}`,
+      );
     } catch (err) {
       if (!isErrnoException(err, "ENOENT")) {
         logger.debug({ err, file }, "读取 SKILL.md 签名失败");
@@ -343,6 +363,25 @@ async function skillFileSignature(files: readonly string[]): Promise<string> {
     }
   }
   return parts.join("\n");
+}
+
+function stableSourceIdentity(source: ResourceCatalogSource): string {
+  return [
+    source.id,
+    source.scope,
+    source.format,
+    String(source.priority),
+    source.namespace ?? "",
+  ].join("\0");
+}
+
+function stableSourceRelativePath(root: string, file: string): string {
+  const path = relative(root, file) || basename(file);
+  return path.split(sep).join("/");
+}
+
+function compareStableText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export class SkillViewTool implements BaseTool {
@@ -462,6 +501,7 @@ async function walkSkillDirectory(
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((left, right) => compareStableText(left.name, right.name));
   } catch (err) {
     // 权限不足或竞态消失:静默跳过该子树
     if (isErrnoException(err, "EACCES") || isErrnoException(err, "ENOENT")) return [];

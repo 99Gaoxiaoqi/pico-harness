@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 6;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v6";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 7;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v7";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
@@ -311,13 +311,15 @@ type RuntimeScopedMcpServerCommon = JsonObject & {
 export type RuntimeScopedMcpServer =
   | (RuntimeScopedMcpServerCommon & {
       readonly transport: "stdio";
-      readonly command: string;
-      readonly args?: readonly string[];
+      /** Executable basename only; absolute/relative paths never cross the Renderer boundary. */
+      readonly commandLabel: string;
+      readonly hasArguments: boolean;
       readonly envKeys?: readonly string[];
     })
   | (RuntimeScopedMcpServerCommon & {
       readonly transport: "http" | "sse";
-      readonly url: string;
+      /** URL origin + pathname only; userinfo, query and fragment are removed by the host. */
+      readonly endpointLabel: string;
       readonly headerKeys?: readonly string[];
     });
 
@@ -2593,10 +2595,11 @@ const runtimeScopedMcpServerResult: RuntimeResultRule = (value, path) => {
       {
         name: resultString,
         transport: resultOneOf(["stdio"]),
-        command: resultString,
+        commandLabel: resultCommandLabel,
+        hasArguments: resultBoolean,
         source: capabilitySourceMetadataResult,
       },
-      { ...common, args: resultStringArray, envKeys: resultStringArray },
+      { ...common, envKeys: resultStringArray },
     )(value, path);
     return;
   }
@@ -2604,11 +2607,39 @@ const runtimeScopedMcpServerResult: RuntimeResultRule = (value, path) => {
     {
       name: resultString,
       transport: resultOneOf(["http", "sse"]),
-      url: resultString,
+      endpointLabel: resultEndpointLabel,
       source: capabilitySourceMetadataResult,
     },
     { ...common, headerKeys: resultStringArray },
   )(value, path);
+};
+
+const resultCommandLabel: RuntimeResultRule = (value, path) => {
+  resultString(value, path);
+  const label = value as string;
+  if (!label || label === "." || label === ".." || /[\\/]/u.test(label)) {
+    throw invalidResult(`${path} 必须是不含路径的可执行文件名`);
+  }
+};
+
+const resultEndpointLabel: RuntimeResultRule = (value, path) => {
+  resultString(value, path);
+  let parsed: URL;
+  try {
+    parsed = new URL(value as string);
+  } catch {
+    throw invalidResult(`${path} 必须是安全的 HTTP(S) endpoint 摘要`);
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    value !== `${parsed.origin}${parsed.pathname}`
+  ) {
+    throw invalidResult(`${path} 只能包含 HTTP(S) origin 和 pathname`);
+  }
 };
 
 const memoryFactResult = exactResultShape(

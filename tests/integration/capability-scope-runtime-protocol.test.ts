@@ -131,8 +131,8 @@ test("scoped capability results expose opaque provenance without source paths or
   const userServer = {
     name: "github",
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-github"],
+    commandLabel: "npx",
+    hasArguments: true,
     envKeys: ["GITHUB_TOKEN"],
     enabled: true,
     source: sourceMetadata({ scope: "user", sourceId: "user:mcp" }),
@@ -140,7 +140,7 @@ test("scoped capability results expose opaque provenance without source paths or
   const pluginServer = {
     name: "github",
     transport: "http",
-    url: "https://example.invalid/mcp",
+    endpointLabel: "https://example.invalid/mcp",
     headerKeys: ["Authorization"],
     source: pluginSource,
   } as const satisfies RuntimeScopedMcpServer;
@@ -192,7 +192,10 @@ test("scoped capability results expose opaque provenance without source paths or
   const secret = "must-not-cross-renderer-boundary";
   for (const unsafeServer of [
     { ...userServer, env: { GITHUB_TOKEN: secret } },
+    { ...userServer, command: "/private/bin/npx" },
+    { ...userServer, args: ["--token", secret] },
     { ...pluginServer, headers: { Authorization: secret } },
+    { ...pluginServer, url: `https://user:${secret}@example.invalid/mcp?token=${secret}` },
     { ...pluginServer, sourcePath: "/private/plugin/mcp.json" },
     { ...pluginServer, source: { ...pluginServer.source, path: "/private/plugin" } },
   ]) {
@@ -201,6 +204,28 @@ test("scoped capability results expose opaque provenance without source paths or
         parseDesktopRuntimeResult("mcp.user.list", {
           servers: [unsafeServer],
           revision: "user-revision",
+        }),
+      RUNTIME_ERROR_CODES.INVALID_REQUEST,
+    );
+    assert.equal(error.message.includes(secret), false);
+  }
+  for (const unsafeSummary of [
+    { ...userServer, commandLabel: "/private/bin/npx" },
+    { ...userServer, commandLabel: "..\\private\\npx" },
+    {
+      ...pluginServer,
+      endpointLabel: `https://user:${secret}@example.invalid/mcp`,
+    },
+    {
+      ...pluginServer,
+      endpointLabel: `https://example.invalid/mcp?token=${secret}#private`,
+    },
+  ]) {
+    const error = assertProtocolError(
+      () =>
+        parseDesktopRuntimeResult("mcp.effective.list", {
+          servers: [unsafeSummary],
+          revisions: revisions(),
         }),
       RUNTIME_ERROR_CODES.INVALID_REQUEST,
     );
@@ -217,6 +242,8 @@ test("scoped capability results expose opaque provenance without source paths or
 });
 
 test("runtime schema and config notifications advertise scoped capabilities without secret data", () => {
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 7);
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v7");
   const ping = {
     pong: true,
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
