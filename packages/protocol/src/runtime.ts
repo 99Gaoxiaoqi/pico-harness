@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 7;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v7";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 8;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v8";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
@@ -318,7 +318,7 @@ export type RuntimeScopedMcpServer =
     })
   | (RuntimeScopedMcpServerCommon & {
       readonly transport: "http" | "sse";
-      /** URL origin + pathname only; userinfo, query and fragment are removed by the host. */
+      /** URL origin only; paths can carry credentials and never cross the Renderer boundary. */
       readonly endpointLabel: string;
       readonly headerKeys?: readonly string[];
     });
@@ -2636,9 +2636,9 @@ const resultEndpointLabel: RuntimeResultRule = (value, path) => {
     parsed.password ||
     parsed.search ||
     parsed.hash ||
-    value !== `${parsed.origin}${parsed.pathname}`
+    value !== parsed.origin
   ) {
-    throw invalidResult(`${path} 只能包含 HTTP(S) origin 和 pathname`);
+    throw invalidResult(`${path} 只能包含 HTTP(S) origin`);
   }
 };
 

@@ -89,6 +89,7 @@ import {
 } from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
 import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
+import { configuredMcpServerNames, filterPluginMcpSources } from "../mcp/effective-config.js";
 import type { ScheduleDraftCoordinator } from "../tasks/cron-draft.js";
 import { looksLikeScheduleCreationIntent, ScheduleTaskTool } from "../tools/schedule-task.js";
 import { BackgroundManager } from "../tools/background-manager.js";
@@ -1000,7 +1001,10 @@ export async function executeAgentRuntime(
     // per-server 失败隔离,一个 server 挂了不影响其他。
     const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
     const hostMcpSources = backgroundPolicy ? [] : (dependencies.mcpConfigSources ?? []);
-    const pluginMcpSources = pluginSnapshot?.mcpSources ?? [];
+    const pluginMcpSources = filterPluginMcpSources(
+      pluginSnapshot?.mcpSources ?? [],
+      configuredMcpServerNames(hostMcpSources),
+    );
     ownsMcpManager = dependencies.mcpManager === undefined;
     const mcpManager =
       dependencies.mcpManager ??
@@ -1020,6 +1024,10 @@ export async function executeAgentRuntime(
                       backgroundPolicy.allowedToolNetworkHosts,
                     ),
                 }
+              : {}),
+            ...(pluginMcpSources.length > 0 &&
+            (hostMcpSources.length > 0 || mcpConfigPath !== undefined)
+              ? { duplicateServerPolicy: "keep-first" as const }
               : {}),
           })
         : undefined);

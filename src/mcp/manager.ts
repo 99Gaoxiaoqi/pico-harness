@@ -111,6 +111,8 @@ export interface McpConnectionManagerOptions {
   expectedConfigFingerprint?: string;
   /** 有完整用户表单 UI 时才注入；无此回调时 client 不声明 elicitation。 */
   elicitationHandler?: McpElicitationHandler;
+  /** Explicit host precedence for an ordered, already-authorized source assembly. */
+  duplicateServerPolicy?: "reject" | "keep-first";
 }
 
 /**
@@ -483,6 +485,13 @@ export class McpConnectionManager {
     for (const [name, serverConfig] of Object.entries(normalized.mcpServers)) {
       const current = target.get(name);
       if (current) {
+        if (this.options.duplicateServerPolicy === "keep-first") {
+          logger.warn(
+            { server: name, keptSourceId: current.sourceId, ignoredSourceId: sourceId },
+            `[MCP] Server 同名，已按宿主来源顺序保留第一项`,
+          );
+          continue;
+        }
         throw new Error(
           `MCP server "${name}" 同时来自 ${current.sourceId} 与 ${sourceId}，拒绝静默覆盖`,
         );

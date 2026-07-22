@@ -38,11 +38,21 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
         id: "plugin:fixture-plugin:mcp",
         config: {
           mcpServers: {
+            shared: {
+              name: "shared",
+              transport: "stdio",
+              command: "shadowed-plugin-server",
+            },
             "fixture-plugin__remote": {
               name: "fixture-plugin__remote",
               transport: "http",
-              url: "https://plugin-user:PLUGIN_PASSWORD@example.test/plugin?token=PLUGIN_TOKEN#secret",
+              url: "https://plugin-user:PLUGIN_PASSWORD@example.test/plugin/PLUGIN_PATH_SECRET?token=PLUGIN_TOKEN#secret",
               headers: { Authorization: "Bearer PLUGIN_HEADER_SECRET" },
+            },
+            "fixture-plugin__invalid": {
+              name: "fixture-plugin__invalid",
+              transport: "http",
+              url: "ftp://example.test/INVALID_PATH_SECRET",
             },
           },
         },
@@ -75,7 +85,18 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
     pluginRuntimeSnapshotRegistry,
     ownsPluginRuntimeSnapshotRegistry: true,
   });
+  await registrationStore.register(workspace);
+  let mcpConfigNotifications = 0;
+  const unsubscribe = desktop.subscribe((notification) => {
+    if (
+      notification.topic === "config.updated" &&
+      JSON.stringify(notification.payload).includes('"mcp"')
+    ) {
+      mcpConfigNotifications++;
+    }
+  });
   context.after(async () => {
+    unsubscribe();
     await desktop.close();
     await rm(root, { recursive: true, force: true });
   });
@@ -92,14 +113,15 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
   );
   assert.equal(pluginLoads, 0, "untrusted lookup must fail before plugin resolution");
 
+  const userServerInput = {
+    name: "shared",
+    transport: "stdio" as const,
+    command: "/private/tools/node --token=COMMAND_SECRET",
+    args: ["--token=ARG_SECRET"],
+    env: { API_TOKEN: "ENV_SECRET" },
+  };
   const upsertRequest = createRuntimeRequest("mcp.user.upsert", {
-    server: {
-      name: "shared",
-      transport: "stdio",
-      command: "/private/tools/node --token=COMMAND_SECRET",
-      args: ["--token=ARG_SECRET"],
-      env: { API_TOKEN: "ENV_SECRET" },
-    },
+    server: userServerInput,
     expectedRevision: initialRevision,
     idempotencyKey: "mcp-upsert-shared",
   });
@@ -115,6 +137,36 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
 
   const replay = asRecord(await desktop.handle(upsertRequest));
   assert.equal(replay["revision"], createdRevision, "same idempotency key must replay safely");
+  const deleted = asRecord(
+    await desktop.handle(
+      createRuntimeRequest("mcp.user.delete", {
+        serverName: "shared",
+        expectedRevision: createdRevision,
+        idempotencyKey: "intervening-delete",
+      }),
+    ),
+  );
+  const afterDelete = asRecord(await desktop.handle(createRuntimeRequest("mcp.user.list", {})));
+  assert.deepEqual(afterDelete["servers"], []);
+  const replayAfterDelete = asRecord(await desktop.handle(upsertRequest));
+  assert.equal(replayAfterDelete["revision"], createdRevision);
+  assert.equal(asRecord(replayAfterDelete["server"])["name"], "shared");
+  assert.deepEqual(
+    asRecord(await desktop.handle(createRuntimeRequest("mcp.user.list", {})))["servers"],
+    [],
+    "replay must not undo a later delete",
+  );
+  const restored = asRecord(
+    await desktop.handle(
+      createRuntimeRequest("mcp.user.upsert", {
+        server: userServerInput,
+        expectedRevision: requiredString(afterDelete["revision"]),
+        idempotencyKey: "restore-shared",
+      }),
+    ),
+  );
+  assert.notEqual(restored["revision"], deleted["revision"]);
+  assert.equal(mcpConfigNotifications, 3, "idempotent replays must not republish config updates");
   await assert.rejects(
     desktop.handle(
       createRuntimeRequest("mcp.user.delete", {
@@ -136,7 +188,7 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
         mcpServers: {
           shared: {
             transport: "http",
-            url: "https://project-user:PROJECT_PASSWORD@example.test/project?token=PROJECT_TOKEN#secret",
+            url: "https://project-user:PROJECT_PASSWORD@example.test/project/PROJECT_PATH_SECRET?token=PROJECT_TOKEN#secret",
             headers: { Authorization: "Bearer PROJECT_HEADER_SECRET" },
           },
         },
@@ -153,7 +205,7 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
   const effectiveText = JSON.stringify(effective);
   assert.doesNotMatch(
     effectiveText,
-    /PROJECT_PASSWORD|PROJECT_TOKEN|PROJECT_HEADER_SECRET|PLUGIN_PASSWORD|PLUGIN_TOKEN|PLUGIN_HEADER_SECRET/u,
+    /PROJECT_PASSWORD|PROJECT_TOKEN|PROJECT_PATH_SECRET|PROJECT_HEADER_SECRET|PLUGIN_PASSWORD|PLUGIN_TOKEN|PLUGIN_PATH_SECRET|PLUGIN_HEADER_SECRET|INVALID_PATH_SECRET/u,
   );
   assert.doesNotMatch(effectiveText, /plugin-user|project-user/u);
   assert.equal(pluginLoads, 1);
@@ -169,8 +221,24 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
   assert.ok(
     servers.some(
       (server) =>
+        server["name"] === "fixture-plugin__invalid" &&
+        server["endpointLabel"] === "https://invalid.invalid",
+    ),
+  );
+  assert.ok(
+    servers.some(
+      (server) =>
         server["name"] === "shared" &&
-        server["endpointLabel"] === "https://example.test/project" &&
+        asRecord(server["source"])["scope"] === "plugin" &&
+        asRecord(server["source"])["effective"] === false &&
+        asRecord(server["source"])["shadowedBy"] === "project",
+    ),
+  );
+  assert.ok(
+    servers.some(
+      (server) =>
+        server["name"] === "shared" &&
+        server["endpointLabel"] === "https://example.test" &&
         asRecord(server["source"])["scope"] === "project",
     ),
   );
@@ -178,7 +246,7 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
     servers.some(
       (server) =>
         server["name"] === "fixture-plugin__remote" &&
-        server["endpointLabel"] === "https://example.test/plugin" &&
+        server["endpointLabel"] === "https://example.test" &&
         asRecord(server["source"])["scope"] === "plugin",
     ),
   );
@@ -190,7 +258,6 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
   await desktop.handle(createRuntimeRequest("mcp.effective.list", { workspacePath: workspace }));
   assert.equal(pluginLoads, 2, "revoking trust must invalidate the active plugin generation");
 
-  await registrationStore.register(workspace);
   await desktop.handle(createRuntimeRequest("workspace.unregister", { workspacePath: workspace }));
   await desktop.handle(createRuntimeRequest("mcp.effective.list", { workspacePath: workspace }));
   assert.equal(pluginLoads, 3, "unregistering a workspace must invalidate its plugin generation");
