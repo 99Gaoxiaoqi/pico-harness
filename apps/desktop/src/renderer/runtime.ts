@@ -533,7 +533,7 @@ function providerCredentialStatus(value: unknown): ProviderCredentialStatus {
 }
 
 function providerCredentialSource(value: unknown): ProviderCredentialSource {
-  return value === "keychain" || value === "environment" ? value : "none";
+  return value === "config" || value === "keychain" || value === "environment" ? value : "none";
 }
 
 function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
@@ -961,12 +961,9 @@ export interface RuntimeActions {
   setProviderCredential(
     providerId: string,
     secret: string,
-    expectedProviderFingerprint: string,
+    expectedRevision: string,
   ): Promise<boolean>;
-  deleteProviderCredential(
-    providerId: string,
-    expectedProviderFingerprint: string,
-  ): Promise<boolean>;
+  deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
   updateMemoryFact(
     factId: string,
@@ -2493,7 +2490,7 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage(modelRouteId ? "默认模型已更新。" : "已清除用户默认模型。");
         });
       },
-      async setProviderCredential(providerId, secret, expectedProviderFingerprint) {
+      async setProviderCredential(providerId, secret, expectedRevision) {
         const providerConfig = dataRef.current.providerConfig;
         if (!providerConfig.writable || !secret) return false;
         return perform("provider-credential", async (bridge) => {
@@ -2501,7 +2498,7 @@ export function useRuntimeStore(): RuntimeStore {
             await invoke(bridge, "provider.credential.set", {
               providerId,
               secret,
-              expectedProviderFingerprint,
+              expectedRevision,
             });
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
@@ -2510,14 +2507,13 @@ export function useRuntimeStore(): RuntimeStore {
               ...current,
               providerConfig: {
                 ...current.providerConfig,
+                revision: `${current.providerConfig.revision}-next`,
                 providers: current.providerConfig.providers.map((provider) =>
                   provider.id === providerId
                     ? {
                         ...provider,
-                        credentialStatus:
-                          provider.credentialSource === "environment" ? "environment" : "ready",
-                        credentialSource:
-                          provider.credentialSource === "environment" ? "environment" : "keychain",
+                        credentialStatus: "ready",
+                        credentialSource: "config",
                         storedCredentialPresent: true,
                       }
                     : provider,
@@ -2525,17 +2521,17 @@ export function useRuntimeStore(): RuntimeStore {
               },
             }));
           }
-          setMessage(`Provider ${providerId} 的凭证已保存到系统安全存储。`);
+          setMessage(`Provider ${providerId} 的 API Key 已保存到 ~/.pico/config.json。`);
         });
       },
-      async deleteProviderCredential(providerId, expectedProviderFingerprint) {
+      async deleteProviderCredential(providerId, expectedRevision) {
         const providerConfig = dataRef.current.providerConfig;
         if (!providerConfig.writable) return false;
         return perform("provider-credential-delete", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "provider.credential.delete", {
               providerId,
-              expectedProviderFingerprint,
+              expectedRevision,
             });
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
@@ -2544,14 +2540,13 @@ export function useRuntimeStore(): RuntimeStore {
               ...current,
               providerConfig: {
                 ...current.providerConfig,
+                revision: `${current.providerConfig.revision}-next`,
                 providers: current.providerConfig.providers.map((provider) =>
                   provider.id === providerId
                     ? {
                         ...provider,
-                        credentialStatus:
-                          provider.credentialSource === "environment" ? "environment" : "missing",
-                        credentialSource:
-                          provider.credentialSource === "environment" ? "environment" : "none",
+                        credentialStatus: "missing",
+                        credentialSource: "none",
                         storedCredentialPresent: false,
                       }
                     : provider,
@@ -2559,7 +2554,7 @@ export function useRuntimeStore(): RuntimeStore {
               },
             }));
           }
-          setMessage(`Provider ${providerId} 的系统凭证已删除。`);
+          setMessage(`Provider ${providerId} 在 ~/.pico/config.json 中的 API Key 已删除。`);
         });
       },
       async refreshMemory() {

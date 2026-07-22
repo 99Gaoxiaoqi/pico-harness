@@ -134,7 +134,7 @@ export type RuntimeConfigSource =
   | "session"
   | "cli";
 export type RuntimeCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
-export type RuntimeCredentialSource = "keychain" | "environment" | "none";
+export type RuntimeCredentialSource = "config" | "keychain" | "environment" | "none";
 
 export type RuntimeProviderInput = JsonObject & {
   readonly id: string;
@@ -151,7 +151,7 @@ export type RuntimeProviderProfile = RuntimeProviderInput & {
   readonly fingerprint: string;
   readonly credentialStatus: RuntimeCredentialStatus;
   readonly credentialSource: RuntimeCredentialSource;
-  /** A durable system credential exists even when an environment variable currently takes precedence. */
+  /** A durable config or legacy keychain credential exists. */
   readonly storedCredentialPresent: boolean;
 };
 
@@ -920,27 +920,29 @@ export type RuntimeMethodMap = {
     readonly params: {
       readonly providerId: string;
       readonly secret: string;
-      readonly expectedProviderFingerprint: string;
+      readonly expectedRevision: string;
     };
     readonly result: {
       readonly providerId: string;
       readonly status: "ready";
-      readonly source: "keychain";
+      readonly source: "config";
       readonly storedCredentialPresent: true;
       readonly providerFingerprint: string;
+      readonly revision: string;
     };
   };
   readonly "provider.credential.delete": {
     readonly params: {
       readonly providerId: string;
-      readonly expectedProviderFingerprint: string;
+      readonly expectedRevision: string;
     };
     readonly result: {
       readonly providerId: string;
-      readonly status: "missing";
-      readonly source: "none";
-      readonly storedCredentialPresent: false;
+      readonly status: RuntimeCredentialStatus;
+      readonly source: RuntimeCredentialSource;
+      readonly storedCredentialPresent: boolean;
       readonly providerFingerprint: string;
+      readonly revision: string;
     };
   };
   readonly "catalog.agents": {
@@ -2232,11 +2234,11 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "provider.credential.set": exactParamShape({
     providerId: stringParam,
     secret: stringParam,
-    expectedProviderFingerprint: stringParam,
+    expectedRevision: stringParam,
   }),
   "provider.credential.delete": exactParamShape({
     providerId: stringParam,
-    expectedProviderFingerprint: stringParam,
+    expectedRevision: stringParam,
   }),
   "catalog.agents": workspaceParams,
   "catalog.skills": workspaceParams,
