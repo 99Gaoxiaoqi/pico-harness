@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, link, lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  rename,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
@@ -11,6 +21,8 @@ const FILE_MODE = 0o600;
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_STALE_LOCK_MS = 30_000;
 const LOCK_RETRY_MS = 10;
+const USER_CONFIG_TEMPORARY_NAME =
+  /^\.config\.json\.[1-9]\d*\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/u;
 
 export const EMPTY_USER_CONFIG_REVISION = sha256("");
 
@@ -118,6 +130,8 @@ export class UserConfigStore {
   readonly lockPath: string;
   private readonly lockTimeoutMs: number;
   private readonly staleLockMs: number;
+  private temporaryRecoveryComplete = false;
+  private temporaryRecoveryFlight?: Promise<void>;
 
   constructor(options: UserConfigStoreOptions = {}) {
     this.directoryPath = options.picoHome ?? resolvePicoHome();
@@ -129,6 +143,7 @@ export class UserConfigStore {
 
   async read(): Promise<UserConfigSnapshot> {
     await this.secureDirectory();
+    await this.recoverTemporaryFilesOnce();
     return this.readUnlocked();
   }
 
@@ -138,6 +153,8 @@ export class UserConfigStore {
   ): Promise<UserConfigSnapshot> {
     const normalized = parseUserConfig(config, this.filePath);
     return this.withWriteLock(async (lock) => {
+      await this.removeAbandonedTemporaryFiles(lock);
+      this.temporaryRecoveryComplete = true;
       const current = await this.readUnlocked();
       if (options.expectedRevision !== current.revision) {
         throw new UserConfigRevisionConflictError(options.expectedRevision, current.revision);
@@ -192,6 +209,60 @@ export class UserConfigStore {
     } finally {
       await handle?.close().catch(() => undefined);
     }
+  }
+
+  /**
+   * A crash can leave a plaintext atomic-write temporary behind. Recovery must acquire the same
+   * cooperative lock as writers: an unlocked directory sweep could otherwise delete a live
+   * writer's not-yet-published file. Concurrent reads on one store share one recovery attempt.
+   */
+  private async recoverTemporaryFilesOnce(): Promise<void> {
+    if (this.temporaryRecoveryComplete) return;
+    if (this.temporaryRecoveryFlight) return this.temporaryRecoveryFlight;
+    const recovery = this.withWriteLock(async (lock) => {
+      await this.removeAbandonedTemporaryFiles(lock);
+      this.temporaryRecoveryComplete = true;
+    });
+    this.temporaryRecoveryFlight = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (this.temporaryRecoveryFlight === recovery) this.temporaryRecoveryFlight = undefined;
+    }
+  }
+
+  private async removeAbandonedTemporaryFiles(lock: UserConfigLockIdentity): Promise<void> {
+    await this.assertOwnedLock(lock);
+    const names = await readdir(this.directoryPath);
+    let removed = false;
+    for (const name of names) {
+      if (!USER_CONFIG_TEMPORARY_NAME.test(name)) continue;
+      const path = join(this.directoryPath, name);
+      let before;
+      try {
+        before = await lstat(path);
+      } catch (error) {
+        if (isErrnoCode(error, "ENOENT")) continue;
+        throw error;
+      }
+      if (before.isSymbolicLink() || !before.isFile()) {
+        throw new Error(`用户配置临时文件必须是普通文件，不能是符号链接或其他类型: ${path}`);
+      }
+      await this.assertOwnedLock(lock);
+      let current;
+      try {
+        current = await lstat(path);
+      } catch (error) {
+        if (isErrnoCode(error, "ENOENT")) continue;
+        throw error;
+      }
+      if (current.isSymbolicLink() || !current.isFile() || !sameFile(before, current)) {
+        throw new Error(`清理用户配置临时文件时目标已变化: ${path}`);
+      }
+      await unlink(path);
+      removed = true;
+    }
+    if (removed) await syncDirectory(this.directoryPath);
   }
 
   private async withWriteLock<T>(
