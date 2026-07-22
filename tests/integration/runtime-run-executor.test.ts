@@ -16,6 +16,7 @@ import {
   RuntimeRunExecutor,
 } from "../../src/runtime/runtime-run-executor.js";
 import { recoverMemoryReviewJobs } from "../../src/runtime/memory-review-recovery.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 
 test("RuntimeRunExecutor executes one assembled turn without owning its resources", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-executor-"));
@@ -144,6 +145,7 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
   const session = new Session("runtime-memory-enqueue-failure", workDir, {
     persistence: true,
     picoHome,
+    runtimePort: createEngineRuntimePort(),
   });
   try {
     await session.recover();
@@ -187,6 +189,19 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
       events.some((event) => event.kind === "run.terminal" && event.data.status === "completed"),
       true,
     );
+    await assert.rejects(
+      recoverMemoryReviewJobs({
+        runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+        scheduler: { enqueue: () => Promise.reject(new Error("recovery queue unavailable")) },
+      }),
+      /recovery queue unavailable/u,
+    );
+    let recoveredAfterRetry = 0;
+    await recoverMemoryReviewJobs({
+      runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+      scheduler: { enqueue: () => void recoveredAfterRetry++ },
+    });
+    assert.equal(recoveredAfterRetry, 1, "a failed scan must remain retryable in this process");
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
@@ -295,10 +310,13 @@ test("a precommitted Desktop user message schedules once while an idle resume do
       "an idle continuation must not replay the previous user input",
     );
     const recovered: Array<{ readonly terminalEventId: string }> = [];
-    await recoverMemoryReviewJobs({
-      runtimeDatabasePath: session.runtimeEventStore!.databasePath,
-      scheduler: { enqueue: (input) => void recovered.push(input) },
-    });
+    const recover = () =>
+      recoverMemoryReviewJobs({
+        runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+        scheduler: { enqueue: (input) => void recovered.push(input) },
+      });
+    await Promise.all([recover(), recover()]);
+    await recover();
     assert.equal(recovered.length, 1, "ledger recovery must not replay Desktop input on idle runs");
   } finally {
     await session.close();
