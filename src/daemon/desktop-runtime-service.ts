@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -233,6 +233,7 @@ export interface DesktopRuntimeInteractions {
  * of creating a renderer-owned cache or a second Agent runtime.
  */
 export class DesktopRuntimeService implements DisposableLocalRuntimeService {
+  private readonly userConfigRevisionTokenKey = randomBytes(32);
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly trustStore: WorkspaceTrustStore;
   private readonly sessionStateStore: DesktopSessionStateStore;
@@ -1733,7 +1734,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const snapshot = await this.userConfigStore.read();
     return {
       config: runtimeUserConfig(snapshot.config),
-      revision: snapshot.revision,
+      revision: this.projectUserConfigRevision(snapshot.revision),
     };
   }
 
@@ -1746,6 +1747,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const defaults = normalizeRuntimeUserDefaults(record["defaults"]);
     const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
     const current = await this.userConfigStore.read();
+    this.assertUserConfigRevision(expectedRevision, current.revision);
     const next = validatedUserConfig(
       {
         version: 1,
@@ -1755,9 +1757,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "config.user.update",
     );
     assertUserDefaultRoute(next);
-    const written = await this.writeUserConfig(next, expectedRevision);
+    const written = await this.writeUserConfig(next, current.revision);
     await this.publishUserConfigUpdated(written.revision, []);
-    return { config: runtimeUserConfig(written.config), revision: written.revision };
+    return {
+      config: runtimeUserConfig(written.config),
+      revision: this.projectUserConfigRevision(written.revision),
+    };
   }
 
   private async getEffectiveConfig(params: unknown): Promise<JsonValue> {
@@ -1807,7 +1812,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         defaults: toJsonValue(snapshot.defaults),
         providers,
         sources: toJsonValue(snapshot.sources),
-        revisions: snapshot.revisions,
+        revisions: {
+          ...snapshot.revisions,
+          user: this.projectUserConfigRevision(snapshot.revisions.user),
+        },
       },
     };
   }
@@ -1820,7 +1828,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         .toSorted(([left], [right]) => left.localeCompare(right))
         .map(([id, provider]) => this.projectProviderProfile(id, provider, "user")),
     );
-    return { providers, revision: snapshot.revision };
+    return { providers, revision: this.projectUserConfigRevision(snapshot.revision) };
   }
 
   private async upsertUserProvider(params: unknown): Promise<JsonValue> {
@@ -1832,6 +1840,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
     const { id, config } = normalizeRuntimeProvider(record["provider"]);
     const current = await this.userConfigStore.read();
+    this.assertUserConfigRevision(expectedRevision, current.revision);
     const previousProvider = current.config.providers[id];
     const workspacePaths = await this.registrationStore.list();
     this.assertProviderCompatibleWithAutomationReferences(
@@ -1856,10 +1865,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "provider.upsert",
     );
     assertUserDefaultRoute(next);
-    const written = await this.writeUserConfig(next, expectedRevision);
+    const written = await this.writeUserConfig(next, current.revision);
     const provider = await this.projectProviderProfile(id, written.config.providers[id]!, "user");
     await this.publishUserConfigUpdated(written.revision, [id]);
-    return { provider, revision: written.revision };
+    return { provider, revision: this.projectUserConfigRevision(written.revision) };
   }
 
   private async importEnvironmentProvider(params: unknown): Promise<JsonValue> {
@@ -1945,7 +1954,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await this.providerOperationJournal.clear(pending.operationId);
     const provider = await this.projectProviderProfile(id, written.config.providers[id]!, "user");
     await this.publishUserConfigUpdated(written.revision, [id]);
-    return { provider, revision: written.revision };
+    return { provider, revision: this.projectUserConfigRevision(written.revision) };
   }
 
   private async deleteUserProvider(params: unknown): Promise<JsonValue> {
@@ -1964,12 +1973,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `Provider ${providerId} 不存在`,
       );
     }
-    if (current.revision !== expectedRevision) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `用户配置已更改: expected ${expectedRevision}, actual ${current.revision}`,
-      );
-    }
+    this.assertUserConfigRevision(expectedRevision, current.revision);
     if (providerIdForModelRoute(current.config.defaults?.modelRouteId) === providerId) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -2023,7 +2027,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     await this.providerOperationJournal.clear(pending.operationId);
     await this.publishUserConfigUpdated(written.revision, [providerId]);
-    return { deleted: true, revision: written.revision };
+    return { deleted: true, revision: this.projectUserConfigRevision(written.revision) };
   }
 
   private async getProviderCredentialStatus(params: unknown): Promise<JsonValue> {
@@ -2061,7 +2065,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         source: "config",
         storedCredentialPresent: true,
         providerFingerprint: fingerprint,
-        revision: current.revision,
+        revision: this.projectUserConfigRevision(current.revision),
       };
     }
     const nextProvider = withConfiguredCredential(provider, secret);
@@ -2081,7 +2085,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       source: "config",
       storedCredentialPresent: true,
       providerFingerprint: fingerprint,
-      revision: written.revision,
+      revision: this.projectUserConfigRevision(written.revision),
     };
   }
 
@@ -2107,7 +2111,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         source: status.credentialSource,
         storedCredentialPresent: status.storedCredentialPresent,
         providerFingerprint: fingerprint,
-        revision: current.revision,
+        revision: this.projectUserConfigRevision(current.revision),
       };
     }
     const nextProvider = withoutConfiguredCredential(provider);
@@ -2131,7 +2135,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       source: status.credentialSource,
       storedCredentialPresent: status.storedCredentialPresent,
       providerFingerprint: fingerprint,
-      revision: written.revision,
+      revision: this.projectUserConfigRevision(written.revision),
     };
   }
 
@@ -2266,10 +2270,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       this.observedUserConfig = written;
       return written;
     } catch (error) {
-      if (
-        error instanceof UserConfigRevisionConflictError ||
-        error instanceof UserConfigLockTimeoutError
-      ) {
+      if (error instanceof UserConfigRevisionConflictError) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "用户配置已更改，请刷新后重试",
+        );
+      }
+      if (error instanceof UserConfigLockTimeoutError) {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
       }
       throw error;
@@ -2524,7 +2531,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async commitProviderOperationConfig(
     operation: ProviderOperationRecord,
   ): Promise<UserConfigSnapshot> {
-    let lastConflict: unknown;
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = await this.userConfigStore.read();
       const next = reconcileProviderOperationConfig(operation, current.config);
@@ -2533,12 +2539,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return await this.userConfigStore.write(next, { expectedRevision: current.revision });
       } catch (error) {
         if (!(error instanceof UserConfigRevisionConflictError)) throw error;
-        lastConflict = error;
       }
     }
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,
-      `Provider 操作 ${operation.operationId} 在并发配置更新后仍无法提交: ${errorMessage(lastConflict)}`,
+      `Provider 操作 ${operation.operationId} 在并发配置更新后仍无法提交，请刷新后重试`,
     );
   }
 
@@ -2573,12 +2578,21 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private assertUserConfigRevision(expected: string, actual: string): void {
-    if (expected !== actual) {
+    const expectedBytes = Buffer.from(expected, "hex");
+    const actualBytes = Buffer.from(this.projectUserConfigRevision(actual), "hex");
+    if (!timingSafeEqual(expectedBytes, actualBytes)) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
-        `用户配置已更改: expected ${expected}, actual ${actual}`,
+        "用户配置已更改，请刷新后重试",
       );
     }
+  }
+
+  private projectUserConfigRevision(revision: string): string {
+    return createHmac("sha256", this.userConfigRevisionTokenKey)
+      .update("pico.desktop.user-config-revision.v1\0", "utf8")
+      .update(revision, "utf8")
+      .digest("hex");
   }
 
   private async publishUserConfigUpdated(
@@ -2594,7 +2608,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           at: this.now(),
           payload: {
             scope: "user",
-            revision,
+            revision: this.projectUserConfigRevision(revision),
             providerIds: [...providerIds],
           },
         }),

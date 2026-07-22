@@ -38,12 +38,13 @@ test("Desktop credential API persists a user-config API key without projecting p
   const notifications: unknown[] = [];
   const unsubscribe = fixture.desktop.subscribe((notification) => notifications.push(notification));
   context.after(unsubscribe);
+  const initialRevision = await readPublicUserRevision(fixture.desktop);
 
   const upserted = asRecord(
     await fixture.desktop.handle(
       createRuntimeRequest("provider.upsert", {
         provider: providerInput(),
-        expectedRevision: EMPTY_USER_CONFIG_REVISION,
+        expectedRevision: initialRevision,
       }),
     ),
   );
@@ -81,11 +82,12 @@ test("credential delete is CAS protected and removes only the persisted API key"
   const fixture = await createDesktopFixture("desktop-delete");
   context.after(fixture.dispose);
   const secret = syntheticSecret("desktop-delete");
+  const initialRevision = await readPublicUserRevision(fixture.desktop);
   const upserted = asRecord(
     await fixture.desktop.handle(
       createRuntimeRequest("provider.upsert", {
         provider: providerInput(),
-        expectedRevision: EMPTY_USER_CONFIG_REVISION,
+        expectedRevision: initialRevision,
       }),
     ),
   );
@@ -421,6 +423,11 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requiredString(value: unknown, label: string): string {
   assert.ok(typeof value === "string" && value.length > 0, `${label} must be non-empty`);
   return value;
+}
+
+async function readPublicUserRevision(desktop: DesktopRuntimeService): Promise<string> {
+  const result = asRecord(await desktop.handle(createRuntimeRequest("provider.list", {})));
+  return requiredString(result["revision"], "public user config revision");
 }
 
 async function runChildLogger(script: string, secret: string, apiKeyEnv: string): Promise<string> {
