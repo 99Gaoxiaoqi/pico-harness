@@ -6,6 +6,7 @@
 // 随后是 Markdown 格式的执行指令正文。
 // 渐进式暴露:启动时只加载元数据与正文,按需提供给智能体。
 
+import { createHash } from "node:crypto";
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -19,6 +20,7 @@ import {
   canonicalResourceName,
   resolveResourceCatalog,
   type ExternalResourceCatalogSource,
+  type ResourceCatalogCandidate,
   type ResourceCatalogFormat,
   type ResourceCatalogSource,
 } from "../catalog/resource-catalog.js";
@@ -77,12 +79,26 @@ export interface SkillLoaderOptions {
   readonly includeUserResources?: boolean;
   readonly includeClaudeProjectResources?: boolean;
   readonly includeClaudeUserResources?: boolean;
+  /** 仅扫描用户目录；该模式不会构造项目或 Plugin 来源。 */
+  readonly catalogScope?: "effective" | "user";
+}
+
+export interface SkillCatalogSnapshot {
+  readonly candidates: readonly ResourceCatalogCandidate<Skill>[];
+  readonly revision: string;
+  readonly scopeRevisions: Readonly<Record<ResourceCatalogSource["scope"], string>>;
 }
 
 /** 负责从本地文件系统中加载并解析符合规范的技能模板 */
 export class SkillLoader {
   // 文件签名缓存:每次扫描 SKILL.md 路径和 mtime/size,未变则复用解析结果。
-  private cache?: { skills: Skill[]; signature: string };
+  private cache?: {
+    skills: Skill[];
+    candidates: ResourceCatalogCandidate<Skill>[];
+    revision: string;
+    scopeRevisions: Readonly<Record<ResourceCatalogSource["scope"], string>>;
+    signature: string;
+  };
 
   constructor(
     private readonly workDir: string,
@@ -114,7 +130,17 @@ export class SkillLoader {
 
   /** 供 system prompt、skill_view 与 Slash Command 投影共用的唯一 Skill Catalog。 */
   async list(): Promise<Skill[]> {
-    return await this.loadSkillFiles();
+    return (await this.loadSkillCatalog()).skills;
+  }
+
+  /** 管理面使用的只读候选快照；只解析文件，不激活 Skill hooks。 */
+  async snapshot(): Promise<SkillCatalogSnapshot> {
+    const catalog = await this.loadSkillCatalog();
+    return {
+      candidates: catalog.candidates,
+      revision: catalog.revision,
+      scopeRevisions: catalog.scopeRevisions,
+    };
   }
 
   async viewBody(name: string): Promise<string | undefined> {
@@ -131,7 +157,12 @@ export class SkillLoader {
     return skills.find((skill) => canonicalResourceName(skill.name) === key);
   }
 
-  private async loadSkillFiles(): Promise<Skill[]> {
+  private async loadSkillCatalog(): Promise<{
+    readonly skills: Skill[];
+    readonly candidates: ResourceCatalogCandidate<Skill>[];
+    readonly revision: string;
+    readonly scopeRevisions: Readonly<Record<ResourceCatalogSource["scope"], string>>;
+  }> {
     const sources = this.catalogSources();
     const skillFiles = (
       await Promise.all(
@@ -142,10 +173,14 @@ export class SkillLoader {
     ).flat();
     const signature = await skillFileSignature(skillFiles.map(({ file }) => file));
     if (this.cache && this.cache.signature === signature) {
-      return this.cache.skills;
+      return this.cache;
     }
 
-    const candidates = [];
+    const candidates: ResourceCatalogCandidate<Skill>[] = [];
+    const revisionParts: Array<{
+      readonly part: string;
+      readonly scope: ResourceCatalogSource["scope"];
+    }> = [];
     for (const { file, source } of skillFiles) {
       try {
         const content = await readBoundedUtf8(file, MAX_SKILL_FILE_BYTES);
@@ -154,6 +189,10 @@ export class SkillLoader {
         const parsed = parseSkillMD(content, fallbackName);
         const name = `${source.namespace ?? ""}${parsed.name}`;
         const allowedTools = normalizeAllowedTools(parsed.allowedTools, source.format, name, file);
+        revisionParts.push({
+          scope: source.scope,
+          part: `${source.id}\0${source.scope}\0${source.priority}\0${file}\0${createHash("sha256").update(content).digest("hex")}`,
+        });
         candidates.push({
           name,
           source,
@@ -181,8 +220,23 @@ export class SkillLoader {
       logger.warn(conflict, "[skill-catalog] 同级 Skill 名称冲突，已保留第一条");
     }
     const sorted = [...resolved.entries];
-    this.cache = { skills: sorted, signature };
-    return sorted;
+    const revision = hashRevisionParts(revisionParts.map(({ part }) => part));
+    const scopeRevisions = {
+      project: hashRevisionParts(
+        revisionParts.filter(({ scope }) => scope === "project").map(({ part }) => part),
+      ),
+      user: hashRevisionParts(
+        revisionParts.filter(({ scope }) => scope === "user").map(({ part }) => part),
+      ),
+      builtin: hashRevisionParts(
+        revisionParts.filter(({ scope }) => scope === "builtin").map(({ part }) => part),
+      ),
+      external: hashRevisionParts(
+        revisionParts.filter(({ scope }) => scope === "external").map(({ part }) => part),
+      ),
+    } satisfies Readonly<Record<ResourceCatalogSource["scope"], string>>;
+    this.cache = { skills: sorted, candidates, revision, scopeRevisions, signature };
+    return this.cache;
   }
 
   private catalogSources(): ResourceCatalogSource[] {
@@ -196,30 +250,36 @@ export class SkillLoader {
           ? { picoHome: join(homeDir, ".pico") }
           : {}),
     });
+    const userOnly = this.options.catalogScope === "user";
     const includeUserResources =
+      userOnly ||
       this.options.includeUserResources === true ||
       this.options.homeDir !== undefined ||
       this.options.picoHome !== undefined;
     return [
-      source("project-pico", "project", "pico-native", paths.project.skills, 50),
-      // `.claw` 只作为旧 Pico 版本过渡输入，不再是原生事实源。
-      source(
-        "project-claw-legacy",
-        "project",
-        "pico-legacy",
-        join(this.workDir, ".claw", "skills"),
-        45,
-      ),
-      ...(this.options.includeClaudeProjectResources === false
+      ...(userOnly
         ? []
         : [
+            source("project-pico", "project", "pico-native", paths.project.skills, 50),
+            // `.claw` 只作为旧 Pico 版本过渡输入，不再是原生事实源。
             source(
-              "project-claude",
+              "project-claw-legacy",
               "project",
-              "claude-compat",
-              join(this.workDir, ".claude", "skills"),
-              40,
+              "pico-legacy",
+              join(this.workDir, ".claw", "skills"),
+              45,
             ),
+            ...(this.options.includeClaudeProjectResources === false
+              ? []
+              : [
+                  source(
+                    "project-claude",
+                    "project",
+                    "claude-compat",
+                    join(this.workDir, ".claude", "skills"),
+                    40,
+                  ),
+                ]),
           ]),
       ...(includeUserResources
         ? [
@@ -237,9 +297,15 @@ export class SkillLoader {
                 ]),
           ]
         : []),
-      ...(this.options.externalSources ?? []),
+      ...(userOnly ? [] : (this.options.externalSources ?? [])),
     ];
   }
+}
+
+function hashRevisionParts(parts: readonly string[]): string {
+  return createHash("sha256")
+    .update([...parts].sort().join("\n"))
+    .digest("hex");
 }
 
 function source(
