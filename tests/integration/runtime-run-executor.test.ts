@@ -163,7 +163,7 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
       sessionSelection: { mode: "new", sessionId: session.id },
       workDir,
       picoHome,
-      prompt: "hello",
+      prompt: "请记住：这个项目固定使用 npm run verify 。",
       resumeExistingSession: false,
       traceEnabled: false,
       options: {},
@@ -185,6 +185,109 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
     assert.equal(
       events.some((event) => event.kind === "run.terminal" && event.data.status === "completed"),
       true,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ordinary questions never schedule Memory review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-signal-gate-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-memory-signal-gate", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  try {
+    await session.recover();
+    let enqueued = 0;
+    await new RuntimeRunExecutor({
+      session,
+      runtimeState: {
+        dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+      } as unknown as SessionRuntime,
+      engine: {
+        run: async (target: Session) => {
+          await target.commitMessages({ role: "assistant", content: "4" });
+          return target.getHistory();
+        },
+      } as unknown as AgentEngine,
+      sessionSelection: { mode: "new", sessionId: session.id },
+      workDir,
+      picoHome,
+      prompt: "What is 2 + 2?",
+      resumeExistingSession: false,
+      traceEnabled: false,
+      options: {},
+      memoryReviewScheduler: { enqueue: () => void enqueued++ },
+    }).execute();
+
+    await waitForImmediate();
+    assert.equal(enqueued, 0);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a precommitted Desktop user message schedules once while an idle resume does not", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-precommitted-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-memory-precommitted", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  const prompt = "请记住：这个项目固定使用 npm run desktop-memory 。";
+  try {
+    await session.recover();
+    const receipt = await session.commitMessageOnce("desktop-user-memory", {
+      role: "user",
+      content: prompt,
+      providerData: { picoKind: "desktop_user_input" },
+    });
+    const enqueued: Array<{ readonly userMessageEventId: string }> = [];
+    const engine = {
+      run: async (target: Session) => {
+        await target.commitMessages({ role: "assistant", content: "done" });
+        return target.getHistory();
+      },
+    } as unknown as AgentEngine;
+    const runtimeState = {
+      dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+    } as unknown as SessionRuntime;
+    const execute = (currentPrompt: string) =>
+      new RuntimeRunExecutor({
+        session,
+        runtimeState,
+        engine,
+        sessionSelection: { mode: "resume", sessionId: session.id },
+        workDir,
+        picoHome,
+        prompt: currentPrompt,
+        resumeExistingSession: true,
+        traceEnabled: false,
+        options: {},
+        memoryReviewScheduler: {
+          enqueue: (input) => void enqueued.push(input),
+        },
+      }).execute();
+
+    await execute(prompt);
+    await waitForImmediate();
+    assert.deepEqual(
+      enqueued.map((input) => input.userMessageEventId),
+      [receipt.eventId],
+    );
+
+    await execute("");
+    await waitForImmediate();
+    assert.equal(
+      enqueued.length,
+      1,
+      "an idle continuation must not replay the previous user input",
     );
   } finally {
     await session.close();
@@ -225,7 +328,7 @@ test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory 
       sessionSelection: { mode: "new", sessionId: session.id },
       workDir,
       picoHome,
-      prompt: "hello",
+      prompt: "请记住：默认使用 npm run verify 。",
       resumeExistingSession: false,
       traceEnabled: false,
       options: {},
