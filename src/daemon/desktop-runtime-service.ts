@@ -733,6 +733,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async setTrust(workspacePath: string, trusted: boolean): Promise<JsonValue> {
     const canonical = await this.trustStore.canonicalize(workspacePath);
     await this.trustStore.setTrusted(canonical, trusted);
+    if (!trusted) this.pluginRuntimeSnapshotRegistry.invalidate(canonical);
     this.publish(
       createRuntimeNotification({
         topic: "workspace.trustChanged",
@@ -2472,9 +2473,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `工作区仍有已启用 Automation ${automationReferences[0]!.jobId}，拒绝注销`,
       );
     }
-    return this.options.runtimeService.handle(
+    const result = await this.options.runtimeService.handle(
       createRuntimeRequest("workspace.unregister", { workspacePath: canonical }),
     );
+    this.pluginRuntimeSnapshotRegistry.invalidate(canonical);
+    return result;
   }
 
   private async assertNoActiveRuns(
@@ -4124,7 +4127,8 @@ function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedM
     return {
       ...common,
       transport: "stdio",
-      command: basename(definition.config.command ?? "unknown"),
+      commandLabel: basename(definition.config.command ?? "unknown"),
+      hasArguments: (definition.config.args?.length ?? 0) > 0,
       ...(definition.config.env && Object.keys(definition.config.env).length > 0
         ? { envKeys: Object.keys(definition.config.env).sort() }
         : {}),
@@ -4133,7 +4137,7 @@ function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedM
   return {
     ...common,
     transport: definition.config.transport,
-    url: safeMcpEndpointLabel(definition.config.url),
+    endpointLabel: safeMcpEndpointLabel(definition.config.url),
     ...(definition.config.headers && Object.keys(definition.config.headers).length > 0
       ? { headerKeys: Object.keys(definition.config.headers).sort() }
       : {}),
@@ -4141,12 +4145,15 @@ function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedM
 }
 
 function safeMcpEndpointLabel(rawUrl: string | undefined): string {
-  if (!rawUrl) return "unknown";
+  if (!rawUrl) return "https://invalid.invalid/";
   try {
     const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "https://invalid.invalid/";
+    }
     return `${parsed.origin}${parsed.pathname}`;
   } catch {
-    return "invalid-url";
+    return "https://invalid.invalid/";
   }
 }
 

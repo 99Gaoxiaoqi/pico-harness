@@ -720,7 +720,10 @@ function scopedSkill(skill: RuntimeScopedSkill, index: number): CapabilityView {
 }
 
 function scopedMcpServer(server: RuntimeScopedMcpServer, index: number): CapabilityView {
-  const endpoint = server.transport === "stdio" ? server.command : server.url;
+  const endpoint =
+    server.transport === "stdio"
+      ? `${server.commandLabel}${server.hasArguments ? " · 含启动参数" : ""}`
+      : server.endpointLabel;
   return {
     id: `${server.source.sourceId}:${server.name}:${index}`,
     name: server.name,
