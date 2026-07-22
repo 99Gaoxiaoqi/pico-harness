@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
@@ -82,7 +82,11 @@ import {
   type SubagentModelCatalog,
 } from "./subagent-model-catalog.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
-import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
+import {
+  McpConnectionManager,
+  type McpConfigSource,
+  type McpStatusSnapshot,
+} from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
 import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
 import type { ScheduleDraftCoordinator } from "../tasks/cron-draft.js";
@@ -204,6 +208,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
   /** TUI 宿主持有的 MCP manager；注入时本轮只换 registry，不重连或关闭 server。 */
   mcpManager?: McpConnectionManager;
+  /** Trusted foreground hosts may inject a collision-free user/project MCP snapshot. */
+  mcpConfigSources?: readonly McpConfigSource[];
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
   /** Host-owned gate used by desktop Pause at tool-safe execution boundaries. */
@@ -993,11 +999,12 @@ export async function executeAgentRuntime(
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
     const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
+    const hostMcpSources = backgroundPolicy ? [] : (dependencies.mcpConfigSources ?? []);
     const pluginMcpSources = pluginSnapshot?.mcpSources ?? [];
     ownsMcpManager = dependencies.mcpManager === undefined;
     const mcpManager =
       dependencies.mcpManager ??
-      (mcpConfigPath || pluginMcpSources.length > 0
+      (mcpConfigPath || hostMcpSources.length > 0 || pluginMcpSources.length > 0
         ? new McpConnectionManager(registry, {
             stdioCwd: workDir,
             ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
@@ -1025,16 +1032,21 @@ export async function executeAgentRuntime(
     if (mcpManager && !ownsMcpManager) {
       mcpManager.attachRegistry(registry);
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-    } else if (mcpManager && (mcpConfigPath || pluginMcpSources.length > 0)) {
-      if (mcpConfigPath && (backgroundPolicy || pluginMcpSources.length === 0)) {
+    } else if (
+      mcpManager &&
+      (mcpConfigPath || hostMcpSources.length > 0 || pluginMcpSources.length > 0)
+    ) {
+      if (
+        mcpConfigPath &&
+        (backgroundPolicy || (hostMcpSources.length === 0 && pluginMcpSources.length === 0))
+      ) {
         await mcpManager.loadConfig(mcpConfigPath);
       } else {
         await mcpManager.replaceSources([
-          {
-            id: "project",
-            path: mcpConfigPath ?? join(workDir, ".pico", "mcp.json"),
-            optional: mcpConfigPath === undefined,
-          },
+          ...hostMcpSources,
+          ...(mcpConfigPath
+            ? [{ id: "project", path: mcpConfigPath } satisfies McpConfigSource]
+            : []),
           ...pluginMcpSources,
         ]);
       }
@@ -1295,6 +1307,7 @@ async function prepareBackgroundExecution(
   }
   if (
     dependencies.mcpManager ||
+    dependencies.mcpConfigSources ||
     dependencies.hookService ||
     dependencies.scheduleDraftCoordinator
   ) {

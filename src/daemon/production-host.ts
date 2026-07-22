@@ -8,7 +8,8 @@ import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import { EffectiveConfigResolver } from "../input/effective-config.js";
 import { UserConfigStore } from "../input/user-config-store.js";
-import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
+import { resolveTrustedEffectiveMcpSources } from "../mcp/effective-config.js";
+import { UserMcpConfigStore } from "../mcp/user-config-store.js";
 import {
   assertCredentialRefMatchesProvider,
   assertCredentialRefMatchesModelRoute,
@@ -65,6 +66,7 @@ export interface ProductionLocalDaemonHostOptions {
   agentRuntime?: AgentRuntime;
   credentialVault?: CredentialVault;
   userConfigStore?: UserConfigStore;
+  userMcpConfigStore?: UserMcpConfigStore;
   effectiveConfigResolver?: EffectiveConfigResolver;
   /** Host-owned registry shared by Desktop catalog and AgentRuntime activation. */
   pluginRuntimeSnapshotRegistry?: PluginRuntimeSnapshotRegistry;
@@ -121,6 +123,7 @@ export function createProductionLocalDaemonHost(
   const credentialVault =
     options.credentialVault ?? createPlatformCredentialVault(process.platform, env);
   const userConfigStore = options.userConfigStore ?? new UserConfigStore({ picoHome });
+  const userMcpConfigStore = options.userMcpConfigStore ?? new UserMcpConfigStore({ picoHome });
   const effectiveConfigResolver =
     options.effectiveConfigResolver ?? new EffectiveConfigResolver({ userConfigStore });
   const registrationStore =
@@ -193,6 +196,11 @@ export function createProductionLocalDaemonHost(
           route.capabilities.reasoningProfile,
           persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
         ).level;
+        const effectiveMcp = await resolveTrustedEffectiveMcpSources(workspacePath, {
+          picoHome,
+          trustStore,
+          userStore: userMcpConfigStore,
+        });
         // Resolve the shared immutable snapshot before creating SessionRuntime as well as before
         // AgentRuntime.execute. When a runtimeState is injected, AgentRuntime deliberately reuses
         // it and cannot attach extension Hook sources retroactively.
@@ -271,7 +279,6 @@ export function createProductionLocalDaemonHost(
                 ? { rewindPrePlanMode: persistedSettings.prePlanMode }
                 : {}),
               ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
-              ...(await existingMcpConfig(workspacePath)),
             },
             {
               signal: context.signal,
@@ -286,6 +293,7 @@ export function createProductionLocalDaemonHost(
               rewindPointSink: context.bindCheckpoint,
               pluginSnapshot,
               pluginCapabilityRegistry,
+              mcpConfigSources: effectiveMcp.sources,
               picoHome,
               env,
               memoryProposalSink: (notice) =>
@@ -728,13 +736,6 @@ function resolveDesktopRequestedModel(
     );
   }
   return aliased;
-}
-
-async function existingMcpConfig(
-  workspacePath: string,
-): Promise<{ readonly mcpConfigPath?: string }> {
-  const resolution = await resolveProjectMcpConfigPath(workspacePath);
-  return resolution.exists ? { mcpConfigPath: resolution.path } : {};
 }
 
 /** Production adapter from the worker's metadata-only sink to the durable Runtime channel. */

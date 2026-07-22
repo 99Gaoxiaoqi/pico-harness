@@ -26,6 +26,8 @@ export interface PicoHomePaths {
   readonly skills: string;
   readonly agents: string;
   readonly hooks: string;
+  /** User-level MCP definitions. Connections remain scoped to trusted foreground Runs. */
+  readonly mcp: string;
   readonly plugins: string;
   readonly pluginData: string;
   readonly workspaces: string;
@@ -126,6 +128,7 @@ export function resolvePicoPaths(
       skills: join(picoHome, "skills"),
       agents: join(picoHome, "agents.yaml"),
       hooks: join(picoHome, "hooks.json"),
+      mcp: join(picoHome, "mcp.json"),
       plugins: join(picoHome, "plugins"),
       pluginData: join(picoHome, "plugin-data"),
       workspaces: join(picoHome, "workspaces"),
