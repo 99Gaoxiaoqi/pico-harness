@@ -350,6 +350,49 @@ test("the second turn in one Session schedules Memory only when it carries a sta
   repository.close();
 });
 
+test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {
+  const fixture = await createFixture("ordinary-recovery-kick");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const trustStore = await trustFixture(fixture);
+  await enqueueCompletedReview(fixture, trustStore, "memory-recovery-before-ordinary");
+
+  let repository = openRepository(fixture);
+  const queued = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0]?.status, "queued");
+  repository.close();
+
+  await executeAgentRuntime(
+    {
+      prompt: "What is 2 + 2?",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId: "memory-ordinary-recovery-trigger" },
+      provider: "openai",
+    },
+    {
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "4" };
+        },
+      },
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
+      memoryProposalModelFactory: () => ({ model: createSuccessfulModel(() => undefined) }),
+    },
+  );
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await waitForImmediate();
+    repository = openRepository(fixture);
+    const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+    const recovered = jobs.length === 1 && jobs[0]?.status === "succeeded";
+    repository.close();
+    if (recovered) return;
+  }
+  assert.fail("ordinary foreground startup did not recover the existing durable review");
+});
+
 test("proposal notification outbox retries across workers without repeating extraction", async (context) => {
   const fixture = await createFixture("worker");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
