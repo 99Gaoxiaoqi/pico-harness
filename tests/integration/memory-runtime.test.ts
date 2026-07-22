@@ -181,6 +181,9 @@ test("memory recall keeps one stable preference without displacing every query-a
   createFact(repository, "fix-command", "project_fact", {
     content: "修复错误后运行 npm test",
   });
+  createFact(repository, "fix-style", "reference", {
+    content: "修复错误时先检查代码风格",
+  });
   createFact(repository, "pinned", "reference", {
     content: "不要修改协议",
     pinned: true,
@@ -189,13 +192,20 @@ test("memory recall keeps one stable preference without displacing every query-a
   const result = await new MemoryContextBuilder(repository).build("帮我修复错误");
   assert.deepEqual(
     result.facts.map((fact) => fact.factId),
-    ["pinned", "fix-command", "reply-language"],
+    ["pinned", "fix-command", "fix-style"],
   );
   assert.ok(result.tokenCount <= MEMORY_CONTEXT_MAX_TOKENS);
   assert.ok(result.facts.length <= MEMORY_CONTEXT_MAX_FACTS);
   assert.equal(result.block.includes("older-preference"), false);
   assert.equal(result.block.includes("archived-preference"), false);
+  assert.equal(result.block.includes("reply-language"), false);
   assert.match(result.block, /trust="low"/u);
+
+  const withRemainingCapacity = await new MemoryContextBuilder(repository).build("帮我分析需求");
+  assert.deepEqual(
+    withRemainingCapacity.facts.map((fact) => fact.factId),
+    ["pinned", "reply-language"],
+  );
 });
 
 test("foreground Runtime injects trusted recall ephemerally and schedules only completed enabled runs", async (context) => {
