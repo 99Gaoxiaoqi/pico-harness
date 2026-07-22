@@ -45,8 +45,14 @@ export interface RuntimeEventStoreOptions {
   readonly databasePath: string;
 }
 
-export interface RuntimeEventStorePageOptions {
-  readonly offset?: number;
+export interface RuntimeSessionManifestCursor {
+  readonly createdAt: string;
+  readonly sessionId: string;
+}
+
+export interface RuntimeSessionManifestPageOptions {
+  readonly upperBound: RuntimeSessionManifestCursor;
+  readonly before?: RuntimeSessionManifestCursor;
   readonly limit?: number;
 }
 
@@ -188,21 +194,50 @@ export class RuntimeEventStore {
     }
   }
 
+  async getSessionManifestScanUpperBound(): Promise<RuntimeSessionManifestCursor | undefined> {
+    const db = this.openDatabase();
+    try {
+      return db
+        .prepare(
+          `SELECT created_at AS createdAt, session_id AS sessionId
+           FROM agent_sessions
+           ORDER BY created_at DESC, session_id DESC
+           LIMIT 1`,
+        )
+        .get() as RuntimeSessionManifestCursor | undefined;
+    } finally {
+      db.close();
+    }
+  }
+
   /** Bounded manifest page for background maintenance that must not materialize the whole DB. */
   async listSessionManifestsPage(
-    options: RuntimeEventStorePageOptions = {},
+    options: RuntimeSessionManifestPageOptions,
   ): Promise<RuntimeSessionManifest[]> {
-    const offset = normalizePageOffset(options.offset);
+    const upperBound = normalizeManifestCursor(options.upperBound, "upperBound");
+    const before = options.before ? normalizeManifestCursor(options.before, "before") : undefined;
     const limit = normalizePageLimit(options.limit);
     const db = this.openDatabase();
     try {
+      const beforeClause = before
+        ? `AND (created_at < ? OR (created_at = ? AND session_id < ?))`
+        : "";
+      const params: Array<string | number> = [
+        upperBound.createdAt,
+        upperBound.createdAt,
+        upperBound.sessionId,
+      ];
+      if (before) params.push(before.createdAt, before.createdAt, before.sessionId);
+      params.push(limit);
       const rows = db
         .prepare(
           `SELECT * FROM agent_sessions
+           WHERE (created_at < ? OR (created_at = ? AND session_id <= ?))
+           ${beforeClause}
            ORDER BY created_at DESC, session_id DESC
-           LIMIT ? OFFSET ?`,
+           LIMIT ?`,
         )
-        .all(limit, offset) as SessionRow[];
+        .all(...params) as SessionRow[];
       return rows.map(manifestFromRow);
     } finally {
       db.close();
@@ -838,6 +873,22 @@ function normalizePageLimit(value = RUNTIME_EVENT_STORE_MAX_PAGE_SIZE): number {
     );
   }
   return value;
+}
+
+function normalizeManifestCursor(
+  value: RuntimeSessionManifestCursor,
+  field: string,
+): RuntimeSessionManifestCursor {
+  if (
+    !value ||
+    typeof value.createdAt !== "string" ||
+    !value.createdAt.trim() ||
+    typeof value.sessionId !== "string" ||
+    !value.sessionId.trim()
+  ) {
+    throw new Error(`Runtime event store ${field} manifest cursor is invalid`);
+  }
+  return { createdAt: value.createdAt, sessionId: value.sessionId };
 }
 
 function canonicalizeRuntimeEvent(event: RuntimeEvent): {
