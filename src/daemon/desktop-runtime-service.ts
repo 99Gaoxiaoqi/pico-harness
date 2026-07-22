@@ -1900,6 +1900,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `Provider ${id} 已使用不同的协议或 Endpoint，请先显式删除后再导入`,
       );
     }
+    if (previousProvider && configuredCredential(previousProvider) !== undefined) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${id} 已在用户配置中保存 API Key，请先删除配置中的 Key 再导入旧版环境凭证`,
+      );
+    }
     const workspacePaths = await this.registrationStore.list();
     this.assertProviderCompatibleWithAutomationReferences(
       id,
@@ -1974,6 +1980,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     this.assertUserConfigRevision(expectedRevision, current.revision);
+    if (configuredCredential(provider) !== undefined) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${providerId} 已在用户配置中保存 API Key，请先删除配置中的 Key 再删除 Provider`,
+      );
+    }
     if (providerIdForModelRoute(current.config.defaults?.modelRouteId) === providerId) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
