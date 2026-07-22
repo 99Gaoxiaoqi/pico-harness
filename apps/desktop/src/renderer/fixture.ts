@@ -283,13 +283,13 @@ export const previewData: AppData = {
       description: "聚焦正确性、安全边界与回归风险。",
       state: "ready",
       meta: "内置",
-    },
-    {
-      id: "skill-docs",
-      name: "文档维护",
-      description: "让技术说明与当前实现保持一致。",
-      state: "ready",
-      meta: "工作区",
+      source: {
+        scope: "user",
+        sourceId: "user:skills",
+        sourceLabel: "~/.pico/skills",
+        readOnly: true,
+        effective: true,
+      },
     },
   ],
   mcpServers: [
@@ -299,15 +299,53 @@ export const previewData: AppData = {
       description: "项目文件与本地命令能力。",
       state: "ready",
       meta: "8 个工具",
-    },
-    {
-      id: "mcp-figma",
-      name: "Figma",
-      description: "读取设计上下文与组件变量。",
-      state: "attention",
-      meta: "需要登录",
+      source: {
+        scope: "user",
+        sourceId: "user:mcp",
+        sourceLabel: "~/.pico/config.json",
+        readOnly: false,
+        effective: true,
+      },
     },
   ],
+  skillScope: {
+    userItems: [
+      {
+        id: "skill-review",
+        name: "代码审查",
+        description: "聚焦正确性、安全边界与回归风险。",
+        state: "ready",
+        meta: "内置",
+        source: {
+          scope: "user",
+          sourceId: "user:skills",
+          sourceLabel: "~/.pico/skills",
+          readOnly: true,
+          effective: true,
+        },
+      },
+    ],
+    userRevision: "preview-skills-revision",
+  },
+  mcpScope: {
+    userItems: [
+      {
+        id: "mcp-files",
+        name: "Local tools",
+        description: "项目文件与本地命令能力。",
+        state: "ready",
+        meta: "8 个工具",
+        source: {
+          scope: "user",
+          sourceId: "user:mcp",
+          sourceLabel: "~/.pico/config.json",
+          readOnly: false,
+          effective: true,
+        },
+      },
+    ],
+    userRevision: "preview-mcp-revision",
+  },
   providers: [
     {
       id: "provider-openai",
