@@ -7,6 +7,7 @@ import {
   type WorkspaceRunSnapshot,
 } from "../runtime/workspace-runtime.js";
 import {
+  CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   createRuntimeNotification,
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   DESKTOP_RUNTIME_SCHEMA_REVISION,
@@ -158,6 +159,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         picoHome: this.picoHome,
         capabilities: [
           DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
+          CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
           "shared-config-v1",
           "session-conversation-v1",
           "session-management-v1",

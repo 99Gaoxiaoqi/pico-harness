@@ -145,8 +145,10 @@ import {
 } from "./desktop-automation-service.js";
 import {
   listDesktopAgents,
+  listDesktopEffectiveSkills,
   listDesktopMcpServers,
   listDesktopSkills,
+  listDesktopUserSkills,
 } from "./desktop-resource-catalog.js";
 import {
   applyDesktopRewind,
@@ -402,6 +404,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "catalog.agents": (request) => this.listAgents(request.params.workspacePath),
       "catalog.skills": (request) => this.listSkills(request.params.workspacePath, true),
       "config.skills": (request) => this.listSkills(request.params.workspacePath, false),
+      "skills.user.list": () => this.listUserSkills(),
+      "skills.effective.list": (request) => this.listEffectiveSkills(request.params.workspacePath),
       "config.mcpServers": (request) => this.listMcpServers(request.params.workspacePath),
       "usage.get": (request) => this.getUsage(request.params),
       "changes.list": (request) =>
@@ -2648,6 +2652,27 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       pluginSnapshot,
     });
     return { skills: toJsonValue(skills) };
+  }
+
+  private async listUserSkills(): Promise<JsonValue> {
+    return toJsonValue(
+      await listDesktopUserSkills({
+        env: this.env,
+        picoHome: this.picoHome,
+      }),
+    );
+  }
+
+  private async listEffectiveSkills(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
+    return toJsonValue(
+      await listDesktopEffectiveSkills(canonical, {
+        env: this.env,
+        picoHome: this.picoHome,
+        pluginSnapshot,
+      }),
+    );
   }
 
   private async listMcpServers(workspacePath: string): Promise<JsonValue> {
