@@ -271,14 +271,21 @@ test("legacy environment and Keychain credentials remain compatible fallbacks", 
 
 test("structured logger redacts API-key fields before serialization", async () => {
   const secret = syntheticSecret("structured-log");
+  const apiKeyEnv = "PICO_VISIBLE_API_KEY_ENV_METADATA";
   const script = [
     'import { logger } from "./src/observability/logger.ts";',
     "const secret = process.env.PICO_SYNTHETIC_LOG_SECRET;",
-    'logger.info({ apiKey: secret, config: { providers: { fixture: { apiKey: secret } } } }, "credential fixture");',
+    "const apiKeyEnv = process.env.PICO_VISIBLE_API_KEY_ENV_METADATA;",
+    'logger.info({ apiKey: secret, apiKeyEnv, config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } }, providers: { fixture: { apiKey: secret, apiKeyEnv } }, req: { body: { config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } } }, res: { body: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } }, error: { data: { apiKey: secret, providers: { fixture: { apiKey: secret, apiKeyEnv } } } }, err: { data: { config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } } }, data: { apiKey: secret, config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } } }, "credential fixture");',
     "logger.flush();",
   ].join("\n");
-  const output = await runChildLogger(script, secret);
+  const output = await runChildLogger(script, secret, apiKeyEnv);
   assert.equal(output.includes(secret), false, "structured logs must redact plaintext credentials");
+  assert.equal(
+    output.includes(apiKeyEnv),
+    true,
+    "apiKeyEnv diagnostic metadata must remain visible",
+  );
 });
 
 async function createDesktopFixture(suffix: string): Promise<{
@@ -423,7 +430,7 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
-async function runChildLogger(script: string, secret: string): Promise<string> {
+async function runChildLogger(script: string, secret: string, apiKeyEnv: string): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -435,6 +442,7 @@ async function runChildLogger(script: string, secret: string): Promise<string> {
           NODE_ENV: "test",
           LOG_LEVEL: "info",
           PICO_SYNTHETIC_LOG_SECRET: secret,
+          PICO_VISIBLE_API_KEY_ENV_METADATA: apiKeyEnv,
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
