@@ -56,12 +56,12 @@ export class MemoryContextBuilder {
     const maxTokens = clampBudget(options.maxTokens, MEMORY_CONTEXT_MAX_TOKENS);
     if (maxFacts === 0 || maxTokens === 0) return emptyResult();
     const querySignals = collectSignals(query);
-    const eligible = this.repository
+    const ranked = this.repository
       .listFacts({ states: ["active"], limit: MEMORY_CONTEXT_CANDIDATE_LIMIT })
       .filter((fact) => isEligible(fact, now))
       .map((fact) => ({ fact, relevance: relevanceScore(fact, querySignals) }))
-      .filter(({ fact, relevance }) => isStrongCandidate(fact) || relevance > 0)
       .sort(compareCandidates);
+    const eligible = selectCandidates(ranked);
     const selected: Fact[] = [];
     let block = `${HEADER}\n`;
 
@@ -244,6 +244,24 @@ function trimSignalPunctuation(value: string): string {
 
 function isStrongCandidate(fact: Fact): boolean {
   return fact.pinned || fact.kind === "correction";
+}
+
+/**
+ * Strong facts remain first. One relevant fact is then protected before the single resident
+ * preference slot, so a general preference cannot consume all query-aware capacity.
+ */
+function selectCandidates(ranked: readonly RankedFact[]): readonly RankedFact[] {
+  const strong = ranked.filter(({ fact }) => isStrongCandidate(fact));
+  const relevant = ranked.filter(
+    ({ fact, relevance }) => !isStrongCandidate(fact) && relevance > 0,
+  );
+  const residentPreference = ranked.find(
+    ({ fact, relevance }) =>
+      !isStrongCandidate(fact) && fact.kind === "preference" && relevance === 0,
+  );
+  if (!residentPreference) return [...strong, ...relevant];
+  if (relevant.length === 0) return [...strong, residentPreference];
+  return [...strong, relevant[0]!, residentPreference, ...relevant.slice(1)];
 }
 
 function compareCandidates(left: RankedFact, right: RankedFact): number {

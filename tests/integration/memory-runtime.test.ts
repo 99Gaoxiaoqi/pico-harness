@@ -157,6 +157,44 @@ test("memory recall uses CJK bigrams and does not expand short confirmations or 
   }
 });
 
+test("memory recall keeps one stable preference without displacing every query-aware fact", async (context) => {
+  const fixture = await createFixture("recall-resident-preference");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = openRepository(fixture);
+  context.after(() => repository.close());
+
+  createFact(repository, "reply-language", "preference", {
+    content: "始终使用中文回复",
+    lastUsedAt: "2026-07-20T10:00:00.000Z",
+  });
+  createFact(repository, "older-preference", "preference", {
+    content: "回答保持简洁",
+    lastUsedAt: "2026-07-19T10:00:00.000Z",
+  });
+  createFact(repository, "archived-preference", "preference", {
+    content: "使用英文回复",
+    state: "archived",
+  });
+  createFact(repository, "fix-command", "project_fact", {
+    content: "修复错误后运行 npm test",
+  });
+  createFact(repository, "pinned", "reference", {
+    content: "不要修改协议",
+    pinned: true,
+  });
+
+  const result = await new MemoryContextBuilder(repository).build("帮我修复错误");
+  assert.deepEqual(
+    result.facts.map((fact) => fact.factId),
+    ["pinned", "fix-command", "reply-language"],
+  );
+  assert.ok(result.tokenCount <= MEMORY_CONTEXT_MAX_TOKENS);
+  assert.ok(result.facts.length <= MEMORY_CONTEXT_MAX_FACTS);
+  assert.equal(result.block.includes("older-preference"), false);
+  assert.equal(result.block.includes("archived-preference"), false);
+  assert.match(result.block, /trust="low"/u);
+});
+
 test("foreground Runtime injects trusted recall ephemerally and schedules only completed enabled runs", async (context) => {
   const fixture = await createFixture("runtime");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
