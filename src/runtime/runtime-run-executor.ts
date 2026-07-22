@@ -11,6 +11,8 @@ import { logger } from "../observability/logger.js";
 import type { SessionRuntime } from "./session-runtime.js";
 import { RuntimeRun } from "./runtime-run.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
+import { detectStableMemorySignal } from "../memory/proposal-signal.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -81,13 +83,20 @@ export class RuntimeRunExecutor {
       const runtimeRun = await RuntimeRun.start({
         capability: runtimeCapability,
       });
+      let submittedUserMessage =
+        memoryReviewScheduler && resumeExistingSession
+          ? findPrecommittedSubmittedUserMessage(
+              await runtimeRun.store.readSessionEntries(session.id),
+              runtimeRun.runId,
+              initialPrompt,
+            )
+          : undefined;
       emitRuntimeLifecycleEvent(onEvent, {
         type: "run.started",
         sessionId: session.id,
         workDir,
         at: Date.now(),
       });
-      let userMessageEventId: string | undefined;
       const runResult = await runtimeRun.run(async () => {
         signal?.throwIfAborted();
         if (!resumeExistingSession) {
@@ -138,7 +147,7 @@ export class RuntimeRunExecutor {
             content: prompt,
             ...(images ? { images } : {}),
           });
-          userMessageEventId = userReceipt.eventId;
+          submittedUserMessage = { eventId: userReceipt.eventId, content: prompt };
           await session.bindRewindPointSource(rewindPointId, userReceipt);
         }
 
@@ -155,7 +164,11 @@ export class RuntimeRunExecutor {
             : {}),
         } satisfies RunAgentCliResult;
       }, signal);
-      if (memoryReviewScheduler && userMessageEventId) {
+      if (
+        memoryReviewScheduler &&
+        submittedUserMessage &&
+        detectStableMemorySignal(submittedUserMessage.content).eligible
+      ) {
         try {
           const terminalEntry = (await runtimeRun.store.readSessionEntries(session.id)).find(
             ({ event }) =>
@@ -172,7 +185,7 @@ export class RuntimeRunExecutor {
                 sessionId: session.id,
                 runId: runtimeRun.runId,
                 terminalEventId: terminal.eventId,
-                userMessageEventId,
+                userMessageEventId: submittedUserMessage.eventId,
                 terminalSequence: terminalEntry.sequence,
               },
               { sessionId: session.id, runId: runtimeRun.runId },
@@ -201,6 +214,36 @@ export class RuntimeRunExecutor {
     });
     return result;
   }
+}
+
+function findPrecommittedSubmittedUserMessage(
+  entries: readonly RuntimeEventStoreEntry[],
+  runId: string,
+  prompt: string,
+): { readonly eventId: string; readonly content: string } | undefined {
+  // Desktop commits visible input before starting the foreground run. Internal completion/hook
+  // continuations pass an empty prompt and therefore cannot replay an older user message.
+  if (!prompt.trim()) return undefined;
+  const startedSequence = entries.find(
+    (entry) => entry.event.kind === "run.started" && entry.event.runId === runId,
+  )?.sequence;
+  if (startedSequence === undefined) return undefined;
+  const latestModelMessage = entries.findLast(
+    (entry) =>
+      entry.sequence < startedSequence &&
+      entry.event.kind === "message.committed" &&
+      entry.event.visibility === "model" &&
+      !entry.event.partial,
+  );
+  if (
+    latestModelMessage?.event.kind !== "message.committed" ||
+    latestModelMessage.event.data.message.role !== "user" ||
+    latestModelMessage.event.data.message.toolCallId !== undefined ||
+    latestModelMessage.event.data.message.content !== prompt
+  ) {
+    return undefined;
+  }
+  return { eventId: latestModelMessage.event.eventId, content: prompt };
 }
 
 function scheduleMemoryReviewEnqueue(
