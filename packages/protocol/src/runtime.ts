@@ -1,8 +1,9 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 5;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v5";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 6;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v6";
+export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
 
@@ -256,6 +257,73 @@ export type RuntimeCatalogSkill = JsonObject & {
   readonly sourcePath?: string;
   readonly allowedTools?: readonly string[];
   readonly model?: string;
+};
+
+export type RuntimeCapabilityScope = "user" | "project" | "plugin";
+
+/** Opaque provenance safe to expose to the sandboxed Renderer. */
+export type RuntimeCapabilitySourceMetadata = JsonObject & {
+  readonly scope: RuntimeCapabilityScope;
+  readonly sourceId: string;
+  readonly sourceLabel: string;
+  readonly readOnly: boolean;
+  readonly effective: boolean;
+  readonly shadowedBy?: string;
+};
+
+export type RuntimeScopedSkill = JsonObject & {
+  readonly name: string;
+  readonly description: string;
+  readonly source: RuntimeCapabilitySourceMetadata;
+  readonly allowedTools?: readonly string[];
+  readonly model?: string;
+};
+
+type RuntimeMcpServerCommon = JsonObject & {
+  readonly name: string;
+  readonly startupTimeoutMs?: number;
+  readonly toolTimeoutMs?: number;
+  readonly enabled?: boolean;
+};
+
+export type RuntimeMcpServerInput =
+  | (RuntimeMcpServerCommon & {
+      readonly transport: "stdio";
+      readonly command: string;
+      readonly args?: readonly string[];
+      readonly env?: Readonly<Record<string, string>>;
+    })
+  | (RuntimeMcpServerCommon & {
+      readonly transport: "http" | "sse";
+      readonly url: string;
+      readonly headers?: Readonly<Record<string, string>>;
+    });
+
+type RuntimeScopedMcpServerCommon = JsonObject & {
+  readonly name: string;
+  readonly startupTimeoutMs?: number;
+  readonly toolTimeoutMs?: number;
+  readonly enabled?: boolean;
+  readonly source: RuntimeCapabilitySourceMetadata;
+};
+
+/** Sanitized MCP projection: secret values are represented only by their key names. */
+export type RuntimeScopedMcpServer =
+  | (RuntimeScopedMcpServerCommon & {
+      readonly transport: "stdio";
+      readonly command: string;
+      readonly args?: readonly string[];
+      readonly envKeys?: readonly string[];
+    })
+  | (RuntimeScopedMcpServerCommon & {
+      readonly transport: "http" | "sse";
+      readonly url: string;
+      readonly headerKeys?: readonly string[];
+    });
+
+export type RuntimeCapabilityRevisions = JsonObject & {
+  readonly user: string;
+  readonly project: string;
 };
 
 export type RuntimeQueuedInput = JsonObject & {
@@ -961,6 +1029,51 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams;
     readonly result: { readonly servers: readonly JsonObject[] };
   };
+  readonly "skills.user.list": {
+    readonly params: EmptyParams;
+    readonly result: { readonly skills: readonly RuntimeScopedSkill[]; readonly revision: string };
+  };
+  readonly "skills.effective.list": {
+    readonly params: WorkspaceParams;
+    readonly result: {
+      readonly skills: readonly RuntimeScopedSkill[];
+      readonly revisions: RuntimeCapabilityRevisions;
+    };
+  };
+  readonly "mcp.user.list": {
+    readonly params: EmptyParams;
+    readonly result: {
+      readonly servers: readonly RuntimeScopedMcpServer[];
+      readonly revision: string;
+    };
+  };
+  readonly "mcp.user.upsert": {
+    readonly params: {
+      readonly server: RuntimeMcpServerInput;
+      readonly expectedRevision: string;
+      readonly idempotencyKey: string;
+    };
+    readonly result: { readonly server: RuntimeScopedMcpServer; readonly revision: string };
+  };
+  readonly "mcp.user.delete": {
+    readonly params: {
+      readonly serverName: string;
+      readonly expectedRevision: string;
+      readonly idempotencyKey: string;
+    };
+    readonly result: {
+      readonly serverName: string;
+      readonly deleted: true;
+      readonly revision: string;
+    };
+  };
+  readonly "mcp.effective.list": {
+    readonly params: WorkspaceParams;
+    readonly result: {
+      readonly servers: readonly RuntimeScopedMcpServer[];
+      readonly revisions: RuntimeCapabilityRevisions;
+    };
+  };
   readonly "usage.get": {
     readonly params: WorkspaceParams & {
       readonly sessionId?: SessionId;
@@ -1080,6 +1193,12 @@ export const RUNTIME_METHODS = [
   "catalog.skills",
   "config.skills",
   "config.mcpServers",
+  "skills.user.list",
+  "skills.effective.list",
+  "mcp.user.list",
+  "mcp.user.upsert",
+  "mcp.user.delete",
+  "mcp.effective.list",
   "usage.get",
   "workspace.register",
   "workspace.unregister",
@@ -1170,6 +1289,12 @@ export const DESKTOP_RUNTIME_METHODS = [
   "catalog.skills",
   "config.skills",
   "config.mcpServers",
+  "skills.user.list",
+  "skills.effective.list",
+  "mcp.user.list",
+  "mcp.user.upsert",
+  "mcp.user.delete",
+  "mcp.effective.list",
   "usage.get",
   "workspace.register",
   "workspace.unregister",
@@ -1258,6 +1383,7 @@ export type RuntimeNotificationMap = {
     readonly scope?: "user" | "project";
     readonly revision?: string;
     readonly providerIds?: readonly string[];
+    readonly capabilities?: readonly ("skills" | "mcp")[];
   };
   readonly "usage.updated": { readonly usage: JsonObject };
   readonly "runtime.error": {
@@ -1805,6 +1931,16 @@ const stringArrayParam: RuntimeParamRule = (value, path) => {
     throw invalidParams(`${path} 必须是字符串数组`);
   }
 };
+const stringRecordParam: RuntimeParamRule = (value, path) => {
+  if (
+    !isJsonObject(value) ||
+    !Object.entries(value).every(
+      ([key, item]) => key.length > 0 && key.length <= 512 && typeof item === "string",
+    )
+  ) {
+    throw invalidParams(`${path} 必须是字符串键值对象`);
+  }
+};
 
 function oneOfParam<const Values extends readonly string[]>(values: Values): RuntimeParamRule {
   const allowed = new Set<string>(values);
@@ -1910,6 +2046,38 @@ const runtimeUserDefaultsParam: RuntimeParamRule = (value, path) => {
       mode: interactionModeParam,
       thinkingEffort: stringParam,
     },
+  );
+};
+
+const runtimeMcpServerParam: RuntimeParamRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidParams(`${path} 必须是 MCP server 对象`);
+  const common = {
+    startupTimeoutMs: positiveIntegerParam,
+    toolTimeoutMs: positiveIntegerParam,
+    enabled: booleanParam,
+  } as const;
+  if (value["transport"] === "stdio") {
+    assertNestedShape(
+      value,
+      path,
+      {
+        name: boundedNonEmptyStringParam(256),
+        transport: oneOfParam(["stdio"]),
+        command: boundedNonEmptyStringParam(4_096),
+      },
+      { ...common, args: stringArrayParam, env: stringRecordParam },
+    );
+    return;
+  }
+  assertNestedShape(
+    value,
+    path,
+    {
+      name: boundedNonEmptyStringParam(256),
+      transport: oneOfParam(["http", "sse"]),
+      url: boundedNonEmptyStringParam(8_192),
+    },
+    { ...common, headers: stringRecordParam },
   );
 };
 
@@ -2244,6 +2412,20 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "catalog.skills": workspaceParams,
   "config.skills": workspaceParams,
   "config.mcpServers": workspaceParams,
+  "skills.user.list": noParams,
+  "skills.effective.list": workspaceParams,
+  "mcp.user.list": noParams,
+  "mcp.user.upsert": exactParamShape({
+    server: runtimeMcpServerParam,
+    expectedRevision: boundedNonEmptyStringParam(512),
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
+  "mcp.user.delete": exactParamShape({
+    serverName: boundedNonEmptyStringParam(256),
+    expectedRevision: boundedNonEmptyStringParam(512),
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
+  "mcp.effective.list": workspaceParams,
   "usage.get": exactParamShape(
     { workspacePath: stringParam },
     { sessionId: stringParam, from: finiteNumberParam, to: finiteNumberParam },
@@ -2307,6 +2489,10 @@ const resultNonNegativeInteger: RuntimeResultRule = (value, path) => {
   resultNonNegativeNumber(value, path);
   if (!Number.isSafeInteger(value)) throw invalidResult(`${path} 必须是安全整数`);
 };
+const resultPositiveInteger: RuntimeResultRule = (value, path) => {
+  resultNonNegativeInteger(value, path);
+  if ((value as number) < 1) throw invalidResult(`${path} 必须是正整数`);
+};
 const resultJsonObject: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 JSON 对象`);
 };
@@ -2369,6 +2555,61 @@ function resultNullable(rule: RuntimeResultRule): RuntimeResultRule {
     if (value !== null) rule(value, path);
   };
 }
+
+const capabilitySourceMetadataResult = exactResultShape(
+  {
+    scope: resultOneOf(["user", "project", "plugin"]),
+    sourceId: resultString,
+    sourceLabel: resultString,
+    readOnly: resultBoolean,
+    effective: resultBoolean,
+  },
+  { shadowedBy: resultString },
+);
+
+const runtimeScopedSkillResult = exactResultShape(
+  {
+    name: resultString,
+    description: resultString,
+    source: capabilitySourceMetadataResult,
+  },
+  { allowedTools: resultStringArray, model: resultString },
+);
+
+const runtimeCapabilityRevisionsResult = exactResultShape({
+  user: resultString,
+  project: resultString,
+});
+
+const runtimeScopedMcpServerResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 MCP server 对象`);
+  const common = {
+    startupTimeoutMs: resultPositiveInteger,
+    toolTimeoutMs: resultPositiveInteger,
+    enabled: resultBoolean,
+  } as const;
+  if (value["transport"] === "stdio") {
+    exactResultShape(
+      {
+        name: resultString,
+        transport: resultOneOf(["stdio"]),
+        command: resultString,
+        source: capabilitySourceMetadataResult,
+      },
+      { ...common, args: resultStringArray, envKeys: resultStringArray },
+    )(value, path);
+    return;
+  }
+  exactResultShape(
+    {
+      name: resultString,
+      transport: resultOneOf(["http", "sse"]),
+      url: resultString,
+      source: capabilitySourceMetadataResult,
+    },
+    { ...common, headerKeys: resultStringArray },
+  )(value, path);
+};
 
 const memoryFactResult = exactResultShape(
   {
@@ -2625,7 +2866,8 @@ const runtimePingResult: RuntimeResultRule = (value, path) => {
   if (
     value["desktopSchemaRevision"] !== DESKTOP_RUNTIME_SCHEMA_REVISION ||
     !Array.isArray(capabilities) ||
-    !capabilities.includes(DESKTOP_RUNTIME_SCHEMA_CAPABILITY)
+    !capabilities.includes(DESKTOP_RUNTIME_SCHEMA_CAPABILITY) ||
+    !capabilities.includes(CAPABILITY_SCOPE_RUNTIME_CAPABILITY)
   ) {
     throw protocolError(
       RUNTIME_ERROR_CODES.VERSION_MISMATCH,
@@ -2700,6 +2942,31 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       usedTokens: resultFiniteNumber,
       truncated: resultBoolean,
     }),
+  }),
+  "skills.user.list": exactResultShape({
+    skills: resultArray(runtimeScopedSkillResult),
+    revision: resultString,
+  }),
+  "skills.effective.list": exactResultShape({
+    skills: resultArray(runtimeScopedSkillResult),
+    revisions: runtimeCapabilityRevisionsResult,
+  }),
+  "mcp.user.list": exactResultShape({
+    servers: resultArray(runtimeScopedMcpServerResult),
+    revision: resultString,
+  }),
+  "mcp.user.upsert": exactResultShape({
+    server: runtimeScopedMcpServerResult,
+    revision: resultString,
+  }),
+  "mcp.user.delete": exactResultShape({
+    serverName: resultString,
+    deleted: resultOneOf([true]),
+    revision: resultString,
+  }),
+  "mcp.effective.list": exactResultShape({
+    servers: resultArray(runtimeScopedMcpServerResult),
+    revisions: runtimeCapabilityRevisionsResult,
   }),
   "events.replay": resultShape(
     { events: resultArray(durableRuntimeNotificationResult), hasMore: resultBoolean },
