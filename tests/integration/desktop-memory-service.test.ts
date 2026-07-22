@@ -301,6 +301,55 @@ test("edited approval is one atomic CAS and never activates the original body", 
   );
 });
 
+test("Desktop review approval replaces a conflict fact instead of creating a duplicate", async (context) => {
+  const fixture = await createFixture("conflict-review");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const repository = new MemoryRepository({
+    databasePath: paths.workspace.memoryDatabase,
+    workspaceId: paths.workspace.id,
+  });
+  const fact = repository.createFact({
+    factId: "conflict-fact",
+    kind: "preference",
+    title: "Response language",
+    content: "Reply in English",
+  });
+  const proposal = repository.createProposal({
+    proposalId: "conflict-proposal",
+    kind: "preference",
+    title: "Response language",
+    content: "Reply in Chinese",
+    reason: "The user corrected the preference",
+    conflictStatus: "potential",
+    conflictFactId: fact.factId,
+  });
+  repository.close();
+
+  const service = new DesktopMemoryService({
+    picoHome: fixture.picoHome,
+    publish: () => undefined,
+  });
+  context.after(() => service.close());
+  const accepted = service.resolveReview(fixture.workspace, {
+    workspacePath: fixture.workspace,
+    proposalId: proposal.proposalId,
+    resolution: "accepted",
+    expectedVersion: proposal.version,
+    idempotencyKey: "approve-conflict-review",
+  });
+  assert.equal(accepted.fact?.factId, fact.factId);
+  assert.equal(accepted.fact?.content, "Reply in Chinese");
+  assert.equal(accepted.proposal.resolvedFactId, fact.factId);
+  assert.equal(accepted.proposal.conflictStatus, "resolved");
+  assert.deepEqual(
+    service
+      .list(fixture.workspace, { workspacePath: fixture.workspace, states: ["active"] })
+      .facts.map((item) => item.factId),
+    [fact.factId],
+  );
+});
+
 test("session deletion and rewind invalidate sources and pending proposals but retain facts", async (context) => {
   const fixture = await createFixture("lifecycle");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
