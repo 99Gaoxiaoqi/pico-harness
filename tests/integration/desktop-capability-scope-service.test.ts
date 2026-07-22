@@ -96,7 +96,7 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
     server: {
       name: "shared",
       transport: "stdio",
-      command: "/private/tools/node",
+      command: "/private/tools/node --token=COMMAND_SECRET",
       args: ["--token=ARG_SECRET"],
       env: { API_TOKEN: "ENV_SECRET" },
     },
@@ -105,9 +105,9 @@ test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-
   });
   const created = asRecord(await desktop.handle(upsertRequest));
   const createdText = JSON.stringify(created);
-  assert.doesNotMatch(createdText, /ARG_SECRET|ENV_SECRET|\/private\/tools/u);
+  assert.doesNotMatch(createdText, /ARG_SECRET|ENV_SECRET|COMMAND_SECRET|\/private\/tools/u);
   const createdServer = asRecord(created["server"]);
-  assert.equal(createdServer["commandLabel"], "node");
+  assert.equal(createdServer["commandLabel"], "configured-command");
   assert.equal(createdServer["hasArguments"], true);
   assert.deepEqual(createdServer["envKeys"], ["API_TOKEN"]);
   const createdRevision = requiredString(created["revision"]);
