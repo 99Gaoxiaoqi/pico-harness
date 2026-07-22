@@ -160,11 +160,13 @@ export class ProviderOperationJournal {
       input.previousUserConfig,
       this.filePath,
       this.parseUserConfig,
+      { redactApiKeys: true },
     );
     const targetUserConfig = strictUserConfig(
       input.targetUserConfig,
       this.filePath,
       this.parseUserConfig,
+      { redactApiKeys: true },
     );
     const credentialRef = parseProviderCredentialRef(input.credentialRef).ref;
     const configRevision = parseRevision(input.configRevision, "configRevision");
@@ -558,6 +560,7 @@ function strictUserConfig(
   value: unknown,
   path: string,
   parseUserConfig: ProviderUserConfigParser,
+  options: { readonly redactApiKeys?: boolean } = {},
 ): PicoUserConfig {
   let json: string | undefined;
   try {
@@ -568,16 +571,36 @@ function strictUserConfig(
   if (json === undefined) throw journalError(path, "User config 不是 JSON");
   const jsonValue = JSON.parse(json) as unknown;
   const normalized = parseUserConfig(jsonValue, path);
-  if (Object.values(normalized.providers).some((provider) => provider.apiKey !== undefined)) {
+  if (canonicalJson(jsonValue) !== canonicalJson(normalized)) {
+    throw journalError(path, "User config 包含未知字段或非规范值");
+  }
+  if (options.redactApiKeys) return redactUserConfigApiKeys(normalized);
+  if (hasUserConfigApiKey(normalized)) {
     throw journalError(
       path,
       "Provider operation journal 不得保存 apiKey；明文凭证仅允许存在于用户级 config.json",
     );
   }
-  if (canonicalJson(jsonValue) !== canonicalJson(normalized)) {
-    throw journalError(path, "User config 包含未知字段或非规范值");
-  }
   return normalized;
+}
+
+function redactUserConfigApiKeys(config: PicoUserConfig): PicoUserConfig {
+  if (!hasUserConfigApiKey(config)) return config;
+  return {
+    version: config.version,
+    ...(config.defaults ? { defaults: config.defaults } : {}),
+    providers: Object.fromEntries(
+      Object.entries(config.providers).map(([providerId, provider]) => {
+        const metadata = { ...provider };
+        delete metadata.apiKey;
+        return [providerId, metadata];
+      }),
+    ),
+  };
+}
+
+function hasUserConfigApiKey(config: PicoUserConfig): boolean {
+  return Object.values(config.providers).some((provider) => provider.apiKey !== undefined);
 }
 
 function assertExactObject(
