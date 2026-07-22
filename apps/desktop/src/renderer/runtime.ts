@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   isJsonValue,
   type DesktopRuntimeMethod,
   type RuntimeProviderInput,
@@ -9,7 +10,10 @@ import {
   type RuntimeMemoryProposal,
   type RuntimeMemoryReviewBudget,
   type RuntimeMemorySettings,
+  type RuntimeMcpServerInput,
   type RuntimeResult,
+  type RuntimeScopedMcpServer,
+  type RuntimeScopedSkill,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
@@ -19,6 +23,8 @@ import {
   type AppData,
   type CatalogAgentView,
   type CatalogSkillView,
+  type CapabilitySourceView,
+  type CapabilityView,
   type ChangeView,
   type ConnectionState,
   type ConversationView,
@@ -668,7 +674,7 @@ function parseUsage(value: unknown): UsageView {
   };
 }
 
-function capability(item: JsonRecord, index: number) {
+function capability(item: JsonRecord, index: number): CapabilityView {
   const enabled = item.enabled;
   const configured = item.configured;
   return {
@@ -682,6 +688,46 @@ function capability(item: JsonRecord, index: number) {
           ? ("attention" as const)
           : ("ready" as const),
     meta: stringValue(item.model ?? item.version ?? item.status),
+  };
+}
+
+function capabilitySource(
+  source: RuntimeScopedSkill["source"] | RuntimeScopedMcpServer["source"],
+): CapabilitySourceView {
+  return {
+    scope: source.scope,
+    sourceId: source.sourceId,
+    sourceLabel: source.sourceLabel,
+    readOnly: source.readOnly,
+    effective: source.effective,
+    ...(source.shadowedBy ? { shadowedBy: source.shadowedBy } : {}),
+  };
+}
+
+function scopedSkill(skill: RuntimeScopedSkill, index: number): CapabilityView {
+  return {
+    id: `${skill.source.sourceId}:${skill.name}:${index}`,
+    name: skill.name,
+    description: skill.description,
+    state: skill.source.effective ? "ready" : "disabled",
+    meta:
+      skill.model ??
+      (skill.allowedTools && skill.allowedTools.length > 0
+        ? `${skill.allowedTools.length} 个工具`
+        : undefined),
+    source: capabilitySource(skill.source),
+  };
+}
+
+function scopedMcpServer(server: RuntimeScopedMcpServer, index: number): CapabilityView {
+  const endpoint = server.transport === "stdio" ? server.command : server.url;
+  return {
+    id: `${server.source.sourceId}:${server.name}:${index}`,
+    name: server.name,
+    description: endpoint ? `${server.transport.toUpperCase()} · ${endpoint}` : server.transport,
+    state: server.enabled === false ? "disabled" : server.source.effective ? "ready" : "attention",
+    meta: server.transport,
+    source: capabilitySource(server.source),
   };
 }
 
@@ -819,8 +865,6 @@ function mergeLoadedData(
   const workspaceResult = isRecord(results.workspace) ? results.workspace : {};
   const workspaceMode = parseWorkspaceMode(workspaceResult.mode, base.workspaceMode);
   const jobResult = isRecord(results.jobs) ? results.jobs : {};
-  const skillResult = isRecord(results.skills) ? results.skills : {};
-  const mcpResult = isRecord(results.mcp) ? results.mcp : {};
   const providerResult = isRecord(results.legacyProviders) ? results.legacyProviders : {};
   const usageResult = isRecord(results.usage) ? results.usage : {};
   const usage = isRecord(usageResult.usage) ? usageResult.usage : {};
@@ -858,8 +902,6 @@ function mergeLoadedData(
       status: stringValue(item.status, "idle"),
       updatedAt: numberValue(item.updatedAt, Date.now()),
     })),
-    skills: recordArray(skillResult.skills).map(capability),
-    mcpServers: recordArray(mcpResult.servers).map(capability),
     providers: recordArray(providerResult.providers).map(capability),
     providerConfig: parseProviderConfig(results, base.providerConfig.supported),
     modelRoutes: parseModelRoutes(
@@ -955,6 +997,9 @@ export interface RuntimeActions {
   }): Promise<void>;
   runJob(id: string): Promise<void>;
   deleteJob(id: string): Promise<void>;
+  loadCapabilityScope(kind: "skills" | "mcp", workspacePath?: string): Promise<void>;
+  addUserMcp(server: RuntimeMcpServerInput): Promise<boolean>;
+  deleteUserMcp(serverName: string): Promise<boolean>;
   upsertProvider(provider: ProviderDraft): Promise<boolean>;
   deleteProvider(providerId: string): Promise<boolean>;
   setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
@@ -1013,7 +1058,15 @@ export function useRuntimeStore(): RuntimeStore {
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
   const runtimeCapabilitiesRef = useRef(
-    new Set<string>(preview ? [SHARED_CONFIG_CAPABILITY, WORKSPACE_MEMORY_CAPABILITY] : []),
+    new Set<string>(
+      preview
+        ? [
+            SHARED_CONFIG_CAPABILITY,
+            WORKSPACE_MEMORY_CAPABILITY,
+            CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+          ]
+        : [],
+    ),
   );
   const seenEventIdsRef = useRef(new Set<string>());
   const workspaceLoadGenerationRef = useRef(0);
@@ -1090,6 +1143,130 @@ export function useRuntimeStore(): RuntimeStore {
       return workspaces;
     },
     [],
+  );
+
+  const loadUserCapabilities = useCallback(async (bridge: DesktopBridge) => {
+    if (!runtimeCapabilitiesRef.current.has(CAPABILITY_SCOPE_RUNTIME_CAPABILITY)) {
+      setData((current) => ({
+        ...current,
+        notices: {
+          ...current.notices,
+          skills: "当前 Runtime 未提供全局 Skills 作用域能力。",
+          mcp: "当前 Runtime 未提供全局 MCP 作用域能力。",
+        },
+      }));
+      return;
+    }
+    const [skillResult, mcpResult] = await Promise.all([
+      optionalInvoke(bridge, "skills.user.list", {}),
+      optionalInvoke(bridge, "mcp.user.list", {}),
+    ]);
+    setData((current) => {
+      const skills = skillResult.value?.skills.map(scopedSkill);
+      const mcpServers = mcpResult.value?.servers.map(scopedMcpServer);
+      const skillRevision = skillResult.value?.revision;
+      const mcpRevision = mcpResult.value?.revision;
+      const notices = { ...current.notices };
+      if (skillResult.error) notices.skills = skillResult.error;
+      else delete notices.skills;
+      if (mcpResult.error) notices.mcp = mcpResult.error;
+      else delete notices.mcp;
+      return {
+        ...current,
+        ...(skills && skillRevision
+          ? {
+              skills: current.skillScope.workspacePath ? current.skills : skills,
+              skillScope: {
+                ...current.skillScope,
+                userItems: skills,
+                userRevision: skillRevision,
+              },
+            }
+          : {}),
+        ...(mcpServers && mcpRevision
+          ? {
+              mcpServers: current.mcpScope.workspacePath ? current.mcpServers : mcpServers,
+              mcpScope: {
+                ...current.mcpScope,
+                userItems: mcpServers,
+                userRevision: mcpRevision,
+              },
+            }
+          : {}),
+        notices,
+      };
+    });
+  }, []);
+
+  const loadScopedCapabilities = useCallback(
+    async (bridge: DesktopBridge, kind: "skills" | "mcp", workspacePath?: string) => {
+      if (!workspacePath) {
+        await loadUserCapabilities(bridge);
+        setData((current) => ({
+          ...current,
+          ...(kind === "skills"
+            ? {
+                skills: current.skillScope.userItems,
+                skillScope: { ...current.skillScope, workspacePath: undefined },
+              }
+            : {
+                mcpServers: current.mcpScope.userItems,
+                mcpScope: { ...current.mcpScope, workspacePath: undefined },
+              }),
+        }));
+        return;
+      }
+      try {
+        if (kind === "skills") {
+          const result = await invoke(bridge, "skills.effective.list", { workspacePath });
+          setData((current) => {
+            const notices = { ...current.notices };
+            delete notices.skills;
+            return {
+              ...current,
+              skills: result.skills.map(scopedSkill),
+              skillScope: { ...current.skillScope, workspacePath },
+              notices,
+            };
+          });
+        } else {
+          const result = await invoke(bridge, "mcp.effective.list", { workspacePath });
+          setData((current) => {
+            const notices = { ...current.notices };
+            delete notices.mcp;
+            return {
+              ...current,
+              mcpServers: result.servers.map(scopedMcpServer),
+              mcpScope: { ...current.mcpScope, workspacePath },
+              notices,
+            };
+          });
+        }
+      } catch (error) {
+        const detail =
+          error instanceof RuntimeInvocationError && error.code === "FORBIDDEN"
+            ? "该项目尚未信任，无法读取项目级能力；已继续显示用户级列表。"
+            : `${errorMessage(error)}；已继续显示用户级列表。`;
+        setData((current) => ({
+          ...current,
+          ...(kind === "skills"
+            ? {
+                skills: current.skillScope.userItems,
+                skillScope: { ...current.skillScope, workspacePath: undefined },
+              }
+            : {
+                mcpServers: current.mcpScope.userItems,
+                mcpScope: { ...current.mcpScope, workspacePath: undefined },
+              }),
+          notices: {
+            ...current.notices,
+            [kind]: detail,
+          },
+        }));
+        throw error;
+      }
+    },
+    [loadUserCapabilities],
   );
 
   const loadMemory = useCallback(
@@ -1175,8 +1352,6 @@ export function useRuntimeStore(): RuntimeStore {
       optionalEntry("sessions", bridge, "session.list", { ...params, includeArchived: true }),
       optionalEntry("runs", bridge, "runs.list", params),
       optionalEntry("jobs", bridge, "jobs.list", params),
-      optionalEntry("skills", bridge, "config.skills", params),
-      optionalEntry("mcp", bridge, "config.mcpServers", params),
       optionalEntry("legacyProviders", bridge, "config.providers", params),
       optionalEntry("agentCatalog", bridge, "catalog.agents", params),
       optionalEntry("skillCatalog", bridge, "catalog.skills", params),
@@ -1414,11 +1589,12 @@ export function useRuntimeStore(): RuntimeStore {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
       await loadWorkspaceIndex(bridge, true);
+      await loadUserCapabilities(bridge);
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
     }
-  }, [loadWorkspaceIndex, preview]);
+  }, [loadUserCapabilities, loadWorkspaceIndex, preview]);
 
   useEffect(() => {
     void bootstrap();
@@ -1431,12 +1607,20 @@ export function useRuntimeStore(): RuntimeStore {
     const refreshOnFocus = () => {
       const workspacePath = dataRef.current.workspacePath;
       void loadWorkspaceIndex(bridge)
+        .then(() => loadUserCapabilities(bridge))
         .then(() => (workspacePath ? loadWorkspace(bridge, workspacePath) : undefined))
         .catch(reportFailure);
     };
     window.addEventListener("focus", refreshOnFocus);
     return () => window.removeEventListener("focus", refreshOnFocus);
-  }, [connection.kind, loadWorkspace, loadWorkspaceIndex, preview, reportFailure]);
+  }, [
+    connection.kind,
+    loadUserCapabilities,
+    loadWorkspace,
+    loadWorkspaceIndex,
+    preview,
+    reportFailure,
+  ]);
 
   useEffect(() => {
     if (preview || connection.kind !== "ready" || !data.workspacePath) return;
@@ -1684,6 +1868,24 @@ export function useRuntimeStore(): RuntimeStore {
           }
         }
       } else if (topic === "config.updated") {
+        const changedCapabilities = Array.isArray(payload.capabilities)
+          ? payload.capabilities.map((item) => stringValue(item))
+          : [];
+        if (changedCapabilities.includes("skills") || changedCapabilities.includes("mcp")) {
+          void loadUserCapabilities(bridge)
+            .then(async () => {
+              const current = dataRef.current;
+              await Promise.all([
+                changedCapabilities.includes("skills") && current.skillScope.workspacePath
+                  ? loadScopedCapabilities(bridge, "skills", current.skillScope.workspacePath)
+                  : undefined,
+                changedCapabilities.includes("mcp") && current.mcpScope.workspacePath
+                  ? loadScopedCapabilities(bridge, "mcp", current.mcpScope.workspacePath)
+                  : undefined,
+              ]);
+            })
+            .catch(reportFailure);
+        }
         scheduleHydration();
       } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
         scheduleHydration(stringValue(scope.sessionId) || undefined);
@@ -1721,6 +1923,8 @@ export function useRuntimeStore(): RuntimeStore {
     data.workspacePath,
     loadConversation,
     loadMemory,
+    loadScopedCapabilities,
+    loadUserCapabilities,
     loadWorkspace,
     preview,
     reportFailure,
@@ -1759,6 +1963,24 @@ export function useRuntimeStore(): RuntimeStore {
         }
         if (
           !preview &&
+          label.startsWith("mcp-user-") &&
+          error instanceof RuntimeInvocationError &&
+          (error.code === "CONFIG_REVISION_CONFLICT" || error.code === "CONFLICT")
+        ) {
+          const bridge = getBridge();
+          if (bridge) {
+            try {
+              await loadUserCapabilities(bridge);
+            } catch (reloadError) {
+              reportFailure(reloadError);
+              return false;
+            }
+          }
+          setMessage("MCP 配置已在另一处更新，已刷新用户级列表。请检查后重试。");
+          return false;
+        }
+        if (
+          !preview &&
           label.startsWith("provider-") &&
           error instanceof RuntimeInvocationError &&
           (error.code === "CONFIG_REVISION_CONFLICT" || error.code === "CONFLICT")
@@ -1784,7 +2006,7 @@ export function useRuntimeStore(): RuntimeStore {
         setBusy(undefined);
       }
     },
-    [loadMemory, loadWorkspace, preview, reportFailure],
+    [loadMemory, loadUserCapabilities, loadWorkspace, preview, reportFailure],
   );
 
   const actions = useMemo<RuntimeActions>(
@@ -2370,6 +2592,122 @@ export function useRuntimeStore(): RuntimeStore {
           }));
         });
       },
+      async loadCapabilityScope(kind, workspacePath) {
+        await perform(`capability-${kind}`, async (bridge) => {
+          if (preview) {
+            setData((current) => ({
+              ...current,
+              ...(kind === "skills"
+                ? {
+                    skills: current.skillScope.userItems,
+                    skillScope: { ...current.skillScope, workspacePath },
+                  }
+                : {
+                    mcpServers: current.mcpScope.userItems,
+                    mcpScope: { ...current.mcpScope, workspacePath },
+                  }),
+            }));
+            return;
+          }
+          await loadScopedCapabilities(bridge, kind, workspacePath);
+        });
+      },
+      async addUserMcp(server) {
+        const revision = dataRef.current.mcpScope.userRevision;
+        if (!revision) {
+          setMessage("MCP 用户级配置尚未加载，请刷新后再试。");
+          return false;
+        }
+        if (dataRef.current.mcpScope.userItems.some((item) => item.name === server.name)) {
+          setMessage(
+            `MCP 服务 ${server.name} 已存在。Desktop v1 不会覆盖现有配置，以避免丢失密钥。`,
+          );
+          return false;
+        }
+        return perform("mcp-user-add", async (bridge) => {
+          if (preview) {
+            const item: CapabilityView = {
+              id: `user:mcp:${server.name}`,
+              name: server.name,
+              description: `${server.transport.toUpperCase()} · ${server.transport === "stdio" ? server.command : server.url}`,
+              state: server.enabled === false ? "disabled" : "ready",
+              meta: server.transport,
+              source: {
+                scope: "user",
+                sourceId: "user:mcp",
+                sourceLabel: "~/.pico/config.json",
+                readOnly: false,
+                effective: true,
+              },
+            };
+            setData((current) => {
+              const userItems = [
+                ...current.mcpScope.userItems.filter((candidate) => candidate.name !== server.name),
+                item,
+              ];
+              return {
+                ...current,
+                mcpServers: [
+                  ...current.mcpServers.filter(
+                    (candidate) =>
+                      candidate.name !== server.name || candidate.source?.scope !== "user",
+                  ),
+                  item,
+                ],
+                mcpScope: {
+                  ...current.mcpScope,
+                  userItems,
+                  userRevision: `${current.mcpScope.userRevision}-next`,
+                },
+              };
+            });
+          } else {
+            await invoke(bridge, "mcp.user.upsert", {
+              server,
+              expectedRevision: revision,
+              idempotencyKey: globalThis.crypto.randomUUID(),
+            });
+            await loadUserCapabilities(bridge);
+            const workspacePath = dataRef.current.mcpScope.workspacePath;
+            if (workspacePath) await loadScopedCapabilities(bridge, "mcp", workspacePath);
+          }
+          setMessage(`MCP 服务 ${server.name} 已添加。`);
+        });
+      },
+      async deleteUserMcp(serverName) {
+        const revision = dataRef.current.mcpScope.userRevision;
+        if (!revision) {
+          setMessage("MCP 用户级配置尚未加载，请刷新后再试。");
+          return false;
+        }
+        return perform("mcp-user-delete", async (bridge) => {
+          if (preview) {
+            setData((current) => ({
+              ...current,
+              mcpServers: current.mcpServers.filter(
+                (candidate) => candidate.name !== serverName || candidate.source?.scope !== "user",
+              ),
+              mcpScope: {
+                ...current.mcpScope,
+                userItems: current.mcpScope.userItems.filter(
+                  (candidate) => candidate.name !== serverName,
+                ),
+                userRevision: `${current.mcpScope.userRevision}-next`,
+              },
+            }));
+          } else {
+            await invoke(bridge, "mcp.user.delete", {
+              serverName,
+              expectedRevision: revision,
+              idempotencyKey: globalThis.crypto.randomUUID(),
+            });
+            await loadUserCapabilities(bridge);
+            const workspacePath = dataRef.current.mcpScope.workspacePath;
+            if (workspacePath) await loadScopedCapabilities(bridge, "mcp", workspacePath);
+          }
+          setMessage(`MCP 服务 ${serverName} 已删除。`);
+        });
+      },
       async upsertProvider(provider) {
         const providerConfig = dataRef.current.providerConfig;
         if (!providerConfig.writable) {
@@ -2804,7 +3142,16 @@ export function useRuntimeStore(): RuntimeStore {
         return output;
       },
     }),
-    [bootstrap, loadConversation, loadMemory, loadWorkspace, loadWorkspaceIndex, perform, preview],
+    [
+      bootstrap,
+      loadConversation,
+      loadMemory,
+      loadScopedCapabilities,
+      loadWorkspace,
+      loadWorkspaceIndex,
+      perform,
+      preview,
+    ],
   );
 
   return { preview, connection, data, busy, message, actions };
