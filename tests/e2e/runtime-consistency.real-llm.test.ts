@@ -4,7 +4,7 @@ import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { globalApprovalManager } from "../../src/approval/manager.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
@@ -18,7 +18,7 @@ import {
   resolveRestoredSessionModelRoute,
 } from "../../src/input/session-settings.js";
 import { UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import {
   loadEffectiveModelRuntime,
   type EffectiveModelRuntime,
@@ -35,11 +35,7 @@ const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TEST_TIMEOUT_MS = 5 * 60_000;
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
-const MODEL_CONFIG_HOME = mkdtemp(join(tmpdir(), "pico-real-llm-config-"));
-
-after(async () => {
-  await rm(await MODEL_CONFIG_HOME, { recursive: true, force: true });
-});
+const MODEL_CONFIG_HOME = resolvePicoHome();
 
 interface RealModel {
   readonly runtime: EffectiveModelRuntime;
@@ -179,8 +175,7 @@ realModelTest(
 
 async function configuredRealModel(): Promise<RealModel> {
   realModelPromise ??= (async () => {
-    const modelConfigHome = await MODEL_CONFIG_HOME;
-    const userConfigStore = new UserConfigStore({ picoHome: modelConfigHome });
+    const userConfigStore = new UserConfigStore({ picoHome: MODEL_CONFIG_HOME });
     const configResolver = new EffectiveConfigResolver({ userConfigStore });
     const runtime = await loadEffectiveModelRuntime({
       workDir: PROJECT_ROOT,
