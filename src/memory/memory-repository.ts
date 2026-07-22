@@ -1123,34 +1123,80 @@ export class MemoryRepository {
         const finalConfidence = patch?.confidence ?? current.confidence;
         let fact: Fact | undefined;
         if (input.resolution === "accepted") {
-          const factId = normalizeId(input.factId ?? `fact:${randomUUID()}`, "factId");
-          this.insertFact({
-            factId,
-            kind: finalKind,
-            title: finalTitle,
-            content: finalContent,
-            confidence: finalConfidence,
-            sourceId: current.sourceId,
-            state: "active",
-            pinned: false,
-            at,
-          });
-          fact = this.requireFact(factId);
-          this.recordMutation(
-            "fact",
-            factId,
-            "fact.created",
-            undefined,
-            fact.version,
-            input.idempotencyKey,
-            at,
-          );
+          if (current.conflictStatus !== "none" && !current.conflictFactId) {
+            throw new MemoryConflictError(
+              `Conflict proposal ${proposalId} no longer has its conflict fact`,
+            );
+          }
+          if (current.conflictFactId) {
+            const target = this.requireUnchangedActiveConflictFact(current);
+            if (input.factId !== undefined) {
+              const requestedFactId = normalizeId(input.factId, "factId");
+              if (requestedFactId !== target.factId) {
+                throw new MemoryConflictError(
+                  `Conflict proposal ${proposalId} must replace fact ${target.factId}`,
+                );
+              }
+            }
+            const changedFact = this.db
+              .prepare(
+                `UPDATE memory_facts
+                 SET kind = ?, title = ?, content = ?, confidence = ?, source_id = ?,
+                     state = 'active', version = version + 1, updated_at = ?
+                 WHERE workspace_id = ? AND fact_id = ? AND version = ? AND state = 'active'`,
+              )
+              .run(
+                finalKind,
+                finalTitle,
+                finalContent,
+                finalConfidence,
+                current.sourceId ?? null,
+                at,
+                this.workspaceId,
+                target.factId,
+                target.version,
+              );
+            assertChanged(changedFact.changes, "fact", target.factId);
+            fact = this.requireFact(target.factId);
+            this.recordMutation(
+              "fact",
+              target.factId,
+              "fact.updated",
+              target.version,
+              fact.version,
+              input.idempotencyKey,
+              at,
+            );
+          } else {
+            const factId = normalizeId(input.factId ?? `fact:${randomUUID()}`, "factId");
+            this.insertFact({
+              factId,
+              kind: finalKind,
+              title: finalTitle,
+              content: finalContent,
+              confidence: finalConfidence,
+              sourceId: current.sourceId,
+              state: "active",
+              pinned: false,
+              at,
+            });
+            fact = this.requireFact(factId);
+            this.recordMutation(
+              "fact",
+              factId,
+              "fact.created",
+              undefined,
+              fact.version,
+              input.idempotencyKey,
+              at,
+            );
+          }
         }
         const changed = this.db
           .prepare(
             `UPDATE memory_proposals
              SET kind = ?, title = ?, content = ?, reason = ?, confidence = ?,
-                 status = ?, resolved_fact_id = ?, version = version + 1,
+                 status = ?, conflict_status = ?, resolved_fact_id = ?, version = version + 1,
                  updated_at = ?, reviewed_at = ?
              WHERE workspace_id = ? AND proposal_id = ? AND version = ? AND status = 'pending'`,
           )
@@ -1161,6 +1207,9 @@ export class MemoryRepository {
             finalReason,
             finalConfidence,
             input.resolution,
+            input.resolution === "accepted" && current.conflictFactId
+              ? "resolved"
+              : current.conflictStatus,
             fact?.factId ?? null,
             at,
             at,
@@ -1614,6 +1663,43 @@ export class MemoryRepository {
   private requireFact(factId: string): Fact {
     const fact = this.getFact(factId);
     if (!fact) throw new MemoryNotFoundError("fact", factId);
+    return fact;
+  }
+
+  private requireUnchangedActiveConflictFact(proposal: Proposal): Fact {
+    const factId = proposal.conflictFactId;
+    if (!factId) {
+      throw new MemoryConflictError(`Proposal ${proposal.proposalId} has no conflict fact`);
+    }
+    const fact = this.requireFact(factId);
+    if (fact.state !== "active") {
+      throw new MemoryConflictError(`Conflict fact ${factId} is no longer active`);
+    }
+    const proposalCreated = this.db
+      .prepare(
+        `SELECT sequence FROM memory_mutations
+         WHERE workspace_id = ? AND entity_type = 'proposal' AND entity_id = ?
+           AND action = 'proposal.created'
+         ORDER BY sequence ASC LIMIT 1`,
+      )
+      .get(this.workspaceId, proposal.proposalId) as { readonly sequence: number } | undefined;
+    if (!proposalCreated) {
+      throw new MemoryConflictError(
+        `Conflict proposal ${proposal.proposalId} has no creation audit record`,
+      );
+    }
+    const changedAfterProposal = this.db
+      .prepare(
+        `SELECT 1 FROM memory_mutations
+         WHERE workspace_id = ? AND entity_type = 'fact' AND entity_id = ? AND sequence > ?
+         LIMIT 1`,
+      )
+      .get(this.workspaceId, factId, proposalCreated.sequence);
+    if (changedAfterProposal) {
+      throw new MemoryConflictError(
+        `Conflict fact ${factId} changed after proposal ${proposal.proposalId} was created`,
+      );
+    }
     return fact;
   }
 
