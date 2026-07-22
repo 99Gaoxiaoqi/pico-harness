@@ -49,6 +49,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -86,6 +87,7 @@ import {
 import type {
   CapabilityView,
   ChangeView,
+  McpServerDraft,
   RunView,
   SessionView,
   TimelineItem,
@@ -214,22 +216,8 @@ function AppStateRouter() {
             </WorkspaceRoute>
           }
         />
-        <Route
-          path="skills"
-          element={
-            <WorkspaceRoute>
-              <CapabilityPage kind="skills" />
-            </WorkspaceRoute>
-          }
-        />
-        <Route
-          path="mcp"
-          element={
-            <WorkspaceRoute>
-              <CapabilityPage kind="mcp" />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="skills" element={<CapabilityPage kind="skills" />} />
+        <Route path="mcp" element={<CapabilityPage kind="mcp" />} />
         <Route
           path="providers"
           element={
@@ -495,8 +483,8 @@ const primaryNav = [{ to: "/automations", label: "自动化", icon: Workflow, sc
 
 const resourceNav = [
   { to: "/memory", label: "记忆", icon: BrainCircuit, scoped: true },
-  { to: "/skills", label: "Skills", icon: WandSparkles, scoped: true },
-  { to: "/mcp", label: "MCP", icon: Network, scoped: true },
+  { to: "/skills", label: "Skills", icon: WandSparkles },
+  { to: "/mcp", label: "MCP", icon: Network },
   { to: "/providers", label: "模型", icon: BrainCircuit, scoped: true },
   { to: "/usage", label: "用量", icon: Gauge, scoped: true },
 ] as const;
@@ -2202,8 +2190,10 @@ function MemoryPageRoute() {
   return <MemoryPage runtime={useRuntime()} />;
 }
 
-function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
-  const { data } = useRuntime();
+export function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
+  const { data, actions, busy } = useRuntime();
+  const [addingMcp, setAddingMcp] = useState(false);
+  const scope = kind === "skills" ? data.skillScope : data.mcpScope;
   const config = {
     skills: {
       title: "Skills",
@@ -2232,25 +2222,179 @@ function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
           <h2>{config.title}</h2>
           <p>{config.detail}</p>
         </div>
-        <Button disabled title="配置编辑将在 Runtime 提供写入能力后开放">
-          <Plus aria-hidden="true" size={16} />
-          添加
-        </Button>
+        {kind === "mcp" ? (
+          <Button disabled={Boolean(busy)} onClick={() => setAddingMcp((visible) => !visible)}>
+            <Plus aria-hidden="true" size={16} />
+            添加用户级 MCP
+          </Button>
+        ) : (
+          <Button disabled title="Skills v1 仅支持查看">
+            Skills v1 只读
+          </Button>
+        )}
+      </section>
+      <section className="panel capability-scope-picker" aria-label={`${config.title}作用域`}>
+        <div>
+          <strong>查看范围</strong>
+          <p>默认只显示用户级配置；选择项目后才读取该项目的有效配置。</p>
+        </div>
+        <label>
+          <span className="sr-only">选择项目</span>
+          <select
+            className="select-control"
+            value={scope.workspacePath ?? ""}
+            disabled={busy === `capability-${kind}`}
+            onChange={(event) =>
+              void actions.loadCapabilityScope(kind, event.target.value || undefined)
+            }
+          >
+            <option value="">仅用户级</option>
+            {data.workspaces.map((workspace) => (
+              <option key={workspace.path} value={workspace.path}>
+                {workspace.name}
+                {workspace.trusted ? "" : "（未信任）"}
+              </option>
+            ))}
+          </select>
+        </label>
       </section>
       {config.notice && <InlineNotice tone="warning">{config.notice}</InlineNotice>}
+      {kind === "mcp" && addingMcp && (
+        <McpAddForm
+          busy={busy === "mcp-user-add"}
+          onCancel={() => setAddingMcp(false)}
+          onSubmit={async (server) => {
+            const saved = await actions.addUserMcp(server);
+            if (saved) setAddingMcp(false);
+          }}
+        />
+      )}
       <section className="panel capability-panel">
         <CapabilityList
           items={config.items as readonly CapabilityView[]}
           emptyTitle={config.empty}
           emptyDetail="当前 Runtime 没有返回任何配置；Pico 不会填充示例项。"
+          {...(kind === "mcp"
+            ? {
+                onDelete: (item: CapabilityView) => {
+                  if (!window.confirm(`删除用户级 MCP 服务“${item.name}”？`)) return;
+                  void actions.deleteUserMcp(item.name);
+                },
+                deleting: busy === "mcp-user-delete",
+              }
+            : {})}
         />
       </section>
       {kind === "skills" && (
         <InlineNotice tone="neutral">
-          公开 Plugin Runtime 尚未开放；这里只显示 Runtime 已加载的 Skills。
+          Skills v1 仅支持查看来源与有效状态，不在 Desktop 中修改文件。
         </InlineNotice>
       )}
     </div>
+  );
+}
+
+function McpAddForm({
+  busy,
+  onCancel,
+  onSubmit,
+}: {
+  readonly busy: boolean;
+  readonly onCancel: () => void;
+  readonly onSubmit: (server: McpServerDraft) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [transport, setTransport] = useState<"stdio" | "http" | "sse">("stdio");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [url, setUrl] = useState("");
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const serverName = name.trim();
+    if (!serverName) return;
+    if (transport === "stdio") {
+      const executable = command.trim();
+      if (!executable) return;
+      void onSubmit({
+        name: serverName,
+        transport,
+        command: executable,
+        ...(args.trim()
+          ? {
+              args: args
+                .split("\n")
+                .map((item) => item.trim())
+                .filter(Boolean),
+            }
+          : {}),
+        enabled: true,
+      });
+      return;
+    }
+    const endpoint = url.trim();
+    if (!endpoint) return;
+    void onSubmit({ name: serverName, transport, url: endpoint, enabled: true });
+  };
+  return (
+    <form className="capability-add-form" onSubmit={submit}>
+      <header>
+        <div>
+          <strong>添加用户级 MCP 服务</strong>
+          <p>只新增配置，不会连接或启动服务。如需密钥，请在安全配置源中管理。</p>
+        </div>
+      </header>
+      <label>
+        <span>名称</span>
+        <input required value={name} onChange={(event) => setName(event.target.value)} />
+      </label>
+      <label>
+        <span>传输方式</span>
+        <select
+          value={transport}
+          onChange={(event) => setTransport(event.target.value as typeof transport)}
+        >
+          <option value="stdio">stdio</option>
+          <option value="http">HTTP</option>
+          <option value="sse">SSE</option>
+        </select>
+      </label>
+      {transport === "stdio" ? (
+        <>
+          <label>
+            <span>命令</span>
+            <input
+              required
+              value={command}
+              onChange={(event) => setCommand(event.target.value)}
+              placeholder="npx"
+            />
+          </label>
+          <label className="capability-add-form__wide">
+            <span>参数（每行一个）</span>
+            <textarea value={args} onChange={(event) => setArgs(event.target.value)} rows={3} />
+          </label>
+        </>
+      ) : (
+        <label className="capability-add-form__wide">
+          <span>URL</span>
+          <input
+            required
+            type="url"
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder="https://example.com/mcp"
+          />
+        </label>
+      )}
+      <div className="button-row capability-add-form__wide">
+        <Button disabled={busy} onClick={onCancel}>
+          取消
+        </Button>
+        <Button variant="primary" disabled={busy} type="submit">
+          保存用户级配置
+        </Button>
+      </div>
+    </form>
   );
 }
 

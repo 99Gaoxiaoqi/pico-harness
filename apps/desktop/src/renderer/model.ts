@@ -1,5 +1,7 @@
 import type { ConversationItemView } from "./conversation/types.js";
 import type {
+  RuntimeCapabilityScope,
+  RuntimeMcpServerInput,
   RuntimeMemoryFact,
   RuntimeMemoryProposal,
   RuntimeMemoryReviewBudget,
@@ -170,7 +172,25 @@ export interface CapabilityView {
   readonly description: string;
   readonly state: "ready" | "attention" | "disabled";
   readonly meta?: string | undefined;
+  readonly source?: CapabilitySourceView | undefined;
 }
+
+export interface CapabilitySourceView {
+  readonly scope: RuntimeCapabilityScope;
+  readonly sourceId: string;
+  readonly sourceLabel: string;
+  readonly readOnly: boolean;
+  readonly effective: boolean;
+  readonly shadowedBy?: string | undefined;
+}
+
+export interface CapabilityScopeView {
+  readonly userItems: readonly CapabilityView[];
+  readonly userRevision: string;
+  readonly workspacePath?: string | undefined;
+}
+
+export type McpServerDraft = RuntimeMcpServerInput;
 
 export interface UsageView {
   readonly inputTokens?: number | undefined;
@@ -222,6 +242,8 @@ export interface AppData {
   readonly jobs: readonly JobView[];
   readonly skills: readonly CapabilityView[];
   readonly mcpServers: readonly CapabilityView[];
+  readonly skillScope: CapabilityScopeView;
+  readonly mcpScope: CapabilityScopeView;
   readonly providers: readonly CapabilityView[];
   readonly providerConfig: ProviderConfigView;
   readonly modelRoutes: readonly ModelRouteView[];
@@ -285,6 +307,8 @@ export const emptyData: AppData = {
   jobs: [],
   skills: [],
   mcpServers: [],
+  skillScope: { userItems: [], userRevision: "" },
+  mcpScope: { userItems: [], userRevision: "" },
   providers: [],
   providerConfig: {
     supported: false,
