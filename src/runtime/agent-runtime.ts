@@ -355,7 +355,7 @@ export async function executeAgentRuntime(
           });
           memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
           const memorySettings = memoryRepository.getSettings();
-          if (memorySettings.enabled && memorySettings.autoPropose && !resumeExistingSession) {
+          if (memorySettings.enabled && memorySettings.autoPropose) {
             memoryReviewScheduler = {
               enqueue: (input) => {
                 // This callback runs in RuntimeRunExecutor's detached host task, after the
@@ -676,8 +676,6 @@ export async function executeAgentRuntime(
                 : {}),
             }),
         );
-      // Recover durable jobs left by an earlier process before the next foreground completion.
-      kickMemoryWorker();
     }
     let activeMcpManager = dependencies.mcpManager;
     runtimeState.bindHookRuntime({

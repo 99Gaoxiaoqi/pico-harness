@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
+import { globalSessionManager } from "../../src/engine/session.js";
 import type { Message } from "../../src/schema/message.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import {
@@ -33,7 +34,9 @@ import { CostTracker } from "../../src/observability/tracker.js";
 import { estimateCost, type BillingRoute } from "../../src/observability/pricing.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { publishDesktopMemoryProposal } from "../../src/daemon/production-host.js";
@@ -273,6 +276,78 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   const untrusted = openRepository(fixture);
   assert.equal(untrusted.listJobs().length, 1, "untrusted run must not enqueue extraction");
   untrusted.close();
+});
+
+test("the second turn in one Session schedules Memory only when it carries a stable signal", async (context) => {
+  const fixture = await createFixture("multi-turn-signal-gate");
+  const workspace = await realpath(fixture.workspace);
+  const trustStore = await trustFixture(fixture);
+  const sessionId = "memory-multi-turn-signal-gate";
+  const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workspace, {
+    persistence: true,
+    picoHome: fixture.picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const session = sessionLease.session;
+  const runtimeState = await createSessionRuntime({
+    session,
+    sessionLease,
+    hooks: false,
+    lspServers: [],
+  });
+  context.after(async () => {
+    await runtimeState.dispose();
+    const released = globalSessionManager.delete(sessionId, workspace, {
+      picoHome: fixture.picoHome,
+    });
+    await released?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  const provider: LLMProvider = {
+    async generate() {
+      return { role: "assistant", content: "done" };
+    },
+  };
+  const executeDesktopTurn = async (prompt: string, eventId: string) => {
+    await session.commitMessageOnce(eventId, {
+      role: "user",
+      content: prompt,
+      providerData: { picoKind: "desktop_user_input" },
+    });
+    await executeAgentRuntime(
+      {
+        prompt,
+        dir: workspace,
+        sessionSelection: { mode: "resume", sessionId },
+        provider: "openai",
+      },
+      {
+        provider,
+        picoHome: fixture.picoHome,
+        memoryTrustStore: trustStore,
+        memoryReviewDebounceMs: 0,
+        runtimeState,
+        resumeExistingSession: true,
+      },
+    );
+  };
+
+  await executeDesktopTurn("What is 2 + 2?", "desktop-user-ordinary");
+  await waitForImmediate();
+  let repository = openRepository(fixture);
+  assert.equal(repository.listJobs().length, 0);
+  repository.close();
+
+  await executeDesktopTurn(
+    "请记住：这个项目固定使用 npm run multi-turn-memory 。",
+    "desktop-user-stable",
+  );
+  await waitForImmediate();
+  repository = openRepository(fixture);
+  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0]?.cursor.sessionId, sessionId);
+  repository.close();
 });
 
 test("proposal notification outbox retries across workers without repeating extraction", async (context) => {
