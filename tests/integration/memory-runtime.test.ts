@@ -35,7 +35,10 @@ import { estimateCost, type BillingRoute } from "../../src/observability/pricing
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import { recoverMemoryReviewJobs } from "../../src/runtime/memory-review-recovery.js";
+import {
+  invalidateMemoryReviewRecoverySuccess,
+  recoverMemoryReviewJobs,
+} from "../../src/runtime/memory-review-recovery.js";
 import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
   RuntimeEventStore,
@@ -572,6 +575,100 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
   assert.fail("the Run after a direct enqueue failure did not rebuild the missing review");
 });
 
+test("an invalidated in-flight recovery continues with the current generation", async (context) => {
+  const fixture = await createFixture("recovery-generation-handoff");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const sessionId = "memory-recovery-generation-handoff";
+  await store.initializeSession({ sessionId, workDir: fixture.workspace });
+  const appendCompletedRun = async (suffix: string): Promise<void> => {
+    const runId = `generation-run-${suffix}`;
+    const base = {
+      schemaVersion: 1 as const,
+      sessionId,
+      invocationId: `invocation-${suffix}`,
+      runId,
+      turnId: `turn-${suffix}`,
+      at: "2026-07-22T00:00:00.000Z",
+      partial: false,
+    };
+    await store.appendBatch([
+      {
+        ...base,
+        eventId: `generation-started-${suffix}`,
+        visibility: "internal",
+        kind: "run.started",
+        data: { workDir: fixture.workspace },
+      },
+      {
+        ...base,
+        eventId: `generation-user-${suffix}`,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message: { role: "user", content: `请记住：固定使用 generation-${suffix}` } },
+      },
+      {
+        ...base,
+        eventId: `generation-assistant-${suffix}`,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message: { role: "assistant", content: "done" } },
+      },
+      {
+        ...base,
+        eventId: `generation-terminal-${suffix}`,
+        visibility: "internal",
+        kind: "run.terminal",
+        data: { status: "completed" },
+      },
+    ]);
+  };
+  await appendCompletedRun("old");
+
+  let releaseFirstEnqueue = (): void => undefined;
+  const firstEnqueueReleased = new Promise<void>((resolve) => {
+    releaseFirstEnqueue = resolve;
+  });
+  let notifyFirstEnqueue = (): void => undefined;
+  const firstEnqueueStarted = new Promise<void>((resolve) => {
+    notifyFirstEnqueue = resolve;
+  });
+  const terminalCalls: string[] = [];
+  let calls = 0;
+  const scheduler = {
+    async enqueue(input: { readonly terminalEventId: string }): Promise<void> {
+      terminalCalls.push(input.terminalEventId);
+      calls++;
+      if (calls === 1) {
+        notifyFirstEnqueue();
+        await firstEnqueueReleased;
+      }
+    },
+  };
+
+  const staleRecovery = recoverMemoryReviewJobs({
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    scheduler,
+  });
+  await firstEnqueueStarted;
+  await appendCompletedRun("new");
+  invalidateMemoryReviewRecoverySuccess(paths.workspace.runtimeDatabase);
+  const currentRecovery = recoverMemoryReviewJobs({
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    scheduler,
+  });
+  releaseFirstEnqueue();
+  await Promise.all([staleRecovery, currentRecovery]);
+  store.close();
+
+  assert.equal(
+    terminalCalls.includes("generation-terminal-new"),
+    true,
+    "the caller waiting on a stale flight must observe the current-generation rescan",
+  );
+});
+
 test("manifest pages keep a fixed upper bound and DESC keyset across concurrent mutations", async (context) => {
   const fixture = await createFixture("manifest-keyset");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -780,6 +877,67 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
   assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length, 0);
   repository.close();
   assert.equal(memoryModelCalls, 0);
+});
+
+test("compact recovery restores an active Run at a rewind target before its terminal", async (context) => {
+  const fixture = await createFixture("compact-recovery-preterminal-rewind");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const sessionId = "memory-compact-preterminal-rewind";
+  const runId = "memory-compact-replayed-run";
+  const base = (eventId: string, visibility: "internal" | "model") => ({
+    schemaVersion: 1 as const,
+    eventId,
+    sessionId,
+    invocationId: "memory-compact-invocation",
+    runId,
+    turnId: "memory-compact-turn",
+    at: "2026-07-22T00:00:00.000Z",
+    partial: false,
+    visibility,
+  });
+  await store.initializeSession({ sessionId, workDir: fixture.workspace });
+  await store.appendBatch([
+    {
+      ...base("compact-started", "internal"),
+      kind: "run.started",
+      data: { workDir: fixture.workspace },
+    },
+    {
+      ...base("compact-user", "model"),
+      kind: "message.committed",
+      data: { message: { role: "user", content: "请记住：固定使用 compact-recovery" } },
+    },
+    {
+      ...base("compact-assistant", "model"),
+      kind: "message.committed",
+      data: { message: { role: "assistant", content: "done" } },
+    },
+    {
+      ...base("compact-terminal-discarded", "internal"),
+      kind: "run.terminal",
+      data: { status: "completed" },
+    },
+    {
+      ...base("compact-rewind", "internal"),
+      kind: "history.rewound",
+      data: { branchId: "compact-replayed-branch", throughEventId: "compact-assistant" },
+    },
+    {
+      ...base("compact-terminal-active", "internal"),
+      kind: "run.terminal",
+      data: { status: "completed" },
+    },
+  ]);
+  store.close();
+
+  const recovered: string[] = [];
+  await recoverMemoryReviewJobs({
+    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    scheduler: { enqueue: (input) => void recovered.push(input.terminalEventId) },
+  });
+  assert.deepEqual(recovered, ["compact-terminal-active"]);
 });
 
 test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {
