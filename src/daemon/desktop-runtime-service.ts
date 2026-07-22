@@ -4127,7 +4127,7 @@ function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedM
     return {
       ...common,
       transport: "stdio",
-      commandLabel: basename(definition.config.command ?? "unknown"),
+      commandLabel: safeMcpCommandLabel(definition.config.command),
       hasArguments: (definition.config.args?.length ?? 0) > 0,
       ...(definition.config.env && Object.keys(definition.config.env).length > 0
         ? { envKeys: Object.keys(definition.config.env).sort() }
@@ -4142,6 +4142,11 @@ function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedM
       ? { headerKeys: Object.keys(definition.config.headers).sort() }
       : {}),
   };
+}
+
+function safeMcpCommandLabel(command: string | undefined): string {
+  const label = basename(command ?? "").trim();
+  return /^[a-z0-9._+-]+$/iu.test(label) ? label : "configured-command";
 }
 
 function safeMcpEndpointLabel(rawUrl: string | undefined): string {
