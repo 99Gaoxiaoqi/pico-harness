@@ -29,6 +29,7 @@ import {
   type McpTool,
   type McpToolResult,
 } from "./types.js";
+import { parseMcpConfig } from "./config-parser.js";
 
 const DEFAULT_CONFIG_RELATIVE = ".pico/mcp.json";
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
@@ -800,46 +801,7 @@ export class McpConnectionManager {
   }
 
   private validateConfig(data: unknown, source: string): McpConfig {
-    if (typeof data !== "object" || data === null) {
-      throw new Error(`MCP 配置 ${source} 根结构必须是对象`);
-    }
-    const raw = data as { mcpServers?: unknown };
-    if (!raw.mcpServers || typeof raw.mcpServers !== "object") {
-      throw new Error(`MCP 配置 ${source} 缺少 mcpServers 字段或非对象`);
-    }
-    const result: McpConfig = { mcpServers: {} };
-    for (const [name, config] of Object.entries(raw.mcpServers as Record<string, unknown>)) {
-      if (typeof config !== "object" || config === null) {
-        throw new Error(`MCP 配置 ${source} 中 server "${name}" 必须是对象`);
-      }
-      const input = config as Partial<McpServerConfig>;
-      const transport = input.transport ?? "stdio";
-      if (transport !== "stdio" && transport !== "http" && transport !== "sse") {
-        throw new Error(`MCP server "${name}" 的 transport 必须是 stdio/http/sse`);
-      }
-      if (transport === "stdio" && !input.command) {
-        throw new Error(`MCP server "${name}" 是 stdio 模式但缺少 command`);
-      }
-      if ((transport === "http" || transport === "sse") && !input.url) {
-        throw new Error(`MCP server "${name}" 是 ${transport} 模式但缺少 url`);
-      }
-      result.mcpServers[name] = {
-        name,
-        transport,
-        ...(input.command !== undefined ? { command: input.command } : {}),
-        ...(input.args !== undefined ? { args: input.args } : {}),
-        ...(input.url !== undefined ? { url: input.url } : {}),
-        ...(input.env !== undefined ? { env: input.env } : {}),
-        ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
-        ...(input.headers !== undefined ? { headers: input.headers } : {}),
-        ...(input.startupTimeoutMs !== undefined
-          ? { startupTimeoutMs: input.startupTimeoutMs }
-          : {}),
-        ...(input.toolTimeoutMs !== undefined ? { toolTimeoutMs: input.toolTimeoutMs } : {}),
-        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
-      };
-    }
-    return result;
+    return parseMcpConfig(data, source);
   }
 
   private emitSnapshot(): void {
