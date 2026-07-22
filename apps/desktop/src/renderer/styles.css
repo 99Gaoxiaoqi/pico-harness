@@ -2183,6 +2183,62 @@
   .capability-panel {
     padding: 5px 18px;
   }
+  .capability-scope-picker {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 16px 18px;
+  }
+  .capability-scope-picker p {
+    margin-top: 3px;
+    color: var(--ink-secondary);
+    font-size: 11px;
+  }
+  .capability-scope-picker select {
+    min-width: 220px;
+  }
+  .capability-add-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: var(--surface);
+  }
+  .capability-add-form header,
+  .capability-add-form__wide {
+    grid-column: 1 / -1;
+  }
+  .capability-add-form header p {
+    margin-top: 3px;
+    color: var(--ink-secondary);
+    font-size: 11px;
+  }
+  .capability-add-form label {
+    display: grid;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 660;
+  }
+  .capability-add-form input,
+  .capability-add-form select,
+  .capability-add-form textarea {
+    width: 100%;
+    min-height: 39px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-raised);
+    color: var(--ink);
+  }
+  .capability-add-form textarea {
+    resize: vertical;
+  }
+  .capability-add-form .button-row {
+    justify-content: flex-end;
+  }
   .capability-list {
     display: grid;
   }
@@ -2220,6 +2276,24 @@
     margin-top: 3px;
     color: var(--ink-secondary);
     font-size: 11px;
+  }
+  .capability-source {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 8px;
+  }
+  .capability-source span {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--surface-muted);
+    color: var(--ink-secondary);
+    font-size: 10px;
+  }
+  .capability-row__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .provider-page {
     max-width: 980px;

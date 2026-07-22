@@ -122,10 +122,14 @@ export function CapabilityList({
   items,
   emptyTitle,
   emptyDetail,
+  onDelete,
+  deleting = false,
 }: {
   readonly items: readonly CapabilityView[];
   readonly emptyTitle: string;
   readonly emptyDetail: string;
+  readonly onDelete?: ((item: CapabilityView) => void) | undefined;
+  readonly deleting?: boolean | undefined;
 }) {
   if (items.length === 0) return <EmptyState title={emptyTitle} detail={emptyDetail} />;
   return (
@@ -141,12 +145,32 @@ export function CapabilityList({
               <StatusPill status={item.state} />
             </div>
             <p>{item.description}</p>
+            {item.source && (
+              <div className="capability-source" aria-label={`${item.name} 来源`}>
+                <span>{scopeLabel(item.source.scope)}</span>
+                <span>{item.source.sourceLabel}</span>
+                <span>{item.source.readOnly ? "只读" : "可管理"}</span>
+                <span>{item.source.effective ? "已生效" : "未生效"}</span>
+                {item.source.shadowedBy && <span>被 {item.source.shadowedBy} 覆盖</span>}
+              </div>
+            )}
           </div>
-          {item.meta && <span className="row-meta">{item.meta}</span>}
+          <div className="capability-row__actions">
+            {item.meta && <span className="row-meta">{item.meta}</span>}
+            {onDelete && item.source?.scope === "user" && !item.source.readOnly && (
+              <Button variant="quiet" disabled={deleting} onClick={() => onDelete(item)}>
+                删除
+              </Button>
+            )}
+          </div>
         </article>
       ))}
     </div>
   );
+}
+
+function scopeLabel(scope: NonNullable<CapabilityView["source"]>["scope"]): string {
+  return scope === "user" ? "用户级" : scope === "project" ? "项目级" : "Plugin";
 }
 
 export function ApprovalDialog({
