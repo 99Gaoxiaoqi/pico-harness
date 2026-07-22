@@ -144,6 +144,65 @@ test("credential delete is CAS protected and removes only the persisted API key"
   assert.equal(fixture.vaultCalls(), 0, "ordinary config-key deletion must not require Keychain");
 });
 
+test("provider delete and legacy import reject a configured key before durable side effects", async (context) => {
+  let vaultMutations = 0;
+  const fixture = await createDesktopFixture("provider-preconditions", {
+    credentialVault: memoryVault(() => vaultMutations++),
+  });
+  context.after(fixture.dispose);
+  const secret = syntheticSecret("provider-preconditions");
+  const importedSecret = syntheticSecret("legacy-import-preconditions");
+  const initialRevision = await readPublicUserRevision(fixture.desktop);
+  const upserted = asRecord(
+    await fixture.desktop.handle(
+      createRuntimeRequest("provider.upsert", {
+        provider: providerInput(),
+        expectedRevision: initialRevision,
+      }),
+    ),
+  );
+  const setResult = asRecord(
+    await fixture.desktop.handle(
+      createRuntimeRequest("provider.credential.set", {
+        providerId: PROVIDER_ID,
+        secret,
+        expectedRevision: requiredString(upserted["revision"], "provider revision"),
+      }),
+    ),
+  );
+  const configuredRevision = requiredString(setResult["revision"], "configured revision");
+
+  for (const request of [
+    createRuntimeRequest("provider.delete", {
+      providerId: PROVIDER_ID,
+      expectedRevision: configuredRevision,
+    }),
+    createRuntimeRequest("provider.importEnvironment", {
+      provider: providerInput(),
+      defaultModel: MODEL_ID,
+      secret: importedSecret,
+      expectedRevision: configuredRevision,
+    }),
+  ]) {
+    await assert.rejects(
+      fixture.desktop.handle(request),
+      (error: unknown) =>
+        error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
+    );
+  }
+
+  assert.equal(vaultMutations, 0, "precondition failures must precede Keychain mutations");
+  assertSecretMatches(
+    "config after provider precondition failures",
+    readPersistedApiKey(await readFile(fixture.userConfig.filePath, "utf8")),
+    secret,
+  );
+  await assert.rejects(
+    stat(join(fixture.userConfig.directoryPath, "provider-operation.json")),
+    (error: unknown) => isErrnoCode(error, "ENOENT"),
+  );
+});
+
 test("project .pico/config.json rejects plaintext apiKey", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-project-config-key-reject-"));
   const secret = syntheticSecret("project-reject");
@@ -283,7 +342,10 @@ test("structured logger redacts API-key fields before serialization", async () =
   );
 });
 
-async function createDesktopFixture(suffix: string): Promise<{
+async function createDesktopFixture(
+  suffix: string,
+  options: { readonly credentialVault?: CredentialVault } = {},
+): Promise<{
   readonly desktop: DesktopRuntimeService;
   readonly userConfig: UserConfigStore;
   readonly vaultCalls: () => number;
@@ -304,7 +366,7 @@ async function createDesktopFixture(suffix: string): Promise<{
     runtimeService: runtime,
     registrationStore,
     userConfigStore: userConfig,
-    credentialVault: unavailable,
+    credentialVault: options.credentialVault ?? unavailable,
     env,
   });
   return {
@@ -368,7 +430,7 @@ function unavailableVault(onCall: () => void = () => undefined): CredentialVault
   };
 }
 
-function memoryVault(): CredentialVault {
+function memoryVault(onMutation: () => void = () => undefined): CredentialVault {
   const secrets = new Map<CredentialRef, string>();
   return {
     capability: () => ({
@@ -377,6 +439,7 @@ function memoryVault(): CredentialVault {
       diagnostic: "synthetic in-memory compatibility vault",
     }),
     async put(ref, secret) {
+      onMutation();
       secrets.set(ref, secret);
     },
     async resolve(ref) {
@@ -388,6 +451,7 @@ function memoryVault(): CredentialVault {
       return secrets.has(ref);
     },
     async delete(ref) {
+      onMutation();
       if (!secrets.delete(ref)) throw new CredentialNotFoundError(ref);
     },
   };
@@ -423,6 +487,10 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requiredString(value: unknown, label: string): string {
   assert.ok(typeof value === "string" && value.length > 0, `${label} must be non-empty`);
   return value;
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 async function readPublicUserRevision(desktop: DesktopRuntimeService): Promise<string> {
