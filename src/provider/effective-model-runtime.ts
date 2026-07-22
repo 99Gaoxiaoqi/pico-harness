@@ -1,5 +1,5 @@
 import type { ConfigSource, EffectiveConfigSnapshot } from "../input/effective-config.js";
-import type { PicoUserConfig } from "../input/user-config-store.js";
+import type { PicoUserConfig, UserModelProviderConfig } from "../input/user-config-store.js";
 import {
   createPlatformCredentialVault,
   CredentialNotFoundError,
@@ -20,7 +20,12 @@ import type {
   ModelRuntimeUserConfigStore,
 } from "./model-runtime-config-contract.js";
 
-export type EffectiveCredentialState = "environment" | "keychain" | "missing" | "unsupported";
+export type EffectiveCredentialState =
+  | "config"
+  | "environment"
+  | "keychain"
+  | "missing"
+  | "unsupported";
 
 export interface EffectiveProviderCredentialStatus {
   readonly providerId: string;
@@ -115,7 +120,7 @@ async function resolveStableConfiguration(
 
 async function resolveSecrets(
   config: EffectiveConfigSnapshot,
-  userProviders: Readonly<Record<string, ModelProviderConfig>>,
+  userProviders: Readonly<Record<string, UserModelProviderConfig>>,
   workDir: string,
   env: Readonly<Record<string, string | undefined>>,
   vault: CredentialVault,
@@ -130,18 +135,20 @@ async function resolveSecrets(
   await Promise.all(
     Object.entries(config.providers).map(async ([providerId, provider]) => {
       const configSource = config.sources[`providers.${providerId}`] ?? "user";
-      const environmentSecret = readFirstSecret(env[provider.apiKeyEnv]);
-      if (environmentSecret) {
-        providerSecrets[providerId] = environmentSecret;
-        statuses[providerId] = { providerId, configSource, state: "environment" };
+      const userProvider = userProviders[providerId];
+      const userProviderMatches =
+        configSource === "user" ||
+        (userProvider !== undefined && sameProviderAuthority(userProvider, provider));
+      const configuredSecret = userProviderMatches
+        ? normalizeConfiguredSecret(userProvider?.apiKey)
+        : undefined;
+      if (configuredSecret) {
+        providerSecrets[providerId] = configuredSecret;
+        statuses[providerId] = { providerId, configSource, state: "config" };
         return;
       }
 
-      const userProvider = userProviders[providerId];
-      if (
-        configSource === "user" ||
-        (userProvider !== undefined && sameProviderAuthority(userProvider, provider))
-      ) {
+      if (userProviderMatches) {
         const secret = await resolveVaultSecret(
           vault,
           credentialRefForProvider({
@@ -153,14 +160,6 @@ async function resolveSecrets(
         if (secret) {
           providerSecrets[providerId] = secret;
           statuses[providerId] = { providerId, configSource, state: "keychain" };
-          return;
-        }
-        if (configSource === "user") {
-          statuses[providerId] = {
-            providerId,
-            configSource,
-            state: unavailableState(vault),
-          };
           return;
         }
       }
@@ -177,15 +176,29 @@ async function resolveSecrets(
           routeSecrets[routeId] = secret;
           found = true;
         }
-        statuses[providerId] = {
-          providerId,
-          configSource,
-          state: found ? "keychain" : unavailableState(vault),
-        };
+        if (found) {
+          statuses[providerId] = { providerId, configSource, state: "keychain" };
+          return;
+        }
+      }
+
+      // Environment credentials remain a compatibility fallback for legacy configurations. A
+      // configured user key or an existing keychain entry always wins and needs no environment.
+      const environmentSecret = readFirstSecret(env[provider.apiKeyEnv]);
+      if (environmentSecret) {
+        providerSecrets[providerId] = environmentSecret;
+        statuses[providerId] = { providerId, configSource, state: "environment" };
         return;
       }
 
-      statuses[providerId] = { providerId, configSource, state: "missing" };
+      statuses[providerId] = {
+        providerId,
+        configSource,
+        state:
+          userProviderMatches || configSource === "project-legacy"
+            ? unavailableState(vault)
+            : "missing",
+      };
     }),
   );
 
@@ -230,6 +243,11 @@ function readFirstSecret(value: string | undefined): string | undefined {
     ?.split(",")
     .map((item) => item.trim())
     .find(Boolean);
+}
+
+function normalizeConfiguredSecret(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized || undefined;
 }
 
 function sameProviderAuthority(left: ModelProviderConfig, right: ModelProviderConfig): boolean {
