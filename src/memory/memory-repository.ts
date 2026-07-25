@@ -1,8 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import Database from "better-sqlite3";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import type { WorkspaceId } from "../paths/pico-paths.js";
+import {
+  commitFileTransactionSync,
+  FileStorageIntegrityError,
+  mkdirPrivateSync,
+  readJsonFileSync,
+  recoverFileTransactionSync,
+  withFileLockSync,
+} from "../storage/local-file-storage.js";
+import { LeaseConflictError } from "../storage/owner-lease.js";
 import {
   FACT_STATES,
   MEMORY_JOB_STATUSES,
@@ -28,13 +36,19 @@ import {
   type Source,
   type SourceAvailability,
 } from "./domain.js";
-import { migrateMemorySchema } from "./memory-schema.js";
+import {
+  createMemoryFileState,
+  decodeMemoryFileState,
+  type MemoryFileState,
+  type MemoryIdempotencyRecord,
+} from "./memory-file-state.js";
 
 const MAX_ID_LENGTH = 512;
 const MAX_TITLE_LENGTH = 512;
 const MAX_CONTENT_LENGTH = 32_000;
 const MAX_REASON_LENGTH = 4_000;
 const MAX_LIST_LIMIT = 500;
+const memoryLockWait = new Int32Array(new SharedArrayBuffer(4));
 
 export const MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE = "notification.memory.forgotten" as const;
 export const MEMORY_FORGOTTEN_NOTIFICATION_VERSION = "memory-forgotten-notification-v1" as const;
@@ -54,7 +68,9 @@ type RejectAsyncTransactionArguments<Result> = [Result] extends [never]
     : [];
 
 export interface MemoryRepositoryOptions {
-  readonly databasePath: string;
+  readonly storageRoot?: string;
+  /** Temporary source compatibility. A `*.sqlite` path resolves to its parent directory. */
+  readonly databasePath?: string;
   readonly workspaceId: WorkspaceId;
   readonly now?: () => Date;
   readonly busyTimeoutMs?: number;
@@ -254,124 +270,6 @@ export interface CancelSessionJobsInput {
   readonly idempotencyKeyPrefix: string;
 }
 
-interface SettingsRow {
-  readonly workspace_id: string;
-  readonly enabled: number;
-  readonly auto_propose: number;
-  readonly auto_commit: number;
-  readonly injection_enabled: number;
-  readonly review_mode: string;
-  readonly version: number;
-  readonly updated_at: string;
-}
-
-interface SourceRow {
-  readonly source_id: string;
-  readonly workspace_id: string;
-  readonly session_id: string;
-  readonly run_id: string | null;
-  readonly branch_id: string | null;
-  readonly event_ids_json: string;
-  readonly start_sequence: number | null;
-  readonly end_sequence: number | null;
-  readonly digest: string;
-  readonly availability: string;
-  readonly invalidated_at: string | null;
-  readonly invalidation_code: string | null;
-  readonly version: number;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
-
-interface FactRow {
-  readonly fact_id: string;
-  readonly workspace_id: string;
-  readonly kind: string;
-  readonly title: string | null;
-  readonly content: string | null;
-  readonly confidence: number;
-  readonly source_id: string | null;
-  readonly state: string;
-  readonly pinned: number;
-  readonly expires_at: string | null;
-  readonly last_used_at: string | null;
-  readonly version: number;
-  readonly created_at: string;
-  readonly updated_at: string;
-  readonly forgotten_at: string | null;
-}
-
-interface ProposalRow {
-  readonly proposal_id: string;
-  readonly workspace_id: string;
-  readonly kind: string;
-  readonly title: string | null;
-  readonly content: string | null;
-  readonly reason: string | null;
-  readonly confidence: number;
-  readonly source_id: string | null;
-  readonly status: string;
-  readonly conflict_status: string;
-  readonly conflict_fact_id: string | null;
-  readonly resolved_fact_id: string | null;
-  readonly version: number;
-  readonly created_at: string;
-  readonly updated_at: string;
-  readonly reviewed_at: string | null;
-  readonly deleted_at: string | null;
-}
-
-interface MutationRow {
-  readonly sequence: number;
-  readonly mutation_id: string;
-  readonly workspace_id: string;
-  readonly entity_type: string;
-  readonly entity_id: string;
-  readonly action: string;
-  readonly from_version: number | null;
-  readonly to_version: number;
-  readonly idempotency_key_hash: string | null;
-  readonly created_at: string;
-}
-
-interface JobRow {
-  readonly job_id: string;
-  readonly workspace_id: string;
-  readonly type: string;
-  readonly status: string;
-  readonly terminal_event_id: string;
-  readonly extractor_version: string;
-  readonly cursor_json: string;
-  readonly source_id: string | null;
-  readonly attempt_count: number;
-  readonly max_attempts: number;
-  readonly next_attempt_at: string | null;
-  readonly error_code: string | null;
-  readonly model_calls: number;
-  readonly input_tokens: number;
-  readonly output_tokens: number;
-  readonly cost_usd: number;
-  readonly version: number;
-  readonly created_at: string;
-  readonly updated_at: string;
-  readonly terminal_at: string | null;
-}
-
-interface IdempotencyRow {
-  readonly request_hash: string;
-  readonly result_json: string;
-}
-
-interface MaintenanceRow {
-  readonly secure_delete_pending: number;
-}
-
-interface WalCheckpointResult {
-  readonly busy: number;
-  readonly log: number;
-  readonly checkpointed: number;
-}
-
 export class MemoryConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -396,13 +294,6 @@ export class MemoryIdempotencyConflictError extends MemoryConflictError {
   }
 }
 
-export class MemorySecureDeletePendingError extends Error {
-  constructor(message = "Memory secure deletion is committed but its WAL checkpoint is pending") {
-    super(message);
-    this.name = "MemorySecureDeletePendingError";
-  }
-}
-
 export class MemoryAsyncTransactionError extends TypeError {
   constructor() {
     super("MemoryRepository.transaction callback must return synchronously");
@@ -410,60 +301,60 @@ export class MemoryAsyncTransactionError extends TypeError {
   }
 }
 
-/**
- * Workspace-scoped authority for long-term memory. All text-bearing records, body-free audit
- * mutations and idempotency claims share one SQLite transaction boundary.
- */
+interface MemoryTransactionContext {
+  readonly workspaceId: WorkspaceId;
+  readonly state: MemoryFileState;
+  readonly forgottenSecrets: Set<string>;
+}
+
+const activeMemoryTransactions = new Map<string, MemoryTransactionContext>();
+
+/** Workspace-scoped, file-backed authority for long-term memory. */
 export class MemoryRepository {
+  readonly storageRoot: string;
+  /** Temporary compatibility alias. It now points at state.json, never SQLite. */
   readonly databasePath: string;
   readonly workspaceId: WorkspaceId;
-  private readonly db: Database.Database;
+  private readonly statePath: string;
+  private readonly lockPath: string;
   private readonly now: () => Date;
-  private transactionDepth = 0;
+  private readonly busyTimeoutMs: number;
 
   constructor(options: MemoryRepositoryOptions) {
-    this.databasePath = resolve(options.databasePath);
+    const configured = options.storageRoot ?? options.databasePath;
+    if (!configured) throw new Error("MemoryRepository requires storageRoot");
+    const configuredPath = resolve(configured);
+    this.storageRoot =
+      options.storageRoot !== undefined || basename(configuredPath) !== "memory.sqlite"
+        ? configuredPath
+        : dirname(configuredPath);
+    this.databasePath = join(this.storageRoot, "state.json");
+    this.statePath = this.databasePath;
+    this.lockPath = join(this.storageRoot, "lock");
     this.workspaceId = options.workspaceId;
     this.now = options.now ?? (() => new Date());
-    const busyTimeoutMs = normalizeNonNegativeInteger(
-      options.busyTimeoutMs ?? 5_000,
-      "busyTimeoutMs",
-    );
-    const databaseDirectory = dirname(this.databasePath);
-    const databaseDirectoryExisted = existsSync(databaseDirectory);
-    mkdirSync(databaseDirectory, { recursive: true, mode: 0o700 });
-    if (!statSync(databaseDirectory).isDirectory()) {
-      throw new Error(`Memory database parent is not a directory: ${databaseDirectory}`);
+    this.busyTimeoutMs = normalizeNonNegativeInteger(options.busyTimeoutMs ?? 5_000, "busyTimeoutMs");
+    mkdirPrivateSync(this.storageRoot);
+    if (!statSync(this.storageRoot).isDirectory()) {
+      throw new Error(`Memory storage root is not a directory: ${this.storageRoot}`);
     }
-    if (!databaseDirectoryExisted) chmodSync(databaseDirectory, 0o700);
-    this.db = new Database(this.databasePath);
-    try {
-      this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
-      this.db.pragma("foreign_keys = ON");
-      this.db.pragma("secure_delete = ON");
-      migrateMemorySchema(this.db, this.workspaceId, () => this.timestamp());
-      chmodSync(this.databasePath, 0o600);
-      this.db.pragma("journal_mode = WAL");
-      this.db.pragma("synchronous = FULL");
-      this.completePendingSecureDelete();
-    } catch (error) {
-      this.db.close();
-      throw error;
-    }
+    this.withLock(() => {
+      recoverFileTransactionSync(this.storageRoot);
+      if (!existsSync(this.statePath)) {
+        commitFileTransactionSync(this.storageRoot, {
+          replacements: [
+            {
+              relativePath: "state.json",
+              content: `${JSON.stringify(createMemoryFileState(this.workspaceId, this.timestamp()), null, 2)}\n`,
+            },
+          ],
+        });
+      }
+      this.readState();
+    });
   }
 
-  close(): void {
-    if (!this.db.open) return;
-    let checkpointError: unknown;
-    try {
-      this.completePendingSecureDelete();
-    } catch (error) {
-      checkpointError = error;
-    } finally {
-      this.db.close();
-    }
-    if (checkpointError) throw checkpointError;
-  }
+  close(): void {}
 
   transaction<Result>(
     operation: (repository: this) => Result,
@@ -473,29 +364,44 @@ export class MemoryRepository {
   }
 
   private runTransaction<Result>(operation: (repository: this) => Result): Result {
-    if (this.transactionDepth > 0) {
+    const existing = activeMemoryTransactions.get(this.storageRoot);
+    if (existing) {
+      this.assertContextWorkspace(existing);
       return requireSynchronousTransactionResult(operation(this));
     }
-    this.completePendingSecureDelete();
-    const run = this.db.transaction(() => {
-      this.transactionDepth += 1;
+    return this.withLock(() => {
+      recoverFileTransactionSync(this.storageRoot);
+      const context: MemoryTransactionContext = {
+        workspaceId: this.workspaceId,
+        state: this.readState(),
+        forgottenSecrets: new Set(),
+      };
+      const initialState = JSON.stringify(context.state);
+      activeMemoryTransactions.set(this.storageRoot, context);
+      let result: Result;
       try {
-        return requireSynchronousTransactionResult(operation(this));
+        result = requireSynchronousTransactionResult(operation(this));
+        if (JSON.stringify(context.state) !== initialState) {
+          context.state.revision += 1;
+          commitFileTransactionSync(this.storageRoot, {
+            replacements: [
+              {
+                relativePath: "state.json",
+                content: `${JSON.stringify(context.state, null, 2)}\n`,
+              },
+            ],
+          });
+        }
       } finally {
-        this.transactionDepth -= 1;
+        activeMemoryTransactions.delete(this.storageRoot);
       }
+      if (context.forgottenSecrets.size > 0) this.verifySecretsRemoved(context.forgottenSecrets);
+      return result;
     });
-    const result = run.immediate();
-    this.completePendingSecureDelete();
-    return result;
   }
 
   getSettings(): Settings {
-    const row = this.db
-      .prepare("SELECT * FROM memory_settings WHERE workspace_id = ?")
-      .get(this.workspaceId) as SettingsRow | undefined;
-    if (!row) throw new MemoryNotFoundError("settings", this.workspaceId);
-    return mapSettings(row, this.workspaceId);
+    return this.read((state) => structuredClone(state.settings));
   }
 
   updateSettings(input: UpdateSettingsInput): Settings {
@@ -517,25 +423,17 @@ export class MemoryRepository {
         const current = this.getSettings();
         assertVersion("settings", this.workspaceId, current.version, input.expectedVersion);
         const updatedAt = this.timestamp();
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_settings
-             SET enabled = ?, auto_propose = ?, auto_commit = ?, injection_enabled = ?, review_mode = ?,
-                 version = version + 1, updated_at = ?
-             WHERE workspace_id = ? AND version = ?`,
-          )
-          .run(
-            toSqlBoolean(input.enabled ?? current.enabled),
-            toSqlBoolean(input.autoPropose ?? current.autoPropose),
-            toSqlBoolean(input.autoCommit ?? current.autoCommit),
-            toSqlBoolean(input.injectionEnabled ?? current.injectionEnabled),
-            requireEnum(input.reviewMode ?? current.reviewMode, MEMORY_REVIEW_MODES, "reviewMode"),
-            updatedAt,
-            this.workspaceId,
-            input.expectedVersion,
-          );
-        assertChanged(changed.changes, "settings", this.workspaceId);
-        const result = this.getSettings();
+        const result: Settings = {
+          ...current,
+          enabled: input.enabled ?? current.enabled,
+          autoPropose: input.autoPropose ?? current.autoPropose,
+          autoCommit: input.autoCommit ?? current.autoCommit,
+          injectionEnabled: input.injectionEnabled ?? current.injectionEnabled,
+          reviewMode: requireEnum(input.reviewMode ?? current.reviewMode, MEMORY_REVIEW_MODES, "reviewMode"),
+          version: current.version + 1,
+          updatedAt,
+        };
+        this.state().settings = result;
         this.recordMutation(
           "settings",
           this.workspaceId,
@@ -560,28 +458,23 @@ export class MemoryRepository {
       () => {
         const sourceId = normalizeId(input.sourceId ?? `source:${randomUUID()}`, "sourceId");
         const at = this.timestamp();
-        this.db
-          .prepare(
-            `INSERT INTO memory_sources(
-               source_id, workspace_id, session_id, run_id, branch_id, event_ids_json,
-               start_sequence, end_sequence, digest, availability, invalidated_at,
-               invalidation_code, version, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', NULL, NULL, 1, ?, ?)`,
-          )
-          .run(
-            sourceId,
-            this.workspaceId,
-            normalized.sessionId,
-            normalized.runId ?? null,
-            normalized.branchId ?? null,
-            JSON.stringify(normalized.eventIds),
-            normalized.startSequence ?? null,
-            normalized.endSequence ?? null,
-            normalized.digest,
-            at,
-            at,
-          );
-        const source = this.requireSource(sourceId);
+        if (this.state().sources[sourceId]) throw new MemoryConflictError(`Memory source ${sourceId} already exists`);
+        const source: Source = {
+          sourceId,
+          workspaceId: this.workspaceId,
+          sessionId: normalized.sessionId,
+          ...(normalized.runId ? { runId: normalized.runId } : {}),
+          ...(normalized.branchId ? { branchId: normalized.branchId } : {}),
+          eventIds: normalized.eventIds,
+          ...(normalized.startSequence === undefined ? {} : { startSequence: normalized.startSequence }),
+          ...(normalized.endSequence === undefined ? {} : { endSequence: normalized.endSequence }),
+          digest: normalized.digest,
+          availability: "available",
+          version: 1,
+          createdAt: at,
+          updatedAt: at,
+        };
+        this.state().sources[sourceId] = source;
         this.recordMutation(
           "source",
           sourceId,
@@ -598,47 +491,31 @@ export class MemoryRepository {
   }
 
   getSource(sourceId: string): Source | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM memory_sources WHERE workspace_id = ? AND source_id = ?")
-      .get(this.workspaceId, normalizeId(sourceId, "sourceId")) as SourceRow | undefined;
-    return row ? mapSource(row, this.workspaceId) : undefined;
+    const id = normalizeId(sourceId, "sourceId");
+    return this.read((state) => cloneOptional(state.sources[id]));
   }
 
   listSources(limit = 100): Source[] {
     const bounded = normalizeLimit(limit);
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_sources
-         WHERE workspace_id = ? ORDER BY created_at DESC, source_id DESC LIMIT ?`,
-      )
-      .all(this.workspaceId, bounded) as SourceRow[];
-    return rows.map((row) => mapSource(row, this.workspaceId));
+    return this.read((state) => Object.values(state.sources)
+      .sort((a, b) => compareDesc(a.createdAt, b.createdAt) || compareDesc(a.sourceId, b.sourceId))
+      .slice(0, bounded).map(clone));
   }
 
   /** Bounded, SQL-filtered lifecycle scan; callers advance with the last sourceId. */
   listSessionSources(sessionId: string, options: SessionSourceListOptions = {}): Source[] {
-    const clauses = ["workspace_id = ?", "session_id = ?"];
-    const params: Array<string | number> = [this.workspaceId, normalizeId(sessionId, "sessionId")];
-    if (options.availability !== undefined) {
-      clauses.push("availability = ?");
-      params.push(requireEnum(options.availability, SOURCE_AVAILABILITIES, "availability"));
-    }
-    if (options.afterSequence !== undefined) {
-      clauses.push("COALESCE(end_sequence, start_sequence, 0) > ?");
-      params.push(normalizeNonNegativeInteger(options.afterSequence, "afterSequence"));
-    }
-    if (options.afterSourceId !== undefined) {
-      clauses.push("source_id > ?");
-      params.push(normalizeId(options.afterSourceId, "afterSourceId"));
-    }
-    params.push(normalizeLimit(options.limit));
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_sources WHERE ${clauses.join(" AND ")}
-         ORDER BY source_id ASC LIMIT ?`,
-      )
-      .all(...params) as SourceRow[];
-    return rows.map((row) => mapSource(row, this.workspaceId));
+    const id = normalizeId(sessionId, "sessionId");
+    const availability = options.availability === undefined ? undefined : requireEnum(options.availability, SOURCE_AVAILABILITIES, "availability");
+    const afterSequence = options.afterSequence === undefined ? undefined : normalizeNonNegativeInteger(options.afterSequence, "afterSequence");
+    const afterSourceId = options.afterSourceId === undefined ? undefined : normalizeId(options.afterSourceId, "afterSourceId");
+    const limit = normalizeLimit(options.limit);
+    return this.read((state) => Object.values(state.sources)
+      .filter((source) => source.sessionId === id)
+      .filter((source) => availability === undefined || source.availability === availability)
+      .filter((source) => afterSequence === undefined || (source.endSequence ?? source.startSequence ?? 0) > afterSequence)
+      .filter((source) => afterSourceId === undefined || source.sourceId > afterSourceId)
+      .sort((a, b) => a.sourceId.localeCompare(b.sourceId))
+      .slice(0, limit).map(clone));
   }
 
   updateSourceAvailability(input: UpdateSourceAvailabilityInput): Source {
@@ -656,24 +533,14 @@ export class MemoryRepository {
         const current = this.requireSource(input.sourceId);
         assertVersion("source", current.sourceId, current.version, input.expectedVersion);
         const updatedAt = this.timestamp();
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_sources
-             SET availability = ?, invalidated_at = ?, invalidation_code = ?,
-                 version = version + 1, updated_at = ?
-             WHERE workspace_id = ? AND source_id = ? AND version = ?`,
-          )
-          .run(
-            input.availability,
-            input.availability === "available" ? null : updatedAt,
-            invalidationCode ?? null,
-            updatedAt,
-            this.workspaceId,
-            current.sourceId,
-            input.expectedVersion,
-          );
-        assertChanged(changed.changes, "source", current.sourceId);
-        const result = this.requireSource(current.sourceId);
+        const result: Source = {
+          ...current,
+          availability: input.availability,
+          ...(input.availability === "available" ? { invalidatedAt: undefined, invalidationCode: undefined } : { invalidatedAt: updatedAt, invalidationCode }),
+          version: current.version + 1,
+          updatedAt,
+        };
+        this.state().sources[current.sourceId] = compact(result);
         this.recordMutation(
           "source",
           current.sourceId,
@@ -720,27 +587,19 @@ export class MemoryRepository {
   }
 
   getFact(factId: string): Fact | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM memory_facts WHERE workspace_id = ? AND fact_id = ?")
-      .get(this.workspaceId, normalizeId(factId, "factId")) as FactRow | undefined;
-    return row ? mapFact(row, this.workspaceId) : undefined;
+    const id = normalizeId(factId, "factId");
+    return this.read((state) => cloneOptional(state.facts[id]));
   }
 
   listFacts(options: FactListOptions = {}): Fact[] {
     const states = options.states?.map((state) => requireEnum(state, FACT_STATES, "state"));
     const kinds = options.kinds?.map((kind) => requireEnum(kind, MEMORY_KINDS, "kind"));
-    const clauses = ["workspace_id = ?"];
-    const params: Array<string | number> = [this.workspaceId];
-    appendInFilter(clauses, params, "state", states);
-    appendInFilter(clauses, params, "kind", kinds);
-    params.push(normalizeLimit(options.limit));
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_facts WHERE ${clauses.join(" AND ")}
-         ORDER BY pinned DESC, updated_at DESC, fact_id DESC LIMIT ?`,
-      )
-      .all(...params) as FactRow[];
-    return rows.map((row) => mapFact(row, this.workspaceId));
+    const limit = normalizeLimit(options.limit);
+    return this.read((state) => Object.values(state.facts)
+      .filter((fact) => !states?.length || states.includes(fact.state))
+      .filter((fact) => !kinds?.length || kinds.includes(fact.kind))
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || compareDesc(a.updatedAt, b.updatedAt) || compareDesc(a.factId, b.factId))
+      .slice(0, limit).map(clone));
   }
 
   updateFact(input: UpdateFactInput): Fact {
@@ -763,41 +622,21 @@ export class MemoryRepository {
           input.sourceId === undefined ? current.sourceId : (input.sourceId ?? undefined);
         if (sourceId) this.requireSource(sourceId);
         const at = this.timestamp();
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_facts
-             SET kind = ?, title = ?, content = ?, confidence = ?, source_id = ?, state = ?,
-                 pinned = ?, expires_at = ?, last_used_at = ?, version = version + 1,
-                 updated_at = ?
-             WHERE workspace_id = ? AND fact_id = ? AND version = ? AND state <> 'forgotten'`,
-          )
-          .run(
-            input.kind ? requireEnum(input.kind, MEMORY_KINDS, "kind") : current.kind,
-            input.title === undefined
-              ? current.title
-              : requireText(input.title, "title", MAX_TITLE_LENGTH),
-            input.content === undefined
-              ? current.content
-              : requireText(input.content, "content", MAX_CONTENT_LENGTH),
-            input.confidence === undefined
-              ? current.confidence
-              : normalizeConfidence(input.confidence),
-            sourceId ?? null,
-            input.state ? requireNonForgottenState(input.state) : current.state,
-            toSqlBoolean(input.pinned ?? current.pinned),
-            input.expiresAt === undefined
-              ? (current.expiresAt ?? null)
-              : normalizeOptionalTimestamp(input.expiresAt, "expiresAt"),
-            input.lastUsedAt === undefined
-              ? (current.lastUsedAt ?? null)
-              : normalizeOptionalTimestamp(input.lastUsedAt, "lastUsedAt"),
-            at,
-            this.workspaceId,
-            factId,
-            input.expectedVersion,
-          );
-        assertChanged(changed.changes, "fact", factId);
-        const result = this.requireFact(factId);
+        const result: Fact = compact({
+          ...current,
+          kind: input.kind ? requireEnum(input.kind, MEMORY_KINDS, "kind") : current.kind,
+          title: input.title === undefined ? current.title : requireText(input.title, "title", MAX_TITLE_LENGTH),
+          content: input.content === undefined ? current.content : requireText(input.content, "content", MAX_CONTENT_LENGTH),
+          confidence: input.confidence === undefined ? current.confidence : normalizeConfidence(input.confidence),
+          sourceId,
+          state: input.state ? requireNonForgottenState(input.state) : current.state,
+          pinned: input.pinned ?? current.pinned,
+          expiresAt: input.expiresAt === undefined ? current.expiresAt : normalizeOptionalTimestamp(input.expiresAt, "expiresAt") ?? undefined,
+          lastUsedAt: input.lastUsedAt === undefined ? current.lastUsedAt : normalizeOptionalTimestamp(input.lastUsedAt, "lastUsedAt") ?? undefined,
+          version: current.version + 1,
+          updatedAt: at,
+        });
+        this.state().facts[factId] = result;
         this.recordMutation(
           "fact",
           factId,
@@ -827,40 +666,39 @@ export class MemoryRepository {
         }
         assertVersion("fact", factId, current.version, input.expectedVersion);
         const at = this.timestamp();
-        const linkedProposals = this.db
-          .prepare(
-            `SELECT proposal_id, version FROM memory_proposals
-             WHERE workspace_id = ? AND (resolved_fact_id = ? OR conflict_fact_id = ?)
-               AND status <> 'deleted'`,
-          )
-          .all(this.workspaceId, factId, factId) as Array<{
-          readonly proposal_id: string;
-          readonly version: number;
-        }>;
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_facts
-             SET title = NULL, content = NULL, state = 'forgotten', pinned = 0,
-                 expires_at = NULL, last_used_at = NULL, version = version + 1,
-                 updated_at = ?, forgotten_at = ?
-             WHERE workspace_id = ? AND fact_id = ? AND version = ? AND state <> 'forgotten'`,
-          )
-          .run(at, at, this.workspaceId, factId, input.expectedVersion);
-        assertChanged(changed.changes, "fact", factId);
-        this.db
-          .prepare(
-            `UPDATE memory_proposals
-             SET title = NULL, content = NULL, reason = NULL, status = 'deleted',
-                 conflict_status = 'resolved', version = version + 1, updated_at = ?,
-                 deleted_at = COALESCE(deleted_at, ?)
-             WHERE workspace_id = ? AND (resolved_fact_id = ? OR conflict_fact_id = ?)
-               AND status <> 'deleted'`,
-          )
-          .run(at, at, this.workspaceId, factId, factId);
+        this.rememberSecrets(current.title, current.content);
+        const linkedProposals = Object.values(this.state().proposals).filter(
+          (proposal) => (proposal.resolvedFactId === factId || proposal.conflictFactId === factId) && proposal.status !== "deleted",
+        );
+        const forgotten: Fact = compact({
+          ...current,
+          title: null,
+          content: null,
+          state: "forgotten",
+          pinned: false,
+          expiresAt: undefined,
+          lastUsedAt: undefined,
+          version: current.version + 1,
+          updatedAt: at,
+          forgottenAt: at,
+        });
+        this.state().facts[factId] = forgotten;
         for (const proposal of linkedProposals) {
+          this.rememberSecrets(proposal.title, proposal.content, proposal.reason);
+          this.state().proposals[proposal.proposalId] = compact({
+            ...proposal,
+            title: null,
+            content: null,
+            reason: null,
+            status: "deleted",
+            conflictStatus: "resolved",
+            version: proposal.version + 1,
+            updatedAt: at,
+            deletedAt: proposal.deletedAt ?? at,
+          });
           this.recordMutation(
             "proposal",
-            proposal.proposal_id,
+            proposal.proposalId,
             "proposal.deleted",
             proposal.version,
             proposal.version + 1,
@@ -868,7 +706,6 @@ export class MemoryRepository {
             at,
           );
         }
-        const forgotten = this.requireFact(factId);
         this.recordMutation(
           "fact",
           factId,
@@ -879,7 +716,6 @@ export class MemoryRepository {
           at,
         );
         this.enqueueForgottenNotification(forgotten, input.idempotencyKey, at);
-        this.markSecureDeletePending(at);
         return { value: forgotten, marker: { factId } };
       },
       (marker) => this.requireFact(readMarkerId(marker, "factId")),
@@ -901,29 +737,24 @@ export class MemoryRepository {
           "proposalId",
         );
         const at = this.timestamp();
-        this.db
-          .prepare(
-            `INSERT INTO memory_proposals(
-               proposal_id, workspace_id, kind, title, content, reason, confidence, source_id,
-               status, conflict_status, conflict_fact_id, resolved_fact_id, version,
-               created_at, updated_at, reviewed_at, deleted_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, 1, ?, ?, NULL, NULL)`,
-          )
-          .run(
-            proposalId,
-            this.workspaceId,
-            normalized.kind,
-            normalized.title,
-            normalized.content,
-            normalized.reason,
-            normalized.confidence,
-            normalized.sourceId ?? null,
-            normalized.conflictStatus,
-            normalized.conflictFactId ?? null,
-            at,
-            at,
-          );
-        const proposal = this.requireProposal(proposalId);
+        if (this.state().proposals[proposalId]) throw new MemoryConflictError(`Memory proposal ${proposalId} already exists`);
+        const proposal: Proposal = {
+          proposalId,
+          workspaceId: this.workspaceId,
+          kind: normalized.kind,
+          title: normalized.title,
+          content: normalized.content,
+          reason: normalized.reason,
+          confidence: normalized.confidence,
+          ...(normalized.sourceId ? { sourceId: normalized.sourceId } : {}),
+          status: "pending",
+          conflictStatus: normalized.conflictStatus,
+          ...(normalized.conflictFactId ? { conflictFactId: normalized.conflictFactId } : {}),
+          version: 1,
+          createdAt: at,
+          updatedAt: at,
+        };
+        this.state().proposals[proposalId] = proposal;
         this.recordMutation(
           "proposal",
           proposalId,
@@ -940,27 +771,19 @@ export class MemoryRepository {
   }
 
   getProposal(proposalId: string): Proposal | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM memory_proposals WHERE workspace_id = ? AND proposal_id = ?")
-      .get(this.workspaceId, normalizeId(proposalId, "proposalId")) as ProposalRow | undefined;
-    return row ? mapProposal(row, this.workspaceId) : undefined;
+    const id = normalizeId(proposalId, "proposalId");
+    return this.read((state) => cloneOptional(state.proposals[id]));
   }
 
   listProposals(options: ProposalListOptions = {}): Proposal[] {
     const statuses = options.statuses?.map((status) =>
       requireEnum(status, PROPOSAL_STATUSES, "status"),
     );
-    const clauses = ["workspace_id = ?"];
-    const params: Array<string | number> = [this.workspaceId];
-    appendInFilter(clauses, params, "status", statuses);
-    params.push(normalizeLimit(options.limit));
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_proposals WHERE ${clauses.join(" AND ")}
-         ORDER BY created_at DESC, proposal_id DESC LIMIT ?`,
-      )
-      .all(...params) as ProposalRow[];
-    return rows.map((row) => mapProposal(row, this.workspaceId));
+    const limit = normalizeLimit(options.limit);
+    return this.read((state) => Object.values(state.proposals)
+      .filter((proposal) => !statuses?.length || statuses.includes(proposal.status))
+      .sort((a, b) => compareDesc(a.createdAt, b.createdAt) || compareDesc(a.proposalId, b.proposalId))
+      .slice(0, limit).map(clone));
   }
 
   listPendingProposalsForSources(sourceIds: readonly string[]): Proposal[] {
@@ -968,16 +791,10 @@ export class MemoryRepository {
     if (sourceIds.length > MAX_LIST_LIMIT) {
       throw new Error(`sourceIds cannot exceed ${MAX_LIST_LIMIT}`);
     }
-    const normalized = sourceIds.map((sourceId) => normalizeId(sourceId, "sourceId"));
-    const placeholders = normalized.map(() => "?").join(", ");
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_proposals
-         WHERE workspace_id = ? AND status = 'pending' AND source_id IN (${placeholders})
-         ORDER BY proposal_id ASC`,
-      )
-      .all(this.workspaceId, ...normalized) as ProposalRow[];
-    return rows.map((row) => mapProposal(row, this.workspaceId));
+    const normalized = new Set(sourceIds.map((sourceId) => normalizeId(sourceId, "sourceId")));
+    return this.read((state) => Object.values(state.proposals)
+      .filter((proposal) => proposal.status === "pending" && proposal.sourceId !== undefined && normalized.has(proposal.sourceId))
+      .sort((a, b) => a.proposalId.localeCompare(b.proposalId)).map(clone));
   }
 
   updateProposal(input: UpdateProposalInput): Proposal {
@@ -1005,39 +822,20 @@ export class MemoryRepository {
         if (sourceId) this.requireSource(sourceId);
         if (conflictFactId) this.requireFact(conflictFactId);
         const at = this.timestamp();
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_proposals
-             SET kind = ?, title = ?, content = ?, reason = ?, confidence = ?, source_id = ?,
-                 conflict_status = ?, conflict_fact_id = ?, version = version + 1, updated_at = ?
-             WHERE workspace_id = ? AND proposal_id = ? AND version = ? AND status = 'pending'`,
-          )
-          .run(
-            input.kind ? requireEnum(input.kind, MEMORY_KINDS, "kind") : current.kind,
-            input.title === undefined
-              ? current.title
-              : requireText(input.title, "title", MAX_TITLE_LENGTH),
-            input.content === undefined
-              ? current.content
-              : requireText(input.content, "content", MAX_CONTENT_LENGTH),
-            input.reason === undefined
-              ? current.reason
-              : requireText(input.reason, "reason", MAX_REASON_LENGTH),
-            input.confidence === undefined
-              ? current.confidence
-              : normalizeConfidence(input.confidence),
-            sourceId ?? null,
-            input.conflictStatus
-              ? requireEnum(input.conflictStatus, PROPOSAL_CONFLICT_STATUSES, "conflictStatus")
-              : current.conflictStatus,
-            conflictFactId ?? null,
-            at,
-            this.workspaceId,
-            proposalId,
-            input.expectedVersion,
-          );
-        assertChanged(changed.changes, "proposal", proposalId);
-        const result = this.requireProposal(proposalId);
+        const result: Proposal = compact({
+          ...current,
+          kind: input.kind ? requireEnum(input.kind, MEMORY_KINDS, "kind") : current.kind,
+          title: input.title === undefined ? current.title : requireText(input.title, "title", MAX_TITLE_LENGTH),
+          content: input.content === undefined ? current.content : requireText(input.content, "content", MAX_CONTENT_LENGTH),
+          reason: input.reason === undefined ? current.reason : requireText(input.reason, "reason", MAX_REASON_LENGTH),
+          confidence: input.confidence === undefined ? current.confidence : normalizeConfidence(input.confidence),
+          sourceId,
+          conflictStatus: input.conflictStatus ? requireEnum(input.conflictStatus, PROPOSAL_CONFLICT_STATUSES, "conflictStatus") : current.conflictStatus,
+          conflictFactId,
+          version: current.version + 1,
+          updatedAt: at,
+        });
+        this.state().proposals[proposalId] = result;
         this.recordMutation(
           "proposal",
           proposalId,
@@ -1067,16 +865,17 @@ export class MemoryRepository {
         }
         assertVersion("proposal", proposalId, current.version, input.expectedVersion);
         const at = this.timestamp();
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_proposals
-             SET title = NULL, content = NULL, reason = NULL, status = 'deleted',
-                 version = version + 1, updated_at = ?, deleted_at = ?
-             WHERE workspace_id = ? AND proposal_id = ? AND version = ? AND status <> 'deleted'`,
-          )
-          .run(at, at, this.workspaceId, proposalId, input.expectedVersion);
-        assertChanged(changed.changes, "proposal", proposalId);
-        const deleted = this.requireProposal(proposalId);
+        const deleted: Proposal = {
+          ...current,
+          title: null,
+          content: null,
+          reason: null,
+          status: "deleted",
+          version: current.version + 1,
+          updatedAt: at,
+          deletedAt: at,
+        };
+        this.state().proposals[proposalId] = deleted;
         this.recordMutation(
           "proposal",
           proposalId,
@@ -1086,7 +885,6 @@ export class MemoryRepository {
           input.idempotencyKey,
           at,
         );
-        this.markSecureDeletePending(at);
         return { value: deleted, marker: { proposalId } };
       },
       (marker) => this.requireProposal(readMarkerId(marker, "proposalId")),
@@ -1138,32 +936,25 @@ export class MemoryRepository {
                 );
               }
             }
-            const changedFact = this.db
-              .prepare(
-                `UPDATE memory_facts
-                 SET kind = ?, title = ?, content = ?, confidence = ?, source_id = ?,
-                     state = 'active', version = version + 1, updated_at = ?
-                 WHERE workspace_id = ? AND fact_id = ? AND version = ? AND state = 'active'`,
-              )
-              .run(
-                finalKind,
-                finalTitle,
-                finalContent,
-                finalConfidence,
-                current.sourceId ?? null,
-                at,
-                this.workspaceId,
-                target.factId,
-                target.version,
-              );
-            assertChanged(changedFact.changes, "fact", target.factId);
-            fact = this.requireFact(target.factId);
+            const updatedFact: Fact = compact({
+              ...target,
+              kind: finalKind,
+              title: finalTitle,
+              content: finalContent,
+              confidence: finalConfidence,
+              sourceId: current.sourceId,
+              state: "active" as const,
+              version: target.version + 1,
+              updatedAt: at,
+            });
+            fact = updatedFact;
+            this.state().facts[target.factId] = updatedFact;
             this.recordMutation(
               "fact",
               target.factId,
               "fact.updated",
               target.version,
-              fact.version,
+              updatedFact.version,
               input.idempotencyKey,
               at,
             );
@@ -1192,33 +983,21 @@ export class MemoryRepository {
             );
           }
         }
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_proposals
-             SET kind = ?, title = ?, content = ?, reason = ?, confidence = ?,
-                 status = ?, conflict_status = ?, resolved_fact_id = ?, version = version + 1,
-                 updated_at = ?, reviewed_at = ?
-             WHERE workspace_id = ? AND proposal_id = ? AND version = ? AND status = 'pending'`,
-          )
-          .run(
-            finalKind,
-            finalTitle,
-            finalContent,
-            finalReason,
-            finalConfidence,
-            input.resolution,
-            input.resolution === "accepted" && current.conflictFactId
-              ? "resolved"
-              : current.conflictStatus,
-            fact?.factId ?? null,
-            at,
-            at,
-            this.workspaceId,
-            proposalId,
-            input.expectedVersion,
-          );
-        assertChanged(changed.changes, "proposal", proposalId);
-        const proposal = this.requireProposal(proposalId);
+        const proposal: Proposal = compact({
+          ...current,
+          kind: finalKind,
+          title: finalTitle,
+          content: finalContent,
+          reason: finalReason,
+          confidence: finalConfidence,
+          status: input.resolution,
+          conflictStatus: input.resolution === "accepted" && current.conflictFactId ? "resolved" : current.conflictStatus,
+          resolvedFactId: fact?.factId,
+          version: current.version + 1,
+          updatedAt: at,
+          reviewedAt: at,
+        });
+        this.state().proposals[proposalId] = proposal;
         this.recordMutation(
           "proposal",
           proposalId,
@@ -1243,27 +1022,14 @@ export class MemoryRepository {
   }
 
   listMutations(options: MutationListOptions = {}): Mutation[] {
-    const clauses = ["workspace_id = ?", "sequence > ?"];
-    const params: Array<string | number> = [
-      this.workspaceId,
-      normalizeNonNegativeInteger(options.afterSequence ?? 0, "afterSequence"),
-    ];
-    if (options.entityType) {
-      clauses.push("entity_type = ?");
-      params.push(options.entityType);
-    }
-    if (options.entityId) {
-      clauses.push("entity_id = ?");
-      params.push(normalizeId(options.entityId, "entityId"));
-    }
-    params.push(normalizeLimit(options.limit));
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_mutations WHERE ${clauses.join(" AND ")}
-         ORDER BY sequence ASC LIMIT ?`,
-      )
-      .all(...params) as MutationRow[];
-    return rows.map((row) => mapMutation(row, this.workspaceId));
+    const after = normalizeNonNegativeInteger(options.afterSequence ?? 0, "afterSequence");
+    const entityId = options.entityId === undefined ? undefined : normalizeId(options.entityId, "entityId");
+    const limit = normalizeLimit(options.limit);
+    return this.read((state) => state.mutations
+      .filter((mutation) => mutation.sequence > after)
+      .filter((mutation) => options.entityType === undefined || mutation.entityType === options.entityType)
+      .filter((mutation) => entityId === undefined || mutation.entityId === entityId)
+      .sort((a, b) => a.sequence - b.sequence).slice(0, limit).map(clone));
   }
 
   createJob(input: CreateJobInput): Job {
@@ -1273,43 +1039,38 @@ export class MemoryRepository {
       input.idempotencyKey,
       normalized.request,
       () => {
-        const existing = this.db
-          .prepare(
-            `SELECT * FROM memory_jobs
-             WHERE workspace_id = ? AND terminal_event_id = ? AND extractor_version = ?`,
-          )
-          .get(this.workspaceId, normalized.terminalEventId, normalized.extractorVersion) as
-          | JobRow
-          | undefined;
+        const existing = Object.values(this.state().jobs).find(
+          (job) => job.terminalEventId === normalized.terminalEventId && job.extractorVersion === normalized.extractorVersion,
+        );
         if (existing) {
-          const job = mapJob(existing, this.workspaceId);
+          const job = clone(existing);
           return { value: job, marker: { jobId: job.jobId } };
         }
         if (normalized.sourceId) this.requireSource(normalized.sourceId);
         const jobId = normalizeId(input.jobId ?? `memory-job:${randomUUID()}`, "jobId");
         const at = this.timestamp();
-        this.db
-          .prepare(
-            `INSERT INTO memory_jobs(
-               job_id, workspace_id, type, status, terminal_event_id, extractor_version,
-               cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
-               model_calls, input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
-             ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, 0, ?, ?, NULL, 0, 0, 0, 0, 1, ?, ?, NULL)`,
-          )
-          .run(
-            jobId,
-            this.workspaceId,
-            normalized.type,
-            normalized.terminalEventId,
-            normalized.extractorVersion,
-            JSON.stringify(normalized.cursor),
-            normalized.sourceId ?? null,
-            normalized.maxAttempts,
-            normalized.nextAttemptAt ?? null,
-            at,
-            at,
-          );
-        const job = this.requireJob(jobId);
+        if (this.state().jobs[jobId]) throw new MemoryConflictError(`Memory job ${jobId} already exists`);
+        const job: Job = {
+          jobId,
+          workspaceId: this.workspaceId,
+          type: normalized.type,
+          status: "queued",
+          terminalEventId: normalized.terminalEventId,
+          extractorVersion: normalized.extractorVersion,
+          cursor: normalized.cursor,
+          ...(normalized.sourceId ? { sourceId: normalized.sourceId } : {}),
+          attemptCount: 0,
+          maxAttempts: normalized.maxAttempts,
+          ...(normalized.nextAttemptAt ? { nextAttemptAt: normalized.nextAttemptAt } : {}),
+          modelCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          costUsd: 0,
+          version: 1,
+          createdAt: at,
+          updatedAt: at,
+        };
+        this.state().jobs[jobId] = job;
         this.recordMutation(
           "job",
           jobId,
@@ -1326,50 +1087,33 @@ export class MemoryRepository {
   }
 
   getJob(jobId: string): Job | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM memory_jobs WHERE workspace_id = ? AND job_id = ?")
-      .get(this.workspaceId, normalizeId(jobId, "jobId")) as JobRow | undefined;
-    return row ? mapJob(row, this.workspaceId) : undefined;
+    const id = normalizeId(jobId, "jobId");
+    return this.read((state) => cloneOptional(state.jobs[id]));
   }
 
   listJobs(options: JobListOptions = {}): Job[] {
     const statuses = options.statuses?.map((status) =>
       requireEnum(status, MEMORY_JOB_STATUSES, "status"),
     );
-    const clauses = ["workspace_id = ?"];
-    const params: Array<string | number> = [this.workspaceId];
-    appendInFilter(clauses, params, "status", statuses);
-    if (options.type !== undefined) {
-      clauses.push("type = ?");
-      params.push(requireNonEmpty(options.type, "type", 128));
-    }
-    if (options.extractorVersion !== undefined) {
-      clauses.push("extractor_version = ?");
-      params.push(requireNonEmpty(options.extractorVersion, "extractorVersion", 128));
-    }
-    if (options.readyAt !== undefined) {
-      clauses.push("(next_attempt_at IS NULL OR next_attempt_at <= ?)");
-      params.push(normalizeTimestamp(options.readyAt, "readyAt"));
-    }
-    if (options.attemptsRemaining === true) {
-      clauses.push("attempt_count < max_attempts");
-    }
-    if (options.withModelUsage === true) {
-      clauses.push("(model_calls > 0 OR input_tokens > 0 OR output_tokens > 0 OR cost_usd > 0)");
-    }
+    const type = options.type === undefined ? undefined : requireNonEmpty(options.type, "type", 128);
+    const extractorVersion = options.extractorVersion === undefined ? undefined : requireNonEmpty(options.extractorVersion, "extractorVersion", 128);
+    const readyAt = options.readyAt === undefined ? undefined : normalizeTimestamp(options.readyAt, "readyAt");
     const order = options.order ?? "newest";
     if (order !== "newest" && order !== "oldest") {
       throw new Error(`order has unsupported value ${String(order)}`);
     }
-    const direction = order === "oldest" ? "ASC" : "DESC";
-    params.push(normalizeLimit(options.limit));
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memory_jobs WHERE ${clauses.join(" AND ")}
-         ORDER BY created_at ${direction}, job_id ${direction} LIMIT ?`,
-      )
-      .all(...params) as JobRow[];
-    return rows.map((row) => mapJob(row, this.workspaceId));
+    const limit = normalizeLimit(options.limit);
+    return this.read((state) => Object.values(state.jobs)
+      .filter((job) => !statuses?.length || statuses.includes(job.status))
+      .filter((job) => type === undefined || job.type === type)
+      .filter((job) => extractorVersion === undefined || job.extractorVersion === extractorVersion)
+      .filter((job) => readyAt === undefined || job.nextAttemptAt === undefined || job.nextAttemptAt <= readyAt)
+      .filter((job) => options.attemptsRemaining !== true || job.attemptCount < job.maxAttempts)
+      .filter((job) => options.withModelUsage !== true || job.modelCalls > 0 || job.inputTokens > 0 || job.outputTokens > 0 || job.costUsd > 0)
+      .sort((a, b) => {
+        const compared = a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId);
+        return order === "oldest" ? compared : -compared;
+      }).slice(0, limit).map(clone));
   }
 
   rescheduleQueuedJobs(input: RescheduleQueuedJobsInput): number {
@@ -1380,17 +1124,11 @@ export class MemoryRepository {
     const maxWaitMs = normalizePositiveInteger(input.maxWaitMs, "maxWaitMs");
     const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
     return this.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT * FROM memory_jobs
-           WHERE workspace_id = ? AND status = 'queued' AND error_code IS NULL
-             AND type = ? AND extractor_version = ?
-           ORDER BY created_at ASC, job_id ASC`,
-        )
-        .all(this.workspaceId, type, extractorVersion) as JobRow[];
+      const rows = Object.values(this.state().jobs)
+        .filter((job) => job.status === "queued" && job.errorCode === undefined && job.type === type && job.extractorVersion === extractorVersion)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId));
       let changed = 0;
-      for (const row of rows) {
-        const job = mapJob(row, this.workspaceId);
+      for (const job of rows) {
         const deadline = new Date(
           Math.min(requestedTime, Date.parse(job.createdAt) + maxWaitMs),
         ).toISOString();
@@ -1416,18 +1154,11 @@ export class MemoryRepository {
     if (!errorCode) throw new Error("errorCode is required");
     const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
     return this.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT * FROM memory_jobs
-           WHERE workspace_id = ? AND status IN ('queued', 'running', 'failed')
-             AND type = ? AND extractor_version = ?
-             AND json_extract(cursor_json, '$.sessionId') = ?
-           ORDER BY created_at ASC, job_id ASC`,
-        )
-        .all(this.workspaceId, type, extractorVersion, sessionId) as JobRow[];
+      const rows = Object.values(this.state().jobs)
+        .filter((job) => ["queued", "running", "failed"].includes(job.status) && job.type === type && job.extractorVersion === extractorVersion && job.cursor.sessionId === sessionId)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId));
       let changed = 0;
-      for (const row of rows) {
-        const job = mapJob(row, this.workspaceId);
+      for (const job of rows) {
         if (
           afterSequence !== undefined &&
           job.cursor.sequence !== undefined &&
@@ -1470,37 +1201,23 @@ export class MemoryRepository {
           : current.status;
         const terminalAt = isTerminalJobStatus(status) ? this.timestamp() : undefined;
         const updatedAt = terminalAt ?? this.timestamp();
-        const changed = this.db
-          .prepare(
-            `UPDATE memory_jobs
-             SET status = ?, source_id = ?, attempt_count = ?, max_attempts = ?,
-                 next_attempt_at = ?, error_code = ?, model_calls = ?, input_tokens = ?, output_tokens = ?,
-                 cost_usd = ?, version = version + 1, updated_at = ?, terminal_at = ?
-             WHERE workspace_id = ? AND job_id = ? AND version = ?`,
-          )
-          .run(
-            status,
-            sourceId ?? null,
-            normalizeNonNegativeInteger(input.attemptCount ?? current.attemptCount, "attemptCount"),
-            normalizePositiveInteger(input.maxAttempts ?? current.maxAttempts, "maxAttempts"),
-            input.nextAttemptAt === undefined
-              ? (current.nextAttemptAt ?? null)
-              : normalizeOptionalTimestamp(input.nextAttemptAt, "nextAttemptAt"),
-            input.errorCode === undefined
-              ? (current.errorCode ?? null)
-              : normalizeOptionalCode(input.errorCode, "errorCode"),
-            normalizeNonNegativeInteger(input.modelCalls ?? current.modelCalls, "modelCalls"),
-            normalizeNonNegativeInteger(input.inputTokens ?? current.inputTokens, "inputTokens"),
-            normalizeNonNegativeInteger(input.outputTokens ?? current.outputTokens, "outputTokens"),
-            normalizeNonNegativeNumber(input.costUsd ?? current.costUsd, "costUsd"),
-            updatedAt,
-            terminalAt ?? (isTerminalJobStatus(current.status) ? current.terminalAt : null),
-            this.workspaceId,
-            jobId,
-            input.expectedVersion,
-          );
-        assertChanged(changed.changes, "job", jobId);
-        const job = this.requireJob(jobId);
+        const job: Job = compact({
+          ...current,
+          status,
+          sourceId,
+          attemptCount: normalizeNonNegativeInteger(input.attemptCount ?? current.attemptCount, "attemptCount"),
+          maxAttempts: normalizePositiveInteger(input.maxAttempts ?? current.maxAttempts, "maxAttempts"),
+          nextAttemptAt: input.nextAttemptAt === undefined ? current.nextAttemptAt : normalizeOptionalTimestamp(input.nextAttemptAt, "nextAttemptAt") ?? undefined,
+          errorCode: input.errorCode === undefined ? current.errorCode : normalizeOptionalCode(input.errorCode, "errorCode") ?? undefined,
+          modelCalls: normalizeNonNegativeInteger(input.modelCalls ?? current.modelCalls, "modelCalls"),
+          inputTokens: normalizeNonNegativeInteger(input.inputTokens ?? current.inputTokens, "inputTokens"),
+          outputTokens: normalizeNonNegativeInteger(input.outputTokens ?? current.outputTokens, "outputTokens"),
+          costUsd: normalizeNonNegativeNumber(input.costUsd ?? current.costUsd, "costUsd"),
+          version: current.version + 1,
+          updatedAt,
+          terminalAt: terminalAt ?? (isTerminalJobStatus(current.status) ? current.terminalAt : undefined),
+        });
+        this.state().jobs[jobId] = job;
         this.recordMutation(
           "job",
           jobId,
@@ -1523,32 +1240,15 @@ export class MemoryRepository {
     const identity = hashOpaqueKey(`${proposal.proposalId}\0${proposal.version}\0${proposal.kind}`);
     const jobId = `notification:proposed:${identity}`;
     const at = this.timestamp();
-    const inserted = this.db
-      .prepare(
-        `INSERT OR IGNORE INTO memory_jobs(
-           job_id, workspace_id, type, status, terminal_event_id, extractor_version,
-           cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
-           input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
-         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, 0, 1, NULL, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
-      )
-      .run(
-        jobId,
-        this.workspaceId,
-        MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
-        identity,
-        `${MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX}${proposal.kind}`,
-        JSON.stringify({
-          sessionId: "memory-service",
-          eventId: proposal.proposalId,
-          sequence: proposal.version,
-        }),
-        at,
-        at,
-      );
-    if (inserted.changes === 1) {
-      this.recordMutation("job", jobId, "job.created", undefined, 1, idempotencyKey, at);
-    }
-    return this.requireJob(jobId);
+    return this.runTransaction(() => this.enqueueNotificationJob({
+      jobId,
+      type: MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
+      terminalEventId: identity,
+      extractorVersion: `${MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX}${proposal.kind}`,
+      cursor: { sessionId: "memory-service", eventId: proposal.proposalId, sequence: proposal.version },
+      idempotencyKey,
+      at,
+    }));
   }
 
   private insertFact(input: {
@@ -1564,28 +1264,23 @@ export class MemoryRepository {
     readonly lastUsedAt?: string;
     readonly at: string;
   }): void {
-    this.db
-      .prepare(
-        `INSERT INTO memory_facts(
-           fact_id, workspace_id, kind, title, content, confidence, source_id, state,
-           pinned, expires_at, last_used_at, version, created_at, updated_at, forgotten_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
-      )
-      .run(
-        input.factId,
-        this.workspaceId,
-        input.kind,
-        input.title,
-        input.content,
-        input.confidence,
-        input.sourceId ?? null,
-        input.state,
-        toSqlBoolean(input.pinned),
-        input.expiresAt ?? null,
-        input.lastUsedAt ?? null,
-        input.at,
-        input.at,
-      );
+    if (this.state().facts[input.factId]) throw new MemoryConflictError(`Memory fact ${input.factId} already exists`);
+    this.state().facts[input.factId] = {
+      factId: input.factId,
+      workspaceId: this.workspaceId,
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      confidence: input.confidence,
+      ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+      state: input.state,
+      pinned: input.pinned,
+      ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+      ...(input.lastUsedAt ? { lastUsedAt: input.lastUsedAt } : {}),
+      version: 1,
+      createdAt: input.at,
+      updatedAt: input.at,
+    };
   }
 
   private enqueueForgottenNotification(
@@ -1595,27 +1290,15 @@ export class MemoryRepository {
   ): void {
     const identity = hashOpaqueKey(`${fact.factId}\0${fact.version}`);
     const jobId = `notification:forgotten:${identity}`;
-    const inserted = this.db
-      .prepare(
-        `INSERT OR IGNORE INTO memory_jobs(
-           job_id, workspace_id, type, status, terminal_event_id, extractor_version,
-           cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
-           input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
-         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, 0, 1, NULL, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
-      )
-      .run(
-        jobId,
-        this.workspaceId,
-        MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE,
-        identity,
-        MEMORY_FORGOTTEN_NOTIFICATION_VERSION,
-        JSON.stringify({ sessionId: "memory-service", eventId: fact.factId }),
-        at,
-        at,
-      );
-    if (inserted.changes === 1) {
-      this.recordMutation("job", jobId, "job.created", undefined, 1, idempotencyKey, at);
-    }
+    this.enqueueNotificationJob({
+      jobId,
+      type: MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE,
+      terminalEventId: identity,
+      extractorVersion: MEMORY_FORGOTTEN_NOTIFICATION_VERSION,
+      cursor: { sessionId: "memory-service", eventId: fact.factId },
+      idempotencyKey,
+      at,
+    });
   }
 
   private enqueueSourceChangedNotification(
@@ -1625,33 +1308,17 @@ export class MemoryRepository {
   ): void {
     const identity = hashOpaqueKey(`${source.sourceId}\0${source.version}\0${source.availability}`);
     const jobId = `notification:source:${identity}`;
-    const inserted = this.db
-      .prepare(
-        `INSERT OR IGNORE INTO memory_jobs(
-           job_id, workspace_id, type, status, terminal_event_id, extractor_version,
-           cursor_json, source_id, attempt_count, max_attempts, next_attempt_at, error_code,
-           input_tokens, output_tokens, cost_usd, version, created_at, updated_at, terminal_at
-         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, 0, 1, NULL, NULL, 0, 0, 0, 1, ?, ?, NULL)`,
-      )
-      .run(
-        jobId,
-        this.workspaceId,
-        MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
-        identity,
-        source.availability === "rewound"
-          ? MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
-          : MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
-        JSON.stringify({
-          sessionId: "memory-service",
-          eventId: source.sourceId,
-          sequence: source.version,
-        }),
-        at,
-        at,
-      );
-    if (inserted.changes === 1) {
-      this.recordMutation("job", jobId, "job.created", undefined, 1, idempotencyKey, at);
-    }
+    this.enqueueNotificationJob({
+      jobId,
+      type: MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
+      terminalEventId: identity,
+      extractorVersion: source.availability === "rewound"
+        ? MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
+        : MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
+      cursor: { sessionId: "memory-service", eventId: source.sourceId, sequence: source.version },
+      idempotencyKey,
+      at,
+    });
   }
 
   private requireSource(sourceId: string): Source {
@@ -1675,26 +1342,17 @@ export class MemoryRepository {
     if (fact.state !== "active") {
       throw new MemoryConflictError(`Conflict fact ${factId} is no longer active`);
     }
-    const proposalCreated = this.db
-      .prepare(
-        `SELECT sequence FROM memory_mutations
-         WHERE workspace_id = ? AND entity_type = 'proposal' AND entity_id = ?
-           AND action = 'proposal.created'
-         ORDER BY sequence ASC LIMIT 1`,
-      )
-      .get(this.workspaceId, proposal.proposalId) as { readonly sequence: number } | undefined;
+    const proposalCreated = this.state().mutations.find(
+      (mutation) => mutation.entityType === "proposal" && mutation.entityId === proposal.proposalId && mutation.action === "proposal.created",
+    );
     if (!proposalCreated) {
       throw new MemoryConflictError(
         `Conflict proposal ${proposal.proposalId} has no creation audit record`,
       );
     }
-    const changedAfterProposal = this.db
-      .prepare(
-        `SELECT 1 FROM memory_mutations
-         WHERE workspace_id = ? AND entity_type = 'fact' AND entity_id = ? AND sequence > ?
-         LIMIT 1`,
-      )
-      .get(this.workspaceId, factId, proposalCreated.sequence);
+    const changedAfterProposal = this.state().mutations.some(
+      (mutation) => mutation.entityType === "fact" && mutation.entityId === factId && mutation.sequence > proposalCreated.sequence,
+    );
     if (changedAfterProposal) {
       throw new MemoryConflictError(
         `Conflict fact ${factId} changed after proposal ${proposal.proposalId} was created`,
@@ -1724,82 +1382,19 @@ export class MemoryRepository {
     idempotencyKey: string | undefined,
     createdAt: string,
   ): void {
-    this.db
-      .prepare(
-        `INSERT INTO memory_mutations(
-           mutation_id, workspace_id, entity_type, entity_id, action, from_version,
-           to_version, idempotency_key_hash, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        `mutation:${randomUUID()}`,
-        this.workspaceId,
-        entityType,
-        entityId,
-        action,
-        fromVersion ?? null,
-        toVersion,
-        idempotencyKey ? hashOpaqueKey(normalizeIdempotencyKey(idempotencyKey)) : null,
-        createdAt,
-      );
-  }
-
-  private markSecureDeletePending(at: string): void {
-    const changed = this.db
-      .prepare(
-        `UPDATE memory_maintenance
-         SET secure_delete_pending = 1, requested_at = COALESCE(requested_at, ?), updated_at = ?
-         WHERE workspace_id = ?`,
-      )
-      .run(at, at, this.workspaceId);
-    if (changed.changes !== 1) {
-      throw new Error(`Memory maintenance state is missing for workspace ${this.workspaceId}`);
-    }
-  }
-
-  private completePendingSecureDelete(): void {
-    const state = this.db
-      .prepare(`SELECT secure_delete_pending FROM memory_maintenance WHERE workspace_id = ?`)
-      .get(this.workspaceId) as MaintenanceRow | undefined;
-    if (!state) {
-      throw new Error(`Memory maintenance state is missing for workspace ${this.workspaceId}`);
-    }
-    if (state.secure_delete_pending === 0) return;
-    if (state.secure_delete_pending !== 1) {
-      throw new Error("Memory secure-delete pending state is invalid");
-    }
-
-    let checkpoint: WalCheckpointResult;
-    try {
-      checkpoint = parseWalCheckpointResult(this.db.pragma("wal_checkpoint(TRUNCATE)"));
-    } catch (error) {
-      if (error instanceof MemorySecureDeletePendingError) throw error;
-      throw new MemorySecureDeletePendingError(
-        `Memory secure-delete WAL checkpoint failed: ${errorMessage(error)}`,
-      );
-    }
-    if (checkpoint.busy !== 0 || checkpoint.log !== 0) {
-      throw new MemorySecureDeletePendingError(
-        `Memory secure-delete WAL checkpoint is busy (busy=${checkpoint.busy}, log=${checkpoint.log}, checkpointed=${checkpoint.checkpointed})`,
-      );
-    }
-
-    try {
-      const cleared = this.db
-        .prepare(
-          `UPDATE memory_maintenance
-           SET secure_delete_pending = 0, requested_at = NULL, updated_at = ?
-           WHERE workspace_id = ? AND secure_delete_pending = 1`,
-        )
-        .run(this.timestamp(), this.workspaceId);
-      if (cleared.changes !== 1) {
-        throw new Error("Memory secure-delete pending state changed during checkpoint");
-      }
-    } catch (error) {
-      throw new MemorySecureDeletePendingError(
-        `Memory secure-delete checkpoint completed but state clearing failed: ${errorMessage(error)}`,
-      );
-    }
+    const mutations = this.state().mutations;
+    mutations.push({
+      sequence: mutations.length === 0 ? 1 : mutations[mutations.length - 1]!.sequence + 1,
+      mutationId: `mutation:${randomUUID()}`,
+      workspaceId: this.workspaceId,
+      entityType,
+      entityId,
+      action,
+      ...(fromVersion === undefined ? {} : { fromVersion }),
+      toVersion,
+      ...(idempotencyKey ? { idempotencyKeyHash: hashOpaqueKey(normalizeIdempotencyKey(idempotencyKey)) } : {}),
+      createdAt,
+    });
   }
 
   private idempotentWrite<Result>(
@@ -1814,35 +1409,127 @@ export class MemoryRepository {
       const key = normalizeIdempotencyKey(idempotencyKey);
       const keyHash = hashOpaqueKey(key);
       const requestHash = hashCanonicalJson(request);
-      const existing = this.db
-        .prepare(
-          `SELECT request_hash, result_json FROM memory_idempotency
-           WHERE workspace_id = ? AND operation = ? AND idempotency_key_hash = ?`,
-        )
-        .get(this.workspaceId, operation, keyHash) as IdempotencyRow | undefined;
+      const identity = `${operation}:${keyHash}`;
+      const existing = this.state().idempotency[identity];
       if (existing) {
-        if (existing.request_hash !== requestHash) {
+        if (existing.requestHash !== requestHash) {
           throw new MemoryIdempotencyConflictError(operation);
         }
-        return replay(parseMarker(existing.result_json));
+        return replay(existing.marker);
       }
       const result = execute();
-      this.db
-        .prepare(
-          `INSERT INTO memory_idempotency(
-             workspace_id, operation, idempotency_key_hash, request_hash, result_json, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          this.workspaceId,
-          operation,
-          keyHash,
-          requestHash,
-          JSON.stringify(result.marker),
-          this.timestamp(),
-        );
+      const record: MemoryIdempotencyRecord = {
+        operation,
+        keyHash,
+        requestHash,
+        marker: result.marker,
+        createdAt: this.timestamp(),
+      };
+      this.state().idempotency[identity] = record;
       return result.value;
     });
+  }
+
+  private enqueueNotificationJob(input: {
+    readonly jobId: string;
+    readonly type: string;
+    readonly terminalEventId: string;
+    readonly extractorVersion: string;
+    readonly cursor: MemoryJobCursor;
+    readonly idempotencyKey?: string;
+    readonly at: string;
+  }): Job {
+    const existing = this.state().jobs[input.jobId];
+    if (existing) return clone(existing);
+    const job: Job = {
+      jobId: input.jobId,
+      workspaceId: this.workspaceId,
+      type: input.type,
+      status: "queued",
+      terminalEventId: input.terminalEventId,
+      extractorVersion: input.extractorVersion,
+      cursor: input.cursor,
+      attemptCount: 0,
+      maxAttempts: 1,
+      modelCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      version: 1,
+      createdAt: input.at,
+      updatedAt: input.at,
+    };
+    this.state().jobs[input.jobId] = job;
+    this.recordMutation("job", input.jobId, "job.created", undefined, 1, input.idempotencyKey, input.at);
+    return clone(job);
+  }
+
+  private read<Result>(operation: (state: MemoryFileState) => Result): Result {
+    const context = activeMemoryTransactions.get(this.storageRoot);
+    if (context) {
+      this.assertContextWorkspace(context);
+      return operation(context.state);
+    }
+    return this.withLock(() => {
+      recoverFileTransactionSync(this.storageRoot);
+      return operation(this.readState());
+    });
+  }
+
+  private state(): MemoryFileState {
+    const context = activeMemoryTransactions.get(this.storageRoot);
+    if (!context) throw new Error("Memory mutation requires an active transaction");
+    this.assertContextWorkspace(context);
+    return context.state;
+  }
+
+  private readState(): MemoryFileState {
+    try {
+      return decodeMemoryFileState(readJsonFileSync(this.statePath), this.workspaceId);
+    } catch (error) {
+      if (error instanceof FileStorageIntegrityError) throw error;
+      throw new FileStorageIntegrityError(`Cannot read memory state ${this.statePath}: ${errorMessage(error)}`);
+    }
+  }
+
+  private withLock<Result>(operation: () => Result): Result {
+    const deadline = Date.now() + this.busyTimeoutMs;
+    for (;;) {
+      try {
+        return withFileLockSync(this.lockPath, `memory:${this.workspaceId}:${process.pid}`, operation, {
+          timeoutMs: Math.max(0, deadline - Date.now()),
+        });
+      } catch (error) {
+        if (!(error instanceof LeaseConflictError) || Date.now() >= deadline) throw error;
+        // A releasing process can briefly expose the lock directory after owner.json is gone.
+        // Treat that unverifiable window as contention, never as permission to steal the lock.
+        Atomics.wait(memoryLockWait, 0, 0, 10);
+      }
+    }
+  }
+
+  private assertContextWorkspace(context: MemoryTransactionContext): void {
+    if (context.workspaceId !== this.workspaceId) {
+      throw new FileStorageIntegrityError(`Memory transaction belongs to workspace ${context.workspaceId}, not ${this.workspaceId}`);
+    }
+  }
+
+  private rememberSecrets(...values: Array<string | null | undefined>): void {
+    const context = activeMemoryTransactions.get(this.storageRoot);
+    if (!context) throw new Error("Memory deletion requires an active transaction");
+    for (const value of values) if (value) context.forgottenSecrets.add(value);
+  }
+
+  private verifySecretsRemoved(secrets: ReadonlySet<string>): void {
+    for (const path of listMemoryVerificationFiles(this.storageRoot)) {
+      const content = readFileSync(path, "utf8");
+      for (const secret of secrets) {
+        const escaped = JSON.stringify(secret).slice(1, -1);
+        if (content.includes(secret) || content.includes(escaped)) {
+          throw new FileStorageIntegrityError(`Deleted memory text remains in ${path}`);
+        }
+      }
+    }
   }
 
   private timestamp(): string {
@@ -2057,132 +1744,6 @@ function normalizeCreateJobInput(input: CreateJobInput) {
   };
 }
 
-function mapSettings(row: SettingsRow, workspaceId: WorkspaceId): Settings {
-  assertWorkspace(row.workspace_id, workspaceId);
-  return {
-    workspaceId,
-    enabled: fromSqlBoolean(row.enabled, "enabled"),
-    autoPropose: fromSqlBoolean(row.auto_propose, "autoPropose"),
-    autoCommit: fromSqlBoolean(row.auto_commit, "autoCommit"),
-    injectionEnabled: fromSqlBoolean(row.injection_enabled, "injectionEnabled"),
-    reviewMode: requireEnum(row.review_mode, MEMORY_REVIEW_MODES, "reviewMode"),
-    version: row.version,
-    updatedAt: row.updated_at,
-  };
-}
-
-function mapSource(row: SourceRow, workspaceId: WorkspaceId): Source {
-  assertWorkspace(row.workspace_id, workspaceId);
-  const eventIds = parseStringArray(row.event_ids_json, "source eventIds");
-  return {
-    sourceId: row.source_id,
-    workspaceId,
-    sessionId: row.session_id,
-    ...(row.run_id ? { runId: row.run_id } : {}),
-    ...(row.branch_id ? { branchId: row.branch_id } : {}),
-    eventIds,
-    ...(row.start_sequence === null ? {} : { startSequence: row.start_sequence }),
-    ...(row.end_sequence === null ? {} : { endSequence: row.end_sequence }),
-    digest: row.digest,
-    availability: requireEnum(row.availability, SOURCE_AVAILABILITIES, "source availability"),
-    ...(row.invalidated_at ? { invalidatedAt: row.invalidated_at } : {}),
-    ...(row.invalidation_code ? { invalidationCode: row.invalidation_code } : {}),
-    version: row.version,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function mapFact(row: FactRow, workspaceId: WorkspaceId): Fact {
-  assertWorkspace(row.workspace_id, workspaceId);
-  return {
-    factId: row.fact_id,
-    workspaceId,
-    kind: requireEnum(row.kind, MEMORY_KINDS, "fact kind"),
-    title: row.title,
-    content: row.content,
-    confidence: row.confidence,
-    ...(row.source_id ? { sourceId: row.source_id } : {}),
-    state: requireEnum(row.state, FACT_STATES, "fact state"),
-    pinned: fromSqlBoolean(row.pinned, "pinned"),
-    ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
-    ...(row.last_used_at ? { lastUsedAt: row.last_used_at } : {}),
-    version: row.version,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    ...(row.forgotten_at ? { forgottenAt: row.forgotten_at } : {}),
-  };
-}
-
-function mapProposal(row: ProposalRow, workspaceId: WorkspaceId): Proposal {
-  assertWorkspace(row.workspace_id, workspaceId);
-  return {
-    proposalId: row.proposal_id,
-    workspaceId,
-    kind: requireEnum(row.kind, MEMORY_KINDS, "proposal kind"),
-    title: row.title,
-    content: row.content,
-    reason: row.reason,
-    confidence: row.confidence,
-    ...(row.source_id ? { sourceId: row.source_id } : {}),
-    status: requireEnum(row.status, PROPOSAL_STATUSES, "proposal status"),
-    conflictStatus: requireEnum(
-      row.conflict_status,
-      PROPOSAL_CONFLICT_STATUSES,
-      "proposal conflictStatus",
-    ),
-    ...(row.conflict_fact_id ? { conflictFactId: row.conflict_fact_id } : {}),
-    ...(row.resolved_fact_id ? { resolvedFactId: row.resolved_fact_id } : {}),
-    version: row.version,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    ...(row.reviewed_at ? { reviewedAt: row.reviewed_at } : {}),
-    ...(row.deleted_at ? { deletedAt: row.deleted_at } : {}),
-  };
-}
-
-function mapMutation(row: MutationRow, workspaceId: WorkspaceId): Mutation {
-  assertWorkspace(row.workspace_id, workspaceId);
-  return {
-    sequence: row.sequence,
-    mutationId: row.mutation_id,
-    workspaceId,
-    entityType: row.entity_type as MutationEntityType,
-    entityId: row.entity_id,
-    action: row.action as MutationAction,
-    ...(row.from_version === null ? {} : { fromVersion: row.from_version }),
-    toVersion: row.to_version,
-    ...(row.idempotency_key_hash ? { idempotencyKeyHash: row.idempotency_key_hash } : {}),
-    createdAt: row.created_at,
-  };
-}
-
-function mapJob(row: JobRow, workspaceId: WorkspaceId): Job {
-  assertWorkspace(row.workspace_id, workspaceId);
-  return {
-    jobId: row.job_id,
-    workspaceId,
-    type: row.type,
-    status: requireEnum(row.status, MEMORY_JOB_STATUSES, "job status"),
-    terminalEventId: row.terminal_event_id,
-    extractorVersion: row.extractor_version,
-    cursor: parseJobCursor(row.cursor_json),
-    ...(row.source_id ? { sourceId: row.source_id } : {}),
-    attemptCount: row.attempt_count,
-    maxAttempts: row.max_attempts,
-    ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}),
-    ...(row.error_code ? { errorCode: row.error_code } : {}),
-    modelCalls: row.model_calls,
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
-    costUsd: row.cost_usd,
-    version: row.version,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    ...(row.terminal_at ? { terminalAt: row.terminal_at } : {}),
-  };
-}
-
 function normalizeJobCursor(cursor: MemoryJobCursor): MemoryJobCursor {
   const sessionId = normalizeId(cursor.sessionId, "cursor.sessionId");
   const sequence = normalizeOptionalNonNegativeInteger(cursor.sequence, "cursor.sequence");
@@ -2192,50 +1753,6 @@ function normalizeJobCursor(cursor: MemoryJobCursor): MemoryJobCursor {
     ...(sequence === undefined ? {} : { sequence }),
     ...(eventId ? { eventId } : {}),
   };
-}
-
-function parseJobCursor(encoded: string): MemoryJobCursor {
-  let value: unknown;
-  try {
-    value = JSON.parse(encoded) as unknown;
-  } catch (error) {
-    throw new Error("Memory job cursor is invalid JSON", { cause: error });
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Memory job cursor is invalid");
-  }
-  const record = value as Record<string, unknown>;
-  return normalizeJobCursor({
-    sessionId: String(record["sessionId"] ?? ""),
-    ...(record["sequence"] === undefined ? {} : { sequence: Number(record["sequence"]) }),
-    ...(typeof record["eventId"] === "string" ? { eventId: record["eventId"] } : {}),
-  });
-}
-
-function parseStringArray(encoded: string, field: string): readonly string[] {
-  let value: unknown;
-  try {
-    value = JSON.parse(encoded) as unknown;
-  } catch (error) {
-    throw new Error(`${field} is invalid JSON`, { cause: error });
-  }
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new Error(`${field} is invalid`);
-  }
-  return value;
-}
-
-function parseMarker(encoded: string): Readonly<Record<string, unknown>> {
-  let value: unknown;
-  try {
-    value = JSON.parse(encoded) as unknown;
-  } catch (error) {
-    throw new Error("Memory idempotency marker is invalid JSON", { cause: error });
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Memory idempotency marker is invalid");
-  }
-  return value as Readonly<Record<string, unknown>>;
 }
 
 function readMarkerId(marker: Readonly<Record<string, unknown>>, key: string): string {
@@ -2254,26 +1771,9 @@ function readOptionalMarkerId(
   return value;
 }
 
-function appendInFilter(
-  clauses: string[],
-  params: Array<string | number>,
-  column: string,
-  values: readonly string[] | undefined,
-): void {
-  if (!values?.length) return;
-  clauses.push(`${column} IN (${values.map(() => "?").join(",")})`);
-  params.push(...values);
-}
-
 function hasDefinedPatch(value: object, keys: readonly string[]): boolean {
   const record = value as Readonly<Record<string, unknown>>;
   return keys.some((key) => record[key] !== undefined);
-}
-
-function assertWorkspace(actual: string, expected: WorkspaceId): void {
-  if (actual !== expected) {
-    throw new Error(`Memory row belongs to workspace ${actual}, not ${expected}`);
-  }
 }
 
 function assertVersion(entity: string, id: string, actual: number, expected: number): void {
@@ -2282,10 +1782,6 @@ function assertVersion(entity: string, id: string, actual: number, expected: num
       `Memory ${entity} ${id} version changed from ${expected} to ${actual}`,
     );
   }
-}
-
-function assertChanged(changes: number, entity: string, id: string): void {
-  if (changes !== 1) throw new MemoryConflictError(`Memory ${entity} ${id} update lost CAS`);
 }
 
 function requireExpectedVersion(value: number): number {
@@ -2411,15 +1907,6 @@ function isTerminalJobStatus(status: MemoryJobStatus): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 
-function toSqlBoolean(value: boolean): number {
-  return value ? 1 : 0;
-}
-
-function fromSqlBoolean(value: number, field: string): boolean {
-  if (value !== 0 && value !== 1) throw new Error(`Memory ${field} is not a SQLite boolean`);
-  return value === 1;
-}
-
 function hashCanonicalJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
@@ -2439,30 +1926,38 @@ function requireSynchronousTransactionResult<Result>(result: Result): Result {
   return result;
 }
 
-function parseWalCheckpointResult(value: unknown): WalCheckpointResult {
-  if (!Array.isArray(value) || value.length !== 1) {
-    throw new Error("SQLite returned an invalid WAL checkpoint result");
-  }
-  const row = value[0];
-  if (!row || typeof row !== "object" || Array.isArray(row)) {
-    throw new Error("SQLite returned an invalid WAL checkpoint row");
-  }
-  const record = row as Readonly<Record<string, unknown>>;
-  const busy = parseCheckpointInteger(record["busy"], "busy");
-  const log = parseCheckpointInteger(record["log"], "log");
-  const checkpointed = parseCheckpointInteger(record["checkpointed"], "checkpointed");
-  return { busy, log, checkpointed };
-}
-
-function parseCheckpointInteger(value: unknown, field: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new Error(`SQLite WAL checkpoint ${field} is invalid`);
-  }
-  return value as number;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function clone<Value>(value: Value): Value {
+  return structuredClone(value);
+}
+
+function cloneOptional<Value>(value: Value | undefined): Value | undefined {
+  return value === undefined ? undefined : clone(value);
+}
+
+function compact<Value extends object>(value: Value): Value {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, field]) => field !== undefined),
+  ) as Value;
+}
+
+function compareDesc(left: string, right: string): number {
+  return right.localeCompare(left);
+}
+
+function listMemoryVerificationFiles(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const files: string[] = [];
+  for (const name of readdirSync(root)) {
+    const path = join(root, name);
+    const stat = statSync(path);
+    if (!stat.isFile()) continue;
+    if (name === "state.json" || name === "commit.json" || name.endsWith(".tmp")) files.push(path);
+  }
+  return files;
 }
 
 function canonicalJson(value: unknown): string {

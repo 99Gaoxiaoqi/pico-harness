@@ -1,915 +1,290 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "better-sqlite3";
+import { promisify } from "node:util";
 import {
+  MemoryAsyncTransactionError,
   MemoryConflictError,
   MemoryIdempotencyConflictError,
-  MemoryAsyncTransactionError,
   MemoryRepository,
-  MemorySecureDeletePendingError,
 } from "../../src/memory/memory-repository.js";
-import {
-  MEMORY_SCHEMA_CURRENT_MIGRATION_NAME,
-  MEMORY_SCHEMA_VERSION,
-  MemorySchemaVersionError,
-  MemoryWorkspaceMismatchError,
-} from "../../src/memory/memory-schema.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { FileStorageIntegrityError } from "../../src/storage/local-file-storage.js";
+import type { WorkspaceId } from "../../src/paths/pico-paths.js";
 
-test("memory foundation persists workspace facts, reviews and jobs across restart", async (context) => {
-  const fixture = await createFixture("restart");
+const execFileAsync = promisify(execFile);
+
+test("memory JSON snapshot persists the complete structured model", async (context) => {
+  const fixture = await createFixture();
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
-
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  assert.equal(paths.workspace.memoryDatabase, join(paths.workspace.memory, "memory.sqlite"));
-  const now = () => new Date("2026-07-20T12:00:00.000Z");
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-    now,
-  });
-
-  assert.deepEqual(repository.getSettings(), {
-    workspaceId: paths.workspace.id,
-    enabled: true,
-    autoPropose: true,
-    autoCommit: false,
-    injectionEnabled: true,
-    reviewMode: "balanced",
-    version: 1,
-    updatedAt: now().toISOString(),
-  });
-  const settings = repository.updateSettings({
-    expectedVersion: 1,
-    autoCommit: true,
-    reviewMode: "quality",
-  });
-  assert.equal(settings.version, 2);
+  const repository = open(fixture);
 
   const source = repository.createSource({
     sourceId: "source-1",
     sessionId: "session-1",
-    runId: "run-1",
-    branchId: "main",
-    eventIds: ["event-1", "event-2"],
-    startSequence: 10,
-    endSequence: 11,
-    digest: "sha256:source",
+    eventIds: ["event-1"],
+    digest: "sha256:digest",
   });
-  assert.equal(source.availability, "available");
-
+  const fact = repository.createFact({
+    factId: "fact-1",
+    kind: "project_fact",
+    title: "title",
+    content: "content",
+    sourceId: source.sourceId,
+  });
   const proposal = repository.createProposal({
     proposalId: "proposal-1",
-    kind: "project_fact",
-    title: "Build command",
-    content: "Use npm run build",
-    reason: "The user stated the canonical build command",
-    confidence: 0.9,
+    kind: "correction",
+    title: "proposal",
+    content: "replacement",
+    reason: "reason",
     sourceId: source.sourceId,
-    conflictStatus: "none",
   });
-  const resolved = repository.resolveProposal({
-    proposalId: proposal.proposalId,
-    expectedVersion: proposal.version,
-    resolution: "accepted",
-    factId: "fact-from-review",
-  });
-  assert.equal(resolved.proposal.status, "accepted");
-  assert.equal(resolved.fact?.content, "Use npm run build");
-
-  const job = repository.createJob({
-    type: "terminal-extraction",
+  repository.createJob({
+    jobId: "job-1",
+    type: "extract",
     terminalEventId: "terminal-1",
-    extractorVersion: "extractor-v1",
-    cursor: { sessionId: "session-1", sequence: 11, eventId: "event-2" },
-    sourceId: source.sourceId,
-    maxAttempts: 4,
+    extractorVersion: "v1",
+    cursor: { sessionId: "session-1", sequence: 1 },
   });
-  const duplicateJob = repository.createJob({
-    type: "terminal-extraction",
-    terminalEventId: "terminal-1",
-    extractorVersion: "extractor-v1",
-    cursor: { sessionId: "session-1", sequence: 11, eventId: "event-2" },
-    sourceId: source.sourceId,
-    maxAttempts: 4,
-  });
-  assert.equal(duplicateJob.jobId, job.jobId, "terminal event + extractor is idempotent");
-  const mutationsBeforeJobUpdate = repository.listMutations().length;
-  const updatedJob = repository.updateJob({
-    jobId: job.jobId,
-    expectedVersion: job.version,
-    sourceId: null,
-    maxAttempts: 8,
-    nextAttemptAt: "2026-07-21T00:00:00.000Z",
-  });
-  const replayAfterMutableUpdate = repository.createJob({
-    type: "terminal-extraction",
-    terminalEventId: "terminal-1",
-    extractorVersion: "extractor-v1",
-    cursor: { sessionId: "session-1", sequence: 11, eventId: "event-2" },
-    sourceId: source.sourceId,
-    maxAttempts: 4,
-  });
-  assert.equal(replayAfterMutableUpdate.jobId, job.jobId);
-  assert.equal(replayAfterMutableUpdate.version, updatedJob.version);
-  assert.equal(replayAfterMutableUpdate.sourceId, undefined);
-  assert.equal(replayAfterMutableUpdate.maxAttempts, 8);
-  assert.equal(repository.listMutations().length, mutationsBeforeJobUpdate + 1);
+  repository.updateSettings({ expectedVersion: 1, autoCommit: true });
   repository.close();
 
-  const reopened = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-    now,
-  });
-  context.after(() => reopened.close());
-  assert.equal(reopened.getSettings().enabled, true);
+  const reopened = open(fixture);
+  assert.deepEqual(reopened.getFact(fact.factId), fact);
+  assert.deepEqual(reopened.getProposal(proposal.proposalId), proposal);
   assert.equal(reopened.getSettings().autoCommit, true);
-  assert.equal(reopened.getSettings().reviewMode, "quality");
-  assert.equal(reopened.getFact("fact-from-review")?.sourceId, source.sourceId);
-  assert.equal(reopened.getProposal("proposal-1")?.resolvedFactId, "fact-from-review");
-  assert.equal(reopened.getJob(job.jobId)?.extractorVersion, "extractor-v1");
-  assert.equal(reopened.listMutations().length, 7);
-
-  const database = new Database(paths.workspace.memoryDatabase, {
-    readonly: true,
-    fileMustExist: true,
-  });
-  context.after(() => database.close());
-  const migration = database
-    .prepare("SELECT version, name FROM memory_schema_migrations ORDER BY version DESC LIMIT 1")
-    .get() as { readonly version: number; readonly name: string };
-  assert.deepEqual(migration, {
-    version: MEMORY_SCHEMA_VERSION,
-    name: MEMORY_SCHEMA_CURRENT_MIGRATION_NAME,
-  });
+  assert.equal(reopened.listJobs().length, 1);
+  const state = JSON.parse(await readFile(join(fixture.storageRoot, "state.json"), "utf8")) as {
+    schemaVersion: number;
+    workspaceId: string;
+    revision: number;
+    mutations: unknown[];
+    idempotency: object;
+  };
+  assert.equal(state.schemaVersion, 1);
+  assert.equal(state.workspaceId, fixture.workspaceId);
+  assert.ok(state.revision >= 5);
+  assert.ok(state.mutations.length >= 5);
+  assert.deepEqual(state.idempotency, {});
+  assert.equal(existsSync(join(fixture.storageRoot, "memory.sqlite")), false);
 });
 
-test("memory writes are idempotent, CAS guarded and transactionally rolled back", async (context) => {
-  const fixture = await createFixture("transactions");
+test("transaction is nested, synchronous and commits one snapshot revision", async (context) => {
+  const fixture = await createFixture();
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-  });
-  context.after(() => repository.close());
+  const repository = open(fixture);
+  const before = await revision(fixture.storageRoot);
 
-  const create = {
-    kind: "preference" as const,
-    title: "Language",
-    content: "Reply in Chinese",
-    idempotencyKey: "fact-create-1",
-  };
-  const first = repository.createFact(create);
-  const replay = repository.createFact(create);
-  assert.equal(replay.factId, first.factId);
-  assert.equal(repository.listFacts().length, 1);
-  assert.deepEqual(
-    repository.listMutations({ entityType: "fact", entityId: first.factId }).length,
-    1,
-  );
+  repository.transaction((outer) => {
+    outer.createFact({
+      factId: "fact-a",
+      kind: "preference",
+      title: "A",
+      content: "A body",
+    });
+    outer.transaction((inner) => {
+      inner.createFact({
+        factId: "fact-b",
+        kind: "preference",
+        title: "B",
+        content: "B body",
+      });
+    });
+  });
+  assert.equal(await revision(fixture.storageRoot), before + 1);
+
   assert.throws(
-    () => repository.createFact({ ...create, content: "Reply in English" }),
+    () =>
+      repository.transaction(() => {
+        repository.createFact({
+          factId: "rolled-back",
+          kind: "reference",
+          title: "rollback",
+          content: "rollback body",
+        });
+        throw new Error("rollback");
+      }),
+    /rollback/u,
+  );
+  assert.equal(repository.getFact("rolled-back"), undefined);
+
+  assert.throws(
+    () =>
+      // @ts-expect-error The public type rejects Promise-like transaction results.
+      repository.transaction(
+        async () => undefined,
+      ),
+    MemoryAsyncTransactionError,
+  );
+});
+
+test("idempotency replays the marker and rejects another request", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = open(fixture);
+  const first = repository.createFact({
+    factId: "fact-idempotent",
+    kind: "preference",
+    title: "stable",
+    content: "stable body",
+    idempotencyKey: "request-1",
+  });
+  const replay = repository.createFact({
+    factId: "fact-idempotent",
+    kind: "preference",
+    title: "stable",
+    content: "stable body",
+    idempotencyKey: "request-1",
+  });
+  assert.deepEqual(replay, first);
+  assert.throws(
+    () =>
+      repository.createFact({
+        factId: "fact-other",
+        kind: "preference",
+        title: "changed",
+        content: "changed body",
+        idempotencyKey: "request-1",
+      }),
     MemoryIdempotencyConflictError,
   );
+});
 
-  const updated = repository.updateFact({
-    factId: first.factId,
-    expectedVersion: first.version,
-    pinned: true,
+test("two repository instances serialize CAS writes and observe current state", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const first = open(fixture);
+  const second = open(fixture);
+  const fact = first.createFact({
+    factId: "fact-cas",
+    kind: "project_fact",
+    title: "one",
+    content: "one",
   });
-  assert.equal(updated.version, 2);
+  const updated = second.updateFact({
+    factId: fact.factId,
+    expectedVersion: fact.version,
+    title: "two",
+  });
+  assert.equal(first.getFact(fact.factId)?.title, "two");
   assert.throws(
-    () =>
-      repository.updateFact({
-        factId: first.factId,
-        expectedVersion: first.version,
-        pinned: false,
-      }),
+    () => first.updateFact({ factId: fact.factId, expectedVersion: fact.version, title: "lost" }),
     MemoryConflictError,
   );
-  assert.equal(repository.getFact(first.factId)?.pinned, true);
+  assert.equal(first.getFact(fact.factId)?.version, updated.version);
+});
 
-  const mutationCount = repository.listMutations().length;
-  assert.throws(
-    () =>
-      repository.transaction((transaction) => {
-        transaction.createFact({
-          factId: "rolled-back-fact",
-          kind: "reference",
-          title: "Rollback",
-          content: "This must not commit",
-          idempotencyKey: "rolled-back-create",
-        });
-        throw new Error("force rollback");
-      }),
-    /force rollback/,
-  );
-  assert.equal(repository.getFact("rolled-back-fact"), undefined);
-  assert.equal(repository.listMutations().length, mutationCount);
-  const retried = repository.createFact({
-    factId: "rolled-back-fact",
-    kind: "reference",
-    title: "Rollback",
-    content: "This must not commit",
-    idempotencyKey: "rolled-back-create",
-  });
-  assert.equal(retried.factId, "rolled-back-fact", "idempotency claim rolled back too");
-
-  const mutationsBeforeAsync = repository.listMutations().length;
-  const runAsyncTransaction = () => {
-    // @ts-expect-error MemoryRepository transactions deliberately reject Promise-like results.
-    return repository.transaction(async (transaction) => {
-      transaction.createFact({
-        factId: "async-rolled-back-fact",
-        kind: "reference",
-        title: "Async rollback",
-        content: "Promise callbacks must not commit",
-        idempotencyKey: "async-rolled-back-create",
+test("independent processes serialize snapshot writes without losing facts", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  open(fixture).close();
+  const script = `
+    import { MemoryRepository } from "./src/memory/memory-repository.ts";
+    const [storageRoot, workspaceId, prefix] = process.argv.slice(1);
+    const repository = new MemoryRepository({ storageRoot, workspaceId, busyTimeoutMs: 10000 });
+    for (let index = 0; index < 5; index++) {
+      repository.createFact({
+        factId: prefix + "-" + index,
+        kind: "project_fact",
+        title: prefix + " title " + index,
+        content: prefix + " content " + index
       });
-      return "not synchronous";
-    });
-  };
-  assert.throws(runAsyncTransaction, MemoryAsyncTransactionError);
-  assert.equal(repository.getFact("async-rolled-back-fact"), undefined);
-  assert.equal(repository.listMutations().length, mutationsBeforeAsync);
-});
-
-test("accepting a conflict proposal atomically replaces the active fact", async (context) => {
-  const fixture = await createFixture("conflict-replace");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-  });
-  const concurrentRepository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-  });
-  context.after(() => repository.close());
-  context.after(() => concurrentRepository.close());
-
-  const originalSource = repository.createSource({
-    sourceId: "source-original",
-    sessionId: "session-original",
-    digest: "sha256:original",
-  });
-  const replacementSource = repository.createSource({
-    sourceId: "source-replacement",
-    sessionId: "session-replacement",
-    digest: "sha256:replacement",
-  });
-  const original = repository.createFact({
-    factId: "fact-language",
-    kind: "preference",
-    title: "Response language",
-    content: "Reply in English",
-    confidence: 0.8,
-    sourceId: originalSource.sourceId,
-    pinned: true,
-    expiresAt: "2027-01-01T00:00:00.000Z",
-  });
-  const proposal = repository.createProposal({
-    proposalId: "proposal-language-correction",
-    kind: "preference",
-    title: "Response language",
-    content: "Reply in Chinese",
-    reason: "The user explicitly corrected the language",
-    confidence: 0.95,
-    sourceId: replacementSource.sourceId,
-    conflictStatus: "potential",
-    conflictFactId: original.factId,
-  });
-
-  const approval = {
-    proposalId: proposal.proposalId,
-    expectedVersion: proposal.version,
-    resolution: "accepted" as const,
-    patch: {
-      kind: "correction",
-      title: "Preferred response language",
-      content: "Always reply in Chinese",
-      confidence: 0.99,
-    },
-    idempotencyKey: "accept-conflict",
-  } as const;
-  const faultInjection = new Database(paths.workspace.memoryDatabase);
-  faultInjection.exec(
-    `CREATE TRIGGER fail_conflict_proposal_resolution
-     BEFORE UPDATE ON memory_proposals
-     WHEN NEW.status = 'accepted'
-     BEGIN
-       SELECT RAISE(ABORT, 'injected proposal resolution failure');
-     END;`,
-  );
-  assert.throws(() => repository.resolveProposal(approval), /injected proposal resolution failure/);
-  assert.equal(repository.getFact(original.factId)?.version, original.version);
-  assert.equal(repository.getFact(original.factId)?.content, original.content);
-  assert.equal(repository.getProposal(proposal.proposalId)?.status, "pending");
-  assert.deepEqual(
-    repository
-      .listMutations({ entityType: "fact", entityId: original.factId })
-      .map((mutation) => mutation.action),
-    ["fact.created"],
-  );
-  faultInjection.exec("DROP TRIGGER fail_conflict_proposal_resolution");
-  faultInjection.close();
-
-  const accepted = repository.resolveProposal(approval);
-  assert.equal(accepted.fact?.factId, original.factId);
-  assert.equal(accepted.fact?.version, original.version + 1);
-  assert.equal(accepted.fact?.kind, "correction");
-  assert.equal(accepted.fact?.title, "Preferred response language");
-  assert.equal(accepted.fact?.content, "Always reply in Chinese");
-  assert.equal(accepted.fact?.confidence, 0.99);
-  assert.equal(accepted.fact?.sourceId, replacementSource.sourceId);
-  assert.equal(accepted.fact?.state, "active");
-  assert.equal(accepted.fact?.pinned, true);
-  assert.equal(accepted.fact?.expiresAt, "2027-01-01T00:00:00.000Z");
-  assert.equal(accepted.proposal.resolvedFactId, original.factId);
-  assert.equal(accepted.proposal.conflictStatus, "resolved");
-  assert.deepEqual(
-    repository.listFacts({ states: ["active"] }).map((fact) => fact.factId),
-    [original.factId],
-  );
-  assert.deepEqual(
-    repository
-      .listMutations({ entityType: "fact", entityId: original.factId })
-      .map((mutation) => mutation.action),
-    ["fact.created", "fact.updated"],
-  );
-
-  const mutationCount = repository.listMutations().length;
-  const replay = concurrentRepository.resolveProposal(approval);
-  assert.equal(replay.fact?.factId, original.factId);
-  assert.equal(replay.fact?.version, original.version + 1);
-  assert.equal(repository.listMutations().length, mutationCount);
-  assert.throws(
-    () =>
-      concurrentRepository.resolveProposal({
-        proposalId: proposal.proposalId,
-        expectedVersion: proposal.version,
-        resolution: "accepted",
-        idempotencyKey: "stale-conflict-approval",
-      }),
-    MemoryConflictError,
-  );
-
-  const forgotten = repository.forgetFact({
-    factId: original.factId,
-    expectedVersion: accepted.fact!.version,
-    idempotencyKey: "forget-replaced-conflict",
-  });
-  assert.equal(forgotten.state, "forgotten");
-  assert.equal(repository.getProposal(proposal.proposalId)?.status, "deleted");
-});
-
-test("conflict approval fails closed when its fact is stale or inactive", async (context) => {
-  const fixture = await createFixture("conflict-fail-closed");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-  });
-  context.after(() => repository.close());
-
-  const staleFact = repository.createFact({
-    factId: "fact-stale",
-    kind: "preference",
-    title: "Language",
-    content: "Reply in English",
-  });
-  const staleProposal = repository.createProposal({
-    proposalId: "proposal-stale",
-    kind: "preference",
-    title: "Language",
-    content: "Reply in Chinese",
-    reason: "User correction",
-    conflictStatus: "potential",
-    conflictFactId: staleFact.factId,
-  });
-  const changedFact = repository.updateFact({
-    factId: staleFact.factId,
-    expectedVersion: staleFact.version,
-    pinned: true,
-  });
-  assert.throws(
-    () =>
-      repository.resolveProposal({
-        proposalId: staleProposal.proposalId,
-        expectedVersion: staleProposal.version,
-        resolution: "accepted",
-      }),
-    MemoryConflictError,
-  );
-  assert.equal(repository.getProposal(staleProposal.proposalId)?.status, "pending");
-  assert.equal(repository.getFact(staleFact.factId)?.version, changedFact.version);
-  assert.equal(repository.listFacts({ states: ["active"] }).length, 1);
-
-  const inactiveFact = repository.createFact({
-    factId: "fact-inactive",
-    kind: "project_fact",
-    title: "Build command",
-    content: "Use npm run build",
-  });
-  const inactiveProposal = repository.createProposal({
-    proposalId: "proposal-inactive",
-    kind: "project_fact",
-    title: "Build command",
-    content: "Use npm run compile",
-    reason: "User correction",
-    conflictStatus: "potential",
-    conflictFactId: inactiveFact.factId,
-  });
-  repository.updateFact({
-    factId: inactiveFact.factId,
-    expectedVersion: inactiveFact.version,
-    state: "disabled",
-  });
-  assert.throws(
-    () =>
-      repository.resolveProposal({
-        proposalId: inactiveProposal.proposalId,
-        expectedVersion: inactiveProposal.version,
-        resolution: "accepted",
-      }),
-    MemoryConflictError,
-  );
-  assert.equal(repository.getProposal(inactiveProposal.proposalId)?.status, "pending");
-
-  const rejectedFact = repository.createFact({
-    factId: "fact-rejected",
-    kind: "reference",
-    title: "Docs",
-    content: "Use the stable docs",
-  });
-  const rejectedProposal = repository.createProposal({
-    proposalId: "proposal-rejected",
-    kind: "reference",
-    title: "Docs",
-    content: "Use preview docs",
-    reason: "Unconfirmed change",
-    conflictStatus: "potential",
-    conflictFactId: rejectedFact.factId,
-  });
-  const rejected = repository.resolveProposal({
-    proposalId: rejectedProposal.proposalId,
-    expectedVersion: rejectedProposal.version,
-    resolution: "rejected",
-  });
-  assert.equal(rejected.fact, undefined);
-  assert.equal(repository.getFact(rejectedFact.factId)?.version, rejectedFact.version);
-  assert.equal(repository.getFact(rejectedFact.factId)?.content, rejectedFact.content);
-
-  const missingFact = repository.createFact({
-    factId: "fact-missing",
-    kind: "correction",
-    title: "Deleted target",
-    content: "Original target body",
-  });
-  const missingProposal = repository.createProposal({
-    proposalId: "proposal-missing",
-    kind: "correction",
-    title: "Deleted target",
-    content: "Replacement body",
-    reason: "Target later disappeared",
-    conflictStatus: "potential",
-    conflictFactId: missingFact.factId,
-  });
-  const corruption = new Database(paths.workspace.memoryDatabase);
-  corruption.pragma("foreign_keys = ON");
-  corruption.prepare("DELETE FROM memory_facts WHERE fact_id = ?").run(missingFact.factId);
-  corruption.close();
-  assert.equal(repository.getProposal(missingProposal.proposalId)?.conflictFactId, undefined);
-  const factCountBeforeMissingApproval = repository.listFacts().length;
-  assert.throws(
-    () =>
-      repository.resolveProposal({
-        proposalId: missingProposal.proposalId,
-        expectedVersion: missingProposal.version,
-        resolution: "accepted",
-      }),
-    MemoryConflictError,
-  );
-  assert.equal(repository.getProposal(missingProposal.proposalId)?.status, "pending");
-  assert.equal(repository.listFacts().length, factCountBeforeMissingApproval);
-});
-
-test("memory authority is isolated by workspace and rejects a mismatched database", async (context) => {
-  const fixture = await createFixture("isolation");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const workspaceB = join(fixture.root, "workspace-b");
-  await mkdir(workspaceB);
-  const pathsA = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const pathsB = resolvePicoPaths(workspaceB, { picoHome: fixture.picoHome });
-  assert.notEqual(pathsA.workspace.id, pathsB.workspace.id);
-  assert.notEqual(pathsA.workspace.memoryDatabase, pathsB.workspace.memoryDatabase);
-
-  const repositoryA = new MemoryRepository({
-    databasePath: pathsA.workspace.memoryDatabase,
-    workspaceId: pathsA.workspace.id,
-  });
-  const repositoryB = new MemoryRepository({
-    databasePath: pathsB.workspace.memoryDatabase,
-    workspaceId: pathsB.workspace.id,
-  });
-  context.after(() => repositoryA.close());
-  context.after(() => repositoryB.close());
-  repositoryA.createFact({
-    factId: "workspace-a-only",
-    kind: "project_fact",
-    title: "Workspace A",
-    content: "Private to A",
-  });
-  assert.equal(repositoryA.listFacts().length, 1);
-  assert.equal(repositoryB.listFacts().length, 0);
-  assert.throws(
-    () =>
-      new MemoryRepository({
-        databasePath: pathsA.workspace.memoryDatabase,
-        workspaceId: pathsB.workspace.id,
-      }),
-    MemoryWorkspaceMismatchError,
-  );
-
-  const existingParent = join(fixture.root, "existing-database-parent");
-  await mkdir(existingParent);
-  await chmod(existingParent, 0o755);
-  const modeBefore = (await stat(existingParent)).mode & 0o777;
-  const arbitraryParentRepository = new MemoryRepository({
-    databasePath: join(existingParent, "memory.sqlite"),
-    workspaceId: pathsA.workspace.id,
-  });
-  arbitraryParentRepository.close();
-  assert.equal((await stat(existingParent)).mode & 0o777, modeBefore);
-});
-
-test("memory migration rejects future schemas and rolls back failed initialization", async (context) => {
-  const fixture = await createFixture("migration");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const futurePath = join(fixture.root, "future.sqlite");
-  const future = new Database(futurePath);
-  future.exec(
-    `CREATE TABLE memory_schema_migrations (
-       version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
-     );
-     INSERT INTO memory_schema_migrations VALUES (5, 'future_memory', '2026-07-20T00:00:00.000Z');`,
-  );
-  future.close();
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  assert.throws(
-    () =>
-      new MemoryRepository({
-        databasePath: futurePath,
-        workspaceId: paths.workspace.id,
-      }),
-    MemorySchemaVersionError,
-  );
-  const futureInspection = new Database(futurePath, { readonly: true, fileMustExist: true });
-  assert.deepEqual(
-    futureInspection.prepare("SELECT version, name FROM memory_schema_migrations").all(),
-    [{ version: 5, name: "future_memory" }],
-  );
-  assert.deepEqual(
-    futureInspection
-      .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'")
-      .get(),
-    { count: 1 },
-  );
-  futureInspection.close();
-
-  const rollbackPath = join(fixture.root, "rollback.sqlite");
-  const rollback = new Database(rollbackPath);
-  rollback.exec(
-    `CREATE TABLE memory_schema_migrations (
-       version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
-     );
-     CREATE TABLE memory_settings (sentinel TEXT NOT NULL);`,
-  );
-  rollback.close();
-  assert.throws(() =>
-    new MemoryRepository({
-      databasePath: rollbackPath,
-      workspaceId: paths.workspace.id,
-    }).close(),
-  );
-  const rollbackInspection = new Database(rollbackPath, { readonly: true, fileMustExist: true });
-  assert.deepEqual(
-    rollbackInspection
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-      .all(),
-    [{ name: "memory_schema_migrations" }, { name: "memory_settings" }],
-  );
-  assert.deepEqual(rollbackInspection.prepare("SELECT * FROM memory_schema_migrations").all(), []);
-  rollbackInspection.close();
-
-  const upgradePath = join(fixture.root, "upgrade-v1.sqlite");
-  new MemoryRepository({
-    databasePath: upgradePath,
-    workspaceId: paths.workspace.id,
-  }).close();
-  const downgradeFixture = new Database(upgradePath);
-  downgradeFixture.exec(
-    `DELETE FROM memory_schema_migrations WHERE version >= 3;
-     ALTER TABLE memory_settings DROP COLUMN review_mode;
-     ALTER TABLE memory_jobs DROP COLUMN model_calls;`,
-  );
-  downgradeFixture.close();
-  const upgraded = new MemoryRepository({
-    databasePath: upgradePath,
-    workspaceId: paths.workspace.id,
-  });
-  assert.equal(readSecureDeletePending(upgradePath), 0);
-  assert.equal(upgraded.getSettings().reviewMode, "balanced");
-  upgraded.close();
-  const upgradeInspection = new Database(upgradePath, { readonly: true, fileMustExist: true });
-  assert.deepEqual(
-    upgradeInspection
-      .prepare("SELECT version, name FROM memory_schema_migrations ORDER BY version")
-      .all(),
-    [
-      { version: 1, name: "workspace_memory_foundation" },
-      { version: 2, name: "secure_delete_checkpoint_state" },
-      { version: 3, name: "workspace_memory_review_mode" },
-      { version: 4, name: MEMORY_SCHEMA_CURRENT_MIGRATION_NAME },
-    ],
-  );
-  upgradeInspection.close();
-});
-
-test("busy secure-delete checkpoints stay durable and retry without duplicate effects", async (context) => {
-  const fixture = await createFixture("secure-delete-retry");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-    busyTimeoutMs: 1,
-  });
-  context.after(() => {
-    if (repositoryIsOpen(repository)) repository.close();
-  });
-
-  const retrySecret = "secure-delete-retry-secret-f83882";
-  const retryFact = repository.createFact({
-    factId: "secure-delete-retry-fact",
-    kind: "reference",
-    title: retrySecret,
-    content: retrySecret,
-  });
-  const retryReader = holdFactReadSnapshot(
-    paths.workspace.memoryDatabase,
-    retryFact.factId,
-    retrySecret,
-  );
-  assert.throws(
-    () =>
-      repository.forgetFact({
-        factId: retryFact.factId,
-        expectedVersion: retryFact.version,
-        idempotencyKey: "secure-delete-retry",
-      }),
-    MemorySecureDeletePendingError,
-  );
-  assert.equal(readSecureDeletePending(paths.workspace.memoryDatabase), 1);
-  assert.equal(repository.getFact(retryFact.factId)?.version, 2);
-  assert.equal(repository.listMutations({ entityId: retryFact.factId }).length, 2);
-  releaseReadSnapshot(retryReader);
-
-  const replayedForget = repository.forgetFact({
-    factId: retryFact.factId,
-    expectedVersion: retryFact.version,
-    idempotencyKey: "secure-delete-retry",
-  });
-  assert.equal(replayedForget.version, 2);
-  assert.equal(replayedForget.state, "forgotten");
-  assert.equal(repository.listMutations({ entityId: retryFact.factId }).length, 2);
-  assert.equal(readSecureDeletePending(paths.workspace.memoryDatabase), 0);
-
-  const nextWriteSecret = "secure-delete-next-write-secret-a615f4";
-  const nextWriteFact = repository.createFact({
-    factId: "secure-delete-next-write-fact",
-    kind: "reference",
-    title: nextWriteSecret,
-    content: nextWriteSecret,
-  });
-  const nextWriteReader = holdFactReadSnapshot(
-    paths.workspace.memoryDatabase,
-    nextWriteFact.factId,
-    nextWriteSecret,
-  );
-  assert.throws(
-    () =>
-      repository.forgetFact({
-        factId: nextWriteFact.factId,
-        expectedVersion: nextWriteFact.version,
-        idempotencyKey: "secure-delete-next-write",
-      }),
-    MemorySecureDeletePendingError,
-  );
-  releaseReadSnapshot(nextWriteReader);
-  const followingFact = repository.createFact({
-    factId: "write-after-pending-checkpoint",
-    kind: "project_fact",
-    title: "Checkpoint completed",
-    content: "A later write may proceed",
-  });
-  assert.equal(followingFact.version, 1);
-  const nextWriteReplay = repository.forgetFact({
-    factId: nextWriteFact.factId,
-    expectedVersion: nextWriteFact.version,
-    idempotencyKey: "secure-delete-next-write",
-  });
-  assert.equal(nextWriteReplay.version, 2);
-  assert.equal(repository.listMutations({ entityId: nextWriteFact.factId }).length, 2);
-  repository.close();
-
-  for (const secret of [retrySecret, nextWriteSecret]) {
-    for (const path of [
-      paths.workspace.memoryDatabase,
-      `${paths.workspace.memoryDatabase}-wal`,
-      `${paths.workspace.memoryDatabase}-shm`,
-    ]) {
-      if (!existsSync(path)) continue;
-      assert.equal((await readFile(path)).includes(Buffer.from(secret)), false);
     }
-  }
+  `;
+  const run = (prefix: string) =>
+    execFileAsync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", script, fixture.storageRoot, fixture.workspaceId, prefix],
+      { cwd: process.cwd() },
+    );
+  await Promise.all([run("process-a"), run("process-b")]);
+  const facts = open(fixture).listFacts({ limit: 20 });
+  assert.equal(facts.length, 10);
+  assert.deepEqual(
+    new Set(facts.map((fact) => fact.factId)),
+    new Set(Array.from({ length: 5 }, (_, index) => [`process-a-${index}`, `process-b-${index}`]).flat()),
+  );
 });
 
-test("close reports durable secure-delete pending state and restart completes it", async (context) => {
-  const fixture = await createFixture("secure-delete-restart");
+test("future schema and workspace mismatch fail closed", async (context) => {
+  const fixture = await createFixture();
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-    busyTimeoutMs: 1,
-  });
-  const secret = "secure-delete-restart-secret-c31df7";
+  open(fixture).close();
+  const statePath = join(fixture.storageRoot, "state.json");
+  const original = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+
+  await writeFile(statePath, `${JSON.stringify({ ...original, schemaVersion: 2 })}\n`);
+  assert.throws(() => open(fixture), FileStorageIntegrityError);
+
+  await writeFile(statePath, `${JSON.stringify({ ...original, workspaceId: "another" })}\n`);
+  assert.throws(() => open(fixture), FileStorageIntegrityError);
+});
+
+test("forget atomically clears fact and linked proposal bodies from live files", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = open(fixture);
+  const title = "FORGET_SECRET_TITLE_9eb7";
+  const content = "FORGET_SECRET_CONTENT_a12c";
+  const reason = "FORGET_SECRET_REASON_4d51";
   const fact = repository.createFact({
-    factId: "secure-delete-restart-fact",
+    factId: "fact-forget",
     kind: "correction",
-    title: secret,
-    content: secret,
+    title,
+    content,
   });
-  const reader = holdFactReadSnapshot(paths.workspace.memoryDatabase, fact.factId, secret);
-  assert.throws(
-    () =>
-      repository.forgetFact({
-        factId: fact.factId,
-        expectedVersion: fact.version,
-        idempotencyKey: "secure-delete-restart",
-      }),
-    MemorySecureDeletePendingError,
-  );
-  assert.throws(() => repository.close(), MemorySecureDeletePendingError);
-  assert.equal(readSecureDeletePending(paths.workspace.memoryDatabase), 1);
-  releaseReadSnapshot(reader);
-
-  const reopened = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-    busyTimeoutMs: 1,
-  });
-  assert.equal(readSecureDeletePending(paths.workspace.memoryDatabase), 0);
-  assert.equal(reopened.getFact(fact.factId)?.state, "forgotten");
-  assert.equal(reopened.getFact(fact.factId)?.version, 2);
-  assert.equal(reopened.listMutations({ entityId: fact.factId }).length, 2);
-  reopened.close();
-  assert.equal(
-    (await readFile(paths.workspace.memoryDatabase)).includes(Buffer.from(secret)),
-    false,
-  );
-});
-
-test("forget clears fact and linked proposal bodies while retaining a body-free tombstone", async (context) => {
-  const fixture = await createFixture("forget");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
-    workspaceId: paths.workspace.id,
-  });
-  const secret = "sensitive-memory-body-4e7011f3";
-  const proposal = repository.createProposal({
-    proposalId: "forget-proposal",
+  repository.createProposal({
+    proposalId: "linked",
     kind: "correction",
-    title: `Title ${secret}`,
-    content: `Content ${secret}`,
-    reason: `Reason ${secret}`,
+    title,
+    content,
+    reason,
+    conflictStatus: "confirmed",
+    conflictFactId: fact.factId,
   });
-  const accepted = repository.resolveProposal({
-    proposalId: proposal.proposalId,
-    expectedVersion: proposal.version,
-    resolution: "accepted",
-    factId: "forget-fact",
-  });
+
   const forgotten = repository.forgetFact({
-    factId: "forget-fact",
-    expectedVersion: accepted.fact!.version,
-    idempotencyKey: "forget-1",
+    factId: fact.factId,
+    expectedVersion: fact.version,
   });
   assert.equal(forgotten.state, "forgotten");
   assert.equal(forgotten.title, null);
   assert.equal(forgotten.content, null);
-  assert.equal(forgotten.pinned, false);
-  const linkedProposal = repository.getProposal(proposal.proposalId);
-  assert.equal(linkedProposal?.status, "deleted");
-  assert.equal(linkedProposal?.title, null);
-  assert.equal(linkedProposal?.content, null);
-  assert.equal(linkedProposal?.reason, null);
-  assert.equal(
-    repository.listMutations({ entityId: "forget-fact" }).at(-1)?.action,
-    "fact.forgotten",
-  );
-  repository.close();
-
-  for (const path of [
-    paths.workspace.memoryDatabase,
-    `${paths.workspace.memoryDatabase}-wal`,
-    `${paths.workspace.memoryDatabase}-shm`,
-  ]) {
-    if (!existsSync(path)) continue;
-    const bytes = await readFile(path);
-    assert.equal(bytes.includes(Buffer.from(secret)), false, `${path} retained forgotten body`);
-  }
-
-  const inspection = new Database(paths.workspace.memoryDatabase, {
-    readonly: true,
-    fileMustExist: true,
-  });
-  context.after(() => inspection.close());
-  assert.deepEqual(
-    inspection
-      .prepare("SELECT title, content, state FROM memory_facts WHERE fact_id = 'forget-fact'")
-      .get(),
-    { title: null, content: null, state: "forgotten" },
-  );
-  assert.deepEqual(
-    inspection
-      .prepare("SELECT COUNT(*) AS count FROM memory_mutations WHERE action = 'fact.forgotten'")
-      .get(),
-    { count: 1 },
-  );
+  assert.equal(repository.getProposal("linked")?.status, "deleted");
+  const stored = await readFile(join(fixture.storageRoot, "state.json"), "utf8");
+  for (const secret of [title, content, reason]) assert.equal(stored.includes(secret), false);
 });
 
-async function createFixture(name: string): Promise<{
+interface Fixture {
   readonly root: string;
-  readonly workspace: string;
-  readonly picoHome: string;
-}> {
-  const root = await mkdtemp(join(tmpdir(), `pico-memory-${name}-`));
-  const workspace = join(root, "workspace");
-  const picoHome = join(root, "pico-home");
-  await Promise.all([mkdir(workspace), mkdir(picoHome)]);
-  return { root, workspace, picoHome };
+  readonly storageRoot: string;
+  readonly workspaceId: WorkspaceId;
 }
 
-function holdFactReadSnapshot(
-  databasePath: string,
-  factId: string,
-  expectedContent: string,
-): Database.Database {
-  const reader = new Database(databasePath, { readonly: true, fileMustExist: true });
-  reader.pragma("busy_timeout = 0");
-  reader.exec("BEGIN");
-  const row = reader.prepare("SELECT content FROM memory_facts WHERE fact_id = ?").get(factId) as {
-    readonly content: string;
+async function createFixture(): Promise<Fixture> {
+  const root = await mkdtemp(join(tmpdir(), "pico-memory-json-"));
+  return {
+    root,
+    storageRoot: join(root, "memory"),
+    workspaceId: "workspace:test" as WorkspaceId,
   };
-  assert.equal(row.content, expectedContent);
-  return reader;
 }
 
-function releaseReadSnapshot(reader: Database.Database): void {
-  if (!reader.open) return;
-  reader.exec("ROLLBACK");
-  reader.close();
+function open(fixture: Fixture): MemoryRepository {
+  return new MemoryRepository({
+    storageRoot: fixture.storageRoot,
+    workspaceId: fixture.workspaceId,
+    now: () => new Date("2026-07-25T12:00:00.000Z"),
+  });
 }
 
-function readSecureDeletePending(databasePath: string): number {
-  const database = new Database(databasePath, { readonly: true, fileMustExist: true });
-  try {
-    const row = database.prepare("SELECT secure_delete_pending FROM memory_maintenance").get() as {
-      readonly secure_delete_pending: number;
-    };
-    return row.secure_delete_pending;
-  } finally {
-    database.close();
-  }
-}
-
-function repositoryIsOpen(repository: MemoryRepository): boolean {
-  try {
-    repository.getSettings();
-    return true;
-  } catch {
-    return false;
-  }
+async function revision(storageRoot: string): Promise<number> {
+  const state = JSON.parse(await readFile(join(storageRoot, "state.json"), "utf8")) as {
+    revision: number;
+  };
+  return state.revision;
 }
