@@ -248,7 +248,7 @@ daemon subscription
                  └─ Renderer 将通知投影为 Transcript / Timeline / status
 ```
 
-Renderer 不直接读取 SQLite、文件系统、daemon token 或已有 Provider secret。用户在
+Renderer 不直接读取 Runtime 文件存储、daemon token 或已有 Provider secret。用户在
 Providers 页面输入的新 secret 会短暂经过 Renderer，并通过类型化 write-only 请求发送；
 它不会出现在响应、事件、Renderer Store、持久配置或日志中。Session 标题来自
 RuntimeEvent；Desktop metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自

@@ -79,7 +79,7 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
 
 ## 状态真源
 
-`$PICO_HOME/workspaces/<workspace-id>/runtime.sqlite` 由两个边界清晰的组件共享：
+`$PICO_HOME/workspaces/<workspace-id>/runtime/` 由两个边界清晰的组件共享：
 
 | 组件                | 负责的数据                                                                                  | 不负责的数据                  |
 | ------------------- | ------------------------------------------------------------------------------------------- | ----------------------------- |
@@ -92,8 +92,9 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
 Session 标题也属于 RuntimeEvent。Desktop session metadata 只保存 archive 等 UI 元数据；
 旧 metadata 由一次性迁移转换，正常读写只使用当前 schema，不以 metadata title 作为回退。
 
-`RuntimeStore` 是后台任务控制面的真源。它与 RuntimeEventStore 共用数据库和迁移身份，
-但通过不同表和 API 维持 bounded context，不能把 Job 状态当作 Session 历史。
+`RuntimeStore` 是后台任务控制面的真源。它与 RuntimeEventStore 共用 workspace 文件事务锁和
+commit 协调器，但通过不同 JSON/JSONL 文件和 API 维持 bounded context，不能把 Job 状态当作
+Session 历史。
 
 ## 路径模型
 
@@ -113,13 +114,17 @@ $PICO_HOME/
 ├── daemon-workspaces.json
 ├── file-history/
 └── workspaces/<workspace-id>/
-    ├── runtime.sqlite
+    ├── runtime/
+    │   ├── sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
+    │   ├── control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
+    │   ├── commit.json
+    │   └── lock/
     ├── sessions.db
     ├── todo.json
     ├── artifacts/
     ├── evidence/
     ├── traces/
-    ├── memory/
+    ├── memory/{state.json,lock/,summaries/}
     ├── tasks/
     ├── storage-operations/
     └── fork-staging/
@@ -141,7 +146,8 @@ $PICO_HOME/
 
 - Session 以 `workspace root + sessionId` 隔离，并通过 owner lease 和 per-session drain
   串行化持久变更。
-- RuntimeEvent 追加在 SQLite 事务中分配全局 sequence，并以 `eventId` 保证重试幂等。
+- RuntimeEvent 追加在 workspace 文件事务中按 Session 分配连续 sequence，并以 `eventId`
+  保证重试幂等；跨 Session 批次由 durable `commit.json` 保证全有或全无。
 - ToolScheduler 根据声明的文件读写资源构建冲突图；Bash 等动态能力使用保守资源边界。
 - 文件改动由 FileHistory、CAS blob 和 storage operation journal 支持 rewind/fork 恢复。
 - Approval、Hardline、Plan、Workspace trust 和 Hook 位于工具执行前的安全链；Hook 改写后

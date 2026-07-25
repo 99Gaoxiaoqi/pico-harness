@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { join, resolve } from "node:path";
 import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
 import { parseBackgroundYoloPolicySnapshot } from "../safety/background-yolo-policy-schema.js";
 import {
+  assertLocalFileStorageCapabilitiesSync,
+  assertPrivateDataFileSync,
   commitFileTransactionSync,
   mkdirPrivateSync,
   readJsonFileSync,
@@ -16,6 +18,15 @@ import { LeaseConflictError } from "../storage/owner-lease.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   DAEMON_RUN_STATUSES,
+  CRON_RUN_STATUSES,
+  JOB_COMMAND_KINDS,
+  JOB_COMPLETION_POLICIES,
+  JOB_EXECUTION_CLASSES,
+  JOB_STATUSES,
+  MERGE_REQUEST_STATUSES,
+  PROVIDER_CALL_PURPOSES,
+  PROVIDER_CALL_STATUSES,
+  TERMINAL_JOB_STATUSES,
   type CompletionOutboxRecord,
   type CronJobRecord,
   type CronRunRecord,
@@ -64,8 +75,6 @@ export class RuntimeConflictError extends Error {
 export interface RuntimeStoreOptions {
   workDir: string;
   storageRoot?: string;
-  /** @deprecated Use storageRoot. Treated as a local storage root, never as SQLite. */
-  databasePath?: string;
   picoHome?: string;
   now?: () => number;
 }
@@ -127,14 +136,6 @@ export interface CancelQueuedJobInput {
   reason?: string;
 }
 
-export interface LegacyTaskMigrationResult {
-  status: "absent" | "migrated" | "already_migrated";
-  imported: number;
-  skipped: number;
-  interrupted: number;
-  archivePath?: string;
-}
-
 export interface CreateCronJobInput {
   cronJobId: string;
   workspacePath: string;
@@ -180,7 +181,7 @@ export interface FinishCronRunInput {
   result?: Record<string, unknown>;
 }
 
-interface DaemonCommandState {
+export interface DaemonCommandState {
   commandType: string;
   idempotencyKey: string;
   requestHash: string;
@@ -192,7 +193,7 @@ interface DaemonCommandState {
   updatedAt: number;
 }
 
-interface RuntimeControlState {
+export interface RuntimeControlState {
   schemaVersion: typeof STATE_SCHEMA_VERSION;
   revision: number;
   lastTransactionId?: string;
@@ -209,7 +210,7 @@ interface RuntimeControlState {
   mergeRequests: Record<string, MergeRequestRecord>;
 }
 
-interface RuntimeEventEnvelope {
+export interface RuntimeEventEnvelope {
   schemaVersion: typeof LEDGER_SCHEMA_VERSION;
   type: "runtime-event";
   txId: string;
@@ -217,7 +218,7 @@ interface RuntimeEventEnvelope {
   event: RuntimeEventRecord;
 }
 
-type UsageLedgerEnvelope =
+export type UsageLedgerEnvelope =
   | {
       schemaVersion: typeof LEDGER_SCHEMA_VERSION;
       type: "provider-call";
@@ -233,6 +234,9 @@ type UsageLedgerEnvelope =
 
 interface RuntimeTransaction {
   state: RuntimeControlState;
+  baseRevision: number;
+  baseTransactionId?: string;
+  baseNextRuntimeEventSequence: number;
   events: Array<Omit<RuntimeEventEnvelope, "txId">>;
   usage: BufferedUsageLedgerEnvelope[];
 }
@@ -243,22 +247,66 @@ type BufferedUsageLedgerEnvelope =
 
 const activeTransactions = new Map<string, RuntimeTransaction>();
 
+interface RuntimeStoreIndex {
+  stateRevision: number;
+  stateTransactionId?: string;
+  daemonFileSize: number;
+  usageFileSize: number;
+  events: Array<Omit<RuntimeEventEnvelope, "txId">>;
+  eventIds: Set<string>;
+  providerCalls: Map<string, ProviderCallRecord>;
+  baselines: Map<string, UsageBaselineRecord>;
+  fullRebuildCount: number;
+  incrementalRefreshCount: number;
+}
+
+const runtimeStoreIndexes = new Map<string, RuntimeStoreIndex>();
+
+export interface RuntimeStoreIndexDiagnostics {
+  stateRevision: number;
+  daemonFileSize: number;
+  usageFileSize: number;
+  eventCount: number;
+  providerCallCount: number;
+  baselineCount: number;
+  fullRebuildCount: number;
+  incrementalRefreshCount: number;
+}
+
+/** Test-only visibility into the disposable process-local index. */
+export function inspectRuntimeStoreIndexForTesting(
+  storageRoot: string,
+): RuntimeStoreIndexDiagnostics | undefined {
+  const index = runtimeStoreIndexes.get(resolve(storageRoot));
+  if (!index) return undefined;
+  return {
+    stateRevision: index.stateRevision,
+    daemonFileSize: index.daemonFileSize,
+    usageFileSize: index.usageFileSize,
+    eventCount: index.events.length,
+    providerCallCount: index.providerCalls.size,
+    baselineCount: index.baselines.size,
+    fullRebuildCount: index.fullRebuildCount,
+    incrementalRefreshCount: index.incrementalRefreshCount,
+  };
+}
+
 /** Local JSON/JSONL control plane for recoverable tasks and daemon replay. */
 export class RuntimeStore {
   readonly storageRoot: string;
-  /** @deprecated Compatibility alias during the file-store cutover. */
-  readonly databasePath: string;
   private readonly now: () => number;
 
   constructor(options: RuntimeStoreOptions) {
+    if (options.storageRoot !== undefined && !options.storageRoot.trim()) {
+      throw new Error("RuntimeStore storageRoot must not be empty");
+    }
     this.storageRoot = resolve(
       options.storageRoot ??
-        options.databasePath ??
         resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.runtime,
     );
-    this.databasePath = this.storageRoot;
     this.now = options.now ?? Date.now;
     mkdirPrivateSync(this.storageRoot);
+    assertLocalFileStorageCapabilitiesSync(this.storageRoot);
     mkdirPrivateSync(join(this.storageRoot, "control"));
     this.write(() => undefined);
   }
@@ -1374,11 +1422,6 @@ export class RuntimeStore {
     };
   }
 
-  /** The JSON task ledger is deliberately not imported during the clean file-store cutover. */
-  async migrateLegacyTaskStore(_filePath: string): Promise<LegacyTaskMigrationResult> {
-    return { status: "absent", imported: 0, skipped: 0, interrupted: 0 };
-  }
-
   private closeQueuedCronRun(
     cronRunId: string,
     status: "blocked" | "skipped",
@@ -1483,10 +1526,8 @@ export class RuntimeStore {
   }
 
   private runtimeEvents(tx: RuntimeTransaction): Array<Omit<RuntimeEventEnvelope, "txId">> {
-    const persisted = decodeRuntimeEvents(
-      readJsonLinesSync(join(this.storageRoot, DAEMON_EVENTS_FILE), true),
-    );
-    const events = [...persisted, ...tx.events].sort(
+    const index = this.ensureStorageIndex(tx);
+    const events = [...index.events, ...tx.events].sort(
       (left, right) => left.sequence - right.sequence,
     );
     if (
@@ -1502,13 +1543,13 @@ export class RuntimeStore {
     providerCalls: Map<string, ProviderCallRecord>;
     baselines: Map<string, UsageBaselineRecord>;
   } {
-    const records = [
-      ...decodeUsageLedger(readJsonLinesSync(join(this.storageRoot, USAGE_LEDGER_FILE), true)),
-      ...tx.usage,
-    ];
-    const providerCalls = new Map<string, ProviderCallRecord>();
-    const baselines = new Map<string, UsageBaselineRecord>();
-    for (const envelope of records) {
+    const index = this.ensureStorageIndex(tx);
+    if (tx.usage.length === 0) {
+      return { providerCalls: index.providerCalls, baselines: index.baselines };
+    }
+    const providerCalls = new Map(index.providerCalls);
+    const baselines = new Map(index.baselines);
+    for (const envelope of tx.usage) {
       if (envelope.type === "provider-call") {
         if (providerCalls.has(envelope.record.callId)) {
           throw new Error(`usage-ledger.jsonl 包含重复 callId: ${envelope.record.callId}`);
@@ -1522,6 +1563,60 @@ export class RuntimeStore {
       }
     }
     return { providerCalls, baselines };
+  }
+
+  private ensureStorageIndex(tx: RuntimeTransaction): RuntimeStoreIndex {
+    const state = {
+      revision: tx.baseRevision,
+      lastTransactionId: tx.baseTransactionId,
+      nextRuntimeEventSequence: tx.baseNextRuntimeEventSequence,
+    };
+    const existing = runtimeStoreIndexes.get(this.storageRoot);
+    if (
+      existing &&
+      existing.stateRevision === state.revision &&
+      existing.stateTransactionId === state.lastTransactionId
+    ) {
+      return existing;
+    }
+    const refreshed = existing
+      ? refreshRuntimeStoreIndex(this.storageRoot, state, existing)
+      : rebuildRuntimeStoreIndex(this.storageRoot, state);
+    runtimeStoreIndexes.set(this.storageRoot, refreshed);
+    return refreshed;
+  }
+
+  private refreshExistingStorageIndex(state: RuntimeControlState): void {
+    const existing = runtimeStoreIndexes.get(this.storageRoot);
+    if (!existing) return;
+    runtimeStoreIndexes.set(
+      this.storageRoot,
+      refreshRuntimeStoreIndex(this.storageRoot, state, existing),
+    );
+  }
+
+  private updateStorageIndexAfterCommit(tx: RuntimeTransaction, transactionId: string): void {
+    const index = runtimeStoreIndexes.get(this.storageRoot);
+    if (!index) return;
+    for (const event of tx.events) {
+      if (index.eventIds.has(event.event.eventId)) {
+        runtimeStoreIndexes.delete(this.storageRoot);
+        return;
+      }
+      index.events.push(clone(event));
+      index.eventIds.add(event.event.eventId);
+    }
+    for (const envelope of tx.usage) {
+      if (envelope.type === "provider-call") {
+        index.providerCalls.set(envelope.record.callId, clone(envelope.record));
+      } else {
+        index.baselines.set(envelope.record.baselineId, clone(envelope.record));
+      }
+    }
+    index.stateRevision = tx.state.revision;
+    index.stateTransactionId = transactionId;
+    index.daemonFileSize = fileSize(join(this.storageRoot, DAEMON_EVENTS_FILE));
+    index.usageFileSize = fileSize(join(this.storageRoot, USAGE_LEDGER_FILE));
   }
 
   private requireJob(jobId: string, tx: RuntimeTransaction): JobRecord {
@@ -1571,7 +1666,9 @@ export class RuntimeStore {
     if (active) return operation(active);
     return this.withRuntimeLock(() => {
       recoverFileTransactionSync(this.storageRoot, { commitFileName: COMMIT_FILE });
-      return operation({ state: this.loadState(), events: [], usage: [] });
+      const state = this.loadState();
+      this.refreshExistingStorageIndex(state);
+      return operation(createRuntimeTransaction(state));
     });
   }
 
@@ -1591,7 +1688,9 @@ export class RuntimeStore {
     return this.withRuntimeLock(() => {
       recoverFileTransactionSync(this.storageRoot, { commitFileName: COMMIT_FILE });
       const stateExists = existsSync(join(this.storageRoot, STATE_FILE));
-      const tx: RuntimeTransaction = { state: this.loadState(), events: [], usage: [] };
+      const state = this.loadState();
+      this.refreshExistingStorageIndex(state);
+      const tx = createRuntimeTransaction(state);
       const initialState = clone(tx.state);
       activeTransactions.set(this.storageRoot, tx);
       try {
@@ -1636,7 +1735,11 @@ export class RuntimeStore {
           },
           { commitFileName: COMMIT_FILE, transactionId },
         );
+        this.updateStorageIndexAfterCommit(tx, transactionId);
         return result;
+      } catch (error) {
+        runtimeStoreIndexes.delete(this.storageRoot);
+        throw error;
       } finally {
         activeTransactions.delete(this.storageRoot);
       }
@@ -1665,8 +1768,185 @@ export class RuntimeStore {
   private loadState(): RuntimeControlState {
     const path = join(this.storageRoot, STATE_FILE);
     if (!existsSync(path)) return emptyState();
-    return decodeState(readJsonFileSync(path), path);
+    return decodeRuntimeControlState(readJsonFileSync(path), path);
   }
+}
+
+interface RuntimeIndexState {
+  revision: number;
+  lastTransactionId?: string;
+  nextRuntimeEventSequence: number;
+}
+
+function createRuntimeTransaction(state: RuntimeControlState): RuntimeTransaction {
+  return {
+    state,
+    baseRevision: state.revision,
+    baseTransactionId: state.lastTransactionId,
+    baseNextRuntimeEventSequence: state.nextRuntimeEventSequence,
+    events: [],
+    usage: [],
+  };
+}
+
+function refreshRuntimeStoreIndex(
+  storageRoot: string,
+  state: RuntimeIndexState,
+  current: RuntimeStoreIndex,
+): RuntimeStoreIndex {
+  const daemonPath = join(storageRoot, DAEMON_EVENTS_FILE);
+  const usagePath = join(storageRoot, USAGE_LEDGER_FILE);
+  const daemonSize = fileSize(daemonPath);
+  const usageSize = fileSize(usagePath);
+  if (
+    state.revision === current.stateRevision &&
+    state.lastTransactionId === current.stateTransactionId &&
+    daemonSize === current.daemonFileSize &&
+    usageSize === current.usageFileSize
+  ) {
+    return current;
+  }
+  if (
+    state.revision <= current.stateRevision ||
+    state.lastTransactionId === current.stateTransactionId ||
+    daemonSize < current.daemonFileSize ||
+    usageSize < current.usageFileSize
+  ) {
+    return rebuildRuntimeStoreIndex(storageRoot, state, current);
+  }
+
+  try {
+    const daemonValues = readJsonLineAppend(daemonPath, current.daemonFileSize, daemonSize);
+    const usageValues = readJsonLineAppend(usagePath, current.usageFileSize, usageSize);
+    if (!daemonValues || !usageValues) {
+      return rebuildRuntimeStoreIndex(storageRoot, state, current);
+    }
+    if (state.revision === current.stateRevision + 1) {
+      const appendedTransactionIds = [...daemonValues, ...usageValues].map((value) =>
+        isRecord(value) && typeof value["txId"] === "string" ? value["txId"] : undefined,
+      );
+      if (
+        appendedTransactionIds.some((transactionId) => transactionId !== state.lastTransactionId)
+      ) {
+        return rebuildRuntimeStoreIndex(storageRoot, state, current);
+      }
+    }
+
+    const appendedEvents = decodeRuntimeEvents(daemonValues, current.events.length + 1);
+    const events = [...current.events, ...appendedEvents];
+    const eventIds = new Set(current.eventIds);
+    for (const envelope of appendedEvents) {
+      if (eventIds.has(envelope.event.eventId)) {
+        return rebuildRuntimeStoreIndex(storageRoot, state, current);
+      }
+      eventIds.add(envelope.event.eventId);
+    }
+    if (events.length + 1 !== state.nextRuntimeEventSequence) {
+      return rebuildRuntimeStoreIndex(storageRoot, state, current);
+    }
+
+    const appendedUsage = decodeUsageLedger(usageValues);
+    const providerCalls = new Map(current.providerCalls);
+    const baselines = new Map(current.baselines);
+    for (const envelope of appendedUsage) {
+      if (envelope.type === "provider-call") {
+        if (providerCalls.has(envelope.record.callId)) {
+          return rebuildRuntimeStoreIndex(storageRoot, state, current);
+        }
+        providerCalls.set(envelope.record.callId, envelope.record);
+      } else {
+        if (baselines.has(envelope.record.baselineId)) {
+          return rebuildRuntimeStoreIndex(storageRoot, state, current);
+        }
+        baselines.set(envelope.record.baselineId, envelope.record);
+      }
+    }
+    return {
+      stateRevision: state.revision,
+      stateTransactionId: state.lastTransactionId,
+      daemonFileSize: daemonSize,
+      usageFileSize: usageSize,
+      events,
+      eventIds,
+      providerCalls,
+      baselines,
+      fullRebuildCount: current.fullRebuildCount,
+      incrementalRefreshCount: current.incrementalRefreshCount + 1,
+    };
+  } catch {
+    return rebuildRuntimeStoreIndex(storageRoot, state, current);
+  }
+}
+
+function rebuildRuntimeStoreIndex(
+  storageRoot: string,
+  state: RuntimeIndexState,
+  previous?: RuntimeStoreIndex,
+): RuntimeStoreIndex {
+  const daemonPath = join(storageRoot, DAEMON_EVENTS_FILE);
+  const usagePath = join(storageRoot, USAGE_LEDGER_FILE);
+  const events = decodeRuntimeEvents(readJsonLinesSync(daemonPath, true));
+  const eventIds = new Set(events.map(({ event }) => event.eventId));
+  if (events.length + 1 !== state.nextRuntimeEventSequence || eventIds.size !== events.length) {
+    throw new Error("daemon-events.jsonl 与 Runtime control state 不一致");
+  }
+  const providerCalls = new Map<string, ProviderCallRecord>();
+  const baselines = new Map<string, UsageBaselineRecord>();
+  for (const envelope of decodeUsageLedger(readJsonLinesSync(usagePath, true))) {
+    if (envelope.type === "provider-call") {
+      if (providerCalls.has(envelope.record.callId)) {
+        throw new Error(`usage-ledger.jsonl 包含重复 callId: ${envelope.record.callId}`);
+      }
+      providerCalls.set(envelope.record.callId, envelope.record);
+    } else {
+      if (baselines.has(envelope.record.baselineId)) {
+        throw new Error(`usage-ledger.jsonl 包含重复 baselineId: ${envelope.record.baselineId}`);
+      }
+      baselines.set(envelope.record.baselineId, envelope.record);
+    }
+  }
+  return {
+    stateRevision: state.revision,
+    stateTransactionId: state.lastTransactionId,
+    daemonFileSize: fileSize(daemonPath),
+    usageFileSize: fileSize(usagePath),
+    events,
+    eventIds,
+    providerCalls,
+    baselines,
+    fullRebuildCount: (previous?.fullRebuildCount ?? 0) + 1,
+    incrementalRefreshCount: previous?.incrementalRefreshCount ?? 0,
+  };
+}
+
+function readJsonLineAppend(path: string, offset: number, size: number): unknown[] | undefined {
+  if (size === offset) return [];
+  if (size < offset || !existsSync(path)) return undefined;
+  const length = size - offset;
+  const buffer = Buffer.allocUnsafe(length);
+  const descriptor = openSync(path, "r");
+  try {
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const count = readSync(descriptor, buffer, bytesRead, length - bytesRead, offset + bytesRead);
+      if (count === 0) return undefined;
+      bytesRead += count;
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  if (buffer.length === 0 || buffer[buffer.length - 1] !== 0x0a) return undefined;
+  return buffer
+    .toString("utf8")
+    .split("\n")
+    .slice(0, -1)
+    .map((line) => JSON.parse(line) as unknown);
+}
+
+function fileSize(path: string): number {
+  if (!existsSync(path)) return 0;
+  assertPrivateDataFileSync(path);
+  return statSync(path).size;
 }
 
 function emptyState(): RuntimeControlState {
@@ -1687,7 +1967,7 @@ function emptyState(): RuntimeControlState {
   };
 }
 
-function decodeState(value: unknown, path: string): RuntimeControlState {
+export function decodeRuntimeControlState(value: unknown, path: string): RuntimeControlState {
   if (!isRecord(value) || value["schemaVersion"] !== STATE_SCHEMA_VERSION) {
     throw new Error(`Runtime control state schema 不受支持: ${path}`);
   }
@@ -1704,17 +1984,37 @@ function decodeState(value: unknown, path: string): RuntimeControlState {
     "mergeRequests",
   ] as const;
   if (
-    !Number.isSafeInteger(value["revision"]) ||
-    !Number.isSafeInteger(value["nextRuntimeEventSequence"]) ||
+    !isNonNegativeSafeInteger(value["revision"]) ||
+    !isPositiveSafeInteger(value["nextRuntimeEventSequence"]) ||
+    (value["lastTransactionId"] !== undefined && typeof value["lastTransactionId"] !== "string") ||
     requiredMaps.some((key) => !isRecord(value[key]))
   ) {
     throw new Error(`Runtime control state 已损坏: ${path}`);
   }
+  validateRecordMap(value["jobs"], "jobs", "jobId", validateJob);
+  validateRecordMap(value["attempts"], "attempts", "attemptId", validateAttempt);
+  validateRecordMap(value["leases"], "leases", "resourceKey", validateLease);
+  validateRecordMap(value["cronJobs"], "cronJobs", "cronJobId", validateCronJob);
+  validateRecordMap(value["cronRuns"], "cronRuns", "cronRunId", validateCronRun);
+  validateRecordMap(value["daemonCommands"], "daemonCommands", undefined, validateDaemonCommand);
+  validateRecordMap(value["daemonRuns"], "daemonRuns", "runId", validateDaemonRun);
+  validateRecordMap(value["jobCommands"], "jobCommands", "commandId", validateJobCommand);
+  validateRecordMap(value["completions"], "completions", "completionId", validateCompletion);
+  validateRecordMap(
+    value["mergeRequests"],
+    "mergeRequests",
+    "mergeRequestId",
+    validateMergeRequest,
+  );
+  validateRuntimeRelationships(value);
   return clone(value) as unknown as RuntimeControlState;
 }
 
-function decodeRuntimeEvents(values: unknown[]): Array<Omit<RuntimeEventEnvelope, "txId">> {
-  let expectedSequence = 1;
+export function decodeRuntimeEvents(
+  values: unknown[],
+  firstExpectedSequence = 1,
+): Array<Omit<RuntimeEventEnvelope, "txId">> {
+  let expectedSequence = firstExpectedSequence;
   return values.map((value, index) => {
     if (
       !isRecord(value) ||
@@ -1724,7 +2024,7 @@ function decodeRuntimeEvents(values: unknown[]): Array<Omit<RuntimeEventEnvelope
       value["sequence"] !== expectedSequence ||
       !isRuntimeEventRecord(value["event"])
     ) {
-      throw new Error(`daemon-events.jsonl 第 ${index + 1} 条记录已损坏`);
+      throw new Error(`daemon-events.jsonl 第 ${firstExpectedSequence + index} 条记录已损坏`);
     }
     expectedSequence += 1;
     return {
@@ -1736,7 +2036,7 @@ function decodeRuntimeEvents(values: unknown[]): Array<Omit<RuntimeEventEnvelope
   });
 }
 
-function decodeUsageLedger(values: unknown[]): BufferedUsageLedgerEnvelope[] {
+export function decodeUsageLedger(values: unknown[]): BufferedUsageLedgerEnvelope[] {
   return values.map((value, index) => {
     if (
       !isRecord(value) ||
@@ -1763,34 +2063,351 @@ function decodeUsageLedger(values: unknown[]): BufferedUsageLedgerEnvelope[] {
   });
 }
 
+function validateRecordMap(
+  value: unknown,
+  field: string,
+  idField: string | undefined,
+  validate: (record: Record<string, unknown>, field: string) => void,
+): void {
+  if (!isRecord(value)) throw invalidRuntimeState(`${field} must be an object`);
+  for (const [id, record] of Object.entries(value)) {
+    if (!isRecord(record)) throw invalidRuntimeState(`${field}.${id} must be an object`);
+    if (idField !== undefined && record[idField] !== id) {
+      throw invalidRuntimeState(`${field}.${id} has a mismatched ${idField}`);
+    }
+    validate(record, `${field}.${id}`);
+  }
+}
+
+function validateJob(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["jobId", "type", "description"]);
+  requireEnum(value, field, "status", JOB_STATUSES);
+  requireEnum(value, field, "executionClass", JOB_EXECUTION_CLASSES);
+  requireEnum(value, field, "completionPolicy", JOB_COMPLETION_POLICIES);
+  requireIntegers(value, field, [
+    "version",
+    "leaseEpoch",
+    "attemptCount",
+    "createdAt",
+    "updatedAt",
+  ]);
+  optionalStrings(value, field, [
+    "ownerSessionId",
+    "childSessionId",
+    "toolUseId",
+    "outputPath",
+    "error",
+  ]);
+  optionalInteger(value, field, "terminalAt");
+  optionalRecord(value, field, "data");
+}
+
+function validateAttempt(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["attemptId", "jobId", "ownerId"]);
+  requireEnum(value, field, "status", JOB_STATUSES);
+  requireIntegers(value, field, [
+    "attemptNumber",
+    "leaseEpoch",
+    "outputOffset",
+    "startedAt",
+    "updatedAt",
+    "version",
+  ]);
+  optionalStrings(value, field, ["outputPath", "error"]);
+  optionalInteger(value, field, "finishedAt");
+  optionalRecord(value, field, "result");
+}
+
+function validateLease(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["resourceKey", "ownerId"]);
+  requireIntegers(value, field, ["leaseEpoch", "heartbeatAt", "expiresAt", "version"]);
+}
+
+function validateCronJob(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, [
+    "cronJobId",
+    "workspacePath",
+    "name",
+    "schedule",
+    "timeZone",
+    "prompt",
+  ]);
+  if (typeof value["enabled"] !== "boolean") throw invalidRuntimeState(`${field}.enabled`);
+  requireIntegers(value, field, ["version", "createdAt", "updatedAt"]);
+  try {
+    parseBackgroundYoloPolicySnapshot(value["policySnapshot"]);
+  } catch {
+    throw invalidRuntimeState(`${field}.policySnapshot`);
+  }
+  if (value["credentialRef"] !== undefined) {
+    if (typeof value["credentialRef"] !== "string") {
+      throw invalidRuntimeState(`${field}.credentialRef`);
+    }
+    try {
+      parseAnyCredentialRef(value["credentialRef"]);
+    } catch {
+      throw invalidRuntimeState(`${field}.credentialRef`);
+    }
+  }
+  optionalStrings(value, field, ["modelRouteId"]);
+}
+
+function validateCronRun(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["cronRunId", "cronJobId", "workspacePath"]);
+  requireEnum(value, field, "status", CRON_RUN_STATUSES);
+  requireIntegers(value, field, ["scheduledFor", "leaseEpoch", "createdAt", "version"]);
+  optionalStrings(value, field, ["ownerId", "reason"]);
+  optionalInteger(value, field, "startedAt");
+  optionalInteger(value, field, "finishedAt");
+  optionalRecord(value, field, "result");
+}
+
+function validateDaemonCommand(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["commandType", "idempotencyKey", "requestHash", "requestJson"]);
+  requireEnum(value, field, "status", ["pending", "completed"] as const);
+  requireIntegers(value, field, ["createdAt", "updatedAt"]);
+  optionalStrings(value, field, ["resourceId"]);
+  optionalRecord(value, field, "result");
+}
+
+function validateDaemonRun(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["runId", "workspacePath", "description"]);
+  requireEnum(value, field, "status", DAEMON_RUN_STATUSES);
+  requireIntegers(value, field, ["startedAt", "updatedAt", "version"]);
+  optionalStrings(value, field, ["sessionId", "checkpointId", "error"]);
+  optionalInteger(value, field, "finishedAt");
+  optionalRecord(value, field, "result");
+}
+
+function validateJobCommand(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["commandId", "jobId"]);
+  requireEnum(value, field, "kind", JOB_COMMAND_KINDS);
+  requireIntegers(value, field, ["createdAt"]);
+  optionalInteger(value, field, "deliveredAt");
+  optionalRecord(value, field, "payload");
+}
+
+function validateCompletion(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, ["completionId", "jobId"]);
+  requireEnum(value, field, "policy", JOB_COMPLETION_POLICIES);
+  requireEnum(value, field, "status", TERMINAL_JOB_STATUSES);
+  requireIntegers(value, field, ["createdAt"]);
+  optionalStrings(value, field, ["attemptId"]);
+  optionalInteger(value, field, "deliveredAt");
+  optionalRecord(value, field, "payload");
+}
+
+function validateMergeRequest(value: Record<string, unknown>, field: string): void {
+  requireStrings(value, field, [
+    "mergeRequestId",
+    "jobId",
+    "sourceBranch",
+    "sourceWorktree",
+    "targetBranch",
+    "targetWorktree",
+  ]);
+  requireEnum(value, field, "status", MERGE_REQUEST_STATUSES);
+  requireIntegers(value, field, ["version", "createdAt", "updatedAt"]);
+  optionalStrings(value, field, ["attemptId", "sourceHead", "error"]);
+}
+
+function validateRuntimeRelationships(state: Record<string, unknown>): void {
+  const jobs = state["jobs"] as Record<string, Record<string, unknown>>;
+  const attempts = state["attempts"] as Record<string, Record<string, unknown>>;
+  const cronJobs = state["cronJobs"] as Record<string, Record<string, unknown>>;
+  const cronRuns = state["cronRuns"] as Record<string, Record<string, unknown>>;
+  const jobCommands = state["jobCommands"] as Record<string, Record<string, unknown>>;
+  const completions = state["completions"] as Record<string, Record<string, unknown>>;
+  const mergeRequests = state["mergeRequests"] as Record<string, Record<string, unknown>>;
+
+  const attemptNumbers = new Set<string>();
+  for (const [attemptId, attempt] of Object.entries(attempts)) {
+    const jobId = attempt["jobId"] as string;
+    if (!(jobId in jobs)) throw invalidRuntimeState(`attempts.${attemptId}.jobId is orphaned`);
+    const identity = `${jobId}\0${String(attempt["attemptNumber"])}`;
+    if (attemptNumbers.has(identity)) {
+      throw invalidRuntimeState(`attempts has duplicate jobId/attemptNumber ${jobId}`);
+    }
+    attemptNumbers.add(identity);
+  }
+  for (const [commandId, command] of Object.entries(jobCommands)) {
+    if (!((command["jobId"] as string) in jobs)) {
+      throw invalidRuntimeState(`jobCommands.${commandId}.jobId is orphaned`);
+    }
+  }
+
+  const completedAttempts = new Set<string>();
+  for (const [completionId, completion] of Object.entries(completions)) {
+    const jobId = completion["jobId"] as string;
+    if (!(jobId in jobs)) {
+      throw invalidRuntimeState(`completions.${completionId}.jobId is orphaned`);
+    }
+    const attemptId = completion["attemptId"];
+    if (typeof attemptId === "string") {
+      if (!(attemptId in attempts) || attempts[attemptId]?.["jobId"] !== jobId) {
+        throw invalidRuntimeState(`completions.${completionId}.attemptId is orphaned`);
+      }
+      if (completedAttempts.has(attemptId)) {
+        throw invalidRuntimeState(`completions has duplicate attemptId ${attemptId}`);
+      }
+      completedAttempts.add(attemptId);
+    }
+  }
+  for (const [mergeRequestId, request] of Object.entries(mergeRequests)) {
+    const jobId = request["jobId"] as string;
+    if (!(jobId in jobs)) {
+      throw invalidRuntimeState(`mergeRequests.${mergeRequestId}.jobId is orphaned`);
+    }
+    const attemptId = request["attemptId"];
+    if (
+      typeof attemptId === "string" &&
+      (!(attemptId in attempts) || attempts[attemptId]?.["jobId"] !== jobId)
+    ) {
+      throw invalidRuntimeState(`mergeRequests.${mergeRequestId}.attemptId is orphaned`);
+    }
+  }
+
+  const scheduledRuns = new Set<string>();
+  for (const [cronRunId, run] of Object.entries(cronRuns)) {
+    const cronJobId = run["cronJobId"] as string;
+    if (!(cronJobId in cronJobs)) {
+      throw invalidRuntimeState(`cronRuns.${cronRunId}.cronJobId is orphaned`);
+    }
+    const identity = `${cronJobId}\0${String(run["scheduledFor"])}`;
+    if (scheduledRuns.has(identity)) {
+      throw invalidRuntimeState(`cronRuns has duplicate cronJobId/scheduledFor ${cronJobId}`);
+    }
+    scheduledRuns.add(identity);
+  }
+}
+
 function isRuntimeEventRecord(value: unknown): value is RuntimeEventRecord {
   return (
     isRecord(value) &&
-    typeof value["eventId"] === "string" &&
-    typeof value["topic"] === "string" &&
-    typeof value["workspacePath"] === "string" &&
-    typeof value["createdAt"] === "number"
+    isNonEmptyString(value["eventId"]) &&
+    isNonEmptyString(value["topic"]) &&
+    isNonEmptyString(value["workspacePath"]) &&
+    isFiniteNumber(value["createdAt"]) &&
+    isOptionalString(value["cronJobId"]) &&
+    isOptionalString(value["cronRunId"]) &&
+    isOptionalRecord(value["payload"])
   );
 }
 
 function isProviderCall(value: unknown): value is ProviderCallRecord {
   return (
     isRecord(value) &&
-    typeof value["callId"] === "string" &&
-    typeof value["purpose"] === "string" &&
-    typeof value["provider"] === "string" &&
-    typeof value["model"] === "string" &&
-    typeof value["status"] === "string" &&
-    typeof value["createdAt"] === "number"
+    isNonEmptyString(value["callId"]) &&
+    (PROVIDER_CALL_PURPOSES as readonly unknown[]).includes(value["purpose"]) &&
+    isNonEmptyString(value["provider"]) &&
+    isNonEmptyString(value["model"]) &&
+    (PROVIDER_CALL_STATUSES as readonly unknown[]).includes(value["status"]) &&
+    isUsageNumbers(value) &&
+    isFiniteNumber(value["createdAt"]) &&
+    ["sessionId", "conversationId", "goalId", "jobId", "attemptId", "route"].every((field) =>
+      isOptionalString(value[field]),
+    ) &&
+    isOptionalRecord(value["reported"])
   );
 }
 
 function isUsageBaseline(value: unknown): value is UsageBaselineRecord {
   return (
     isRecord(value) &&
-    typeof value["baselineId"] === "string" &&
-    typeof value["importedAt"] === "number"
+    isNonEmptyString(value["baselineId"]) &&
+    isUsageNumbers(value) &&
+    isFiniteNumber(value["importedAt"]) &&
+    isOptionalString(value["sessionId"]) &&
+    isOptionalString(value["goalId"]) &&
+    isOptionalRecord(value["source"])
   );
+}
+
+function requireStrings(
+  value: Record<string, unknown>,
+  field: string,
+  keys: readonly string[],
+): void {
+  for (const key of keys) {
+    if (!isNonEmptyString(value[key])) throw invalidRuntimeState(`${field}.${key}`);
+  }
+}
+
+function optionalStrings(
+  value: Record<string, unknown>,
+  field: string,
+  keys: readonly string[],
+): void {
+  for (const key of keys) {
+    if (!isOptionalString(value[key])) throw invalidRuntimeState(`${field}.${key}`);
+  }
+}
+
+function requireIntegers(
+  value: Record<string, unknown>,
+  field: string,
+  keys: readonly string[],
+): void {
+  for (const key of keys) {
+    if (!isNonNegativeSafeInteger(value[key])) throw invalidRuntimeState(`${field}.${key}`);
+  }
+}
+
+function optionalInteger(value: Record<string, unknown>, field: string, key: string): void {
+  if (value[key] !== undefined && !isNonNegativeSafeInteger(value[key])) {
+    throw invalidRuntimeState(`${field}.${key}`);
+  }
+}
+
+function optionalRecord(value: Record<string, unknown>, field: string, key: string): void {
+  if (!isOptionalRecord(value[key])) throw invalidRuntimeState(`${field}.${key}`);
+}
+
+function requireEnum(
+  value: Record<string, unknown>,
+  field: string,
+  key: string,
+  allowed: readonly unknown[],
+): void {
+  if (!allowed.includes(value[key])) throw invalidRuntimeState(`${field}.${key}`);
+}
+
+function invalidRuntimeState(field: string): Error {
+  return new Error(`Runtime control state 已损坏: ${field}`);
+}
+
+function isUsageNumbers(value: Record<string, unknown>): boolean {
+  return ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "cost"].every(
+    (field) => isFiniteNonNegativeNumber(value[field]),
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isOptionalRecord(value: unknown): boolean {
+  return value === undefined || isRecord(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isFiniteNonNegativeNumber(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 function daemonCommandKey(commandType: string, idempotencyKey: string): string {

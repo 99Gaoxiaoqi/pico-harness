@@ -8,7 +8,7 @@ const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
 const VERSION = 1 as const;
 
-/** User-level discovery index; the authoritative Jobs/Runs remain in each workspace SQLite ledger. */
+/** User-level discovery index; authoritative Jobs/Runs remain in each workspace Runtime store. */
 export class WorkspaceRegistrationStore {
   readonly filePath: string;
   private mutationQueue: Promise<void> = Promise.resolve();

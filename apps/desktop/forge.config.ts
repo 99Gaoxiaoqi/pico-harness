@@ -3,22 +3,12 @@ import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { VitePlugin } from "@electron-forge/plugin-vite";
 import type { ForgeConfig } from "@electron-forge/shared-types";
-import { cp, mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
 
 const macSigningIdentity = process.env.PICO_MAC_SIGN_IDENTITY;
 const appleId = process.env.PICO_APPLE_ID;
 const appleIdPassword = process.env.PICO_APPLE_ID_PASSWORD;
 const appleTeamId = process.env.PICO_APPLE_TEAM_ID;
 const updateBaseUrl = readOptionalHttpsUrl("PICO_UPDATE_BASE_URL");
-const workspaceRoot = resolve(import.meta.dirname, "../..");
-// Keep Electron's native binary separate from the Node/TUI copy. Rebuilding the
-// shared package for either ABI would otherwise break the other runtime.
-const nativeRuntimePackages = [
-  { source: "better-sqlite3-electron", target: "better-sqlite3-electron" },
-  { source: "bindings", target: "bindings" },
-  { source: "file-uri-to-path", target: "file-uri-to-path" },
-] as const;
 
 const macNotarization =
   appleId && appleIdPassword && appleTeamId
@@ -29,28 +19,10 @@ const config = {
   packagerConfig: {
     appBundleId: "com.pico.harness",
     appCategoryType: "public.app-category.developer-tools",
-    asar: { unpack: "**/*.node" },
     executableName: "Pico",
     name: "Pico",
     osxSign: macSigningIdentity ? { identity: macSigningIdentity } : undefined,
     osxNotarize: macNotarization,
-  },
-  hooks: {
-    packageAfterCopy: async (_forgeConfig, buildPath) => {
-      const target = join(buildPath, "node_modules");
-      await mkdir(target, { recursive: true });
-      for (const packageName of nativeRuntimePackages) {
-        await cp(
-          join(workspaceRoot, "node_modules", packageName.source),
-          join(target, packageName.target),
-          { recursive: true },
-        );
-      }
-    },
-  },
-  rebuildConfig: {
-    force: true,
-    onlyModules: ["better-sqlite3-electron"],
   },
   makers: [
     new MakerZIP(updateBaseUrl ? { macUpdateManifestBaseUrl: `${updateBaseUrl}/darwin` } : {}, [

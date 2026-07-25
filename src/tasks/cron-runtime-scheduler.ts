@@ -16,7 +16,7 @@ export interface CronRuntimeSchedulerOptions {
   ): Promise<Record<string, unknown> | void>;
   /** Revalidates trust/hardline/hooks immediately before a background run starts. */
   canRun(job: CronJobRecord): Promise<{ allowed: boolean; reason?: string }>;
-  /** Must stay shorter than the SQLite lease TTL used by CronService. */
+  /** Must stay shorter than the durable lease TTL used by CronService. */
   leaseHeartbeatMs?: number;
   now?: () => number;
 }

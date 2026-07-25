@@ -125,8 +125,8 @@ function commonAbortSignal(batch: readonly PendingModelExtraction[]): AbortSigna
 export interface MemoryReviewWorkerOptions {
   readonly workDir: string;
   readonly workspaceId: WorkspaceId;
-  readonly memoryDatabasePath: string;
-  readonly runtimeDatabasePath: string;
+  readonly memoryStorageRoot: string;
+  readonly runtimeStorageRoot: string;
   readonly trustStore: WorkspaceTrustStore;
   readonly modelFactory: MemoryProposalModelFactory;
   readonly proposalSink?: MemoryProposalPublishedSink;
@@ -148,7 +148,7 @@ export class MemoryReviewWorker {
     this.nextWakeAt = undefined;
     if (!(await isTrusted(this.options.trustStore, this.options.workDir))) return [];
     const repository = new MemoryRepository({
-      databasePath: this.options.memoryDatabasePath,
+      storageRoot: this.options.memoryStorageRoot,
       workspaceId: this.options.workspaceId,
     });
     try {
@@ -165,7 +165,7 @@ export class MemoryReviewWorker {
       });
       const jobs = [...scheduler.pending()];
       const results: Array<MemoryProposalProcessResult | undefined> = new Array(jobs.length);
-      const eventStore = new RuntimeEventStore({ databasePath: this.options.runtimeDatabasePath });
+      const eventStore = new RuntimeEventStore({ storageRoot: this.options.runtimeStorageRoot });
       let sharedLease: MemoryProposalModelLease | undefined;
       let batchedModel: MemoryProposalModelPort | undefined;
       try {

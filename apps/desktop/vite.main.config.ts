@@ -9,13 +9,10 @@ export default defineConfig({
   build: {
     sourcemap: false,
     rollupOptions: {
-      external: ["electron", "better-sqlite3"],
+      external: ["electron"],
       output: {
         entryFileNames: "main.cjs",
         format: "cjs",
-        // The Desktop process needs Electron's ABI without mutating the
-        // Node/TUI package installed at the workspace root.
-        paths: { "better-sqlite3": "better-sqlite3-electron" },
       },
     },
   },

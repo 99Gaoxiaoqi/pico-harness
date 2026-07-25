@@ -96,7 +96,7 @@ function engineSessionCapability(session: Session): string {
   return JSON.stringify([
     canonicalizeWorkspacePath(session.workDir),
     session.id,
-    session.runtimeEventStore?.databasePath ?? null,
+    session.runtimeEventStore?.storageRoot ?? null,
   ]);
 }
 

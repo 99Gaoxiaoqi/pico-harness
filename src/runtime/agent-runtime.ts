@@ -361,7 +361,7 @@ export async function executeAgentRuntime(
         if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
           const memoryPaths = resolvePicoPaths(canonicalMemoryWorkspace, { picoHome });
           memoryRepository = new MemoryRepository({
-            databasePath: memoryPaths.workspace.memoryDatabase,
+            storageRoot: memoryPaths.workspace.memory,
             workspaceId: memoryPaths.workspace.id,
           });
           memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
@@ -373,7 +373,7 @@ export async function executeAgentRuntime(
                 // foreground result is available. Own the connection so AgentRuntime cleanup
                 // cannot close it before the durable enqueue begins.
                 const schedulerRepository = new MemoryRepository({
-                  databasePath: memoryPaths.workspace.memoryDatabase,
+                  storageRoot: memoryPaths.workspace.memory,
                   workspaceId: memoryPaths.workspace.id,
                 });
                 try {
@@ -381,7 +381,7 @@ export async function executeAgentRuntime(
                     debounceMs: dependencies.memoryReviewDebounceMs,
                   }).enqueue(input);
                 } catch (error) {
-                  invalidateMemoryReviewRecoverySuccess(memoryPaths.workspace.runtimeDatabase);
+                  invalidateMemoryReviewRecoverySuccess(memoryPaths.workspace.runtime);
                   throw error;
                 } finally {
                   schedulerRepository.close();
@@ -681,8 +681,8 @@ export async function executeAgentRuntime(
             new MemoryReviewWorker({
               workDir,
               workspaceId: memoryPaths.workspace.id,
-              memoryDatabasePath: memoryPaths.workspace.memoryDatabase,
-              runtimeDatabasePath: memoryPaths.workspace.runtimeDatabase,
+              memoryStorageRoot: memoryPaths.workspace.memory,
+              runtimeStorageRoot: memoryPaths.workspace.runtime,
               trustStore: memoryTrustStore,
               modelFactory: memoryModelFactory,
               ...(dependencies.memoryProposalSink
@@ -693,7 +693,7 @@ export async function executeAgentRuntime(
       // Rebuild jobs lost after a canonical terminal commit, then drain all durable work. Keep
       // this detached from the foreground path: recovery degradation must not delay streaming.
       void recoverMemoryReviewJobs({
-        runtimeDatabasePath: memoryPaths.workspace.runtimeDatabase,
+        runtimeStorageRoot: memoryPaths.workspace.runtime,
         scheduler: memoryReviewScheduler,
       })
         .catch((error: unknown) =>
@@ -1160,7 +1160,7 @@ async function acquireRuntimeSession({
   planMode: boolean;
 }): Promise<SessionManagerLease> {
   const runtimeEventStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.runtime,
   });
   let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
@@ -1169,7 +1169,7 @@ async function acquireRuntimeSession({
     );
     if (!sourceManifest) {
       throw new Error(
-        `无法 fork session ${sessionSelection.sourceSessionId}: runtime.sqlite 中不存在`,
+        `无法 fork session ${sessionSelection.sourceSessionId}: RuntimeEvent 日志中不存在`,
       );
     }
     if (!targetManifest) {

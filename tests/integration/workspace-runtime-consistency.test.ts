@@ -360,7 +360,7 @@ test("Run projection and Runtime event roll back together when event append fail
           },
         },
       ),
-    /UNIQUE constraint failed/u,
+    /Runtime event ID duplicate-event 已存在/u,
   );
 
   assert.deepEqual(store.getDaemonRun(canonicalWorkspace, running.runId), running);

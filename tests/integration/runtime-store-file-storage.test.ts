@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { inspectRuntimeStoreIndexForTesting, RuntimeStore } from "../../src/tasks/runtime-store.js";
+
+test("RuntimeStore rejects an empty explicit storage root", () => {
+  assert.throws(
+    () => new RuntimeStore({ workDir: process.cwd(), storageRoot: " " }),
+    /storageRoot must not be empty/u,
+  );
+});
 
 test("RuntimeStore commits job state and replay ledgers without SQLite", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-store-"));
@@ -198,6 +205,103 @@ test("RuntimeStore serializes writers from separate processes", async (context) 
       .sort(),
     ["process-job-0", "process-job-1", "process-job-2", "process-job-3"],
   );
+});
+
+test("RuntimeStore incrementally refreshes and safely rebuilds its disposable index", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-index-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const storageRoot = join(root, "runtime");
+  const store = new RuntimeStore({ workDir: root, storageRoot });
+  store.appendRuntimeEvent({
+    eventId: "event-1",
+    topic: "run.started",
+    workspacePath: root,
+  });
+  const call = {
+    purpose: "main" as const,
+    provider: "test",
+    model: "test",
+    status: "succeeded" as const,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cost: 0,
+  };
+  store.recordProviderCall({ callId: "call-1", ...call });
+  assert.deepEqual(
+    store.listRuntimeEvents().map((event) => event.eventId),
+    ["event-1"],
+  );
+  assert.deepEqual(
+    store.listProviderCalls().map((record) => record.callId),
+    ["call-1"],
+  );
+  const before = inspectRuntimeStoreIndexForTesting(storageRoot);
+  assert.ok(before);
+
+  const modulePath = new URL("../../src/tasks/runtime-store.ts", import.meta.url).href;
+  await runChild(
+    `
+      import { RuntimeStore } from ${JSON.stringify(modulePath)};
+      const store = new RuntimeStore({
+        workDir: process.env.ROOT,
+        storageRoot: process.env.STORAGE_ROOT,
+      });
+      store.appendRuntimeEvent({
+        eventId: "event-2",
+        topic: "run.finished",
+        workspacePath: process.env.ROOT,
+      });
+      store.recordProviderCall({
+        callId: "call-2",
+        purpose: "main",
+        provider: "test",
+        model: "test",
+        status: "succeeded",
+        inputTokens: 2,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        cost: 0,
+      });
+    `,
+    { ROOT: root, STORAGE_ROOT: storageRoot },
+  );
+
+  assert.deepEqual(
+    store.listRuntimeEvents().map((event) => event.eventId),
+    ["event-1", "event-2"],
+  );
+  assert.deepEqual(
+    store.listProviderCalls().map((record) => record.callId),
+    ["call-1", "call-2"],
+  );
+  const incrementallyRefreshed = inspectRuntimeStoreIndexForTesting(storageRoot);
+  assert.ok(incrementallyRefreshed);
+  assert.equal(incrementallyRefreshed.fullRebuildCount, before.fullRebuildCount);
+  assert.equal(incrementallyRefreshed.incrementalRefreshCount, before.incrementalRefreshCount + 1);
+  assert.equal(
+    store.recordProviderCall({
+      callId: "call-2",
+      ...call,
+      inputTokens: 2,
+      outputTokens: 2,
+    }).inserted,
+    false,
+  );
+
+  const usagePath = join(storageRoot, "control/usage-ledger.jsonl");
+  const firstUsageLine = (await readFile(usagePath, "utf8")).split("\n")[0]!;
+  await truncate(usagePath, Buffer.byteLength(`${firstUsageLine}\n`));
+  assert.deepEqual(
+    store.listProviderCalls().map((record) => record.callId),
+    ["call-1"],
+  );
+  const rebuilt = inspectRuntimeStoreIndexForTesting(storageRoot);
+  assert.ok(rebuilt);
+  assert.equal(rebuilt.fullRebuildCount, incrementallyRefreshed.fullRebuildCount + 1);
+  assert.equal(store.recordProviderCall({ callId: "call-1", ...call }).inserted, false);
 });
 
 function runChild(source: string, environment: Record<string, string>): Promise<void> {

@@ -3,7 +3,6 @@ import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "better-sqlite3";
 import { globalSessionManager } from "../../src/engine/session.js";
 import type { Message } from "../../src/schema/message.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
@@ -48,10 +47,6 @@ import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { publishDesktopMemoryProposal } from "../../src/daemon/production-host.js";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
-import {
-  RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME,
-  RUNTIME_SCHEMA_VERSION,
-} from "../../src/tasks/runtime-types.js";
 
 test("memory recall is deterministic, filtered, bounded and ephemeral across Sessions", async (context) => {
   const fixture = await createFixture("recall");
@@ -102,7 +97,7 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   repository.close();
   const reopened = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const acrossSession = await new MemoryContextBuilder(reopened, () => now).build(
@@ -115,7 +110,7 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   await mkdir(otherWorkspace);
   const otherPaths = resolvePicoPaths(otherWorkspace, { picoHome: fixture.picoHome });
   const other = new MemoryRepository({
-    databasePath: otherPaths.workspace.memoryDatabase,
+    storageRoot: otherPaths.workspace.memory,
     workspaceId: otherPaths.workspace.id,
   });
   assert.equal((await new MemoryContextBuilder(other, () => now).build()).block, "");
@@ -261,7 +256,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   );
   const runtimePaths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const runtimeEvents = await new RuntimeEventStore({
-    databasePath: runtimePaths.workspace.runtimeDatabase,
+    storageRoot: runtimePaths.workspace.runtime,
   }).readSession("memory-runtime-session");
   assert.equal(
     JSON.stringify(runtimeEvents).includes("hidden-recall-policy"),
@@ -414,7 +409,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
   const sessionId = "memory-terminal-job-gap";
   const runId = "run-before-crash";
   const at = "2026-07-22T00:00:00.000Z";
@@ -553,8 +548,8 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
   repository.close();
 
   const runtimeStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
-      .runtimeDatabase,
+    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+      .runtime,
   });
   const failedTerminal = (await runtimeStore.readSession(failedSessionId)).find(
     (event) => event.kind === "run.terminal" && event.data.status === "completed",
@@ -579,7 +574,7 @@ test("an invalidated in-flight recovery continues with the current generation", 
   const fixture = await createFixture("recovery-generation-handoff");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
   const sessionId = "memory-recovery-generation-handoff";
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   const appendCompletedRun = async (suffix: string): Promise<void> => {
@@ -648,14 +643,14 @@ test("an invalidated in-flight recovery continues with the current generation", 
   };
 
   const staleRecovery = recoverMemoryReviewJobs({
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    runtimeStorageRoot: paths.workspace.runtime,
     scheduler,
   });
   await firstEnqueueStarted;
   await appendCompletedRun("new");
-  invalidateMemoryReviewRecoverySuccess(paths.workspace.runtimeDatabase);
+  invalidateMemoryReviewRecoverySuccess(paths.workspace.runtime);
   const currentRecovery = recoverMemoryReviewJobs({
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    runtimeStorageRoot: paths.workspace.runtime,
     scheduler,
   });
   releaseFirstEnqueue();
@@ -673,7 +668,7 @@ test("manifest pages keep a fixed upper bound and DESC keyset across concurrent 
   const fixture = await createFixture("manifest-keyset");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
   const originalIds = Array.from(
     { length: 30 },
     (_, index) => `keyset-${String(index).padStart(2, "0")}`,
@@ -720,7 +715,7 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
   const fixture = await createFixture("review-enqueue-batch-yield");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
   const sessionId = "memory-review-enqueue-batch-yield";
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   const at = "2026-07-22T00:00:00.000Z";
@@ -773,7 +768,7 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
   let enqueued = 0;
   let hostYielded = false;
   await recoverMemoryReviewJobs({
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    runtimeStorageRoot: paths.workspace.runtime,
     scheduler: {
       enqueue() {
         enqueued++;
@@ -790,7 +785,7 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
   const sessionId = "memory-terminal-job-gap-rewound";
   const at = "2026-07-22T00:00:00.000Z";
   const base = (eventId: string, runId: string, visibility: "internal" | "model") => ({
@@ -883,7 +878,7 @@ test("compact recovery restores an active Run at a rewind target before its term
   const fixture = await createFixture("compact-recovery-preterminal-rewind");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
   const sessionId = "memory-compact-preterminal-rewind";
   const runId = "memory-compact-replayed-run";
   const base = (eventId: string, visibility: "internal" | "model") => ({
@@ -934,7 +929,7 @@ test("compact recovery restores an active Run at a rewind target before its term
 
   const recovered: string[] = [];
   await recoverMemoryReviewJobs({
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    runtimeStorageRoot: paths.workspace.runtime,
     scheduler: { enqueue: (input) => void recovered.push(input.terminalEventId) },
   });
   assert.deepEqual(recovered, ["compact-terminal-active"]);
@@ -1077,8 +1072,8 @@ test("proposal notification outbox retries across workers without repeating extr
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory,
     proposalSink: async (notice) => {
@@ -1121,8 +1116,8 @@ test("proposal notification outbox retries across workers without repeating extr
   const recoveredWorker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory,
     proposalSink: (notice) => {
@@ -1211,8 +1206,8 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1287,8 +1282,8 @@ test("supported queued and stale-running reviews are not starved by over 500 uns
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     now: () => new Date(Date.parse(running.updatedAt) + MEMORY_REVIEW_LEASE_TTL_MS + 1),
     modelFactory: () => ({
@@ -1329,8 +1324,8 @@ test("two workers racing the same queued review have one model call and one prop
     new MemoryReviewWorker({
       workDir: fixture.workspace,
       workspaceId: paths.workspace.id,
-      memoryDatabasePath: paths.workspace.memoryDatabase,
-      runtimeDatabasePath: paths.workspace.runtimeDatabase,
+      memoryStorageRoot: paths.workspace.memory,
+      runtimeStorageRoot: paths.workspace.runtime,
       trustStore: new SecondCanonicalizeBarrierTrustStore(
         { userStateDirectory: fixture.picoHome },
         rendezvous,
@@ -1391,8 +1386,8 @@ test("one drain reuses its model lease and a failed extraction does not advance 
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1439,8 +1434,8 @@ test("an in-flight review cannot commit after its rewind job is cancelled", asyn
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory: () => ({
       model: {
@@ -1566,8 +1561,8 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory: () => ({
       model: new ProviderMemoryProposalModel(provider, billingRoute),
@@ -1628,8 +1623,8 @@ test("eco review mode resolves fuzzy evidence without acquiring a model", async 
   const results = await new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1679,8 +1674,8 @@ test("exhausted workspace review budget defers fuzzy jobs without consuming an a
   const results = await new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryDatabasePath: paths.workspace.memoryDatabase,
-    runtimeDatabasePath: paths.workspace.runtimeDatabase,
+    memoryStorageRoot: paths.workspace.memory,
+    runtimeStorageRoot: paths.workspace.runtime,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1797,84 +1792,6 @@ test("/memory command uses trust, sanitizer, idempotency, CAS and executable und
   assert.equal(repository.getSettings().enabled, true);
   assert.equal(repository.getSettings().autoPropose, false);
   repository.close();
-});
-
-test("memory review provider calls are accepted by schema v7 and audited with a distinct purpose", async (context) => {
-  const fixture = await createFixture("provider-purpose");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  let ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
-  context.after(() => ledger.close());
-  ledger.recordProviderCall({
-    callId: "pre-v7-main-call",
-    purpose: "main",
-    provider: "openai",
-    model: "fixture",
-    status: "succeeded",
-    inputTokens: 1,
-    outputTokens: 1,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    cost: 0,
-  });
-  const databasePath = ledger.databasePath;
-  ledger.close();
-  downgradeRuntimeDatabaseToV6(databasePath);
-  ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
-  const provider = new CostTracker(
-    {
-      async generate() {
-        return {
-          role: "assistant",
-          content: "",
-          usage: { promptTokens: 5, completionTokens: 3 },
-        };
-      },
-    },
-    { provider: "openai", model: "memory-fixture", baseUrl: "https://example.test" },
-    undefined,
-    { ledger, context: { purpose: "memory_review" } },
-  );
-  await provider.generate([{ role: "user", content: "review" }], []);
-  const calls = ledger.listProviderCalls();
-  assert.equal(calls.length, 2);
-  assert.equal(
-    calls.some((call) => call.callId === "pre-v7-main-call" && call.purpose === "main"),
-    true,
-    "v6 provider call survives v7 table migration",
-  );
-  const memoryCall = calls.find((call) => call.purpose === "memory_review");
-  assert.equal(memoryCall?.inputTokens, 5);
-  assert.equal(memoryCall?.outputTokens, 3);
-  const migrated = new Database(databasePath, { readonly: true });
-  const migration = migrated
-    .prepare("SELECT name FROM schema_migrations WHERE version = ?")
-    .get(RUNTIME_SCHEMA_VERSION) as { name: string };
-  migrated.close();
-  assert.equal(migration.name, RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME);
-});
-
-test("runtime v6 migration name is verified before the v7 provider purpose upgrade", async (context) => {
-  const fixture = await createFixture("provider-purpose-v6-name");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
-  const databasePath = ledger.databasePath;
-  ledger.close();
-  downgradeRuntimeDatabaseToV6(databasePath, "tampered_v6");
-
-  assert.throws(
-    () => new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome }),
-    /schema 6 migration tampered_v6 不受支持/u,
-  );
-  const inspected = new Database(databasePath, { readonly: true });
-  const current = inspected
-    .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-    .get() as { version: number };
-  const providerTable = inspected
-    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_calls'")
-    .get() as { sql: string };
-  inspected.close();
-  assert.equal(current.version, 6, "fail-closed validation must not partially apply v7");
-  assert.equal(providerTable.sql.includes("memory_review"), false);
 });
 
 async function createFixture(name: string) {
@@ -2007,67 +1924,10 @@ class SecondCanonicalizeBarrierTrustStore extends WorkspaceTrustStore {
   }
 }
 
-function downgradeRuntimeDatabaseToV6(
-  databasePath: string,
-  migrationName = "daemon_run_projection_and_idempotency",
-): void {
-  const database = new Database(databasePath);
-  try {
-    database.transaction(() => {
-      database.exec(`
-        DROP INDEX IF EXISTS provider_calls_session_idx;
-        DROP INDEX IF EXISTS provider_calls_goal_idx;
-        DROP INDEX IF EXISTS provider_calls_job_idx;
-        ALTER TABLE provider_calls RENAME TO provider_calls_v7_fixture;
-        CREATE TABLE provider_calls (
-          call_id TEXT PRIMARY KEY,
-          session_id TEXT,
-          conversation_id TEXT,
-          goal_id TEXT,
-          job_id TEXT REFERENCES jobs(job_id) ON DELETE SET NULL,
-          attempt_id TEXT REFERENCES job_attempts(attempt_id) ON DELETE SET NULL,
-          purpose TEXT NOT NULL CHECK (purpose IN ('main','subagent','compaction','aux','grace','hook')),
-          provider TEXT NOT NULL,
-          model TEXT NOT NULL,
-          route TEXT,
-          status TEXT NOT NULL CHECK (status IN ('succeeded','failed','cancelled')),
-          input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
-          output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
-          cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
-          cache_write_tokens INTEGER NOT NULL CHECK (cache_write_tokens >= 0),
-          cost REAL NOT NULL CHECK (cost >= 0),
-          reported_json TEXT,
-          created_at INTEGER NOT NULL
-        );
-        INSERT INTO provider_calls (
-          call_id, session_id, conversation_id, goal_id, job_id, attempt_id, purpose,
-          provider, model, route, status, input_tokens, output_tokens, cache_read_tokens,
-          cache_write_tokens, cost, reported_json, created_at
-        )
-        SELECT
-          call_id, session_id, conversation_id, goal_id, job_id, attempt_id, purpose,
-          provider, model, route, status, input_tokens, output_tokens, cache_read_tokens,
-          cache_write_tokens, cost, reported_json, created_at
-        FROM provider_calls_v7_fixture;
-        DROP TABLE provider_calls_v7_fixture;
-        CREATE INDEX provider_calls_session_idx ON provider_calls(session_id, created_at);
-        CREATE INDEX provider_calls_goal_idx ON provider_calls(goal_id, created_at);
-        CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
-      `);
-      database.prepare("DELETE FROM schema_migrations WHERE version = 7").run();
-      database
-        .prepare("UPDATE schema_migrations SET name = ? WHERE version = 6")
-        .run(migrationName);
-    })();
-  } finally {
-    database.close();
-  }
-}
-
 function openRepository(fixture: { workspace: string; picoHome: string }) {
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   return new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
 }

@@ -143,7 +143,7 @@ realModelTest(
 );
 
 realModelTest(
-  "real model recovers context and Usage only from runtime.sqlite facts",
+  "real model recovers context and Usage only from RuntimeEvent facts",
   { timeout: TEST_TIMEOUT_MS },
   async (context) => {
     const model = await configuredUserDefaultRealModel();
@@ -295,8 +295,8 @@ function supportsThinkingOff(route: ModelRoute): boolean {
 
 async function readRuntimeEvents(sandbox: TestSandbox): Promise<RuntimeEvent[]> {
   const store = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace
-      .runtimeDatabase,
+    storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace
+      .runtime,
   });
   try {
     return await store.readSession(sandbox.sessionId);

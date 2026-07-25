@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,6 +16,17 @@ import { FileStorageIntegrityError } from "../../src/storage/local-file-storage.
 import type { WorkspaceId } from "../../src/paths/pico-paths.js";
 
 const execFileAsync = promisify(execFile);
+
+test("MemoryRepository rejects an empty storage root", () => {
+  assert.throws(
+    () =>
+      new MemoryRepository({
+        storageRoot: " ",
+        workspaceId: "workspace-empty-root" as WorkspaceId,
+      }),
+    /storageRoot must not be empty/u,
+  );
+});
 
 test("memory JSON snapshot persists the complete structured model", async (context) => {
   const fixture = await createFixture();
@@ -115,9 +126,7 @@ test("transaction is nested, synchronous and commits one snapshot revision", asy
   assert.throws(
     () =>
       // @ts-expect-error The public type rejects Promise-like transaction results.
-      repository.transaction(
-        async () => undefined,
-      ),
+      repository.transaction(async () => undefined),
     MemoryAsyncTransactionError,
   );
 });
@@ -198,7 +207,16 @@ test("independent processes serialize snapshot writes without losing facts", asy
   const run = (prefix: string) =>
     execFileAsync(
       process.execPath,
-      ["--import", "tsx", "--input-type=module", "--eval", script, fixture.storageRoot, fixture.workspaceId, prefix],
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "--eval",
+        script,
+        fixture.storageRoot,
+        fixture.workspaceId,
+        prefix,
+      ],
       { cwd: process.cwd() },
     );
   await Promise.all([run("process-a"), run("process-b")]);
@@ -206,7 +224,9 @@ test("independent processes serialize snapshot writes without losing facts", asy
   assert.equal(facts.length, 10);
   assert.deepEqual(
     new Set(facts.map((fact) => fact.factId)),
-    new Set(Array.from({ length: 5 }, (_, index) => [`process-a-${index}`, `process-b-${index}`]).flat()),
+    new Set(
+      Array.from({ length: 5 }, (_, index) => [`process-a-${index}`, `process-b-${index}`]).flat(),
+    ),
   );
 });
 
@@ -222,6 +242,96 @@ test("future schema and workspace mismatch fail closed", async (context) => {
 
   await writeFile(statePath, `${JSON.stringify({ ...original, workspaceId: "another" })}\n`);
   assert.throws(() => open(fixture), FileStorageIntegrityError);
+});
+
+test("malformed structured memory entities fail closed", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = open(fixture);
+  const source = repository.createSource({
+    sourceId: "source-corrupt",
+    sessionId: "session-corrupt",
+    digest: "sha256:corrupt",
+  });
+  repository.createFact({
+    factId: "fact-corrupt",
+    kind: "project_fact",
+    title: "fact",
+    content: "body",
+    sourceId: source.sourceId,
+    idempotencyKey: "fact-corrupt-create",
+  });
+  repository.createProposal({
+    proposalId: "proposal-corrupt",
+    kind: "correction",
+    title: "proposal",
+    content: "body",
+    reason: "reason",
+    sourceId: source.sourceId,
+  });
+  repository.createJob({
+    jobId: "job-corrupt",
+    type: "extract",
+    terminalEventId: "terminal-corrupt",
+    extractorVersion: "v1",
+    cursor: { sessionId: "session-corrupt", sequence: 1 },
+  });
+  repository.close();
+  const statePath = join(fixture.storageRoot, "state.json");
+  const original = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+  interface CorruptibleMemoryState {
+    settings: Record<string, unknown>;
+    sources: Record<string, Record<string, unknown>>;
+    facts: Record<string, Record<string, unknown>>;
+    proposals: Record<string, Record<string, unknown>>;
+    mutations: Array<Record<string, unknown>>;
+    jobs: Record<string, Record<string, unknown> & { cursor: Record<string, unknown> }>;
+    idempotency: Record<string, Record<string, unknown>>;
+  }
+  const corruptions: Array<(state: CorruptibleMemoryState) => void> = [
+    (state) => {
+      state.settings.enabled = "yes";
+    },
+    (state) => {
+      state.sources["source-corrupt"]!.eventIds = [42];
+    },
+    (state) => {
+      state.facts["fact-corrupt"]!.kind = "invented";
+    },
+    (state) => {
+      state.proposals["proposal-corrupt"]!.status = "unknown";
+    },
+    (state) => {
+      state.mutations[0]!.action = "fact.body-copied";
+    },
+    (state) => {
+      state.jobs["job-corrupt"]!.cursor.sequence = -1;
+    },
+    (state) => {
+      const idempotency = Object.values(state.idempotency)[0] as Record<string, unknown>;
+      idempotency.marker = { factId: 42 };
+    },
+    (state) => {
+      state.facts["fact-corrupt"]!.sourceId = "missing-source";
+    },
+    (state) => {
+      state.jobs["job-duplicate"] = {
+        ...structuredClone(state.jobs["job-corrupt"]!),
+        jobId: "job-duplicate",
+      };
+    },
+    (state) => {
+      const mutation = structuredClone(state.mutations[0]!);
+      mutation.sequence = state.mutations.length + 1;
+      state.mutations.push(mutation);
+    },
+  ];
+  for (const corrupt of corruptions) {
+    const state = structuredClone(original) as unknown as CorruptibleMemoryState;
+    corrupt(state);
+    await writeFile(statePath, `${JSON.stringify(state)}\n`);
+    assert.throws(() => open(fixture), FileStorageIntegrityError);
+  }
 });
 
 test("forget atomically clears fact and linked proposal bodies from live files", async (context) => {
@@ -246,17 +356,33 @@ test("forget atomically clears fact and linked proposal bodies from live files",
     conflictStatus: "confirmed",
     conflictFactId: fact.factId,
   });
+  const staleTemporary = join(fixture.storageRoot, ".state.json.crashed.tmp");
+  await writeFile(staleTemporary, `${title}\n${content}\n${reason}\n`);
+  const summariesDirectory = join(fixture.storageRoot, "summaries");
+  const summaryTemporary = join(summariesDirectory, ".state.json.concurrent.tmp");
+  await mkdir(summariesDirectory);
+  await writeFile(summaryTemporary, `${title}\n${content}\n${reason}\n`);
 
-  const forgotten = repository.forgetFact({
+  const forgetInput = {
     factId: fact.factId,
     expectedVersion: fact.version,
-  });
+    idempotencyKey: "forget-fact",
+  } as const;
+  const forgotten = repository.forgetFact(forgetInput);
   assert.equal(forgotten.state, "forgotten");
   assert.equal(forgotten.title, null);
   assert.equal(forgotten.content, null);
   assert.equal(repository.getProposal("linked")?.status, "deleted");
   const stored = await readFile(join(fixture.storageRoot, "state.json"), "utf8");
   for (const secret of [title, content, reason]) assert.equal(stored.includes(secret), false);
+  assert.equal(existsSync(staleTemporary), false);
+  assert.equal(existsSync(summaryTemporary), true);
+
+  const replayTemporary = join(fixture.storageRoot, ".commit.json.replay.tmp");
+  await writeFile(replayTemporary, `${title}\n${content}\n${reason}\n`);
+  assert.deepEqual(repository.forgetFact(forgetInput), forgotten);
+  assert.equal(existsSync(replayTemporary), false);
+  assert.equal(existsSync(summaryTemporary), true);
 });
 
 interface Fixture {

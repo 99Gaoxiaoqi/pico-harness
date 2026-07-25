@@ -5,32 +5,33 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
+  readSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   truncateSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-  LeaseConflictError,
-  OwnerLease,
-  type OwnerLeaseRecord,
-} from "./owner-lease.js";
+import { LeaseConflictError, OwnerLease, type OwnerLeaseRecord } from "./owner-lease.js";
 
 const FILE_TRANSACTION_SCHEMA_VERSION = 1 as const;
 const LOCK_SCHEMA_VERSION = 1 as const;
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
 const DEFAULT_STALE_AFTER_MS = 30_000;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const syncSleepArray = new Int32Array(new SharedArrayBuffer(4));
 const heldSyncLocks = new Map<string, number>();
 const heldAsyncLocks = new AsyncLocalStorage<ReadonlySet<string>>();
 const localAsyncLockTails = new Map<string, Promise<void>>();
+const capabilityCheckedRoots = new Set<string>();
 
 export class FileStorageIntegrityError extends Error {
   constructor(message: string) {
@@ -72,10 +73,7 @@ export interface FileTransactionInput {
   readonly appends?: readonly FileTransactionAppend[];
 }
 
-export type FileTransactionStage =
-  | "commit-published"
-  | "targets-applied"
-  | "commit-cleared";
+export type FileTransactionStage = "commit-published" | "targets-applied" | "commit-cleared";
 
 export interface FileTransactionOptions {
   readonly commitFileName?: string;
@@ -119,11 +117,14 @@ export function withFileLockSync<Result>(
   options: FileLockOptions = {},
 ): Result {
   const canonicalLock = resolve(lockDirectory);
+  if (heldAsyncLocks.getStore()?.has(canonicalLock)) {
+    return assertSynchronousResult(operation(), canonicalLock);
+  }
   const heldDepth = heldSyncLocks.get(canonicalLock);
   if (heldDepth !== undefined) {
     heldSyncLocks.set(canonicalLock, heldDepth + 1);
     try {
-      return operation();
+      return assertSynchronousResult(operation(), canonicalLock);
     } finally {
       releaseReentrantSyncLock(canonicalLock);
     }
@@ -132,14 +133,14 @@ export function withFileLockSync<Result>(
   const owner = acquireFileLockSync(canonicalLock, ownerId, options);
   heldSyncLocks.set(canonicalLock, 1);
   try {
-    return operation();
+    return assertSynchronousResult(operation(), canonicalLock);
   } finally {
     heldSyncLocks.delete(canonicalLock);
     releaseFileLockSync(canonicalLock, owner);
   }
 }
 
-/** Async counterpart for RuntimeEventStore and other promise-based stores. */
+/** Async counterpart for promise-based stores that need heartbeat-backed ownership. */
 export async function withFileLock<Result>(
   lockDirectory: string,
   ownerId: string,
@@ -148,6 +149,8 @@ export async function withFileLock<Result>(
 ): Promise<Result> {
   const canonicalLock = resolve(lockDirectory);
   if (heldAsyncLocks.getStore()?.has(canonicalLock)) return operation();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
 
   let releaseTurn!: () => void;
   const turn = new Promise<void>((resolveTurn) => {
@@ -156,21 +159,34 @@ export async function withFileLock<Result>(
   const previous = localAsyncLockTails.get(canonicalLock) ?? Promise.resolve();
   const tail = previous.catch(() => undefined).then(() => turn);
   localAsyncLockTails.set(canonicalLock, tail);
-  await previous.catch(() => undefined);
 
   let lease: OwnerLease | undefined;
+  let reachedFront = false;
   try {
-    lease = await acquireFileLock(canonicalLock, ownerId, options);
+    await waitForLocalLockTurn(previous, deadline, canonicalLock);
+    reachedFront = true;
+    lease = await acquireFileLock(canonicalLock, ownerId, {
+      ...options,
+      timeoutMs: Math.max(0, deadline - Date.now()),
+    });
     const scope = new Set(heldAsyncLocks.getStore() ?? []);
     scope.add(canonicalLock);
-    return await heldAsyncLocks.run(scope, operation);
+    const result = await heldAsyncLocks.run(scope, operation);
+    await lease.assertOwnership();
+    return result;
   } finally {
     try {
       await lease?.release();
     } finally {
       releaseTurn();
-      if (localAsyncLockTails.get(canonicalLock) === tail) {
+      if (reachedFront && localAsyncLockTails.get(canonicalLock) === tail) {
         localAsyncLockTails.delete(canonicalLock);
+      } else if (!reachedFront) {
+        void tail.finally(() => {
+          if (localAsyncLockTails.get(canonicalLock) === tail) {
+            localAsyncLockTails.delete(canonicalLock);
+          }
+        });
       }
     }
   }
@@ -207,7 +223,37 @@ export function writeFileAtomicSync(path: string, content: string | Buffer): voi
 }
 
 export function readJsonFileSync(path: string): unknown {
+  assertPrivateDataFileSync(path);
   return JSON.parse(readFileSync(path, "utf8")) as unknown;
+}
+
+export function readFirstJsonLineSync(path: string): unknown {
+  assertPrivateDataFileSync(path);
+  const descriptor = openSync(path, "r");
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(4_096);
+      const bytesRead = readSync(descriptor, chunk, 0, chunk.length, total);
+      if (bytesRead === 0) {
+        throw new FileStorageIntegrityError(`JSONL has no complete first record: ${path}`);
+      }
+      const content = chunk.subarray(0, bytesRead);
+      const newline = content.indexOf(0x0a);
+      if (newline >= 0) {
+        chunks.push(content.subarray(0, newline));
+        return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+      }
+      chunks.push(content);
+      total += bytesRead;
+      if (total > 1024 * 1024) {
+        throw new FileStorageIntegrityError(`JSONL first record exceeds 1 MiB: ${path}`);
+      }
+    }
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 /**
@@ -216,6 +262,7 @@ export function readJsonFileSync(path: string): unknown {
  */
 export function readJsonLinesSync(path: string, repairIncompleteTail = false): unknown[] {
   if (!existsSync(path)) return [];
+  assertPrivateDataFileSync(path);
   let bytes = readFileSync(path);
   if (bytes.length === 0) return [];
   if (bytes[bytes.length - 1] !== 0x0a) {
@@ -255,6 +302,7 @@ export function appendFileDurableSync(path: string, content: string | Buffer): v
     closeSync(descriptor);
   }
   chmodSync(target, 0o600);
+  syncDirectorySync(dirname(target));
 }
 
 /**
@@ -302,21 +350,172 @@ export function recoverFileTransactionSync(
   return transaction.transactionId;
 }
 
+/**
+ * Validates a durable marker without applying it. Read-only diagnostics use this to distinguish
+ * a recoverable pending transaction from a corrupt commit.
+ */
+export function validateFileTransactionMarkerSync(
+  storageRoot: string,
+  options: Pick<FileTransactionOptions, "commitFileName"> = {},
+): string {
+  return inspectFileTransactionMarkerSync(storageRoot, options).transactionId;
+}
+
+export interface FileTransactionInspection {
+  readonly transactionId: string;
+  readonly status: "pending" | "partially-applied" | "applied";
+}
+
+/** Validates both marker structure and the recoverability of every current target. */
+export function inspectFileTransactionMarkerSync(
+  storageRoot: string,
+  options: Pick<FileTransactionOptions, "commitFileName"> = {},
+): FileTransactionInspection {
+  const root = resolve(storageRoot);
+  const commitPath = transactionCommitPath(root, options.commitFileName);
+  const transaction = decodePersistedTransaction(readJsonFileSync(commitPath), commitPath);
+  validateTransactionTargets(root, transaction);
+  let applied = 0;
+  let pending = 0;
+  let partial = 0;
+  for (const replacement of transaction.replacements) {
+    const target = resolveTransactionTarget(root, replacement.relativePath);
+    const current = readOptionalFile(target);
+    const hash = sha256(current);
+    if (hash === replacement.nextHash) {
+      applied++;
+    } else if (current.length === replacement.expectedSize && hash === replacement.expectedHash) {
+      pending++;
+    } else {
+      throw targetConflict(target, transaction.transactionId);
+    }
+  }
+  for (const append of transaction.appends) {
+    const target = resolveTransactionTarget(root, append.relativePath);
+    const current = readOptionalFile(target);
+    const hash = sha256(current);
+    if (current.length === append.nextSize && hash === append.nextHash) {
+      applied++;
+      continue;
+    }
+    if (current.length === append.expectedSize && hash === append.expectedHash) {
+      pending++;
+      continue;
+    }
+    const addition = Buffer.from(append.contentBase64, "base64");
+    if (
+      current.length > append.expectedSize &&
+      current.length < append.nextSize &&
+      sha256(current.subarray(0, append.expectedSize)) === append.expectedHash &&
+      addition
+        .subarray(0, current.length - append.expectedSize)
+        .equals(current.subarray(append.expectedSize))
+    ) {
+      partial++;
+      continue;
+    }
+    throw targetConflict(target, transaction.transactionId);
+  }
+  return {
+    transactionId: transaction.transactionId,
+    status:
+      partial > 0 || (applied > 0 && pending > 0)
+        ? "partially-applied"
+        : pending > 0
+          ? "pending"
+          : "applied",
+  };
+}
+
 export function mkdirPrivateSync(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chmodSync(path, 0o700);
 }
 
 export function syncDirectorySync(directory: string): void {
-  let descriptor: number | undefined;
+  const descriptor = openSync(directory, "r");
   try {
-    descriptor = openSync(directory, "r");
     fsyncSync(descriptor);
-  } catch (error) {
-    if (!isUnsupportedDirectorySync(error)) throw error;
   } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
+    closeSync(descriptor);
   }
+}
+
+/**
+ * Probes the exact storage root used by a Store. The result is cached only after the local
+ * filesystem proves private modes, atomic mkdir/rename, file+directory fsync, and recovery of a
+ * published transaction.
+ */
+export function assertLocalFileStorageCapabilitiesSync(storageRoot: string): void {
+  const root = resolve(storageRoot);
+  if (capabilityCheckedRoots.has(root)) return;
+  mkdirPrivateSync(root);
+  const probeRoot = join(root, `.storage-capability-${process.pid}-${randomUUID()}`);
+  try {
+    mkdirSync(probeRoot, { mode: 0o700 });
+    const lockPath = join(probeRoot, "lock");
+    mkdirSync(lockPath, { mode: 0o700 });
+    try {
+      mkdirSync(lockPath);
+      throw new FileStorageIntegrityError("Atomic mkdir did not reject a duplicate lock");
+    } catch (error) {
+      if (!isNodeCode(error, "EEXIST")) throw error;
+    }
+    rmSync(lockPath, { recursive: true });
+
+    const statePath = join(probeRoot, "state.json");
+    writeFileAtomicSync(statePath, '{"revision":1}\n');
+    if (readFileSync(statePath, "utf8") !== '{"revision":1}\n') {
+      throw new FileStorageIntegrityError("Atomic rename probe returned unexpected content");
+    }
+    if (process.platform !== "win32") {
+      const directoryMode = statSync(probeRoot).mode & 0o777;
+      const fileMode = statSync(statePath).mode & 0o777;
+      if (directoryMode !== 0o700 || fileMode !== 0o600) {
+        throw new FileStorageIntegrityError(
+          `Private storage mode probe failed (${directoryMode.toString(8)}/${fileMode.toString(8)})`,
+        );
+      }
+    }
+
+    let crashInjected = false;
+    try {
+      commitFileTransactionSync(
+        probeRoot,
+        {
+          replacements: [{ relativePath: "state.json", content: '{"revision":2}\n' }],
+          appends: [{ relativePath: "events.jsonl", content: '{"eventId":"probe"}\n' }],
+        },
+        {
+          transactionId: "storage-capability-probe",
+          onStage(stage) {
+            if (stage === "commit-published") {
+              crashInjected = true;
+              throw new Error("storage capability crash probe");
+            }
+          },
+        },
+      );
+    } catch (error) {
+      if (!crashInjected || errorMessage(error) !== "storage capability crash probe") throw error;
+    }
+    if (!crashInjected) {
+      throw new FileStorageIntegrityError("Crash recovery probe did not publish a commit marker");
+    }
+    if (recoverFileTransactionSync(probeRoot) !== "storage-capability-probe") {
+      throw new FileStorageIntegrityError("Crash recovery probe did not recover its transaction");
+    }
+    if (
+      readFileSync(statePath, "utf8") !== '{"revision":2}\n' ||
+      readFileSync(join(probeRoot, "events.jsonl"), "utf8") !== '{"eventId":"probe"}\n'
+    ) {
+      throw new FileStorageIntegrityError("Crash recovery probe produced unexpected content");
+    }
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+    syncDirectorySync(root);
+  }
+  capabilityCheckedRoots.add(root);
 }
 
 function acquireFileLockSync(
@@ -335,13 +534,11 @@ function acquireFileLockSync(
     const candidate = prepareSyncLockCandidate(lockDirectory, ownerId, now);
     try {
       const inspection = inspectSyncLock(lockDirectory);
-      if (inspection.state === "absent" && publishSyncLockCandidate(candidate.path, lockDirectory)) {
+      if (
+        inspection.state === "absent" &&
+        publishSyncLockCandidate(candidate.path, lockDirectory)
+      ) {
         return candidate.owner;
-      }
-      if (inspection.state === "unverifiable") {
-        throw new LeaseConflictError(
-          `Lock directory exists but its owner cannot be verified: ${lockDirectory}`,
-        );
       }
       if (inspection.state === "owned") {
         lastOwner = inspection.owner;
@@ -355,7 +552,9 @@ function acquireFileLockSync(
     }
     if (now() >= deadline) {
       throw new FileLockTimeoutError(
-        `Timed out waiting for file lock ${lockDirectory}`,
+        `Timed out waiting for file lock ${lockDirectory}${
+          lastOwner ? ` held by ${lastOwner.ownerId} (${lastOwner.hostname}:${lastOwner.pid})` : ""
+        }`,
         lockDirectory,
         lastOwner,
       );
@@ -382,7 +581,11 @@ async function acquireFileLock(
       lastOwner = error.owner;
       if (Date.now() >= deadline) {
         throw new FileLockTimeoutError(
-          `Timed out waiting for file lock ${lockDirectory}`,
+          `Timed out waiting for file lock ${lockDirectory}${
+            lastOwner
+              ? ` held by ${lastOwner.ownerId} (${lastOwner.hostname}:${lastOwner.pid})`
+              : ""
+          }`,
           lockDirectory,
           lastOwner,
         );
@@ -491,11 +694,7 @@ function publishSyncLockCandidate(candidatePath: string, lockDirectory: string):
   }
 }
 
-function canProveOwnerIsDead(
-  owner: OwnerLeaseRecord,
-  now: number,
-  staleAfterMs: number,
-): boolean {
+function canProveOwnerIsDead(owner: OwnerLeaseRecord, now: number, staleAfterMs: number): boolean {
   if (owner.hostname !== hostname()) return false;
   const heartbeatAt = Date.parse(owner.heartbeatAt);
   if (!Number.isFinite(heartbeatAt) || now - heartbeatAt < staleAfterMs) return false;
@@ -565,15 +764,13 @@ function prepareTransaction(
 }
 
 function applyTransaction(root: string, transaction: PersistedFileTransaction): void {
+  validateTransactionTargets(root, transaction);
   for (const replacement of transaction.replacements) {
     const target = resolveTransactionTarget(root, replacement.relativePath);
     const current = readOptionalFile(target);
     const currentHash = sha256(current);
     if (currentHash === replacement.nextHash) continue;
-    if (
-      current.length !== replacement.expectedSize ||
-      currentHash !== replacement.expectedHash
-    ) {
+    if (current.length !== replacement.expectedSize || currentHash !== replacement.expectedHash) {
       throw targetConflict(target, transaction.transactionId);
     }
     const next = Buffer.from(replacement.contentBase64, "base64");
@@ -595,9 +792,9 @@ function applyTransaction(root: string, transaction: PersistedFileTransaction): 
       current.length > append.expectedSize &&
       current.length < append.nextSize &&
       sha256(current.subarray(0, append.expectedSize)) === append.expectedHash &&
-      addition.subarray(0, current.length - append.expectedSize).equals(
-        current.subarray(append.expectedSize),
-      )
+      addition
+        .subarray(0, current.length - append.expectedSize)
+        .equals(current.subarray(append.expectedSize))
     ) {
       truncateSync(target, append.expectedSize);
       syncFileSync(target);
@@ -622,13 +819,116 @@ function decodePersistedTransaction(value: unknown, path: string): PersistedFile
     !isRecord(value) ||
     value["schemaVersion"] !== FILE_TRANSACTION_SCHEMA_VERSION ||
     typeof value["transactionId"] !== "string" ||
+    value["transactionId"].length === 0 ||
     typeof value["createdAt"] !== "string" ||
+    value["createdAt"].length === 0 ||
     !Array.isArray(value["replacements"]) ||
     !Array.isArray(value["appends"])
   ) {
     throw new FileStorageIntegrityError(`Invalid file transaction marker: ${path}`);
   }
-  return value as unknown as PersistedFileTransaction;
+  const replacements = value["replacements"].map((entry, index) =>
+    decodePersistedReplacement(entry, path, index),
+  );
+  const appends = value["appends"].map((entry, index) => decodePersistedAppend(entry, path, index));
+  return {
+    schemaVersion: FILE_TRANSACTION_SCHEMA_VERSION,
+    transactionId: value["transactionId"],
+    createdAt: value["createdAt"],
+    replacements,
+    appends,
+  };
+}
+
+function decodePersistedReplacement(
+  value: unknown,
+  path: string,
+  index: number,
+): PersistedReplacement {
+  if (
+    !isRecord(value) ||
+    typeof value["relativePath"] !== "string" ||
+    !isNonNegativeSafeInteger(value["expectedSize"]) ||
+    !isSha256(value["expectedHash"]) ||
+    !isSha256(value["nextHash"]) ||
+    typeof value["contentBase64"] !== "string"
+  ) {
+    throw invalidTransactionEntry(path, "replacement", index);
+  }
+  const content = decodeCanonicalBase64(value["contentBase64"], path);
+  if (sha256(content) !== value["nextHash"]) {
+    throw invalidTransactionEntry(path, "replacement", index);
+  }
+  return {
+    relativePath: value["relativePath"],
+    expectedSize: value["expectedSize"],
+    expectedHash: value["expectedHash"],
+    nextHash: value["nextHash"],
+    contentBase64: value["contentBase64"],
+  };
+}
+
+function decodePersistedAppend(value: unknown, path: string, index: number): PersistedAppend {
+  if (
+    !isRecord(value) ||
+    typeof value["relativePath"] !== "string" ||
+    !isNonNegativeSafeInteger(value["expectedSize"]) ||
+    !isSha256(value["expectedHash"]) ||
+    !isNonNegativeSafeInteger(value["nextSize"]) ||
+    !isSha256(value["nextHash"]) ||
+    typeof value["contentBase64"] !== "string"
+  ) {
+    throw invalidTransactionEntry(path, "append", index);
+  }
+  const content = decodeCanonicalBase64(value["contentBase64"], path);
+  if (value["nextSize"] !== value["expectedSize"] + content.length) {
+    throw invalidTransactionEntry(path, "append", index);
+  }
+  return {
+    relativePath: value["relativePath"],
+    expectedSize: value["expectedSize"],
+    expectedHash: value["expectedHash"],
+    nextSize: value["nextSize"],
+    nextHash: value["nextHash"],
+    contentBase64: value["contentBase64"],
+  };
+}
+
+function validateTransactionTargets(root: string, transaction: PersistedFileTransaction): void {
+  const targets = [...transaction.replacements, ...transaction.appends].map((entry) =>
+    normalizedRelativePath(root, resolveTransactionTarget(root, entry.relativePath)),
+  );
+  if (new Set(targets).size !== targets.length) {
+    throw new FileStorageIntegrityError(
+      `File transaction ${transaction.transactionId} mutates one target more than once`,
+    );
+  }
+}
+
+function decodeCanonicalBase64(value: string, path: string): Buffer {
+  const content = Buffer.from(value, "base64");
+  if (content.toString("base64") !== value) {
+    throw new FileStorageIntegrityError(`Invalid base64 payload in file transaction ${path}`);
+  }
+  return content;
+}
+
+function invalidTransactionEntry(
+  path: string,
+  kind: "replacement" | "append",
+  index: number,
+): FileStorageIntegrityError {
+  return new FileStorageIntegrityError(
+    `Invalid ${kind} ${index + 1} in file transaction marker: ${path}`,
+  );
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && SHA256_PATTERN.test(value);
 }
 
 function transactionCommitPath(root: string, fileName = "commit.json"): string {
@@ -693,12 +993,61 @@ function sha256(content: Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function isUnsupportedDirectorySync(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(String(error.code))
-  );
+function assertSynchronousResult<Result>(value: Result, lockPath: string): Result {
+  if (
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    "then" in value &&
+    typeof value.then === "function"
+  ) {
+    void Promise.resolve(value).catch(() => undefined);
+    throw new TypeError(
+      `withFileLockSync callback for ${lockPath} returned a Promise; use withFileLock instead`,
+    );
+  }
+  return value;
+}
+
+export function assertPrivateDataFileSync(path: string): void {
+  if (process.platform === "win32") return;
+  const file = lstatSync(path);
+  if (!file.isFile() || file.isSymbolicLink() || (file.mode & 0o777) !== 0o600) {
+    throw new FileStorageIntegrityError(`Storage data file must be a regular 0600 file: ${path}`);
+  }
+  const parent = lstatSync(dirname(path));
+  if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o777) !== 0o700) {
+    throw new FileStorageIntegrityError(
+      `Storage data directory must be a regular 0700 directory: ${dirname(path)}`,
+    );
+  }
+}
+
+async function waitForLocalLockTurn(
+  previous: Promise<void>,
+  deadline: number,
+  lockPath: string,
+): Promise<void> {
+  const remainingMs = Math.max(0, deadline - Date.now());
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      previous.catch(() => undefined),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new FileLockTimeoutError(
+                `Timed out waiting for in-process file lock ${lockPath}`,
+                lockPath,
+              ),
+            ),
+          remainingMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function isNodeCode(error: unknown, code: string): boolean {

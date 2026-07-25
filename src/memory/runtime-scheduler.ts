@@ -73,7 +73,7 @@ export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   pending(): readonly Job[] {
     const now = (this.options.now ?? (() => new Date()))();
     this.recoverStaleRunningJobs(now.getTime());
-    // Failed reviews are retryable until maxAttempts; delayed retries stay dormant in SQLite so
+    // Failed reviews are retryable until maxAttempts; delayed retries stay dormant in Memory state so
     // they cannot occupy the bounded page ahead of work that is ready now.
     return this.repository.listJobs({
       statuses: ["queued", "failed"],

@@ -28,9 +28,9 @@ export class Session {
 }
 ```
 
-Session 隔离的是 `history`、设置、Goal、usage 投影和串行运行队列，不隔离工作区本身。同一工作区的多个 Session 仍共享文件、项目配置和同一个 `runtime.sqlite`，但事件都带明确 `session_id`，不会串进另一条模型历史。
+Session 隔离的是 `history`、设置、Goal、usage 投影和串行运行队列，不隔离工作区本身。同一工作区的多个 Session 仍共享文件、项目配置和同一个 Runtime 存储根，但每条 Session 使用独立账本，不会串进另一条模型历史。
 
-新建 CLI Session 使用时间和随机 UUID 生成 ID；`resume` / `continue` 从 RuntimeEvent manifest 找回已有 ID。工作区路径决定状态命名空间和数据库位置，不直接充当 Session ID。
+新建 CLI Session 使用时间和随机 UUID 生成 ID；`resume` / `continue` 从 RuntimeEvent manifest 找回已有 ID。工作区路径决定状态命名空间和存储位置，不直接充当 Session ID。
 
 ### 并发安全：Promise 链式队列
 
@@ -53,7 +53,7 @@ serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 `catch(() => {})` 保证前一条任务失败后，后续任务仍能继续进入队列。
 
-Promise 队列只约束单个进程。持久化 Session 还会在 workspace 状态根下取得按 `workspaceId + sessionId` 隔离的 owner lease，并持有到 `close()`；第二个进程不能同时打开同一 Session 写入。SQLite 负责事实事务，lease 只负责单写者仲裁，不承载对话数据。
+Promise 队列只约束单个进程。持久化 Session 还会在 workspace 状态根下取得按 `workspaceId + sessionId` 隔离的 owner lease，并持有到 `close()`；第二个进程不能同时打开同一 Session 写入。文件 commit marker 负责事实事务，lease 负责跨进程单写者仲裁，不承载对话数据。
 
 ---
 
@@ -83,7 +83,9 @@ AgentRuntime
     ├─ message / tool / model / usage / rewind / fork 事件
     ▼
 RuntimeEventStore
-    └─ ~/.pico/workspaces/<workspace-id>/runtime.sqlite
+    └─ ~/.pico/workspaces/<workspace-id>/runtime/sessions/<session-hash>/
+             ├─ session.jsonl
+             └─ manifest.json
              │
              ├─ Session.history 投影
              ├─ Session settings / Goal / usage 投影
@@ -92,8 +94,8 @@ RuntimeEventStore
 
 写入顺序也变得明确：
 
-1. 在 SQLite 事务中追加 RuntimeEvent。
-2. 以 `(session_id, event_id)` 保证精确一次语义；同 ID 同 payload 可幂等重试，同 ID 不同 payload 直接拒绝。
+1. 先发布耐久 commit marker，再追加一个 RuntimeEvent 批次并更新 manifest 投影。
+2. 以 `(sessionId, eventId)` 保证精确一次语义；同 ID 同 payload 可幂等重试，同 ID 不同 payload 直接拒绝。
 3. durable commit 成功后，再更新 `Session.history` 等内存投影。
 4. 启动时从 RuntimeEvent 重放消息、usage 和 Session state，不信任旧的内存状态。
 
@@ -187,7 +189,7 @@ Agent 的记忆系统成形了：
 
 - **Session 逻辑隔离**：每条会话独立历史与运行态，Promise 队列和 owner lease 保证单写
 - **完整 Model Context**：低于 token 水位时传完整历史，工具协议按局部批次修复
-- **RuntimeEvent 事件溯源**：SQLite 事务、稳定游标与精确一次事件 ID 保证可重放
+- **RuntimeEvent 事件溯源**：JSONL 批次事务、稳定游标与精确一次事件 ID 保证可重放
 - **Summary sidecar**：只辅助 compaction/rewind/fork，不升级为第二事实源
 - **Prompt 模块化组装**：内核 + AGENTS.md + Skills + Plan Context 动态拼接
 

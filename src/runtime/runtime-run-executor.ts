@@ -222,7 +222,7 @@ function scheduleMemoryReviewEnqueue(
   context: { readonly sessionId: string; readonly runId: string },
 ): void {
   // The terminal fact is already durable. Schedule the observer in a new host task so neither a
-  // slow Promise nor synchronous SQLite busy time can extend the foreground response path.
+  // slow Promise nor synchronous storage lock contention can extend the foreground response path.
   setImmediate(() => {
     try {
       const pending = scheduler.enqueue(input);

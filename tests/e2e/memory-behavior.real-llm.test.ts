@@ -53,7 +53,7 @@ realModelTest(
     ]);
     const paths = resolvePicoPaths(workspace, { picoHome });
     const repository = new MemoryRepository({
-      databasePath: paths.workspace.memoryDatabase,
+      storageRoot: paths.workspace.memory,
       workspaceId: paths.workspace.id,
     });
     const actual: ScoredMemoryProposal[] = [];
@@ -323,7 +323,7 @@ function runtimeRequest(
 function openMemoryRepository(workspace: string, picoHome: string): MemoryRepository {
   const paths = resolvePicoPaths(workspace, { picoHome });
   return new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
 }

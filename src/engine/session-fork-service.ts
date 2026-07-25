@@ -162,8 +162,7 @@ export class SessionForkService {
       options.journal ??
       new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
     this.runtimeStore =
-      options.runtimeStore ??
-      new RuntimeEventStore({ databasePath: this.workspacePaths.runtimeDatabase });
+      options.runtimeStore ?? new RuntimeEventStore({ storageRoot: this.workspacePaths.runtime });
     this.fileHistoryBaseDir =
       options.fileHistoryBaseDir ??
       (options.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir());
@@ -195,7 +194,7 @@ export class SessionForkService {
     if (!sourceRuntimeStore) {
       throw new Error(`Fork requires a durable source Session: ${input.sourceSessionId}`);
     }
-    if (resolve(sourceRuntimeStore.databasePath) !== resolve(this.runtimeStore.databasePath)) {
+    if (resolve(sourceRuntimeStore.storageRoot) !== resolve(this.runtimeStore.storageRoot)) {
       throw new Error(
         `Fork Runtime store does not match source Session store: ${input.sourceSessionId}`,
       );

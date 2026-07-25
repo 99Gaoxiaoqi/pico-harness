@@ -318,7 +318,7 @@ test("memory reviewer failure cannot replace foreground terminal success", async
     );
     assert.equal(reviewCalls, 1);
     const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-    const eventStore = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+    const eventStore = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
     try {
       const events = await eventStore.readSession(sessionId);
       assert.equal(
@@ -576,7 +576,7 @@ function extractEvidenceEventId(messages: Message[]): string {
 function openRepository(workspace: string, picoHome: string): MemoryRepository {
   const paths = resolvePicoPaths(workspace, { picoHome });
   return new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
 }

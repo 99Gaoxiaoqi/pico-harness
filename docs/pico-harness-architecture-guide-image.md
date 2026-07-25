@@ -166,7 +166,7 @@ TUI 使用 `providerID/modelID` 选择稳定的模型路由。路由层不仅负
 - Tool Result 未到齐时，后续普通消息暂存，避免产生模型 API 无法接受的顺序。
 - Working Memory 只取近期有效消息，并丢弃孤儿 Tool Result。
 
-对话内容优先索引到 SQLite FTS5，供长期检索和 Memory Nudger 使用；如果原生 SQLite 因 Node ABI、文件权限或运行环境不可用，会降级到可由 Session JSONL 重建的有界内存索引，并在 TUI 中展示后端状态和降级原因。大结果进入 `.claw/artifacts`，决策链路进入 `.claw/traces`，摘要独立持久化。这些外部化状态共同构成了 Agent 的“硬盘”。
+对话内容以 Session JSONL 为事实源，并在进程内建立可丢弃索引供恢复和 Memory 读取；索引可以从日志重建，不升级为第二事实源。大结果进入 workspace artifacts，决策链路进入 traces，摘要独立持久化。这些外部化状态共同构成了 Agent 的“硬盘”。
 
 ## 六、Rewind 为什么不等于 Git Reset
 

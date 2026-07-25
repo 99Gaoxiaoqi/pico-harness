@@ -502,7 +502,7 @@ async function createFixture(label: string) {
   await mkdir(workspace);
   const paths = resolvePicoPaths(workspace, { picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const store = new MemoryRepositoryProposalStore(repository);

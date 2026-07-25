@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "better-sqlite3";
 import { DesktopMemoryService, mapMemoryError } from "../../src/daemon/desktop-memory-service.js";
 import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../src/daemon/protocol.js";
 import { MemoryRepository } from "../../src/memory/memory-repository.js";
@@ -18,7 +17,7 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -48,7 +47,7 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
     states: ["active"],
   });
   assert.equal(listed.facts.length, 1);
-  assert.equal("databasePath" in listed.facts[0]!, false);
+  assert.equal("storageRoot" in listed.facts[0]!, false);
   assert.deepEqual(listed.facts[0]!.source, {
     sourceId: "source-1",
     sessionId: "session-1",
@@ -136,14 +135,9 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
       } as never),
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
   );
-  const internal = mapMemoryError(new Error("failed at /private/secret/memory.sqlite"));
+  const internal = mapMemoryError(new Error("failed at /private/secret/memory/state.json"));
   assert.equal(internal.code, RUNTIME_ERROR_CODES.INTERNAL_ERROR);
   assert.equal(internal.message.includes("/private/secret"), false);
-  const pendingDelete = new Error("pending secure delete at /private/secret/memory.sqlite");
-  pendingDelete.name = "MemorySecureDeletePendingError";
-  const mappedPendingDelete = mapMemoryError(pendingDelete);
-  assert.equal(mappedPendingDelete.code, RUNTIME_ERROR_CODES.CONFLICT);
-  assert.equal(mappedPendingDelete.message.includes("/private/secret"), false);
 });
 
 test("Desktop memory settings expose only rolling actual terminal review usage", async (context) => {
@@ -152,7 +146,7 @@ test("Desktop memory settings expose only rolling actual terminal review usage",
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   let clock = new Date("2026-07-21T11:00:00.000Z");
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
     now: () => clock,
   });
@@ -202,7 +196,7 @@ test("Desktop memory settings expose only rolling actual terminal review usage",
     maxCostUsd: 0.1,
     nextRecoveryAt: "2026-07-22T11:00:00.000Z",
   });
-  assert.equal("databasePath" in result.reviewBudget, false);
+  assert.equal("storageRoot" in result.reviewBudget, false);
   assert.equal("content" in result.reviewBudget, false);
 });
 
@@ -211,7 +205,7 @@ test("edited approval is one atomic CAS and never activates the original body", 
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const proposal = repository.createProposal({
@@ -277,7 +271,7 @@ test("edited approval is one atomic CAS and never activates the original body", 
   disconnect = false;
 
   const verify = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -306,7 +300,7 @@ test("Desktop review approval replaces a conflict fact instead of creating a dup
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const fact = repository.createFact({
@@ -355,7 +349,7 @@ test("session deletion and rewind invalidate sources and pending proposals but r
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const deletedSource = repository.createSource({
@@ -458,7 +452,7 @@ test("session deletion and rewind invalidate sources and pending proposals but r
   service.close();
 
   const verify = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -482,7 +476,7 @@ test("session lifecycle compensation invalidates more than 500 sources without o
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   for (let index = 0; index < 510; index++) {
@@ -526,43 +520,38 @@ test("session lifecycle compensation invalidates more than 500 sources without o
 
   // Any later memory access retries the durable lifecycle job.
   service.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
-  const inspection = new Database(paths.workspace.memoryDatabase, {
-    readonly: true,
-    fileMustExist: true,
-  });
-  context.after(() => inspection.close());
-  assert.deepEqual(
-    inspection
-      .prepare(
-        "SELECT availability, COUNT(*) AS count FROM memory_sources WHERE session_id = ? GROUP BY availability",
-      )
-      .all("bulk-session"),
-    [{ availability: "unavailable", count: 510 }],
+  const state = JSON.parse(await readFile(paths.workspace.memoryState, "utf8")) as {
+    sources: Record<string, { sessionId: string; availability: string }>;
+    proposals: Record<string, { proposalId: string; status: string }>;
+    jobs: Record<string, { type: string; status: string }>;
+  };
+  assert.equal(
+    Object.values(state.sources).filter(
+      (source) => source.sessionId === "bulk-session" && source.availability === "unavailable",
+    ).length,
+    510,
   );
-  assert.deepEqual(
-    inspection
-      .prepare(
-        "SELECT status, COUNT(*) AS count FROM memory_proposals WHERE proposal_id LIKE 'bulk-proposal-%' GROUP BY status",
-      )
-      .all(),
-    [{ status: "deleted", count: 510 }],
+  assert.equal(
+    Object.values(state.proposals).filter(
+      (proposal) =>
+        proposal.proposalId.startsWith("bulk-proposal-") && proposal.status === "deleted",
+    ).length,
+    510,
   );
-  assert.deepEqual(
-    inspection
-      .prepare(
-        "SELECT status, COUNT(*) AS count FROM memory_jobs WHERE type = 'source-lifecycle-invalidation' GROUP BY status",
-      )
-      .all(),
-    [{ status: "succeeded", count: 1 }],
+  assert.equal(
+    Object.values(state.jobs).filter(
+      (job) => job.type === "source-lifecycle-invalidation" && job.status === "succeeded",
+    ).length,
+    1,
   );
 });
 
-test("busy secure-delete forget durably outboxes a body-free notification", async (context) => {
+test("file-backed forget durably outboxes a body-free notification", async (context) => {
   const fixture = await createFixture("forget-outbox");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const secret = "forget-outbox-sensitive-body";
@@ -575,32 +564,25 @@ test("busy secure-delete forget durably outboxes a body-free notification", asyn
   repository.close();
 
   const events: Array<{ readonly topic: string; readonly payload: Record<string, unknown> }> = [];
-  const degraded: string[] = [];
   const service = new DesktopMemoryService({
     picoHome: fixture.picoHome,
     repositoryBusyTimeoutMs: 1,
     publish: (_workspacePath, topic, payload) => events.push({ topic, payload }),
-    onDegraded: (event) => degraded.push(event.code),
   });
   context.after(() => service.close());
   service.get(fixture.workspace, fact.factId);
-  const reader = holdFactReadSnapshot(paths.workspace.memoryDatabase, fact.factId, secret);
-  assertRuntimeError(
-    () =>
-      service.forget(fixture.workspace, {
-        workspacePath: fixture.workspace,
-        factId: fact.factId,
-        expectedVersion: fact.version,
-        idempotencyKey: "forget-outbox-request",
-      }),
-    RUNTIME_ERROR_CODES.CONFLICT,
-  );
+  const forgotten = service.forget(fixture.workspace, {
+    workspacePath: fixture.workspace,
+    factId: fact.factId,
+    expectedVersion: fact.version,
+    idempotencyKey: "forget-outbox-request",
+  });
+  assert.equal(forgotten.fact.state, "forgotten");
   assert.equal(
     events.some((event) => event.topic === "memory.forgotten"),
     true,
   );
   assert.ok(events.every((event) => !("content" in event.payload) && !("title" in event.payload)));
-  releaseReadSnapshot(reader);
 
   const replay = service.forget(fixture.workspace, {
     workspacePath: fixture.workspace,
@@ -609,20 +591,15 @@ test("busy secure-delete forget durably outboxes a body-free notification", asyn
     idempotencyKey: "forget-outbox-request",
   });
   assert.equal(replay.fact.state, "forgotten");
-  const inspection = new Database(paths.workspace.memoryDatabase, {
-    readonly: true,
-    fileMustExist: true,
+  const inspection = new MemoryRepository({
+    storageRoot: paths.workspace.memory,
+    workspaceId: paths.workspace.id,
   });
   context.after(() => inspection.close());
-  assert.deepEqual(
-    inspection
-      .prepare(
-        "SELECT status, COUNT(*) AS count FROM memory_jobs WHERE type = 'notification.memory.forgotten' GROUP BY status",
-      )
-      .all(),
-    [{ status: "succeeded", count: 1 }],
+  assert.equal(
+    inspection.listJobs({ type: "notification.memory.forgotten", statuses: ["succeeded"] }).length,
+    1,
   );
-  assert.ok(degraded.includes("notification_delivery_deferred"));
 });
 
 test("context preview reuses query-aware recall and reports the 3-fact/320-token hard budget", async (context) => {
@@ -630,7 +607,7 @@ test("context preview reuses query-aware recall and reports the 3-fact/320-token
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   repository.createFact({
@@ -714,25 +691,4 @@ function assertRuntimeError(operation: () => unknown, code: string): void {
     assert.equal(error.code, code);
     return true;
   });
-}
-
-function holdFactReadSnapshot(
-  databasePath: string,
-  factId: string,
-  expectedContent: string,
-): Database.Database {
-  const reader = new Database(databasePath, { readonly: true, fileMustExist: true });
-  reader.pragma("busy_timeout = 0");
-  reader.exec("BEGIN");
-  const row = reader.prepare("SELECT content FROM memory_facts WHERE fact_id = ?").get(factId) as {
-    readonly content: string;
-  };
-  assert.equal(row.content, expectedContent);
-  return reader;
-}
-
-function releaseReadSnapshot(reader: Database.Database): void {
-  if (!reader.open) return;
-  reader.exec("ROLLBACK");
-  reader.close();
 }

@@ -12,7 +12,7 @@ export interface CronWorkspaceRuntimeOptions extends Omit<
 > {
   workspacePath: string;
   ownerId: string;
-  databasePath?: string;
+  storageRoot?: string;
   picoHome?: string;
   policyGuard?: CronPolicyGuard;
   closeDrainTimeoutMs?: number;
@@ -32,7 +32,7 @@ export class CronWorkspaceRuntime {
     this.cronService = new CronService({
       workDir: options.workspacePath,
       ownerId: options.ownerId,
-      ...(options.databasePath ? { databasePath: options.databasePath } : {}),
+      ...(options.storageRoot ? { storageRoot: options.storageRoot } : {}),
       ...(options.picoHome ? { picoHome: options.picoHome } : {}),
       ...(options.policyGuard ? { policyGuard: options.policyGuard } : {}),
       ...(options.now ? { now: options.now } : {}),
