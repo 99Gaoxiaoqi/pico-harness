@@ -40,9 +40,14 @@ export interface PicoHomePaths {
 export interface PicoWorkspacePaths {
   readonly id: WorkspaceId;
   readonly root: string;
+  /** Workspace-private JSON/JSONL Runtime storage root. */
+  readonly runtime: string;
+  /** @deprecated Legacy SQLite path retained only for diagnostics during the file-store cutover. */
   readonly runtimeDatabase: string;
   readonly memory: string;
-  /** Workspace-private long-term memory authority, isolated from runtime.sqlite. */
+  /** Workspace-private structured long-term memory authority. */
+  readonly memoryState: string;
+  /** @deprecated Legacy SQLite path retained only for diagnostics during the file-store cutover. */
   readonly memoryDatabase: string;
   readonly summaries: string;
   readonly artifacts: string;
@@ -140,8 +145,10 @@ export function resolvePicoPaths(
     workspace: {
       id: workspaceId,
       root: workspaceRoot,
+      runtime: join(workspaceRoot, "runtime"),
       runtimeDatabase: join(workspaceRoot, "runtime.sqlite"),
       memory: join(workspaceRoot, "memory"),
+      memoryState: join(workspaceRoot, "memory", "state.json"),
       memoryDatabase: join(workspaceRoot, "memory", "memory.sqlite"),
       summaries: join(workspaceRoot, "memory", "summaries"),
       artifacts: join(workspaceRoot, "artifacts"),
