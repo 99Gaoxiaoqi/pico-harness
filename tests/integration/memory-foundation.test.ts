@@ -84,6 +84,34 @@ test("memory JSON snapshot persists the complete structured model", async (conte
   assert.equal(existsSync(join(fixture.storageRoot, "memory.sqlite")), false);
 });
 
+test("retrying a failed memory job clears its terminal timestamp", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = open(fixture);
+  const queued = repository.createJob({
+    jobId: "job-retry",
+    type: "extract",
+    terminalEventId: "terminal-retry",
+    extractorVersion: "v1",
+    cursor: { sessionId: "session-retry", sequence: 1 },
+  });
+  const failed = repository.updateJob({
+    jobId: queued.jobId,
+    expectedVersion: queued.version,
+    status: "failed",
+  });
+  assert.ok(failed.terminalAt);
+
+  const running = repository.updateJob({
+    jobId: failed.jobId,
+    expectedVersion: failed.version,
+    status: "running",
+  });
+  assert.equal(running.terminalAt, undefined);
+  repository.close();
+  assert.equal(open(fixture).listJobs()[0]?.terminalAt, undefined);
+});
+
 test("transaction is nested, synchronous and commits one snapshot revision", async (context) => {
   const fixture = await createFixture();
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -299,13 +327,25 @@ test("malformed structured memory entities fail closed", async (context) => {
       state.facts["fact-corrupt"]!.kind = "invented";
     },
     (state) => {
+      state.facts["fact-corrupt"]!.title = null;
+      state.facts["fact-corrupt"]!.content = null;
+    },
+    (state) => {
       state.proposals["proposal-corrupt"]!.status = "unknown";
+    },
+    (state) => {
+      state.proposals["proposal-corrupt"]!.title = null;
+      state.proposals["proposal-corrupt"]!.content = null;
+      state.proposals["proposal-corrupt"]!.reason = null;
     },
     (state) => {
       state.mutations[0]!.action = "fact.body-copied";
     },
     (state) => {
       state.jobs["job-corrupt"]!.cursor.sequence = -1;
+    },
+    (state) => {
+      state.jobs["job-corrupt"]!.terminalAt = "2026-07-25T12:00:00.000Z";
     },
     (state) => {
       const idempotency = Object.values(state.idempotency)[0] as Record<string, unknown>;
@@ -383,6 +423,41 @@ test("forget atomically clears fact and linked proposal bodies from live files",
   assert.deepEqual(repository.forgetFact(forgetInput), forgotten);
   assert.equal(existsSync(replayTemporary), false);
   assert.equal(existsSync(summaryTemporary), true);
+});
+
+test("forget preserves another active fact with identical text without reporting failure", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const repository = open(fixture);
+  const sharedTitle = "Shared title";
+  const sharedContent = "Shared sensitive body";
+  const forgotten = repository.createFact({
+    factId: "fact-shared-forget",
+    kind: "project_fact",
+    title: sharedTitle,
+    content: sharedContent,
+  });
+  repository.createFact({
+    factId: "fact-shared-retain",
+    kind: "project_fact",
+    title: sharedTitle,
+    content: sharedContent,
+  });
+
+  assert.equal(
+    repository.forgetFact({
+      factId: forgotten.factId,
+      expectedVersion: forgotten.version,
+      idempotencyKey: "forget-shared",
+    }).state,
+    "forgotten",
+  );
+  assert.equal(repository.getFact("fact-shared-retain")?.title, sharedTitle);
+  assert.equal(repository.getFact("fact-shared-retain")?.content, sharedContent);
+  assert.match(
+    await readFile(join(fixture.storageRoot, "state.json"), "utf8"),
+    /Shared sensitive body/u,
+  );
 });
 
 interface Fixture {

@@ -210,7 +210,10 @@ export class StorageDoctor {
     }
     let rebuiltRuntimeManifests = false;
     if (options.rebuildRuntimeManifests === true) {
-      await new RuntimeEventStore({ storageRoot: this.runtimeStorageRoot }).listSessionManifests();
+      await new RuntimeEventStore(
+        { storageRoot: this.runtimeStorageRoot },
+        { repairIncompleteTails: false },
+      ).listSessionManifests();
       rebuiltRuntimeManifests = true;
     }
 

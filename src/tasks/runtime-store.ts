@@ -1291,6 +1291,15 @@ export class RuntimeStore {
       if (tx.state.mergeRequests[input.mergeRequestId]) {
         throw new RuntimeConflictError(`合并请求 ${input.mergeRequestId} 已存在`);
       }
+      this.requireJob(input.jobId, tx);
+      if (input.attemptId) {
+        const attempt = this.requireAttempt(input.attemptId, tx);
+        if (attempt.jobId !== input.jobId) {
+          throw new RuntimeConflictError(
+            `合并请求 ${input.mergeRequestId} 的 attempt ${input.attemptId} 不属于 job ${input.jobId}`,
+          );
+        }
+      }
       const now = this.now();
       const record: MergeRequestRecord = compact({
         ...input,
@@ -1341,9 +1350,10 @@ export class RuntimeStore {
     inserted: boolean;
   } {
     return this.write((tx) => {
-      if (record.jobId && record.attemptId) {
+      if (record.jobId) this.requireJob(record.jobId, tx);
+      if (record.attemptId) {
         const attempt = this.requireAttempt(record.attemptId, tx);
-        if (attempt.jobId !== record.jobId) {
+        if (record.jobId && attempt.jobId !== record.jobId) {
           throw new RuntimeConflictError(
             `Provider call ${record.callId} 的 attempt ${record.attemptId} 不属于 job ${record.jobId}`,
           );

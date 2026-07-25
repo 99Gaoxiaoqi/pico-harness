@@ -242,8 +242,17 @@ function assertFact(value: Record<string, unknown>, field: string): void {
   requireConfidence(value["confidence"], `${field}.confidence`);
   requireOptionalString(value["sourceId"], `${field}.sourceId`);
   const state = requireEnum(value["state"], FACT_STATES, `${field}.state`);
-  if (state === "forgotten" && (value["title"] !== null || value["content"] !== null)) {
-    throw integrity(`${field} forgotten tombstone retains text`);
+  if (state === "forgotten") {
+    if (value["title"] !== null || value["content"] !== null) {
+      throw integrity(`${field} forgotten tombstone retains text`);
+    }
+    requireTimestamp(value["forgottenAt"], `${field}.forgottenAt`);
+  } else {
+    requireString(value["title"], `${field}.title`);
+    requireString(value["content"], `${field}.content`);
+    if (value["forgottenAt"] !== undefined) {
+      throw integrity(`${field} non-forgotten fact has forgottenAt`);
+    }
   }
   requireBoolean(value["pinned"], `${field}.pinned`);
   requireOptionalTimestamp(value["expiresAt"], `${field}.expiresAt`);
@@ -267,6 +276,16 @@ function assertProposal(value: Record<string, unknown>, field: string): void {
   ) {
     throw integrity(`${field} deleted tombstone retains text`);
   }
+  if (status === "deleted") {
+    requireTimestamp(value["deletedAt"], `${field}.deletedAt`);
+  } else {
+    requireString(value["title"], `${field}.title`);
+    requireString(value["content"], `${field}.content`);
+    requireString(value["reason"], `${field}.reason`);
+    if (value["deletedAt"] !== undefined) {
+      throw integrity(`${field} non-deleted proposal has deletedAt`);
+    }
+  }
   requireEnum(value["conflictStatus"], PROPOSAL_CONFLICT_STATUSES, `${field}.conflictStatus`);
   requireOptionalString(value["conflictFactId"], `${field}.conflictFactId`);
   requireOptionalString(value["resolvedFactId"], `${field}.resolvedFactId`);
@@ -278,7 +297,7 @@ function assertProposal(value: Record<string, unknown>, field: string): void {
 function assertJob(value: Record<string, unknown>, field: string): void {
   requireString(value["jobId"], `${field}.jobId`);
   requireString(value["type"], `${field}.type`);
-  requireEnum(value["status"], MEMORY_JOB_STATUSES, `${field}.status`);
+  const status = requireEnum(value["status"], MEMORY_JOB_STATUSES, `${field}.status`);
   requireString(value["terminalEventId"], `${field}.terminalEventId`);
   requireString(value["extractorVersion"], `${field}.extractorVersion`);
   const cursor = value["cursor"];
@@ -296,7 +315,11 @@ function assertJob(value: Record<string, unknown>, field: string): void {
   requireNonNegativeInteger(value["outputTokens"], `${field}.outputTokens`);
   requireNonNegativeNumber(value["costUsd"], `${field}.costUsd`);
   requireVersionAndDates(value, field);
-  requireOptionalTimestamp(value["terminalAt"], `${field}.terminalAt`);
+  if (status === "succeeded" || status === "failed" || status === "cancelled") {
+    requireTimestamp(value["terminalAt"], `${field}.terminalAt`);
+  } else if (value["terminalAt"] !== undefined) {
+    throw integrity(`${field} non-terminal job has terminalAt`);
+  }
 }
 
 function requireVersionAndDates(value: Record<string, unknown>, field: string): void {

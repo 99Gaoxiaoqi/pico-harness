@@ -3,7 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -133,7 +136,9 @@ export function withFileLockSync<Result>(
   const owner = acquireFileLockSync(canonicalLock, ownerId, options);
   heldSyncLocks.set(canonicalLock, 1);
   try {
-    return assertSynchronousResult(operation(), canonicalLock);
+    const result = assertSynchronousResult(operation(), canonicalLock);
+    assertSyncLockOwnership(canonicalLock, owner);
+    return result;
   } finally {
     heldSyncLocks.delete(canonicalLock);
     releaseFileLockSync(canonicalLock, owner);
@@ -256,6 +261,44 @@ export function readFirstJsonLineSync(path: string): unknown {
   }
 }
 
+export function readLastJsonLineSync(path: string): unknown {
+  assertPrivateDataFileSync(path);
+  const size = statSync(path).size;
+  if (size === 0) throw new FileStorageIntegrityError(`JSONL is empty: ${path}`);
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const chunks: Buffer[] = [];
+  let position = size;
+  let skipTrailingNewline = true;
+  try {
+    while (position > 0) {
+      const length = Math.min(4_096, position);
+      position -= length;
+      const chunk = Buffer.allocUnsafe(length);
+      const bytesRead = readSync(descriptor, chunk, 0, length, position);
+      if (bytesRead !== length) {
+        throw new FileStorageIntegrityError(`Cannot read JSONL tail: ${path}`);
+      }
+      let content = chunk;
+      if (skipTrailingNewline) {
+        if (content[content.length - 1] !== 0x0a) {
+          throw new FileStorageIntegrityError(`JSONL has an incomplete final record: ${path}`);
+        }
+        content = content.subarray(0, -1);
+        skipTrailingNewline = false;
+      }
+      const newline = content.lastIndexOf(0x0a);
+      if (newline >= 0) {
+        chunks.unshift(content.subarray(newline + 1));
+        return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+      }
+      chunks.unshift(content);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 /**
  * Reads a JSONL ledger under its owning lock. A non-newline-terminated tail is uncommitted and
  * may be truncated; every complete line must remain valid JSON.
@@ -294,8 +337,15 @@ export function readJsonLinesSync(path: string, repairIncompleteTail = false): u
 export function appendFileDurableSync(path: string, content: string | Buffer): void {
   const target = resolve(path);
   mkdirPrivateSync(dirname(target));
-  const descriptor = openSync(target, "a", 0o600);
+  const descriptor = openSync(
+    target,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
   try {
+    if (!fstatSync(descriptor).isFile()) {
+      throw new FileStorageIntegrityError(`Append target must be a regular file: ${target}`);
+    }
     writeFileSync(descriptor, content);
     fsyncSync(descriptor);
   } finally {
@@ -375,6 +425,13 @@ export function inspectFileTransactionMarkerSync(
   const commitPath = transactionCommitPath(root, options.commitFileName);
   const transaction = decodePersistedTransaction(readJsonFileSync(commitPath), commitPath);
   validateTransactionTargets(root, transaction);
+  return inspectTransactionTargets(root, transaction);
+}
+
+function inspectTransactionTargets(
+  root: string,
+  transaction: PersistedFileTransaction,
+): FileTransactionInspection {
   let applied = 0;
   let pending = 0;
   let partial = 0;
@@ -393,6 +450,18 @@ export function inspectFileTransactionMarkerSync(
   for (const append of transaction.appends) {
     const target = resolveTransactionTarget(root, append.relativePath);
     const current = readOptionalFile(target);
+    const addition = Buffer.from(append.contentBase64, "base64");
+    if (
+      current.length >= append.expectedSize &&
+      sha256(current.subarray(0, append.expectedSize)) === append.expectedHash
+    ) {
+      const projected = Buffer.concat([current.subarray(0, append.expectedSize), addition]);
+      if (projected.length !== append.nextSize || sha256(projected) !== append.nextHash) {
+        throw new FileStorageIntegrityError(
+          `Append payload hash mismatch in transaction ${transaction.transactionId}`,
+        );
+      }
+    }
     const hash = sha256(current);
     if (current.length === append.nextSize && hash === append.nextHash) {
       applied++;
@@ -402,7 +471,6 @@ export function inspectFileTransactionMarkerSync(
       pending++;
       continue;
     }
-    const addition = Buffer.from(append.contentBase64, "base64");
     if (
       current.length > append.expectedSize &&
       current.length < append.nextSize &&
@@ -607,9 +675,21 @@ function releaseFileLockSync(lockDirectory: string, expected: OwnerLeaseRecord):
     if (!existsSync(lockDirectory)) return;
     throw new LeaseConflictError(`Lock ownership can no longer be verified: ${lockDirectory}`);
   }
-  if (current.leaseId !== expected.leaseId) return;
+  if (current.leaseId !== expected.leaseId) {
+    throw new LeaseConflictError(
+      `Lock ownership changed before release: ${lockDirectory}`,
+      current,
+    );
+  }
   rmSync(lockDirectory, { recursive: true, force: true });
   syncDirectorySync(dirname(lockDirectory));
+}
+
+function assertSyncLockOwnership(lockDirectory: string, expected: OwnerLeaseRecord): void {
+  const current = readSyncLockOwner(join(lockDirectory, "owner.json"));
+  if (current?.leaseId !== expected.leaseId) {
+    throw new LeaseConflictError(`Lock ownership changed: ${lockDirectory}`, current);
+  }
 }
 
 function prepareSyncLockCandidate(
@@ -726,6 +806,7 @@ function prepareTransaction(
 ): PersistedFileTransaction {
   const replacements = (input.replacements ?? []).map((replacement) => {
     const target = resolveTransactionTarget(root, replacement.relativePath);
+    assertSafeTransactionTarget(root, target, true);
     const current = readOptionalFile(target);
     const next = toBuffer(replacement.content);
     return {
@@ -738,6 +819,7 @@ function prepareTransaction(
   });
   const appends = (input.appends ?? []).map((append) => {
     const target = resolveTransactionTarget(root, append.relativePath);
+    assertSafeTransactionTarget(root, target, true);
     const current = readOptionalFile(target);
     const addition = toBuffer(append.content);
     const next = Buffer.concat([current, addition]);
@@ -765,6 +847,9 @@ function prepareTransaction(
 
 function applyTransaction(root: string, transaction: PersistedFileTransaction): void {
   validateTransactionTargets(root, transaction);
+  // Prove every target is recoverable before mutating any of them. Without this pass, a
+  // conflict in a later target could strand an earlier target in a newly partial transaction.
+  inspectTransactionTargets(root, transaction);
   for (const replacement of transaction.replacements) {
     const target = resolveTransactionTarget(root, replacement.relativePath);
     const current = readOptionalFile(target);
@@ -796,8 +881,7 @@ function applyTransaction(root: string, transaction: PersistedFileTransaction): 
         .subarray(0, current.length - append.expectedSize)
         .equals(current.subarray(append.expectedSize))
     ) {
-      truncateSync(target, append.expectedSize);
-      syncFileSync(target);
+      truncateFileNoFollowSync(target, append.expectedSize);
       current = current.subarray(0, append.expectedSize);
       currentHash = sha256(current);
     }
@@ -896,13 +980,15 @@ function decodePersistedAppend(value: unknown, path: string, index: number): Per
 
 function validateTransactionTargets(root: string, transaction: PersistedFileTransaction): void {
   const targets = [...transaction.replacements, ...transaction.appends].map((entry) =>
-    normalizedRelativePath(root, resolveTransactionTarget(root, entry.relativePath)),
+    resolveTransactionTarget(root, entry.relativePath),
   );
-  if (new Set(targets).size !== targets.length) {
+  const normalizedTargets = targets.map((target) => normalizedRelativePath(root, target));
+  if (new Set(normalizedTargets).size !== normalizedTargets.length) {
     throw new FileStorageIntegrityError(
       `File transaction ${transaction.transactionId} mutates one target more than once`,
     );
   }
+  for (const target of targets) assertSafeTransactionTarget(root, target, false);
 }
 
 function decodeCanonicalBase64(value: string, path: string): Buffer {
@@ -949,22 +1035,80 @@ function resolveTransactionTarget(root: string, relativePath: string): string {
   return target;
 }
 
+function assertSafeTransactionTarget(root: string, target: string, createParents: boolean): void {
+  const rootMetadata = lstatSync(root);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    throw new FileStorageIntegrityError(`Storage root must be a real directory: ${root}`);
+  }
+  const parentRelative = relative(root, dirname(target));
+  if (parentRelative.startsWith("..") || isAbsolute(parentRelative)) {
+    throw new FileStorageIntegrityError(`Transaction target escapes storage root: ${target}`);
+  }
+  let current = root;
+  for (const segment of parentRelative.split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    if (!existsSync(current)) {
+      if (!createParents) {
+        throw new FileStorageIntegrityError(`Transaction target parent does not exist: ${current}`);
+      }
+      mkdirSync(current, { mode: 0o700 });
+      syncDirectorySync(dirname(current));
+    }
+    const metadata = lstatSync(current);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(
+        `Transaction target parent must be a real directory: ${current}`,
+      );
+    }
+  }
+  if (!existsSync(target)) return;
+  const targetMetadata = lstatSync(target);
+  if (!targetMetadata.isFile() || targetMetadata.isSymbolicLink()) {
+    throw new FileStorageIntegrityError(
+      `Transaction target must be a regular file or absent: ${target}`,
+    );
+  }
+}
+
 function normalizedRelativePath(root: string, target: string): string {
   return relative(root, target).split(sep).join("/");
 }
 
 function readOptionalFile(path: string): Buffer {
+  let descriptor: number | undefined;
   try {
-    return readFileSync(path);
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    if (!fstatSync(descriptor).isFile()) {
+      throw new FileStorageIntegrityError(`Transaction target must be a regular file: ${path}`);
+    }
+    return readFileSync(descriptor);
   } catch (error) {
     if (isNodeCode(error, "ENOENT")) return Buffer.alloc(0);
     throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
 function syncFileSync(path: string): void {
-  const descriptor = openSync(path, "r");
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
+    if (!fstatSync(descriptor).isFile()) {
+      throw new FileStorageIntegrityError(`Storage target must be a regular file: ${path}`);
+    }
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function truncateFileNoFollowSync(path: string, size: number): void {
+  const descriptor = openSync(path, constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!fstatSync(descriptor).isFile()) {
+      throw new FileStorageIntegrityError(`Storage target must be a regular file: ${path}`);
+    }
+    ftruncateSync(descriptor, size);
     fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
