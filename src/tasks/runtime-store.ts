@@ -1590,10 +1590,20 @@ export class RuntimeStore {
     }
     return this.withRuntimeLock(() => {
       recoverFileTransactionSync(this.storageRoot, { commitFileName: COMMIT_FILE });
+      const stateExists = existsSync(join(this.storageRoot, STATE_FILE));
       const tx: RuntimeTransaction = { state: this.loadState(), events: [], usage: [] };
+      const initialState = clone(tx.state);
       activeTransactions.set(this.storageRoot, tx);
       try {
         const result = operation(tx);
+        if (
+          stateExists &&
+          tx.events.length === 0 &&
+          tx.usage.length === 0 &&
+          isDeepStrictEqual(tx.state, initialState)
+        ) {
+          return result;
+        }
         const transactionId = randomUUID();
         tx.state.revision += 1;
         tx.state.lastTransactionId = transactionId;
