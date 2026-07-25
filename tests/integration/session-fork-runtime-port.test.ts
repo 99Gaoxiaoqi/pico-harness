@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import Database from "better-sqlite3";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session.js";
 import { SessionForkService } from "../../src/engine/session-fork-service.js";
@@ -175,14 +175,23 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
       (event) => event.kind === "run.terminal",
     );
     assert.ok(terminal?.kind === "run.terminal");
-    const database = new Database(store.databasePath);
-    try {
-      database
-        .prepare("DELETE FROM agent_runtime_events WHERE session_id = ? AND event_id = ?")
-        .run(bootstrap.targetSessionId, terminal.eventId);
-    } finally {
-      database.close();
-    }
+    const sessionDigest = createHash("sha256").update(bootstrap.targetSessionId).digest("hex");
+    const ledgerPath = join(store.storageRoot, "sessions", sessionDigest, "session.jsonl");
+    const records = (await readFile(ledgerPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const rewritten = records.flatMap((record) => {
+      if (record["type"] !== "event-batch") return [record];
+      const entries = (record["entries"] as Array<Record<string, unknown>>).filter(
+        (entry) => (entry["event"] as Record<string, unknown>)["eventId"] !== terminal.eventId,
+      );
+      return entries.length > 0 ? [{ ...record, entries }] : [];
+    });
+    await writeFile(
+      ledgerPath,
+      `${rewritten.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    );
     await store.append({
       ...terminal,
       eventId: `${terminal.eventId}:conflict`,

@@ -1,29 +1,39 @@
-import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import Database from "better-sqlite3";
-import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
-import {
-  preflightOpenedRuntimeSchema,
-  RUNTIME_SCHEMA_VERSION,
-  type RuntimeSchemaPreflightResult,
-} from "./runtime-schema-preflight.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStateWritePatch,
   type SessionRuntimeStateWritePatch,
 } from "../engine/session-runtime.js";
 import type { SessionCursor } from "../engine/session-persistence.js";
+import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   decodeRuntimeEvent,
-  decodeRuntimeEventJson,
   type RuntimeEvent,
 } from "./runtime-event.js";
+import {
+  FileStorageIntegrityError,
+  commitFileTransactionSync,
+  mkdirPrivateSync,
+  readJsonFileSync,
+  readJsonLinesSync,
+  recoverFileTransactionSync,
+  syncDirectorySync,
+  withFileLock,
+  writeJsonAtomicSync,
+} from "./local-file-storage.js";
 
 const RUNTIME_SESSION_MANIFEST_VERSION = 1 as const;
+const RUNTIME_SESSION_FILE_VERSION = 1 as const;
+const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
+const SESSION_FILE_NAME = "session.jsonl";
+const MANIFEST_FILE_NAME = "manifest.json";
+const SESSIONS_DIRECTORY_NAME = "sessions";
+const LOCK_DIRECTORY_NAME = "lock";
 export const RUNTIME_EVENT_STORE_MAX_PAGE_SIZE = 250;
 
 export interface RuntimeSessionManifest {
@@ -42,7 +52,9 @@ export interface InitializeRuntimeSessionOptions {
 }
 
 export interface RuntimeEventStoreOptions {
-  readonly databasePath: string;
+  readonly storageRoot?: string;
+  /** @deprecated Use storageRoot. Retained while callers move off the SQLite-shaped option. */
+  readonly databasePath?: string;
 }
 
 export interface RuntimeSessionManifestCursor {
@@ -98,27 +110,46 @@ export interface AppendRuntimeTranscriptEventOptions {
   readonly eventId?: string;
 }
 
-interface SessionRow {
-  readonly session_id: string;
-  readonly work_dir: string;
-  readonly history_source: string;
-  readonly created_at: string;
-  readonly active_branch_id: string;
+interface RuntimeSessionFileHeader {
+  readonly type: "session";
+  readonly schemaVersion: typeof RUNTIME_SESSION_FILE_VERSION;
+  readonly sessionId: string;
+  readonly workDir: string;
+  readonly historySource: "runtime-event-v1";
+  readonly createdAt: string;
 }
 
-interface EventRow {
+interface RuntimeEventBatchEntry {
   readonly sequence: number;
-  readonly session_id: string;
-  readonly run_id: string;
-  readonly event_id: string;
-  readonly kind: string;
-  readonly at: string;
-  readonly event_json: string;
+  readonly committedAt: string;
+  readonly event: RuntimeEvent;
+}
+
+interface RuntimeEventBatch {
+  readonly type: "event-batch";
+  readonly schemaVersion: typeof RUNTIME_SESSION_FILE_VERSION;
+  readonly txId: string;
+  readonly committedAt: string;
+  readonly entries: readonly RuntimeEventBatchEntry[];
+}
+
+interface LoadedRuntimeSession {
+  readonly header: RuntimeSessionFileHeader;
+  readonly manifest: RuntimeSessionManifest;
+  readonly entries: readonly RuntimeEventStoreEntry[];
+}
+
+interface MutableRuntimeSession {
+  readonly loaded: LoadedRuntimeSession;
+  readonly entries: RuntimeEventStoreEntry[];
+  readonly eventById: Map<string, RuntimeEventStoreEntry>;
+  readonly appended: RuntimeEventBatchEntry[];
+  activeBranchId: string;
 }
 
 export class RuntimeEventStoreIntegrityError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "RuntimeEventStoreIntegrityError";
   }
 }
@@ -126,122 +157,103 @@ export class RuntimeEventStoreIntegrityError extends Error {
 /**
  * Canonical Session and Agent runtime fact store.
  *
- * One SQLite transaction commits each fact and its global sequence. Session memory,
- * run headers, FTS, and UI state are projections that may be rebuilt from this store.
+ * Each Session owns one append-only JSONL ledger. A workspace-global file lock and durable
+ * commit marker make appendBatch atomic even when it spans multiple Session ledgers.
  */
 export class RuntimeEventStore {
+  readonly storageRoot: string;
+  /** @deprecated Compatibility alias for callers not yet renamed to storageRoot. */
   readonly databasePath: string;
+  private readonly sessionsRoot: string;
+  private readonly lockDirectory: string;
+  private readonly ownerId = `runtime-event-store:${process.pid}:${randomUUID()}`;
 
   constructor(options: RuntimeEventStoreOptions) {
-    this.databasePath = resolve(options.databasePath);
-    mkdirSync(dirname(this.databasePath), { recursive: true, mode: 0o700 });
-    chmodSync(dirname(this.databasePath), 0o700);
-    const db = this.openDatabase(true);
-    db.close();
+    const configuredRoot = options.storageRoot ?? options.databasePath;
+    if (!configuredRoot?.trim()) {
+      throw new Error("RuntimeEventStore requires storageRoot");
+    }
+    this.storageRoot = resolve(configuredRoot);
+    this.databasePath = this.storageRoot;
+    this.sessionsRoot = join(this.storageRoot, SESSIONS_DIRECTORY_NAME);
+    this.lockDirectory = join(this.storageRoot, LOCK_DIRECTORY_NAME);
+    mkdirPrivateSync(this.storageRoot);
+    mkdirPrivateSync(this.sessionsRoot);
   }
 
   async initializeSession(
     options: InitializeRuntimeSessionOptions,
   ): Promise<RuntimeSessionManifest> {
     const workDir = canonicalizeWorkspacePath(options.workDir);
-    const db = this.openDatabase();
-    try {
-      return db
-        .transaction(() => {
-          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
-          const existing = this.selectSession(db, options.sessionId);
-          if (existing) {
-            if (existing.work_dir !== workDir) {
-              throw new RuntimeEventStoreIntegrityError(
-                `Runtime session ${options.sessionId} belongs to another workspace`,
-              );
-            }
-            return manifestFromRow(existing);
-          }
-          const createdAt = (options.now ?? (() => new Date()))().toISOString();
-          db.prepare(
-            `INSERT INTO agent_sessions
-             (session_id, work_dir, history_source, created_at, active_branch_id)
-           VALUES (?, ?, 'runtime-event-v1', ?, 'main')`,
-          ).run(options.sessionId, workDir, createdAt);
-          return manifestFromRow(this.requireSession(db, options.sessionId));
-        })
-        .immediate();
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => {
+      const existing = this.loadSession(options.sessionId);
+      if (existing) {
+        if (existing.manifest.workDir !== workDir) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime session ${options.sessionId} belongs to another workspace`,
+          );
+        }
+        return existing.manifest;
+      }
+
+      const directory = this.sessionDirectory(options.sessionId);
+      if (existsSync(directory)) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session ${options.sessionId} directory exists without a valid ledger`,
+        );
+      }
+      const createdAt = (options.now ?? (() => new Date()))().toISOString();
+      const header: RuntimeSessionFileHeader = {
+        type: "session",
+        schemaVersion: RUNTIME_SESSION_FILE_VERSION,
+        sessionId: options.sessionId,
+        workDir,
+        historySource: "runtime-event-v1",
+        createdAt,
+      };
+      const manifest = manifestFromHeader(header, "main");
+      commitFileTransactionSync(this.storageRoot, {
+        replacements: [
+          {
+            relativePath: this.sessionRelativePath(options.sessionId, SESSION_FILE_NAME),
+            content: encodeJsonLine(header),
+          },
+          {
+            relativePath: this.sessionRelativePath(options.sessionId, MANIFEST_FILE_NAME),
+            content: encodeJsonDocument(manifest),
+          },
+        ],
+      });
+      return manifest;
+    });
   }
 
   async readSessionManifest(sessionId: string): Promise<RuntimeSessionManifest | undefined> {
-    const db = this.openDatabase();
-    try {
-      const row = this.selectSession(db, sessionId);
-      return row ? manifestFromRow(row) : undefined;
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => this.loadSession(sessionId)?.manifest);
   }
 
   async listSessionManifests(): Promise<RuntimeSessionManifest[]> {
-    const db = this.openDatabase();
-    try {
-      const rows = db
-        .prepare("SELECT * FROM agent_sessions ORDER BY created_at DESC, session_id DESC")
-        .all() as SessionRow[];
-      return rows.map(manifestFromRow);
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => this.loadAllSessionManifests());
   }
 
   async getSessionManifestScanUpperBound(): Promise<RuntimeSessionManifestCursor | undefined> {
-    const db = this.openDatabase();
-    try {
-      return db
-        .prepare(
-          `SELECT created_at AS createdAt, session_id AS sessionId
-           FROM agent_sessions
-           ORDER BY created_at DESC, session_id DESC
-           LIMIT 1`,
-        )
-        .get() as RuntimeSessionManifestCursor | undefined;
-    } finally {
-      db.close();
-    }
+    const first = (await this.listSessionManifests())[0];
+    return first ? { createdAt: first.createdAt, sessionId: first.sessionId } : undefined;
   }
 
-  /** Bounded manifest page for background maintenance that must not materialize the whole DB. */
+  /** Bounded manifest page for background maintenance. */
   async listSessionManifestsPage(
     options: RuntimeSessionManifestPageOptions,
   ): Promise<RuntimeSessionManifest[]> {
     const upperBound = normalizeManifestCursor(options.upperBound, "upperBound");
     const before = options.before ? normalizeManifestCursor(options.before, "before") : undefined;
     const limit = normalizePageLimit(options.limit);
-    const db = this.openDatabase();
-    try {
-      const beforeClause = before
-        ? `AND (created_at < ? OR (created_at = ? AND session_id < ?))`
-        : "";
-      const params: Array<string | number> = [
-        upperBound.createdAt,
-        upperBound.createdAt,
-        upperBound.sessionId,
-      ];
-      if (before) params.push(before.createdAt, before.createdAt, before.sessionId);
-      params.push(limit);
-      const rows = db
-        .prepare(
-          `SELECT * FROM agent_sessions
-           WHERE (created_at < ? OR (created_at = ? AND session_id <= ?))
-           ${beforeClause}
-           ORDER BY created_at DESC, session_id DESC
-           LIMIT ?`,
-        )
-        .all(...params) as SessionRow[];
-      return rows.map(manifestFromRow);
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() =>
+      this.loadAllSessionManifests()
+        .filter((manifest) => compareManifestToCursor(manifest, upperBound) >= 0)
+        .filter((manifest) => !before || compareManifestToCursor(manifest, before) > 0)
+        .slice(0, limit),
+    );
   }
 
   async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
@@ -250,32 +262,103 @@ export class RuntimeEventStore {
   }
 
   /**
-   * Atomically appends an ordered group of facts. Every exact-once comparison,
-   * insert, and active-branch update shares one IMMEDIATE transaction, so a
-   * conflict or storage failure cannot expose a partially committed transition.
+   * Atomically appends an ordered group of facts. Validation and exact-once checks complete
+   * before one commit marker publishes all affected Session batches and manifest projections.
    */
   async appendBatch(
     events: readonly RuntimeEvent[],
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
-    const canonicalEvents = events.map((event) => {
-      decodeRuntimeEvent(event);
-      return canonicalizeRuntimeEvent(event);
-    });
+    const canonicalEvents = events.map(canonicalizeRuntimeEvent);
     if (canonicalEvents.length === 0) return [];
 
-    const db = this.openDatabase();
-    try {
-      return db
-        .transaction(() => {
-          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
-          return canonicalEvents.map(({ event: canonicalEvent, encoded }) =>
-            this.appendCanonicalEvent(db, canonicalEvent, encoded),
+    return this.withStoreLock(() => {
+      const sessions = new Map<string, MutableRuntimeSession>();
+      for (const event of canonicalEvents) {
+        if (sessions.has(event.sessionId)) continue;
+        const loaded = this.requireSession(event.sessionId);
+        sessions.set(event.sessionId, {
+          loaded,
+          entries: [...loaded.entries],
+          eventById: new Map(loaded.entries.map((entry) => [entry.event.eventId, entry])),
+          appended: [],
+          activeBranchId: loaded.manifest.activeBranchId,
+        });
+      }
+
+      const results: RuntimeEventStoreAppendResult[] = [];
+      for (const event of canonicalEvents) {
+        const session = sessions.get(event.sessionId)!;
+        if (
+          event.kind === "run.started" &&
+          canonicalizeWorkspacePath(event.data.workDir) !== session.loaded.manifest.workDir
+        ) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event workspace does not match session ${event.sessionId}`,
           );
-        })
-        .immediate();
-    } finally {
-      db.close();
-    }
+        }
+
+        const existing = session.eventById.get(event.eventId);
+        if (existing) {
+          if (!isDeepStrictEqual(existing.event, event)) {
+            throw new RuntimeEventStoreIntegrityError(
+              `Runtime event ID ${event.eventId} is already bound to another payload`,
+            );
+          }
+          results.push(this.appendResult(session.entries, existing, false));
+          continue;
+        }
+
+        const entry: RuntimeEventStoreEntry = {
+          sequence: session.entries.length + 1,
+          event,
+        };
+        session.entries.push(entry);
+        session.eventById.set(event.eventId, entry);
+        session.appended.push({
+          sequence: entry.sequence,
+          committedAt: event.at,
+          event,
+        });
+        if (event.kind === "history.rewound") session.activeBranchId = event.data.branchId;
+        results.push(this.appendResult(session.entries, entry, true));
+      }
+
+      const transactionId = randomUUID();
+      const transactionCommittedAt = new Date().toISOString();
+      const appends = [...sessions.entries()]
+        .filter(([, session]) => session.appended.length > 0)
+        .map(([sessionId, session]) => {
+          const batch: RuntimeEventBatch = {
+            type: "event-batch",
+            schemaVersion: RUNTIME_SESSION_FILE_VERSION,
+            txId: transactionId,
+            committedAt: transactionCommittedAt,
+            entries: session.appended,
+          };
+          return {
+            relativePath: this.sessionRelativePath(sessionId, SESSION_FILE_NAME),
+            content: encodeJsonLine(batch),
+          };
+        });
+      const replacements = [...sessions.entries()]
+        .filter(
+          ([, session]) =>
+            session.appended.length > 0 &&
+            session.activeBranchId !== session.loaded.manifest.activeBranchId,
+        )
+        .map(([sessionId, session]) => ({
+          relativePath: this.sessionRelativePath(sessionId, MANIFEST_FILE_NAME),
+          content: encodeJsonDocument({
+            ...session.loaded.manifest,
+            activeBranchId: session.activeBranchId,
+          }),
+        }));
+
+      if (appends.length > 0) {
+        commitFileTransactionSync(this.storageRoot, { appends, replacements }, { transactionId });
+      }
+      return results;
+    });
   }
 
   async appendSessionState(
@@ -325,20 +408,11 @@ export class RuntimeEventStore {
   }
 
   async readRun(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
-    const db = this.openDatabase();
-    try {
-      const rows = db
-        .prepare(
-          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-           FROM agent_runtime_events
-           WHERE session_id = ? AND run_id = ?
-           ORDER BY sequence`,
-        )
-        .all(sessionId, runId) as EventRow[];
-      return rows.map((row) => decodeEventRow(row, sessionId, runId).event);
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() =>
+      (this.loadSession(sessionId)?.entries ?? [])
+        .filter((entry) => entry.event.runId === runId)
+        .map((entry) => entry.event),
+    );
   }
 
   async readSession(sessionId: string): Promise<RuntimeEvent[]> {
@@ -349,36 +423,13 @@ export class RuntimeEventStore {
     sessionId: string,
     eventId: string,
   ): Promise<RuntimeEventStoreEntry | undefined> {
-    const db = this.openDatabase();
-    try {
-      const row = db
-        .prepare(
-          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-           FROM agent_runtime_events
-           WHERE session_id = ? AND event_id = ?`,
-        )
-        .get(sessionId, eventId) as EventRow | undefined;
-      return row ? decodeEventRow(row, sessionId) : undefined;
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() =>
+      this.loadSession(sessionId)?.entries.find((entry) => entry.event.eventId === eventId),
+    );
   }
 
   async readSessionEntries(sessionId: string): Promise<RuntimeEventStoreEntry[]> {
-    const db = this.openDatabase();
-    try {
-      const rows = db
-        .prepare(
-          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-           FROM agent_runtime_events
-           WHERE session_id = ?
-           ORDER BY sequence`,
-        )
-        .all(sessionId) as EventRow[];
-      return rows.map((row) => decodeEventRow(row, sessionId));
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => [...(this.loadSession(sessionId)?.entries ?? [])]);
   }
 
   /** Bounded sequence page for cooperative background scans. */
@@ -388,33 +439,18 @@ export class RuntimeEventStore {
   ): Promise<RuntimeEventStoreEntry[]> {
     const afterSequence = normalizePageOffset(options.afterSequence, "afterSequence");
     const limit = normalizePageLimit(options.limit);
-    const db = this.openDatabase();
-    try {
-      const rows = db
-        .prepare(
-          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-           FROM agent_runtime_events
-           WHERE session_id = ? AND sequence > ?
-           ORDER BY sequence
-           LIMIT ?`,
-        )
-        .all(sessionId, afterSequence, limit) as EventRow[];
-      return rows.map((row) => decodeEventRow(row, sessionId));
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() =>
+      (this.loadSession(sessionId)?.entries ?? [])
+        .filter((entry) => entry.sequence > afterSequence)
+        .slice(0, limit),
+    );
   }
 
   /** Reads one internally consistent canonical projection for recovery or repair. */
   async readSessionProjection(
     sessionId: string,
   ): Promise<RuntimeSessionProjectionSnapshot | undefined> {
-    const db = this.openDatabase();
-    try {
-      return db.transaction(() => readSessionProjectionFromDatabase(db, sessionId))();
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => this.projectionForSession(this.loadSession(sessionId)));
   }
 
   /**
@@ -436,401 +472,389 @@ export class RuntimeEventStore {
       return undefined;
     }
 
-    const db = this.openDatabase();
-    try {
-      return db.transaction((): RuntimeSessionProjectionDelta | undefined => {
-        const session = this.selectSession(db, sessionId);
-        if (!session) return undefined;
-        const cursorRow = this.selectSessionEventAtSequence(db, sessionId, after.seq);
-        const targetRow = this.selectSessionEventAtSequence(db, sessionId, through.seq);
-        const headRow = this.selectSessionHead(db, sessionId);
-        if (!cursorRow || !targetRow || !headRow) return undefined;
+    return this.withStoreLock(() => {
+      const loaded = this.loadSession(sessionId);
+      if (!loaded) return undefined;
+      const cursorEntry = loaded.entries[after.seq - 1];
+      const targetEntry = loaded.entries[through.seq - 1];
+      const headEntry = loaded.entries.at(-1);
+      if (
+        !cursorEntry ||
+        !targetEntry ||
+        !headEntry ||
+        cursorEntry.sequence !== after.seq ||
+        cursorEntry.event.eventId !== after.eventId ||
+        targetEntry.sequence !== through.seq ||
+        targetEntry.event.eventId !== through.eventId ||
+        headEntry.sequence !== through.seq ||
+        headEntry.event.eventId !== through.eventId ||
+        activeBranchAt(loaded.entries, after.seq) !== expectedBranchId
+      ) {
+        return undefined;
+      }
 
-        const cursorEntry = decodeEventRow(cursorRow, sessionId);
-        const targetEntry = decodeEventRow(targetRow, sessionId);
-        const headEntry = decodeEventRow(headRow, sessionId);
-        if (
-          cursorEntry.event.eventId !== after.eventId ||
-          targetEntry.event.eventId !== through.eventId ||
-          headEntry.sequence !== through.seq ||
-          headEntry.event.eventId !== through.eventId ||
-          this.activeBranchAt(db, sessionId, after.seq) !== expectedBranchId
-        ) {
-          return undefined;
-        }
-
-        const rows = db
-          .prepare(
-            `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-             FROM agent_runtime_events
-             WHERE session_id = ? AND sequence > ? AND sequence <= ?
-             ORDER BY sequence`,
-          )
-          .all(sessionId, after.seq, through.seq) as EventRow[];
-        const entries = rows.map((row) => decodeEventRow(row, sessionId));
-        if (entries.at(-1)?.event.eventId !== through.eventId) return undefined;
-
-        let epoch = after.epoch;
-        let activeBranchId = expectedBranchId;
-        for (const entry of entries) {
-          if (entry.event.kind !== "history.rewound") continue;
-          epoch++;
-          activeBranchId = entry.event.data.branchId;
-        }
-        if (epoch !== through.epoch || activeBranchId !== session.active_branch_id)
-          return undefined;
-
-        return { activeBranchId, entries, cursor: { ...through } };
-      })();
-    } finally {
-      db.close();
-    }
+      const entries = loaded.entries.filter(
+        (entry) => entry.sequence > after.seq && entry.sequence <= through.seq,
+      );
+      if (entries.at(-1)?.event.eventId !== through.eventId) return undefined;
+      let epoch = after.epoch;
+      let activeBranchId = expectedBranchId;
+      for (const entry of entries) {
+        if (entry.event.kind !== "history.rewound") continue;
+        epoch++;
+        activeBranchId = entry.event.data.branchId;
+      }
+      if (epoch !== through.epoch || activeBranchId !== loaded.manifest.activeBranchId) {
+        return undefined;
+      }
+      return { activeBranchId, entries, cursor: { ...through } };
+    });
   }
 
   async listRunIds(sessionId: string): Promise<string[]> {
-    const db = this.openDatabase();
-    try {
-      const rows = db
-        .prepare(
-          `SELECT DISTINCT run_id
-           FROM agent_runtime_events
-           WHERE session_id = ? AND run_id <> 'session-state'
-           ORDER BY run_id`,
-        )
-        .all(sessionId) as Array<{ run_id: string }>;
-      return rows.map((row) => row.run_id);
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() =>
+      [
+        ...new Set(
+          (this.loadSession(sessionId)?.entries ?? [])
+            .map((entry) => entry.event.runId)
+            .filter((runId) => runId !== "session-state"),
+        ),
+      ].sort(),
+    );
   }
 
   async getHeadCursor(sessionId: string): Promise<SessionCursor | undefined> {
-    const db = this.openDatabase();
-    try {
-      const row = this.selectSessionHead(db, sessionId);
-      if (!row) return undefined;
-      const head = decodeEventRow(row, sessionId);
-      return this.cursorForEvent(db, head.sequence, head.event);
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => {
+      const entries = this.loadSession(sessionId)?.entries ?? [];
+      const head = entries.at(-1);
+      return head
+        ? cursorForEntries(sessionId, entries, head.sequence, head.event.eventId)
+        : undefined;
+    });
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
-    const db = this.openDatabase();
-    try {
-      return db
-        .transaction(() => {
-          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
-          return (
-            db.prepare("DELETE FROM agent_sessions WHERE session_id = ?").run(sessionId).changes > 0
-          );
-        })
-        .immediate();
-    } finally {
-      db.close();
-    }
+    return this.withStoreLock(() => {
+      if (!this.loadSession(sessionId)) return false;
+      const directory = this.sessionDirectory(sessionId);
+      const tombstone = join(
+        this.sessionsRoot,
+        `.deleted-${sessionDigest(sessionId)}-${randomUUID()}`,
+      );
+      renameSync(directory, tombstone);
+      syncDirectorySync(this.sessionsRoot);
+      rmSync(tombstone, { recursive: true, force: true });
+      syncDirectorySync(this.sessionsRoot);
+      return true;
+    });
   }
 
   close(): void {
-    // Connections are intentionally scoped to individual operations.
+    // File-backed operations do not retain handles.
+  }
+
+  private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
+    try {
+      return await withFileLock(this.lockDirectory, this.ownerId, async () => {
+        recoverFileTransactionSync(this.storageRoot);
+        return operation();
+      });
+    } catch (error) {
+      if (error instanceof RuntimeEventStoreIntegrityError) throw error;
+      if (error instanceof FileStorageIntegrityError || error instanceof SyntaxError) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime event storage is invalid: ${error.message}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   private appendResult(
-    db: Database.Database,
-    sequence: number,
-    event: RuntimeEvent,
+    entries: readonly RuntimeEventStoreEntry[],
+    entry: RuntimeEventStoreEntry,
     inserted: boolean,
   ): RuntimeEventStoreAppendResult {
     return {
       inserted,
-      cursor: this.cursorForEvent(db, sequence, event),
-      committedAt: event.at,
+      cursor: cursorForEntries(entry.event.sessionId, entries, entry.sequence, entry.event.eventId),
+      committedAt: entry.event.at,
     };
   }
 
-  private cursorForEvent(
-    db: Database.Database,
-    sequence: number,
-    event: RuntimeEvent,
-  ): SessionCursor {
-    const epoch = Number(
-      db
-        .prepare(
-          `SELECT COUNT(*)
-           FROM agent_runtime_events
-           WHERE session_id = ? AND sequence <= ? AND kind = 'history.rewound'`,
-        )
-        .pluck()
-        .get(event.sessionId, sequence),
-    );
-    return {
-      logId: event.sessionId,
-      seq: sequence,
-      epoch,
-      eventId: event.eventId,
-    };
-  }
-
-  private appendCanonicalEvent(
-    db: Database.Database,
-    canonicalEvent: RuntimeEvent,
-    encoded: string,
-  ): RuntimeEventStoreAppendResult {
-    const session = this.requireSession(db, canonicalEvent.sessionId);
-    if (
-      canonicalEvent.kind === "run.started" &&
-      canonicalizeWorkspacePath(canonicalEvent.data.workDir) !== session.work_dir
-    ) {
-      throw new RuntimeEventStoreIntegrityError(
-        `Runtime event workspace does not match session ${canonicalEvent.sessionId}`,
-      );
-    }
-
-    const existing = db
-      .prepare(
-        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-         FROM agent_runtime_events
-         WHERE session_id = ? AND event_id = ?`,
-      )
-      .get(canonicalEvent.sessionId, canonicalEvent.eventId) as EventRow | undefined;
-    if (existing) {
-      const stored = decodeEventRow(existing, canonicalEvent.sessionId);
-      if (!isDeepStrictEqual(stored.event, canonicalEvent)) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime event ID ${canonicalEvent.eventId} is already bound to another payload`,
-        );
-      }
-      return this.appendResult(db, stored.sequence, stored.event, false);
-    }
-
-    const inserted = db
-      .prepare(
-        `INSERT INTO agent_runtime_events
-         (session_id, run_id, event_id, kind, at, event_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        canonicalEvent.sessionId,
-        canonicalEvent.runId,
-        canonicalEvent.eventId,
-        canonicalEvent.kind,
-        canonicalEvent.at,
-        encoded,
-      );
-    const sequence = Number(inserted.lastInsertRowid);
-    if (!Number.isSafeInteger(sequence) || sequence < 1) {
-      throw new RuntimeEventStoreIntegrityError("Runtime event sequence is invalid");
-    }
-    if (canonicalEvent.kind === "history.rewound") {
-      db.prepare("UPDATE agent_sessions SET active_branch_id = ? WHERE session_id = ?").run(
-        canonicalEvent.data.branchId,
-        canonicalEvent.sessionId,
-      );
-    }
-    return this.appendResult(db, sequence, canonicalEvent, true);
-  }
-
-  private selectSession(db: Database.Database, sessionId: string): SessionRow | undefined {
-    return db.prepare("SELECT * FROM agent_sessions WHERE session_id = ?").get(sessionId) as
-      | SessionRow
-      | undefined;
-  }
-
-  private requireSession(db: Database.Database, sessionId: string): SessionRow {
-    const row = this.selectSession(db, sessionId);
-    if (!row) {
+  private requireSession(sessionId: string): LoadedRuntimeSession {
+    const loaded = this.loadSession(sessionId);
+    if (!loaded) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime session ${sessionId} must be initialized before appending events`,
       );
     }
-    return row;
+    return loaded;
   }
 
-  private selectSessionEventAtSequence(
-    db: Database.Database,
-    sessionId: string,
-    sequence: number,
-  ): EventRow | undefined {
-    return db
-      .prepare(
-        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-         FROM agent_runtime_events
-         WHERE session_id = ? AND sequence = ?`,
-      )
-      .get(sessionId, sequence) as EventRow | undefined;
-  }
-
-  private selectSessionHead(db: Database.Database, sessionId: string): EventRow | undefined {
-    return db
-      .prepare(
-        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-         FROM agent_runtime_events
-         WHERE session_id = ?
-         ORDER BY sequence DESC
-         LIMIT 1`,
-      )
-      .get(sessionId) as EventRow | undefined;
-  }
-
-  private activeBranchAt(db: Database.Database, sessionId: string, sequence: number): string {
-    const row = db
-      .prepare(
-        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-         FROM agent_runtime_events
-         WHERE session_id = ? AND kind = 'history.rewound' AND sequence <= ?
-         ORDER BY sequence DESC
-         LIMIT 1`,
-      )
-      .get(sessionId, sequence) as EventRow | undefined;
-    if (!row) return "main";
-    const entry = decodeEventRow(row, sessionId);
-    if (entry.event.kind !== "history.rewound") {
-      throw new RuntimeEventStoreIntegrityError("Runtime active branch event has an invalid kind");
+  private loadSession(sessionId: string): LoadedRuntimeSession | undefined {
+    const logPath = this.sessionFilePath(sessionId);
+    if (!existsSync(logPath)) return undefined;
+    const records = readJsonLinesSync(logPath);
+    if (records.length === 0) {
+      throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} ledger is empty`);
     }
-    return entry.event.data.branchId;
-  }
+    const header = decodeSessionHeader(records[0], logPath);
+    if (
+      header.sessionId !== sessionId ||
+      sessionDigest(header.sessionId) !== sessionDigest(sessionId)
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${sessionId} does not match its ledger header`,
+      );
+    }
 
-  private openDatabase(initializeSchema = false): Database.Database {
-    const db = new Database(this.databasePath);
-    try {
-      db.pragma("busy_timeout = 5000");
-      assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
-      chmodSync(this.databasePath, 0o600);
-      db.pragma("journal_mode = WAL");
-      db.pragma("foreign_keys = ON");
-      db.pragma("synchronous = FULL");
-      if (initializeSchema) {
-        db.transaction(() => {
-          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
-          db.exec(
-            `CREATE TABLE IF NOT EXISTS agent_sessions (
-           session_id TEXT PRIMARY KEY,
-           work_dir TEXT NOT NULL,
-           history_source TEXT NOT NULL CHECK (history_source = 'runtime-event-v1'),
-           created_at TEXT NOT NULL,
-           active_branch_id TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS agent_runtime_events (
-           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-           session_id TEXT NOT NULL,
-           run_id TEXT NOT NULL,
-           event_id TEXT NOT NULL,
-           kind TEXT NOT NULL,
-           at TEXT NOT NULL,
-           event_json TEXT NOT NULL,
-           UNIQUE (session_id, event_id),
-           FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE
-         );
-         CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_sequence
-           ON agent_runtime_events(session_id, sequence);
-         CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_run_sequence
-           ON agent_runtime_events(session_id, run_id, sequence);
-         CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_kind_sequence
-           ON agent_runtime_events(session_id, kind, sequence);`,
+    const entries: RuntimeEventStoreEntry[] = [];
+    const eventIds = new Set<string>();
+    for (let index = 1; index < records.length; index++) {
+      const batch = decodeEventBatch(records[index], logPath, index + 1);
+      for (const batchEntry of batch.entries) {
+        const expectedSequence = entries.length + 1;
+        if (batchEntry.sequence !== expectedSequence) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime session ${sessionId} sequence ${batchEntry.sequence} is not contiguous`,
           );
-        }).immediate();
+        }
+        if (batchEntry.event.sessionId !== sessionId) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event ${batchEntry.event.eventId} belongs to another session`,
+          );
+        }
+        if (eventIds.has(batchEntry.event.eventId)) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event ID ${batchEntry.event.eventId} is duplicated in session ${sessionId}`,
+          );
+        }
+        eventIds.add(batchEntry.event.eventId);
+        entries.push({ sequence: batchEntry.sequence, event: batchEntry.event });
       }
-      return db;
-    } catch (error) {
-      db.close();
-      throw error;
     }
+
+    const activeBranchId = activeBranchForEntries(entries);
+    const derivedManifest = manifestFromHeader(header, activeBranchId);
+    const manifestPath = this.manifestFilePath(sessionId);
+    let persistedManifest: RuntimeSessionManifest | undefined;
+    if (existsSync(manifestPath)) {
+      try {
+        persistedManifest = decodeManifest(readJsonFileSync(manifestPath), manifestPath);
+      } catch (error) {
+        if (
+          !(error instanceof RuntimeEventStoreIntegrityError) &&
+          !(error instanceof SyntaxError)
+        ) {
+          throw error;
+        }
+        // manifest.json is a disposable projection. The canonical JSONL header and facts win.
+      }
+    }
+    if (!persistedManifest || !isDeepStrictEqual(persistedManifest, derivedManifest)) {
+      writeJsonAtomicSync(manifestPath, derivedManifest);
+    }
+    return { header, manifest: derivedManifest, entries };
+  }
+
+  private loadAllSessionManifests(): RuntimeSessionManifest[] {
+    const manifests: RuntimeSessionManifest[] = [];
+    for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
+      const logPath = join(this.sessionsRoot, entry.name, SESSION_FILE_NAME);
+      if (!existsSync(logPath)) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session directory ${entry.name} has no ledger`,
+        );
+      }
+      const records = readJsonLinesSync(logPath);
+      if (records.length === 0) {
+        throw new RuntimeEventStoreIntegrityError(`Runtime session ledger ${logPath} is empty`);
+      }
+      const header = decodeSessionHeader(records[0], logPath);
+      if (sessionDigest(header.sessionId) !== entry.name) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session directory ${entry.name} does not match its ledger header`,
+        );
+      }
+      manifests.push(this.requireSession(header.sessionId).manifest);
+    }
+    return manifests.sort(compareManifestsDescending);
+  }
+
+  private projectionForSession(
+    loaded: LoadedRuntimeSession | undefined,
+  ): RuntimeSessionProjectionSnapshot | undefined {
+    if (!loaded) return undefined;
+    const head = loaded.entries.at(-1);
+    return {
+      manifest: loaded.manifest,
+      activeBranchId: loaded.manifest.activeBranchId,
+      entries: loaded.entries,
+      ...(head
+        ? {
+            cursor: cursorForEntries(
+              loaded.header.sessionId,
+              loaded.entries,
+              head.sequence,
+              head.event.eventId,
+            ),
+          }
+        : {}),
+    };
+  }
+
+  private sessionDirectory(sessionId: string): string {
+    return join(this.sessionsRoot, sessionDigest(sessionId));
+  }
+
+  private sessionFilePath(sessionId: string): string {
+    return join(this.sessionDirectory(sessionId), SESSION_FILE_NAME);
+  }
+
+  private manifestFilePath(sessionId: string): string {
+    return join(this.sessionDirectory(sessionId), MANIFEST_FILE_NAME);
+  }
+
+  private sessionRelativePath(sessionId: string, fileName: string): string {
+    return join(SESSIONS_DIRECTORY_NAME, sessionDigest(sessionId), fileName);
   }
 }
 
 /**
- * Reads an existing canonical Session projection without creating directories, opening a
- * writable connection, changing journal settings, or running schema DDL.
+ * Reads an existing canonical Session projection. A pending durable commit is recovered before
+ * the projection is returned; a missing storage root remains a non-creating undefined result.
  */
 export async function readExistingRuntimeSessionProjection(
   options: ReadRuntimeSessionProjectionOptions,
 ): Promise<RuntimeSessionProjectionSnapshot | undefined> {
-  const databasePath = resolve(options.databasePath);
-  if (!existsSync(databasePath)) return undefined;
-
-  const db = new Database(databasePath, { readonly: true, fileMustExist: true });
-  try {
-    db.pragma("busy_timeout = 5000");
-    assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, databasePath));
-    return db.transaction(() => readSessionProjectionFromDatabase(db, options.sessionId))();
-  } finally {
-    db.close();
-  }
+  const configuredRoot = options.storageRoot ?? options.databasePath;
+  if (!configuredRoot?.trim()) throw new Error("RuntimeEventStore requires storageRoot");
+  if (!existsSync(resolve(configuredRoot))) return undefined;
+  return new RuntimeEventStore(options).readSessionProjection(options.sessionId);
 }
 
 export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
 }
 
-function readSessionProjectionFromDatabase(
-  db: Database.Database,
-  sessionId: string,
-): RuntimeSessionProjectionSnapshot | undefined {
-  const session = db.prepare("SELECT * FROM agent_sessions WHERE session_id = ?").get(sessionId) as
-    | SessionRow
-    | undefined;
-  if (!session) return undefined;
-  const rows = db
-    .prepare(
-      `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
-       FROM agent_runtime_events
-       WHERE session_id = ?
-       ORDER BY sequence`,
-    )
-    .all(sessionId) as EventRow[];
-  const entries = rows.map((row) => decodeEventRow(row, sessionId));
-  const activeBranchId = activeBranchForEntries(entries);
-  if (activeBranchId !== session.active_branch_id) {
-    throw new RuntimeEventStoreIntegrityError(
-      `Runtime session ${sessionId} active branch does not match its canonical events`,
-    );
+function decodeSessionHeader(value: unknown, path: string): RuntimeSessionFileHeader {
+  if (
+    !isRecord(value) ||
+    value["type"] !== "session" ||
+    value["schemaVersion"] !== RUNTIME_SESSION_FILE_VERSION ||
+    typeof value["sessionId"] !== "string" ||
+    !value["sessionId"] ||
+    typeof value["workDir"] !== "string" ||
+    !value["workDir"] ||
+    value["historySource"] !== "runtime-event-v1" ||
+    typeof value["createdAt"] !== "string" ||
+    !value["createdAt"]
+  ) {
+    throw new RuntimeEventStoreIntegrityError(`Runtime session header is invalid in ${path}`);
   }
-  const head = entries.at(-1);
   return {
-    manifest: manifestFromRow(session),
-    activeBranchId,
-    entries,
-    ...(head
-      ? { cursor: cursorForEntries(sessionId, entries, head.sequence, head.event.eventId) }
-      : {}),
+    type: "session",
+    schemaVersion: RUNTIME_SESSION_FILE_VERSION,
+    sessionId: value["sessionId"],
+    workDir: value["workDir"],
+    historySource: "runtime-event-v1",
+    createdAt: value["createdAt"],
   };
 }
 
-function manifestFromRow(row: SessionRow): RuntimeSessionManifest {
-  if (row.history_source !== "runtime-event-v1") {
-    throw new RuntimeEventStoreIntegrityError(
-      `Runtime session ${row.session_id} has an unsupported history source`,
-    );
+function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEventBatch {
+  if (
+    !isRecord(value) ||
+    value["type"] !== "event-batch" ||
+    value["schemaVersion"] !== RUNTIME_SESSION_FILE_VERSION ||
+    typeof value["txId"] !== "string" ||
+    !value["txId"] ||
+    typeof value["committedAt"] !== "string" ||
+    !value["committedAt"] ||
+    !Array.isArray(value["entries"]) ||
+    value["entries"].length === 0
+  ) {
+    throw new RuntimeEventStoreIntegrityError(`Runtime event batch at ${path}:${line} is invalid`);
+  }
+  const entries = value["entries"].map((entry, index): RuntimeEventBatchEntry => {
+    if (
+      !isRecord(entry) ||
+      !Number.isSafeInteger(entry["sequence"]) ||
+      (entry["sequence"] as number) < 1 ||
+      typeof entry["committedAt"] !== "string" ||
+      !entry["committedAt"]
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime event batch entry ${index + 1} at ${path}:${line} is invalid`,
+      );
+    }
+    let event: RuntimeEvent;
+    try {
+      event = decodeRuntimeEvent(entry["event"]);
+    } catch (error) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime event batch entry ${index + 1} at ${path}:${line} is invalid`,
+        { cause: error },
+      );
+    }
+    if (entry["committedAt"] !== event.at) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime event ${event.eventId} committedAt does not match its payload`,
+      );
+    }
+    return {
+      sequence: entry["sequence"] as number,
+      committedAt: entry["committedAt"],
+      event,
+    };
+  });
+  return {
+    type: "event-batch",
+    schemaVersion: RUNTIME_SESSION_FILE_VERSION,
+    txId: value["txId"],
+    committedAt: value["committedAt"],
+    entries,
+  };
+}
+
+function decodeManifest(value: unknown, path: string): RuntimeSessionManifest {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== RUNTIME_SESSION_MANIFEST_VERSION ||
+    typeof value["sessionId"] !== "string" ||
+    typeof value["workDir"] !== "string" ||
+    value["historySource"] !== "runtime-event-v1" ||
+    typeof value["createdAt"] !== "string" ||
+    typeof value["activeBranchId"] !== "string" ||
+    !value["activeBranchId"]
+  ) {
+    throw new RuntimeEventStoreIntegrityError(`Runtime session manifest is invalid in ${path}`);
   }
   return {
     schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
-    sessionId: row.session_id,
-    workDir: row.work_dir,
+    sessionId: value["sessionId"],
+    workDir: value["workDir"],
     historySource: "runtime-event-v1",
-    createdAt: row.created_at,
-    activeBranchId: row.active_branch_id,
+    createdAt: value["createdAt"],
+    activeBranchId: value["activeBranchId"],
   };
 }
 
-function decodeEventRow(
-  row: EventRow,
-  expectedSessionId: string,
-  expectedRunId?: string,
-): RuntimeEventStoreEntry {
-  const value = decodeRuntimeEventJson(row.event_json);
-  if (
-    value.sessionId !== expectedSessionId ||
-    row.session_id !== expectedSessionId ||
-    value.eventId !== row.event_id ||
-    value.runId !== row.run_id ||
-    value.kind !== row.kind ||
-    value.at !== row.at ||
-    (expectedRunId !== undefined && value.runId !== expectedRunId)
-  ) {
-    throw new RuntimeEventStoreIntegrityError("Runtime event identity does not match its row");
-  }
-  return { sequence: row.sequence, event: value };
+function manifestFromHeader(
+  header: RuntimeSessionFileHeader,
+  activeBranchId: string,
+): RuntimeSessionManifest {
+  return {
+    schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
+    sessionId: header.sessionId,
+    workDir: header.workDir,
+    historySource: "runtime-event-v1",
+    createdAt: header.createdAt,
+    activeBranchId,
+  };
 }
 
 function cursorForEntries(
@@ -850,13 +874,45 @@ function cursorForEntries(
 }
 
 function activeBranchForEntries(entries: readonly RuntimeEventStoreEntry[]): string {
+  return activeBranchAt(entries, Number.MAX_SAFE_INTEGER);
+}
+
+function activeBranchAt(entries: readonly RuntimeEventStoreEntry[], sequence: number): string {
   let activeBranchId = "main";
   for (const entry of entries) {
+    if (entry.sequence > sequence) break;
     if (entry.event.kind === "history.rewound") {
       activeBranchId = entry.event.data.branchId;
     }
   }
   return activeBranchId;
+}
+
+function sessionDigest(sessionId: string): string {
+  return createHash("sha256").update(sessionId).digest("hex");
+}
+
+function compareManifestsDescending(
+  left: RuntimeSessionManifest,
+  right: RuntimeSessionManifest,
+): number {
+  return (
+    right.createdAt.localeCompare(left.createdAt) || right.sessionId.localeCompare(left.sessionId)
+  );
+}
+
+/**
+ * Returns a positive value when a descending manifest is strictly after the cursor,
+ * zero for equality, and a negative value when it is before it.
+ */
+function compareManifestToCursor(
+  manifest: RuntimeSessionManifest,
+  cursor: RuntimeSessionManifestCursor,
+): number {
+  return (
+    cursor.createdAt.localeCompare(manifest.createdAt) ||
+    cursor.sessionId.localeCompare(manifest.sessionId)
+  );
 }
 
 function normalizePageOffset(value = 0, field = "offset"): number {
@@ -891,10 +947,7 @@ function normalizeManifestCursor(
   return { createdAt: value.createdAt, sessionId: value.sessionId };
 }
 
-function canonicalizeRuntimeEvent(event: RuntimeEvent): {
-  readonly event: RuntimeEvent;
-  readonly encoded: string;
-} {
+function canonicalizeRuntimeEvent(event: RuntimeEvent): RuntimeEvent {
   let encoded: string | undefined;
   try {
     encoded = JSON.stringify(event);
@@ -908,27 +961,24 @@ function canonicalizeRuntimeEvent(event: RuntimeEvent): {
       `Runtime event ${event.eventId} encoded to undefined`,
     );
   }
-  const canonical: unknown = JSON.parse(encoded);
-  return { event: decodeRuntimeEvent(canonical), encoded };
+  try {
+    return decodeRuntimeEvent(JSON.parse(encoded) as unknown);
+  } catch (error) {
+    if (error instanceof RuntimeEventStoreIntegrityError) throw error;
+    throw new RuntimeEventStoreIntegrityError(`Runtime event ${event.eventId} is invalid`, {
+      cause: error,
+    });
+  }
 }
 
-function assertRuntimeEventStoreSchema(schema: RuntimeSchemaPreflightResult): void {
-  if (schema.status === "future") {
-    throw new RuntimeEventStoreIntegrityError(
-      `runtime.sqlite schema ${schema.schemaVersion} is newer than supported ${RUNTIME_SCHEMA_VERSION}`,
-    );
-  }
-  if (schema.status === "current_migration_name_mismatch") {
-    throw new RuntimeEventStoreIntegrityError(
-      `runtime.sqlite schema ${schema.schemaVersion} migration ${schema.migrationName} does not match ${schema.expectedMigrationName}`,
-    );
-  }
-  if (schema.status === "invalid") {
-    throw new RuntimeEventStoreIntegrityError(`runtime.sqlite schema is invalid: ${schema.reason}`);
-  }
-  if ("tables" in schema && schema.tables.agentSessions !== schema.tables.agentRuntimeEvents) {
-    throw new RuntimeEventStoreIntegrityError(
-      "runtime.sqlite contains only part of the Agent runtime event schema",
-    );
-  }
+function encodeJsonLine(value: unknown): string {
+  return `${JSON.stringify(value)}\n`;
+}
+
+function encodeJsonDocument(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
