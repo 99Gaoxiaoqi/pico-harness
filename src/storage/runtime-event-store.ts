@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -16,14 +16,16 @@ import {
   type RuntimeEvent,
 } from "./runtime-event.js";
 import {
+  assertLocalFileStorageCapabilitiesSync,
   FileStorageIntegrityError,
   commitFileTransactionSync,
   mkdirPrivateSync,
+  readFirstJsonLineSync,
   readJsonFileSync,
   readJsonLinesSync,
   recoverFileTransactionSync,
   syncDirectorySync,
-  withFileLock,
+  withFileLockSync,
   writeJsonAtomicSync,
 } from "./local-file-storage.js";
 
@@ -45,6 +47,17 @@ export interface RuntimeSessionManifest {
   readonly activeBranchId: string;
 }
 
+export interface RuntimeSessionManifestProjection {
+  readonly type: "session-manifest";
+  readonly schemaVersion: typeof RUNTIME_SESSION_MANIFEST_VERSION;
+  readonly manifest: RuntimeSessionManifest;
+  readonly ledger: {
+    readonly byteLength: number;
+    readonly lastSequence: number;
+    readonly lastTxId?: string;
+  };
+}
+
 export interface InitializeRuntimeSessionOptions {
   readonly sessionId: string;
   readonly workDir: string;
@@ -52,9 +65,16 @@ export interface InitializeRuntimeSessionOptions {
 }
 
 export interface RuntimeEventStoreOptions {
-  readonly storageRoot?: string;
-  /** @deprecated Use storageRoot. Retained while callers move off the SQLite-shaped option. */
-  readonly databasePath?: string;
+  readonly storageRoot: string;
+}
+
+interface RuntimeEventStoreRecoveryPolicy {
+  /** Internal diagnostic mode: derive manifests without mutating disposable projections. */
+  readonly repairManifests?: boolean;
+  /** Internal diagnostic mode: report, rather than truncate, an incomplete JSONL tail. */
+  readonly repairIncompleteTails?: boolean;
+  /** Internal diagnostic mode: open existing files without locks, recovery, chmod, or probes. */
+  readonly readOnly?: boolean;
 }
 
 export interface RuntimeSessionManifestCursor {
@@ -162,23 +182,31 @@ export class RuntimeEventStoreIntegrityError extends Error {
  */
 export class RuntimeEventStore {
   readonly storageRoot: string;
-  /** @deprecated Compatibility alias for callers not yet renamed to storageRoot. */
-  readonly databasePath: string;
   private readonly sessionsRoot: string;
   private readonly lockDirectory: string;
+  private readonly repairManifests: boolean;
+  private readonly repairIncompleteTails: boolean;
+  private readonly readOnly: boolean;
   private readonly ownerId = `runtime-event-store:${process.pid}:${randomUUID()}`;
 
-  constructor(options: RuntimeEventStoreOptions) {
-    const configuredRoot = options.storageRoot ?? options.databasePath;
-    if (!configuredRoot?.trim()) {
+  constructor(
+    options: RuntimeEventStoreOptions,
+    recoveryPolicy: RuntimeEventStoreRecoveryPolicy = {},
+  ) {
+    if (!options.storageRoot.trim()) {
       throw new Error("RuntimeEventStore requires storageRoot");
     }
-    this.storageRoot = resolve(configuredRoot);
-    this.databasePath = this.storageRoot;
+    this.storageRoot = resolve(options.storageRoot);
     this.sessionsRoot = join(this.storageRoot, SESSIONS_DIRECTORY_NAME);
     this.lockDirectory = join(this.storageRoot, LOCK_DIRECTORY_NAME);
-    mkdirPrivateSync(this.storageRoot);
-    mkdirPrivateSync(this.sessionsRoot);
+    this.repairManifests = recoveryPolicy.repairManifests ?? true;
+    this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? true;
+    this.readOnly = recoveryPolicy.readOnly ?? false;
+    if (!this.readOnly) {
+      mkdirPrivateSync(this.storageRoot);
+      assertLocalFileStorageCapabilitiesSync(this.storageRoot);
+      mkdirPrivateSync(this.sessionsRoot);
+    }
   }
 
   async initializeSession(
@@ -212,18 +240,25 @@ export class RuntimeEventStore {
         createdAt,
       };
       const manifest = manifestFromHeader(header, "main");
-      commitFileTransactionSync(this.storageRoot, {
-        replacements: [
-          {
-            relativePath: this.sessionRelativePath(options.sessionId, SESSION_FILE_NAME),
-            content: encodeJsonLine(header),
-          },
-          {
-            relativePath: this.sessionRelativePath(options.sessionId, MANIFEST_FILE_NAME),
-            content: encodeJsonDocument(manifest),
-          },
-        ],
-      });
+      const headerLine = encodeJsonLine(header);
+      commitFileTransactionSync(
+        this.storageRoot,
+        {
+          replacements: [
+            {
+              relativePath: this.sessionRelativePath(options.sessionId, SESSION_FILE_NAME),
+              content: headerLine,
+            },
+            {
+              relativePath: this.sessionRelativePath(options.sessionId, MANIFEST_FILE_NAME),
+              content: encodeJsonDocument(
+                createManifestProjection(manifest, Buffer.byteLength(headerLine), 0),
+              ),
+            },
+          ],
+        },
+        { transactionId: randomUUID() },
+      );
       return manifest;
     });
   }
@@ -325,34 +360,45 @@ export class RuntimeEventStore {
 
       const transactionId = randomUUID();
       const transactionCommittedAt = new Date().toISOString();
-      const appends = [...sessions.entries()]
-        .filter(([, session]) => session.appended.length > 0)
-        .map(([sessionId, session]) => {
-          const batch: RuntimeEventBatch = {
-            type: "event-batch",
-            schemaVersion: RUNTIME_SESSION_FILE_VERSION,
-            txId: transactionId,
-            committedAt: transactionCommittedAt,
-            entries: session.appended,
-          };
-          return {
-            relativePath: this.sessionRelativePath(sessionId, SESSION_FILE_NAME),
-            content: encodeJsonLine(batch),
-          };
-        });
-      const replacements = [...sessions.entries()]
-        .filter(
-          ([, session]) =>
-            session.appended.length > 0 &&
-            session.activeBranchId !== session.loaded.manifest.activeBranchId,
-        )
-        .map(([sessionId, session]) => ({
+      const appendedSessions = [...sessions.entries()].filter(
+        ([, session]) => session.appended.length > 0,
+      );
+      const batchLines = new Map<string, string>();
+      const appends = appendedSessions.map(([sessionId, session]) => {
+        const batch: RuntimeEventBatch = {
+          type: "event-batch",
+          schemaVersion: RUNTIME_SESSION_FILE_VERSION,
+          txId: transactionId,
+          committedAt: transactionCommittedAt,
+          entries: session.appended,
+        };
+        const content = encodeJsonLine(batch);
+        batchLines.set(sessionId, content);
+        return {
+          relativePath: this.sessionRelativePath(sessionId, SESSION_FILE_NAME),
+          content,
+        };
+      });
+      const replacements = appendedSessions.map(([sessionId, session]) => {
+        const manifest = {
+          ...session.loaded.manifest,
+          activeBranchId: session.activeBranchId,
+        };
+        const ledgerByteLength =
+          statSync(this.sessionFilePath(sessionId)).size +
+          Buffer.byteLength(batchLines.get(sessionId)!);
+        return {
           relativePath: this.sessionRelativePath(sessionId, MANIFEST_FILE_NAME),
-          content: encodeJsonDocument({
-            ...session.loaded.manifest,
-            activeBranchId: session.activeBranchId,
-          }),
-        }));
+          content: encodeJsonDocument(
+            createManifestProjection(
+              manifest,
+              ledgerByteLength,
+              session.entries.length,
+              transactionId,
+            ),
+          ),
+        };
+      });
 
       if (appends.length > 0) {
         commitFileTransactionSync(this.storageRoot, { appends, replacements }, { transactionId });
@@ -555,7 +601,8 @@ export class RuntimeEventStore {
 
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
     try {
-      return await withFileLock(this.lockDirectory, this.ownerId, async () => {
+      if (this.readOnly) return operation();
+      return withFileLockSync(this.lockDirectory, this.ownerId, () => {
         recoverFileTransactionSync(this.storageRoot);
         return operation();
       });
@@ -596,7 +643,7 @@ export class RuntimeEventStore {
   private loadSession(sessionId: string): LoadedRuntimeSession | undefined {
     const logPath = this.sessionFilePath(sessionId);
     if (!existsSync(logPath)) return undefined;
-    const records = readJsonLinesSync(logPath);
+    const records = readJsonLinesSync(logPath, this.repairIncompleteTails);
     if (records.length === 0) {
       throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} ledger is empty`);
     }
@@ -612,8 +659,10 @@ export class RuntimeEventStore {
 
     const entries: RuntimeEventStoreEntry[] = [];
     const eventIds = new Set<string>();
+    let lastTxId: string | undefined;
     for (let index = 1; index < records.length; index++) {
       const batch = decodeEventBatch(records[index], logPath, index + 1);
+      lastTxId = batch.txId;
       for (const batchEntry of batch.entries) {
         const expectedSequence = entries.length + 1;
         if (batchEntry.sequence !== expectedSequence) {
@@ -638,11 +687,20 @@ export class RuntimeEventStore {
 
     const activeBranchId = activeBranchForEntries(entries);
     const derivedManifest = manifestFromHeader(header, activeBranchId);
+    const derivedProjection = createManifestProjection(
+      derivedManifest,
+      statSync(logPath).size,
+      entries.length,
+      lastTxId,
+    );
     const manifestPath = this.manifestFilePath(sessionId);
-    let persistedManifest: RuntimeSessionManifest | undefined;
+    let persistedProjection: RuntimeSessionManifestProjection | undefined;
     if (existsSync(manifestPath)) {
       try {
-        persistedManifest = decodeManifest(readJsonFileSync(manifestPath), manifestPath);
+        persistedProjection = decodeRuntimeSessionManifestProjection(
+          readJsonFileSync(manifestPath),
+          manifestPath,
+        );
       } catch (error) {
         if (
           !(error instanceof RuntimeEventStoreIntegrityError) &&
@@ -653,13 +711,17 @@ export class RuntimeEventStore {
         // manifest.json is a disposable projection. The canonical JSONL header and facts win.
       }
     }
-    if (!persistedManifest || !isDeepStrictEqual(persistedManifest, derivedManifest)) {
-      writeJsonAtomicSync(manifestPath, derivedManifest);
+    if (
+      this.repairManifests &&
+      (!persistedProjection || !isDeepStrictEqual(persistedProjection, derivedProjection))
+    ) {
+      writeJsonAtomicSync(manifestPath, derivedProjection);
     }
     return { header, manifest: derivedManifest, entries };
   }
 
   private loadAllSessionManifests(): RuntimeSessionManifest[] {
+    if (!existsSync(this.sessionsRoot)) return [];
     const manifests: RuntimeSessionManifest[] = [];
     for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || !SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
@@ -669,11 +731,12 @@ export class RuntimeEventStore {
           `Runtime session directory ${entry.name} has no ledger`,
         );
       }
-      const records = readJsonLinesSync(logPath);
-      if (records.length === 0) {
-        throw new RuntimeEventStoreIntegrityError(`Runtime session ledger ${logPath} is empty`);
+      const fastManifest = this.loadManifestProjectionFast(entry.name, logPath);
+      if (fastManifest) {
+        manifests.push(fastManifest);
+        continue;
       }
-      const header = decodeSessionHeader(records[0], logPath);
+      const header = readSessionHeaderSync(logPath);
       if (sessionDigest(header.sessionId) !== entry.name) {
         throw new RuntimeEventStoreIntegrityError(
           `Runtime session directory ${entry.name} does not match its ledger header`,
@@ -682,6 +745,41 @@ export class RuntimeEventStore {
       manifests.push(this.requireSession(header.sessionId).manifest);
     }
     return manifests.sort(compareManifestsDescending);
+  }
+
+  private loadManifestProjectionFast(
+    sessionDirectoryName: string,
+    logPath: string,
+  ): RuntimeSessionManifest | undefined {
+    const manifestPath = join(this.sessionsRoot, sessionDirectoryName, MANIFEST_FILE_NAME);
+    if (!existsSync(manifestPath)) return undefined;
+    try {
+      const projection = decodeRuntimeSessionManifestProjection(
+        readJsonFileSync(manifestPath),
+        manifestPath,
+      );
+      if (
+        sessionDigest(projection.manifest.sessionId) !== sessionDirectoryName ||
+        statSync(logPath).size !== projection.ledger.byteLength
+      ) {
+        return undefined;
+      }
+      const header = readSessionHeaderSync(logPath);
+      if (
+        !isDeepStrictEqual(
+          manifestFromHeader(header, projection.manifest.activeBranchId),
+          projection.manifest,
+        )
+      ) {
+        return undefined;
+      }
+      return projection.manifest;
+    } catch (error) {
+      if (error instanceof RuntimeEventStoreIntegrityError || error instanceof SyntaxError) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   private projectionForSession(
@@ -730,9 +828,8 @@ export class RuntimeEventStore {
 export async function readExistingRuntimeSessionProjection(
   options: ReadRuntimeSessionProjectionOptions,
 ): Promise<RuntimeSessionProjectionSnapshot | undefined> {
-  const configuredRoot = options.storageRoot ?? options.databasePath;
-  if (!configuredRoot?.trim()) throw new Error("RuntimeEventStore requires storageRoot");
-  if (!existsSync(resolve(configuredRoot))) return undefined;
+  if (!options.storageRoot.trim()) throw new Error("RuntimeEventStore requires storageRoot");
+  if (!existsSync(resolve(options.storageRoot))) return undefined;
   return new RuntimeEventStore(options).readSessionProjection(options.sessionId);
 }
 
@@ -763,6 +860,10 @@ function decodeSessionHeader(value: unknown, path: string): RuntimeSessionFileHe
     historySource: "runtime-event-v1",
     createdAt: value["createdAt"],
   };
+}
+
+function readSessionHeaderSync(path: string): RuntimeSessionFileHeader {
+  return decodeSessionHeader(readFirstJsonLineSync(path), path);
 }
 
 function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEventBatch {
@@ -820,9 +921,48 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
   };
 }
 
-function decodeManifest(value: unknown, path: string): RuntimeSessionManifest {
+export function decodeRuntimeSessionManifestProjection(
+  value: unknown,
+  path: string,
+): RuntimeSessionManifestProjection {
   if (
     !isRecord(value) ||
+    value["type"] !== "session-manifest" ||
+    value["schemaVersion"] !== RUNTIME_SESSION_MANIFEST_VERSION ||
+    !isRecord(value["manifest"]) ||
+    !isRecord(value["ledger"])
+  ) {
+    throw new RuntimeEventStoreIntegrityError(`Runtime session manifest is invalid in ${path}`);
+  }
+  const manifestValue = value["manifest"];
+  const ledgerValue = value["ledger"];
+  const manifest = decodeManifestValue(manifestValue, path);
+  if (
+    !Number.isSafeInteger(ledgerValue["byteLength"]) ||
+    (ledgerValue["byteLength"] as number) <= 0 ||
+    !Number.isSafeInteger(ledgerValue["lastSequence"]) ||
+    (ledgerValue["lastSequence"] as number) < 0 ||
+    (ledgerValue["lastTxId"] !== undefined &&
+      (typeof ledgerValue["lastTxId"] !== "string" || !ledgerValue["lastTxId"]))
+  ) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime session manifest ledger is invalid in ${path}`,
+    );
+  }
+  return {
+    type: "session-manifest",
+    schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
+    manifest,
+    ledger: {
+      byteLength: ledgerValue["byteLength"] as number,
+      lastSequence: ledgerValue["lastSequence"] as number,
+      ...(typeof ledgerValue["lastTxId"] === "string" ? { lastTxId: ledgerValue["lastTxId"] } : {}),
+    },
+  };
+}
+
+function decodeManifestValue(value: Record<string, unknown>, path: string): RuntimeSessionManifest {
+  if (
     value["schemaVersion"] !== RUNTIME_SESSION_MANIFEST_VERSION ||
     typeof value["sessionId"] !== "string" ||
     typeof value["workDir"] !== "string" ||
@@ -840,6 +980,24 @@ function decodeManifest(value: unknown, path: string): RuntimeSessionManifest {
     historySource: "runtime-event-v1",
     createdAt: value["createdAt"],
     activeBranchId: value["activeBranchId"],
+  };
+}
+
+function createManifestProjection(
+  manifest: RuntimeSessionManifest,
+  byteLength: number,
+  lastSequence: number,
+  lastTxId?: string,
+): RuntimeSessionManifestProjection {
+  return {
+    type: "session-manifest",
+    schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
+    manifest,
+    ledger: {
+      byteLength,
+      lastSequence,
+      ...(lastTxId ? { lastTxId } : {}),
+    },
   };
 }
 

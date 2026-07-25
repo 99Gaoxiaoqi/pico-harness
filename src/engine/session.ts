@@ -350,19 +350,18 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
    *      并行测试间相互污染(vitest 默认并行跑文件,共享 process.env 不安全)。
    *   2. 环境变量 PICO_PERSISTENCE —— 生产入口的全局默认,=0 关闭。
    *   3. 默认开启。
-   * durable 事件落点为 workspace runtime.sqlite。
+   * durable 事件落点为 workspace Runtime 文件账本。
    */
   private initPersistence(explicit?: boolean): void {
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
     this.store = new RuntimeEventStore({
-      databasePath: resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace
-        .runtimeDatabase,
+      storageRoot: resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.runtime,
     });
   }
 
   /**
-   * 重启后读取 runtime.sqlite manifest + events，重建内存投影。
+   * 重启后读取 Session manifest + events，重建内存投影。
    * 在 SessionManager.getOrCreate 新建实例时自动调用一次。
    * 持久化关闭时为空操作。
    */
@@ -405,7 +404,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     return tracked;
   }
 
-  /** One live process owns a durable Session until close; SQLite remains the data authority. */
+  /** One live process owns a durable Session until close; the RuntimeEvent log remains authoritative. */
   private ensureRuntimeOwnership(): Promise<OwnerLease> {
     if (!this.store) return Promise.reject(new Error("Session persistence is disabled"));
     if (this.runtimeOwnership) return Promise.resolve(this.runtimeOwnership);

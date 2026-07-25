@@ -76,7 +76,7 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
     /was not issued/u,
   );
   const foreignStore = new RuntimeEventStore({
-    databasePath: join(root, "foreign-runtime.sqlite"),
+    storageRoot: join(root, "foreign-runtime"),
   });
   assert.throws(
     () =>

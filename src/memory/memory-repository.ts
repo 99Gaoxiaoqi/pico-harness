@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { WorkspaceId } from "../paths/pico-paths.js";
 import {
+  assertLocalFileStorageCapabilitiesSync,
   commitFileTransactionSync,
   FileStorageIntegrityError,
   mkdirPrivateSync,
   readJsonFileSync,
   recoverFileTransactionSync,
+  syncDirectorySync,
   withFileLockSync,
 } from "../storage/local-file-storage.js";
 import { LeaseConflictError } from "../storage/owner-lease.js";
@@ -68,9 +70,7 @@ type RejectAsyncTransactionArguments<Result> = [Result] extends [never]
     : [];
 
 export interface MemoryRepositoryOptions {
-  readonly storageRoot?: string;
-  /** Temporary source compatibility. A `*.sqlite` path resolves to its parent directory. */
-  readonly databasePath?: string;
+  readonly storageRoot: string;
   readonly workspaceId: WorkspaceId;
   readonly now?: () => Date;
   readonly busyTimeoutMs?: number;
@@ -301,10 +301,29 @@ export class MemoryAsyncTransactionError extends TypeError {
   }
 }
 
+export class MemoryFileCleanupError extends FileStorageIntegrityError {
+  constructor(path: string, cause: unknown) {
+    super(`Failed to clean stale memory temporary file ${path}: ${errorMessage(cause)}`);
+    this.name = "MemoryFileCleanupError";
+  }
+}
+
+export class MemoryPlaintextVerificationError extends FileStorageIntegrityError {
+  constructor(path: string, cause?: unknown) {
+    super(
+      cause === undefined
+        ? `Deleted memory text remains in live file ${path}`
+        : `Failed to verify deleted memory text in ${path}: ${errorMessage(cause)}`,
+    );
+    this.name = "MemoryPlaintextVerificationError";
+  }
+}
+
 interface MemoryTransactionContext {
   readonly workspaceId: WorkspaceId;
   readonly state: MemoryFileState;
   readonly forgottenSecrets: Set<string>;
+  readonly forgottenFactIds: Set<string>;
 }
 
 const activeMemoryTransactions = new Map<string, MemoryTransactionContext>();
@@ -312,8 +331,6 @@ const activeMemoryTransactions = new Map<string, MemoryTransactionContext>();
 /** Workspace-scoped, file-backed authority for long-term memory. */
 export class MemoryRepository {
   readonly storageRoot: string;
-  /** Temporary compatibility alias. It now points at state.json, never SQLite. */
-  readonly databasePath: string;
   readonly workspaceId: WorkspaceId;
   private readonly statePath: string;
   private readonly lockPath: string;
@@ -321,20 +338,20 @@ export class MemoryRepository {
   private readonly busyTimeoutMs: number;
 
   constructor(options: MemoryRepositoryOptions) {
-    const configured = options.storageRoot ?? options.databasePath;
-    if (!configured) throw new Error("MemoryRepository requires storageRoot");
-    const configuredPath = resolve(configured);
-    this.storageRoot =
-      options.storageRoot !== undefined || basename(configuredPath) !== "memory.sqlite"
-        ? configuredPath
-        : dirname(configuredPath);
-    this.databasePath = join(this.storageRoot, "state.json");
-    this.statePath = this.databasePath;
+    if (!options.storageRoot.trim()) {
+      throw new Error("MemoryRepository storageRoot must not be empty");
+    }
+    this.storageRoot = resolve(options.storageRoot);
+    this.statePath = join(this.storageRoot, "state.json");
     this.lockPath = join(this.storageRoot, "lock");
     this.workspaceId = options.workspaceId;
     this.now = options.now ?? (() => new Date());
-    this.busyTimeoutMs = normalizeNonNegativeInteger(options.busyTimeoutMs ?? 5_000, "busyTimeoutMs");
+    this.busyTimeoutMs = normalizeNonNegativeInteger(
+      options.busyTimeoutMs ?? 5_000,
+      "busyTimeoutMs",
+    );
     mkdirPrivateSync(this.storageRoot);
+    assertLocalFileStorageCapabilitiesSync(this.storageRoot);
     if (!statSync(this.storageRoot).isDirectory()) {
       throw new Error(`Memory storage root is not a directory: ${this.storageRoot}`);
     }
@@ -375,12 +392,14 @@ export class MemoryRepository {
         workspaceId: this.workspaceId,
         state: this.readState(),
         forgottenSecrets: new Set(),
+        forgottenFactIds: new Set(),
       };
       const initialState = JSON.stringify(context.state);
       activeMemoryTransactions.set(this.storageRoot, context);
       let result: Result;
       try {
         result = requireSynchronousTransactionResult(operation(this));
+        if (context.forgottenFactIds.size > 0) this.cleanupTemporaryFiles();
         if (JSON.stringify(context.state) !== initialState) {
           context.state.revision += 1;
           commitFileTransactionSync(this.storageRoot, {
@@ -395,7 +414,10 @@ export class MemoryRepository {
       } finally {
         activeMemoryTransactions.delete(this.storageRoot);
       }
-      if (context.forgottenSecrets.size > 0) this.verifySecretsRemoved(context.forgottenSecrets);
+      if (context.forgottenFactIds.size > 0) {
+        this.verifyForgottenEntities(context.state, context.forgottenFactIds);
+        this.verifySecretsRemoved(context.forgottenSecrets);
+      }
       return result;
     });
   }
@@ -429,7 +451,11 @@ export class MemoryRepository {
           autoPropose: input.autoPropose ?? current.autoPropose,
           autoCommit: input.autoCommit ?? current.autoCommit,
           injectionEnabled: input.injectionEnabled ?? current.injectionEnabled,
-          reviewMode: requireEnum(input.reviewMode ?? current.reviewMode, MEMORY_REVIEW_MODES, "reviewMode"),
+          reviewMode: requireEnum(
+            input.reviewMode ?? current.reviewMode,
+            MEMORY_REVIEW_MODES,
+            "reviewMode",
+          ),
           version: current.version + 1,
           updatedAt,
         };
@@ -458,7 +484,8 @@ export class MemoryRepository {
       () => {
         const sourceId = normalizeId(input.sourceId ?? `source:${randomUUID()}`, "sourceId");
         const at = this.timestamp();
-        if (this.state().sources[sourceId]) throw new MemoryConflictError(`Memory source ${sourceId} already exists`);
+        if (this.state().sources[sourceId])
+          throw new MemoryConflictError(`Memory source ${sourceId} already exists`);
         const source: Source = {
           sourceId,
           workspaceId: this.workspaceId,
@@ -466,7 +493,9 @@ export class MemoryRepository {
           ...(normalized.runId ? { runId: normalized.runId } : {}),
           ...(normalized.branchId ? { branchId: normalized.branchId } : {}),
           eventIds: normalized.eventIds,
-          ...(normalized.startSequence === undefined ? {} : { startSequence: normalized.startSequence }),
+          ...(normalized.startSequence === undefined
+            ? {}
+            : { startSequence: normalized.startSequence }),
           ...(normalized.endSequence === undefined ? {} : { endSequence: normalized.endSequence }),
           digest: normalized.digest,
           availability: "available",
@@ -497,25 +526,46 @@ export class MemoryRepository {
 
   listSources(limit = 100): Source[] {
     const bounded = normalizeLimit(limit);
-    return this.read((state) => Object.values(state.sources)
-      .sort((a, b) => compareDesc(a.createdAt, b.createdAt) || compareDesc(a.sourceId, b.sourceId))
-      .slice(0, bounded).map(clone));
+    return this.read((state) =>
+      Object.values(state.sources)
+        .sort(
+          (a, b) => compareDesc(a.createdAt, b.createdAt) || compareDesc(a.sourceId, b.sourceId),
+        )
+        .slice(0, bounded)
+        .map(clone),
+    );
   }
 
   /** Bounded, SQL-filtered lifecycle scan; callers advance with the last sourceId. */
   listSessionSources(sessionId: string, options: SessionSourceListOptions = {}): Source[] {
     const id = normalizeId(sessionId, "sessionId");
-    const availability = options.availability === undefined ? undefined : requireEnum(options.availability, SOURCE_AVAILABILITIES, "availability");
-    const afterSequence = options.afterSequence === undefined ? undefined : normalizeNonNegativeInteger(options.afterSequence, "afterSequence");
-    const afterSourceId = options.afterSourceId === undefined ? undefined : normalizeId(options.afterSourceId, "afterSourceId");
+    const availability =
+      options.availability === undefined
+        ? undefined
+        : requireEnum(options.availability, SOURCE_AVAILABILITIES, "availability");
+    const afterSequence =
+      options.afterSequence === undefined
+        ? undefined
+        : normalizeNonNegativeInteger(options.afterSequence, "afterSequence");
+    const afterSourceId =
+      options.afterSourceId === undefined
+        ? undefined
+        : normalizeId(options.afterSourceId, "afterSourceId");
     const limit = normalizeLimit(options.limit);
-    return this.read((state) => Object.values(state.sources)
-      .filter((source) => source.sessionId === id)
-      .filter((source) => availability === undefined || source.availability === availability)
-      .filter((source) => afterSequence === undefined || (source.endSequence ?? source.startSequence ?? 0) > afterSequence)
-      .filter((source) => afterSourceId === undefined || source.sourceId > afterSourceId)
-      .sort((a, b) => a.sourceId.localeCompare(b.sourceId))
-      .slice(0, limit).map(clone));
+    return this.read((state) =>
+      Object.values(state.sources)
+        .filter((source) => source.sessionId === id)
+        .filter((source) => availability === undefined || source.availability === availability)
+        .filter(
+          (source) =>
+            afterSequence === undefined ||
+            (source.endSequence ?? source.startSequence ?? 0) > afterSequence,
+        )
+        .filter((source) => afterSourceId === undefined || source.sourceId > afterSourceId)
+        .sort((a, b) => a.sourceId.localeCompare(b.sourceId))
+        .slice(0, limit)
+        .map(clone),
+    );
   }
 
   updateSourceAvailability(input: UpdateSourceAvailabilityInput): Source {
@@ -536,7 +586,9 @@ export class MemoryRepository {
         const result: Source = {
           ...current,
           availability: input.availability,
-          ...(input.availability === "available" ? { invalidatedAt: undefined, invalidationCode: undefined } : { invalidatedAt: updatedAt, invalidationCode }),
+          ...(input.availability === "available"
+            ? { invalidatedAt: undefined, invalidationCode: undefined }
+            : { invalidatedAt: updatedAt, invalidationCode }),
           version: current.version + 1,
           updatedAt,
         };
@@ -595,11 +647,19 @@ export class MemoryRepository {
     const states = options.states?.map((state) => requireEnum(state, FACT_STATES, "state"));
     const kinds = options.kinds?.map((kind) => requireEnum(kind, MEMORY_KINDS, "kind"));
     const limit = normalizeLimit(options.limit);
-    return this.read((state) => Object.values(state.facts)
-      .filter((fact) => !states?.length || states.includes(fact.state))
-      .filter((fact) => !kinds?.length || kinds.includes(fact.kind))
-      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || compareDesc(a.updatedAt, b.updatedAt) || compareDesc(a.factId, b.factId))
-      .slice(0, limit).map(clone));
+    return this.read((state) =>
+      Object.values(state.facts)
+        .filter((fact) => !states?.length || states.includes(fact.state))
+        .filter((fact) => !kinds?.length || kinds.includes(fact.kind))
+        .sort(
+          (a, b) =>
+            Number(b.pinned) - Number(a.pinned) ||
+            compareDesc(a.updatedAt, b.updatedAt) ||
+            compareDesc(a.factId, b.factId),
+        )
+        .slice(0, limit)
+        .map(clone),
+    );
   }
 
   updateFact(input: UpdateFactInput): Fact {
@@ -625,14 +685,29 @@ export class MemoryRepository {
         const result: Fact = compact({
           ...current,
           kind: input.kind ? requireEnum(input.kind, MEMORY_KINDS, "kind") : current.kind,
-          title: input.title === undefined ? current.title : requireText(input.title, "title", MAX_TITLE_LENGTH),
-          content: input.content === undefined ? current.content : requireText(input.content, "content", MAX_CONTENT_LENGTH),
-          confidence: input.confidence === undefined ? current.confidence : normalizeConfidence(input.confidence),
+          title:
+            input.title === undefined
+              ? current.title
+              : requireText(input.title, "title", MAX_TITLE_LENGTH),
+          content:
+            input.content === undefined
+              ? current.content
+              : requireText(input.content, "content", MAX_CONTENT_LENGTH),
+          confidence:
+            input.confidence === undefined
+              ? current.confidence
+              : normalizeConfidence(input.confidence),
           sourceId,
           state: input.state ? requireNonForgottenState(input.state) : current.state,
           pinned: input.pinned ?? current.pinned,
-          expiresAt: input.expiresAt === undefined ? current.expiresAt : normalizeOptionalTimestamp(input.expiresAt, "expiresAt") ?? undefined,
-          lastUsedAt: input.lastUsedAt === undefined ? current.lastUsedAt : normalizeOptionalTimestamp(input.lastUsedAt, "lastUsedAt") ?? undefined,
+          expiresAt:
+            input.expiresAt === undefined
+              ? current.expiresAt
+              : (normalizeOptionalTimestamp(input.expiresAt, "expiresAt") ?? undefined),
+          lastUsedAt:
+            input.lastUsedAt === undefined
+              ? current.lastUsedAt
+              : (normalizeOptionalTimestamp(input.lastUsedAt, "lastUsedAt") ?? undefined),
           version: current.version + 1,
           updatedAt: at,
         });
@@ -666,10 +741,21 @@ export class MemoryRepository {
         }
         assertVersion("fact", factId, current.version, input.expectedVersion);
         const at = this.timestamp();
-        this.rememberSecrets(current.title, current.content);
         const linkedProposals = Object.values(this.state().proposals).filter(
-          (proposal) => (proposal.resolvedFactId === factId || proposal.conflictFactId === factId) && proposal.status !== "deleted",
+          (proposal) =>
+            (proposal.resolvedFactId === factId || proposal.conflictFactId === factId) &&
+            proposal.status !== "deleted",
         );
+        const forgottenTexts = [
+          current.title,
+          current.content,
+          ...linkedProposals.flatMap((proposal) => [
+            proposal.title,
+            proposal.content,
+            proposal.reason,
+          ]),
+        ].filter((value): value is string => value !== null && value !== undefined);
+        this.rememberForgetPostcondition(factId, forgottenTexts);
         const forgotten: Fact = compact({
           ...current,
           title: null,
@@ -684,7 +770,6 @@ export class MemoryRepository {
         });
         this.state().facts[factId] = forgotten;
         for (const proposal of linkedProposals) {
-          this.rememberSecrets(proposal.title, proposal.content, proposal.reason);
           this.state().proposals[proposal.proposalId] = compact({
             ...proposal,
             title: null,
@@ -718,7 +803,11 @@ export class MemoryRepository {
         this.enqueueForgottenNotification(forgotten, input.idempotencyKey, at);
         return { value: forgotten, marker: { factId } };
       },
-      (marker) => this.requireFact(readMarkerId(marker, "factId")),
+      (marker) => {
+        const replayFactId = readMarkerId(marker, "factId");
+        this.rememberForgetPostcondition(replayFactId, []);
+        return this.requireFact(replayFactId);
+      },
     );
     return result;
   }
@@ -737,7 +826,8 @@ export class MemoryRepository {
           "proposalId",
         );
         const at = this.timestamp();
-        if (this.state().proposals[proposalId]) throw new MemoryConflictError(`Memory proposal ${proposalId} already exists`);
+        if (this.state().proposals[proposalId])
+          throw new MemoryConflictError(`Memory proposal ${proposalId} already exists`);
         const proposal: Proposal = {
           proposalId,
           workspaceId: this.workspaceId,
@@ -780,10 +870,16 @@ export class MemoryRepository {
       requireEnum(status, PROPOSAL_STATUSES, "status"),
     );
     const limit = normalizeLimit(options.limit);
-    return this.read((state) => Object.values(state.proposals)
-      .filter((proposal) => !statuses?.length || statuses.includes(proposal.status))
-      .sort((a, b) => compareDesc(a.createdAt, b.createdAt) || compareDesc(a.proposalId, b.proposalId))
-      .slice(0, limit).map(clone));
+    return this.read((state) =>
+      Object.values(state.proposals)
+        .filter((proposal) => !statuses?.length || statuses.includes(proposal.status))
+        .sort(
+          (a, b) =>
+            compareDesc(a.createdAt, b.createdAt) || compareDesc(a.proposalId, b.proposalId),
+        )
+        .slice(0, limit)
+        .map(clone),
+    );
   }
 
   listPendingProposalsForSources(sourceIds: readonly string[]): Proposal[] {
@@ -792,9 +888,17 @@ export class MemoryRepository {
       throw new Error(`sourceIds cannot exceed ${MAX_LIST_LIMIT}`);
     }
     const normalized = new Set(sourceIds.map((sourceId) => normalizeId(sourceId, "sourceId")));
-    return this.read((state) => Object.values(state.proposals)
-      .filter((proposal) => proposal.status === "pending" && proposal.sourceId !== undefined && normalized.has(proposal.sourceId))
-      .sort((a, b) => a.proposalId.localeCompare(b.proposalId)).map(clone));
+    return this.read((state) =>
+      Object.values(state.proposals)
+        .filter(
+          (proposal) =>
+            proposal.status === "pending" &&
+            proposal.sourceId !== undefined &&
+            normalized.has(proposal.sourceId),
+        )
+        .sort((a, b) => a.proposalId.localeCompare(b.proposalId))
+        .map(clone),
+    );
   }
 
   updateProposal(input: UpdateProposalInput): Proposal {
@@ -825,12 +929,26 @@ export class MemoryRepository {
         const result: Proposal = compact({
           ...current,
           kind: input.kind ? requireEnum(input.kind, MEMORY_KINDS, "kind") : current.kind,
-          title: input.title === undefined ? current.title : requireText(input.title, "title", MAX_TITLE_LENGTH),
-          content: input.content === undefined ? current.content : requireText(input.content, "content", MAX_CONTENT_LENGTH),
-          reason: input.reason === undefined ? current.reason : requireText(input.reason, "reason", MAX_REASON_LENGTH),
-          confidence: input.confidence === undefined ? current.confidence : normalizeConfidence(input.confidence),
+          title:
+            input.title === undefined
+              ? current.title
+              : requireText(input.title, "title", MAX_TITLE_LENGTH),
+          content:
+            input.content === undefined
+              ? current.content
+              : requireText(input.content, "content", MAX_CONTENT_LENGTH),
+          reason:
+            input.reason === undefined
+              ? current.reason
+              : requireText(input.reason, "reason", MAX_REASON_LENGTH),
+          confidence:
+            input.confidence === undefined
+              ? current.confidence
+              : normalizeConfidence(input.confidence),
           sourceId,
-          conflictStatus: input.conflictStatus ? requireEnum(input.conflictStatus, PROPOSAL_CONFLICT_STATUSES, "conflictStatus") : current.conflictStatus,
+          conflictStatus: input.conflictStatus
+            ? requireEnum(input.conflictStatus, PROPOSAL_CONFLICT_STATUSES, "conflictStatus")
+            : current.conflictStatus,
           conflictFactId,
           version: current.version + 1,
           updatedAt: at,
@@ -991,7 +1109,10 @@ export class MemoryRepository {
           reason: finalReason,
           confidence: finalConfidence,
           status: input.resolution,
-          conflictStatus: input.resolution === "accepted" && current.conflictFactId ? "resolved" : current.conflictStatus,
+          conflictStatus:
+            input.resolution === "accepted" && current.conflictFactId
+              ? "resolved"
+              : current.conflictStatus,
           resolvedFactId: fact?.factId,
           version: current.version + 1,
           updatedAt: at,
@@ -1023,13 +1144,21 @@ export class MemoryRepository {
 
   listMutations(options: MutationListOptions = {}): Mutation[] {
     const after = normalizeNonNegativeInteger(options.afterSequence ?? 0, "afterSequence");
-    const entityId = options.entityId === undefined ? undefined : normalizeId(options.entityId, "entityId");
+    const entityId =
+      options.entityId === undefined ? undefined : normalizeId(options.entityId, "entityId");
     const limit = normalizeLimit(options.limit);
-    return this.read((state) => state.mutations
-      .filter((mutation) => mutation.sequence > after)
-      .filter((mutation) => options.entityType === undefined || mutation.entityType === options.entityType)
-      .filter((mutation) => entityId === undefined || mutation.entityId === entityId)
-      .sort((a, b) => a.sequence - b.sequence).slice(0, limit).map(clone));
+    return this.read((state) =>
+      state.mutations
+        .filter((mutation) => mutation.sequence > after)
+        .filter(
+          (mutation) =>
+            options.entityType === undefined || mutation.entityType === options.entityType,
+        )
+        .filter((mutation) => entityId === undefined || mutation.entityId === entityId)
+        .sort((a, b) => a.sequence - b.sequence)
+        .slice(0, limit)
+        .map(clone),
+    );
   }
 
   createJob(input: CreateJobInput): Job {
@@ -1040,7 +1169,9 @@ export class MemoryRepository {
       normalized.request,
       () => {
         const existing = Object.values(this.state().jobs).find(
-          (job) => job.terminalEventId === normalized.terminalEventId && job.extractorVersion === normalized.extractorVersion,
+          (job) =>
+            job.terminalEventId === normalized.terminalEventId &&
+            job.extractorVersion === normalized.extractorVersion,
         );
         if (existing) {
           const job = clone(existing);
@@ -1049,7 +1180,8 @@ export class MemoryRepository {
         if (normalized.sourceId) this.requireSource(normalized.sourceId);
         const jobId = normalizeId(input.jobId ?? `memory-job:${randomUUID()}`, "jobId");
         const at = this.timestamp();
-        if (this.state().jobs[jobId]) throw new MemoryConflictError(`Memory job ${jobId} already exists`);
+        if (this.state().jobs[jobId])
+          throw new MemoryConflictError(`Memory job ${jobId} already exists`);
         const job: Job = {
           jobId,
           workspaceId: this.workspaceId,
@@ -1095,25 +1227,48 @@ export class MemoryRepository {
     const statuses = options.statuses?.map((status) =>
       requireEnum(status, MEMORY_JOB_STATUSES, "status"),
     );
-    const type = options.type === undefined ? undefined : requireNonEmpty(options.type, "type", 128);
-    const extractorVersion = options.extractorVersion === undefined ? undefined : requireNonEmpty(options.extractorVersion, "extractorVersion", 128);
-    const readyAt = options.readyAt === undefined ? undefined : normalizeTimestamp(options.readyAt, "readyAt");
+    const type =
+      options.type === undefined ? undefined : requireNonEmpty(options.type, "type", 128);
+    const extractorVersion =
+      options.extractorVersion === undefined
+        ? undefined
+        : requireNonEmpty(options.extractorVersion, "extractorVersion", 128);
+    const readyAt =
+      options.readyAt === undefined ? undefined : normalizeTimestamp(options.readyAt, "readyAt");
     const order = options.order ?? "newest";
     if (order !== "newest" && order !== "oldest") {
       throw new Error(`order has unsupported value ${String(order)}`);
     }
     const limit = normalizeLimit(options.limit);
-    return this.read((state) => Object.values(state.jobs)
-      .filter((job) => !statuses?.length || statuses.includes(job.status))
-      .filter((job) => type === undefined || job.type === type)
-      .filter((job) => extractorVersion === undefined || job.extractorVersion === extractorVersion)
-      .filter((job) => readyAt === undefined || job.nextAttemptAt === undefined || job.nextAttemptAt <= readyAt)
-      .filter((job) => options.attemptsRemaining !== true || job.attemptCount < job.maxAttempts)
-      .filter((job) => options.withModelUsage !== true || job.modelCalls > 0 || job.inputTokens > 0 || job.outputTokens > 0 || job.costUsd > 0)
-      .sort((a, b) => {
-        const compared = a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId);
-        return order === "oldest" ? compared : -compared;
-      }).slice(0, limit).map(clone));
+    return this.read((state) =>
+      Object.values(state.jobs)
+        .filter((job) => !statuses?.length || statuses.includes(job.status))
+        .filter((job) => type === undefined || job.type === type)
+        .filter(
+          (job) => extractorVersion === undefined || job.extractorVersion === extractorVersion,
+        )
+        .filter(
+          (job) =>
+            readyAt === undefined ||
+            job.nextAttemptAt === undefined ||
+            job.nextAttemptAt <= readyAt,
+        )
+        .filter((job) => options.attemptsRemaining !== true || job.attemptCount < job.maxAttempts)
+        .filter(
+          (job) =>
+            options.withModelUsage !== true ||
+            job.modelCalls > 0 ||
+            job.inputTokens > 0 ||
+            job.outputTokens > 0 ||
+            job.costUsd > 0,
+        )
+        .sort((a, b) => {
+          const compared = a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId);
+          return order === "oldest" ? compared : -compared;
+        })
+        .slice(0, limit)
+        .map(clone),
+    );
   }
 
   rescheduleQueuedJobs(input: RescheduleQueuedJobsInput): number {
@@ -1125,7 +1280,13 @@ export class MemoryRepository {
     const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
     return this.transaction(() => {
       const rows = Object.values(this.state().jobs)
-        .filter((job) => job.status === "queued" && job.errorCode === undefined && job.type === type && job.extractorVersion === extractorVersion)
+        .filter(
+          (job) =>
+            job.status === "queued" &&
+            job.errorCode === undefined &&
+            job.type === type &&
+            job.extractorVersion === extractorVersion,
+        )
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId));
       let changed = 0;
       for (const job of rows) {
@@ -1155,7 +1316,13 @@ export class MemoryRepository {
     const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
     return this.transaction(() => {
       const rows = Object.values(this.state().jobs)
-        .filter((job) => ["queued", "running", "failed"].includes(job.status) && job.type === type && job.extractorVersion === extractorVersion && job.cursor.sessionId === sessionId)
+        .filter(
+          (job) =>
+            ["queued", "running", "failed"].includes(job.status) &&
+            job.type === type &&
+            job.extractorVersion === extractorVersion &&
+            job.cursor.sessionId === sessionId,
+        )
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.jobId.localeCompare(b.jobId));
       let changed = 0;
       for (const job of rows) {
@@ -1205,17 +1372,39 @@ export class MemoryRepository {
           ...current,
           status,
           sourceId,
-          attemptCount: normalizeNonNegativeInteger(input.attemptCount ?? current.attemptCount, "attemptCount"),
-          maxAttempts: normalizePositiveInteger(input.maxAttempts ?? current.maxAttempts, "maxAttempts"),
-          nextAttemptAt: input.nextAttemptAt === undefined ? current.nextAttemptAt : normalizeOptionalTimestamp(input.nextAttemptAt, "nextAttemptAt") ?? undefined,
-          errorCode: input.errorCode === undefined ? current.errorCode : normalizeOptionalCode(input.errorCode, "errorCode") ?? undefined,
-          modelCalls: normalizeNonNegativeInteger(input.modelCalls ?? current.modelCalls, "modelCalls"),
-          inputTokens: normalizeNonNegativeInteger(input.inputTokens ?? current.inputTokens, "inputTokens"),
-          outputTokens: normalizeNonNegativeInteger(input.outputTokens ?? current.outputTokens, "outputTokens"),
+          attemptCount: normalizeNonNegativeInteger(
+            input.attemptCount ?? current.attemptCount,
+            "attemptCount",
+          ),
+          maxAttempts: normalizePositiveInteger(
+            input.maxAttempts ?? current.maxAttempts,
+            "maxAttempts",
+          ),
+          nextAttemptAt:
+            input.nextAttemptAt === undefined
+              ? current.nextAttemptAt
+              : (normalizeOptionalTimestamp(input.nextAttemptAt, "nextAttemptAt") ?? undefined),
+          errorCode:
+            input.errorCode === undefined
+              ? current.errorCode
+              : (normalizeOptionalCode(input.errorCode, "errorCode") ?? undefined),
+          modelCalls: normalizeNonNegativeInteger(
+            input.modelCalls ?? current.modelCalls,
+            "modelCalls",
+          ),
+          inputTokens: normalizeNonNegativeInteger(
+            input.inputTokens ?? current.inputTokens,
+            "inputTokens",
+          ),
+          outputTokens: normalizeNonNegativeInteger(
+            input.outputTokens ?? current.outputTokens,
+            "outputTokens",
+          ),
           costUsd: normalizeNonNegativeNumber(input.costUsd ?? current.costUsd, "costUsd"),
           version: current.version + 1,
           updatedAt,
-          terminalAt: terminalAt ?? (isTerminalJobStatus(current.status) ? current.terminalAt : undefined),
+          terminalAt:
+            terminalAt ?? (isTerminalJobStatus(current.status) ? current.terminalAt : undefined),
         });
         this.state().jobs[jobId] = job;
         this.recordMutation(
@@ -1240,15 +1429,21 @@ export class MemoryRepository {
     const identity = hashOpaqueKey(`${proposal.proposalId}\0${proposal.version}\0${proposal.kind}`);
     const jobId = `notification:proposed:${identity}`;
     const at = this.timestamp();
-    return this.runTransaction(() => this.enqueueNotificationJob({
-      jobId,
-      type: MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
-      terminalEventId: identity,
-      extractorVersion: `${MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX}${proposal.kind}`,
-      cursor: { sessionId: "memory-service", eventId: proposal.proposalId, sequence: proposal.version },
-      idempotencyKey,
-      at,
-    }));
+    return this.runTransaction(() =>
+      this.enqueueNotificationJob({
+        jobId,
+        type: MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
+        terminalEventId: identity,
+        extractorVersion: `${MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX}${proposal.kind}`,
+        cursor: {
+          sessionId: "memory-service",
+          eventId: proposal.proposalId,
+          sequence: proposal.version,
+        },
+        idempotencyKey,
+        at,
+      }),
+    );
   }
 
   private insertFact(input: {
@@ -1264,7 +1459,8 @@ export class MemoryRepository {
     readonly lastUsedAt?: string;
     readonly at: string;
   }): void {
-    if (this.state().facts[input.factId]) throw new MemoryConflictError(`Memory fact ${input.factId} already exists`);
+    if (this.state().facts[input.factId])
+      throw new MemoryConflictError(`Memory fact ${input.factId} already exists`);
     this.state().facts[input.factId] = {
       factId: input.factId,
       workspaceId: this.workspaceId,
@@ -1312,9 +1508,10 @@ export class MemoryRepository {
       jobId,
       type: MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
       terminalEventId: identity,
-      extractorVersion: source.availability === "rewound"
-        ? MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
-        : MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
+      extractorVersion:
+        source.availability === "rewound"
+          ? MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
+          : MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
       cursor: { sessionId: "memory-service", eventId: source.sourceId, sequence: source.version },
       idempotencyKey,
       at,
@@ -1343,7 +1540,10 @@ export class MemoryRepository {
       throw new MemoryConflictError(`Conflict fact ${factId} is no longer active`);
     }
     const proposalCreated = this.state().mutations.find(
-      (mutation) => mutation.entityType === "proposal" && mutation.entityId === proposal.proposalId && mutation.action === "proposal.created",
+      (mutation) =>
+        mutation.entityType === "proposal" &&
+        mutation.entityId === proposal.proposalId &&
+        mutation.action === "proposal.created",
     );
     if (!proposalCreated) {
       throw new MemoryConflictError(
@@ -1351,7 +1551,10 @@ export class MemoryRepository {
       );
     }
     const changedAfterProposal = this.state().mutations.some(
-      (mutation) => mutation.entityType === "fact" && mutation.entityId === factId && mutation.sequence > proposalCreated.sequence,
+      (mutation) =>
+        mutation.entityType === "fact" &&
+        mutation.entityId === factId &&
+        mutation.sequence > proposalCreated.sequence,
     );
     if (changedAfterProposal) {
       throw new MemoryConflictError(
@@ -1392,7 +1595,9 @@ export class MemoryRepository {
       action,
       ...(fromVersion === undefined ? {} : { fromVersion }),
       toVersion,
-      ...(idempotencyKey ? { idempotencyKeyHash: hashOpaqueKey(normalizeIdempotencyKey(idempotencyKey)) } : {}),
+      ...(idempotencyKey
+        ? { idempotencyKeyHash: hashOpaqueKey(normalizeIdempotencyKey(idempotencyKey)) }
+        : {}),
       createdAt,
     });
   }
@@ -1460,7 +1665,15 @@ export class MemoryRepository {
       updatedAt: input.at,
     };
     this.state().jobs[input.jobId] = job;
-    this.recordMutation("job", input.jobId, "job.created", undefined, 1, input.idempotencyKey, input.at);
+    this.recordMutation(
+      "job",
+      input.jobId,
+      "job.created",
+      undefined,
+      1,
+      input.idempotencyKey,
+      input.at,
+    );
     return clone(job);
   }
 
@@ -1488,7 +1701,9 @@ export class MemoryRepository {
       return decodeMemoryFileState(readJsonFileSync(this.statePath), this.workspaceId);
     } catch (error) {
       if (error instanceof FileStorageIntegrityError) throw error;
-      throw new FileStorageIntegrityError(`Cannot read memory state ${this.statePath}: ${errorMessage(error)}`);
+      throw new FileStorageIntegrityError(
+        `Cannot read memory state ${this.statePath}: ${errorMessage(error)}`,
+      );
     }
   }
 
@@ -1496,9 +1711,14 @@ export class MemoryRepository {
     const deadline = Date.now() + this.busyTimeoutMs;
     for (;;) {
       try {
-        return withFileLockSync(this.lockPath, `memory:${this.workspaceId}:${process.pid}`, operation, {
-          timeoutMs: Math.max(0, deadline - Date.now()),
-        });
+        return withFileLockSync(
+          this.lockPath,
+          `memory:${this.workspaceId}:${process.pid}`,
+          operation,
+          {
+            timeoutMs: Math.max(0, deadline - Date.now()),
+          },
+        );
       } catch (error) {
         if (!(error instanceof LeaseConflictError) || Date.now() >= deadline) throw error;
         // A releasing process can briefly expose the lock directory after owner.json is gone.
@@ -1510,24 +1730,78 @@ export class MemoryRepository {
 
   private assertContextWorkspace(context: MemoryTransactionContext): void {
     if (context.workspaceId !== this.workspaceId) {
-      throw new FileStorageIntegrityError(`Memory transaction belongs to workspace ${context.workspaceId}, not ${this.workspaceId}`);
+      throw new FileStorageIntegrityError(
+        `Memory transaction belongs to workspace ${context.workspaceId}, not ${this.workspaceId}`,
+      );
     }
   }
 
-  private rememberSecrets(...values: Array<string | null | undefined>): void {
+  private rememberForgetPostcondition(factId: string, secrets: readonly string[]): void {
     const context = activeMemoryTransactions.get(this.storageRoot);
     if (!context) throw new Error("Memory deletion requires an active transaction");
-    for (const value of values) if (value) context.forgottenSecrets.add(value);
+    context.forgottenFactIds.add(factId);
+    for (const secret of secrets) context.forgottenSecrets.add(secret);
+  }
+
+  private verifyForgottenEntities(state: MemoryFileState, factIds: ReadonlySet<string>): void {
+    for (const factId of factIds) {
+      const fact = state.facts[factId];
+      if (!fact || fact.state !== "forgotten" || fact.title !== null || fact.content !== null) {
+        throw new MemoryPlaintextVerificationError(this.statePath);
+      }
+      for (const proposal of Object.values(state.proposals)) {
+        if (proposal.resolvedFactId !== factId && proposal.conflictFactId !== factId) continue;
+        if (
+          proposal.status !== "deleted" ||
+          proposal.title !== null ||
+          proposal.content !== null ||
+          proposal.reason !== null
+        ) {
+          throw new MemoryPlaintextVerificationError(this.statePath);
+        }
+      }
+    }
   }
 
   private verifySecretsRemoved(secrets: ReadonlySet<string>): void {
-    for (const path of listMemoryVerificationFiles(this.storageRoot)) {
-      const content = readFileSync(path, "utf8");
+    let files: string[];
+    try {
+      files = listMemoryVerificationFiles(this.storageRoot);
+    } catch (error) {
+      throw new MemoryPlaintextVerificationError(this.storageRoot, error);
+    }
+    for (const path of files) {
+      if (path.endsWith(".tmp")) {
+        throw new MemoryFileCleanupError(path, new Error("temporary file remains after cleanup"));
+      }
+      let content: string;
+      try {
+        content = readFileSync(path, "utf8");
+      } catch (error) {
+        throw new MemoryPlaintextVerificationError(path, error);
+      }
       for (const secret of secrets) {
         const escaped = JSON.stringify(secret).slice(1, -1);
         if (content.includes(secret) || content.includes(escaped)) {
-          throw new FileStorageIntegrityError(`Deleted memory text remains in ${path}`);
+          throw new MemoryPlaintextVerificationError(path);
         }
+      }
+    }
+  }
+
+  private cleanupTemporaryFiles(): void {
+    let files: string[];
+    try {
+      files = listMemoryTemporaryFiles(this.storageRoot);
+    } catch (error) {
+      throw new MemoryFileCleanupError(this.storageRoot, error);
+    }
+    for (const path of files) {
+      try {
+        unlinkSync(path);
+        syncDirectorySync(dirname(path));
+      } catch (error) {
+        throw new MemoryFileCleanupError(path, error);
       }
     }
   }
@@ -1949,15 +2223,35 @@ function compareDesc(left: string, right: string): number {
 }
 
 function listMemoryVerificationFiles(root: string): string[] {
+  return listMemoryRootFiles(root)
+    .filter(
+      ({ name }) =>
+        name === "state.json" || name === "commit.json" || isRepositoryTemporaryFile(name),
+    )
+    .map(({ path }) => path);
+}
+
+function listMemoryTemporaryFiles(root: string): string[] {
+  return listMemoryRootFiles(root)
+    .filter(({ name }) => isRepositoryTemporaryFile(name))
+    .map(({ path }) => path);
+}
+
+function listMemoryRootFiles(
+  root: string,
+): Array<{ readonly name: string; readonly path: string }> {
   if (!existsSync(root)) return [];
-  const files: string[] = [];
+  const files: Array<{ readonly name: string; readonly path: string }> = [];
   for (const name of readdirSync(root)) {
     const path = join(root, name);
-    const stat = statSync(path);
-    if (!stat.isFile()) continue;
-    if (name === "state.json" || name === "commit.json" || name.endsWith(".tmp")) files.push(path);
+    const stat = statSync(path, { throwIfNoEntry: false });
+    if (stat?.isFile()) files.push({ name, path });
   }
   return files;
+}
+
+function isRepositoryTemporaryFile(name: string): boolean {
+  return /^\.(?:state|commit)\.json\..+\.tmp$/u.test(name);
 }
 
 function canonicalJson(value: unknown): string {

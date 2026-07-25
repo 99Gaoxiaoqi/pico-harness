@@ -9,7 +9,7 @@ export interface RuntimeNotificationCursor {
   /** Exclusive event ID cursor. Omit it to read from the oldest retained event. */
   afterEventId?: string;
   /**
-   * A durable cursor belongs to one workspace SQLite ledger. Callers observing more
+   * A durable cursor belongs to one workspace daemon-event ledger. Callers observing more
    * than one workspace should replay each ledger independently.
    */
   workspacePath: string;

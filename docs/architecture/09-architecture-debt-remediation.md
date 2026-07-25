@@ -87,7 +87,7 @@ flowchart LR
 - reasoning、Skill、system feedback 和子代理终态可以恢复。
 - assistant/tool 不因同时存在 Message 与 TranscriptEvent 而重复。
 - 旧 Session 没有 transcript events 时仍能恢复。
-- SQLite 不按 token delta 无界增长。
+- RuntimeEvent JSONL 不按 token delta 无界增长。
 
 ## D2：Markdown 四套表示不一致
 
@@ -195,7 +195,7 @@ Engine Runtime capability 现在由 Session 通过 engine-owned factory 签发�
 
 `SessionForkService` 也通过 `src/engine/session-fork-runtime-port.ts` 接收 fork reconcile/repair/bootstrap 能力，由 `src/runtime/session-fork-runtime-port-adapter.ts` 绑定 RuntimeRun。这样 fork operation journal 仍由 Engine coordinator 管理，但不再直接 value-import RuntimeRun；read-model/projection 已落到 engine-owned contract，durable store 由中立 storage owner 提供。
 
-Fork 发布现在在入口校验 source Session 与 service 使用同一 Runtime database，并且先持久化过滤后的 Session state，再写 `session.forked` publication marker；因此任何观察到 marker 的消费者都一定同时能看到消息、checkpoint 和 settings/goal。稳定 state、start、checkpoint、terminal 或 event ID 的已持久化 payload 冲突都会转换为 coordinator 可识别的 target conflict，进入 `needs_attention` 而不是无限重试。`RuntimeEventStore` 的 SQLite connection 按单次操作打开和关闭，`SessionForkService` 本身不持有长生命连接句柄。
+Fork 发布现在在入口校验 source Session 与 service 使用同一 Runtime storage root，并且先持久化过滤后的 Session state，再写 `session.forked` publication marker；因此任何观察到 marker 的消费者都一定同时能看到消息、checkpoint 和 settings/goal。稳定 state、start、checkpoint、terminal 或 event ID 的已持久化 payload 冲突都会转换为 coordinator 可识别的 target conflict，进入 `needs_attention` 而不是无限重试。`RuntimeEventStore` 的每次操作都在短生命周期文件锁内完成，`SessionForkService` 本身不持有数据库连接句柄。
 
 ## D4：`Session` 保留聚合根，消息账本已窄拆
 
@@ -207,7 +207,7 @@ Fork 发布现在在入口校验 source Session 与 service 使用同一 Runtime
 
 本轮已提取 `src/engine/session-message-ledger.ts`，只负责纯内存的消息顺序与派生状态：tool 调用等待/释放、deferred message、pending tool 集合、ToolResult metadata、model context 和历史边界替换。`Session` 仍独占 RuntimeEventStore、owner lease、persistence queue、rewind、FileHistory 和 close 生命周期；ledger 不写 durable store，也不拥有第二份持久化事实。
 
-同时将 `SessionManager` 的路由、LRU/TTL 驱逐、pin 和 per-key drain 协调提取到 `src/engine/session-manager.ts`，并把跨 Manager 共享的 drain fence 放到 `session-manager-state.ts`。它只负责进程内实例治理；Session 的 durable owner、SQLite 写队列和 close/drain 语义保持不变，`session.ts` 仅保留默认工厂配置与兼容 re-export。
+同时将 `SessionManager` 的路由、LRU/TTL 驱逐、pin 和 per-key drain 协调提取到 `src/engine/session-manager.ts`，并把跨 Manager 共享的 drain fence 放到 `session-manager-state.ts`。它只负责进程内实例治理；Session 的 durable owner、文件事务写队列和 close/drain 语义保持不变，`session.ts` 仅保留默认工厂配置与兼容 re-export。
 
 生命周期能力现已进一步收口：`SessionManager.getOrCreatePinned()` 在 async recover 发布 entry 前预留 pin，并在 `entries.set`/LRU 之前原子转入 `pinCount`，消除“拿到 Session 后再 pin”的 TTL/LRU 空窗。AgentRuntime、TUI、Desktop daemon/production host 和命令旁路都显式交接该 lease；`SessionRuntime.dispose()` 是成功交接后的唯一释放点，失败路径依靠幂等 release 收口。pin 中的 Session 不能被删除；同一 durable key 在进程内只能由一个 `SessionManager` 持有，释放后新 owner 会先等待 drain。`RuntimeRun`、reconcile、repair 与 fork bootstrap 必须由 Composition Root 传入确切的 `RuntimeEventStore`，不再从进程环境猜测 `PICO_HOME`。
 

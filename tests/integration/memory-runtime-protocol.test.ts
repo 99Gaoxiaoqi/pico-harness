@@ -139,7 +139,7 @@ test("workspace memory methods are explicit Desktop capabilities with strict wri
         workspacePath: "/workspace",
         expectedVersion: 1,
         idempotencyKey: "request-2",
-        databasePath: "/private/memory.sqlite",
+        storageRoot: "/private/memory",
       }),
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
   );
@@ -151,7 +151,7 @@ test("memory results reject undeclared storage fields", () => {
   assertProtocolError(
     () =>
       parseDesktopRuntimeResult("memory.get", {
-        fact: { ...fact, databasePath: "/private/memory.sqlite" },
+        fact: { ...fact, storageRoot: "/private/memory" },
       }),
     RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
@@ -202,7 +202,7 @@ test("memory settings results strictly validate the rolling review budget", () =
       () =>
         parseDesktopRuntimeResult(method, {
           settings,
-          reviewBudget: { ...reviewBudget, databasePath: "/private/memory.sqlite" },
+          reviewBudget: { ...reviewBudget, storageRoot: "/private/memory" },
         }),
       RUNTIME_ERROR_CODES.INVALID_REQUEST,
     );

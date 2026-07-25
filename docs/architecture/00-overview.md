@@ -48,24 +48,41 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 ## 状态边界
 
 - `RuntimeEventStore` 是 Session manifest、消息、工具、审批、压缩、rewind 和 run terminal
-  的唯一事实源，落在 `agent_sessions` / `agent_runtime_events`。
+  的唯一事实源，落在每个 Session 的 `session.jsonl`。
 - `RuntimeStore` 是 Jobs、daemon/cron runs、attempts、leases、usage 和 completion outbox
   的控制面真源。
-- `RuntimeStore.runtime_events` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面表。
-- 两者共享 `$PICO_HOME/workspaces/<workspace-id>/runtime.sqlite`，但使用不同表和 API。
+- `daemon-events.jsonl` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面状态。
+- 两者共享 `$PICO_HOME/workspaces/<workspace-id>/runtime/`，但使用不同账本和 API。
 - Session 内存、Transcript 和 Desktop ViewModel 都是可重建投影。
 - Session title 存在 RuntimeEvent；Desktop metadata 不保存第二份 title。
 
 ## 路径边界
 
 - `$PICO_HOME`：用户和设备级状态根，默认 `~/.pico`。
-- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 数据库、Summary sidecar、Artifact、Evidence、
+- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 文件账本、Summary sidecar、Artifact、Evidence、
   Trace、Task 和 storage operation。
 - `<workDir>/.pico/`：项目配置、commands、skills、agents、hooks、MCP 和 plugins。
-- `.claw` 只可能作为明确的旧版本兼容读取来源，不是 Pico 原生写入路径或事实源。
+- 旧 `runtime.sqlite`、`memory.sqlite`、WAL/SHM 与 legacy task 文件保留原样，但当前版本不读取、迁移或自动删除。
+
+```text
+workspace/
+  runtime/
+    sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
+    control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
+    commit.json
+    lock/
+  memory/
+    state.json
+    lock/
+    summaries/
+```
+
+目录使用 `0700`，数据文件使用 `0600`。所有读写先取得 workspace 对应的 owner lease
+文件锁并恢复遗留 `commit.json`；JSON 替换通过临时文件、文件 `fsync`、原子 rename 和目录
+`fsync` 发布。JSONL 只允许截断未完成的最后一行，完整但非法的中间记录会 fail closed。
 
 Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，不同
-`PICO_HOME` 的 Session 设置、授权、凭证、Artifact 与数据库不能共享状态。
+`PICO_HOME` 的 Session 设置、授权、凭证、Artifact 与存储根不能共享状态。
 
 ## 核心设计原则
 
@@ -97,5 +114,5 @@ Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，
 ## 技术栈
 
 - TypeScript ESM，Node.js 22.13+/24.3+/26，strict type checking
-- better-sqlite3、Ink/React、Electron、pino、gpt-tokenizer、js-yaml
+- 本地 JSON/JSONL 文件存储、Ink/React、Electron、pino、gpt-tokenizer、js-yaml
 - tsx、TypeScript、ESLint、Prettier

@@ -8,7 +8,7 @@ import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";
 
 export interface RecoverMemoryReviewJobsInput {
-  readonly runtimeDatabasePath: string;
+  readonly runtimeStorageRoot: string;
   readonly scheduler: MemoryReviewSchedulerPort;
 }
 
@@ -22,11 +22,11 @@ interface RecoveryFlight {
 const recoveryFlights = new Map<string, RecoveryFlight>();
 const recoveryGenerations = new Map<string, number>();
 
-/** Invalidates only this process's successful-scan marker for one Runtime database. */
-export function invalidateMemoryReviewRecoverySuccess(runtimeDatabasePath: string): void {
-  const databasePath = resolve(runtimeDatabasePath);
-  successfulRecoveryDatabases.delete(databasePath);
-  recoveryGenerations.set(databasePath, (recoveryGenerations.get(databasePath) ?? 0) + 1);
+/** Invalidates only this process's successful-scan marker for one Runtime storage root. */
+export function invalidateMemoryReviewRecoverySuccess(runtimeStorageRoot: string): void {
+  const storageRoot = resolve(runtimeStorageRoot);
+  successfulRecoveryDatabases.delete(storageRoot);
+  recoveryGenerations.set(storageRoot, (recoveryGenerations.get(storageRoot) ?? 0) + 1);
 }
 
 /**
@@ -34,41 +34,41 @@ export function invalidateMemoryReviewRecoverySuccess(runtimeDatabasePath: strin
  * crash window after run.terminal is durable but before the Memory job reaches its own database.
  */
 export function recoverMemoryReviewJobs(input: RecoverMemoryReviewJobsInput): Promise<number> {
-  const databasePath = resolve(input.runtimeDatabasePath);
-  if (successfulRecoveryDatabases.has(databasePath)) return Promise.resolve(0);
-  const generation = recoveryGenerations.get(databasePath) ?? 0;
-  const inFlight = recoveryFlights.get(databasePath);
+  const storageRoot = resolve(input.runtimeStorageRoot);
+  if (successfulRecoveryDatabases.has(storageRoot)) return Promise.resolve(0);
+  const generation = recoveryGenerations.get(storageRoot) ?? 0;
+  const inFlight = recoveryFlights.get(storageRoot);
   if (inFlight) return inFlight.promise;
 
-  // Begin in a later host task so opening SQLite never extends the caller's synchronous path.
+  // Begin in a later host task so opening file storage never extends the caller's synchronous path.
   const scan = yieldToHost()
-    .then(() => scanRuntimeLedger({ ...input, runtimeDatabasePath: databasePath }))
+    .then(() => scanRuntimeLedger({ ...input, runtimeStorageRoot: storageRoot }))
     .then((recovered) => {
-      if ((recoveryGenerations.get(databasePath) ?? 0) === generation) {
-        successfulRecoveryDatabases.add(databasePath);
+      if ((recoveryGenerations.get(storageRoot) ?? 0) === generation) {
+        successfulRecoveryDatabases.add(storageRoot);
       }
       return recovered;
     });
   const flight: RecoveryFlight = {
     promise: scan
       .finally(() => {
-        if (recoveryFlights.get(databasePath) === flight) recoveryFlights.delete(databasePath);
+        if (recoveryFlights.get(storageRoot) === flight) recoveryFlights.delete(storageRoot);
       })
       .then(async (recovered) => {
-        if (successfulRecoveryDatabases.has(databasePath)) return recovered;
+        if (successfulRecoveryDatabases.has(storageRoot)) return recovered;
         // An enqueue failure can invalidate this generation while its scan is still running. The
-        // stale scan has now released SQLite and its flight slot, so immediately continue with the
+        // The stale scan has released the file lock and its flight slot, so immediately continue with the
         // current generation instead of making another foreground Run discover the gap. A failed
         // scan rejects before this continuation and therefore keeps the existing failure semantics.
         return recovered + (await recoverMemoryReviewJobs(input));
       }),
   };
-  recoveryFlights.set(databasePath, flight);
+  recoveryFlights.set(storageRoot, flight);
   return flight.promise;
 }
 
 async function scanRuntimeLedger(input: RecoverMemoryReviewJobsInput): Promise<number> {
-  const store = new RuntimeEventStore({ databasePath: input.runtimeDatabasePath });
+  const store = new RuntimeEventStore({ storageRoot: input.runtimeStorageRoot });
   let recovered = 0;
   try {
     const upperBound = await store.getSessionManifestScanUpperBound();

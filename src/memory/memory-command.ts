@@ -177,7 +177,7 @@ async function openTrustedRepository(options: MemoryCommandOptions): Promise<Mem
   }
   const paths = resolvePicoPaths(canonical, { picoHome: options.picoHome });
   return new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
 }

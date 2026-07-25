@@ -69,7 +69,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
       result.messages.map((message) => message.role),
       ["user", "assistant"],
     );
-    assert.equal(session.runtimeEventStore?.databasePath !== undefined, true);
+    assert.equal(session.runtimeEventStore?.storageRoot !== undefined, true);
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
@@ -191,14 +191,14 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
     );
     await assert.rejects(
       recoverMemoryReviewJobs({
-        runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+        runtimeStorageRoot: session.runtimeEventStore!.storageRoot,
         scheduler: { enqueue: () => Promise.reject(new Error("recovery queue unavailable")) },
       }),
       /recovery queue unavailable/u,
     );
     let recoveredAfterRetry = 0;
     await recoverMemoryReviewJobs({
-      runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+      runtimeStorageRoot: session.runtimeEventStore!.storageRoot,
       scheduler: { enqueue: () => void recoveredAfterRetry++ },
     });
     assert.equal(recoveredAfterRetry, 1, "a failed scan must remain retryable in this process");
@@ -312,7 +312,7 @@ test("a precommitted Desktop user message schedules once while an idle resume do
     const recovered: Array<{ readonly terminalEventId: string }> = [];
     const recover = () =>
       recoverMemoryReviewJobs({
-        runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+        runtimeStorageRoot: session.runtimeEventStore!.storageRoot,
         scheduler: { enqueue: (input) => void recovered.push(input) },
       });
     await Promise.all([recover(), recover()]);
@@ -386,7 +386,7 @@ test("Desktop resume rejects expanded, internal, and unverifiable Memory evidenc
     assert.equal(enqueued, 0);
     const recovered: Array<{ readonly terminalEventId: string }> = [];
     await recoverMemoryReviewJobs({
-      runtimeDatabasePath: session.runtimeEventStore!.databasePath,
+      runtimeStorageRoot: session.runtimeEventStore!.storageRoot,
       scheduler: { enqueue: (input) => void recovered.push(input) },
     });
     assert.equal(recovered.length, 0, "ledger recovery must preserve Desktop fail-closed checks");

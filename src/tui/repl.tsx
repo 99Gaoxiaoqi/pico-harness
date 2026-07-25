@@ -1222,10 +1222,10 @@ export async function startTuiRepl(
     };
   };
   // Both constructors are preflights without long-lived handles. Run them before acquiring
-  // Plugin/Task/Cron/MCP resources so invalid socket/SQLite paths have nothing to unwind.
+  // Plugin/Task/Cron/MCP resources so invalid socket/storage paths have nothing to unwind.
   const cronDaemonBridge = new LocalCronDaemonBridge();
   const runtimeEventStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(opts.workDir).workspace.runtimeDatabase,
+    storageRoot: resolvePicoPaths(opts.workDir).workspace.runtime,
   });
   const pluginCapabilityRegistry =
     opts.pluginCapabilityRegistry ?? createBuiltinPluginCapabilityRegistry();
@@ -1355,7 +1355,9 @@ export async function startTuiRepl(
     if (selection.mode === "fork" && selection.sourceSessionId) {
       const sourceManifest = await runtimeEventStore.readSessionManifest(selection.sourceSessionId);
       if (!sourceManifest) {
-        throw new Error(`无法 fork session ${selection.sourceSessionId}: runtime.sqlite 中不存在`);
+        throw new Error(
+          `无法 fork session ${selection.sourceSessionId}: RuntimeEvent 日志中不存在`,
+        );
       }
       if (!(await runtimeEventStore.readSessionManifest(selection.sessionId))) {
         const sourceLease = await globalSessionManager.getOrCreatePinned(

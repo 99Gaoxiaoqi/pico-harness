@@ -14,7 +14,7 @@ export interface TerminalMemoryEvidenceRef {
   readonly terminalSequence?: number;
 }
 
-/** Exact, user-authored evidence. Raw text stays in runtime.sqlite. */
+/** Exact, user-authored evidence. Raw text stays in the canonical RuntimeEvent log. */
 export interface UserMemoryEvidence extends TerminalMemoryEvidenceRef {
   readonly content: string;
   readonly eventIds: readonly string[];

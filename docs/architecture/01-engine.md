@@ -118,8 +118,8 @@ generateWithRetry (内层:普通重试)
 ### 核心职责
 
 会话运行态隔离（并发 run 不共用 history）+ 完整模型历史的内存投影。同一工作区的 Session
-仍共享项目文件和 Runtime 数据库。持久化事实统一由
-`RuntimeEventStore` 写入 workspace 的 `runtime.sqlite`，Session 可随时从事件重建。
+仍共享项目文件和 Runtime 存储根。持久化事实统一由
+`RuntimeEventStore` 写入 workspace 的 Session JSONL，Session 可随时从事件重建。
 
 ### 关键机制
 
@@ -133,14 +133,15 @@ generateWithRetry (内层:普通重试)
 
 ### RuntimeEventStore (`src/storage/runtime-event-store.ts`)
 
-SQLite 追加事件表是会话与运行时的唯一事实源：`message.committed`、
+Session 级追加 JSONL 是会话与运行时的唯一事实源：`message.committed`、
 `session.state.committed`、`history.rewound`、`session.forked` 与 run/tool/model 事实共享一条全序列。
 
-- **事务提交**：事件内容与全局 sequence 在同一 SQLite 事务中提交
-- **Exactly-once**：`(session_id, event_id)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝
+- **事务提交**：事件批次先发布耐久 commit marker，再原子完成 JSONL 与 manifest 投影
+- **Exactly-once**：`(sessionId, eventId)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝
+- **稳定游标**：sequence 在每个 Session 内从 1 连续递增；`SessionCursor.logId` 仍等于原始 sessionId
 - **可重建投影**：Session history、usage、Goal、CLI 会话列表和 Transcript 均从事件恢复
-- **版本边界**：Store 与 Storage Doctor 共用 RuntimeEvent decoder；未知/旧版/未来版事件 fail closed，共享 SQLite 若为未来 schema 或 migration 身份不匹配则在 WAL、DDL 和写入前拒绝
-- **单一恢复路径**：不再读取或写入 Session/run JSONL，也不迁移旧 `.claw` 会话数据
+- **版本边界**：Store 与 Storage Doctor 共用 RuntimeEvent decoder；未知或未来文件 envelope、完整但损坏的 JSONL 行都 fail closed
+- **单一恢复路径**：不读取旧 SQLite 或 `.claw` 会话数据，也不按 Run 复制第二份事件日志
 
 ---
 

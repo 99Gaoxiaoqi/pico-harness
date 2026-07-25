@@ -184,7 +184,7 @@ export class TaskHostRuntime {
     await this.supervisor.cleanup(taskId, { merged: true });
   }
 
-  /** SQLite 先收口，再幂等刷新进程内 TaskRegistry 视图。 */
+  /** Runtime 文件事务先收口，再幂等刷新进程内 TaskRegistry 视图。 */
   private reconcileRuntimeAuthority(): void {
     this.jobService.reconcileExpiredJobs();
     for (const snapshot of materializeRuntimeTaskSnapshots(this.jobService)) {

@@ -121,7 +121,7 @@ test("session fork rejects a Runtime store that differs from the source Session"
     picoHome,
   });
   const foreignStore = new RuntimeEventStore({
-    databasePath: join(root, "foreign-runtime.sqlite"),
+    storageRoot: join(root, "foreign-runtime"),
   });
   try {
     await source.recover();

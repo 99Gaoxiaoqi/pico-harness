@@ -39,8 +39,7 @@
     "test:integration:windows": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/windows/hook-security.test.ts tests/integration/windows/file-write-dacl.test.ts tests/integration/windows/yolo-shell-hardline.test.ts",
     "pretest:llm-e2e": "npm run check:storage && npm run build:protocol",
     "test:llm-e2e": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/*.real-llm.test.ts",
-    "check:storage": "node scripts/check-storage-capability.mjs",
-    "repair:storage": "npm rebuild better-sqlite3 && npm run check:storage",
+    "check:storage": "node --import tsx scripts/check-storage-capability.mjs",
     "check:architecture": "node scripts/check-architecture-boundaries.mjs",
     "check:architecture:strict": "node scripts/check-architecture-boundaries.mjs --strict",
     "lint": "eslint src scripts tests 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js --no-error-on-unmatched-pattern && npm run check:architecture",
@@ -51,7 +50,6 @@
   },
   "dependencies": {
     "@pico/protocol": "*",
-    "better-sqlite3": "12.11.1",
     "gpt-tokenizer": "^3.4.0",
     "ink": "^7.1.0",
     "js-yaml": "^5.1.0",
@@ -68,7 +66,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.0",
     "@types/react": "^19.2.17",
@@ -81,7 +78,6 @@
     "typescript-eslint": "^8.61.1"
   },
   "overrides": {
-    "@electron/rebuild": "4.2.0",
     "external-editor": {
       "tmp": "0.2.7"
     },

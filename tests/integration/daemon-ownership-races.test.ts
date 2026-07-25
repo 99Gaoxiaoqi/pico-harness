@@ -143,7 +143,7 @@ test("Daemon stop is bounded during an active Cron tick and releases its lock af
         cronRuntime = new CronWorkspaceRuntime({
           workspacePath,
           ownerId,
-          databasePath: join(root, "cron-runtime.sqlite"),
+          storageRoot: join(root, "cron-runtime"),
           closeDrainTimeoutMs: 5,
           getWorkspaceRuntime: async () => workspaceRuntime,
           canRun: async () => ({ allowed: true }),

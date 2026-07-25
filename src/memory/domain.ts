@@ -57,7 +57,7 @@ export interface Proposal {
 
 /**
  * Durable provenance contains identities and a digest only. Raw transcript excerpts belong in
- * runtime.sqlite and are deliberately not duplicated into memory.sqlite.
+ * Runtime logs and are deliberately not duplicated into the Memory state projection.
  */
 export const SOURCE_AVAILABILITIES = ["available", "unavailable", "rewound"] as const;
 export type SourceAvailability = (typeof SOURCE_AVAILABILITIES)[number];

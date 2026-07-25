@@ -379,7 +379,7 @@ const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent["type"]>([
   "transcript.cleared",
 ]);
 
-/** Fail-closed structural guard used when transcript facts are read from runtime.sqlite. */
+/** Fail-closed structural guard used when transcript facts are read from RuntimeEvent logs. */
 export function assertTranscriptEvent(value: unknown): asserts value is TranscriptEvent {
   if (!isTranscriptRecord(value)) throw new Error("Transcript event must be an object");
   transcriptString(value, "eventId");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -131,7 +131,7 @@ test("memory quality corpus meets precision, recall and zero sensitive-misstore 
       repositorySnapshot(fixture.repository),
       sensitiveCanaries,
     );
-    await assertNoSensitiveDatabaseFiles(paths.workspace.memoryDatabase, sensitiveCanaries);
+    await assertNoSensitiveMemoryFiles(paths.workspace.memory, sensitiveCanaries);
     fixture.repository.close();
 
     const notifications: unknown[] = [];
@@ -173,7 +173,7 @@ test("memory quality corpus meets precision, recall and zero sensitive-misstore 
     assertNoSensitiveCanaries("desktop-notifications", notifications, sensitiveCanaries);
 
     const inspection = new MemoryRepository({
-      databasePath: paths.workspace.memoryDatabase,
+      storageRoot: paths.workspace.memory,
       workspaceId: paths.workspace.id,
     });
     try {
@@ -186,7 +186,7 @@ test("memory quality corpus meets precision, recall and zero sensitive-misstore 
       inspection.close();
     }
 
-    await assertNoSensitiveDatabaseFiles(paths.workspace.memoryDatabase, sensitiveCanaries);
+    await assertNoSensitiveMemoryFiles(paths.workspace.memory, sensitiveCanaries);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -376,22 +376,15 @@ function assertNoSensitiveBytes(
   }
 }
 
-async function readIfExists(path: string): Promise<Buffer | undefined> {
-  try {
-    return await readFile(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-}
-
-async function assertNoSensitiveDatabaseFiles(
-  databasePath: string,
+async function assertNoSensitiveMemoryFiles(
+  memoryRoot: string,
   canaries: readonly string[],
 ): Promise<void> {
-  for (const databaseFile of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
-    const bytes = await readIfExists(databaseFile);
-    if (bytes) assertNoSensitiveBytes(databaseFile, bytes, canaries);
+  const entries = await readdir(memoryRoot, { recursive: true, withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const filePath = join(entry.parentPath, entry.name);
+    assertNoSensitiveBytes(filePath, await readFile(filePath), canaries);
   }
 }
 
@@ -411,7 +404,7 @@ async function createFixture(label: string): Promise<{
     workspace,
     picoHome,
     repository: new MemoryRepository({
-      databasePath: paths.workspace.memoryDatabase,
+      storageRoot: paths.workspace.memory,
       workspaceId: paths.workspace.id,
     }),
   };

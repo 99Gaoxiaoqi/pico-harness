@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "better-sqlite3";
 import {
   createRuntimeRequest,
   DesktopConversationStateStore,
@@ -59,18 +59,22 @@ test("session delete is blocked when lifecycle prepare cannot become durable", a
   assert.equal(asRecord(retained["session"])["sessionId"], sessionId);
 });
 
-test("session delete succeeds after prepare while failed lifecycle apply stays queued", async (context) => {
+test("session delete succeeds after prepare while failed lifecycle apply stays durable", async (context) => {
   const fixture = await createFixture("apply-deferred");
   const canonical = await realpath(fixture.workspace);
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
   await trustStore.trust(canonical);
   const degraded: string[] = [];
-  const memory = new DesktopMemoryService({
-    picoHome: fixture.picoHome,
-    repositoryBusyTimeoutMs: 1,
-    publish: () => undefined,
-    onDegraded: (event) => degraded.push(event.code),
-  });
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const memory = new CommitDeferringMemoryService(
+    {
+      picoHome: fixture.picoHome,
+      repositoryBusyTimeoutMs: 1,
+      publish: () => undefined,
+      onDegraded: (event) => degraded.push(event.code),
+    },
+    join(paths.workspace.memory, "lock"),
+  );
   const runtime = new WorkspaceRuntimeService({
     env: { PICO_HOME: fixture.picoHome },
     execute: async () => undefined,
@@ -88,9 +92,8 @@ test("session delete succeeds after prepare while failed lifecycle apply stays q
   });
 
   const sessionId = await createSession(desktop, fixture.workspace);
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -107,19 +110,12 @@ test("session delete succeeds after prepare while failed lifecycle apply stays q
     sourceId: source.sourceId,
   });
   repository.close();
-  const reader = holdProposalReadSnapshot(
-    paths.workspace.memoryDatabase,
-    "desktop-delete-proposal",
-    "Pending body",
-  );
-
   const deleted = asRecord(
     await desktop.handle(
       createRuntimeRequest("session.delete", { workspacePath: fixture.workspace, sessionId }),
     ),
   );
   assert.deepEqual(deleted, { sessionId, deleted: true });
-  releaseReadSnapshot(reader);
   await assert.rejects(
     desktop.handle(
       createRuntimeRequest("session.get", { workspacePath: fixture.workspace, sessionId }),
@@ -127,21 +123,22 @@ test("session delete succeeds after prepare while failed lifecycle apply stays q
     (error: unknown) =>
       error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.NOT_FOUND,
   );
+  memory.releaseCommitBlock();
 
-  const queued = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+  const durable = new MemoryRepository({
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   assert.equal(
-    queued.listJobs({ type: "source-lifecycle-invalidation", statuses: ["queued"] }).length,
+    durable.listJobs({ type: "source-lifecycle-invalidation", statuses: ["running"] }).length,
     1,
   );
-  queued.close();
+  durable.close();
   assert.deepEqual(degraded, ["lifecycle_deferred"]);
 
   memory.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
   const settled = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   context.after(() => settled.close());
@@ -184,7 +181,7 @@ test("a delete failure after destructive work starts still commits lifecycle inv
   const sessionId = await createSession(desktop, fixture.workspace);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -209,7 +206,7 @@ test("a delete failure after destructive work starts still commits lifecycle inv
     /clear queued failed/u,
   );
   const verify = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -226,7 +223,7 @@ test("a prepared lifecycle job is recovered after service restart with privacy-f
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const repository = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -268,7 +265,7 @@ test("a prepared lifecycle job is recovered after service restart with privacy-f
   context.after(() => restarted.close());
   restarted.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
   const verify = new MemoryRepository({
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -284,6 +281,27 @@ test("a prepared lifecycle job is recovered after service restart with privacy-f
 class PrepareFailingMemoryService extends DesktopMemoryService {
   override prepareSessionSourceInvalidation(): PreparedMemorySourceInvalidation {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "memory prepare failed");
+  }
+}
+
+class CommitDeferringMemoryService extends DesktopMemoryService {
+  constructor(
+    options: ConstructorParameters<typeof DesktopMemoryService>[0],
+    private readonly blockedLockPath: string,
+  ) {
+    super(options);
+  }
+
+  override prepareSessionSourceInvalidation(
+    ...args: Parameters<DesktopMemoryService["prepareSessionSourceInvalidation"]>
+  ): PreparedMemorySourceInvalidation {
+    const prepared = super.prepareSessionSourceInvalidation(...args);
+    mkdirSync(this.blockedLockPath, { recursive: true, mode: 0o700 });
+    return prepared;
+  }
+
+  releaseCommitBlock(): void {
+    rmSync(this.blockedLockPath, { recursive: true, force: true });
   }
 }
 
@@ -322,25 +340,4 @@ async function createFixture(name: string): Promise<{
 function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
-}
-
-function holdProposalReadSnapshot(
-  databasePath: string,
-  proposalId: string,
-  expectedContent: string,
-): Database.Database {
-  const reader = new Database(databasePath, { readonly: true, fileMustExist: true });
-  reader.pragma("busy_timeout = 0");
-  reader.exec("BEGIN");
-  const row = reader
-    .prepare("SELECT content FROM memory_proposals WHERE proposal_id = ?")
-    .get(proposalId) as { readonly content: string };
-  assert.equal(row.content, expectedContent);
-  return reader;
-}
-
-function releaseReadSnapshot(reader: Database.Database): void {
-  if (!reader.open) return;
-  reader.exec("ROLLBACK");
-  reader.close();
 }

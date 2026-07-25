@@ -870,8 +870,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     metadata: LegacyDesktopSessionTitleMetadata,
   ): Promise<"migrated" | "orphan"> {
     const projection = await readExistingRuntimeSessionProjection({
-      databasePath: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
-        .runtimeDatabase,
+      storageRoot: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
+        .runtime,
       sessionId: metadata.sessionId,
     });
     // Read the canonical ledger before Session hydration can append another settings snapshot.
@@ -885,8 +885,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       // A queued Session operation may have renamed the title after the first read. Re-read while
       // serialized, still before getSessionSettings() can enqueue its hydration snapshot.
       const currentProjection = await readExistingRuntimeSessionProjection({
-        databasePath: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome })
-          .workspace.runtimeDatabase,
+        storageRoot: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
+          .runtime,
         sessionId: metadata.sessionId,
       });
       if (!currentProjection) {
@@ -1397,8 +1397,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await this.transcriptPersistenceTail;
     const session = await this.requireSession(canonical, params.sessionId);
     const projection = await readExistingRuntimeSessionProjection({
-      databasePath: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace
-        .runtimeDatabase,
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.runtime,
       sessionId: params.sessionId,
     });
     if (!projection) {

@@ -27,7 +27,10 @@ import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
 } from "../memory/proposal-contracts.js";
-import { MemorySchemaVersionError, MemoryWorkspaceMismatchError } from "../memory/memory-schema.js";
+import {
+  MemoryFileSchemaVersionError,
+  MemoryFileWorkspaceMismatchError,
+} from "../memory/memory-file-state.js";
 import {
   MEMORY_CONTEXT_MAX_FACTS,
   MEMORY_CONTEXT_MAX_TOKENS,
@@ -68,7 +71,7 @@ const MEMORY_LIFECYCLE_UNAVAILABLE_VERSION = "memory-source-lifecycle-v1:unavail
 const MEMORY_LIFECYCLE_REWOUND_VERSION = "memory-source-lifecycle-v1:rewound" as const;
 const MEMORY_LIFECYCLE_BATCH_SIZE = 250;
 
-/** Host-owned workspace repository boundary. Database paths never cross this service. */
+/** Host-owned workspace repository boundary. Private storage paths never cross this service. */
 export class DesktopMemoryService {
   private readonly repositories = new Map<string, MemoryRepository>();
   private readonly preparedLifecycleJobs = new Set<string>();
@@ -416,7 +419,7 @@ export class DesktopMemoryService {
     if (existing) return existing;
     const paths = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome });
     const repository = new MemoryRepository({
-      databasePath: paths.workspace.memoryDatabase,
+      storageRoot: paths.workspace.memory,
       workspaceId: paths.workspace.id,
       ...(this.options.repositoryBusyTimeoutMs !== undefined
         ? { busyTimeoutMs: this.options.repositoryBusyTimeoutMs }
@@ -681,17 +684,11 @@ export function mapMemoryError(error: unknown): RuntimeProtocolError {
       "记忆版本冲突或幂等键已用于其他请求",
     );
   }
-  if (error instanceof MemoryWorkspaceMismatchError) {
+  if (error instanceof MemoryFileWorkspaceMismatchError) {
     return new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, "记忆不属于当前工作区");
   }
-  if (error instanceof MemorySchemaVersionError) {
+  if (error instanceof MemoryFileSchemaVersionError) {
     return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "记忆存储版本不兼容");
-  }
-  if (error instanceof Error && error.name === "MemorySecureDeletePendingError") {
-    return new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.CONFLICT,
-      "记忆安全删除尚未完成，请稍后重试",
-    );
   }
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "记忆服务暂时不可用");
 }

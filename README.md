@@ -62,10 +62,11 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 
 ### 状态所有权
 
-状态不是写进一张“万能表”。Agent 事实与任务控制面可以位于同一个物理 `runtime.sqlite`，但使用不同逻辑账本和所有者：
+状态不是写进一份“万能文件”。Agent 事实与任务控制面共享 workspace Runtime 根目录，但使用不同逻辑账本和所有者：
 
-- `RuntimeEventStore` 以 `agent_runtime_events` 保存 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
-- `RuntimeStore` 保存 Job、Cron、daemon 通知与调度状态；其中 `runtime_events` 是 daemon 通知账本，不是 Agent 事实表。
+- `RuntimeEventStore` 以每个 Session 的 `session.jsonl` 保存 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
+- `RuntimeStore` 以 `control/state.json` 保存 Job、Cron 与调度状态；`daemon-events.jsonl` 是 daemon 通知账本，不是 Agent 事实日志。
+- `MemoryRepository` 以 `memory/state.json` 保存版本化的 settings、sources、facts、proposals、审计和幂等记录；忘记操作会清除实时文件中的结构化明文。
 - 文件历史、计划/待办、Skill 结果和大体积工具输出使用独立 sidecar/artifact 存储，避免污染模型消息协议。
 
 ## 核心能力
@@ -105,7 +106,7 @@ export LLM_MODEL=your-model
 npm run dev
 ```
 
-`better-sqlite3` 包含按 Node ABI 区分的原生二进制。切换 Node 主版本后无需修改数据或更换 SQLite 版本，但需要运行 `npm ci`；如果希望复用现有依赖目录，可运行 `npm run repair:storage` 只重建 Node/TUI 使用的 SQLite 模块。Desktop 使用独立的 Electron SQLite 别名，不会与 Node 运行时互相覆盖。
+Runtime、Memory 和 usage 使用本地 JSON/JSONL，不依赖 Node/Electron 原生数据库模块。`PICO_HOME` 必须位于支持原子 `mkdir`、同目录 `rename` 与 `fsync` 的本地文件系统；`npm run check:storage` 会在启动和验证前探测这些能力。
 
 指定工作区、协议和模型：
 
@@ -203,7 +204,7 @@ Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin
 
 | 命令                               | 验证内容                                              |
 | ---------------------------------- | ----------------------------------------------------- |
-| `npm run check:storage`            | Node ABI、`better-sqlite3`、SQLite 事务/WAL 能力      |
+| `npm run check:storage`            | 本地文件锁、原子 rename、权限与 fsync 能力            |
 | `npm run typecheck`                | Runtime、TUI 与共享 TypeScript 类型                   |
 | `npm run desktop:typecheck`        | Desktop main、preload、renderer 类型边界              |
 | `npm run lint`                     | 根项目、Desktop、测试与脚本的 ESLint 检查             |

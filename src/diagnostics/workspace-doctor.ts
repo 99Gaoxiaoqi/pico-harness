@@ -194,7 +194,7 @@ function runtimeLedgerCheck(
       "Runtime ledger",
       "unavailable",
       error ?? "diagnostic unavailable",
-      "retry /doctor after checking runtime.sqlite permissions",
+      "retry /doctor after checking the workspace runtime storage permissions",
     );
   }
   const findings = runtimeLedgerFindings(report);

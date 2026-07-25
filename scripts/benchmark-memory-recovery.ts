@@ -17,9 +17,9 @@ async function runBenchmark(): Promise<void> {
   const runCount = positiveInteger(process.argv[2], 5_000, "runCount");
   const assistantBytes = positiveInteger(process.argv[3], 8_192, "assistantBytes");
   const root = await mkdtemp(join(tmpdir(), "pico-memory-recovery-benchmark-"));
-  const databasePath = join(root, "runtime.sqlite");
+  const storageRoot = join(root, "runtime");
   const sessionId = "memory-recovery-benchmark";
-  const store = new RuntimeEventStore({ databasePath });
+  const store = new RuntimeEventStore({ storageRoot });
   const assistantBody = "x".repeat(assistantBytes);
 
   try {
@@ -75,10 +75,7 @@ async function runBenchmark(): Promise<void> {
     }
     store.close();
 
-    const measurement = JSON.parse(await runRecoveryWorker(databasePath)) as Record<
-      string,
-      unknown
-    >;
+    const measurement = JSON.parse(await runRecoveryWorker(storageRoot)) as Record<string, unknown>;
     process.stdout.write(
       `${JSON.stringify(
         {
@@ -99,8 +96,8 @@ async function runBenchmark(): Promise<void> {
   }
 }
 
-async function measureRecovery(databasePath: string | undefined): Promise<void> {
-  if (!databasePath) throw new Error("recovery worker requires a database path");
+async function measureRecovery(storageRoot: string | undefined): Promise<void> {
+  if (!storageRoot) throw new Error("recovery worker requires a storage root");
   if (!globalThis.gc) throw new Error("recovery benchmark requires --expose-gc");
 
   globalThis.gc();
@@ -116,7 +113,7 @@ async function measureRecovery(databasePath: string | undefined): Promise<void> 
 
   try {
     const recovered = await recoverMemoryReviewJobs({
-      runtimeDatabasePath: databasePath,
+      runtimeStorageRoot: storageRoot,
       scheduler: { enqueue: () => undefined },
     });
     const final = process.memoryUsage();
@@ -135,11 +132,11 @@ async function measureRecovery(databasePath: string | undefined): Promise<void> 
   }
 }
 
-async function runRecoveryWorker(databasePath: string): Promise<string> {
+async function runRecoveryWorker(storageRoot: string): Promise<string> {
   return await new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ["--expose-gc", "--import", "tsx", process.argv[1]!, "--recover", databasePath],
+      ["--expose-gc", "--import", "tsx", process.argv[1]!, "--recover", storageRoot],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     let stdout = "";

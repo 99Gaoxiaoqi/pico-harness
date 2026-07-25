@@ -227,7 +227,7 @@ async function assertRuntimeSessionExists(
   const store = createRuntimeEventStore(workDir, picoHome);
   const manifest = await store.readSessionManifest(sessionId);
   if (!manifest) {
-    throw new Error(`${prefix} session ${sessionId}: runtime.sqlite 中不存在`);
+    throw new Error(`${prefix} session ${sessionId}: RuntimeEvent 日志中不存在`);
   }
   const entries = await store.readSessionEntries(sessionId);
   const forkTargets = await indexForkTargetOperations(workDir, picoHome);
@@ -289,7 +289,7 @@ export async function removeCliSessionFile(
 
 function createRuntimeEventStore(workDir: string, picoHome?: string): RuntimeEventStore {
   return new RuntimeEventStore({
-    databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.runtime,
   });
 }
 

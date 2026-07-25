@@ -71,7 +71,7 @@ export interface DesktopTrustedAutomationInput {
 }
 
 /**
- * Typed desktop adapter over the existing Cron SQLite ledger. It never keeps a
+ * Typed desktop adapter over the existing Cron file ledger. It never keeps a
  * renderer-owned copy: every response is projected from the durable records.
  */
 export class DesktopAutomationService {

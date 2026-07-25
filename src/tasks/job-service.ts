@@ -1,12 +1,9 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
-import { join } from "node:path";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   RuntimeConflictError,
   RuntimeStore,
   generateRuntimeId,
   type FinishJobResult,
-  type LegacyTaskMigrationResult,
   type RuntimeStoreOptions,
 } from "./runtime-store.js";
 import {
@@ -30,13 +27,11 @@ import {
 
 export interface JobServiceOptions extends RuntimeStoreOptions {
   ownerId?: string;
-  legacyTaskStorePath?: string;
   generateId?: (prefix: "job" | "attempt" | "command" | "merge") => string;
 }
 
 export interface JobServiceCreateResult {
   service: JobService;
-  legacyMigration: LegacyTaskMigrationResult;
 }
 
 export interface DispatchJobInput {
@@ -110,19 +105,7 @@ export class JobService {
 
   static async create(options: JobServiceOptions): Promise<JobServiceCreateResult> {
     const service = new JobService(options);
-    const legacyPath =
-      options.legacyTaskStorePath ??
-      join(
-        resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.tasks,
-        "state.json",
-      );
-    try {
-      const legacyMigration = await service.store.migrateLegacyTaskStore(legacyPath);
-      return { service, legacyMigration };
-    } catch (error) {
-      service.close();
-      throw error;
-    }
+    return { service };
   }
 
   dispatch(input: DispatchJobInput): JobRecord {

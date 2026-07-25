@@ -13,7 +13,7 @@ export interface SessionSummaryBasis {
   prefixDigest: string | null;
 }
 
-/** Summary persistence is independent from the optional native SQLite index. */
+/** Summary persistence is independent from the structured Memory state projection. */
 export interface SessionSummaryStore {
   readonly persistent: boolean;
   save(sessionId: string, summary: string, messageCount: number, basis?: SessionSummaryBasis): void;

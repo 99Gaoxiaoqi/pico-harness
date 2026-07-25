@@ -21,7 +21,7 @@ test("memory review enqueue applies the durable workspace debounce", async (cont
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
   const repository = new MemoryRepository({
-    databasePath: fixture.databasePath,
+    storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
@@ -57,7 +57,7 @@ test("workspace debounce has a durable maximum wait", async (context) => {
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
   const repository = new MemoryRepository({
-    databasePath: fixture.databasePath,
+    storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
@@ -89,7 +89,7 @@ test("workspace debounce preserves a budget recovery deadline", async (context) 
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
   const repository = new MemoryRepository({
-    databasePath: fixture.databasePath,
+    storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
@@ -117,7 +117,7 @@ test("memory review scheduling is due-aware, oldest-first and type isolated", as
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
   const repository = new MemoryRepository({
-    databasePath: fixture.databasePath,
+    storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
@@ -179,7 +179,7 @@ test("memory review scheduling fairly pages an oldest-first backlog of more than
   let tick = 0;
   const epoch = Date.parse("2026-07-22T01:00:00.000Z");
   const repository = new MemoryRepository({
-    databasePath: fixture.databasePath,
+    storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => new Date(epoch + tick++),
   });
@@ -227,7 +227,7 @@ function createExtractionJob(
 
 async function createFixture(name: string): Promise<{
   readonly root: string;
-  readonly databasePath: string;
+  readonly storageRoot: string;
   readonly workspaceId: WorkspaceId;
 }> {
   const root = await mkdtemp(join(tmpdir(), `pico-memory-scheduler-${name}-`));
@@ -237,7 +237,7 @@ async function createFixture(name: string): Promise<{
   const paths = resolvePicoPaths(workspace, { picoHome });
   return {
     root,
-    databasePath: paths.workspace.memoryDatabase,
+    storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   };
 }

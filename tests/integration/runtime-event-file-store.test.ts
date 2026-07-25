@@ -72,7 +72,10 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
 
   await unlink(manifestPath);
   assert.equal((await store.readSessionManifest(manifest.sessionId))?.activeBranchId, "branch-2");
-  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).activeBranchId, "branch-2");
+  assert.equal(
+    JSON.parse(await readFile(manifestPath, "utf8")).manifest.activeBranchId,
+    "branch-2",
+  );
 });
 
 test("RuntimeEventStore preserves idempotency and rejects a cross-Session batch before any append", async (context) => {
@@ -210,7 +213,7 @@ test("RuntimeEventStore serializes independent process writers without losing se
   ]);
 });
 
-test("RuntimeEventStore fails closed for incomplete tails and complete malformed records", async (context) => {
+test("RuntimeEventStore repairs an incomplete tail and rejects complete malformed records", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-corrupt-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -218,13 +221,10 @@ test("RuntimeEventStore fails closed for incomplete tails and complete malformed
 
   const incompleteStore = new RuntimeEventStore({ storageRoot: join(root, "incomplete") });
   await incompleteStore.initializeSession({ sessionId: "incomplete", workDir: workspace });
-  await appendFile(sessionLogPath(incompleteStore, "incomplete"), '{"type":"event-batch"');
-  await assert.rejects(
-    incompleteStore.readSession("incomplete"),
-    (error: unknown) =>
-      error instanceof RuntimeEventStoreIntegrityError &&
-      /incomplete final record/u.test(error.message),
-  );
+  const incompletePath = sessionLogPath(incompleteStore, "incomplete");
+  await appendFile(incompletePath, '{"type":"event-batch"');
+  assert.deepEqual(await incompleteStore.readSession("incomplete"), []);
+  assert.equal((await readFile(incompletePath, "utf8")).trimEnd().split("\n").length, 1);
 
   const malformedStore = new RuntimeEventStore({ storageRoot: join(root, "malformed") });
   await malformedStore.initializeSession({ sessionId: "malformed", workDir: workspace });

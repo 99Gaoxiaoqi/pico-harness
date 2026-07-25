@@ -397,7 +397,7 @@ export class RuntimeRun {
     };
     const identity = runtimeForkBootstrapIdentity(options, completion, modelCheckpoint);
     const targetSessionKey = runtimeSessionKey(
-      store.databasePath,
+      store.storageRoot,
       options.workDir,
       options.targetSessionId,
     );
@@ -620,7 +620,7 @@ export class RuntimeRun {
     if (!capability) return undefined;
     const store = runtimeEventStoreFromCapability(capability);
     if (!(await store.readSessionManifest(session.id))) return undefined;
-    const sessionKey = runtimeSessionKey(store.databasePath, session.workDir, session.id);
+    const sessionKey = runtimeSessionKey(store.storageRoot, session.workDir, session.id);
     return serializeExternalMessageCommit(sessionKey, eventId, async () => {
       const existing = await store.readSessionEvent(session.id, eventId);
       if (existing) {
@@ -1214,8 +1214,8 @@ function runtimeEventStoreFromCapability(capability: EngineRuntimeCapability): R
   return capability.runtimeAuthority;
 }
 
-function runtimeSessionKey(databasePath: string, workDir: string, sessionId: string): string {
-  return `${resolve(databasePath)}\0${canonicalizeWorkspacePath(workDir)}\0${sessionId}`;
+function runtimeSessionKey(storageRoot: string, workDir: string, sessionId: string): string {
+  return `${resolve(storageRoot)}\0${canonicalizeWorkspacePath(workDir)}\0${sessionId}`;
 }
 
 function runtimeForkBootstrapIdentity(

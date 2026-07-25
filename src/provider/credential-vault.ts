@@ -14,7 +14,7 @@ const PROVIDER_KINDS = ["openai", "claude", "gemini"] as const satisfies readonl
 
 declare const credentialRefBrand: unique symbol;
 
-/** Opaque, non-secret identifier that may safely be persisted in runtime.sqlite. */
+/** Opaque, non-secret identifier that may safely be persisted in Runtime storage. */
 export type CredentialRef = string & { readonly [credentialRefBrand]: true };
 
 export interface CredentialVaultCapability {
