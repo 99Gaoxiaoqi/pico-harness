@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -66,15 +75,45 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   });
   const batch = JSON.parse(lines[1]!) as Record<string, unknown>;
   assert.equal(batch["type"], "event-batch");
+  assert.equal(batch["activeBranchId"], "branch-2");
   assert.equal((batch["entries"] as unknown[]).length, 2);
   assert.equal((await stat(sessionDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(logPath)).mode & 0o777, 0o600);
 
+  delete batch["activeBranchId"];
+  await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batch)}\n`, { mode: 0o600 });
   await unlink(manifestPath);
   assert.equal((await store.readSessionManifest(manifest.sessionId))?.activeBranchId, "branch-2");
   assert.equal(
     JSON.parse(await readFile(manifestPath, "utf8")).manifest.activeBranchId,
     "branch-2",
+  );
+});
+
+test("RuntimeEventStore rejects a forged manifest branch and rebuilds it from the ledger tail", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-forged-manifest-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const store = new RuntimeEventStore({ storageRoot: join(root, "runtime") });
+  const manifest = await store.initializeSession({
+    sessionId: "manifest-session",
+    workDir: workspace,
+  });
+  await store.append(runtimeEvent(manifest.sessionId, "run-1", "event-1", workspace));
+  const digest = createHash("sha256").update(manifest.sessionId).digest("hex");
+  const manifestPath = join(store.storageRoot, "sessions", digest, "manifest.json");
+  const projection = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    manifest: { activeBranchId: string };
+  };
+  projection.manifest.activeBranchId = "forged";
+  await writeFile(manifestPath, `${JSON.stringify(projection)}\n`, { mode: 0o600 });
+
+  assert.equal((await store.listSessionManifests())[0]?.activeBranchId, "main");
+  assert.equal(
+    (JSON.parse(await readFile(manifestPath, "utf8")) as typeof projection).manifest.activeBranchId,
+    "main",
   );
 });
 
@@ -126,6 +165,7 @@ test("RuntimeEventStore recovers a published cross-file commit before reading", 
     schemaVersion: 1,
     txId: transactionId,
     committedAt: event.at,
+    activeBranchId: "main",
     entries: [{ sequence: 1, committedAt: event.at, event }],
   };
 

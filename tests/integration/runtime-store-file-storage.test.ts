@@ -88,6 +88,79 @@ test("RuntimeStore commits job state and replay ledgers without SQLite", async (
   assert.match(usage, /"type":"provider-call"/u);
 });
 
+test("RuntimeStore rejects orphan merge and provider-call relationships without committing", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-relationships-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const storageRoot = join(root, "runtime");
+  const store = new RuntimeStore({ workDir: root, storageRoot });
+  store.createJob({
+    jobId: "existing-job",
+    type: "test",
+    executionClass: "recoverable",
+    completionPolicy: "detached",
+    description: "existing",
+  });
+  const statePath = join(storageRoot, "control/state.json");
+  const before = await readFile(statePath, "utf8");
+
+  assert.throws(
+    () =>
+      store.createMergeRequest({
+        mergeRequestId: "orphan-merge",
+        jobId: "missing-job",
+        sourceBranch: "source",
+        sourceWorktree: root,
+        targetBranch: "main",
+        targetWorktree: root,
+        status: "queued",
+      }),
+    /未知任务/u,
+  );
+  assert.throws(
+    () =>
+      store.createMergeRequest({
+        mergeRequestId: "orphan-attempt-merge",
+        jobId: "existing-job",
+        attemptId: "missing-attempt",
+        sourceBranch: "source",
+        sourceWorktree: root,
+        targetBranch: "main",
+        targetWorktree: root,
+        status: "queued",
+      }),
+    /未知 attempt/u,
+  );
+  const usage = {
+    purpose: "main" as const,
+    provider: "test",
+    model: "test",
+    status: "succeeded" as const,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cost: 0,
+  };
+  assert.throws(
+    () => store.recordProviderCall({ callId: "orphan-job-call", jobId: "missing-job", ...usage }),
+    /未知任务/u,
+  );
+  assert.throws(
+    () =>
+      store.recordProviderCall({
+        callId: "orphan-attempt-call",
+        attemptId: "missing-attempt",
+        ...usage,
+      }),
+    /未知 attempt/u,
+  );
+
+  assert.equal(await readFile(statePath, "utf8"), before);
+  assert.equal(store.listMergeRequests().length, 0);
+  assert.equal(store.listProviderCalls().length, 0);
+  new RuntimeStore({ workDir: root, storageRoot }).close();
+});
+
 test("RuntimeStore joins nested stores into one transaction and rolls the draft back", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-nested-"));
   context.after(() => rm(root, { recursive: true, force: true }));

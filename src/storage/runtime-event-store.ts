@@ -21,6 +21,7 @@ import {
   commitFileTransactionSync,
   mkdirPrivateSync,
   readFirstJsonLineSync,
+  readLastJsonLineSync,
   readJsonFileSync,
   readJsonLinesSync,
   recoverFileTransactionSync,
@@ -150,6 +151,11 @@ interface RuntimeEventBatch {
   readonly schemaVersion: typeof RUNTIME_SESSION_FILE_VERSION;
   readonly txId: string;
   readonly committedAt: string;
+  /**
+   * Added to the v1 envelope after its initial implementation. Missing values remain readable
+   * and force a canonical replay instead of the manifest fast path.
+   */
+  readonly activeBranchId?: string;
   readonly entries: readonly RuntimeEventBatchEntry[];
 }
 
@@ -370,6 +376,7 @@ export class RuntimeEventStore {
           schemaVersion: RUNTIME_SESSION_FILE_VERSION,
           txId: transactionId,
           committedAt: transactionCommittedAt,
+          activeBranchId: session.activeBranchId,
           entries: session.appended,
         };
         const content = encodeJsonLine(batch);
@@ -660,6 +667,7 @@ export class RuntimeEventStore {
     const entries: RuntimeEventStoreEntry[] = [];
     const eventIds = new Set<string>();
     let lastTxId: string | undefined;
+    let activeBranchId = "main";
     for (let index = 1; index < records.length; index++) {
       const batch = decodeEventBatch(records[index], logPath, index + 1);
       lastTxId = batch.txId;
@@ -682,10 +690,17 @@ export class RuntimeEventStore {
         }
         eventIds.add(batchEntry.event.eventId);
         entries.push({ sequence: batchEntry.sequence, event: batchEntry.event });
+        if (batchEntry.event.kind === "history.rewound") {
+          activeBranchId = batchEntry.event.data.branchId;
+        }
+      }
+      if (batch.activeBranchId !== undefined && activeBranchId !== batch.activeBranchId) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime event batch ${batch.txId} active branch does not match its entries`,
+        );
       }
     }
 
-    const activeBranchId = activeBranchForEntries(entries);
     const derivedManifest = manifestFromHeader(header, activeBranchId);
     const derivedProjection = createManifestProjection(
       derivedManifest,
@@ -772,6 +787,25 @@ export class RuntimeEventStore {
         )
       ) {
         return undefined;
+      }
+      const lastRecord = readLastJsonLineSync(logPath);
+      if (projection.ledger.lastSequence === 0) {
+        if (
+          !isDeepStrictEqual(lastRecord, readFirstJsonLineSync(logPath)) ||
+          projection.ledger.lastTxId !== undefined ||
+          projection.manifest.activeBranchId !== "main"
+        ) {
+          return undefined;
+        }
+      } else {
+        const lastBatch = decodeEventBatch(lastRecord, logPath, -1);
+        if (
+          lastBatch.txId !== projection.ledger.lastTxId ||
+          lastBatch.entries.at(-1)?.sequence !== projection.ledger.lastSequence ||
+          lastBatch.activeBranchId !== projection.manifest.activeBranchId
+        ) {
+          return undefined;
+        }
       }
       return projection.manifest;
     } catch (error) {
@@ -875,6 +909,8 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
     !value["txId"] ||
     typeof value["committedAt"] !== "string" ||
     !value["committedAt"] ||
+    (value["activeBranchId"] !== undefined &&
+      (typeof value["activeBranchId"] !== "string" || !value["activeBranchId"])) ||
     !Array.isArray(value["entries"]) ||
     value["entries"].length === 0
   ) {
@@ -917,6 +953,9 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
     schemaVersion: RUNTIME_SESSION_FILE_VERSION,
     txId: value["txId"],
     committedAt: value["committedAt"],
+    ...(typeof value["activeBranchId"] === "string"
+      ? { activeBranchId: value["activeBranchId"] }
+      : {}),
     entries,
   };
 }
@@ -937,13 +976,14 @@ export function decodeRuntimeSessionManifestProjection(
   const manifestValue = value["manifest"];
   const ledgerValue = value["ledger"];
   const manifest = decodeManifestValue(manifestValue, path);
+  const lastSequence = ledgerValue["lastSequence"];
+  const lastTxId = ledgerValue["lastTxId"];
   if (
     !Number.isSafeInteger(ledgerValue["byteLength"]) ||
     (ledgerValue["byteLength"] as number) <= 0 ||
-    !Number.isSafeInteger(ledgerValue["lastSequence"]) ||
-    (ledgerValue["lastSequence"] as number) < 0 ||
-    (ledgerValue["lastTxId"] !== undefined &&
-      (typeof ledgerValue["lastTxId"] !== "string" || !ledgerValue["lastTxId"]))
+    !Number.isSafeInteger(lastSequence) ||
+    (lastSequence as number) < 0 ||
+    (lastSequence === 0 ? lastTxId !== undefined : typeof lastTxId !== "string" || !lastTxId)
   ) {
     throw new RuntimeEventStoreIntegrityError(
       `Runtime session manifest ledger is invalid in ${path}`,
@@ -955,8 +995,8 @@ export function decodeRuntimeSessionManifestProjection(
     manifest,
     ledger: {
       byteLength: ledgerValue["byteLength"] as number,
-      lastSequence: ledgerValue["lastSequence"] as number,
-      ...(typeof ledgerValue["lastTxId"] === "string" ? { lastTxId: ledgerValue["lastTxId"] } : {}),
+      lastSequence: lastSequence as number,
+      ...(typeof lastTxId === "string" ? { lastTxId } : {}),
     },
   };
 }
@@ -1029,10 +1069,6 @@ function cursorForEntries(
     ).length,
     eventId,
   };
-}
-
-function activeBranchForEntries(entries: readonly RuntimeEventStoreEntry[]): string {
-  return activeBranchAt(entries, Number.MAX_SAFE_INTEGER);
 }
 
 function activeBranchAt(entries: readonly RuntimeEventStoreEntry[], sequence: number): string {

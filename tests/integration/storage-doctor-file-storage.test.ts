@@ -44,6 +44,35 @@ test("StorageDoctor reports a stale manifest without mutating it and rebuilds it
   assert.deepEqual(JSON.parse(await readFile(manifestPath, "utf8")).manifest, manifest);
 });
 
+test("StorageDoctor manifest rebuild refuses to truncate an incomplete canonical tail", async (context) => {
+  const fixture = await createFixture("manifest-tail");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const manifest = await store.initializeSession({
+    sessionId: "doctor-tail-session",
+    workDir: fixture.workspace,
+  });
+  const logPath = join(
+    paths.workspace.runtime,
+    "sessions",
+    createHash("sha256").update(manifest.sessionId).digest("hex"),
+    "session.jsonl",
+  );
+  await appendFile(logPath, '{"type":"event-batch"');
+  const damaged = await readFile(logPath);
+  const doctor = new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  });
+
+  await assert.rejects(
+    doctor.repair({ rebuildRuntimeManifests: true }),
+    /incomplete final record/u,
+  );
+  assert.deepEqual(await readFile(logPath), damaged);
+});
+
 test("StorageDoctor reports pending commits and ignored legacy SQLite without recovering either", async (context) => {
   const fixture = await createFixture("pending");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));

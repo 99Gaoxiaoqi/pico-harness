@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -164,6 +165,110 @@ test("a malformed commit marker is fully validated before any target is applied"
   assert.equal(await readFile(join(root, "second.json"), "utf8"), '{"revision":1}\n');
 });
 
+test("a forged append hash is rejected before any transaction target is applied", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-file-invalid-append-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "state.json"), '{"revision":1}\n', { mode: 0o600 });
+  await writeFile(join(root, "events.jsonl"), '{"eventId":"one"}\n', { mode: 0o600 });
+
+  assert.throws(
+    () =>
+      withFileLockSync(join(root, "lock"), "fault-injection", () =>
+        commitFileTransactionSync(
+          root,
+          {
+            replacements: [{ relativePath: "state.json", content: '{"revision":2}\n' }],
+            appends: [{ relativePath: "events.jsonl", content: '{"eventId":"two"}\n' }],
+          },
+          {
+            transactionId: "forged-append",
+            onStage(stage) {
+              if (stage === "commit-published") throw new Error("simulated crash");
+            },
+          },
+        ),
+      ),
+    /simulated crash/u,
+  );
+  const commitPath = join(root, "commit.json");
+  const commit = JSON.parse(await readFile(commitPath, "utf8")) as {
+    appends: Array<{ nextHash: string }>;
+  };
+  commit.appends[0]!.nextHash = "0".repeat(64);
+  await writeFile(commitPath, `${JSON.stringify(commit)}\n`, { mode: 0o600 });
+
+  assert.throws(
+    () => withFileLockSync(join(root, "lock"), "recovery", () => recoverFileTransactionSync(root)),
+    /Append payload hash mismatch/u,
+  );
+  assert.equal(await readFile(join(root, "state.json"), "utf8"), '{"revision":1}\n');
+  assert.equal(await readFile(join(root, "events.jsonl"), "utf8"), '{"eventId":"one"}\n');
+});
+
+test("recovery checks every target conflict before applying any target", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-file-conflicting-recovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "first.json"), '{"revision":1}\n', { mode: 0o600 });
+  await writeFile(join(root, "second.json"), '{"revision":1}\n', { mode: 0o600 });
+
+  assert.throws(
+    () =>
+      withFileLockSync(join(root, "lock"), "fault-injection", () =>
+        commitFileTransactionSync(
+          root,
+          {
+            replacements: [
+              { relativePath: "first.json", content: '{"revision":2}\n' },
+              { relativePath: "second.json", content: '{"revision":2}\n' },
+            ],
+          },
+          {
+            transactionId: "conflicting-recovery",
+            onStage(stage) {
+              if (stage === "commit-published") throw new Error("simulated crash");
+            },
+          },
+        ),
+      ),
+    /simulated crash/u,
+  );
+  await writeFile(join(root, "second.json"), '{"revision":99}\n', { mode: 0o600 });
+
+  assert.throws(
+    () => withFileLockSync(join(root, "lock"), "recovery", () => recoverFileTransactionSync(root)),
+    FileStorageIntegrityError,
+  );
+  assert.equal(await readFile(join(root, "first.json"), "utf8"), '{"revision":1}\n');
+  assert.equal(await readFile(join(root, "second.json"), "utf8"), '{"revision":99}\n');
+});
+
+test("file transactions reject an intermediate symlink that escapes the storage root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-file-symlink-root-"));
+  const outside = await mkdtemp(join(tmpdir(), "pico-file-symlink-outside-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(outside, { recursive: true, force: true }),
+    ]),
+  );
+  const victimPath = join(outside, "victim.jsonl");
+  await writeFile(victimPath, '{"outside":true}\n', { mode: 0o600 });
+  await symlink(outside, join(root, "escape"), "dir");
+
+  assert.throws(
+    () =>
+      withFileLockSync(join(root, "lock"), "symlink-check", () =>
+        commitFileTransactionSync(root, {
+          appends: [
+            { relativePath: join("escape", "victim.jsonl"), content: '{"escaped":true}\n' },
+          ],
+        }),
+      ),
+    FileStorageIntegrityError,
+  );
+  assert.equal(await readFile(victimPath, "utf8"), '{"outside":true}\n');
+});
+
 test("JSONL repairs only an incomplete tail and rejects malformed complete records", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-jsonl-integrity-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -226,6 +331,23 @@ test("async file locks reject success after ownership can no longer be proved", 
       await writeFile(join(lockPath, "owner.json"), "{}\n", { mode: 0o600 });
     }),
     /ownership changed|cannot be verified/u,
+  );
+});
+
+test("synchronous file locks reject success after ownership changes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-file-lock-sync-lost-ownership-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockPath = join(root, "lock");
+
+  assert.throws(
+    () =>
+      withFileLockSync(lockPath, "owner", () => {
+        const ownerPath = join(lockPath, "owner.json");
+        const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+        owner["leaseId"] = "foreign-lease";
+        writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+      }),
+    /ownership changed/u,
   );
 });
 

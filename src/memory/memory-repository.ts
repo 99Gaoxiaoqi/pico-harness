@@ -415,7 +415,7 @@ export class MemoryRepository {
         activeMemoryTransactions.delete(this.storageRoot);
       }
       if (context.forgottenFactIds.size > 0) {
-        this.verifyForgottenEntities(context.state, context.forgottenFactIds);
+        this.verifyForgottenEntities(this.readState(), context.forgottenFactIds);
         this.verifySecretsRemoved(context.forgottenSecrets);
       }
       return result;
@@ -1403,8 +1403,7 @@ export class MemoryRepository {
           costUsd: normalizeNonNegativeNumber(input.costUsd ?? current.costUsd, "costUsd"),
           version: current.version + 1,
           updatedAt,
-          terminalAt:
-            terminalAt ?? (isTerminalJobStatus(current.status) ? current.terminalAt : undefined),
+          terminalAt: isTerminalJobStatus(status) ? (terminalAt ?? current.terminalAt) : undefined,
         });
         this.state().jobs[jobId] = job;
         this.recordMutation(
@@ -2224,10 +2223,7 @@ function compareDesc(left: string, right: string): number {
 
 function listMemoryVerificationFiles(root: string): string[] {
   return listMemoryRootFiles(root)
-    .filter(
-      ({ name }) =>
-        name === "state.json" || name === "commit.json" || isRepositoryTemporaryFile(name),
-    )
+    .filter(({ name }) => name === "commit.json" || isRepositoryTemporaryFile(name))
     .map(({ path }) => path);
 }
 
