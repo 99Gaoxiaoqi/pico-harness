@@ -8,6 +8,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { commitFileTransactionSync } from "../../src/storage/local-file-storage.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { StorageDoctor } from "../../src/storage/storage-doctor.js";
+import { WORKSPACE_RUNTIME_TRANSACTION_OPTIONS } from "../../src/storage/workspace-storage-layout.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 
 test("StorageDoctor reports a stale manifest without mutating it and rebuilds it explicitly", async (context) => {
@@ -91,6 +92,7 @@ test("StorageDoctor reports pending commits and ignored legacy SQLite without re
           ],
         },
         {
+          ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
           transactionId: "pending-doctor-transaction",
           onStage(stage) {
             if (stage === "commit-published") throw new Error("simulated crash");
@@ -99,11 +101,27 @@ test("StorageDoctor reports pending commits and ignored legacy SQLite without re
       ),
     /simulated crash/u,
   );
-  await writeFile(join(paths.workspace.root, "runtime.sqlite"), "legacy", { mode: 0o600 });
   await mkdir(paths.workspace.memory, { recursive: true });
-  await writeFile(join(paths.workspace.memory, "memory.sqlite-wal"), "legacy", { mode: 0o600 });
+  const legacySqlitePaths = [
+    join(paths.workspace.root, "runtime.sqlite"),
+    join(paths.workspace.root, "runtime.sqlite-wal"),
+    join(paths.workspace.root, "runtime.sqlite-shm"),
+    join(paths.workspace.memory, "memory.sqlite"),
+    join(paths.workspace.memory, "memory.sqlite-wal"),
+    join(paths.workspace.memory, "memory.sqlite-shm"),
+  ];
+  const legacySqliteContents = new Map(
+    legacySqlitePaths.map((path, index) => [path, `legacy-sqlite-${index}\n`] as const),
+  );
+  await Promise.all(
+    [...legacySqliteContents].map(([path, content]) => writeFile(path, content, { mode: 0o600 })),
+  );
+  const legacyRuntimeFile = join(paths.workspace.legacyRuntime, "sessions", "legacy.jsonl");
+  await mkdir(join(paths.workspace.legacyRuntime, "sessions"), { recursive: true });
+  await writeFile(legacyRuntimeFile, '{"legacy":true}\n', { mode: 0o600 });
   await mkdir(paths.workspace.tasks, { recursive: true });
-  await writeFile(join(paths.workspace.tasks, "legacy.json"), "{}\n", { mode: 0o600 });
+  const legacyTaskFile = join(paths.workspace.tasks, "legacy.json");
+  await writeFile(legacyTaskFile, "{}\n", { mode: 0o600 });
 
   const report = await new StorageDoctor({
     workDir: fixture.workspace,
@@ -126,10 +144,26 @@ test("StorageDoctor reports pending commits and ignored legacy SQLite without re
     report.findings.some((finding) => finding.code === "legacy_task_storage_ignored"),
     true,
   );
+  assert.equal(
+    report.findings.some((finding) => finding.code === "legacy_runtime_json_preserved"),
+    true,
+  );
+  for (const path of legacySqlitePaths) {
+    const expectedCode = path.endsWith("runtime.sqlite")
+      ? "legacy_runtime_sqlite_ignored"
+      : "legacy_sqlite_file_ignored";
+    assert.equal(
+      report.findings.some((finding) => finding.code === expectedCode && finding.path === path),
+      true,
+    );
+    assert.equal(await readFile(path, "utf8"), legacySqliteContents.get(path));
+  }
   assert.match(
-    await readFile(join(paths.workspace.root, "commit.json"), "utf8"),
+    await readFile(paths.workspace.storageCommit, "utf8"),
     /pending-doctor-transaction/u,
   );
+  assert.equal(await readFile(legacyRuntimeFile, "utf8"), '{"legacy":true}\n');
+  assert.equal(await readFile(legacyTaskFile, "utf8"), "{}\n");
 });
 
 test("StorageDoctor validates commit markers, runtime ledgers, and Memory state", async (context) => {
@@ -224,8 +258,8 @@ test("StorageDoctor distinguishes a corrupt commit marker without applying it", 
   const fixture = await createFixture("invalid-commit");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  await mkdir(paths.workspace.root, { recursive: true });
-  await writeFile(join(paths.workspace.root, "commit.json"), "{}\n", { mode: 0o600 });
+  await mkdir(paths.workspace.storage, { recursive: true });
+  await writeFile(paths.workspace.storageCommit, "{}\n", { mode: 0o600 });
 
   const report = await new StorageDoctor({
     workDir: fixture.workspace,
@@ -235,7 +269,7 @@ test("StorageDoctor distinguishes a corrupt commit marker without applying it", 
     report.findings.some((finding) => finding.code === "runtime_commit_invalid"),
     true,
   );
-  assert.equal(await readFile(join(paths.workspace.root, "commit.json"), "utf8"), "{}\n");
+  assert.equal(await readFile(paths.workspace.storageCommit, "utf8"), "{}\n");
 });
 
 test("StorageDoctor accepts a control-only runtime and reports exposed data modes", async (context) => {
@@ -279,6 +313,40 @@ test("StorageDoctor accepts a control-only runtime and reports exposed data mode
       /regular 0600 file/u,
     );
   }
+});
+
+test("StorageDoctor limits Runtime permission scans to sessions, control, and .storage", async (context) => {
+  const fixture = await createFixture("runtime-scan-boundary");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  new RuntimeStore({
+    workDir: fixture.workspace,
+    storageRoot: paths.workspace.root,
+  }).close();
+  const unrelatedRoots = [
+    paths.workspace.memory,
+    paths.workspace.artifacts,
+    paths.workspace.evidence,
+    paths.workspace.traces,
+    paths.workspace.tasks,
+    paths.workspace.forkStaging,
+    paths.workspace.storageOperations,
+  ];
+  await Promise.all(unrelatedRoots.map((path) => mkdir(path, { recursive: true, mode: 0o755 })));
+  if (process.platform !== "win32") {
+    await Promise.all(unrelatedRoots.map((path) => chmod(path, 0o755)));
+  }
+
+  const report = await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  }).scan();
+  assert.equal(
+    report.findings.some(
+      (finding) => finding.component === "runtime" && unrelatedRoots.includes(finding.path),
+    ),
+    false,
+  );
 });
 
 test("StorageDoctor fails closed for a complete malformed Session JSONL record", async (context) => {

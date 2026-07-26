@@ -83,7 +83,7 @@ AgentRuntime
     ├─ message / tool / model / usage / rewind / fork 事件
     ▼
 RuntimeEventStore
-    └─ ~/.pico/workspaces/<workspace-id>/runtime/sessions/<session-hash>/
+    └─ ~/.pico/workspaces/<workspace-id>/sessions/<session-hash>/
              ├─ session.jsonl
              └─ manifest.json
              │
