@@ -48,7 +48,7 @@ jobs:
       - name: Audit full dependency tree
         run: npm audit --audit-level=low
 
-      - name: Verify native SQLite capabilities
+      - name: Verify local file storage capabilities
         run: npm run check:storage
 
       - name: Typecheck runtime packages

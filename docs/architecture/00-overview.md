@@ -52,7 +52,8 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 - `RuntimeStore` 是 Jobs、daemon/cron runs、attempts、leases、usage 和 completion outbox
   的控制面真源。
 - `daemon-events.jsonl` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面状态。
-- 两者共享 `$PICO_HOME/workspaces/<workspace-id>/runtime/`，但使用不同账本和 API。
+- 两者共享 `$PICO_HOME/workspaces/<workspace-id>/` 下的事务协调，但分别落在 `sessions/`
+  和 `control/`，使用不同账本和 API。
 - Session 内存、Transcript 和 Desktop ViewModel 都是可重建投影。
 - Session title 存在 RuntimeEvent；Desktop metadata 不保存第二份 title。
 
@@ -63,12 +64,14 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
   Trace、Task 和 storage operation。
 - `<workDir>/.pico/`：项目配置、commands、skills、agents、hooks、MCP 和 plugins。
 - 旧 `runtime.sqlite`、`memory.sqlite`、WAL/SHM 与 legacy task 文件保留原样，但当前版本不读取、迁移或自动删除。
+- 旧 `runtime/` JSON 布局在一次性布局迁移后仍原样保留；Storage Doctor 会把它报告为回退副本，而不会继续把它当作当前真源。
 
 ```text
 workspace/
-  runtime/
-    sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
-    control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
+  sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
+  control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
+  .storage/
+    layout.json
     commit.json
     lock/
   memory/
@@ -77,9 +80,10 @@ workspace/
     summaries/
 ```
 
-目录使用 `0700`，数据文件使用 `0600`。所有读写先取得 workspace 对应的 owner lease
-文件锁并恢复遗留 `commit.json`；JSON 替换通过临时文件、文件 `fsync`、原子 rename 和目录
-`fsync` 发布。JSONL 只允许截断未完成的最后一行，完整但非法的中间记录会 fail closed。
+目录使用 `0700`，数据文件使用 `0600`。Session 与控制面读写先取得
+`.storage/lock/` 的 workspace owner lease，并恢复遗留 `.storage/commit.json`；JSON 替换通过
+临时文件、文件 `fsync`、原子 rename 和目录 `fsync` 发布。JSONL 只允许截断未完成的最后
+一行，完整但非法的中间记录会 fail closed。
 
 Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，不同
 `PICO_HOME` 的 Session 设置、授权、凭证、Artifact 与存储根不能共享状态。

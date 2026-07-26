@@ -62,10 +62,11 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 
 ### 状态所有权
 
-状态不是写进一份“万能文件”。Agent 事实与任务控制面共享 workspace Runtime 根目录，但使用不同逻辑账本和所有者：
+状态不是写进一份“万能文件”。Agent 事实与任务控制面共享 workspace 状态根目录，但使用不同逻辑账本和所有者：
 
-- `RuntimeEventStore` 以每个 Session 的 `session.jsonl` 保存 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
-- `RuntimeStore` 以 `control/state.json` 保存 Job、Cron 与调度状态；`daemon-events.jsonl` 是 daemon 通知账本，不是 Agent 事实日志。
+- `RuntimeEventStore` 以 `sessions/<session-hash>/session.jsonl` 保存每个 Session 的 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
+- `RuntimeStore` 以 `control/state.json` 保存 Job、Cron 与调度状态；`control/daemon-events.jsonl` 是 daemon 通知账本，不是 Agent 事实日志。
+- `.storage/layout.json` 标识当前布局，`.storage/commit.json` 与 `.storage/lock/` 为 Session 和控制面提供共享事务协调。
 - `MemoryRepository` 以 `memory/state.json` 保存版本化的 settings、sources、facts、proposals、审计和幂等记录；忘记操作会清除实时文件中的结构化明文。
 - 文件历史、计划/待办、Skill 结果和大体积工具输出使用独立 sidecar/artifact 存储，避免污染模型消息协议。
 
