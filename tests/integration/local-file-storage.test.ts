@@ -16,6 +16,108 @@ import {
   withFileLock,
   withFileLockSync,
 } from "../../src/storage/local-file-storage.js";
+import {
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_COMMIT_FILE,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
+} from "../../src/storage/workspace-storage-layout.js";
+
+test("workspace transaction publishes and recovers its nested marker", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-transaction-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, ".storage"), { mode: 0o700 });
+  await mkdir(join(root, "control"), { mode: 0o700 });
+  await writeFile(join(root, "control", "state.json"), '{"revision":1}\n', { mode: 0o600 });
+
+  assert.throws(
+    () =>
+      withFileLockSync(join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY), "fault-injection", () =>
+        commitFileTransactionSync(
+          root,
+          {
+            replacements: [{ relativePath: "control/state.json", content: '{"revision":2}\n' }],
+            appends: [
+              {
+                relativePath: "sessions/session-a/session.jsonl",
+                content: '{"type":"session"}\n',
+              },
+            ],
+          },
+          {
+            ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+            transactionId: "workspace-nested-marker",
+            onStage(stage) {
+              if (stage === "commit-published") throw new Error("simulated crash");
+            },
+          },
+        ),
+      ),
+    /simulated crash/u,
+  );
+
+  assert.equal(
+    inspectFileTransactionMarkerSync(root, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS).status,
+    "pending",
+  );
+  assert.equal(
+    JSON.parse(await readFile(join(root, WORKSPACE_STORAGE_COMMIT_FILE), "utf8")).transactionId,
+    "workspace-nested-marker",
+  );
+  await assert.rejects(stat(join(root, "commit.json")), { code: "ENOENT" });
+
+  withFileLockSync(join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY), "recovery", () => {
+    assert.equal(
+      recoverFileTransactionSync(root, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS),
+      "workspace-nested-marker",
+    );
+    assert.equal(
+      recoverFileTransactionSync(root, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS),
+      undefined,
+    );
+  });
+
+  assert.equal(await readFile(join(root, "control", "state.json"), "utf8"), '{"revision":2}\n');
+  assert.equal(
+    await readFile(join(root, "sessions", "session-a", "session.jsonl"), "utf8"),
+    '{"type":"session"}\n',
+  );
+  await assert.rejects(stat(join(root, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
+});
+
+test("workspace transaction namespace rejects memory and non-layout coordinator targets", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-namespace-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, ".storage"), { mode: 0o700 });
+
+  assert.throws(
+    () =>
+      commitFileTransactionSync(
+        root,
+        {
+          replacements: [{ relativePath: "memory/state.json", content: '{"revision":1}\n' }],
+        },
+        WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+      ),
+    /outside its namespace/u,
+  );
+  assert.throws(
+    () =>
+      commitFileTransactionSync(
+        root,
+        {
+          replacements: [
+            { relativePath: ".storage/foreign.json", content: '{"unexpected":true}\n' },
+          ],
+        },
+        WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+      ),
+    /outside its namespace/u,
+  );
+
+  await assert.rejects(stat(join(root, "memory", "state.json")), { code: "ENOENT" });
+  await assert.rejects(stat(join(root, ".storage", "foreign.json")), { code: "ENOENT" });
+  await assert.rejects(stat(join(root, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
+});
 
 test("file transaction recovers a published replacement and append exactly once", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-file-transaction-"));

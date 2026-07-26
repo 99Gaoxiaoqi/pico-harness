@@ -24,6 +24,10 @@ import {
   RuntimeEventStore,
   RuntimeEventStoreIntegrityError,
 } from "../../src/storage/runtime-event-store.js";
+import {
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_COMMIT_FILE,
+} from "../../src/storage/workspace-storage-layout.js";
 
 test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest projection", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-files-"));
@@ -31,7 +35,7 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   await mkdir(workspace);
   context.after(() => rm(root, { recursive: true, force: true }));
 
-  const store = new RuntimeEventStore({ storageRoot: join(root, "runtime") });
+  const store = new RuntimeEventStore({ storageRoot: root });
   const manifest = await store.initializeSession({
     sessionId: "session/with:path",
     workDir: workspace,
@@ -79,6 +83,8 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   assert.equal((batch["entries"] as unknown[]).length, 2);
   assert.equal((await stat(sessionDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(logPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(join(root, ".storage"))).mode & 0o777, 0o700);
+  await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
 
   delete batch["activeBranchId"];
   await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batch)}\n`, { mode: 0o600 });
@@ -96,7 +102,7 @@ test("RuntimeEventStore rejects a forged manifest branch and rebuilds it from th
   await mkdir(workspace);
   context.after(() => rm(root, { recursive: true, force: true }));
 
-  const store = new RuntimeEventStore({ storageRoot: join(root, "runtime") });
+  const store = new RuntimeEventStore({ storageRoot: root });
   const manifest = await store.initializeSession({
     sessionId: "manifest-session",
     workDir: workspace,
@@ -122,7 +128,7 @@ test("RuntimeEventStore preserves idempotency and rejects a cross-Session batch 
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   context.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "runtime") });
+  const store = new RuntimeEventStore({ storageRoot: root });
   await store.initializeSession({ sessionId: "session-a", workDir: workspace });
   await store.initializeSession({ sessionId: "session-b", workDir: workspace });
 
@@ -156,7 +162,7 @@ test("RuntimeEventStore recovers a published cross-file commit before reading", 
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   context.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "runtime") });
+  const store = new RuntimeEventStore({ storageRoot: root });
   await store.initializeSession({ sessionId: "recover-session", workDir: workspace });
   const event = runtimeEvent("recover-session", "recover-run", "recover-event", workspace);
   const transactionId = "recovery-transaction";
@@ -186,6 +192,7 @@ test("RuntimeEventStore recovers a published cross-file commit before reading", 
           ],
         },
         {
+          ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
           transactionId,
           onStage(stage) {
             if (stage === "commit-published") throw new Error("injected crash");
@@ -195,7 +202,9 @@ test("RuntimeEventStore recovers a published cross-file commit before reading", 
     /injected crash/u,
   );
   assert.equal((await store.readSession(event.sessionId))[0]?.eventId, event.eventId);
-  await assert.rejects(stat(join(store.storageRoot, "commit.json")), { code: "ENOENT" });
+  await assert.rejects(stat(join(store.storageRoot, WORKSPACE_STORAGE_COMMIT_FILE)), {
+    code: "ENOENT",
+  });
 });
 
 test("RuntimeEventStore serializes independent process writers without losing sequences", async (context) => {
@@ -203,7 +212,7 @@ test("RuntimeEventStore serializes independent process writers without losing se
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   context.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "runtime") });
+  const store = new RuntimeEventStore({ storageRoot: root });
   await store.initializeSession({ sessionId: "shared-session", workDir: workspace });
 
   const childScript = `
