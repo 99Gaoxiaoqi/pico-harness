@@ -1,7 +1,17 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
-import { assertLocalFileStorageCapabilitiesSync } from "../src/storage/local-file-storage.ts";
+import {
+  assertLocalFileStorageCapabilitiesSync,
+  commitFileTransactionSync,
+  recoverFileTransactionSync,
+} from "../src/storage/local-file-storage.ts";
+import {
+  prepareWorkspaceStorageLayoutSync,
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_COMMIT_FILE,
+} from "../src/storage/workspace-storage-layout.ts";
 
 const SUPPORTED_NODE_RELEASES = new Map([
   [22, 13],
@@ -36,8 +46,44 @@ if (minimumMinor === undefined || nodeMinor < minimumMinor) {
 } else {
   try {
     assertLocalFileStorageCapabilitiesSync(picoHome);
+    const probeRoot = mkdtempSync(join(picoHome, ".workspace-storage-check-"));
+    try {
+      prepareWorkspaceStorageLayoutSync(probeRoot);
+      let injected = false;
+      try {
+        commitFileTransactionSync(
+          probeRoot,
+          {
+            replacements: [
+              { relativePath: "control/state.json", content: '{"revision":1}\n' },
+            ],
+          },
+          {
+            ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+            transactionId: "workspace-storage-capability-probe",
+            onStage(stage) {
+              if (stage === "commit-published") {
+                injected = true;
+                throw new Error("injected workspace storage crash");
+              }
+            },
+          },
+        );
+      } catch (error) {
+        if (!injected) throw error;
+      }
+      if (!existsSync(join(probeRoot, WORKSPACE_STORAGE_COMMIT_FILE))) {
+        throw new Error("nested workspace commit marker was not published");
+      }
+      recoverFileTransactionSync(probeRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
+      if (readFileSync(join(probeRoot, "control", "state.json"), "utf8") !== '{"revision":1}\n') {
+        throw new Error("nested workspace commit recovery returned unexpected content");
+      }
+    } finally {
+      rmSync(probeRoot, { recursive: true, force: true });
+    }
     console.log(
-      `[storage-check] 通过: ${runtime}, ${picoHome}, atomic mkdir/rename, file+directory fsync, crash recovery`,
+      `[storage-check] 通过: ${runtime}, ${picoHome}, .storage lock/commit, atomic mkdir/rename, file+directory fsync, crash recovery`,
     );
   } catch (error) {
     fail("项目所需的本地文件存储能力不可用。", error);
