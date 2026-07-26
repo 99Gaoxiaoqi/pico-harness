@@ -107,7 +107,7 @@ test("RuntimeStore commits job state and replay ledgers without SQLite", async (
     /"layout": "session-centric-v1"/u,
   );
   await assert.rejects(stat(join(root, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
-  await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
+  assert.equal((await stat(join(root, "runtime", "lock"))).mode & 0o777, 0o700);
 });
 
 test("RuntimeStore rejects orphan merge and provider-call relationships without committing", async (context) => {
@@ -265,6 +265,43 @@ test("RuntimeStore joins nested stores into one transaction and rolls the draft 
     },
   );
   assert.equal(store.getDaemonRun(root, "nested-rolled-back-run"), undefined);
+});
+
+test("RuntimeStore canonicalizes case aliases before joining a nested transaction", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-alias-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const canonicalRoot = join(root, "State");
+  const aliasRoot = join(root, "state");
+  const store = new RuntimeStore({ workDir: root, storageRoot: canonicalRoot });
+  let aliasMetadata;
+  try {
+    aliasMetadata = await stat(aliasRoot);
+  } catch {
+    context.skip("filesystem is case-sensitive");
+    return;
+  }
+  const canonicalMetadata = await stat(canonicalRoot);
+  if (aliasMetadata.dev !== canonicalMetadata.dev || aliasMetadata.ino !== canonicalMetadata.ino) {
+    context.skip("paths do not identify the same physical directory");
+    return;
+  }
+
+  store.executeIdempotentDaemonCommand(
+    { commandType: "job.create", idempotencyKey: "alias-request", request: {} },
+    () => {
+      const nested = new RuntimeStore({ workDir: root, storageRoot: aliasRoot });
+      nested.createJob({
+        jobId: "alias-job",
+        type: "test",
+        executionClass: "recoverable",
+        completionPolicy: "detached",
+        description: "physical alias",
+      });
+      return { result: { jobId: "alias-job" }, resourceId: "alias-job" };
+    },
+  );
+
+  assert.equal(store.getJob("alias-job")?.status, "queued");
 });
 
 test("RuntimeStore recovers an EventStore Session marker from the shared workspace coordinator", async (context) => {

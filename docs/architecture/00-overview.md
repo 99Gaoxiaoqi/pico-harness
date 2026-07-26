@@ -64,7 +64,9 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
   Trace、Task 和 storage operation。
 - `<workDir>/.pico/`：项目配置、commands、skills、agents、hooks、MCP 和 plugins。
 - 旧 `runtime.sqlite`、`memory.sqlite`、WAL/SHM 与 legacy task 文件保留原样，但当前版本不读取、迁移或自动删除。
-- 旧 `runtime/` JSON 布局在一次性布局迁移后仍原样保留；Storage Doctor 会把它报告为回退副本，而不会继续把它当作当前真源。
+- `runtime/lock/` 只作为升级 fence 保留，使旧版本 fail closed，避免与新布局形成双写分叉；
+  若存在旧 `runtime/` JSON 账本，它们在一次性迁移后仍保留为回退副本。回滚前必须先停止
+  所有新版本进程，再显式移除该 fence；新旧版本不得并行运行。
 
 ```text
 workspace/
@@ -74,6 +76,7 @@ workspace/
     layout.json
     commit.json
     lock/
+  runtime/lock/ # 兼容 fence，仅用于阻止旧版本继续写
   memory/
     state.json
     lock/

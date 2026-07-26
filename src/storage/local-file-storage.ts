@@ -13,6 +13,7 @@ import {
   openSync,
   readSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -124,7 +125,7 @@ export function withFileLockSync<Result>(
   operation: () => Result,
   options: FileLockOptions = {},
 ): Result {
-  const canonicalLock = resolve(lockDirectory);
+  const canonicalLock = canonicalStoragePathSync(lockDirectory);
   if (heldAsyncLocks.getStore()?.has(canonicalLock)) {
     return assertSynchronousResult(operation(), canonicalLock);
   }
@@ -150,6 +151,64 @@ export function withFileLockSync<Result>(
   }
 }
 
+/**
+ * Runs one final critical section and retains the lock as an unverifiable fence.
+ *
+ * Older storage implementations only understand owner lease records, so the fence makes them
+ * fail closed instead of continuing to write an obsolete layout. The caller must explicitly
+ * remove the fenced lock directory before rolling back to that implementation.
+ */
+export function withPermanentFileLockFenceSync<Result>(
+  lockDirectory: string,
+  ownerId: string,
+  reason: string,
+  operation: () => Result,
+  options: FileLockOptions = {},
+): Result {
+  const canonicalLock = canonicalStoragePathSync(lockDirectory);
+  if (!reason.trim()) throw new Error("Permanent file lock fence requires a reason");
+  if (heldAsyncLocks.getStore()?.has(canonicalLock) || heldSyncLocks.has(canonicalLock)) {
+    throw new LeaseConflictError(`Cannot retain a re-entrant lock as a fence: ${canonicalLock}`);
+  }
+
+  const owner = acquireFileLockSync(canonicalLock, ownerId, options);
+  heldSyncLocks.set(canonicalLock, 1);
+  let fenced = false;
+  try {
+    const result = assertSynchronousResult(operation(), canonicalLock);
+    assertSyncLockOwnership(canonicalLock, owner);
+    writeJsonAtomicSync(join(canonicalLock, "owner.json"), {
+      schemaVersion: 0,
+      type: "permanent-file-lock-fence",
+      reason,
+      createdAt: new Date().toISOString(),
+    });
+    fenced = true;
+    return result;
+  } finally {
+    heldSyncLocks.delete(canonicalLock);
+    if (!fenced) releaseFileLockSync(canonicalLock, owner);
+  }
+}
+
+export function hasPermanentFileLockFenceSync(lockDirectory: string, reason: string): boolean {
+  const ownerPath = join(resolve(lockDirectory), "owner.json");
+  if (!existsSync(ownerPath)) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(ownerPath, "utf8")) as unknown;
+  } catch {
+    return false;
+  }
+  return (
+    isRecord(value) &&
+    value["schemaVersion"] === 0 &&
+    value["type"] === "permanent-file-lock-fence" &&
+    value["reason"] === reason &&
+    typeof value["createdAt"] === "string"
+  );
+}
+
 /** Async counterpart for promise-based stores that need heartbeat-backed ownership. */
 export async function withFileLock<Result>(
   lockDirectory: string,
@@ -157,7 +216,7 @@ export async function withFileLock<Result>(
   operation: () => Promise<Result>,
   options: FileLockOptions = {},
 ): Promise<Result> {
-  const canonicalLock = resolve(lockDirectory);
+  const canonicalLock = canonicalStoragePathSync(lockDirectory);
   if (heldAsyncLocks.getStore()?.has(canonicalLock)) return operation();
   const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
@@ -370,7 +429,7 @@ export function commitFileTransactionSync(
   options: FileTransactionOptions = {},
 ): string {
   const root = resolve(storageRoot);
-  mkdirPrivateSync(root);
+  ensurePrivateStorageRootSync(root);
   recoverFileTransactionSync(root, options);
   validateInputTargetPrefixes(root, input, options.allowedTargetPrefixes);
   const transactionId = options.transactionId ?? randomUUID();
@@ -526,8 +585,9 @@ export function syncDirectorySync(directory: string): void {
  */
 export function assertLocalFileStorageCapabilitiesSync(storageRoot: string): void {
   const root = resolve(storageRoot);
-  if (capabilityCheckedRoots.has(root)) return;
-  mkdirPrivateSync(root);
+  ensurePrivateStorageRootSync(root);
+  const canonicalRoot = realpathSync.native(root);
+  if (capabilityCheckedRoots.has(canonicalRoot)) return;
   const probeRoot = join(root, `.storage-capability-${process.pid}-${randomUUID()}`);
   try {
     mkdirSync(probeRoot, { mode: 0o700 });
@@ -593,7 +653,36 @@ export function assertLocalFileStorageCapabilitiesSync(storageRoot: string): voi
     rmSync(probeRoot, { recursive: true, force: true });
     syncDirectorySync(root);
   }
-  capabilityCheckedRoots.add(root);
+  capabilityCheckedRoots.add(canonicalRoot);
+}
+
+function canonicalStoragePathSync(path: string): string {
+  const resolvedPath = resolve(path);
+  if (existsSync(resolvedPath)) {
+    const metadata = lstatSync(resolvedPath);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(`File lock must be a real directory: ${resolvedPath}`);
+    }
+  }
+  let existing = dirname(resolvedPath);
+  const missingSegments: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missingSegments.unshift(basename(existing));
+    existing = parent;
+  }
+  return join(resolve(realpathSync.native(existing), ...missingSegments), basename(resolvedPath));
+}
+
+function ensurePrivateStorageRootSync(root: string): void {
+  if (existsSync(root)) {
+    const metadata = lstatSync(root);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(`Storage root must be a real directory: ${root}`);
+    }
+  }
+  mkdirPrivateSync(root);
 }
 
 function acquireFileLockSync(

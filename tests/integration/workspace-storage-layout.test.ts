@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   commitFileTransactionSync,
+  FileLockTimeoutError,
   FileStorageIntegrityError,
   withFileLockSync,
 } from "../../src/storage/local-file-storage.js";
@@ -18,7 +19,7 @@ import {
 } from "../../src/storage/workspace-storage-layout.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 
-test("workspace storage copies legacy Runtime JSON without modifying the rollback source", async (t) => {
+test("workspace storage copies legacy Runtime JSON without modifying rollback ledgers", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-migrate-"));
   const workDir = join(root, "project");
   const storageRoot = join(root, "state");
@@ -29,6 +30,14 @@ test("workspace storage copies legacy Runtime JSON without modifying the rollbac
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(workDir, { mode: 0o700 });
   await mkdir(legacySessionRoot, { recursive: true, mode: 0o700 });
+  const tombstonePath = join(storageRoot, "runtime", `.lock.tombstone-${"a".repeat(64)}`);
+  const candidatePath = join(
+    storageRoot,
+    "runtime",
+    ".lock.candidate-12345678-1234-4234-9234-123456789abc",
+  );
+  await mkdir(tombstonePath, { mode: 0o700 });
+  await mkdir(candidatePath, { mode: 0o700 });
   const legacyLedger = `${JSON.stringify({
     type: "session",
     schemaVersion: 1,
@@ -53,6 +62,67 @@ test("workspace storage copies legacy Runtime JSON without modifying the rollbac
     "runtime-directory-v1",
   );
   assert.equal((await stat(join(storageRoot, "runtime"))).isDirectory(), true);
+  assert.equal((await stat(tombstonePath)).isDirectory(), true);
+  assert.equal((await stat(candidatePath)).isDirectory(), true);
+  assert.equal((await stat(join(storageRoot, "runtime", "lock"))).isDirectory(), true);
+  assert.throws(
+    () =>
+      withFileLockSync(join(storageRoot, "runtime", "lock"), "obsolete-runtime-writer", () => {}, {
+        timeoutMs: 20,
+        retryIntervalMs: 2,
+      }),
+    FileLockTimeoutError,
+  );
+});
+
+test("workspace storage rejects a symbolic-link root without touching its target", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symbolic-link setup requires elevated privileges on Windows");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-root-link-"));
+  const realStorageRoot = join(root, "real-state");
+  const aliasStorageRoot = join(root, "alias-state");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new RuntimeEventStore({ storageRoot: realStorageRoot });
+  await store.initializeSession({
+    sessionId: "protected-session",
+    workDir: root,
+  });
+  await symlink(realStorageRoot, aliasStorageRoot, "dir");
+
+  assert.throws(
+    () => new RuntimeEventStore({ storageRoot: aliasStorageRoot }),
+    /Storage root must be a real directory/u,
+  );
+  assert.throws(
+    () => new RuntimeEventStore({ storageRoot: aliasStorageRoot }, { readOnly: true }),
+    /Storage root must be a real directory/u,
+  );
+  assert.equal(
+    (await store.readSessionManifest("protected-session"))?.sessionId,
+    "protected-session",
+  );
+});
+
+test("workspace storage revalidates a cached root before following a replacement symlink", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symbolic-link setup requires elevated privileges on Windows");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-cached-link-"));
+  const storageRoot = join(root, "state");
+  const movedStorageRoot = join(root, "moved-state");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  new RuntimeStore({ workDir: root, storageRoot }).close();
+  await rename(storageRoot, movedStorageRoot);
+  await symlink(movedStorageRoot, storageRoot, "dir");
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot }),
+    /Storage root must be a real directory/u,
+  );
+  assert.equal((await stat(join(movedStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE))).isFile(), true);
 });
 
 test("workspace storage migration fails closed when canonical and legacy Session data conflict", async (t) => {

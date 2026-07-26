@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { join, resolve } from "node:path";
 import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
@@ -281,7 +281,10 @@ export interface RuntimeStoreIndexDiagnostics {
 export function inspectRuntimeStoreIndexForTesting(
   storageRoot: string,
 ): RuntimeStoreIndexDiagnostics | undefined {
-  const index = runtimeStoreIndexes.get(resolve(storageRoot));
+  const resolvedRoot = resolve(storageRoot);
+  const index = runtimeStoreIndexes.get(
+    existsSync(resolvedRoot) ? realpathSync.native(resolvedRoot) : resolvedRoot,
+  );
   if (!index) return undefined;
   return {
     stateRevision: index.stateRevision,
@@ -304,12 +307,13 @@ export class RuntimeStore {
     if (options.storageRoot !== undefined && !options.storageRoot.trim()) {
       throw new Error("RuntimeStore storageRoot must not be empty");
     }
-    this.storageRoot = resolve(
+    const requestedStorageRoot = resolve(
       options.storageRoot ??
         resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.root,
     );
     this.now = options.now ?? Date.now;
-    prepareWorkspaceStorageLayoutSync(this.storageRoot);
+    prepareWorkspaceStorageLayoutSync(requestedStorageRoot);
+    this.storageRoot = realpathSync.native(requestedStorageRoot);
     ensurePrivateWorkspaceStorageDirectorySync(join(this.storageRoot, "control"));
     this.write(() => undefined);
   }

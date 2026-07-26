@@ -84,7 +84,7 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   assert.equal((await stat(sessionDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(logPath)).mode & 0o777, 0o600);
   assert.equal((await stat(join(root, ".storage"))).mode & 0o777, 0o700);
-  await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
+  assert.equal((await stat(join(root, "runtime", "lock"))).mode & 0o777, 0o700);
 
   delete batch["activeBranchId"];
   await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batch)}\n`, { mode: 0o600 });
