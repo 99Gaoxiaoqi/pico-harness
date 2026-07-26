@@ -1013,9 +1013,7 @@ function validateTransactionTargets(
     normalizedPrefixes &&
     normalizedTargets.some(
       (target) =>
-        !normalizedPrefixes.some(
-          (prefix) => target === prefix || target.startsWith(`${prefix}/`),
-        ),
+        !normalizedPrefixes.some((prefix) => target === prefix || target.startsWith(`${prefix}/`)),
     )
   ) {
     throw new FileStorageIntegrityError(
@@ -1031,14 +1029,9 @@ function validateInputTargetPrefixes(
   allowedTargetPrefixes?: readonly string[],
 ): void {
   if (!allowedTargetPrefixes) return;
-  const prefixes = allowedTargetPrefixes.map((prefix) =>
-    normalizedTransactionPrefix(root, prefix),
-  );
+  const prefixes = allowedTargetPrefixes.map((prefix) => normalizedTransactionPrefix(root, prefix));
   for (const entry of [...(input.replacements ?? []), ...(input.appends ?? [])]) {
-    const target = normalizedRelativePath(
-      root,
-      resolveTransactionTarget(root, entry.relativePath),
-    );
+    const target = normalizedRelativePath(root, resolveTransactionTarget(root, entry.relativePath));
     if (!prefixes.some((prefix) => target === prefix || target.startsWith(`${prefix}/`))) {
       throw new FileStorageIntegrityError(
         `File transaction target is outside its namespace: ${entry.relativePath}`,
