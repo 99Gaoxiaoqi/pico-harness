@@ -295,8 +295,7 @@ function supportsThinkingOff(route: ModelRoute): boolean {
 
 async function readRuntimeEvents(sandbox: TestSandbox): Promise<RuntimeEvent[]> {
   const store = new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace
-      .runtime,
+    storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace.root,
   });
   try {
     return await store.readSession(sandbox.sessionId);

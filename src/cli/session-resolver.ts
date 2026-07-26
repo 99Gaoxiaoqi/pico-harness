@@ -289,7 +289,7 @@ export async function removeCliSessionFile(
 
 function createRuntimeEventStore(workDir: string, picoHome?: string): RuntimeEventStore {
   return new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.runtime,
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
 }
 

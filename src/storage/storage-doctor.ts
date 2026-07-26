@@ -32,6 +32,13 @@ import {
   readJsonLinesSync,
   withFileLock,
 } from "./local-file-storage.js";
+import {
+  decodeWorkspaceStorageLayout,
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_COMMIT_FILE,
+  WORKSPACE_STORAGE_LAYOUT_FILE,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
+} from "./workspace-storage-layout.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
@@ -116,6 +123,7 @@ export class StorageDoctor {
   private readonly memoryStorageRoot: string;
   private readonly workspaceId: WorkspaceId;
   private readonly legacyStoragePaths: readonly string[];
+  private readonly legacyJsonRuntimePath: string;
   private readonly legacyTasksPath: string;
   private readonly summariesDir: string;
   private readonly artifactsDir: string;
@@ -128,7 +136,7 @@ export class StorageDoctor {
       ...(this.picoHome ? { picoHome: this.picoHome } : {}),
     });
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
-    this.runtimeStorageRoot = resolve(options.runtimeStorageRoot ?? paths.workspace.runtime);
+    this.runtimeStorageRoot = resolve(options.runtimeStorageRoot ?? paths.workspace.root);
     this.memoryStorageRoot = resolve(paths.workspace.memory);
     this.workspaceId = paths.workspace.id;
     this.legacyStoragePaths = [
@@ -139,6 +147,7 @@ export class StorageDoctor {
         resolve(paths.workspace.memory, `memory.sqlite${suffix}`),
       ),
     ];
+    this.legacyJsonRuntimePath = resolve(paths.workspace.legacyRuntime);
     this.legacyTasksPath = resolve(paths.workspace.tasks);
     this.summariesDir = resolve(options.summariesDir ?? paths.workspace.summaries);
     this.artifactsDir = resolve(options.artifactsDir ?? paths.workspace.artifacts);
@@ -153,7 +162,7 @@ export class StorageDoctor {
     await this.scanLegacyStorage(findings);
     if (await pathExists(this.runtimeStorageRoot)) {
       await withFileLock(
-        join(this.runtimeStorageRoot, "lock"),
+        join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
         `storage-doctor:${process.pid}:runtime`,
         async () => {
           const runtimeAvailable = await this.scanRuntime(findings, scanned);
@@ -347,13 +356,48 @@ export class StorageDoctor {
   ): Promise<boolean> {
     if (!(await pathExists(this.runtimeStorageRoot))) return false;
     scanned.runtime++;
-    await this.scanPrivateModes(this.runtimeStorageRoot, "runtime", findings, new Set(["lock"]));
+    for (const [relativePath, exclusions] of [
+      ["sessions", new Set<string>()],
+      ["control", new Set<string>()],
+      [".storage", new Set(["lock"])],
+    ] as const) {
+      const path = join(this.runtimeStorageRoot, relativePath);
+      if (await pathExists(path)) {
+        await this.scanPrivateModes(path, "runtime", findings, exclusions);
+      }
+    }
 
-    const commitPath = join(this.runtimeStorageRoot, "commit.json");
+    const layoutPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+    if (await pathExists(layoutPath)) {
+      try {
+        decodeWorkspaceStorageLayout(
+          parseJson(await readFile(layoutPath, "utf8"), "Workspace storage layout"),
+          layoutPath,
+        );
+      } catch (error) {
+        findings.push(
+          finding(
+            "runtime_layout_invalid",
+            "critical",
+            "runtime",
+            layoutPath,
+            errorMessage(error),
+            "Preserve the marker and restore it from a verified copy",
+            "authoritative",
+          ),
+        );
+        return false;
+      }
+    }
+
+    const commitPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_COMMIT_FILE);
     if (await pathExists(commitPath)) {
       let inspection;
       try {
-        inspection = inspectFileTransactionMarkerSync(this.runtimeStorageRoot);
+        inspection = inspectFileTransactionMarkerSync(
+          this.runtimeStorageRoot,
+          WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+        );
       } catch (error) {
         findings.push(
           finding(
@@ -561,6 +605,20 @@ export class StorageDoctor {
           path,
           `Legacy SQLite file ${path} exists but is not read by the file storage backend`,
           "Keep it as a manual rollback artifact or remove it only after explicit backup approval",
+          "sidecar",
+        ),
+      );
+    }
+    const legacyRuntimeEntries = await readDirectoryEntries(this.legacyJsonRuntimePath);
+    if (legacyRuntimeEntries.some((entry) => entry.name !== "lock")) {
+      findings.push(
+        finding(
+          "legacy_runtime_json_preserved",
+          "warning",
+          "runtime",
+          this.legacyJsonRuntimePath,
+          "The pre-v2 Runtime JSON directory is preserved and is not used after layout migration",
+          "Keep it as a rollback artifact until the new sessions/control layout is verified",
           "sidecar",
         ),
       );

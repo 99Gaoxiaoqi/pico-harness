@@ -1225,7 +1225,7 @@ export async function startTuiRepl(
   // Plugin/Task/Cron/MCP resources so invalid socket/storage paths have nothing to unwind.
   const cronDaemonBridge = new LocalCronDaemonBridge();
   const runtimeEventStore = new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(opts.workDir).workspace.runtime,
+    storageRoot: resolvePicoPaths(opts.workDir).workspace.root,
   });
   const pluginCapabilityRegistry =
     opts.pluginCapabilityRegistry ?? createBuiltinPluginCapabilityRegistry();

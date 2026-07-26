@@ -16,10 +16,8 @@ import {
   type RuntimeEvent,
 } from "./runtime-event.js";
 import {
-  assertLocalFileStorageCapabilitiesSync,
   FileStorageIntegrityError,
   commitFileTransactionSync,
-  mkdirPrivateSync,
   readFirstJsonLineSync,
   readLastJsonLineSync,
   readJsonFileSync,
@@ -29,6 +27,13 @@ import {
   withFileLockSync,
   writeJsonAtomicSync,
 } from "./local-file-storage.js";
+import {
+  ensurePrivateWorkspaceStorageDirectorySync,
+  prepareWorkspaceStorageLayoutSync,
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_COMMIT_FILE,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
+} from "./workspace-storage-layout.js";
 
 const RUNTIME_SESSION_MANIFEST_VERSION = 1 as const;
 const RUNTIME_SESSION_FILE_VERSION = 1 as const;
@@ -36,7 +41,6 @@ const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
 const SESSION_FILE_NAME = "session.jsonl";
 const MANIFEST_FILE_NAME = "manifest.json";
 const SESSIONS_DIRECTORY_NAME = "sessions";
-const LOCK_DIRECTORY_NAME = "lock";
 export const RUNTIME_EVENT_STORE_MAX_PAGE_SIZE = 250;
 
 export interface RuntimeSessionManifest {
@@ -204,14 +208,13 @@ export class RuntimeEventStore {
     }
     this.storageRoot = resolve(options.storageRoot);
     this.sessionsRoot = join(this.storageRoot, SESSIONS_DIRECTORY_NAME);
-    this.lockDirectory = join(this.storageRoot, LOCK_DIRECTORY_NAME);
+    this.lockDirectory = join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY);
     this.repairManifests = recoveryPolicy.repairManifests ?? true;
     this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? true;
     this.readOnly = recoveryPolicy.readOnly ?? false;
     if (!this.readOnly) {
-      mkdirPrivateSync(this.storageRoot);
-      assertLocalFileStorageCapabilitiesSync(this.storageRoot);
-      mkdirPrivateSync(this.sessionsRoot);
+      prepareWorkspaceStorageLayoutSync(this.storageRoot);
+      ensurePrivateWorkspaceStorageDirectorySync(this.sessionsRoot);
     }
   }
 
@@ -263,7 +266,7 @@ export class RuntimeEventStore {
             },
           ],
         },
-        { transactionId: randomUUID() },
+        { ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS, transactionId: randomUUID() },
       );
       return manifest;
     });
@@ -408,7 +411,10 @@ export class RuntimeEventStore {
       });
 
       if (appends.length > 0) {
-        commitFileTransactionSync(this.storageRoot, { appends, replacements }, { transactionId });
+        commitFileTransactionSync(this.storageRoot, { appends, replacements }, {
+          ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+          transactionId,
+        });
       }
       return results;
     });
@@ -610,7 +616,7 @@ export class RuntimeEventStore {
     try {
       if (this.readOnly) return operation();
       return withFileLockSync(this.lockDirectory, this.ownerId, () => {
-        recoverFileTransactionSync(this.storageRoot);
+        recoverFileTransactionSync(this.storageRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
         return operation();
       });
     } catch (error) {
@@ -863,7 +869,15 @@ export async function readExistingRuntimeSessionProjection(
   options: ReadRuntimeSessionProjectionOptions,
 ): Promise<RuntimeSessionProjectionSnapshot | undefined> {
   if (!options.storageRoot.trim()) throw new Error("RuntimeEventStore requires storageRoot");
-  if (!existsSync(resolve(options.storageRoot))) return undefined;
+  const root = resolve(options.storageRoot);
+  const digest = sessionDigest(options.sessionId);
+  if (
+    !existsSync(join(root, SESSIONS_DIRECTORY_NAME, digest, SESSION_FILE_NAME)) &&
+    !existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE)) &&
+    !existsSync(join(root, "runtime", SESSIONS_DIRECTORY_NAME, digest, SESSION_FILE_NAME))
+  ) {
+    return undefined;
+  }
   return new RuntimeEventStore(options).readSessionProjection(options.sessionId);
 }
 

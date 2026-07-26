@@ -256,7 +256,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   );
   const runtimePaths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const runtimeEvents = await new RuntimeEventStore({
-    storageRoot: runtimePaths.workspace.runtime,
+    storageRoot: runtimePaths.workspace.root,
   }).readSession("memory-runtime-session");
   assert.equal(
     JSON.stringify(runtimeEvents).includes("hidden-recall-policy"),
@@ -409,7 +409,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-terminal-job-gap";
   const runId = "run-before-crash";
   const at = "2026-07-22T00:00:00.000Z";
@@ -548,8 +548,7 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
   repository.close();
 
   const runtimeStore = new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
-      .runtime,
+    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
   });
   const failedTerminal = (await runtimeStore.readSession(failedSessionId)).find(
     (event) => event.kind === "run.terminal" && event.data.status === "completed",
@@ -574,7 +573,7 @@ test("an invalidated in-flight recovery continues with the current generation", 
   const fixture = await createFixture("recovery-generation-handoff");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-recovery-generation-handoff";
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   const appendCompletedRun = async (suffix: string): Promise<void> => {
@@ -643,14 +642,14 @@ test("an invalidated in-flight recovery continues with the current generation", 
   };
 
   const staleRecovery = recoverMemoryReviewJobs({
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     scheduler,
   });
   await firstEnqueueStarted;
   await appendCompletedRun("new");
-  invalidateMemoryReviewRecoverySuccess(paths.workspace.runtime);
+  invalidateMemoryReviewRecoverySuccess(paths.workspace.root);
   const currentRecovery = recoverMemoryReviewJobs({
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     scheduler,
   });
   releaseFirstEnqueue();
@@ -668,7 +667,7 @@ test("manifest pages keep a fixed upper bound and DESC keyset across concurrent 
   const fixture = await createFixture("manifest-keyset");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const originalIds = Array.from(
     { length: 30 },
     (_, index) => `keyset-${String(index).padStart(2, "0")}`,
@@ -715,7 +714,7 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
   const fixture = await createFixture("review-enqueue-batch-yield");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-review-enqueue-batch-yield";
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   const at = "2026-07-22T00:00:00.000Z";
@@ -768,7 +767,7 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
   let enqueued = 0;
   let hostYielded = false;
   await recoverMemoryReviewJobs({
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     scheduler: {
       enqueue() {
         enqueued++;
@@ -785,7 +784,7 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const trustStore = await trustFixture(fixture);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-terminal-job-gap-rewound";
   const at = "2026-07-22T00:00:00.000Z";
   const base = (eventId: string, runId: string, visibility: "internal" | "model") => ({
@@ -878,7 +877,7 @@ test("compact recovery restores an active Run at a rewind target before its term
   const fixture = await createFixture("compact-recovery-preterminal-rewind");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-compact-preterminal-rewind";
   const runId = "memory-compact-replayed-run";
   const base = (eventId: string, visibility: "internal" | "model") => ({
@@ -929,7 +928,7 @@ test("compact recovery restores an active Run at a rewind target before its term
 
   const recovered: string[] = [];
   await recoverMemoryReviewJobs({
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     scheduler: { enqueue: (input) => void recovered.push(input.terminalEventId) },
   });
   assert.deepEqual(recovered, ["compact-terminal-active"]);
@@ -1073,7 +1072,7 @@ test("proposal notification outbox retries across workers without repeating extr
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory,
     proposalSink: async (notice) => {
@@ -1117,7 +1116,7 @@ test("proposal notification outbox retries across workers without repeating extr
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory,
     proposalSink: (notice) => {
@@ -1207,7 +1206,7 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1283,7 +1282,7 @@ test("supported queued and stale-running reviews are not starved by over 500 uns
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     now: () => new Date(Date.parse(running.updatedAt) + MEMORY_REVIEW_LEASE_TTL_MS + 1),
     modelFactory: () => ({
@@ -1325,7 +1324,7 @@ test("two workers racing the same queued review have one model call and one prop
       workDir: fixture.workspace,
       workspaceId: paths.workspace.id,
       memoryStorageRoot: paths.workspace.memory,
-      runtimeStorageRoot: paths.workspace.runtime,
+      runtimeStorageRoot: paths.workspace.root,
       trustStore: new SecondCanonicalizeBarrierTrustStore(
         { userStateDirectory: fixture.picoHome },
         rendezvous,
@@ -1387,7 +1386,7 @@ test("one drain reuses its model lease and a failed extraction does not advance 
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1435,7 +1434,7 @@ test("an in-flight review cannot commit after its rewind job is cancelled", asyn
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => ({
       model: {
@@ -1562,7 +1561,7 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => ({
       model: new ProviderMemoryProposalModel(provider, billingRoute),
@@ -1624,7 +1623,7 @@ test("eco review mode resolves fuzzy evidence without acquiring a model", async 
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
@@ -1675,7 +1674,7 @@ test("exhausted workspace review budget defers fuzzy jobs without consuming an a
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
     memoryStorageRoot: paths.workspace.memory,
-    runtimeStorageRoot: paths.workspace.runtime,
+    runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
       factoryCalls++;
