@@ -34,7 +34,7 @@ import {
 } from "./local-file-storage.js";
 import {
   decodeWorkspaceStorageLayout,
-  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
   WORKSPACE_STORAGE_LAYOUT_FILE,
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
@@ -81,6 +81,7 @@ export interface StorageDoctorOptions {
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   readonly picoHome?: string;
   readonly fileHistoryDir?: string;
+  /** Canonical workspace state root; retained name preserves the diagnostic API. */
   readonly runtimeStorageRoot?: string;
   readonly summariesDir?: string;
   readonly artifactsDir?: string;
@@ -396,7 +397,7 @@ export class StorageDoctor {
       try {
         inspection = inspectFileTransactionMarkerSync(
           this.runtimeStorageRoot,
-          WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+          WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
         );
       } catch (error) {
         findings.push(

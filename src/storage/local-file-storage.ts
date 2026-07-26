@@ -372,6 +372,7 @@ export function commitFileTransactionSync(
   const root = resolve(storageRoot);
   mkdirPrivateSync(root);
   recoverFileTransactionSync(root, options);
+  validateInputTargetPrefixes(root, input, options.allowedTargetPrefixes);
   const transactionId = options.transactionId ?? randomUUID();
   const transaction = prepareTransaction(root, transactionId, input);
   validateTransactionTargets(root, transaction, options.allowedTargetPrefixes);
@@ -1024,6 +1025,28 @@ function validateTransactionTargets(
   for (const target of targets) assertSafeTransactionTarget(root, target, false);
 }
 
+function validateInputTargetPrefixes(
+  root: string,
+  input: FileTransactionInput,
+  allowedTargetPrefixes?: readonly string[],
+): void {
+  if (!allowedTargetPrefixes) return;
+  const prefixes = allowedTargetPrefixes.map((prefix) =>
+    normalizedTransactionPrefix(root, prefix),
+  );
+  for (const entry of [...(input.replacements ?? []), ...(input.appends ?? [])]) {
+    const target = normalizedRelativePath(
+      root,
+      resolveTransactionTarget(root, entry.relativePath),
+    );
+    if (!prefixes.some((prefix) => target === prefix || target.startsWith(`${prefix}/`))) {
+      throw new FileStorageIntegrityError(
+        `File transaction target is outside its namespace: ${entry.relativePath}`,
+      );
+    }
+  }
+}
+
 function normalizedTransactionPrefix(root: string, prefix: string): string {
   if (!prefix || isAbsolute(prefix)) {
     throw new Error(`Transaction target prefix must be relative: ${prefix}`);
@@ -1062,7 +1085,12 @@ function isSha256(value: unknown): value is string {
 }
 
 function transactionCommitPath(root: string, fileName = "commit.json"): string {
-  if (!fileName || isAbsolute(fileName)) {
+  const segments = fileName.split(/[\\/]+/u);
+  if (
+    !fileName ||
+    isAbsolute(fileName) ||
+    segments.some((segment) => !segment || segment === "." || segment === "..")
+  ) {
     throw new Error(`Invalid transaction commit file name: ${fileName}`);
   }
   const path = resolve(root, fileName);

@@ -6,7 +6,7 @@ import {
   readdirSync,
   type Dirent,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   assertLocalFileStorageCapabilitiesSync,
   assertPrivateDataFileSync,
@@ -35,9 +35,12 @@ export const WORKSPACE_STORAGE_LAYOUT_FILE = ".storage/layout.json";
 export const WORKSPACE_STORAGE_LOCK_DIRECTORY = ".storage/lock";
 export const WORKSPACE_RUNTIME_TRANSACTION_OPTIONS = Object.freeze({
   commitFileName: WORKSPACE_STORAGE_COMMIT_FILE,
+  allowedTargetPrefixes: Object.freeze(["sessions", "control"]),
+}) satisfies Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName">;
+export const WORKSPACE_LAYOUT_TRANSACTION_OPTIONS = Object.freeze({
+  commitFileName: WORKSPACE_STORAGE_COMMIT_FILE,
   allowedTargetPrefixes: Object.freeze([
-    "sessions",
-    "control",
+    ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS.allowedTargetPrefixes,
     WORKSPACE_STORAGE_LAYOUT_FILE,
   ]),
 }) satisfies Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName">;
@@ -76,7 +79,7 @@ export function prepareWorkspaceStorageLayoutSync(
     join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
     `workspace-storage-layout:${process.pid}:${randomUUID()}`,
     () => {
-      recoverFileTransactionSync(root, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
+      recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
       if (existsSync(layoutPath)) {
         decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath);
@@ -150,7 +153,7 @@ function publishLayout(
         },
       ],
     },
-    WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+    WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   );
 }
 
@@ -213,6 +216,7 @@ function copyLegacyFileIfPresent(
   assertPrivateDataFileSync(sourcePath);
   const content = readFileSync(sourcePath);
   const targetPath = join(workspaceRoot, targetRelativePath);
+  assertSafeTargetParentChain(workspaceRoot, targetPath);
   if (existsSync(targetPath)) {
     assertPrivateDataFileSync(targetPath);
     if (!readFileSync(targetPath).equals(content)) {
@@ -226,6 +230,19 @@ function copyLegacyFileIfPresent(
     relativePath: targetRelativePath,
     content,
   });
+}
+
+function assertSafeTargetParentChain(workspaceRoot: string, targetPath: string): void {
+  const parentRelative = relative(workspaceRoot, dirname(targetPath));
+  if (parentRelative.startsWith("..") || isAbsolute(parentRelative)) {
+    throw new FileStorageIntegrityError(`Migration target escapes workspace: ${targetPath}`);
+  }
+  let current = workspaceRoot;
+  for (const segment of parentRelative.split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    if (!existsSync(current)) return;
+    assertRealDirectory(current, "Workspace storage target parent");
+  }
 }
 
 function assertKnownEntries(
