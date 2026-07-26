@@ -5,15 +5,19 @@ import { join, resolve } from "node:path";
 import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
 import { parseBackgroundYoloPolicySnapshot } from "../safety/background-yolo-policy-schema.js";
 import {
-  assertLocalFileStorageCapabilitiesSync,
   assertPrivateDataFileSync,
   commitFileTransactionSync,
-  mkdirPrivateSync,
   readJsonFileSync,
   readJsonLinesSync,
   recoverFileTransactionSync,
   withFileLockSync,
 } from "../storage/local-file-storage.js";
+import {
+  ensurePrivateWorkspaceStorageDirectorySync,
+  prepareWorkspaceStorageLayoutSync,
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
+} from "../storage/workspace-storage-layout.js";
 import { LeaseConflictError } from "../storage/owner-lease.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import {
@@ -60,7 +64,6 @@ const DAEMON_RUN_RECOVERY_EVENT_PREFIX = "daemon-run-recovery:";
 const STATE_FILE = "control/state.json";
 const DAEMON_EVENTS_FILE = "control/daemon-events.jsonl";
 const USAGE_LEDGER_FILE = "control/usage-ledger.jsonl";
-const COMMIT_FILE = "commit.json";
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_RETRY_MS = 10;
 const lockSleepArray = new Int32Array(new SharedArrayBuffer(4));
@@ -302,12 +305,11 @@ export class RuntimeStore {
     }
     this.storageRoot = resolve(
       options.storageRoot ??
-        resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.runtime,
+        resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.root,
     );
     this.now = options.now ?? Date.now;
-    mkdirPrivateSync(this.storageRoot);
-    assertLocalFileStorageCapabilitiesSync(this.storageRoot);
-    mkdirPrivateSync(join(this.storageRoot, "control"));
+    prepareWorkspaceStorageLayoutSync(this.storageRoot);
+    ensurePrivateWorkspaceStorageDirectorySync(join(this.storageRoot, "control"));
     this.write(() => undefined);
   }
 
@@ -1675,7 +1677,7 @@ export class RuntimeStore {
     const active = activeTransactions.get(this.storageRoot);
     if (active) return operation(active);
     return this.withRuntimeLock(() => {
-      recoverFileTransactionSync(this.storageRoot, { commitFileName: COMMIT_FILE });
+      recoverFileTransactionSync(this.storageRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
       const state = this.loadState();
       this.refreshExistingStorageIndex(state);
       return operation(createRuntimeTransaction(state));
@@ -1696,7 +1698,7 @@ export class RuntimeStore {
       }
     }
     return this.withRuntimeLock(() => {
-      recoverFileTransactionSync(this.storageRoot, { commitFileName: COMMIT_FILE });
+      recoverFileTransactionSync(this.storageRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
       const stateExists = existsSync(join(this.storageRoot, STATE_FILE));
       const state = this.loadState();
       this.refreshExistingStorageIndex(state);
@@ -1743,7 +1745,7 @@ export class RuntimeStore {
             ],
             appends,
           },
-          { commitFileName: COMMIT_FILE, transactionId },
+          { ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS, transactionId },
         );
         this.updateStorageIndexAfterCommit(tx, transactionId);
         return result;
@@ -1761,7 +1763,7 @@ export class RuntimeStore {
     for (;;) {
       try {
         return withFileLockSync(
-          join(this.storageRoot, "lock"),
+          join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
           `runtime:${process.pid}`,
           operation,
           { timeoutMs: Math.max(0, deadline - Date.now()) },

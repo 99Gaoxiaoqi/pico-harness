@@ -381,7 +381,7 @@ export async function executeAgentRuntime(
                     debounceMs: dependencies.memoryReviewDebounceMs,
                   }).enqueue(input);
                 } catch (error) {
-                  invalidateMemoryReviewRecoverySuccess(memoryPaths.workspace.runtime);
+                  invalidateMemoryReviewRecoverySuccess(memoryPaths.workspace.root);
                   throw error;
                 } finally {
                   schedulerRepository.close();
@@ -682,7 +682,7 @@ export async function executeAgentRuntime(
               workDir,
               workspaceId: memoryPaths.workspace.id,
               memoryStorageRoot: memoryPaths.workspace.memory,
-              runtimeStorageRoot: memoryPaths.workspace.runtime,
+              runtimeStorageRoot: memoryPaths.workspace.root,
               trustStore: memoryTrustStore,
               modelFactory: memoryModelFactory,
               ...(dependencies.memoryProposalSink
@@ -693,7 +693,7 @@ export async function executeAgentRuntime(
       // Rebuild jobs lost after a canonical terminal commit, then drain all durable work. Keep
       // this detached from the foreground path: recovery degradation must not delay streaming.
       void recoverMemoryReviewJobs({
-        runtimeStorageRoot: memoryPaths.workspace.runtime,
+        runtimeStorageRoot: memoryPaths.workspace.root,
         scheduler: memoryReviewScheduler,
       })
         .catch((error: unknown) =>
@@ -1160,7 +1160,7 @@ async function acquireRuntimeSession({
   planMode: boolean;
 }): Promise<SessionManagerLease> {
   const runtimeEventStore = new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.runtime,
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {

@@ -40,8 +40,16 @@ export interface PicoHomePaths {
 export interface PicoWorkspacePaths {
   readonly id: WorkspaceId;
   readonly root: string;
-  /** Workspace-private JSON/JSONL Runtime storage root. */
-  readonly runtime: string;
+  /** Canonical Session RuntimeEvent ledgers and their rebuildable projections. */
+  readonly sessions: string;
+  /** Jobs, attempts, leases, Cron/daemon state, and usage ledgers. */
+  readonly control: string;
+  /** Shared file-transaction coordinator for Session and control storage. */
+  readonly storage: string;
+  readonly storageCommit: string;
+  readonly storageLock: string;
+  /** Preserved pre-v2 JSON layout. Current stores only read it during one-time layout migration. */
+  readonly legacyRuntime: string;
   readonly memory: string;
   /** Workspace-private structured long-term memory authority. */
   readonly memoryState: string;
@@ -141,7 +149,12 @@ export function resolvePicoPaths(
     workspace: {
       id: workspaceId,
       root: workspaceRoot,
-      runtime: join(workspaceRoot, "runtime"),
+      sessions: join(workspaceRoot, "sessions"),
+      control: join(workspaceRoot, "control"),
+      storage: join(workspaceRoot, ".storage"),
+      storageCommit: join(workspaceRoot, ".storage", "commit.json"),
+      storageLock: join(workspaceRoot, ".storage", "lock"),
+      legacyRuntime: join(workspaceRoot, "runtime"),
       memory: join(workspaceRoot, "memory"),
       memoryState: join(workspaceRoot, "memory", "state.json"),
       summaries: join(workspaceRoot, "memory", "summaries"),

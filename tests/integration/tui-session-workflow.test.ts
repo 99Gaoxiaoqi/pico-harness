@@ -111,7 +111,7 @@ async function createFixture(name: string): Promise<{
   const picoHome = join(root, "pico-home");
   await mkdir(workspace, { recursive: true });
   const store = new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.runtime,
+    storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
   });
   return {
     root,

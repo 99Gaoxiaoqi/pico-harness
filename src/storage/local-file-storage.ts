@@ -80,6 +80,11 @@ export type FileTransactionStage = "commit-published" | "targets-applied" | "com
 
 export interface FileTransactionOptions {
   readonly commitFileName?: string;
+  /**
+   * Optional transaction namespace boundary, relative to storageRoot. Recovery validates the
+   * persisted marker against the same prefixes before applying any target.
+   */
+  readonly allowedTargetPrefixes?: readonly string[];
   readonly transactionId?: string;
   readonly onStage?: (stage: FileTransactionStage, transactionId: string) => void;
 }
@@ -369,13 +374,14 @@ export function commitFileTransactionSync(
   recoverFileTransactionSync(root, options);
   const transactionId = options.transactionId ?? randomUUID();
   const transaction = prepareTransaction(root, transactionId, input);
+  validateTransactionTargets(root, transaction, options.allowedTargetPrefixes);
   if (transaction.replacements.length === 0 && transaction.appends.length === 0) {
     return transactionId;
   }
   const commitPath = transactionCommitPath(root, options.commitFileName);
   writeJsonAtomicSync(commitPath, transaction);
   options.onStage?.("commit-published", transactionId);
-  applyTransaction(root, transaction);
+  applyTransaction(root, transaction, options.allowedTargetPrefixes);
   options.onStage?.("targets-applied", transactionId);
   unlinkSync(commitPath);
   syncDirectorySync(dirname(commitPath));
@@ -386,13 +392,16 @@ export function commitFileTransactionSync(
 /** Completes a previously published commit. Callers must hold the storage root's lock. */
 export function recoverFileTransactionSync(
   storageRoot: string,
-  options: Pick<FileTransactionOptions, "commitFileName" | "onStage"> = {},
+  options: Pick<
+    FileTransactionOptions,
+    "allowedTargetPrefixes" | "commitFileName" | "onStage"
+  > = {},
 ): string | undefined {
   const root = resolve(storageRoot);
   const commitPath = transactionCommitPath(root, options.commitFileName);
   if (!existsSync(commitPath)) return undefined;
   const transaction = decodePersistedTransaction(readJsonFileSync(commitPath), commitPath);
-  applyTransaction(root, transaction);
+  applyTransaction(root, transaction, options.allowedTargetPrefixes);
   options.onStage?.("targets-applied", transaction.transactionId);
   unlinkSync(commitPath);
   syncDirectorySync(dirname(commitPath));
@@ -406,7 +415,7 @@ export function recoverFileTransactionSync(
  */
 export function validateFileTransactionMarkerSync(
   storageRoot: string,
-  options: Pick<FileTransactionOptions, "commitFileName"> = {},
+  options: Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName"> = {},
 ): string {
   return inspectFileTransactionMarkerSync(storageRoot, options).transactionId;
 }
@@ -419,12 +428,12 @@ export interface FileTransactionInspection {
 /** Validates both marker structure and the recoverability of every current target. */
 export function inspectFileTransactionMarkerSync(
   storageRoot: string,
-  options: Pick<FileTransactionOptions, "commitFileName"> = {},
+  options: Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName"> = {},
 ): FileTransactionInspection {
   const root = resolve(storageRoot);
   const commitPath = transactionCommitPath(root, options.commitFileName);
   const transaction = decodePersistedTransaction(readJsonFileSync(commitPath), commitPath);
-  validateTransactionTargets(root, transaction);
+  validateTransactionTargets(root, transaction, options.allowedTargetPrefixes);
   return inspectTransactionTargets(root, transaction);
 }
 
@@ -845,8 +854,12 @@ function prepareTransaction(
   };
 }
 
-function applyTransaction(root: string, transaction: PersistedFileTransaction): void {
-  validateTransactionTargets(root, transaction);
+function applyTransaction(
+  root: string,
+  transaction: PersistedFileTransaction,
+  allowedTargetPrefixes?: readonly string[],
+): void {
+  validateTransactionTargets(root, transaction, allowedTargetPrefixes);
   // Prove every target is recoverable before mutating any of them. Without this pass, a
   // conflict in a later target could strand an earlier target in a newly partial transaction.
   inspectTransactionTargets(root, transaction);
@@ -978,7 +991,11 @@ function decodePersistedAppend(value: unknown, path: string, index: number): Per
   };
 }
 
-function validateTransactionTargets(root: string, transaction: PersistedFileTransaction): void {
+function validateTransactionTargets(
+  root: string,
+  transaction: PersistedFileTransaction,
+  allowedTargetPrefixes?: readonly string[],
+): void {
   const targets = [...transaction.replacements, ...transaction.appends].map((entry) =>
     resolveTransactionTarget(root, entry.relativePath),
   );
@@ -988,7 +1005,34 @@ function validateTransactionTargets(root: string, transaction: PersistedFileTran
       `File transaction ${transaction.transactionId} mutates one target more than once`,
     );
   }
+  const normalizedPrefixes = allowedTargetPrefixes?.map((prefix) =>
+    normalizedTransactionPrefix(root, prefix),
+  );
+  if (
+    normalizedPrefixes &&
+    normalizedTargets.some(
+      (target) =>
+        !normalizedPrefixes.some(
+          (prefix) => target === prefix || target.startsWith(`${prefix}/`),
+        ),
+    )
+  ) {
+    throw new FileStorageIntegrityError(
+      `File transaction ${transaction.transactionId} targets a path outside its namespace`,
+    );
+  }
   for (const target of targets) assertSafeTransactionTarget(root, target, false);
+}
+
+function normalizedTransactionPrefix(root: string, prefix: string): string {
+  if (!prefix || isAbsolute(prefix)) {
+    throw new Error(`Transaction target prefix must be relative: ${prefix}`);
+  }
+  const target = resolve(root, prefix);
+  if (target === root || !target.startsWith(`${root}${sep}`)) {
+    throw new Error(`Transaction target prefix escapes storage root: ${prefix}`);
+  }
+  return normalizedRelativePath(root, target);
 }
 
 function decodeCanonicalBase64(value: string, path: string): Buffer {
@@ -1018,10 +1062,14 @@ function isSha256(value: unknown): value is string {
 }
 
 function transactionCommitPath(root: string, fileName = "commit.json"): string {
-  if (!fileName || isAbsolute(fileName) || fileName.includes("..") || fileName.includes(sep)) {
+  if (!fileName || isAbsolute(fileName)) {
     throw new Error(`Invalid transaction commit file name: ${fileName}`);
   }
-  return join(root, fileName);
+  const path = resolve(root, fileName);
+  if (path === root || !path.startsWith(`${root}${sep}`)) {
+    throw new Error(`Transaction commit file escapes storage root: ${fileName}`);
+  }
+  return path;
 }
 
 function resolveTransactionTarget(root: string, relativePath: string): string {

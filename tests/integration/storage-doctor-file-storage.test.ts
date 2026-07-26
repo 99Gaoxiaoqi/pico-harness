@@ -14,14 +14,14 @@ test("StorageDoctor reports a stale manifest without mutating it and rebuilds it
   const fixture = await createFixture("manifest");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const manifest = await store.initializeSession({
     sessionId: "doctor-session",
     workDir: fixture.workspace,
     now: () => new Date("2026-07-25T00:00:00.000Z"),
   });
   const manifestPath = join(
-    paths.workspace.runtime,
+    paths.workspace.root,
     "sessions",
     createHash("sha256").update(manifest.sessionId).digest("hex"),
     "manifest.json",
@@ -48,13 +48,13 @@ test("StorageDoctor manifest rebuild refuses to truncate an incomplete canonical
   const fixture = await createFixture("manifest-tail");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const manifest = await store.initializeSession({
     sessionId: "doctor-tail-session",
     workDir: fixture.workspace,
   });
   const logPath = join(
-    paths.workspace.runtime,
+    paths.workspace.root,
     "sessions",
     createHash("sha256").update(manifest.sessionId).digest("hex"),
     "session.jsonl",
@@ -77,11 +77,11 @@ test("StorageDoctor reports pending commits and ignored legacy SQLite without re
   const fixture = await createFixture("pending");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  await mkdir(paths.workspace.runtime, { recursive: true });
+  await mkdir(paths.workspace.root, { recursive: true });
   assert.throws(
     () =>
       commitFileTransactionSync(
-        paths.workspace.runtime,
+        paths.workspace.root,
         {
           replacements: [
             {
@@ -127,7 +127,7 @@ test("StorageDoctor reports pending commits and ignored legacy SQLite without re
     true,
   );
   assert.match(
-    await readFile(join(paths.workspace.runtime, "commit.json"), "utf8"),
+    await readFile(join(paths.workspace.root, "commit.json"), "utf8"),
     /pending-doctor-transaction/u,
   );
 });
@@ -136,7 +136,7 @@ test("StorageDoctor validates commit markers, runtime ledgers, and Memory state"
   const fixture = await createFixture("schemas");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const control = join(paths.workspace.runtime, "control");
+  const control = join(paths.workspace.root, "control");
   await mkdir(control, { recursive: true });
   const state = emptyRuntimeState();
   state.nextRuntimeEventSequence = 3;
@@ -224,8 +224,8 @@ test("StorageDoctor distinguishes a corrupt commit marker without applying it", 
   const fixture = await createFixture("invalid-commit");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  await mkdir(paths.workspace.runtime, { recursive: true });
-  await writeFile(join(paths.workspace.runtime, "commit.json"), "{}\n", { mode: 0o600 });
+  await mkdir(paths.workspace.root, { recursive: true });
+  await writeFile(join(paths.workspace.root, "commit.json"), "{}\n", { mode: 0o600 });
 
   const report = await new StorageDoctor({
     workDir: fixture.workspace,
@@ -235,7 +235,7 @@ test("StorageDoctor distinguishes a corrupt commit marker without applying it", 
     report.findings.some((finding) => finding.code === "runtime_commit_invalid"),
     true,
   );
-  assert.equal(await readFile(join(paths.workspace.runtime, "commit.json"), "utf8"), "{}\n");
+  assert.equal(await readFile(join(paths.workspace.root, "commit.json"), "utf8"), "{}\n");
 });
 
 test("StorageDoctor accepts a control-only runtime and reports exposed data modes", async (context) => {
@@ -244,7 +244,7 @@ test("StorageDoctor accepts a control-only runtime and reports exposed data mode
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   new RuntimeStore({
     workDir: fixture.workspace,
-    storageRoot: paths.workspace.runtime,
+    storageRoot: paths.workspace.root,
   }).close();
 
   const healthy = await new StorageDoctor({
@@ -257,7 +257,7 @@ test("StorageDoctor accepts a control-only runtime and reports exposed data mode
   );
   assert.equal(healthy.scanned.session, 0);
 
-  const statePath = join(paths.workspace.runtime, "control", "state.json");
+  const statePath = join(paths.workspace.root, "control", "state.json");
   if (process.platform !== "win32") await chmod(statePath, 0o644);
   const exposed = await new StorageDoctor({
     workDir: fixture.workspace,
@@ -274,7 +274,7 @@ test("StorageDoctor accepts a control-only runtime and reports exposed data mode
       () =>
         new RuntimeStore({
           workDir: fixture.workspace,
-          storageRoot: paths.workspace.runtime,
+          storageRoot: paths.workspace.root,
         }),
       /regular 0600 file/u,
     );
@@ -285,13 +285,13 @@ test("StorageDoctor fails closed for a complete malformed Session JSONL record",
   const fixture = await createFixture("jsonl");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.runtime });
+  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
   const manifest = await store.initializeSession({
     sessionId: "corrupt-session",
     workDir: fixture.workspace,
   });
   const logPath = join(
-    paths.workspace.runtime,
+    paths.workspace.root,
     "sessions",
     createHash("sha256").update(manifest.sessionId).digest("hex"),
     "session.jsonl",

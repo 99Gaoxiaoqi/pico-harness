@@ -356,7 +356,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
     this.store = new RuntimeEventStore({
-      storageRoot: resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.runtime,
+      storageRoot: resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.root,
     });
   }
 

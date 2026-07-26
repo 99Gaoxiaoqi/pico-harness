@@ -162,7 +162,7 @@ export class SessionForkService {
       options.journal ??
       new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
     this.runtimeStore =
-      options.runtimeStore ?? new RuntimeEventStore({ storageRoot: this.workspacePaths.runtime });
+      options.runtimeStore ?? new RuntimeEventStore({ storageRoot: this.workspacePaths.root });
     this.fileHistoryBaseDir =
       options.fileHistoryBaseDir ??
       (options.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir());
