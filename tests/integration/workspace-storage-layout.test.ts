@@ -7,12 +7,14 @@ import { test } from "node:test";
 import {
   commitFileTransactionSync,
   FileStorageIntegrityError,
+  withFileLockSync,
 } from "../../src/storage/local-file-storage.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import {
   WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
   WORKSPACE_STORAGE_LAYOUT_FILE,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
 } from "../../src/storage/workspace-storage-layout.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 
@@ -102,20 +104,28 @@ test("opening RuntimeEventStore recovers a pending control transaction from the 
 
   assert.throws(
     () =>
-      commitFileTransactionSync(
-        storageRoot,
-        {
-          replacements: [
-            { relativePath: "control/state.json", content: `${JSON.stringify(next, null, 2)}\n` },
-          ],
-        },
-        {
-          ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
-          transactionId: "cross-store-control-recovery",
-          onStage(stage) {
-            if (stage === "commit-published") throw new Error("simulated control crash");
-          },
-        },
+      withFileLockSync(
+        join(storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "cross-store-control-crash",
+        () =>
+          commitFileTransactionSync(
+            storageRoot,
+            {
+              replacements: [
+                {
+                  relativePath: "control/state.json",
+                  content: `${JSON.stringify(next, null, 2)}\n`,
+                },
+              ],
+            },
+            {
+              ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+              transactionId: "cross-store-control-recovery",
+              onStage(stage) {
+                if (stage === "commit-published") throw new Error("simulated control crash");
+              },
+            },
+          ),
       ),
     /simulated control crash/u,
   );
