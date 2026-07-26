@@ -1,11 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  readdirSync,
-  type Dirent,
-} from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, type Dirent } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   assertLocalFileStorageCapabilitiesSync,
@@ -22,11 +16,7 @@ import {
 
 const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 1 as const;
 const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
-const LEGACY_CONTROL_FILES = [
-  "state.json",
-  "daemon-events.jsonl",
-  "usage-ledger.jsonl",
-] as const;
+const LEGACY_CONTROL_FILES = ["state.json", "daemon-events.jsonl", "usage-ledger.jsonl"] as const;
 const LEGACY_SESSION_FILES = ["session.jsonl", "manifest.json"] as const;
 
 export const WORKSPACE_STORAGE_DIRECTORY = ".storage";
@@ -119,8 +109,7 @@ export function decodeWorkspaceStorageLayout(
     value["schemaVersion"] !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
     value["layout"] !== "session-centric-v1" ||
     typeof value["createdAt"] !== "string" ||
-    (value["migratedFrom"] !== undefined &&
-      value["migratedFrom"] !== "runtime-directory-v1")
+    (value["migratedFrom"] !== undefined && value["migratedFrom"] !== "runtime-directory-v1")
   ) {
     throw new FileStorageIntegrityError(`Invalid workspace storage layout marker: ${path}`);
   }
@@ -269,7 +258,9 @@ function assertOrCreatePrivateDirectory(path: string): void {
   }
   assertRealDirectory(path, "Workspace storage coordinator");
   if (process.platform !== "win32" && (lstatSync(path).mode & 0o777) !== 0o700) {
-    throw new FileStorageIntegrityError(`Workspace storage coordinator must use mode 0700: ${path}`);
+    throw new FileStorageIntegrityError(
+      `Workspace storage coordinator must use mode 0700: ${path}`,
+    );
   }
 }
 

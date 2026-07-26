@@ -412,10 +412,14 @@ export class RuntimeEventStore {
       });
 
       if (appends.length > 0) {
-        commitFileTransactionSync(this.storageRoot, { appends, replacements }, {
-          ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
-          transactionId,
-        });
+        commitFileTransactionSync(
+          this.storageRoot,
+          { appends, replacements },
+          {
+            ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+            transactionId,
+          },
+        );
       }
       return results;
     });

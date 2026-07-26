@@ -54,9 +54,7 @@ if (minimumMinor === undefined || nodeMinor < minimumMinor) {
         commitFileTransactionSync(
           probeRoot,
           {
-            replacements: [
-              { relativePath: "control/state.json", content: '{"revision":1}\n' },
-            ],
+            replacements: [{ relativePath: "control/state.json", content: '{"revision":1}\n' }],
           },
           {
             ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
