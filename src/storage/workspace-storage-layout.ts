@@ -98,9 +98,12 @@ export function prepareWorkspaceStorageLayoutSync(
         `workspace-storage-layout-legacy:${process.pid}:${randomUUID()}`,
         () => {
           recoverFileTransactionSync(legacyRoot);
+          const legacyLayoutFound = readDirectoryEntries(legacyRoot).some(
+            (entry) => entry.name !== "lock",
+          );
           const replacements = collectLegacyRuntimeReplacements(root, legacyRoot);
-          publishLayout(root, replacements.length > 0, replacements);
-          return { migratedLegacyRuntime: replacements.length > 0 };
+          publishLayout(root, legacyLayoutFound, replacements);
+          return { migratedLegacyRuntime: legacyLayoutFound };
         },
       );
     },
