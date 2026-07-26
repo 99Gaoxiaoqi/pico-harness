@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -157,6 +157,41 @@ test("transaction is nested, synchronous and commits one snapshot revision", asy
       repository.transaction(async () => undefined),
     MemoryAsyncTransactionError,
   );
+});
+
+test("MemoryRepository shares one draft across case aliases", async (context) => {
+  const fixture = await createFixture();
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const canonicalRoot = join(fixture.root, "Memory");
+  const aliasRoot = join(fixture.root, "memory");
+  const repository = new MemoryRepository({
+    storageRoot: canonicalRoot,
+    workspaceId: fixture.workspaceId,
+  });
+  let aliasMetadata;
+  try {
+    aliasMetadata = await stat(aliasRoot);
+  } catch {
+    context.skip("filesystem is case-sensitive");
+    return;
+  }
+  const canonicalMetadata = await stat(canonicalRoot);
+  if (aliasMetadata.dev !== canonicalMetadata.dev || aliasMetadata.ino !== canonicalMetadata.ino) {
+    context.skip("paths do not identify the same physical directory");
+    return;
+  }
+
+  repository.transaction((outer) => {
+    outer.updateSettings({ expectedVersion: 1, autoCommit: true });
+    const nested = new MemoryRepository({
+      storageRoot: aliasRoot,
+      workspaceId: fixture.workspaceId,
+    });
+    nested.updateSettings({ expectedVersion: 2, injectionEnabled: false });
+  });
+
+  assert.equal(repository.getSettings().autoCommit, true);
+  assert.equal(repository.getSettings().injectionEnabled, false);
 });
 
 test("idempotency replays the marker and rejects another request", async (context) => {

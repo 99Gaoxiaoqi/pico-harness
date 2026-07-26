@@ -1,12 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { WorkspaceId } from "../paths/pico-paths.js";
 import {
   assertLocalFileStorageCapabilitiesSync,
   commitFileTransactionSync,
   FileStorageIntegrityError,
-  mkdirPrivateSync,
   readJsonFileSync,
   recoverFileTransactionSync,
   syncDirectorySync,
@@ -341,7 +340,9 @@ export class MemoryRepository {
     if (!options.storageRoot.trim()) {
       throw new Error("MemoryRepository storageRoot must not be empty");
     }
-    this.storageRoot = resolve(options.storageRoot);
+    const requestedStorageRoot = resolve(options.storageRoot);
+    assertLocalFileStorageCapabilitiesSync(requestedStorageRoot);
+    this.storageRoot = realpathSync.native(requestedStorageRoot);
     this.statePath = join(this.storageRoot, "state.json");
     this.lockPath = join(this.storageRoot, "lock");
     this.workspaceId = options.workspaceId;
@@ -350,8 +351,6 @@ export class MemoryRepository {
       options.busyTimeoutMs ?? 5_000,
       "busyTimeoutMs",
     );
-    mkdirPrivateSync(this.storageRoot);
-    assertLocalFileStorageCapabilitiesSync(this.storageRoot);
     if (!statSync(this.storageRoot).isDirectory()) {
       throw new Error(`Memory storage root is not a directory: ${this.storageRoot}`);
     }
