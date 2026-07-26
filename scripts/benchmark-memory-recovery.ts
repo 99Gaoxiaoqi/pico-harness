@@ -17,7 +17,7 @@ async function runBenchmark(): Promise<void> {
   const runCount = positiveInteger(process.argv[2], 5_000, "runCount");
   const assistantBytes = positiveInteger(process.argv[3], 8_192, "assistantBytes");
   const root = await mkdtemp(join(tmpdir(), "pico-memory-recovery-benchmark-"));
-  const storageRoot = join(root, "runtime");
+  const storageRoot = root;
   const sessionId = "memory-recovery-benchmark";
   const store = new RuntimeEventStore({ storageRoot });
   const assistantBody = "x".repeat(assistantBytes);
