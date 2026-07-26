@@ -6,16 +6,22 @@ import {
   assertPrivateDataFileSync,
   commitFileTransactionSync,
   FileStorageIntegrityError,
+  hasPermanentFileLockFenceSync,
   mkdirPrivateSync,
   readJsonFileSync,
   recoverFileTransactionSync,
   withFileLockSync,
+  withPermanentFileLockFenceSync,
   type FileTransactionOptions,
   type FileTransactionReplacement,
 } from "./local-file-storage.js";
 
 const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 1 as const;
 const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
+const LEGACY_LOCK_TOMBSTONE_PATTERN = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
+const LEGACY_LOCK_CANDIDATE_PATTERN =
+  /^\.lock\.candidate-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+const LEGACY_RUNTIME_FENCE_REASON = "workspace-session-centric-layout-v1";
 const LEGACY_CONTROL_FILES = ["state.json", "daemon-events.jsonl", "usage-ledger.jsonl"] as const;
 const LEGACY_SESSION_FILES = ["session.jsonl", "manifest.json"] as const;
 
@@ -60,7 +66,6 @@ export function prepareWorkspaceStorageLayoutSync(
   workspaceRoot: string,
 ): WorkspaceStorageLayoutPreparation {
   const root = resolve(workspaceRoot);
-  mkdirPrivateSync(root);
   assertLocalFileStorageCapabilitiesSync(root);
   const coordinator = join(root, WORKSPACE_STORAGE_DIRECTORY);
   assertOrCreatePrivateDirectory(coordinator);
@@ -71,29 +76,41 @@ export function prepareWorkspaceStorageLayoutSync(
     () => {
       recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
-      if (existsSync(layoutPath)) {
-        decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath);
-        return { migratedLegacyRuntime: false };
-      }
-
+      const existingLayout = existsSync(layoutPath)
+        ? decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath)
+        : undefined;
       const legacyRoot = join(root, "runtime");
-      if (!existsSync(legacyRoot)) {
-        publishLayout(root, false, []);
+      assertOrCreatePrivateDirectory(legacyRoot);
+      const legacyLock = join(legacyRoot, "lock");
+      if (
+        existingLayout &&
+        hasPermanentFileLockFenceSync(legacyLock, LEGACY_RUNTIME_FENCE_REASON)
+      ) {
         return { migratedLegacyRuntime: false };
       }
-      assertRealDirectory(legacyRoot, "Legacy Runtime storage root");
 
-      return withFileLockSync(
-        join(legacyRoot, "lock"),
+      return withPermanentFileLockFenceSync(
+        legacyLock,
         `workspace-storage-layout-legacy:${process.pid}:${randomUUID()}`,
+        LEGACY_RUNTIME_FENCE_REASON,
         () => {
           recoverFileTransactionSync(legacyRoot);
-          const legacyLayoutFound = readDirectoryEntries(legacyRoot).some(
-            (entry) => entry.name !== "lock",
-          );
+          const legacyLayoutFound = readDirectoryEntries(legacyRoot).some(isLegacyDataEntry);
           const replacements = collectLegacyRuntimeReplacements(root, legacyRoot);
-          publishLayout(root, legacyLayoutFound, replacements);
-          return { migratedLegacyRuntime: legacyLayoutFound };
+          if (
+            !existingLayout ||
+            replacements.length > 0 ||
+            (legacyLayoutFound && existingLayout.migratedFrom === undefined)
+          ) {
+            publishLayout(
+              root,
+              legacyLayoutFound || existingLayout?.migratedFrom !== undefined,
+              replacements,
+            );
+          }
+          return {
+            migratedLegacyRuntime: existingLayout === undefined && legacyLayoutFound,
+          };
         },
       );
     },
@@ -154,7 +171,15 @@ function collectLegacyRuntimeReplacements(
   legacyRoot: string,
 ): FileTransactionReplacement[] {
   const rootEntries = readDirectoryEntries(legacyRoot);
-  assertKnownEntries(rootEntries, new Set(["sessions", "control", "lock"]), legacyRoot);
+  assertKnownEntries(
+    rootEntries,
+    new Set(["sessions", "control", "lock"]),
+    legacyRoot,
+    (entry) =>
+      entry.isDirectory() &&
+      (LEGACY_LOCK_TOMBSTONE_PATTERN.test(entry.name) ||
+        LEGACY_LOCK_CANDIDATE_PATTERN.test(entry.name)),
+  );
   const replacements: FileTransactionReplacement[] = [];
 
   const controlRoot = join(legacyRoot, "control");
@@ -241,14 +266,23 @@ function assertKnownEntries(
   entries: readonly Dirent[],
   allowed: ReadonlySet<string>,
   directory: string,
+  ignored: (entry: Dirent) => boolean = () => false,
 ): void {
   for (const entry of entries) {
-    if (!allowed.has(entry.name)) {
+    if (!allowed.has(entry.name) && !ignored(entry)) {
       throw new FileStorageIntegrityError(
         `Unexpected entry in legacy Runtime storage: ${join(directory, entry.name)}`,
       );
     }
   }
+}
+
+function isLegacyDataEntry(entry: Dirent): boolean {
+  return (
+    entry.name !== "lock" &&
+    !LEGACY_LOCK_TOMBSTONE_PATTERN.test(entry.name) &&
+    !LEGACY_LOCK_CANDIDATE_PATTERN.test(entry.name)
+  );
 }
 
 function assertOrCreatePrivateDirectory(path: string): void {

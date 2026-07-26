@@ -44,6 +44,10 @@ TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配
 这些目录必须位于同一个支持原子 rename、原子 `mkdir` 和文件/目录 `fsync` 的本地文件系统。
 `memory/`、`artifacts/`、`evidence/` 与 `traces/` 仍是独立的同级存储领域。
 
+首次打开工作区时会在旧 `runtime/lock/` 位置保留升级 fence。旧版本会因此拒绝写入，避免
+旧 `runtime/` 与新 `sessions/`、`control/` 静默分叉。若必须回滚，先停止所有新版本进程，
+再显式移除 fence；不要让两个布局版本并行运行。
+
 运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。TUI 在下一轮发送前重新解析配置；Desktop 通过 Runtime 事件刷新，并在窗口重新聚焦时补一次读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
 
 ## 环境变量兼容

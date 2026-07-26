@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -346,6 +357,74 @@ test("StorageDoctor limits Runtime permission scans to sessions, control, and .s
       (finding) => finding.component === "runtime" && unrelatedRoots.includes(finding.path),
     ),
     false,
+  );
+});
+
+test("StorageDoctor does not create a coordinator while scanning an empty workspace", async (context) => {
+  const fixture = await createFixture("empty-read-only");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  await mkdir(paths.workspace.root, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await chmod(paths.workspace.root, 0o700);
+
+  await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  }).scan();
+
+  await assert.rejects(stat(paths.workspace.storage), { code: "ENOENT" });
+});
+
+test("StorageDoctor rejects a coordinator symlink without writing through it", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("symbolic-link setup requires elevated privileges on Windows");
+    return;
+  }
+  const fixture = await createFixture("coordinator-link");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const target = join(fixture.root, "coordinator-target");
+  await mkdir(paths.workspace.root, { recursive: true, mode: 0o700 });
+  await mkdir(target, { mode: 0o700 });
+  await symlink(target, paths.workspace.storage, "dir");
+
+  const report = await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  }).scan();
+
+  assert.equal(
+    report.findings.some(
+      (finding) =>
+        finding.code === "storage_symlink_rejected" && finding.path === paths.workspace.storage,
+    ),
+    true,
+  );
+  assert.deepEqual(await readdir(target), []);
+});
+
+test("StorageDoctor reports an exposed workspace storage root", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("POSIX mode checks do not apply on Windows");
+    return;
+  }
+  const fixture = await createFixture("root-mode");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  await mkdir(paths.workspace.root, { recursive: true, mode: 0o700 });
+  await chmod(paths.workspace.root, 0o755);
+
+  const report = await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  }).scan();
+
+  assert.equal(
+    report.findings.some(
+      (finding) =>
+        finding.code === "storage_permissions_invalid" && finding.path === paths.workspace.root,
+    ),
+    true,
   );
 });
 

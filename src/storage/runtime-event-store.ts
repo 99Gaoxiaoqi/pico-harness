@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -207,16 +215,27 @@ export class RuntimeEventStore {
     if (!options.storageRoot.trim()) {
       throw new Error("RuntimeEventStore requires storageRoot");
     }
-    this.storageRoot = resolve(options.storageRoot);
-    this.sessionsRoot = join(this.storageRoot, SESSIONS_DIRECTORY_NAME);
-    this.lockDirectory = join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY);
+    const requestedStorageRoot = resolve(options.storageRoot);
+    if (existsSync(requestedStorageRoot)) {
+      const metadata = lstatSync(requestedStorageRoot);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new FileStorageIntegrityError(
+          `Storage root must be a real directory: ${requestedStorageRoot}`,
+        );
+      }
+    }
     this.repairManifests = recoveryPolicy.repairManifests ?? true;
     this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? true;
     this.readOnly = recoveryPolicy.readOnly ?? false;
     if (!this.readOnly) {
-      prepareWorkspaceStorageLayoutSync(this.storageRoot);
-      ensurePrivateWorkspaceStorageDirectorySync(this.sessionsRoot);
+      prepareWorkspaceStorageLayoutSync(requestedStorageRoot);
     }
+    this.storageRoot = existsSync(requestedStorageRoot)
+      ? realpathSync.native(requestedStorageRoot)
+      : requestedStorageRoot;
+    this.sessionsRoot = join(this.storageRoot, SESSIONS_DIRECTORY_NAME);
+    this.lockDirectory = join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY);
+    if (!this.readOnly) ensurePrivateWorkspaceStorageDirectorySync(this.sessionsRoot);
   }
 
   async initializeSession(

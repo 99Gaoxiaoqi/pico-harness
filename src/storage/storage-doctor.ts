@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -42,6 +43,9 @@ import {
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
+const LEGACY_LOCK_TOMBSTONE_RE = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
+const LEGACY_LOCK_CANDIDATE_RE =
+  /^\.lock\.candidate-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 
 export const STORAGE_DOCTOR_SEVERITIES = ["info", "warning", "error", "critical"] as const;
 export type StorageDoctorSeverity = (typeof STORAGE_DOCTOR_SEVERITIES)[number];
@@ -161,17 +165,53 @@ export class StorageDoctor {
       STORAGE_DOCTOR_COMPONENTS.map((component) => [component, 0]),
     ) as Record<StorageDoctorComponent, number>;
     await this.scanLegacyStorage(findings);
-    if (await pathExists(this.runtimeStorageRoot)) {
-      await withFileLock(
-        join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
-        `storage-doctor:${process.pid}:runtime`,
-        async () => {
-          const runtimeAvailable = await this.scanRuntime(findings, scanned);
-          if (runtimeAvailable) await this.scanSessions(findings, scanned);
-        },
-      );
+    const runtimeRootMetadata = await lstatIfExists(this.runtimeStorageRoot);
+    if (runtimeRootMetadata) {
+      const scanRuntime = async () => {
+        const runtimeAvailable = await this.scanRuntime(findings, scanned);
+        if (runtimeAvailable) await this.scanSessions(findings, scanned);
+      };
+      if (!isRealDirectory(runtimeRootMetadata)) {
+        findings.push(
+          invalidStorageDirectoryFinding(this.runtimeStorageRoot, "runtime", runtimeRootMetadata),
+        );
+      } else {
+        if (process.platform !== "win32" && (runtimeRootMetadata.mode & 0o777) !== 0o700) {
+          findings.push(
+            finding(
+              "storage_permissions_invalid",
+              "error",
+              "runtime",
+              this.runtimeStorageRoot,
+              `Expected 700, found mode ${(runtimeRootMetadata.mode & 0o777).toString(8)}`,
+              "Restrict the workspace storage root to 0700 before opening this storage",
+              "authoritative",
+            ),
+          );
+        }
+        const coordinatorPath = join(this.runtimeStorageRoot, ".storage");
+        const coordinatorMetadata = await lstatIfExists(coordinatorPath);
+        if (!coordinatorMetadata) {
+          await scanRuntime();
+        } else if (!isRealDirectory(coordinatorMetadata)) {
+          findings.push(
+            invalidStorageDirectoryFinding(coordinatorPath, "runtime", coordinatorMetadata),
+          );
+        } else {
+          await withFileLock(
+            join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+            `storage-doctor:${process.pid}:runtime`,
+            scanRuntime,
+          );
+        }
+      }
     }
-    if (await pathExists(this.memoryStorageRoot)) {
+    const memoryRootMetadata = await lstatIfExists(this.memoryStorageRoot);
+    if (memoryRootMetadata && !isRealDirectory(memoryRootMetadata)) {
+      findings.push(
+        invalidStorageDirectoryFinding(this.memoryStorageRoot, "memory", memoryRootMetadata),
+      );
+    } else if (memoryRootMetadata) {
       await withFileLock(
         join(this.memoryStorageRoot, "lock"),
         `storage-doctor:${process.pid}:memory`,
@@ -611,7 +651,14 @@ export class StorageDoctor {
       );
     }
     const legacyRuntimeEntries = await readDirectoryEntries(this.legacyJsonRuntimePath);
-    if (legacyRuntimeEntries.some((entry) => entry.name !== "lock")) {
+    if (
+      legacyRuntimeEntries.some(
+        (entry) =>
+          entry.name !== "lock" &&
+          !LEGACY_LOCK_TOMBSTONE_RE.test(entry.name) &&
+          !LEGACY_LOCK_CANDIDATE_RE.test(entry.name),
+      )
+    ) {
       findings.push(
         finding(
           "legacy_runtime_json_preserved",
@@ -1049,6 +1096,37 @@ async function pathExists(path: string): Promise<boolean> {
     if (isNodeCode(error, "ENOENT")) return false;
     throw error;
   }
+}
+
+async function lstatIfExists(path: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (isNodeCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+function isRealDirectory(metadata: Stats): boolean {
+  return metadata.isDirectory() && !metadata.isSymbolicLink();
+}
+
+function invalidStorageDirectoryFinding(
+  path: string,
+  component: Extract<StorageDoctorComponent, "runtime" | "memory">,
+  metadata: Stats,
+): StorageDoctorFinding {
+  return finding(
+    metadata.isSymbolicLink() ? "storage_symlink_rejected" : "storage_root_invalid",
+    "critical",
+    component,
+    path,
+    metadata.isSymbolicLink()
+      ? "Storage data must not be reached through a symbolic link"
+      : "Storage root must be a real directory",
+    "Move the data to a private real directory and preserve this path for inspection",
+    "authoritative",
+  );
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
