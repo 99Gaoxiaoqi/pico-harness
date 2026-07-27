@@ -10,7 +10,14 @@ import { Session } from "../../src/engine/session.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import type { RuntimeToolResultRecordedEvent } from "../../src/runtime/runtime-event.js";
-import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "../../src/tools/registry.js";
+import type { ToolCall, ToolDefinition, ToolResult } from "../../src/schema/message.js";
+import { ToolAccesses } from "../../src/tools/tool-access.js";
+import {
+  NO_FILE_SIDE_EFFECTS,
+  type BaseTool,
+  type Registry,
+  type ToolExecutionContext,
+} from "../../src/tools/registry.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
 test("Reporter failure happens after canonical ToolResult commit and keeps Session writable", async () => {
@@ -115,6 +122,267 @@ test("Reporter failure happens after canonical ToolResult commit and keeps Sessi
   }
 });
 
+test("abnormal parallel batch reports settled and synthetic ToolResults once after commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-reporter-batch-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-result-reporter-batch", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const controller = new AbortController();
+  const cancellation = new DOMException("fixture cancellation", "AbortError");
+  const bothStarted = deferred<void>();
+  let startedCount = 0;
+  const markStarted = (): void => {
+    startedCount++;
+    if (startedCount === 2) bothStarted.resolve();
+  };
+  const definitions: ToolDefinition[] = [
+    fixtureDefinition("fast_fixture"),
+    fixtureDefinition("slow_fixture"),
+  ];
+  const registry: Registry = {
+    register() {},
+    use() {},
+    getAvailableTools: () => definitions,
+    isReadOnlyTool: () => false,
+    getFileSideEffects: (call) => ({ kind: "exact", paths: [`${call.name}.fixture`] }),
+    getAccesses: () => ToolAccesses.none(),
+    async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+      markStarted();
+      await bothStarted.promise;
+      if (call.name === "fast_fixture") {
+        return {
+          toolCallId: call.id,
+          output: "fast actual output",
+          isError: false,
+        };
+      }
+      await waitForAbort(context?.signal);
+      assert.fail("slow fixture must be cancelled");
+    },
+  };
+  const provider: LLMProvider = {
+    async generate() {
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "call:fast", name: "fast_fixture", arguments: "{}" },
+          { id: "call:slow", name: "slow_fixture", arguments: "{}" },
+        ],
+      };
+    },
+  };
+  const reported: Array<{
+    toolName: string;
+    result: string;
+    isError: boolean;
+    providerCallId?: string;
+  }> = [];
+  const reporter = new (class extends SilentReporter {
+    override onToolResult(
+      toolName = "",
+      result = "",
+      isError = false,
+      providerCallId?: string,
+    ): void {
+      reported.push({ toolName, result, isError, providerCallId });
+      if (toolName === "fast_fixture") {
+        throw new Error("fixture Reporter failure after recording");
+      }
+    }
+  })();
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run both fixtures." });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      reporter,
+      maxTurns: 2,
+    });
+
+    const runPromise = engine.run(session, undefined, undefined, controller.signal);
+    await bothStarted.promise;
+    controller.abort(cancellation);
+    await assert.rejects(runPromise, (error: unknown) => error === cancellation);
+
+    assert.equal(reported.length, 2);
+    assert.deepEqual(
+      reported.map(({ toolName, isError, providerCallId }) => ({
+        toolName,
+        isError,
+        providerCallId,
+      })),
+      [
+        {
+          toolName: "fast_fixture",
+          isError: false,
+          providerCallId: "call:fast",
+        },
+        {
+          toolName: "slow_fixture",
+          isError: true,
+          providerCallId: "call:slow",
+        },
+      ],
+    );
+    assert.equal(reported[0]?.result, "fast actual output");
+    assert.match(reported[1]?.result ?? "", /^工具执行已取消:/u);
+
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    const recorded = events.filter(
+      (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
+    );
+    assert.equal(recorded.length, 2);
+    assert.deepEqual(
+      recorded.map((event) => ({
+        toolCallId: event.refs.toolCallId,
+        status: event.data.status,
+        mode: event.data.projection.mode,
+      })),
+      [
+        { toolCallId: "call:fast", status: "succeeded", mode: "full" },
+        { toolCallId: "call:slow", status: "cancelled", mode: "synthetic" },
+      ],
+    );
+    const history = materializeRuntimeHistory(events);
+    assert.deepEqual(
+      history.filter((message) => message.toolCallId).map((message) => message.toolCallId),
+      ["call:fast", "call:slow"],
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("required delegation batch reports its synthetic rejection and actual result once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-reporter-delegation-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-result-reporter-delegation", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const registry = new ToolRegistry({ truncateResults: false });
+  registry.register(outputTool("rejected_fixture", "this output must not be used"));
+  registry.register(
+    outputTool(
+      "delegate_task",
+      JSON.stringify({
+        status: "completed",
+        results: [{ status: "completed", summary: "delegation fixture completed" }],
+      }),
+    ),
+  );
+  let providerCallCount = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      providerCallCount++;
+      if (providerCallCount > 1) {
+        return { role: "assistant", content: "Done." };
+      }
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "call:rejected", name: "rejected_fixture", arguments: "{}" },
+          {
+            id: "call:delegate",
+            name: "delegate_task",
+            arguments: JSON.stringify({
+              goal: "Run the delegation fixture.",
+              mode: "worker",
+              completion_policy: "required",
+            }),
+          },
+        ],
+      };
+    },
+  };
+  const reported: Array<{
+    toolName: string;
+    result: string;
+    isError: boolean;
+    providerCallId?: string;
+  }> = [];
+  const reporter = new (class extends SilentReporter {
+    override onToolResult(
+      toolName = "",
+      result = "",
+      isError = false,
+      providerCallId?: string,
+    ): void {
+      reported.push({ toolName, result, isError, providerCallId });
+    }
+  })();
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run the two fixtures." });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      reporter,
+      maxTurns: 3,
+    });
+
+    await engine.run(session);
+
+    assert.equal(reported.length, 2);
+    assert.deepEqual(
+      reported.map(({ toolName, isError, providerCallId }) => ({
+        toolName,
+        isError,
+        providerCallId,
+      })),
+      [
+        {
+          toolName: "rejected_fixture",
+          isError: true,
+          providerCallId: "call:rejected",
+        },
+        {
+          toolName: "delegate_task",
+          isError: false,
+          providerCallId: "call:delegate",
+        },
+      ],
+    );
+    assert.match(reported[0]?.result ?? "", /^工具执行已拒绝[：:]/u);
+
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    const recorded = events.filter(
+      (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
+    );
+    assert.deepEqual(
+      recorded.map((event) => ({
+        toolCallId: event.refs.toolCallId,
+        status: event.data.status,
+      })),
+      [
+        { toolCallId: "call:rejected", status: "rejected" },
+        { toolCallId: "call:delegate", status: "succeeded" },
+      ],
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function outputTool(name: string, output: string): BaseTool {
   return {
     readOnly: true,
@@ -133,4 +401,37 @@ function outputTool(name: string, output: string): BaseTool {
       return output;
     },
   };
+}
+
+function fixtureDefinition(name: string): ToolDefinition {
+  return {
+    name,
+    description: "Deterministic parallel fixture.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  return {
+    promise: new Promise<T>((res) => {
+      resolve = res;
+    }),
+    resolve: (value) => resolve(value),
+  };
+}
+
+async function waitForAbort(signal?: AbortSignal): Promise<never> {
+  if (signal?.aborted) throw signal.reason;
+  await new Promise<never>((_resolve, reject) => {
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  throw new Error("unreachable");
 }
