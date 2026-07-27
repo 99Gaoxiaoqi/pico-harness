@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
   appendFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -29,7 +30,10 @@ import {
   type RecoverableTaskLaunchReceipt,
   type TaskRunEvent,
 } from "../../src/tasks/task-run-contract.js";
-import { deriveRecoverableTaskRuntimeLaunchIdentity } from "../../src/tasks/recoverable-task.js";
+import {
+  deriveRecoverableTaskLaunchId,
+  deriveRecoverableTaskRuntimeLaunchIdentity,
+} from "../../src/tasks/recoverable-task.js";
 import {
   hashTaskRunInput,
   TASK_RUN_TRANSACTION_OPTIONS,
@@ -119,6 +123,7 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
     ],
   );
 
+  const successorLaunchId = deriveRecoverableTaskLaunchId("task/run:with-path", "attempt-1", 2);
   await store.appendBatch(
     "task/run:with-path",
     [
@@ -133,14 +138,21 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
       ),
       attemptStarted("task/run:with-path", "start-2", "attempt-2", 2, "owner-2", 2, "attempt-1"),
       executionClaimed("task/run:with-path", "execution-2", "attempt-2", "owner-2", 2),
-      launchClaimed("task/run:with-path", "launch-claim-2", "attempt-2", "launch-2", "owner-2", 3),
+      launchClaimed(
+        "task/run:with-path",
+        "launch-claim-2",
+        "attempt-2",
+        successorLaunchId,
+        "owner-2",
+        1,
+      ),
       launchSucceeded(
         "task/run:with-path",
         "launch-succeeded-2",
         "attempt-2",
-        "launch-2",
+        successorLaunchId,
         "owner-2",
-        3,
+        1,
       ),
     ],
     { transactionId: "task-transaction-2" },
@@ -363,6 +375,7 @@ test("TaskRunStore fences launch claims, receipts, and settlement with the execu
   const root = await mkdtemp(join(tmpdir(), "pico-task-run-launch-fence-"));
   const taskRunId = "launch-fenced-task";
   const workspace = join(root, "workspace");
+  const launchId = deriveRecoverableTaskLaunchId(taskRunId, "attempt-1", 2);
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = await initializedStore(root, taskRunId);
   await store.appendBatch(
@@ -376,6 +389,43 @@ test("TaskRunStore fences launch claims, receipts, and settlement with the execu
     { transactionId: "source-attempt" },
   );
   const beforeMismatchedClaim = await readFile(ledgerPath(root, taskRunId), "utf8");
+
+  await assert.rejects(
+    store.appendBatch(
+      taskRunId,
+      [
+        resumeClaimed(
+          taskRunId,
+          "resume-without-launch",
+          "resume-without-launch",
+          "attempt-1",
+          "attempt-2",
+          "owner-b",
+          2,
+        ),
+        attemptStarted(
+          taskRunId,
+          "successor-start-without-launch",
+          "attempt-2",
+          2,
+          "owner-b",
+          2,
+          "attempt-1",
+        ),
+        executionClaimed(
+          taskRunId,
+          "successor-execution-without-launch",
+          "attempt-2",
+          "owner-b",
+          2,
+        ),
+      ],
+      { transactionId: "missing-launch-claim" },
+    ),
+    /pair every resume claim with one successor launch claim/u,
+  );
+  assert.equal(await readFile(ledgerPath(root, taskRunId), "utf8"), beforeMismatchedClaim);
+  assert.equal((await store.readTaskRunProjection(taskRunId))?.revision, 1);
 
   await assert.rejects(
     store.appendBatch(
@@ -400,11 +450,11 @@ test("TaskRunStore fences launch claims, receipts, and settlement with the execu
           "attempt-1",
         ),
         executionClaimed(taskRunId, "successor-execution-owner-b", "attempt-2", "owner-b", 2),
-        launchClaimed(taskRunId, "launch-owner-c", "attempt-2", "launch-fenced", "owner-c", 1),
+        launchClaimed(taskRunId, "launch-owner-c", "attempt-2", launchId, "owner-c", 1),
       ],
       { transactionId: "mismatched-launch-owner" },
     ),
-    /invalid launch lease claim/u,
+    /resume claim without one matching successor execution and launch owner/u,
   );
   assert.equal(await readFile(ledgerPath(root, taskRunId), "utf8"), beforeMismatchedClaim);
   assert.equal((await store.readTaskRunProjection(taskRunId))?.revision, 1);
@@ -431,7 +481,7 @@ test("TaskRunStore fences launch claims, receipts, and settlement with the execu
         AT,
         "2026-07-27T00:00:10.000Z",
       ),
-      launchClaimed(taskRunId, "launch-valid", "attempt-2", "launch-fenced", "owner-b", 1),
+      launchClaimed(taskRunId, "launch-valid", "attempt-2", launchId, "owner-b", 1),
     ],
     { transactionId: "valid-launch-claim" },
   );
@@ -440,7 +490,7 @@ test("TaskRunStore fences launch claims, receipts, and settlement with the execu
     taskRunId,
     "launch-valid-settlement",
     "attempt-2",
-    "launch-fenced",
+    launchId,
     "owner-b",
     1,
   );
@@ -496,7 +546,7 @@ test("TaskRunStore fences launch claims, receipts, and settlement with the execu
       taskRunId,
       "stale-owner-launch-failed",
       "attempt-2",
-      "launch-fenced",
+      launchId,
       "owner-b",
       1,
       "2026-07-27T00:00:10.002Z",
@@ -629,6 +679,62 @@ test("TaskRunStore recovers a published commit and only repairs an incomplete ta
   );
 });
 
+test("TaskRunStore audits a portable cross-root copy without mutating or appending to it", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-cross-root-"));
+  const sourceRoot = join(root, "source");
+  const destinationRoot = join(root, "destination");
+  const taskRunId = "portable-cross-root-task";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const source = await initializedStore(sourceRoot, taskRunId);
+  const destinationIdentity = new TaskRunStore({ storageRoot: destinationRoot }).storageRootId;
+  const digest = taskRunDigest(taskRunId);
+  await cp(join(sourceRoot, "task-runs", digest), join(destinationRoot, "task-runs", digest), {
+    recursive: true,
+  });
+  const copiedLedgerPath = ledgerPath(destinationRoot, taskRunId);
+  const copiedManifestPath = join(destinationRoot, "task-runs", digest, "manifest.json");
+  await writeFile(copiedManifestPath, '{"forged":true}\n', { mode: 0o600 });
+  const beforeLedger = await readFile(copiedLedgerPath);
+  const beforeManifest = await readFile(copiedManifestPath);
+
+  const destination = new TaskRunStore({ storageRoot: destinationRoot });
+  const canonicalCopiedLedgerPath = ledgerPath(destination.storageRoot, taskRunId);
+  const projection = await destination.readTaskRunProjection(taskRunId);
+  assert.equal(projection?.header.storageRootId, source.storageRootId);
+  assert.notEqual(projection?.header.storageRootId, destinationIdentity);
+  const inspection = await destination.inspectTaskRuns();
+  assert.deepEqual(inspection.staleManifestPaths, []);
+  assert.deepEqual(inspection.storageRootMismatches, [
+    {
+      taskRunId,
+      ledgerPath: canonicalCopiedLedgerPath,
+      taskRunStorageRootId: source.storageRootId,
+      currentStorageRootId: destinationIdentity,
+    },
+  ]);
+  await assert.rejects(
+    destination.append(taskRunId, taskParked(taskRunId, "cross-root-park")),
+    /does not match the verified workspace root/u,
+  );
+  await assert.rejects(
+    destination.initializeTaskRun({
+      taskRunId,
+      workDir: join(sourceRoot, "workspace"),
+      adapter: projection!.header.adapter,
+      maxAttempts: projection!.header.maxAttempts,
+    }),
+    /does not match the verified workspace root/u,
+  );
+  assert.deepEqual(await readFile(copiedLedgerPath), beforeLedger);
+  assert.deepEqual(await readFile(copiedManifestPath), beforeManifest);
+
+  await appendFile(copiedLedgerPath, '{"type":"task-event-batch"');
+  const incompleteLedger = await readFile(copiedLedgerPath);
+  await assert.rejects(destination.readTaskRunProjection(taskRunId), /incomplete final record/u);
+  assert.deepEqual(await readFile(copiedLedgerPath), incompleteLedger);
+  assert.deepEqual(await readFile(copiedManifestPath), beforeManifest);
+});
+
 test("TaskRunStore rejects invalid state transitions without publishing a batch", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-run-invalid-transition-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -659,6 +765,14 @@ test("TaskRunStore rejects invalid state transitions without publishing a batch"
       resumeClaimed("invalid-task", "claim-event", "claim", "attempt-1", "attempt-2", "owner-2", 2),
       attemptStarted("invalid-task", "successor-start", "attempt-2", 2, "owner-2", 2, "attempt-1"),
       executionClaimed("invalid-task", "successor-execution", "attempt-2", "owner-2", 2),
+      launchClaimed(
+        "invalid-task",
+        "successor-launch",
+        "attempt-2",
+        deriveRecoverableTaskLaunchId("invalid-task", "attempt-1", 2),
+        "owner-2",
+        1,
+      ),
     ]),
     (error: unknown) =>
       error instanceof TaskRunStoreIntegrityError &&

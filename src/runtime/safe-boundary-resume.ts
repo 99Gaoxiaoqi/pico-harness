@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
+  deriveRecoverableTaskResumeIdentity,
   deriveRecoverableTaskRuntimeLaunchIdentity,
   prepareRecoverableTaskInput,
   validateRecoverableTaskLaunchReceipt,
@@ -522,6 +523,18 @@ export class SafeBoundaryResumeCoordinator {
     for (let retry = 0; retry <= this.maxContentionRetries; retry += 1) {
       const projection = await this.readProjection(input.taskRunId);
       if (!projection) return missingLedgerResult(input.taskRunId);
+      if (
+        projection.terminal ||
+        projection.header.storageRootId !== this.options.environment.storageRootId
+      ) {
+        const evaluation = await this.planner.evaluate(projection);
+        if (isPreparedResume(evaluation)) {
+          throw new Error(
+            `TaskRun ${projection.header.taskRunId} terminal or root-mismatch recovery was unexpectedly resumable`,
+          );
+        }
+        return { status: "parked", plan: evaluation.plan };
+      }
 
       const active = latestAttempt(projection.attempts);
       if (active?.status === "running") {
@@ -676,7 +689,7 @@ export class SafeBoundaryResumeCoordinator {
     const attemptLeaseEpoch =
       Math.max(...projection.attempts.map((attempt) => attempt.execution.leaseEpoch), 0) + 1;
     const launchLeaseEpoch = 1;
-    const identity = resumeIdentity(
+    const identity = deriveRecoverableTaskResumeIdentity(
       projection.header.taskRunId,
       prepared.source.attemptId,
       attemptNumber,
@@ -756,7 +769,7 @@ export class SafeBoundaryResumeCoordinator {
     }
     const atDate = this.now();
     const at = atDate.toISOString();
-    const identity = resumeIdentity(
+    const identity = deriveRecoverableTaskResumeIdentity(
       projection.header.taskRunId,
       attempt.sourceAttemptId,
       attempt.attemptNumber,
@@ -1296,12 +1309,6 @@ function sameParkProjection(
     projection.parkReasons.length === plan.reasons.length &&
     projection.parkReasons.every((reason, index) => reason === plan.reasons[index])
   );
-}
-
-function resumeIdentity(taskRunId: string, sourceAttemptId: string, attemptNumber: number): string {
-  return createHash("sha256")
-    .update(JSON.stringify(["task-resume-v1", taskRunId, sourceAttemptId, attemptNumber]))
-    .digest("hex");
 }
 
 function comparablePath(path: string): string {

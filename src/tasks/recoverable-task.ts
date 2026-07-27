@@ -137,6 +137,31 @@ export function deriveRecoverableTaskRuntimeLaunchIdentity(
   };
 }
 
+export function deriveRecoverableTaskResumeIdentity(
+  taskRunId: string,
+  sourceAttemptId: string,
+  attemptNumber: number,
+): string {
+  if (!taskRunId.trim()) throw new Error("Recoverable task taskRunId must not be empty");
+  if (!sourceAttemptId.trim()) {
+    throw new Error("Recoverable task sourceAttemptId must not be empty");
+  }
+  if (!Number.isSafeInteger(attemptNumber) || attemptNumber <= 0) {
+    throw new Error("Recoverable task attemptNumber must be a positive safe integer");
+  }
+  return createHash("sha256")
+    .update(JSON.stringify(["task-resume-v1", taskRunId, sourceAttemptId, attemptNumber]))
+    .digest("hex");
+}
+
+export function deriveRecoverableTaskLaunchId(
+  taskRunId: string,
+  sourceAttemptId: string,
+  attemptNumber: number,
+): string {
+  return `launch:${deriveRecoverableTaskResumeIdentity(taskRunId, sourceAttemptId, attemptNumber)}`;
+}
+
 export function validateRecoverableTaskLaunchReceipt(value: unknown): RecoverableTaskLaunchReceipt {
   if (
     !isRecord(value) ||
