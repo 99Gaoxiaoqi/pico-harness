@@ -37,6 +37,11 @@ export interface PreparedRequestDiagnostic extends PreparedRequestCapture {
   firstChangedCacheableSegment?: Pick<PreparedRequestSegment, "kind" | "index" | "role">;
 }
 
+interface PreparedRequestSegmentCandidate {
+  segment: PreparedRequestSegment;
+  cacheBreakpoint: boolean;
+}
+
 /**
  * 对 Provider 即将 JSON.stringify 的请求体生成精确指纹。
  *
@@ -127,21 +132,32 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
 
 function cacheSegments(request: PreparedProviderRequest): PreparedRequestSegment[] {
   const body = request.body;
-  const segments: PreparedRequestSegment[] = [];
+  const candidates: PreparedRequestSegmentCandidate[] = [];
   const claimed = new Set<string>(["model"]);
 
   // Anthropic 的真实缓存顺序是 tools → system → messages；其他协议也沿用
   // 这套稳定诊断顺序，避免对象属性插入顺序影响“首个变化段”的解释。
-  appendArraySegments(segments, body["tools"], "tool_schema");
+  appendArraySegments(candidates, body["tools"], "tool_schema");
   claimed.add("tools");
 
   const systemKey = request.provider === "gemini" ? "system_instruction" : "system";
-  appendValueSegments(segments, body[systemKey], "system_prompt");
+  appendValueSegments(candidates, body[systemKey], "system_prompt");
   claimed.add(systemKey);
 
   const messagesKey = request.provider === "gemini" ? "contents" : "messages";
-  appendArraySegments(segments, body[messagesKey], "message", true);
+  appendArraySegments(candidates, body[messagesKey], "message", true);
   claimed.add(messagesKey);
+
+  // Claude 只有最后一个显式 cache_control 断点及其之前的内容属于真实缓存前缀。
+  // OpenAI/Gemini 使用服务端隐式前缀缓存，因此其协议内容均视为潜在可缓存。
+  const cacheBoundary =
+    request.provider === "claude"
+      ? candidates.findLastIndex((candidate) => candidate.cacheBreakpoint)
+      : candidates.length - 1;
+  const segments = candidates.map(({ segment: candidate }, index) => ({
+    ...candidate,
+    cacheable: index <= cacheBoundary,
+  }));
 
   const providerOptions = Object.fromEntries(
     Object.entries(body).filter(([key]) => !claimed.has(key)),
@@ -153,22 +169,22 @@ function cacheSegments(request: PreparedProviderRequest): PreparedRequestSegment
 }
 
 function appendValueSegments(
-  target: PreparedRequestSegment[],
+  target: PreparedRequestSegmentCandidate[],
   value: unknown,
   kind: PreparedRequestSegmentKind,
 ): void {
   if (value === undefined) return;
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) {
-      target.push(segment(kind, index, item, true));
+      target.push(candidate(kind, index, item));
     }
     return;
   }
-  target.push(segment(kind, 0, value, true));
+  target.push(candidate(kind, 0, value));
 }
 
 function appendArraySegments(
-  target: PreparedRequestSegment[],
+  target: PreparedRequestSegmentCandidate[],
   value: unknown,
   kind: PreparedRequestSegmentKind,
   includeRole = false,
@@ -177,8 +193,33 @@ function appendArraySegments(
   for (const [index, item] of value.entries()) {
     const role =
       includeRole && isRecord(item) && typeof item["role"] === "string" ? item["role"] : undefined;
-    target.push(segment(kind, index, item, true, role));
+    target.push(candidate(kind, index, item, role));
   }
+}
+
+function candidate(
+  kind: PreparedRequestSegmentKind,
+  index: number,
+  value: unknown,
+  role?: string,
+): PreparedRequestSegmentCandidate {
+  return {
+    segment: segment(kind, index, value, false, role),
+    cacheBreakpoint: hasCacheBreakpoint(kind, value),
+  };
+}
+
+function hasCacheBreakpoint(kind: PreparedRequestSegmentKind, value: unknown): boolean {
+  if (hasDirectCacheBreakpoint(value)) return true;
+  if (kind !== "message" || !isRecord(value)) return false;
+  const content = value["content"];
+  return Array.isArray(content) && content.some((block) => hasDirectCacheBreakpoint(block));
+}
+
+function hasDirectCacheBreakpoint(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const cacheControl = value["cache_control"];
+  return isRecord(cacheControl) && cacheControl["type"] === "ephemeral";
 }
 
 function segment(

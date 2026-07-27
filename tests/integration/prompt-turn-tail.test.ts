@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { PromptComposer } from "../../src/context/composer.js";
+import { FullCompactor } from "../../src/context/full-compactor.js";
 import { TodoStore } from "../../src/context/todo-store.js";
 import { GoalManager } from "../../src/engine/goal-manager.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { ContextOverflowError } from "../../src/provider/errors.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
@@ -93,6 +95,7 @@ test("dynamic prompt state stays in the current user request copy across runs an
   assert.equal(systems[0], systems[1]);
   assert.equal(systems[1], systems[2]);
   assert.match(systems[0] ?? "", /stable-agent-instruction/u);
+  assert.match(systems[0] ?? "", /长程任务与状态外部化强制规范/u);
   assert.doesNotMatch(systems[0] ?? "", /plan-alpha|plan-beta|structured-todo|goal-alpha/u);
 
   for (const firstRunRequest of requests.slice(0, 2)) {
@@ -184,6 +187,71 @@ test("grace call receives the frozen turn tail without persisting it", async (co
     persistedHistory.some((message) => message.providerData?.["picoKind"] === "grace"),
     "grace control message itself should remain durable",
   );
+});
+
+test("provider overflow compaction retry preserves one frozen turn tail", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-turn-tail-overflow-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const requests: Message[][] = [];
+  const compactionRequests: Message[][] = [];
+  let mainCalls = 0;
+  let layerCalls = 0;
+  const turnTail = "overflow-tail-marker";
+  const provider: LLMProvider = {
+    async generate(messages) {
+      requests.push(structuredClone(messages));
+      mainCalls++;
+      if (mainCalls === 1) throw new ContextOverflowError("fixture context overflow");
+      return { role: "assistant", content: "overflow recovered" };
+    },
+  };
+  const compactionProvider: LLMProvider = {
+    async generate(messages) {
+      compactionRequests.push(structuredClone(messages));
+      return { role: "assistant", content: "fixture compacted history" };
+    },
+  };
+  const engine = new AgentEngine({
+    provider,
+    registry: new ToolRegistry(),
+    workDir: root,
+    reporter: new SilentReporter(),
+    fullCompactor: new FullCompactor({ provider: compactionProvider, maxAttempts: 1 }),
+    promptLayersFactory: async ({ currentUserPrompt }) => {
+      layerCalls++;
+      assert.equal(currentUserPrompt, "overflow-current-user");
+      return { systemPrompt: "stable-overflow-system", turnTail };
+    },
+  });
+  const session = new Session("turn-tail-overflow", root, {
+    persistence: false,
+    picoHome: join(root, "pico-home"),
+  });
+  context.after(() => session.close());
+  const oldContext = "old context ".repeat(180);
+  for (let index = 0; index < 3; index++) {
+    await session.commitMessages(
+      { role: "user", content: `old-user-${index} ${oldContext}` },
+      { role: "assistant", content: `old-assistant-${index} ${oldContext}` },
+    );
+  }
+  await session.commitMessages({ role: "user", content: "overflow-current-user" });
+
+  await engine.run(session);
+
+  assert.equal(layerCalls, 1);
+  assert.equal(mainCalls, 2);
+  assert.equal(compactionRequests.length, 1);
+  assert.doesNotMatch(JSON.stringify(compactionRequests), new RegExp(turnTail, "u"));
+  for (const request of requests) {
+    const currentUser = visibleUsers(request).at(-1);
+    assert.match(currentUser?.content ?? "", /^overflow-current-user/u);
+    assert.match(currentUser?.content ?? "", new RegExp(turnTail, "u"));
+    assert.equal(countOccurrences(currentUser?.content ?? "", "<current-turn-context>"), 1);
+  }
+  const persistedHistory = await session.getModelContext();
+  assert.doesNotMatch(JSON.stringify(persistedHistory), new RegExp(turnTail, "u"));
+  assert.doesNotMatch(JSON.stringify(persistedHistory), /current-turn-context/u);
 });
 
 test("AgentRuntime puts schedule intent in the current turn tail, not durable events", async (context) => {

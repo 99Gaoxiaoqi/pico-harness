@@ -203,13 +203,31 @@ export class CostTracker implements LLMProvider {
       ...(context.jobId ? { jobId: context.jobId } : {}),
     });
     if (!records) return undefined;
-    for (let index = records.length - 1; index >= 0; index -= 1) {
-      const record = records[index];
-      if (!record || record.purpose !== context.purpose || record.model !== model) continue;
+    let latest: { record: ProviderCallRecord; capture: PreparedRequestCapture } | undefined;
+    for (const record of records) {
+      if (
+        record.purpose !== context.purpose ||
+        record.sessionId !== context.sessionId ||
+        record.conversationId !== context.conversationId ||
+        record.goalId !== context.goalId ||
+        record.jobId !== context.jobId ||
+        record.attemptId !== context.attemptId ||
+        record.model !== model
+      ) {
+        continue;
+      }
       const capture = parsePreparedRequestCapture(record.reported?.["requestDiagnostic"]);
-      if (capture?.provider === provider && capture.model === model) return capture;
+      if (capture?.provider !== provider || capture.model !== model) continue;
+      if (
+        !latest ||
+        record.createdAt > latest.record.createdAt ||
+        (record.createdAt === latest.record.createdAt &&
+          record.callId.localeCompare(latest.record.callId) > 0)
+      ) {
+        latest = { record, capture };
+      }
     }
-    return undefined;
+    return latest?.capture;
   }
 
   /** Durable Session calls must already be enclosed by the host's canonical RuntimeRun. */

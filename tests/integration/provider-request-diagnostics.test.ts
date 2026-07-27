@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CostTracker, type ProviderCallLedger } from "../../src/observability/tracker.js";
+import { applyAnthropicCacheControl } from "../../src/provider/anthropic-cache.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
@@ -32,6 +33,7 @@ class PreparedClaudeProvider implements LLMProvider {
         input_schema: tool.inputSchema,
       })),
     };
+    applyAnthropicCacheControl(body);
     options?.onRequestPrepared?.({
       provider: "claude",
       model: this.modelName,
@@ -54,13 +56,18 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
       return { record: stored, inserted: true };
     },
     listProviderCalls() {
-      return records.map((record) => structuredClone(record));
+      return records.toReversed().map((record) => structuredClone(record));
     },
   };
   let call = 0;
   const trackerOptions = {
     ledger,
-    context: { purpose: "main" as const, sessionId: "session-cache-diagnostic" },
+    context: {
+      purpose: "main" as const,
+      sessionId: "session-cache-diagnostic",
+      conversationId: "conversation-a",
+      attemptId: "attempt-a",
+    },
     callId: () => `call-${++call}`,
   };
   const tools: ToolDefinition[] = [
@@ -77,10 +84,20 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
   const secretPrompt = "PRIVATE_PROMPT_MUST_NOT_BE_PERSISTED";
   const firstMessages: Message[] = [
     { role: "system", content: "stable-system" },
+    { role: "user", content: "stable-history" },
+    { role: "assistant", content: "stable-answer" },
     { role: "user", content: secretPrompt },
   ];
-  const secondMessages: Message[] = [
+  const changedLatestMessages: Message[] = [
     { role: "system", content: "stable-system" },
+    { role: "user", content: "stable-history" },
+    { role: "assistant", content: "stable-answer" },
+    { role: "user", content: "changed-current-user" },
+  ];
+  const changedPrefixMessages: Message[] = [
+    { role: "system", content: "stable-system" },
+    { role: "user", content: "changed-history" },
+    { role: "assistant", content: "stable-answer" },
     { role: "user", content: "changed-current-user" },
   ];
 
@@ -95,20 +112,53 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
     { provider: "claude", model: "claude-cache-test" },
     undefined,
     trackerOptions,
-  ).generate(secondMessages, tools);
+  ).generate(changedLatestMessages, tools);
+  await new CostTracker(
+    new PreparedClaudeProvider(64),
+    { provider: "claude", model: "claude-cache-test" },
+    undefined,
+    trackerOptions,
+  ).generate(changedPrefixMessages, tools);
   await new CostTracker(
     new PreparedClaudeProvider(128),
     { provider: "claude", model: "claude-cache-test" },
     undefined,
     trackerOptions,
-  ).generate(secondMessages, tools);
+  ).generate(changedPrefixMessages, tools);
+  await new CostTracker(
+    new PreparedClaudeProvider(128),
+    { provider: "claude", model: "claude-cache-test" },
+    undefined,
+    {
+      ...trackerOptions,
+      context: {
+        ...trackerOptions.context,
+        conversationId: "conversation-b",
+        attemptId: "attempt-b",
+      },
+    },
+  ).generate(changedPrefixMessages, tools);
+  await new CostTracker(
+    new PreparedClaudeProvider(128),
+    { provider: "claude", model: "claude-cache-test" },
+    undefined,
+    trackerOptions,
+  ).generate(changedPrefixMessages, tools);
 
   const first = requestDiagnostic(records[0]);
   assert.equal(first["changeReason"], "first_request");
   assert.equal(String(first["requestHash"]).length, 64);
   assert.ok(Number(first["requestBytes"]) > 0);
 
-  const changedPrefix = requestDiagnostic(records[1]);
+  const changedLatest = requestDiagnostic(records[1]);
+  assert.equal(changedLatest["changeReason"], "request_changed");
+  assert.equal(changedLatest["firstChangedCacheableSegment"], undefined);
+  const latestMessageSegment = (changedLatest["segments"] as Array<Record<string, unknown>>).find(
+    (segment) => segment["kind"] === "message" && segment["index"] === 2,
+  );
+  assert.equal(latestMessageSegment?.["cacheable"], false);
+
+  const changedPrefix = requestDiagnostic(records[2]);
   assert.equal(changedPrefix["changeReason"], "cacheable_prefix_changed");
   assert.deepEqual(changedPrefix["firstChangedCacheableSegment"], {
     kind: "message",
@@ -116,9 +166,11 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
     role: "user",
   });
 
-  const changedOptions = requestDiagnostic(records[2]);
+  const changedOptions = requestDiagnostic(records[3]);
   assert.equal(changedOptions["changeReason"], "request_changed");
   assert.equal(changedOptions["firstChangedCacheableSegment"], undefined);
+  assert.equal(requestDiagnostic(records[4])["changeReason"], "first_request");
+  assert.equal(requestDiagnostic(records[5])["changeReason"], "stable");
   assert.equal(JSON.stringify(records).includes(secretPrompt), false);
 });
 

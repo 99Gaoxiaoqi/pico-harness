@@ -69,9 +69,10 @@ export class PromptComposer {
   /**
    * 分层组装提示词。
    *
-   * systemPrompt 只保留跨轮相对稳定的 core / AGENTS.md / Skills，便于
-   * Provider 复用 system/tools 缓存断点；Plan/Todo/Goal 属于当前运行状态，
-   * 由 AgentEngine 仅追加到本轮可见 user 消息的请求副本。
+   * systemPrompt 只保留跨轮相对稳定的 core / Plan Mode 约束 / AGENTS.md /
+   * Skills，便于 Provider 复用 system/tools 缓存断点；PLAN/TODO 文件内容、
+   * 结构化 Todo 与 Goal 属于当前运行状态，由 AgentEngine 仅追加到本轮可见
+   * user 消息的请求副本。
    */
   async buildLayers(): Promise<PromptLayers> {
     const stableParts: string[] = [];
@@ -94,13 +95,14 @@ export class PromptComposer {
     // 借鉴 Claude Code:重型记忆管理是可选的计划模式,只对复杂长程任务开启,
     // 避免简单问答也官僚地建 PLAN.md/TODO.md 浪费 Token。
     if (this.planMode) {
+      // 行为约束属于稳定且高优先级的 system 层；文件内容属于易变的 turn tail。
+      stableParts.push(PLAN_MODE_SPEC);
       // 动态嗅探磁盘:文件存在则注入当前进度(断点续传),不存在则引导建文件。
-      // buildPlanContext 出错时降级到静态规范,不让 Plan Mode 嗅探阻断主流程。
+      // buildPlanContext 出错时保留静态规范,不让 Plan Mode 嗅探阻断主流程。
       try {
         turnTailParts.push(await this.planStore.buildPlanContext());
       } catch (err) {
-        logger.warn({ err }, "buildPlanContext 失败,降级到静态 PLAN_MODE_SPEC");
-        turnTailParts.push(PLAN_MODE_SPEC);
+        logger.warn({ err }, "buildPlanContext 失败,仅保留静态 PLAN_MODE_SPEC");
       }
     }
 
@@ -166,13 +168,13 @@ ${agentsContent}
 /**
  * Plan Mode 静态强制规范:状态外部化 (Externalized State) 的工作流指令。
  *
- * 现仅作为 buildPlanContext 失败时的降级 fallback。正常运行路径下,
- * PromptComposer 会调用 PlanStore.buildPlanContext() 动态嗅探磁盘:
+ * 该规范始终位于稳定 system 层；PromptComposer 同时调用
+ * PlanStore.buildPlanContext()，把以下易变状态放入当前轮 tail:
  * - 文件存在:注入 PLAN.md / TODO.md 当前内容,引导断点续传
  * - 文件不存在:提示模型用 write_file 创建两份文件
  *
  * 这段静态文本保留了原始的三步强制流程(环境嗅探 → 单步打勾 → 迷失自救),
- * 在动态路径异常时兜底,确保 Plan Mode 永远有可用的提示词。
+ * 动态路径异常时仍保留该 system 规范,确保 Plan Mode 有可用的行为约束。
  *
  * 摒弃内存状态机,引导大模型把宏观规划与微观待办以 PLAN.md / TODO.md 实体化到文件系统。
  * 这段提示词在人看是语言,在大模型眼中是强有力的微代码 (Micro-code):
