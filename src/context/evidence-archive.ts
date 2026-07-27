@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, link, mkdir, open, unlink, type FileHandle } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import type { FileHandle } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { RuntimeEvidenceReference } from "../runtime/runtime-event.js";
 import type { Message } from "../schema/message.js";
 import {
   assertEvidenceBlobRef,
   EvidenceBlobStore,
-  readRegularEvidenceFile,
+  type VerifiedEvidenceDirectory,
+  withVerifiedEvidenceDirectory,
   type EvidenceBlobRef,
 } from "./evidence-blob-store.js";
 
@@ -173,7 +174,12 @@ export class EvidenceArchive {
       archivedAt: this.now().toISOString(),
       content,
     };
-    const created = await writeImmutableJson(this.pathFor(sessionId, contentHash), manifest);
+    const created = await writeImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(sessionId)],
+      `${contentHash}.json`,
+      manifest,
+    );
     if (!created) await this.read(reference);
     return reference;
   }
@@ -201,6 +207,12 @@ export class EvidenceArchive {
     input: ArchiveRuntimeToolResultInput,
   ): Promise<RuntimeEvidenceReference> {
     assertRuntimeToolResultInput(input);
+    await withVerifiedEvidenceDirectory(
+      this.baseDir,
+      [sanitizeFilePart(input.sessionId)],
+      { create: true },
+      async () => undefined,
+    );
     const rawOutput = (await this.blobs.putUtf8(input.rawOutput)).ref;
     const content: RuntimeToolResultEvidenceV2 = {
       kind: "tool-exchange",
@@ -232,7 +244,12 @@ export class EvidenceArchive {
       kind: "tool-exchange",
       content,
     };
-    const created = await writeImmutableJson(this.pathFor(input.sessionId, contentHash), manifest);
+    const created = await writeImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(input.sessionId)],
+      `${contentHash}.json`,
+      manifest,
+    );
     if (!created) await this.readRuntimeToolExchange(reference);
     return reference;
   }
@@ -249,7 +266,6 @@ export class EvidenceArchive {
     reference: RuntimeEvidenceReference,
     options: RuntimeToolOutputPageOptions = {},
   ): Promise<RuntimeToolOutputPage> {
-    const bytes = Buffer.from(await this.readRuntimeToolOutput(reference), "utf8");
     const offsetBytes = pageInteger(
       options.offsetBytes,
       "offsetBytes",
@@ -264,25 +280,23 @@ export class EvidenceArchive {
       1,
       MAX_EVIDENCE_PAGE_LIMIT_BYTES,
     );
-    if (offsetBytes > bytes.byteLength) {
-      throw new EvidenceArchiveIntegrityError(
-        `Evidence offsetBytes ${offsetBytes} exceeds output size ${bytes.byteLength}`,
+    const manifest = await this.readRuntimeToolExchange(reference);
+    if (manifest.schemaVersion === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
+      return buildRuntimeToolOutputPage(
+        Buffer.from(manifest.content.rawOutput, "utf8"),
+        offsetBytes,
+        limitBytes,
       );
     }
-    const start = advanceToCodePointBoundary(bytes, offsetBytes);
-    const requestedEnd = Math.min(bytes.byteLength, start + limitBytes);
-    let end = retreatToCodePointBoundary(bytes, requestedEnd, start);
-    if (end === start && start < bytes.byteLength) {
-      end = advancePastCodePoint(bytes, start);
-    }
+    const page = await this.blobs.readPage(manifest.content.rawOutput, offsetBytes, limitBytes);
     return {
-      content: bytes.subarray(start, end).toString("utf8"),
-      offsetBytes: start,
-      endOffsetBytes: end,
-      totalBytes: bytes.byteLength,
+      content: page.bytes.toString("utf8"),
+      offsetBytes: page.offsetBytes,
+      endOffsetBytes: page.endOffsetBytes,
+      totalBytes: page.totalBytes,
       limitBytes,
-      truncated: end < bytes.byteLength,
-      ...(end < bytes.byteLength ? { nextOffsetBytes: end } : {}),
+      truncated: page.endOffsetBytes < page.totalBytes,
+      ...(page.endOffsetBytes < page.totalBytes ? { nextOffsetBytes: page.endOffsetBytes } : {}),
     };
   }
 
@@ -294,7 +308,9 @@ export class EvidenceArchive {
     if (hasRuntimeEvidenceKind(reference)) return this.readRuntimeToolExchange(reference);
     assertEvidenceArchiveReference(reference);
     const manifest = await readImmutableJson(
-      this.pathFor(reference.sessionId, reference.contentHash),
+      this.baseDir,
+      [sanitizeFilePart(reference.sessionId)],
+      `${reference.contentHash}.json`,
       decodeManifest,
       "Evidence archive manifest",
     );
@@ -316,7 +332,9 @@ export class EvidenceArchive {
   ): Promise<RuntimeToolExchangeEvidenceManifest> {
     assertRuntimeEvidenceReference(reference);
     const manifest = await readImmutableJson(
-      this.pathFor(reference.sessionId, reference.contentHash),
+      this.baseDir,
+      [sanitizeFilePart(reference.sessionId)],
+      `${reference.contentHash}.json`,
       decodeRuntimeToolExchangeManifest,
       "Runtime tool-exchange evidence manifest",
     );
@@ -336,13 +354,6 @@ export class EvidenceArchive {
       );
     }
     return manifest;
-  }
-
-  private pathFor(sessionId: string, contentHash: string): string {
-    if (!isContentHash(contentHash)) {
-      throw new EvidenceArchiveIntegrityError("Evidence archive content hash is invalid");
-    }
-    return join(this.baseDir, sanitizeFilePart(sessionId), `${contentHash}.json`);
   }
 }
 
@@ -703,13 +714,20 @@ function assertRuntimeEvidenceReference(reference: RuntimeEvidenceReference): vo
 }
 
 async function readImmutableJson<T>(
-  path: string,
+  baseDir: string,
+  directoryParts: readonly string[],
+  fileName: string,
   decoder: (value: unknown) => T,
   label: string,
 ): Promise<T> {
   let raw: Buffer;
   try {
-    raw = await readRegularEvidenceFile(path, label);
+    raw = await withVerifiedEvidenceDirectory(
+      baseDir,
+      directoryParts,
+      { create: false },
+      (directory) => directory.readRegularFile(fileName, label),
+    );
   } catch (error) {
     if (isMissing(error)) throw error;
     throw new EvidenceArchiveIntegrityError(`${label} is unreadable: ${errorMessage(error)}`);
@@ -739,79 +757,107 @@ function pageInteger(
   return value;
 }
 
-function advanceToCodePointBoundary(bytes: Buffer, offset: number): number {
-  let boundary = Math.min(offset, bytes.byteLength);
-  while (boundary < bytes.byteLength && isUtf8ContinuationByte(bytes[boundary]!)) boundary++;
-  return boundary;
-}
-
-function retreatToCodePointBoundary(bytes: Buffer, offset: number, minimum: number): number {
-  if (offset >= bytes.byteLength) return bytes.byteLength;
-  let boundary = offset;
-  while (boundary > minimum && isUtf8ContinuationByte(bytes[boundary]!)) boundary--;
-  return boundary;
-}
-
-function advancePastCodePoint(bytes: Buffer, start: number): number {
-  let boundary = Math.min(start + 1, bytes.byteLength);
-  while (boundary < bytes.byteLength && isUtf8ContinuationByte(bytes[boundary]!)) boundary++;
-  return boundary;
-}
-
 function isUtf8ContinuationByte(byte: number): boolean {
   return (byte & 0xc0) === 0x80;
 }
 
-async function writeImmutableJson(path: string, value: unknown): Promise<boolean> {
-  const directory = dirname(path);
-  const temporaryPath = join(
-    directory,
-    `.${basename(path)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`,
-  );
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
+function buildRuntimeToolOutputPage(
+  bytes: Buffer,
+  offsetBytes: number,
+  limitBytes: number,
+): RuntimeToolOutputPage {
+  if (offsetBytes > bytes.byteLength) {
+    throw new EvidenceArchiveIntegrityError(
+      `Evidence offsetBytes ${offsetBytes} exceeds output size ${bytes.byteLength}`,
+    );
+  }
+  if (offsetBytes < bytes.byteLength && isUtf8ContinuationByte(bytes[offsetBytes]!)) {
+    throw new EvidenceArchiveIntegrityError(
+      `Evidence offsetBytes ${offsetBytes} is not a UTF-8 code point boundary`,
+    );
+  }
 
+  let endOffsetBytes = Math.min(bytes.byteLength, offsetBytes + limitBytes);
+  if (endOffsetBytes < bytes.byteLength) {
+    while (endOffsetBytes > offsetBytes && isUtf8ContinuationByte(bytes[endOffsetBytes]!)) {
+      endOffsetBytes--;
+    }
+  }
+  if (endOffsetBytes === offsetBytes && offsetBytes < bytes.byteLength) {
+    throw new EvidenceArchiveIntegrityError(
+      `Evidence limitBytes ${limitBytes} cannot contain the next complete UTF-8 code point`,
+    );
+  }
+  return {
+    content: bytes.subarray(offsetBytes, endOffsetBytes).toString("utf8"),
+    offsetBytes,
+    endOffsetBytes,
+    totalBytes: bytes.byteLength,
+    limitBytes,
+    truncated: endOffsetBytes < bytes.byteLength,
+    ...(endOffsetBytes < bytes.byteLength ? { nextOffsetBytes: endOffsetBytes } : {}),
+  };
+}
+
+async function writeImmutableJson(
+  baseDir: string,
+  directoryParts: readonly string[],
+  fileName: string,
+  value: unknown,
+): Promise<boolean> {
+  return withVerifiedEvidenceDirectory(
+    baseDir,
+    directoryParts,
+    { create: true },
+    async (directory) => writeImmutableJsonInDirectory(directory, fileName, value),
+  );
+}
+
+async function writeImmutableJsonInDirectory(
+  directory: VerifiedEvidenceDirectory,
+  fileName: string,
+  value: unknown,
+): Promise<boolean> {
+  const temporaryName = `.${fileName}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
   let handle: FileHandle | undefined;
   try {
-    handle = await open(temporaryPath, "wx", 0o600);
+    handle = await directory.createExclusiveFile(temporaryName, 0o600);
     await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
     await handle.sync();
-    await handle.close();
-    handle = undefined;
+    const temporaryIdentity = await handle.stat({ bigint: true });
     try {
-      await link(temporaryPath, path);
+      await directory.linkFile(temporaryName, fileName);
     } catch (error) {
       if (isAlreadyExists(error)) return false;
       throw error;
     }
-    await chmod(path, 0o600);
-    await syncDirectory(directory);
+
+    let finalHandle: FileHandle | undefined;
+    try {
+      finalHandle = await directory.openRegularFile(fileName, "Evidence archive manifest");
+      const finalIdentity = await finalHandle.stat({ bigint: true });
+      if (
+        temporaryIdentity.dev !== finalIdentity.dev ||
+        temporaryIdentity.ino !== finalIdentity.ino
+      ) {
+        await directory.unlinkFile(fileName).catch(() => undefined);
+        throw new EvidenceArchiveIntegrityError(
+          "Evidence archive manifest changed while it was published",
+        );
+      }
+    } finally {
+      await finalHandle?.close().catch(() => undefined);
+    }
+    await directory.sync();
     return true;
   } finally {
     await handle?.close().catch(() => undefined);
-    await unlink(temporaryPath).catch(() => undefined);
-  }
-}
-
-async function syncDirectory(directory: string): Promise<void> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(directory, "r");
-    await handle.sync();
-  } catch (error) {
-    if (!isUnsupportedDirectorySync(error)) throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
+    await directory.unlinkFile(temporaryName).catch(() => undefined);
   }
 }
 
 function isAlreadyExists(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "EEXIST";
-}
-
-function isUnsupportedDirectorySync(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code ?? "");
 }
 
 function errorMessage(error: unknown): string {
