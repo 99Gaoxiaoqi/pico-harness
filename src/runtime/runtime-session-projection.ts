@@ -6,6 +6,7 @@
 export {
   projectRuntimeSessionMessages,
   projectRuntimeSessionMessageEntries,
+  projectRuntimeSessionModelHistoryEntries,
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionTranscriptEventEntries,
   projectRuntimeSessionState,
@@ -14,5 +15,6 @@ export {
 export type {
   SequencedRuntimeEvent,
   RuntimeSessionSequencedMessageEntry,
+  RuntimeSessionModelHistoryEntry,
   RuntimeSessionTranscriptEventEntry,
 } from "../engine/session-runtime-projection.js";

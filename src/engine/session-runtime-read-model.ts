@@ -4,6 +4,10 @@ import type {
   RuntimeEvent,
   RuntimeRollingCheckpointData,
 } from "./session-runtime-event.js";
+import {
+  projectRuntimeModelMessage,
+  runtimeEventHasModelHistoryEntry,
+} from "./runtime-model-message.js";
 
 export interface RuntimeHistoryProjectionEntry {
   /** The immutable event that currently contributes this model-visible message. */
@@ -82,8 +86,14 @@ function materializePrefix(
       replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
       continue;
     }
-    if (event.kind === "message.committed" && event.visibility === "model" && !event.partial) {
-      projected.push({ eventId: event.eventId, message: cloneMessage(event.data.message) });
+    if (runtimeEventHasModelHistoryEntry(event)) {
+      const message = projectRuntimeModelMessage(event);
+      if (!message) {
+        throw new RuntimeEventReadModelIntegrityError(
+          `Runtime event ${event.eventId} has no model projection`,
+        );
+      }
+      projected.push({ eventId: event.eventId, message: cloneMessage(message) });
     }
   }
   return projected;

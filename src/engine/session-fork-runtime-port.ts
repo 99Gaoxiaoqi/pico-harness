@@ -1,6 +1,7 @@
 import type { Message } from "../schema/message.js";
 import type { Session } from "./session.js";
 import type { RuntimeEvent } from "./session-runtime-event.js";
+import type { RuntimeModelHistoryEvent } from "./runtime-model-message.js";
 import type { EngineRuntimeCapability } from "./runtime-port.js";
 import type { SessionRuntimeStateWritePatch } from "./session-runtime.js";
 
@@ -51,6 +52,8 @@ export interface SessionForkBootstrapSeed {
   readonly operationId?: string;
   readonly operationCreatedAt?: string;
   readonly messages: readonly Message[];
+  /** v3 seeds retain the canonical fact kind and evidence reference for each message. */
+  readonly historyEntries?: readonly RuntimeModelHistoryEvent[];
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceThroughEventId?: string;
   readonly workDir: string;

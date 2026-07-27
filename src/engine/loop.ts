@@ -66,9 +66,18 @@ import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
-import type { EngineRuntimePort } from "./runtime-port.js";
+import type {
+  EngineRuntimeEvidenceReference,
+  EngineRuntimePort,
+  EngineRuntimeRun,
+  EngineRuntimeToolResultBody,
+  EngineRuntimeToolResultStatus,
+} from "./runtime-port.js";
 import type { HookService } from "../hooks/service.js";
-import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
+import {
+  buildRuntimeToolResultProjection,
+  type ToolObservationProcessor,
+} from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
@@ -168,31 +177,37 @@ function isExploreOnlyRequiredDelegation(call: ToolCall): boolean {
   return call.name === "delegate_task" && isExploreOnlyRequiredDelegationArguments(call.arguments);
 }
 
-function buildSynthesisToolRejection(toolCall: ToolCall): Message {
-  return {
-    role: "user",
-    content: "工具执行已拒绝：explore-only required 委派收口后必须直接基于聚合结果输出纯文本总结。",
-    toolCallId: toolCall.id,
-    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
-  };
+function buildSynthesisToolRejection(toolCall: ToolCall, runtimeRun?: EngineRuntimeRun): Message {
+  return buildRejectedToolResult(
+    toolCall,
+    "工具执行已拒绝：explore-only required 委派收口后必须直接基于聚合结果输出纯文本总结。",
+    "explore-synthesis-rejection",
+    runtimeRun,
+  );
 }
 
-function buildRequiredFirstToolRejection(toolCall: ToolCall): Message {
-  return {
-    role: "user",
-    content: "工具执行已拒绝：用户明确要求首先委派子代理，本轮只允许 required delegate_task。",
-    toolCallId: toolCall.id,
-    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
-  };
+function buildRequiredFirstToolRejection(
+  toolCall: ToolCall,
+  runtimeRun?: EngineRuntimeRun,
+): Message {
+  return buildRejectedToolResult(
+    toolCall,
+    "工具执行已拒绝：用户明确要求首先委派子代理，本轮只允许 required delegate_task。",
+    "required-first-delegation-rejection",
+    runtimeRun,
+  );
 }
 
-function buildDelegationRecoveryToolRejection(toolCall: ToolCall): Message {
-  return {
-    role: "user",
-    content: "工具执行已拒绝：required 委派恢复轮只允许一次缩小范围的 required delegate_task。",
-    toolCallId: toolCall.id,
-    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
-  };
+function buildDelegationRecoveryToolRejection(
+  toolCall: ToolCall,
+  runtimeRun?: EngineRuntimeRun,
+): Message {
+  return buildRejectedToolResult(
+    toolCall,
+    "工具执行已拒绝：required 委派恢复轮只允许一次缩小范围的 required delegate_task。",
+    "required-delegation-recovery-rejection",
+    runtimeRun,
+  );
 }
 
 function latestVisibleUserInput(messages: readonly Message[]): string {
@@ -261,10 +276,15 @@ interface RequiredDelegationAssessment {
 interface ToolExecutionOutcome {
   message: Message;
   reminder?: Message;
+  report: {
+    toolName: string;
+    isError: boolean;
+    providerCallId: string;
+  };
 }
 
 interface ToolProtocolFailure {
-  status: "cancelled" | "failed";
+  status: "cancelled" | "interrupted";
   reason: string;
 }
 
@@ -278,21 +298,106 @@ function toolProtocolFailureFrom(error: unknown, signal?: AbortSignal): ToolProt
   }
   const detail = error instanceof Error ? error.message : String(error);
   return {
-    status: "failed",
+    status: "interrupted",
     reason: `工具批次异常中止: ${truncate(detail, 500)}`,
   };
 }
 
-function buildSyntheticToolObservation(toolCall: ToolCall, failure: ToolProtocolFailure): Message {
-  const prefix = failure.status === "cancelled" ? "工具执行已取消" : "工具执行失败";
-  return {
-    role: "user",
-    content: `${prefix}: ${failure.reason}；该调用未获得可用结果。`,
+function buildSyntheticToolObservation(
+  toolCall: ToolCall,
+  failure: ToolProtocolFailure,
+  runtimeRun?: EngineRuntimeRun,
+): Message {
+  const prefix = failure.status === "cancelled" ? "工具执行已取消" : "工具执行已中断";
+  const content = `${prefix}: ${failure.reason}；该调用未获得可用结果。`;
+  if (!runtimeRun) {
+    return {
+      role: "user",
+      content,
+      toolCallId: toolCall.id,
+      providerData: {
+        [PICO_TOOL_RESULT_ERROR_KEY]: true,
+        picoKind: "synthetic_tool_result",
+        picoToolResultStatus: failure.status,
+      },
+    };
+  }
+  return runtimeRun.registerToolResult({
     toolCallId: toolCall.id,
-    providerData: {
-      [PICO_TOOL_RESULT_ERROR_KEY]: true,
-      picoKind: "synthetic_tool_result",
-      picoToolResultStatus: failure.status,
+    toolName: toolCall.name,
+    status: failure.status,
+    body: inlineRuntimeToolResultBody(content),
+    projection: {
+      version: 1,
+      mode: "synthetic",
+      text: content,
+      strategy: `tool-batch-${failure.status}`,
+      truncated: false,
+    },
+  });
+}
+
+function inlineRuntimeToolResultBody(content: string) {
+  return {
+    storage: "inline" as const,
+    content,
+    sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    sizeBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
+
+function buildRejectedToolResult(
+  toolCall: ToolCall,
+  content: string,
+  strategy: string,
+  runtimeRun?: EngineRuntimeRun,
+): Message {
+  if (!runtimeRun) {
+    return {
+      role: "user",
+      content,
+      toolCallId: toolCall.id,
+      providerData: {
+        [PICO_TOOL_RESULT_ERROR_KEY]: true,
+        picoKind: "synthetic_tool_result",
+        picoToolResultStatus: "rejected",
+      },
+    };
+  }
+  return runtimeRun.registerToolResult({
+    toolCallId: toolCall.id,
+    toolName: toolCall.name,
+    status: "rejected",
+    body: inlineRuntimeToolResultBody(content),
+    projection: {
+      version: 1,
+      mode: "synthetic",
+      text: content,
+      strategy,
+      truncated: false,
+    },
+  });
+}
+
+function buildRejectedToolObservation(
+  toolCall: ToolCall,
+  requiredDelegation: ToolCall,
+  runtimeRun?: EngineRuntimeRun,
+): ToolExecutionOutcome {
+  const content =
+    `工具执行已拒绝：同一模型响应中的 required delegate_task ` +
+    `(${requiredDelegation.id}) 必须独占执行并等待所有子代理收口。`;
+  return {
+    message: buildRejectedToolResult(
+      toolCall,
+      content,
+      "exclusive-delegation-rejection",
+      runtimeRun,
+    ),
+    report: {
+      toolName: toolCall.name,
+      isError: true,
+      providerCallId: toolCall.id,
     },
   };
 }
@@ -336,23 +441,6 @@ function assessRequiredDelegationResult(message: Message): RequiredDelegationAss
   } catch {
     return { usableResults: 0, batchFailed: true };
   }
-}
-
-function buildExclusiveDelegationRejection(
-  toolCall: ToolCall,
-  requiredDelegation: ToolCall,
-): { message: Message } {
-  const content =
-    `工具执行已拒绝：同一模型响应中的 required delegate_task ` +
-    `(${requiredDelegation.id}) 必须独占执行并等待所有子代理收口。`;
-  return {
-    message: {
-      role: "user",
-      content,
-      toolCallId: toolCall.id,
-      providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
-    },
-  };
 }
 
 function fileSideEffectKind(registry: Registry, call: ToolCall): ToolFileSideEffects["kind"] {
@@ -1480,9 +1568,10 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
+            const runtimeRun = this.runtimePort?.currentRun();
             await session.commitMessages(
               rejectedResponse,
-              ...toolCalls.map(buildSynthesisToolRejection),
+              ...toolCalls.map((toolCall) => buildSynthesisToolRejection(toolCall, runtimeRun)),
             );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
 
@@ -1537,9 +1626,12 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
+            const runtimeRun = this.runtimePort?.currentRun();
             await session.commitMessages(
               rejectedResponse,
-              ...toolCalls.map(buildDelegationRecoveryToolRejection),
+              ...toolCalls.map((toolCall) =>
+                buildDelegationRecoveryToolRejection(toolCall, runtimeRun),
+              ),
             );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
             const failedResponse: Message = {
@@ -1564,9 +1656,10 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
+            const runtimeRun = this.runtimePort?.currentRun();
             await session.commitMessages(
               rejectedResponse,
-              ...toolCalls.map(buildRequiredFirstToolRejection),
+              ...toolCalls.map((toolCall) => buildRequiredFirstToolRejection(toolCall, runtimeRun)),
             );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
             requiredFirstDelegationAttempts++;
@@ -1603,6 +1696,7 @@ export class AgentEngine implements AgentRunner {
             toolCalls.length,
           );
           const scheduled: Array<Promise<ToolExecutionOutcome>> = [];
+          const completedToolReportIndexes: number[] = [];
           let toolProtocolClosed = toolCalls.length === 0;
           const closeToolProtocol = async (failure: ToolProtocolFailure): Promise<void> => {
             if (toolProtocolClosed) return;
@@ -1610,6 +1704,7 @@ export class AgentEngine implements AgentRunner {
               session,
               toolCalls,
               settledResults,
+              completedToolReportIndexes,
               failure,
               reporter,
             );
@@ -1765,9 +1860,15 @@ export class AgentEngine implements AgentRunner {
                 signal,
               });
               for (const [index, tc] of toolCalls.entries()) {
-                const execution =
+                const execution: Promise<ToolExecutionOutcome> =
                   requiredDelegation && index !== requiredDelegationIndex
-                    ? Promise.resolve(buildExclusiveDelegationRejection(tc, requiredDelegation))
+                    ? Promise.resolve(
+                        buildRejectedToolObservation(
+                          tc,
+                          requiredDelegation,
+                          this.runtimePort?.currentRun(),
+                        ),
+                      )
                     : scheduler.add({
                         accesses: getAccesses
                           ? getAccesses.call(this.registry, tc)
@@ -1786,6 +1887,7 @@ export class AgentEngine implements AgentRunner {
                 scheduled.push(
                   execution.then((result) => {
                     settledResults[index] = result;
+                    completedToolReportIndexes.push(index);
                     return result;
                   }),
                 );
@@ -1831,6 +1933,19 @@ export class AgentEngine implements AgentRunner {
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
           toolProtocolClosed = true;
+          // Reporter 是派生展示层。必须等 canonical ToolResult durable 且 Session
+          // 投影完成后再通知；否则 Reporter 异常会让 pending actual 与 synthetic
+          // closure 错配。按工具实际完成顺序保持并发批次既有的展示次序。
+          for (const index of completedToolReportIndexes) {
+            const outcome = results[index]!;
+            const report = outcome.report;
+            reporter.onToolResult(
+              report.toolName,
+              outcome.message.content,
+              report.isError,
+              report.providerCallId,
+            );
+          }
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
@@ -1984,6 +2099,7 @@ export class AgentEngine implements AgentRunner {
     session: Session,
     toolCalls: readonly ToolCall[],
     settledResults: readonly (ToolExecutionOutcome | undefined)[],
+    completedToolReportIndexes: readonly number[],
     failure: ToolProtocolFailure,
     reporter: Reporter,
   ): Promise<void> {
@@ -1992,22 +2108,37 @@ export class AgentEngine implements AgentRunner {
       const settled = settledResults[index];
       if (settled) return settled.message;
       syntheticIndexes.push(index);
-      return buildSyntheticToolObservation(toolCall, failure);
+      return buildSyntheticToolObservation(toolCall, failure, this.runtimePort?.currentRun());
     });
 
     const reminders = settledResults.flatMap((result) =>
       result?.reminder ? [result.reminder] : [],
     );
     await session.commitMessages(...observations, ...reminders);
-    for (const index of syntheticIndexes) {
+    // Settled outcomes are notified in their true completion order. Calls without
+    // an outcome become synthetic only after the batch closes, so they follow in
+    // provider order. Every notification happens after the whole canonical batch
+    // is durable, and a broken Reporter cannot mask the original protocol failure.
+    for (const index of [...completedToolReportIndexes, ...syntheticIndexes]) {
+      const settled = settledResults[index];
       const toolCall = toolCalls[index]!;
       const observation = observations[index]!;
+      const report = settled?.report ?? {
+        toolName: toolCall.name,
+        isError: true,
+        providerCallId: toolCall.id,
+      };
       try {
-        reporter.onToolResult(toolCall.name, observation.content, true, toolCall.id);
+        reporter.onToolResult(
+          report.toolName,
+          observation.content,
+          report.isError,
+          report.providerCallId,
+        );
       } catch (error) {
         logger.warn(
-          { error: String(error), tool: toolCall.name },
-          "[Engine] synthetic ToolResult 已持久化，但 Reporter 通知失败",
+          { error: String(error), tool: report.toolName },
+          "[Engine] ToolResult 已持久化，但 Reporter 通知失败",
         );
       }
     }
@@ -2023,6 +2154,11 @@ export class AgentEngine implements AgentRunner {
   ): Promise<{
     message: Message;
     result: ToolResult;
+    report: {
+      toolName: string;
+      isError: boolean;
+      providerCallId: string;
+    };
     reminder?: Message;
   }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
@@ -2036,6 +2172,7 @@ export class AgentEngine implements AgentRunner {
       const guardDecision = this.guardrail.beforeCall(toolCall);
       const runtimeRun = this.runtimePort?.currentRun();
       let result: ToolResult;
+      let runtimeStatus: EngineRuntimeToolResultStatus;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
           "PermissionDenied",
@@ -2053,6 +2190,7 @@ export class AgentEngine implements AgentRunner {
           output: `执行被 Guardrail 阻断。原因: ${guardDecision.reason ?? "未知"}`,
           isError: true,
         };
+        runtimeStatus = "rejected";
       } else {
         signal?.throwIfAborted();
         await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
@@ -2064,6 +2202,7 @@ export class AgentEngine implements AgentRunner {
             }
           },
         });
+        runtimeStatus = result.isError ? "failed" : "succeeded";
       }
 
       // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
@@ -2074,51 +2213,141 @@ export class AgentEngine implements AgentRunner {
         finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
         logger.warn({ tool: toolCall.name }, `-> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
       }
-      const observationOutput = await this.processObservation(
-        toolCall,
-        result,
-        finalOutput,
-        sessionId,
-      );
-      if (runtimeRun && this.runtimeEvidenceArchive) {
-        const evidence = await this.runtimeEvidenceArchive.archiveRuntimeToolExchange(
-          runtimeRun.sessionId,
-          toolCall.id,
-          toolCall.name,
-          toolCall.arguments,
-          result.output,
-          observationOutput,
-          result.isError,
-        );
-        runtimeRun.registerToolEvidence(toolCall.id, evidence);
-      }
-
-      toolSpan?.addAttributes({
-        isError: result.isError,
-        outputPreview: truncate(observationOutput, 500),
-        rawOutputPreview: finalOutput === result.output ? undefined : truncate(result.output, 500),
-      });
-
-      reporter.onToolResult(toolCall.name, observationOutput, result.isError, toolCall.id);
       const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
       const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
-      // ToolCallId 必须携带!这是维系大模型推理链条的关键
+      const message = runtimeRun
+        ? await this.buildRuntimeToolResultMessage(
+            runtimeRun,
+            toolCall,
+            result,
+            finalOutput,
+            runtimeStatus,
+          )
+        : {
+            role: "user" as const,
+            content: await this.processObservation(toolCall, result, finalOutput, sessionId),
+            toolCallId: toolCall.id,
+            providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
+          };
+
+      try {
+        toolSpan?.addAttributes({
+          isError: result.isError,
+          outputPreview: truncate(message.content, 500),
+          rawOutputPreview:
+            finalOutput === result.output ? undefined : truncate(result.output, 500),
+        });
+      } catch (error) {
+        logger.warn(
+          { error: String(error), tool: toolCall.name },
+          "[Tracing] ToolResult 属性记录失败",
+        );
+      }
       return {
-        message: {
-          role: "user",
-          content: observationOutput,
-          toolCallId: toolCall.id,
-          providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
-        },
+        message,
         result,
+        report: {
+          toolName: toolCall.name,
+          isError: result.isError,
+          providerCallId: toolCall.id,
+        },
         ...(reminder ? { reminder } : {}),
       };
     } catch (err) {
       recordTraceError(toolSpan, err);
       throw err;
     } finally {
-      toolSpan?.end();
+      try {
+        toolSpan?.end();
+      } catch (error) {
+        logger.warn({ error: String(error), tool: toolCall.name }, "[Tracing] Tool span 收口失败");
+      }
     }
+  }
+
+  private async buildRuntimeToolResultMessage(
+    runtimeRun: EngineRuntimeRun,
+    toolCall: ToolCall,
+    result: ToolResult,
+    modelOutput: string,
+    status: EngineRuntimeToolResultStatus,
+    visibility: "model" | "transcript" = "model",
+  ): Promise<Message> {
+    const built = buildRuntimeToolResultProjection({
+      toolCall,
+      result,
+      modelOutput,
+    });
+    let body: EngineRuntimeToolResultBody = {
+      storage: "inline",
+      content: result.output,
+      sha256: built.rawSha256,
+      sizeBytes: built.rawSizeBytes,
+    };
+    let projection = built.projection;
+    let evidence: EngineRuntimeEvidenceReference | undefined;
+
+    if (built.shouldArchive) {
+      try {
+        if (!this.runtimeEvidenceArchive) {
+          throw new Error("Runtime EvidenceArchive is not configured");
+        }
+        const archived = await this.runtimeEvidenceArchive.archiveRuntimeToolResult({
+          sessionId: runtimeRun.sessionId,
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          rawArguments: toolCall.arguments,
+          rawOutput: result.output,
+          isError: result.isError,
+        });
+        if (!archived) {
+          throw new Error("Runtime EvidenceArchive returned no reference");
+        }
+        evidence = archived;
+        // Evidence 预览会明确要求下一轮调用 read_evidence；同步披露其 schema，
+        // 避免渐进式工具列表让模型只能看到引用却无法执行回读。
+        this.toolDisclosure?.disclose(["read_evidence"]);
+        body = {
+          storage: "evidence",
+          sha256: built.rawSha256,
+          sizeBytes: built.rawSizeBytes,
+        };
+      } catch (error) {
+        logger.warn(
+          { error: String(error), tool: toolCall.name, toolCallId: toolCall.id },
+          "[ToolResult] Evidence 归档失败，完整结果以内联事实继续执行",
+        );
+        evidence = undefined;
+        body = {
+          storage: "inline",
+          content: result.output,
+          sha256: built.rawSha256,
+          sizeBytes: built.rawSizeBytes,
+        };
+        projection = {
+          version: 1,
+          mode: "full",
+          text: modelOutput,
+          strategy:
+            modelOutput === result.output
+              ? "evidence-fail-open-original"
+              : "evidence-fail-open-recovery",
+          truncated: false,
+        };
+      }
+    }
+
+    const input = {
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      status,
+      body,
+      projection,
+      ...(evidence ? { evidence } : {}),
+    };
+    return visibility === "transcript"
+      ? runtimeRun.recordTranscriptToolResult(input)
+      : runtimeRun.registerToolResult(input);
   }
 
   private async processObservation(
@@ -2791,34 +3020,29 @@ export class AgentEngine implements AgentRunner {
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
             }
-            const observationOutput = await this.processObservation(
-              tc,
-              result,
-              finalOutput,
-              `subagent:${tc.id}`,
-            );
+            const message = runtimeRun
+              ? await this.buildRuntimeToolResultMessage(
+                  runtimeRun,
+                  tc,
+                  result,
+                  finalOutput,
+                  result.isError ? "failed" : "succeeded",
+                  "transcript",
+                )
+              : {
+                  role: "user" as const,
+                  content: await this.processObservation(
+                    tc,
+                    result,
+                    finalOutput,
+                    `subagent:${tc.id}`,
+                  ),
+                  toolCallId: tc.id,
+                  providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
+                };
             // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
-            const artifactPath = extractArtifactPath(observationOutput);
-            rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError, tc.id);
-            const message: Message = {
-              role: "user" as const,
-              content: observationOutput,
-              toolCallId: tc.id,
-              providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
-            };
-            if (runtimeRun && this.runtimeEvidenceArchive) {
-              const evidence = await this.runtimeEvidenceArchive.archiveRuntimeToolExchange(
-                runtimeRun.sessionId,
-                tc.id,
-                tc.name,
-                tc.arguments,
-                result.output,
-                observationOutput,
-                result.isError,
-              );
-              runtimeRun.registerToolEvidence(tc.id, evidence);
-            }
-            await runtimeRun?.recordTranscriptMessage(message);
+            const artifactPath = extractArtifactPath(message.content);
+            rep.onToolResult(`[Subagent] ${tc.name}`, message.content, result.isError, tc.id);
             return {
               message,
               ...(artifactPath !== undefined ? { artifactPath } : {}),
