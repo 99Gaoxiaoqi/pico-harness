@@ -85,7 +85,11 @@ test("accepted Session A memory reaches Session B AgentRuntime prompt but not an
         reporter: new SilentReporter(),
       },
     );
-    assert.match(sessionBPrompts[0]?.[0]?.content ?? "", new RegExp(MEMORY_CANARY, "u"));
+    assert.doesNotMatch(sessionBPrompts[0]?.[0]?.content ?? "", new RegExp(MEMORY_CANARY, "u"));
+    assert.match(
+      currentVisibleUserContent(sessionBPrompts[0] ?? []),
+      new RegExp(MEMORY_CANARY, "u"),
+    );
 
     repository = openRepository(otherWorkspace, fixture.picoHome);
     const otherSettings = repository.getSettings();
@@ -105,7 +109,7 @@ test("accepted Session A memory reaches Session B AgentRuntime prompt but not an
         reporter: new SilentReporter(),
       },
     );
-    assert.equal(otherPrompts[0]?.[0]?.content.includes(MEMORY_CANARY), false);
+    assert.equal(currentVisibleUserContent(otherPrompts[0] ?? []).includes(MEMORY_CANARY), false);
     assert.equal(reviewCalls, 0);
   } finally {
     await closeSessions(
@@ -190,7 +194,11 @@ test("memory settings independently gate recall and review work", async (context
           },
         );
         assert.equal(mainCalls, 1);
-        assert.equal(prompts[0]?.[0]?.content.includes(MEMORY_CANARY), settingCase.expectedRecall);
+        assert.equal(prompts[0]?.[0]?.content.includes(MEMORY_CANARY), false);
+        assert.equal(
+          currentVisibleUserContent(prompts[0] ?? []).includes(MEMORY_CANARY),
+          settingCase.expectedRecall,
+        );
 
         if (settingCase.expectedJobs > 0) {
           await waitForMemoryState(fixture, (current) =>
@@ -554,6 +562,17 @@ function capturingProvider(captured: Message[][], content: string): LLMProvider 
       };
     },
   };
+}
+
+function currentVisibleUserContent(messages: readonly Message[]): string {
+  return (
+    messages.findLast(
+      (message) =>
+        message.role === "user" &&
+        message.toolCallId === undefined &&
+        message.providerData?.["picoHiddenFromTranscript"] !== true,
+    )?.content ?? ""
+  );
 }
 
 function runtimeRequest(workspace: string, sessionId: string, prompt: string) {

@@ -248,8 +248,16 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   );
   beforeDetachedEnqueue.close();
   await waitForImmediate();
-  assert.match(captured[0]?.[0]?.content ?? "", /hidden-recall-policy/u);
-  assert.doesNotMatch(captured[0]?.[0]?.content ?? "", /Deploy with kubectl/u);
+  const firstRequest = captured[0] ?? [];
+  const currentUserRequest = firstRequest.findLast(
+    (message) =>
+      message.role === "user" &&
+      message.toolCallId === undefined &&
+      message.providerData?.["picoHiddenFromTranscript"] !== true,
+  );
+  assert.doesNotMatch(firstRequest[0]?.content ?? "", /hidden-recall-policy/u);
+  assert.match(currentUserRequest?.content ?? "", /hidden-recall-policy/u);
+  assert.doesNotMatch(currentUserRequest?.content ?? "", /Deploy with kubectl/u);
   assert.equal(
     result.messages.some((message) => message.content.includes("hidden-recall-policy")),
     false,
