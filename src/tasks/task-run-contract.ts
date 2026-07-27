@@ -89,6 +89,8 @@ export interface TaskAttemptCheckpointedEvent extends TaskRunEventBase {
   readonly kind: "attempt.checkpointed";
   readonly data: {
     readonly attemptId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
     readonly boundary: TaskSafeBoundary;
   };
 }
@@ -97,6 +99,8 @@ export interface TaskAttemptFinishedEvent extends TaskRunEventBase {
   readonly kind: "attempt.finished";
   readonly data: {
     readonly attemptId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
     readonly status: TaskAttemptTerminalStatus;
     readonly result?: Readonly<Record<string, unknown>>;
     readonly error?: string;
@@ -111,6 +115,38 @@ export interface TaskResumeClaimedEvent extends TaskRunEventBase {
     readonly successorAttemptId: string;
     readonly ownerId: string;
     readonly leaseEpoch: number;
+  };
+}
+
+export interface TaskAttemptLaunchClaimedEvent extends TaskRunEventBase {
+  readonly kind: "attempt.launch.claimed";
+  readonly data: {
+    readonly attemptId: string;
+    readonly launchId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
+    readonly expiresAt: string;
+  };
+}
+
+export interface TaskAttemptLaunchSucceededEvent extends TaskRunEventBase {
+  readonly kind: "attempt.launch.succeeded";
+  readonly data: {
+    readonly attemptId: string;
+    readonly launchId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
+  };
+}
+
+export interface TaskAttemptLaunchFailedEvent extends TaskRunEventBase {
+  readonly kind: "attempt.launch.failed";
+  readonly data: {
+    readonly attemptId: string;
+    readonly launchId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
+    readonly error: string;
   };
 }
 
@@ -138,6 +174,9 @@ export type TaskRunEvent =
   | TaskAttemptCheckpointedEvent
   | TaskAttemptFinishedEvent
   | TaskResumeClaimedEvent
+  | TaskAttemptLaunchClaimedEvent
+  | TaskAttemptLaunchSucceededEvent
+  | TaskAttemptLaunchFailedEvent
   | TaskRunParkedEvent
   | TaskRunFinishedEvent;
 
@@ -165,6 +204,18 @@ export interface TaskAttemptProjection {
   readonly finishedAt?: string;
   readonly boundary?: TaskSafeBoundary;
   readonly result?: Readonly<Record<string, unknown>>;
+  readonly error?: string;
+  readonly launch?: TaskAttemptLaunchProjection;
+}
+
+export interface TaskAttemptLaunchProjection {
+  readonly launchId: string;
+  readonly status: "claimed" | "succeeded" | "failed";
+  readonly ownerId: string;
+  readonly leaseEpoch: number;
+  readonly claimedAt: string;
+  readonly expiresAt: string;
+  readonly settledAt?: string;
   readonly error?: string;
 }
 

@@ -28,6 +28,7 @@ import {
   TASK_RUN_FILE_SCHEMA_VERSION,
   TASK_RUN_TERMINAL_STATUSES,
   type RecoverableTaskAdapterIdentity,
+  type TaskAttemptLaunchProjection,
   type TaskAttemptProjection,
   type TaskAttemptTerminalStatus,
   type TaskResumeParkReason,
@@ -133,6 +134,7 @@ interface MutableTaskAttempt {
   boundary?: TaskSafeBoundary;
   result?: Readonly<Record<string, unknown>>;
   error?: string;
+  launch?: TaskAttemptLaunchProjection;
 }
 
 interface MutableTaskRunProjection {
@@ -510,12 +512,15 @@ export class TaskRunStore {
       if (this.rootIdentity) {
         assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
       }
+      this.assertTaskRunsBoundary();
       if (this.readOnly) return operation();
       return withFileLockSync(this.lockDirectory, this.ownerId, () => {
         if (this.rootIdentity) {
           assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
         }
+        this.assertTaskRunsBoundary();
         recoverFileTransactionSync(this.storageRoot, TASK_RUN_TRANSACTION_OPTIONS);
+        this.assertTaskRunsBoundary();
         return operation();
       });
     } catch (error) {
@@ -538,6 +543,7 @@ export class TaskRunStore {
   }
 
   private loadTaskRun(taskRunId: string): LoadedTaskRun | undefined {
+    this.assertTaskRunDigestBoundary(taskRunDigest(taskRunId));
     const ledgerPath = this.taskRunFilePath(taskRunId);
     if (!existsSync(ledgerPath)) return undefined;
     const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails);
@@ -625,6 +631,7 @@ export class TaskRunStore {
           `Unexpected entry in TaskRun storage: ${join(this.taskRunsRoot, entry.name)}`,
         );
       }
+      this.assertTaskRunDigestBoundary(entry.name);
       const ledgerPath = join(this.taskRunsRoot, entry.name, TASK_RUN_FILE_NAME);
       if (!existsSync(ledgerPath)) {
         throw new TaskRunStoreIntegrityError(`TaskRun directory ${entry.name} has no ledger`);
@@ -651,6 +658,40 @@ export class TaskRunStore {
 
   private taskRunDirectory(taskRunId: string): string {
     return join(this.taskRunsRoot, taskRunDigest(taskRunId));
+  }
+
+  private assertTaskRunsBoundary(): void {
+    const metadata = lstatIfExists(this.taskRunsRoot);
+    if (!metadata) {
+      if (this.readOnly) return;
+      throw new FileStorageIntegrityError(
+        `TaskRun storage directory disappeared: ${this.taskRunsRoot}`,
+      );
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(
+        `TaskRun storage must be a real directory: ${this.taskRunsRoot}`,
+      );
+    }
+  }
+
+  private assertTaskRunDigestBoundary(digest: string): void {
+    this.assertTaskRunsBoundary();
+    const directory = join(this.taskRunsRoot, digest);
+    const directoryMetadata = lstatIfExists(directory);
+    if (!directoryMetadata) return;
+    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(
+        `TaskRun directory must be a real directory: ${directory}`,
+      );
+    }
+    for (const fileName of [TASK_RUN_FILE_NAME, TASK_RUN_MANIFEST_FILE_NAME]) {
+      const path = join(directory, fileName);
+      const metadata = lstatIfExists(path);
+      if (metadata && (!metadata.isFile() || metadata.isSymbolicLink())) {
+        throw new FileStorageIntegrityError(`TaskRun data must be a regular file: ${path}`);
+      }
+    }
   }
 
   private taskRunFilePath(taskRunId: string): string {
@@ -714,6 +755,9 @@ function decodeTaskRunHeader(value: unknown, path: string): TaskRunFileHeader {
     !isCanonicalTimestamp(value["createdAt"])
   ) {
     throw new TaskRunStoreIntegrityError(`TaskRun header is invalid in ${path}`);
+  }
+  if (canonicalizeWorkspacePath(value["workDir"]) !== value["workDir"]) {
+    throw new TaskRunStoreIntegrityError(`TaskRun header workDir is not canonical in ${path}`);
   }
   const adapter = decodeTaskAdapter(value["adapter"], `TaskRun header in ${path}`);
   if (hashTaskRunInput(adapter.input) !== adapter.inputHash) {
@@ -835,7 +879,11 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
       };
     }
     case "attempt.checkpointed": {
-      if (!isNonEmptyString(data["attemptId"])) {
+      if (
+        !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"])
+      ) {
         throw new TaskRunStoreIntegrityError("TaskRun attempt.checkpointed event is invalid");
       }
       return {
@@ -843,6 +891,8 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
         kind: "attempt.checkpointed",
         data: {
           attemptId: data["attemptId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
           boundary: decodeTaskSafeBoundary(data["boundary"]),
         },
       };
@@ -850,6 +900,8 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
     case "attempt.finished": {
       if (
         !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"]) ||
         !isTaskAttemptTerminalStatus(data["status"]) ||
         (data["result"] !== undefined && !isRecord(data["result"])) ||
         (data["error"] !== undefined && typeof data["error"] !== "string")
@@ -861,6 +913,8 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
         kind: "attempt.finished",
         data: {
           attemptId: data["attemptId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
           status: data["status"],
           ...(isRecord(data["result"])
             ? {
@@ -890,6 +944,70 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
           successorAttemptId: data["successorAttemptId"],
           ownerId: data["ownerId"],
           leaseEpoch: data["leaseEpoch"],
+        },
+      };
+    }
+    case "attempt.launch.claimed": {
+      if (
+        !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["launchId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"]) ||
+        !isCanonicalTimestamp(data["expiresAt"])
+      ) {
+        throw new TaskRunStoreIntegrityError("TaskRun attempt.launch.claimed event is invalid");
+      }
+      return {
+        ...base,
+        kind: "attempt.launch.claimed",
+        data: {
+          attemptId: data["attemptId"],
+          launchId: data["launchId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
+          expiresAt: data["expiresAt"],
+        },
+      };
+    }
+    case "attempt.launch.succeeded": {
+      if (
+        !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["launchId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"])
+      ) {
+        throw new TaskRunStoreIntegrityError("TaskRun attempt.launch.succeeded event is invalid");
+      }
+      return {
+        ...base,
+        kind: "attempt.launch.succeeded",
+        data: {
+          attemptId: data["attemptId"],
+          launchId: data["launchId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
+        },
+      };
+    }
+    case "attempt.launch.failed": {
+      if (
+        !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["launchId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"]) ||
+        !isNonEmptyString(data["error"])
+      ) {
+        throw new TaskRunStoreIntegrityError("TaskRun attempt.launch.failed event is invalid");
+      }
+      return {
+        ...base,
+        kind: "attempt.launch.failed",
+        data: {
+          attemptId: data["attemptId"],
+          launchId: data["launchId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
+          error: data["error"],
         },
       };
     }
@@ -960,6 +1078,10 @@ function decodeTaskSafeBoundary(value: unknown): TaskSafeBoundary {
   ) {
     throw new TaskRunStoreIntegrityError("TaskRun safe boundary is invalid");
   }
+  const workspacePath = canonicalizeWorkspacePath(value["workspacePath"]);
+  if (workspacePath !== value["workspacePath"]) {
+    throw new TaskRunStoreIntegrityError("TaskRun safe boundary workspacePath is not canonical");
+  }
   let runtime: TaskSafeBoundary["runtime"];
   if (value["runtime"] !== undefined) {
     const candidate = value["runtime"];
@@ -984,7 +1106,7 @@ function decodeTaskSafeBoundary(value: unknown): TaskSafeBoundary {
   }
   return {
     storageRootId: value["storageRootId"],
-    workspacePath: value["workspacePath"],
+    workspacePath,
     backgroundOperationsSettled: value["backgroundOperationsSettled"],
     ...(runtime ? { runtime } : {}),
     ...(typeof value["toolCatalogHash"] === "string"
@@ -1105,12 +1227,24 @@ function applyTaskRunEvent(
       break;
     }
     case "attempt.checkpointed": {
-      const attempt = requireRunningAttempt(indexes, event.data.attemptId);
+      const attempt = requireOwnedRunningAttempt(
+        indexes,
+        event.data.attemptId,
+        event.data.ownerId,
+        event.data.leaseEpoch,
+      );
+      assertAttemptWasLaunched(attempt);
       attempt.boundary = structuredClone(event.data.boundary);
       break;
     }
     case "attempt.finished": {
-      const attempt = requireRunningAttempt(indexes, event.data.attemptId);
+      const attempt = requireOwnedRunningAttempt(
+        indexes,
+        event.data.attemptId,
+        event.data.ownerId,
+        event.data.leaseEpoch,
+      );
+      assertAttemptWasLaunched(attempt);
       attempt.status = event.data.status;
       attempt.finishedAt = event.at;
       attempt.result = event.data.result;
@@ -1145,6 +1279,56 @@ function applyTaskRunEvent(
       }
       indexes.claimIds.add(event.data.claimId);
       indexes.claims.set(source.attemptId, event.data);
+      break;
+    }
+    case "attempt.launch.claimed": {
+      const attempt = requireRunningAttempt(indexes, event.data.attemptId);
+      if (!attempt.sourceAttemptId) {
+        throw new TaskRunStoreIntegrityError(
+          `Initial TaskRun Attempt ${attempt.attemptId} cannot use a resume launch lease`,
+        );
+      }
+      const current = attempt.launch;
+      if (
+        event.data.leaseEpoch <= attempt.leaseEpoch ||
+        event.data.expiresAt <= event.at ||
+        (current !== undefined && current.launchId !== event.data.launchId) ||
+        current?.status === "succeeded" ||
+        (current?.status === "claimed" && current.expiresAt > event.at)
+      ) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun Attempt ${attempt.attemptId} has an invalid launch lease claim`,
+        );
+      }
+      attempt.ownerId = event.data.ownerId;
+      attempt.leaseEpoch = event.data.leaseEpoch;
+      attempt.launch = {
+        launchId: event.data.launchId,
+        status: "claimed",
+        ownerId: event.data.ownerId,
+        leaseEpoch: event.data.leaseEpoch,
+        claimedAt: event.at,
+        expiresAt: event.data.expiresAt,
+      };
+      break;
+    }
+    case "attempt.launch.succeeded": {
+      const attempt = requireCurrentLaunch(indexes, event);
+      attempt.launch = {
+        ...attempt.launch!,
+        status: "succeeded",
+        settledAt: event.at,
+      };
+      break;
+    }
+    case "attempt.launch.failed": {
+      const attempt = requireCurrentLaunch(indexes, event);
+      attempt.launch = {
+        ...attempt.launch!,
+        status: "failed",
+        settledAt: event.at,
+        error: event.data.error,
+      };
       break;
     }
     case "task.parked": {
@@ -1202,6 +1386,55 @@ function requireRunningAttempt(indexes: ProjectionIndexes, attemptId: string): M
   return attempt;
 }
 
+function requireOwnedRunningAttempt(
+  indexes: ProjectionIndexes,
+  attemptId: string,
+  ownerId: string,
+  leaseEpoch: number,
+): MutableTaskAttempt {
+  const attempt = requireRunningAttempt(indexes, attemptId);
+  if (attempt.ownerId !== ownerId || attempt.leaseEpoch !== leaseEpoch) {
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun Attempt ${attemptId} ownerId/leaseEpoch fence rejected a stale mutation`,
+    );
+  }
+  return attempt;
+}
+
+function requireCurrentLaunch(
+  indexes: ProjectionIndexes,
+  event:
+    | Extract<TaskRunEvent, { kind: "attempt.launch.succeeded" }>
+    | Extract<TaskRunEvent, { kind: "attempt.launch.failed" }>,
+): MutableTaskAttempt {
+  const attempt = requireOwnedRunningAttempt(
+    indexes,
+    event.data.attemptId,
+    event.data.ownerId,
+    event.data.leaseEpoch,
+  );
+  const launch = attempt.launch;
+  if (
+    !launch ||
+    launch.status !== "claimed" ||
+    launch.launchId !== event.data.launchId ||
+    event.at >= launch.expiresAt
+  ) {
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun Attempt ${attempt.attemptId} launch settlement lost its lease`,
+    );
+  }
+  return attempt;
+}
+
+function assertAttemptWasLaunched(attempt: MutableTaskAttempt): void {
+  if (attempt.sourceAttemptId && attempt.launch?.status !== "succeeded") {
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun successor Attempt ${attempt.attemptId} has not completed launch`,
+    );
+  }
+}
+
 function initialProjection(header: TaskRunFileHeader): TaskRunProjection {
   return {
     header,
@@ -1232,6 +1465,7 @@ function immutableProjection(projection: MutableTaskRunProjection): TaskRunProje
         ...(attempt.boundary ? { boundary: structuredClone(attempt.boundary) } : {}),
         ...(attempt.result ? { result: structuredClone(attempt.result) } : {}),
         ...(attempt.error !== undefined ? { error: attempt.error } : {}),
+        ...(attempt.launch ? { launch: structuredClone(attempt.launch) } : {}),
       }),
     ),
     parkReasons: [...projection.parkReasons],
@@ -1361,6 +1595,17 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function lstatIfExists(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 function toCanonicalJson(value: unknown): unknown {
