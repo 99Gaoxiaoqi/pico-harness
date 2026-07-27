@@ -138,6 +138,21 @@ test("RuntimeEventStore preserves idempotency and rejects a cross-Session batch 
   assert.equal((await store.append(existing)).inserted, true);
   assert.equal((await store.append(structuredClone(existing))).inserted, false);
 
+  const duplicateInBatch = runtimeEvent("session-a", "run-a", "duplicate-in-batch", workspace);
+  await assert.rejects(
+    store.appendBatch([
+      duplicateInBatch,
+      {
+        ...duplicateInBatch,
+        runId: "run-a-conflicting",
+      },
+    ]),
+    (error: unknown) =>
+      error instanceof RuntimeEventStoreIntegrityError &&
+      /conflicting payloads in one append batch/u.test(error.message),
+  );
+  assert.deepEqual(await store.readSession("session-a"), []);
+
   const newForA = runtimeEvent("session-a", "run-a", "new-a", workspace);
   const conflicting = {
     ...existing,

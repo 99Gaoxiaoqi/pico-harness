@@ -391,8 +391,19 @@ export class RuntimeEventStore {
         }
       }
       let hasNewEvent = false;
+      const requestedEventBySession = new Map<string, Map<string, RuntimeEvent>>();
       for (const event of canonicalEvents) {
         const session = sessions.get(event.sessionId)!;
+        const requestedEvents =
+          requestedEventBySession.get(event.sessionId) ?? new Map<string, RuntimeEvent>();
+        requestedEventBySession.set(event.sessionId, requestedEvents);
+        const requested = requestedEvents.get(event.eventId);
+        if (requested && !isDeepStrictEqual(requested, event)) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event ID ${event.eventId} is bound to conflicting payloads in one append batch`,
+          );
+        }
+        if (!requested) requestedEvents.set(event.eventId, event);
         if (
           event.kind === "run.started" &&
           canonicalizeWorkspacePath(event.data.workDir) !== session.loaded.manifest.workDir
@@ -436,6 +447,11 @@ export class RuntimeEventStore {
         const session = sessions.get(event.sessionId)!;
         const existing = session.eventById.get(event.eventId);
         if (existing) {
+          if (!isDeepStrictEqual(existing.event, event)) {
+            throw new RuntimeEventStoreIntegrityError(
+              `Runtime event ID ${event.eventId} is already bound to another payload`,
+            );
+          }
           results.push(this.appendResult(session.entries, existing, false));
           continue;
         }
