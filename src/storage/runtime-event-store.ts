@@ -36,11 +36,14 @@ import {
   writeJsonAtomicSync,
 } from "./local-file-storage.js";
 import {
+  assertWorkspaceStorageRootIdentitySync,
   ensurePrivateWorkspaceStorageDirectorySync,
   prepareWorkspaceStorageLayoutSync,
+  readWorkspaceStorageRootIdentitySync,
   WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
+  type WorkspaceStorageRootIdentity,
 } from "./workspace-storage-layout.js";
 
 const RUNTIME_SESSION_MANIFEST_VERSION = 1 as const;
@@ -206,6 +209,7 @@ export class RuntimeEventStore {
   private readonly repairManifests: boolean;
   private readonly repairIncompleteTails: boolean;
   private readonly readOnly: boolean;
+  private readonly rootIdentity?: WorkspaceStorageRootIdentity;
   private readonly ownerId = `runtime-event-store:${process.pid}:${randomUUID()}`;
 
   constructor(
@@ -227,12 +231,13 @@ export class RuntimeEventStore {
     this.repairManifests = recoveryPolicy.repairManifests ?? true;
     this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? true;
     this.readOnly = recoveryPolicy.readOnly ?? false;
-    if (!this.readOnly) {
-      prepareWorkspaceStorageLayoutSync(requestedStorageRoot);
-    }
+    const rootIdentity = this.readOnly
+      ? readWorkspaceStorageRootIdentitySync(requestedStorageRoot)
+      : prepareWorkspaceStorageLayoutSync(requestedStorageRoot).rootIdentity;
     this.storageRoot = existsSync(requestedStorageRoot)
       ? realpathSync.native(requestedStorageRoot)
       : requestedStorageRoot;
+    this.rootIdentity = rootIdentity;
     this.sessionsRoot = join(this.storageRoot, SESSIONS_DIRECTORY_NAME);
     this.lockDirectory = join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY);
     if (!this.readOnly) ensurePrivateWorkspaceStorageDirectorySync(this.sessionsRoot);
@@ -638,8 +643,14 @@ export class RuntimeEventStore {
 
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
     try {
+      if (this.rootIdentity) {
+        assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
+      }
       if (this.readOnly) return operation();
       return withFileLockSync(this.lockDirectory, this.ownerId, () => {
+        if (this.rootIdentity) {
+          assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
+        }
         recoverFileTransactionSync(this.storageRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
         return operation();
       });

@@ -13,10 +13,12 @@ import {
   withFileLockSync,
 } from "../storage/local-file-storage.js";
 import {
+  assertWorkspaceStorageRootIdentitySync,
   ensurePrivateWorkspaceStorageDirectorySync,
   prepareWorkspaceStorageLayoutSync,
   WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
+  type WorkspaceStorageRootIdentity,
 } from "../storage/workspace-storage-layout.js";
 import { LeaseConflictError } from "../storage/owner-lease.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
@@ -302,6 +304,7 @@ export function inspectRuntimeStoreIndexForTesting(
 export class RuntimeStore {
   readonly storageRoot: string;
   private readonly now: () => number;
+  private readonly rootIdentity: WorkspaceStorageRootIdentity;
 
   constructor(options: RuntimeStoreOptions) {
     if (options.storageRoot !== undefined && !options.storageRoot.trim()) {
@@ -312,7 +315,7 @@ export class RuntimeStore {
         resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.root,
     );
     this.now = options.now ?? Date.now;
-    prepareWorkspaceStorageLayoutSync(requestedStorageRoot);
+    this.rootIdentity = prepareWorkspaceStorageLayoutSync(requestedStorageRoot).rootIdentity;
     this.storageRoot = realpathSync.native(requestedStorageRoot);
     ensurePrivateWorkspaceStorageDirectorySync(join(this.storageRoot, "control"));
     this.write(() => undefined);
@@ -1764,13 +1767,17 @@ export class RuntimeStore {
   }
 
   private withRuntimeLock<Result>(operation: () => Result): Result {
+    assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (;;) {
       try {
         return withFileLockSync(
           join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
           `runtime:${process.pid}`,
-          operation,
+          () => {
+            assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
+            return operation();
+          },
           { timeoutMs: Math.max(0, deadline - Date.now()) },
         );
       } catch (error) {

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +23,7 @@ import {
 } from "../../src/storage/local-file-storage.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import {
+  adoptWorkspaceStorageRootIdentitySync,
   WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
   WORKSPACE_STORAGE_LAYOUT_FILE,
@@ -123,6 +135,83 @@ test("workspace storage revalidates a cached root before following a replacement
     /Storage root must be a real directory/u,
   );
   assert.equal((await stat(join(movedStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE))).isFile(), true);
+});
+
+test("active stores fail closed when the storage root directory is replaced", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-replaced-root-"));
+  const storageRoot = join(root, "state");
+  const movedStorageRoot = join(root, "original-state");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new RuntimeStore({ workDir: root, storageRoot });
+  const originalLayoutPath = join(movedStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+
+  await rename(storageRoot, movedStorageRoot);
+  await mkdir(join(storageRoot, ".storage"), { recursive: true, mode: 0o700 });
+  await copyFile(originalLayoutPath, join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE));
+
+  assert.throws(() => store.listJobs(), /Workspace storage root identity changed/u);
+});
+
+test("copied storage roots require explicit adoption and preserve the stable root ID", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-adopt-"));
+  const sourceRoot = join(root, "source");
+  const copiedRoot = join(root, "copied");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  new RuntimeStore({ workDir: root, storageRoot: sourceRoot }).close();
+  const sourceLayout = JSON.parse(
+    await readFile(join(sourceRoot, WORKSPACE_STORAGE_LAYOUT_FILE), "utf8"),
+  ) as { schemaVersion: number; storageRootId: string };
+  await cp(sourceRoot, copiedRoot, { recursive: true, preserveTimestamps: true });
+
+  assert.equal(sourceLayout.schemaVersion, 2);
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot: copiedRoot }),
+    /requires explicit adoption/u,
+  );
+  assert.throws(
+    () => adoptWorkspaceStorageRootIdentitySync(copiedRoot, "wrong-root-id"),
+    /does not match explicit adoption request/u,
+  );
+
+  const adopted = adoptWorkspaceStorageRootIdentitySync(copiedRoot, sourceLayout.storageRootId);
+  assert.equal(adopted.storageRootId, sourceLayout.storageRootId);
+  new RuntimeStore({ workDir: root, storageRoot: copiedRoot }).close();
+  const copiedLayout = JSON.parse(
+    await readFile(join(copiedRoot, WORKSPACE_STORAGE_LAYOUT_FILE), "utf8"),
+  ) as { schemaVersion: number; storageRootId: string; adoptedAt?: string };
+  assert.equal(copiedLayout.schemaVersion, 2);
+  assert.equal(copiedLayout.storageRootId, sourceLayout.storageRootId);
+  assert.equal(typeof copiedLayout.adoptedAt, "string");
+});
+
+test("opening a version 1 layout upgrades it once without changing its creation time", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-upgrade-"));
+  const storageRoot = join(root, "state");
+  const createdAt = "2026-07-25T00:00:00.000Z";
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(storageRoot, ".storage"), { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        layout: "session-centric-v1",
+        createdAt,
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+
+  new RuntimeStore({ workDir: root, storageRoot }).close();
+
+  const upgraded = JSON.parse(
+    await readFile(join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE), "utf8"),
+  ) as { schemaVersion: number; storageRootId?: string; createdAt: string };
+  assert.equal(upgraded.schemaVersion, 2);
+  assert.equal(upgraded.createdAt, createdAt);
+  assert.equal(typeof upgraded.storageRootId, "string");
 });
 
 test("workspace storage migration fails closed when canonical and legacy Session data conflict", async (t) => {

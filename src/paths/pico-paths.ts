@@ -42,6 +42,8 @@ export interface PicoWorkspacePaths {
   readonly root: string;
   /** Canonical Session RuntimeEvent ledgers and their rebuildable projections. */
   readonly sessions: string;
+  /** Durable TaskRun/Attempt fact ledgers. Legacy tasks/ remains diagnostic-only. */
+  readonly taskRuns: string;
   /** Jobs, attempts, leases, Cron/daemon state, and usage ledgers. */
   readonly control: string;
   /** Shared file-transaction coordinator for Session and control storage. */
@@ -58,6 +60,7 @@ export interface PicoWorkspacePaths {
   /** Immutable raw tool exchanges removed from Session history by full compaction. */
   readonly evidence: string;
   readonly traces: string;
+  /** Preserved legacy task files. Current stores never read or migrate this directory. */
   readonly tasks: string;
   readonly forkStaging: string;
   readonly storageOperations: string;
@@ -150,6 +153,7 @@ export function resolvePicoPaths(
       id: workspaceId,
       root: workspaceRoot,
       sessions: join(workspaceRoot, "sessions"),
+      taskRuns: join(workspaceRoot, "task-runs"),
       control: join(workspaceRoot, "control"),
       storage: join(workspaceRoot, ".storage"),
       storageCommit: join(workspaceRoot, ".storage", "commit.json"),
