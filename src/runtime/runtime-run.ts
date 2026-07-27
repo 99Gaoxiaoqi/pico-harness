@@ -316,8 +316,13 @@ export class RuntimeRun {
 
     const reconciled: string[] = [];
     for (const runId of await store.listRunIds(sessionId)) {
-      if (runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)) continue;
       const events = await store.readRun(sessionId, runId);
+      if (
+        runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX) &&
+        !isPublishedCompletedForkBootstrap(events)
+      ) {
+        continue;
+      }
       const started = events.find((event) => event.kind === "run.started");
       if (!started) continue;
       const existingTerminal = events.find(
@@ -1171,6 +1176,14 @@ function findDanglingRuntimeToolCalls(
   }
 
   return pending.filter((entry) => !entry.resolved);
+}
+
+function isPublishedCompletedForkBootstrap(events: readonly RuntimeEvent[]): boolean {
+  const published = events.some((event) => event.kind === "session.forked");
+  const completed = events.some(
+    (event) => event.kind === "run.terminal" && event.data.status === "completed",
+  );
+  return published && completed;
 }
 
 function buildInterruptedToolResultEvent(
