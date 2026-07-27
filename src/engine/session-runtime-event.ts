@@ -4,9 +4,12 @@ import { SESSION_RUNTIME_STATE_VERSION, type SessionRuntimeStatePatch } from "./
 
 /** Durable Session event contract. Runtime owns validation and storage adapters. */
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
+export const RUNTIME_TOOL_OPERATION_SCHEMA_VERSION = 1 as const;
 
 export type RuntimeEventVisibility = "model" | "transcript" | "internal";
 export type RuntimeTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
+export type RuntimeToolRecoveryMode = "never_auto_retry";
+export type RuntimeToolOutcomeStatus = "completed" | "failed" | "cancelled";
 
 export interface RuntimeEvidenceReference {
   readonly schemaVersion: 1;
@@ -49,7 +52,33 @@ export interface RuntimeMessageCommittedEvent extends RuntimeEventBase {
 
 export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   readonly kind: "tool.started";
-  readonly data: { readonly toolName: string; readonly argumentsHash: string };
+  readonly data: {
+    readonly toolName: string;
+    readonly argumentsHash: string;
+  } & (
+    | {
+        /** Compatibility shape written before the durable tool-operation protocol. */
+        readonly protocolVersion?: undefined;
+        readonly operationId?: undefined;
+        readonly recoveryMode?: undefined;
+      }
+    | {
+        readonly protocolVersion: typeof RUNTIME_TOOL_OPERATION_SCHEMA_VERSION;
+        readonly operationId: string;
+        readonly recoveryMode: RuntimeToolRecoveryMode;
+      }
+  );
+}
+
+export interface RuntimeToolOutcomeRecordedEvent extends RuntimeEventBase {
+  readonly kind: "tool.outcome.recorded";
+  readonly data: {
+    readonly protocolVersion: typeof RUNTIME_TOOL_OPERATION_SCHEMA_VERSION;
+    readonly operationId: string;
+    readonly status: RuntimeToolOutcomeStatus;
+    readonly resultEventId: string;
+    readonly resultHash: string;
+  };
 }
 
 export interface RuntimeApprovalRequestedEvent extends RuntimeEventBase {
@@ -143,6 +172,7 @@ export type RuntimeEvent =
   | RuntimeRunStartedEvent
   | RuntimeMessageCommittedEvent
   | RuntimeToolStartedEvent
+  | RuntimeToolOutcomeRecordedEvent
   | RuntimeApprovalRequestedEvent
   | RuntimeApprovalSettledEvent
   | RuntimeModelCallStartedEvent

@@ -11,6 +11,13 @@ import {
   RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
   type TaskRuntimeBoundary,
 } from "../tasks/task-run-contract.js";
+import { inspectRuntimeToolRecoveryStates } from "./runtime-tool-protocol.js";
+
+export { inspectRuntimeToolRecoveryStates } from "./runtime-tool-protocol.js";
+export type {
+  RuntimeToolRecoveryDisposition,
+  RuntimeToolRecoveryState,
+} from "./runtime-tool-protocol.js";
 
 export interface RuntimeEventBoundaryInspectorOptions {
   readonly store: Pick<RuntimeEventStore, "readSessionEntries" | "readSessionManifest">;
@@ -96,6 +103,10 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
         )
         .map(({ event }) => event.data.checkpointId),
     );
+    for (const { sequence, event } of runEntries) {
+      if (sequence > boundary.eventHighWater) continue;
+      checkpointRefs.add(`runtime-event:${event.eventId}`);
+    }
     for (const reference of (await this.options.additionalCheckpointRefs?.(boundary)) ?? []) {
       if (!reference.trim()) {
         throw new Error(
@@ -261,24 +272,11 @@ function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] 
 }
 
 function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] {
-  const pending = new Set<string>();
-  for (const { event } of entries) {
-    if (event.kind === "tool.started") {
-      const toolCallId = event.refs?.toolCallId;
-      if (typeof toolCallId !== "string" || !toolCallId.trim()) {
-        throw new Error(`Runtime tool.started ${event.eventId} has no stable toolCallId`);
-      }
-      pending.add(toolCallId);
-      continue;
-    }
-    if (
-      event.kind === "message.committed" &&
-      event.data.message.role === "user" &&
-      event.data.message.toolCallId &&
-      event.data.message.providerData?.["picoKind"] !== "synthetic_tool_result"
-    ) {
-      pending.delete(event.data.message.toolCallId);
-    }
-  }
-  return [...pending].sort();
+  return [
+    ...new Set(
+      inspectRuntimeToolRecoveryStates(entries)
+        .filter(({ disposition }) => disposition === "indeterminate")
+        .map(({ toolCallId }) => toolCallId),
+    ),
+  ].sort();
 }
