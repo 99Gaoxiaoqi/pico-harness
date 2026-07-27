@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   constants,
   closeSync,
@@ -11,6 +11,14 @@ import {
   type Stats,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { recoverFileTransactionSync, withFileLockSync } from "./local-file-storage.js";
+import {
+  assertWorkspaceStorageRootIdentitySync,
+  readWorkspaceStorageRootIdentitySync,
+  type WorkspaceStorageRootIdentity,
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
+} from "./workspace-storage-layout.js";
 
 export const WORKSPACE_PORTABILITY_PLAN_SCHEMA_VERSION = 1 as const;
 
@@ -243,9 +251,10 @@ const PROTECTED_DATABASE_POLICY = Object.freeze({
 /**
  * Builds a deterministic, read-only export plan for one Pico workspace storage root.
  *
- * The function never copies data and never follows symbolic links. Unknown top-level entries,
- * ledger descendants, and direct children under memory/ fail closed so adding a new persistence
- * surface requires an explicit portability decision.
+ * The function never copies data and never follows symbolic links. It does recover an already
+ * published workspace transaction under the shared lock before hashing a consistent snapshot.
+ * Unknown top-level entries, ledger descendants, and direct children under memory/ fail closed so
+ * adding a new persistence surface requires an explicit portability decision.
  */
 export function buildWorkspacePortabilityPlanSync(storageRoot: string): WorkspacePortabilityPlan {
   const requestedRoot = resolve(storageRoot);
@@ -269,6 +278,47 @@ export function buildWorkspacePortabilityPlanSync(storageRoot: string): Workspac
       error,
     );
   }
+  let rootIdentity: WorkspaceStorageRootIdentity | undefined;
+  try {
+    rootIdentity = readWorkspaceStorageRootIdentitySync(root);
+  } catch (error) {
+    throw planError(
+      "invalid_storage_root",
+      ".",
+      `Workspace storage identity cannot be verified before export planning: ${root}`,
+      error,
+    );
+  }
+  if (!rootIdentity) {
+    throw planError(
+      "invalid_storage_root",
+      ".",
+      `Workspace storage layout marker is required before export planning: ${root}`,
+    );
+  }
+  try {
+    return withFileLockSync(
+      join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+      `workspace-portability-plan:${process.pid}:${randomUUID()}`,
+      () => {
+        assertWorkspaceStorageRootIdentitySync(root, rootIdentity);
+        recoverFileTransactionSync(root, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
+        assertWorkspaceStorageRootIdentitySync(root, rootIdentity);
+        return scanWorkspacePortabilityPlan(root);
+      },
+    );
+  } catch (error) {
+    if (error instanceof WorkspacePortabilityPlanError) throw error;
+    throw planError(
+      "file_changed_during_scan",
+      ".",
+      `Workspace storage could not provide one transactionally consistent export snapshot: ${root}`,
+      error,
+    );
+  }
+}
+
+function scanWorkspacePortabilityPlan(root: string): WorkspacePortabilityPlan {
   const entries: WorkspacePortabilityPlanEntry[] = [];
   for (const name of readDirectoryNames(root)) {
     const absolutePath = join(root, name);
@@ -596,8 +646,8 @@ function isSensitiveName(name: string): boolean {
 function isDatabaseOrJournalName(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
-    /\.(?:sqlite|sqlite3|db)(?:-(?:wal|shm))?$/u.test(normalized) ||
-    /-(?:wal|shm)$/u.test(normalized)
+    /\.(?:sqlite|sqlite3|db)(?:-(?:wal|shm|journal))?$/u.test(normalized) ||
+    /-(?:wal|shm|journal)$/u.test(normalized)
   );
 }
 

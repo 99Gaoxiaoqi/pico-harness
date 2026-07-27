@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   commitFileTransactionSync,
@@ -547,6 +547,34 @@ test("missing layout markers fail closed when a pending transaction cannot verif
   await assert.rejects(stat(layoutPath), { code: "ENOENT" });
 });
 
+for (const [surface, relativePath] of [
+  ["Session", join("sessions", "a".repeat(64), "session.jsonl")],
+  ["TaskRun", join("task-runs", "b".repeat(64), "task.jsonl")],
+  ["control", join("control", "state.json")],
+] as const) {
+  test(`missing layout markers fail closed over existing canonical ${surface} data`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-missing-canonical-"));
+    const storageRoot = join(root, "state");
+    const dataPath = join(storageRoot, relativePath);
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await mkdir(dirname(dataPath), { recursive: true, mode: 0o700 });
+    await writeFile(dataPath, "canonical data must stay bound\n", { mode: 0o600 });
+    const dataBytes = await readFile(dataPath);
+    const rootMtimeBefore = (await stat(storageRoot)).mtimeMs;
+
+    assert.throws(
+      () => new RuntimeStore({ workDir: root, storageRoot }),
+      /canonical data without a workspace storage layout marker.*verified manual import/u,
+    );
+    assert.deepEqual(await readFile(dataPath), dataBytes);
+    assert.equal((await stat(storageRoot)).mtimeMs, rootMtimeBefore);
+    await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_DIRECTORY)), {
+      code: "ENOENT",
+    });
+    await assert.rejects(stat(join(storageRoot, "runtime")), { code: "ENOENT" });
+  });
+}
+
 test("version 1 runtime-only pending commits require verified manual recovery", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-runtime-pending-"));
   const storageRoot = join(root, "state");
@@ -654,7 +682,7 @@ test("opening a version 1 layout upgrades it once without changing its creation 
   assert.equal(typeof upgraded.storageRootId, "string");
 });
 
-test("workspace storage migration fails closed when canonical and legacy Session data conflict", async (t) => {
+test("workspace storage fails closed when markerless canonical and legacy Session data conflict", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-conflict-"));
   const storageRoot = join(root, "state");
   const digest = sessionDigest("conflicting-session");
@@ -673,7 +701,7 @@ test("workspace storage migration fails closed when canonical and legacy Session
     () => new RuntimeEventStore({ storageRoot }),
     (error: unknown) =>
       error instanceof FileStorageIntegrityError &&
-      /migration conflicts with existing target/u.test(error.message),
+      /canonical data without a workspace storage layout marker/u.test(error.message),
   );
 
   assert.equal(await readFile(legacyLogPath, "utf8"), '{"source":"legacy"}\n');

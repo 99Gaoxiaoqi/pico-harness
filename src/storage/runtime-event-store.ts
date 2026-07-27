@@ -246,9 +246,12 @@ export class RuntimeEventStore {
         );
       }
     }
-    this.repairManifests = recoveryPolicy.repairManifests ?? true;
-    this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? true;
     this.readOnly = recoveryPolicy.readOnly ?? false;
+    this.repairManifests = recoveryPolicy.repairManifests ?? !this.readOnly;
+    this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? !this.readOnly;
+    if (this.readOnly && (this.repairManifests || this.repairIncompleteTails)) {
+      throw new Error("RuntimeEventStore readOnly mode cannot enable repairs");
+    }
     const rootIdentity = this.readOnly
       ? readWorkspaceStorageRootIdentitySync(requestedStorageRoot)
       : prepareWorkspaceStorageLayoutSync(requestedStorageRoot).rootIdentity;
@@ -264,6 +267,7 @@ export class RuntimeEventStore {
   async initializeSession(
     options: InitializeRuntimeSessionOptions,
   ): Promise<RuntimeSessionManifest> {
+    this.assertWritable();
     const workDir = canonicalizeWorkspacePath(options.workDir);
     return this.withStoreLock(() => {
       const existing = this.loadSession(options.sessionId);
@@ -344,6 +348,7 @@ export class RuntimeEventStore {
   }
 
   async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
+    this.assertWritable();
     const results = await this.appendBatch([event]);
     return results[0]!;
   }
@@ -356,6 +361,7 @@ export class RuntimeEventStore {
     events: readonly RuntimeEvent[],
     options: AppendRuntimeEventBatchOptions = {},
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
+    this.assertWritable();
     const canonicalEvents = events.map(canonicalizeRuntimeEvent);
     if (canonicalEvents.length === 0) return [];
 
@@ -378,12 +384,44 @@ export class RuntimeEventStore {
         if (!Number.isSafeInteger(expectedHighWater) || expectedHighWater < 0) {
           throw new Error(`Runtime session ${sessionId} expected high-water is invalid`);
         }
-        const session = sessions.get(sessionId);
-        if (!session) {
+        if (!sessions.has(sessionId)) {
           throw new Error(
             `Runtime session ${sessionId} high-water CAS has no event in this append batch`,
           );
         }
+      }
+      let hasNewEvent = false;
+      for (const event of canonicalEvents) {
+        const session = sessions.get(event.sessionId)!;
+        if (
+          event.kind === "run.started" &&
+          canonicalizeWorkspacePath(event.data.workDir) !== session.loaded.manifest.workDir
+        ) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event workspace does not match session ${event.sessionId}`,
+          );
+        }
+        const existing = session.eventById.get(event.eventId);
+        if (!existing) {
+          hasNewEvent = true;
+          continue;
+        }
+        if (!isDeepStrictEqual(existing.event, event)) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event ID ${event.eventId} is already bound to another payload`,
+          );
+        }
+      }
+      if (!hasNewEvent) {
+        return canonicalEvents.map((event) => {
+          const session = sessions.get(event.sessionId)!;
+          return this.appendResult(session.entries, session.eventById.get(event.eventId)!, false);
+        });
+      }
+      for (const [sessionId, expectedHighWater] of Object.entries(
+        options.expectedSessionHighWater ?? {},
+      )) {
+        const session = sessions.get(sessionId)!;
         if (session.entries.length !== expectedHighWater) {
           throw new RuntimeEventStoreHighWaterConflictError(
             sessionId,
@@ -396,22 +434,8 @@ export class RuntimeEventStore {
       const results: RuntimeEventStoreAppendResult[] = [];
       for (const event of canonicalEvents) {
         const session = sessions.get(event.sessionId)!;
-        if (
-          event.kind === "run.started" &&
-          canonicalizeWorkspacePath(event.data.workDir) !== session.loaded.manifest.workDir
-        ) {
-          throw new RuntimeEventStoreIntegrityError(
-            `Runtime event workspace does not match session ${event.sessionId}`,
-          );
-        }
-
         const existing = session.eventById.get(event.eventId);
         if (existing) {
-          if (!isDeepStrictEqual(existing.event, event)) {
-            throw new RuntimeEventStoreIntegrityError(
-              `Runtime event ID ${event.eventId} is already bound to another payload`,
-            );
-          }
           results.push(this.appendResult(session.entries, existing, false));
           continue;
         }
@@ -494,6 +518,7 @@ export class RuntimeEventStore {
     patch: SessionRuntimeStateWritePatch,
     options: AppendRuntimeSessionStateOptions = {},
   ): Promise<RuntimeEventStoreAppendResult> {
+    this.assertWritable();
     const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) throw new Error("Runtime session state write patch is invalid");
     const at = (options.now ?? (() => new Date()))().toISOString();
@@ -520,6 +545,7 @@ export class RuntimeEventStore {
     event: TranscriptEvent,
     options: AppendRuntimeTranscriptEventOptions = {},
   ): Promise<RuntimeEventStoreAppendResult> {
+    this.assertWritable();
     return this.append({
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
       eventId: options.eventId ?? `transcript:${event.eventId}`,
@@ -662,6 +688,7 @@ export class RuntimeEventStore {
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
+    this.assertWritable();
     return this.withStoreLock(() => {
       if (!this.loadSession(sessionId)) return false;
       const digest = sessionDigest(sessionId);
@@ -690,6 +717,10 @@ export class RuntimeEventStore {
 
   close(): void {
     // File-backed operations do not retain handles.
+  }
+
+  private assertWritable(): void {
+    if (this.readOnly) throw new Error("RuntimeEventStore is read-only");
   }
 
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
