@@ -22,6 +22,8 @@ import { AgentRuntime, type RunAgentCliOptions } from "../../src/runtime/agent-r
 import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { projectRuntimeSessionUsage } from "../../src/runtime/runtime-session-projection.js";
+import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
 import {
   configuredUserDefaultRealModel,
   loadUserDefaultRealModel,
@@ -188,6 +190,25 @@ realModelTest(
     assert.ok(projectedUsage.totalProviderCalls >= 2);
     assert.ok(projectedUsage.totalPromptTokens > 0);
     assert.ok(projectedUsage.totalCompletionTokens > 0);
+
+    const usageStore = new RuntimeStore({
+      workDir: sandbox.workDir,
+      picoHome: sandbox.picoHome,
+    });
+    const providerCalls = usageStore
+      .listProviderCalls({ sessionId: sandbox.sessionId })
+      .filter((record) => record.purpose === "main" && record.status === "succeeded");
+    usageStore.close();
+    assert.equal(providerCalls.length, 2);
+    const firstDiagnostic = requestDiagnostic(providerCalls[0]);
+    const secondDiagnostic = requestDiagnostic(providerCalls[1]);
+    assert.equal(firstDiagnostic["changeReason"], "first_request");
+    assert.equal(secondDiagnostic["changeReason"], "cacheable_prefix_changed");
+    const firstChanged = secondDiagnostic["firstChangedCacheableSegment"];
+    assert.equal(typeof firstChanged, "object");
+    assert.ok(firstChanged);
+    assert.equal((firstChanged as Record<string, unknown>)["kind"], "message");
+    assert.equal(JSON.stringify(providerCalls).includes(marker), false);
 
     await evictProcessState(sandbox);
     const recovered = await globalSessionManager.getOrCreate(sandbox.sessionId, sandbox.workDir, {
@@ -386,4 +407,12 @@ function assertUsageEquals(actual: SessionUsageSnapshot, expected: SessionUsageS
       assert.equal(actual[key], expected[key], `Usage mismatch for ${key}`);
     }
   }
+}
+
+function requestDiagnostic(record: ProviderCallRecord | undefined): Record<string, unknown> {
+  assert.ok(record);
+  const diagnostic = record.reported?.["requestDiagnostic"];
+  assert.equal(typeof diagnostic, "object");
+  assert.ok(diagnostic);
+  return diagnostic as Record<string, unknown>;
 }
