@@ -238,7 +238,9 @@ export class ToolRegistry implements Registry {
   }
 
   getAvailableTools(): ToolDefinition[] {
-    return [...this.tools.values()].map((t) => t.definition());
+    return [...this.tools.values()]
+      .map((tool) => tool.definition())
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   }
 
   /**
