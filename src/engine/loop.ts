@@ -2193,6 +2193,13 @@ export class AgentEngine implements AgentRunner {
           { error: String(error), tool: toolCall.name, toolCallId: toolCall.id },
           "[ToolResult] Evidence 归档失败，完整结果以内联事实继续执行",
         );
+        evidence = undefined;
+        body = {
+          storage: "inline",
+          content: result.output,
+          sha256: built.rawSha256,
+          sizeBytes: built.rawSizeBytes,
+        };
         projection = {
           version: 1,
           mode: "full",
