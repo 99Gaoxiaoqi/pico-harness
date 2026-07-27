@@ -23,7 +23,10 @@ import {
 } from "../../src/context/evidence-archive.js";
 import type { RuntimeEvidenceReference } from "../../src/runtime/runtime-event.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
+import { DelegationManager } from "../../src/tools/delegation-manager.js";
+import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
 import { ReadEvidenceTool } from "../../src/tools/evidence-read.js";
+import type { AgentRunner } from "../../src/tools/subagent.js";
 
 interface EvidenceFixture {
   readonly root: string;
@@ -314,6 +317,36 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   const names = registry.getAvailableTools().map((definition) => definition.name);
   assert.ok(names.includes("read_evidence"));
   assert.ok(names.includes("read_artifact"));
+
+  const workerDir = join(fixture.root, "worker");
+  await mkdir(workerDir, { recursive: true });
+  const runner: AgentRunner = {
+    async runSub() {
+      return { status: "completed", summary: "unused", artifacts: [] };
+    },
+  };
+  const subagentRegistry = createSubagentRegistryFactory({
+    workDir: fixture.root,
+    runner,
+    manager: new DelegationManager(),
+    evidenceBaseDir: fixture.evidenceRoot,
+  })({
+    mode: "explore",
+    role: "leaf",
+    depth: 0,
+    maxSpawnDepth: 0,
+    workDir: workerDir,
+  });
+  assert.ok(
+    subagentRegistry.getAvailableTools().some((definition) => definition.name === "read_evidence"),
+  );
+  const subagentRead = await subagentRegistry.execute({
+    id: "call:read-shared-evidence",
+    name: "read_evidence",
+    arguments: JSON.stringify({ ref, offsetBytes: 0, limitBytes: 7 }),
+  });
+  assert.equal(subagentRead.isError, false);
+  assert.match(subagentRead.output, /^开头/u);
 });
 
 async function evidenceFixture(context: TestContext, prefix: string): Promise<EvidenceFixture> {

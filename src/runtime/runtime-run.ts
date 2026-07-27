@@ -15,6 +15,7 @@ import {
 } from "../engine/runtime-port.js";
 import {
   projectRuntimeModelMessage,
+  projectRuntimeToolResultMessage,
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
 } from "../engine/runtime-model-message.js";
@@ -854,6 +855,34 @@ export class RuntimeRun {
 
   registerToolEvidence(toolCallId: string, evidence: RuntimeEvidenceReference): void {
     this.evidenceByToolCallId.set(toolCallId, evidence);
+  }
+
+  /**
+   * Persists one child-agent ToolResult as an audit fact without changing the
+   * parent Session model projection.
+   */
+  async recordTranscriptToolResult(input: EngineRuntimeToolResultInput): Promise<Message> {
+    this.assertOpen();
+    const canonical = canonicalizeRuntimeToolResultInput(input);
+    const event: RuntimeToolResultRecordedEvent = {
+      ...this.base(createRuntimeEventId("transcript-tool-result"), true, "transcript"),
+      refs: {
+        ...(this.refs() ?? {}),
+        toolCallId: canonical.toolCallId,
+        ...(canonical.evidence ? { evidence: canonical.evidence } : {}),
+      },
+      kind: "tool.result.recorded",
+      data: {
+        toolName: canonical.toolName,
+        status: canonical.status,
+        body: canonical.body,
+        projection: canonical.projection,
+      },
+    };
+    assertRuntimeEvent(event);
+    const message = projectRuntimeToolResultMessage(event);
+    await this.append(event);
+    return structuredClone(message);
   }
 
   registerToolResult(input: EngineRuntimeToolResultInput): Message {

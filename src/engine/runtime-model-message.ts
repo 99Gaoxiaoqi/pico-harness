@@ -28,7 +28,11 @@ export function projectRuntimeModelMessage(event: RuntimeEvent): Message | undef
   if (event.kind === "message.committed") {
     return structuredClone(event.data.message);
   }
+  return projectRuntimeToolResultMessage(event);
+}
 
+/** Shared projection for model-visible and transcript-only structured ToolResult facts. */
+export function projectRuntimeToolResultMessage(event: RuntimeToolResultRecordedEvent): Message {
   const synthetic = event.data.projection.mode === "synthetic";
   const evidence = event.refs.evidence;
   const evidenceUri = evidence
