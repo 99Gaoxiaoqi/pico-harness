@@ -159,6 +159,61 @@ test("RuntimeEventStore preserves idempotency and rejects a cross-Session batch 
   );
 });
 
+test("RuntimeEventStore replays a fully persisted CAS batch but fences mixed replay and new events", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-cas-replay-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new RuntimeEventStore({ storageRoot: root });
+  const sessionId = "cas-replay-session";
+  await store.initializeSession({ sessionId, workDir: workspace });
+  const persisted = [
+    runtimeEvent(sessionId, "run-1", "cas-event-1", workspace),
+    runtimeEvent(sessionId, "run-1", "cas-event-2", workspace),
+  ];
+
+  assert.deepEqual(
+    (
+      await store.appendBatch(persisted, {
+        expectedSessionHighWater: { [sessionId]: 0 },
+      })
+    ).map(({ inserted, cursor }) => [inserted, cursor.seq]),
+    [
+      [true, 1],
+      [true, 2],
+    ],
+  );
+  const ledgerBeforeReplay = await readFile(sessionLogPath(store, sessionId));
+  assert.deepEqual(
+    (
+      await store.appendBatch(structuredClone(persisted), {
+        expectedSessionHighWater: { [sessionId]: 0 },
+      })
+    ).map(({ inserted, cursor }) => [inserted, cursor.seq]),
+    [
+      [false, 1],
+      [false, 2],
+    ],
+  );
+  assert.deepEqual(await readFile(sessionLogPath(store, sessionId)), ledgerBeforeReplay);
+
+  await assert.rejects(
+    store.appendBatch(
+      [
+        structuredClone(persisted[0]!),
+        runtimeEvent(sessionId, "run-2", "cas-event-new", workspace),
+      ],
+      { expectedSessionHighWater: { [sessionId]: 0 } },
+    ),
+    /high-water changed from 0 to 2/u,
+  );
+  assert.deepEqual(await readFile(sessionLogPath(store, sessionId)), ledgerBeforeReplay);
+  assert.deepEqual(
+    (await store.readSessionEntries(sessionId)).map(({ event }) => event.eventId),
+    ["cas-event-1", "cas-event-2"],
+  );
+});
+
 test("RuntimeEventStore recovers a published cross-file commit before reading", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-recover-"));
   const workspace = join(root, "workspace");
@@ -286,6 +341,60 @@ test("RuntimeEventStore repairs an incomplete tail and rejects complete malforme
       error instanceof RuntimeEventStoreIntegrityError &&
       /record 2 is invalid/u.test(error.message),
   );
+});
+
+test("RuntimeEventStore readOnly mode neither repairs nor accepts mutations", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-read-only-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const sessionId = "read-only-session";
+  const writable = new RuntimeEventStore({ storageRoot: root });
+  await writable.initializeSession({ sessionId, workDir: workspace });
+  const existing = runtimeEvent(sessionId, "run-1", "event-1", workspace);
+  await writable.append(existing);
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  const ledgerPath = join(root, "sessions", digest, "session.jsonl");
+  const manifestPath = join(root, "sessions", digest, "manifest.json");
+  const staleManifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    manifest: { activeBranchId: string };
+  };
+  staleManifest.manifest.activeBranchId = "stale-read-only-projection";
+  await writeFile(manifestPath, `${JSON.stringify(staleManifest)}\n`, { mode: 0o600 });
+  const beforeLedger = await readFile(ledgerPath);
+  const beforeManifest = await readFile(manifestPath);
+
+  assert.throws(
+    () => new RuntimeEventStore({ storageRoot: root }, { readOnly: true, repairManifests: true }),
+    /readOnly mode cannot enable repairs/u,
+  );
+  assert.throws(
+    () =>
+      new RuntimeEventStore({ storageRoot: root }, { readOnly: true, repairIncompleteTails: true }),
+    /readOnly mode cannot enable repairs/u,
+  );
+  const readOnly = new RuntimeEventStore({ storageRoot: root }, { readOnly: true });
+  assert.equal((await readOnly.readSessionManifest(sessionId))?.activeBranchId, "main");
+  assert.deepEqual(await readFile(manifestPath), beforeManifest);
+
+  for (const mutation of [
+    () => readOnly.initializeSession({ sessionId: "new-session", workDir: workspace }),
+    () => readOnly.append(runtimeEvent(sessionId, "run-2", "event-2", workspace)),
+    () => readOnly.appendBatch([runtimeEvent(sessionId, "run-2", "event-3", workspace)]),
+    () => readOnly.appendSessionState(sessionId, {}),
+    () => readOnly.appendTranscriptEvent(sessionId, {} as never),
+    () => readOnly.deleteSession(sessionId),
+  ]) {
+    await assert.rejects(mutation(), /RuntimeEventStore is read-only/u);
+  }
+  assert.deepEqual(await readFile(ledgerPath), beforeLedger);
+  assert.deepEqual(await readFile(manifestPath), beforeManifest);
+
+  await appendFile(ledgerPath, '{"type":"event-batch"');
+  const incompleteLedger = await readFile(ledgerPath);
+  await assert.rejects(readOnly.readSession(sessionId), /incomplete final record/u);
+  assert.deepEqual(await readFile(ledgerPath), incompleteLedger);
+  assert.deepEqual(await readFile(manifestPath), beforeManifest);
 });
 
 test("RuntimeEventStore rejects a post-construction Session root symlink without touching its target", async (context) => {

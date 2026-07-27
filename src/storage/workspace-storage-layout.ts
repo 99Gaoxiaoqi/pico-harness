@@ -34,6 +34,7 @@ const LEGACY_LOCK_CANDIDATE_PATTERN =
 const LEGACY_RUNTIME_FENCE_REASON = "workspace-session-centric-layout-v1";
 const LEGACY_CONTROL_FILES = ["state.json", "daemon-events.jsonl", "usage-ledger.jsonl"] as const;
 const LEGACY_SESSION_FILES = ["session.jsonl", "manifest.json"] as const;
+const CANONICAL_STORAGE_DIRECTORIES = ["sessions", "task-runs", "control"] as const;
 
 export const WORKSPACE_STORAGE_DIRECTORY = ".storage";
 export const WORKSPACE_STORAGE_COMMIT_FILE = ".storage/commit.json";
@@ -425,7 +426,23 @@ function assertLayoutAllowsRecovery(
       );
     }
     assertLayoutMatchesPhysicalIdentity(pendingLayout, physicalIdentity, layoutPath);
+    return;
   }
+  if (layout === undefined && hasCanonicalWorkspaceData(root)) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage has canonical data without a workspace storage layout marker: ${root}; ordinary initialization is refused and requires verified manual import`,
+    );
+  }
+}
+
+function hasCanonicalWorkspaceData(root: string): boolean {
+  for (const directoryName of CANONICAL_STORAGE_DIRECTORIES) {
+    const directory = join(root, directoryName);
+    if (!existsSync(directory)) continue;
+    assertRealDirectory(directory, `Canonical workspace ${directoryName} directory`);
+    if (readDirectoryEntries(directory).length > 0) return true;
+  }
+  return false;
 }
 
 function readWorkspaceStorageLayoutMarkerSync(
