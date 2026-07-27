@@ -6,8 +6,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -286,9 +288,59 @@ test("RuntimeEventStore repairs an incomplete tail and rejects complete malforme
   );
 });
 
+test("RuntimeEventStore rejects a post-construction Session root symlink without touching its target", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-session-root-symlink-"));
+  const storageRoot = join(root, "state");
+  const workspace = join(root, "workspace");
+  const externalSessionsRoot = join(root, "external-sessions");
+  const sessionId = "session-root-symlink";
+  await mkdir(workspace);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const store = new RuntimeEventStore({ storageRoot });
+  await store.initializeSession({ sessionId, workDir: workspace });
+  await store.append(runtimeEvent(sessionId, "run-1", "event-1", workspace));
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  const sessionsRoot = join(storageRoot, "sessions");
+  const externalSessionRoot = join(externalSessionsRoot, digest);
+  const externalLogPath = join(externalSessionRoot, "session.jsonl");
+  const externalManifestPath = join(externalSessionRoot, "manifest.json");
+  const logBytes = await readFile(join(sessionsRoot, digest, "session.jsonl"));
+  const manifestBytes = await readFile(join(sessionsRoot, digest, "manifest.json"));
+
+  await rename(sessionsRoot, externalSessionsRoot);
+  await symlink(externalSessionsRoot, sessionsRoot, "dir");
+  const readError = await captureError(() => store.readSession(sessionId));
+  await writeFile(externalManifestPath, "invalid external manifest\n", { mode: 0o600 });
+  const invalidManifestBytes = await readFile(externalManifestPath);
+  const repairError = await captureError(() => store.readSessionManifest(sessionId));
+  const writeError = await captureError(() =>
+    store.append(runtimeEvent(sessionId, "run-2", "event-2", workspace)),
+  );
+  const deleteError = await captureError(() => store.deleteSession(sessionId));
+
+  for (const error of [readError, repairError, writeError, deleteError]) {
+    assert.equal(error instanceof RuntimeEventStoreIntegrityError, true);
+    assert.match((error as Error).message, /Session storage must be a real directory/u);
+  }
+  assert.equal((await stat(externalSessionRoot)).isDirectory(), true);
+  assert.deepEqual(await readFile(externalLogPath), logBytes);
+  assert.deepEqual(await readFile(externalManifestPath), invalidManifestBytes);
+  assert.notDeepEqual(invalidManifestBytes, manifestBytes);
+});
+
 function sessionLogPath(store: RuntimeEventStore, sessionId: string): string {
   const digest = createHash("sha256").update(sessionId).digest("hex");
   return join(store.storageRoot, "sessions", digest, "session.jsonl");
+}
+
+async function captureError(operation: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await operation();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
 }
 
 function runtimeEvent(
