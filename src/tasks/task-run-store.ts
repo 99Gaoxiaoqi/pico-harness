@@ -4,7 +4,6 @@ import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
-  assertLocalFileStorageCapabilitiesSync,
   commitFileTransactionSync,
   FileStorageIntegrityError,
   readJsonFileSync,
@@ -12,15 +11,15 @@ import {
   recoverFileTransactionSync,
   withFileLockSync,
   writeJsonAtomicSync,
-  type FileTransactionOptions,
 } from "../storage/local-file-storage.js";
 import {
+  assertWorkspaceStorageRootIdentitySync,
   ensurePrivateWorkspaceStorageDirectorySync,
   prepareWorkspaceStorageLayoutSync,
-  WORKSPACE_STORAGE_COMMIT_FILE,
-  WORKSPACE_STORAGE_DIRECTORY,
-  WORKSPACE_STORAGE_LAYOUT_FILE,
+  readWorkspaceStorageRootIdentitySync,
+  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
+  type WorkspaceStorageRootIdentity,
 } from "../storage/workspace-storage-layout.js";
 import {
   TASK_ATTEMPT_TERMINAL_STATUSES,
@@ -48,19 +47,7 @@ const TASK_RUN_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const TASK_RUN_MANIFEST_SCHEMA_VERSION = 1 as const;
 
-/**
- * This module temporarily widens the shared workspace transaction namespace locally. The
- * workspace layout owner will fold task-runs into the exported shared constant at integration.
- */
-export const TASK_RUN_TRANSACTION_OPTIONS = Object.freeze({
-  commitFileName: WORKSPACE_STORAGE_COMMIT_FILE,
-  allowedTargetPrefixes: Object.freeze([
-    "sessions",
-    "control",
-    TASK_RUNS_DIRECTORY_NAME,
-    WORKSPACE_STORAGE_LAYOUT_FILE,
-  ]),
-}) satisfies Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName">;
+export const TASK_RUN_TRANSACTION_OPTIONS = WORKSPACE_RUNTIME_TRANSACTION_OPTIONS;
 
 export interface TaskRunStoreOptions {
   /** Canonical Pico workspace state root containing task-runs/ and .storage/. */
@@ -68,10 +55,17 @@ export interface TaskRunStoreOptions {
   readonly now?: () => Date;
 }
 
+export interface TaskRunStoreRecoveryPolicy {
+  readonly repairManifests?: boolean;
+  readonly repairIncompleteTails?: boolean;
+  readonly readOnly?: boolean;
+}
+
 export interface InitializeTaskRunOptions {
   readonly taskRunId: string;
   readonly workDir: string;
-  readonly storageRootId: string;
+  /** Optional assertion; the persisted header always uses the Store's verified root identity. */
+  readonly storageRootId?: string;
   readonly adapter: RecoverableTaskAdapterIdentity;
   readonly maxAttempts: number;
   readonly now?: () => Date;
@@ -80,6 +74,8 @@ export interface InitializeTaskRunOptions {
 export interface AppendTaskRunBatchOptions {
   /** Stable caller-supplied transaction identity for crash-safe request replay. */
   readonly transactionId?: string;
+  /** Optional compare-and-swap boundary checked under the workspace lock. */
+  readonly expectedRevision?: number;
   readonly now?: () => Date;
 }
 
@@ -93,6 +89,11 @@ export interface TaskRunAppendResult {
 export interface TaskRunSnapshot {
   readonly projection: TaskRunProjection;
   readonly events: readonly TaskRunEventEntry[];
+}
+
+export interface TaskRunStoreInspection {
+  readonly projections: readonly TaskRunProjection[];
+  readonly staleManifestPaths: readonly string[];
 }
 
 export interface TaskRunManifestProjection {
@@ -116,6 +117,8 @@ interface LoadedTaskRun {
   readonly projection: TaskRunProjection;
   readonly events: readonly LoadedTaskRunEvent[];
   readonly transactions: ReadonlyMap<string, readonly LoadedTaskRunEvent[]>;
+  readonly manifestPath: string;
+  readonly manifestStale: boolean;
 }
 
 interface MutableTaskAttempt {
@@ -165,6 +168,13 @@ export class TaskRunStoreIntegrityError extends Error {
   }
 }
 
+export class TaskRunStoreRevisionConflictError extends TaskRunStoreIntegrityError {
+  constructor(readonly projection: TaskRunProjection) {
+    super(`TaskRun ${projection.header.taskRunId} revision changed to ${projection.revision}`);
+    this.name = "TaskRunStoreRevisionConflictError";
+  }
+}
+
 /**
  * Append-only durable TaskRun/Attempt fact ledger.
  *
@@ -173,12 +183,17 @@ export class TaskRunStoreIntegrityError extends Error {
  */
 export class TaskRunStore {
   readonly storageRoot: string;
+  readonly storageRootId: string;
   private readonly taskRunsRoot: string;
   private readonly lockDirectory: string;
   private readonly now: () => Date;
+  private readonly rootIdentity?: WorkspaceStorageRootIdentity;
+  private readonly repairManifests: boolean;
+  private readonly repairIncompleteTails: boolean;
+  private readonly readOnly: boolean;
   private readonly ownerId = `task-run-store:${process.pid}:${randomUUID()}`;
 
-  constructor(options: TaskRunStoreOptions) {
+  constructor(options: TaskRunStoreOptions, recoveryPolicy: TaskRunStoreRecoveryPolicy = {}) {
     if (!options.storageRoot.trim()) throw new Error("TaskRunStore requires storageRoot");
     const requestedStorageRoot = resolve(options.storageRoot);
     if (existsSync(requestedStorageRoot)) {
@@ -190,26 +205,36 @@ export class TaskRunStore {
       }
     }
 
-    assertLocalFileStorageCapabilitiesSync(requestedStorageRoot);
-    ensurePrivateWorkspaceStorageDirectorySync(
-      join(requestedStorageRoot, WORKSPACE_STORAGE_DIRECTORY),
-    );
-    withFileLockSync(
-      join(requestedStorageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
-      this.ownerId,
-      () => recoverFileTransactionSync(requestedStorageRoot, TASK_RUN_TRANSACTION_OPTIONS),
-    );
-    prepareWorkspaceStorageLayoutSync(requestedStorageRoot);
-
-    this.storageRoot = realpathSync.native(requestedStorageRoot);
+    this.readOnly = recoveryPolicy.readOnly ?? false;
+    this.repairManifests = recoveryPolicy.repairManifests ?? !this.readOnly;
+    this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? !this.readOnly;
+    if (this.readOnly && (this.repairManifests || this.repairIncompleteTails)) {
+      throw new Error("TaskRunStore readOnly mode cannot enable repairs");
+    }
+    this.rootIdentity = this.readOnly
+      ? readWorkspaceStorageRootIdentitySync(requestedStorageRoot)
+      : prepareWorkspaceStorageLayoutSync(requestedStorageRoot).rootIdentity;
+    this.storageRoot = existsSync(requestedStorageRoot)
+      ? realpathSync.native(requestedStorageRoot)
+      : requestedStorageRoot;
+    this.storageRootId = this.rootIdentity?.storageRootId ?? "";
     this.taskRunsRoot = join(this.storageRoot, TASK_RUNS_DIRECTORY_NAME);
     this.lockDirectory = join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY);
     this.now = options.now ?? (() => new Date());
-    ensurePrivateWorkspaceStorageDirectorySync(this.taskRunsRoot);
+    if (!this.readOnly) ensurePrivateWorkspaceStorageDirectorySync(this.taskRunsRoot);
   }
 
   async initializeTaskRun(options: InitializeTaskRunOptions): Promise<TaskRunProjection> {
-    const requestedHeader = createTaskRunHeader(options, options.now ?? this.now);
+    this.assertWritable();
+    if (options.storageRootId !== undefined && options.storageRootId !== this.storageRootId) {
+      throw new TaskRunStoreIntegrityError(
+        `TaskRun ${options.taskRunId} storageRootId does not match the verified workspace root`,
+      );
+    }
+    const requestedHeader = createTaskRunHeader(
+      { ...options, storageRootId: this.storageRootId },
+      options.now ?? this.now,
+    );
     return this.withStoreLock(() => {
       const existing = this.loadTaskRun(options.taskRunId);
       if (existing) {
@@ -274,10 +299,12 @@ export class TaskRunStore {
     events: readonly TaskRunEvent[],
     options: AppendTaskRunBatchOptions = {},
   ): Promise<readonly TaskRunAppendResult[]> {
+    this.assertWritable();
     if (!taskRunId) throw new Error("TaskRun ID must not be empty");
     if (events.length === 0) return [];
     const canonicalEvents = events.map((event) => decodeTaskRunEvent(toCanonicalJson(event)));
     assertUniqueRequestedEventIds(canonicalEvents);
+    assertResumeBatchPairs(canonicalEvents, `TaskRun ${taskRunId} append request`);
 
     return this.withStoreLock(() => {
       const loaded = this.requireTaskRun(taskRunId);
@@ -286,24 +313,36 @@ export class TaskRunStore {
         assertNonEmptyIdentifier(requestedTransactionId, "transactionId");
         const replayed = loaded.transactions.get(requestedTransactionId);
         if (replayed) {
-          if (
+          const payloadDiffers =
             replayed.length !== canonicalEvents.length ||
             replayed.some(
               (persisted, index) =>
                 !isDeepStrictEqual(persisted.entry.event, canonicalEvents[index]),
-            )
-          ) {
-            throw new TaskRunStoreIntegrityError(
-              `TaskRun transaction ${requestedTransactionId} is already bound to another payload`,
             );
+          if (!payloadDiffers) {
+            return replayed.map(({ entry, revision, transactionId }) => ({
+              inserted: false,
+              entry: structuredClone(entry),
+              revision,
+              transactionId,
+            }));
           }
-          return replayed.map(({ entry, revision, transactionId }) => ({
-            inserted: false,
-            entry: structuredClone(entry),
-            revision,
-            transactionId,
-          }));
+          if (
+            options.expectedRevision !== undefined &&
+            loaded.projection.revision !== options.expectedRevision
+          ) {
+            throw new TaskRunStoreRevisionConflictError(cloneProjection(loaded.projection));
+          }
+          throw new TaskRunStoreIntegrityError(
+            `TaskRun transaction ${requestedTransactionId} is already bound to another payload`,
+          );
         }
+      }
+      if (
+        options.expectedRevision !== undefined &&
+        loaded.projection.revision !== options.expectedRevision
+      ) {
+        throw new TaskRunStoreRevisionConflictError(cloneProjection(loaded.projection));
       }
 
       const existingByEventId = new Map(
@@ -445,13 +484,37 @@ export class TaskRunStore {
     );
   }
 
+  async inspectTaskRuns(): Promise<TaskRunStoreInspection> {
+    return this.withStoreLock(() => {
+      const loaded = this.loadAllTaskRuns();
+      return {
+        projections: loaded.map(({ projection }) => cloneProjection(projection)),
+        staleManifestPaths: loaded
+          .filter(({ manifestStale }) => manifestStale)
+          .map(({ manifestPath }) => manifestPath)
+          .sort(),
+      };
+    });
+  }
+
   close(): void {
     // File-backed operations do not retain handles.
   }
 
+  private assertWritable(): void {
+    if (this.readOnly) throw new Error("TaskRunStore is read-only");
+  }
+
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
     try {
+      if (this.rootIdentity) {
+        assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
+      }
+      if (this.readOnly) return operation();
       return withFileLockSync(this.lockDirectory, this.ownerId, () => {
+        if (this.rootIdentity) {
+          assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
+        }
         recoverFileTransactionSync(this.storageRoot, TASK_RUN_TRANSACTION_OPTIONS);
         return operation();
       });
@@ -477,7 +540,7 @@ export class TaskRunStore {
   private loadTaskRun(taskRunId: string): LoadedTaskRun | undefined {
     const ledgerPath = this.taskRunFilePath(taskRunId);
     if (!existsSync(ledgerPath)) return undefined;
-    const records = readJsonLinesSync(ledgerPath, true);
+    const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails);
     if (records.length === 0) {
       throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ledger is empty`);
     }
@@ -540,13 +603,21 @@ export class TaskRunStore {
         if (!(error instanceof SyntaxError)) throw error;
       }
     }
-    if (!isDeepStrictEqual(persistedManifest, derivedManifest)) {
+    const manifestStale = !isDeepStrictEqual(persistedManifest, derivedManifest);
+    if (manifestStale && this.repairManifests) {
       writeJsonAtomicSync(manifestPath, derivedManifest);
     }
-    return { projection, events, transactions };
+    return {
+      projection,
+      events,
+      transactions,
+      manifestPath,
+      manifestStale: manifestStale && !this.repairManifests,
+    };
   }
 
   private loadAllTaskRuns(): LoadedTaskRun[] {
+    if (!existsSync(this.taskRunsRoot)) return [];
     const loaded: LoadedTaskRun[] = [];
     for (const entry of readdirSync(this.taskRunsRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || !TASK_RUN_DIRECTORY_PATTERN.test(entry.name)) {
@@ -558,7 +629,7 @@ export class TaskRunStore {
       if (!existsSync(ledgerPath)) {
         throw new TaskRunStoreIntegrityError(`TaskRun directory ${entry.name} has no ledger`);
       }
-      const records = readJsonLinesSync(ledgerPath, true);
+      const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails);
       if (records.length === 0) {
         throw new TaskRunStoreIntegrityError(`TaskRun directory ${entry.name} ledger is empty`);
       }
@@ -605,7 +676,7 @@ export function hashTaskRunInput(input: Readonly<Record<string, unknown>>): stri
 }
 
 function createTaskRunHeader(
-  options: InitializeTaskRunOptions,
+  options: InitializeTaskRunOptions & { readonly storageRootId: string },
   now: () => Date,
 ): TaskRunFileHeader {
   assertNonEmptyIdentifier(options.taskRunId, "taskRunId");
@@ -707,6 +778,10 @@ function decodeTaskRunEventBatch(value: unknown, path: string, line: number): Ta
       event: decodeTaskRunEvent(entry["event"]),
     };
   });
+  assertResumeBatchPairs(
+    entries.map(({ event }) => event),
+    `TaskRun event batch at ${path}:${line}`,
+  );
   return {
     type: "task-event-batch",
     schemaVersion: TASK_RUN_FILE_SCHEMA_VERSION,
@@ -1205,6 +1280,36 @@ function assertUniqueRequestedEventIds(events: readonly TaskRunEvent[]): void {
       );
     }
     eventIds.add(event.eventId);
+  }
+}
+
+function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string): void {
+  const claims = events.filter(
+    (event): event is Extract<TaskRunEvent, { kind: "task.resume.claimed" }> =>
+      event.kind === "task.resume.claimed",
+  );
+  const successors = events.filter(
+    (event): event is Extract<TaskRunEvent, { kind: "attempt.started" }> =>
+      event.kind === "attempt.started" && event.data.sourceAttemptId !== undefined,
+  );
+  if (claims.length !== successors.length) {
+    throw new TaskRunStoreIntegrityError(
+      `${context} must atomically pair every resume claim with its successor Attempt`,
+    );
+  }
+  for (const claim of claims) {
+    const matching = successors.filter(
+      (successor) =>
+        successor.data.sourceAttemptId === claim.data.sourceAttemptId &&
+        successor.data.attemptId === claim.data.successorAttemptId &&
+        successor.data.ownerId === claim.data.ownerId &&
+        successor.data.leaseEpoch === claim.data.leaseEpoch,
+    );
+    if (matching.length !== 1) {
+      throw new TaskRunStoreIntegrityError(
+        `${context} has a resume claim without one matching successor Attempt`,
+      );
+    }
   }
 }
 

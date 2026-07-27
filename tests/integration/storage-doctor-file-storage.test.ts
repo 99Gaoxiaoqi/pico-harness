@@ -22,6 +22,7 @@ import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { StorageDoctor } from "../../src/storage/storage-doctor.js";
 import { WORKSPACE_RUNTIME_TRANSACTION_OPTIONS } from "../../src/storage/workspace-storage-layout.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { hashTaskRunInput, TaskRunStore, taskRunDigest } from "../../src/tasks/task-run-store.js";
 
 test("StorageDoctor reports a stale manifest without mutating it and rebuilds it explicitly", async (context) => {
   const fixture = await createFixture("manifest");
@@ -55,6 +56,52 @@ test("StorageDoctor reports a stale manifest without mutating it and rebuilds it
   const repair = await doctor.repair({ rebuildRuntimeManifests: true });
   assert.equal(repair.rebuiltRuntimeManifests, true);
   assert.deepEqual(JSON.parse(await readFile(manifestPath, "utf8")).manifest, manifest);
+});
+
+test("StorageDoctor validates TaskRun ledgers and only rebuilds their derived manifests explicitly", async (context) => {
+  const fixture = await createFixture("task-run");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const input = { prompt: "resume safely" };
+  await new TaskRunStore({ storageRoot: paths.workspace.root }).initializeTaskRun({
+    taskRunId: "doctor-task-run",
+    workDir: fixture.workspace,
+    adapter: {
+      id: "doctor.adapter",
+      version: 1,
+      input,
+      inputHash: hashTaskRunInput(input),
+    },
+    maxAttempts: 3,
+  });
+  const taskRoot = join(paths.workspace.taskRuns, taskRunDigest("doctor-task-run"));
+  const manifestPath = join(taskRoot, "manifest.json");
+  const ledgerPath = join(taskRoot, "task.jsonl");
+  await writeFile(manifestPath, '{"forged":true}\n', { mode: 0o600 });
+
+  const doctor = new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  });
+  const stale = await doctor.scan();
+  assert.equal(stale.scanned.task, 1);
+  assert.equal(
+    stale.findings.some((finding) => finding.code === "task_run_manifest_rebuild_required"),
+    true,
+  );
+  assert.equal(await readFile(manifestPath, "utf8"), '{"forged":true}\n');
+
+  const repair = await doctor.repair({ rebuildTaskRunManifests: true });
+  assert.equal(repair.rebuiltTaskRunManifests, true);
+  assert.match(await readFile(manifestPath, "utf8"), /"type": "task-run-manifest"/u);
+
+  await appendFile(ledgerPath, "{}\n");
+  const corrupt = await doctor.scan();
+  assert.equal(
+    corrupt.findings.some((finding) => finding.code === "task_run_ledger_invalid"),
+    true,
+  );
+  assert.equal(corrupt.healthy, false);
 });
 
 test("StorageDoctor manifest rebuild refuses to truncate an incomplete canonical tail", async (context) => {

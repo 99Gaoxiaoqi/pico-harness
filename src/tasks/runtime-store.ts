@@ -79,7 +79,7 @@ export class RuntimeConflictError extends Error {
 
 export interface RuntimeStoreOptions {
   workDir: string;
-  /** Canonical Pico workspace state root containing sessions/, control/, and .storage/. */
+  /** Canonical Pico workspace state root containing sessions/, task-runs/, control/, and .storage/. */
   storageRoot?: string;
   picoHome?: string;
   now?: () => number;

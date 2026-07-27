@@ -81,7 +81,7 @@ export interface InitializeRuntimeSessionOptions {
 }
 
 export interface RuntimeEventStoreOptions {
-  /** Canonical Pico workspace state root containing sessions/, control/, and .storage/. */
+  /** Canonical Pico workspace state root containing sessions/, task-runs/, control/, and .storage/. */
   readonly storageRoot: string;
 }
 

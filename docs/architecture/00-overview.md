@@ -22,6 +22,7 @@ AgentRuntime
   └─ AgentEngine ── Provider / Tools / Context / Approval / Hooks / MCP
           │
           ├─ RuntimeEventStore：Session 与 Agent 事实
+          ├─ TaskRunStore：可恢复任务与 Attempt 事实
           └─ RuntimeStore：Jobs、Runs、Usage 与租约控制面
 ```
 
@@ -38,7 +39,7 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 | `src/provider/`               | Provider 协议、ModelRouter、凭证轮换、重试和计费能力                                 |
 | `src/tools/`                  | 工具 Registry、中间件、调度器、子代理与渐进披露                                      |
 | `src/context/`                | Prompt 组装、请求投影、模型摘要、Artifact 和 Evidence                                |
-| `src/tasks/`                  | RuntimeStore、后台 Job、Cron、租约、Usage 和完成通知                                 |
+| `src/tasks/`                  | RuntimeStore、TaskRun、后台 Job、Cron、租约、Usage 和完成通知                        |
 | `src/daemon/`                 | 本机 IPC、认证、Desktop/Workspace Runtime 服务；typed request router 与领域 handlers |
 | `src/plugins/`                | Plugin Manager、scope/winner、snapshot、Hook trust、受限 capability 与统一诊断       |
 | `packages/protocol/`          | daemon 协议契约、运行时校验和 Desktop 方法白名单                                     |
@@ -51,9 +52,11 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
   的唯一事实源，落在每个 Session 的 `session.jsonl`。
 - `RuntimeStore` 是 Jobs、daemon/cron runs、attempts、leases、usage 和 completion outbox
   的控制面真源。
+- `TaskRunStore` 是显式 recoverable 任务跨 Attempt 的事实账本；它保存 adapter 身份、不可变输入、
+  checkpoint 引用和恢复 claim，但不复制 Session RuntimeEvent。
 - `daemon-events.jsonl` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面状态。
-- 两者共享 `$PICO_HOME/workspaces/<workspace-id>/` 下的事务协调，但分别落在 `sessions/`
-  和 `control/`，使用不同账本和 API。
+- 三者共享 `$PICO_HOME/workspaces/<workspace-id>/` 下的事务协调，但分别落在 `sessions/`、
+  `task-runs/` 和 `control/`，使用不同账本和 API。
 - Session 内存、Transcript 和 Desktop ViewModel 都是可重建投影。
 - Session title 存在 RuntimeEvent；Desktop metadata 不保存第二份 title。
 
@@ -71,9 +74,10 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 ```text
 workspace/
   sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
+  task-runs/<sha256(taskRunId)>/{task.jsonl,manifest.json}
   control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
   .storage/
-    layout.json
+    layout.json # stable storageRootId + physical directory identity
     commit.json
     lock/
   runtime/lock/ # 兼容 fence，仅用于阻止旧版本继续写
@@ -83,7 +87,7 @@ workspace/
     summaries/
 ```
 
-目录使用 `0700`，数据文件使用 `0600`。Session 与控制面读写先取得
+目录使用 `0700`，数据文件使用 `0600`。Session、TaskRun 与控制面读写先取得
 `.storage/lock/` 的 workspace owner lease，并恢复遗留 `.storage/commit.json`；JSON 替换通过
 临时文件、文件 `fsync`、原子 rename 和目录 `fsync` 发布。JSONL 只允许截断未完成的最后
 一行，完整但非法的中间记录会 fail closed。
@@ -91,12 +95,25 @@ workspace/
 Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，不同
 `PICO_HOME` 的 Session 设置、授权、凭证、Artifact 与存储根不能共享状态。
 
+## 可恢复任务边界
+
+可恢复的是持久化工作流，不是旧 JavaScript 调用栈。恢复必须同时证明 adapter 版本与输入、
+workspace/root identity、RuntimeEvent 高水位、interrupted terminal、审批与工具副作用、
+后台操作、工具目录和 checkpoint 均一致；任一条件不确定就写入稳定 park reason。
+通过校验后，协调器以 revision CAS 原子写入 `task.resume.claimed + attempt.started`，并创建
+新的 Attempt。既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为
+`host_bound`，进程退出后只收敛为 `interrupted`。
+
+`sessions/`、`task-runs/`、Artifact、Evidence、Trace 和 Memory summaries 可进入只读导出计划；
+`.storage/`、`control/`、Memory state、锁、凭据、临时文件和 legacy SQLite 属于 host-bound
+或 protected。Portable TaskRun 可用于检查和审计，但在新的 storage root 上不会自动接管执行。
+
 ## 核心设计原则
 
 | 原则             | 说明                                                                        |
 | ---------------- | --------------------------------------------------------------------------- |
 | 单一执行内核     | TUI 和 Desktop 共享 AgentRuntime/AgentEngine，不维护两套业务实现            |
-| 事实与控制面分离 | RuntimeEventStore 管 Agent 事实，RuntimeStore 管后台调度状态                |
+| 事实与控制面分离 | RuntimeEvent 管 Agent 事实，TaskRun 管任务事实，RuntimeStore 管调度状态     |
 | 显式宿主边界     | Home、env、Provider config、Artifact root 由 composition root 固定并注入    |
 | 安全链前置       | Trust、Plan、Hardline、Approval、Hooks 和 workspace boundary 位于工具执行前 |
 | 投影可重建       | Session 内存、Transcript、UI state 不升级为第二事实源                       |

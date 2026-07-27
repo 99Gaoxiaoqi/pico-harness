@@ -30,6 +30,7 @@ import {
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
 } from "../../src/storage/workspace-storage-layout.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { hashTaskRunInput, TaskRunStore, taskRunDigest } from "../../src/tasks/task-run-store.js";
 
 test("workspace storage copies legacy Runtime JSON without modifying rollback ledgers", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-migrate-"));
@@ -301,6 +302,81 @@ test("opening RuntimeEventStore recovers a pending control transaction from the 
   await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
   assert.deepEqual(controlStore.listJobs(), []);
   new RuntimeStore({ workDir, storageRoot }).close();
+});
+
+test("opening RuntimeStore recovers a pending TaskRun transaction from the shared marker", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-task-recovery-"));
+  const workDir = join(root, "project");
+  const storageRoot = join(root, "state");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(workDir, { mode: 0o700 });
+  const input = { prompt: "recover the task transaction" };
+  const tasks = new TaskRunStore({ storageRoot });
+  await tasks.initializeTaskRun({
+    taskRunId: "shared-task",
+    workDir,
+    adapter: {
+      id: "shared.adapter",
+      version: 1,
+      input,
+      inputHash: hashTaskRunInput(input),
+    },
+    maxAttempts: 3,
+  });
+  const batch = {
+    type: "task-event-batch",
+    schemaVersion: 1,
+    txId: "cross-store-task-recovery",
+    entries: [
+      {
+        sequence: 1,
+        committedAt: "2026-07-27T00:00:00.000Z",
+        event: {
+          schemaVersion: 1,
+          eventId: "task-parked",
+          taskRunId: "shared-task",
+          at: "2026-07-27T00:00:00.000Z",
+          kind: "task.parked",
+          data: { reasons: ["adapter_missing"] },
+        },
+      },
+    ],
+  };
+
+  assert.throws(
+    () =>
+      withFileLockSync(
+        join(storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "cross-store-task-crash",
+        () =>
+          commitFileTransactionSync(
+            storageRoot,
+            {
+              appends: [
+                {
+                  relativePath: join("task-runs", taskRunDigest("shared-task"), "task.jsonl"),
+                  content: `${JSON.stringify(batch)}\n`,
+                },
+              ],
+            },
+            {
+              ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+              transactionId: "cross-store-task-recovery",
+              onStage(stage) {
+                if (stage === "commit-published") throw new Error("simulated TaskRun crash");
+              },
+            },
+          ),
+      ),
+    /simulated TaskRun crash/u,
+  );
+
+  new RuntimeStore({ workDir, storageRoot }).close();
+
+  assert.equal((await tasks.readTaskRunProjection("shared-task"))?.status, "parked");
+  await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_COMMIT_FILE)), {
+    code: "ENOENT",
+  });
 });
 
 function sessionDigest(sessionId: string): string {

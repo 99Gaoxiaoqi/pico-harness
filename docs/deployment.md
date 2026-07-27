@@ -39,10 +39,16 @@ TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配
 
 `PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的 Runtime。工作区 `.pico/config.json` 只在信任后读取，并可覆盖用户默认模型。MCP 默认读取 `.pico/mcp.json`；旧 `.claw/mcp.json` 仅作兼容回退。
 
-每个 workspace 的 Session 账本和控制面分别位于 `sessions/` 与 `control/`；同级
+每个 workspace 的 Session、TaskRun 账本和控制面分别位于 `sessions/`、`task-runs/` 与 `control/`；同级
 `.storage/layout.json`、`.storage/commit.json` 和 `.storage/lock/` 负责布局标记与跨文件事务协调。
 这些目录必须位于同一个支持原子 rename、原子 `mkdir` 和文件/目录 `fsync` 的本地文件系统。
 `memory/`、`artifacts/`、`evidence/` 与 `traces/` 仍是独立的同级存储领域。
+
+`layout.json` 同时保存稳定 `storageRootId` 和当前物理目录身份。运行中的 Store 会在每次事务
+入口重新校验；目录被复制、替换或移动后会 fail closed。确认副本来源后只能通过显式 adopt API
+更新物理身份，不能由普通启动流程静默接管。可移植导出计划默认只包含 Session、TaskRun、
+Artifact、Evidence、Trace 和 Memory summary；控制面、事务协调、Memory state、凭据、临时文件
+及 SQLite/WAL/SHM 不随包导出。
 
 首次打开工作区时会在旧 `runtime/lock/` 位置保留升级 fence。旧版本会因此拒绝写入，避免
 旧 `runtime/` 与新 `sessions/`、`control/` 静默分叉。若必须回滚，先停止所有新版本进程，

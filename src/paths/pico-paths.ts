@@ -46,7 +46,7 @@ export interface PicoWorkspacePaths {
   readonly taskRuns: string;
   /** Jobs, attempts, leases, Cron/daemon state, and usage ledgers. */
   readonly control: string;
-  /** Shared file-transaction coordinator for Session and control storage. */
+  /** Shared file-transaction coordinator for Session, TaskRun, and control storage. */
   readonly storage: string;
   readonly storageCommit: string;
   readonly storageLock: string;
