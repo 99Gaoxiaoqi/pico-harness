@@ -256,7 +256,7 @@ interface RequiredDelegationAssessment {
 interface ToolExecutionOutcome {
   message: Message;
   reminder?: Message;
-  report?: {
+  report: {
     toolName: string;
     isError: boolean;
     providerCallId: string;
@@ -363,7 +363,7 @@ function buildRejectedToolObservation(
   toolCall: ToolCall,
   requiredDelegation: ToolCall,
   runtimeRun?: EngineRuntimeRun,
-): { message: Message } {
+): ToolExecutionOutcome {
   const content =
     `工具执行已拒绝：同一模型响应中的 required delegate_task ` +
     `(${requiredDelegation.id}) 必须独占执行并等待所有子代理收口。`;
@@ -374,6 +374,11 @@ function buildRejectedToolObservation(
       "exclusive-delegation-rejection",
       runtimeRun,
     ),
+    report: {
+      toolName: toolCall.name,
+      isError: true,
+      providerCallId: toolCall.id,
+    },
   };
 }
 
@@ -1645,6 +1650,7 @@ export class AgentEngine implements AgentRunner {
               session,
               toolCalls,
               settledResults,
+              completedToolReportIndexes,
               failure,
               reporter,
             );
@@ -1827,7 +1833,7 @@ export class AgentEngine implements AgentRunner {
                 scheduled.push(
                   execution.then((result) => {
                     settledResults[index] = result;
-                    if (result.report) completedToolReportIndexes.push(index);
+                    completedToolReportIndexes.push(index);
                     return result;
                   }),
                 );
@@ -1878,7 +1884,7 @@ export class AgentEngine implements AgentRunner {
           // closure 错配。按工具实际完成顺序保持并发批次既有的展示次序。
           for (const index of completedToolReportIndexes) {
             const outcome = results[index]!;
-            const report = outcome.report!;
+            const report = outcome.report;
             reporter.onToolResult(
               report.toolName,
               outcome.message.content,
@@ -2031,6 +2037,7 @@ export class AgentEngine implements AgentRunner {
     session: Session,
     toolCalls: readonly ToolCall[],
     settledResults: readonly (ToolExecutionOutcome | undefined)[],
+    completedToolReportIndexes: readonly number[],
     failure: ToolProtocolFailure,
     reporter: Reporter,
   ): Promise<void> {
@@ -2046,15 +2053,30 @@ export class AgentEngine implements AgentRunner {
       result?.reminder ? [result.reminder] : [],
     );
     await session.commitMessages(...observations, ...reminders);
-    for (const index of syntheticIndexes) {
+    // Settled outcomes are notified in their true completion order. Calls without
+    // an outcome become synthetic only after the batch closes, so they follow in
+    // provider order. Every notification happens after the whole canonical batch
+    // is durable, and a broken Reporter cannot mask the original protocol failure.
+    for (const index of [...completedToolReportIndexes, ...syntheticIndexes]) {
+      const settled = settledResults[index];
       const toolCall = toolCalls[index]!;
       const observation = observations[index]!;
+      const report = settled?.report ?? {
+        toolName: toolCall.name,
+        isError: true,
+        providerCallId: toolCall.id,
+      };
       try {
-        reporter.onToolResult(toolCall.name, observation.content, true, toolCall.id);
+        reporter.onToolResult(
+          report.toolName,
+          observation.content,
+          report.isError,
+          report.providerCallId,
+        );
       } catch (error) {
         logger.warn(
-          { error: String(error), tool: toolCall.name },
-          "[Engine] synthetic ToolResult 已持久化，但 Reporter 通知失败",
+          { error: String(error), tool: report.toolName },
+          "[Engine] ToolResult 已持久化，但 Reporter 通知失败",
         );
       }
     }
