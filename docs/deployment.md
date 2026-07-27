@@ -50,6 +50,12 @@ TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配
 Artifact、Evidence、Trace 和 Memory summary；控制面、事务协调、Memory state、凭据、临时文件
 及 SQLite/WAL/SHM 不随包导出。
 
+显式 recoverable 任务的执行权由 `task.jsonl` 中的 TaskRun execution lease 决定；进程重启后
+只有租约到期且安全边界可证明时，新的 owner 才能创建 successor Attempt。adapter 必须先以
+Session 高水位 CAS 发布确定性的 `run.started`，再启动 provider、工具或外部进程；如果在
+TaskRun 结算前崩溃，下一次恢复会从该 canonical 事件重建启动凭据。未实现这套契约的现有
+生产 executor 均保持 `host_bound`，不会被自动接管。
+
 首次打开工作区时会在旧 `runtime/lock/` 位置保留升级 fence。旧版本会因此拒绝写入，避免
 旧 `runtime/` 与新 `sessions/`、`control/` 静默分叉。若必须回滚，先停止所有新版本进程，
 再显式移除 fence；不要让两个布局版本并行运行。

@@ -65,7 +65,7 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 状态不是写进一份“万能文件”。Agent 事实与任务控制面共享 workspace 状态根目录，但使用不同逻辑账本和所有者：
 
 - `RuntimeEventStore` 以 `sessions/<session-hash>/session.jsonl` 保存每个 Session 的 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
-- `TaskRunStore` 以 `task-runs/<task-run-hash>/task.jsonl` 保存显式可恢复任务跨 Attempt 的事实；它只引用 RuntimeEvent 高水位，不复制 Agent 事件。
+- `TaskRunStore` 以 `task-runs/<task-run-hash>/task.jsonl` 保存显式可恢复任务跨 Attempt 的事实、执行租约、安全边界和启动凭据；它只引用 RuntimeEvent 高水位，不复制 Agent 事件。
 - `RuntimeStore` 以 `control/state.json` 保存 Job、Cron 与调度状态；`control/daemon-events.jsonl` 是 daemon 通知账本，不是 Agent 事实日志。
 - `.storage/layout.json` 保存稳定 `storageRootId` 与物理目录身份；`.storage/commit.json` 与 `.storage/lock/` 为 Session、TaskRun 和控制面提供共享事务协调。
 - `MemoryRepository` 以 `memory/state.json` 保存版本化的 settings、sources、facts、proposals、审计和幂等记录；忘记操作会清除实时文件中的结构化明文。
@@ -79,7 +79,7 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 - **渐进式上下文**：Skills 只先披露元数据，按需加载正文；Compaction、ErrorRecovery 与 SystemReminders 控制预算和重复失败。
 - **多代理隔离**：Explore 保持只读；可写 Worker 只有在独立 Git worktree 和平台沙箱都可用时才启动，否则 fail-closed。
 - **后台任务**：自然语言或 `/cron` 创建持久 Job，由当前 OS 用户的本机 daemon 执行；模型路由、凭证引用和网络策略在创建时冻结。
-- **安全恢复任务**：只有注册了稳定 adapter ID/version、不可变输入和 checkpoint 契约的任务才可进入 `recoverable`；重启后从已验证边界创建新 Attempt，既有闭包、进程和流仍为 `host_bound`。
+- **安全恢复任务**：只有注册了稳定 adapter ID/version、不可变输入和 checkpoint 契约的任务才可进入 `recoverable`；重启后先取得 TaskRun 执行租约，再从已验证边界创建新 Attempt。adapter 必须以 RuntimeEvent 高水位 CAS 原子发布确定性的 `run.started`，之后才可产生外部副作用；结算前崩溃可从该事件重建启动凭据。既有闭包、进程和流仍为 `host_bound`。
 - **可扩展能力**：Hooks、MCP、LSP 与 Agent/Skill Catalog 由 Runtime 装配；Markdown Command 当前属于 TUI 输入层能力。
 - **受信 Plugin 快照**：Pico/Claude manifest 会先解析、校验并冻结为纯数据，可贡献 Skill、Command、Agent、Hook、MCP 与 LSP；TUI 在宿主生命周期复用快照，Desktop 默认按 Run 加载和释放，后台 Job 不加载。任意 Plugin 代码不会直接载入 Runtime 进程，但已授权 Hook、MCP 或 LSP 可以按各自边界启动子进程。
 - **可观测性**：usage/成本、结构化日志、追踪、运行事件和诊断命令覆盖主要执行链。
