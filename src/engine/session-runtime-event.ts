@@ -1,6 +1,11 @@
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import type { Message, Usage } from "../schema/message.js";
 import { SESSION_RUNTIME_STATE_VERSION, type SessionRuntimeStatePatch } from "./session-runtime.js";
+import type {
+  RuntimeToolResultBody,
+  RuntimeToolResultProjection,
+  RuntimeToolResultStatus,
+} from "./tool-result-contract.js";
 
 /** Durable Session event contract. Runtime owns validation and storage adapters. */
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
@@ -50,6 +55,20 @@ export interface RuntimeMessageCommittedEvent extends RuntimeEventBase {
 export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   readonly kind: "tool.started";
   readonly data: { readonly toolName: string; readonly argumentsHash: string };
+}
+
+export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
+  readonly kind: "tool.result.recorded";
+  readonly refs: RuntimeEventRefs & {
+    readonly toolCallId: string;
+    readonly evidence?: RuntimeEvidenceReference;
+  };
+  readonly data: {
+    readonly toolName: string;
+    readonly status: RuntimeToolResultStatus;
+    readonly body: RuntimeToolResultBody;
+    readonly projection: RuntimeToolResultProjection;
+  };
 }
 
 export interface RuntimeApprovalRequestedEvent extends RuntimeEventBase {
@@ -143,6 +162,7 @@ export type RuntimeEvent =
   | RuntimeRunStartedEvent
   | RuntimeMessageCommittedEvent
   | RuntimeToolStartedEvent
+  | RuntimeToolResultRecordedEvent
   | RuntimeApprovalRequestedEvent
   | RuntimeApprovalSettledEvent
   | RuntimeModelCallStartedEvent

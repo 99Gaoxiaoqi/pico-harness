@@ -95,7 +95,8 @@ test("reconciliation replaces a tool result that was rewound after its active ca
   assert.equal(
     events.filter(
       (event) =>
-        event.kind === "message.committed" && event.data.message.toolCallId === "call:kept",
+        (event.kind === "message.committed" && event.data.message.toolCallId === "call:kept") ||
+        (event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:kept"),
     ).length,
     2,
   );
@@ -143,7 +144,7 @@ test("reconciliation repairs a completed run in a separate terminal recovery run
   const recoveryEvents = await session.runtimeEventStore!.readRun(session.id, recoveryRunId);
   assert.deepEqual(
     recoveryEvents.map((event) => event.kind),
-    ["run.started", "message.committed", "run.terminal"],
+    ["run.started", "tool.result.recorded", "run.terminal"],
   );
   const recoveryTerminal = recoveryEvents.at(-1);
   assert.equal(recoveryTerminal?.kind, "run.terminal");
@@ -157,6 +158,42 @@ test("reconciliation repairs a completed run in a separate terminal recovery run
   });
   assert.equal(session.getHistory().at(-1)?.toolCallId, "call:completed");
   assert.match(session.getHistory().at(-1)?.content ?? "", /中断/u);
+
+  await session.rewindOnce("remove-first-recovered-result", 2);
+  assert.deepEqual(
+    await RuntimeRun.reconcileIncompleteRuns({
+      capability: session.runtimeEventCapability!,
+    }),
+    [run.runId],
+  );
+  await RuntimeRun.repairSessionProjection(session, {
+    capability: session.runtimeEventCapability!,
+  });
+  assert.equal(session.getHistory().at(-1)?.toolCallId, "call:completed");
+  assert.match(session.getHistory().at(-1)?.content ?? "", /中断/u);
+
+  const recoveryRunIds = (await session.runtimeEventStore!.listRunIds(session.id)).filter((runId) =>
+    runId.startsWith("runtime-recovery:run:"),
+  );
+  assert.equal(recoveryRunIds.length, 2);
+  assert.equal(
+    new Set(recoveryRunIds).size,
+    2,
+    "each rewind branch must receive a distinct recovery closure",
+  );
+  assert.deepEqual(
+    await RuntimeRun.reconcileIncompleteRuns({
+      capability: session.runtimeEventCapability!,
+    }),
+    [],
+    "reconciliation must remain idempotent within one rewind branch",
+  );
+
+  const probe = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const recoveredHistory = await probe.readModelHistory();
+  await probe.finish("completed");
+  assert.equal(recoveredHistory.at(-1)?.toolCallId, "call:completed");
+  assert.match(recoveredHistory.at(-1)?.content ?? "", /中断/u);
 });
 
 async function createFixture(context: test.TestContext, suffix: string) {

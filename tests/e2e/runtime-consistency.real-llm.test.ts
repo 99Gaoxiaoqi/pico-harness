@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { globalApprovalManager } from "../../src/approval/manager.js";
+import { EvidenceArchive, formatRuntimeEvidenceUri } from "../../src/context/evidence-archive.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import type {
@@ -18,12 +19,14 @@ import {
 import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { ModelRoute } from "../../src/provider/model-router.js";
+import type { ToolCall } from "../../src/schema/message.js";
 import { AgentRuntime, type RunAgentCliOptions } from "../../src/runtime/agent-runtime.js";
 import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { projectRuntimeSessionUsage } from "../../src/runtime/runtime-session-projection.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
+import { ReadFileTool } from "../../src/tools/registry-impl.js";
 import {
   configuredUserDefaultRealModel,
   loadUserDefaultRealModel,
@@ -226,6 +229,121 @@ realModelTest(
   },
 );
 
+realModelTest(
+  "large ToolResult is archived and read back through Evidence",
+  { timeout: TEST_TIMEOUT_MS },
+  async (context) => {
+    const model = await configuredUserDefaultRealModel();
+    const sandbox = await createSandbox("large-tool-result");
+    context.after(() => cleanupSandbox(sandbox));
+    const fileName = "large-evidence.txt";
+    const marker = `PICO_LARGE_EVIDENCE_${randomUUID().replaceAll("-", "").toUpperCase()}`;
+    const sourceLines = Array.from(
+      { length: 128 },
+      (_, index) => `${String(index + 1).padStart(3, "0")}|证据回读😀|${"数据".repeat(35)}`,
+    );
+    sourceLines[11] = `012|${marker}|${"中段".repeat(10)}`;
+    const source = `${sourceLines.join("\n")}\n`;
+    const sourceBytes = Buffer.byteLength(source, "utf8");
+    assert.ok(sourceBytes >= 20 * 1024);
+    assert.ok(sourceBytes <= 30 * 1024);
+    await writeFile(join(sandbox.workDir, fileName), source, "utf8");
+
+    const readFileArguments = JSON.stringify({ path: fileName });
+    const expectedRawOutput = await new ReadFileTool(sandbox.workDir).execute(readFileArguments);
+    const markerIndex = expectedRawOutput.indexOf(marker);
+    assert.ok(markerIndex > 0);
+    const markerOffsetBytes = Buffer.byteLength(expectedRawOutput.slice(0, markerIndex), "utf8");
+    assert.ok(markerOffsetBytes >= 2 * 1024);
+    assert.ok(markerOffsetBytes <= 3 * 1024);
+    const offsetBytes = 0;
+    const limitBytes = 4_096;
+
+    const result = await new AgentRuntime().execute(
+      runtimeRequest(
+        sandbox,
+        model,
+        [
+          "严格按顺序执行，不得并行调用工具，也不得猜测文件中的 marker：",
+          `1. 仅调用一次 read_file，参数必须是 ${readFileArguments}。`,
+          "2. 从该工具返回的有界预览中复制完整 Evidence URI。",
+          `3. 仅调用一次 read_evidence，ref 使用该 URI，offsetBytes 必须是 ${offsetBytes}，limitBytes 必须是 ${limitBytes}。`,
+          "4. 从回读页找到以 PICO_LARGE_EVIDENCE_ 开头的完整 token，最终只输出该 token，不要解释。",
+        ].join("\n"),
+        "new",
+        ["read_file", "read_evidence"],
+      ),
+      runtimeHost(sandbox, model),
+    );
+    assert.equal(result.finalMessage.trim(), marker);
+
+    const events = await readRuntimeEvents(sandbox);
+    assertClosedRuns(events, 1);
+    assertModelCallsArePaired(events);
+    assert.deepEqual(
+      events.filter((event) => event.kind === "tool.started").map((event) => event.data.toolName),
+      ["read_file", "read_evidence"],
+    );
+
+    const fileRead = singleToolExchange(events, "read_file");
+    assert.deepEqual(JSON.parse(fileRead.call.arguments), { path: fileName });
+    const expectedBytes = Buffer.byteLength(expectedRawOutput, "utf8");
+    const expectedHash = sha256Utf8(expectedRawOutput);
+    assert.equal(fileRead.result.data.status, "succeeded");
+    assert.deepEqual(fileRead.result.data.body, {
+      storage: "evidence",
+      sha256: expectedHash,
+      sizeBytes: expectedBytes,
+    });
+    assert.equal(fileRead.result.data.projection.mode, "preview");
+    assert.equal(fileRead.result.data.projection.truncated, true);
+    assert.doesNotMatch(fileRead.result.data.projection.text, new RegExp(marker, "u"));
+
+    const evidence = fileRead.result.refs.evidence;
+    assert.ok(evidence);
+    assert.equal(evidence.sessionId, sandbox.sessionId);
+    const evidenceBaseDir = resolvePicoPaths(sandbox.workDir, {
+      picoHome: sandbox.picoHome,
+    }).workspace.evidence;
+    const archive = new EvidenceArchive({ baseDir: evidenceBaseDir });
+    assert.equal(await archive.readRuntimeToolOutput(evidence), expectedRawOutput);
+    const manifest = await archive.readRuntimeToolExchange(evidence);
+    assert.equal(manifest.schemaVersion, 2);
+    if (manifest.schemaVersion !== 2) assert.fail("expected Runtime Evidence v2");
+    assert.equal(manifest.content.toolCallId, fileRead.call.id);
+    assert.equal(manifest.content.toolName, "read_file");
+    assert.equal(manifest.content.rawOutput.digest, expectedHash);
+    assert.equal(manifest.content.rawOutput.sizeBytes, expectedBytes);
+
+    const evidenceRead = singleToolExchange(events, "read_evidence");
+    assert.ok(events.indexOf(fileRead.result) < events.indexOf(evidenceRead.callEvent));
+    assert.deepEqual(JSON.parse(evidenceRead.call.arguments), {
+      ref: formatRuntimeEvidenceUri(evidence),
+      offsetBytes,
+      limitBytes,
+    });
+    assert.equal(evidenceRead.result.data.status, "succeeded");
+    assert.equal(evidenceRead.result.refs.evidence, undefined);
+    assert.equal(evidenceRead.result.data.body.storage, "inline");
+    if (evidenceRead.result.data.body.storage !== "inline") {
+      assert.fail("read_evidence result must stay inline");
+    }
+    const readback = evidenceRead.result.data.body.content;
+    assert.match(readback, new RegExp(marker, "u"));
+    assert.match(readback, /\[Evidence bytes \d+-\d+\/\d+\]/u);
+    assert.ok(readback.includes(`/${expectedBytes}]`));
+    assert.equal(evidenceRead.result.data.body.sha256, sha256Utf8(readback));
+    assert.equal(evidenceRead.result.data.body.sizeBytes, Buffer.byteLength(readback, "utf8"));
+    assert.deepEqual(evidenceRead.result.data.projection, {
+      version: 1,
+      mode: "full",
+      text: readback,
+      strategy: "bounded-readback",
+      truncated: false,
+    });
+  },
+);
+
 async function createSandbox(label: string): Promise<TestSandbox> {
   const root = await mkdtemp(join(tmpdir(), `pico-${label}-real-llm-`));
   const workDir = join(root, "workspace");
@@ -284,6 +402,7 @@ function runtimeRequest(
   model: RealModel,
   prompt: string,
   mode: "new" | "resume",
+  allowedTools: readonly string[] = [],
 ): RunAgentCliOptions {
   return {
     prompt,
@@ -296,7 +415,7 @@ function runtimeRequest(
     modelRouteId: model.route.id,
     modelCapabilities: model.route.capabilities,
     thinkingEffort: supportsThinkingOff(model.route) ? "off" : undefined,
-    allowedTools: [],
+    allowedTools,
   };
 }
 
@@ -397,6 +516,57 @@ function assertNoUsageStateWrites(events: readonly RuntimeEvent[]): void {
       Object.prototype.hasOwnProperty.call(event.data.patch, "usage"),
   );
   assert.equal(usageWrites.length, 0);
+}
+
+type MessageCommittedEvent = Extract<RuntimeEvent, { kind: "message.committed" }>;
+type ToolStartedEvent = Extract<RuntimeEvent, { kind: "tool.started" }>;
+type ToolResultRecordedEvent = Extract<RuntimeEvent, { kind: "tool.result.recorded" }>;
+
+function singleToolExchange(
+  events: readonly RuntimeEvent[],
+  toolName: string,
+): {
+  readonly call: ToolCall;
+  readonly callEvent: MessageCommittedEvent;
+  readonly started: ToolStartedEvent;
+  readonly result: ToolResultRecordedEvent;
+} {
+  const calls: Array<{
+    readonly call: ToolCall;
+    readonly callEvent: MessageCommittedEvent;
+  }> = [];
+  for (const event of events) {
+    if (event.kind !== "message.committed") continue;
+    for (const call of event.data.message.toolCalls ?? []) {
+      if (call.name === toolName) calls.push({ call, callEvent: event });
+    }
+  }
+  assert.equal(calls.length, 1);
+  const recorded = calls[0];
+  assert.ok(recorded);
+  const starts = events.filter(
+    (event): event is ToolStartedEvent =>
+      event.kind === "tool.started" && event.refs?.toolCallId === recorded.call.id,
+  );
+  const results = events.filter(
+    (event): event is ToolResultRecordedEvent =>
+      event.kind === "tool.result.recorded" && event.refs.toolCallId === recorded.call.id,
+  );
+  assert.equal(starts.length, 1);
+  assert.equal(results.length, 1);
+  const started = starts[0];
+  const result = results[0];
+  assert.ok(started);
+  assert.ok(result);
+  assert.equal(started.data.toolName, toolName);
+  assert.equal(result.data.toolName, toolName);
+  assert.ok(events.indexOf(recorded.callEvent) < events.indexOf(started));
+  assert.ok(events.indexOf(started) < events.indexOf(result));
+  return { ...recorded, started, result };
+}
+
+function sha256Utf8(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 function assertUsageEquals(actual: SessionUsageSnapshot, expected: SessionUsageSnapshot): void {

@@ -1,6 +1,11 @@
 import type { Message } from "../schema/message.js";
 import type { CommitReceipt } from "./session-persistence.js";
 import { Session } from "./session.js";
+import type {
+  RuntimeToolResultBody,
+  RuntimeToolResultProjection,
+  RuntimeToolResultStatus,
+} from "./tool-result-contract.js";
 
 /**
  * Engine-facing view of the durable runtime store.
@@ -80,10 +85,23 @@ export interface EngineRuntimeHistoryEntry {
 }
 
 export interface EngineRuntimeEvidenceReference {
-  readonly schemaVersion: number;
+  readonly schemaVersion: 1;
   readonly contentHash: string;
   readonly sessionId: string;
   readonly kind: "tool-exchange";
+}
+
+export type EngineRuntimeToolResultStatus = RuntimeToolResultStatus;
+export type EngineRuntimeToolResultBody = RuntimeToolResultBody;
+export type EngineRuntimeToolResultProjection = RuntimeToolResultProjection;
+
+export interface EngineRuntimeToolResultInput {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly status: EngineRuntimeToolResultStatus;
+  readonly body: EngineRuntimeToolResultBody;
+  readonly projection: EngineRuntimeToolResultProjection;
+  readonly evidence?: EngineRuntimeEvidenceReference;
 }
 
 export interface EngineRuntimeCheckpointInput {
@@ -114,6 +132,8 @@ export interface EngineRuntimeRun {
   recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
   recordToolStarted(toolCallId: string, toolName: string, argumentsJson: string): Promise<void>;
   recordTranscriptMessage(message: Message): Promise<void>;
+  recordTranscriptToolResult(input: EngineRuntimeToolResultInput): Promise<Message>;
+  registerToolResult(input: EngineRuntimeToolResultInput): Message;
   registerToolEvidence(toolCallId: string, evidence: EngineRuntimeEvidenceReference): void;
 }
 

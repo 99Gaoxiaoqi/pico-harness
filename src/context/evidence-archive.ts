@@ -1,11 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, link, mkdir, open, unlink, type FileHandle } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import type { FileHandle } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { RuntimeEvidenceReference } from "../runtime/runtime-event.js";
 import type { Message } from "../schema/message.js";
-import { readVersionedJson } from "../storage/atomic-json.js";
+import {
+  assertEvidenceBlobRef,
+  EvidenceBlobStore,
+  type VerifiedEvidenceDirectory,
+  withVerifiedEvidenceDirectory,
+  type EvidenceBlobRef,
+} from "./evidence-blob-store.js";
 
 const EVIDENCE_ARCHIVE_SCHEMA_VERSION = 1 as const;
+const RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION = 2 as const;
+export const DEFAULT_EVIDENCE_PAGE_LIMIT_BYTES = 16 * 1024;
+export const MAX_EVIDENCE_PAGE_LIMIT_BYTES = 64 * 1024;
 
 export interface EvidenceToolExchange {
   /** Zero-based position of the assistant tool-call message in the compacted prefix. */
@@ -34,8 +43,8 @@ export interface EvidenceArchiveReference {
   readonly exchangeCount: number;
 }
 
-/** Complete, immutable source material for one RuntimeEvent tool exchange. */
-export interface RuntimeToolExchangeEvidence {
+/** Legacy v1 evidence embedded both raw and model-visible output in the manifest. */
+export interface RuntimeToolExchangeEvidenceV1 {
   readonly kind: "tool-exchange";
   readonly sessionId: string;
   readonly toolCallId: string;
@@ -46,12 +55,62 @@ export interface RuntimeToolExchangeEvidence {
   readonly isError: boolean;
 }
 
-export interface RuntimeToolExchangeEvidenceManifest {
+/** @deprecated Runtime writes use RuntimeToolResultEvidenceV2; retained for v1 readers. */
+export type RuntimeToolExchangeEvidence = RuntimeToolExchangeEvidenceV1;
+
+export interface RuntimeToolExchangeEvidenceManifestV1 {
   readonly schemaVersion: typeof EVIDENCE_ARCHIVE_SCHEMA_VERSION;
   readonly contentHash: string;
   readonly archivedAt: string;
   readonly kind: "tool-exchange";
-  readonly content: RuntimeToolExchangeEvidence;
+  readonly content: RuntimeToolExchangeEvidenceV1;
+}
+
+/** Runtime ToolResult v2 keeps the original body once in the Evidence CAS. */
+export interface RuntimeToolResultEvidenceV2 {
+  readonly kind: "tool-exchange";
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly arguments: string;
+  readonly rawOutput: EvidenceBlobRef;
+  readonly isError: boolean;
+}
+
+export interface RuntimeToolResultEvidenceManifestV2 {
+  readonly schemaVersion: typeof RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION;
+  readonly contentHash: string;
+  readonly archivedAt: string;
+  readonly kind: "tool-exchange";
+  readonly content: RuntimeToolResultEvidenceV2;
+}
+
+export type RuntimeToolExchangeEvidenceManifest =
+  | RuntimeToolExchangeEvidenceManifestV1
+  | RuntimeToolResultEvidenceManifestV2;
+
+export interface ArchiveRuntimeToolResultInput {
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly rawArguments: string;
+  readonly rawOutput: string;
+  readonly isError: boolean;
+}
+
+export interface RuntimeToolOutputPageOptions {
+  readonly offsetBytes?: number;
+  readonly limitBytes?: number;
+}
+
+export interface RuntimeToolOutputPage {
+  readonly content: string;
+  readonly offsetBytes: number;
+  readonly endOffsetBytes: number;
+  readonly totalBytes: number;
+  readonly limitBytes: number;
+  readonly truncated: boolean;
+  readonly nextOffsetBytes?: number;
 }
 
 export interface EvidenceArchiveOptions {
@@ -74,10 +133,12 @@ export class EvidenceArchiveIntegrityError extends Error {
 export class EvidenceArchive {
   private readonly baseDir: string;
   private readonly now: () => Date;
+  private readonly blobs: EvidenceBlobStore;
 
   constructor(options: EvidenceArchiveOptions) {
     this.baseDir = resolve(options.baseDir);
     this.now = options.now ?? (() => new Date());
+    this.blobs = new EvidenceBlobStore(this.baseDir);
   }
 
   async archiveToolExchanges(
@@ -113,7 +174,12 @@ export class EvidenceArchive {
       archivedAt: this.now().toISOString(),
       content,
     };
-    const created = await writeImmutableJson(this.pathFor(sessionId, contentHash), manifest);
+    const created = await writeImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(sessionId)],
+      `${contentHash}.json`,
+      manifest,
+    );
     if (!created) await this.read(reference);
     return reference;
   }
@@ -124,23 +190,44 @@ export class EvidenceArchive {
     toolName: string,
     rawArguments: string,
     rawOutput: string,
-    modelVisibleOutput: string,
+    _modelVisibleOutput: string,
     isError: boolean,
   ): Promise<RuntimeEvidenceReference> {
-    const content = createRuntimeToolExchangeEvidence(
+    return this.archiveRuntimeToolResult({
       sessionId,
       toolCallId,
       toolName,
       rawArguments,
       rawOutput,
-      modelVisibleOutput,
       isError,
+    });
+  }
+
+  async archiveRuntimeToolResult(
+    input: ArchiveRuntimeToolResultInput,
+  ): Promise<RuntimeEvidenceReference> {
+    assertRuntimeToolResultInput(input);
+    await withVerifiedEvidenceDirectory(
+      this.baseDir,
+      [sanitizeFilePart(input.sessionId)],
+      { create: true },
+      async () => undefined,
     );
+    const rawOutput = (await this.blobs.putUtf8(input.rawOutput)).ref;
+    const content: RuntimeToolResultEvidenceV2 = {
+      kind: "tool-exchange",
+      sessionId: input.sessionId,
+      toolCallId: input.toolCallId,
+      toolName: input.toolName,
+      arguments: input.rawArguments,
+      rawOutput,
+      isError: input.isError,
+    };
     const contentHash = hashContent(content);
     const reference: RuntimeEvidenceReference = {
       schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
       contentHash,
-      sessionId,
+      sessionId: input.sessionId,
       kind: "tool-exchange",
     };
     try {
@@ -150,16 +237,67 @@ export class EvidenceArchive {
       if (!isMissing(error)) throw error;
     }
 
-    const manifest: RuntimeToolExchangeEvidenceManifest = {
-      schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+    const manifest: RuntimeToolResultEvidenceManifestV2 = {
+      schemaVersion: RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION,
       contentHash,
       archivedAt: this.now().toISOString(),
       kind: "tool-exchange",
       content,
     };
-    const created = await writeImmutableJson(this.pathFor(sessionId, contentHash), manifest);
+    const created = await writeImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(input.sessionId)],
+      `${contentHash}.json`,
+      manifest,
+    );
     if (!created) await this.readRuntimeToolExchange(reference);
     return reference;
+  }
+
+  async readRuntimeToolOutput(reference: RuntimeEvidenceReference): Promise<string> {
+    const manifest = await this.readRuntimeToolExchange(reference);
+    if (manifest.schemaVersion === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
+      return manifest.content.rawOutput;
+    }
+    return (await this.blobs.read(manifest.content.rawOutput)).toString("utf8");
+  }
+
+  async readRuntimeToolOutputPage(
+    reference: RuntimeEvidenceReference,
+    options: RuntimeToolOutputPageOptions = {},
+  ): Promise<RuntimeToolOutputPage> {
+    const offsetBytes = pageInteger(
+      options.offsetBytes,
+      "offsetBytes",
+      0,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const limitBytes = pageInteger(
+      options.limitBytes,
+      "limitBytes",
+      DEFAULT_EVIDENCE_PAGE_LIMIT_BYTES,
+      1,
+      MAX_EVIDENCE_PAGE_LIMIT_BYTES,
+    );
+    const manifest = await this.readRuntimeToolExchange(reference);
+    if (manifest.schemaVersion === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
+      return buildRuntimeToolOutputPage(
+        Buffer.from(manifest.content.rawOutput, "utf8"),
+        offsetBytes,
+        limitBytes,
+      );
+    }
+    const page = await this.blobs.readPage(manifest.content.rawOutput, offsetBytes, limitBytes);
+    return {
+      content: page.bytes.toString("utf8"),
+      offsetBytes: page.offsetBytes,
+      endOffsetBytes: page.endOffsetBytes,
+      totalBytes: page.totalBytes,
+      limitBytes,
+      truncated: page.endOffsetBytes < page.totalBytes,
+      ...(page.endOffsetBytes < page.totalBytes ? { nextOffsetBytes: page.endOffsetBytes } : {}),
+    };
   }
 
   async read(reference: EvidenceArchiveReference): Promise<EvidenceArchiveManifest>;
@@ -169,9 +307,12 @@ export class EvidenceArchive {
   ): Promise<EvidenceArchiveManifest | RuntimeToolExchangeEvidenceManifest> {
     if (hasRuntimeEvidenceKind(reference)) return this.readRuntimeToolExchange(reference);
     assertEvidenceArchiveReference(reference);
-    const manifest = await readVersionedJson(
-      this.pathFor(reference.sessionId, reference.contentHash),
+    const manifest = await readImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(reference.sessionId)],
+      `${reference.contentHash}.json`,
       decodeManifest,
+      "Evidence archive manifest",
     );
     if (
       manifest.contentHash !== reference.contentHash ||
@@ -190,9 +331,12 @@ export class EvidenceArchive {
     reference: RuntimeEvidenceReference,
   ): Promise<RuntimeToolExchangeEvidenceManifest> {
     assertRuntimeEvidenceReference(reference);
-    const manifest = await readVersionedJson(
-      this.pathFor(reference.sessionId, reference.contentHash),
+    const manifest = await readImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(reference.sessionId)],
+      `${reference.contentHash}.json`,
       decodeRuntimeToolExchangeManifest,
+      "Runtime tool-exchange evidence manifest",
     );
     if (
       manifest.contentHash !== reference.contentHash ||
@@ -211,13 +355,35 @@ export class EvidenceArchive {
     }
     return manifest;
   }
+}
 
-  private pathFor(sessionId: string, contentHash: string): string {
-    if (!isContentHash(contentHash)) {
-      throw new EvidenceArchiveIntegrityError("Evidence archive content hash is invalid");
-    }
-    return join(this.baseDir, sanitizeFilePart(sessionId), `${contentHash}.json`);
+export function formatRuntimeEvidenceUri(reference: RuntimeEvidenceReference): string {
+  assertRuntimeEvidenceReference(reference);
+  return `pico://evidence/${encodeURIComponent(reference.sessionId)}/${reference.contentHash}`;
+}
+
+export function parseRuntimeEvidenceUri(value: string): RuntimeEvidenceReference {
+  const match = /^pico:\/\/evidence\/([^/]+)\/([a-f0-9]{64})$/u.exec(value);
+  if (!match) {
+    throw new EvidenceArchiveIntegrityError("Runtime evidence ref is invalid");
   }
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(match[1]!);
+  } catch (error) {
+    throw new EvidenceArchiveIntegrityError(
+      `Runtime evidence ref has invalid session encoding: ${errorMessage(error)}`,
+    );
+  }
+  if (!isNonEmptyString(sessionId) || encodeURIComponent(sessionId) !== match[1]) {
+    throw new EvidenceArchiveIntegrityError("Runtime evidence ref has a non-canonical session");
+  }
+  return {
+    schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+    contentHash: match[2]!,
+    sessionId,
+    kind: "tool-exchange",
+  };
 }
 
 export function extractCompletedToolExchanges(
@@ -292,7 +458,11 @@ function decodeManifest(value: unknown): EvidenceArchiveManifest {
 }
 
 function decodeRuntimeToolExchangeManifest(value: unknown): RuntimeToolExchangeEvidenceManifest {
-  if (!isRecord(value) || value["schemaVersion"] !== EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
+  if (
+    !isRecord(value) ||
+    (value["schemaVersion"] !== EVIDENCE_ARCHIVE_SCHEMA_VERSION &&
+      value["schemaVersion"] !== RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION)
+  ) {
     throw new EvidenceArchiveIntegrityError(
       "Runtime tool-exchange evidence has an invalid schema version",
     );
@@ -306,55 +476,46 @@ function decodeRuntimeToolExchangeManifest(value: unknown): RuntimeToolExchangeE
       "Runtime tool-exchange evidence has an invalid envelope",
     );
   }
-  const content = decodeRuntimeToolExchangeEvidence(value["content"]);
+  if (value["schemaVersion"] === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
+    return {
+      schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+      contentHash: value["contentHash"],
+      archivedAt: value["archivedAt"],
+      kind: "tool-exchange",
+      content: decodeRuntimeToolExchangeEvidenceV1(value["content"]),
+    };
+  }
   return {
-    schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+    schemaVersion: RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION,
     contentHash: value["contentHash"],
     archivedAt: value["archivedAt"],
     kind: "tool-exchange",
-    content,
+    content: decodeRuntimeToolResultEvidenceV2(value["content"]),
   };
 }
 
-function createRuntimeToolExchangeEvidence(
-  sessionId: string,
-  toolCallId: string,
-  toolName: string,
-  rawArguments: string,
-  rawOutput: string,
-  modelVisibleOutput: string,
-  isError: boolean,
-): RuntimeToolExchangeEvidence {
-  if (!isNonEmptyString(sessionId)) {
+function assertRuntimeToolResultInput(
+  input: ArchiveRuntimeToolResultInput,
+): asserts input is ArchiveRuntimeToolResultInput {
+  if (!isNonEmptyString(input.sessionId)) {
     throw new EvidenceArchiveIntegrityError("Runtime tool-exchange session ID must be non-empty");
   }
-  if (!isNonEmptyString(toolCallId)) {
+  if (!isNonEmptyString(input.toolCallId)) {
     throw new EvidenceArchiveIntegrityError("Runtime tool-exchange call ID must be non-empty");
   }
-  if (!isNonEmptyString(toolName)) {
+  if (!isNonEmptyString(input.toolName)) {
     throw new EvidenceArchiveIntegrityError("Runtime tool-exchange tool name must be non-empty");
   }
   if (
-    typeof rawArguments !== "string" ||
-    typeof rawOutput !== "string" ||
-    typeof modelVisibleOutput !== "string" ||
-    typeof isError !== "boolean"
+    typeof input.rawArguments !== "string" ||
+    typeof input.rawOutput !== "string" ||
+    typeof input.isError !== "boolean"
   ) {
     throw new EvidenceArchiveIntegrityError("Runtime tool-exchange payload is invalid");
   }
-  return {
-    kind: "tool-exchange",
-    sessionId,
-    toolCallId,
-    toolName,
-    arguments: rawArguments,
-    rawOutput,
-    modelVisibleOutput,
-    isError,
-  };
 }
 
-function decodeRuntimeToolExchangeEvidence(value: unknown): RuntimeToolExchangeEvidence {
+function decodeRuntimeToolExchangeEvidenceV1(value: unknown): RuntimeToolExchangeEvidenceV1 {
   if (
     !isRecord(value) ||
     value["kind"] !== "tool-exchange" ||
@@ -376,6 +537,36 @@ function decodeRuntimeToolExchangeEvidence(value: unknown): RuntimeToolExchangeE
     arguments: value["arguments"],
     rawOutput: value["rawOutput"],
     modelVisibleOutput: value["modelVisibleOutput"],
+    isError: value["isError"],
+  };
+}
+
+function decodeRuntimeToolResultEvidenceV2(value: unknown): RuntimeToolResultEvidenceV2 {
+  if (
+    !isRecord(value) ||
+    value["kind"] !== "tool-exchange" ||
+    !isNonEmptyString(value["sessionId"]) ||
+    !isNonEmptyString(value["toolCallId"]) ||
+    !isNonEmptyString(value["toolName"]) ||
+    typeof value["arguments"] !== "string" ||
+    typeof value["isError"] !== "boolean"
+  ) {
+    throw new EvidenceArchiveIntegrityError("Runtime tool-exchange evidence has invalid content");
+  }
+  try {
+    assertEvidenceBlobRef(value["rawOutput"]);
+  } catch (error) {
+    throw new EvidenceArchiveIntegrityError(
+      `Runtime tool-exchange evidence has invalid blob reference: ${errorMessage(error)}`,
+    );
+  }
+  return {
+    kind: "tool-exchange",
+    sessionId: value["sessionId"],
+    toolCallId: value["toolCallId"],
+    toolName: value["toolName"],
+    arguments: value["arguments"],
+    rawOutput: value["rawOutput"],
     isError: value["isError"],
   };
 }
@@ -514,6 +705,7 @@ function assertEvidenceArchiveReference(reference: EvidenceArchiveReference): vo
 function assertRuntimeEvidenceReference(reference: RuntimeEvidenceReference): void {
   if (
     reference.schemaVersion !== EVIDENCE_ARCHIVE_SCHEMA_VERSION ||
+    !isContentHash(reference.contentHash) ||
     !isNonEmptyString(reference.sessionId) ||
     reference.kind !== "tool-exchange"
   ) {
@@ -521,46 +713,146 @@ function assertRuntimeEvidenceReference(reference: RuntimeEvidenceReference): vo
   }
 }
 
-async function writeImmutableJson(path: string, value: unknown): Promise<boolean> {
-  const directory = dirname(path);
-  const temporaryPath = join(
-    directory,
-    `.${basename(path)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`,
-  );
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
+async function readImmutableJson<T>(
+  baseDir: string,
+  directoryParts: readonly string[],
+  fileName: string,
+  decoder: (value: unknown) => T,
+  label: string,
+): Promise<T> {
+  let raw: Buffer;
+  try {
+    raw = await withVerifiedEvidenceDirectory(
+      baseDir,
+      directoryParts,
+      { create: false },
+      (directory) => directory.readRegularFile(fileName, label),
+    );
+  } catch (error) {
+    if (isMissing(error)) throw error;
+    throw new EvidenceArchiveIntegrityError(`${label} is unreadable: ${errorMessage(error)}`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new EvidenceArchiveIntegrityError(`${label} is invalid JSON: ${errorMessage(error)}`);
+  }
+  return decoder(value);
+}
 
+function pageInteger(
+  value: number | undefined,
+  field: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new EvidenceArchiveIntegrityError(
+      `${field} must be an integer between ${minimum} and ${maximum}`,
+    );
+  }
+  return value;
+}
+
+function isUtf8ContinuationByte(byte: number): boolean {
+  return (byte & 0xc0) === 0x80;
+}
+
+function buildRuntimeToolOutputPage(
+  bytes: Buffer,
+  offsetBytes: number,
+  limitBytes: number,
+): RuntimeToolOutputPage {
+  if (offsetBytes > bytes.byteLength) {
+    throw new EvidenceArchiveIntegrityError(
+      `Evidence offsetBytes ${offsetBytes} exceeds output size ${bytes.byteLength}`,
+    );
+  }
+  if (offsetBytes < bytes.byteLength && isUtf8ContinuationByte(bytes[offsetBytes]!)) {
+    throw new EvidenceArchiveIntegrityError(
+      `Evidence offsetBytes ${offsetBytes} is not a UTF-8 code point boundary`,
+    );
+  }
+
+  let endOffsetBytes = Math.min(bytes.byteLength, offsetBytes + limitBytes);
+  if (endOffsetBytes < bytes.byteLength) {
+    while (endOffsetBytes > offsetBytes && isUtf8ContinuationByte(bytes[endOffsetBytes]!)) {
+      endOffsetBytes--;
+    }
+  }
+  if (endOffsetBytes === offsetBytes && offsetBytes < bytes.byteLength) {
+    throw new EvidenceArchiveIntegrityError(
+      `Evidence limitBytes ${limitBytes} cannot contain the next complete UTF-8 code point`,
+    );
+  }
+  return {
+    content: bytes.subarray(offsetBytes, endOffsetBytes).toString("utf8"),
+    offsetBytes,
+    endOffsetBytes,
+    totalBytes: bytes.byteLength,
+    limitBytes,
+    truncated: endOffsetBytes < bytes.byteLength,
+    ...(endOffsetBytes < bytes.byteLength ? { nextOffsetBytes: endOffsetBytes } : {}),
+  };
+}
+
+async function writeImmutableJson(
+  baseDir: string,
+  directoryParts: readonly string[],
+  fileName: string,
+  value: unknown,
+): Promise<boolean> {
+  return withVerifiedEvidenceDirectory(
+    baseDir,
+    directoryParts,
+    { create: true },
+    async (directory) => writeImmutableJsonInDirectory(directory, fileName, value),
+  );
+}
+
+async function writeImmutableJsonInDirectory(
+  directory: VerifiedEvidenceDirectory,
+  fileName: string,
+  value: unknown,
+): Promise<boolean> {
+  const temporaryName = `.${fileName}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
   let handle: FileHandle | undefined;
   try {
-    handle = await open(temporaryPath, "wx", 0o600);
+    handle = await directory.createExclusiveFile(temporaryName, 0o600);
     await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
     await handle.sync();
-    await handle.close();
-    handle = undefined;
+    const temporaryIdentity = await handle.stat({ bigint: true });
     try {
-      await link(temporaryPath, path);
+      await directory.linkFile(temporaryName, fileName);
     } catch (error) {
       if (isAlreadyExists(error)) return false;
       throw error;
     }
-    await chmod(path, 0o600);
-    await syncDirectory(directory);
+
+    let finalHandle: FileHandle | undefined;
+    try {
+      finalHandle = await directory.openRegularFile(fileName, "Evidence archive manifest");
+      const finalIdentity = await finalHandle.stat({ bigint: true });
+      if (
+        temporaryIdentity.dev !== finalIdentity.dev ||
+        temporaryIdentity.ino !== finalIdentity.ino
+      ) {
+        await directory.unlinkFile(fileName).catch(() => undefined);
+        throw new EvidenceArchiveIntegrityError(
+          "Evidence archive manifest changed while it was published",
+        );
+      }
+    } finally {
+      await finalHandle?.close().catch(() => undefined);
+    }
+    await directory.sync();
     return true;
   } finally {
     await handle?.close().catch(() => undefined);
-    await unlink(temporaryPath).catch(() => undefined);
-  }
-}
-
-async function syncDirectory(directory: string): Promise<void> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(directory, "r");
-    await handle.sync();
-  } catch (error) {
-    if (!isUnsupportedDirectorySync(error)) throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
+    await directory.unlinkFile(temporaryName).catch(() => undefined);
   }
 }
 
@@ -568,7 +860,6 @@ function isAlreadyExists(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "EEXIST";
 }
 
-function isUnsupportedDirectorySync(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code ?? "");
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

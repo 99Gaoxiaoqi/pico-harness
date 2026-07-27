@@ -558,9 +558,12 @@ export async function executeAgentRuntime(
         };
       },
     };
-    const artifactBaseDir = resolvePicoPaths(workDir, {
+    const workspaceStatePaths = resolvePicoPaths(workDir, {
       picoHome: session.picoHome,
-    }).workspace.artifacts;
+    }).workspace;
+    const artifactBaseDir = workspaceStatePaths.artifacts;
+    const evidenceBaseDir = workspaceStatePaths.evidence;
+    const evidenceArchive = new EvidenceArchive({ baseDir: evidenceBaseDir });
     // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
     // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
     let currentConfig: ProviderConfig = providerConfig;
@@ -726,6 +729,7 @@ export async function executeAgentRuntime(
             workspaceRoots,
             usageSession: session,
             goalManager: runtimeState.goalManager,
+            runtimeEvidenceArchive: evidenceArchive,
           });
           const verifierRegistry = createSubagentRegistryFactory({
             workDir,
@@ -736,6 +740,7 @@ export async function executeAgentRuntime(
             yoloSandbox: { config: picoConfig.sandbox },
             ownerSessionId: session.id,
             artifactBaseDir,
+            evidenceBaseDir,
             env: runtimeEnv,
           })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
           const task = [
@@ -801,6 +806,7 @@ export async function executeAgentRuntime(
       skillLoaderFactory(workDir),
       approvalManager,
       artifactBaseDir,
+      evidenceBaseDir,
       runtimeEnv,
     );
     registerPluginCapabilityTools(
@@ -872,9 +878,6 @@ export async function executeAgentRuntime(
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
     const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions, providerDecorator);
-    const evidenceArchive = new EvidenceArchive({
-      baseDir: resolvePicoPaths(workDir, { picoHome }).workspace.evidence,
-    });
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
@@ -977,6 +980,7 @@ export async function executeAgentRuntime(
       runtimeState.hookService,
       subagentModelCatalog,
       artifactBaseDir,
+      evidenceBaseDir,
       runtimeEnv,
       async (profile) => {
         if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
@@ -1278,6 +1282,7 @@ function buildRegistry(
   skillLoader?: SkillLoader,
   approvalManager?: ApprovalManager,
   artifactBaseDir?: string,
+  evidenceBaseDir?: string,
   env?: NodeJS.ProcessEnv,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
@@ -1296,6 +1301,7 @@ function buildRegistry(
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(approvalManager !== undefined ? { approvalManager } : {}),
     ...(artifactBaseDir !== undefined ? { artifactBaseDir } : {}),
+    ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
   });
 }
@@ -1424,6 +1430,7 @@ function registerDelegationTools(
   hookService?: HookService,
   modelCatalog?: SubagentModelCatalog,
   artifactBaseDir?: string,
+  evidenceBaseDir?: string,
   env?: Readonly<Record<string, string | undefined>>,
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
 ): void {
@@ -1439,6 +1446,7 @@ function registerDelegationTools(
     ...(hookService ? { hookService } : {}),
     ...(modelCatalog ? { modelCatalog } : {}),
     ...(artifactBaseDir ? { artifactBaseDir } : {}),
+    ...(evidenceBaseDir ? { evidenceBaseDir } : {}),
     ...(env ? { env } : {}),
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
