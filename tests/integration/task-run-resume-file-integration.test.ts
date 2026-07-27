@@ -402,6 +402,81 @@ test("verified H+1 still re-proves pending source effects before adapter ensure"
   );
 });
 
+test("source Run cannot advance after terminal H while a verified successor starts at H+1", async (t) => {
+  const fixture = await prepareFileRecovery(
+    t,
+    minimalRuntimeFacts,
+    (storageRootId, workspace) =>
+      initialAttemptFacts(storageRootId, workspace).map(
+        (event): TaskRunEvent =>
+          event.kind === "attempt.checkpointed"
+            ? {
+                ...event,
+                data: {
+                  ...event.data,
+                  boundary: {
+                    ...event.data.boundary,
+                    runtime: {
+                      ...event.data.boundary.runtime!,
+                      eventHighWater: 3,
+                    },
+                  },
+                },
+              }
+            : event,
+      ),
+  );
+  const registry = new RecoverableTaskRegistry();
+  let adapterCalls = 0;
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    async resume(_input, context) {
+      adapterCalls += 1;
+      const receipt = await appendExpectedRunStarted(fixture, context);
+      await fixture.runtimeEvents.append({
+        schemaVersion: 1,
+        eventId: "runtime-source-message-after-terminal",
+        sessionId: SESSION_ID,
+        invocationId: "invocation:late-source-message",
+        runId: RUN_ID,
+        turnId: "turn:late-source-message",
+        at: "2026-07-27T00:00:00.500Z",
+        partial: false,
+        visibility: "model",
+        kind: "message.committed",
+        data: {
+          message: {
+            role: "assistant",
+            content: "late source output",
+          },
+        },
+      });
+      return receipt;
+    },
+  });
+
+  const result = await recoveryCoordinator(fixture, registry, "host:source-run-fence").recover({
+    taskRunId: TASK_RUN_ID,
+    executionClass: "recoverable",
+  });
+
+  assert.equal(result.status, "parked");
+  if (result.status !== "parked") assert.fail("source Run advancement after H must park");
+  assert.ok(result.plan.reasons.includes("runtime_high_water_mismatch"));
+  assert.equal(adapterCalls, 1);
+  const entries = await fixture.runtimeEvents.readSessionEntries(SESSION_ID);
+  assert.equal(entries.find(({ event }) => event.kind === "run.terminal")?.sequence, 3);
+  assert.equal(
+    entries.find(({ event }) => event.eventId === "runtime-source-message-after-terminal")?.sequence,
+    5,
+  );
+  const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
+  assert.equal(projection?.status, "parked");
+  assert.notEqual(projection?.attempts[1]?.launch?.status, "succeeded");
+});
+
 test("run.started admission is not launch success until the idempotent adapter confirms a worker", async (t) => {
   const fixture = await prepareFileRecovery(t);
   const registry = new RecoverableTaskRegistry();
@@ -1018,6 +1093,48 @@ function expectedLaunchId(): string {
     .update(JSON.stringify(["task-resume-v1", TASK_RUN_ID, "attempt-1", 2]))
     .digest("hex");
   return `launch:${identity}`;
+}
+
+function minimalRuntimeFacts(workspace: string): RuntimeEvent[] {
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: SESSION_ID,
+    invocationId: "invocation-1",
+    runId: RUN_ID,
+    turnId: "turn-1",
+    at: AT,
+    partial: false,
+  };
+  return [
+    {
+      ...base,
+      eventId: "runtime-started",
+      visibility: "internal",
+      kind: "run.started",
+      data: { workDir: canonicalizeWorkspacePath(workspace) },
+    },
+    {
+      ...base,
+      eventId: "runtime-checkpoint",
+      visibility: "internal",
+      kind: "context.checkpoint.recorded",
+      data: {
+        checkpointId: "checkpoint-1",
+        sourceDigest: "digest-1",
+        coveredEventCount: 2,
+      },
+    },
+    {
+      ...base,
+      eventId: "runtime-terminal",
+      visibility: "internal",
+      kind: "run.terminal",
+      data: {
+        status: "interrupted",
+        reason: "host process exited",
+      },
+    },
+  ];
 }
 
 function runtimeFacts(workspace: string): RuntimeEvent[] {

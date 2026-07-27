@@ -82,11 +82,12 @@ export class RecoverableTaskRegistry {
         `Recoverable task adapter ${adapter.adapterId}@${adapter.version} is already registered`,
       );
     }
-    versions.set(adapter.version, Object.freeze({ ...adapter }));
+    const registeredAdapter = Object.freeze({ ...adapter });
+    versions.set(adapter.version, registeredAdapter);
     this.adapters.set(adapter.adapterId, versions);
     return () => {
       const current = this.adapters.get(adapter.adapterId);
-      if (!current || current.get(adapter.version) !== versions.get(adapter.version)) return;
+      if (!current || current.get(adapter.version) !== registeredAdapter) return;
       current.delete(adapter.version);
       if (current.size === 0) this.adapters.delete(adapter.adapterId);
     };
