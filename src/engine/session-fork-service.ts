@@ -44,10 +44,18 @@ import type {
   SessionForkRuntimePort,
 } from "./session-fork-runtime-port.js";
 import { SessionForkRuntimeConflictError } from "./session-fork-runtime-port.js";
+import {
+  projectRuntimeModelMessage,
+  runtimeEventHasModelHistoryEntry,
+  type RuntimeModelHistoryEvent,
+} from "./runtime-model-message.js";
+import { projectRuntimeSessionModelHistoryEntries } from "./session-runtime-projection.js";
+import { decodeRuntimeEvent } from "../storage/runtime-event.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const LEGACY_FROZEN_FORK_BUNDLE_VERSION = 1 as const;
-const FROZEN_FORK_BUNDLE_VERSION = 2 as const;
+const MESSAGE_FROZEN_FORK_BUNDLE_VERSION = 2 as const;
+const FROZEN_FORK_BUNDLE_VERSION = 3 as const;
 const FROZEN_FORK_BUNDLE_NAME = "runtime-fork.json";
 const FORK_SIDECARS_VERSION = 1 as const;
 const FORK_SIDECARS_NAME = "fork-sidecars.json";
@@ -109,12 +117,14 @@ export class SessionForkNeedsAttentionError extends Error {
 interface FrozenForkBundle {
   readonly schemaVersion:
     | typeof LEGACY_FROZEN_FORK_BUNDLE_VERSION
+    | typeof MESSAGE_FROZEN_FORK_BUNDLE_VERSION
     | typeof FROZEN_FORK_BUNDLE_VERSION;
   readonly operationId: string;
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly sourceCursor: ForkSourceCursor;
   readonly messages: readonly Message[];
+  readonly historyEntries?: readonly RuntimeModelHistoryEvent[];
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
@@ -366,7 +376,7 @@ export class SessionForkService {
     prepared: ForkPreparedBundle,
     publication: ForkRuntimePublicationCapability,
   ): Promise<void> {
-    const { frozen, messages, modelCheckpoint } = await this.readRuntimePublication(
+    const { frozen, messages, historyEntries, modelCheckpoint } = await this.readRuntimePublication(
       operation,
       prepared,
     );
@@ -389,6 +399,7 @@ export class SessionForkService {
         operationId: operation.operationId,
         operationCreatedAt: operation.createdAt,
         messages,
+        ...(historyEntries ? { historyEntries } : {}),
         ...(modelCheckpoint ? { modelCheckpoint } : {}),
         ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
         workDir: this.workDir,
@@ -421,13 +432,17 @@ export class SessionForkService {
     if (!(await this.runtimeStore.readSessionManifest(operation.targetSessionId))) return;
     const events = await this.runtimeStore.readSession(operation.targetSessionId);
     if (events.length === 0) return;
-    const { messages, modelCheckpoint } = await this.readRuntimePublication(operation, prepared);
+    const { messages, historyEntries, modelCheckpoint } = await this.readRuntimePublication(
+      operation,
+      prepared,
+    );
     const expectedRunId = this.runtimePort.deriveBootstrapRunId({
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
       operationId: operation.operationId,
       operationCreatedAt: operation.createdAt,
       messages,
+      ...(historyEntries ? { historyEntries } : {}),
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
       workDir: this.workDir,
       runtimeAuthority: this.runtimeStore,
@@ -451,6 +466,7 @@ export class SessionForkService {
   ): Promise<{
     readonly frozen: FrozenForkBundle;
     readonly messages: readonly Message[];
+    readonly historyEntries?: readonly RuntimeModelHistoryEvent[];
     readonly modelCheckpoint?: SessionForkModelCheckpoint;
   }> {
     const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
@@ -462,10 +478,19 @@ export class SessionForkService {
       sidecars.artifactMappings,
     );
     const messages = rewritten.slice(0, frozen.messages.length);
+    const historyEntries = frozen.historyEntries
+      ? rewriteRuntimeHistoryArtifactReferences(
+          frozen.historyEntries,
+          operation.sourceSessionId,
+          operation.targetSessionId,
+          sidecars.artifactMappings,
+        )
+      : undefined;
     const summary = frozen.modelCheckpoint ? rewritten.at(-1) : undefined;
     return {
       frozen,
       messages,
+      ...(historyEntries ? { historyEntries } : {}),
       ...(frozen.modelCheckpoint && summary
         ? {
             modelCheckpoint: {
@@ -587,6 +612,7 @@ function createFrozenForkBundle(
     targetSessionId: input.targetSessionId,
     sourceCursor: structuredClone(snapshot.cursor),
     messages: snapshot.hydration.messages.map(stripMessageUsage),
+    historyEntries: snapshot.runtimeHistoryEntries.map(stripRuntimeHistoryUsage),
     ...(snapshot.modelCheckpoint
       ? {
           modelCheckpoint: {
@@ -661,6 +687,16 @@ function stripMessageUsage(message: Message): Message {
   return copy;
 }
 
+function stripRuntimeHistoryUsage(event: RuntimeModelHistoryEvent): RuntimeModelHistoryEvent {
+  const copy = structuredClone(event);
+  return copy.kind === "message.committed"
+    ? {
+        ...copy,
+        data: { message: stripMessageUsage(copy.data.message) },
+      }
+    : copy;
+}
+
 function persistArtifactMapping(mapping: ArtifactCloneMapping): PersistedArtifactCloneMapping {
   return {
     sourceId: mapping.sourceId,
@@ -676,6 +712,17 @@ function rewriteArtifactReferences(
   targetSessionId: string,
   mappings: readonly PersistedArtifactCloneMapping[],
 ): Message[] {
+  return [
+    ...rewriteArtifactReferencesInValue(messages, sourceSessionId, targetSessionId, mappings),
+  ];
+}
+
+function rewriteArtifactReferencesInValue<Value>(
+  value: Value,
+  sourceSessionId: string,
+  targetSessionId: string,
+  mappings: readonly PersistedArtifactCloneMapping[],
+): Value {
   const replacements: Array<readonly [string, string]> = [];
   for (const mapping of mappings) {
     replacements.push([mapping.sourcePath, mapping.targetPath]);
@@ -690,7 +737,46 @@ function rewriteArtifactReferences(
         encodeURIComponent(mapping.targetId),
     ]);
   }
-  return rewriteStrings(structuredClone(messages), replacements) as Message[];
+  return rewriteStrings(structuredClone(value), replacements) as Value;
+}
+
+function rewriteRuntimeHistoryArtifactReferences(
+  entries: readonly RuntimeModelHistoryEvent[],
+  sourceSessionId: string,
+  targetSessionId: string,
+  mappings: readonly PersistedArtifactCloneMapping[],
+): RuntimeModelHistoryEvent[] {
+  return entries.map((source) => {
+    const event = structuredClone(source);
+    if (event.kind === "message.committed") {
+      return {
+        ...event,
+        data: {
+          message: rewriteArtifactReferences(
+            [event.data.message],
+            sourceSessionId,
+            targetSessionId,
+            mappings,
+          )[0]!,
+        },
+      };
+    }
+    return {
+      ...event,
+      data: {
+        ...event.data,
+        projection: {
+          ...event.data.projection,
+          text: rewriteArtifactReferencesInValue(
+            event.data.projection.text,
+            sourceSessionId,
+            targetSessionId,
+            mappings,
+          ),
+        },
+      },
+    };
+  });
 }
 
 function rewriteStrings(
@@ -716,6 +802,7 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
   if (
     !isRecord(value) ||
     (value["schemaVersion"] !== LEGACY_FROZEN_FORK_BUNDLE_VERSION &&
+      value["schemaVersion"] !== MESSAGE_FROZEN_FORK_BUNDLE_VERSION &&
       value["schemaVersion"] !== FROZEN_FORK_BUNDLE_VERSION) ||
     typeof value["operationId"] !== "string" ||
     typeof value["sourceSessionId"] !== "string" ||
@@ -726,9 +813,30 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     !isSessionForkModelCheckpoint(value["modelCheckpoint"]) ||
     (value["schemaVersion"] === LEGACY_FROZEN_FORK_BUNDLE_VERSION &&
       value["modelCheckpoint"] !== undefined) ||
+    (value["schemaVersion"] === FROZEN_FORK_BUNDLE_VERSION
+      ? !Array.isArray(value["historyEntries"])
+      : value["historyEntries"] !== undefined) ||
     (value["sourceTitle"] !== undefined && typeof value["sourceTitle"] !== "string")
   ) {
     throw new Error("Invalid frozen Runtime fork bundle");
+  }
+  const historyEntries =
+    value["schemaVersion"] === FROZEN_FORK_BUNDLE_VERSION
+      ? parseFrozenRuntimeHistoryEntries(value["historyEntries"])
+      : undefined;
+  if (
+    historyEntries &&
+    (historyEntries.some((event) => event.sessionId !== value["sourceSessionId"]) ||
+      !isDeepStrictEqual(
+        historyEntries.map((event) => {
+          const message = projectRuntimeModelMessage(event);
+          if (!message) throw new Error(`Frozen Runtime event ${event.eventId} has no projection`);
+          return stripMessageUsage(message);
+        }),
+        value["messages"],
+      ))
+  ) {
+    throw new Error("Frozen Runtime v3 history does not match its Message projection");
   }
   const modelCheckpoint = value["modelCheckpoint"];
   if (
@@ -763,11 +871,23 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     targetSessionId: value["targetSessionId"],
     sourceCursor: structuredClone(value["sourceCursor"]),
     messages: structuredClone(value["messages"] as Message[]),
+    ...(historyEntries ? { historyEntries } : {}),
     ...(modelCheckpoint ? { modelCheckpoint: structuredClone(modelCheckpoint) } : {}),
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
     ...(normalized?.goal ? { goal: normalized.goal } : {}),
   };
+}
+
+function parseFrozenRuntimeHistoryEntries(value: unknown): RuntimeModelHistoryEvent[] {
+  if (!Array.isArray(value)) throw new Error("Frozen Runtime v3 history must be an array");
+  return value.map((item) => {
+    const event = decodeRuntimeEvent(structuredClone(item));
+    if (!runtimeEventHasModelHistoryEntry(event)) {
+      throw new Error(`Frozen Runtime event ${event.eventId} is not model-visible`);
+    }
+    return event;
+  });
 }
 
 function parseForkSidecarsBundle(value: unknown): ForkSidecarsBundle {
@@ -915,13 +1035,25 @@ async function resolveFrozenSourceThroughEventId(
     );
   }
   const bounded = entries.filter((entry) => entry.sequence <= frozen.sourceCursor.seq);
-  const projected = runtimePort.projectModelMessages(bounded.map(({ event }) => event));
+  const boundedEvents = bounded.map(({ event }) => event);
+  const projected = runtimePort.projectModelMessages(boundedEvents);
   const messages = projected.map(({ message }) => stripMessageUsage(message));
   if (!isDeepStrictEqual(messages, frozen.messages)) {
     throw new ForkOperationConflictError(
       "Frozen source messages do not match the RuntimeEvent cursor",
       "source_cursor_changed",
     );
+  }
+  if (frozen.historyEntries) {
+    const historyEntries = projectRuntimeSessionModelHistoryEntries(boundedEvents).map(
+      ({ event }) => stripRuntimeHistoryUsage(event),
+    );
+    if (!isDeepStrictEqual(historyEntries, frozen.historyEntries)) {
+      throw new ForkOperationConflictError(
+        "Frozen source canonical history does not match the RuntimeEvent cursor",
+        "source_cursor_changed",
+      );
+    }
   }
   return projected.at(-1)?.eventId;
 }

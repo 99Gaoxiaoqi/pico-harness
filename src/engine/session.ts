@@ -78,12 +78,16 @@ import {
 } from "./runtime-port.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
-  runtimeEventHasModelMessage,
   type RuntimeEventBase,
   type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
   type RuntimeMessageCommittedEvent,
 } from "./session-runtime-event.js";
+import {
+  projectRuntimeModelMessage,
+  runtimeEventHasModelHistoryEntry,
+  type RuntimeModelHistoryEvent,
+} from "./runtime-model-message.js";
 import { materializeRuntimeHistoryEntries } from "./session-runtime-read-model.js";
 import {
   RuntimeEventStore,
@@ -95,6 +99,7 @@ import {
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
+  projectRuntimeSessionModelHistoryEntries,
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
   projectRuntimeSessionTranscriptEventEntries,
@@ -149,6 +154,7 @@ export interface DurableRuntimeForkCheckpoint {
 
 export interface DurableSessionForkSnapshot {
   readonly hydration: SessionHydrationSnapshot;
+  readonly runtimeHistoryEntries: readonly RuntimeModelHistoryEvent[];
   readonly cursor: SessionCursor;
   readonly rootLogId: string;
   readonly modelCheckpoint?: DurableRuntimeForkCheckpoint;
@@ -791,6 +797,9 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const modelCheckpoint = durableForkModelCheckpoint(events);
     return {
       hydration: this.runtimeHydrationSnapshot(manifest, entries),
+      runtimeHistoryEntries: projectRuntimeSessionModelHistoryEntries(events).map(({ event }) =>
+        structuredClone(event),
+      ),
       rootLogId: await resolveRuntimeRootSessionId(store, this.id),
       cursor,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
@@ -813,10 +822,15 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     if (seedIndex < 0) return undefined;
     const seed = events[seedIndex]!;
     if (seed.kind !== "session.forked" || seed.data.parentSessionId === this.id) return undefined;
-    const messages = projectRuntimeSessionMessages(events.slice(0, seedIndex + 1));
+    const seedEvents = events.slice(0, seedIndex + 1);
+    const messages = projectRuntimeSessionMessages(seedEvents);
+    const canonicalDigest = runtimeForkHistoryDigest(
+      projectRuntimeSessionModelHistoryEntries(seedEvents).map(({ event }) => event),
+    );
     if (
       seed.data.messageCount !== messages.length ||
-      seed.data.sourceDigest !== messageDigest(messages)
+      (seed.data.sourceDigest !== messageDigest(messages) &&
+        seed.data.sourceDigest !== canonicalDigest)
     ) {
       throw new Error(`Runtime fork seed ${this.id} 与完成标记不一致`);
     }
@@ -1035,7 +1049,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         entry !== undefined &&
         entry.sequence === commit.cursor.seq &&
         entry.event.at === commit.committedAt &&
-        runtimeEventHasModelMessage(entry.event)
+        runtimeEventHasModelHistoryEntry(entry.event)
       );
     });
     if (!commitsMatchCanonicalMessages) {
@@ -1043,11 +1057,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       return;
     }
 
-    const messages = delta.entries
-      .filter((entry): entry is RuntimeEventStoreEntry & { event: RuntimeMessageCommittedEvent } =>
-        runtimeEventHasModelMessage(entry.event),
-      )
-      .map((entry) => structuredClone(entry.event.data.message));
+    const messages = delta.entries.flatMap((entry) => {
+      const message = projectRuntimeModelMessage(entry.event);
+      return message ? [message] : [];
+    });
     this.applyRuntimeHistoryProjectionDelta(
       messages,
       delta.cursor,
@@ -2165,6 +2178,30 @@ async function resolveRuntimeRootSessionId(
 
 function messageDigest(messages: readonly Message[]): string {
   return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+}
+
+function runtimeForkHistoryDigest(events: readonly RuntimeModelHistoryEvent[]): string {
+  const payloads = events.map((event) =>
+    event.kind === "message.committed"
+      ? {
+          kind: event.kind,
+          data: { message: stripRuntimeMessageUsage(event.data.message) },
+        }
+      : {
+          kind: event.kind,
+          refs: {
+            toolCallId: event.refs.toolCallId,
+            ...(event.refs.evidence ? { evidence: event.refs.evidence } : {}),
+          },
+          data: event.data,
+        },
+  );
+  return createHash("sha256").update(JSON.stringify(payloads)).digest("hex");
+}
+
+function stripRuntimeMessageUsage(message: Message): Message {
+  const { usage: _usage, ...copy } = structuredClone(message);
+  return copy;
 }
 
 /** 旧 undo 交互语义：跳过 system，且不跨越 compaction summary。 */
