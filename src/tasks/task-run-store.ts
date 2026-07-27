@@ -6,6 +6,7 @@ import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
   commitFileTransactionSync,
   FileStorageIntegrityError,
+  readFirstJsonLineSync,
   readJsonFileSync,
   readJsonLinesSync,
   recoverFileTransactionSync,
@@ -43,7 +44,10 @@ import {
   type TaskRunTerminalStatus,
   type TaskSafeBoundary,
 } from "./task-run-contract.js";
-import { deriveRecoverableTaskRuntimeLaunchIdentity } from "./recoverable-task.js";
+import {
+  deriveRecoverableTaskLaunchId,
+  deriveRecoverableTaskRuntimeLaunchIdentity,
+} from "./recoverable-task.js";
 
 const TASK_RUNS_DIRECTORY_NAME = "task-runs";
 const TASK_RUN_FILE_NAME = "task.jsonl";
@@ -99,6 +103,14 @@ export interface TaskRunSnapshot {
 export interface TaskRunStoreInspection {
   readonly projections: readonly TaskRunProjection[];
   readonly staleManifestPaths: readonly string[];
+  readonly storageRootMismatches: readonly TaskRunStorageRootMismatch[];
+}
+
+export interface TaskRunStorageRootMismatch {
+  readonly taskRunId: string;
+  readonly ledgerPath: string;
+  readonly taskRunStorageRootId: string;
+  readonly currentStorageRootId: string;
 }
 
 export interface TaskRunManifestProjection {
@@ -243,6 +255,7 @@ export class TaskRunStore {
     return this.withStoreLock(() => {
       const existing = this.loadTaskRun(options.taskRunId);
       if (existing) {
+        this.assertTaskRunStorageRoot(existing.projection);
         if (!sameImmutableHeader(existing.projection.header, requestedHeader)) {
           throw new TaskRunStoreIntegrityError(
             `TaskRun ${options.taskRunId} is already bound to different immutable metadata`,
@@ -313,6 +326,7 @@ export class TaskRunStore {
 
     return this.withStoreLock(() => {
       const loaded = this.requireTaskRun(taskRunId);
+      this.assertTaskRunStorageRoot(loaded.projection);
       const requestedTransactionId = options.transactionId;
       if (requestedTransactionId !== undefined) {
         assertNonEmptyIdentifier(requestedTransactionId, "transactionId");
@@ -495,9 +509,21 @@ export class TaskRunStore {
       return {
         projections: loaded.map(({ projection }) => cloneProjection(projection)),
         staleManifestPaths: loaded
-          .filter(({ manifestStale }) => manifestStale)
+          .filter(
+            ({ manifestStale, projection }) =>
+              manifestStale && this.isTaskRunBoundToStorageRoot(projection),
+          )
           .map(({ manifestPath }) => manifestPath)
           .sort(),
+        storageRootMismatches: loaded
+          .filter(({ projection }) => !this.isTaskRunBoundToStorageRoot(projection))
+          .map(({ projection }) => ({
+            taskRunId: projection.header.taskRunId,
+            ledgerPath: this.taskRunFilePath(projection.header.taskRunId),
+            taskRunStorageRootId: projection.header.storageRootId,
+            currentStorageRootId: this.storageRootId,
+          }))
+          .sort((left, right) => left.taskRunId.localeCompare(right.taskRunId)),
       };
     });
   }
@@ -508,6 +534,17 @@ export class TaskRunStore {
 
   private assertWritable(): void {
     if (this.readOnly) throw new Error("TaskRunStore is read-only");
+  }
+
+  private isTaskRunBoundToStorageRoot(projection: TaskRunProjection): boolean {
+    return this.storageRootId.length > 0 && projection.header.storageRootId === this.storageRootId;
+  }
+
+  private assertTaskRunStorageRoot(projection: TaskRunProjection): void {
+    if (this.isTaskRunBoundToStorageRoot(projection)) return;
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun ${projection.header.taskRunId} storageRootId ${projection.header.storageRootId} does not match the verified workspace root ${this.storageRootId}`,
+    );
   }
 
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
@@ -549,11 +586,13 @@ export class TaskRunStore {
     this.assertTaskRunDigestBoundary(taskRunDigest(taskRunId));
     const ledgerPath = this.taskRunFilePath(taskRunId);
     if (!existsSync(ledgerPath)) return undefined;
-    const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails);
+    const header = decodeTaskRunHeader(readFirstJsonLineSync(ledgerPath), ledgerPath);
+    const boundToStorageRoot =
+      this.storageRootId.length > 0 && header.storageRootId === this.storageRootId;
+    const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails && boundToStorageRoot);
     if (records.length === 0) {
       throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ledger is empty`);
     }
-    const header = decodeTaskRunHeader(records[0], ledgerPath);
     if (
       header.taskRunId !== taskRunId ||
       taskRunDigest(header.taskRunId) !== taskRunDigest(taskRunId)
@@ -613,7 +652,7 @@ export class TaskRunStore {
       }
     }
     const manifestStale = !isDeepStrictEqual(persistedManifest, derivedManifest);
-    if (manifestStale && this.repairManifests) {
+    if (manifestStale && this.repairManifests && boundToStorageRoot) {
       writeJsonAtomicSync(manifestPath, derivedManifest);
     }
     return {
@@ -639,11 +678,7 @@ export class TaskRunStore {
       if (!existsSync(ledgerPath)) {
         throw new TaskRunStoreIntegrityError(`TaskRun directory ${entry.name} has no ledger`);
       }
-      const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails);
-      if (records.length === 0) {
-        throw new TaskRunStoreIntegrityError(`TaskRun directory ${entry.name} ledger is empty`);
-      }
-      const header = decodeTaskRunHeader(records[0], ledgerPath);
+      const header = decodeTaskRunHeader(readFirstJsonLineSync(ledgerPath), ledgerPath);
       if (taskRunDigest(header.taskRunId) !== entry.name) {
         throw new TaskRunStoreIntegrityError(
           `TaskRun directory ${entry.name} does not match its ledger header`,
@@ -1744,6 +1779,10 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
     (event): event is Extract<TaskRunEvent, { kind: "attempt.execution.claimed" }> =>
       event.kind === "attempt.execution.claimed",
   );
+  const launchClaims = events.filter(
+    (event): event is Extract<TaskRunEvent, { kind: "attempt.launch.claimed" }> =>
+      event.kind === "attempt.launch.claimed",
+  );
   for (const started of startedAttempts) {
     const matchingExecutionClaims = executionClaims.filter(
       (claim) => claim.data.attemptId === started.data.attemptId,
@@ -1759,6 +1798,11 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
       `${context} must atomically pair every resume claim with its successor Attempt`,
     );
   }
+  if (claims.length > 0 && launchClaims.length !== successors.length) {
+    throw new TaskRunStoreIntegrityError(
+      `${context} must atomically pair every resume claim with one successor launch claim`,
+    );
+  }
   for (const claim of claims) {
     const matching = successors.filter(
       (successor) =>
@@ -1771,9 +1815,28 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
         executionClaim.data.ownerId === claim.data.ownerId &&
         executionClaim.data.leaseEpoch === claim.data.leaseEpoch,
     );
-    if (matching.length !== 1 || matchingExecutionClaims.length !== 1) {
+    const successor = matching[0];
+    const matchingLaunchClaims = launchClaims.filter(
+      (launchClaim) => launchClaim.data.attemptId === claim.data.successorAttemptId,
+    );
+    const launchClaim = matchingLaunchClaims[0];
+    if (
+      matching.length !== 1 ||
+      matchingExecutionClaims.length !== 1 ||
+      matchingLaunchClaims.length !== 1 ||
+      !successor ||
+      !launchClaim ||
+      launchClaim.data.ownerId !== claim.data.ownerId ||
+      launchClaim.data.leaseEpoch !== 1 ||
+      launchClaim.data.launchId !==
+        deriveRecoverableTaskLaunchId(
+          claim.taskRunId,
+          claim.data.sourceAttemptId,
+          successor.data.attemptNumber,
+        )
+    ) {
       throw new TaskRunStoreIntegrityError(
-        `${context} has a resume claim without one matching successor Attempt execution owner`,
+        `${context} has a resume claim without one matching successor execution and launch owner`,
       );
     }
   }

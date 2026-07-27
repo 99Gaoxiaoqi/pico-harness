@@ -278,6 +278,21 @@ export class StorageDoctor {
     }
     let rebuiltTaskRunManifests = false;
     if (options.rebuildTaskRunManifests === true) {
+      const inspection = await new TaskRunStore(
+        { storageRoot: this.runtimeStorageRoot },
+        {
+          repairManifests: false,
+          repairIncompleteTails: false,
+          readOnly: true,
+        },
+      ).inspectTaskRuns();
+      if (inspection.storageRootMismatches.length > 0) {
+        throw new Error(
+          `StorageDoctor refuses to rebuild TaskRun manifests across storage roots: ${inspection.storageRootMismatches
+            .map(({ taskRunId }) => taskRunId)
+            .join(", ")}`,
+        );
+      }
       await new TaskRunStore(
         { storageRoot: this.runtimeStorageRoot },
         { repairIncompleteTails: false },
@@ -426,6 +441,19 @@ export class StorageDoctor {
         },
       ).inspectTaskRuns();
       scanned.task += inspection.projections.length;
+      for (const mismatch of inspection.storageRootMismatches) {
+        findings.push(
+          finding(
+            "task_run_storage_root_mismatch",
+            "error",
+            "task",
+            mismatch.ledgerPath,
+            `TaskRun ${mismatch.taskRunId} belongs to storage root ${mismatch.taskRunStorageRootId}, not ${mismatch.currentStorageRootId}`,
+            "Preserve the ledger and explicitly import it into this workspace before recovery",
+            "authoritative",
+          ),
+        );
+      }
       for (const manifestPath of inspection.staleManifestPaths) {
         findings.push(
           finding(

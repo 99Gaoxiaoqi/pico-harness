@@ -107,6 +107,67 @@ test("StorageDoctor validates TaskRun ledgers and only rebuilds their derived ma
   assert.equal(corrupt.healthy, false);
 });
 
+test("StorageDoctor reports but never repairs a portable TaskRun copied from another root", async (context) => {
+  const fixture = await createFixture("task-run-cross-root");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const sourceRoot = join(fixture.root, "source-runtime");
+  const input = { prompt: "audit this portable task" };
+  const source = new TaskRunStore({ storageRoot: sourceRoot });
+  await source.initializeTaskRun({
+    taskRunId: "doctor-cross-root-task",
+    workDir: fixture.workspace,
+    adapter: {
+      id: "doctor.adapter",
+      version: 1,
+      input,
+      inputHash: hashTaskRunInput(input),
+    },
+    maxAttempts: 3,
+  });
+  const destination = new TaskRunStore({ storageRoot: paths.workspace.root });
+  assert.notEqual(destination.storageRootId, source.storageRootId);
+  const digest = taskRunDigest("doctor-cross-root-task");
+  const taskRoot = join(paths.workspace.taskRuns, digest);
+  await cp(join(sourceRoot, "task-runs", digest), taskRoot, { recursive: true });
+  const ledgerPath = join(taskRoot, "task.jsonl");
+  const canonicalLedgerPath = join(destination.storageRoot, "task-runs", digest, "task.jsonl");
+  const manifestPath = join(taskRoot, "manifest.json");
+  await writeFile(manifestPath, '{"forged":true}\n', { mode: 0o600 });
+  const beforeLedger = await readFile(ledgerPath);
+  const beforeManifest = await readFile(manifestPath);
+  const doctor = new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  });
+
+  const report = await doctor.scan();
+  assert.equal(report.scanned.task, 1);
+  assert.equal(
+    report.findings.some(
+      (finding) =>
+        finding.code === "task_run_storage_root_mismatch" &&
+        finding.path === canonicalLedgerPath &&
+        finding.authority === "authoritative",
+    ),
+    true,
+  );
+  assert.equal(
+    report.findings.some((finding) => finding.code === "task_run_manifest_rebuild_required"),
+    false,
+  );
+  assert.equal(report.healthy, false);
+  assert.deepEqual(await readFile(ledgerPath), beforeLedger);
+  assert.deepEqual(await readFile(manifestPath), beforeManifest);
+
+  await assert.rejects(
+    doctor.repair({ rebuildTaskRunManifests: true }),
+    /refuses to rebuild TaskRun manifests across storage roots/u,
+  );
+  assert.deepEqual(await readFile(ledgerPath), beforeLedger);
+  assert.deepEqual(await readFile(manifestPath), beforeManifest);
+});
+
 test("StorageDoctor manifest rebuild refuses to truncate an incomplete canonical tail", async (context) => {
   const fixture = await createFixture("manifest-tail");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));

@@ -284,6 +284,51 @@ test("host-bound tasks never touch the recovery ledger or invoke an adapter", as
   assert.equal(launches, 0);
 });
 
+test("terminal and cross-root recovery plans park idempotently without appending facts", async () => {
+  for (const status of ["succeeded", "failed", "cancelled"] as const) {
+    const projection: TaskRunProjection = {
+      ...taskRunProjection(),
+      status,
+      terminal: { status, attemptId: "attempt-1" },
+    };
+    const ledger = new InMemoryTaskResumeLedger(projection);
+    const recovery = coordinator({
+      ledger,
+      registry: registryWithoutResumeSideEffects(),
+      ownerId: `host:terminal:${status}`,
+    });
+    for (let replay = 0; replay < 2; replay += 1) {
+      const result = await recovery.recover({
+        taskRunId: projection.header.taskRunId,
+        executionClass: "recoverable",
+      });
+      assert.equal(result.status, "parked");
+      if (result.status !== "parked") assert.fail("terminal TaskRun must park");
+      assert.deepEqual(result.plan.reasons, ["task_terminal"]);
+    }
+    assert.equal(ledger.appendCount, 0);
+    assert.deepEqual(ledger.events, []);
+  }
+
+  const crossRootProjection = taskRunProjection({
+    header: { ...taskRunHeader(), storageRootId: "root:portable-source" },
+  });
+  const crossRootLedger = new InMemoryTaskResumeLedger(crossRootProjection);
+  const result = await coordinator({
+    ledger: crossRootLedger,
+    registry: registryWithoutResumeSideEffects(),
+    ownerId: "host:cross-root",
+  }).recover({
+    taskRunId: crossRootProjection.header.taskRunId,
+    executionClass: "recoverable",
+  });
+  assert.equal(result.status, "parked");
+  if (result.status !== "parked") assert.fail("cross-root TaskRun must park");
+  assert.equal(result.plan.reasons.includes("storage_root_mismatch"), true);
+  assert.equal(crossRootLedger.appendCount, 0);
+  assert.deepEqual(crossRootLedger.events, []);
+});
+
 function coordinator(options: {
   readonly ledger: TaskResumeLedger;
   readonly registry: RecoverableTaskRegistry;
