@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -26,7 +26,7 @@ import {
   type TaskRunEvent,
   type TaskSafeBoundary,
 } from "../../src/tasks/task-run-contract.js";
-import { TaskRunStore } from "../../src/tasks/task-run-store.js";
+import { TaskRunStore, taskRunDigest } from "../../src/tasks/task-run-store.js";
 
 const AT = "2026-07-27T00:00:00.000Z";
 const TASK_RUN_ID = "recoverable-task-1";
@@ -119,6 +119,61 @@ test("file-backed recovery claims one fresh Attempt from canonical RuntimeEvent 
   assert.equal(projection?.attempts[1]?.sourceAttemptId, "attempt-1");
   assert.equal(projection?.attempts[1]?.launch?.status, "succeeded");
   assert.equal(projection?.revision, 3);
+});
+
+test("repeated recovery of a terminal TaskRun is read-only", async (t) => {
+  for (const status of ["succeeded", "failed", "cancelled"] as const) {
+    await t.test(status, async (t) => {
+      const fixture = await prepareFileRecovery(t);
+      await fixture.taskRuns.appendBatch(
+        TASK_RUN_ID,
+        [
+          {
+            schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+            eventId: `task-terminal:${status}`,
+            taskRunId: TASK_RUN_ID,
+            at: AT,
+            kind: "task.finished",
+            data: { status },
+          },
+        ],
+        { transactionId: `task-terminal:${status}` },
+      );
+      const beforeProjection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
+      const ledgerPath = taskRunLedgerPath(fixture.storageRoot, TASK_RUN_ID);
+      const beforeBytes = await readFile(ledgerPath);
+      const registry = new RecoverableTaskRegistry();
+      let adapterCalls = 0;
+      registry.register({
+        adapterId: "agent.task",
+        version: 1,
+        launchMode: "idempotent",
+        resume(_input, context) {
+          adapterCalls += 1;
+          return expectedLaunchReceipt(context);
+        },
+      });
+      const coordinator = recoveryCoordinator(fixture, registry, `host:terminal:${status}`);
+
+      const first = await coordinator.recover({
+        taskRunId: TASK_RUN_ID,
+        executionClass: "recoverable",
+      });
+      const second = await coordinator.recover({
+        taskRunId: TASK_RUN_ID,
+        executionClass: "recoverable",
+      });
+
+      assert.deepEqual(second, first);
+      assert.equal(first.status, "parked");
+      if (first.status !== "parked") assert.fail("terminal TaskRun must return without mutation");
+      assert.deepEqual(first.plan.reasons, ["task_terminal"]);
+      assert.equal(first.plan.diagnostics[0]?.detail?.["status"], status);
+      assert.equal(adapterCalls, 0);
+      assert.deepEqual(await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID), beforeProjection);
+      assert.deepEqual(await readFile(ledgerPath), beforeBytes);
+    });
+  }
 });
 
 test("adapter launch failure is durably retryable with one stable idempotency key", async (t) => {
@@ -1086,6 +1141,10 @@ function expectedLaunchReceipt(context: RecoverableTaskResumeContext) {
     runStartedEventId: context.expectedRunStartedEventId,
     runStartedSequence: context.expectedSessionHighWater + 1,
   };
+}
+
+function taskRunLedgerPath(storageRoot: string, taskRunId: string): string {
+  return join(storageRoot, "task-runs", taskRunDigest(taskRunId), "task.jsonl");
 }
 
 function expectedLaunchId(): string {
