@@ -1,5 +1,6 @@
 import type { RuntimeEvent } from "../storage/runtime-event.js";
 import type { RuntimeEventStore, RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type {
   RuntimeBoundaryInspection,
   RuntimeBoundaryInspector,
@@ -40,12 +41,30 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
     }
     const entries = await this.options.store.readSessionEntries(boundary.sessionId);
     const runEntries = entries.filter(({ event }) => event.runId === boundary.runId);
-    if (!runEntries.some(({ event }) => event.kind === "run.started")) {
+    const startedEntries = runEntries.filter(
+      (
+        entry,
+      ): entry is RuntimeEventStoreEntry & {
+        readonly event: Extract<RuntimeEvent, { kind: "run.started" }>;
+      } => entry.event.kind === "run.started",
+    );
+    if (startedEntries.length === 0) {
       return {
         status: "run_missing",
         sessionId: boundary.sessionId,
         runId: boundary.runId,
       };
+    }
+    if (startedEntries.length > 1) {
+      throw new Error(`Runtime run ${boundary.runId} contains multiple run.started facts`);
+    }
+    const sessionWorkspacePath = canonicalizeWorkspacePath(manifest.workDir);
+    const runWorkspacePath = canonicalizeWorkspacePath(startedEntries[0]!.event.data.workDir);
+    if (sessionWorkspacePath !== manifest.workDir) {
+      throw new Error(`Runtime session ${boundary.sessionId} manifest workDir is not canonical`);
+    }
+    if (runWorkspacePath !== startedEntries[0]!.event.data.workDir) {
+      throw new Error(`Runtime run ${boundary.runId} workDir is not canonical`);
     }
 
     const terminals = runEntries.filter(
@@ -90,6 +109,8 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
       status: "available",
       sessionId: boundary.sessionId,
       runId: boundary.runId,
+      sessionWorkspacePath,
+      runWorkspacePath,
       eventHighWater: entries.at(-1)?.sequence ?? 0,
       ...(terminal
         ? {
@@ -131,7 +152,8 @@ function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] 
     if (
       event.kind === "message.committed" &&
       event.data.message.role === "user" &&
-      event.data.message.toolCallId
+      event.data.message.toolCallId &&
+      event.data.message.providerData?.["picoKind"] !== "synthetic_tool_result"
     ) {
       pending.delete(event.data.message.toolCallId);
     }
