@@ -35,6 +35,8 @@ import {
 } from "./local-file-storage.js";
 import {
   decodeWorkspaceStorageLayout,
+  decodeWorkspaceStorageLayoutMarker,
+  readWorkspaceStorageRootIdentitySync,
   WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
   WORKSPACE_STORAGE_LAYOUT_FILE,
@@ -399,6 +401,7 @@ export class StorageDoctor {
     scanned.runtime++;
     for (const [relativePath, exclusions] of [
       ["sessions", new Set<string>()],
+      ["task-runs", new Set<string>()],
       ["control", new Set<string>()],
       [".storage", new Set(["lock"])],
     ] as const) {
@@ -411,10 +414,25 @@ export class StorageDoctor {
     const layoutPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
     if (await pathExists(layoutPath)) {
       try {
-        decodeWorkspaceStorageLayout(
+        const layout = decodeWorkspaceStorageLayoutMarker(
           parseJson(await readFile(layoutPath, "utf8"), "Workspace storage layout"),
           layoutPath,
         );
+        if (layout.schemaVersion === 1) {
+          findings.push(
+            finding(
+              "runtime_layout_upgrade_required",
+              "warning",
+              "runtime",
+              layoutPath,
+              "Workspace storage layout predates stable root identity",
+              "Open the workspace with the current pico build to upgrade the marker under lock",
+              "authoritative",
+            ),
+          );
+          return false;
+        }
+        decodeWorkspaceStorageLayout(layout, layoutPath);
       } catch (error) {
         findings.push(
           finding(
@@ -424,6 +442,22 @@ export class StorageDoctor {
             layoutPath,
             errorMessage(error),
             "Preserve the marker and restore it from a verified copy",
+            "authoritative",
+          ),
+        );
+        return false;
+      }
+      try {
+        readWorkspaceStorageRootIdentitySync(this.runtimeStorageRoot);
+      } catch (error) {
+        findings.push(
+          finding(
+            "runtime_root_identity_invalid",
+            "critical",
+            "runtime",
+            layoutPath,
+            errorMessage(error),
+            "Preserve the root and use explicit storage adoption only after verifying its origin",
             "authoritative",
           ),
         );
