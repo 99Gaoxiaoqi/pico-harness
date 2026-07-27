@@ -233,6 +233,11 @@ export class OpenAIProvider implements LLMProvider {
       }));
     }
     const requestBody = this.finalizeRequestBody(body);
+    options?.onRequestPrepared?.({
+      provider: "openai",
+      model: this.config.model,
+      body: requestBody,
+    });
 
     // 3. 构建请求并发送
     const bodyJson = JSON.stringify(requestBody);
@@ -379,6 +384,11 @@ export class OpenAIProvider implements LLMProvider {
       }));
     }
     const requestBody = this.finalizeRequestBody(body);
+    options?.onRequestPrepared?.({
+      provider: "openai",
+      model: this.config.model,
+      body: requestBody,
+    });
 
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
       method: "POST",

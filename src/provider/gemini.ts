@@ -85,6 +85,11 @@ export class GeminiProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     const body = this.buildRequestBody(messages, availableTools);
+    options?.onRequestPrepared?.({
+      provider: "gemini",
+      model: this.config.model,
+      body,
+    });
 
     const resp = await fetch(this.generateUrl(), {
       method: "POST",
@@ -128,6 +133,11 @@ export class GeminiProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     const body = this.buildRequestBody(messages, availableTools);
+    options?.onRequestPrepared?.({
+      provider: "gemini",
+      model: this.config.model,
+      body,
+    });
 
     const resp = await fetch(this.streamUrl(), {
       method: "POST",
