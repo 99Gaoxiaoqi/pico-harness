@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   appendFile,
   chmod,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -326,7 +327,7 @@ test("StorageDoctor accepts a control-only runtime and reports exposed data mode
   }
 });
 
-test("StorageDoctor limits Runtime permission scans to sessions, control, and .storage", async (context) => {
+test("StorageDoctor limits Runtime permission scans to canonical ledgers and .storage", async (context) => {
   const fixture = await createFixture("runtime-scan-boundary");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -347,6 +348,8 @@ test("StorageDoctor limits Runtime permission scans to sessions, control, and .s
   if (process.platform !== "win32") {
     await Promise.all(unrelatedRoots.map((path) => chmod(path, 0o755)));
   }
+  await mkdir(paths.workspace.taskRuns, { recursive: true, mode: 0o755 });
+  if (process.platform !== "win32") await chmod(paths.workspace.taskRuns, 0o755);
 
   const report = await new StorageDoctor({
     workDir: fixture.workspace,
@@ -357,6 +360,65 @@ test("StorageDoctor limits Runtime permission scans to sessions, control, and .s
       (finding) => finding.component === "runtime" && unrelatedRoots.includes(finding.path),
     ),
     false,
+  );
+  assert.equal(
+    report.findings.some(
+      (finding) =>
+        finding.code === "storage_permissions_invalid" && finding.path === paths.workspace.taskRuns,
+    ),
+    process.platform !== "win32",
+  );
+});
+
+test("StorageDoctor reports a copied root that has not been explicitly adopted", async (context) => {
+  const fixture = await createFixture("copied-root");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  new RuntimeStore({
+    workDir: fixture.workspace,
+    storageRoot: paths.workspace.root,
+  }).close();
+  const copiedRoot = join(fixture.root, "copied-runtime");
+  await cp(paths.workspace.root, copiedRoot, { recursive: true, preserveTimestamps: true });
+
+  const report = await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+    runtimeStorageRoot: copiedRoot,
+  }).scan();
+
+  assert.equal(
+    report.findings.some((finding) => finding.code === "runtime_root_identity_invalid"),
+    true,
+  );
+  assert.equal(report.healthy, false);
+});
+
+test("StorageDoctor reports a version 1 layout as upgradeable without rewriting it", async (context) => {
+  const fixture = await createFixture("layout-v1");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const marker = `${JSON.stringify({
+    schemaVersion: 1,
+    layout: "session-centric-v1",
+    createdAt: "2026-07-25T00:00:00.000Z",
+  })}\n`;
+  await mkdir(paths.workspace.storage, { recursive: true, mode: 0o700 });
+  await writeFile(join(paths.workspace.root, ".storage", "layout.json"), marker, { mode: 0o600 });
+
+  const report = await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  }).scan();
+
+  assert.equal(
+    report.findings.some((finding) => finding.code === "runtime_layout_upgrade_required"),
+    true,
+  );
+  assert.equal(report.healthy, true);
+  assert.equal(
+    await readFile(join(paths.workspace.root, ".storage", "layout.json"), "utf8"),
+    marker,
   );
 });
 

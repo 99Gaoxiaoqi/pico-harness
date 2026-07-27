@@ -71,7 +71,7 @@ export interface WorkspaceStorageLayout {
   readonly adoptedAt?: string;
 }
 
-interface LegacyWorkspaceStorageLayout {
+export interface LegacyWorkspaceStorageLayout {
   readonly schemaVersion: typeof LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION;
   readonly layout: "session-centric-v1";
   readonly createdAt: string;
@@ -108,7 +108,7 @@ export function prepareWorkspaceStorageLayoutSync(
       recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
       const existingLayout = existsSync(layoutPath)
-        ? decodeCompatibleWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath)
+        ? decodeWorkspaceStorageLayoutMarker(readJsonFileSync(layoutPath), layoutPath)
         : undefined;
       const physicalIdentity = currentPhysicalIdentity(root);
       if (existingLayout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
@@ -346,9 +346,9 @@ function publishLayout(
   return layout;
 }
 
-function decodeCompatibleWorkspaceStorageLayout(
+export function decodeWorkspaceStorageLayoutMarker(
   value: unknown,
-  path: string,
+  path = WORKSPACE_STORAGE_LAYOUT_FILE,
 ): WorkspaceStorageLayout | LegacyWorkspaceStorageLayout {
   if (isRecord(value) && value["schemaVersion"] === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
     return decodeWorkspaceStorageLayout(value, path);
