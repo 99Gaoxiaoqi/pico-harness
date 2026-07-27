@@ -12,7 +12,11 @@
 // 不把成本监控落到实处,就无法优化 System Prompt 长度,也无从判断上下文压缩是否省钱。
 
 import { randomUUID } from "node:crypto";
-import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
+import type {
+  LLMProvider,
+  LLMProviderRequestOptions,
+  PreparedProviderRequest,
+} from "../provider/interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
 import { isAbortError } from "../provider/errors.js";
@@ -22,12 +26,25 @@ import { logger } from "./logger.js";
 import { getProviderCallContext, type ProviderCallContext } from "./provider-call-context.js";
 import { currentRuntimeRun } from "../runtime/runtime-run.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
+import {
+  capturePreparedProviderRequest,
+  diagnosePreparedProviderRequest,
+  parsePreparedRequestCapture,
+  type PreparedRequestCapture,
+  type PreparedRequestDiagnostic,
+} from "./provider-request-diagnostics.js";
 
 export interface ProviderCallLedger {
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
     record: ProviderCallRecord;
     inserted: boolean;
   };
+  /** 可选读接口：供新建 Tracker 从持久账本恢复上一份请求指纹。 */
+  listProviderCalls?(filter?: {
+    sessionId?: string;
+    goalId?: string;
+    jobId?: string;
+  }): ProviderCallRecord[];
 }
 
 export interface CostTrackerOptions {
@@ -44,6 +61,8 @@ export interface CostTrackerOptions {
  * 像安检门:数据必须先经过它,它盖上"时间戳"和"成本戳",再原封不动还给你。
  */
 export class CostTracker implements LLMProvider {
+  private readonly preparedRequests = new Map<string, PreparedRequestCapture>();
+
   constructor(
     private readonly next: LLMProvider,
     private readonly modelRoute: string | BillingRoute,
@@ -66,7 +85,8 @@ export class CostTracker implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     return this.track(
-      () => this.next.generate(messages, availableTools, options),
+      (observeRequest) =>
+        this.next.generate(messages, availableTools, withRequestObserver(options, observeRequest)),
       options?.signal,
       false,
       options?.purpose,
@@ -86,7 +106,13 @@ export class CostTracker implements LLMProvider {
     }
 
     return this.track(
-      () => this.next.generateStream!(messages, availableTools, onDelta, options),
+      (observeRequest) =>
+        this.next.generateStream!(
+          messages,
+          availableTools,
+          onDelta,
+          withRequestObserver(options, observeRequest),
+        ),
       options?.signal,
       true,
       options?.purpose,
@@ -94,7 +120,7 @@ export class CostTracker implements LLMProvider {
   }
 
   private async track(
-    invoke: () => Promise<Message>,
+    invoke: (observeRequest: (request: PreparedProviderRequest) => void) => Promise<Message>,
     signal?: AbortSignal,
     streaming = false,
     purpose?: LLMProviderRequestOptions["purpose"],
@@ -109,9 +135,28 @@ export class CostTracker implements LLMProvider {
       model: route.model,
       purpose: context.purpose,
     });
+    let requestDiagnostic: PreparedRequestDiagnostic | undefined;
+    const observeRequest = (request: PreparedProviderRequest): void => {
+      try {
+        const current = capturePreparedProviderRequest(request);
+        const key = preparedRequestKey(context, current);
+        const prior =
+          this.preparedRequests.get(key) ??
+          this.restorePreparedRequest(context, current.provider, current.model);
+        requestDiagnostic = diagnosePreparedProviderRequest(current, prior);
+        // 在网络 dispatch 前同步更新，使并发调用按真实发出顺序比较。
+        this.preparedRequests.set(key, current);
+      } catch (error) {
+        // 可观测性必须 fail-open，不能因诊断序列化问题阻断模型请求。
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "[Tracker] Provider 请求指纹生成失败",
+        );
+      }
+    };
     const start = Date.now();
     try {
-      const response = await invoke();
+      const response = await invoke(observeRequest);
       const latencyMs = Date.now() - start;
       const cost = response.usage ? estimateCost(this.modelRoute, response.usage) : undefined;
       await runtimeRun?.recordModelCallSettled({
@@ -123,7 +168,15 @@ export class CostTracker implements LLMProvider {
         ...(cost ? { costStatus: cost.status } : {}),
       });
       this.recordSessionUsage(response, latencyMs, streaming);
-      this.recordLedger(callId, context, "succeeded", response, latencyMs);
+      this.recordLedger(
+        callId,
+        context,
+        "succeeded",
+        response,
+        latencyMs,
+        undefined,
+        requestDiagnostic,
+      );
       return response;
     } catch (error) {
       const latencyMs = Date.now() - start;
@@ -134,9 +187,29 @@ export class CostTracker implements LLMProvider {
         latencyMs,
         error: runtimeErrorMessage(error),
       });
-      this.recordLedger(callId, context, status, undefined, latencyMs, error);
+      this.recordLedger(callId, context, status, undefined, latencyMs, error, requestDiagnostic);
       throw error;
     }
+  }
+
+  private restorePreparedRequest(
+    context: ProviderCallContext,
+    provider: PreparedProviderRequest["provider"],
+    model: string,
+  ): PreparedRequestCapture | undefined {
+    const records = this.options.ledger?.listProviderCalls?.({
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+      ...(context.goalId ? { goalId: context.goalId } : {}),
+      ...(context.jobId ? { jobId: context.jobId } : {}),
+    });
+    if (!records) return undefined;
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const record = records[index];
+      if (!record || record.purpose !== context.purpose || record.model !== model) continue;
+      const capture = parsePreparedRequestCapture(record.reported?.["requestDiagnostic"]);
+      if (capture?.provider === provider && capture.model === model) return capture;
+    }
+    return undefined;
   }
 
   /** Durable Session calls must already be enclosed by the host's canonical RuntimeRun. */
@@ -203,6 +276,7 @@ export class CostTracker implements LLMProvider {
     response: Message | undefined,
     latencyMs: number,
     error?: unknown,
+    requestDiagnostic?: PreparedRequestDiagnostic,
   ): void {
     if (!this.options.ledger) return;
     const route = normalizeRoute(this.modelRoute);
@@ -230,11 +304,13 @@ export class CostTracker implements LLMProvider {
               reasoningTokens: cost?.usage.reasoningTokens ?? 0,
               costStatus: cost?.status ?? "unknown",
               latencyMs,
+              ...(requestDiagnostic ? { requestDiagnostic } : {}),
             }
           : {
               usageMetadata: "unknown",
               costStatus: "unknown",
               latencyMs,
+              ...(requestDiagnostic ? { requestDiagnostic } : {}),
               ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
             },
       });
@@ -250,6 +326,36 @@ export class CostTracker implements LLMProvider {
 
 function normalizeRoute(route: string | BillingRoute): BillingRoute {
   return typeof route === "string" ? { provider: "unknown", model: route } : route;
+}
+
+function withRequestObserver(
+  options: LLMProviderRequestOptions | undefined,
+  observeRequest: (request: PreparedProviderRequest) => void,
+): LLMProviderRequestOptions {
+  const upstream = options?.onRequestPrepared;
+  return {
+    ...options,
+    onRequestPrepared: (request) => {
+      observeRequest(request);
+      upstream?.(request);
+    },
+  };
+}
+
+function preparedRequestKey(
+  context: ProviderCallContext,
+  capture: Pick<PreparedRequestCapture, "provider" | "model">,
+): string {
+  return JSON.stringify([
+    context.purpose,
+    context.sessionId,
+    context.conversationId,
+    context.goalId,
+    context.jobId,
+    context.attemptId,
+    capture.provider,
+    capture.model,
+  ]);
 }
 
 function runtimeErrorMessage(error: unknown): string {

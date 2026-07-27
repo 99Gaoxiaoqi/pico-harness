@@ -74,6 +74,11 @@ export class ClaudeProvider implements LLMProvider {
   ): Promise<Message> {
     // 1. 构建请求体(消息翻译 + 工具 schema + thinking + cache 注入)
     const body = this.buildRequestBody(messages, availableTools);
+    options?.onRequestPrepared?.({
+      provider: "claude",
+      model: this.config.model,
+      body,
+    });
 
     // 2. 构建请求并发送
     const resp = await fetch(`${this.config.baseURL}/messages`, {
@@ -133,6 +138,11 @@ export class ClaudeProvider implements LLMProvider {
     // 1. 构建请求体(与 generate 共用,加 stream: true)
     const body = this.buildRequestBody(messages, availableTools);
     body.stream = true;
+    options?.onRequestPrepared?.({
+      provider: "claude",
+      model: this.config.model,
+      body,
+    });
 
     // 2. 构建请求并发送
     const resp = await fetch(`${this.config.baseURL}/messages`, {
