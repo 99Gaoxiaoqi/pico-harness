@@ -331,7 +331,8 @@ export class RuntimeRun {
       const last = events.at(-1) ?? started;
       const recoveryAt = existingTerminal?.at ?? last.at;
       const syntheticToolResults = findDanglingRuntimeToolCalls(events, activeMessageEventIds).map(
-        (pending) => buildInterruptedToolResultEvent(events, pending, recoveryAt),
+        (pending) =>
+          buildInterruptedToolResultEvent(events, pending, recoveryAt, manifest.activeBranchId),
       );
       if (existingTerminal && syntheticToolResults.length === 0) continue;
       const recoveryEvents = existingTerminal
@@ -1190,6 +1191,7 @@ function buildInterruptedToolResultEvent(
   events: readonly RuntimeEvent[],
   pending: PendingRuntimeToolCall,
   at: string,
+  activeBranchId: string,
 ): RuntimeToolResultRecordedEvent {
   const source = pending.source;
   const toolContext = events.findLast(
@@ -1210,6 +1212,7 @@ function buildInterruptedToolResultEvent(
       source.eventId,
       pending.callIndex,
       pending.toolCall.id,
+      activeBranchId,
     ]),
     sessionId: source.sessionId,
     invocationId: source.invocationId,
