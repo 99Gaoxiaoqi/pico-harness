@@ -132,6 +132,7 @@ export interface EngineRuntimeRun {
   recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
   recordToolStarted(toolCallId: string, toolName: string, argumentsJson: string): Promise<void>;
   recordTranscriptMessage(message: Message): Promise<void>;
+  recordTranscriptToolResult(input: EngineRuntimeToolResultInput): Promise<Message>;
   registerToolResult(input: EngineRuntimeToolResultInput): Message;
   registerToolEvidence(toolCallId: string, evidence: EngineRuntimeEvidenceReference): void;
 }

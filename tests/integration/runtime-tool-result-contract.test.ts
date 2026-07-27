@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   projectRuntimeModelMessage,
+  projectRuntimeToolResultMessage,
   runtimeEventHasModelHistoryEntry,
 } from "../../src/engine/runtime-model-message.js";
 import { materializeRuntimeHistory } from "../../src/engine/session-runtime-read-model.js";
@@ -14,6 +15,7 @@ import type {
   RuntimeEvent,
   RuntimeToolResultRecordedEvent,
 } from "../../src/engine/session-runtime-event.js";
+import { RuntimeEventBoundaryInspector } from "../../src/runtime/runtime-event-boundary-inspector.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { RuntimeEventDecodeError, decodeRuntimeEvent } from "../../src/storage/runtime-event.js";
 
@@ -194,6 +196,60 @@ test("RuntimeRun registers one structured fact and commits its projected Message
     },
     result,
   ]);
+});
+
+test("RuntimeRun durably records transcript ToolResult without polluting model history", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-transcript-tool-result-"));
+  const session = new Session("transcript-tool-result", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+  });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  await run.recordToolStarted("call:subagent", "grep", '{"pattern":"needle"}');
+  const result = await run.recordTranscriptToolResult({
+    toolCallId: "call:subagent",
+    toolName: "grep",
+    status: "succeeded",
+    body: inlineBody("one match"),
+    projection: {
+      version: 1,
+      mode: "full",
+      text: "one match",
+      strategy: "original",
+      truncated: false,
+    },
+  });
+  await run.finish("completed");
+
+  const events = await session.runtimeEventStore!.readRun(session.id, run.runId);
+  const recorded = events.find(
+    (event): event is RuntimeToolResultRecordedEvent =>
+      event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:subagent",
+  );
+  assert.ok(recorded);
+  assert.equal(recorded.visibility, "transcript");
+  assert.deepEqual(projectRuntimeToolResultMessage(recorded), result);
+  assert.equal(projectRuntimeModelMessage(recorded), undefined);
+  assert.equal(runtimeEventHasModelHistoryEntry(recorded), false);
+  assert.deepEqual(materializeRuntimeHistory(events), []);
+  assert.deepEqual(session.getHistory(), []);
+
+  const boundary = await new RuntimeEventBoundaryInspector({
+    store: session.runtimeEventStore!,
+    backgroundOperationsSettled: () => true,
+  }).inspect({
+    sessionId: session.id,
+    runId: run.runId,
+    eventHighWater: events.length,
+  });
+  assert.equal(boundary.status, "available");
+  if (boundary.status !== "available") assert.fail("Runtime boundary should be available");
+  assert.deepEqual(boundary.pendingToolCallIds, []);
 });
 
 function toolResultEvent(
