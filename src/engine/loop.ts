@@ -46,7 +46,7 @@ import {
 } from "../context/context-budget.js";
 import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
-import { PromptComposer } from "../context/composer.js";
+import { PromptComposer, type PromptLayers } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { TodoStore } from "../context/todo-store.js";
@@ -204,6 +204,26 @@ function latestVisibleUserInput(messages: readonly Message[]): string {
         message.providerData?.["picoHiddenFromTranscript"] !== true,
     )?.content ?? ""
   );
+}
+
+function appendTurnTail(messages: Message[], turnTail: string): Message[] {
+  const normalizedTail = turnTail.trim();
+  if (!normalizedTail) return messages;
+  const currentUserIndex = messages.findLastIndex(
+    (message) =>
+      message.role === "user" &&
+      message.toolCallId === undefined &&
+      message.providerData?.["picoHiddenFromTranscript"] !== true,
+  );
+  if (currentUserIndex < 0) return messages;
+
+  const currentUser = messages[currentUserIndex]!;
+  const requestMessages = [...messages];
+  requestMessages[currentUserIndex] = {
+    ...currentUser,
+    content: `${currentUser.content}\n\n<current-turn-context>\n${normalizedTail}\n</current-turn-context>`,
+  };
+  return requestMessages;
 }
 
 function isSubagentCompletionWake(messages: readonly Message[]): boolean {
@@ -378,6 +398,11 @@ export interface AgentEngineOptions {
   /** Host-owned prompt composition with session-scoped memory and runtime state. */
   systemPromptFactory?: () => Promise<string>;
   /**
+   * Host-owned layered prompt composition. Called once per run after the current
+   * visible user input is available. Takes precedence over systemPromptFactory.
+   */
+  promptLayersFactory?: (input: { readonly currentUserPrompt: string }) => Promise<PromptLayers>;
+  /**
    * 当前模型的原生思考档位。
    * 控制 provider 向模型发送 reasoning_effort / thinking.budget_tokens 参数。
    * 此字段在 engine 层仅用于子代理继承;provider 的实际参数注入在构造时已完成。
@@ -425,8 +450,7 @@ export interface AgentEngineOptions {
   usageSession?: Session;
   /**
    * Goal Manager 单例(ROADMAP 3.5 Goal Mode)。
-   * 注入后:planMode 时 PromptComposer 会把 active goal 注入 system prompt;
-   * Grace Call 收尾总结会拼上 goal 状态,让收尾对齐目标。
+   * 注入后:planMode 时 PromptComposer 会把 active goal 注入本轮 turn tail。
    * 必须与 buildDefaultToolRegistry 传入的是同一实例,确保工具与引擎状态一致。
    * 未提供则 Goal Mode 不生效,行为不变。
    */
@@ -531,6 +555,7 @@ export class AgentEngine implements AgentRunner {
   private readonly workspaceRoots?: WorkspaceRoots;
   private readonly systemPrompt: string;
   private readonly systemPromptFactory?: () => Promise<string>;
+  private readonly promptLayersFactory?: AgentEngineOptions["promptLayersFactory"];
   private readonly thinkingEffort: string;
   private readonly modelRouteId?: string;
   private readonly resolveSubagentModelRuntime?: SubagentModelRuntimeResolver;
@@ -550,7 +575,7 @@ export class AgentEngine implements AgentRunner {
    * 避免每个请求都用自己的 costBefore 导致重复计费。
    */
   private readonly accountedSessionCostCNY = new WeakMap<Session, number>();
-  /** Goal Manager 单例(可选);planMode 注入 prompt + Grace Call 收尾对齐目标 */
+  /** Goal Manager 单例(可选);planMode 注入本轮 turn tail 并执行预算控制 */
   private readonly goalManager?: GoalManager;
   /** TodoStore 单例(可选);planMode 下 PromptComposer 复用,与 TodoTool 共享 */
   private readonly todoStore?: TodoStore;
@@ -588,6 +613,7 @@ export class AgentEngine implements AgentRunner {
       "You are pico, an expert coding assistant running in a Harness engine. " +
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.systemPromptFactory = opts.systemPromptFactory;
+    this.promptLayersFactory = opts.promptLayersFactory;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.modelRouteId = opts.modelRouteId;
     this.resolveSubagentModelRuntime = opts.resolveSubagentModelRuntime;
@@ -672,19 +698,22 @@ export class AgentEngine implements AgentRunner {
     return this.providerForReporter(provider, reporter, signal);
   }
 
-  /**
-   * 组装本轮 System Prompt。
-   * Plan Mode 开启时,每次 run 动态用 PromptComposer 重新组装,
-   * 以反映工作区最新的 AGENTS.md / Skills / 外部化规范状态;
-   * 关闭时使用构造时固定的 systemPrompt。
-   */
-  private async buildSystemPrompt(signal?: AbortSignal): Promise<string> {
+  /** 单次 run 只组装一次提示词，冻结稳定 system 与易变 turn tail。 */
+  private async buildPromptLayers(
+    currentUserPrompt: string,
+    signal?: AbortSignal,
+  ): Promise<PromptLayers> {
+    if (this.promptLayersFactory) {
+      return this.promptLayersFactory({ currentUserPrompt });
+    }
     if (this.systemPromptFactory) {
-      return this.systemPromptFactory();
+      return {
+        systemPrompt: await this.systemPromptFactory(),
+        turnTail: "",
+      };
     }
     if (this.planMode) {
-      // planMode 时用 PromptComposer 动态组装;goalManager / todoStore 单例注入,
-      // 让 active goal 与最新 todo 状态在每轮 prompt 中浮现(对齐 host 注入范式)。
+      // 兼容直接构造 AgentEngine 的调用方，同时把动态状态移出 system prefix。
       const opts: ConstructorParameters<typeof PromptComposer>[2] = {};
       if (this.goalManager) opts.goalManager = this.goalManager;
       if (this.todoStore) opts.todoStore = this.todoStore;
@@ -694,9 +723,13 @@ export class AgentEngine implements AgentRunner {
         };
       }
       const composer = new PromptComposer(this.workDir, true, opts);
-      return composer.build();
+      return composer.buildLayers();
     }
-    return this.systemPrompt;
+    signal?.throwIfAborted();
+    return {
+      systemPrompt: this.systemPrompt,
+      turnTail: "",
+    };
   }
 
   /**
@@ -882,6 +915,7 @@ export class AgentEngine implements AgentRunner {
   private async prepareModelContext(
     session: Session,
     systemPrompt: string,
+    turnTail: string,
     tools: ToolDefinition[],
     span?: Span,
     signal?: AbortSignal,
@@ -889,7 +923,10 @@ export class AgentEngine implements AgentRunner {
   ): Promise<Message[]> {
     signal?.throwIfAborted();
     const rawHistory = await this.readModelHistory(session);
-    const context = sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]);
+    const context = appendTurnTail(
+      sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]),
+      turnTail,
+    );
 
     // Compatibility for embedders/tests that have not yet supplied a model profile.
     if (!this.contextBudget) {
@@ -970,7 +1007,15 @@ export class AgentEngine implements AgentRunner {
             await this.readModelHistory(session),
           ),
         });
-        return this.prepareModelContext(session, systemPrompt, tools, span, signal, false);
+        return this.prepareModelContext(
+          session,
+          systemPrompt,
+          turnTail,
+          tools,
+          span,
+          signal,
+          false,
+        );
       }
     }
 
@@ -984,6 +1029,7 @@ export class AgentEngine implements AgentRunner {
   private async generateWithOverflowRetry(
     session: Session,
     systemPrompt: string,
+    turnTail: string,
     tools: ToolDefinition[],
     baseContext: Message[],
     reporter: Reporter,
@@ -1038,6 +1084,7 @@ export class AgentEngine implements AgentRunner {
       const retryContext = await this.prepareModelContext(
         session,
         systemPrompt,
+        turnTail,
         tools,
         span,
         signal,
@@ -1159,13 +1206,13 @@ export class AgentEngine implements AgentRunner {
       `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
     );
 
-    // Plan Mode 开启时,每次 run 动态组装 System Prompt(反映最新工作区状态)
-    const systemPrompt = await this.buildSystemPrompt(signal);
+    const runHistory = await this.readModelHistory(session);
+    const currentUserPrompt = latestVisibleUserInput(runHistory);
+    const { systemPrompt, turnTail } = await this.buildPromptLayers(currentUserPrompt, signal);
     signal?.throwIfAborted();
 
-    const runHistory = await this.readModelHistory(session);
     const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
-      isSubagentCompletionWake(runHistory) ? "" : latestVisibleUserInput(runHistory),
+      isSubagentCompletionWake(runHistory) ? "" : currentUserPrompt,
     );
     let requiredFirstDelegationPending =
       firstTurnDelegationPolicy.kind === "required-first-delegation";
@@ -1271,15 +1318,21 @@ export class AgentEngine implements AgentRunner {
 
           // 主 Agent 默认投影完整 Session 历史。只有超过 token 水位时，
           // 才先缩短旧 ToolResult，再在安全工具边界做持久化摘要。
-          const contextChars = estimateTraceLength([
-            { role: "system", content: systemPrompt },
-            ...(await this.readModelHistory(session)),
-          ]);
+          const contextChars = estimateTraceLength(
+            appendTurnTail(
+              [
+                { role: "system", content: systemPrompt },
+                ...(await this.readModelHistory(session)),
+              ],
+              turnTail,
+            ),
+          );
           let compactedContext: Message[];
           try {
             compactedContext = await this.prepareModelContext(
               session,
               systemPrompt,
+              turnTail,
               providerTools,
               turnSpan,
               signal,
@@ -1363,6 +1416,7 @@ export class AgentEngine implements AgentRunner {
             responseMsg = await this.generateWithOverflowRetry(
               session,
               systemPrompt,
+              turnTail,
               providerTools,
               compactedContext,
               reporter,
@@ -1885,7 +1939,15 @@ export class AgentEngine implements AgentRunner {
       }
       if (exhaustedReason) {
         signal?.throwIfAborted();
-        await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan, signal);
+        await this.runGraceCall(
+          session,
+          systemPrompt,
+          turnTail,
+          exhaustedReason,
+          reporter,
+          rootSpan,
+          signal,
+        );
       }
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) reporter.onInterrupted?.();
@@ -2086,19 +2148,15 @@ export class AgentEngine implements AgentRunner {
   private async runGraceCall(
     session: Session,
     systemPrompt: string,
+    turnTail: string,
     reason: string,
     reporter: Reporter,
     parentSpan?: Span,
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    // Goal Mode(可选):把 active goal 状态拼进收尾提示,让总结对齐目标。
-    // 无 goalManager 或无 active goal 时 goalSection 为空,gracePrompt 保持原样。
-    const goalContext = this.goalManager?.buildGoalContext() ?? "";
-    const goalSection = goalContext
-      ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。`
-      : "";
-    const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。${goalSection}`;
+    // 本轮 Goal/Plan/Todo 已在 ephemeral turn tail 中可见，grace 消息只持久化控制指令。
+    const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。`;
     await session.commitMessages({
       role: "user",
       content: gracePrompt,
@@ -2109,12 +2167,20 @@ export class AgentEngine implements AgentRunner {
       availableToolCount: 0,
     });
     try {
-      const context = await this.prepareModelContext(session, systemPrompt, [], graceSpan, signal);
+      const context = await this.prepareModelContext(
+        session,
+        systemPrompt,
+        turnTail,
+        [],
+        graceSpan,
+        signal,
+      );
       const costBefore = session.totalCostCNY;
       const response = await withProviderCallContext({ purpose: "grace" }, () =>
         this.generateWithOverflowRetry(
           session,
           systemPrompt,
+          turnTail,
           [],
           context,
           reporter,
