@@ -38,11 +38,14 @@ export interface RecoverableTaskAdapter {
   readonly adapterId: string;
   readonly version: number;
   /**
-   * Repeated calls with one launchId must reconcile one deterministic Runtime run.
+   * Repeated calls with one launchId must install or confirm one durable execution intent/worker
+   * for the deterministic Runtime run without repeating provider, tool, or other external effects.
    *
-   * `resume` is durable admission, not proof that asynchronous execution completed. The adapter
-   * must publish the expected run.started with the supplied Session high-water CAS before starting
-   * provider, tool, or other external side effects. A failed CAS must leave side effects at zero.
+   * The adapter must publish the expected run.started with the supplied Session high-water CAS
+   * before starting provider, tool, or other external effects. A failed CAS must leave side effects
+   * at zero. The run.started fact proves only Runtime admission: `resume` must not return its receipt
+   * until the durable worker intent has also been installed or confirmed. A coordinator may call
+   * `resume` again after observing run.started when a prior call crashed before TaskRun settlement.
    */
   readonly launchMode: "idempotent";
   readonly validateInput?: (input: Readonly<Record<string, unknown>>) => void;

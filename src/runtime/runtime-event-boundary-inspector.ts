@@ -261,8 +261,12 @@ function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] 
 function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] {
   const pending = new Set<string>();
   for (const { event } of entries) {
-    if (event.kind === "tool.started" && event.refs?.toolCallId) {
-      pending.add(event.refs.toolCallId);
+    if (event.kind === "tool.started") {
+      const toolCallId = event.refs?.toolCallId;
+      if (typeof toolCallId !== "string" || !toolCallId.trim()) {
+        throw new Error(`Runtime tool.started ${event.eventId} has no stable toolCallId`);
+      }
+      pending.add(toolCallId);
       continue;
     }
     if (
