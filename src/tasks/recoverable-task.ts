@@ -6,6 +6,8 @@ export interface RecoverableTaskResumeContext {
   readonly sourceAttemptId: string;
   readonly attemptId: string;
   readonly attemptNumber: number;
+  /** Stable across lease takeover and retries; the adapter must deduplicate the actual launch. */
+  readonly launchId: string;
   readonly ownerId: string;
   readonly leaseEpoch: number;
   readonly boundary: TaskSafeBoundary;
@@ -20,6 +22,8 @@ export interface RecoverableTaskResumeContext {
 export interface RecoverableTaskAdapter {
   readonly adapterId: string;
   readonly version: number;
+  /** Explicit promise that repeated resume calls with one launchId produce one actual launch. */
+  readonly launchMode: "idempotent";
   readonly validateInput?: (input: Readonly<Record<string, unknown>>) => void;
   readonly resume: (
     input: Readonly<Record<string, unknown>>,
@@ -106,6 +110,11 @@ function assertAdapter(adapter: RecoverableTaskAdapter): void {
   }
   if (typeof adapter.resume !== "function") {
     throw new Error(`Recoverable task adapter ${adapter.adapterId} must implement resume`);
+  }
+  if (adapter.launchMode !== "idempotent") {
+    throw new Error(
+      `Recoverable task adapter ${adapter.adapterId} must promise idempotent launch semantics`,
+    );
   }
 }
 

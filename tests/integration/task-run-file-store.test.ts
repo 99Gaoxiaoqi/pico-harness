@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { canonicalizeWorkspacePath } from "../../src/paths/pico-paths.js";
 import {
   commitFileTransactionSync,
   withFileLockSync,
@@ -26,6 +37,7 @@ import {
 } from "../../src/tasks/task-run-store.js";
 
 const AT = "2026-07-27T00:00:00.000Z";
+const EXPIRES_AT = "2026-07-27T00:01:00.000Z";
 
 test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-run-files-"));
@@ -70,8 +82,8 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
 
   const firstBatch = [
     attemptStarted("task/run:with-path", "start-1", "attempt-1", 1, "owner-1", 1),
-    checkpointed("task/run:with-path", "checkpoint-1", "attempt-1", workspace),
-    attemptFinished("task/run:with-path", "finish-1", "attempt-1", "interrupted"),
+    checkpointed("task/run:with-path", "checkpoint-1", "attempt-1", "owner-1", 1, workspace),
+    attemptFinished("task/run:with-path", "finish-1", "attempt-1", "owner-1", 1, "interrupted"),
   ] satisfies TaskRunEvent[];
   const first = await store.appendBatch("task/run:with-path", firstBatch, {
     transactionId: "task-transaction-1",
@@ -115,13 +127,22 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
         2,
       ),
       attemptStarted("task/run:with-path", "start-2", "attempt-2", 2, "owner-2", 2, "attempt-1"),
+      launchClaimed("task/run:with-path", "launch-claim-2", "attempt-2", "launch-2", "owner-2", 3),
+      launchSucceeded(
+        "task/run:with-path",
+        "launch-succeeded-2",
+        "attempt-2",
+        "launch-2",
+        "owner-2",
+        3,
+      ),
     ],
     { transactionId: "task-transaction-2" },
   );
   await store.appendBatch(
     "task/run:with-path",
     [
-      attemptFinished("task/run:with-path", "finish-2", "attempt-2", "succeeded"),
+      attemptFinished("task/run:with-path", "finish-2", "attempt-2", "owner-2", 3, "succeeded"),
       taskFinished("task/run:with-path", "task-finished", "attempt-2"),
     ],
     { transactionId: "task-transaction-3" },
@@ -154,13 +175,13 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
   );
   assert.deepEqual(
     (await store.readTaskRunEvents("task/run:with-path")).map(({ sequence }) => sequence),
-    [1, 2, 3, 4, 5, 6, 7],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9],
   );
   store.close();
   const reopened = new TaskRunStore({ storageRoot: root });
   const snapshot = await reopened.readTaskRun("task/run:with-path");
   assert.equal(snapshot?.projection.status, "succeeded");
-  assert.equal(snapshot?.events.length, 7);
+  assert.equal(snapshot?.events.length, 9);
 
   const digest = taskRunDigest("task/run:with-path");
   const taskDirectory = join(root, "task-runs", digest);
@@ -170,9 +191,9 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
   assert.equal(lines.length, 4);
   assert.equal(JSON.parse(lines[0]!).taskRunId, "task/run:with-path");
   assert.equal(JSON.parse(lines[1]!).entries.length, 3);
-  assert.equal(JSON.parse(lines[2]!).entries.length, 2);
+  assert.equal(JSON.parse(lines[2]!).entries.length, 4);
   assert.equal(JSON.parse(lines[3]!).entries.length, 2);
-  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).ledger.lastSequence, 7);
+  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).ledger.lastSequence, 9);
   if (process.platform !== "win32") {
     assert.equal((await stat(taskDirectory)).mode & 0o777, 0o700);
     assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
@@ -181,7 +202,7 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
 
   await writeFile(manifestPath, '{"forged":true}\n', { mode: 0o600 });
   assert.equal((await reopened.listTaskRunProjections())[0]?.revision, 3);
-  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).ledger.lastSequence, 7);
+  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).ledger.lastSequence, 9);
 
   await assert.rejects(
     reopened.append(
@@ -209,6 +230,82 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
       error instanceof TaskRunStoreIntegrityError &&
       /transaction task-transaction-1 is already bound/u.test(error.message),
   );
+});
+
+test("TaskRunStore rejects stale Attempt owner and lease-epoch mutations atomically", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-fence-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await initializedStore(root, "fenced-task");
+  await store.append(
+    "fenced-task",
+    attemptStarted("fenced-task", "start", "attempt-1", 1, "owner-current", 2),
+    { transactionId: "start" },
+  );
+  const before = await readFile(ledgerPath(root, "fenced-task"), "utf8");
+
+  await assert.rejects(
+    store.append(
+      "fenced-task",
+      checkpointed(
+        "fenced-task",
+        "stale-owner-checkpoint",
+        "attempt-1",
+        "owner-stale",
+        2,
+        join(root, "workspace"),
+      ),
+      { transactionId: "stale-owner-checkpoint" },
+    ),
+    /ownerId\/leaseEpoch fence rejected/u,
+  );
+  await assert.rejects(
+    store.append(
+      "fenced-task",
+      attemptFinished(
+        "fenced-task",
+        "stale-epoch-finish",
+        "attempt-1",
+        "owner-current",
+        1,
+        "interrupted",
+      ),
+      { transactionId: "stale-epoch-finish" },
+    ),
+    /ownerId\/leaseEpoch fence rejected/u,
+  );
+
+  assert.equal(await readFile(ledgerPath(root, "fenced-task"), "utf8"), before);
+  assert.equal((await store.readTaskRunProjection("fenced-task"))?.revision, 1);
+  assert.equal((await store.readTaskRunProjection("fenced-task"))?.attempts[0]?.status, "running");
+});
+
+test("TaskRunStore rejects a post-construction task-runs symlink before read, repair or write", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-symlink-"));
+  const storageRoot = join(root, "state");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await initializedStore(storageRoot, "symlink-task");
+  const taskRunsRoot = join(storageRoot, "task-runs");
+  const outsideTaskRuns = join(root, "outside-task-runs");
+  await rename(taskRunsRoot, outsideTaskRuns);
+  await symlink(outsideTaskRuns, taskRunsRoot, "dir");
+  const outsideLedger = join(outsideTaskRuns, taskRunDigest("symlink-task"), "task.jsonl");
+  await appendFile(outsideLedger, '{"incomplete":');
+  const before = await readFile(outsideLedger, "utf8");
+
+  await assert.rejects(
+    store.readTaskRunProjection("symlink-task"),
+    /TaskRun storage must be a real directory/u,
+  );
+  await assert.rejects(
+    store.append(
+      "symlink-task",
+      attemptStarted("symlink-task", "outside-start", "attempt-1", 1, "owner", 1),
+      { transactionId: "outside-write" },
+    ),
+    /TaskRun storage must be a real directory/u,
+  );
+
+  assert.equal(await readFile(outsideLedger, "utf8"), before);
 });
 
 test("TaskRunStore recovers a published commit and only repairs an incomplete tail", async (context) => {
@@ -420,6 +517,8 @@ function checkpointed(
   taskRunId: string,
   eventId: string,
   attemptId: string,
+  ownerId: string,
+  leaseEpoch: number,
   workspacePath: string,
 ): TaskRunEvent {
   return {
@@ -430,9 +529,11 @@ function checkpointed(
     kind: "attempt.checkpointed",
     data: {
       attemptId,
+      ownerId,
+      leaseEpoch,
       boundary: {
         storageRootId: "storage-root-1",
-        workspacePath,
+        workspacePath: canonicalizeWorkspacePath(workspacePath),
         backgroundOperationsSettled: true,
         runtime: {
           sessionId: "session-1",
@@ -451,6 +552,8 @@ function attemptFinished(
   taskRunId: string,
   eventId: string,
   attemptId: string,
+  ownerId: string,
+  leaseEpoch: number,
   status: "interrupted" | "succeeded",
 ): TaskRunEvent {
   return {
@@ -459,7 +562,49 @@ function attemptFinished(
     taskRunId,
     at: AT,
     kind: "attempt.finished",
-    data: { attemptId, status },
+    data: { attemptId, ownerId, leaseEpoch, status },
+  };
+}
+
+function launchClaimed(
+  taskRunId: string,
+  eventId: string,
+  attemptId: string,
+  launchId: string,
+  ownerId: string,
+  leaseEpoch: number,
+): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "attempt.launch.claimed",
+    data: {
+      attemptId,
+      launchId,
+      ownerId,
+      leaseEpoch,
+      expiresAt: EXPIRES_AT,
+    },
+  };
+}
+
+function launchSucceeded(
+  taskRunId: string,
+  eventId: string,
+  attemptId: string,
+  launchId: string,
+  ownerId: string,
+  leaseEpoch: number,
+): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "attempt.launch.succeeded",
+    data: { attemptId, launchId, ownerId, leaseEpoch },
   };
 }
 
