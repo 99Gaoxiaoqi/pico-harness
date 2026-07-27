@@ -54,6 +54,7 @@ export const WORKSPACE_PORTABILITY_ERROR_CODES = [
   "special_file",
   "unknown_top_level_entry",
   "unknown_memory_entry",
+  "invalid_ledger_entry",
   "file_changed_during_scan",
   "file_too_large",
 ] as const;
@@ -134,6 +135,9 @@ const PORTABLE_TOP_LEVEL_POLICIES = new Map<string, PathPolicy>([
     },
   ],
 ]);
+const LEDGER_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
+const SESSION_LEDGER_FILES = new Set(["session.jsonl", "manifest.json"]);
+const TASK_RUN_LEDGER_FILES = new Set(["task.jsonl", "manifest.json"]);
 
 const HOST_BOUND_TOP_LEVEL_POLICIES = new Map<string, PathPolicy>([
   [
@@ -239,9 +243,9 @@ const PROTECTED_DATABASE_POLICY = Object.freeze({
 /**
  * Builds a deterministic, read-only export plan for one Pico workspace storage root.
  *
- * The function never copies data and never follows symbolic links. Unknown top-level entries and
- * unknown direct children under memory/ fail closed so adding a new persistence surface requires an
- * explicit portability decision.
+ * The function never copies data and never follows symbolic links. Unknown top-level entries,
+ * ledger descendants, and direct children under memory/ fail closed so adding a new persistence
+ * surface requires an explicit portability decision.
  */
 export function buildWorkspacePortabilityPlanSync(storageRoot: string): WorkspacePortabilityPlan {
   const requestedRoot = resolve(storageRoot);
@@ -281,6 +285,25 @@ export function buildWorkspacePortabilityPlanSync(storageRoot: string): Workspac
         );
       }
       scanMemoryRoot(root, absolutePath, relativePath, entries);
+      continue;
+    }
+
+    if (name === "sessions" || name === "task-runs") {
+      if (!metadata.isDirectory()) {
+        throw planError(
+          "special_file",
+          relativePath,
+          `Workspace ${name} entry must be a real directory: ${relativePath}`,
+        );
+      }
+      scanPortableLedgerRoot(
+        root,
+        absolutePath,
+        relativePath,
+        PORTABLE_TOP_LEVEL_POLICIES.get(name)!,
+        name === "sessions" ? SESSION_LEDGER_FILES : TASK_RUN_LEDGER_FILES,
+        entries,
+      );
       continue;
     }
 
@@ -328,6 +351,59 @@ export function buildWorkspacePortabilityPlanSync(storageRoot: string): Workspac
     excludedFileCount: entries.length - portableFileCount,
     portableBytes,
   };
+}
+
+function scanPortableLedgerRoot(
+  root: string,
+  ledgerRoot: string,
+  ledgerRelativePath: string,
+  policy: PathPolicy,
+  allowedFileNames: ReadonlySet<string>,
+  entries: WorkspacePortabilityPlanEntry[],
+): void {
+  assertCanonicalPathInsideRoot(root, ledgerRoot, ledgerRelativePath);
+  for (const digest of readDirectoryNames(ledgerRoot)) {
+    const digestRoot = join(ledgerRoot, digest);
+    const digestRelativePath = toPortablePath(join(ledgerRelativePath, digest));
+    const digestMetadata = lstatPath(digestRoot, digestRelativePath);
+    assertSupportedNode(digestMetadata, digestRelativePath);
+    if (!LEDGER_DIRECTORY_PATTERN.test(digest)) {
+      throw planError(
+        "invalid_ledger_entry",
+        digestRelativePath,
+        `Workspace ledger directory must use a full SHA-256 digest: ${digestRelativePath}`,
+      );
+    }
+    if (!digestMetadata.isDirectory()) {
+      throw planError(
+        "special_file",
+        digestRelativePath,
+        `Workspace ledger digest entry must be a real directory: ${digestRelativePath}`,
+      );
+    }
+    assertCanonicalPathInsideRoot(root, digestRoot, digestRelativePath);
+    for (const fileName of readDirectoryNames(digestRoot)) {
+      const absolutePath = join(digestRoot, fileName);
+      const relativePath = toPortablePath(join(digestRelativePath, fileName));
+      const metadata = lstatPath(absolutePath, relativePath);
+      assertSupportedNode(metadata, relativePath);
+      if (!allowedFileNames.has(fileName)) {
+        throw planError(
+          "invalid_ledger_entry",
+          relativePath,
+          `Unknown workspace ledger descendant has no portability policy: ${relativePath}`,
+        );
+      }
+      if (!metadata.isFile()) {
+        throw planError(
+          "special_file",
+          relativePath,
+          `Workspace ledger descendant must be a regular file: ${relativePath}`,
+        );
+      }
+      scanNode(root, absolutePath, relativePath, policy, entries);
+    }
+  }
 }
 
 function scanMemoryRoot(

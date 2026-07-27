@@ -412,16 +412,13 @@ function assertLayoutAllowsRecovery(
     assertLayoutMatchesPhysicalIdentity(layout, physicalIdentity, layoutPath);
     return;
   }
-  if (
-    layout?.schemaVersion === LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION &&
-    existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE))
-  ) {
-    // A v1 marker cannot bind a runtime-only transaction to one physical root. Automatic
-    // recovery is safe only when the same strict marker publishes a verifiable v2 identity.
+  if (existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE))) {
+    // A missing or v1 marker cannot bind a transaction to one physical root. Automatic recovery
+    // is safe only when that same strict marker publishes a verifiable v2 identity.
     const pendingLayout = readPendingWorkspaceLayoutReplacementSync(root);
     if (!pendingLayout) {
       throw new FileStorageIntegrityError(
-        `Legacy workspace storage has a pending transaction without a verifiable version 2 layout replacement: ${join(
+        `Workspace storage has a pending transaction without a verifiable version 2 layout replacement: ${join(
           root,
           WORKSPACE_STORAGE_COMMIT_FILE,
         )}; ordinary recovery is refused and requires verified manual recovery`,
@@ -456,7 +453,8 @@ function requireAdoptableWorkspaceStorageLayoutSync(
   const adoptableLayout =
     layout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
       ? layout
-      : layout?.schemaVersion === LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
+      : layout?.schemaVersion === LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
+          layout === undefined
         ? readPendingWorkspaceLayoutReplacementSync(root)
         : undefined;
   if (!adoptableLayout) {

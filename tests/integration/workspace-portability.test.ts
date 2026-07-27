@@ -13,10 +13,14 @@ import {
 test("workspace portability builds a deterministic allowlisted export plan", async (t) => {
   const fixture = await createFixture("pico-portability-plan-");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const sessionDigest = "a".repeat(64);
+  const taskRunDigest = "b".repeat(64);
 
   const portableFiles = new Map([
-    ["sessions/aaa/session.jsonl", '{"type":"session"}\n'],
-    ["task-runs/bbb/task.jsonl", '{"type":"task-run"}\n'],
+    [`sessions/${sessionDigest}/session.jsonl`, '{"type":"session"}\n'],
+    [`sessions/${sessionDigest}/manifest.json`, '{"sessionId":"session-1"}\n'],
+    [`task-runs/${taskRunDigest}/task.jsonl`, '{"type":"task-run"}\n'],
+    [`task-runs/${taskRunDigest}/manifest.json`, '{"taskRunId":"task-1"}\n'],
     ["artifacts/report.md", "# report\n"],
     ["evidence/tool.json", '{"ok":true}\n'],
     ["traces/run.jsonl", '{"event":"finish"}\n'],
@@ -124,6 +128,44 @@ test("workspace portability fails closed for unknown storage surfaces", async (t
       error instanceof WorkspacePortabilityPlanError &&
       error.code === "special_file" &&
       error.relativePath === "sessions",
+  );
+});
+
+test("workspace portability rejects unknown Session and TaskRun ledger descendants", async (t) => {
+  const fixture = await createFixture("pico-portability-ledger-shape-");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const sessionDigest = "a".repeat(64);
+  await writeFixtureFile(
+    fixture.storageRoot,
+    `sessions/${sessionDigest}/session.jsonl`,
+    '{"type":"session"}\n',
+  );
+  await writeFixtureFile(
+    fixture.storageRoot,
+    `sessions/${sessionDigest}/private-notes.txt`,
+    "must not export\n",
+  );
+
+  assert.throws(
+    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
+    (error: unknown) =>
+      error instanceof WorkspacePortabilityPlanError &&
+      error.code === "invalid_ledger_entry" &&
+      error.relativePath === `sessions/${sessionDigest}/private-notes.txt`,
+  );
+
+  await rm(join(fixture.storageRoot, "sessions"), { recursive: true, force: true });
+  await writeFixtureFile(
+    fixture.storageRoot,
+    "task-runs/not-a-sha256/task.jsonl",
+    '{"type":"task-run"}\n',
+  );
+  assert.throws(
+    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
+    (error: unknown) =>
+      error instanceof WorkspacePortabilityPlanError &&
+      error.code === "invalid_ledger_entry" &&
+      error.relativePath === "task-runs/not-a-sha256",
   );
 });
 

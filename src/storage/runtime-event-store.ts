@@ -454,6 +454,7 @@ export class RuntimeEventStore {
         };
       });
       const replacements = appendedSessions.map(([sessionId, session]) => {
+        this.assertSessionDigestBoundary(sessionDigest(sessionId));
         const manifest = {
           ...session.loaded.manifest,
           activeBranchId: session.activeBranchId,
@@ -663,14 +664,25 @@ export class RuntimeEventStore {
   async deleteSession(sessionId: string): Promise<boolean> {
     return this.withStoreLock(() => {
       if (!this.loadSession(sessionId)) return false;
+      const digest = sessionDigest(sessionId);
+      this.assertSessionDigestBoundary(digest);
       const directory = this.sessionDirectory(sessionId);
-      const tombstone = join(
-        this.sessionsRoot,
-        `.deleted-${sessionDigest(sessionId)}-${randomUUID()}`,
-      );
+      const tombstone = join(this.sessionsRoot, `.deleted-${digest}-${randomUUID()}`);
       renameSync(directory, tombstone);
+      const tombstoneMetadata = lstatIfExists(tombstone);
+      if (
+        !tombstoneMetadata ||
+        !tombstoneMetadata.isDirectory() ||
+        tombstoneMetadata.isSymbolicLink()
+      ) {
+        throw new FileStorageIntegrityError(
+          `Runtime session tombstone must be a real directory: ${tombstone}`,
+        );
+      }
+      this.assertSessionsBoundary();
       syncDirectorySync(this.sessionsRoot);
       rmSync(tombstone, { recursive: true, force: true });
+      this.assertSessionsBoundary();
       syncDirectorySync(this.sessionsRoot);
       return true;
     });
@@ -685,12 +697,15 @@ export class RuntimeEventStore {
       if (this.rootIdentity) {
         assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
       }
+      this.assertSessionsBoundary();
       if (this.readOnly) return operation();
       return withFileLockSync(this.lockDirectory, this.ownerId, () => {
         if (this.rootIdentity) {
           assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
         }
+        this.assertSessionsBoundary();
         recoverFileTransactionSync(this.storageRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
+        this.assertSessionsBoundary();
         return operation();
       });
     } catch (error) {
@@ -728,6 +743,8 @@ export class RuntimeEventStore {
   }
 
   private loadSession(sessionId: string): LoadedRuntimeSession | undefined {
+    const digest = sessionDigest(sessionId);
+    this.assertSessionDigestBoundary(digest);
     const logPath = this.sessionFilePath(sessionId);
     if (!existsSync(logPath)) return undefined;
     const records = readJsonLinesSync(logPath, this.repairIncompleteTails);
@@ -810,6 +827,7 @@ export class RuntimeEventStore {
       this.repairManifests &&
       (!persistedProjection || !isDeepStrictEqual(persistedProjection, derivedProjection))
     ) {
+      this.assertSessionDigestBoundary(digest);
       writeJsonAtomicSync(manifestPath, derivedProjection);
     }
     return { header, manifest: derivedManifest, entries };
@@ -817,9 +835,11 @@ export class RuntimeEventStore {
 
   private loadAllSessionManifests(): RuntimeSessionManifest[] {
     if (!existsSync(this.sessionsRoot)) return [];
+    this.assertSessionsBoundary();
     const manifests: RuntimeSessionManifest[] = [];
     for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
+      if (!SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
+      this.assertSessionDigestBoundary(entry.name);
       const logPath = join(this.sessionsRoot, entry.name, SESSION_FILE_NAME);
       if (!existsSync(logPath)) {
         throw new RuntimeEventStoreIntegrityError(
@@ -846,6 +866,7 @@ export class RuntimeEventStore {
     sessionDirectoryName: string,
     logPath: string,
   ): RuntimeSessionManifest | undefined {
+    this.assertSessionDigestBoundary(sessionDirectoryName);
     const manifestPath = join(this.sessionsRoot, sessionDirectoryName, MANIFEST_FILE_NAME);
     if (!existsSync(manifestPath)) return undefined;
     try {
@@ -920,6 +941,43 @@ export class RuntimeEventStore {
 
   private sessionDirectory(sessionId: string): string {
     return join(this.sessionsRoot, sessionDigest(sessionId));
+  }
+
+  private assertSessionsBoundary(): void {
+    const metadata = lstatIfExists(this.sessionsRoot);
+    if (!metadata) {
+      if (this.readOnly) return;
+      throw new FileStorageIntegrityError(
+        `Runtime Session storage directory disappeared: ${this.sessionsRoot}`,
+      );
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(
+        `Runtime Session storage must be a real directory: ${this.sessionsRoot}`,
+      );
+    }
+  }
+
+  private assertSessionDigestBoundary(digest: string): void {
+    if (!SESSION_DIRECTORY_PATTERN.test(digest)) {
+      throw new FileStorageIntegrityError(`Runtime Session digest is invalid: ${digest}`);
+    }
+    this.assertSessionsBoundary();
+    const directory = join(this.sessionsRoot, digest);
+    const directoryMetadata = lstatIfExists(directory);
+    if (!directoryMetadata) return;
+    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) {
+      throw new FileStorageIntegrityError(
+        `Runtime Session directory must be a real directory: ${directory}`,
+      );
+    }
+    for (const fileName of [SESSION_FILE_NAME, MANIFEST_FILE_NAME]) {
+      const path = join(directory, fileName);
+      const metadata = lstatIfExists(path);
+      if (metadata && (!metadata.isFile() || metadata.isSymbolicLink())) {
+        throw new FileStorageIntegrityError(`Runtime Session data must be a regular file: ${path}`);
+      }
+    }
   }
 
   private sessionFilePath(sessionId: string): string {
@@ -1263,4 +1321,15 @@ function encodeJsonDocument(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function lstatIfExists(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
 }
