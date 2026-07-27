@@ -13,6 +13,20 @@ export interface LLMProviderRequestOptions {
   purpose?: "hook";
   /** Provider 返回可展示的 reasoning/thinking 增量时调用；不得混入最终回答正文。 */
   onReasoningDelta?: (delta: string) => void;
+  /**
+   * Provider 完成协议翻译、即将序列化请求体时触发。
+   *
+   * 仅供 Harness 可观测层生成无明文的请求指纹；不得传入 headers、URL query
+   * 或凭证，也不得在回调中修改 body。
+   */
+  onRequestPrepared?: (request: PreparedProviderRequest) => void;
+}
+
+/** 已完成协议翻译、但尚未发送的无凭证 Provider 请求体。 */
+export interface PreparedProviderRequest {
+  provider: "claude" | "openai" | "gemini";
+  model: string;
+  body: Readonly<Record<string, unknown>>;
 }
 
 /** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */
