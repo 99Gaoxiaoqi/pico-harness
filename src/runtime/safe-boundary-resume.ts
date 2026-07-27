@@ -182,10 +182,7 @@ export class SafeBoundaryResumePlanner {
     const { header } = projection;
 
     if (projection.terminal) {
-      add("task_terminal", `TaskRun ${header.taskRunId} is already terminal`, {
-        status: projection.terminal.status,
-      });
-      return parkPlan(header.taskRunId, diagnostics);
+      return terminalTaskPlan(projection);
     }
 
     const source = options.sourceAttemptId
@@ -557,6 +554,9 @@ export class SafeBoundaryResumeCoordinator {
     for (let retry = 0; retry <= this.maxContentionRetries; retry += 1) {
       const projection = await this.readProjection(input.taskRunId);
       if (!projection) return missingLedgerResult(input.taskRunId);
+      if (projection.terminal) {
+        return { status: "parked", plan: terminalTaskPlan(projection).plan };
+      }
 
       const active = latestAttempt(projection.attempts);
       if (active?.status === "running") {
@@ -1347,6 +1347,21 @@ function parkPlan(
       diagnostics,
     },
   };
+}
+
+function terminalTaskPlan(
+  projection: TaskRunProjection,
+): { readonly plan: Extract<TaskResumePlan, { disposition: "park" }> } {
+  if (!projection.terminal) {
+    throw new Error(`TaskRun ${projection.header.taskRunId} is not terminal`);
+  }
+  return parkPlan(projection.header.taskRunId, [
+    {
+      reason: "task_terminal",
+      message: `TaskRun ${projection.header.taskRunId} is already terminal`,
+      detail: { status: projection.terminal.status },
+    },
+  ]);
 }
 
 function launchMismatch(
