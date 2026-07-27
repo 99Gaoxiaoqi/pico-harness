@@ -88,7 +88,7 @@ export function ensurePrivateWorkspaceStorageDirectorySync(path: string): void {
 }
 
 /**
- * Prepares the workspace-wide Session/control transaction namespace.
+ * Prepares the workspace-wide Session/TaskRun/control transaction namespace.
  *
  * Existing JSON data under runtime/ is copied once, under both the new and legacy locks, and is
  * deliberately left untouched as a rollback artifact. SQLite and legacy task data are never read.

@@ -41,7 +41,6 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
   const initialized = await store.initializeTaskRun({
     taskRunId: "task/run:with-path",
     workDir: workspace,
-    storageRootId: "storage-root-1",
     adapter: {
       id: "test.adapter",
       version: 1,
@@ -52,6 +51,22 @@ test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", a
   });
   assert.equal(initialized.status, "queued");
   assert.equal(initialized.revision, 0);
+  assert.equal(initialized.header.storageRootId, store.storageRootId);
+  await assert.rejects(
+    store.initializeTaskRun({
+      taskRunId: "another-task",
+      workDir: workspace,
+      storageRootId: "unverified-root",
+      adapter: {
+        id: "test.adapter",
+        version: 1,
+        input,
+        inputHash: hashTaskRunInput(input),
+      },
+      maxAttempts: 3,
+    }),
+    /does not match the verified workspace root/u,
+  );
 
   const firstBatch = [
     attemptStarted("task/run:with-path", "start-1", "attempt-1", 1, "owner-1", 1),
@@ -279,8 +294,23 @@ test("TaskRunStore rejects invalid state transitions without publishing a batch"
   await assert.rejects(
     store.append(
       "invalid-task",
-      resumeClaimed("invalid-task", "claim-event", "claim", "attempt-1", "attempt-2", "owner-2", 2),
+      resumeClaimed(
+        "invalid-task",
+        "unpaired-claim-event",
+        "unpaired-claim",
+        "attempt-1",
+        "attempt-2",
+        "owner-2",
+        2,
+      ),
     ),
+    /must atomically pair every resume claim/u,
+  );
+  await assert.rejects(
+    store.appendBatch("invalid-task", [
+      resumeClaimed("invalid-task", "claim-event", "claim", "attempt-1", "attempt-2", "owner-2", 2),
+      attemptStarted("invalid-task", "successor-start", "attempt-2", 2, "owner-2", 2, "attempt-1"),
+    ]),
     (error: unknown) =>
       error instanceof TaskRunStoreIntegrityError &&
       /source is not interrupted/u.test(error.message),
@@ -345,7 +375,6 @@ async function initializedStore(root: string, taskRunId: string): Promise<TaskRu
   await store.initializeTaskRun({
     taskRunId,
     workDir: workspace,
-    storageRootId: "test-storage-root",
     adapter: {
       id: "test.adapter",
       version: 1,

@@ -24,6 +24,7 @@ import {
   decodeRuntimeEvents,
   decodeUsageLedger,
 } from "../tasks/runtime-store.js";
+import { TaskRunStore } from "../tasks/task-run-store.js";
 import {
   decodeRuntimeSessionManifestProjection,
   RuntimeEventStore,
@@ -55,6 +56,7 @@ export type StorageDoctorSeverity = (typeof STORAGE_DOCTOR_SEVERITIES)[number];
 export const STORAGE_DOCTOR_COMPONENTS = [
   "session",
   "runtime",
+  "task",
   "memory",
   "operation",
   "file_history",
@@ -101,6 +103,8 @@ export interface StorageDoctorRepairOptions {
   readonly rebuildDerivedProjections?: () => void | Promise<void>;
   /** 从 canonical Session JSONL 重建可丢弃的 manifest.json 投影。 */
   readonly rebuildRuntimeManifests?: boolean;
+  /** 从 canonical TaskRun JSONL 重建可丢弃的 manifest.json 投影。 */
+  readonly rebuildTaskRunManifests?: boolean;
   /** 显式请求协调时，forwarder 必须完成真实副作用及 journal 推进。 */
   readonly reconcileOperations?: {
     readonly forward: (
@@ -114,6 +118,7 @@ export interface StorageDoctorRepairResult {
   readonly quarantined: readonly QuarantinedJson[];
   readonly rebuiltDerivedProjections: boolean;
   readonly rebuiltRuntimeManifests: boolean;
+  readonly rebuiltTaskRunManifests: boolean;
   readonly reconciledOperationIds: readonly string[];
   readonly needsAttentionOperationIds: readonly string[];
 }
@@ -171,7 +176,10 @@ export class StorageDoctor {
     if (runtimeRootMetadata) {
       const scanRuntime = async () => {
         const runtimeAvailable = await this.scanRuntime(findings, scanned);
-        if (runtimeAvailable) await this.scanSessions(findings, scanned);
+        if (runtimeAvailable) {
+          await this.scanSessions(findings, scanned);
+          await this.scanTaskRuns(findings, scanned);
+        }
       };
       if (!isRealDirectory(runtimeRootMetadata)) {
         findings.push(
@@ -268,6 +276,14 @@ export class StorageDoctor {
       ).listSessionManifests();
       rebuiltRuntimeManifests = true;
     }
+    let rebuiltTaskRunManifests = false;
+    if (options.rebuildTaskRunManifests === true) {
+      await new TaskRunStore(
+        { storageRoot: this.runtimeStorageRoot },
+        { repairIncompleteTails: false },
+      ).listTaskRunProjections();
+      rebuiltTaskRunManifests = true;
+    }
 
     const reconciledOperationIds: string[] = [];
     const needsAttentionOperationIds: string[] = [];
@@ -308,6 +324,7 @@ export class StorageDoctor {
       quarantined,
       rebuiltDerivedProjections,
       rebuiltRuntimeManifests,
+      rebuiltTaskRunManifests,
       reconciledOperationIds: reconciledOperationIds.toSorted(),
       needsAttentionOperationIds: needsAttentionOperationIds.toSorted(),
     };
@@ -390,6 +407,50 @@ export class StorageDoctor {
       } catch (error) {
         findings.push(sessionReplayFinding(sessionPath, error));
       }
+    }
+  }
+
+  private async scanTaskRuns(
+    findings: StorageDoctorFinding[],
+    scanned: Record<StorageDoctorComponent, number>,
+  ): Promise<void> {
+    const taskRunsRoot = join(this.runtimeStorageRoot, "task-runs");
+    if (!(await pathExists(taskRunsRoot))) return;
+    try {
+      const inspection = await new TaskRunStore(
+        { storageRoot: this.runtimeStorageRoot },
+        {
+          repairManifests: false,
+          repairIncompleteTails: false,
+          readOnly: true,
+        },
+      ).inspectTaskRuns();
+      scanned.task += inspection.projections.length;
+      for (const manifestPath of inspection.staleManifestPaths) {
+        findings.push(
+          finding(
+            "task_run_manifest_rebuild_required",
+            "warning",
+            "projection",
+            manifestPath,
+            "TaskRun manifest is missing, malformed, or stale",
+            "Run StorageDoctor repair with rebuildTaskRunManifests enabled",
+            "derived",
+          ),
+        );
+      }
+    } catch (error) {
+      findings.push(
+        finding(
+          "task_run_ledger_invalid",
+          "critical",
+          "task",
+          taskRunsRoot,
+          errorMessage(error),
+          "Preserve the append-only TaskRun ledger and recover it from a verified copy",
+          "authoritative",
+        ),
+      );
     }
   }
 
