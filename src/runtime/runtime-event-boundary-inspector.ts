@@ -195,20 +195,7 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
         },
       };
     }
-    const progression = entries.slice(source.eventHighWater);
-    const foreign = progression.find(({ event }) => event.runId !== expected.runId);
-    if (foreign) {
-      return {
-        status: "mismatch",
-        reason: "runtime_high_water_mismatch",
-        message: `Runtime session ${source.sessionId} advanced outside the expected launch`,
-        detail: {
-          expectedRunId: expected.runId,
-          actualRunId: foreign.event.runId,
-          actualEventId: foreign.event.eventId,
-        },
-      };
-    }
+    // H+1 durably binds this admission. Later Session events may belong to subsequent Runs.
     const matchingStarts = entries.filter(
       ({ event }) => event.kind === "run.started" && event.runId === expected.runId,
     );
