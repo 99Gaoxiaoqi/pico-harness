@@ -268,6 +268,8 @@ export interface TaskAttemptLaunchProjection {
   readonly status: "claimed" | "succeeded" | "failed";
   readonly ownerId: string;
   readonly leaseEpoch: number;
+  /** Execution lease epoch that admitted this launch lease. */
+  readonly executionLeaseEpoch: number;
   readonly claimedAt: string;
   readonly expiresAt: string;
   readonly settledAt?: string;

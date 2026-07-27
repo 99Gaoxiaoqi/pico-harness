@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
+  deriveRecoverableTaskLaunchId,
+  deriveRecoverableTaskResumeIdentity,
   deriveRecoverableTaskRuntimeLaunchIdentity,
   prepareRecoverableTaskInput,
   validateRecoverableTaskLaunchReceipt,
@@ -557,6 +559,15 @@ export class SafeBoundaryResumeCoordinator {
       if (projection.terminal) {
         return { status: "parked", plan: terminalTaskPlan(projection).plan };
       }
+      if (projection.header.storageRootId !== this.options.environment.storageRootId) {
+        const evaluation = await this.planner.evaluate(projection);
+        if (isPreparedResume(evaluation)) {
+          throw new Error(
+            `TaskRun ${projection.header.taskRunId} root-mismatch recovery was unexpectedly resumable`,
+          );
+        }
+        return { status: "parked", plan: evaluation.plan };
+      }
 
       const active = latestAttempt(projection.attempts);
       if (active?.status === "running") {
@@ -610,9 +621,7 @@ export class SafeBoundaryResumeCoordinator {
         const evaluation = await this.planner.evaluate(projection, {
           sourceAttemptId: active.sourceAttemptId,
           creatingSuccessor: false,
-          ...(reconciliation.status === "verified"
-            ? { verifiedLaunch: reconciliation }
-            : {}),
+          ...(reconciliation.status === "verified" ? { verifiedLaunch: reconciliation } : {}),
         });
         const launchClaim = await this.claimLaunch(projection, active);
         if (launchClaim.status === "conflict") continue;
@@ -623,11 +632,7 @@ export class SafeBoundaryResumeCoordinator {
           throw new Error(`TaskRun ${input.taskRunId} lost Attempt ${active.attemptId}`);
         }
         if (!isPreparedResume(evaluation)) {
-          return this.parkClaimedLaunch(
-            projection.header.taskRunId,
-            successor,
-            evaluation.plan,
-          );
+          return this.parkClaimedLaunch(projection.header.taskRunId, successor, evaluation.plan);
         }
         return this.executeLaunch(launchClaim.projection, successor, evaluation);
       }
@@ -729,7 +734,7 @@ export class SafeBoundaryResumeCoordinator {
     const attemptLeaseEpoch =
       Math.max(...projection.attempts.map((attempt) => attempt.execution.leaseEpoch), 0) + 1;
     const launchLeaseEpoch = 1;
-    const identity = resumeIdentity(
+    const identity = deriveRecoverableTaskResumeIdentity(
       projection.header.taskRunId,
       prepared.source.attemptId,
       attemptNumber,
@@ -809,7 +814,7 @@ export class SafeBoundaryResumeCoordinator {
     }
     const atDate = this.now();
     const at = atDate.toISOString();
-    const identity = resumeIdentity(
+    const identity = deriveRecoverableTaskResumeIdentity(
       projection.header.taskRunId,
       attempt.sourceAttemptId,
       attempt.attemptNumber,
@@ -908,11 +913,7 @@ export class SafeBoundaryResumeCoordinator {
       ...(before.status === "verified" ? { verifiedLaunch: before } : {}),
     });
     if (!isPreparedResume(currentEvaluation)) {
-      return this.parkClaimedLaunch(
-        projection.header.taskRunId,
-        successor,
-        currentEvaluation.plan,
-      );
+      return this.parkClaimedLaunch(projection.header.taskRunId, successor, currentEvaluation.plan);
     }
     const prepared = currentEvaluation;
     const currentCheckpointRef = prepared.plan.boundary.checkpointRef;
@@ -1038,11 +1039,11 @@ export class SafeBoundaryResumeCoordinator {
         `Attempt ${successor.attemptId} lost its source Runtime boundary`,
       );
     }
-    const expectedLaunchId = `launch:${resumeIdentity(
+    const expectedLaunchId = deriveRecoverableTaskLaunchId(
       projection.header.taskRunId,
       sourceAttemptId,
       successor.attemptNumber,
-    )}`;
+    );
     if (launch.launchId !== expectedLaunchId) {
       return launchMismatch(
         "ledger_corrupt",
@@ -1349,9 +1350,9 @@ function parkPlan(
   };
 }
 
-function terminalTaskPlan(
-  projection: TaskRunProjection,
-): { readonly plan: Extract<TaskResumePlan, { disposition: "park" }> } {
+function terminalTaskPlan(projection: TaskRunProjection): {
+  readonly plan: Extract<TaskResumePlan, { disposition: "park" }>;
+} {
   if (!projection.terminal) {
     throw new Error(`TaskRun ${projection.header.taskRunId} is not terminal`);
   }
@@ -1472,12 +1473,6 @@ function sameParkProjection(
     projection.parkReasons.length === plan.reasons.length &&
     projection.parkReasons.every((reason, index) => reason === plan.reasons[index])
   );
-}
-
-function resumeIdentity(taskRunId: string, sourceAttemptId: string, attemptNumber: number): string {
-  return createHash("sha256")
-    .update(JSON.stringify(["task-resume-v1", taskRunId, sourceAttemptId, attemptNumber]))
-    .digest("hex");
 }
 
 function comparablePath(path: string): string {

@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   commitFileTransactionSync,
@@ -378,6 +378,203 @@ test("copied version 1 roots validate a pending version 2 layout identity before
   await assert.rejects(stat(copiedCommitPath), { code: "ENOENT" });
 });
 
+test("copied roots with a missing marker validate the pending version 2 identity before recovery", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-missing-copy-pending-"));
+  const sourceRoot = join(root, "source");
+  const copiedRoot = join(root, "copied");
+  const sourceStatePath = join(sourceRoot, "control", "state.json");
+  const sourceLayoutPath = join(sourceRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const sourceCommitPath = join(sourceRoot, WORKSPACE_STORAGE_COMMIT_FILE);
+  const copiedStatePath = join(copiedRoot, "control", "state.json");
+  const copiedLayoutPath = join(copiedRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const copiedCommitPath = join(copiedRoot, WORKSPACE_STORAGE_COMMIT_FILE);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  new RuntimeStore({ workDir: root, storageRoot: sourceRoot }).close();
+  const version2LayoutBytes = await readFile(sourceLayoutPath);
+  const version2Layout = JSON.parse(version2LayoutBytes.toString("utf8")) as {
+    schemaVersion: 2;
+    storageRootId: string;
+    physicalIdentity: { canonicalPath: string };
+  };
+  const stateBefore = JSON.parse(await readFile(sourceStatePath, "utf8")) as {
+    revision: number;
+    lastTransactionId?: string;
+  };
+  const stateAfter = {
+    ...stateBefore,
+    revision: stateBefore.revision + 1,
+    lastTransactionId: "missing-layout-upgrade-pending",
+  };
+  await rm(sourceLayoutPath);
+  assert.throws(
+    () =>
+      withFileLockSync(
+        join(sourceRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "missing-layout-upgrade-crash",
+        () =>
+          commitFileTransactionSync(
+            sourceRoot,
+            {
+              replacements: [
+                {
+                  relativePath: "control/state.json",
+                  content: `${JSON.stringify(stateAfter, null, 2)}\n`,
+                },
+                {
+                  relativePath: WORKSPACE_STORAGE_LAYOUT_FILE,
+                  content: version2LayoutBytes,
+                },
+              ],
+            },
+            {
+              ...WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
+              transactionId: "missing-layout-upgrade-pending",
+              onStage(stage) {
+                if (stage === "commit-published") {
+                  throw new Error("simulated missing layout upgrade crash");
+                }
+              },
+            },
+          ),
+      ),
+    /simulated missing layout upgrade crash/u,
+  );
+  await cp(sourceRoot, copiedRoot, { recursive: true, preserveTimestamps: true });
+  const copiedStateBefore = await readFile(copiedStatePath);
+  const copiedCommitBefore = await readFile(copiedCommitPath);
+  const copiedRootMtimeBefore = (await stat(copiedRoot)).mtimeMs;
+  const copiedCoordinatorMtimeBefore = (await stat(join(copiedRoot, WORKSPACE_STORAGE_DIRECTORY)))
+    .mtimeMs;
+  await assert.rejects(stat(copiedLayoutPath), { code: "ENOENT" });
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot: copiedRoot }),
+    /requires explicit adoption/u,
+  );
+  assert.deepEqual(await readFile(copiedStatePath), copiedStateBefore);
+  assert.deepEqual(await readFile(copiedCommitPath), copiedCommitBefore);
+  await assert.rejects(stat(copiedLayoutPath), { code: "ENOENT" });
+  assert.equal((await stat(copiedRoot)).mtimeMs, copiedRootMtimeBefore);
+  assert.equal(
+    (await stat(join(copiedRoot, WORKSPACE_STORAGE_DIRECTORY))).mtimeMs,
+    copiedCoordinatorMtimeBefore,
+  );
+
+  new RuntimeStore({ workDir: root, storageRoot: sourceRoot }).close();
+  assert.deepEqual(JSON.parse(await readFile(sourceStatePath, "utf8")), stateAfter);
+  assert.deepEqual(await readFile(sourceLayoutPath), version2LayoutBytes);
+  await assert.rejects(stat(sourceCommitPath), { code: "ENOENT" });
+
+  const adopted = adoptWorkspaceStorageRootIdentitySync(copiedRoot, version2Layout.storageRootId);
+  assert.equal(adopted.storageRootId, version2Layout.storageRootId);
+  assert.deepEqual(JSON.parse(await readFile(copiedStatePath, "utf8")), stateAfter);
+  const copiedLayoutAfter = JSON.parse(await readFile(copiedLayoutPath, "utf8")) as {
+    schemaVersion: number;
+    storageRootId: string;
+    adoptedAt?: string;
+    physicalIdentity: { canonicalPath: string };
+  };
+  assert.equal(copiedLayoutAfter.schemaVersion, 2);
+  assert.equal(copiedLayoutAfter.storageRootId, version2Layout.storageRootId);
+  assert.equal(copiedLayoutAfter.physicalIdentity.canonicalPath, await realpath(copiedRoot));
+  assert.equal(typeof copiedLayoutAfter.adoptedAt, "string");
+  await assert.rejects(stat(copiedCommitPath), { code: "ENOENT" });
+});
+
+test("missing layout markers fail closed when a pending transaction cannot verify identity", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-missing-unverified-"));
+  const storageRoot = join(root, "state");
+  const statePath = join(storageRoot, "control", "state.json");
+  const layoutPath = join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const commitPath = join(storageRoot, WORKSPACE_STORAGE_COMMIT_FILE);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  new RuntimeStore({ workDir: root, storageRoot }).close();
+  const layout = JSON.parse(await readFile(layoutPath, "utf8")) as {
+    storageRootId: string;
+  };
+  const stateBefore = JSON.parse(await readFile(statePath, "utf8")) as {
+    revision: number;
+    lastTransactionId?: string;
+  };
+  const stateAfter = {
+    ...stateBefore,
+    revision: stateBefore.revision + 1,
+    lastTransactionId: "missing-layout-unverified-pending",
+  };
+  await rm(layoutPath);
+  assert.throws(
+    () =>
+      withFileLockSync(
+        join(storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "missing-layout-unverified-crash",
+        () =>
+          commitFileTransactionSync(
+            storageRoot,
+            {
+              replacements: [
+                {
+                  relativePath: "control/state.json",
+                  content: `${JSON.stringify(stateAfter, null, 2)}\n`,
+                },
+              ],
+            },
+            {
+              ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+              transactionId: "missing-layout-unverified-pending",
+              onStage(stage) {
+                if (stage === "commit-published") {
+                  throw new Error("simulated unverified missing layout crash");
+                }
+              },
+            },
+          ),
+      ),
+    /simulated unverified missing layout crash/u,
+  );
+  const stateBytes = await readFile(statePath);
+  const commitBytes = await readFile(commitPath);
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot }),
+    /pending transaction without a verifiable version 2 layout replacement.*verified manual recovery/u,
+  );
+  assert.throws(
+    () => adoptWorkspaceStorageRootIdentitySync(storageRoot, layout.storageRootId),
+    /cannot be explicitly adopted/u,
+  );
+  assert.deepEqual(await readFile(statePath), stateBytes);
+  assert.deepEqual(await readFile(commitPath), commitBytes);
+  await assert.rejects(stat(layoutPath), { code: "ENOENT" });
+});
+
+for (const [surface, relativePath] of [
+  ["Session", join("sessions", "a".repeat(64), "session.jsonl")],
+  ["TaskRun", join("task-runs", "b".repeat(64), "task.jsonl")],
+  ["control", join("control", "state.json")],
+] as const) {
+  test(`missing layout markers fail closed over existing canonical ${surface} data`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-missing-canonical-"));
+    const storageRoot = join(root, "state");
+    const dataPath = join(storageRoot, relativePath);
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await mkdir(dirname(dataPath), { recursive: true, mode: 0o700 });
+    await writeFile(dataPath, "canonical data must stay bound\n", { mode: 0o600 });
+    const dataBytes = await readFile(dataPath);
+    const rootMtimeBefore = (await stat(storageRoot)).mtimeMs;
+
+    assert.throws(
+      () => new RuntimeStore({ workDir: root, storageRoot }),
+      /canonical data without a workspace storage layout marker.*verified manual import/u,
+    );
+    assert.deepEqual(await readFile(dataPath), dataBytes);
+    assert.equal((await stat(storageRoot)).mtimeMs, rootMtimeBefore);
+    await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_DIRECTORY)), {
+      code: "ENOENT",
+    });
+    await assert.rejects(stat(join(storageRoot, "runtime")), { code: "ENOENT" });
+  });
+}
+
 test("version 1 runtime-only pending commits require verified manual recovery", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-runtime-pending-"));
   const storageRoot = join(root, "state");
@@ -485,7 +682,7 @@ test("opening a version 1 layout upgrades it once without changing its creation 
   assert.equal(typeof upgraded.storageRootId, "string");
 });
 
-test("workspace storage migration fails closed when canonical and legacy Session data conflict", async (t) => {
+test("workspace storage fails closed when markerless canonical and legacy Session data conflict", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-conflict-"));
   const storageRoot = join(root, "state");
   const digest = sessionDigest("conflicting-session");
@@ -504,7 +701,7 @@ test("workspace storage migration fails closed when canonical and legacy Session
     () => new RuntimeEventStore({ storageRoot }),
     (error: unknown) =>
       error instanceof FileStorageIntegrityError &&
-      /migration conflicts with existing target/u.test(error.message),
+      /canonical data without a workspace storage layout marker/u.test(error.message),
   );
 
   assert.equal(await readFile(legacyLogPath, "utf8"), '{"source":"legacy"}\n');
