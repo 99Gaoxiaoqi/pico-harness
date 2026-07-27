@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   type RuntimeBoundaryInspection,
   type RuntimeBoundaryInspector,
+  type RuntimeLaunchExpectation,
+  type RuntimeLaunchReconciliation,
   SafeBoundaryResumeCoordinator,
   SafeBoundaryResumePlanner,
   type TaskResumeLedger,
@@ -21,6 +23,7 @@ import {
   type TaskRunEvent,
   type TaskRunFileHeader,
   type TaskRunProjection,
+  type TaskRuntimeBoundary,
   type TaskSafeBoundary,
 } from "../../src/tasks/task-run-contract.js";
 
@@ -48,6 +51,7 @@ test("safe-boundary recovery starts a fresh Attempt and a restart cannot claim a
       assert.ok(Object.isFrozen(input));
       assert.ok(Object.isFrozen(input["nested"]));
       resumeCalls.push({ input, context });
+      return launchReceipt(context);
     },
   });
 
@@ -66,7 +70,7 @@ test("safe-boundary recovery starts a fresh Attempt and a restart cannot claim a
   assert.notEqual(first.attemptId, "attempt-1");
   assert.equal(first.sourceAttemptId, "attempt-1");
   assert.equal(first.attemptNumber, 2);
-  assert.equal(first.leaseEpoch, 9);
+  assert.equal(first.leaseEpoch, 8);
   assert.equal(first.ownerId, "host:after-restart");
   assert.equal(resumeCalls.length, 1);
   assert.equal(resumeCalls[0]?.context.attemptId, first.attemptId);
@@ -92,9 +96,9 @@ test("safe-boundary recovery starts a fresh Attempt and a restart cannot claim a
   assert.equal(ledger.events.filter((event) => event.kind === "task.resume.claimed").length, 1);
   assert.equal(ledger.events.filter((event) => event.kind === "attempt.started").length, 1);
   const claim = ledger.events.find((event) => event.kind === "task.resume.claimed");
-  const started = ledger.events.find((event) => event.kind === "attempt.started");
-  assert.equal(claim?.data.leaseEpoch, started?.data.leaseEpoch);
-  assert.equal(claim?.data.successorAttemptId, started?.data.attemptId);
+  const execution = ledger.events.find((event) => event.kind === "attempt.execution.claimed");
+  assert.equal(claim?.data.leaseEpoch, execution?.data.leaseEpoch);
+  assert.equal(claim?.data.successorAttemptId, execution?.data.attemptId);
   assert.equal(
     ledger.events.filter((event) => event.kind === "attempt.launch.succeeded").length,
     1,
@@ -109,8 +113,9 @@ test("concurrent recovery claims are revision-checked so only one owner launches
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume() {
+    resume(_input, context) {
       launches += 1;
+      return launchReceipt(context);
     },
   });
   const input = { taskRunId: "task-run-1", executionClass: "recoverable" as const };
@@ -125,7 +130,7 @@ test("concurrent recovery claims are revision-checked so only one owner launches
   assert.equal(ledger.projection?.attempts.length, 2);
   const successor = ledger.projection?.attempts.at(-1);
   assert.equal(successor?.sourceAttemptId, "attempt-1");
-  assert.equal(successor?.leaseEpoch, 9);
+  assert.equal(successor?.execution.leaseEpoch, 8);
   assert.equal(ledger.events.filter((event) => event.kind === "task.resume.claimed").length, 1);
 });
 
@@ -135,7 +140,9 @@ test("planner parks every uncertain boundary instead of guessing a continuation"
     adapterId: "agent.task",
     version: 2,
     launchMode: "idempotent",
-    resume() {},
+    resume(_input, context) {
+      return launchReceipt(context);
+    },
   });
   const unsafeBoundary: TaskSafeBoundary = {
     ...safeBoundary(),
@@ -252,8 +259,9 @@ test("host-bound tasks never touch the recovery ledger or invoke an adapter", as
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume() {
+    resume(_input, context) {
       launches += 1;
+      return launchReceipt(context);
     },
   });
 
@@ -295,7 +303,9 @@ function registryWithoutResumeSideEffects(): RecoverableTaskRegistry {
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume() {},
+    resume(_input, context) {
+      return launchReceipt(context);
+    },
   });
   return registry;
 }
@@ -343,6 +353,17 @@ function availableRuntimeInspection(): Extract<RuntimeBoundaryInspection, { stat
   };
 }
 
+function launchReceipt(context: RecoverableTaskResumeContext) {
+  return {
+    schemaVersion: 1 as const,
+    launchId: context.launchId,
+    sessionId: context.runtimeSessionId,
+    runId: context.expectedRuntimeRunId,
+    runStartedEventId: context.expectedRunStartedEventId,
+    runStartedSequence: context.expectedSessionHighWater + 1,
+  };
+}
+
 function taskRunHeader(): TaskRunFileHeader {
   return {
     type: "task-run",
@@ -365,8 +386,12 @@ function interruptedAttempt(): TaskAttemptProjection {
   return {
     attemptId: "attempt-1",
     attemptNumber: 1,
-    ownerId: "host:before-crash",
-    leaseEpoch: 7,
+    execution: {
+      ownerId: "host:before-crash",
+      leaseEpoch: 7,
+      claimedAt: "2026-07-26T00:00:00.000Z",
+      expiresAt: "2026-07-26T00:02:00.000Z",
+    },
     status: "interrupted",
     startedAt: "2026-07-26T00:00:00.000Z",
     finishedAt: "2026-07-26T00:01:00.000Z",
@@ -393,10 +418,36 @@ function taskRunProjection(
 }
 
 class StaticRuntimeInspector implements RuntimeBoundaryInspector {
+  private readonly reconciled = new Set<string>();
+
   constructor(private readonly inspection: RuntimeBoundaryInspection) {}
 
   async inspect(): Promise<RuntimeBoundaryInspection> {
     return this.inspection;
+  }
+
+  async reconcileLaunch(
+    source: TaskRuntimeBoundary,
+    expected: RuntimeLaunchExpectation,
+  ): Promise<RuntimeLaunchReconciliation> {
+    if (!this.reconciled.has(expected.launchId)) {
+      this.reconciled.add(expected.launchId);
+      return { status: "not_started" };
+    }
+    return {
+      status: "verified",
+      sessionWorkspacePath: WORKSPACE_PATH,
+      runWorkspacePath: WORKSPACE_PATH,
+      currentEventHighWater: source.eventHighWater + 1,
+      receipt: {
+        schemaVersion: 1,
+        launchId: expected.launchId,
+        sessionId: source.sessionId,
+        runId: expected.runId,
+        runStartedEventId: expected.runStartedEventId,
+        runStartedSequence: source.eventHighWater + 1,
+      },
+    };
   }
 }
 
@@ -430,26 +481,76 @@ class InMemoryTaskResumeLedger implements TaskResumeLedger {
     for (const event of input.events) {
       this.events.push(event);
       if (event.kind === "attempt.started") {
+        const executionClaim = input.events.find(
+          (candidate) =>
+            candidate.kind === "attempt.execution.claimed" &&
+            candidate.data.attemptId === event.data.attemptId,
+        );
+        if (!executionClaim || executionClaim.kind !== "attempt.execution.claimed") {
+          throw new Error("started Attempt has no execution claim");
+        }
         attempts = [
           ...attempts,
           {
             attemptId: event.data.attemptId,
             attemptNumber: event.data.attemptNumber,
-            ownerId: event.data.ownerId,
-            leaseEpoch: event.data.leaseEpoch,
+            execution: {
+              ownerId: executionClaim.data.ownerId,
+              leaseEpoch: executionClaim.data.leaseEpoch,
+              claimedAt: executionClaim.at,
+              expiresAt: executionClaim.data.expiresAt,
+            },
             ...(event.data.sourceAttemptId ? { sourceAttemptId: event.data.sourceAttemptId } : {}),
             status: "running",
             startedAt: event.at,
           },
         ];
         status = "running";
+      } else if (event.kind === "attempt.execution.claimed") {
+        attempts = attempts.map((attempt) =>
+          attempt.attemptId === event.data.attemptId
+            ? {
+                ...attempt,
+                execution: {
+                  ownerId: event.data.ownerId,
+                  leaseEpoch: event.data.leaseEpoch,
+                  claimedAt: event.at,
+                  expiresAt: event.data.expiresAt,
+                },
+              }
+            : attempt,
+        );
+      } else if (event.kind === "attempt.execution.renewed") {
+        attempts = attempts.map((attempt) =>
+          attempt.attemptId === event.data.attemptId
+            ? {
+                ...attempt,
+                execution: {
+                  ...attempt.execution,
+                  expiresAt: event.data.expiresAt,
+                  renewedAt: event.at,
+                },
+              }
+            : attempt,
+        );
+      } else if (event.kind === "attempt.execution.released") {
+        attempts = attempts.map((attempt) =>
+          attempt.attemptId === event.data.attemptId
+            ? {
+                ...attempt,
+                execution: {
+                  ...attempt.execution,
+                  expiresAt: event.at,
+                  releasedAt: event.at,
+                },
+              }
+            : attempt,
+        );
       } else if (event.kind === "attempt.launch.claimed") {
         attempts = attempts.map((attempt) =>
           attempt.attemptId === event.data.attemptId
             ? {
                 ...attempt,
-                ownerId: event.data.ownerId,
-                leaseEpoch: event.data.leaseEpoch,
                 launch: {
                   launchId: event.data.launchId,
                   status: "claimed",
@@ -473,6 +574,9 @@ class InMemoryTaskResumeLedger implements TaskResumeLedger {
                   ...attempt.launch,
                   status: event.kind === "attempt.launch.succeeded" ? "succeeded" : "failed",
                   settledAt: event.at,
+                  ...(event.kind === "attempt.launch.succeeded"
+                    ? { receipt: event.data.receipt }
+                    : {}),
                   ...(event.kind === "attempt.launch.failed" ? { error: event.data.error } : {}),
                 },
               }
@@ -486,7 +590,7 @@ class InMemoryTaskResumeLedger implements TaskResumeLedger {
     }
     this.projection = {
       ...current,
-      revision: current.revision + input.events.length,
+      revision: current.revision + 1,
       lastTransactionId: input.transactionId,
       status,
       attempts,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +16,10 @@ import {
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import {
+  deriveRecoverableTaskRuntimeLaunchIdentity,
   hashRecoverableTaskInput,
   RecoverableTaskRegistry,
+  type RecoverableTaskResumeContext,
 } from "../../src/tasks/recoverable-task.js";
 import {
   TASK_RUN_EVENT_SCHEMA_VERSION,
@@ -64,11 +67,15 @@ test("file-backed recovery claims one fresh Attempt from canonical RuntimeEvent 
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume(persistedInput, context) {
+    async resume(persistedInput, context) {
       launches += 1;
       assert.deepEqual(persistedInput, input);
       assert.equal(context.sourceAttemptId, "attempt-1");
       assert.equal(context.checkpointRef, "checkpoint-1");
+      return appendExpectedRunStarted(
+        { runtimeEvents, workspace: canonicalizeWorkspacePath(workspace) },
+        context,
+      );
     },
   });
   const inspector = new RuntimeEventBoundaryInspector({
@@ -123,10 +130,12 @@ test("adapter launch failure is durably retryable with one stable idempotency ke
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume(_input, context) {
+    async resume(_input, context) {
       launchIds.push(context.launchId);
       if (launchIds.length === 1) throw new Error("injected adapter launch failure");
+      const receipt = await appendExpectedRunStarted(fixture, context);
       actualLaunches.add(context.launchId);
+      return receipt;
     },
   });
 
@@ -151,7 +160,7 @@ test("adapter launch failure is durably retryable with one stable idempotency ke
   const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
   assert.equal(projection?.attempts.length, 2);
   assert.equal(projection?.attempts[1]?.launch?.status, "succeeded");
-  assert.equal(projection?.attempts[1]?.ownerId, "host:second");
+  assert.equal(projection?.attempts[1]?.execution.ownerId, "host:second");
 });
 
 test("an expired launch lease is taken over after a crash between durable claim and adapter call", async (t) => {
@@ -162,8 +171,9 @@ test("an expired launch lease is taken over after a crash between durable claim 
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume(_input, context) {
+    async resume(_input, context) {
       launchIds.add(context.launchId);
+      return appendExpectedRunStarted(fixture, context);
     },
   });
   const crashingLedger = new CrashAfterResumeClaimLedger(
@@ -172,6 +182,7 @@ test("an expired launch lease is taken over after a crash between durable claim 
   const first = recoveryCoordinator(fixture, registry, "host:crashed", {
     ledger: crashingLedger,
     launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
     now: () => new Date(AT),
   });
 
@@ -185,6 +196,7 @@ test("an expired launch lease is taken over after a crash between durable claim 
 
   const recovered = await recoveryCoordinator(fixture, registry, "host:replacement", {
     launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
     now: () => new Date("2026-07-27T00:00:01.001Z"),
   }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
 
@@ -193,10 +205,10 @@ test("an expired launch lease is taken over after a crash between durable claim 
   const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
   assert.equal(projection?.attempts.length, 2);
   assert.equal(projection?.attempts[1]?.launch?.status, "succeeded");
-  assert.equal(projection?.attempts[1]?.ownerId, "host:replacement");
+  assert.equal(projection?.attempts[1]?.execution.ownerId, "host:replacement");
 });
 
-test("a crash after actual launch but before settlement retries one idempotent launchId", async (t) => {
+test("a crash after run.started but before settlement reconciles one canonical launch", async (t) => {
   const fixture = await prepareFileRecovery(t);
   const registry = new RecoverableTaskRegistry();
   const resumeCalls: string[] = [];
@@ -205,9 +217,11 @@ test("a crash after actual launch but before settlement retries one idempotent l
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume(_input, context) {
+    async resume(_input, context) {
       resumeCalls.push(context.launchId);
+      const receipt = await appendExpectedRunStarted(fixture, context);
       actualLaunches.add(context.launchId);
+      return receipt;
     },
   });
   const settlementCrash = new CrashBeforeLaunchSettlementLedger(
@@ -216,6 +230,7 @@ test("a crash after actual launch but before settlement retries one idempotent l
   const first = recoveryCoordinator(fixture, registry, "host:settlement-crash", {
     ledger: settlementCrash,
     launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
     now: () => new Date(AT),
   });
 
@@ -232,17 +247,167 @@ test("a crash after actual launch but before settlement retries one idempotent l
 
   const recovered = await recoveryCoordinator(fixture, registry, "host:settlement-recovery", {
     launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
     now: () => new Date("2026-07-27T00:00:01.001Z"),
   }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
 
   assert.equal(recovered.status, "resumed");
-  assert.equal(resumeCalls.length, 2);
+  assert.equal(resumeCalls.length, 1);
   assert.equal(new Set(resumeCalls).size, 1);
   assert.equal(actualLaunches.size, 1);
+  assert.equal(
+    (await fixture.runtimeEvents.readSessionEntries(SESSION_ID)).filter(
+      ({ event }) => event.runId !== RUN_ID && event.kind === "run.started",
+    ).length,
+    1,
+  );
   assert.equal(
     (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.attempts[1]?.launch?.status,
     "succeeded",
   );
+});
+
+test("Runtime high-water CAS prevents adapter side effects when an unknown H+1 wins", async (t) => {
+  const fixture = await prepareFileRecovery(t);
+  const registry = new RecoverableTaskRegistry();
+  let sideEffects = 0;
+  let expectedRunStartedEventId: string | undefined;
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    async resume(_input, context) {
+      expectedRunStartedEventId = context.expectedRunStartedEventId;
+      await fixture.runtimeEvents.append({
+        schemaVersion: 1,
+        eventId: "runtime-unknown-h-plus-one",
+        sessionId: context.runtimeSessionId,
+        invocationId: "invocation:unknown",
+        runId: "run:unknown",
+        turnId: "turn:unknown",
+        at: AT,
+        partial: false,
+        visibility: "internal",
+        kind: "run.started",
+        data: { workDir: fixture.workspace },
+      });
+      const receipt = await appendExpectedRunStarted(fixture, context);
+      sideEffects += 1;
+      return receipt;
+    },
+  });
+
+  const result = await recoveryCoordinator(fixture, registry, "host:cas-race").recover({
+    taskRunId: TASK_RUN_ID,
+    executionClass: "recoverable",
+  });
+
+  assert.equal(result.status, "parked");
+  if (result.status !== "parked") assert.fail("unknown H+1 must park");
+  assert.deepEqual(result.plan.reasons, ["runtime_high_water_mismatch"]);
+  assert.equal(sideEffects, 0);
+  assert.ok(expectedRunStartedEventId);
+  assert.equal(
+    (await fixture.runtimeEvents.readSessionEntries(SESSION_ID)).some(
+      ({ event }) => event.eventId === expectedRunStartedEventId,
+    ),
+    false,
+  );
+  assert.equal(
+    (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.attempts[1]?.status,
+    "interrupted",
+  );
+});
+
+test("a deterministic successor Runtime identity cannot be pre-bound before H", async (t) => {
+  const launchId = expectedLaunchId();
+  const expected = deriveRecoverableTaskRuntimeLaunchIdentity(launchId);
+  const fixture = await prepareFileRecovery(t, (workspace) =>
+    runtimeFacts(workspace).map((event, index): RuntimeEvent => {
+      if (index !== 1) return event;
+      return {
+        ...event,
+        eventId: expected.runStartedEventId,
+        runId: expected.runId,
+      };
+    }),
+  );
+  const registry = new RecoverableTaskRegistry();
+  let adapterCalls = 0;
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    resume(_input, context) {
+      adapterCalls += 1;
+      return appendExpectedRunStarted(fixture, context);
+    },
+  });
+
+  const result = await recoveryCoordinator(fixture, registry, "host:identity-conflict").recover({
+    taskRunId: TASK_RUN_ID,
+    executionClass: "recoverable",
+  });
+
+  assert.equal(result.status, "parked");
+  if (result.status !== "parked") assert.fail("pre-bound launch identity must park");
+  assert.deepEqual(result.plan.reasons, ["ledger_corrupt"]);
+  assert.equal(adapterCalls, 0);
+});
+
+test("an expired initial execution lease is fenced and recovered through a fresh Attempt", async (t) => {
+  const fixture = await prepareFileRecovery(t, runtimeFacts, (storageRootId, workspace) =>
+    initialAttemptFacts(storageRootId, workspace)
+      .filter((event) => event.kind !== "attempt.finished")
+      .map((event): TaskRunEvent => {
+        if (event.kind !== "attempt.execution.claimed") return event;
+        return {
+          ...event,
+          data: {
+            ...event.data,
+            expiresAt: "2026-07-27T00:00:01.000Z",
+          },
+        };
+      }),
+  );
+  const registry = successfulRegistry(fixture);
+
+  const result = await recoveryCoordinator(fixture, registry, "host:initial-replacement", {
+    launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date("2026-07-27T00:00:01.001Z"),
+  }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
+
+  assert.equal(result.status, "resumed");
+  const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
+  assert.equal(projection?.attempts.length, 2);
+  assert.equal(projection?.attempts[0]?.status, "interrupted");
+  assert.equal(projection?.attempts[0]?.execution.ownerId, "host:initial-replacement");
+  assert.equal(projection?.attempts[0]?.execution.leaseEpoch, 2);
+  assert.equal(projection?.attempts[1]?.status, "running");
+});
+
+test("an expired launched successor is interrupted and parks without its own boundary", async (t) => {
+  const fixture = await prepareFileRecovery(t);
+  const registry = successfulRegistry(fixture);
+  const first = await recoveryCoordinator(fixture, registry, "host:successor-owner", {
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date(AT),
+  }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
+  assert.equal(first.status, "resumed");
+
+  const recovered = await recoveryCoordinator(fixture, registry, "host:successor-replacement", {
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date("2026-07-27T00:00:01.001Z"),
+  }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
+
+  assert.equal(recovered.status, "parked");
+  if (recovered.status !== "parked") assert.fail("successor without boundary must park");
+  assert.ok(recovered.plan.reasons.includes("checkpoint_unavailable"));
+  const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
+  assert.equal(projection?.attempts.length, 2);
+  assert.equal(projection?.attempts[1]?.status, "interrupted");
+  assert.equal(projection?.status, "parked");
 });
 
 test("synthetic interrupted tool results remain pending and park file-backed recovery", async (t) => {
@@ -268,7 +433,7 @@ test("synthetic interrupted tool results remain pending and park file-backed rec
       };
     }),
   );
-  const registry = successfulRegistry();
+  const registry = successfulRegistry(fixture);
 
   const result = await recoveryCoordinator(fixture, registry, "host:pending-tool").recover({
     taskRunId: TASK_RUN_ID,
@@ -311,6 +476,9 @@ test("planner binds Session manifest and run.started workDir to TaskRun, boundar
 
 interface FileRecoveryFixture {
   readonly taskRuns: TaskRunStore;
+  readonly runtimeEvents: RuntimeEventStore;
+  readonly storageRoot: string;
+  readonly workspace: string;
   readonly inspector: RuntimeEventBoundaryInspector;
   readonly environment: {
     readonly storageRootId: string;
@@ -318,13 +486,15 @@ interface FileRecoveryFixture {
   };
 }
 
-function successfulRegistry(): RecoverableTaskRegistry {
+function successfulRegistry(fixture: FileRecoveryFixture): RecoverableTaskRegistry {
   const registry = new RecoverableTaskRegistry();
   registry.register({
     adapterId: "agent.task",
     version: 1,
     launchMode: "idempotent",
-    resume() {},
+    resume(_input, context) {
+      return appendExpectedRunStarted(fixture, context);
+    },
   });
   return registry;
 }
@@ -339,6 +509,7 @@ async function inspectFixtureBoundary(fixture: FileRecoveryFixture) {
 async function prepareFileRecovery(
   t: TestContext,
   facts: (workspace: string) => RuntimeEvent[] = runtimeFacts,
+  taskFacts: (storageRootId: string, workspace: string) => TaskRunEvent[] = initialAttemptFacts,
 ): Promise<FileRecoveryFixture> {
   const root = await mkdtemp(join(tmpdir(), "pico-task-resume-review-"));
   const workspace = join(root, "workspace");
@@ -361,11 +532,14 @@ async function prepareFileRecovery(
     },
     maxAttempts: 3,
   });
-  await taskRuns.appendBatch(TASK_RUN_ID, initialAttemptFacts(taskRuns.storageRootId, workspace), {
+  await taskRuns.appendBatch(TASK_RUN_ID, taskFacts(taskRuns.storageRootId, workspace), {
     transactionId: "task-initial-attempt",
   });
   return {
     taskRuns,
+    runtimeEvents,
+    storageRoot,
+    workspace: canonicalizeWorkspacePath(workspace),
     inspector: new RuntimeEventBoundaryInspector({
       store: runtimeEvents,
       backgroundOperationsSettled: () => true,
@@ -385,16 +559,24 @@ function recoveryCoordinator(
   overrides: {
     readonly ledger?: TaskResumeLedger;
     readonly launchLeaseTtlMs?: number;
+    readonly executionLeaseTtlMs?: number;
     readonly now?: () => Date;
   } = {},
 ): SafeBoundaryResumeCoordinator {
   return new SafeBoundaryResumeCoordinator({
-    ledger: overrides.ledger ?? new FileTaskResumeLedger(fixture.taskRuns),
+    ledger:
+      overrides.ledger ??
+      new FileTaskResumeLedger(
+        overrides.now
+          ? new TaskRunStore({ storageRoot: fixture.storageRoot, now: overrides.now })
+          : fixture.taskRuns,
+      ),
     registry,
     runtime: fixture.inspector,
     environment: fixture.environment,
     ownerId,
     launchLeaseTtlMs: overrides.launchLeaseTtlMs,
+    executionLeaseTtlMs: overrides.executionLeaseTtlMs,
     now: overrides.now ?? (() => new Date(AT)),
   });
 }
@@ -460,8 +642,19 @@ function initialAttemptFacts(storageRootId: string, workspace: string): TaskRunE
       data: {
         attemptId: "attempt-1",
         attemptNumber: 1,
+      },
+    },
+    {
+      schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+      eventId: "task-attempt-execution-claimed",
+      taskRunId: TASK_RUN_ID,
+      at: AT,
+      kind: "attempt.execution.claimed",
+      data: {
+        attemptId: "attempt-1",
         ownerId: "host:crashed",
         leaseEpoch: 1,
+        expiresAt: "2026-07-27T00:05:00.000Z",
       },
     },
     {
@@ -492,6 +685,50 @@ function initialAttemptFacts(storageRootId: string, workspace: string): TaskRunE
       },
     },
   ];
+}
+
+async function appendExpectedRunStarted(
+  fixture: Pick<FileRecoveryFixture, "runtimeEvents" | "workspace">,
+  context: RecoverableTaskResumeContext,
+) {
+  const [result] = await fixture.runtimeEvents.appendBatch(
+    [
+      {
+        schemaVersion: 1,
+        eventId: context.expectedRunStartedEventId,
+        sessionId: context.runtimeSessionId,
+        invocationId: `invocation:${context.expectedRuntimeRunId}`,
+        runId: context.expectedRuntimeRunId,
+        turnId: `turn:${context.expectedRuntimeRunId}`,
+        at: AT,
+        partial: false,
+        visibility: "internal",
+        kind: "run.started",
+        data: { workDir: fixture.workspace },
+      },
+    ],
+    {
+      expectedSessionHighWater: {
+        [context.runtimeSessionId]: context.expectedSessionHighWater,
+      },
+    },
+  );
+  if (!result) throw new Error("expected one Runtime run.started append result");
+  return {
+    schemaVersion: 1 as const,
+    launchId: context.launchId,
+    sessionId: context.runtimeSessionId,
+    runId: context.expectedRuntimeRunId,
+    runStartedEventId: context.expectedRunStartedEventId,
+    runStartedSequence: result.cursor.seq,
+  };
+}
+
+function expectedLaunchId(): string {
+  const identity = createHash("sha256")
+    .update(JSON.stringify(["task-resume-v1", TASK_RUN_ID, "attempt-1", 2]))
+    .digest("hex");
+  return `launch:${identity}`;
 }
 
 function runtimeFacts(workspace: string): RuntimeEvent[] {
