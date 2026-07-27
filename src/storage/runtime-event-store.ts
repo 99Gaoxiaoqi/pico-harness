@@ -120,6 +120,11 @@ export interface RuntimeEventStoreAppendResult {
   readonly committedAt: string;
 }
 
+export interface AppendRuntimeEventBatchOptions {
+  /** Session sequence CAS checked under the canonical workspace lock before any append. */
+  readonly expectedSessionHighWater?: Readonly<Record<string, number>>;
+}
+
 export interface RuntimeEventStoreEntry {
   readonly sequence: number;
   readonly event: RuntimeEvent;
@@ -193,6 +198,19 @@ export class RuntimeEventStoreIntegrityError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "RuntimeEventStoreIntegrityError";
+  }
+}
+
+export class RuntimeEventStoreHighWaterConflictError extends RuntimeEventStoreIntegrityError {
+  constructor(
+    readonly sessionId: string,
+    readonly expectedHighWater: number,
+    readonly actualHighWater: number,
+  ) {
+    super(
+      `Runtime session ${sessionId} high-water changed from ${expectedHighWater} to ${actualHighWater}`,
+    );
+    this.name = "RuntimeEventStoreHighWaterConflictError";
   }
 }
 
@@ -336,6 +354,7 @@ export class RuntimeEventStore {
    */
   async appendBatch(
     events: readonly RuntimeEvent[],
+    options: AppendRuntimeEventBatchOptions = {},
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const canonicalEvents = events.map(canonicalizeRuntimeEvent);
     if (canonicalEvents.length === 0) return [];
@@ -352,6 +371,26 @@ export class RuntimeEventStore {
           appended: [],
           activeBranchId: loaded.manifest.activeBranchId,
         });
+      }
+      for (const [sessionId, expectedHighWater] of Object.entries(
+        options.expectedSessionHighWater ?? {},
+      )) {
+        if (!Number.isSafeInteger(expectedHighWater) || expectedHighWater < 0) {
+          throw new Error(`Runtime session ${sessionId} expected high-water is invalid`);
+        }
+        const session = sessions.get(sessionId);
+        if (!session) {
+          throw new Error(
+            `Runtime session ${sessionId} high-water CAS has no event in this append batch`,
+          );
+        }
+        if (session.entries.length !== expectedHighWater) {
+          throw new RuntimeEventStoreHighWaterConflictError(
+            sessionId,
+            expectedHighWater,
+            session.entries.length,
+          );
+        }
       }
 
       const results: RuntimeEventStoreAppendResult[] = [];
