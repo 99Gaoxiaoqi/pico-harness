@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
+  deriveRecoverableTaskRuntimeLaunchIdentity,
   prepareRecoverableTaskInput,
+  validateRecoverableTaskLaunchReceipt,
   type RecoverableTaskAdapter,
   type RecoverableTaskRegistry,
 } from "../tasks/recoverable-task.js";
 import {
   TASK_RUN_EVENT_SCHEMA_VERSION,
+  type RecoverableTaskLaunchReceipt,
+  type TaskAttemptExecutionClaimedEvent,
+  type TaskAttemptExecutionRenewedEvent,
+  type TaskAttemptExecutionReleasedEvent,
+  type TaskAttemptFinishedEvent,
   type TaskAttemptLaunchClaimedEvent,
   type TaskAttemptLaunchFailedEvent,
   type TaskAttemptLaunchSucceededEvent,
@@ -53,7 +60,40 @@ export type RuntimeBoundaryInspection =
 
 export interface RuntimeBoundaryInspector {
   inspect(boundary: TaskRuntimeBoundary): Promise<RuntimeBoundaryInspection>;
+  reconcileLaunch(
+    source: TaskRuntimeBoundary,
+    expected: RuntimeLaunchExpectation,
+  ): Promise<RuntimeLaunchReconciliation>;
 }
+
+export interface RuntimeLaunchExpectation {
+  readonly launchId: string;
+  readonly runId: string;
+  readonly runStartedEventId: string;
+}
+
+export type RuntimeLaunchReconciliation =
+  | {
+      readonly status: "not_started";
+    }
+  | {
+      readonly status: "verified";
+      readonly sessionWorkspacePath: string;
+      readonly runWorkspacePath: string;
+      readonly currentEventHighWater: number;
+      readonly receipt: RecoverableTaskLaunchReceipt;
+    }
+  | {
+      readonly status: "mismatch";
+      readonly reason:
+        | "runtime_session_missing"
+        | "runtime_run_missing"
+        | "runtime_high_water_mismatch"
+        | "workspace_path_mismatch"
+        | "ledger_corrupt";
+      readonly message: string;
+      readonly detail?: Readonly<Record<string, unknown>>;
+    };
 
 export interface TaskResumeLedgerAppendInput {
   readonly taskRunId: string;
@@ -90,6 +130,7 @@ export interface SafeBoundaryResumeEnvironment {
 interface TaskResumeEvaluationOptions {
   readonly sourceAttemptId?: string;
   readonly creatingSuccessor?: boolean;
+  readonly sourceProof?: "required" | "already_claimed";
 }
 
 interface PreparedTaskResume {
@@ -239,7 +280,7 @@ export class SafeBoundaryResumePlanner {
       }
       if (!boundary.runtime) {
         add("runtime_session_missing", `Attempt ${source.attemptId} has no Runtime session`);
-      } else {
+      } else if (options.sourceProof !== "already_claimed") {
         await this.inspectRuntimeBoundary(
           boundary.runtime,
           boundary,
@@ -396,6 +437,7 @@ export interface SafeBoundaryResumeCoordinatorOptions {
   readonly ownerId: string;
   readonly now?: () => Date;
   readonly launchLeaseTtlMs?: number;
+  readonly executionLeaseTtlMs?: number;
   readonly maxContentionRetries?: number;
 }
 
@@ -448,6 +490,7 @@ export class SafeBoundaryResumeCoordinator {
   private readonly planner: SafeBoundaryResumePlanner;
   private readonly now: () => Date;
   private readonly launchLeaseTtlMs: number;
+  private readonly executionLeaseTtlMs: number;
   private readonly maxContentionRetries: number;
 
   constructor(private readonly options: SafeBoundaryResumeCoordinatorOptions) {
@@ -456,6 +499,10 @@ export class SafeBoundaryResumeCoordinator {
     this.launchLeaseTtlMs = options.launchLeaseTtlMs ?? 30_000;
     if (!Number.isSafeInteger(this.launchLeaseTtlMs) || this.launchLeaseTtlMs <= 0) {
       throw new Error("launchLeaseTtlMs must be a positive safe integer");
+    }
+    this.executionLeaseTtlMs = options.executionLeaseTtlMs ?? 30_000;
+    if (!Number.isSafeInteger(this.executionLeaseTtlMs) || this.executionLeaseTtlMs <= 0) {
+      throw new Error("executionLeaseTtlMs must be a positive safe integer");
     }
     this.maxContentionRetries = options.maxContentionRetries ?? 4;
     if (!Number.isSafeInteger(this.maxContentionRetries) || this.maxContentionRetries < 0) {
@@ -478,23 +525,45 @@ export class SafeBoundaryResumeCoordinator {
 
       const active = latestAttempt(projection.attempts);
       if (active?.status === "running") {
+        const now = this.now().toISOString();
+        const executionLive = active.execution.expiresAt > now;
         if (!active.sourceAttemptId) {
+          if (executionLive) {
+            return {
+              status: "ignored",
+              taskRunId: projection.header.taskRunId,
+              reason: "attempt_running",
+            };
+          }
+          const interrupted = await this.interruptExpiredAttempt(projection, active);
+          if (interrupted.status === "conflict") continue;
+          continue;
+        }
+        if (active.launch?.status === "succeeded") {
+          if (executionLive) {
+            return alreadyClaimedResult(projection.header.taskRunId, active);
+          }
+          const interrupted = await this.interruptExpiredAttempt(projection, active);
+          if (interrupted.status === "conflict") continue;
+          continue;
+        }
+        if (
+          (executionLive && active.execution.ownerId !== this.options.ownerId) ||
+          (active.launch?.status === "claimed" && active.launch.expiresAt > now)
+        ) {
+          return alreadyClaimedResult(projection.header.taskRunId, active);
+        }
+        if (!active.launch) {
           return {
             status: "ignored",
             taskRunId: projection.header.taskRunId,
             reason: "attempt_running",
           };
         }
-        if (
-          active.launch?.status === "succeeded" ||
-          (active.launch?.status === "claimed" &&
-            active.launch.expiresAt > this.now().toISOString())
-        ) {
-          return alreadyClaimedResult(projection.header.taskRunId, active);
-        }
         const evaluation = await this.planner.evaluate(projection, {
           sourceAttemptId: active.sourceAttemptId,
           creatingSuccessor: false,
+          sourceProof: "already_claimed",
         });
         if (!isPreparedResume(evaluation)) {
           return { status: "parked", plan: evaluation.plan };
@@ -553,6 +622,51 @@ export class SafeBoundaryResumeCoordinator {
     }
   }
 
+  private interruptExpiredAttempt(
+    projection: TaskRunProjection,
+    attempt: TaskAttemptProjection,
+  ): Promise<TaskResumeLedgerAppendResult> {
+    const atDate = this.now();
+    const at = atDate.toISOString();
+    if (attempt.execution.expiresAt > at) {
+      throw new Error(`Attempt ${attempt.attemptId} execution lease is still live`);
+    }
+    const leaseEpoch = attempt.execution.leaseEpoch + 1;
+    const claimed: TaskAttemptExecutionClaimedEvent = {
+      kind: "attempt.execution.claimed",
+      schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+      eventId: `event:attempt-execution-takeover:${attempt.attemptId}:${leaseEpoch}`,
+      taskRunId: projection.header.taskRunId,
+      at,
+      data: {
+        attemptId: attempt.attemptId,
+        ownerId: this.options.ownerId,
+        leaseEpoch,
+        expiresAt: new Date(atDate.getTime() + this.executionLeaseTtlMs).toISOString(),
+      },
+    };
+    const interrupted: TaskAttemptFinishedEvent = {
+      kind: "attempt.finished",
+      schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+      eventId: `event:attempt-expired-interrupted:${attempt.attemptId}:${leaseEpoch}`,
+      taskRunId: projection.header.taskRunId,
+      at,
+      data: {
+        attemptId: attempt.attemptId,
+        ownerId: this.options.ownerId,
+        leaseEpoch,
+        status: "interrupted",
+        error: "execution lease expired",
+      },
+    };
+    return this.options.ledger.appendBatch({
+      taskRunId: projection.header.taskRunId,
+      expectedRevision: projection.revision,
+      transactionId: `task-attempt-expired:${attempt.attemptId}:${leaseEpoch}`,
+      events: [claimed, interrupted],
+    });
+  }
+
   private claim(
     projection: TaskRunProjection,
     prepared: PreparedTaskResume,
@@ -560,8 +674,8 @@ export class SafeBoundaryResumeCoordinator {
     const attemptNumber =
       Math.max(...projection.attempts.map((attempt) => attempt.attemptNumber), 0) + 1;
     const attemptLeaseEpoch =
-      Math.max(...projection.attempts.map((attempt) => attempt.leaseEpoch), 0) + 1;
-    const launchLeaseEpoch = attemptLeaseEpoch + 1;
+      Math.max(...projection.attempts.map((attempt) => attempt.execution.leaseEpoch), 0) + 1;
+    const launchLeaseEpoch = 1;
     const identity = resumeIdentity(
       projection.header.taskRunId,
       prepared.source.attemptId,
@@ -595,9 +709,20 @@ export class SafeBoundaryResumeCoordinator {
       data: {
         attemptId: successorAttemptId,
         attemptNumber,
+        sourceAttemptId: prepared.source.attemptId,
+      },
+    };
+    const executionClaim: TaskAttemptExecutionClaimedEvent = {
+      kind: "attempt.execution.claimed",
+      schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+      eventId: `event:attempt-execution-claimed:${identity}:${attemptLeaseEpoch}`,
+      taskRunId: projection.header.taskRunId,
+      at,
+      data: {
+        attemptId: successorAttemptId,
         ownerId: this.options.ownerId,
         leaseEpoch: attemptLeaseEpoch,
-        sourceAttemptId: prepared.source.attemptId,
+        expiresAt: new Date(atDate.getTime() + this.executionLeaseTtlMs).toISOString(),
       },
     };
     const launchClaim: TaskAttemptLaunchClaimedEvent = {
@@ -618,7 +743,7 @@ export class SafeBoundaryResumeCoordinator {
       taskRunId: projection.header.taskRunId,
       expectedRevision: projection.revision,
       transactionId: `task-resume:${identity}`,
-      events: [claim, started, launchClaim],
+      events: [claim, started, executionClaim, launchClaim],
     });
   }
 
@@ -631,33 +756,58 @@ export class SafeBoundaryResumeCoordinator {
     }
     const atDate = this.now();
     const at = atDate.toISOString();
-    const leaseEpoch =
-      Math.max(...projection.attempts.map((candidate) => candidate.leaseEpoch), 0) + 1;
     const identity = resumeIdentity(
       projection.header.taskRunId,
       attempt.sourceAttemptId,
       attempt.attemptNumber,
     );
     const launchId = attempt.launch?.launchId ?? `launch:${identity}`;
-    const event: TaskAttemptLaunchClaimedEvent = {
-      kind: "attempt.launch.claimed",
-      schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
-      eventId: `event:attempt-launch-claimed:${identity}:${leaseEpoch}`,
-      taskRunId: projection.header.taskRunId,
-      at,
-      data: {
-        attemptId: attempt.attemptId,
-        launchId,
-        ownerId: this.options.ownerId,
-        leaseEpoch,
-        expiresAt: new Date(atDate.getTime() + this.launchLeaseTtlMs).toISOString(),
-      },
-    };
+    const events: TaskRunEvent[] = [];
+    let executionLeaseEpoch = attempt.execution.leaseEpoch;
+    if (attempt.execution.expiresAt <= at) {
+      executionLeaseEpoch += 1;
+      events.push({
+        kind: "attempt.execution.claimed",
+        schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+        eventId: `event:attempt-execution-claimed:${identity}:${executionLeaseEpoch}`,
+        taskRunId: projection.header.taskRunId,
+        at,
+        data: {
+          attemptId: attempt.attemptId,
+          ownerId: this.options.ownerId,
+          leaseEpoch: executionLeaseEpoch,
+          expiresAt: new Date(atDate.getTime() + this.executionLeaseTtlMs).toISOString(),
+        },
+      });
+    } else if (attempt.execution.ownerId !== this.options.ownerId) {
+      throw new Error(`Attempt ${attempt.attemptId} execution lease belongs to another host`);
+    }
+    let launchLeaseEpoch = attempt.launch?.leaseEpoch ?? 0;
+    if (attempt.launch?.status !== "succeeded") {
+      launchLeaseEpoch += 1;
+      events.push({
+        kind: "attempt.launch.claimed",
+        schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+        eventId: `event:attempt-launch-claimed:${identity}:${launchLeaseEpoch}`,
+        taskRunId: projection.header.taskRunId,
+        at,
+        data: {
+          attemptId: attempt.attemptId,
+          launchId,
+          ownerId: this.options.ownerId,
+          leaseEpoch: launchLeaseEpoch,
+          expiresAt: new Date(atDate.getTime() + this.launchLeaseTtlMs).toISOString(),
+        },
+      });
+    }
+    if (events.length === 0) {
+      throw new Error(`Attempt ${attempt.attemptId} has no expired lease to claim`);
+    }
     return this.options.ledger.appendBatch({
       taskRunId: projection.header.taskRunId,
       expectedRevision: projection.revision,
-      transactionId: `task-launch-claim:${identity}:${leaseEpoch}`,
-      events: [event],
+      transactionId: `task-launch-claim:${identity}:${executionLeaseEpoch}:${launchLeaseEpoch}`,
+      events,
     });
   }
 
@@ -667,39 +817,103 @@ export class SafeBoundaryResumeCoordinator {
     prepared: PreparedTaskResume,
   ): Promise<SafeBoundaryResumeResult> {
     const launch = successor.launch;
-    if (
-      !launch ||
-      launch.status !== "claimed" ||
-      launch.ownerId !== this.options.ownerId ||
-      launch.expiresAt <= this.now().toISOString()
-    ) {
-      throw new Error(`Attempt ${successor.attemptId} has no live launch lease for this host`);
-    }
+    if (!launch) throw new Error(`Attempt ${successor.attemptId} has no launch identity`);
     const checkpointRef = prepared.plan.boundary.checkpointRef;
+    const sourceRuntime = prepared.plan.boundary.runtime;
     if (!checkpointRef) {
       throw new Error(
         `Safe resume plan for ${projection.header.taskRunId} lost its checkpoint reference`,
       );
     }
+    if (!sourceRuntime) {
+      throw new Error(
+        `Safe resume plan for ${projection.header.taskRunId} lost its Runtime source`,
+      );
+    }
+    const runtimeIdentity = deriveRecoverableTaskRuntimeLaunchIdentity(launch.launchId);
+    const expectation: RuntimeLaunchExpectation = {
+      launchId: launch.launchId,
+      ...runtimeIdentity,
+    };
+    const before = await this.options.runtime.reconcileLaunch(sourceRuntime, expectation);
+    if (before.status === "mismatch") {
+      return this.parkLaunchMismatch(projection.header.taskRunId, successor, before);
+    }
+    if (before.status === "verified") {
+      if (launch.status === "succeeded") {
+        if (!launch.receipt || !sameLaunchReceipt(launch.receipt, before.receipt)) {
+          return this.parkLaunchMismatch(projection.header.taskRunId, successor, {
+            status: "mismatch",
+            reason: "ledger_corrupt",
+            message: `Attempt ${successor.attemptId} launch receipt does not match RuntimeEvent`,
+          });
+        }
+      } else {
+        await this.settleLaunch(
+          projection.header.taskRunId,
+          successor.attemptId,
+          launch,
+          successor.execution,
+          "succeeded",
+          before.receipt,
+        );
+      }
+      return resumedResult(projection.header.taskRunId, prepared, successor);
+    }
+    if (
+      launch.status !== "claimed" ||
+      launch.ownerId !== this.options.ownerId ||
+      launch.expiresAt <= this.now().toISOString() ||
+      successor.execution.ownerId !== this.options.ownerId ||
+      successor.execution.expiresAt <= this.now().toISOString()
+    ) {
+      throw new Error(`Attempt ${successor.attemptId} has no live launch/execution lease`);
+    }
+
+    let adapterReceipt: RecoverableTaskLaunchReceipt | undefined;
     try {
-      await prepared.adapter.resume(prepared.input, {
-        taskRunId: projection.header.taskRunId,
-        sourceAttemptId: prepared.source.attemptId,
-        attemptId: successor.attemptId,
-        attemptNumber: successor.attemptNumber,
-        launchId: launch.launchId,
-        ownerId: launch.ownerId,
-        leaseEpoch: launch.leaseEpoch,
-        boundary: prepared.plan.boundary,
-        checkpointRef,
-      });
+      adapterReceipt = validateRecoverableTaskLaunchReceipt(
+        await prepared.adapter.resume(prepared.input, {
+          taskRunId: projection.header.taskRunId,
+          sourceAttemptId: prepared.source.attemptId,
+          attemptId: successor.attemptId,
+          attemptNumber: successor.attemptNumber,
+          launchId: launch.launchId,
+          ownerId: successor.execution.ownerId,
+          leaseEpoch: successor.execution.leaseEpoch,
+          executionLeaseExpiresAt: successor.execution.expiresAt,
+          runtimeSessionId: sourceRuntime.sessionId,
+          expectedRuntimeRunId: runtimeIdentity.runId,
+          expectedRunStartedEventId: runtimeIdentity.runStartedEventId,
+          expectedSessionHighWater: sourceRuntime.eventHighWater,
+          boundary: prepared.plan.boundary,
+          checkpointRef,
+        }),
+      );
     } catch (error) {
+      const afterError = await this.options.runtime.reconcileLaunch(sourceRuntime, expectation);
+      if (afterError.status === "verified") {
+        await this.settleLaunch(
+          projection.header.taskRunId,
+          successor.attemptId,
+          launch,
+          successor.execution,
+          "succeeded",
+          afterError.receipt,
+        );
+        return resumedResult(projection.header.taskRunId, prepared, successor);
+      }
+      if (afterError.status === "mismatch") {
+        return this.parkLaunchMismatch(projection.header.taskRunId, successor, afterError);
+      }
       const message = errorMessage(error) || "Recoverable task adapter launch failed";
       await this.settleLaunch(
         projection.header.taskRunId,
         successor.attemptId,
         launch,
+        successor.execution,
         "failed",
+        undefined,
         message,
       );
       return {
@@ -708,29 +922,48 @@ export class SafeBoundaryResumeCoordinator {
         sourceAttemptId: prepared.source.attemptId,
         attemptId: successor.attemptId,
         launchId: launch.launchId,
-        ownerId: launch.ownerId,
-        leaseEpoch: launch.leaseEpoch,
+        ownerId: successor.execution.ownerId,
+        leaseEpoch: successor.execution.leaseEpoch,
         error: message,
       };
     }
-    await this.settleLaunch(projection.header.taskRunId, successor.attemptId, launch, "succeeded");
-    return {
-      status: "resumed",
-      taskRunId: projection.header.taskRunId,
-      sourceAttemptId: prepared.source.attemptId,
-      attemptId: successor.attemptId,
-      attemptNumber: successor.attemptNumber,
-      launchId: launch.launchId,
-      ownerId: launch.ownerId,
-      leaseEpoch: launch.leaseEpoch,
-    };
+    const after = await this.options.runtime.reconcileLaunch(sourceRuntime, expectation);
+    if (after.status === "mismatch") {
+      return this.parkLaunchMismatch(projection.header.taskRunId, successor, after);
+    }
+    if (after.status === "not_started") {
+      const mismatch: RuntimeLaunchReconciliation = {
+        status: "mismatch",
+        reason: "runtime_run_missing",
+        message: `Adapter returned before canonical run.started for ${launch.launchId}`,
+      };
+      return this.parkLaunchMismatch(projection.header.taskRunId, successor, mismatch);
+    }
+    if (!adapterReceipt || !sameLaunchReceipt(adapterReceipt, after.receipt)) {
+      return this.parkLaunchMismatch(projection.header.taskRunId, successor, {
+        status: "mismatch",
+        reason: "ledger_corrupt",
+        message: `Adapter receipt for ${launch.launchId} does not match canonical RuntimeEvent`,
+      });
+    }
+    await this.settleLaunch(
+      projection.header.taskRunId,
+      successor.attemptId,
+      launch,
+      successor.execution,
+      "succeeded",
+      after.receipt,
+    );
+    return resumedResult(projection.header.taskRunId, prepared, successor);
   }
 
   private async settleLaunch(
     taskRunId: string,
     attemptId: string,
     launch: NonNullable<TaskAttemptProjection["launch"]>,
+    execution: TaskAttemptProjection["execution"],
     status: "succeeded" | "failed",
+    receipt?: RecoverableTaskLaunchReceipt,
     error?: string,
   ): Promise<void> {
     for (let retry = 0; retry <= this.maxContentionRetries; retry += 1) {
@@ -743,9 +976,15 @@ export class SafeBoundaryResumeCoordinator {
         current.launch.launchId !== launch.launchId ||
         current.launch.ownerId !== launch.ownerId ||
         current.launch.leaseEpoch !== launch.leaseEpoch ||
-        current.launch.expiresAt <= this.now().toISOString()
+        current.launch.expiresAt <= this.now().toISOString() ||
+        current.execution.ownerId !== execution.ownerId ||
+        current.execution.leaseEpoch !== execution.leaseEpoch ||
+        current.execution.expiresAt <= this.now().toISOString()
       ) {
         throw new Error(`Attempt ${attemptId} launch lease was lost before ${status} settlement`);
+      }
+      if (status === "succeeded" && !receipt) {
+        throw new Error(`Attempt ${attemptId} launch success has no receipt`);
       }
       const at = this.now().toISOString();
       const event: TaskAttemptLaunchSucceededEvent | TaskAttemptLaunchFailedEvent =
@@ -761,6 +1000,7 @@ export class SafeBoundaryResumeCoordinator {
                 launchId: launch.launchId,
                 ownerId: launch.ownerId,
                 leaseEpoch: launch.leaseEpoch,
+                receipt: receipt!,
               },
             }
           : {
@@ -777,15 +1017,137 @@ export class SafeBoundaryResumeCoordinator {
                 error: error ?? "Recoverable task adapter launch failed",
               },
             };
+      const events: TaskRunEvent[] = [event];
+      if (status === "failed") {
+        const released: TaskAttemptExecutionReleasedEvent = {
+          kind: "attempt.execution.released",
+          schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+          eventId: `event:attempt-execution-released:${launch.launchId}:${execution.leaseEpoch}`,
+          taskRunId,
+          at,
+          data: {
+            attemptId,
+            ownerId: execution.ownerId,
+            leaseEpoch: execution.leaseEpoch,
+          },
+        };
+        events.push(released);
+      } else {
+        const renewedExpiresAt = new Date(
+          this.now().getTime() + this.executionLeaseTtlMs,
+        ).toISOString();
+        if (renewedExpiresAt > current.execution.expiresAt) {
+          const renewed: TaskAttemptExecutionRenewedEvent = {
+            kind: "attempt.execution.renewed",
+            schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+            eventId: `event:attempt-execution-renewed:${launch.launchId}:${execution.leaseEpoch}`,
+            taskRunId,
+            at,
+            data: {
+              attemptId,
+              ownerId: execution.ownerId,
+              leaseEpoch: execution.leaseEpoch,
+              expiresAt: renewedExpiresAt,
+            },
+          };
+          events.push(renewed);
+        }
+      }
       const result = await this.options.ledger.appendBatch({
         taskRunId,
         expectedRevision: projection.revision,
         transactionId: `task-launch-${status}:${launch.launchId}:${launch.leaseEpoch}`,
-        events: [event],
+        events,
       });
       if (result.status === "committed") return;
     }
     throw new Error(`Attempt ${attemptId} launch settlement exceeded contention retries`);
+  }
+
+  private async parkLaunchMismatch(
+    taskRunId: string,
+    successor: TaskAttemptProjection,
+    mismatch: Extract<RuntimeLaunchReconciliation, { status: "mismatch" }>,
+  ): Promise<Extract<SafeBoundaryResumeResult, { status: "parked" }>> {
+    const plan = parkPlan(taskRunId, [
+      {
+        reason: mismatch.reason,
+        message: mismatch.message,
+        ...(mismatch.detail ? { detail: mismatch.detail } : {}),
+      },
+    ]).plan;
+    for (let retry = 0; retry <= this.maxContentionRetries; retry += 1) {
+      const projection = await this.options.ledger.readProjection(taskRunId);
+      const current = projection?.attempts.find(
+        (attempt) => attempt.attemptId === successor.attemptId,
+      );
+      if (!projection || !current || current.status !== "running") {
+        throw new Error(`Attempt ${successor.attemptId} disappeared before launch parking`);
+      }
+      const launch = current.launch;
+      const at = this.now().toISOString();
+      if (launch?.status === "succeeded") {
+        return { status: "parked", plan };
+      }
+      if (
+        !launch ||
+        launch.status !== "claimed" ||
+        launch.ownerId !== this.options.ownerId ||
+        launch.expiresAt <= at ||
+        current.execution.ownerId !== this.options.ownerId ||
+        current.execution.expiresAt <= at
+      ) {
+        throw new Error(`Attempt ${successor.attemptId} lost its lease before launch parking`);
+      }
+      const failed: TaskAttemptLaunchFailedEvent = {
+        kind: "attempt.launch.failed",
+        schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+        eventId: `event:attempt-launch-invalid:${launch.launchId}:${launch.leaseEpoch}`,
+        taskRunId,
+        at,
+        data: {
+          attemptId: current.attemptId,
+          launchId: launch.launchId,
+          ownerId: launch.ownerId,
+          leaseEpoch: launch.leaseEpoch,
+          error: mismatch.message,
+        },
+      };
+      const interrupted: TaskAttemptFinishedEvent = {
+        kind: "attempt.finished",
+        schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+        eventId: `event:attempt-launch-interrupted:${launch.launchId}:${launch.leaseEpoch}`,
+        taskRunId,
+        at,
+        data: {
+          attemptId: current.attemptId,
+          ownerId: current.execution.ownerId,
+          leaseEpoch: current.execution.leaseEpoch,
+          status: "interrupted",
+          error: mismatch.message,
+        },
+      };
+      const parked: TaskRunParkedEvent = {
+        kind: "task.parked",
+        schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+        eventId: `event:task-launch-parked:${launch.launchId}:${launch.leaseEpoch}`,
+        taskRunId,
+        at,
+        data: {
+          sourceAttemptId: current.attemptId,
+          reasons: plan.reasons,
+          diagnostics: plan.diagnostics.map((diagnostic) => diagnostic.message),
+        },
+      };
+      const result = await this.options.ledger.appendBatch({
+        taskRunId,
+        expectedRevision: projection.revision,
+        transactionId: `task-launch-park:${launch.launchId}:${launch.leaseEpoch}`,
+        events: [failed, interrupted, parked],
+      });
+      if (result.status === "committed") return { status: "parked", plan };
+    }
+    throw new Error(`Attempt ${successor.attemptId} launch parking exceeded contention retries`);
   }
 
   private appendPark(
@@ -888,9 +1250,41 @@ function alreadyClaimedResult(
     sourceAttemptId: successor.sourceAttemptId,
     successorAttemptId: successor.attemptId,
     launchId: successor.launch.launchId,
-    ownerId: successor.ownerId,
-    leaseEpoch: successor.leaseEpoch,
+    ownerId: successor.execution.ownerId,
+    leaseEpoch: successor.execution.leaseEpoch,
   };
+}
+
+function resumedResult(
+  taskRunId: string,
+  prepared: PreparedTaskResume,
+  successor: TaskAttemptProjection,
+): Extract<SafeBoundaryResumeResult, { status: "resumed" }> {
+  if (!successor.launch) throw new Error(`Attempt ${successor.attemptId} has no launch fact`);
+  return {
+    status: "resumed",
+    taskRunId,
+    sourceAttemptId: prepared.source.attemptId,
+    attemptId: successor.attemptId,
+    attemptNumber: successor.attemptNumber,
+    launchId: successor.launch.launchId,
+    ownerId: successor.execution.ownerId,
+    leaseEpoch: successor.execution.leaseEpoch,
+  };
+}
+
+function sameLaunchReceipt(
+  left: RecoverableTaskLaunchReceipt,
+  right: RecoverableTaskLaunchReceipt,
+): boolean {
+  return (
+    left.schemaVersion === right.schemaVersion &&
+    left.launchId === right.launchId &&
+    left.sessionId === right.sessionId &&
+    left.runId === right.runId &&
+    left.runStartedEventId === right.runStartedEventId &&
+    left.runStartedSequence === right.runStartedSequence
+  );
 }
 
 function sameParkProjection(

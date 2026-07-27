@@ -1,5 +1,6 @@
 export const TASK_RUN_FILE_SCHEMA_VERSION = 1 as const;
 export const TASK_RUN_EVENT_SCHEMA_VERSION = 1 as const;
+export const RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION = 1 as const;
 
 export const TASK_RUN_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled"] as const;
 export type TaskRunTerminalStatus = (typeof TASK_RUN_TERMINAL_STATUSES)[number];
@@ -47,6 +48,21 @@ export interface TaskRuntimeBoundary {
   readonly terminalEventId?: string;
 }
 
+/**
+ * Body-free durable identity for one idempotent Runtime launch.
+ *
+ * `runStartedSequence` is the canonical Session sequence of `runStartedEventId`.
+ * The stable `launchId` binds adapter reconciliation to one launch request.
+ */
+export interface RecoverableTaskLaunchReceipt {
+  readonly schemaVersion: typeof RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION;
+  readonly launchId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly runStartedEventId: string;
+  readonly runStartedSequence: number;
+}
+
 export interface TaskSafeBoundary {
   readonly storageRootId: string;
   readonly workspacePath: string;
@@ -79,9 +95,36 @@ export interface TaskAttemptStartedEvent extends TaskRunEventBase {
   readonly data: {
     readonly attemptId: string;
     readonly attemptNumber: number;
+    readonly sourceAttemptId?: string;
+  };
+}
+
+export interface TaskAttemptExecutionClaimedEvent extends TaskRunEventBase {
+  readonly kind: "attempt.execution.claimed";
+  readonly data: {
+    readonly attemptId: string;
     readonly ownerId: string;
     readonly leaseEpoch: number;
-    readonly sourceAttemptId?: string;
+    readonly expiresAt: string;
+  };
+}
+
+export interface TaskAttemptExecutionRenewedEvent extends TaskRunEventBase {
+  readonly kind: "attempt.execution.renewed";
+  readonly data: {
+    readonly attemptId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
+    readonly expiresAt: string;
+  };
+}
+
+export interface TaskAttemptExecutionReleasedEvent extends TaskRunEventBase {
+  readonly kind: "attempt.execution.released";
+  readonly data: {
+    readonly attemptId: string;
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
   };
 }
 
@@ -136,6 +179,7 @@ export interface TaskAttemptLaunchSucceededEvent extends TaskRunEventBase {
     readonly launchId: string;
     readonly ownerId: string;
     readonly leaseEpoch: number;
+    readonly receipt: RecoverableTaskLaunchReceipt;
   };
 }
 
@@ -171,6 +215,9 @@ export interface TaskRunFinishedEvent extends TaskRunEventBase {
 
 export type TaskRunEvent =
   | TaskAttemptStartedEvent
+  | TaskAttemptExecutionClaimedEvent
+  | TaskAttemptExecutionRenewedEvent
+  | TaskAttemptExecutionReleasedEvent
   | TaskAttemptCheckpointedEvent
   | TaskAttemptFinishedEvent
   | TaskResumeClaimedEvent
@@ -196,8 +243,7 @@ export interface TaskRunEventBatch {
 export interface TaskAttemptProjection {
   readonly attemptId: string;
   readonly attemptNumber: number;
-  readonly ownerId: string;
-  readonly leaseEpoch: number;
+  readonly execution: TaskAttemptExecutionProjection;
   readonly sourceAttemptId?: string;
   readonly status: "running" | TaskAttemptTerminalStatus;
   readonly startedAt: string;
@@ -208,6 +254,15 @@ export interface TaskAttemptProjection {
   readonly launch?: TaskAttemptLaunchProjection;
 }
 
+export interface TaskAttemptExecutionProjection {
+  readonly ownerId: string;
+  readonly leaseEpoch: number;
+  readonly claimedAt: string;
+  readonly expiresAt: string;
+  readonly renewedAt?: string;
+  readonly releasedAt?: string;
+}
+
 export interface TaskAttemptLaunchProjection {
   readonly launchId: string;
   readonly status: "claimed" | "succeeded" | "failed";
@@ -216,6 +271,7 @@ export interface TaskAttemptLaunchProjection {
   readonly claimedAt: string;
   readonly expiresAt: string;
   readonly settledAt?: string;
+  readonly receipt?: RecoverableTaskLaunchReceipt;
   readonly error?: string;
 }
 

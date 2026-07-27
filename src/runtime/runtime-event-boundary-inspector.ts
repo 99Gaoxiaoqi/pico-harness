@@ -4,8 +4,13 @@ import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type {
   RuntimeBoundaryInspection,
   RuntimeBoundaryInspector,
+  RuntimeLaunchExpectation,
+  RuntimeLaunchReconciliation,
 } from "./safe-boundary-resume.js";
-import type { TaskRuntimeBoundary } from "../tasks/task-run-contract.js";
+import {
+  RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
+  type TaskRuntimeBoundary,
+} from "../tasks/task-run-contract.js";
 
 export interface RuntimeEventBoundaryInspectorOptions {
   readonly store: Pick<RuntimeEventStore, "readSessionEntries" | "readSessionManifest">;
@@ -126,6 +131,130 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
         (await this.options.backgroundOperationsSettled?.(boundary)) ?? false,
       ...(toolCatalogHash !== undefined ? { toolCatalogHash } : {}),
       availableCheckpointRefs: [...checkpointRefs].sort(),
+    };
+  }
+
+  async reconcileLaunch(
+    source: TaskRuntimeBoundary,
+    expected: RuntimeLaunchExpectation,
+  ): Promise<RuntimeLaunchReconciliation> {
+    const manifest = await this.options.store.readSessionManifest(source.sessionId);
+    if (!manifest) {
+      return {
+        status: "mismatch",
+        reason: "runtime_session_missing",
+        message: `Runtime session ${source.sessionId} is missing during launch reconciliation`,
+      };
+    }
+    const entries = await this.options.store.readSessionEntries(source.sessionId);
+    if (entries.length < source.eventHighWater) {
+      return {
+        status: "mismatch",
+        reason: "runtime_high_water_mismatch",
+        message: `Runtime session ${source.sessionId} regressed before launch reconciliation`,
+        detail: { expected: source.eventHighWater, actual: entries.length },
+      };
+    }
+
+    const priorIdentityBinding = entries
+      .slice(0, source.eventHighWater)
+      .find(
+        ({ event }) =>
+          event.runId === expected.runId || event.eventId === expected.runStartedEventId,
+      );
+    if (priorIdentityBinding) {
+      return {
+        status: "mismatch",
+        reason: "ledger_corrupt",
+        message: `Runtime launch identity ${expected.launchId} was bound before its source boundary`,
+        detail: {
+          actualEventId: priorIdentityBinding.event.eventId,
+          actualRunId: priorIdentityBinding.event.runId,
+          actualSequence: priorIdentityBinding.sequence,
+        },
+      };
+    }
+    if (entries.length === source.eventHighWater) return { status: "not_started" };
+    const firstAdvance = entries[source.eventHighWater];
+    if (
+      !firstAdvance ||
+      firstAdvance.sequence !== source.eventHighWater + 1 ||
+      firstAdvance.event.kind !== "run.started" ||
+      firstAdvance.event.sessionId !== source.sessionId ||
+      firstAdvance.event.runId !== expected.runId ||
+      firstAdvance.event.eventId !== expected.runStartedEventId
+    ) {
+      return {
+        status: "mismatch",
+        reason: "runtime_high_water_mismatch",
+        message: `Runtime session ${source.sessionId} advanced with an unknown event`,
+        detail: {
+          sourceEventHighWater: source.eventHighWater,
+          actualEventId: firstAdvance?.event.eventId,
+          actualRunId: firstAdvance?.event.runId,
+        },
+      };
+    }
+    const progression = entries.slice(source.eventHighWater);
+    const foreign = progression.find(({ event }) => event.runId !== expected.runId);
+    if (foreign) {
+      return {
+        status: "mismatch",
+        reason: "runtime_high_water_mismatch",
+        message: `Runtime session ${source.sessionId} advanced outside the expected launch`,
+        detail: {
+          expectedRunId: expected.runId,
+          actualRunId: foreign.event.runId,
+          actualEventId: foreign.event.eventId,
+        },
+      };
+    }
+    const matchingStarts = entries.filter(
+      ({ event }) => event.kind === "run.started" && event.runId === expected.runId,
+    );
+    const matchingEventIds = entries.filter(
+      ({ event }) => event.eventId === expected.runStartedEventId,
+    );
+    if (
+      matchingStarts.length !== 1 ||
+      matchingStarts[0]?.sequence !== firstAdvance.sequence ||
+      matchingEventIds.length !== 1 ||
+      matchingEventIds[0]?.sequence !== firstAdvance.sequence
+    ) {
+      return {
+        status: "mismatch",
+        reason: "ledger_corrupt",
+        message: `Runtime launch ${expected.launchId} does not have one unique run.started identity`,
+      };
+    }
+
+    const sessionWorkspacePath = canonicalizeWorkspacePath(manifest.workDir);
+    const runWorkspacePath = canonicalizeWorkspacePath(firstAdvance.event.data.workDir);
+    if (
+      sessionWorkspacePath !== manifest.workDir ||
+      runWorkspacePath !== firstAdvance.event.data.workDir ||
+      runWorkspacePath !== sessionWorkspacePath
+    ) {
+      return {
+        status: "mismatch",
+        reason: "workspace_path_mismatch",
+        message: `Runtime launch ${expected.launchId} belongs to another workspace`,
+        detail: { sessionWorkspacePath, runWorkspacePath },
+      };
+    }
+    return {
+      status: "verified",
+      sessionWorkspacePath,
+      runWorkspacePath,
+      currentEventHighWater: entries.length,
+      receipt: {
+        schemaVersion: RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
+        launchId: expected.launchId,
+        sessionId: source.sessionId,
+        runId: expected.runId,
+        runStartedEventId: expected.runStartedEventId,
+        runStartedSequence: firstAdvance.sequence,
+      },
     };
   }
 }
