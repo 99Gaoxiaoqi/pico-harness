@@ -252,8 +252,9 @@ export class ClaudeProvider implements LLMProvider {
     const usage: Usage | undefined =
       inputTokens > 0 || outputTokens > 0 || cacheWriteTokens > 0 || cacheReadTokens > 0
         ? {
-            promptTokens: inputTokens,
+            promptTokens: inputTokens + cacheWriteTokens + cacheReadTokens,
             completionTokens: outputTokens,
+            ...(reportedFields.has("input") ? { inputTokens } : {}),
             cacheWriteTokens,
             cacheReadTokens,
             reportedFields: [...reportedFields],
@@ -416,8 +417,12 @@ export class ClaudeProvider implements LLMProvider {
     const normalizedUsage =
       usage && (typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number")
         ? {
-            promptTokens: usage.input_tokens ?? 0,
+            promptTokens:
+              (usage.input_tokens ?? 0) +
+              (usage.cache_creation_input_tokens ?? 0) +
+              (usage.cache_read_input_tokens ?? 0),
             completionTokens: usage.output_tokens ?? 0,
+            ...(typeof usage.input_tokens === "number" ? { inputTokens: usage.input_tokens } : {}),
             cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
             cacheReadTokens: usage.cache_read_input_tokens ?? 0,
             reportedFields: [
