@@ -47,6 +47,8 @@ export type RuntimeBoundaryInspection =
       readonly sessionWorkspacePath: string;
       readonly runWorkspacePath: string;
       readonly eventHighWater: number;
+      readonly sourceRunLastSequence: number;
+      readonly terminalSequence?: number;
       readonly terminal?: {
         readonly eventId: string;
         readonly status: "completed" | "failed" | "cancelled" | "interrupted";
@@ -394,9 +396,20 @@ export class SafeBoundaryResumePlanner {
         actual: inspection.eventHighWater,
       });
     }
+    if (inspection.sourceRunLastSequence !== runtimeBoundary.eventHighWater) {
+      add(
+        "runtime_high_water_mismatch",
+        `Runtime source run ${runtimeBoundary.runId} advanced beyond its safe boundary`,
+        {
+          expectedSourceRunLastSequence: runtimeBoundary.eventHighWater,
+          actualSourceRunLastSequence: inspection.sourceRunLastSequence,
+        },
+      );
+    }
     if (
       !inspection.terminal ||
       inspection.terminal.status !== "interrupted" ||
+      inspection.terminalSequence !== runtimeBoundary.eventHighWater ||
       (runtimeBoundary.terminalEventId !== undefined &&
         runtimeBoundary.terminalEventId !== inspection.terminal.eventId)
     ) {
@@ -407,6 +420,8 @@ export class SafeBoundaryResumePlanner {
           expectedTerminalEventId: runtimeBoundary.terminalEventId,
           actualTerminalEventId: inspection.terminal?.eventId,
           actualStatus: inspection.terminal?.status,
+          expectedTerminalSequence: runtimeBoundary.eventHighWater,
+          actualTerminalSequence: inspection.terminalSequence,
         },
       );
     }
@@ -971,6 +986,18 @@ export class SafeBoundaryResumeCoordinator {
         message: `Adapter receipt for ${launch.launchId} does not match canonical RuntimeEvent`,
       });
     }
+    const completedEvaluation = await this.planner.evaluate(projection, {
+      sourceAttemptId: prepared.source.attemptId,
+      creatingSuccessor: false,
+      verifiedLaunch: after,
+    });
+    if (!isPreparedResume(completedEvaluation)) {
+      return this.parkClaimedLaunch(
+        projection.header.taskRunId,
+        successor,
+        completedEvaluation.plan,
+      );
+    }
     await this.settleLaunch(
       projection.header.taskRunId,
       successor.attemptId,
@@ -979,7 +1006,7 @@ export class SafeBoundaryResumeCoordinator {
       "succeeded",
       after.receipt,
     );
-    return resumedResult(projection.header.taskRunId, prepared, successor);
+    return resumedResult(projection.header.taskRunId, completedEvaluation, successor);
   }
 
   private async reconcileExistingLaunch(

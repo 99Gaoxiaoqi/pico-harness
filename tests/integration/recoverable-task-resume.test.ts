@@ -284,6 +284,63 @@ test("host-bound tasks never touch the recovery ledger or invoke an adapter", as
   assert.equal(launches, 0);
 });
 
+test("an old adapter disposer cannot delete a re-registered version", () => {
+  const registry = new RecoverableTaskRegistry();
+  const initialV1Resume = (
+    _input: Readonly<Record<string, unknown>>,
+    context: RecoverableTaskResumeContext,
+  ) => launchReceipt(context);
+  const v2Resume = (
+    _input: Readonly<Record<string, unknown>>,
+    context: RecoverableTaskResumeContext,
+  ) => launchReceipt(context);
+  const replacementV1Resume = (
+    _input: Readonly<Record<string, unknown>>,
+    context: RecoverableTaskResumeContext,
+  ) => launchReceipt(context);
+  const disposeInitialV1 = registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    resume: initialV1Resume,
+  });
+  const disposeV2 = registry.register({
+    adapterId: "agent.task",
+    version: 2,
+    launchMode: "idempotent",
+    resume: v2Resume,
+  });
+
+  disposeInitialV1();
+  const disposeReplacementV1 = registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    resume: replacementV1Resume,
+  });
+  disposeInitialV1();
+
+  const currentV1 = registry.resolve("agent.task", 1);
+  assert.equal(currentV1.status, "found");
+  if (currentV1.status !== "found") assert.fail("replacement v1 must remain registered");
+  assert.equal(currentV1.adapter.resume, replacementV1Resume);
+  const currentV2 = registry.resolve("agent.task", 2);
+  assert.equal(currentV2.status, "found");
+  if (currentV2.status !== "found") assert.fail("v2 must remain registered");
+  assert.equal(currentV2.adapter.resume, v2Resume);
+
+  disposeReplacementV1();
+  const missingV1 = registry.resolve("agent.task", 1);
+  assert.equal(missingV1.status, "version_mismatch");
+  if (missingV1.status !== "version_mismatch") assert.fail("v1 should be removed");
+  assert.deepEqual(missingV1.availableVersions, [2]);
+  disposeV2();
+  assert.deepEqual(registry.resolve("agent.task", 2), {
+    status: "missing",
+    adapterId: "agent.task",
+  });
+});
+
 function coordinator(options: {
   readonly ledger: TaskResumeLedger;
   readonly registry: RecoverableTaskRegistry;
@@ -341,6 +398,8 @@ function availableRuntimeInspection(): Extract<RuntimeBoundaryInspection, { stat
     sessionWorkspacePath: WORKSPACE_PATH,
     runWorkspacePath: WORKSPACE_PATH,
     eventHighWater: 8,
+    sourceRunLastSequence: 8,
+    terminalSequence: 8,
     terminal: {
       eventId: "terminal-1",
       status: "interrupted",
@@ -419,10 +478,17 @@ function taskRunProjection(
 
 class StaticRuntimeInspector implements RuntimeBoundaryInspector {
   private readonly reconciled = new Set<string>();
+  private launchVerified = false;
 
   constructor(private readonly inspection: RuntimeBoundaryInspection) {}
 
   async inspect(): Promise<RuntimeBoundaryInspection> {
+    if (this.launchVerified && this.inspection.status === "available") {
+      return {
+        ...this.inspection,
+        eventHighWater: this.inspection.eventHighWater + 1,
+      };
+    }
     return this.inspection;
   }
 
@@ -434,6 +500,7 @@ class StaticRuntimeInspector implements RuntimeBoundaryInspector {
       this.reconciled.add(expected.launchId);
       return { status: "not_started" };
     }
+    this.launchVerified = true;
     return {
       status: "verified",
       sessionWorkspacePath: WORKSPACE_PATH,

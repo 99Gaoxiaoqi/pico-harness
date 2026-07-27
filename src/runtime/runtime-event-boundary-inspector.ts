@@ -117,6 +117,8 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
       sessionWorkspacePath,
       runWorkspacePath,
       eventHighWater: entries.at(-1)?.sequence ?? 0,
+      sourceRunLastSequence: runEntries.at(-1)!.sequence,
+      ...(terminals[0] ? { terminalSequence: terminals[0].sequence } : {}),
       ...(terminal
         ? {
             terminal: {
