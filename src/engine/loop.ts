@@ -256,6 +256,11 @@ interface RequiredDelegationAssessment {
 interface ToolExecutionOutcome {
   message: Message;
   reminder?: Message;
+  report?: {
+    toolName: string;
+    isError: boolean;
+    providerCallId: string;
+  };
 }
 
 interface ToolProtocolFailure {
@@ -1632,6 +1637,7 @@ export class AgentEngine implements AgentRunner {
             toolCalls.length,
           );
           const scheduled: Array<Promise<ToolExecutionOutcome>> = [];
+          const completedToolReportIndexes: number[] = [];
           let toolProtocolClosed = toolCalls.length === 0;
           const closeToolProtocol = async (failure: ToolProtocolFailure): Promise<void> => {
             if (toolProtocolClosed) return;
@@ -1794,7 +1800,7 @@ export class AgentEngine implements AgentRunner {
                 signal,
               });
               for (const [index, tc] of toolCalls.entries()) {
-                const execution =
+                const execution: Promise<ToolExecutionOutcome> =
                   requiredDelegation && index !== requiredDelegationIndex
                     ? Promise.resolve(
                         buildRejectedToolObservation(
@@ -1821,6 +1827,7 @@ export class AgentEngine implements AgentRunner {
                 scheduled.push(
                   execution.then((result) => {
                     settledResults[index] = result;
+                    if (result.report) completedToolReportIndexes.push(index);
                     return result;
                   }),
                 );
@@ -1866,6 +1873,19 @@ export class AgentEngine implements AgentRunner {
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
           toolProtocolClosed = true;
+          // Reporter 是派生展示层。必须等 canonical ToolResult durable 且 Session
+          // 投影完成后再通知；否则 Reporter 异常会让 pending actual 与 synthetic
+          // closure 错配。按工具实际完成顺序保持并发批次既有的展示次序。
+          for (const index of completedToolReportIndexes) {
+            const outcome = results[index]!;
+            const report = outcome.report!;
+            reporter.onToolResult(
+              report.toolName,
+              outcome.message.content,
+              report.isError,
+              report.providerCallId,
+            );
+          }
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
@@ -2050,6 +2070,11 @@ export class AgentEngine implements AgentRunner {
   ): Promise<{
     message: Message;
     result: ToolResult;
+    report: {
+      toolName: string;
+      isError: boolean;
+      providerCallId: string;
+    };
     reminder?: Message;
   }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
@@ -2104,6 +2129,8 @@ export class AgentEngine implements AgentRunner {
         finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
         logger.warn({ tool: toolCall.name }, `-> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
       }
+      const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
+      const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
       const message = runtimeRun
         ? await this.buildRuntimeToolResultMessage(
             runtimeRun,
@@ -2119,25 +2146,38 @@ export class AgentEngine implements AgentRunner {
             providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
           };
 
-      toolSpan?.addAttributes({
-        isError: result.isError,
-        outputPreview: truncate(message.content, 500),
-        rawOutputPreview: finalOutput === result.output ? undefined : truncate(result.output, 500),
-      });
-
-      reporter.onToolResult(toolCall.name, message.content, result.isError, toolCall.id);
-      const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
-      const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
+      try {
+        toolSpan?.addAttributes({
+          isError: result.isError,
+          outputPreview: truncate(message.content, 500),
+          rawOutputPreview:
+            finalOutput === result.output ? undefined : truncate(result.output, 500),
+        });
+      } catch (error) {
+        logger.warn(
+          { error: String(error), tool: toolCall.name },
+          "[Tracing] ToolResult 属性记录失败",
+        );
+      }
       return {
         message,
         result,
+        report: {
+          toolName: toolCall.name,
+          isError: result.isError,
+          providerCallId: toolCall.id,
+        },
         ...(reminder ? { reminder } : {}),
       };
     } catch (err) {
       recordTraceError(toolSpan, err);
       throw err;
     } finally {
-      toolSpan?.end();
+      try {
+        toolSpan?.end();
+      } catch (error) {
+        logger.warn({ error: String(error), tool: toolCall.name }, "[Tracing] Tool span 收口失败");
+      }
     }
   }
 
