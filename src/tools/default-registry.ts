@@ -29,6 +29,7 @@ import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { ReadArtifactTool } from "./artifact-read.js";
+import { ReadEvidenceTool } from "./evidence-read.js";
 import type { ApprovalManager } from "../approval/manager.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
@@ -75,6 +76,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   approvalManager?: ApprovalManager;
   /** Host-owned artifact root shared by writer and read_artifact. */
   artifactBaseDir?: string;
+  /** Host-owned durable Evidence root shared by Runtime and read_evidence. */
+  evidenceBaseDir?: string;
   /** Host-owned process environment for tools that intentionally inherit it. */
   env?: NodeJS.ProcessEnv;
 }
@@ -95,6 +98,7 @@ export function buildDefaultToolRegistry(
     skillLoader,
     approvalManager,
     artifactBaseDir,
+    evidenceBaseDir,
     env,
     workspaceRoots,
     deferWorkspaceBoundary = false,
@@ -107,6 +111,7 @@ export function buildDefaultToolRegistry(
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
   registry.register(new ReadArtifactTool(workDir, artifactBaseDir));
+  registry.register(new ReadEvidenceTool(workDir, evidenceBaseDir));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));
   registry.register(
