@@ -97,6 +97,7 @@ export function prepareWorkspaceStorageLayoutSync(
   workspaceRoot: string,
 ): WorkspaceStorageLayoutPreparation {
   const root = resolve(workspaceRoot);
+  assertWorkspaceLayoutAllowsMutationSync(root);
   assertLocalFileStorageCapabilitiesSync(root);
   const coordinator = join(root, WORKSPACE_STORAGE_DIRECTORY);
   assertOrCreatePrivateDirectory(coordinator);
@@ -105,15 +106,13 @@ export function prepareWorkspaceStorageLayoutSync(
     join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
     `workspace-storage-layout:${process.pid}:${randomUUID()}`,
     () => {
-      recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
-      const existingLayout = existsSync(layoutPath)
-        ? decodeWorkspaceStorageLayoutMarker(readJsonFileSync(layoutPath), layoutPath)
-        : undefined;
       const physicalIdentity = currentPhysicalIdentity(root);
-      if (existingLayout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
-        assertLayoutMatchesPhysicalIdentity(existingLayout, physicalIdentity, layoutPath);
-      }
+      let existingLayout = readWorkspaceStorageLayoutMarkerSync(root);
+      assertLayoutAllowsRecovery(existingLayout, physicalIdentity, layoutPath);
+      recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
+      existingLayout = readWorkspaceStorageLayoutMarkerSync(root);
+      assertLayoutAllowsRecovery(existingLayout, physicalIdentity, layoutPath);
       const legacyRoot = join(root, "runtime");
       assertOrCreatePrivateDirectory(legacyRoot);
       const legacyLock = join(legacyRoot, "lock");
@@ -265,6 +264,7 @@ export function adoptWorkspaceStorageRootIdentitySync(
     throw new Error("expectedStorageRootId must not be empty");
   }
   const root = resolve(workspaceRoot);
+  requireAdoptableWorkspaceStorageLayoutSync(root, expectedStorageRootId);
   assertLocalFileStorageCapabilitiesSync(root);
   const coordinator = join(root, WORKSPACE_STORAGE_DIRECTORY);
   assertOrCreatePrivateDirectory(coordinator);
@@ -272,19 +272,9 @@ export function adoptWorkspaceStorageRootIdentitySync(
     join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
     `workspace-storage-adopt:${process.pid}:${randomUUID()}`,
     () => {
+      requireAdoptableWorkspaceStorageLayoutSync(root, expectedStorageRootId);
       recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
-      const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
-      if (!existsSync(layoutPath)) {
-        throw new FileStorageIntegrityError(
-          `Workspace storage layout marker is missing: ${layoutPath}`,
-        );
-      }
-      const layout = decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath);
-      if (layout.storageRootId !== expectedStorageRootId) {
-        throw new FileStorageIntegrityError(
-          `Workspace storage root ID does not match explicit adoption request: ${layoutPath}`,
-        );
-      }
+      const layout = requireAdoptableWorkspaceStorageLayoutSync(root, expectedStorageRootId);
       const physicalIdentity = currentPhysicalIdentity(root);
       const adopted: WorkspaceStorageLayout = {
         ...layout,
@@ -401,6 +391,59 @@ function assertLayoutMatchesPhysicalIdentity(
       )}, received ${formatIdentity(actual)}`,
     );
   }
+}
+
+function assertWorkspaceLayoutAllowsMutationSync(root: string): void {
+  if (!existsSync(root)) return;
+  const physicalIdentity = currentPhysicalIdentity(root);
+  const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const layout = readWorkspaceStorageLayoutMarkerSync(root);
+  assertLayoutAllowsRecovery(layout, physicalIdentity, layoutPath);
+}
+
+function assertLayoutAllowsRecovery(
+  layout: WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined,
+  physicalIdentity: WorkspaceStorageLayout["physicalIdentity"],
+  layoutPath: string,
+): void {
+  if (layout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+    assertLayoutMatchesPhysicalIdentity(layout, physicalIdentity, layoutPath);
+  }
+}
+
+function readWorkspaceStorageLayoutMarkerSync(
+  root: string,
+): WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined {
+  const coordinator = join(root, WORKSPACE_STORAGE_DIRECTORY);
+  if (!existsSync(coordinator)) return undefined;
+  assertPrivateDirectory(coordinator, "Workspace storage coordinator");
+  const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
+  return existsSync(layoutPath)
+    ? decodeWorkspaceStorageLayoutMarker(readJsonFileSync(layoutPath), layoutPath)
+    : undefined;
+}
+
+function requireAdoptableWorkspaceStorageLayoutSync(
+  root: string,
+  expectedStorageRootId: string,
+): WorkspaceStorageLayout {
+  if (!existsSync(root)) {
+    throw new FileStorageIntegrityError(`Workspace storage root is missing: ${root}`);
+  }
+  currentPhysicalIdentity(root);
+  const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const layout = readWorkspaceStorageLayoutMarkerSync(root);
+  if (!layout || layout.schemaVersion !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage layout marker is missing or cannot be explicitly adopted: ${layoutPath}`,
+    );
+  }
+  if (layout.storageRootId !== expectedStorageRootId) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage root ID does not match explicit adoption request: ${layoutPath}`,
+    );
+  }
+  return layout;
 }
 
 function rootIdentityFromLayout(layout: WorkspaceStorageLayout): WorkspaceStorageRootIdentity {
@@ -554,11 +597,13 @@ function assertOrCreatePrivateDirectory(path: string): void {
     mkdirPrivateSync(path);
     return;
   }
-  assertRealDirectory(path, "Workspace storage coordinator");
+  assertPrivateDirectory(path, "Workspace storage coordinator");
+}
+
+function assertPrivateDirectory(path: string, label: string): void {
+  assertRealDirectory(path, label);
   if (process.platform !== "win32" && (lstatSync(path).mode & 0o777) !== 0o700) {
-    throw new FileStorageIntegrityError(
-      `Workspace storage coordinator must use mode 0700: ${path}`,
-    );
+    throw new FileStorageIntegrityError(`${label} must use mode 0700: ${path}`);
   }
 }
 
