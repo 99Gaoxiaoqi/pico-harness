@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { RecoverableTaskAdapterIdentity, TaskSafeBoundary } from "./task-run-contract.js";
+import {
+  RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
+  type RecoverableTaskAdapterIdentity,
+  type RecoverableTaskLaunchReceipt,
+  type TaskSafeBoundary,
+} from "./task-run-contract.js";
 
 export interface RecoverableTaskResumeContext {
   readonly taskRunId: string;
@@ -10,8 +15,18 @@ export interface RecoverableTaskResumeContext {
   readonly launchId: string;
   readonly ownerId: string;
   readonly leaseEpoch: number;
+  readonly executionLeaseExpiresAt: string;
+  readonly runtimeSessionId: string;
+  readonly expectedRuntimeRunId: string;
+  readonly expectedRunStartedEventId: string;
+  readonly expectedSessionHighWater: number;
   readonly boundary: TaskSafeBoundary;
   readonly checkpointRef: string;
+}
+
+export interface RecoverableTaskRuntimeLaunchIdentity {
+  readonly runId: string;
+  readonly runStartedEventId: string;
 }
 
 /**
@@ -22,13 +37,19 @@ export interface RecoverableTaskResumeContext {
 export interface RecoverableTaskAdapter {
   readonly adapterId: string;
   readonly version: number;
-  /** Explicit promise that repeated resume calls with one launchId produce one actual launch. */
+  /**
+   * Repeated calls with one launchId must reconcile one deterministic Runtime run.
+   *
+   * `resume` is durable admission, not proof that asynchronous execution completed. The adapter
+   * must publish the expected run.started with the supplied Session high-water CAS before starting
+   * provider, tool, or other external side effects. A failed CAS must leave side effects at zero.
+   */
   readonly launchMode: "idempotent";
   readonly validateInput?: (input: Readonly<Record<string, unknown>>) => void;
   readonly resume: (
     input: Readonly<Record<string, unknown>>,
     context: RecoverableTaskResumeContext,
-  ) => void | Promise<void>;
+  ) => RecoverableTaskLaunchReceipt | Promise<RecoverableTaskLaunchReceipt>;
 }
 
 export type RecoverableTaskAdapterResolution =
@@ -101,6 +122,50 @@ export function hashRecoverableTaskInput(input: Readonly<Record<string, unknown>
   return createHash("sha256")
     .update(canonicalJson(input, "$", new Set()))
     .digest("hex");
+}
+
+export function deriveRecoverableTaskRuntimeLaunchIdentity(
+  launchId: string,
+): RecoverableTaskRuntimeLaunchIdentity {
+  if (!launchId.trim()) throw new Error("Recoverable task launchId must not be empty");
+  const digest = createHash("sha256")
+    .update(JSON.stringify(["recoverable-task-runtime-launch-v1", launchId]))
+    .digest("hex");
+  return {
+    runId: `run:task-resume:${digest}`,
+    runStartedEventId: `runtime-event:task-resume-started:${digest}`,
+  };
+}
+
+export function validateRecoverableTaskLaunchReceipt(value: unknown): RecoverableTaskLaunchReceipt {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "launchId",
+      "runId",
+      "runStartedEventId",
+      "runStartedSequence",
+      "schemaVersion",
+      "sessionId",
+    ]) ||
+    value["schemaVersion"] !== RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION ||
+    !isNonEmptyString(value["launchId"]) ||
+    !isNonEmptyString(value["sessionId"]) ||
+    !isNonEmptyString(value["runId"]) ||
+    !isNonEmptyString(value["runStartedEventId"]) ||
+    !Number.isSafeInteger(value["runStartedSequence"]) ||
+    (value["runStartedSequence"] as number) <= 0
+  ) {
+    throw new Error("Recoverable task adapter returned an invalid launch receipt");
+  }
+  return Object.freeze({
+    schemaVersion: RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
+    launchId: value["launchId"],
+    sessionId: value["sessionId"],
+    runId: value["runId"],
+    runStartedEventId: value["runStartedEventId"],
+    runStartedSequence: value["runStartedSequence"] as number,
+  });
 }
 
 function assertAdapter(adapter: RecoverableTaskAdapter): void {
@@ -185,4 +250,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }

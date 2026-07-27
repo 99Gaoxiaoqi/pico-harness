@@ -22,12 +22,15 @@ import {
   type WorkspaceStorageRootIdentity,
 } from "../storage/workspace-storage-layout.js";
 import {
+  RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
   TASK_ATTEMPT_TERMINAL_STATUSES,
   TASK_RESUME_PARK_REASONS,
   TASK_RUN_EVENT_SCHEMA_VERSION,
   TASK_RUN_FILE_SCHEMA_VERSION,
   TASK_RUN_TERMINAL_STATUSES,
   type RecoverableTaskAdapterIdentity,
+  type RecoverableTaskLaunchReceipt,
+  type TaskAttemptExecutionProjection,
   type TaskAttemptLaunchProjection,
   type TaskAttemptProjection,
   type TaskAttemptTerminalStatus,
@@ -125,8 +128,7 @@ interface LoadedTaskRun {
 interface MutableTaskAttempt {
   attemptId: string;
   attemptNumber: number;
-  ownerId: string;
-  leaseEpoch: number;
+  execution?: TaskAttemptExecutionProjection;
   sourceAttemptId?: string;
   status: "running" | TaskAttemptTerminalStatus;
   startedAt: string;
@@ -858,8 +860,6 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
       if (
         !isNonEmptyString(data["attemptId"]) ||
         !isPositiveSafeInteger(data["attemptNumber"]) ||
-        !isNonEmptyString(data["ownerId"]) ||
-        !isPositiveSafeInteger(data["leaseEpoch"]) ||
         (data["sourceAttemptId"] !== undefined && !isNonEmptyString(data["sourceAttemptId"]))
       ) {
         throw new TaskRunStoreIntegrityError("TaskRun attempt.started event is invalid");
@@ -870,11 +870,48 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
         data: {
           attemptId: data["attemptId"],
           attemptNumber: data["attemptNumber"],
-          ownerId: data["ownerId"],
-          leaseEpoch: data["leaseEpoch"],
           ...(typeof data["sourceAttemptId"] === "string"
             ? { sourceAttemptId: data["sourceAttemptId"] }
             : {}),
+        },
+      };
+    }
+    case "attempt.execution.claimed":
+    case "attempt.execution.renewed": {
+      if (
+        !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"]) ||
+        !isCanonicalTimestamp(data["expiresAt"])
+      ) {
+        throw new TaskRunStoreIntegrityError(`TaskRun ${value["kind"]} event is invalid`);
+      }
+      return {
+        ...base,
+        kind: value["kind"],
+        data: {
+          attemptId: data["attemptId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
+          expiresAt: data["expiresAt"],
+        },
+      };
+    }
+    case "attempt.execution.released": {
+      if (
+        !isNonEmptyString(data["attemptId"]) ||
+        !isNonEmptyString(data["ownerId"]) ||
+        !isPositiveSafeInteger(data["leaseEpoch"])
+      ) {
+        throw new TaskRunStoreIntegrityError("TaskRun attempt.execution.released event is invalid");
+      }
+      return {
+        ...base,
+        kind: "attempt.execution.released",
+        data: {
+          attemptId: data["attemptId"],
+          ownerId: data["ownerId"],
+          leaseEpoch: data["leaseEpoch"],
         },
       };
     }
@@ -986,6 +1023,7 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
           launchId: data["launchId"],
           ownerId: data["ownerId"],
           leaseEpoch: data["leaseEpoch"],
+          receipt: decodeLaunchReceipt(data["receipt"]),
         },
       };
     }
@@ -1118,6 +1156,36 @@ function decodeTaskSafeBoundary(value: unknown): TaskSafeBoundary {
   };
 }
 
+function decodeLaunchReceipt(value: unknown): RecoverableTaskLaunchReceipt {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "launchId",
+      "runId",
+      "runStartedEventId",
+      "runStartedSequence",
+      "schemaVersion",
+      "sessionId",
+    ]) ||
+    value["schemaVersion"] !== RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION ||
+    !isNonEmptyString(value["launchId"]) ||
+    !isNonEmptyString(value["sessionId"]) ||
+    !isNonEmptyString(value["runId"]) ||
+    !isNonEmptyString(value["runStartedEventId"]) ||
+    !isPositiveSafeInteger(value["runStartedSequence"])
+  ) {
+    throw new TaskRunStoreIntegrityError("TaskRun launch receipt is invalid");
+  }
+  return {
+    schemaVersion: RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
+    launchId: value["launchId"],
+    sessionId: value["sessionId"],
+    runId: value["runId"],
+    runStartedEventId: value["runStartedEventId"],
+    runStartedSequence: value["runStartedSequence"],
+  };
+}
+
 function replayProjection(
   header: TaskRunFileHeader,
   events: readonly LoadedTaskRunEvent[],
@@ -1148,7 +1216,7 @@ function replayProjection(
         `TaskRun ${header.taskRunId} revision ${persisted.revision} is not contiguous`,
       );
     }
-    applyTaskRunEvent(projection, indexes, persisted.entry.event);
+    applyTaskRunEvent(projection, indexes, persisted.entry.event, persisted.entry.committedAt);
     lastSequence = persisted.entry.sequence;
     lastRevision = persisted.revision;
     projection.revision = persisted.revision;
@@ -1161,6 +1229,7 @@ function applyTaskRunEvent(
   projection: MutableTaskRunProjection,
   indexes: ProjectionIndexes,
   event: TaskRunEvent,
+  committedAt: string,
 ): void {
   if (projection.terminal) {
     throw new TaskRunStoreIntegrityError(
@@ -1199,11 +1268,10 @@ function applyTaskRunEvent(
         if (
           !source ||
           source.status !== "interrupted" ||
+          !source.execution ||
           !claim ||
           claim.successorAttemptId !== event.data.attemptId ||
-          claim.ownerId !== event.data.ownerId ||
-          claim.leaseEpoch !== event.data.leaseEpoch ||
-          event.data.leaseEpoch <= source.leaseEpoch
+          claim.leaseEpoch !== source.execution.leaseEpoch + 1
         ) {
           throw new TaskRunStoreIntegrityError(
             `TaskRun successor Attempt ${event.data.attemptId} has no valid resume claim`,
@@ -1213,8 +1281,6 @@ function applyTaskRunEvent(
       const attempt: MutableTaskAttempt = {
         attemptId: event.data.attemptId,
         attemptNumber: event.data.attemptNumber,
-        ownerId: event.data.ownerId,
-        leaseEpoch: event.data.leaseEpoch,
         ...(event.data.sourceAttemptId ? { sourceAttemptId: event.data.sourceAttemptId } : {}),
         status: "running",
         startedAt: event.at,
@@ -1226,12 +1292,89 @@ function applyTaskRunEvent(
       projection.parkDiagnostics = [];
       break;
     }
+    case "attempt.execution.claimed": {
+      const attempt = requireRunningAttempt(indexes, event.data.attemptId);
+      if (event.data.expiresAt <= committedAt) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun Attempt ${attempt.attemptId} execution lease expires before its claim`,
+        );
+      }
+      const current = attempt.execution;
+      if (!current) {
+        if (attempt.sourceAttemptId) {
+          const source = indexes.attempts.get(attempt.sourceAttemptId);
+          const claim = indexes.claims.get(attempt.sourceAttemptId);
+          if (
+            !source?.execution ||
+            !claim ||
+            claim.successorAttemptId !== attempt.attemptId ||
+            claim.ownerId !== event.data.ownerId ||
+            claim.leaseEpoch !== event.data.leaseEpoch ||
+            event.data.leaseEpoch !== source.execution.leaseEpoch + 1
+          ) {
+            throw new TaskRunStoreIntegrityError(
+              `TaskRun successor Attempt ${attempt.attemptId} has no valid execution owner`,
+            );
+          }
+        }
+      } else if (
+        current.expiresAt > committedAt ||
+        event.data.leaseEpoch !== current.leaseEpoch + 1
+      ) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun Attempt ${attempt.attemptId} execution lease cannot be transferred`,
+        );
+      }
+      attempt.execution = {
+        ownerId: event.data.ownerId,
+        leaseEpoch: event.data.leaseEpoch,
+        claimedAt: event.at,
+        expiresAt: event.data.expiresAt,
+      };
+      break;
+    }
+    case "attempt.execution.renewed": {
+      const attempt = requireOwnedRunningAttempt(
+        indexes,
+        event.data.attemptId,
+        event.data.ownerId,
+        event.data.leaseEpoch,
+        committedAt,
+      );
+      if (event.data.expiresAt <= attempt.execution!.expiresAt) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun Attempt ${attempt.attemptId} execution lease renewal must extend expiry`,
+        );
+      }
+      attempt.execution = {
+        ...attempt.execution!,
+        expiresAt: event.data.expiresAt,
+        renewedAt: event.at,
+      };
+      break;
+    }
+    case "attempt.execution.released": {
+      const attempt = requireOwnedRunningAttempt(
+        indexes,
+        event.data.attemptId,
+        event.data.ownerId,
+        event.data.leaseEpoch,
+        committedAt,
+      );
+      attempt.execution = {
+        ...attempt.execution!,
+        expiresAt: committedAt,
+        releasedAt: event.at,
+      };
+      break;
+    }
     case "attempt.checkpointed": {
       const attempt = requireOwnedRunningAttempt(
         indexes,
         event.data.attemptId,
         event.data.ownerId,
         event.data.leaseEpoch,
+        committedAt,
       );
       assertAttemptWasLaunched(attempt);
       attempt.boundary = structuredClone(event.data.boundary);
@@ -1243,8 +1386,9 @@ function applyTaskRunEvent(
         event.data.attemptId,
         event.data.ownerId,
         event.data.leaseEpoch,
+        committedAt,
       );
-      assertAttemptWasLaunched(attempt);
+      assertAttemptCanFinish(attempt, event.data.status);
       attempt.status = event.data.status;
       attempt.finishedAt = event.at;
       attempt.result = event.data.result;
@@ -1270,7 +1414,8 @@ function applyTaskRunEvent(
       }
       if (
         indexes.attempts.has(event.data.successorAttemptId) ||
-        event.data.leaseEpoch <= source.leaseEpoch ||
+        !source.execution ||
+        event.data.leaseEpoch !== source.execution.leaseEpoch + 1 ||
         projection.attempts.length >= projection.header.maxAttempts
       ) {
         throw new TaskRunStoreIntegrityError(
@@ -1290,18 +1435,16 @@ function applyTaskRunEvent(
       }
       const current = attempt.launch;
       if (
-        event.data.leaseEpoch <= attempt.leaseEpoch ||
-        event.data.expiresAt <= event.at ||
+        event.data.leaseEpoch <= (current?.leaseEpoch ?? 0) ||
+        event.data.expiresAt <= committedAt ||
         (current !== undefined && current.launchId !== event.data.launchId) ||
         current?.status === "succeeded" ||
-        (current?.status === "claimed" && current.expiresAt > event.at)
+        (current?.status === "claimed" && current.expiresAt > committedAt)
       ) {
         throw new TaskRunStoreIntegrityError(
           `TaskRun Attempt ${attempt.attemptId} has an invalid launch lease claim`,
         );
       }
-      attempt.ownerId = event.data.ownerId;
-      attempt.leaseEpoch = event.data.leaseEpoch;
       attempt.launch = {
         launchId: event.data.launchId,
         status: "claimed",
@@ -1313,16 +1456,22 @@ function applyTaskRunEvent(
       break;
     }
     case "attempt.launch.succeeded": {
-      const attempt = requireCurrentLaunch(indexes, event);
+      const attempt = requireCurrentLaunch(indexes, event, committedAt);
+      if (event.data.receipt.launchId !== event.data.launchId) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun Attempt ${attempt.attemptId} launch receipt has another launchId`,
+        );
+      }
       attempt.launch = {
         ...attempt.launch!,
         status: "succeeded",
         settledAt: event.at,
+        receipt: structuredClone(event.data.receipt),
       };
       break;
     }
     case "attempt.launch.failed": {
-      const attempt = requireCurrentLaunch(indexes, event);
+      const attempt = requireCurrentLaunch(indexes, event, committedAt);
       attempt.launch = {
         ...attempt.launch!,
         status: "failed",
@@ -1391,11 +1540,17 @@ function requireOwnedRunningAttempt(
   attemptId: string,
   ownerId: string,
   leaseEpoch: number,
+  committedAt: string,
 ): MutableTaskAttempt {
   const attempt = requireRunningAttempt(indexes, attemptId);
-  if (attempt.ownerId !== ownerId || attempt.leaseEpoch !== leaseEpoch) {
+  if (
+    !attempt.execution ||
+    attempt.execution.ownerId !== ownerId ||
+    attempt.execution.leaseEpoch !== leaseEpoch ||
+    attempt.execution.expiresAt <= committedAt
+  ) {
     throw new TaskRunStoreIntegrityError(
-      `TaskRun Attempt ${attemptId} ownerId/leaseEpoch fence rejected a stale mutation`,
+      `TaskRun Attempt ${attemptId} execution lease fence rejected a stale mutation`,
     );
   }
   return attempt;
@@ -1406,19 +1561,17 @@ function requireCurrentLaunch(
   event:
     | Extract<TaskRunEvent, { kind: "attempt.launch.succeeded" }>
     | Extract<TaskRunEvent, { kind: "attempt.launch.failed" }>,
+  committedAt: string,
 ): MutableTaskAttempt {
-  const attempt = requireOwnedRunningAttempt(
-    indexes,
-    event.data.attemptId,
-    event.data.ownerId,
-    event.data.leaseEpoch,
-  );
+  const attempt = requireRunningAttempt(indexes, event.data.attemptId);
   const launch = attempt.launch;
   if (
     !launch ||
     launch.status !== "claimed" ||
     launch.launchId !== event.data.launchId ||
-    event.at >= launch.expiresAt
+    launch.ownerId !== event.data.ownerId ||
+    launch.leaseEpoch !== event.data.leaseEpoch ||
+    committedAt >= launch.expiresAt
   ) {
     throw new TaskRunStoreIntegrityError(
       `TaskRun Attempt ${attempt.attemptId} launch settlement lost its lease`,
@@ -1429,6 +1582,21 @@ function requireCurrentLaunch(
 
 function assertAttemptWasLaunched(attempt: MutableTaskAttempt): void {
   if (attempt.sourceAttemptId && attempt.launch?.status !== "succeeded") {
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun successor Attempt ${attempt.attemptId} has not completed launch`,
+    );
+  }
+}
+
+function assertAttemptCanFinish(
+  attempt: MutableTaskAttempt,
+  status: TaskAttemptTerminalStatus,
+): void {
+  if (
+    attempt.sourceAttemptId &&
+    attempt.launch?.status !== "succeeded" &&
+    !(status === "interrupted" && attempt.launch?.status === "failed")
+  ) {
     throw new TaskRunStoreIntegrityError(
       `TaskRun successor Attempt ${attempt.attemptId} has not completed launch`,
     );
@@ -1456,8 +1624,7 @@ function immutableProjection(projection: MutableTaskRunProjection): TaskRunProje
       (attempt): TaskAttemptProjection => ({
         attemptId: attempt.attemptId,
         attemptNumber: attempt.attemptNumber,
-        ownerId: attempt.ownerId,
-        leaseEpoch: attempt.leaseEpoch,
+        execution: requireExecutionProjection(attempt),
         ...(attempt.sourceAttemptId ? { sourceAttemptId: attempt.sourceAttemptId } : {}),
         status: attempt.status,
         startedAt: attempt.startedAt,
@@ -1472,6 +1639,15 @@ function immutableProjection(projection: MutableTaskRunProjection): TaskRunProje
     parkDiagnostics: [...projection.parkDiagnostics],
     ...(projection.terminal ? { terminal: structuredClone(projection.terminal) } : {}),
   };
+}
+
+function requireExecutionProjection(attempt: MutableTaskAttempt): TaskAttemptExecutionProjection {
+  if (!attempt.execution) {
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun Attempt ${attempt.attemptId} has no execution lease`,
+    );
+  }
+  return structuredClone(attempt.execution);
 }
 
 function cloneProjection(projection: TaskRunProjection): TaskRunProjection {
@@ -1526,6 +1702,24 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
     (event): event is Extract<TaskRunEvent, { kind: "attempt.started" }> =>
       event.kind === "attempt.started" && event.data.sourceAttemptId !== undefined,
   );
+  const startedAttempts = events.filter(
+    (event): event is Extract<TaskRunEvent, { kind: "attempt.started" }> =>
+      event.kind === "attempt.started",
+  );
+  const executionClaims = events.filter(
+    (event): event is Extract<TaskRunEvent, { kind: "attempt.execution.claimed" }> =>
+      event.kind === "attempt.execution.claimed",
+  );
+  for (const started of startedAttempts) {
+    const matchingExecutionClaims = executionClaims.filter(
+      (claim) => claim.data.attemptId === started.data.attemptId,
+    );
+    if (matchingExecutionClaims.length !== 1) {
+      throw new TaskRunStoreIntegrityError(
+        `${context} must atomically pair every started Attempt with one execution lease claim`,
+      );
+    }
+  }
   if (claims.length !== successors.length) {
     throw new TaskRunStoreIntegrityError(
       `${context} must atomically pair every resume claim with its successor Attempt`,
@@ -1535,13 +1729,17 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
     const matching = successors.filter(
       (successor) =>
         successor.data.sourceAttemptId === claim.data.sourceAttemptId &&
-        successor.data.attemptId === claim.data.successorAttemptId &&
-        successor.data.ownerId === claim.data.ownerId &&
-        successor.data.leaseEpoch === claim.data.leaseEpoch,
+        successor.data.attemptId === claim.data.successorAttemptId,
     );
-    if (matching.length !== 1) {
+    const matchingExecutionClaims = executionClaims.filter(
+      (executionClaim) =>
+        executionClaim.data.attemptId === claim.data.successorAttemptId &&
+        executionClaim.data.ownerId === claim.data.ownerId &&
+        executionClaim.data.leaseEpoch === claim.data.leaseEpoch,
+    );
+    if (matching.length !== 1 || matchingExecutionClaims.length !== 1) {
       throw new TaskRunStoreIntegrityError(
-        `${context} has a resume claim without one matching successor Attempt`,
+        `${context} has a resume claim without one matching successor Attempt execution owner`,
       );
     }
   }
@@ -1595,6 +1793,14 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function hasExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function lstatIfExists(path: string): ReturnType<typeof lstatSync> | undefined {
