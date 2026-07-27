@@ -10,6 +10,7 @@ import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { SessionForkRuntimeConflictError } from "../../src/engine/session-fork-runtime-port.js";
 import { createSessionForkRuntimePort } from "../../src/runtime/session-fork-runtime-port-adapter.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 
 test("session fork runtime port preserves the durable fork lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-port-"));
@@ -202,6 +203,87 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
       port.bootstrapFork(bootstrap),
       (error: unknown) =>
         error instanceof SessionForkRuntimeConflictError && error.reason === "target_conflict",
+    );
+  } finally {
+    await source.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SessionForkService v3 preserves structured ToolResult and source evidence ref", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-tool-result-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const manager = new SessionManager();
+  const source = await manager.getOrCreate("fork-tool-result-source", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  try {
+    await source.recover();
+    const run = await RuntimeRun.start({ capability: source.runtimeEventCapability! });
+    const raw = "full output kept in evidence";
+    const evidence = {
+      schemaVersion: 1 as const,
+      contentHash: createHash("sha256").update("manifest").digest("hex"),
+      sessionId: source.id,
+      kind: "tool-exchange" as const,
+    };
+    const result = run.registerToolResult({
+      toolCallId: "call:fork-evidence",
+      toolName: "bash",
+      status: "succeeded",
+      body: {
+        storage: "evidence",
+        sha256: createHash("sha256").update(raw).digest("hex"),
+        sizeBytes: Buffer.byteLength(raw),
+      },
+      projection: {
+        version: 1,
+        mode: "preview",
+        text: "bounded fork preview",
+        strategy: "head-tail",
+        truncated: true,
+      },
+      evidence,
+    });
+    await run.commitMessages(source, [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call:fork-evidence", name: "bash", arguments: "{}" }],
+      },
+      result,
+    ]);
+    await run.finish("completed");
+
+    const service = new SessionForkService({
+      workDir,
+      picoHome,
+      sessionManager: manager,
+      runtimeStore: source.runtimeEventStore!,
+      runtimePort: createSessionForkRuntimePort(),
+    });
+    await service.fork({
+      sourceSessionId: source.id,
+      targetSessionId: "fork-tool-result-target",
+      targetMode: "default",
+    });
+
+    const targetEvents = await source.runtimeEventStore!.readSession("fork-tool-result-target");
+    const copied = targetEvents.find(
+      (event) =>
+        event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:fork-evidence",
+    );
+    assert.ok(copied?.kind === "tool.result.recorded");
+    assert.deepEqual(copied.refs.evidence, evidence);
+    assert.equal(copied.data.body.storage, "evidence");
+    assert.equal("content" in copied.data.body, false);
+
+    const targetMessages = createSessionForkRuntimePort().projectModelMessages(targetEvents);
+    assert.match(
+      targetMessages.at(-1)?.message.content ?? "",
+      new RegExp(`pico://evidence/${source.id}/${evidence.contentHash}`, "u"),
     );
   } finally {
     await source.close();

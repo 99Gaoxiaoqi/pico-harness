@@ -95,7 +95,8 @@ test("reconciliation replaces a tool result that was rewound after its active ca
   assert.equal(
     events.filter(
       (event) =>
-        event.kind === "message.committed" && event.data.message.toolCallId === "call:kept",
+        (event.kind === "message.committed" && event.data.message.toolCallId === "call:kept") ||
+        (event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:kept"),
     ).length,
     2,
   );
@@ -143,7 +144,7 @@ test("reconciliation repairs a completed run in a separate terminal recovery run
   const recoveryEvents = await session.runtimeEventStore!.readRun(session.id, recoveryRunId);
   assert.deepEqual(
     recoveryEvents.map((event) => event.kind),
-    ["run.started", "message.committed", "run.terminal"],
+    ["run.started", "tool.result.recorded", "run.terminal"],
   );
   const recoveryTerminal = recoveryEvents.at(-1);
   assert.equal(recoveryTerminal?.kind, "run.terminal");

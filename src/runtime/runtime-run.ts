@@ -10,13 +10,19 @@ import { SessionForkRuntimeConflictError } from "../engine/session-fork-runtime-
 import {
   assertIssuedEngineRuntimeCapability,
   type EngineRuntimeCapability,
+  type EngineRuntimeToolResultInput,
   type EngineRuntimeWriteGuard,
 } from "../engine/runtime-port.js";
+import {
+  projectRuntimeModelMessage,
+  runtimeEventHasModelHistoryEntry,
+  type RuntimeModelHistoryEvent,
+} from "../engine/runtime-model-message.js";
 import type { SessionRuntimeStateWritePatch } from "../engine/session-runtime.js";
-import { PICO_TOOL_RESULT_ERROR_KEY, type Message, type ToolCall } from "../schema/message.js";
+import type { Message, ToolCall } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
-  runtimeEventHasModelMessage,
+  assertRuntimeEvent,
   type RuntimeApprovalRequestedEvent,
   type RuntimeApprovalSettledEvent,
   type RuntimeCheckpointRecordedEvent,
@@ -31,6 +37,7 @@ import {
   type RuntimeSessionForkedEvent,
   type RuntimeTerminalStatus,
   type RuntimeToolStartedEvent,
+  type RuntimeToolResultRecordedEvent,
 } from "./runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
 import {
@@ -42,6 +49,7 @@ import {
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
+  projectRuntimeSessionModelHistoryEntries,
   projectRuntimeSessionState,
 } from "./runtime-session-projection.js";
 
@@ -111,6 +119,8 @@ export interface RuntimeForkBootstrapSeed {
   readonly operationCreatedAt?: string;
   /** The immutable, usage-free Session seed published by SessionForkService. */
   readonly messages: readonly Message[];
+  /** Frozen v3 fact history; v1/v2 callers omit it and use legacy Message imports. */
+  readonly historyEntries?: readonly RuntimeModelHistoryEvent[];
   /** Effective model prefix replacement frozen at the same source cursor as messages. */
   readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
   /** Last source message included in the frozen seed, before target-side rewrites. */
@@ -182,6 +192,11 @@ interface PendingRuntimeToolCall {
   resolved: boolean;
 }
 
+interface PendingRegisteredToolResult {
+  readonly event: RuntimeToolResultRecordedEvent;
+  readonly message: Message;
+}
+
 /** The canonical run bound to the current asynchronous Agent execution. */
 export function currentRuntimeRun(): RuntimeRun | undefined {
   const context = runtimeRunContext.getStore();
@@ -196,8 +211,9 @@ export function currentRuntimeToolCallId(): string | undefined {
 /** Pure identity helper used by fork recovery before it trusts target Runtime facts. */
 export function deriveRuntimeForkBootstrapRunId(options: RuntimeForkBootstrapSeed): string {
   const messages = options.messages.map(stripMessageUsage);
+  const historyEntries = normalizeForkHistoryEntries(options.historyEntries, messages);
   const completion: RuntimeForkBootstrapCompletion = {
-    sourceDigest: forkSeedDigest(messages),
+    sourceDigest: historyEntries ? forkHistorySeedDigest(historyEntries) : forkSeedDigest(messages),
     messageCount: messages.length,
   };
   const checkpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
@@ -224,6 +240,7 @@ export class RuntimeRun {
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
+  private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
   private turnId: string;
   private stepId: string;
   private terminal?: RuntimeRunTerminalEvent;
@@ -390,9 +407,12 @@ export class RuntimeRun {
     }
     const store = options.store;
     const messages = options.messages.map(stripMessageUsage);
+    const historyEntries = normalizeForkHistoryEntries(options.historyEntries, messages);
     const modelCheckpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
     const completion: RuntimeForkBootstrapCompletion = {
-      sourceDigest: forkSeedDigest(messages),
+      sourceDigest: historyEntries
+        ? forkHistorySeedDigest(historyEntries)
+        : forkSeedDigest(messages),
       messageCount: messages.length,
     };
     const identity = runtimeForkBootstrapIdentity(options, completion, modelCheckpoint);
@@ -425,9 +445,9 @@ export class RuntimeRun {
             `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
           );
         }
-        if (modelCheckpoint && completedMarker.runId !== identity.runId) {
+        if ((historyEntries || modelCheckpoint) && completedMarker.runId !== identity.runId) {
           throw runtimeForkConflict(
-            `Runtime fork target ${options.targetSessionId} has a conflicting checkpoint seed`,
+            `Runtime fork target ${options.targetSessionId} has a conflicting canonical seed`,
           );
         }
         if (completedMarker.runId === identity.runId) {
@@ -441,14 +461,12 @@ export class RuntimeRun {
       const imported = projectRuntimeSessionMessageEntries(existingEvents).map(({ message }) =>
         stripMessageUsage(message),
       );
-      if (!isMessagePrefix(imported, messages)) {
-        throw runtimeForkConflict(
-          `Runtime fork target ${options.targetSessionId} has incomplete facts that diverge from its frozen Session seed`,
-        );
-      }
+      const importedCount = historyEntries
+        ? assertForkHistoryPrefix(existingEvents, historyEntries, options.targetSessionId)
+        : assertMessageForkPrefix(imported, messages, options.targetSessionId);
       // Compatibility: old bootstrap wrote session.forked before its copied messages.
       // A complete old fork is already a usable history; only incomplete prefixes resume.
-      if (!modelCheckpoint && forkMarkers.length > 0 && imported.length === messages.length) {
+      if (!modelCheckpoint && forkMarkers.length > 0 && importedCount === messages.length) {
         await RuntimeRun.ensureForkState(options, store, writeGuard);
         return false;
       }
@@ -471,8 +489,15 @@ export class RuntimeRun {
       const throughEventId =
         options.sourceThroughEventId ??
         (await resolveForkSourceThroughEventId(store, options.sourceSessionId, messages));
-      for (let index = imported.length; index < messages.length; index += 1) {
-        await forkRun.recordImportedMessage(messages[index]!, identity.messageEventId(index));
+      for (let index = importedCount; index < messages.length; index += 1) {
+        if (historyEntries) {
+          await forkRun.recordImportedHistoryEvent(
+            historyEntries[index]!,
+            identity.messageEventId(index),
+          );
+        } else {
+          await forkRun.recordImportedMessage(messages[index]!, identity.messageEventId(index));
+        }
       }
       if (modelCheckpoint) {
         const coveredEventIds = Array.from(
@@ -714,11 +739,33 @@ export class RuntimeRun {
     if (messages.length === 0) return;
     this.assertSession(session);
     this.assertOpen();
-    const events = messages.map((message) =>
-      this.messageCommittedEvent(createRuntimeEventId("message"), message),
-    );
+    const consumedByToolCallId = new Map<string, number>();
+    const events = messages.map((message) => {
+      const canonicalMessage = canonicalizeRuntimeMessage(message);
+      const toolCallId = canonicalMessage.toolCallId;
+      if (toolCallId) {
+        const consumed = consumedByToolCallId.get(toolCallId) ?? 0;
+        const registered = this.pendingToolResults.get(toolCallId)?.[consumed];
+        if (registered) {
+          if (!isDeepStrictEqual(canonicalMessage, registered.message)) {
+            throw new Error(
+              `Registered Runtime tool result ${toolCallId} must be committed with its canonical projection`,
+            );
+          }
+          consumedByToolCallId.set(toolCallId, consumed + 1);
+          return registered.event;
+        }
+      }
+      return this.messageCommittedEvent(createRuntimeEventId("message"), canonicalMessage);
+    });
     const persisted = await this.appendBatch(events);
     await session.commitRuntimeProjectionBatch(persisted);
+    for (const [toolCallId, consumed] of consumedByToolCallId) {
+      const queue = this.pendingToolResults.get(toolCallId);
+      if (!queue) continue;
+      queue.splice(0, consumed);
+      if (queue.length === 0) this.pendingToolResults.delete(toolCallId);
+    }
   }
 
   async commitMessageOnce(
@@ -748,6 +795,30 @@ export class RuntimeRun {
       kind: "message.committed",
       data: { message },
     });
+  }
+
+  /** Imports one frozen v3 model fact without degrading a ToolResult to Message. */
+  async recordImportedHistoryEvent(
+    source: RuntimeModelHistoryEvent,
+    eventId = createRuntimeEventId("fork-history"),
+  ): Promise<void> {
+    this.assertOpen();
+    if (source.kind === "message.committed") {
+      await this.recordImportedMessage(source.data.message, eventId);
+      return;
+    }
+    const event: RuntimeToolResultRecordedEvent = {
+      ...this.base(eventId),
+      refs: {
+        ...(this.refs() ?? {}),
+        toolCallId: source.refs.toolCallId,
+        ...(source.refs.evidence ? { evidence: structuredClone(source.refs.evidence) } : {}),
+      },
+      kind: "tool.result.recorded",
+      data: structuredClone(source.data),
+    };
+    assertRuntimeEvent(event);
+    await this.append(event);
   }
 
   /** Records an audit-only child-agent message without changing the parent model context. */
@@ -783,6 +854,35 @@ export class RuntimeRun {
 
   registerToolEvidence(toolCallId: string, evidence: RuntimeEvidenceReference): void {
     this.evidenceByToolCallId.set(toolCallId, evidence);
+  }
+
+  registerToolResult(input: EngineRuntimeToolResultInput): Message {
+    this.assertOpen();
+    const canonical = canonicalizeRuntimeToolResultInput(input);
+    const event: RuntimeToolResultRecordedEvent = {
+      ...this.base(createRuntimeEventId("tool-result")),
+      refs: {
+        ...(this.refs() ?? {}),
+        toolCallId: canonical.toolCallId,
+        ...(canonical.evidence ? { evidence: canonical.evidence } : {}),
+      },
+      kind: "tool.result.recorded",
+      data: {
+        toolName: canonical.toolName,
+        status: canonical.status,
+        body: canonical.body,
+        projection: canonical.projection,
+      },
+    };
+    assertRuntimeEvent(event);
+    const message = projectRuntimeModelMessage(event);
+    if (!message) {
+      throw new Error(`Runtime tool result ${canonical.toolCallId} has no model projection`);
+    }
+    const queue = this.pendingToolResults.get(canonical.toolCallId) ?? [];
+    queue.push({ event, message });
+    this.pendingToolResults.set(canonical.toolCallId, queue);
+    return structuredClone(message);
   }
 
   async recordApprovalRequested(
@@ -1012,12 +1112,13 @@ function findDanglingRuntimeToolCalls(
   const unresolvedByToolCallId = new Map<string, PendingRuntimeToolCall[]>();
 
   for (const event of events) {
-    if (!runtimeEventHasModelMessage(event)) continue;
+    if (!runtimeEventHasModelHistoryEntry(event)) continue;
     // Rewind keeps canonical facts but removes them from the active Session projection.
     // Both a call and its result must be matched inside that same active projection.
     if (!activeMessageEventIds.has(event.eventId)) continue;
-    const message = event.data.message;
-    if (message.role === "assistant") {
+    const message = projectRuntimeModelMessage(event);
+    if (!message) continue;
+    if (event.kind === "message.committed" && message.role === "assistant") {
       for (const [callIndex, toolCall] of (message.toolCalls ?? []).entries()) {
         const entry: PendingRuntimeToolCall = {
           source: event,
@@ -1047,7 +1148,7 @@ function buildInterruptedToolResultEvent(
   events: readonly RuntimeEvent[],
   pending: PendingRuntimeToolCall,
   at: string,
-): RuntimeMessageCommittedEvent {
+): RuntimeToolResultRecordedEvent {
   const source = pending.source;
   const toolContext = events.findLast(
     (event) => event.turnId === source.turnId && event.refs?.toolCallId === pending.toolCall.id,
@@ -1057,6 +1158,8 @@ function buildInterruptedToolResultEvent(
     ...(toolContext?.refs ?? {}),
     toolCallId: pending.toolCall.id,
   });
+  const content = "工具执行已中断: 运行进程在该工具结果持久化前终止；该调用未获得可用结果。";
+  const { evidence: _evidence, ...inlineRefs } = refs ?? {};
   return {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
     eventId: runtimeInterruptionRecoveryEventId("tool-result", [
@@ -1073,18 +1176,26 @@ function buildInterruptedToolResultEvent(
     at,
     partial: false,
     visibility: "model",
-    ...(refs ? { refs } : {}),
-    kind: "message.committed",
+    refs: {
+      ...inlineRefs,
+      toolCallId: pending.toolCall.id,
+    },
+    kind: "tool.result.recorded",
     data: {
-      message: {
-        role: "user",
-        content: "工具执行已中断: 运行进程在该工具结果持久化前终止；该调用未获得可用结果。",
-        toolCallId: pending.toolCall.id,
-        providerData: {
-          [PICO_TOOL_RESULT_ERROR_KEY]: true,
-          picoKind: "synthetic_tool_result",
-          picoToolResultStatus: "interrupted",
-        },
+      toolName: pending.toolCall.name,
+      status: "interrupted",
+      body: {
+        storage: "inline",
+        content,
+        sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+        sizeBytes: Buffer.byteLength(content, "utf8"),
+      },
+      projection: {
+        version: 1,
+        mode: "synthetic",
+        text: content,
+        strategy: "runtime-interruption-recovery",
+        truncated: false,
       },
     },
   };
@@ -1093,7 +1204,7 @@ function buildInterruptedToolResultEvent(
 function buildInterruptedToolRecoveryRun(options: {
   readonly sourceStarted: RuntimeRunStartedEvent;
   readonly sourceTerminal: RuntimeRunTerminalEvent;
-  readonly toolResults: readonly RuntimeMessageCommittedEvent[];
+  readonly toolResults: readonly RuntimeToolResultRecordedEvent[];
   readonly at: string;
 }): RuntimeEvent[] {
   const { sourceStarted, sourceTerminal, toolResults, at } = options;
@@ -1120,7 +1231,7 @@ function buildInterruptedToolRecoveryRun(options: {
     data: { workDir: sourceStarted.data.workDir },
   };
   const recoveredResults = toolResults.map(
-    (event): RuntimeMessageCommittedEvent => ({
+    (event): RuntimeToolResultRecordedEvent => ({
       ...event,
       invocationId,
       runId: recoveryRunId,
@@ -1333,8 +1444,26 @@ function canonicalizeRuntimeMessage(message: Message): Message {
   }
 }
 
+function canonicalizeRuntimeToolResultInput(
+  input: EngineRuntimeToolResultInput,
+): EngineRuntimeToolResultInput {
+  try {
+    const encoded = JSON.stringify(input);
+    if (encoded === undefined) throw new Error("tool result encoded to undefined");
+    return JSON.parse(encoded) as EngineRuntimeToolResultInput;
+  } catch (error) {
+    throw new Error("Runtime tool result must be JSON-serializable", { cause: error });
+  }
+}
+
 function forkSeedDigest(messages: readonly Message[]): string {
   return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+}
+
+function forkHistorySeedDigest(entries: readonly RuntimeModelHistoryEvent[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(entries.map(forkHistoryPayload)))
+    .digest("hex");
 }
 
 function isMessagePrefix(prefix: readonly Message[], messages: readonly Message[]): boolean {
@@ -1342,6 +1471,87 @@ function isMessagePrefix(prefix: readonly Message[], messages: readonly Message[
     prefix.length <= messages.length &&
     prefix.every((message, index) => isDeepStrictEqual(message, messages[index]))
   );
+}
+
+function normalizeForkHistoryEntries(
+  entries: readonly RuntimeModelHistoryEvent[] | undefined,
+  messages: readonly Message[],
+): RuntimeModelHistoryEvent[] | undefined {
+  if (!entries) return undefined;
+  const normalized = entries.map((source) => {
+    const event = structuredClone(source);
+    const eventId = event.eventId;
+    assertRuntimeEvent(event);
+    if (!runtimeEventHasModelHistoryEntry(event)) {
+      throw new Error(`Runtime fork history event ${eventId} is not model-visible`);
+    }
+    if (event.kind === "message.committed") {
+      return {
+        ...event,
+        data: { message: stripMessageUsage(event.data.message) },
+      } satisfies RuntimeModelHistoryEvent;
+    }
+    return event;
+  });
+  const projected = normalized.map((event) => {
+    const message = projectRuntimeModelMessage(event);
+    if (!message) throw new Error(`Runtime fork history event ${event.eventId} has no projection`);
+    return stripMessageUsage(message);
+  });
+  if (!isDeepStrictEqual(projected, messages)) {
+    throw new Error("Runtime fork v3 history does not match its projected Message seed");
+  }
+  return normalized;
+}
+
+function assertForkHistoryPrefix(
+  existingEvents: readonly RuntimeEvent[],
+  expected: readonly RuntimeModelHistoryEvent[],
+  targetSessionId: string,
+): number {
+  const imported = projectRuntimeSessionModelHistoryEntries(existingEvents).map(({ event }) =>
+    forkHistoryPayload(event),
+  );
+  const expectedPayloads = expected.map(forkHistoryPayload);
+  if (
+    imported.length > expectedPayloads.length ||
+    !imported.every((entry, index) => isDeepStrictEqual(entry, expectedPayloads[index]))
+  ) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} has incomplete facts that diverge from its frozen v3 history`,
+    );
+  }
+  return imported.length;
+}
+
+function assertMessageForkPrefix(
+  imported: readonly Message[],
+  expected: readonly Message[],
+  targetSessionId: string,
+): number {
+  if (!isMessagePrefix(imported, expected)) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} has incomplete facts that diverge from its frozen Session seed`,
+    );
+  }
+  return imported.length;
+}
+
+function forkHistoryPayload(event: RuntimeModelHistoryEvent): unknown {
+  if (event.kind === "message.committed") {
+    return {
+      kind: event.kind,
+      data: { message: stripMessageUsage(event.data.message) },
+    };
+  }
+  return {
+    kind: event.kind,
+    refs: {
+      toolCallId: event.refs.toolCallId,
+      ...(event.refs.evidence ? { evidence: event.refs.evidence } : {}),
+    },
+    data: event.data,
+  };
 }
 
 async function resolveForkSourceThroughEventId(

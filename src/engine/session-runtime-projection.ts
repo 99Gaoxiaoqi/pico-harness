@@ -6,7 +6,12 @@ import {
 } from "./session-runtime.js";
 import { toCanonicalUsage, type Message } from "../schema/message.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
-import type { RuntimeEvent, RuntimeMessageCommittedEvent } from "./session-runtime-event.js";
+import {
+  projectRuntimeModelMessage,
+  runtimeEventHasModelHistoryEntry,
+  type RuntimeModelHistoryEvent,
+} from "./runtime-model-message.js";
+import type { RuntimeEvent } from "./session-runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
 
 export interface SequencedRuntimeEvent {
@@ -18,6 +23,10 @@ export interface RuntimeSessionSequencedMessageEntry extends RuntimeHistoryProje
   readonly sequence: number;
   readonly runId: string;
   readonly turnId: string;
+}
+
+export interface RuntimeSessionModelHistoryEntry extends RuntimeHistoryProjectionEntry {
+  readonly event: RuntimeModelHistoryEvent;
 }
 
 export interface RuntimeSessionTranscriptEventEntry {
@@ -36,9 +45,19 @@ export function projectRuntimeSessionMessages(events: readonly RuntimeEvent[]): 
 export function projectRuntimeSessionMessageEntries(
   events: readonly RuntimeEvent[],
 ): RuntimeHistoryProjectionEntry[] {
-  return projectMessageEvents(events).map((event) => ({
+  return projectRuntimeSessionModelHistoryEntries(events).map(({ eventId, message }) => ({
+    eventId,
+    message,
+  }));
+}
+
+export function projectRuntimeSessionModelHistoryEntries(
+  events: readonly RuntimeEvent[],
+): RuntimeSessionModelHistoryEntry[] {
+  return projectModelHistoryEvents(events).map((event) => ({
     eventId: event.eventId,
-    message: structuredClone(event.data.message),
+    message: requiredRuntimeModelMessage(event),
+    event,
   }));
 }
 
@@ -47,10 +66,10 @@ export function projectRuntimeSessionSequencedMessageEntries(
 ): RuntimeSessionSequencedMessageEntry[] {
   return projectBranchEventIndexes(
     entries.map(({ event }) => event),
-    (event): event is RuntimeMessageCommittedEvent => isModelMessage(event),
+    runtimeEventHasModelHistoryEntry,
   ).map(({ eventIndex, event }) => ({
     eventId: event.eventId,
-    message: structuredClone(event.data.message),
+    message: requiredRuntimeModelMessage(event),
     sequence: entries[eventIndex]!.sequence,
     runId: event.runId,
     turnId: event.turnId,
@@ -141,10 +160,10 @@ export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): Ses
   return usage;
 }
 
-function projectMessageEvents(events: readonly RuntimeEvent[]): RuntimeMessageCommittedEvent[] {
-  return projectBranchEventIndexes(events, (event): event is RuntimeMessageCommittedEvent =>
-    isModelMessage(event),
-  ).map(({ event }) => event);
+function projectModelHistoryEvents(events: readonly RuntimeEvent[]): RuntimeModelHistoryEvent[] {
+  return projectBranchEventIndexes(events, runtimeEventHasModelHistoryEntry).map(
+    ({ event }) => event,
+  );
 }
 
 function projectBranchEventIndexes<Event extends RuntimeEvent>(
@@ -180,6 +199,10 @@ function projectBranchEventIndexes<Event extends RuntimeEvent>(
   return projected;
 }
 
-function isModelMessage(event: RuntimeEvent): event is RuntimeMessageCommittedEvent {
-  return event.kind === "message.committed" && event.visibility === "model" && !event.partial;
+function requiredRuntimeModelMessage(event: RuntimeModelHistoryEvent): Message {
+  const message = projectRuntimeModelMessage(event);
+  if (!message) {
+    throw new Error(`Runtime event ${event.eventId} has no model projection`);
+  }
+  return message;
 }
