@@ -473,6 +473,7 @@ export class StorageDoctor {
     }
 
     const layoutPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+    let legacyLayoutRequiresUpgrade = false;
     if (await pathExists(layoutPath)) {
       try {
         const layout = decodeWorkspaceStorageLayoutMarker(
@@ -491,9 +492,10 @@ export class StorageDoctor {
               "authoritative",
             ),
           );
-          return false;
+          legacyLayoutRequiresUpgrade = true;
+        } else {
+          decodeWorkspaceStorageLayout(layout, layoutPath);
         }
-        decodeWorkspaceStorageLayout(layout, layoutPath);
       } catch (error) {
         findings.push(
           finding(
@@ -508,21 +510,23 @@ export class StorageDoctor {
         );
         return false;
       }
-      try {
-        readWorkspaceStorageRootIdentitySync(this.runtimeStorageRoot);
-      } catch (error) {
-        findings.push(
-          finding(
-            "runtime_root_identity_invalid",
-            "critical",
-            "runtime",
-            layoutPath,
-            errorMessage(error),
-            "Preserve the root and use explicit storage adoption only after verifying its origin",
-            "authoritative",
-          ),
-        );
-        return false;
+      if (!legacyLayoutRequiresUpgrade) {
+        try {
+          readWorkspaceStorageRootIdentitySync(this.runtimeStorageRoot);
+        } catch (error) {
+          findings.push(
+            finding(
+              "runtime_root_identity_invalid",
+              "critical",
+              "runtime",
+              layoutPath,
+              errorMessage(error),
+              "Preserve the root and use explicit storage adoption only after verifying its origin",
+              "authoritative",
+            ),
+          );
+          return false;
+        }
       }
     }
 
@@ -561,6 +565,7 @@ export class StorageDoctor {
       );
       return false;
     }
+    if (legacyLayoutRequiresUpgrade) return false;
 
     const statePath = join(this.runtimeStorageRoot, "control", "state.json");
     let stateNextSequence: number | undefined;

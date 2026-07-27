@@ -14,10 +14,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { commitFileTransactionSync } from "../../src/storage/local-file-storage.js";
+import {
+  commitFileTransactionSync,
+  withFileLockSync,
+} from "../../src/storage/local-file-storage.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { StorageDoctor } from "../../src/storage/storage-doctor.js";
 import { WORKSPACE_RUNTIME_TRANSACTION_OPTIONS } from "../../src/storage/workspace-storage-layout.js";
@@ -467,6 +470,63 @@ test("StorageDoctor reports a version 1 layout as upgradeable without rewriting 
     await readFile(join(paths.workspace.root, ".storage", "layout.json"), "utf8"),
     marker,
   );
+});
+
+test("StorageDoctor reports a pending commit before stopping at a version 1 layout", async (context) => {
+  const fixture = await createFixture("layout-v1-pending");
+  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const layoutPath = join(paths.workspace.root, ".storage", "layout.json");
+  const statePath = join(paths.workspace.root, "control", "state.json");
+  const marker = `${JSON.stringify({
+    schemaVersion: 1,
+    layout: "session-centric-v1",
+    createdAt: "2026-07-25T00:00:00.000Z",
+  })}\n`;
+  const before = '{"revision":1}\n';
+  const next = '{"revision":2}\n';
+  await mkdir(dirname(layoutPath), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
+  await writeFile(layoutPath, marker, { mode: 0o600 });
+  await writeFile(statePath, before, { mode: 0o600 });
+  assert.throws(
+    () =>
+      withFileLockSync(paths.workspace.storageLock, "storage-doctor-v1-pending-crash", () =>
+        commitFileTransactionSync(
+          paths.workspace.root,
+          {
+            replacements: [{ relativePath: "control/state.json", content: next }],
+          },
+          {
+            ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+            transactionId: "storage-doctor-v1-pending",
+            onStage(stage) {
+              if (stage === "commit-published") throw new Error("simulated v1 crash");
+            },
+          },
+        ),
+      ),
+    /simulated v1 crash/u,
+  );
+  const commitBefore = await readFile(paths.workspace.storageCommit, "utf8");
+
+  const report = await new StorageDoctor({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+  }).scan();
+
+  assert.equal(
+    report.findings.some((finding) => finding.code === "runtime_layout_upgrade_required"),
+    true,
+  );
+  assert.equal(
+    report.findings.some((finding) => finding.code === "runtime_commit_pending"),
+    true,
+  );
+  assert.equal(report.healthy, false);
+  assert.equal(await readFile(layoutPath, "utf8"), marker);
+  assert.equal(await readFile(statePath, "utf8"), before);
+  assert.equal(await readFile(paths.workspace.storageCommit, "utf8"), commitBefore);
 });
 
 test("StorageDoctor does not create a coordinator while scanning an empty workspace", async (context) => {
