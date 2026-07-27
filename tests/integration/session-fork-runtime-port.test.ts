@@ -290,3 +290,120 @@ test("SessionForkService v3 preserves structured ToolResult and source evidence 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("completed fork bootstrap reconciles a ToolResult rewound after its active call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-rewind-result-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const manager = new SessionManager();
+  const source = await manager.getOrCreate("fork-rewind-source", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  let target: Session | undefined;
+  try {
+    await source.recover();
+    await source.commitMessages({ role: "user", content: "kept seed" });
+    const sourceRun = await RuntimeRun.start({ capability: source.runtimeEventCapability! });
+    const rawResult = "completed source result";
+    const result = sourceRun.registerToolResult({
+      toolCallId: "call:fork-rewind",
+      toolName: "read_file",
+      status: "succeeded",
+      body: {
+        storage: "inline",
+        content: rawResult,
+        sha256: createHash("sha256").update(rawResult).digest("hex"),
+        sizeBytes: Buffer.byteLength(rawResult),
+      },
+      projection: {
+        version: 1,
+        mode: "full",
+        text: rawResult,
+        strategy: "full",
+        truncated: false,
+      },
+    });
+    await sourceRun.commitMessages(source, [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call:fork-rewind", name: "read_file", arguments: "{}" }],
+      },
+      result,
+    ]);
+    await sourceRun.finish("completed");
+
+    const service = new SessionForkService({
+      workDir,
+      picoHome,
+      sessionManager: manager,
+      runtimeStore: source.runtimeEventStore!,
+      runtimePort: createSessionForkRuntimePort(),
+    });
+    await service.fork({
+      sourceSessionId: source.id,
+      targetSessionId: "fork-rewind-target",
+      targetMode: "default",
+    });
+
+    target = await manager.getOrCreate("fork-rewind-target", workDir, {
+      persistence: true,
+      picoHome,
+    });
+    await target.recover();
+    assert.deepEqual(
+      target.getHistory().map((message) => [message.role, message.toolCallId]),
+      [
+        ["user", undefined],
+        ["assistant", undefined],
+        ["user", "call:fork-rewind"],
+      ],
+    );
+    await target.rewindOnce("remove-forked-result", 2);
+
+    const bootstrapRunId = (await target.runtimeEventStore!.listRunIds(target.id)).find((runId) =>
+      runId.startsWith("fork-bootstrap:"),
+    );
+    assert.ok(bootstrapRunId);
+    const reconciled = await RuntimeRun.reconcileIncompleteRuns({
+      capability: target.runtimeEventCapability!,
+    });
+    assert.deepEqual(reconciled, [bootstrapRunId]);
+
+    const probe = await RuntimeRun.start({ capability: target.runtimeEventCapability! });
+    const recoveredHistory = await probe.readModelHistory();
+    await probe.finish("completed");
+    assert.deepEqual(
+      recoveredHistory.map((message) => [message.role, message.toolCallId]),
+      [
+        ["user", undefined],
+        ["assistant", undefined],
+        ["user", "call:fork-rewind"],
+      ],
+    );
+    assert.match(recoveredHistory.at(-1)?.content ?? "", /中断/u);
+
+    const synthetic = (await target.runtimeEventStore!.readSession(target.id)).findLast(
+      (event) =>
+        event.kind === "tool.result.recorded" &&
+        event.refs.toolCallId === "call:fork-rewind" &&
+        event.data.status === "interrupted",
+    );
+    assert.ok(synthetic?.kind === "tool.result.recorded");
+    assert.equal(synthetic.data.projection.mode, "synthetic");
+    assert.equal(synthetic.data.projection.strategy, "runtime-interruption-recovery");
+    assert.equal(synthetic.refs.parentRunId, bootstrapRunId);
+
+    assert.deepEqual(
+      await RuntimeRun.reconcileIncompleteRuns({
+        capability: target.runtimeEventCapability!,
+      }),
+      [],
+    );
+  } finally {
+    await target?.close();
+    await source.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
