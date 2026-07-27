@@ -35,6 +35,11 @@ export interface RuntimeRunExecutorInput {
   readonly picoHome: string;
   readonly prompt: string;
   readonly resumeExistingSession: boolean;
+  /**
+   * Durable H+1 admission already published by a recoverable-task adapter.
+   * RuntimeRun.start reuses this exact fact; it must not create another run.started.
+   */
+  readonly prestartedRun?: PrestartedRuntimeRun;
   readonly traceEnabled: boolean;
   readonly options: RuntimeRunOptions;
   readonly signal?: AbortSignal;
@@ -42,6 +47,14 @@ export interface RuntimeRunExecutorInput {
   readonly rewindPointSink?: (checkpointId: string) => void;
   /** Eligible foreground-only durable post-terminal memory scheduler. */
   readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
+}
+
+export interface PrestartedRuntimeRun {
+  readonly runId: string;
+  readonly invocationId: string;
+  readonly runStartedEventId: string;
+  readonly runStartedAt: string;
+  readonly parentRunId: string;
 }
 
 /**
@@ -61,12 +74,19 @@ export class RuntimeRunExecutor {
       workDir,
       prompt: initialPrompt,
       resumeExistingSession,
+      prestartedRun,
       options,
       signal,
       onEvent,
       rewindPointSink,
       memoryReviewScheduler,
     } = this.input;
+    if (prestartedRun) {
+      assertPrestartedRuntimeRun(prestartedRun);
+      if (!resumeExistingSession) {
+        throw new Error("A prestarted RuntimeRun requires resumeExistingSession");
+      }
+    }
     let prompt = initialPrompt;
 
     const result = await session.serialize(async () => {
@@ -76,12 +96,22 @@ export class RuntimeRunExecutor {
       }
       await RuntimeRun.reconcileIncompleteRuns({
         capability: runtimeCapability,
+        ...(prestartedRun ? { prestartedRunId: prestartedRun.runId } : {}),
       });
       await RuntimeRun.repairSessionProjection(session, {
         capability: runtimeCapability,
       });
       const runtimeRun = await RuntimeRun.start({
         capability: runtimeCapability,
+        ...(prestartedRun
+          ? {
+              runId: prestartedRun.runId,
+              invocationId: prestartedRun.invocationId,
+              runStartedEventId: prestartedRun.runStartedEventId,
+              parentRunId: prestartedRun.parentRunId,
+              now: prestartedRunClock(prestartedRun.runStartedAt),
+            }
+          : {}),
       });
       let submittedUserMessage =
         memoryReviewScheduler && resumeExistingSession
@@ -214,6 +244,30 @@ export class RuntimeRunExecutor {
     });
     return result;
   }
+}
+
+function assertPrestartedRuntimeRun(value: PrestartedRuntimeRun): void {
+  for (const [field, candidate] of Object.entries(value)) {
+    if (field === "runStartedAt") continue;
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      throw new Error(`Prestarted RuntimeRun ${field} must not be empty`);
+    }
+  }
+  const startedAt = new Date(value.runStartedAt);
+  if (!Number.isFinite(startedAt.getTime()) || startedAt.toISOString() !== value.runStartedAt) {
+    throw new Error("Prestarted RuntimeRun runStartedAt must be a canonical timestamp");
+  }
+}
+
+function prestartedRunClock(runStartedAt: string): () => Date {
+  let startPending = true;
+  return () => {
+    if (startPending) {
+      startPending = false;
+      return new Date(runStartedAt);
+    }
+    return new Date();
+  };
 }
 
 function scheduleMemoryReviewEnqueue(
