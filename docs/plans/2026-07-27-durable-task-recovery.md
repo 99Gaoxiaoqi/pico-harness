@@ -8,7 +8,7 @@
   3. 为 Storage Root 建立稳定身份和所有权校验；
   4. 明确 Portable 数据与 Host-bound 状态的边界。
 
-## 当前事实
+## 实施前事实
 
 - Session 的 canonical RuntimeEvent 已持久化到 `sessions/<sha256>/session.jsonl`。
 - Job、Attempt、Lease、Daemon/Cron 和 Outbox 由 `control/state.json` 及控制面 JSONL 保存。
@@ -62,6 +62,11 @@ Attempt
   leaseEpoch
   sourceAttemptId?
 
+ExecutionLease
+  ownerId
+  leaseEpoch
+  expiresAt
+
 SafeBoundary
   sessionId?
   runId?
@@ -71,12 +76,23 @@ SafeBoundary
   toolCatalogHash?
   backgroundOperationsSettled
   checkpointRef?
+
+LaunchReceipt
+  launchId
+  sessionId
+  runId
+  runStartedEventId
+  runStartedSequence
 ```
 
 恢复计划只有两种结果：
 
 - `continue`：全部身份、高水位、工具副作用和 owner 条件可证明；
 - `park`：任何关键条件缺失、冲突或不确定，保留稳定 reason code。
+
+adapter 必须在任何 provider、工具或外部副作用之前，以来源 RuntimeEvent 高水位 CAS 将
+确定性的 `run.started` 发布到 `H+1`。TaskRun 结算前崩溃时，恢复器只根据该 canonical
+`H+1` 事实重建启动凭据；`H+2` 之后同一 Session 的其他 Run 不影响已经成立的凭据。
 
 ## 验收标准
 

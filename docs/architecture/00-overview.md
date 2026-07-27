@@ -53,7 +53,7 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 - `RuntimeStore` 是 Jobs、daemon/cron runs、attempts、leases、usage 和 completion outbox
   的控制面真源。
 - `TaskRunStore` 是显式 recoverable 任务跨 Attempt 的事实账本；它保存 adapter 身份、不可变输入、
-  checkpoint 引用和恢复 claim，但不复制 Session RuntimeEvent。
+  checkpoint 引用、执行租约和启动凭据，但不复制 Session RuntimeEvent。
 - `daemon-events.jsonl` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面状态。
 - 三者共享 `$PICO_HOME/workspaces/<workspace-id>/` 下的事务协调，但分别落在 `sessions/`、
   `task-runs/` 和 `control/`，使用不同账本和 API。
@@ -100,9 +100,14 @@ Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，
 可恢复的是持久化工作流，不是旧 JavaScript 调用栈。恢复必须同时证明 adapter 版本与输入、
 workspace/root identity、RuntimeEvent 高水位、interrupted terminal、审批与工具副作用、
 后台操作、工具目录和 checkpoint 均一致；任一条件不确定就写入稳定 park reason。
-通过校验后，协调器以 revision CAS 原子写入 `task.resume.claimed + attempt.started`，并创建
-新的 Attempt。既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为
-`host_bound`，进程退出后只收敛为 `interrupted`。
+通过校验后，协调器先按 TaskRun 日志的提交时间取得或接管执行租约，再以 revision CAS 原子
+写入 `task.resume.claimed + attempt.started`。adapter 使用确定性的 `launchId`、Runtime Run ID
+和 `run.started` event ID，在来源高水位 `H+1` 以 CAS 原子发布 `run.started`；只有发布成功后
+才能启动 provider、工具或其他外部副作用。若在 TaskRun 结算前崩溃，恢复器从 canonical
+`H+1` 事件重建 body-free 启动凭据，不会重复调用 adapter；同一 Session 在 `H+2` 之后出现的
+其他合法 Run 不会推翻已经成立的凭据。旧 owner/lease epoch 的 checkpoint 与完成写入会被拒绝。
+既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为 `host_bound`，
+进程退出后只收敛为 `interrupted`。
 
 `sessions/`、`task-runs/`、Artifact、Evidence、Trace 和 Memory summaries 可进入只读导出计划；
 `.storage/`、`control/`、Memory state、锁、凭据、临时文件和 legacy SQLite 属于 host-bound
