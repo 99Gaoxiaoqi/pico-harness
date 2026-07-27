@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, type Dirent } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  type Dirent,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   assertLocalFileStorageCapabilitiesSync,
@@ -16,7 +24,8 @@ import {
   type FileTransactionReplacement,
 } from "./local-file-storage.js";
 
-const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 1 as const;
+const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 2 as const;
+const LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 1 as const;
 const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
 const LEGACY_LOCK_TOMBSTONE_PATTERN = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
 const LEGACY_LOCK_CANDIDATE_PATTERN =
@@ -31,7 +40,7 @@ export const WORKSPACE_STORAGE_LAYOUT_FILE = ".storage/layout.json";
 export const WORKSPACE_STORAGE_LOCK_DIRECTORY = ".storage/lock";
 export const WORKSPACE_RUNTIME_TRANSACTION_OPTIONS = Object.freeze({
   commitFileName: WORKSPACE_STORAGE_COMMIT_FILE,
-  allowedTargetPrefixes: Object.freeze(["sessions", "control"]),
+  allowedTargetPrefixes: Object.freeze(["sessions", "task-runs", "control"]),
 }) satisfies Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName">;
 export const WORKSPACE_LAYOUT_TRANSACTION_OPTIONS = Object.freeze({
   commitFileName: WORKSPACE_STORAGE_COMMIT_FILE,
@@ -41,8 +50,29 @@ export const WORKSPACE_LAYOUT_TRANSACTION_OPTIONS = Object.freeze({
   ]),
 }) satisfies Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName">;
 
-interface WorkspaceStorageLayout {
+export interface WorkspaceStorageRootIdentity {
+  readonly storageRootId: string;
+  readonly canonicalPath: string;
+  readonly device: string;
+  readonly inode: string;
+}
+
+export interface WorkspaceStorageLayout {
   readonly schemaVersion: typeof WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION;
+  readonly layout: "session-centric-v1";
+  readonly storageRootId: string;
+  readonly physicalIdentity: {
+    readonly canonicalPath: string;
+    readonly device: string;
+    readonly inode: string;
+  };
+  readonly createdAt: string;
+  readonly migratedFrom?: "runtime-directory-v1";
+  readonly adoptedAt?: string;
+}
+
+interface LegacyWorkspaceStorageLayout {
+  readonly schemaVersion: typeof LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION;
   readonly layout: "session-centric-v1";
   readonly createdAt: string;
   readonly migratedFrom?: "runtime-directory-v1";
@@ -50,6 +80,7 @@ interface WorkspaceStorageLayout {
 
 export interface WorkspaceStorageLayoutPreparation {
   readonly migratedLegacyRuntime: boolean;
+  readonly rootIdentity: WorkspaceStorageRootIdentity;
 }
 
 export function ensurePrivateWorkspaceStorageDirectorySync(path: string): void {
@@ -77,8 +108,12 @@ export function prepareWorkspaceStorageLayoutSync(
       recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
       const existingLayout = existsSync(layoutPath)
-        ? decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath)
+        ? decodeCompatibleWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath)
         : undefined;
+      const physicalIdentity = currentPhysicalIdentity(root);
+      if (existingLayout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+        assertLayoutMatchesPhysicalIdentity(existingLayout, physicalIdentity, layoutPath);
+      }
       const legacyRoot = join(root, "runtime");
       assertOrCreatePrivateDirectory(legacyRoot);
       const legacyLock = join(legacyRoot, "lock");
@@ -86,7 +121,20 @@ export function prepareWorkspaceStorageLayoutSync(
         existingLayout &&
         hasPermanentFileLockFenceSync(legacyLock, LEGACY_RUNTIME_FENCE_REASON)
       ) {
-        return { migratedLegacyRuntime: false };
+        const layout =
+          existingLayout.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
+            ? existingLayout
+            : publishLayout(
+                root,
+                existingLayout,
+                physicalIdentity,
+                [],
+                existingLayout.migratedFrom !== undefined,
+              );
+        return {
+          migratedLegacyRuntime: false,
+          rootIdentity: rootIdentityFromLayout(layout),
+        };
       }
 
       return withPermanentFileLockFenceSync(
@@ -97,19 +145,29 @@ export function prepareWorkspaceStorageLayoutSync(
           recoverFileTransactionSync(legacyRoot);
           const legacyLayoutFound = readDirectoryEntries(legacyRoot).some(isLegacyDataEntry);
           const replacements = collectLegacyRuntimeReplacements(root, legacyRoot);
+          let layout = existingLayout;
           if (
             !existingLayout ||
+            existingLayout.schemaVersion !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
             replacements.length > 0 ||
             (legacyLayoutFound && existingLayout.migratedFrom === undefined)
           ) {
-            publishLayout(
+            layout = publishLayout(
               root,
-              legacyLayoutFound || existingLayout?.migratedFrom !== undefined,
+              existingLayout,
+              physicalIdentity,
               replacements,
+              legacyLayoutFound || existingLayout?.migratedFrom !== undefined,
+            );
+          }
+          if (!layout || layout.schemaVersion !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+            throw new FileStorageIntegrityError(
+              `Workspace storage layout was not upgraded: ${layoutPath}`,
             );
           }
           return {
             migratedLegacyRuntime: existingLayout === undefined && legacyLayoutFound,
+            rootIdentity: rootIdentityFromLayout(layout),
           };
         },
       );
@@ -125,31 +183,152 @@ export function decodeWorkspaceStorageLayout(
     !isRecord(value) ||
     value["schemaVersion"] !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
     value["layout"] !== "session-centric-v1" ||
+    typeof value["storageRootId"] !== "string" ||
+    !value["storageRootId"] ||
+    !isPhysicalIdentity(value["physicalIdentity"]) ||
     typeof value["createdAt"] !== "string" ||
-    (value["migratedFrom"] !== undefined && value["migratedFrom"] !== "runtime-directory-v1")
+    (value["migratedFrom"] !== undefined && value["migratedFrom"] !== "runtime-directory-v1") ||
+    (value["adoptedAt"] !== undefined && typeof value["adoptedAt"] !== "string")
   ) {
     throw new FileStorageIntegrityError(`Invalid workspace storage layout marker: ${path}`);
   }
   return {
     schemaVersion: WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION,
     layout: "session-centric-v1",
+    storageRootId: value["storageRootId"],
+    physicalIdentity: {
+      canonicalPath: value["physicalIdentity"]["canonicalPath"],
+      device: value["physicalIdentity"]["device"],
+      inode: value["physicalIdentity"]["inode"],
+    },
     createdAt: value["createdAt"],
     ...(value["migratedFrom"] === "runtime-directory-v1"
       ? { migratedFrom: "runtime-directory-v1" as const }
       : {}),
+    ...(typeof value["adoptedAt"] === "string" ? { adoptedAt: value["adoptedAt"] } : {}),
   };
+}
+
+export function assertWorkspaceStorageRootIdentitySync(
+  workspaceRoot: string,
+  expected: WorkspaceStorageRootIdentity,
+): void {
+  const root = resolve(workspaceRoot);
+  const actual = currentPhysicalIdentity(root);
+  if (
+    actual.canonicalPath !== expected.canonicalPath ||
+    actual.device !== expected.device ||
+    actual.inode !== expected.inode
+  ) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage root identity changed: ${root}; expected ${formatIdentity(
+        expected,
+      )}, received ${formatIdentity(actual)}`,
+    );
+  }
+  const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
+  if (!existsSync(layoutPath)) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage layout marker is missing: ${layoutPath}`,
+    );
+  }
+  const layout = decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath);
+  assertLayoutMatchesPhysicalIdentity(layout, actual, layoutPath);
+  if (layout.storageRootId !== expected.storageRootId) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage root ID changed: ${layoutPath}; expected ${expected.storageRootId}, received ${layout.storageRootId}`,
+    );
+  }
+}
+
+export function readWorkspaceStorageRootIdentitySync(
+  workspaceRoot: string,
+): WorkspaceStorageRootIdentity | undefined {
+  const root = resolve(workspaceRoot);
+  const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
+  if (!existsSync(root) || !existsSync(layoutPath)) return undefined;
+  const actual = currentPhysicalIdentity(root);
+  const layout = decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath);
+  assertLayoutMatchesPhysicalIdentity(layout, actual, layoutPath);
+  return rootIdentityFromLayout(layout);
+}
+
+/**
+ * Explicitly adopts a copied workspace root on its new physical directory while preserving its
+ * stable storageRootId. Normal Store construction never performs this mutation implicitly.
+ */
+export function adoptWorkspaceStorageRootIdentitySync(
+  workspaceRoot: string,
+  expectedStorageRootId: string,
+): WorkspaceStorageRootIdentity {
+  if (!expectedStorageRootId.trim()) {
+    throw new Error("expectedStorageRootId must not be empty");
+  }
+  const root = resolve(workspaceRoot);
+  assertLocalFileStorageCapabilitiesSync(root);
+  const coordinator = join(root, WORKSPACE_STORAGE_DIRECTORY);
+  assertOrCreatePrivateDirectory(coordinator);
+  return withFileLockSync(
+    join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+    `workspace-storage-adopt:${process.pid}:${randomUUID()}`,
+    () => {
+      recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
+      const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
+      if (!existsSync(layoutPath)) {
+        throw new FileStorageIntegrityError(
+          `Workspace storage layout marker is missing: ${layoutPath}`,
+        );
+      }
+      const layout = decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath);
+      if (layout.storageRootId !== expectedStorageRootId) {
+        throw new FileStorageIntegrityError(
+          `Workspace storage root ID does not match explicit adoption request: ${layoutPath}`,
+        );
+      }
+      const physicalIdentity = currentPhysicalIdentity(root);
+      const adopted: WorkspaceStorageLayout = {
+        ...layout,
+        physicalIdentity,
+        adoptedAt: new Date().toISOString(),
+      };
+      commitFileTransactionSync(
+        root,
+        {
+          replacements: [
+            {
+              relativePath: WORKSPACE_STORAGE_LAYOUT_FILE,
+              content: `${JSON.stringify(adopted, null, 2)}\n`,
+            },
+          ],
+        },
+        { ...WORKSPACE_LAYOUT_TRANSACTION_OPTIONS, transactionId: randomUUID() },
+      );
+      return rootIdentityFromLayout(adopted);
+    },
+  );
 }
 
 function publishLayout(
   root: string,
-  migrated: boolean,
+  existing: WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined,
+  physicalIdentity: WorkspaceStorageLayout["physicalIdentity"],
   replacements: FileTransactionReplacement[],
-): void {
+  migrated: boolean,
+): WorkspaceStorageLayout {
   const layout: WorkspaceStorageLayout = {
     schemaVersion: WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION,
     layout: "session-centric-v1",
-    createdAt: new Date().toISOString(),
+    storageRootId:
+      existing?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
+        ? existing.storageRootId
+        : randomUUID(),
+    physicalIdentity,
+    createdAt: existing?.createdAt ?? new Date().toISOString(),
     ...(migrated ? { migratedFrom: "runtime-directory-v1" } : {}),
+    ...(existing?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION &&
+    existing.adoptedAt !== undefined
+      ? { adoptedAt: existing.adoptedAt }
+      : {}),
   };
   commitFileTransactionSync(
     root,
@@ -164,6 +343,91 @@ function publishLayout(
     },
     WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   );
+  return layout;
+}
+
+function decodeCompatibleWorkspaceStorageLayout(
+  value: unknown,
+  path: string,
+): WorkspaceStorageLayout | LegacyWorkspaceStorageLayout {
+  if (isRecord(value) && value["schemaVersion"] === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+    return decodeWorkspaceStorageLayout(value, path);
+  }
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
+    value["layout"] !== "session-centric-v1" ||
+    typeof value["createdAt"] !== "string" ||
+    (value["migratedFrom"] !== undefined && value["migratedFrom"] !== "runtime-directory-v1")
+  ) {
+    throw new FileStorageIntegrityError(`Invalid workspace storage layout marker: ${path}`);
+  }
+  return {
+    schemaVersion: LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION,
+    layout: "session-centric-v1",
+    createdAt: value["createdAt"],
+    ...(value["migratedFrom"] === "runtime-directory-v1"
+      ? { migratedFrom: "runtime-directory-v1" as const }
+      : {}),
+  };
+}
+
+function currentPhysicalIdentity(root: string): WorkspaceStorageLayout["physicalIdentity"] {
+  const metadata = lstatSync(root);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new FileStorageIntegrityError(`Storage root must be a real directory: ${root}`);
+  }
+  const physical = statSync(root);
+  return {
+    canonicalPath: realpathSync.native(root),
+    device: String(physical.dev),
+    inode: String(physical.ino),
+  };
+}
+
+function assertLayoutMatchesPhysicalIdentity(
+  layout: WorkspaceStorageLayout,
+  actual: WorkspaceStorageLayout["physicalIdentity"],
+  layoutPath: string,
+): void {
+  if (
+    layout.physicalIdentity.canonicalPath !== actual.canonicalPath ||
+    layout.physicalIdentity.device !== actual.device ||
+    layout.physicalIdentity.inode !== actual.inode
+  ) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage root requires explicit adoption: ${layoutPath}; recorded ${formatIdentity(
+        layout.physicalIdentity,
+      )}, received ${formatIdentity(actual)}`,
+    );
+  }
+}
+
+function rootIdentityFromLayout(layout: WorkspaceStorageLayout): WorkspaceStorageRootIdentity {
+  return {
+    storageRootId: layout.storageRootId,
+    ...layout.physicalIdentity,
+  };
+}
+
+function isPhysicalIdentity(value: unknown): value is WorkspaceStorageLayout["physicalIdentity"] {
+  return (
+    isRecord(value) &&
+    typeof value["canonicalPath"] === "string" &&
+    Boolean(value["canonicalPath"]) &&
+    typeof value["device"] === "string" &&
+    Boolean(value["device"]) &&
+    typeof value["inode"] === "string" &&
+    Boolean(value["inode"])
+  );
+}
+
+function formatIdentity(identity: {
+  readonly canonicalPath: string;
+  readonly device: string;
+  readonly inode: string;
+}): string {
+  return `${identity.canonicalPath} (${identity.device}:${identity.inode})`;
 }
 
 function collectLegacyRuntimeReplacements(
