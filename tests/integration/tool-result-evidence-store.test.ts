@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rename,
@@ -10,6 +11,7 @@ import {
   stat,
   symlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,6 +147,12 @@ test("Runtime Evidence reads legacy v1 manifests and compaction Evidence v1", as
 
   assert.equal((await fixture.archive.readRuntimeToolExchange(reference)).schemaVersion, 1);
   assert.equal(await fixture.archive.readRuntimeToolOutput(reference), content.rawOutput);
+  const legacyPage = await fixture.archive.readRuntimeToolOutputPage(reference, {
+    offsetBytes: 0,
+    limitBytes: 6,
+  });
+  assert.equal(legacyPage.content, "legacy");
+  assert.equal(legacyPage.nextOffsetBytes, 6);
 
   const compacted = await fixture.archive.archiveToolExchanges("compaction-session", [
     {
@@ -238,6 +246,193 @@ test(
     );
   },
 );
+
+test(
+  "Runtime Evidence rejects symlink directory ancestors without touching their targets",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-evidence-ancestor-link-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const rawOutput = "ancestor link canary";
+    const digest = createHash("sha256").update(rawOutput).digest("hex");
+    const cases = [
+      {
+        name: "evidence root",
+        linkPath(evidenceRoot: string) {
+          return evidenceRoot;
+        },
+        async prepare() {},
+      },
+      {
+        name: "blobs directory",
+        linkPath(evidenceRoot: string) {
+          return join(evidenceRoot, "blobs");
+        },
+        async prepare(evidenceRoot: string) {
+          await mkdir(evidenceRoot, { mode: 0o700 });
+        },
+      },
+      {
+        name: "sha256 directory",
+        linkPath(evidenceRoot: string) {
+          return join(evidenceRoot, "blobs", "sha256");
+        },
+        async prepare(evidenceRoot: string) {
+          await mkdir(join(evidenceRoot, "blobs"), { recursive: true, mode: 0o700 });
+        },
+      },
+      {
+        name: "digest prefix directory",
+        linkPath(evidenceRoot: string) {
+          return join(evidenceRoot, "blobs", "sha256", digest.slice(0, 2));
+        },
+        async prepare(evidenceRoot: string) {
+          await mkdir(join(evidenceRoot, "blobs", "sha256"), {
+            recursive: true,
+            mode: 0o700,
+          });
+        },
+      },
+      {
+        name: "session directory",
+        linkPath(evidenceRoot: string) {
+          return join(evidenceRoot, "ancestor-session");
+        },
+        async prepare(evidenceRoot: string) {
+          await mkdir(evidenceRoot, { mode: 0o700 });
+        },
+      },
+    ] as const;
+
+    for (const fixtureCase of cases) {
+      await context.test(fixtureCase.name, async () => {
+        const caseRoot = join(root, fixtureCase.name.replaceAll(" ", "-"));
+        const evidenceRoot = join(caseRoot, "evidence");
+        const outside = join(caseRoot, "outside");
+        await mkdir(caseRoot, { recursive: true, mode: 0o700 });
+        await mkdir(outside, { mode: 0o751 });
+        const markerPath = join(outside, "marker.txt");
+        await writeFile(markerPath, "outside remains untouched", {
+          encoding: "utf8",
+          mode: 0o640,
+        });
+        await fixtureCase.prepare(evidenceRoot);
+        await symlink(outside, fixtureCase.linkPath(evidenceRoot));
+
+        const outsideMode = (await stat(outside)).mode & 0o777;
+        const markerMode = (await stat(markerPath)).mode & 0o777;
+        const outsideEntries = await readdir(outside);
+        const archive = new EvidenceArchive({ baseDir: evidenceRoot });
+        await assert.rejects(
+          archive.archiveRuntimeToolResult({
+            sessionId: "ancestor-session",
+            toolCallId: "call-1",
+            toolName: "bash",
+            rawArguments: "{}",
+            rawOutput,
+            isError: false,
+          }),
+          /regular non-symlink directory|changed/u,
+        );
+
+        assert.equal((await stat(outside)).mode & 0o777, outsideMode);
+        assert.equal((await stat(markerPath)).mode & 0o777, markerMode);
+        assert.equal(await readFile(markerPath, "utf8"), "outside remains untouched");
+        assert.deepEqual(await readdir(outside), outsideEntries);
+      });
+    }
+  },
+);
+
+test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (context) => {
+  const fixture = await evidenceFixture(context, "pico-evidence-utf8-boundary-");
+  const rawOutput = "🙂a开";
+  const reference = await fixture.archive.archiveRuntimeToolResult({
+    sessionId: "utf8-session",
+    toolCallId: "call-1",
+    toolName: "bash",
+    rawArguments: "{}",
+    rawOutput,
+    isError: false,
+  });
+
+  await assert.rejects(
+    fixture.archive.readRuntimeToolOutputPage(reference, {
+      offsetBytes: 1,
+      limitBytes: 4,
+    }),
+    /not a UTF-8 code point boundary/u,
+  );
+  for (const limitBytes of [1, 2, 3]) {
+    await assert.rejects(
+      fixture.archive.readRuntimeToolOutputPage(reference, { limitBytes }),
+      /cannot contain the next complete UTF-8 code point/u,
+    );
+  }
+
+  const emoji = await fixture.archive.readRuntimeToolOutputPage(reference, {
+    offsetBytes: 0,
+    limitBytes: 4,
+  });
+  assert.equal(emoji.content, "🙂");
+  assert.equal(Buffer.byteLength(emoji.content, "utf8"), 4);
+  assert.equal(emoji.nextOffsetBytes, 4);
+
+  const ascii = await fixture.archive.readRuntimeToolOutputPage(reference, {
+    offsetBytes: 4,
+    limitBytes: 2,
+  });
+  assert.equal(ascii.content, "a");
+  assert.ok(Buffer.byteLength(ascii.content, "utf8") <= ascii.limitBytes);
+  assert.equal(ascii.nextOffsetBytes, 5);
+});
+
+test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates cache", async (context) => {
+  const fixture = await evidenceFixture(context, "pico-evidence-page-cache-");
+  const rawOutput = "a".repeat(2 * 1024 * 1024);
+  const reference = await fixture.archive.archiveRuntimeToolResult({
+    sessionId: "page-cache-session",
+    toolCallId: "call-1",
+    toolName: "read_file",
+    rawArguments: "{}",
+    rawOutput,
+    isError: false,
+  });
+  const manifest = await fixture.archive.readRuntimeToolExchange(reference);
+  assert.equal(manifest.schemaVersion, 2);
+  const blobPath = pathForBlob(fixture.evidenceRoot, manifest.content.rawOutput.digest);
+  const tracker = await trackFileHandleReads(context, blobPath);
+  const reader = new EvidenceArchive({ baseDir: fixture.evidenceRoot });
+
+  const beforeFirst = tracker.bytesRead;
+  const first = await reader.readRuntimeToolOutputPage(reference, {
+    offsetBytes: 0,
+    limitBytes: 7,
+  });
+  const firstReadBytes = tracker.bytesRead - beforeFirst;
+  assert.equal(first.content, "a".repeat(7));
+  assert.equal(firstReadBytes, rawOutput.length + 8);
+
+  const beforeSecond = tracker.bytesRead;
+  const second = await reader.readRuntimeToolOutputPage(reference, {
+    offsetBytes: 7,
+    limitBytes: 7,
+  });
+  const secondReadBytes = tracker.bytesRead - beforeSecond;
+  assert.equal(second.content, "a".repeat(7));
+  assert.equal(secondReadBytes, 8);
+
+  await writeFile(blobPath, "b".repeat(rawOutput.length), "utf8");
+  const beforeTamper = tracker.bytesRead;
+  await assert.rejects(
+    reader.readRuntimeToolOutputPage(reference, {
+      offsetBytes: 14,
+      limitBytes: 7,
+    }),
+    /failed integrity validation/u,
+  );
+  assert.equal(tracker.bytesRead - beforeTamper, rawOutput.length);
+});
 
 test("read_evidence validates opaque refs and paginates UTF-8 without loss", async (context) => {
   const fixture = await evidenceFixture(context, "pico-read-evidence-");
@@ -360,6 +555,43 @@ async function evidenceFixture(context: TestContext, prefix: string): Promise<Ev
       baseDir: evidenceRoot,
       now: () => new Date("2026-07-28T00:00:00.000Z"),
     }),
+  };
+}
+
+interface FileReadTracker {
+  readonly bytesRead: number;
+}
+
+type TrackedRead = (
+  this: FileHandle,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number | null,
+) => Promise<{ bytesRead: number; buffer: Buffer }>;
+
+async function trackFileHandleReads(context: TestContext, path: string): Promise<FileReadTracker> {
+  const probe = await open(path, "r");
+  const target = await probe.stat({ bigint: true });
+  const prototype = Object.getPrototypeOf(probe) as { read: TrackedRead };
+  await probe.close();
+  const originalRead = prototype.read;
+  let bytesRead = 0;
+  prototype.read = async function trackedRead(buffer, offset, length, position) {
+    const result = await originalRead.call(this, buffer, offset, length, position);
+    const opened = await this.stat({ bigint: true });
+    if (opened.dev === target.dev && opened.ino === target.ino) {
+      bytesRead += result.bytesRead;
+    }
+    return result;
+  };
+  context.after(() => {
+    prototype.read = originalRead;
+  });
+  return {
+    get bytesRead() {
+      return bytesRead;
+    },
   };
 }
 
