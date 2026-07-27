@@ -103,13 +103,18 @@ workspace/root identity、RuntimeEvent 高水位、interrupted terminal、审批
 通过校验后，协调器先按 TaskRun 日志的提交时间取得或接管执行租约，再以 revision CAS 原子
 写入 `task.resume.claimed + attempt.started`。adapter 使用确定性的 `launchId`、Runtime Run ID
 和 `run.started` event ID，在来源高水位 `H+1` 以 CAS 原子发布 `run.started`；只有发布成功后
-才能启动 provider、工具或其他外部副作用。若在 TaskRun 结算前崩溃，恢复器从 canonical
-`H+1` 事件重建 body-free 启动凭据，不会重复调用 adapter；同一 Session 在 `H+2` 之后出现的
-其他合法 Run 不会推翻已经成立的凭据。旧 owner/lease epoch 的 checkpoint 与完成写入会被拒绝。
+才能安装或确认 durable execution intent/worker，再启动 provider、工具或其他外部副作用。
+`run.started` 只证明 admission，不单独证明 worker 已启动；若在 TaskRun 结算前崩溃，恢复器
+从 canonical `H+1` 事件重建 body-free 准入凭据，并以同一 `launchId` 重调幂等 adapter，
+直到 adapter 确认执行已安装。重复调用不得重复真实副作用。同一 Session 在 `H+2` 之后出现的
+其他合法 Run 不会推翻已经成立的准入凭据，但来源 Run 在终止序列后不得再追加事实。旧
+owner/lease epoch 的 checkpoint、launch 与完成写入会被拒绝。
 既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为 `host_bound`，
 进程退出后只收敛为 `interrupted`。
 
 `sessions/`、`task-runs/`、Artifact、Evidence、Trace 和 Memory summaries 可进入只读导出计划；
+其中 Session/TaskRun 只接受完整 SHA-256 目录和固定 canonical 文件名，计划在共享事务锁内
+恢复 pending commit 后生成一致性哈希；
 `.storage/`、`control/`、Memory state、锁、凭据、临时文件和 legacy SQLite 属于 host-bound
 或 protected。Portable TaskRun 可用于检查和审计，但在新的 storage root 上不会自动接管执行。
 

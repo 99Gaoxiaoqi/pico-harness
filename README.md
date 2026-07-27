@@ -79,7 +79,7 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 - **渐进式上下文**：Skills 只先披露元数据，按需加载正文；Compaction、ErrorRecovery 与 SystemReminders 控制预算和重复失败。
 - **多代理隔离**：Explore 保持只读；可写 Worker 只有在独立 Git worktree 和平台沙箱都可用时才启动，否则 fail-closed。
 - **后台任务**：自然语言或 `/cron` 创建持久 Job，由当前 OS 用户的本机 daemon 执行；模型路由、凭证引用和网络策略在创建时冻结。
-- **安全恢复任务**：只有注册了稳定 adapter ID/version、不可变输入和 checkpoint 契约的任务才可进入 `recoverable`；重启后先取得 TaskRun 执行租约，再从已验证边界创建新 Attempt。adapter 必须以 RuntimeEvent 高水位 CAS 原子发布确定性的 `run.started`，之后才可产生外部副作用；结算前崩溃可从该事件重建启动凭据。既有闭包、进程和流仍为 `host_bound`。
+- **安全恢复任务**：只有注册了稳定 adapter ID/version、不可变输入和 checkpoint 契约的任务才可进入 `recoverable`；重启后先取得 TaskRun 执行租约，再从已验证边界创建新 Attempt。adapter 必须以 RuntimeEvent 高水位 CAS 原子发布确定性的 `run.started`，再用同一 `launchId` 幂等安装或确认 durable worker；`run.started` 只证明准入，不单独证明执行已启动。既有闭包、进程和流仍为 `host_bound`。
 - **可扩展能力**：Hooks、MCP、LSP 与 Agent/Skill Catalog 由 Runtime 装配；Markdown Command 当前属于 TUI 输入层能力。
 - **受信 Plugin 快照**：Pico/Claude manifest 会先解析、校验并冻结为纯数据，可贡献 Skill、Command、Agent、Hook、MCP 与 LSP；TUI 在宿主生命周期复用快照，Desktop 默认按 Run 加载和释放，后台 Job 不加载。任意 Plugin 代码不会直接载入 Runtime 进程，但已授权 Hook、MCP 或 LSP 可以按各自边界启动子进程。
 - **可观测性**：usage/成本、结构化日志、追踪、运行事件和诊断命令覆盖主要执行链。
