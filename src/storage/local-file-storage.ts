@@ -485,16 +485,66 @@ export interface FileTransactionInspection {
   readonly status: "pending" | "partially-applied" | "applied";
 }
 
+export interface FileTransactionReplacementInspection extends FileTransactionInspection {
+  readonly replacement?: {
+    readonly relativePath: string;
+    readonly content: Buffer;
+  };
+}
+
 /** Validates both marker structure and the recoverability of every current target. */
 export function inspectFileTransactionMarkerSync(
   storageRoot: string,
   options: Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName"> = {},
 ): FileTransactionInspection {
+  return inspectPersistedFileTransactionSync(storageRoot, options).inspection;
+}
+
+/**
+ * Strictly validates a pending transaction and returns one decoded replacement payload when
+ * present. Callers use this for read-only preflight decisions; no target is applied or rewritten.
+ */
+export function inspectFileTransactionReplacementSync(
+  storageRoot: string,
+  relativePath: string,
+  options: Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName"> = {},
+): FileTransactionReplacementInspection {
+  const root = resolve(storageRoot);
+  const { transaction, inspection } = inspectPersistedFileTransactionSync(root, options);
+  const requested = normalizedRelativePath(root, resolveTransactionTarget(root, relativePath));
+  const replacement = transaction.replacements.find(
+    (entry) =>
+      normalizedRelativePath(root, resolveTransactionTarget(root, entry.relativePath)) ===
+      requested,
+  );
+  return {
+    ...inspection,
+    ...(replacement
+      ? {
+          replacement: {
+            relativePath: requested,
+            content: Buffer.from(replacement.contentBase64, "base64"),
+          },
+        }
+      : {}),
+  };
+}
+
+function inspectPersistedFileTransactionSync(
+  storageRoot: string,
+  options: Pick<FileTransactionOptions, "allowedTargetPrefixes" | "commitFileName">,
+): {
+  readonly transaction: PersistedFileTransaction;
+  readonly inspection: FileTransactionInspection;
+} {
   const root = resolve(storageRoot);
   const commitPath = transactionCommitPath(root, options.commitFileName);
   const transaction = decodePersistedTransaction(readJsonFileSync(commitPath), commitPath);
   validateTransactionTargets(root, transaction, options.allowedTargetPrefixes);
-  return inspectTransactionTargets(root, transaction);
+  return {
+    transaction,
+    inspection: inspectTransactionTargets(root, transaction),
+  };
 }
 
 function inspectTransactionTargets(

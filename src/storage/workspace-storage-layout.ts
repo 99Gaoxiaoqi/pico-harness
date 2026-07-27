@@ -15,6 +15,7 @@ import {
   commitFileTransactionSync,
   FileStorageIntegrityError,
   hasPermanentFileLockFenceSync,
+  inspectFileTransactionReplacementSync,
   mkdirPrivateSync,
   readJsonFileSync,
   recoverFileTransactionSync,
@@ -109,10 +110,10 @@ export function prepareWorkspaceStorageLayoutSync(
       const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
       const physicalIdentity = currentPhysicalIdentity(root);
       let existingLayout = readWorkspaceStorageLayoutMarkerSync(root);
-      assertLayoutAllowsRecovery(existingLayout, physicalIdentity, layoutPath);
+      assertLayoutAllowsRecovery(root, existingLayout, physicalIdentity, layoutPath);
       recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       existingLayout = readWorkspaceStorageLayoutMarkerSync(root);
-      assertLayoutAllowsRecovery(existingLayout, physicalIdentity, layoutPath);
+      assertLayoutAllowsRecovery(root, existingLayout, physicalIdentity, layoutPath);
       const legacyRoot = join(root, "runtime");
       assertOrCreatePrivateDirectory(legacyRoot);
       const legacyLock = join(legacyRoot, "lock");
@@ -398,16 +399,35 @@ function assertWorkspaceLayoutAllowsMutationSync(root: string): void {
   const physicalIdentity = currentPhysicalIdentity(root);
   const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
   const layout = readWorkspaceStorageLayoutMarkerSync(root);
-  assertLayoutAllowsRecovery(layout, physicalIdentity, layoutPath);
+  assertLayoutAllowsRecovery(root, layout, physicalIdentity, layoutPath);
 }
 
 function assertLayoutAllowsRecovery(
+  root: string,
   layout: WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined,
   physicalIdentity: WorkspaceStorageLayout["physicalIdentity"],
   layoutPath: string,
 ): void {
   if (layout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
     assertLayoutMatchesPhysicalIdentity(layout, physicalIdentity, layoutPath);
+    return;
+  }
+  if (
+    layout?.schemaVersion === LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION &&
+    existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE))
+  ) {
+    // A v1 marker cannot bind a runtime-only transaction to one physical root. Automatic
+    // recovery is safe only when the same strict marker publishes a verifiable v2 identity.
+    const pendingLayout = readPendingWorkspaceLayoutReplacementSync(root);
+    if (!pendingLayout) {
+      throw new FileStorageIntegrityError(
+        `Legacy workspace storage has a pending transaction without a verifiable version 2 layout replacement: ${join(
+          root,
+          WORKSPACE_STORAGE_COMMIT_FILE,
+        )}; ordinary recovery is refused and requires verified manual recovery`,
+      );
+    }
+    assertLayoutMatchesPhysicalIdentity(pendingLayout, physicalIdentity, layoutPath);
   }
 }
 
@@ -433,17 +453,51 @@ function requireAdoptableWorkspaceStorageLayoutSync(
   currentPhysicalIdentity(root);
   const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
   const layout = readWorkspaceStorageLayoutMarkerSync(root);
-  if (!layout || layout.schemaVersion !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+  const adoptableLayout =
+    layout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
+      ? layout
+      : layout?.schemaVersion === LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
+        ? readPendingWorkspaceLayoutReplacementSync(root)
+        : undefined;
+  if (!adoptableLayout) {
     throw new FileStorageIntegrityError(
       `Workspace storage layout marker is missing or cannot be explicitly adopted: ${layoutPath}`,
     );
   }
-  if (layout.storageRootId !== expectedStorageRootId) {
+  if (adoptableLayout.storageRootId !== expectedStorageRootId) {
     throw new FileStorageIntegrityError(
       `Workspace storage root ID does not match explicit adoption request: ${layoutPath}`,
     );
   }
-  return layout;
+  return adoptableLayout;
+}
+
+function readPendingWorkspaceLayoutReplacementSync(
+  root: string,
+): WorkspaceStorageLayout | undefined {
+  const commitPath = join(root, WORKSPACE_STORAGE_COMMIT_FILE);
+  if (!existsSync(commitPath)) return undefined;
+  const inspection = inspectFileTransactionReplacementSync(
+    root,
+    WORKSPACE_STORAGE_LAYOUT_FILE,
+    WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
+  );
+  if (!inspection.replacement) return undefined;
+  let value: unknown;
+  try {
+    const json = new TextDecoder("utf-8", { fatal: true }).decode(inspection.replacement.content);
+    value = JSON.parse(json) as unknown;
+  } catch (error) {
+    throw new FileStorageIntegrityError(
+      `Pending workspace layout replacement is not valid UTF-8 JSON: ${commitPath}; ${errorMessage(
+        error,
+      )}`,
+    );
+  }
+  return decodeWorkspaceStorageLayout(
+    value,
+    `${commitPath} replacement ${inspection.replacement.relativePath}`,
+  );
 }
 
 function rootIdentityFromLayout(layout: WorkspaceStorageLayout): WorkspaceStorageRootIdentity {
@@ -620,4 +674,8 @@ function readDirectoryEntries(path: string): Dirent[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
