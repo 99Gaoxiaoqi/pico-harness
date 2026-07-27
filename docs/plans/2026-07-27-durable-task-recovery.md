@@ -99,16 +99,16 @@ adapter 必须在任何 provider、工具或外部副作用之前，以来源 Ru
 
 ## 验收标准
 
-- [ ] TaskRun 多事件写入原子提交，重开后能从日志重建投影。
-- [ ] TaskRun ID 使用完整 SHA-256 locator，原始 ID 只保存在内容中。
-- [ ] partial tail 可幂等修复；完整非法中间行拒绝读取和追加。
-- [ ] 两个进程并发追加时 sequence 连续且不丢事件。
-- [ ] 进程崩溃后的 recoverable task 先收敛旧 Attempt，再以新 Attempt 接管。
-- [ ] adapter 缺失、版本变化、workspace identity 变化、Runtime high-water 不一致、未配对工具副作用或后台操作未收敛时必须 park。
-- [ ] 重复恢复不会创建多个 successor Attempt；旧 Lease epoch 的迟到写入被拒绝。
-- [ ] 新建和既有 workspace 都获得稳定 Storage Root ID；目录被替换时活跃 Store fail closed。
-- [ ] Portable 计划只包含白名单路径，明确排除凭据、锁、commit、Host 配置、临时文件和 legacy SQLite。
-- [ ] 现有 Session、RuntimeStore、Memory 和 legacy 文件行为保持兼容。
+- [x] TaskRun 多事件写入原子提交，重开后能从日志重建投影。
+- [x] TaskRun ID 使用完整 SHA-256 locator，原始 ID 只保存在内容中。
+- [x] partial tail 可幂等修复；完整非法中间行拒绝读取和追加。
+- [x] 两个进程并发追加时 sequence 连续且不丢事件。
+- [x] 进程崩溃后的 recoverable task 先收敛旧 Attempt，再以新 Attempt 接管。
+- [x] adapter 缺失、版本变化、workspace identity 变化、Runtime high-water 不一致、未配对工具副作用或后台操作未收敛时必须 park。
+- [x] 重复恢复不会创建多个 successor Attempt；旧 Lease epoch 的迟到写入被拒绝。
+- [x] 新建和既有 workspace 都获得稳定 Storage Root ID；目录被替换时活跃 Store fail closed。
+- [x] Portable 计划只包含白名单路径，明确排除凭据、锁、commit、Host 配置、临时文件和 legacy SQLite。
+- [x] 现有 Session、RuntimeStore、Memory 和 legacy 文件行为保持兼容。
 
 ## 失败与回退
 
@@ -127,4 +127,12 @@ adapter 必须在任何 provider、工具或外部副作用之前，以来源 Ru
 ## 验证证据
 
 - 基线：28 条 RuntimeStore、RuntimeRun recovery、workspace layout、StorageDoctor 测试通过。
-- 最终要求：四组针对性集成测试、相关跨进程/故障测试、lint、typecheck、build、Desktop typecheck、`check:storage`、架构检查和最终独立审查。
+- 最终存储/恢复聚焦套件：103 / 103 通过，覆盖跨进程锁、故障恢复、复制根零写入、
+  Session/TaskRun symlink 边界、execution/launch fencing、admission/ensure、跨根只读、
+  portable 一致快照、read-only 和幂等冲突。
+- 完整集成测试：591 项；583 通过、0 失败、8 项平台限定跳过。
+- 冻结代码通过 lint、核心 typecheck、Desktop typecheck、生产 build、`check:storage`、
+  `check:architecture:strict` 和 `git diff --check`。Storage capability 验证原子 `mkdir`、
+  同目录 rename、文件/目录 `fsync` 与崩溃恢复。
+- 多代理独立审查逐项复现并关闭存储/恢复故障窗口；最终复核为 No findings。
+- `npm audit` 未执行：安全策略拒绝向公共 registry 发送依赖元数据；本次差异未修改依赖清单。
