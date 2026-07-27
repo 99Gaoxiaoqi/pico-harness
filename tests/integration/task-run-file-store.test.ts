@@ -1,0 +1,487 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { promisify } from "node:util";
+import {
+  commitFileTransactionSync,
+  withFileLockSync,
+} from "../../src/storage/local-file-storage.js";
+import {
+  WORKSPACE_STORAGE_COMMIT_FILE,
+  WORKSPACE_STORAGE_LOCK_DIRECTORY,
+} from "../../src/storage/workspace-storage-layout.js";
+import {
+  TASK_RUN_EVENT_SCHEMA_VERSION,
+  type TaskRunEvent,
+} from "../../src/tasks/task-run-contract.js";
+import {
+  hashTaskRunInput,
+  TASK_RUN_TRANSACTION_OPTIONS,
+  TaskRunStore,
+  TaskRunStoreIntegrityError,
+  taskRunDigest,
+} from "../../src/tasks/task-run-store.js";
+
+const AT = "2026-07-27T00:00:00.000Z";
+
+test("TaskRunStore persists a hashed fact ledger and rebuilds its projection", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-files-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const input = { goal: "finish the task", nested: { order: 1 } };
+  const store = new TaskRunStore({
+    storageRoot: root,
+    now: () => new Date(AT),
+  });
+  const initialized = await store.initializeTaskRun({
+    taskRunId: "task/run:with-path",
+    workDir: workspace,
+    storageRootId: "storage-root-1",
+    adapter: {
+      id: "test.adapter",
+      version: 1,
+      input,
+      inputHash: hashTaskRunInput(input),
+    },
+    maxAttempts: 3,
+  });
+  assert.equal(initialized.status, "queued");
+  assert.equal(initialized.revision, 0);
+
+  const firstBatch = [
+    attemptStarted("task/run:with-path", "start-1", "attempt-1", 1, "owner-1", 1),
+    checkpointed("task/run:with-path", "checkpoint-1", "attempt-1", workspace),
+    attemptFinished("task/run:with-path", "finish-1", "attempt-1", "interrupted"),
+  ] satisfies TaskRunEvent[];
+  const first = await store.appendBatch("task/run:with-path", firstBatch, {
+    transactionId: "task-transaction-1",
+  });
+  assert.deepEqual(
+    first.map(({ inserted, entry, revision, transactionId }) => ({
+      inserted,
+      sequence: entry.sequence,
+      revision,
+      transactionId,
+    })),
+    [
+      { inserted: true, sequence: 1, revision: 1, transactionId: "task-transaction-1" },
+      { inserted: true, sequence: 2, revision: 1, transactionId: "task-transaction-1" },
+      { inserted: true, sequence: 3, revision: 1, transactionId: "task-transaction-1" },
+    ],
+  );
+  assert.deepEqual(
+    (
+      await store.appendBatch("task/run:with-path", structuredClone(firstBatch), {
+        transactionId: "task-transaction-1",
+      })
+    ).map(({ inserted, entry }) => [inserted, entry.sequence]),
+    [
+      [false, 1],
+      [false, 2],
+      [false, 3],
+    ],
+  );
+
+  await store.appendBatch(
+    "task/run:with-path",
+    [
+      resumeClaimed(
+        "task/run:with-path",
+        "claim-event-1",
+        "claim-1",
+        "attempt-1",
+        "attempt-2",
+        "owner-2",
+        2,
+      ),
+      attemptStarted("task/run:with-path", "start-2", "attempt-2", 2, "owner-2", 2, "attempt-1"),
+    ],
+    { transactionId: "task-transaction-2" },
+  );
+  await store.appendBatch(
+    "task/run:with-path",
+    [
+      attemptFinished("task/run:with-path", "finish-2", "attempt-2", "succeeded"),
+      taskFinished("task/run:with-path", "task-finished", "attempt-2"),
+    ],
+    { transactionId: "task-transaction-3" },
+  );
+
+  const projection = await store.readTaskRunProjection("task/run:with-path");
+  assert.equal(projection?.status, "succeeded");
+  assert.equal(projection?.revision, 3);
+  assert.deepEqual(
+    projection?.attempts.map(({ attemptId, attemptNumber, status, sourceAttemptId }) => ({
+      attemptId,
+      attemptNumber,
+      status,
+      sourceAttemptId,
+    })),
+    [
+      {
+        attemptId: "attempt-1",
+        attemptNumber: 1,
+        status: "interrupted",
+        sourceAttemptId: undefined,
+      },
+      {
+        attemptId: "attempt-2",
+        attemptNumber: 2,
+        status: "succeeded",
+        sourceAttemptId: "attempt-1",
+      },
+    ],
+  );
+  assert.deepEqual(
+    (await store.readTaskRunEvents("task/run:with-path")).map(({ sequence }) => sequence),
+    [1, 2, 3, 4, 5, 6, 7],
+  );
+  store.close();
+  const reopened = new TaskRunStore({ storageRoot: root });
+  const snapshot = await reopened.readTaskRun("task/run:with-path");
+  assert.equal(snapshot?.projection.status, "succeeded");
+  assert.equal(snapshot?.events.length, 7);
+
+  const digest = taskRunDigest("task/run:with-path");
+  const taskDirectory = join(root, "task-runs", digest);
+  const ledgerPath = join(taskDirectory, "task.jsonl");
+  const manifestPath = join(taskDirectory, "manifest.json");
+  const lines = (await readFile(ledgerPath, "utf8")).trimEnd().split("\n");
+  assert.equal(lines.length, 4);
+  assert.equal(JSON.parse(lines[0]!).taskRunId, "task/run:with-path");
+  assert.equal(JSON.parse(lines[1]!).entries.length, 3);
+  assert.equal(JSON.parse(lines[2]!).entries.length, 2);
+  assert.equal(JSON.parse(lines[3]!).entries.length, 2);
+  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).ledger.lastSequence, 7);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(taskDirectory)).mode & 0o777, 0o700);
+    assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(manifestPath)).mode & 0o777, 0o600);
+  }
+
+  await writeFile(manifestPath, '{"forged":true}\n', { mode: 0o600 });
+  assert.equal((await reopened.listTaskRunProjections())[0]?.revision, 3);
+  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).ledger.lastSequence, 7);
+
+  await assert.rejects(
+    reopened.append(
+      "task/run:with-path",
+      attemptStarted(
+        "task/run:with-path",
+        "start-1",
+        "attempt-1",
+        1,
+        "owner-1",
+        1,
+        undefined,
+        "2026-07-27T00:00:01.000Z",
+      ),
+    ),
+    (error: unknown) =>
+      error instanceof TaskRunStoreIntegrityError &&
+      /already bound to another payload/u.test(error.message),
+  );
+  await assert.rejects(
+    reopened.appendBatch("task/run:with-path", [taskParked("task/run:with-path", "different")], {
+      transactionId: "task-transaction-1",
+    }),
+    (error: unknown) =>
+      error instanceof TaskRunStoreIntegrityError &&
+      /transaction task-transaction-1 is already bound/u.test(error.message),
+  );
+});
+
+test("TaskRunStore recovers a published commit and only repairs an incomplete tail", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-recovery-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = await initializedStore(root, "recover-task");
+  const event = attemptStarted(
+    "recover-task",
+    "recover-start",
+    "recover-attempt",
+    1,
+    "recover-owner",
+    1,
+  );
+  const batch = {
+    type: "task-event-batch",
+    schemaVersion: 1,
+    txId: "recover-transaction",
+    entries: [{ sequence: 1, committedAt: AT, event }],
+  };
+
+  assert.throws(
+    () =>
+      withFileLockSync(
+        join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "task-run-recovery-fixture",
+        () =>
+          commitFileTransactionSync(
+            root,
+            {
+              appends: [
+                {
+                  relativePath: join("task-runs", taskRunDigest("recover-task"), "task.jsonl"),
+                  content: `${JSON.stringify(batch)}\n`,
+                },
+              ],
+            },
+            {
+              ...TASK_RUN_TRANSACTION_OPTIONS,
+              transactionId: "recover-transaction",
+              onStage(stage) {
+                if (stage === "commit-published") throw new Error("injected TaskRun crash");
+              },
+            },
+          ),
+      ),
+    /injected TaskRun crash/u,
+  );
+  assert.match(
+    await readFile(join(root, WORKSPACE_STORAGE_COMMIT_FILE), "utf8"),
+    /recover-transaction/u,
+  );
+  assert.equal((await store.readTaskRunEvents("recover-task"))[0]?.event.eventId, "recover-start");
+  await assert.rejects(stat(join(root, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
+
+  const incompleteRoot = join(root, "incomplete");
+  const incomplete = await initializedStore(incompleteRoot, "incomplete-task");
+  const incompleteLedger = ledgerPath(incompleteRoot, "incomplete-task");
+  await appendFile(incompleteLedger, '{"type":"task-event-batch"');
+  assert.deepEqual(await incomplete.readTaskRunEvents("incomplete-task"), []);
+  assert.equal((await readFile(incompleteLedger, "utf8")).trimEnd().split("\n").length, 1);
+
+  const malformedRoot = join(root, "malformed");
+  const malformed = await initializedStore(malformedRoot, "malformed-task");
+  await appendFile(ledgerPath(malformedRoot, "malformed-task"), "{not-json}\n");
+  await assert.rejects(
+    malformed.readTaskRunProjection("malformed-task"),
+    (error: unknown) =>
+      error instanceof TaskRunStoreIntegrityError && /record 2 is invalid/u.test(error.message),
+  );
+});
+
+test("TaskRunStore rejects invalid state transitions without publishing a batch", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-invalid-transition-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = await initializedStore(root, "invalid-task");
+  await store.append(
+    "invalid-task",
+    attemptStarted("invalid-task", "start", "attempt-1", 1, "owner-1", 1),
+  );
+  const before = await readFile(ledgerPath(root, "invalid-task"), "utf8");
+
+  await assert.rejects(
+    store.append(
+      "invalid-task",
+      resumeClaimed("invalid-task", "claim-event", "claim", "attempt-1", "attempt-2", "owner-2", 2),
+    ),
+    (error: unknown) =>
+      error instanceof TaskRunStoreIntegrityError &&
+      /source is not interrupted/u.test(error.message),
+  );
+  assert.equal(await readFile(ledgerPath(root, "invalid-task"), "utf8"), before);
+});
+
+test("TaskRunStore serializes independent process writers without losing sequence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-processes-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = await initializedStore(root, "shared-task");
+  const modulePath = new URL("../../src/tasks/task-run-store.ts", import.meta.url).href;
+  const source = `
+    import { TaskRunStore } from ${JSON.stringify(modulePath)};
+    const store = new TaskRunStore({ storageRoot: process.env.TEST_STORAGE_ROOT });
+    const prefix = process.env.TEST_EVENT_PREFIX;
+    await store.appendBatch("shared-task", Array.from({ length: 8 }, (_, index) => ({
+      schemaVersion: 1,
+      eventId: prefix + ":" + index,
+      taskRunId: "shared-task",
+      at: "2026-07-27T00:00:00.000Z",
+      kind: "task.parked",
+      data: { reasons: ["adapter_missing"], diagnostics: [prefix] },
+    })), { transactionId: "tx:" + prefix });
+  `;
+  const runChild = async (prefix: string) => {
+    await promisify(execFile)(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", source],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TEST_STORAGE_ROOT: root,
+          TEST_EVENT_PREFIX: prefix,
+        },
+      },
+    );
+  };
+  await Promise.all([runChild("left"), runChild("right")]);
+
+  const events = await store.readTaskRunEvents("shared-task");
+  assert.deepEqual(
+    events.map(({ sequence }) => sequence),
+    Array.from({ length: 16 }, (_, index) => index + 1),
+  );
+  assert.deepEqual([...new Set(events.map(({ event }) => event.eventId.split(":")[0]))].sort(), [
+    "left",
+    "right",
+  ]);
+  assert.equal((await store.readTaskRunProjection("shared-task"))?.revision, 2);
+});
+
+async function initializedStore(root: string, taskRunId: string): Promise<TaskRunStore> {
+  const workspace = join(root, "workspace");
+  await mkdir(workspace, { recursive: true });
+  const input = { taskRunId };
+  const store = new TaskRunStore({
+    storageRoot: root,
+    now: () => new Date(AT),
+  });
+  await store.initializeTaskRun({
+    taskRunId,
+    workDir: workspace,
+    storageRootId: "test-storage-root",
+    adapter: {
+      id: "test.adapter",
+      version: 1,
+      input,
+      inputHash: hashTaskRunInput(input),
+    },
+    maxAttempts: 4,
+  });
+  return store;
+}
+
+function ledgerPath(root: string, taskRunId: string): string {
+  return join(root, "task-runs", taskRunDigest(taskRunId), "task.jsonl");
+}
+
+function attemptStarted(
+  taskRunId: string,
+  eventId: string,
+  attemptId: string,
+  attemptNumber: number,
+  ownerId: string,
+  leaseEpoch: number,
+  sourceAttemptId?: string,
+  at = AT,
+): Extract<TaskRunEvent, { kind: "attempt.started" }> {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at,
+    kind: "attempt.started",
+    data: {
+      attemptId,
+      attemptNumber,
+      ownerId,
+      leaseEpoch,
+      ...(sourceAttemptId ? { sourceAttemptId } : {}),
+    },
+  };
+}
+
+function checkpointed(
+  taskRunId: string,
+  eventId: string,
+  attemptId: string,
+  workspacePath: string,
+): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "attempt.checkpointed",
+    data: {
+      attemptId,
+      boundary: {
+        storageRootId: "storage-root-1",
+        workspacePath,
+        backgroundOperationsSettled: true,
+        runtime: {
+          sessionId: "session-1",
+          runId: "run-1",
+          eventHighWater: 4,
+          terminalEventId: "runtime-terminal-1",
+        },
+        toolCatalogHash: "tool-catalog-1",
+        checkpointRef: "checkpoint-1",
+      },
+    },
+  };
+}
+
+function attemptFinished(
+  taskRunId: string,
+  eventId: string,
+  attemptId: string,
+  status: "interrupted" | "succeeded",
+): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "attempt.finished",
+    data: { attemptId, status },
+  };
+}
+
+function resumeClaimed(
+  taskRunId: string,
+  eventId: string,
+  claimId: string,
+  sourceAttemptId: string,
+  successorAttemptId: string,
+  ownerId: string,
+  leaseEpoch: number,
+): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "task.resume.claimed",
+    data: {
+      claimId,
+      sourceAttemptId,
+      successorAttemptId,
+      ownerId,
+      leaseEpoch,
+    },
+  };
+}
+
+function taskFinished(taskRunId: string, eventId: string, attemptId: string): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "task.finished",
+    data: {
+      status: "succeeded",
+      attemptId,
+    },
+  };
+}
+
+function taskParked(taskRunId: string, eventId: string): TaskRunEvent {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at: AT,
+    kind: "task.parked",
+    data: {
+      reasons: ["adapter_missing"],
+    },
+  };
+}
