@@ -208,7 +208,7 @@ test("an expired launch lease is taken over after a crash between durable claim 
   assert.equal(projection?.attempts[1]?.execution.ownerId, "host:replacement");
 });
 
-test("a crash after run.started but before settlement reconciles one canonical launch", async (t) => {
+test("settlement recovery accepts the expected H+1 after the Session advances to another Run", async (t) => {
   const fixture = await prepareFileRecovery(t);
   const registry = new RecoverableTaskRegistry();
   const resumeCalls: string[] = [];
@@ -244,6 +244,19 @@ test("a crash after run.started but before settlement reconciles one canonical l
     (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.attempts[1]?.launch?.status,
     "claimed",
   );
+  await fixture.runtimeEvents.append({
+    schemaVersion: 1,
+    eventId: "runtime-later-run-started",
+    sessionId: SESSION_ID,
+    invocationId: "invocation:later-run",
+    runId: "run:later",
+    turnId: "turn:later",
+    at: "2026-07-27T00:00:00.500Z",
+    partial: false,
+    visibility: "internal",
+    kind: "run.started",
+    data: { workDir: fixture.workspace },
+  });
 
   const recovered = await recoveryCoordinator(fixture, registry, "host:settlement-recovery", {
     launchLeaseTtlMs: 1_000,
@@ -255,9 +268,17 @@ test("a crash after run.started but before settlement reconciles one canonical l
   assert.equal(resumeCalls.length, 1);
   assert.equal(new Set(resumeCalls).size, 1);
   assert.equal(actualLaunches.size, 1);
+  const expected = deriveRecoverableTaskRuntimeLaunchIdentity(resumeCalls[0]!);
+  const runtimeEntries = await fixture.runtimeEvents.readSessionEntries(SESSION_ID);
+  const expectedStart = runtimeEntries.find(({ event }) => event.runId === expected.runId);
+  const laterStart = runtimeEntries.find(
+    ({ event }) => event.eventId === "runtime-later-run-started",
+  );
+  assert.equal(expectedStart?.sequence, 8);
+  assert.equal(laterStart?.sequence, expectedStart!.sequence + 1);
   assert.equal(
-    (await fixture.runtimeEvents.readSessionEntries(SESSION_ID)).filter(
-      ({ event }) => event.runId !== RUN_ID && event.kind === "run.started",
+    runtimeEntries.filter(
+      ({ event }) => event.runId === expected.runId && event.kind === "run.started",
     ).length,
     1,
   );
