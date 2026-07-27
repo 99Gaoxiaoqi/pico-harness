@@ -91,8 +91,11 @@ LaunchReceipt
 - `park`：任何关键条件缺失、冲突或不确定，保留稳定 reason code。
 
 adapter 必须在任何 provider、工具或外部副作用之前，以来源 RuntimeEvent 高水位 CAS 将
-确定性的 `run.started` 发布到 `H+1`。TaskRun 结算前崩溃时，恢复器只根据该 canonical
-`H+1` 事实重建启动凭据；`H+2` 之后同一 Session 的其他 Run 不影响已经成立的凭据。
+确定性的 `run.started` 发布到 `H+1`。该事实只证明 admission，不证明 durable worker
+已经启动。TaskRun 结算前崩溃时，恢复器根据 canonical `H+1` 重建准入凭据，再用同一
+`launchId` 重调幂等 adapter；adapter 只有在安装或确认 durable execution intent/worker 后
+才能成功返回，重复调用不得重复真实副作用。`H+2` 之后同一 Session 的其他 Run 不影响已经
+成立的准入凭据，但来源 Run 在终止序列后不得再追加事实。
 
 ## 验收标准
 

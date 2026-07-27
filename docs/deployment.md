@@ -52,9 +52,16 @@ Artifact、Evidence、Trace 和 Memory summary；控制面、事务协调、Memo
 
 显式 recoverable 任务的执行权由 `task.jsonl` 中的 TaskRun execution lease 决定；进程重启后
 只有租约到期且安全边界可证明时，新的 owner 才能创建 successor Attempt。adapter 必须先以
-Session 高水位 CAS 发布确定性的 `run.started`，再启动 provider、工具或外部进程；如果在
-TaskRun 结算前崩溃，下一次恢复会从该 canonical 事件重建启动凭据。未实现这套契约的现有
-生产 executor 均保持 `host_bound`，不会被自动接管。
+Session 高水位 CAS 发布确定性的 `run.started`，再用同一 `launchId` 幂等安装或确认 durable
+worker，然后才启动 provider、工具或外部进程。`run.started` 只表示 admission；如果在
+TaskRun 结算前崩溃，下一次恢复会从该 canonical 事件重建准入凭据并再次调用 adapter，
+adapter 必须避免重复真实副作用，且只有确认执行已经安装后才能返回成功。未实现这套契约的
+现有生产 executor 均保持 `host_bound`，不会被自动接管。
+
+可移植计划会在 workspace 共享锁内先完成 pending transaction recovery，再对严格白名单文件
+计算哈希。Session/TaskRun 只接受 64 位十六进制摘要目录和固定账本/manifest 文件；未知文件、
+SQLite/WAL/SHM/rollback journal、锁与事务文件一律不进入计划。Portable TaskRun 的
+`storageRootId` 不匹配时只能只读审计，不能 repair、追加 park 或接管执行。
 
 首次打开工作区时会在旧 `runtime/lock/` 位置保留升级 fence。旧版本会因此拒绝写入，避免
 旧 `runtime/` 与新 `sessions/`、`control/` 静默分叉。若必须回滚，先停止所有新版本进程，
