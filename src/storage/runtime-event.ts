@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { assertTranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
@@ -31,6 +32,7 @@ export type {
   RuntimeSessionStateCommittedEvent,
   RuntimeTerminalStatus,
   RuntimeToolStartedEvent,
+  RuntimeToolResultRecordedEvent,
   RuntimeTranscriptEventRecordedEvent,
 } from "../engine/session-runtime-event.js";
 import type {
@@ -44,6 +46,7 @@ export const RUNTIME_EVENT_KINDS = [
   "run.started",
   "message.committed",
   "tool.started",
+  "tool.result.recorded",
   "approval.requested",
   "approval.settled",
   "model.call.started",
@@ -159,6 +162,9 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
     case "tool.started":
       assertString(value["data"]["toolName"], "tool.started.toolName");
       assertString(value["data"]["argumentsHash"], "tool.started.argumentsHash");
+      return;
+    case "tool.result.recorded":
+      assertToolResultRecordedEvent(value);
       return;
     case "approval.requested":
       assertString(value["data"]["approvalId"], "approval.requested.approvalId");
@@ -312,6 +318,169 @@ function assertCheckpointSummary(value: Record<string, unknown>): void {
   assertMessage(summary);
 }
 
+function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
+  assertOnlyKeys(
+    value,
+    [
+      "schemaVersion",
+      "eventId",
+      "sessionId",
+      "invocationId",
+      "runId",
+      "turnId",
+      "at",
+      "partial",
+      "visibility",
+      "refs",
+      "kind",
+      "data",
+    ],
+    "tool.result.recorded",
+  );
+  if (value["visibility"] !== "model" || value["partial"] !== false) {
+    throw new RuntimeEventIntegrityError(
+      "Runtime tool result must be a complete model-visible fact",
+    );
+  }
+  const refs = value["refs"];
+  if (!isRecord(refs)) {
+    throw new RuntimeEventIntegrityError("Runtime tool result refs must be an object");
+  }
+  assertOnlyKeys(
+    refs,
+    ["stepId", "toolCallId", "parentRunId", "parentToolCallId", "providerCallId", "evidence"],
+    "tool.result.recorded.refs",
+  );
+  assertString(refs["toolCallId"], "tool.result.recorded.refs.toolCallId");
+  for (const field of ["stepId", "parentRunId", "parentToolCallId", "providerCallId"] as const) {
+    if (refs[field] !== undefined) {
+      assertString(refs[field], `tool.result.recorded.refs.${field}`);
+    }
+  }
+
+  const data = value["data"];
+  if (!isRecord(data)) {
+    throw new RuntimeEventIntegrityError("Runtime tool result data must be an object");
+  }
+  assertOnlyKeys(data, ["toolName", "status", "body", "projection"], "tool.result.recorded.data");
+  assertString(data["toolName"], "tool.result.recorded.toolName");
+  if (!isToolResultStatus(data["status"])) {
+    throw new RuntimeEventIntegrityError("Runtime tool result status is invalid");
+  }
+
+  const body = data["body"];
+  if (!isRecord(body)) {
+    throw new RuntimeEventIntegrityError("Runtime tool result body must be an object");
+  }
+  const storage = body["storage"];
+  if (storage !== "inline" && storage !== "evidence") {
+    throw new RuntimeEventIntegrityError("Runtime tool result body storage is invalid");
+  }
+  assertSha256(body["sha256"], "tool.result.recorded.body.sha256");
+  if (!isNonNegativeInteger(body["sizeBytes"])) {
+    throw new RuntimeEventIntegrityError("Runtime tool result body sizeBytes is invalid");
+  }
+  if (storage === "inline") {
+    assertOnlyKeys(
+      body,
+      ["storage", "content", "sha256", "sizeBytes"],
+      "tool.result.recorded.body",
+    );
+    if (typeof body["content"] !== "string") {
+      throw new RuntimeEventIntegrityError("Runtime inline tool result content must be a string");
+    }
+    if (refs["evidence"] !== undefined) {
+      throw new RuntimeEventIntegrityError(
+        "Runtime inline tool result must not reference evidence",
+      );
+    }
+    const content = body["content"];
+    if (Buffer.byteLength(content, "utf8") !== body["sizeBytes"]) {
+      throw new RuntimeEventIntegrityError(
+        "Runtime inline tool result UTF-8 byte count does not match sizeBytes",
+      );
+    }
+    const digest = createHash("sha256").update(content, "utf8").digest("hex");
+    if (digest !== body["sha256"]) {
+      throw new RuntimeEventIntegrityError(
+        "Runtime inline tool result content does not match sha256",
+      );
+    }
+  } else {
+    assertOnlyKeys(body, ["storage", "sha256", "sizeBytes"], "tool.result.recorded.body");
+    assertRuntimeEvidenceReference(refs["evidence"]);
+  }
+
+  const projection = data["projection"];
+  if (!isRecord(projection)) {
+    throw new RuntimeEventIntegrityError("Runtime tool result projection must be an object");
+  }
+  assertOnlyKeys(
+    projection,
+    ["version", "mode", "text", "strategy", "truncated"],
+    "tool.result.recorded.projection",
+  );
+  assertEqual(projection["version"], 1, "tool.result.recorded.projection.version");
+  if (
+    projection["mode"] !== "full" &&
+    projection["mode"] !== "preview" &&
+    projection["mode"] !== "synthetic"
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime tool result projection mode is invalid");
+  }
+  if (
+    projection["mode"] === "synthetic" &&
+    (data["status"] === "succeeded" || data["status"] === "failed")
+  ) {
+    throw new RuntimeEventIntegrityError(
+      "Runtime succeeded or failed tool result cannot use a synthetic projection",
+    );
+  }
+  if (typeof projection["text"] !== "string") {
+    throw new RuntimeEventIntegrityError("Runtime tool result projection text must be a string");
+  }
+  assertString(projection["strategy"], "tool.result.recorded.projection.strategy");
+  if (typeof projection["truncated"] !== "boolean") {
+    throw new RuntimeEventIntegrityError(
+      "Runtime tool result projection truncated must be boolean",
+    );
+  }
+}
+
+function assertRuntimeEvidenceReference(value: unknown): void {
+  if (!isRecord(value)) {
+    throw new RuntimeEventIntegrityError("Runtime tool result evidence ref must be an object");
+  }
+  assertOnlyKeys(
+    value,
+    ["schemaVersion", "contentHash", "sessionId", "kind"],
+    "tool.result.recorded.refs.evidence",
+  );
+  assertEqual(value["schemaVersion"], 1, "tool.result.recorded.refs.evidence.schemaVersion");
+  assertSha256(value["contentHash"], "tool.result.recorded.refs.evidence.contentHash");
+  assertString(value["sessionId"], "tool.result.recorded.refs.evidence.sessionId");
+  assertEqual(value["kind"], "tool-exchange", "tool.result.recorded.refs.evidence.kind");
+}
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  field: string,
+): void {
+  const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unexpected) {
+    throw new RuntimeEventIntegrityError(
+      `Runtime event ${field} contains unsupported field ${unexpected}`,
+    );
+  }
+}
+
+function assertSha256(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new RuntimeEventIntegrityError(`Runtime event ${field} must be a SHA-256 digest`);
+  }
+}
+
 function assertEqual(value: unknown, expected: unknown, field: string): void {
   if (value !== expected) throw new RuntimeEventIntegrityError(`Runtime event ${field} is invalid`);
 }
@@ -356,6 +525,16 @@ function isUsageReportedField(value: unknown): boolean {
 function isTerminalStatus(value: unknown): value is RuntimeTerminalStatus {
   return (
     value === "completed" || value === "failed" || value === "cancelled" || value === "interrupted"
+  );
+}
+
+function isToolResultStatus(value: unknown): boolean {
+  return (
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "rejected" ||
+    value === "cancelled" ||
+    value === "interrupted"
   );
 }
 

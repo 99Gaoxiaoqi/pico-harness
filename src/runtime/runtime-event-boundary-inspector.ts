@@ -278,6 +278,10 @@ function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] 
       event.data.message.providerData?.["picoKind"] !== "synthetic_tool_result"
     ) {
       pending.delete(event.data.message.toolCallId);
+      continue;
+    }
+    if (event.kind === "tool.result.recorded" && event.data.projection.mode !== "synthetic") {
+      pending.delete(event.refs.toolCallId);
     }
   }
   return [...pending].sort();
