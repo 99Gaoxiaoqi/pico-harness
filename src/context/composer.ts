@@ -19,6 +19,12 @@ import { TodoStore } from "./todo-store.js";
 // (engine/loop.ts 反向 import composer)。单例实例由 host 注入,本类不 new。
 import type { GoalManager } from "../engine/goal-manager.js";
 
+/** Provider-facing prompt layers: stable prefix plus per-run volatile context. */
+export interface PromptLayers {
+  readonly systemPrompt: string;
+  readonly turnTail: string;
+}
+
 /** 负责根据工作区环境动态生成 System Prompt */
 export class PromptComposer {
   private readonly workDir: string;
@@ -60,13 +66,20 @@ export class PromptComposer {
     this.onInstructionsLoaded = options?.onInstructionsLoaded;
   }
 
-  /** 组装并返回完整的系统提示词字符串。 */
-  async build(): Promise<string> {
-    const parts: string[] = [];
+  /**
+   * 分层组装提示词。
+   *
+   * systemPrompt 只保留跨轮相对稳定的 core / AGENTS.md / Skills，便于
+   * Provider 复用 system/tools 缓存断点；Plan/Todo/Goal 属于当前运行状态，
+   * 由 AgentEngine 仅追加到本轮可见 user 消息的请求副本。
+   */
+  async buildLayers(): Promise<PromptLayers> {
+    const stableParts: string[] = [];
+    const turnTailParts: string[] = [];
     const loadedInstructionPaths: string[] = [];
 
     // 1. 极简内核:仅确立基本身份与最底线红线纪律
-    parts.push(`# 核心身份
+    stableParts.push(`# 核心身份
 你名叫 pico,一个由驾驭工程 (Harness Engineering) 驱动的骨灰级研发助手。
 你具备极简主义哲学,拒绝废话。你能通过系统提供的内置工具,创建、读取、修改和执行工作区中的代码。
 
@@ -84,10 +97,10 @@ export class PromptComposer {
       // 动态嗅探磁盘:文件存在则注入当前进度(断点续传),不存在则引导建文件。
       // buildPlanContext 出错时降级到静态规范,不让 Plan Mode 嗅探阻断主流程。
       try {
-        parts.push(await this.planStore.buildPlanContext());
+        turnTailParts.push(await this.planStore.buildPlanContext());
       } catch (err) {
         logger.warn({ err }, "buildPlanContext 失败,降级到静态 PLAN_MODE_SPEC");
-        parts.push(PLAN_MODE_SPEC);
+        turnTailParts.push(PLAN_MODE_SPEC);
       }
     }
 
@@ -96,7 +109,7 @@ export class PromptComposer {
     try {
       const agentsContent = await readFile(agentsPath, "utf8");
       loadedInstructionPaths.push(agentsPath);
-      parts.push(`# 项目专属指南 (来自 AGENTS.md)
+      stableParts.push(`# 项目专属指南 (来自 AGENTS.md)
 以下是当前工作区特有的架构规范与注意事项,你的行为必须绝对遵守:
 \`\`\`markdown
 ${agentsContent}
@@ -108,7 +121,7 @@ ${agentsContent}
     // 4. 动态加载技能外挂 (Skills)
     const skillsContent = await this.skillLoader.loadAll();
     if (skillsContent) {
-      parts.push(skillsContent);
+      stableParts.push(skillsContent);
     }
 
     // 5. 结构化 TodoList:注入当前任务清单状态(空清单不注入)
@@ -116,7 +129,7 @@ ${agentsContent}
     try {
       const todoContext = await this.todoStore.buildTodoContext();
       if (todoContext) {
-        parts.push(todoContext);
+        turnTailParts.push(todoContext);
       }
     } catch (err) {
       logger.warn({ err }, "[composer] 构建 TodoList 上下文失败,降级跳过");
@@ -129,7 +142,7 @@ ${agentsContent}
       if (this.goalManager) {
         const goalCtx = this.goalManager.buildGoalContext();
         if (goalCtx) {
-          parts.push(goalCtx);
+          turnTailParts.push(goalCtx);
         }
       }
     } catch (err) {
@@ -137,7 +150,16 @@ ${agentsContent}
     }
 
     await this.onInstructionsLoaded?.(loadedInstructionPaths);
-    return parts.join("\n\n");
+    return {
+      systemPrompt: stableParts.join("\n\n"),
+      turnTail: turnTailParts.join("\n\n"),
+    };
+  }
+
+  /** 兼容旧调用方：仍返回完整提示词，只是不再表达 Provider 的分层边界。 */
+  async build(): Promise<string> {
+    const { systemPrompt, turnTail } = await this.buildLayers();
+    return [systemPrompt, turnTail].filter((part) => part.length > 0).join("\n\n");
   }
 }
 

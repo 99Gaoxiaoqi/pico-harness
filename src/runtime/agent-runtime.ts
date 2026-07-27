@@ -823,7 +823,11 @@ export async function executeAgentRuntime(
     if (options.steer) {
       steerQueue.push(options.steer);
     }
-    const systemPromptFactory = async (): Promise<string> => {
+    const promptLayersFactory = async ({
+      currentUserPrompt,
+    }: {
+      readonly currentUserPrompt: string;
+    }) => {
       const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
         goalManager,
         todoStore,
@@ -835,14 +839,14 @@ export async function executeAgentRuntime(
             { signal: dependencies.signal },
           );
         },
-      }).build();
-      let withMemory = composed;
+      }).buildLayers();
+      const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
       if (memoryContextBuilder) {
         try {
           const canonical = await memoryTrustStore.canonicalize(workDir);
           if (await memoryTrustStore.isTrusted(canonical)) {
-            const memory = await memoryContextBuilder.build(prompt);
-            if (memory.block) withMemory = `${composed}\n\n${memory.block}`;
+            const memory = await memoryContextBuilder.build(currentUserPrompt);
+            if (memory.block) turnTailParts.push(memory.block);
           }
         } catch (error) {
           logger.warn(
@@ -852,13 +856,18 @@ export async function executeAgentRuntime(
         }
       }
       if (
-        backgroundPolicy ||
-        !dependencies.scheduleDraftCoordinator ||
-        !looksLikeScheduleCreationIntent(prompt)
+        !backgroundPolicy &&
+        dependencies.scheduleDraftCoordinator &&
+        looksLikeScheduleCreationIntent(currentUserPrompt)
       ) {
-        return withMemory;
+        turnTailParts.push(
+          "<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>",
+        );
       }
-      return `${withMemory}\n\n<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>`;
+      return {
+        systemPrompt: composed.systemPrompt,
+        turnTail: turnTailParts.join("\n\n"),
+      };
     };
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
@@ -885,7 +894,7 @@ export async function executeAgentRuntime(
         : {}),
       ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
       planMode: effectiveOptions.planMode ?? false,
-      systemPromptFactory,
+      promptLayersFactory,
       goalManager,
       todoStore,
       toolDisclosure,
