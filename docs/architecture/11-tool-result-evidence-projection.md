@@ -25,32 +25,35 @@ interface RuntimeToolResultRecordedEvent {
   };
   data: {
     toolName: string;
-    isError: boolean;
-    rawOutput:
+    status: "succeeded" | "failed" | "rejected" | "cancelled" | "interrupted";
+    body:
       | {
           storage: "inline";
           content: string;
           sha256: string;
-          chars: number;
-          bytes: number;
+          sizeBytes: number;
         }
       | {
           storage: "evidence";
           sha256: string;
-          chars: number;
-          bytes: number;
+          sizeBytes: number;
         };
-    modelProjection:
-      | { kind: "full"; content: string }
-      | { kind: "preview"; content: string; strategy: string };
+    projection: {
+      version: 1;
+      mode: "full" | "preview" | "synthetic";
+      text: string;
+      strategy: string;
+      truncated: boolean;
+    };
   };
 }
 ```
 
-- `rawOutput` 是工具执行事实。Evidence 写入成功时只保存引用及完整性元数据；写入失败时
+- `body` 是工具执行事实。Evidence 写入成功时只保存引用及完整性元数据；写入失败时
   fail-open 为 `inline`，不允许只留下截断文本。
-- `modelProjection` 是可丢弃、可重建的派生数据。当前 Turn 只允许确定性预览，不调用 LLM。
-- `refs.toolCallId` 必填；`rawOutput.storage === "evidence"` 时 `refs.evidence` 必填。
+- `projection` 是可丢弃、可重建的派生数据。当前 Turn 只允许确定性预览，不调用 LLM。
+- `refs.toolCallId` 必填；`body.storage === "evidence"` 时 `refs.evidence` 必填。
+- `body.sha256/sizeBytes` 始终针对原始 `ToolResult.output`，不包含 Recovery 提示或 preview。
 - 旧 `message.committed` ToolResult 继续投影，支持现有 Session、fork seed 与兼容宿主。
 
 ## 写入顺序
@@ -59,7 +62,7 @@ interface RuntimeToolResultRecordedEvent {
 tool.execute
   → 计算 raw sha256 / chars / bytes
   → 生成确定性 full/preview 投影
-  → EvidenceArchive 写入 raw + projection
+  → EvidenceArchive manifest 写入 raw blob ref
       ├─ 成功：register evidence ref
       └─ 失败：记录告警并选择 inline raw
   → 原子提交 tool.result.recorded 批次
@@ -88,11 +91,15 @@ toolCalls 后紧邻全部 ToolResult 的协议顺序。
 read_evidence(ref, offsetBytes?, limitBytes?)
 ```
 
-`ref` 是不可伪造为任意文件路径的 `pico://evidence/...` 引用。读取时必须验证：
+`ref` 是不可伪造为任意文件路径的 `pico://evidence/...` 引用。大正文写入
+`workspace.evidence/blobs/sha256/<prefix>/<digest>`，Evidence manifest 只保存 BlobRef。
+读取时必须验证：
 
 - evidence root 边界；
 - session 与 content hash；
 - manifest 内容 hash；
+- blob size 与 SHA-256；
+- blob 和 manifest 都必须是普通文件而不是 symlink；
 - UTF-8 分页边界；
 - 单页上限。
 
@@ -100,9 +107,10 @@ read_evidence(ref, offsetBytes?, limitBytes?)
 
 ## 存储与兼容
 
-- 生产 Runtime ToolResult 不再写短期 ToolResultArtifactStore；EvidenceArchive 是唯一大正文。
+- 生产 Runtime ToolResult 不再写短期 ToolResultArtifactStore；Evidence 下的 SHA-256 CAS 是唯一大正文。
 - ToolResultArtifactStore 继续服务旧宿主、子代理报告和历史 Artifact，暂不迁移磁盘布局。
-- Existing EvidenceArchive manifest 保持可读；新能力复用其内容寻址与完整性校验。
+- Existing EvidenceArchive v1 manifest 保持可读；新 v2 manifest 引用 BlobRef，不再内嵌
+  `rawOutput` 与 `modelVisibleOutput`。
 - Fork 在同一 workspace 内可继续读取 source-session evidence ref；跨 workspace clone 不在本次范围。
 - 本次不删除旧 Artifact，不迁移或重写既有 RuntimeEvent。
 
