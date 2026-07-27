@@ -337,9 +337,12 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
     ],
     "tool.result.recorded",
   );
-  if (value["visibility"] !== "model" || value["partial"] !== false) {
+  if (
+    (value["visibility"] !== "model" && value["visibility"] !== "transcript") ||
+    value["partial"] !== false
+  ) {
     throw new RuntimeEventIntegrityError(
-      "Runtime tool result must be a complete model-visible fact",
+      "Runtime tool result must be a complete model-visible or transcript fact",
     );
   }
   const refs = value["refs"];

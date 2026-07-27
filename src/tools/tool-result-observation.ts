@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { countTokens } from "../context/token-counter.js";
+import type { RuntimeToolResultProjection } from "../engine/tool-result-contract.js";
 import { logger } from "../observability/logger.js";
 import type { ToolCall, ToolResult } from "../schema/message.js";
 import { summarizeToolResult } from "./result-summarizer.js";
@@ -16,13 +17,7 @@ const DEFAULT_ARTIFACT_SESSION_ID = "default";
 const DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048;
 const BOUNDED_READBACK_TOOLS = new Set(["read_evidence", "read_artifact"]);
 
-export interface RuntimeToolResultProjection {
-  readonly version: 1;
-  readonly mode: "full" | "preview" | "synthetic";
-  readonly text: string;
-  readonly strategy: string;
-  readonly truncated: boolean;
-}
+export type { RuntimeToolResultProjection } from "../engine/tool-result-contract.js";
 
 export interface RuntimeToolResultProjectionResult {
   readonly shouldArchive: boolean;
@@ -159,9 +154,13 @@ export function createToolResultObservationProcessor(
   const cleanupAfterWrite = opts.cleanupAfterWrite ?? true;
 
   return async ({ toolCall, result, output, sessionId }) => {
-    // read_file 自身提供行分页和页大小上限。如果再走通用外部化，
-    // 读 artifact 的结果会被写成新 artifact，形成 artifact→read→artifact 循环。
-    if (toolCall.name === "read_file" || toolCall.name === "read_artifact") {
+    // 分页读取工具已经有硬上限。如果再走通用外部化，
+    // 回读结果会被写成新 artifact，形成 artifact/evidence→read→artifact 循环。
+    if (
+      toolCall.name === "read_file" ||
+      toolCall.name === "read_artifact" ||
+      toolCall.name === "read_evidence"
+    ) {
       return output;
     }
 
