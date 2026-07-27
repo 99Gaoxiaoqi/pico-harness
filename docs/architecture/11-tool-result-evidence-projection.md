@@ -79,6 +79,7 @@ toolCalls 后紧邻全部 ToolResult 的协议顺序。
 - 使用项目现有 `countTokens()`，tokenizer 未就绪时才回退 `chars / 4`；
 - 小结果投影为 `full`；
 - 大结果通过现有 tool-aware summarizer 生成不超过约 1,600 字符的 `preview`；
+- 主 Agent 与子代理 Registry 都不得预先截断结果；截断只发生在 Runtime 模型投影层；
 - `read_evidence` 与旧 `read_artifact` 不再次归档，避免回读递归；
 - preview 必须携带工具名、原始大小、hash、evidence URI 和明确回读动作；
 - LLM 语义摘要只用于后续 FullCompaction，不参与当前 ToolResult 提交。
@@ -96,11 +97,13 @@ read_evidence(ref, offsetBytes?, limitBytes?)
 读取时必须验证：
 
 - evidence root 边界；
+- evidence root、session、blob 层级的每个目录都必须是身份稳定的普通目录，不能是 symlink；
 - session 与 content hash；
 - manifest 内容 hash；
 - blob size 与 SHA-256；
 - blob 和 manifest 都必须是普通文件而不是 symlink；
-- UTF-8 分页边界；
+- v2 blob 冷读用固定大小缓冲流式验签，同一文件版本的后续分页只读取页窗口；
+- 非 UTF-8 码点边界的 offset，以及容不下下一个完整码点的 limit，必须明确拒绝；
 - 单页上限。
 
 旧 `read_artifact` 保留，用于兼容 Artifact 和子代理报告。
@@ -112,6 +115,8 @@ read_evidence(ref, offsetBytes?, limitBytes?)
 - Existing EvidenceArchive v1 manifest 保持可读；新 v2 manifest 引用 BlobRef，不再内嵌
   `rawOutput` 与 `modelVisibleOutput`。
 - Fork 在同一 workspace 内可继续读取 source-session evidence ref；跨 workspace clone 不在本次范围。
+- 未发布完成的 fork bootstrap 不参与恢复；已发布完成的 bootstrap 在 rewind 后按普通 Runtime
+  run 修复未配对 ToolResult。
 - 本次不删除旧 Artifact，不迁移或重写既有 RuntimeEvent。
 
 ## 验收
