@@ -26,8 +26,10 @@ import {
 } from "../../src/storage/workspace-storage-layout.js";
 import {
   TASK_RUN_EVENT_SCHEMA_VERSION,
+  type RecoverableTaskLaunchReceipt,
   type TaskRunEvent,
 } from "../../src/tasks/task-run-contract.js";
+import { deriveRecoverableTaskRuntimeLaunchIdentity } from "../../src/tasks/recoverable-task.js";
 import {
   hashTaskRunInput,
   TASK_RUN_TRANSACTION_OPTIONS,
@@ -357,6 +359,164 @@ test("TaskRunStore rejects stale Attempt owner and lease-epoch mutations atomica
   });
 });
 
+test("TaskRunStore fences launch claims, receipts, and settlement with the execution lease", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-run-launch-fence-"));
+  const taskRunId = "launch-fenced-task";
+  const workspace = join(root, "workspace");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await initializedStore(root, taskRunId);
+  await store.appendBatch(
+    taskRunId,
+    [
+      attemptStarted(taskRunId, "source-start", "attempt-1", 1, "owner-a", 1),
+      executionClaimed(taskRunId, "source-execution", "attempt-1", "owner-a", 1),
+      checkpointed(taskRunId, "source-checkpoint", "attempt-1", "owner-a", 1, workspace),
+      attemptFinished(taskRunId, "source-interrupted", "attempt-1", "owner-a", 1, "interrupted"),
+    ],
+    { transactionId: "source-attempt" },
+  );
+  const beforeMismatchedClaim = await readFile(ledgerPath(root, taskRunId), "utf8");
+
+  await assert.rejects(
+    store.appendBatch(
+      taskRunId,
+      [
+        resumeClaimed(
+          taskRunId,
+          "resume-owner-b",
+          "resume-owner-b",
+          "attempt-1",
+          "attempt-2",
+          "owner-b",
+          2,
+        ),
+        attemptStarted(
+          taskRunId,
+          "successor-start-owner-b",
+          "attempt-2",
+          2,
+          "owner-b",
+          2,
+          "attempt-1",
+        ),
+        executionClaimed(taskRunId, "successor-execution-owner-b", "attempt-2", "owner-b", 2),
+        launchClaimed(taskRunId, "launch-owner-c", "attempt-2", "launch-fenced", "owner-c", 1),
+      ],
+      { transactionId: "mismatched-launch-owner" },
+    ),
+    /invalid launch lease claim/u,
+  );
+  assert.equal(await readFile(ledgerPath(root, taskRunId), "utf8"), beforeMismatchedClaim);
+  assert.equal((await store.readTaskRunProjection(taskRunId))?.revision, 1);
+
+  await store.appendBatch(
+    taskRunId,
+    [
+      resumeClaimed(
+        taskRunId,
+        "resume-valid",
+        "resume-valid",
+        "attempt-1",
+        "attempt-2",
+        "owner-b",
+        2,
+      ),
+      attemptStarted(taskRunId, "successor-start-valid", "attempt-2", 2, "owner-b", 2, "attempt-1"),
+      executionClaimed(
+        taskRunId,
+        "successor-execution-valid",
+        "attempt-2",
+        "owner-b",
+        2,
+        AT,
+        "2026-07-27T00:00:10.000Z",
+      ),
+      launchClaimed(taskRunId, "launch-valid", "attempt-2", "launch-fenced", "owner-b", 1),
+    ],
+    { transactionId: "valid-launch-claim" },
+  );
+  const afterValidClaim = await readFile(ledgerPath(root, taskRunId), "utf8");
+  const validSettlement = launchSucceeded(
+    taskRunId,
+    "launch-valid-settlement",
+    "attempt-2",
+    "launch-fenced",
+    "owner-b",
+    1,
+  );
+  const invalidReceipts: RecoverableTaskLaunchReceipt[] = [
+    { ...validSettlement.data.receipt, sessionId: "another-session" },
+    { ...validSettlement.data.receipt, runId: "another-run" },
+    { ...validSettlement.data.receipt, runStartedEventId: "another-start-event" },
+    { ...validSettlement.data.receipt, runStartedSequence: 6 },
+  ];
+  for (const [index, receipt] of invalidReceipts.entries()) {
+    await assert.rejects(
+      store.append(
+        taskRunId,
+        {
+          ...validSettlement,
+          eventId: `invalid-receipt-${index}`,
+          data: { ...validSettlement.data, receipt },
+        },
+        {
+          transactionId: `invalid-receipt-${index}`,
+          now: () => new Date("2026-07-27T00:00:05.000Z"),
+        },
+      ),
+      /launch receipt does not match its source Runtime boundary/u,
+    );
+    assert.equal(await readFile(ledgerPath(root, taskRunId), "utf8"), afterValidClaim);
+  }
+
+  await store.append(
+    taskRunId,
+    executionClaimed(
+      taskRunId,
+      "successor-execution-transfer",
+      "attempt-2",
+      "owner-c",
+      3,
+      "2026-07-27T00:00:10.001Z",
+      "2026-07-27T00:02:00.000Z",
+    ),
+    {
+      transactionId: "successor-execution-transfer",
+      now: () => new Date("2026-07-27T00:00:10.001Z"),
+    },
+  );
+  const afterExecutionTransfer = await readFile(ledgerPath(root, taskRunId), "utf8");
+  for (const settlement of [
+    {
+      ...validSettlement,
+      eventId: "stale-owner-launch-succeeded",
+      at: "2026-07-27T00:00:10.002Z",
+    },
+    launchFailed(
+      taskRunId,
+      "stale-owner-launch-failed",
+      "attempt-2",
+      "launch-fenced",
+      "owner-b",
+      1,
+      "2026-07-27T00:00:10.002Z",
+    ),
+  ]) {
+    await assert.rejects(
+      store.append(taskRunId, settlement, {
+        transactionId: settlement.eventId,
+        now: () => new Date("2026-07-27T00:00:10.002Z"),
+      }),
+      /launch settlement lost its lease/u,
+    );
+    assert.equal(await readFile(ledgerPath(root, taskRunId), "utf8"), afterExecutionTransfer);
+  }
+  const projection = await store.readTaskRunProjection(taskRunId);
+  assert.equal(projection?.attempts[1]?.execution.ownerId, "owner-c");
+  assert.equal(projection?.attempts[1]?.execution.leaseEpoch, 3);
+  assert.equal(projection?.attempts[1]?.launch?.status, "claimed");
+});
+
 test("TaskRunStore rejects a post-construction task-runs symlink before read, repair or write", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-run-symlink-"));
   const storageRoot = join(root, "state");
@@ -682,19 +842,21 @@ function launchClaimed(
   launchId: string,
   ownerId: string,
   leaseEpoch: number,
-): TaskRunEvent {
+  at = AT,
+  expiresAt = EXPIRES_AT,
+): Extract<TaskRunEvent, { kind: "attempt.launch.claimed" }> {
   return {
     schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
     eventId,
     taskRunId,
-    at: AT,
+    at,
     kind: "attempt.launch.claimed",
     data: {
       attemptId,
       launchId,
       ownerId,
       leaseEpoch,
-      expiresAt: EXPIRES_AT,
+      expiresAt,
     },
   };
 }
@@ -706,12 +868,14 @@ function launchSucceeded(
   launchId: string,
   ownerId: string,
   leaseEpoch: number,
-): TaskRunEvent {
+  at = AT,
+): Extract<TaskRunEvent, { kind: "attempt.launch.succeeded" }> {
+  const identity = deriveRecoverableTaskRuntimeLaunchIdentity(launchId);
   return {
     schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
     eventId,
     taskRunId,
-    at: AT,
+    at,
     kind: "attempt.launch.succeeded",
     data: {
       attemptId,
@@ -721,11 +885,36 @@ function launchSucceeded(
       receipt: {
         schemaVersion: 1,
         launchId,
-        sessionId: "session-2",
-        runId: "run-2",
-        runStartedEventId: "runtime-started-2",
+        sessionId: "session-1",
+        runId: identity.runId,
+        runStartedEventId: identity.runStartedEventId,
         runStartedSequence: 5,
       },
+    },
+  };
+}
+
+function launchFailed(
+  taskRunId: string,
+  eventId: string,
+  attemptId: string,
+  launchId: string,
+  ownerId: string,
+  leaseEpoch: number,
+  at = AT,
+): Extract<TaskRunEvent, { kind: "attempt.launch.failed" }> {
+  return {
+    schemaVersion: TASK_RUN_EVENT_SCHEMA_VERSION,
+    eventId,
+    taskRunId,
+    at,
+    kind: "attempt.launch.failed",
+    data: {
+      attemptId,
+      launchId,
+      ownerId,
+      leaseEpoch,
+      error: "launch failed",
     },
   };
 }
