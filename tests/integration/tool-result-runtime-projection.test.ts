@@ -13,6 +13,8 @@ import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message } from "../../src/schema/message.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import type { RuntimeToolResultRecordedEvent } from "../../src/runtime/runtime-event.js";
+import { DelegationManager } from "../../src/tools/delegation-manager.js";
+import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
 import { ReadEvidenceTool } from "../../src/tools/evidence-read.js";
 import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "../../src/tools/registry.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
@@ -294,6 +296,105 @@ test("Evidence ENOSPC fails open to one complete inline Runtime ToolResult", asy
   );
   assert.ok(terminal?.kind === "run.terminal");
   assert.equal(terminal.data.status, "completed");
+});
+
+test("subagent Runtime preserves complete raw ToolResult before transcript Evidence projection", async (context) => {
+  const sessionId = "runtime-subagent-tool-result-evidence";
+  const fixture = await createFixture("pico-runtime-subagent-tool-result-", sessionId);
+  context.after(async () => {
+    await fixture.activeSession?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  const toolName = "subagent_large_fixture";
+  const toolCallId = "call:subagent-large-fixture";
+  const canary = "PICO_SUBAGENT_MIDDLE_CANARY_ONLY_IN_RAW_EVIDENCE";
+  const rawOutput = buildLargeOutput(canary);
+  assert.ok(rawOutput.length > 8_000);
+  const evidenceArchive = new EvidenceArchive({
+    baseDir: fixture.paths.workspace.evidence,
+  });
+  const providerMessages: Message[][] = [];
+  const summary =
+    "已完成子代理大型工具结果核验，原始证据保持完整且模型上下文仅接收有界投影。".repeat(10);
+  const provider: LLMProvider = {
+    async generate(messages, availableTools) {
+      providerMessages.push(structuredClone(messages));
+      if (providerMessages.length === 1) {
+        assert.ok(availableTools.some((tool) => tool.name === toolName));
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: toolCallId, name: toolName, arguments: "{}" }],
+        };
+      }
+      if (providerMessages.length === 2) {
+        const projected = messages.find((message) => message.toolCallId === toolCallId);
+        assert.ok(projected);
+        assert.match(projected.content, /pico:\/\/evidence\/[^\s"]+\/[a-f0-9]{64}/u);
+        assert.doesNotMatch(projected.content, new RegExp(canary, "u"));
+        return { role: "assistant", content: summary };
+      }
+      throw new Error("unexpected subagent Provider turn");
+    },
+  };
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session(sessionId, fixture.workDir, {
+    persistence: true,
+    picoHome: fixture.picoHome,
+    runtimePort,
+  });
+  fixture.activeSession = session;
+  await session.recover();
+  const engine = new AgentEngine({
+    provider,
+    registry: new ToolRegistry({ truncateResults: false }),
+    workDir: fixture.workDir,
+    runtimePort,
+    runtimeEvidenceArchive: evidenceArchive,
+    reporter: new SilentReporter(),
+  });
+  const subagentRegistry = createSubagentRegistryFactory({
+    workDir: fixture.workDir,
+    runner: engine,
+    manager: new DelegationManager(),
+    evidenceBaseDir: fixture.paths.workspace.evidence,
+  })({
+    mode: "explore",
+    role: "leaf",
+    depth: 0,
+    maxSpawnDepth: 0,
+  });
+  subagentRegistry.register(outputTool(toolName, rawOutput));
+
+  const parentRun = await runtimePort.startRun({
+    capability: session.runtimeEventCapability!,
+  });
+  const result = await parentRun.run(() =>
+    engine.runSub("核验大型工具输出。", subagentRegistry, new SilentReporter(), {
+      maxTurns: 3,
+      workDir: fixture.workDir,
+    }),
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.summary, summary);
+  assert.equal(providerMessages.length, 2);
+  const events = await session.runtimeEventStore!.readSession(session.id);
+  const recorded = requireToolResult(
+    events.filter(
+      (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
+    ),
+    toolCallId,
+  );
+  assert.equal(recorded.visibility, "transcript");
+  assert.equal(recorded.data.body.storage, "evidence");
+  assert.equal(recorded.data.body.sha256, sha256(rawOutput));
+  assert.equal(recorded.data.body.sizeBytes, Buffer.byteLength(rawOutput, "utf8"));
+  assert.equal(recorded.data.projection.mode, "preview");
+  assert.doesNotMatch(recorded.data.projection.text, new RegExp(canary, "u"));
+  assert.ok(recorded.refs.evidence);
+  assert.equal(await evidenceArchive.readRuntimeToolOutput(recorded.refs.evidence), rawOutput);
+  assert.deepEqual(session.getModelContext(), []);
 });
 
 interface RuntimeFixture {
