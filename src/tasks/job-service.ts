@@ -4,9 +4,13 @@ import {
   RuntimeStore,
   generateRuntimeId,
   type FinishJobResult,
+  type RecoverableJobTerminalStatus,
   type RuntimeStoreOptions,
+  type SettleRecoverableJobAfterTaskTerminalResult,
+  type StartRecoverableJobSuccessorResult,
 } from "./runtime-store.js";
 import {
+  isTerminalJobStatus,
   type CompletionOutboxRecord,
   type JobAttemptRecord,
   type JobCommandRecord,
@@ -58,6 +62,33 @@ export interface StartJobResult {
   job: JobRecord;
   attempt: JobAttemptRecord;
   lease: RuntimeLeaseRecord;
+}
+
+export interface StartRecoverableJobSuccessorOptions {
+  sourceAttemptId: string;
+  successorAttemptId: string;
+  expectedJobVersion: number;
+  expectedSourceAttemptVersion: number;
+  outputPath?: string;
+  reason?: string;
+  leaseTtlMs?: number;
+}
+
+export interface StartRecoverableJobSuccessorServiceResult extends StartRecoverableJobSuccessorResult {
+  lease: RuntimeLeaseRecord;
+}
+
+export interface SettleRecoverableJobAfterTaskTerminalOptions {
+  jobId: string;
+  attemptId: string;
+  completionId: string;
+  status: RecoverableJobTerminalStatus;
+  outputOffset?: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  completionPayload?: Record<string, unknown>;
+  completionAlreadyDelivered?: boolean;
+  leaseTtlMs?: number;
 }
 
 export interface TerminalJobInput {
@@ -131,6 +162,97 @@ export class JobService {
       const current = this.store.getJob(jobId);
       if (current?.status === "queued") {
         this.store.releaseLease(`job:${jobId}`, this.ownerId, lease.leaseEpoch);
+      }
+      throw error;
+    }
+  }
+
+  startRecoverableSuccessor(
+    jobId: string,
+    options: StartRecoverableJobSuccessorOptions,
+  ): StartRecoverableJobSuccessorServiceResult {
+    const lease = this.store.acquireLease(`job:${jobId}`, this.ownerId, options.leaseTtlMs);
+    try {
+      const result = this.store.startRecoverableJobSuccessor({
+        jobId,
+        sourceAttemptId: options.sourceAttemptId,
+        successorAttemptId: options.successorAttemptId,
+        ownerId: this.ownerId,
+        leaseEpoch: lease.leaseEpoch,
+        expectedJobVersion: options.expectedJobVersion,
+        expectedSourceAttemptVersion: options.expectedSourceAttemptVersion,
+        ...(options.outputPath ? { outputPath: options.outputPath } : {}),
+        ...(options.reason ? { reason: options.reason } : {}),
+      });
+      return { ...result, lease };
+    } catch (error) {
+      const current = this.store.getJob(jobId);
+      const successor = this.store.getAttempt(options.successorAttemptId);
+      const committed =
+        current?.status === "running" &&
+        current.leaseEpoch === lease.leaseEpoch &&
+        successor?.jobId === jobId &&
+        successor.status === "running" &&
+        successor.ownerId === this.ownerId &&
+        successor.leaseEpoch === lease.leaseEpoch;
+      if (!committed) {
+        try {
+          this.store.releaseLease(`job:${jobId}`, this.ownerId, lease.leaseEpoch);
+        } catch (releaseError) {
+          if (!(releaseError instanceof RuntimeConflictError)) throw releaseError;
+        }
+      }
+      throw error;
+    }
+  }
+
+  settleRecoverableJobAfterTaskTerminal(
+    options: SettleRecoverableJobAfterTaskTerminalOptions,
+  ): SettleRecoverableJobAfterTaskTerminalResult {
+    const current = this.store.getJob(options.jobId);
+    if (!current) throw new Error(`未知任务: ${options.jobId}`);
+    const lease = isTerminalJobStatus(current.status)
+      ? undefined
+      : this.store.acquireLease(`job:${options.jobId}`, this.ownerId, options.leaseTtlMs);
+    try {
+      const result = this.store.settleRecoverableJobAfterTaskTerminal({
+        jobId: options.jobId,
+        attemptId: options.attemptId,
+        ownerId: this.ownerId,
+        leaseEpoch: lease?.leaseEpoch ?? current.leaseEpoch,
+        completionId: options.completionId,
+        status: options.status,
+        ...(options.outputOffset !== undefined ? { outputOffset: options.outputOffset } : {}),
+        ...(options.error !== undefined ? { error: options.error } : {}),
+        ...(options.result !== undefined ? { result: options.result } : {}),
+        ...(options.completionPayload !== undefined
+          ? { completionPayload: options.completionPayload }
+          : {}),
+        ...(options.completionAlreadyDelivered !== undefined
+          ? { completionAlreadyDelivered: options.completionAlreadyDelivered }
+          : {}),
+      });
+      if (lease) {
+        try {
+          this.store.releaseLease(`job:${options.jobId}`, this.ownerId, lease.leaseEpoch);
+        } catch (error) {
+          if (!(error instanceof RuntimeConflictError)) throw error;
+        }
+      }
+      return result;
+    } catch (error) {
+      if (lease) {
+        try {
+          this.store.releaseLease(`job:${options.jobId}`, this.ownerId, lease.leaseEpoch);
+        } catch (releaseError) {
+          if (!(releaseError instanceof RuntimeConflictError)) {
+            throw new AggregateError(
+              [error, releaseError],
+              `recoverable Job ${options.jobId} terminal settlement and lease release both failed`,
+              { cause: releaseError },
+            );
+          }
+        }
       }
       throw error;
     }
