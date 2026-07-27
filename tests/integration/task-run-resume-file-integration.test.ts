@@ -208,6 +208,61 @@ test("an expired launch lease is taken over after a crash between durable claim 
   assert.equal(projection?.attempts[1]?.execution.ownerId, "host:replacement");
 });
 
+test("an expired claimed successor re-proves every live source-boundary condition", async (t) => {
+  await t.test("an adapter-specific checkpoint removed after the claim parks recovery", async (t) => {
+    const fixture = await prepareFileRecovery(
+      t,
+      runtimeFacts,
+      (storageRootId, workspace) =>
+        initialAttemptFacts(storageRootId, workspace).map(
+          (event): TaskRunEvent =>
+            event.kind === "attempt.checkpointed"
+              ? {
+                  ...event,
+                  data: {
+                    ...event.data,
+                    boundary: {
+                      ...event.data.boundary,
+                      checkpointRef: "checkpoint:external",
+                    },
+                  },
+                }
+              : event,
+        ),
+    );
+    fixture.liveEvidence.additionalCheckpointRefs = ["checkpoint:external"];
+    await assertClaimedSuccessorReproofParks(
+      fixture,
+      () => {
+        fixture.liveEvidence.additionalCheckpointRefs = [];
+      },
+      "checkpoint_unavailable",
+    );
+  });
+
+  await t.test("a changed tool catalog after the claim parks recovery", async (t) => {
+    const fixture = await prepareFileRecovery(t);
+    await assertClaimedSuccessorReproofParks(
+      fixture,
+      () => {
+        fixture.liveEvidence.toolCatalogHash = "tools:changed";
+      },
+      "tool_catalog_mismatch",
+    );
+  });
+
+  await t.test("unsettled background work after the claim parks recovery", async (t) => {
+    const fixture = await prepareFileRecovery(t);
+    await assertClaimedSuccessorReproofParks(
+      fixture,
+      () => {
+        fixture.liveEvidence.backgroundOperationsSettled = false;
+      },
+      "background_operation_pending",
+    );
+  });
+});
+
 test("settlement recovery accepts the expected H+1 after the Session advances to another Run", async (t) => {
   const fixture = await prepareFileRecovery(t);
   const registry = new RecoverableTaskRegistry();
@@ -219,6 +274,9 @@ test("settlement recovery accepts the expected H+1 after the Session advances to
     launchMode: "idempotent",
     async resume(_input, context) {
       resumeCalls.push(context.launchId);
+      if (actualLaunches.has(context.launchId)) {
+        return expectedLaunchReceipt(context);
+      }
       const receipt = await appendExpectedRunStarted(fixture, context);
       actualLaunches.add(context.launchId);
       return receipt;
@@ -265,7 +323,7 @@ test("settlement recovery accepts the expected H+1 after the Session advances to
   }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
 
   assert.equal(recovered.status, "resumed");
-  assert.equal(resumeCalls.length, 1);
+  assert.equal(resumeCalls.length, 2);
   assert.equal(new Set(resumeCalls).size, 1);
   assert.equal(actualLaunches.size, 1);
   const expected = deriveRecoverableTaskRuntimeLaunchIdentity(resumeCalls[0]!);
@@ -282,6 +340,113 @@ test("settlement recovery accepts the expected H+1 after the Session advances to
     ).length,
     1,
   );
+  assert.equal(
+    (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.attempts[1]?.launch?.status,
+    "succeeded",
+  );
+});
+
+test("verified H+1 still re-proves pending source effects before adapter ensure", async (t) => {
+  const fixture = await prepareFileRecovery(t);
+  const registry = new RecoverableTaskRegistry();
+  const resumeCalls: string[] = [];
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    async resume(_input, context) {
+      resumeCalls.push(context.launchId);
+      if (resumeCalls.length > 1) return expectedLaunchReceipt(context);
+      return appendExpectedRunStarted(fixture, context);
+    },
+  });
+  const first = recoveryCoordinator(fixture, registry, "host:settlement-crash", {
+    ledger: new CrashBeforeLaunchSettlementLedger(new FileTaskResumeLedger(fixture.taskRuns)),
+    launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date(AT),
+  });
+  await assert.rejects(
+    first.recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" }),
+    /injected crash before launch settlement/u,
+  );
+
+  await fixture.runtimeEvents.append({
+    schemaVersion: 1,
+    eventId: "runtime-late-source-tool",
+    sessionId: SESSION_ID,
+    invocationId: "invocation:late-source-tool",
+    runId: RUN_ID,
+    turnId: "turn:late-source-tool",
+    at: "2026-07-27T00:00:00.500Z",
+    partial: false,
+    visibility: "internal",
+    refs: { toolCallId: "tool-call:late" },
+    kind: "tool.started",
+    data: { toolName: "write_file", argumentsHash: "args:late" },
+  });
+
+  const recovered = await recoveryCoordinator(fixture, registry, "host:reproof", {
+    launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date("2026-07-27T00:00:01.001Z"),
+  }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
+
+  assert.equal(recovered.status, "parked");
+  if (recovered.status !== "parked") assert.fail("late pending source effect must park");
+  assert.ok(recovered.plan.reasons.includes("pending_tool_effect"));
+  assert.equal(resumeCalls.length, 1);
+  assert.equal(
+    (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.status,
+    "parked",
+  );
+});
+
+test("run.started admission is not launch success until the idempotent adapter confirms a worker", async (t) => {
+  const fixture = await prepareFileRecovery(t);
+  const registry = new RecoverableTaskRegistry();
+  const resumeCalls: string[] = [];
+  const admissions = new Set<string>();
+  const durableWorkers = new Set<string>();
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    async resume(_input, context) {
+      resumeCalls.push(context.launchId);
+      if (!admissions.has(context.launchId)) {
+        await appendExpectedRunStarted(fixture, context);
+        admissions.add(context.launchId);
+        throw new Error("injected crash after run.started fsync and before worker install");
+      }
+      durableWorkers.add(context.launchId);
+      return expectedLaunchReceipt(context);
+    },
+  });
+
+  const first = await recoveryCoordinator(fixture, registry, "host:admission-only").recover({
+    taskRunId: TASK_RUN_ID,
+    executionClass: "recoverable",
+  });
+
+  assert.equal(first.status, "launch_failed");
+  assert.equal(admissions.size, 1);
+  assert.equal(durableWorkers.size, 0);
+  assert.equal(
+    (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.attempts[1]?.launch?.status,
+    "failed",
+  );
+
+  const second = await recoveryCoordinator(fixture, registry, "host:worker-retry").recover({
+    taskRunId: TASK_RUN_ID,
+    executionClass: "recoverable",
+  });
+
+  assert.equal(second.status, "resumed");
+  assert.equal(resumeCalls.length, 2);
+  assert.equal(new Set(resumeCalls).size, 1);
+  assert.equal(admissions.size, 1);
+  assert.equal(durableWorkers.size, 1);
   assert.equal(
     (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.attempts[1]?.launch?.status,
     "succeeded",
@@ -466,6 +631,38 @@ test("synthetic interrupted tool results remain pending and park file-backed rec
   assert.ok(result.plan.reasons.includes("pending_tool_effect"));
 });
 
+test("tool.started without a stable toolCallId fails closed", async (t) => {
+  const fixture = await prepareFileRecovery(t, (workspace) =>
+    runtimeFacts(workspace).map((event): RuntimeEvent => {
+      if (event.kind !== "tool.started") return event;
+      const { refs, ...withoutRefs } = event;
+      assert.ok(refs);
+      return withoutRefs;
+    }),
+  );
+  const registry = new RecoverableTaskRegistry();
+  let adapterCalls = 0;
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    resume(_input, context) {
+      adapterCalls += 1;
+      return expectedLaunchReceipt(context);
+    },
+  });
+
+  const result = await recoveryCoordinator(fixture, registry, "host:missing-tool-call-id").recover({
+    taskRunId: TASK_RUN_ID,
+    executionClass: "recoverable",
+  });
+
+  assert.equal(result.status, "parked");
+  if (result.status !== "parked") assert.fail("unidentifiable tool effect must park");
+  assert.ok(result.plan.reasons.includes("ledger_corrupt"));
+  assert.equal(adapterCalls, 0);
+});
+
 test("planner binds Session manifest and run.started workDir to TaskRun, boundary and environment", async (t) => {
   await assert.rejects(
     prepareFileRecovery(t, (workspace) => runtimeFacts(`${workspace}-different`)),
@@ -501,6 +698,11 @@ interface FileRecoveryFixture {
   readonly storageRoot: string;
   readonly workspace: string;
   readonly inspector: RuntimeEventBoundaryInspector;
+  readonly liveEvidence: {
+    backgroundOperationsSettled: boolean;
+    toolCatalogHash: string;
+    additionalCheckpointRefs: string[];
+  };
   readonly environment: {
     readonly storageRootId: string;
     readonly workspacePath: string;
@@ -556,6 +758,11 @@ async function prepareFileRecovery(
   await taskRuns.appendBatch(TASK_RUN_ID, taskFacts(taskRuns.storageRootId, workspace), {
     transactionId: "task-initial-attempt",
   });
+  const liveEvidence = {
+    backgroundOperationsSettled: true,
+    toolCatalogHash: "tools:stable",
+    additionalCheckpointRefs: [] as string[],
+  };
   return {
     taskRuns,
     runtimeEvents,
@@ -563,9 +770,11 @@ async function prepareFileRecovery(
     workspace: canonicalizeWorkspacePath(workspace),
     inspector: new RuntimeEventBoundaryInspector({
       store: runtimeEvents,
-      backgroundOperationsSettled: () => true,
-      toolCatalogHash: () => "tools:stable",
+      backgroundOperationsSettled: () => liveEvidence.backgroundOperationsSettled,
+      toolCatalogHash: () => liveEvidence.toolCatalogHash,
+      additionalCheckpointRefs: () => liveEvidence.additionalCheckpointRefs,
     }),
+    liveEvidence,
     environment: {
       storageRootId: taskRuns.storageRootId,
       workspacePath: canonicalizeWorkspacePath(workspace),
@@ -600,6 +809,54 @@ function recoveryCoordinator(
     executionLeaseTtlMs: overrides.executionLeaseTtlMs,
     now: overrides.now ?? (() => new Date(AT)),
   });
+}
+
+async function assertClaimedSuccessorReproofParks(
+  fixture: FileRecoveryFixture,
+  invalidateLiveEvidence: () => void,
+  expectedReason:
+    | "background_operation_pending"
+    | "checkpoint_unavailable"
+    | "tool_catalog_mismatch",
+): Promise<void> {
+  const registry = new RecoverableTaskRegistry();
+  let adapterCalls = 0;
+  registry.register({
+    adapterId: "agent.task",
+    version: 1,
+    launchMode: "idempotent",
+    resume(_input, context) {
+      adapterCalls += 1;
+      return expectedLaunchReceipt(context);
+    },
+  });
+  const first = recoveryCoordinator(fixture, registry, "host:claim-crash", {
+    ledger: new CrashAfterResumeClaimLedger(new FileTaskResumeLedger(fixture.taskRuns)),
+    launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date(AT),
+  });
+
+  await assert.rejects(
+    first.recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" }),
+    /injected crash after durable launch claim/u,
+  );
+  assert.equal(adapterCalls, 0);
+  invalidateLiveEvidence();
+
+  const result = await recoveryCoordinator(fixture, registry, "host:reproof", {
+    launchLeaseTtlMs: 1_000,
+    executionLeaseTtlMs: 1_000,
+    now: () => new Date("2026-07-27T00:00:01.001Z"),
+  }).recover({ taskRunId: TASK_RUN_ID, executionClass: "recoverable" });
+
+  assert.equal(result.status, "parked");
+  if (result.status !== "parked") assert.fail("invalidated source boundary must park");
+  assert.ok(result.plan.reasons.includes(expectedReason));
+  assert.equal(adapterCalls, 0);
+  const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
+  assert.equal(projection?.status, "parked");
+  assert.equal(projection?.attempts[1]?.status, "interrupted");
 }
 
 class CrashAfterResumeClaimLedger implements TaskResumeLedger {
@@ -742,6 +999,17 @@ async function appendExpectedRunStarted(
     runId: context.expectedRuntimeRunId,
     runStartedEventId: context.expectedRunStartedEventId,
     runStartedSequence: result.cursor.seq,
+  };
+}
+
+function expectedLaunchReceipt(context: RecoverableTaskResumeContext) {
+  return {
+    schemaVersion: 1 as const,
+    launchId: context.launchId,
+    sessionId: context.runtimeSessionId,
+    runId: context.expectedRuntimeRunId,
+    runStartedEventId: context.expectedRunStartedEventId,
+    runStartedSequence: context.expectedSessionHighWater + 1,
   };
 }
 
