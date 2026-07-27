@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -24,6 +25,7 @@ import {
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import {
   adoptWorkspaceStorageRootIdentitySync,
+  WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
   WORKSPACE_STORAGE_DIRECTORY,
@@ -263,6 +265,194 @@ test("copied roots never recover pending commits before explicit adoption", asyn
   assert.equal(adopted.storageRootId, sourceLayout.storageRootId);
   assert.deepEqual(JSON.parse(await readFile(copiedStatePath, "utf8")), next);
   await assert.rejects(stat(copiedCommitPath), { code: "ENOENT" });
+});
+
+test("copied version 1 roots validate a pending version 2 layout identity before recovery", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-copy-pending-"));
+  const sourceRoot = join(root, "source");
+  const copiedRoot = join(root, "copied");
+  const sourceStatePath = join(sourceRoot, "control", "state.json");
+  const sourceLayoutPath = join(sourceRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const copiedStatePath = join(copiedRoot, "control", "state.json");
+  const copiedLayoutPath = join(copiedRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const copiedCommitPath = join(copiedRoot, WORKSPACE_STORAGE_COMMIT_FILE);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  new RuntimeStore({ workDir: root, storageRoot: sourceRoot }).close();
+  const version2Layout = JSON.parse(await readFile(sourceLayoutPath, "utf8")) as {
+    schemaVersion: 2;
+    storageRootId: string;
+    createdAt: string;
+    physicalIdentity: {
+      canonicalPath: string;
+      device: string;
+      inode: string;
+    };
+  };
+  assert.equal(version2Layout.physicalIdentity.canonicalPath, await realpath(sourceRoot));
+  const version1Layout = `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      layout: "session-centric-v1",
+      createdAt: version2Layout.createdAt,
+    },
+    null,
+    2,
+  )}\n`;
+  await writeFile(sourceLayoutPath, version1Layout, { mode: 0o600 });
+  const stateBefore = JSON.parse(await readFile(sourceStatePath, "utf8")) as {
+    revision: number;
+    lastTransactionId?: string;
+  };
+  const stateAfter = {
+    ...stateBefore,
+    revision: stateBefore.revision + 1,
+    lastTransactionId: "v1-layout-upgrade-pending",
+  };
+  assert.equal(stateBefore.revision, 1);
+  assert.throws(
+    () =>
+      withFileLockSync(
+        join(sourceRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "v1-layout-upgrade-crash",
+        () =>
+          commitFileTransactionSync(
+            sourceRoot,
+            {
+              replacements: [
+                {
+                  relativePath: "control/state.json",
+                  content: `${JSON.stringify(stateAfter, null, 2)}\n`,
+                },
+                {
+                  relativePath: WORKSPACE_STORAGE_LAYOUT_FILE,
+                  content: `${JSON.stringify(version2Layout, null, 2)}\n`,
+                },
+              ],
+            },
+            {
+              ...WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
+              transactionId: "v1-layout-upgrade-pending",
+              onStage(stage) {
+                if (stage === "commit-published") {
+                  throw new Error("simulated v1 layout upgrade crash");
+                }
+              },
+            },
+          ),
+      ),
+    /simulated v1 layout upgrade crash/u,
+  );
+  await cp(sourceRoot, copiedRoot, { recursive: true, preserveTimestamps: true });
+  const copiedStateBefore = await readFile(copiedStatePath);
+  const copiedLayoutBefore = await readFile(copiedLayoutPath);
+  const copiedCommitBefore = await readFile(copiedCommitPath);
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot: copiedRoot }),
+    /requires explicit adoption/u,
+  );
+
+  assert.deepEqual(await readFile(copiedStatePath), copiedStateBefore);
+  assert.deepEqual(await readFile(copiedLayoutPath), copiedLayoutBefore);
+  assert.deepEqual(await readFile(copiedCommitPath), copiedCommitBefore);
+
+  new RuntimeStore({ workDir: root, storageRoot: sourceRoot }).close();
+  assert.deepEqual(JSON.parse(await readFile(sourceStatePath, "utf8")), stateAfter);
+  await assert.rejects(stat(join(sourceRoot, WORKSPACE_STORAGE_COMMIT_FILE)), {
+    code: "ENOENT",
+  });
+
+  const adopted = adoptWorkspaceStorageRootIdentitySync(copiedRoot, version2Layout.storageRootId);
+  assert.equal(adopted.storageRootId, version2Layout.storageRootId);
+  assert.deepEqual(JSON.parse(await readFile(copiedStatePath, "utf8")), stateAfter);
+  const copiedLayoutAfter = JSON.parse(await readFile(copiedLayoutPath, "utf8")) as {
+    schemaVersion: number;
+    storageRootId: string;
+    adoptedAt?: string;
+    physicalIdentity: { canonicalPath: string };
+  };
+  assert.equal(copiedLayoutAfter.schemaVersion, 2);
+  assert.equal(copiedLayoutAfter.storageRootId, version2Layout.storageRootId);
+  assert.equal(copiedLayoutAfter.physicalIdentity.canonicalPath, await realpath(copiedRoot));
+  assert.equal(typeof copiedLayoutAfter.adoptedAt, "string");
+  await assert.rejects(stat(copiedCommitPath), { code: "ENOENT" });
+});
+
+test("version 1 runtime-only pending commits require verified manual recovery", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-runtime-pending-"));
+  const storageRoot = join(root, "state");
+  const statePath = join(storageRoot, "control", "state.json");
+  const layoutPath = join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const commitPath = join(storageRoot, WORKSPACE_STORAGE_COMMIT_FILE);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  new RuntimeStore({ workDir: root, storageRoot }).close();
+  const version2Layout = JSON.parse(await readFile(layoutPath, "utf8")) as {
+    storageRootId: string;
+    createdAt: string;
+  };
+  const version1Layout = `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      layout: "session-centric-v1",
+      createdAt: version2Layout.createdAt,
+    },
+    null,
+    2,
+  )}\n`;
+  await writeFile(layoutPath, version1Layout, { mode: 0o600 });
+  const stateBefore = JSON.parse(await readFile(statePath, "utf8")) as {
+    revision: number;
+    lastTransactionId?: string;
+  };
+  const stateAfter = {
+    ...stateBefore,
+    revision: stateBefore.revision + 1,
+    lastTransactionId: "v1-runtime-only-pending",
+  };
+  assert.throws(
+    () =>
+      withFileLockSync(
+        join(storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
+        "v1-runtime-only-crash",
+        () =>
+          commitFileTransactionSync(
+            storageRoot,
+            {
+              replacements: [
+                {
+                  relativePath: "control/state.json",
+                  content: `${JSON.stringify(stateAfter, null, 2)}\n`,
+                },
+              ],
+            },
+            {
+              ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+              transactionId: "v1-runtime-only-pending",
+              onStage(stage) {
+                if (stage === "commit-published") {
+                  throw new Error("simulated v1 runtime crash");
+                }
+              },
+            },
+          ),
+      ),
+    /simulated v1 runtime crash/u,
+  );
+  const stateBytes = await readFile(statePath);
+  const layoutBytes = await readFile(layoutPath);
+  const commitBytes = await readFile(commitPath);
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot }),
+    /without a verifiable version 2 layout replacement.*verified manual recovery/u,
+  );
+  assert.throws(
+    () => adoptWorkspaceStorageRootIdentitySync(storageRoot, version2Layout.storageRootId),
+    /cannot be explicitly adopted/u,
+  );
+  assert.deepEqual(await readFile(statePath), stateBytes);
+  assert.deepEqual(await readFile(layoutPath), layoutBytes);
+  assert.deepEqual(await readFile(commitPath), commitBytes);
 });
 
 test("opening a version 1 layout upgrades it once without changing its creation time", async (t) => {
