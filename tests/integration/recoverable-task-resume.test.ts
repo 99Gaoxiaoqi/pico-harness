@@ -556,6 +556,7 @@ class InMemoryTaskResumeLedger implements TaskResumeLedger {
                   status: "claimed",
                   ownerId: event.data.ownerId,
                   leaseEpoch: event.data.leaseEpoch,
+                  executionLeaseEpoch: attempt.execution.leaseEpoch,
                   claimedAt: event.at,
                   expiresAt: event.data.expiresAt,
                 },

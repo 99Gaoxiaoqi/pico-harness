@@ -43,6 +43,7 @@ import {
   type TaskRunTerminalStatus,
   type TaskSafeBoundary,
 } from "./task-run-contract.js";
+import { deriveRecoverableTaskRuntimeLaunchIdentity } from "./recoverable-task.js";
 
 const TASK_RUNS_DIRECTORY_NAME = "task-runs";
 const TASK_RUN_FILE_NAME = "task.jsonl";
@@ -1434,7 +1435,11 @@ function applyTaskRunEvent(
         );
       }
       const current = attempt.launch;
+      const execution = attempt.execution;
       if (
+        !execution ||
+        execution.ownerId !== event.data.ownerId ||
+        execution.expiresAt <= committedAt ||
         event.data.leaseEpoch <= (current?.leaseEpoch ?? 0) ||
         event.data.expiresAt <= committedAt ||
         (current !== undefined && current.launchId !== event.data.launchId) ||
@@ -1450,6 +1455,7 @@ function applyTaskRunEvent(
         status: "claimed",
         ownerId: event.data.ownerId,
         leaseEpoch: event.data.leaseEpoch,
+        executionLeaseEpoch: execution.leaseEpoch,
         claimedAt: event.at,
         expiresAt: event.data.expiresAt,
       };
@@ -1457,11 +1463,7 @@ function applyTaskRunEvent(
     }
     case "attempt.launch.succeeded": {
       const attempt = requireCurrentLaunch(indexes, event, committedAt);
-      if (event.data.receipt.launchId !== event.data.launchId) {
-        throw new TaskRunStoreIntegrityError(
-          `TaskRun Attempt ${attempt.attemptId} launch receipt has another launchId`,
-        );
-      }
+      assertLaunchReceiptMatchesSourceBoundary(indexes, attempt, event.data.receipt);
       attempt.launch = {
         ...attempt.launch!,
         status: "succeeded",
@@ -1565,19 +1567,51 @@ function requireCurrentLaunch(
 ): MutableTaskAttempt {
   const attempt = requireRunningAttempt(indexes, event.data.attemptId);
   const launch = attempt.launch;
+  const execution = attempt.execution;
   if (
     !launch ||
     launch.status !== "claimed" ||
     launch.launchId !== event.data.launchId ||
     launch.ownerId !== event.data.ownerId ||
     launch.leaseEpoch !== event.data.leaseEpoch ||
-    committedAt >= launch.expiresAt
+    committedAt >= launch.expiresAt ||
+    !execution ||
+    execution.ownerId !== launch.ownerId ||
+    execution.leaseEpoch !== launch.executionLeaseEpoch ||
+    execution.expiresAt <= committedAt
   ) {
     throw new TaskRunStoreIntegrityError(
       `TaskRun Attempt ${attempt.attemptId} launch settlement lost its lease`,
     );
   }
   return attempt;
+}
+
+function assertLaunchReceiptMatchesSourceBoundary(
+  indexes: ProjectionIndexes,
+  attempt: MutableTaskAttempt,
+  receipt: RecoverableTaskLaunchReceipt,
+): void {
+  const source = attempt.sourceAttemptId
+    ? indexes.attempts.get(attempt.sourceAttemptId)
+    : undefined;
+  const runtime = source?.boundary?.runtime;
+  const launch = attempt.launch!;
+  const identity = deriveRecoverableTaskRuntimeLaunchIdentity(launch.launchId);
+  const expectedSequence = runtime ? runtime.eventHighWater + 1 : undefined;
+  if (
+    !runtime ||
+    !Number.isSafeInteger(expectedSequence) ||
+    receipt.launchId !== launch.launchId ||
+    receipt.sessionId !== runtime.sessionId ||
+    receipt.runId !== identity.runId ||
+    receipt.runStartedEventId !== identity.runStartedEventId ||
+    receipt.runStartedSequence !== expectedSequence
+  ) {
+    throw new TaskRunStoreIntegrityError(
+      `TaskRun Attempt ${attempt.attemptId} launch receipt does not match its source Runtime boundary`,
+    );
+  }
 }
 
 function assertAttemptWasLaunched(attempt: MutableTaskAttempt): void {
