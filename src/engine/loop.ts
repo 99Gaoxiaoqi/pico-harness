@@ -1774,7 +1774,8 @@ export class AgentEngine implements AgentRunner {
             }
           }
 
-          // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
+          // RuntimeRun 会把每个已 dispatch 的工具 T2 与对应 Observation 放进
+          // 同一个 appendBatch；这个提交点不得拆成两个独立 durable writes。
           await session.commitMessages(...observations);
           toolProtocolClosed = true;
           await this.hookService?.dispatch(
@@ -1993,6 +1994,8 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
+        // Durable T1 是进入真实工具实现前的最后一道屏障。它已落盘后若进程
+        // 消失，恢复只能判为 indeterminate，不能再次调用 Registry。
         await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
         result = await this.registry.execute(toolCall, {
           signal,
@@ -2715,6 +2718,7 @@ export class AgentEngine implements AgentRunner {
             signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
             const runtimeRun = this.runtimePort?.currentRun();
+            // 子代理工具沿用同一 T1/T2 协议；Transcript result 也与 T2 原子提交。
             await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
             const result = await (this.runtimePort
               ? this.runtimePort.runWithToolCall(tc.id, () =>

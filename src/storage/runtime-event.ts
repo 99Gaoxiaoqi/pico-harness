@@ -3,9 +3,13 @@ import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
 } from "../engine/session-runtime.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
+} from "../engine/session-runtime-event.js";
 export {
   RUNTIME_EVENT_SCHEMA_VERSION,
+  RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
   isRuntimeMessageEvent,
   isRuntimeTerminalEvent,
   runtimeEventHasModelMessage,
@@ -30,6 +34,9 @@ export type {
   RuntimeSessionForkedEvent,
   RuntimeSessionStateCommittedEvent,
   RuntimeTerminalStatus,
+  RuntimeToolOutcomeRecordedEvent,
+  RuntimeToolOutcomeStatus,
+  RuntimeToolRecoveryMode,
   RuntimeToolStartedEvent,
   RuntimeTranscriptEventRecordedEvent,
 } from "../engine/session-runtime-event.js";
@@ -44,6 +51,7 @@ export const RUNTIME_EVENT_KINDS = [
   "run.started",
   "message.committed",
   "tool.started",
+  "tool.outcome.recorded",
   "approval.requested",
   "approval.settled",
   "model.call.started",
@@ -159,6 +167,21 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
     case "tool.started":
       assertString(value["data"]["toolName"], "tool.started.toolName");
       assertString(value["data"]["argumentsHash"], "tool.started.argumentsHash");
+      assertRuntimeToolDispatchProtocol(value);
+      return;
+    case "tool.outcome.recorded":
+      assertEqual(
+        value["data"]["protocolVersion"],
+        RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
+        "tool.outcome.recorded.protocolVersion",
+      );
+      assertString(value["data"]["operationId"], "tool.outcome.recorded.operationId");
+      if (!isToolOutcomeStatus(value["data"]["status"])) {
+        throw new RuntimeEventIntegrityError("Runtime tool outcome status is invalid");
+      }
+      assertString(value["data"]["resultEventId"], "tool.outcome.recorded.resultEventId");
+      assertSha256(value["data"]["resultHash"], "tool.outcome.recorded.resultHash");
+      assertRuntimeToolCallRef(value, "tool.outcome.recorded");
       return;
     case "approval.requested":
       assertString(value["data"]["approvalId"], "approval.requested.approvalId");
@@ -312,6 +335,41 @@ function assertCheckpointSummary(value: Record<string, unknown>): void {
   assertMessage(summary);
 }
 
+function assertRuntimeToolDispatchProtocol(value: Record<string, unknown>): void {
+  const data = value["data"] as Record<string, unknown>;
+  const protocolVersion = data["protocolVersion"];
+  const operationId = data["operationId"];
+  const recoveryMode = data["recoveryMode"];
+  if (protocolVersion === undefined && operationId === undefined && recoveryMode === undefined) {
+    return;
+  }
+  assertEqual(
+    protocolVersion,
+    RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
+    "tool.started.protocolVersion",
+  );
+  assertString(operationId, "tool.started.operationId");
+  if (recoveryMode !== "never_auto_retry") {
+    throw new RuntimeEventIntegrityError("Runtime tool recovery mode is invalid");
+  }
+  assertSha256(data["argumentsHash"], "tool.started.argumentsHash");
+  assertRuntimeToolCallRef(value, "tool.started");
+}
+
+function assertRuntimeToolCallRef(value: Record<string, unknown>, kind: string): void {
+  const refs = value["refs"];
+  if (!isRecord(refs)) {
+    throw new RuntimeEventIntegrityError(`Runtime ${kind} refs must include toolCallId`);
+  }
+  assertString(refs["toolCallId"], `${kind}.refs.toolCallId`);
+}
+
+function assertSha256(value: unknown, field: string): void {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new RuntimeEventIntegrityError(`Runtime event ${field} must be a SHA-256 digest`);
+  }
+}
+
 function assertEqual(value: unknown, expected: unknown, field: string): void {
   if (value !== expected) throw new RuntimeEventIntegrityError(`Runtime event ${field} is invalid`);
 }
@@ -336,6 +394,10 @@ function isRole(value: unknown): boolean {
 
 function isModelCallStatus(value: unknown): boolean {
   return value === "succeeded" || value === "failed" || value === "cancelled";
+}
+
+function isToolOutcomeStatus(value: unknown): boolean {
+  return value === "completed" || value === "failed" || value === "cancelled";
 }
 
 function isCostStatus(value: unknown): boolean {

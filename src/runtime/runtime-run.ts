@@ -16,6 +16,7 @@ import type { SessionRuntimeStateWritePatch } from "../engine/session-runtime.js
 import { PICO_TOOL_RESULT_ERROR_KEY, type Message, type ToolCall } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
+  RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
   runtimeEventHasModelMessage,
   type RuntimeApprovalRequestedEvent,
   type RuntimeApprovalSettledEvent,
@@ -30,6 +31,7 @@ import {
   type RuntimeRunTerminalEvent,
   type RuntimeSessionForkedEvent,
   type RuntimeTerminalStatus,
+  type RuntimeToolOutcomeRecordedEvent,
   type RuntimeToolStartedEvent,
 } from "./runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
@@ -44,6 +46,11 @@ import {
   projectRuntimeSessionMessages,
   projectRuntimeSessionState,
 } from "./runtime-session-projection.js";
+import {
+  canonicalRuntimeToolArgumentsHash,
+  canonicalRuntimeToolResultHash,
+  runtimeToolOutcomeStatus,
+} from "./runtime-tool-protocol.js";
 
 interface RuntimeRunContext {
   readonly run: RuntimeRun;
@@ -182,6 +189,13 @@ interface PendingRuntimeToolCall {
   resolved: boolean;
 }
 
+interface PendingRuntimeToolOperation {
+  readonly operationId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly argumentsHash: string;
+}
+
 /** The canonical run bound to the current asynchronous Agent execution. */
 export function currentRuntimeRun(): RuntimeRun | undefined {
   const context = runtimeRunContext.getStore();
@@ -224,6 +238,7 @@ export class RuntimeRun {
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
+  private readonly pendingToolOperationByCallId = new Map<string, PendingRuntimeToolOperation>();
   private turnId: string;
   private stepId: string;
   private terminal?: RuntimeRunTerminalEvent;
@@ -714,11 +729,21 @@ export class RuntimeRun {
     if (messages.length === 0) return;
     this.assertSession(session);
     this.assertOpen();
-    const events = messages.map((message) =>
-      this.messageCommittedEvent(createRuntimeEventId("message"), message),
-    );
+    const claimedOperationIds = new Set<string>();
+    const settledOperations: PendingRuntimeToolOperation[] = [];
+    const events = messages.flatMap((message): RuntimeEvent[] => {
+      const at = this.now().toISOString();
+      const result = this.messageCommittedEvent(createRuntimeEventId("message"), message, at);
+      const operation = this.pendingToolOperation(result, claimedOperationIds);
+      if (!operation) return [result];
+      settledOperations.push(operation);
+      return [this.toolOutcomeRecordedEvent(operation, result, at), result];
+    });
     const persisted = await this.appendBatch(events);
-    await session.commitRuntimeProjectionBatch(persisted);
+    this.clearSettledToolOperations(settledOperations);
+    await session.commitRuntimeProjectionBatch(
+      persisted.filter((_, index) => events[index]?.kind === "message.committed"),
+    );
   }
 
   async commitMessageOnce(
@@ -755,12 +780,20 @@ export class RuntimeRun {
     this.assertOpen();
     const canonicalMessage = canonicalizeRuntimeMessage(message);
     const refs = this.messageRefs(canonicalMessage);
-    await this.append({
-      ...this.base(createRuntimeEventId("transcript-message"), true, "transcript"),
+    const at = this.now().toISOString();
+    const result: RuntimeMessageCommittedEvent = {
+      ...this.base(createRuntimeEventId("transcript-message"), true, "transcript", at),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
       data: { message: canonicalMessage },
-    });
+    };
+    const operation = this.pendingToolOperation(result, new Set<string>());
+    if (!operation) {
+      await this.append(result);
+      return;
+    }
+    await this.appendBatch([this.toolOutcomeRecordedEvent(operation, result, at), result]);
+    this.clearSettledToolOperations([operation]);
   }
 
   async recordToolStarted(
@@ -769,16 +802,30 @@ export class RuntimeRun {
     argumentsJson: string,
   ): Promise<void> {
     this.assertOpen();
+    if (this.pendingToolOperationByCallId.has(toolCallId)) {
+      throw new Error(`Runtime tool call ${toolCallId} already has an unsettled dispatch`);
+    }
+    const operationId = `tool-operation:${randomUUID()}`;
+    const argumentsHash = canonicalRuntimeToolArgumentsHash(argumentsJson);
     const event: RuntimeToolStartedEvent = {
       ...this.base(createRuntimeEventId("tool-started"), true, "internal"),
       refs: this.refs({ toolCallId }),
       kind: "tool.started",
       data: {
         toolName,
-        argumentsHash: createHash("sha256").update(argumentsJson).digest("hex"),
+        argumentsHash,
+        protocolVersion: RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
+        operationId,
+        recoveryMode: "never_auto_retry",
       },
     };
     await this.append(event);
+    this.pendingToolOperationByCallId.set(toolCallId, {
+      operationId,
+      toolCallId,
+      toolName,
+      argumentsHash,
+    });
   }
 
   registerToolEvidence(toolCallId: string, evidence: RuntimeEvidenceReference): void {
@@ -905,6 +952,7 @@ export class RuntimeRun {
     eventId: string,
     includeStep = true,
     visibility: RuntimeEventBase["visibility"] = "model",
+    at = this.now().toISOString(),
   ): RuntimeEventBase {
     const refs = this.refs(undefined, includeStep);
     return {
@@ -914,7 +962,7 @@ export class RuntimeRun {
       invocationId: this.invocationId,
       runId: this.runId,
       turnId: this.turnId,
-      at: this.now().toISOString(),
+      at,
       partial: false,
       visibility,
       ...(refs ? { refs } : {}),
@@ -938,15 +986,66 @@ export class RuntimeRun {
     });
   }
 
-  private messageCommittedEvent(eventId: string, message: Message): RuntimeMessageCommittedEvent {
+  private messageCommittedEvent(
+    eventId: string,
+    message: Message,
+    at = this.now().toISOString(),
+  ): RuntimeMessageCommittedEvent {
     const canonicalMessage = canonicalizeRuntimeMessage(message);
     const refs = this.messageRefs(canonicalMessage);
     return {
-      ...this.base(eventId),
+      ...this.base(eventId, true, "model", at),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
       data: { message: canonicalMessage },
     };
+  }
+
+  private pendingToolOperation(
+    result: RuntimeMessageCommittedEvent,
+    claimedOperationIds: Set<string>,
+  ): PendingRuntimeToolOperation | undefined {
+    const message = result.data.message;
+    if (message.role !== "user" || !message.toolCallId) return undefined;
+    const operation = this.pendingToolOperationByCallId.get(message.toolCallId);
+    if (!operation) return undefined;
+    if (claimedOperationIds.has(operation.operationId)) {
+      throw new Error(
+        `Runtime tool operation ${operation.operationId} received multiple canonical results`,
+      );
+    }
+    claimedOperationIds.add(operation.operationId);
+    return operation;
+  }
+
+  private toolOutcomeRecordedEvent(
+    operation: PendingRuntimeToolOperation,
+    result: RuntimeMessageCommittedEvent,
+    at: string,
+  ): RuntimeToolOutcomeRecordedEvent {
+    return {
+      ...this.base(createRuntimeEventId("tool-outcome"), true, "internal", at),
+      refs: this.refs({ toolCallId: operation.toolCallId }),
+      kind: "tool.outcome.recorded",
+      data: {
+        protocolVersion: RUNTIME_TOOL_OPERATION_SCHEMA_VERSION,
+        operationId: operation.operationId,
+        status: runtimeToolOutcomeStatus(result.data.message),
+        resultEventId: result.eventId,
+        resultHash: canonicalRuntimeToolResultHash(result.data.message),
+      },
+    };
+  }
+
+  private clearSettledToolOperations(operations: readonly PendingRuntimeToolOperation[]): void {
+    for (const operation of operations) {
+      if (
+        this.pendingToolOperationByCallId.get(operation.toolCallId)?.operationId ===
+        operation.operationId
+      ) {
+        this.pendingToolOperationByCallId.delete(operation.toolCallId);
+      }
+    }
   }
 
   private append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
