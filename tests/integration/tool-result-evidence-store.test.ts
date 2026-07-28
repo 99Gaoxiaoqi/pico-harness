@@ -18,10 +18,11 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   EvidenceArchive,
-  formatRuntimeEvidenceUri,
+  formatEvidenceUri,
   MAX_EVIDENCE_PAGE_LIMIT_BYTES,
-  parseRuntimeEvidenceUri,
+  parseEvidenceUri,
   type RuntimeToolResultEvidenceManifestV2,
+  type SubagentReportEvidenceManifestV2,
 } from "../../src/context/evidence-archive.js";
 import type { RuntimeEvidenceReference } from "../../src/runtime/runtime-event.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
@@ -104,20 +105,47 @@ test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", asy
   }
 });
 
-test("Runtime Evidence reads legacy v1 manifests and compaction Evidence v1", async (context) => {
+test("Subagent reports use the same Evidence URI reader and immutable blob CAS", async (context) => {
+  const fixture = await evidenceFixture(context, "pico-subagent-evidence-");
+  const report = `完整报告\n${"证据行\n".repeat(2_000)}`;
+  const reference = await fixture.archive.archiveSubagentReport({
+    sessionId: "subagent/session",
+    taskPrompt: "核验 Evidence 硬切换",
+    report,
+    status: "partial",
+  });
+  const uri = formatEvidenceUri(reference);
+  const parsed = parseEvidenceUri(uri);
+
+  assert.deepEqual(parsed, {
+    schemaVersion: 1,
+    contentHash: reference.contentHash,
+    sessionId: reference.sessionId,
+  });
+  assert.equal(await fixture.archive.readSubagentReport(reference), report);
+  const page = await fixture.archive.readEvidencePage(parsed, { limitBytes: 17 });
+  assert.equal(page.kind, "subagent-report");
+  assert.equal(report.startsWith(page.content), true);
+  assert.equal(page.truncated, true);
+
+  const manifest = await fixture.archive.readSubagentReportEvidence(reference);
+  const typedManifest = manifest as SubagentReportEvidenceManifestV2;
+  assert.equal(typedManifest.schemaVersion, 2);
+  assert.equal(typedManifest.content.status, "partial");
+  assert.equal(
+    await readFile(pathForBlob(fixture.evidenceRoot, typedManifest.content.report.digest), "utf8"),
+    report,
+  );
+  assert.doesNotMatch(
+    await readFile(pathForManifest(fixture.evidenceRoot, reference), "utf8"),
+    /证据行/u,
+  );
+});
+
+test("Runtime Evidence rejects legacy v1 manifests while compaction Evidence v1 remains readable", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-v1-");
   const sessionId = "legacy/session";
-  const content = {
-    kind: "tool-exchange" as const,
-    sessionId,
-    toolCallId: "legacy-call",
-    toolName: "read_file",
-    arguments: '{"path":"legacy.txt"}',
-    rawOutput: "legacy raw output",
-    modelVisibleOutput: "legacy projected output",
-    isError: false,
-  };
-  const contentHash = hashContent(content);
+  const contentHash = "a".repeat(64);
   const manifestPath = join(
     fixture.evidenceRoot,
     sanitizeFilePart(sessionId),
@@ -134,7 +162,16 @@ test("Runtime Evidence reads legacy v1 manifests and compaction Evidence v1", as
       contentHash,
       archivedAt: "2026-07-28T00:00:00.000Z",
       kind: "tool-exchange",
-      content,
+      content: {
+        kind: "tool-exchange",
+        sessionId,
+        toolCallId: "legacy-call",
+        toolName: "read_file",
+        arguments: '{"path":"legacy.txt"}',
+        rawOutput: "legacy raw output",
+        modelVisibleOutput: "legacy projected output",
+        isError: false,
+      },
     })}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
@@ -145,14 +182,10 @@ test("Runtime Evidence reads legacy v1 manifests and compaction Evidence v1", as
     kind: "tool-exchange",
   };
 
-  assert.equal((await fixture.archive.readRuntimeToolExchange(reference)).schemaVersion, 1);
-  assert.equal(await fixture.archive.readRuntimeToolOutput(reference), content.rawOutput);
-  const legacyPage = await fixture.archive.readRuntimeToolOutputPage(reference, {
-    offsetBytes: 0,
-    limitBytes: 6,
-  });
-  assert.equal(legacyPage.content, "legacy");
-  assert.equal(legacyPage.nextOffsetBytes, 6);
+  await assert.rejects(
+    fixture.archive.readRuntimeToolExchange(reference),
+    /invalid schema version/u,
+  );
 
   const compacted = await fixture.archive.archiveToolExchanges("compaction-session", [
     {
@@ -445,8 +478,12 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
     rawOutput,
     isError: false,
   });
-  const ref = formatRuntimeEvidenceUri(reference);
-  assert.deepEqual(parseRuntimeEvidenceUri(ref), reference);
+  const ref = formatEvidenceUri(reference);
+  assert.deepEqual(parseEvidenceUri(ref), {
+    schemaVersion: 1,
+    contentHash: reference.contentHash,
+    sessionId: reference.sessionId,
+  });
 
   let offsetBytes = 0;
   let recovered = "";
@@ -467,7 +504,7 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   const tool = new ReadEvidenceTool(fixture.root, fixture.evidenceRoot);
   const output = await tool.execute(JSON.stringify({ ref, offsetBytes: 0, limitBytes: 7 }));
   assert.match(output, /^开头/u);
-  assert.match(output, /\[Evidence bytes 0-/u);
+  assert.match(output, /\[Evidence tool-exchange bytes 0-/u);
   assert.match(output, /"offsetBytes":/u);
 
   const hash = reference.contentHash;
@@ -478,7 +515,7 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
     `pico://evidence/a%2fb/${hash}`,
     `pico://evidence/session/${hash}/extra`,
   ]) {
-    assert.throws(() => parseRuntimeEvidenceUri(invalid), /evidence ref/u);
+    assert.throws(() => parseEvidenceUri(invalid), /Evidence ref/u);
   }
   await assert.rejects(
     tool.execute(
@@ -492,7 +529,7 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   await assert.rejects(
     tool.execute(
       JSON.stringify({
-        ref: formatRuntimeEvidenceUri({ ...reference, sessionId: "wrong-session" }),
+        ref: formatEvidenceUri({ ...reference, sessionId: "wrong-session" }),
       }),
     ),
     { code: "ENOENT" },
@@ -500,7 +537,7 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   await assert.rejects(
     tool.execute(
       JSON.stringify({
-        ref: formatRuntimeEvidenceUri({ ...reference, contentHash: "0".repeat(64) }),
+        ref: formatEvidenceUri({ ...reference, contentHash: "0".repeat(64) }),
       }),
     ),
     { code: "ENOENT" },
@@ -511,13 +548,13 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   });
   const names = registry.getAvailableTools().map((definition) => definition.name);
   assert.ok(names.includes("read_evidence"));
-  assert.ok(names.includes("read_artifact"));
+  assert.equal(names.includes("read_artifact"), false);
 
   const workerDir = join(fixture.root, "worker");
   await mkdir(workerDir, { recursive: true });
   const runner: AgentRunner = {
     async runSub() {
-      return { status: "completed", summary: "unused", artifacts: [] };
+      return { status: "completed", summary: "unused", evidenceRefs: [] };
     },
   };
   const subagentRegistry = createSubagentRegistryFactory({
@@ -595,7 +632,10 @@ async function trackFileHandleReads(context: TestContext, path: string): Promise
   };
 }
 
-function pathForManifest(evidenceRoot: string, reference: RuntimeEvidenceReference): string {
+function pathForManifest(
+  evidenceRoot: string,
+  reference: { readonly sessionId: string; readonly contentHash: string },
+): string {
   return join(evidenceRoot, sanitizeFilePart(reference.sessionId), `${reference.contentHash}.json`);
 }
 
@@ -605,31 +645,4 @@ function pathForBlob(evidenceRoot: string, digest: string): string {
 
 function sanitizeFilePart(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
-}
-
-function hashContent(content: unknown): string {
-  return createHash("sha256").update(stableJson(content)).digest("hex");
-}
-
-function stableJson(value: unknown): string {
-  if (
-    value === null ||
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  ) {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
-      .join(",")}}`;
-  }
-  throw new Error("fixture must be JSON serializable");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

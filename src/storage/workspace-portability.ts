@@ -33,7 +33,6 @@ export type WorkspacePortabilityClassification =
 export const WORKSPACE_PORTABILITY_REASONS = [
   "canonical_runtime_history",
   "durable_task_history",
-  "portable_artifact",
   "portable_evidence",
   "portable_trace",
   "portable_memory_summary",
@@ -119,13 +118,6 @@ const PORTABLE_TOP_LEVEL_POLICIES = new Map<string, PathPolicy>([
     {
       classification: "portable",
       reason: "durable_task_history",
-    },
-  ],
-  [
-    "artifacts",
-    {
-      classification: "portable",
-      reason: "portable_artifact",
     },
   ],
   [
