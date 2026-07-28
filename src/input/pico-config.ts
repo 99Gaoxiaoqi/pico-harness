@@ -404,7 +404,13 @@ function parseModelCapabilities(
     }
     result[key] = candidate as number;
   }
-  for (const key of ["vision", "toolCall", "cache", "streamUsage"] as const) {
+  for (const key of [
+    "vision",
+    "toolCall",
+    "cache",
+    "toolChoiceNoneWithTools",
+    "streamUsage",
+  ] as const) {
     const candidate = value[key];
     if (candidate === undefined) continue;
     if (typeof candidate !== "boolean") {

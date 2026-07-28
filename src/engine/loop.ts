@@ -757,6 +757,9 @@ export class AgentEngine implements AgentRunner {
       get modelName() {
         return provider.modelName;
       },
+      get requestCapabilities() {
+        return provider.requestCapabilities;
+      },
       ...(provider.isRetryableError
         ? { isRetryableError: provider.isRetryableError.bind(provider) }
         : {}),
@@ -1080,12 +1083,14 @@ export class AgentEngine implements AgentRunner {
     span?: Span,
     signal?: AbortSignal,
     allowEmergencyCompaction = true,
+    requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
   ): Promise<Message> {
     const generate = (context: Message[]) =>
       generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, tools, {
         signal,
         onRetry: this.makeRetryReporter(span),
         onRateLimited: () => this.rotateProvider(reporter, signal),
+        ...requestOptions,
       });
     try {
       return await generate(baseContext);
@@ -1270,6 +1275,7 @@ export class AgentEngine implements AgentRunner {
     let requiredDelegationRecoveryPending = false;
     let requiredDelegationRecoveryExploreOnly = false;
     let consecutiveHookStopBlocks = 0;
+    let graceCandidateTools: ToolDefinition[] = [];
     const userRewindPointId = session.fileHistory.snapshots.findLast(
       (snapshot) =>
         snapshot.messageId === session.fileHistory.currentMessageId &&
@@ -1448,6 +1454,12 @@ export class AgentEngine implements AgentRunner {
               },
             });
           }
+          graceCandidateTools =
+            !exploreSynthesisOnly &&
+            !requiredFirstDelegationActive &&
+            !requiredDelegationRecoveryPending
+              ? [...providerTools]
+              : [];
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
             availableToolCount: providerTools.length,
@@ -2019,6 +2031,7 @@ export class AgentEngine implements AgentRunner {
           session,
           systemPrompt,
           turnTail,
+          graceCandidateTools,
           exhaustedReason,
           reporter,
           rootSpan,
@@ -2435,12 +2448,19 @@ export class AgentEngine implements AgentRunner {
     session: Session,
     systemPrompt: string,
     turnTail: string,
+    candidateTools: ToolDefinition[],
     reason: string,
     reporter: Reporter,
     parentSpan?: Span,
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
+    const preserveToolPrefix =
+      candidateTools.length > 0 &&
+      this.provider.requestCapabilities?.toolChoiceNoneWithTools === true;
+    // Claude 的 auto → none 会使 messages 层重新计算；保留相同 tools 后，
+    // 显式 tools/system cache breakpoint 仍可复用，避免 grace 整段前缀全失效。
+    const graceTools = preserveToolPrefix ? candidateTools : [];
     // 本轮 Goal/Plan/Todo 已在 ephemeral turn tail 中可见，grace 消息只持久化控制指令。
     const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。`;
     await session.commitMessages({
@@ -2450,31 +2470,44 @@ export class AgentEngine implements AgentRunner {
     });
     const graceSpan = parentSpan?.startChild("LLM.GraceCall", {
       reason,
-      availableToolCount: 0,
+      availableToolCount: graceTools.length,
+      toolChoiceNone: preserveToolPrefix,
     });
     try {
       const context = await this.prepareModelContext(
         session,
         systemPrompt,
         turnTail,
-        [],
+        graceTools,
         graceSpan,
         signal,
       );
       const costBefore = session.totalCostCNY;
-      const response = await withProviderCallContext({ purpose: "grace" }, () =>
+      const providerResponse = await withProviderCallContext({ purpose: "grace" }, () =>
         this.generateWithOverflowRetry(
           session,
           systemPrompt,
           turnTail,
-          [],
+          graceTools,
           context,
           reporter,
           graceSpan,
           signal,
+          true,
+          preserveToolPrefix ? { toolChoice: "none" } : undefined,
         ),
       );
       signal?.throwIfAborted();
+      // A compatible endpoint may ignore tool_choice:none. Grace never executes tools,
+      // and it must not persist an unmatched assistant tool_use into the next request.
+      const response: Message = { ...providerResponse };
+      if (response.toolCalls !== undefined) {
+        graceSpan?.addAttributes({ discardedToolCallCount: response.toolCalls.length });
+        delete response.toolCalls;
+      }
+      if (response.content.trim().length === 0) {
+        response.content = "已达执行预算，但模型未返回可用的纯文本总结。";
+      }
       recordLlmResponse(graceSpan, response);
       // Grace Call is the one permitted over-budget summary. It does not consume another
       // goal turn, but its measurable token/cost usage remains part of the goal totals.

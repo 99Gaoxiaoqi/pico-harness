@@ -16,6 +16,16 @@ export interface PreparedRequestSegment {
   role?: string;
 }
 
+export type PreparedRequestCacheBreakpointLayer = "tools" | "tools+system" | "history";
+
+export interface PreparedRequestCacheBreakpoint {
+  layer: PreparedRequestCacheBreakpointLayer;
+  index: number;
+  hash: string;
+  /** 累计规范化分段 JSON payload 的 UTF-8 字节；不是 token 数或完整 wire prefix 字节。 */
+  bytes: number;
+}
+
 export interface PreparedRequestCapture {
   schemaVersion: 1;
   provider: PreparedProviderRequest["provider"];
@@ -24,6 +34,8 @@ export interface PreparedRequestCapture {
   requestBytes: number;
   cachePrefixHash: string;
   segments: PreparedRequestSegment[];
+  /** 累积到各真实 cache_control 断点的无明文快照；旧版持久记录可能缺失。 */
+  cacheBreakpoints?: PreparedRequestCacheBreakpoint[];
 }
 
 export type PreparedRequestChangeReason =
@@ -32,14 +44,45 @@ export type PreparedRequestChangeReason =
   | "request_changed"
   | "cacheable_prefix_changed";
 
+export type PreparedRequestCacheBreakpointChangeReason =
+  | "first_request"
+  | "prior_unavailable"
+  | "stable"
+  | "changed"
+  | "added"
+  | "removed";
+
+export interface PreparedRequestCacheBreakpointSnapshot {
+  hash: string;
+  bytes: number;
+}
+
+export interface PreparedRequestCacheBreakpointComparison {
+  layer: PreparedRequestCacheBreakpointLayer;
+  index: number;
+  changeReason: PreparedRequestCacheBreakpointChangeReason;
+  prior?: PreparedRequestCacheBreakpointSnapshot;
+  current?: PreparedRequestCacheBreakpointSnapshot;
+}
+
 export interface PreparedRequestDiagnostic extends PreparedRequestCapture {
   changeReason: PreparedRequestChangeReason;
   firstChangedCacheableSegment?: Pick<PreparedRequestSegment, "kind" | "index" | "role">;
+  /**
+   * 按 Anthropic tools → system → messages 顺序逐显式内容断点比较，不含请求明文。
+   * provider options 仍由 requestHash/changeReason 解释，不计入这些断点。
+   */
+  cacheBreakpointComparisons?: PreparedRequestCacheBreakpointComparison[];
 }
 
 interface PreparedRequestSegmentCandidate {
   segment: PreparedRequestSegment;
   cacheBreakpoint: boolean;
+}
+
+interface PreparedRequestCacheSegments {
+  segments: PreparedRequestSegment[];
+  cacheBreakpoints: PreparedRequestCacheBreakpoint[];
 }
 
 /**
@@ -51,26 +94,16 @@ export function capturePreparedProviderRequest(
   request: PreparedProviderRequest,
 ): PreparedRequestCapture {
   const requestJson = serialize(request.body);
-  const segments = cacheSegments(request);
+  const { segments, cacheBreakpoints } = cacheSegments(request);
   return {
     schemaVersion: 1,
     provider: request.provider,
     model: request.model,
     requestHash: hash(`${request.provider}\0${request.model}\0${requestJson}`),
     requestBytes: Buffer.byteLength(requestJson, "utf8"),
-    cachePrefixHash: hash(
-      JSON.stringify(
-        segments
-          .filter((segment) => segment.cacheable)
-          .map(({ kind, index, role, hash: segmentHash }) => ({
-            kind,
-            index,
-            ...(role ? { role } : {}),
-            hash: segmentHash,
-          })),
-      ),
-    ),
+    cachePrefixHash: hashCachePrefix(segments.filter((segment) => segment.cacheable)),
     segments,
+    cacheBreakpoints,
   };
 }
 
@@ -79,9 +112,20 @@ export function diagnosePreparedProviderRequest(
   current: PreparedRequestCapture,
   prior?: PreparedRequestCapture,
 ): PreparedRequestDiagnostic {
-  if (!prior) return { ...current, changeReason: "first_request" };
+  const cacheBreakpointComparisons = compareCacheBreakpoints(current, prior);
+  if (!prior) {
+    return {
+      ...current,
+      changeReason: "first_request",
+      ...(cacheBreakpointComparisons ? { cacheBreakpointComparisons } : {}),
+    };
+  }
   if (current.requestHash === prior.requestHash) {
-    return { ...current, changeReason: "stable" };
+    return {
+      ...current,
+      changeReason: "stable",
+      ...(cacheBreakpointComparisons ? { cacheBreakpointComparisons } : {}),
+    };
   }
   const firstChangedCacheableSegment = findFirstChangedCacheableSegment(current, prior);
   return {
@@ -91,6 +135,7 @@ export function diagnosePreparedProviderRequest(
         ? "request_changed"
         : "cacheable_prefix_changed",
     ...(firstChangedCacheableSegment ? { firstChangedCacheableSegment } : {}),
+    ...(cacheBreakpointComparisons ? { cacheBreakpointComparisons } : {}),
   };
 }
 
@@ -103,13 +148,15 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
   const requestBytes = value["requestBytes"];
   const cachePrefixHash = value["cachePrefixHash"];
   const rawSegments = value["segments"];
+  const rawCacheBreakpoints = value["cacheBreakpoints"];
   if (
     (provider !== "claude" && provider !== "openai" && provider !== "gemini") ||
     typeof model !== "string" ||
     typeof requestHash !== "string" ||
     !isNonNegativeInteger(requestBytes) ||
     typeof cachePrefixHash !== "string" ||
-    !Array.isArray(rawSegments)
+    !Array.isArray(rawSegments) ||
+    (rawCacheBreakpoints !== undefined && !Array.isArray(rawCacheBreakpoints))
   ) {
     return undefined;
   }
@@ -119,6 +166,14 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
     if (!segment) return undefined;
     segments.push(segment);
   }
+  const cacheBreakpoints: PreparedRequestCacheBreakpoint[] = [];
+  if (rawCacheBreakpoints) {
+    for (const raw of rawCacheBreakpoints) {
+      const cacheBreakpoint = parseCacheBreakpoint(raw);
+      if (!cacheBreakpoint) return undefined;
+      cacheBreakpoints.push(cacheBreakpoint);
+    }
+  }
   return {
     schemaVersion: 1,
     provider,
@@ -127,10 +182,11 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
     requestBytes,
     cachePrefixHash,
     segments,
+    ...(rawCacheBreakpoints ? { cacheBreakpoints } : {}),
   };
 }
 
-function cacheSegments(request: PreparedProviderRequest): PreparedRequestSegment[] {
+function cacheSegments(request: PreparedProviderRequest): PreparedRequestCacheSegments {
   const body = request.body;
   const candidates: PreparedRequestSegmentCandidate[] = [];
   const claimed = new Set<string>(["model"]);
@@ -165,7 +221,10 @@ function cacheSegments(request: PreparedProviderRequest): PreparedRequestSegment
   if (Object.keys(providerOptions).length > 0) {
     segments.push(segment("provider_options", 0, providerOptions, false));
   }
-  return segments;
+  return {
+    segments,
+    cacheBreakpoints: collectCacheBreakpoints(candidates, segments),
+  };
 }
 
 function appendValueSegments(
@@ -240,6 +299,145 @@ function segment(
   };
 }
 
+function collectCacheBreakpoints(
+  candidates: PreparedRequestSegmentCandidate[],
+  segments: PreparedRequestSegment[],
+): PreparedRequestCacheBreakpoint[] {
+  const layerIndexes: Record<PreparedRequestCacheBreakpointLayer, number> = {
+    tools: 0,
+    "tools+system": 0,
+    history: 0,
+  };
+  const cacheBreakpoints: PreparedRequestCacheBreakpoint[] = [];
+  for (const [position, candidate] of candidates.entries()) {
+    if (!candidate.cacheBreakpoint) continue;
+    const layer = cacheBreakpointLayer(candidate.segment.kind);
+    if (!layer) continue;
+    const prefix = segments.slice(0, position + 1);
+    cacheBreakpoints.push({
+      layer,
+      index: layerIndexes[layer]++,
+      hash: hashCachePrefix(prefix),
+      bytes: prefix.reduce((total, item) => total + item.bytes, 0),
+    });
+  }
+  return cacheBreakpoints;
+}
+
+function cacheBreakpointLayer(
+  kind: PreparedRequestSegmentKind,
+): PreparedRequestCacheBreakpointLayer | undefined {
+  if (kind === "tool_schema") return "tools";
+  if (kind === "system_prompt") return "tools+system";
+  if (kind === "message") return "history";
+  return undefined;
+}
+
+function compareCacheBreakpoints(
+  current: PreparedRequestCapture,
+  prior?: PreparedRequestCapture,
+): PreparedRequestCacheBreakpointComparison[] | undefined {
+  const currentBreakpoints = current.cacheBreakpoints;
+  if (!currentBreakpoints) return undefined;
+  if (!prior) {
+    return currentBreakpoints.map((cacheBreakpoint) =>
+      breakpointComparison(cacheBreakpoint, undefined, "first_request"),
+    );
+  }
+  const priorBreakpoints = prior.cacheBreakpoints;
+  if (!priorBreakpoints) {
+    return currentBreakpoints.map((cacheBreakpoint) =>
+      breakpointComparison(cacheBreakpoint, undefined, "prior_unavailable"),
+    );
+  }
+
+  const currentByKey = new Map(
+    currentBreakpoints.map((cacheBreakpoint) => [
+      cacheBreakpointKey(cacheBreakpoint),
+      cacheBreakpoint,
+    ]),
+  );
+  const priorByKey = new Map(
+    priorBreakpoints.map((cacheBreakpoint) => [
+      cacheBreakpointKey(cacheBreakpoint),
+      cacheBreakpoint,
+    ]),
+  );
+  const orderedKeys = new Set([...priorByKey.keys(), ...currentByKey.keys()]);
+  return [...orderedKeys]
+    .map((key) => {
+      const currentBreakpoint = currentByKey.get(key);
+      const priorBreakpoint = priorByKey.get(key);
+      if (!currentBreakpoint) {
+        return breakpointComparison(undefined, priorBreakpoint, "removed");
+      }
+      if (!priorBreakpoint) {
+        return breakpointComparison(currentBreakpoint, undefined, "added");
+      }
+      return breakpointComparison(
+        currentBreakpoint,
+        priorBreakpoint,
+        currentBreakpoint.hash === priorBreakpoint.hash &&
+          currentBreakpoint.bytes === priorBreakpoint.bytes
+          ? "stable"
+          : "changed",
+      );
+    })
+    .sort(compareBreakpointOrder);
+}
+
+function breakpointComparison(
+  current: PreparedRequestCacheBreakpoint | undefined,
+  prior: PreparedRequestCacheBreakpoint | undefined,
+  changeReason: PreparedRequestCacheBreakpointChangeReason,
+): PreparedRequestCacheBreakpointComparison {
+  const identity = current ?? prior;
+  if (!identity) throw new Error("Cache breakpoint comparison requires a breakpoint");
+  return {
+    layer: identity.layer,
+    index: identity.index,
+    changeReason,
+    ...(prior ? { prior: breakpointSnapshot(prior) } : {}),
+    ...(current ? { current: breakpointSnapshot(current) } : {}),
+  };
+}
+
+function breakpointSnapshot(
+  cacheBreakpoint: PreparedRequestCacheBreakpoint,
+): PreparedRequestCacheBreakpointSnapshot {
+  return {
+    hash: cacheBreakpoint.hash,
+    bytes: cacheBreakpoint.bytes,
+  };
+}
+
+function cacheBreakpointKey(
+  cacheBreakpoint: Pick<PreparedRequestCacheBreakpoint, "layer" | "index">,
+): string {
+  return `${cacheBreakpoint.layer}\0${cacheBreakpoint.index}`;
+}
+
+function compareBreakpointOrder(
+  left: PreparedRequestCacheBreakpointComparison,
+  right: PreparedRequestCacheBreakpointComparison,
+): number {
+  const layers: PreparedRequestCacheBreakpointLayer[] = ["tools", "tools+system", "history"];
+  return layers.indexOf(left.layer) - layers.indexOf(right.layer) || left.index - right.index;
+}
+
+function hashCachePrefix(segments: PreparedRequestSegment[]): string {
+  return hash(
+    JSON.stringify(
+      segments.map(({ kind, index, role, hash: segmentHash }) => ({
+        kind,
+        index,
+        ...(role ? { role } : {}),
+        hash: segmentHash,
+      })),
+    ),
+  );
+}
+
 function findFirstChangedCacheableSegment(
   current: PreparedRequestCapture,
   prior: PreparedRequestCapture,
@@ -296,6 +494,28 @@ function parseSegment(value: unknown): PreparedRequestSegment | undefined {
     hash: segmentHash,
     bytes,
     ...(role ? { role } : {}),
+  };
+}
+
+function parseCacheBreakpoint(value: unknown): PreparedRequestCacheBreakpoint | undefined {
+  if (!isRecord(value)) return undefined;
+  const layer = value["layer"];
+  const index = value["index"];
+  const cacheBreakpointHash = value["hash"];
+  const bytes = value["bytes"];
+  if (
+    (layer !== "tools" && layer !== "tools+system" && layer !== "history") ||
+    !isNonNegativeInteger(index) ||
+    typeof cacheBreakpointHash !== "string" ||
+    !isNonNegativeInteger(bytes)
+  ) {
+    return undefined;
+  }
+  return {
+    layer,
+    index,
+    hash: cacheBreakpointHash,
+    bytes,
   };
 }
 

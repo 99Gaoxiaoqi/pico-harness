@@ -1484,6 +1484,9 @@ function buildContextRuntime(
 function hookPurposeProvider(provider: LLMProvider): LLMProvider {
   return {
     ...(provider.modelName ? { modelName: provider.modelName } : {}),
+    get requestCapabilities() {
+      return provider.requestCapabilities;
+    },
     generate: (messages, tools, options) =>
       provider.generate(messages, tools, { ...options, purpose: "hook" }),
     ...(provider.generateStream
