@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,7 @@ import {
 } from "../../src/internal/headless-one-shot-runner.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { RunAgentCliOptions, RunAgentCliResult } from "../../src/runtime/runtime-contract.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
@@ -95,6 +96,51 @@ test("headless traces retain metadata but remove tool arguments and workspace ou
   assert.equal(trace.includes(secretPath), false);
   assert.equal(trace.includes("[REDACTED]"), true);
   assert.equal(JSON.stringify(outcome.result).includes(workspaceCanary), false);
+});
+
+test("failed Runtime execution sanitizes its Session-bound trace without a result tracePath", async (context) => {
+  const fixture = await createFixture(context, "failed-trace-sanitization");
+  await configureFixture(fixture, "secret-canary-failed-trace-route");
+  const workspaceCanary = "FAILED_WORKSPACE_TRACE_CANARY_MUST_NOT_APPEAR";
+  const secretPath = join(fixture.workspace, "failed-fixture-secret.txt");
+  await writeFile(secretPath, workspaceCanary);
+  let calls = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "failed-trace-sanitization"),
+      allowedTools: ["read_file"],
+    }),
+    {
+      env: {},
+      providerFactory: () => ({
+        async generate() {
+          calls++;
+          if (calls === 1) {
+            return assistant("", undefined, [
+              {
+                id: "read-failed-secret",
+                name: "read_file",
+                arguments: JSON.stringify({ path: secretPath }),
+              },
+            ]);
+          }
+          throw new DOMException("fixture provider failure", "AbortError");
+        },
+      }),
+    },
+  );
+
+  assert.equal(outcome.result.status, "failed");
+  assert.equal(outcome.result.tracePath, null);
+  const traceDirectory = resolvePicoPaths(fixture.workspace, {
+    picoHome: fixture.picoHome,
+  }).workspace.traces;
+  const traceFiles = (await readdir(traceDirectory)).filter((name) => name.endsWith(".json"));
+  assert.equal(traceFiles.length, 1);
+  const trace = await readFile(join(traceDirectory, traceFiles[0]!), "utf8");
+  assert.equal(trace.includes(workspaceCanary), false);
+  assert.equal(trace.includes(secretPath), false);
+  assert.equal(trace.includes("[REDACTED]"), true);
 });
 
 test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail before generation", async (context) => {

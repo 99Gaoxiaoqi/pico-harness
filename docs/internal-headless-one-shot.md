@@ -84,7 +84,7 @@ node dist/internal/headless-one-shot-main.js < request.json
 ```
 
 失败只输出稳定错误码和脱敏摘要，不输出 stack、完整 Messages 或原始 ToolResult。
-返回的 Trace 会保留 span 结构、时间与数值/布尔指标，但所有字符串属性（包括工具 arguments、输出预览、错误文本和路径）统一替换为 `[REDACTED]`；取消后延迟 settle 的 Runtime 也执行同一净化后才释放租约。
+本 case/Session 绑定的 Trace（包括 Runtime reject 后没有返回 `tracePath` 的失败终态）会保留 span 结构、时间与数值/布尔指标，但所有字符串属性（包括工具 arguments、输出预览、错误文本和路径）统一替换为 `[REDACTED]`；取消后延迟 settle 的 Runtime 也执行同一净化后才释放租约。
 
 | status            | 退出码      | 含义                                       |
 | ----------------- | ----------- | ------------------------------------------ |

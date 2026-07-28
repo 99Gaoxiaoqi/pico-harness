@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { SilentReporter } from "../engine/reporter.js";
@@ -398,6 +407,12 @@ async function runValidatedRequest(
       },
     );
     await racePreflight(assertNewSession(request.sessionId, workDir, picoHome), cancellation);
+    const traceBaseline = request.trace
+      ? await racePreflight(
+          snapshotSessionTraceFiles(workDir, picoHome, request.sessionId),
+          cancellation,
+        )
+      : new Set<string>();
 
     let policyBlocked = false;
     const reporter = new SilentReporter();
@@ -435,17 +450,41 @@ async function runValidatedRequest(
       runtimeDependencies,
     );
     const settled = await settleRuntime(runtimePromise, cancellation, request.shutdownGraceMs);
+    const traceWorkDir = workDir;
     const secrets = credentialCandidates(selected.config.apiKey);
-    const safeTracePath = settled.result?.tracePath
-      ? await sanitizeTrace(settled.result.tracePath, secrets)
+    const safeTracePath = request.trace
+      ? await sanitizeRuntimeTraces({
+          workDir: traceWorkDir,
+          picoHome,
+          sessionId: request.sessionId,
+          baseline: traceBaseline,
+          secrets,
+          tracePath: settled.result?.tracePath,
+        })
       : undefined;
     if (!settled.shutdownConfirmed && locks) {
       const heldLocks = locks;
       locks = undefined;
       void runtimePromise
-        .then(async (lateResult) => {
-          if (lateResult.tracePath) await sanitizeTrace(lateResult.tracePath, secrets);
-        })
+        .then(
+          (lateResult) =>
+            sanitizeRuntimeTraces({
+              workDir: traceWorkDir,
+              picoHome,
+              sessionId: request.sessionId,
+              baseline: traceBaseline,
+              secrets,
+              tracePath: lateResult.tracePath,
+            }),
+          () =>
+            sanitizeRuntimeTraces({
+              workDir: traceWorkDir,
+              picoHome,
+              sessionId: request.sessionId,
+              baseline: traceBaseline,
+              secrets,
+            }),
+        )
         .finally(() => releaseCaseLocks(heldLocks))
         .catch(() => undefined);
     }
@@ -1220,6 +1259,59 @@ function redactSecrets(value: string, secrets: readonly string[]): string {
   let redacted = value;
   for (const secret of secrets) redacted = redacted.replaceAll(secret, "[REDACTED]");
   return redacted;
+}
+
+interface RuntimeTraceSanitizationInput {
+  readonly workDir: string;
+  readonly picoHome: string;
+  readonly sessionId: string;
+  readonly baseline: ReadonlySet<string>;
+  readonly secrets: readonly string[];
+  readonly tracePath?: string;
+}
+
+async function sanitizeRuntimeTraces(
+  input: RuntimeTraceSanitizationInput,
+): Promise<string | undefined> {
+  const traceDirectory = resolvePicoPaths(input.workDir, {
+    picoHome: input.picoHome,
+  }).workspace.traces;
+  const current = await snapshotSessionTraceFiles(input.workDir, input.picoHome, input.sessionId);
+  const createdPaths = [...current]
+    .filter((name) => !input.baseline.has(name))
+    .map((name) => join(traceDirectory, name));
+  const paths = new Set(createdPaths);
+  if (input.tracePath) paths.add(input.tracePath);
+
+  let safeResultPath: string | undefined;
+  for (const path of paths) {
+    const safePath = await sanitizeTrace(path, input.secrets);
+    if (path === input.tracePath) safeResultPath = safePath;
+  }
+  return safeResultPath;
+}
+
+async function snapshotSessionTraceFiles(
+  workDir: string,
+  picoHome: string,
+  sessionId: string,
+): Promise<Set<string>> {
+  const traceDirectory = resolvePicoPaths(workDir, { picoHome }).workspace.traces;
+  const prefix = `trace_${sessionId.replaceAll(/[^a-zA-Z0-9_-]/gu, "_")}_`;
+  try {
+    const entries = await readdir(traceDirectory, { withFileTypes: true });
+    return new Set(
+      entries
+        .filter(
+          (entry) =>
+            entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".json"),
+        )
+        .map((entry) => entry.name),
+    );
+  } catch (error) {
+    if (isErrnoCode(error, "ENOENT")) return new Set();
+    throw error;
+  }
 }
 
 async function sanitizeTrace(
