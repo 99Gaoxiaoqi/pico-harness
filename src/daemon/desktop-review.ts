@@ -81,7 +81,7 @@ export async function applyDesktopRewind(
     projection.changes.files.map((file) => [file.filePath, file.currentFingerprint]),
   );
   try {
-    await session.rewindBoth(checkpointId, checkpoint.messageIndex, expectedCurrentFingerprints);
+    await session.rewindBoth(checkpointId, expectedCurrentFingerprints);
   } catch (error) {
     if (isRewindConflict(error)) {
       throw new RuntimeProtocolError(

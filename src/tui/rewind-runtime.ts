@@ -52,9 +52,9 @@ export async function applyTuiRewind(input: {
   await reporter.flushDurableTranscript();
 
   if (mode === "both") {
-    await session.rewindBoth(snapshot.messageId, snapshot.messageIndex);
+    await session.rewindBoth(snapshot.messageId);
   } else {
-    await session.rewindConversation(snapshot.messageIndex, snapshot.messageId);
+    await session.rewindConversation(snapshot.messageId);
   }
 
   // Rehydrate from the durable branch instead of applying an absolute historical

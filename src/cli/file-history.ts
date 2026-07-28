@@ -147,14 +147,14 @@ export async function rewindFileHistoryFromCli(
     };
   }
 
-  const snapshot = findSnapshot(session, messageId);
+  findSnapshot(session, messageId);
 
   if (mode === "code") {
     await session.rewindCode(messageId);
   } else if (mode === "conversation") {
-    await session.rewindConversation(snapshot.messageIndex, messageId);
+    await session.rewindConversation(messageId);
   } else {
-    await session.rewindBoth(messageId, snapshot.messageIndex);
+    await session.rewindBoth(messageId);
   }
 
   return {
