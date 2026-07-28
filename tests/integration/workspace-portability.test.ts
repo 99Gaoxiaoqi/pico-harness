@@ -26,10 +26,6 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
   const sessionDigest = "a".repeat(64);
   const taskRunDigest = "b".repeat(64);
   const layoutMarker = await readFile(join(fixture.storageRoot, ".storage", "layout.json"), "utf8");
-  const legacyFenceOwner = await readFile(
-    join(fixture.storageRoot, "runtime", "lock", "owner.json"),
-    "utf8",
-  );
 
   const portableFiles = new Map([
     [`sessions/${sessionDigest}/session.jsonl`, '{"type":"session"}\n'],
@@ -42,7 +38,7 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
   const excludedFiles = new Map([
     [".storage/layout.json", layoutMarker],
     ["control/state.json", '{"jobs":[]}\n'],
-    ["runtime/lock/owner.json", legacyFenceOwner],
+    ["runtime/lock/owner.json", '{"legacy":true}\n'],
     ["tasks/legacy.json", '{"legacy":true}\n'],
     ["fork-staging/run/draft.json", '{"draft":true}\n'],
     ["storage-operations/op.json", '{"state":"pending"}\n'],

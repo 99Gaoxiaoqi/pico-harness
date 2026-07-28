@@ -16,7 +16,6 @@ import { writeJsonAtomic } from "./atomic-json.js";
 import { isFileHistoryMutationLeaseHeld } from "./file-history-mutation-lease.js";
 import type { StorageOperation, StorageOperationState } from "./operation-journal.js";
 
-const LEGACY_OPERATION_REFERENCE_INDEX_VERSION = 1 as const;
 const OPERATION_REFERENCE_INDEX_VERSION = 2 as const;
 const GC_PROTOCOL_VERSION = 1 as const;
 const GC_ELIGIBILITY_VERSION = 1 as const;
@@ -37,16 +36,10 @@ interface OperationReferenceIndexEntryBase {
   readonly updatedAt: string;
 }
 
-export type OperationReferenceIndexEntry = OperationReferenceIndexEntryBase &
-  (
-    | {
-        readonly schemaVersion: typeof LEGACY_OPERATION_REFERENCE_INDEX_VERSION;
-      }
-    | {
-        readonly schemaVersion: typeof OPERATION_REFERENCE_INDEX_VERSION;
-        readonly protocolGeneration: string;
-      }
-  );
+export interface OperationReferenceIndexEntry extends OperationReferenceIndexEntryBase {
+  readonly schemaVersion: typeof OPERATION_REFERENCE_INDEX_VERSION;
+  readonly protocolGeneration: string;
+}
 
 interface GcProtocolMetadata {
   readonly schemaVersion: typeof GC_PROTOCOL_VERSION;
@@ -321,8 +314,8 @@ export class OperationReferenceIndex {
           { cause: error },
         );
       }
-      const legacy = parseOperationReferenceIndexEntry(value, undefined);
-      if (!legacy || legacy.schemaVersion !== LEGACY_OPERATION_REFERENCE_INDEX_VERSION) {
+      const indexed = parseOperationReferenceIndexEntry(value, undefined);
+      if (!indexed) {
         throw new Error(
           `Cannot initialize CAS GC protocol with an unproven operation index entry: ${path}`,
         );
@@ -410,10 +403,12 @@ function parseOperationReferenceIndexEntry(
   value: unknown,
   protocolGeneration: string | undefined,
 ): OperationReferenceIndexEntry | undefined {
+  if (isRecord(value) && value["schemaVersion"] === 1) {
+    throw new Error("Unsupported operation reference index schema version 1");
+  }
   if (
     !isRecord(value) ||
-    (value["schemaVersion"] !== LEGACY_OPERATION_REFERENCE_INDEX_VERSION &&
-      value["schemaVersion"] !== OPERATION_REFERENCE_INDEX_VERSION) ||
+    value["schemaVersion"] !== OPERATION_REFERENCE_INDEX_VERSION ||
     typeof value["journalDirectory"] !== "string" ||
     !isAbsolute(value["journalDirectory"]) ||
     typeof value["operationId"] !== "string" ||
@@ -432,14 +427,12 @@ function parseOperationReferenceIndexEntry(
   }
   if (value["kind"] === "fork" && value["stagingDirectory"] === undefined) return undefined;
   if (value["kind"] === "rewind" && value["stagingDirectory"] !== undefined) return undefined;
-  if (value["schemaVersion"] === OPERATION_REFERENCE_INDEX_VERSION) {
-    if (
-      protocolGeneration === undefined ||
-      typeof value["protocolGeneration"] !== "string" ||
-      value["protocolGeneration"] !== protocolGeneration
-    ) {
-      return undefined;
-    }
+  if (
+    protocolGeneration === undefined ||
+    typeof value["protocolGeneration"] !== "string" ||
+    value["protocolGeneration"] !== protocolGeneration
+  ) {
+    return undefined;
   }
   return structuredClone(value) as unknown as OperationReferenceIndexEntry;
 }

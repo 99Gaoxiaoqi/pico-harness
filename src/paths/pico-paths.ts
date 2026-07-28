@@ -50,7 +50,7 @@ export interface PicoWorkspacePaths {
   readonly storage: string;
   readonly storageCommit: string;
   readonly storageLock: string;
-  /** Preserved pre-v2 JSON layout. Current stores only read it during one-time layout migration. */
+  /** Unsupported pre-v2 JSON layout. Current stores never read or migrate this directory. */
   readonly legacyRuntime: string;
   readonly memory: string;
   /** Workspace-private structured long-term memory authority. */

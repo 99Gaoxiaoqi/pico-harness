@@ -1,37 +1,22 @@
 import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  statSync,
-  type Dirent,
-} from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync, type Dirent } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   assertLocalFileStorageCapabilitiesSync,
-  assertPrivateDataFileSync,
   commitFileTransactionSync,
   FileStorageIntegrityError,
-  hasPermanentFileLockFenceSync,
   inspectFileTransactionReplacementSync,
   mkdirPrivateSync,
   readJsonFileSync,
   recoverFileTransactionSync,
   withFileLockSync,
-  withPermanentFileLockFenceSync,
   type FileTransactionOptions,
-  type FileTransactionReplacement,
 } from "./local-file-storage.js";
 
 const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 2 as const;
-const LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 1 as const;
 const LEGACY_LOCK_TOMBSTONE_PATTERN = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
 const LEGACY_LOCK_CANDIDATE_PATTERN =
   /^\.lock\.candidate-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-const LEGACY_RUNTIME_FENCE_REASON = "workspace-session-centric-layout-v1";
-const LEGACY_CONTROL_FILES = ["state.json", "daemon-events.jsonl", "usage-ledger.jsonl"] as const;
 const CANONICAL_STORAGE_DIRECTORIES = ["sessions", "task-runs", "control"] as const;
 
 export const WORKSPACE_STORAGE_DIRECTORY = ".storage";
@@ -67,19 +52,10 @@ export interface WorkspaceStorageLayout {
     readonly inode: string;
   };
   readonly createdAt: string;
-  readonly migratedFrom?: "runtime-directory-v1";
   readonly adoptedAt?: string;
 }
 
-export interface LegacyWorkspaceStorageLayout {
-  readonly schemaVersion: typeof LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION;
-  readonly layout: "session-centric-v1";
-  readonly createdAt: string;
-  readonly migratedFrom?: "runtime-directory-v1";
-}
-
 export interface WorkspaceStorageLayoutPreparation {
-  readonly migratedLegacyRuntime: boolean;
   readonly rootIdentity: WorkspaceStorageRootIdentity;
 }
 
@@ -90,8 +66,7 @@ export function ensurePrivateWorkspaceStorageDirectorySync(path: string): void {
 /**
  * Prepares the workspace-wide Session/TaskRun/control transaction namespace.
  *
- * Existing control JSON under runtime/ is copied once under both locks and left
- * untouched as a rollback artifact. Legacy Session ledgers are deliberately not
+ * Pre-v2 runtime/ data and schema-version-1 layout markers are deliberately not
  * migrated: Runtime v2 is a development hard cut.
  */
 export function prepareWorkspaceStorageLayoutSync(
@@ -114,63 +89,8 @@ export function prepareWorkspaceStorageLayoutSync(
       recoverFileTransactionSync(root, WORKSPACE_LAYOUT_TRANSACTION_OPTIONS);
       existingLayout = readWorkspaceStorageLayoutMarkerSync(root);
       assertLayoutAllowsRecovery(root, existingLayout, physicalIdentity, layoutPath);
-      const legacyRoot = join(root, "runtime");
-      assertOrCreatePrivateDirectory(legacyRoot);
-      const legacyLock = join(legacyRoot, "lock");
-      if (
-        existingLayout &&
-        hasPermanentFileLockFenceSync(legacyLock, LEGACY_RUNTIME_FENCE_REASON)
-      ) {
-        const layout =
-          existingLayout.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
-            ? existingLayout
-            : publishLayout(
-                root,
-                existingLayout,
-                physicalIdentity,
-                [],
-                existingLayout.migratedFrom !== undefined,
-              );
-        return {
-          migratedLegacyRuntime: false,
-          rootIdentity: rootIdentityFromLayout(layout),
-        };
-      }
-
-      return withPermanentFileLockFenceSync(
-        legacyLock,
-        `workspace-storage-layout-legacy:${process.pid}:${randomUUID()}`,
-        LEGACY_RUNTIME_FENCE_REASON,
-        () => {
-          recoverFileTransactionSync(legacyRoot);
-          const legacyLayoutFound = readDirectoryEntries(legacyRoot).some(isLegacyDataEntry);
-          const replacements = collectLegacyRuntimeReplacements(root, legacyRoot);
-          let layout = existingLayout;
-          if (
-            !existingLayout ||
-            existingLayout.schemaVersion !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
-            replacements.length > 0 ||
-            (legacyLayoutFound && existingLayout.migratedFrom === undefined)
-          ) {
-            layout = publishLayout(
-              root,
-              existingLayout,
-              physicalIdentity,
-              replacements,
-              legacyLayoutFound || existingLayout?.migratedFrom !== undefined,
-            );
-          }
-          if (!layout || layout.schemaVersion !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
-            throw new FileStorageIntegrityError(
-              `Workspace storage layout was not upgraded: ${layoutPath}`,
-            );
-          }
-          return {
-            migratedLegacyRuntime: existingLayout === undefined && legacyLayoutFound,
-            rootIdentity: rootIdentityFromLayout(layout),
-          };
-        },
-      );
+      const layout = existingLayout ?? publishLayout(root, physicalIdentity);
+      return { rootIdentity: rootIdentityFromLayout(layout) };
     },
   );
 }
@@ -179,6 +99,11 @@ export function decodeWorkspaceStorageLayout(
   value: unknown,
   path = WORKSPACE_STORAGE_LAYOUT_FILE,
 ): WorkspaceStorageLayout {
+  if (isRecord(value) && value["schemaVersion"] === 1) {
+    throw new FileStorageIntegrityError(
+      `Unsupported workspace storage layout schema version 1: ${path}`,
+    );
+  }
   if (
     !isRecord(value) ||
     value["schemaVersion"] !== WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
@@ -187,7 +112,6 @@ export function decodeWorkspaceStorageLayout(
     !value["storageRootId"] ||
     !isPhysicalIdentity(value["physicalIdentity"]) ||
     typeof value["createdAt"] !== "string" ||
-    (value["migratedFrom"] !== undefined && value["migratedFrom"] !== "runtime-directory-v1") ||
     (value["adoptedAt"] !== undefined && typeof value["adoptedAt"] !== "string")
   ) {
     throw new FileStorageIntegrityError(`Invalid workspace storage layout marker: ${path}`);
@@ -202,9 +126,6 @@ export function decodeWorkspaceStorageLayout(
       inode: value["physicalIdentity"]["inode"],
     },
     createdAt: value["createdAt"],
-    ...(value["migratedFrom"] === "runtime-directory-v1"
-      ? { migratedFrom: "runtime-directory-v1" as const }
-      : {}),
     ...(typeof value["adoptedAt"] === "string" ? { adoptedAt: value["adoptedAt"] } : {}),
   };
 }
@@ -301,31 +222,19 @@ export function adoptWorkspaceStorageRootIdentitySync(
 
 function publishLayout(
   root: string,
-  existing: WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined,
   physicalIdentity: WorkspaceStorageLayout["physicalIdentity"],
-  replacements: FileTransactionReplacement[],
-  migrated: boolean,
 ): WorkspaceStorageLayout {
   const layout: WorkspaceStorageLayout = {
     schemaVersion: WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION,
     layout: "session-centric-v1",
-    storageRootId:
-      existing?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
-        ? existing.storageRootId
-        : randomUUID(),
+    storageRootId: randomUUID(),
     physicalIdentity,
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
-    ...(migrated ? { migratedFrom: "runtime-directory-v1" } : {}),
-    ...(existing?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION &&
-    existing.adoptedAt !== undefined
-      ? { adoptedAt: existing.adoptedAt }
-      : {}),
+    createdAt: new Date().toISOString(),
   };
   commitFileTransactionSync(
     root,
     {
       replacements: [
-        ...replacements,
         {
           relativePath: WORKSPACE_STORAGE_LAYOUT_FILE,
           content: `${JSON.stringify(layout, null, 2)}\n`,
@@ -335,32 +244,6 @@ function publishLayout(
     WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   );
   return layout;
-}
-
-export function decodeWorkspaceStorageLayoutMarker(
-  value: unknown,
-  path = WORKSPACE_STORAGE_LAYOUT_FILE,
-): WorkspaceStorageLayout | LegacyWorkspaceStorageLayout {
-  if (isRecord(value) && value["schemaVersion"] === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
-    return decodeWorkspaceStorageLayout(value, path);
-  }
-  if (
-    !isRecord(value) ||
-    value["schemaVersion"] !== LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
-    value["layout"] !== "session-centric-v1" ||
-    typeof value["createdAt"] !== "string" ||
-    (value["migratedFrom"] !== undefined && value["migratedFrom"] !== "runtime-directory-v1")
-  ) {
-    throw new FileStorageIntegrityError(`Invalid workspace storage layout marker: ${path}`);
-  }
-  return {
-    schemaVersion: LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION,
-    layout: "session-centric-v1",
-    createdAt: value["createdAt"],
-    ...(value["migratedFrom"] === "runtime-directory-v1"
-      ? { migratedFrom: "runtime-directory-v1" as const }
-      : {}),
-  };
 }
 
 function currentPhysicalIdentity(root: string): WorkspaceStorageLayout["physicalIdentity"] {
@@ -397,6 +280,7 @@ function assertLayoutMatchesPhysicalIdentity(
 function assertWorkspaceLayoutAllowsMutationSync(root: string): void {
   if (!existsSync(root)) return;
   const physicalIdentity = currentPhysicalIdentity(root);
+  assertNoUnsupportedLegacyRuntimeData(root);
   const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
   const layout = readWorkspaceStorageLayoutMarkerSync(root);
   assertLayoutAllowsRecovery(root, layout, physicalIdentity, layoutPath);
@@ -404,17 +288,17 @@ function assertWorkspaceLayoutAllowsMutationSync(root: string): void {
 
 function assertLayoutAllowsRecovery(
   root: string,
-  layout: WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined,
+  layout: WorkspaceStorageLayout | undefined,
   physicalIdentity: WorkspaceStorageLayout["physicalIdentity"],
   layoutPath: string,
 ): void {
-  if (layout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION) {
+  if (layout) {
     assertLayoutMatchesPhysicalIdentity(layout, physicalIdentity, layoutPath);
     return;
   }
   if (existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE))) {
-    // A missing or v1 marker cannot bind a transaction to one physical root. Automatic recovery
-    // is safe only when that same strict marker publishes a verifiable v2 identity.
+    // A missing marker cannot bind a transaction to one physical root. Automatic recovery is safe
+    // only when that same strict transaction publishes a verifiable v2 identity.
     const pendingLayout = readPendingWorkspaceLayoutReplacementSync(root);
     if (!pendingLayout) {
       throw new FileStorageIntegrityError(
@@ -444,15 +328,13 @@ function hasCanonicalWorkspaceData(root: string): boolean {
   return false;
 }
 
-function readWorkspaceStorageLayoutMarkerSync(
-  root: string,
-): WorkspaceStorageLayout | LegacyWorkspaceStorageLayout | undefined {
+function readWorkspaceStorageLayoutMarkerSync(root: string): WorkspaceStorageLayout | undefined {
   const coordinator = join(root, WORKSPACE_STORAGE_DIRECTORY);
   if (!existsSync(coordinator)) return undefined;
   assertPrivateDirectory(coordinator, "Workspace storage coordinator");
   const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
   return existsSync(layoutPath)
-    ? decodeWorkspaceStorageLayoutMarker(readJsonFileSync(layoutPath), layoutPath)
+    ? decodeWorkspaceStorageLayout(readJsonFileSync(layoutPath), layoutPath)
     : undefined;
 }
 
@@ -466,13 +348,7 @@ function requireAdoptableWorkspaceStorageLayoutSync(
   currentPhysicalIdentity(root);
   const layoutPath = join(root, WORKSPACE_STORAGE_LAYOUT_FILE);
   const layout = readWorkspaceStorageLayoutMarkerSync(root);
-  const adoptableLayout =
-    layout?.schemaVersion === WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION
-      ? layout
-      : layout?.schemaVersion === LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION ||
-          layout === undefined
-        ? readPendingWorkspaceLayoutReplacementSync(root)
-        : undefined;
+  const adoptableLayout = layout ?? readPendingWorkspaceLayoutReplacementSync(root);
   if (!adoptableLayout) {
     throw new FileStorageIntegrityError(
       `Workspace storage layout marker is missing or cannot be explicitly adopted: ${layoutPath}`,
@@ -541,92 +417,14 @@ function formatIdentity(identity: {
   return `${identity.canonicalPath} (${identity.device}:${identity.inode})`;
 }
 
-function collectLegacyRuntimeReplacements(
-  workspaceRoot: string,
-  legacyRoot: string,
-): FileTransactionReplacement[] {
-  const rootEntries = readDirectoryEntries(legacyRoot);
-  assertKnownEntries(
-    rootEntries,
-    new Set(["sessions", "control", "lock"]),
-    legacyRoot,
-    (entry) =>
-      entry.isDirectory() &&
-      (LEGACY_LOCK_TOMBSTONE_PATTERN.test(entry.name) ||
-        LEGACY_LOCK_CANDIDATE_PATTERN.test(entry.name)),
+function assertNoUnsupportedLegacyRuntimeData(root: string): void {
+  const legacyRoot = join(root, "runtime");
+  if (!existsSync(legacyRoot)) return;
+  assertRealDirectory(legacyRoot, "Legacy Runtime directory");
+  if (!readDirectoryEntries(legacyRoot).some(isLegacyDataEntry)) return;
+  throw new FileStorageIntegrityError(
+    `Unsupported pre-v2 Runtime storage exists: ${legacyRoot}; automatic migration is disabled`,
   );
-  const replacements: FileTransactionReplacement[] = [];
-
-  const controlRoot = join(legacyRoot, "control");
-  if (existsSync(controlRoot)) {
-    assertRealDirectory(controlRoot, "Legacy Runtime control directory");
-    const entries = readDirectoryEntries(controlRoot);
-    assertKnownEntries(entries, new Set(LEGACY_CONTROL_FILES), controlRoot);
-    for (const fileName of LEGACY_CONTROL_FILES) {
-      copyLegacyFileIfPresent(
-        workspaceRoot,
-        join(controlRoot, fileName),
-        join("control", fileName),
-        replacements,
-      );
-    }
-  }
-
-  return replacements;
-}
-
-function copyLegacyFileIfPresent(
-  workspaceRoot: string,
-  sourcePath: string,
-  targetRelativePath: string,
-  replacements: FileTransactionReplacement[],
-): void {
-  if (!existsSync(sourcePath)) return;
-  assertPrivateDataFileSync(sourcePath);
-  const content = readFileSync(sourcePath);
-  const targetPath = join(workspaceRoot, targetRelativePath);
-  assertSafeTargetParentChain(workspaceRoot, targetPath);
-  if (existsSync(targetPath)) {
-    assertPrivateDataFileSync(targetPath);
-    if (!readFileSync(targetPath).equals(content)) {
-      throw new FileStorageIntegrityError(
-        `Legacy Runtime migration conflicts with existing target: ${targetPath}`,
-      );
-    }
-    return;
-  }
-  replacements.push({
-    relativePath: targetRelativePath,
-    content,
-  });
-}
-
-function assertSafeTargetParentChain(workspaceRoot: string, targetPath: string): void {
-  const parentRelative = relative(workspaceRoot, dirname(targetPath));
-  if (parentRelative.startsWith("..") || isAbsolute(parentRelative)) {
-    throw new FileStorageIntegrityError(`Migration target escapes workspace: ${targetPath}`);
-  }
-  let current = workspaceRoot;
-  for (const segment of parentRelative.split(sep).filter(Boolean)) {
-    current = join(current, segment);
-    if (!existsSync(current)) return;
-    assertRealDirectory(current, "Workspace storage target parent");
-  }
-}
-
-function assertKnownEntries(
-  entries: readonly Dirent[],
-  allowed: ReadonlySet<string>,
-  directory: string,
-  ignored: (entry: Dirent) => boolean = () => false,
-): void {
-  for (const entry of entries) {
-    if (!allowed.has(entry.name) && !ignored(entry)) {
-      throw new FileStorageIntegrityError(
-        `Unexpected entry in legacy Runtime storage: ${join(directory, entry.name)}`,
-      );
-    }
-  }
 }
 
 function isLegacyDataEntry(entry: Dirent): boolean {

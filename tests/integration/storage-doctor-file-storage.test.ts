@@ -268,7 +268,7 @@ test("StorageDoctor reports pending commits and ignored legacy SQLite without re
     true,
   );
   assert.equal(
-    report.findings.some((finding) => finding.code === "legacy_runtime_json_preserved"),
+    report.findings.some((finding) => finding.code === "legacy_runtime_json_unsupported"),
     true,
   );
   for (const path of legacySqlitePaths) {
@@ -504,7 +504,7 @@ test("StorageDoctor reports a copied root that has not been explicitly adopted",
   assert.equal(report.healthy, false);
 });
 
-test("StorageDoctor reports a version 1 layout as upgradeable without rewriting it", async (context) => {
+test("StorageDoctor reports a version 1 layout as unsupported without rewriting it", async (context) => {
   const fixture = await createFixture("layout-v1");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -522,10 +522,10 @@ test("StorageDoctor reports a version 1 layout as upgradeable without rewriting 
   }).scan();
 
   assert.equal(
-    report.findings.some((finding) => finding.code === "runtime_layout_upgrade_required"),
+    report.findings.some((finding) => finding.code === "runtime_layout_unsupported"),
     true,
   );
-  assert.equal(report.healthy, true);
+  assert.equal(report.healthy, false);
   assert.equal(
     await readFile(join(paths.workspace.root, ".storage", "layout.json"), "utf8"),
     marker,
@@ -576,7 +576,7 @@ test("StorageDoctor reports a pending commit before stopping at a version 1 layo
   }).scan();
 
   assert.equal(
-    report.findings.some((finding) => finding.code === "runtime_layout_upgrade_required"),
+    report.findings.some((finding) => finding.code === "runtime_layout_unsupported"),
     true,
   );
   assert.equal(

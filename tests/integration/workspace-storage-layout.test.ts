@@ -18,7 +18,6 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   commitFileTransactionSync,
-  FileLockTimeoutError,
   FileStorageIntegrityError,
   withFileLockSync,
 } from "../../src/storage/local-file-storage.js";
@@ -38,7 +37,7 @@ import {
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { hashTaskRunInput, TaskRunStore, taskRunDigest } from "../../src/tasks/task-run-store.js";
 
-test("workspace storage leaves legacy Session ledgers unsupported and untouched", async (t) => {
+test("workspace storage rejects legacy Runtime data without migrating or fencing it", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-migrate-"));
   const workDir = join(root, "project");
   const storageRoot = join(root, "state");
@@ -46,6 +45,8 @@ test("workspace storage leaves legacy Session ledgers unsupported and untouched"
   const digest = sessionDigest(sessionId);
   const legacySessionRoot = join(storageRoot, "runtime", "sessions", digest);
   const legacyLogPath = join(legacySessionRoot, "session.jsonl");
+  const legacyControlPath = join(storageRoot, "runtime", "control", "state.json");
+  const canonicalControlPath = join(storageRoot, "control", "state.json");
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(workDir, { mode: 0o700 });
   await mkdir(legacySessionRoot, { recursive: true, mode: 0o700 });
@@ -66,35 +67,31 @@ test("workspace storage leaves legacy Session ledgers unsupported and untouched"
     createdAt: "2026-07-25T00:00:00.000Z",
   })}\n`;
   await writeFile(legacyLogPath, legacyLedger, { mode: 0o600 });
+  await mkdir(dirname(legacyControlPath), { recursive: true, mode: 0o700 });
+  const legacyControl = '{"revision":1}\n';
+  await writeFile(legacyControlPath, legacyControl, { mode: 0o600 });
 
   assert.equal(await readExistingRuntimeSessionProjection({ storageRoot, sessionId }), undefined);
   await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE)), { code: "ENOENT" });
 
-  const store = new RuntimeEventStore({ storageRoot });
-  assert.equal(await store.readSessionManifest(sessionId), undefined);
+  assert.throws(
+    () => new RuntimeEventStore({ storageRoot }),
+    /Unsupported pre-v2 Runtime storage exists.*automatic migration is disabled/u,
+  );
 
   await assert.rejects(
     stat(join(storageRoot, "sessions", digest, "session.jsonl")),
     (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
   );
   assert.equal(await readFile(legacyLogPath, "utf8"), legacyLedger);
-  assert.equal(
-    JSON.parse(await readFile(join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE), "utf8"))
-      .migratedFrom,
-    "runtime-directory-v1",
-  );
+  assert.equal(await readFile(legacyControlPath, "utf8"), legacyControl);
+  await assert.rejects(stat(canonicalControlPath), { code: "ENOENT" });
+  await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE)), { code: "ENOENT" });
+  await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_DIRECTORY)), { code: "ENOENT" });
   assert.equal((await stat(join(storageRoot, "runtime"))).isDirectory(), true);
   assert.equal((await stat(tombstonePath)).isDirectory(), true);
   assert.equal((await stat(candidatePath)).isDirectory(), true);
-  assert.equal((await stat(join(storageRoot, "runtime", "lock"))).isDirectory(), true);
-  assert.throws(
-    () =>
-      withFileLockSync(join(storageRoot, "runtime", "lock"), "obsolete-runtime-writer", () => {}, {
-        timeoutMs: 20,
-        retryIntervalMs: 2,
-      }),
-    FileLockTimeoutError,
-  );
+  await assert.rejects(stat(join(storageRoot, "runtime", "lock")), { code: "ENOENT" });
 });
 
 test("workspace storage rejects a symbolic-link root without touching its target", async (t) => {
@@ -171,6 +168,7 @@ test("copied storage roots require explicit adoption and preserve the stable roo
   const sourceLayout = JSON.parse(
     await readFile(join(sourceRoot, WORKSPACE_STORAGE_LAYOUT_FILE), "utf8"),
   ) as { schemaVersion: number; storageRootId: string };
+  await assert.rejects(stat(join(sourceRoot, "runtime")), { code: "ENOENT" });
   await cp(sourceRoot, copiedRoot, { recursive: true, preserveTimestamps: true });
 
   assert.equal(sourceLayout.schemaVersion, 2);
@@ -273,7 +271,7 @@ test("copied roots never recover pending commits before explicit adoption", asyn
   await assert.rejects(stat(copiedCommitPath), { code: "ENOENT" });
 });
 
-test("copied version 1 roots validate a pending version 2 layout identity before recovery", async (t) => {
+test("version 1 roots reject pending version 2 replacements without recovery", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-copy-pending-"));
   const sourceRoot = join(root, "source");
   const copiedRoot = join(root, "copied");
@@ -349,39 +347,34 @@ test("copied version 1 roots validate a pending version 2 layout identity before
     /simulated v1 layout upgrade crash/u,
   );
   await cp(sourceRoot, copiedRoot, { recursive: true, preserveTimestamps: true });
+  const sourceStateBytes = await readFile(sourceStatePath);
+  const sourceLayoutBytes = await readFile(sourceLayoutPath);
+  const sourceCommitBytes = await readFile(join(sourceRoot, WORKSPACE_STORAGE_COMMIT_FILE));
   const copiedStateBefore = await readFile(copiedStatePath);
   const copiedLayoutBefore = await readFile(copiedLayoutPath);
   const copiedCommitBefore = await readFile(copiedCommitPath);
 
   assert.throws(
     () => new RuntimeStore({ workDir: root, storageRoot: copiedRoot }),
-    /requires explicit adoption/u,
+    /Unsupported workspace storage layout schema version 1/u,
   );
-
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot: sourceRoot }),
+    /Unsupported workspace storage layout schema version 1/u,
+  );
+  assert.throws(
+    () => adoptWorkspaceStorageRootIdentitySync(copiedRoot, version2Layout.storageRootId),
+    /Unsupported workspace storage layout schema version 1/u,
+  );
+  assert.deepEqual(await readFile(sourceStatePath), sourceStateBytes);
+  assert.deepEqual(await readFile(sourceLayoutPath), sourceLayoutBytes);
+  assert.deepEqual(
+    await readFile(join(sourceRoot, WORKSPACE_STORAGE_COMMIT_FILE)),
+    sourceCommitBytes,
+  );
   assert.deepEqual(await readFile(copiedStatePath), copiedStateBefore);
   assert.deepEqual(await readFile(copiedLayoutPath), copiedLayoutBefore);
   assert.deepEqual(await readFile(copiedCommitPath), copiedCommitBefore);
-
-  new RuntimeStore({ workDir: root, storageRoot: sourceRoot }).close();
-  assert.deepEqual(JSON.parse(await readFile(sourceStatePath, "utf8")), stateAfter);
-  await assert.rejects(stat(join(sourceRoot, WORKSPACE_STORAGE_COMMIT_FILE)), {
-    code: "ENOENT",
-  });
-
-  const adopted = adoptWorkspaceStorageRootIdentitySync(copiedRoot, version2Layout.storageRootId);
-  assert.equal(adopted.storageRootId, version2Layout.storageRootId);
-  assert.deepEqual(JSON.parse(await readFile(copiedStatePath, "utf8")), stateAfter);
-  const copiedLayoutAfter = JSON.parse(await readFile(copiedLayoutPath, "utf8")) as {
-    schemaVersion: number;
-    storageRootId: string;
-    adoptedAt?: string;
-    physicalIdentity: { canonicalPath: string };
-  };
-  assert.equal(copiedLayoutAfter.schemaVersion, 2);
-  assert.equal(copiedLayoutAfter.storageRootId, version2Layout.storageRootId);
-  assert.equal(copiedLayoutAfter.physicalIdentity.canonicalPath, await realpath(copiedRoot));
-  assert.equal(typeof copiedLayoutAfter.adoptedAt, "string");
-  await assert.rejects(stat(copiedCommitPath), { code: "ENOENT" });
 });
 
 test("copied roots with a missing marker validate the pending version 2 identity before recovery", async (t) => {
@@ -647,45 +640,43 @@ test("version 1 runtime-only pending commits require verified manual recovery", 
 
   assert.throws(
     () => new RuntimeStore({ workDir: root, storageRoot }),
-    /without a verifiable version 2 layout replacement.*verified manual recovery/u,
+    /Unsupported workspace storage layout schema version 1/u,
   );
   assert.throws(
     () => adoptWorkspaceStorageRootIdentitySync(storageRoot, version2Layout.storageRootId),
-    /cannot be explicitly adopted/u,
+    /Unsupported workspace storage layout schema version 1/u,
   );
   assert.deepEqual(await readFile(statePath), stateBytes);
   assert.deepEqual(await readFile(layoutPath), layoutBytes);
   assert.deepEqual(await readFile(commitPath), commitBytes);
 });
 
-test("opening a version 1 layout upgrades it once without changing its creation time", async (t) => {
+test("opening a version 1 layout rejects it without rewriting the marker", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-v1-upgrade-"));
   const storageRoot = join(root, "state");
   const createdAt = "2026-07-25T00:00:00.000Z";
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(storageRoot, ".storage"), { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE),
-    `${JSON.stringify(
-      {
-        schemaVersion: 1,
-        layout: "session-centric-v1",
-        createdAt,
-      },
-      null,
-      2,
-    )}\n`,
-    { mode: 0o600 },
+  const layoutPath = join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
+  const marker = `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      layout: "session-centric-v1",
+      createdAt,
+    },
+    null,
+    2,
+  )}\n`;
+  await writeFile(layoutPath, marker, { mode: 0o600 });
+
+  assert.throws(
+    () => new RuntimeStore({ workDir: root, storageRoot }),
+    /Unsupported workspace storage layout schema version 1/u,
   );
 
-  new RuntimeStore({ workDir: root, storageRoot }).close();
-
-  const upgraded = JSON.parse(
-    await readFile(join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE), "utf8"),
-  ) as { schemaVersion: number; storageRootId?: string; createdAt: string };
-  assert.equal(upgraded.schemaVersion, 2);
-  assert.equal(upgraded.createdAt, createdAt);
-  assert.equal(typeof upgraded.storageRootId, "string");
+  assert.equal(await readFile(layoutPath, "utf8"), marker);
+  await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
+  await assert.rejects(stat(join(storageRoot, "runtime")), { code: "ENOENT" });
 });
 
 test("workspace storage fails closed when markerless canonical and legacy Session data conflict", async (t) => {
@@ -707,7 +698,7 @@ test("workspace storage fails closed when markerless canonical and legacy Sessio
     () => new RuntimeEventStore({ storageRoot }),
     (error: unknown) =>
       error instanceof FileStorageIntegrityError &&
-      /canonical data without a workspace storage layout marker/u.test(error.message),
+      /Unsupported pre-v2 Runtime storage exists/u.test(error.message),
   );
 
   assert.equal(await readFile(legacyLogPath, "utf8"), '{"source":"legacy"}\n');
