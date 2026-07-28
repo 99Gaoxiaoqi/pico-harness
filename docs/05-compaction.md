@@ -2,7 +2,8 @@
 
 完整 Model Context 保住了工作链，但也要求主动管理输入预算：**不能等 Provider 已经 overflow 才处理。**
 
-Agent 读了一个 1MB 的日志文件。单条 ToolResult 就可能把上下文撑爆，因此超大输出先外部化为 artifact；正常历史接近输入预算的 85% 时再整理。
+Agent 读了一个 1MB 的日志文件。单条 ToolResult 就可能把上下文撑爆，因此 Engine 在 durable
+边界一次性生成有界投影，并把可回读原文写入 Evidence CAS；正常历史接近输入预算的 85% 时再整理。
 
 整理顺序是：缩短旧 ToolResult 请求副本 → 在完整工具批次边界摘要旧前缀 → Provider 仍 overflow 时用更紧 token 目标紧急摘要一次。
 
@@ -82,7 +83,8 @@ function makeToolResultSummary(msg, allMsgs, index): string {
 
 ### 第三道防线：近期安全尾部
 
-近期安全尾部默认保持原文，不在并发工具批次中间切断。单条超大输出在进入 Session 前已通过 artifact 外部化，只留下摘要与回读路径：
+近期安全尾部默认保持 canonical 投影，不在并发工具批次中间切断。单条超大输出在进入
+Session 前已经留下确定性预览、内容哈希、原始字节数和 Evidence 回读引用：
 
 ```
 [前 500 字符内容...]

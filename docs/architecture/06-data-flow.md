@@ -52,10 +52,10 @@
 │ │     ├─ PreToolUse Hook(改写后重跑安全门)                      │ │
 │ │     ├─ PermissionRequest Hook / 人工审批                     │ │
 │ │     ├─ preWriteHook(写工具记录 File History preimage)        │ │
-│ │     ├─ tool.execute(args) → 文件内容                          │ │
-│ │     ├─ 大结果按策略外置到 Artifact/Evidence                  │ │
-│ │     └─ PostToolUse/PostToolUseFailure（有界等待）            │ │
+│ │     └─ tool.execute(args) → 未截断 ToolResult                 │ │
+│ │   生成 deterministic projection，必要时写 Evidence CAS       │ │
 │ │   await session.commitMessages(...toolResults)               │ │
+│ │     └─ durable 后分发结构化 Hook / Reporter / PostToolBatch   │ │
 │ │                                                              │ │
 │ │ ⑤ 文件历史 journal(工具批次 finally)                         │ │
 │ │   全部已启动工具收口后提交 CAS preimage 与 Session manifest  │ │
@@ -80,7 +80,7 @@
 发送前估算（消息 + 工具 Schema）超过输入预算的 85%
     │
     ▼
-旧 ToolResult 请求投影
+旧 ToolResult 请求投影（只改 Provider 请求副本）
     │
     ├─ 回到 85% 以下 → 发送投影（Session 不变）
     └─ 仍超水位 → FullCompactor
@@ -189,10 +189,10 @@ AgentEngine.runSub():
   │  └───────────────────────────────────────┘
   │
   ├─ summary < 200 字? → 追加一轮强制扩写
-  └─ return {summary, artifacts[]}
-      └─ artifacts: 大输出落盘 $PICO_HOME/workspaces/<id>/artifacts/
+  └─ return {summary, evidenceRefs[]}
+      └─ evidenceRefs: 长报告写入 Evidence CAS，返回 pico://evidence/... 引用
 
-主 Agent 收到浓缩 summary(几百字) + artifacts 路径
+主 Agent 收到浓缩 summary(几百字) + Evidence 引用
   └─ contextHistory 不被几百个文件内容污染
 ```
 

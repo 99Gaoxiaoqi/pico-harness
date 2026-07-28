@@ -26,12 +26,14 @@ interface BaseTool {
   execute(args: string): Promise<string>; // 原始 JSON 字符串,延迟解析
   readOnly?: boolean; // 默认 false
   accesses?(args: string): ToolAccesses; // 资源访问集;未实现按 all() 保守
-  maxResultSizeChars?: number; // 默认 8000
   toolset?: string; // 工具所属集(预留分组)
 }
 ```
 
-关键设计：**延迟解析**——execute/accesses 都收原始 JSON 字符串，各工具内部反序列化，Main Loop 不关心参数结构。
+关键设计：
+
+- **延迟解析**——execute/accesses 都收原始 JSON 字符串，各工具内部反序列化，Main Loop 不关心参数结构。
+- **Registry 不截断结果**——工具原始返回值只在 Engine 的 canonical ToolResult 边界做一次投影和归档，避免多层各自截断后无法校验或回读。
 
 ### Registry (`registry.ts:68-98`)
 
@@ -58,9 +60,11 @@ execute(call)
   ├─ 3. PreToolUse Hook（可 deny/改写）
   ├─ 4. 改写后重跑安全门
   ├─ 5. PermissionRequest Hook → 人工审批
-  ├─ 6. preWriteHook / ExecutionMiddleware / tool.execute
-  ├─ 7. PostToolUse 或 PostToolUseFailure（有界等待）
-  └─ 8. 并行批次完成后 PostToolBatch
+  └─ 6. preWriteHook / ExecutionMiddleware / tool.execute（返回未截断结果）
+
+Engine 随后生成有界投影、写入 Evidence，并原子提交整批 `tool.result.recorded`。只有 canonical
+批次和 Session 投影都成功后，才分发结构化 `PostToolUse/PostToolUseFailure`、Reporter 和
+`PostToolBatch`；这些宿主事件不携带 raw body。
 ```
 
 ---
@@ -104,7 +108,7 @@ Engine 为每批 toolCalls 创建 `ToolScheduler`：
 
 ### 扩展组（按需披露，search_tools 激活）
 
-扩展组包括 `read_artifact`、`skill_view`、后台任务控制、网络工具、Plan/Goal 工具和宿主动态注册的代码智能/MCP 工具。启用渐进披露时，`search_tools` 负责检索并激活扩展工具。
+扩展组包括 `read_evidence`、`skill_view`、后台任务控制、网络工具、Plan/Goal 工具和宿主动态注册的代码智能/MCP 工具。启用渐进披露时，`search_tools` 负责检索并激活扩展工具。
 
 ### 子代理工具（host 单独注册）
 

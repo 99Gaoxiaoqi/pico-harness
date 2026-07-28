@@ -38,7 +38,7 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 | `src/engine/`                 | ReAct 循环、Session、预算、Reporter、Goal 与 Steer                                   |
 | `src/provider/`               | Provider 协议、ModelRouter、凭证轮换、重试和计费能力                                 |
 | `src/tools/`                  | 工具 Registry、中间件、调度器、子代理与渐进披露                                      |
-| `src/context/`                | Prompt 组装、请求投影、模型摘要、Artifact 和 Evidence                                |
+| `src/context/`                | Prompt 组装、请求投影、模型摘要和 Evidence CAS                                       |
 | `src/tasks/`                  | RuntimeStore、TaskRun、后台 Job、Cron、租约、Usage 和完成通知                        |
 | `src/daemon/`                 | 本机 IPC、认证、Desktop/Workspace Runtime 服务；typed request router 与领域 handlers |
 | `src/plugins/`                | Plugin Manager、scope/winner、snapshot、Hook trust、受限 capability 与统一诊断       |
@@ -63,7 +63,7 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 ## 路径边界
 
 - `$PICO_HOME`：用户和设备级状态根，默认 `~/.pico`。
-- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 文件账本、Summary sidecar、Artifact、Evidence、
+- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 文件账本、Summary sidecar、Evidence、
   Trace、Task 和 storage operation。
 - `<workDir>/.pico/`：项目配置、commands、skills、agents、hooks、MCP 和 plugins。
 - 旧 `runtime.sqlite`、`memory.sqlite`、WAL/SHM 与 legacy task 文件保留原样，但当前版本不读取、迁移或自动删除。
@@ -93,7 +93,7 @@ workspace/
 一行，完整但非法的中间记录会 fail closed。
 
 Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，不同
-`PICO_HOME` 的 Session 设置、授权、凭证、Artifact 与存储根不能共享状态。
+`PICO_HOME` 的 Session 设置、授权、凭证、Evidence 与存储根不能共享状态。
 
 ## 可恢复任务边界
 
@@ -112,7 +112,7 @@ owner/lease epoch 的 checkpoint、launch 与完成写入会被拒绝。
 既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为 `host_bound`，
 进程退出后只收敛为 `interrupted`。
 
-`sessions/`、`task-runs/`、Artifact、Evidence、Trace 和 Memory summaries 可进入只读导出计划；
+`sessions/`、`task-runs/`、Evidence、Trace 和 Memory summaries 可进入只读导出计划；
 其中 Session/TaskRun 只接受完整 SHA-256 目录和固定 canonical 文件名，计划在共享事务锁内
 恢复 pending commit 后生成一致性哈希；
 `.storage/`、`control/`、Memory state、锁、凭据、临时文件和 legacy SQLite 属于 host-bound
@@ -124,7 +124,7 @@ owner/lease epoch 的 checkpoint、launch 与完成写入会被拒绝。
 | ---------------- | --------------------------------------------------------------------------- |
 | 单一执行内核     | TUI 和 Desktop 共享 AgentRuntime/AgentEngine，不维护两套业务实现            |
 | 事实与控制面分离 | RuntimeEvent 管 Agent 事实，TaskRun 管任务事实，RuntimeStore 管调度状态     |
-| 显式宿主边界     | Home、env、Provider config、Artifact root 由 composition root 固定并注入    |
+| 显式宿主边界     | Home、env、Provider config、Evidence root 由 composition root 固定并注入    |
 | 安全链前置       | Trust、Plan、Hardline、Approval、Hooks 和 workspace boundary 位于工具执行前 |
 | 投影可重建       | Session 内存、Transcript、UI state 不升级为第二事实源                       |
 | 状态所有权拆分   | 只有拥有独立状态或生命周期的模块才拆成服务，避免空转抽象                    |
@@ -135,7 +135,7 @@ owner/lease epoch 的 checkpoint、launch 与完成写入会被拒绝。
 | -------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | [01-engine.md](./01-engine.md)                                                   | Engine、Session、RuntimeEvent 与 Reporter              |
 | [02-tools.md](./02-tools.md)                                                     | Registry、调度、子代理、渐进披露与 Hooks               |
-| [03-context.md](./03-context.md)                                                 | Prompt、投影、压缩、Artifact 与摘要 sidecar            |
+| [03-context.md](./03-context.md)                                                 | Prompt、投影、压缩、Evidence 与摘要 sidecar            |
 | [04-provider-entry.md](./04-provider-entry.md)                                   | Provider、AgentRuntime、TUI 与 Desktop 入口            |
 | [05-infra-safety.md](./05-infra-safety.md)                                       | FileHistory、审批、MCP、可观测性与部署边界             |
 | [06-data-flow.md](./06-data-flow.md)                                             | TUI/Desktop 到 Runtime 的关键数据流                    |

@@ -1,7 +1,7 @@
 // 上下文压缩器:像操作系统的垃圾回收器一样,防止大模型 Context Window 发生 OOM。
 //
 // 完整历史投影不能防住"单条消息暴击"，因此接近 token 水位时
-// 先缩短旧 ToolResult；单条超大原文则由 artifact 层在入 Session 前外部化。
+// 先缩短旧 ToolResult；单条超大原文则在 canonical 边界写入 Evidence CAS。
 //
 // 驾驭工程铁律:大模型是 CPU,Context Window 是昂贵且容量受限的 RAM。
 // 物理防御(防 OOM)的优先级,永远高于业务逻辑(短期记忆完整性)。
@@ -454,7 +454,7 @@ export class Compactor {
   /**
    * Claude-Code-style micro projection used before persistent full compaction.
    * Only old ToolResult bodies are shortened; the protected recent suffix is
-   * byte-for-byte intact and artifact references are never folded away.
+   * byte-for-byte intact and Evidence references are never folded away.
    */
   compactOldToolResults(
     msgs: Message[],
