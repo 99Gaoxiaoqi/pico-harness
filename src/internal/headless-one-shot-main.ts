@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 
 import { stdin, stdout } from "node:process";
-import {
-  runHeadlessOneShotJson,
-  type HeadlessOneShotOutcome,
-  type HeadlessOneShotResultV1,
+import type {
+  HeadlessOneShotOutcome,
+  HeadlessOneShotResultV1,
 } from "./headless-one-shot-runner.js";
 
 const MAX_STDIN_BYTES = 2 * 1024 * 1024;
 
+// This machine-readable entry never permits Runtime logs to share stderr with benchmark
+// orchestration. Set the boundary before dynamically loading any module that constructs a logger.
+process.env.LOG_LEVEL = "fatal";
 void main();
 
 async function main(): Promise<void> {
+  const { runHeadlessOneShotJson } = await import("./headless-one-shot-runner.js");
   const abortController = new AbortController();
   let signalKind: "SIGINT" | "SIGTERM" | undefined;
   const onSigint = () => {
