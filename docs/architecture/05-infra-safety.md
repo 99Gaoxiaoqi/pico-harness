@@ -57,7 +57,7 @@ CanonicalUsage = {
   └─ 修剪与回退点对应的 File History 后将 operation 置为 completed
 ```
 
-File History 只接受 v2 manifest 和 CAS blob 引用；开发期旧 manifest 不读取、不迁移，遇到时由恢复与 Storage Doctor 明确拒绝。`ContentAddressedBlobGarbageCollector` 与声明式 retention policy 目前保留但未接入生产调度，因此不能假定存在自动全局 GC。
+File History 只接受 v2 manifest、CAS blob 引用和完整的 canonical 用户消息边界；开发期旧 manifest、缺少边界字段的快照均不读取、不迁移，遇到时由恢复与 Storage Doctor 明确拒绝。`ContentAddressedBlobGarbageCollector` 与声明式 retention policy 目前保留但未接入生产调度，因此不能假定存在自动全局 GC。
 
 公开交互入口在 TUI 内：`/snapshots` 列出快照，`/rewind` 选择 code / conversation / both。
 

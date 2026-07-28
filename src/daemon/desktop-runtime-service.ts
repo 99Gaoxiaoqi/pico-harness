@@ -3053,7 +3053,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.withSession(canonical, sessionId, async (session) => ({
       checkpoints: (await listRewindPointSummaries(session)).map((checkpoint) => ({
         checkpointId: checkpoint.messageId,
-        label: checkpoint.userPrompt ?? "未命名检查点",
+        label: checkpoint.userPrompt,
         createdAt: Date.parse(checkpoint.timestamp),
         changedFileCount: checkpoint.changedFileCount ?? 0,
         additions: checkpoint.addedLines ?? 0,
@@ -3092,10 +3092,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const checkpoint = session.fileHistory.snapshots.find(
           (candidate) => candidate.messageId === params.checkpointId,
         );
-        if (checkpoint?.beforeSessionSeq === undefined) {
+        if (!checkpoint) {
           throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            "该检查点缺少可验证的会话序列边界，拒绝同步回退记忆来源",
+            RUNTIME_ERROR_CODES.NOT_FOUND,
+            `Session ${params.sessionId} 中不存在检查点 ${params.checkpointId}`,
           );
         }
         return checkpoint.beforeSessionSeq;

@@ -132,11 +132,7 @@ export async function resolveRewindCommandDialogKey(
 
   if (event.key.escape || event.input === "\u001b") {
     const selector = state.selector;
-    const selectedSnapshot =
-      selector.phase === "confirm"
-        ? snapshots.find((snapshot) => snapshot.messageId === selector.messageId)
-        : undefined;
-    if (selector.phase === "confirm" && selectedSnapshot?.userPrompt !== undefined) {
+    if (selector.phase === "confirm") {
       return {
         ...state,
         selector: {

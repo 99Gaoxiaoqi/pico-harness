@@ -18,7 +18,7 @@ export async function projectDesktopCheckpoint(
   const checkpoint = session.fileHistory.snapshots.find(
     (candidate) => candidate.messageId === checkpointId,
   );
-  if (!checkpoint || checkpoint.userPrompt === undefined) {
+  if (!checkpoint) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.NOT_FOUND,
       `Session ${session.id} 中不存在检查点 ${checkpointId}`,
@@ -68,7 +68,7 @@ export async function applyDesktopRewind(
   const checkpoint = session.fileHistory.snapshots.find(
     (candidate) => candidate.messageId === checkpointId,
   );
-  if (!checkpoint || checkpoint.userPrompt === undefined || checkpoint.messageIndex === undefined) {
+  if (!checkpoint) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.NOT_FOUND,
       `Session ${session.id} 中不存在可完整回滚的检查点 ${checkpointId}`,

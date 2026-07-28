@@ -64,10 +64,10 @@ export interface RewindStorageOperation extends StorageOperationBase {
   };
   target: {
     messageId: string;
-    sourceMessageEventId?: string;
+    sourceMessageEventId: string;
     messageIndex: number;
-    /** TUI 崩溃恢复 handoff；旧 operation 可缺省。 */
-    userPrompt?: string;
+    /** TUI 崩溃恢复 handoff 使用同一 canonical 用户输入。 */
+    userPrompt: string;
     transcriptIndex?: number;
     interactionMode?: "default" | "plan" | "auto" | "yolo";
     prePlanMode?: "default" | "auto" | "yolo";
@@ -426,9 +426,12 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
     !isNonNegativeInteger(precondition["fileHistoryRevision"]) ||
     !isRecord(target) ||
     typeof target["messageId"] !== "string" ||
-    !isOptionalString(target["sourceMessageEventId"]) ||
+    target["messageId"].length === 0 ||
+    typeof target["sourceMessageEventId"] !== "string" ||
+    target["sourceMessageEventId"] !== `user-message:${target["messageId"]}` ||
     !isNonNegativeInteger(target["messageIndex"]) ||
-    !isOptionalString(target["userPrompt"]) ||
+    typeof target["userPrompt"] !== "string" ||
+    target["userPrompt"].length === 0 ||
     !isOptionalNonNegativeInteger(target["transcriptIndex"]) ||
     !isOptionalInteractionMode(target["interactionMode"]) ||
     !isOptionalPrePlanMode(target["prePlanMode"]) ||
@@ -530,10 +533,6 @@ function isOperationState(value: unknown): value is StorageOperationState {
 
 function isRewindMode(value: unknown): value is RewindStorageOperation["mode"] {
   return value === "code" || value === "conversation" || value === "both";
-}
-
-function isOptionalString(value: unknown): boolean {
-  return value === undefined || typeof value === "string";
 }
 
 function isOptionalInteractionMode(value: unknown): boolean {

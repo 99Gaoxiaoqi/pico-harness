@@ -86,33 +86,33 @@ export interface FileHistoryBackup {
 
 export interface FileHistorySnapshot {
   messageId: string;
+  /** 对应顶层用户消息的 canonical durable Session event。 */
+  sourceMessageEventId: string;
+  /** 建立 rewind point 前的 durable Session seq。 */
+  beforeSessionSeq: number;
+  /** 顶层用户消息进入模型历史前的消息下标。 */
+  messageIndex: number;
+  /** 顶层用户消息的原始可见文本。 */
+  userPrompt: string;
   trackedFileBackups: Map<string, FileHistoryBackup>;
   timestamp: Date;
-  messageIndex?: number;
-  /** 顶层用户消息的原始可见文本；旧 manifest 不包含该字段。 */
-  userPrompt?: string;
   /** 该用户消息进入 TUI transcript 前的条目下标。 */
   transcriptIndex?: number;
   /** 预留给宿主恢复 default/plan/yolo 等交互模式。 */
   interactionMode?: string;
-  /** 进入 plan 前的交互模式；旧 manifest 不包含该字段。 */
+  /** 进入 plan 前的交互模式。 */
   prePlanMode?: string;
   /** 本条用户消息执行期间实际触碰过的文件。 */
-  editedFilePaths?: Set<string>;
+  editedFilePaths: Set<string>;
   /** 本条消息的文件事务未完整覆盖工作区时的可见警告。 */
   journalWarnings?: string[];
-  /** 对应顶层用户消息的 durable Session event。 */
-  sourceMessageEventId?: string;
-  /** 建立 rewind point 前的 durable Session seq。 */
-  beforeSessionSeq?: number;
 }
 
 export interface FileHistoryState {
   snapshots: FileHistorySnapshot[];
   trackedFiles: Set<string>;
   snapshotSequence: number;
-  pendingTrackEdits: Map<string, FileHistoryBackup>;
-  pendingJournalWarnings: Set<string>;
+  /** 当前 Run 绑定的 canonical 用户消息 rewind point。 */
   currentMessageId?: string;
   fileVersions: Map<string, number>;
   /** manifest v2 修订号，每次耐久写递增。 */
@@ -177,8 +177,6 @@ export function createFileHistoryState(): FileHistoryState {
     snapshots: [],
     trackedFiles: new Set(),
     snapshotSequence: 0,
-    pendingTrackEdits: new Map(),
-    pendingJournalWarnings: new Set(),
     currentMessageId: undefined,
     fileVersions: new Map(),
     revision: 0,
@@ -361,78 +359,37 @@ export async function fileHistoryTrackEdit(
   sessionId: string,
   baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<void> {
-  const rewindPoint = state.snapshots.findLast(
-    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
-  );
-  if (rewindPoint) {
-    const editedFilePaths = rewindPoint.editedFilePaths ?? new Set<string>();
-    rewindPoint.editedFilePaths = editedFilePaths;
-    if (editedFilePaths.has(filePath)) return;
+  const rewindPoint = requireCanonicalRewindPoint(state, messageId);
+  if (rewindPoint.editedFilePaths.has(filePath)) return;
 
-    // 用户级 rewind point 在 prompt 进入模型前已捕获所有已跟踪文件。
-    // 首次出现的新路径仍需在写前补一份备份，然后把它追加入该点。
-    if (!rewindPoint.trackedFileBackups.has(filePath)) {
-      const version = (state.fileVersions.get(filePath) ?? 0) + 1;
-      let backup: FileHistoryBackup;
-      try {
-        const srcStat = await stat(filePath);
-        const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
-        backup = {
-          backupFileName,
-          version,
-          backupTime: new Date(),
-          originMtimeMs: srcStat.mtimeMs,
-          originSize: srcStat.size,
-          originMode: srcStat.mode & 0o777,
-        };
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT") throw err;
-        backup = { backupFileName: null, version, backupTime: new Date() };
-      }
-      state.fileVersions.set(filePath, version);
-      rewindPoint.trackedFileBackups.set(filePath, backup);
+  // 用户级 rewind point 在 prompt 进入模型前已捕获所有已跟踪文件。
+  // 首次出现的新路径仍需在写前补一份备份，然后把它追加入该点。
+  if (!rewindPoint.trackedFileBackups.has(filePath)) {
+    const version = (state.fileVersions.get(filePath) ?? 0) + 1;
+    let backup: FileHistoryBackup;
+    try {
+      const srcStat = await stat(filePath);
+      const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
+      backup = {
+        backupFileName,
+        version,
+        backupTime: new Date(),
+        originMtimeMs: srcStat.mtimeMs,
+        originSize: srcStat.size,
+        originMode: srcStat.mode & 0o777,
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw err;
+      backup = { backupFileName: null, version, backupTime: new Date() };
     }
-
-    state.trackedFiles.add(filePath);
-    editedFilePaths.add(filePath);
-    await saveFileHistoryState(state, sessionId, baseDir);
-    return;
+    state.fileVersions.set(filePath, version);
+    rewindPoint.trackedFileBackups.set(filePath, backup);
   }
 
-  if (state.currentMessageId !== messageId) {
-    state.pendingTrackEdits = new Map();
-    state.pendingJournalWarnings = new Set();
-    state.currentMessageId = messageId;
-  }
-
-  if (state.pendingTrackEdits.has(filePath)) {
-    return;
-  }
-
-  const version = (state.fileVersions.get(filePath) ?? 0) + 1;
-
-  let backup: FileHistoryBackup;
-  try {
-    const srcStat = await stat(filePath);
-    const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
-    backup = {
-      backupFileName,
-      version,
-      backupTime: new Date(),
-      originMtimeMs: srcStat.mtimeMs,
-      originSize: srcStat.size,
-      originMode: srcStat.mode & 0o777,
-    };
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw err;
-    backup = { backupFileName: null, version, backupTime: new Date() };
-  }
-
-  state.fileVersions.set(filePath, version);
   state.trackedFiles.add(filePath);
-  state.pendingTrackEdits.set(filePath, backup);
+  rewindPoint.editedFilePaths.add(filePath);
+  await saveFileHistoryState(state, sessionId, baseDir);
 }
 
 /**
@@ -446,6 +403,7 @@ export async function fileHistoryCommitJournal(
   sessionId: string,
   baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryJournalCommitResult> {
+  requireCanonicalRewindPoint(state, messageId);
   let changed = false;
   const changedPaths = new Set<string>();
   try {
@@ -550,32 +508,15 @@ async function recordJournalChange(
   sessionId: string,
   baseDir: string,
 ): Promise<boolean> {
-  const rewindPoint = state.snapshots.findLast(
-    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
-  );
-  if (rewindPoint) {
-    const editedFilePaths = rewindPoint.editedFilePaths ?? new Set<string>();
-    rewindPoint.editedFilePaths = editedFilePaths;
-    if (editedFilePaths.has(filePath)) return false;
-    const existing = rewindPoint.trackedFileBackups.get(filePath);
-    if (!(await backupMatchesPreimage(existing, preimage, sessionId, baseDir))) {
-      const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
-      rewindPoint.trackedFileBackups.set(filePath, backup);
-    }
-    state.trackedFiles.add(filePath);
-    editedFilePaths.add(filePath);
-    return true;
+  const rewindPoint = requireCanonicalRewindPoint(state, messageId);
+  if (rewindPoint.editedFilePaths.has(filePath)) return false;
+  const existing = rewindPoint.trackedFileBackups.get(filePath);
+  if (!(await backupMatchesPreimage(existing, preimage, sessionId, baseDir))) {
+    const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
+    rewindPoint.trackedFileBackups.set(filePath, backup);
   }
-
-  if (state.currentMessageId !== messageId) {
-    state.pendingTrackEdits = new Map();
-    state.pendingJournalWarnings = new Set();
-    state.currentMessageId = messageId;
-  }
-  if (state.pendingTrackEdits.has(filePath)) return false;
-  const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
-  state.pendingTrackEdits.set(filePath, backup);
   state.trackedFiles.add(filePath);
+  rewindPoint.editedFilePaths.add(filePath);
   return true;
 }
 
@@ -632,21 +573,19 @@ function attachJournalWarnings(
   warnings: readonly string[],
 ): void {
   if (warnings.length === 0) return;
-  const rewindPoint = state.snapshots.findLast(
-    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
-  );
-  if (rewindPoint) {
-    rewindPoint.journalWarnings = [
-      ...new Set([...(rewindPoint.journalWarnings ?? []), ...warnings]),
-    ];
-    return;
+  const rewindPoint = requireCanonicalRewindPoint(state, messageId);
+  rewindPoint.journalWarnings = [...new Set([...(rewindPoint.journalWarnings ?? []), ...warnings])];
+}
+
+function requireCanonicalRewindPoint(
+  state: FileHistoryState,
+  messageId: string,
+): FileHistorySnapshot {
+  const rewindPoint = state.snapshots.findLast((snapshot) => snapshot.messageId === messageId);
+  if (!rewindPoint) {
+    throw new Error(`FileHistory: 找不到 canonical user rewind point ${messageId}`);
   }
-  if (state.currentMessageId !== messageId) {
-    state.pendingTrackEdits = new Map();
-    state.pendingJournalWarnings = new Set();
-    state.currentMessageId = messageId;
-  }
-  for (const warning of warnings) state.pendingJournalWarnings.add(warning);
+  return rewindPoint;
 }
 
 function findLastBackup(state: FileHistoryState, filePath: string): FileHistoryBackup | undefined {
@@ -694,53 +633,45 @@ async function cleanupExclusiveBackups(
   }
 }
 
-export async function fileHistoryMakeSnapshot(
+/**
+ * 在顶层用户消息进入模型前建立唯一的 File History v2 rewind point。
+ * sourceMessageEventId 由 Session 在提交前确定，因而首次落盘就具备完整用户边界；
+ * 内部 ReAct turn 不再生成另一类快照。
+ */
+export async function fileHistoryBeginRewindPoint(
   state: FileHistoryState,
-  messageId: string,
-  sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
-  messageIndex?: number,
-  metadata?: {
+  input: {
+    messageId: string;
+    sourceMessageEventId: string;
+    beforeSessionSeq: number;
+    messageIndex: number;
     userPrompt: string;
     transcriptIndex?: number;
     interactionMode?: string;
     prePlanMode?: string;
-    sourceMessageEventId?: string;
-    beforeSessionSeq?: number;
   },
+  sessionId: string,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<void> {
+  assertCanonicalUserBoundary(input);
+  if (state.snapshots.some((snapshot) => snapshot.messageId === input.messageId)) {
+    throw new Error(`FileHistory: messageId=${input.messageId} 的 rewind point 已存在`);
+  }
   const snapshot: FileHistorySnapshot = {
-    messageId,
+    messageId: input.messageId,
+    sourceMessageEventId: input.sourceMessageEventId,
+    beforeSessionSeq: input.beforeSessionSeq,
+    messageIndex: input.messageIndex,
+    userPrompt: input.userPrompt,
     trackedFileBackups: new Map(),
     timestamp: new Date(),
     editedFilePaths: new Set(),
-    ...(state.pendingJournalWarnings.size > 0
-      ? { journalWarnings: [...state.pendingJournalWarnings] }
-      : {}),
-    ...(messageIndex !== undefined ? { messageIndex } : {}),
-    ...(metadata !== undefined ? { userPrompt: metadata.userPrompt } : {}),
-    ...(metadata?.transcriptIndex !== undefined
-      ? { transcriptIndex: metadata.transcriptIndex }
-      : {}),
-    ...(metadata?.interactionMode !== undefined
-      ? { interactionMode: metadata.interactionMode }
-      : {}),
-    ...(metadata?.prePlanMode !== undefined ? { prePlanMode: metadata.prePlanMode } : {}),
-    ...(metadata?.sourceMessageEventId !== undefined
-      ? { sourceMessageEventId: metadata.sourceMessageEventId }
-      : {}),
-    ...(metadata?.beforeSessionSeq !== undefined
-      ? { beforeSessionSeq: metadata.beforeSessionSeq }
-      : {}),
+    ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
+    ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+    ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
   };
 
   for (const filePath of state.trackedFiles) {
-    const pending = state.pendingTrackEdits.get(filePath);
-    if (pending) {
-      snapshot.trackedFileBackups.set(filePath, pending);
-      continue;
-    }
-
     const lastBackup = findLastBackup(state, filePath);
     let currentStat;
     try {
@@ -780,9 +711,7 @@ export async function fileHistoryMakeSnapshot(
 
   state.snapshots.push(snapshot);
   state.snapshotSequence++;
-  state.pendingTrackEdits = new Map();
-  state.pendingJournalWarnings = new Set();
-  state.currentMessageId = metadata === undefined ? undefined : messageId;
+  state.currentMessageId = input.messageId;
 
   if (state.snapshots.length > MAX_SNAPSHOTS) {
     const removed = state.snapshots.shift();
@@ -794,64 +723,48 @@ export async function fileHistoryMakeSnapshot(
   await saveFileHistoryState(state, sessionId, baseDir);
 }
 
-/**
- * 在顶层用户消息进入模型前建立 Claude Code 风格的 rewind 边界。
- * 后续写操作会把首次写前备份追加入这个点，而不是为内部 ReAct turn 建点。
- */
-export async function fileHistoryBeginRewindPoint(
-  state: FileHistoryState,
-  input: {
-    messageId: string;
-    userPrompt: string;
-    messageIndex: number;
-    transcriptIndex?: number;
-    interactionMode?: string;
-    prePlanMode?: string;
-    sourceMessageEventId?: string;
-    beforeSessionSeq?: number;
-  },
-  sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
-): Promise<void> {
-  await fileHistoryMakeSnapshot(state, input.messageId, sessionId, baseDir, input.messageIndex, {
-    userPrompt: input.userPrompt,
-    ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
-    ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-    ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
-    ...(input.sourceMessageEventId !== undefined
-      ? { sourceMessageEventId: input.sourceMessageEventId }
-      : {}),
-    ...(input.beforeSessionSeq !== undefined ? { beforeSessionSeq: input.beforeSessionSeq } : {}),
-  });
+function assertCanonicalUserBoundary(input: {
+  messageId: string;
+  sourceMessageEventId: string;
+  beforeSessionSeq: number;
+  messageIndex: number;
+  userPrompt: string;
+  transcriptIndex?: number;
+}): void {
+  if (!input.messageId) throw new Error("FileHistory: messageId 必须是非空字符串");
+  if (input.sourceMessageEventId !== `user-message:${input.messageId}`) {
+    throw new Error("FileHistory: sourceMessageEventId 与 canonical 用户消息事件不匹配");
+  }
+  if (!Number.isInteger(input.beforeSessionSeq) || input.beforeSessionSeq < 0) {
+    throw new Error("FileHistory: beforeSessionSeq 必须是非负整数");
+  }
+  if (!Number.isInteger(input.messageIndex) || input.messageIndex < 0) {
+    throw new Error("FileHistory: messageIndex 必须是非负整数");
+  }
+  if (!input.userPrompt) throw new Error("FileHistory: userPrompt 必须是非空字符串");
+  if (
+    input.transcriptIndex !== undefined &&
+    (!Number.isInteger(input.transcriptIndex) || input.transcriptIndex < 0)
+  ) {
+    throw new Error("FileHistory: transcriptIndex 必须是非负整数");
+  }
 }
 
 /**
- * 用用户消息的 durable receipt 绑定已建立的 rewind point。崩溃后重试会覆写
- * 相同值；若同 messageId 被绑到另一个事件则拒绝猜测。
+ * durable receipt 只验证预先落盘的 canonical 用户边界，不再补写缺失 metadata。
  */
-export async function fileHistoryBindSourceEvent(
+export function fileHistoryBindSourceEvent(
   state: FileHistoryState,
   input: { messageId: string; sourceMessageEventId: string; beforeSessionSeq: number },
-  sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
-): Promise<void> {
-  const snapshot = state.snapshots.find((candidate) => candidate.messageId === input.messageId);
-  if (!snapshot) throw new Error(`FileHistory: 找不到 messageId=${input.messageId} 的快照`);
-  if (
-    snapshot.sourceMessageEventId !== undefined &&
-    snapshot.sourceMessageEventId !== input.sourceMessageEventId
-  ) {
+): void {
+  const snapshot = requireCanonicalRewindPoint(state, input.messageId);
+  if (snapshot.sourceMessageEventId !== input.sourceMessageEventId) {
     throw new Error(`FileHistory: ${input.messageId} 已绑定另一个 Session event`);
   }
-  if (
-    snapshot.beforeSessionSeq !== undefined &&
-    snapshot.beforeSessionSeq !== input.beforeSessionSeq
-  ) {
+  if (snapshot.beforeSessionSeq !== input.beforeSessionSeq) {
     throw new Error(`FileHistory: ${input.messageId} 的 Session 边界不一致`);
   }
-  snapshot.sourceMessageEventId = input.sourceMessageEventId;
-  snapshot.beforeSessionSeq = input.beforeSessionSeq;
-  await saveFileHistoryState(state, sessionId, baseDir);
+  state.currentMessageId = input.messageId;
 }
 
 /** 对话 fork 后只保留目标消息之前的活动 rewind points。 */
@@ -864,8 +777,6 @@ export async function fileHistoryDiscardFrom(
   const targetIndex = state.snapshots.findIndex((snapshot) => snapshot.messageId === messageId);
   if (targetIndex === -1) return;
   state.snapshots = state.snapshots.slice(0, targetIndex);
-  state.pendingTrackEdits = new Map();
-  state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
   await saveFileHistoryState(state, sessionId, baseDir);
 }
@@ -1193,13 +1104,8 @@ export async function fileHistoryMessageDiffStat(
   if (!target) {
     throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
   }
-  const next = state.snapshots
-    .slice(targetIndex + 1)
-    .find((snapshot) => snapshot.userPrompt !== undefined);
-  const candidatePaths =
-    target.editedFilePaths !== undefined
-      ? Array.from(target.editedFilePaths)
-      : Array.from(target.trackedFileBackups.keys());
+  const next = state.snapshots[targetIndex + 1];
+  const candidatePaths = Array.from(target.editedFilePaths);
   const files: FileHistoryDiffFileStat[] = [];
 
   for (const filePath of candidatePaths.sort()) {
@@ -1520,19 +1426,19 @@ type PersistedFileHistoryBackupV2 =
 
 interface PersistedFileHistorySnapshotV2 {
   messageId: string;
-  sourceMessageEventId: string | null;
-  beforeSessionSeq: number | null;
+  sourceMessageEventId: string;
+  beforeSessionSeq: number;
+  messageIndex: number;
+  userPrompt: string;
   trackedFileBackups: Array<{
     location: PersistedFileLocationV2;
     backup: PersistedFileHistoryBackupV2;
   }>;
   timestamp: string;
-  messageIndex?: number;
-  userPrompt?: string;
   transcriptIndex?: number;
   interactionMode?: string;
   prePlanMode?: string;
-  editedFilePaths?: PersistedFileLocationV2[];
+  editedFilePaths: PersistedFileLocationV2[];
   journalWarnings?: string[];
 }
 
@@ -1583,35 +1489,34 @@ async function saveFileHistoryStateUnlocked(
     revision: nextRevision,
     sessionId,
     roots: [...roots.values()].toSorted((left, right) => left.rootId.localeCompare(right.rootId)),
-    snapshots: state.snapshots.map((snapshot) => ({
-      messageId: snapshot.messageId,
-      sourceMessageEventId: snapshot.sourceMessageEventId ?? null,
-      beforeSessionSeq: snapshot.beforeSessionSeq ?? null,
-      trackedFileBackups: Array.from(snapshot.trackedFileBackups, ([filePath, backup]) => ({
-        location: encodeFileLocation(filePath, roots),
-        backup: encodeBackupV2(backup),
-      })),
-      timestamp: snapshot.timestamp.toISOString(),
-      ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
-      ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
-      ...(snapshot.transcriptIndex !== undefined
-        ? { transcriptIndex: snapshot.transcriptIndex }
-        : {}),
-      ...(snapshot.interactionMode !== undefined
-        ? { interactionMode: snapshot.interactionMode }
-        : {}),
-      ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
-      ...(snapshot.editedFilePaths !== undefined
-        ? {
-            editedFilePaths: Array.from(snapshot.editedFilePaths, (filePath) =>
-              encodeFileLocation(filePath, roots),
-            ),
-          }
-        : {}),
-      ...(snapshot.journalWarnings !== undefined
-        ? { journalWarnings: [...snapshot.journalWarnings] }
-        : {}),
-    })),
+    snapshots: state.snapshots.map((snapshot) => {
+      assertCanonicalUserBoundary(snapshot);
+      return {
+        messageId: snapshot.messageId,
+        sourceMessageEventId: snapshot.sourceMessageEventId,
+        beforeSessionSeq: snapshot.beforeSessionSeq,
+        messageIndex: snapshot.messageIndex,
+        userPrompt: snapshot.userPrompt,
+        trackedFileBackups: Array.from(snapshot.trackedFileBackups, ([filePath, backup]) => ({
+          location: encodeFileLocation(filePath, roots),
+          backup: encodeBackupV2(backup),
+        })),
+        timestamp: snapshot.timestamp.toISOString(),
+        ...(snapshot.transcriptIndex !== undefined
+          ? { transcriptIndex: snapshot.transcriptIndex }
+          : {}),
+        ...(snapshot.interactionMode !== undefined
+          ? { interactionMode: snapshot.interactionMode }
+          : {}),
+        ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
+        editedFilePaths: Array.from(snapshot.editedFilePaths, (filePath) =>
+          encodeFileLocation(filePath, roots),
+        ),
+        ...(snapshot.journalWarnings !== undefined
+          ? { journalWarnings: [...snapshot.journalWarnings] }
+          : {}),
+      };
+    }),
     trackedFiles: Array.from(state.trackedFiles, (filePath) => encodeFileLocation(filePath, roots)),
     snapshotSequence: state.snapshotSequence,
     fileVersions: Array.from(state.fileVersions, ([filePath, version]) => ({
@@ -1803,6 +1708,10 @@ function hydrateFileHistoryV2(
   const roots = new Map(manifest.roots.map((root) => [root.rootId, root.absolutePath]));
   state.snapshots = manifest.snapshots.map((snapshot) => ({
     messageId: snapshot.messageId,
+    sourceMessageEventId: snapshot.sourceMessageEventId,
+    beforeSessionSeq: snapshot.beforeSessionSeq,
+    messageIndex: snapshot.messageIndex,
+    userPrompt: snapshot.userPrompt,
     trackedFileBackups: new Map(
       snapshot.trackedFileBackups.map(({ location, backup }) => [
         decodeFileLocation(location, roots),
@@ -1810,12 +1719,6 @@ function hydrateFileHistoryV2(
       ]),
     ),
     timestamp: new Date(snapshot.timestamp),
-    ...(snapshot.sourceMessageEventId !== null
-      ? { sourceMessageEventId: snapshot.sourceMessageEventId }
-      : {}),
-    ...(snapshot.beforeSessionSeq !== null ? { beforeSessionSeq: snapshot.beforeSessionSeq } : {}),
-    ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
-    ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
     ...(snapshot.transcriptIndex !== undefined
       ? { transcriptIndex: snapshot.transcriptIndex }
       : {}),
@@ -1823,13 +1726,9 @@ function hydrateFileHistoryV2(
       ? { interactionMode: snapshot.interactionMode }
       : {}),
     ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
-    ...(snapshot.editedFilePaths !== undefined
-      ? {
-          editedFilePaths: new Set(
-            snapshot.editedFilePaths.map((location) => decodeFileLocation(location, roots)),
-          ),
-        }
-      : {}),
+    editedFilePaths: new Set(
+      snapshot.editedFilePaths.map((location) => decodeFileLocation(location, roots)),
+    ),
     ...(snapshot.journalWarnings !== undefined
       ? { journalWarnings: [...snapshot.journalWarnings] }
       : {}),
@@ -1844,8 +1743,6 @@ function hydrateFileHistoryV2(
       version,
     ]),
   );
-  state.pendingTrackEdits = new Map();
-  state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
   state.revision = manifest.revision;
   state.roots = roots;
@@ -1861,7 +1758,6 @@ async function materializeFileHistoryBlobs(
   for (const snapshot of state.snapshots) {
     for (const backup of snapshot.trackedFileBackups.values()) backups.add(backup);
   }
-  for (const backup of state.pendingTrackEdits.values()) backups.add(backup);
   for (const backup of backups) {
     if (backup.backupFileName === null || backup.blobRef) continue;
     backup.blobRef = (
@@ -1881,7 +1777,7 @@ function collectManifestRoots(state: FileHistoryState): Map<string, PersistedFil
   const paths = new Set<string>([...state.trackedFiles, ...state.fileVersions.keys()]);
   for (const snapshot of state.snapshots) {
     for (const path of snapshot.trackedFileBackups.keys()) paths.add(path);
-    for (const path of snapshot.editedFilePaths ?? []) paths.add(path);
+    for (const path of snapshot.editedFilePaths) paths.add(path);
   }
   for (const filePath of paths) {
     if (!isAbsolute(filePath)) throw new Error(`File History 路径必须是绝对路径: ${filePath}`);
@@ -1992,16 +1888,21 @@ function parseFileHistoryManifestV2(
   };
   const snapshots = requireArray(record["snapshots"], "snapshots").map((candidate, index) => {
     const snapshot = requireRecord(candidate, `snapshots[${index}]`);
-    return {
+    const parsed = {
       messageId: requireString(snapshot["messageId"], `snapshots[${index}].messageId`),
-      sourceMessageEventId: requireNullableString(
+      sourceMessageEventId: requireString(
         snapshot["sourceMessageEventId"],
         `snapshots[${index}].sourceMessageEventId`,
       ),
-      beforeSessionSeq: requireNullableNonNegativeInteger(
+      beforeSessionSeq: requireNonNegativeInteger(
         snapshot["beforeSessionSeq"],
         `snapshots[${index}].beforeSessionSeq`,
       ),
+      messageIndex: requireNonNegativeInteger(
+        snapshot["messageIndex"],
+        `snapshots[${index}].messageIndex`,
+      ),
+      userPrompt: requireString(snapshot["userPrompt"], `snapshots[${index}].userPrompt`),
       trackedFileBackups: requireArray(
         snapshot["trackedFileBackups"],
         `snapshots[${index}].trackedFileBackups`,
@@ -2016,9 +1917,20 @@ function parseFileHistoryManifestV2(
         };
       }),
       timestamp: requireDateString(snapshot["timestamp"], `snapshots[${index}].timestamp`),
-      ...optionalSnapshotFieldsV2(snapshot, index, parseLocation),
+      editedFilePaths: requireArray(
+        snapshot["editedFilePaths"],
+        `snapshots[${index}].editedFilePaths`,
+      ).map((value, pathIndex) =>
+        parseLocation(value, `snapshots[${index}].editedFilePaths[${pathIndex}]`),
+      ),
+      ...optionalSnapshotFieldsV2(snapshot, index),
     } satisfies PersistedFileHistorySnapshotV2;
+    assertCanonicalUserBoundary(parsed);
+    return parsed;
   });
+  if (new Set(snapshots.map((snapshot) => snapshot.messageId)).size !== snapshots.length) {
+    throw new Error("File History snapshots 存在重复 messageId");
+  }
   return {
     schemaVersion: FILE_HISTORY_MANIFEST_VERSION,
     revision: requirePositiveInteger(record["revision"], "revision"),
@@ -2100,26 +2012,21 @@ function parseBackupMetadata(
 function optionalSnapshotFieldsV2(
   snapshot: Record<string, unknown>,
   index: number,
-  parseLocation: (value: unknown, label: string) => PersistedFileLocationV2,
 ): Omit<
   PersistedFileHistorySnapshotV2,
-  "messageId" | "sourceMessageEventId" | "beforeSessionSeq" | "trackedFileBackups" | "timestamp"
+  | "messageId"
+  | "sourceMessageEventId"
+  | "beforeSessionSeq"
+  | "messageIndex"
+  | "userPrompt"
+  | "trackedFileBackups"
+  | "timestamp"
+  | "editedFilePaths"
 > {
-  const edited = snapshot["editedFilePaths"];
   return {
-    ...optionalIntegerField(snapshot, "messageIndex", `snapshots[${index}]`),
-    ...optionalStringField(snapshot, "userPrompt", `snapshots[${index}]`),
     ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
     ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
     ...optionalStringField(snapshot, "prePlanMode", `snapshots[${index}]`),
-    ...(edited !== undefined
-      ? {
-          editedFilePaths: requireArray(edited, `snapshots[${index}].editedFilePaths`).map(
-            (value, pathIndex) =>
-              parseLocation(value, `snapshots[${index}].editedFilePaths[${pathIndex}]`),
-          ),
-        }
-      : {}),
     ...optionalStringArrayField(snapshot, "journalWarnings", `snapshots[${index}]`, false),
   };
 }
@@ -2199,14 +2106,6 @@ function requirePositiveInteger(value: unknown, label: string): number {
   const parsed = requireNonNegativeInteger(value, label);
   if (parsed === 0) throw new Error(`${label} 必须大于 0`);
   return parsed;
-}
-
-function requireNullableString(value: unknown, label: string): string | null {
-  return value === null ? null : requireString(value, label);
-}
-
-function requireNullableNonNegativeInteger(value: unknown, label: string): number | null {
-  return value === null ? null : requireNonNegativeInteger(value, label);
 }
 
 function requireOptionalNonNegativeInteger(value: unknown, label: string): number | undefined {

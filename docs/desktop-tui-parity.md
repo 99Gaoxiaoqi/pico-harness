@@ -76,11 +76,15 @@ Composer 仍保留 Slash 自动补全作为上述能力的高级等价入口。�
 
 | TUI 入口                | TUI 行为与状态                                   | Desktop 等价入口                                          | 等级     | 验收标准                                                                                            |
 | ----------------------- | ------------------------------------------------ | --------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------- |
-| `/snapshots`            | 列出当前 Session 的消息检查点；`idle`            | 会话标题菜单“版本历史”，打开右侧 Changes 面板的检查点列表 | 高级入口 | 仅展示当前 Session；标出用户消息、时间、文件摘要和 legacy 状态                                      |
+| `/snapshots`            | 列出当前 Session 的消息检查点；`idle`            | 会话标题菜单“版本历史”，打开右侧 Changes 面板的检查点列表 | 高级入口 | 仅展示当前 Session；标出 canonical 用户消息、时间和文件摘要                                         |
 | `/changes [message-id]` | 打开指定或最近检查点的单文件部分回退预览；`idle` | Transcript 的文件修改条目“Review”，以及右侧 Changes 面板  | 主路径   | 默认定位触发它的消息检查点；Diff、文件列表与 TUI File History 数据一致                              |
 | `/rewind`               | 打开代码与对话检查点回退菜单；`idle`             | Changes 面板中的“Rewind 到这里”                           | 高级入口 | 执行前展示会截断的对话和文件；文件指纹变化时 fail-closed；成功后旧 Transcript cursor 失效并重新加载 |
 
 `Changes` 是 Session Transcript 的详情，不是跨 Session 的全局变更页。全局 `/review` 页面可以聚合待审内容，但进入审阅时必须携带并展示所属 Session，不能使用 `data.runs[0]` 推断目标。
+
+File History 只接受带 `sourceMessageEventId`、`beforeSessionSeq`、`messageIndex`、`userPrompt`
+和 `editedFilePaths` 的 v2 用户消息检查点。开发期旧 manifest 或缺字段记录直接拒绝；CLI、TUI
+与 Desktop 都不得从 `turn-N`、会话历史或展示文本推断回退边界。
 
 ## MCP、Skills、Subagents 与 Automations
 

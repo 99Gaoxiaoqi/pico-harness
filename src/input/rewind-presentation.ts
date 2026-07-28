@@ -14,7 +14,7 @@ export function formatRewindSelector(
     "Preview first; confirm happens on the next screen.",
   ];
   for (const snapshot of visible) {
-    const prompt = oneLine(snapshot.userPrompt ?? snapshot.messageId);
+    const prompt = oneLine(snapshot.userPrompt);
     const changed = snapshot.changedFileCount ?? snapshot.trackedFileCount;
     lines.push(`  ${truncate(prompt, 72)} · ${snapshot.messageId}`);
     lines.push(

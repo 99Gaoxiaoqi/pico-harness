@@ -78,7 +78,6 @@ import {
   type RuntimeEventBase,
   type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
-  type RuntimeMessageCommittedEvent,
 } from "./session-runtime-event.js";
 import {
   projectRuntimeModelMessage,
@@ -347,7 +346,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       this.persistedGoal = runtime.goal;
       this.restoreUsage(runtime.usage);
       this.applyRuntimeHistoryProjection(projection);
-      await this.recoverRewindPointBindings(entries);
     } catch (error) {
       this.markWriteUncertain("Runtime session initialize/replay failed", error);
       throw error;
@@ -448,42 +446,9 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 
   private async recoverFileHistory(): Promise<void> {
-    try {
-      await fileHistoryLoadState(this.fileHistory, this.id, this.fileHistoryBaseDir);
-      if (!this.fileHistory.roots.has("workspace")) {
-        fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(this.workDir));
-      }
-    } catch (error) {
-      logger.warn({ error: String(error) }, "[session] 文件历史恢复失败,降级为空快照");
-    }
-  }
-
-  private async recoverRewindPointBindings(
-    entries: readonly RuntimeEventStoreEntry[],
-  ): Promise<void> {
-    const events = new Map(
-      entries
-        .filter(
-          (entry): entry is RuntimeEventStoreEntry & { event: RuntimeMessageCommittedEvent } =>
-            entry.event.kind === "message.committed",
-        )
-        .map((entry) => [entry.event.eventId, entry] as const),
-    );
-    for (const snapshot of this.fileHistory.snapshots) {
-      if (snapshot.sourceMessageEventId) continue;
-      const eventId = `user-message:${snapshot.messageId}`;
-      const event = events.get(eventId);
-      if (!event) continue;
-      await fileHistoryBindSourceEvent(
-        this.fileHistory,
-        {
-          messageId: snapshot.messageId,
-          sourceMessageEventId: event.event.eventId,
-          beforeSessionSeq: snapshot.beforeSessionSeq ?? event.sequence,
-        },
-        this.id,
-        this.fileHistoryBaseDir,
-      );
+    await fileHistoryLoadState(this.fileHistory, this.id, this.fileHistoryBaseDir);
+    if (!this.fileHistory.roots.has("workspace")) {
+      fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(this.workDir));
     }
   }
 
@@ -1109,12 +1074,13 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       this.fileHistory,
       {
         messageId,
+        sourceMessageEventId: `user-message:${messageId}`,
+        beforeSessionSeq,
         userPrompt: input.userPrompt,
         messageIndex: this.messageLedger.length,
         ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
-        beforeSessionSeq,
       },
       this.id,
       this.fileHistoryBaseDir,
@@ -1124,19 +1090,12 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
 
   async bindRewindPointSource(messageId: string, receipt: CommitReceipt): Promise<void> {
     this.assertWritable();
-    const snapshot = this.fileHistory.snapshots.find(
-      (candidate) => candidate.messageId === messageId,
-    );
-    await fileHistoryBindSourceEvent(
-      this.fileHistory,
-      {
-        messageId,
-        sourceMessageEventId: receipt.eventId,
-        beforeSessionSeq: snapshot?.beforeSessionSeq ?? receipt.cursor.seq,
-      },
-      this.id,
-      this.fileHistoryBaseDir,
-    );
+    const snapshot = this.requireRewindSnapshot(messageId);
+    await fileHistoryBindSourceEvent(this.fileHistory, {
+      messageId,
+      sourceMessageEventId: receipt.eventId,
+      beforeSessionSeq: snapshot.beforeSessionSeq,
+    });
   }
 
   async rewindTo(messageIndex: number): Promise<void> {
@@ -1198,7 +1157,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     await this.executeRewindOperation(
       "code",
       snapshot,
-      snapshot.messageIndex ?? this.messageLedger.length,
+      snapshot.messageIndex,
       randomUUID(),
       expectedCurrentFingerprints,
     );
@@ -1280,11 +1239,9 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         },
         target: {
           messageId: snapshot.messageId,
-          ...(snapshot.sourceMessageEventId
-            ? { sourceMessageEventId: snapshot.sourceMessageEventId }
-            : {}),
+          sourceMessageEventId: snapshot.sourceMessageEventId,
           messageIndex,
-          ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
+          userPrompt: snapshot.userPrompt,
           ...(snapshot.transcriptIndex !== undefined
             ? { transcriptIndex: snapshot.transcriptIndex }
             : {}),

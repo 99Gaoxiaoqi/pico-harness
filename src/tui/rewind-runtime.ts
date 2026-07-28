@@ -43,12 +43,9 @@ export async function applyTuiRewind(input: {
     return {};
   }
 
-  if (snapshot.messageIndex === undefined) {
-    throw new Error("This legacy checkpoint cannot restore the conversation precisely.");
-  }
   if (snapshot.transcriptIndex === undefined) {
     throw new Error(
-      "This legacy checkpoint has no TUI transcript boundary. Restore code only, or choose a newer user-message checkpoint.",
+      "This checkpoint has no TUI transcript boundary. Restore code only, or use its originating host.",
     );
   }
   // Rewind saga 必须在此前的 transcript 写入全部落盘后才能确定截断边界。
@@ -79,7 +76,7 @@ export async function applyTuiRewind(input: {
 }
 
 function formatRewindSuccess(snapshot: FileHistorySnapshotSummary, mode: RewindMode): string {
-  const prompt = (snapshot.userPrompt ?? snapshot.messageId).replace(/\s+/gu, " ").trim();
+  const prompt = snapshot.userPrompt.replace(/\s+/gu, " ").trim();
   const target = prompt.length <= 72 ? prompt : `${prompt.slice(0, 71)}…`;
   if (mode === "code") {
     return `Rewind complete: restored code to before “${target}”; conversation kept.`;
