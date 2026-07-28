@@ -22,7 +22,6 @@ import {
 import {
   createCanonicalTranscriptToolStart,
   createRuntimeTranscriptToolStartEvent,
-  createTranscriptToolStartIdentity,
   type CanonicalTranscriptToolStart,
 } from "../engine/transcript-tool-start.js";
 import {
@@ -65,6 +64,7 @@ import {
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
+  projectRuntimeSessionModelToolResultEntries,
   projectRuntimeSessionState,
   projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
@@ -374,6 +374,7 @@ export class RuntimeRun {
       const syntheticToolStarts = buildInterruptedTranscriptToolStartEvents({
         entries: await store.readSessionEntries(sessionId),
         pendingToolCalls,
+        toolResults: syntheticToolResults,
         activeBranchId: manifest.activeBranchId,
         at: recoveryAt,
       });
@@ -1346,22 +1347,32 @@ function isPublishedCompletedForkBootstrap(events: readonly RuntimeEvent[]): boo
 function buildInterruptedTranscriptToolStartEvents(options: {
   readonly entries: readonly RuntimeEventStoreEntry[];
   readonly pendingToolCalls: readonly PendingRuntimeToolCall[];
+  readonly toolResults: readonly RuntimeToolResultRecordedEvent[];
   readonly activeBranchId: string;
   readonly at: string;
 }): RuntimeTranscriptEventRecordedEvent[] {
   if (options.pendingToolCalls.length === 0) return [];
+  if (options.pendingToolCalls.length !== options.toolResults.length) {
+    throw new Error("Runtime recovery tool starts and results must have the same length");
+  }
   const transcriptEntries = projectRuntimeSessionTranscriptEventEntries(options.entries);
   const activeToolCallIds = new Set(
     Object.keys(projectTranscriptEvents(transcriptEntries.map(({ event }) => event)).toolCalls),
   );
-  const runtimeEventById = new Map(
-    options.entries.map(({ event }) => [event.eventId, event] as const),
+  const unmatchedActiveStarts = countUnmatchedActiveTranscriptToolStarts(
+    options.entries,
+    transcriptEntries,
+    activeToolCallIds,
   );
   let nextSequence =
     transcriptEntries.reduce((maximum, { event }) => Math.max(maximum, event.sequence), 0) + 1;
   const starts: RuntimeTranscriptEventRecordedEvent[] = [];
+  const durableRuntimeEventIds = new Set(options.entries.map(({ event }) => event.eventId));
 
-  for (const pending of options.pendingToolCalls) {
+  for (const [pendingIndex, pending] of options.pendingToolCalls.entries()) {
+    // A retry of this same branch reuses the existing deterministic result.
+    // It must not append a fresh running start after that result has closed.
+    if (durableRuntimeEventIds.has(options.toolResults[pendingIndex]!.eventId)) continue;
     const source = pending.source;
     const identityInput = {
       sessionId: source.sessionId,
@@ -1369,22 +1380,11 @@ function buildInterruptedTranscriptToolStartEvents(options: {
       turnId: source.turnId,
       callIndex: pending.callIndex,
     };
-    const acceptedIdentity = createTranscriptToolStartIdentity(identityInput);
-    const recoveryIdentity = createTranscriptToolStartIdentity({
-      ...identityInput,
-      scope: `runtime-recovery:${options.activeBranchId}`,
-    });
-    const hasActiveStart = [acceptedIdentity.runtimeEventId, recoveryIdentity.runtimeEventId].some(
-      (eventId) => {
-        const event = runtimeEventById.get(eventId);
-        return (
-          event?.kind === "transcript.event.recorded" &&
-          event.data.event.type === "tool.started" &&
-          activeToolCallIds.has(event.data.event.toolCallId)
-        );
-      },
-    );
-    if (hasActiveStart) continue;
+    const unmatchedCount = unmatchedActiveStarts.get(pending.toolCall.id) ?? 0;
+    if (unmatchedCount > 0) {
+      unmatchedActiveStarts.set(pending.toolCall.id, unmatchedCount - 1);
+      continue;
+    }
 
     const createdAt = Date.parse(source.at);
     if (!Number.isFinite(createdAt)) {
@@ -1411,6 +1411,33 @@ function buildInterruptedTranscriptToolStartEvents(options: {
   }
 
   return starts;
+}
+
+/**
+ * Mirrors hydration's providerCallId FIFO join over the active projections.
+ * Wrapper Runtime event IDs and recovery scopes may change across fork/rewind,
+ * so neither can be used as the semantic "already started" identity.
+ */
+function countUnmatchedActiveTranscriptToolStarts(
+  entries: readonly RuntimeEventStoreEntry[],
+  transcriptEntries: ReturnType<typeof projectRuntimeSessionTranscriptEventEntries>,
+  activeToolCallIds: ReadonlySet<string>,
+): Map<string, number> {
+  const startCounts = new Map<string, number>();
+  for (const { event } of transcriptEntries) {
+    if (event.type !== "tool.started" || !activeToolCallIds.has(event.toolCallId)) continue;
+    startCounts.set(event.providerCallId, (startCounts.get(event.providerCallId) ?? 0) + 1);
+  }
+  const resultCounts = new Map<string, number>();
+  for (const { envelope } of projectRuntimeSessionModelToolResultEntries(entries)) {
+    resultCounts.set(envelope.toolCallId, (resultCounts.get(envelope.toolCallId) ?? 0) + 1);
+  }
+  const unmatched = new Map<string, number>();
+  for (const [providerCallId, startCount] of startCounts) {
+    const count = Math.max(0, startCount - (resultCounts.get(providerCallId) ?? 0));
+    if (count > 0) unmatched.set(providerCallId, count);
+  }
+  return unmatched;
 }
 
 function buildInterruptedToolResultEvent(

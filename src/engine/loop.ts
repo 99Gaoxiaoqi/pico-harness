@@ -1682,6 +1682,7 @@ export class AgentEngine implements AgentRunner {
           const scheduled: Array<Promise<ToolExecutionOutcome>> = [];
           const completedToolReportIndexes: number[] = [];
           let toolProtocolClosed = toolCalls.length === 0;
+          let toolStartsRecorded = toolCalls.length === 0;
           const closeToolProtocol = async (failure: ToolProtocolFailure): Promise<void> => {
             if (toolProtocolClosed) return;
             await this.closeToolProtocolBatch(
@@ -1696,6 +1697,10 @@ export class AgentEngine implements AgentRunner {
           };
           const failToolProtocol = async (error: unknown): Promise<never> => {
             await Promise.allSettled(scheduled);
+            // The assistant tool-call batch is durable, but no ToolResult may
+            // become canonical until its structured starts are known durable.
+            // Reconciliation will later close this still-pending model batch.
+            if (!toolStartsRecorded) throw error;
             try {
               await closeToolProtocol(toolProtocolFailureFrom(error, signal));
             } catch (closureError) {
@@ -1709,13 +1714,14 @@ export class AgentEngine implements AgentRunner {
           };
 
           try {
-            this.onTurn?.({ turn: turnCount, message: responseMsg });
-            await this.publishAcceptedToolCalls(
+            const durableStarts = await this.recordAcceptedToolCalls(
               session,
-              reporter,
               toolCalls,
               this.runtimePort?.currentRun(),
             );
+            toolStartsRecorded = true;
+            this.publishAcceptedToolCalls(reporter, toolCalls, durableStarts);
+            this.onTurn?.({ turn: turnCount, message: responseMsg });
             if (exhaustedReason) {
               await closeToolProtocol({
                 status: "cancelled",
@@ -2036,10 +2042,14 @@ export class AgentEngine implements AgentRunner {
     outcomes: readonly ToolExecutionOutcome[],
     runtimeRun: EngineRuntimeRun | undefined,
   ): Promise<void> {
+    let toolStartsRecorded = toolCalls.length === 0;
     let startNotificationError: unknown;
     try {
-      await this.publishAcceptedToolCalls(session, reporter, toolCalls, runtimeRun);
+      const durableStarts = await this.recordAcceptedToolCalls(session, toolCalls, runtimeRun);
+      toolStartsRecorded = true;
+      this.publishAcceptedToolCalls(reporter, toolCalls, durableStarts);
     } catch (error) {
+      if (!toolStartsRecorded) throw error;
       startNotificationError = error;
     }
 
@@ -2066,23 +2076,30 @@ export class AgentEngine implements AgentRunner {
   }
 
   /**
-   * Acceptance is the single start boundary: first persist the whole structured
-   * batch, then notify every Reporter callback exactly once in provider order.
+   * Acceptance is the single durable start boundary. Reporter callbacks happen
+   * only after the complete structured batch has committed.
    */
-  private async publishAcceptedToolCalls(
+  private async recordAcceptedToolCalls(
     session: Session,
-    reporter: Reporter,
     toolCalls: readonly ToolCall[],
     runtimeRun: EngineRuntimeRun | undefined,
-  ): Promise<void> {
-    if (toolCalls.length === 0) return;
+  ): Promise<readonly CanonicalTranscriptToolStart[] | undefined> {
+    if (toolCalls.length === 0) return [];
     const durableStarts = runtimeRun
       ? await runtimeRun.recordTranscriptToolStarts(session, toolCalls)
       : undefined;
     if (durableStarts && durableStarts.length !== toolCalls.length) {
       throw new Error("Durable tool start batch must contain every accepted provider call");
     }
+    return durableStarts;
+  }
 
+  /** Notify every accepted call exactly once in provider order. */
+  private publishAcceptedToolCalls(
+    reporter: Reporter,
+    toolCalls: readonly ToolCall[],
+    durableStarts: readonly CanonicalTranscriptToolStart[] | undefined,
+  ): void {
     let firstError: unknown;
     for (const [index, toolCall] of toolCalls.entries()) {
       const durableStart: CanonicalTranscriptToolStart | undefined = durableStarts?.[index];
