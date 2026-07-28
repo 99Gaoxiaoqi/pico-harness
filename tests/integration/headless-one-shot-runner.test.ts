@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -8,12 +9,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { test } from "node:test";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
 import type { Message } from "../../src/schema/message.js";
+import { createToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
 import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
 import {
   runHeadlessOneShotJson,
   type HeadlessOneShotRequestV1,
 } from "../../src/internal/headless-one-shot-runner.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import type { RunAgentCliOptions, RunAgentCliResult } from "../../src/runtime/runtime-contract.js";
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
@@ -128,6 +131,13 @@ test("unknown tools fail before provider generation and Session IDs cannot be re
   assert.equal(invalidTools.result.error?.code, "ALLOWED_TOOLS_INVALID");
   assert.equal(providerCalls, 0);
 
+  const corrected = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "invalid-tools")),
+    { env: {}, providerFactory },
+  );
+  assert.equal(corrected.result.status, "completed");
+  assert.equal(providerCalls, 1);
+
   const request = requestFor(fixture, "unique-session");
   const first = await runHeadlessOneShotJson(JSON.stringify(request), {
     env: {},
@@ -140,7 +150,7 @@ test("unknown tools fail before provider generation and Session IDs cannot be re
   });
   assert.equal(repeated.result.status, "invalid_request");
   assert.equal(repeated.result.error?.code, "SESSION_ALREADY_EXISTS");
-  assert.equal(providerCalls, 1);
+  assert.equal(providerCalls, 2);
 });
 
 test("a headless policy denial returns policy_blocked without waiting for UI", async (context) => {
@@ -159,7 +169,7 @@ test("a headless policy denial returns policy_blocked without waiting for UI", a
         async generate() {
           calls++;
           if (calls === 1) {
-            return assistant("", undefined, [
+            return assistant("", { promptTokens: 7, completionTokens: 3 }, [
               {
                 id: "write-1",
                 name: "write_file",
@@ -167,7 +177,7 @@ test("a headless policy denial returns policy_blocked without waiting for UI", a
               },
             ]);
           }
-          return assistant("policy explained");
+          return assistant("policy explained", { promptTokens: 5, completionTokens: 2 });
         },
       }),
     },
@@ -176,7 +186,230 @@ test("a headless policy denial returns policy_blocked without waiting for UI", a
   assert.equal(outcome.exitCode, 4);
   assert.equal(outcome.result.status, "policy_blocked");
   assert.equal(outcome.result.error?.code, "POLICY_BLOCKED");
+  assert.deepEqual(outcome.result.usage, {
+    promptTokens: 12,
+    completionTokens: 5,
+    costCNY: 0,
+  });
   assert.equal(calls, 2);
+});
+
+test("a non-policy rejected envelope does not become policy_blocked", async (context) => {
+  const fixture = await createFixture(context, "control-rejection");
+  await configureFixture(fixture, "secret-canary-control-rejection");
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "control-rejection")),
+    {
+      env: {},
+      executeRuntime: async (options, dependencies) => {
+        const content = "required delegation retry";
+        dependencies?.reporter?.onToolResult(
+          createToolResultEnvelope({
+            toolCallId: "control-rejected",
+            toolName: "delegate_task",
+            status: "rejected",
+            body: {
+              storage: "inline",
+              content,
+              sha256: createHash("sha256").update(content).digest("hex"),
+              sizeBytes: Buffer.byteLength(content),
+            },
+            projection: {
+              version: 1,
+              mode: "synthetic",
+              text: content,
+              strategy: "required-delegation",
+              truncated: false,
+            },
+          }),
+        );
+        return runtimeResult(options, "continued safely");
+      },
+    },
+  );
+
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(outcome.result.finalMessage, "continued safely");
+});
+
+test("trusted user routing ignores project providers and host extension canaries", async (context) => {
+  const fixture = await createFixture(context, "host-isolation");
+  const routeSecret = "secret-canary-trusted-route";
+  const hostSecret = "secret-canary-host-environment";
+  await configureFixture(fixture, routeSecret);
+  const receiver = await createCountingServer(context);
+  const hostHome = join(fixture.root, "host-home");
+  const resourceCanary = "HOST_RESOURCE_CANARY_MUST_NOT_APPEAR";
+  await Promise.all([
+    mkdir(join(hostHome, ".claude", "skills", "host-canary"), { recursive: true }),
+    mkdir(join(fixture.workspace, ".claude", "skills", "project-canary"), { recursive: true }),
+    mkdir(join(fixture.picoHome, "skills", "user-canary"), { recursive: true }),
+    mkdir(join(fixture.workspace, ".pico"), { recursive: true }),
+  ]);
+  const skill = `---\nname: canary\ndescription: ${resourceCanary}\n---\n${resourceCanary}\n`;
+  await Promise.all([
+    writeFile(join(hostHome, ".claude", "skills", "host-canary", "SKILL.md"), skill),
+    writeFile(join(fixture.workspace, ".claude", "skills", "project-canary", "SKILL.md"), skill),
+    writeFile(join(fixture.picoHome, "skills", "user-canary", "SKILL.md"), skill),
+    writeFile(
+      join(fixture.workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        providers: {
+          [PROVIDER_ID]: {
+            protocol: "openai",
+            baseURL: receiver.baseURL,
+            apiKeyEnv: "HOST_SECRET",
+            models: [MODEL_ID],
+          },
+        },
+      }),
+    ),
+  ]);
+  let serializedMessages = "";
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "host-isolation")),
+    {
+      env: { HOME: hostHome, HOST_SECRET: hostSecret },
+      providerFactory: (_kind, config) => {
+        assert.equal(config.apiKey, routeSecret);
+        assert.notEqual(config.baseURL, receiver.baseURL);
+        return {
+          async generate(messages) {
+            serializedMessages = JSON.stringify(messages);
+            return assistant("isolated");
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(receiver.requests(), 0);
+  assert.equal(serializedMessages.includes(resourceCanary), false);
+  const projection = JSON.stringify(outcome.result);
+  assert.equal(projection.includes(routeSecret), false);
+  assert.equal(projection.includes(hostSecret), false);
+});
+
+test("timeout covers a hanging credential preflight and leaves the Session reusable", async (context) => {
+  const fixture = await createFixture(context, "credential-timeout");
+  await configureFixtureWithoutSecret(fixture);
+  const request = {
+    ...requestFor(fixture, "credential-timeout"),
+    timeoutMs: 20,
+    shutdownGraceMs: 10,
+  };
+  const startedAt = Date.now();
+  const timedOut = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    credentialVault: {
+      capability: () => ({ available: true, backend: "macos-keychain", diagnostic: "test" }),
+      resolve: () => new Promise(() => undefined),
+      put: async () => undefined,
+      has: async () => false,
+      delete: async () => undefined,
+    },
+  });
+  assert.equal(timedOut.result.status, "timed_out");
+  assert.equal(timedOut.exitCode, 124);
+  assert.equal(timedOut.result.terminationConfirmed, true);
+  assert.ok(Date.now() - startedAt < 500);
+
+  const corrected = await runHeadlessOneShotJson(
+    JSON.stringify({ ...request, timeoutMs: 30_000 }),
+    {
+      env: { FIXTURE_API_KEY: "fixed-after-timeout" },
+      providerFactory: () => ({ generate: async () => assistant("recovered") }),
+    },
+  );
+  assert.equal(corrected.result.status, "completed");
+
+  const signalFixture = await createFixture(context, "credential-signal");
+  await configureFixtureWithoutSecret(signalFixture);
+  const signalRequest = requestFor(signalFixture, "credential-signal");
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException("SIGTERM", "AbortError")), 20).unref();
+  const canceled = await runHeadlessOneShotJson(JSON.stringify(signalRequest), {
+    env: {},
+    signal: controller.signal,
+    signalKind: "SIGTERM",
+    credentialVault: {
+      capability: () => ({ available: true, backend: "macos-keychain", diagnostic: "test" }),
+      resolve: () => new Promise(() => undefined),
+      put: async () => undefined,
+      has: async () => false,
+      delete: async () => undefined,
+    },
+  });
+  assert.equal(canceled.result.status, "canceled");
+  assert.equal(canceled.exitCode, 143);
+  assert.equal(canceled.result.terminationConfirmed, true);
+  const afterSignal = await runHeadlessOneShotJson(JSON.stringify(signalRequest), {
+    env: { FIXTURE_API_KEY: "fixed-after-signal" },
+    providerFactory: () => ({ generate: async () => assistant("recovered") }),
+  });
+  assert.equal(afterSignal.result.status, "completed");
+});
+
+test("failed Runtime execution releases case resources for a corrected retry", async (context) => {
+  const fixture = await createFixture(context, "failed-runtime-lock");
+  await configureFixture(fixture, "secret-canary-failed-runtime");
+  const failed = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "failed-runtime")),
+    {
+      env: {},
+      executeRuntime: async () => {
+        throw new Error("fixture runtime failure");
+      },
+    },
+  );
+  assert.equal(failed.result.status, "failed");
+  const recovered = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "failed-runtime-retry")),
+    {
+      env: {},
+      executeRuntime: async (options) => runtimeResult(options, "recovered"),
+    },
+  );
+  assert.equal(recovered.result.status, "completed");
+});
+
+test("unconfirmed in-process cancellation retains locks until Runtime settles", async (context) => {
+  const fixture = await createFixture(context, "unconfirmed-in-process");
+  await configureFixture(fixture, "secret-canary-unconfirmed");
+  const request = {
+    ...requestFor(fixture, "unconfirmed-in-process"),
+    timeoutMs: 500,
+    shutdownGraceMs: 0,
+  };
+  let settleRuntime!: () => void;
+  const timedOut = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    executeRuntime: (options) =>
+      new Promise<RunAgentCliResult>((resolveRuntime) => {
+        settleRuntime = () => resolveRuntime(runtimeResult(options, "late completion"));
+      }),
+  });
+  assert.equal(timedOut.result.status, "timed_out");
+  assert.equal(timedOut.result.error?.code, "SHUTDOWN_UNCONFIRMED");
+  assert.equal(timedOut.result.terminationConfirmed, false);
+  assert.equal(timedOut.exitCode, 124);
+
+  const conflict = await runHeadlessOneShotJson(
+    JSON.stringify({ ...request, requestId: "request-conflict", sessionId: "session-conflict" }),
+    { env: {}, executeRuntime: async (options) => runtimeResult(options, "must not run") },
+  );
+  assert.equal(conflict.result.error?.code, "CASE_RESOURCE_CONFLICT");
+
+  settleRuntime();
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
+  const recovered = await runHeadlessOneShotJson(
+    JSON.stringify({ ...request, requestId: "request-recovered", sessionId: "session-recovered" }),
+    { env: {}, executeRuntime: async (options) => runtimeResult(options, "recovered") },
+  );
+  assert.equal(recovered.result.status, "completed");
 });
 
 test("timeout and host signals map to stable statuses and exit codes", async (context) => {
@@ -292,6 +525,61 @@ test("SIGINT and SIGTERM cancel while stdin remains open", async () => {
   }
 });
 
+test("dead CLI owners are recovered after unconfirmed exit and SIGKILL", async (context) => {
+  const timeoutFixture = await createFixture(context, "dead-owner-timeout");
+  await configureFixture(timeoutFixture, "secret-canary-dead-timeout");
+  const timeoutRequest = {
+    ...requestFor(timeoutFixture, "dead-owner-timeout"),
+    timeoutMs: 500,
+    shutdownGraceMs: 0,
+  };
+  const timeoutChild = spawnUnconfirmedChild("timeout");
+  const timeoutResult = await collectChild(timeoutChild, JSON.stringify(timeoutRequest));
+  assert.equal(timeoutResult.code, 124);
+  const timeoutPayload = JSON.parse(timeoutResult.stdout) as {
+    status: string;
+    terminationConfirmed: boolean;
+  };
+  assert.equal(timeoutPayload.status, "timed_out");
+  assert.equal(timeoutPayload.terminationConfirmed, false);
+  const afterTimeout = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...timeoutRequest,
+      requestId: "request-after-dead-timeout",
+      sessionId: "session-after-dead-timeout",
+    }),
+    { env: {}, executeRuntime: async (options) => runtimeResult(options, "recovered") },
+  );
+  assert.equal(afterTimeout.result.status, "completed");
+
+  const killedFixture = await createFixture(context, "dead-owner-sigkill");
+  await configureFixture(killedFixture, "secret-canary-dead-kill");
+  const killedRequest = {
+    ...requestFor(killedFixture, "dead-owner-sigkill"),
+    timeoutMs: 60_000,
+    shutdownGraceMs: 0,
+  };
+  const killedChild = spawnUnconfirmedChild("hang");
+  const started = waitForStreamText(killedChild.stderr, "RUNTIME_STARTED");
+  killedChild.stdin.end(JSON.stringify(killedRequest));
+  await started;
+  killedChild.kill("SIGKILL");
+  const [, killedSignal] = (await once(killedChild, "exit")) as [
+    number | null,
+    NodeJS.Signals | null,
+  ];
+  assert.equal(killedSignal, "SIGKILL");
+  const afterKill = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...killedRequest,
+      requestId: "request-after-sigkill",
+      sessionId: "session-after-sigkill",
+    }),
+    { env: {}, executeRuntime: async (options) => runtimeResult(options, "recovered") },
+  );
+  assert.equal(afterKill.result.status, "completed");
+});
+
 interface Fixture {
   readonly root: string;
   readonly workspace: string;
@@ -336,6 +624,26 @@ async function configureFixture(
   if (trust) await trustFixture(fixture);
 }
 
+async function configureFixtureWithoutSecret(fixture: Fixture): Promise<void> {
+  const store = new UserConfigStore({ picoHome: fixture.picoHome });
+  await store.write(
+    {
+      version: 1,
+      providers: {
+        [PROVIDER_ID]: {
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "FIXTURE_API_KEY",
+          models: [MODEL_ID],
+          discoverModels: false,
+        },
+      },
+    },
+    { expectedRevision: EMPTY_USER_CONFIG_REVISION },
+  );
+  await trustFixture(fixture);
+}
+
 async function trustFixture(fixture: Fixture): Promise<void> {
   const store = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
   await store.trust(await store.canonicalize(fixture.workspace));
@@ -368,6 +676,23 @@ function assistant(
     content,
     ...(usage ? { usage } : {}),
     ...(toolCalls ? { toolCalls } : {}),
+  };
+}
+
+function runtimeResult(
+  options: RunAgentCliOptions,
+  finalMessage: string,
+  usage = { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+): RunAgentCliResult {
+  assert.ok(options.sessionSelection);
+  assert.ok(options.dir);
+  return {
+    sessionId: options.sessionSelection.sessionId,
+    sessionSelection: options.sessionSelection,
+    workDir: options.dir,
+    finalMessage,
+    usage,
+    messages: [{ role: "assistant", content: finalMessage }],
   };
 }
 
@@ -433,6 +758,31 @@ async function createFakeOpenAiServer(
   return { server, baseURL: `http://127.0.0.1:${address.port}/v1`, called };
 }
 
+async function createCountingServer(context: {
+  after(callback: () => void | Promise<void>): void;
+}): Promise<{ baseURL: string; requests(): number }> {
+  let requestCount = 0;
+  const server = createServer((_request, response) => {
+    requestCount++;
+    response.writeHead(500);
+    response.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(
+    () =>
+      new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => (error ? rejectClose(error) : resolveClose()));
+      }),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    baseURL: `http://127.0.0.1:${address.port}/v1`,
+    requests: () => requestCount,
+  };
+}
+
 async function runProcess(input: string): Promise<{
   code: number | null;
   stdout: string;
@@ -454,6 +804,23 @@ function spawnHeadlessProcess(): ChildProcessWithoutNullStreams {
     {
       cwd: process.cwd(),
       env: { ...process.env, NODE_ENV: "test", LOG_LEVEL: "fatal" },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+}
+
+function spawnUnconfirmedChild(mode: "timeout" | "hang"): ChildProcessWithoutNullStreams {
+  return spawn(
+    process.execPath,
+    ["--import", "tsx", "tests/fixtures/headless-one-shot-unconfirmed-child.ts"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        LOG_LEVEL: "fatal",
+        HEADLESS_CHILD_MODE: mode,
+      },
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -493,4 +860,13 @@ async function runProcessWithOpenStdin(
     stdout: Buffer.concat(stdout).toString("utf8"),
     stderr: Buffer.concat(stderr).toString("utf8"),
   };
+}
+
+async function waitForStreamText(stream: NodeJS.ReadableStream, expected: string): Promise<void> {
+  let output = "";
+  for await (const chunk of stream) {
+    output += Buffer.from(chunk as Uint8Array).toString("utf8");
+    if (output.includes(expected)) return;
+  }
+  throw new Error(`Stream closed before ${expected}`);
 }

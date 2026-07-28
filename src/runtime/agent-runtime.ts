@@ -98,7 +98,7 @@ import {
   type SessionToolStatus,
   type SessionSettings,
 } from "../input/session-settings.js";
-import { loadPicoConfig } from "../input/pico-config.js";
+import { createIsolatedPicoConfig, loadPicoConfig } from "../input/pico-config.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
@@ -181,6 +181,14 @@ export interface RuntimeHost {
   onEvent?: (event: RuntimeLifecycleEvent) => void;
   /** Metadata-only observer for newly committed pending memory proposals. */
   memoryProposalSink?: MemoryProposalPublishedSink;
+  /** Structured fail-closed safety/permission denial observer for non-interactive hosts. */
+  onPolicyDenied?: (event: RuntimePolicyDenial) => void;
+}
+
+export interface RuntimePolicyDenial {
+  readonly source: "safety" | "permission";
+  readonly code: "plan_mode" | "hardline" | "hook" | "approval";
+  readonly toolName: string;
 }
 
 export interface RunAgentCliDependencies extends RuntimeHost {
@@ -231,6 +239,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   memoryProposalModelFactory?: MemoryProposalModelFactory;
   /** Test/host override; production automatic reviews wait for a short workspace debounce. */
   memoryReviewDebounceMs?: number;
+  /** @internal Ignore project/user extension catalogs and host compatibility resources. */
+  isolatedHeadless?: boolean;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -275,7 +285,9 @@ export async function executeAgentRuntime(
       ? await prepareBackgroundExecution(execution, workDir, options, dependencies, picoHome)
       : undefined;
   const backgroundApiKey = await resolveBackgroundCredential(options, execution, dependencies);
-  const picoConfig = await loadPicoConfig(workDir);
+  const picoConfig = dependencies.isolatedHeadless
+    ? createIsolatedPicoConfig(workDir)
+    : await loadPicoConfig(workDir);
   const claudeCompatibility = picoConfig.compatibility.claude;
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =
@@ -353,7 +365,7 @@ export async function executeAgentRuntime(
     );
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    if (!backgroundPolicy) {
+    if (!backgroundPolicy && !dependencies.isolatedHeadless) {
       try {
         const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
         if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
@@ -477,11 +489,12 @@ export async function executeAgentRuntime(
     }
     const skillLoaderFactory = (root: string): SkillLoader =>
       new SkillLoader(root, {
-        includeUserResources: true,
+        includeUserResources: !dependencies.isolatedHeadless,
         includeClaudeProjectResources:
           claudeCompatibility.enabled && claudeCompatibility.projectResources,
         includeClaudeUserResources:
           claudeCompatibility.enabled && claudeCompatibility.userResources,
+        ...(dependencies.isolatedHeadless ? { catalogScope: "none" as const } : {}),
         ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
         env: runtimeEnv,
         picoHome,
@@ -505,7 +518,7 @@ export async function executeAgentRuntime(
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
             : "startup",
-        ...(backgroundPolicy ? { hooks: false as const } : {}),
+        ...(backgroundPolicy || dependencies.isolatedHeadless ? { hooks: false as const } : {}),
         ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
         ...(pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
@@ -941,7 +954,14 @@ export async function executeAgentRuntime(
         }),
       );
     } else {
-      registry.useSafety?.(buildForegroundSafetyMiddleware(workDir, settings, workspaceRoots));
+      registry.useSafety?.(
+        buildForegroundSafetyMiddleware(
+          workDir,
+          settings,
+          workspaceRoots,
+          dependencies.onPolicyDenied,
+        ),
+      );
       registry.usePermission?.(
         buildPermissionMiddleware(
           approvalNotifier,
@@ -952,6 +972,7 @@ export async function executeAgentRuntime(
           workspaceRoots,
           runtimeState.hookService,
           session.picoHome,
+          dependencies.onPolicyDenied,
         ),
       );
     }
@@ -959,15 +980,17 @@ export async function executeAgentRuntime(
       registry,
       engine,
       workDir,
-      await loadProfiles(workDir, {
-        externalSources: pluginSnapshot?.agentSources,
-        includeClaudeProjectResources:
-          claudeCompatibility.enabled && claudeCompatibility.projectResources,
-        includeClaudeUserResources:
-          claudeCompatibility.enabled && claudeCompatibility.userResources,
-        env: runtimeEnv,
-        picoHome,
-      }),
+      dependencies.isolatedHeadless
+        ? []
+        : await loadProfiles(workDir, {
+            externalSources: pluginSnapshot?.agentSources,
+            includeClaudeProjectResources:
+              claudeCompatibility.enabled && claudeCompatibility.projectResources,
+            includeClaudeUserResources:
+              claudeCompatibility.enabled && claudeCompatibility.userResources,
+            env: runtimeEnv,
+            picoHome,
+          }),
       delegationManager,
       workspaceRoots,
       // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
@@ -1634,17 +1657,20 @@ export function buildForegroundSafetyMiddleware(
   workDir: string,
   settings?: Pick<SessionSettings, "mode">,
   workspaceRoots?: WorkspaceRoots,
+  denialSink?: (event: RuntimePolicyDenial) => void,
 ): MiddlewareFunc {
   return async (call) => {
     const mode = settings?.mode ?? "default";
     const planModeDenial = await planModeDenialReason(call, mode, workDir, workspaceRoots);
     if (planModeDenial !== undefined) {
+      denialSink?.({ source: "safety", code: "plan_mode", toolName: call.name });
       return {
         allowed: false,
         reason: planModeDenial,
       };
     }
     if (isHardlineCommand(call.name, call.arguments, workDir)) {
+      denialSink?.({ source: "safety", code: "hardline", toolName: call.name });
       return {
         allowed: false,
         reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
@@ -1665,6 +1691,7 @@ export function buildPermissionMiddleware(
   workspaceRoots?: WorkspaceRoots,
   hookService?: HookService,
   picoHome?: string,
+  denialSink?: (event: RuntimePolicyDenial) => void,
 ): MiddlewareFunc {
   return async (call, context) => {
     const mode = settings?.mode ?? "default";
@@ -1734,6 +1761,7 @@ export function buildPermissionMiddleware(
         { signal },
       );
       if (hookDecision.decision === "deny") {
+        denialSink?.({ source: "permission", code: "hook", toolName: call.name });
         return {
           allowed: false,
           reason: hookDecision.reason ?? "PermissionRequest hook 拒绝了该工具调用。",
@@ -1784,6 +1812,9 @@ export function buildPermissionMiddleware(
     }
     if (runtimeApprovalRecorded) {
       await runtimeRun!.recordApprovalSettled(approvalId, result.allowed ? "approved" : "rejected");
+    }
+    if (!result.allowed) {
+      denialSink?.({ source: "permission", code: "approval", toolName: call.name });
     }
     if (!result.allowed || !workspaceRoots || !settings) {
       return result.allowed ? result : { ...result, denialSource: "human" };

@@ -96,6 +96,7 @@ function signalBeforeRequest(signal: "SIGINT" | "SIGTERM"): HeadlessOneShotOutco
       code: signal,
       summary: "The headless process was canceled before a complete request was received.",
     },
+    terminationConfirmed: true,
   };
   return { result, exitCode, shutdownConfirmed: true };
 }
@@ -121,6 +122,7 @@ function fallbackFailure(): HeadlessOneShotOutcome {
       code: "STDIN_READ_FAILED",
       summary: "The headless request could not be read from stdin.",
     },
+    terminationConfirmed: true,
   };
   return { result, exitCode: 2, shutdownConfirmed: true };
 }
