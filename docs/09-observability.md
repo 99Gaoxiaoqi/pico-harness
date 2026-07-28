@@ -186,17 +186,19 @@ export const logger = {
 
 这一点很重要。在飞书 AgentOps 场景中，用户可能报告"Agent 昨天下午的响应很慢"。你不用翻几百行日志——你只需要 `jq 'select(.timestamp > "2026-07-04T12:00:00" and .latencyMs > 5000)'`，三秒钟定位到慢请求。
 
-### Artifact 外部化：不让大数据进上下文
+### Evidence 外部化：不让大数据进上下文
 
-还有一个容易被忽略的观测维度：artifact（产物）。Agent 执行 `bash "cat /var/log/app.log"` 时，输出可能有 50K 字符。如果这个输出原样进入上下文，会迅速撑爆窗口。但如果直接丢弃，主 Agent 又没法事后查阅。
+还有一个容易被忽略的观测维度：可回读证据。Agent 执行 `bash "cat /var/log/app.log"` 时，输出可能有 50K 字符。如果这个输出原样进入上下文，会迅速撑爆窗口；如果直接丢弃，主 Agent 又没法事后查阅。
 
-解决方案是**外部化存储**。大型工具输出不进入上下文，而是写入磁盘文件（`workDir/.claw/artifacts/`），上下文中只保留一个引用路径：
+解决方案是 **Evidence CAS**。Engine 把原始输出按内容哈希写入 workspace Evidence，并在
+canonical ToolResult 中保存大小、SHA-256、有界投影和不可伪造为任意路径的 URI：
 
 ```
-[工具 bash 输出已外部化: .claw/artifacts/bash_1712345678.log, 原始 52341 字符]
+pico://evidence/<session-id>/<sha256>
 ```
 
-主 Agent 在需要时可以 `read_file(".claw/artifacts/...")` 查看完整内容。子代理的探索结果也一样——大型文件读取的结果外部化，只有 summary 回到主上下文。
+主 Agent 需要细节时使用 `read_evidence` 按 UTF-8 字节分页回读，不能用 `read_file` 绕过
+Session 和哈希校验。长子代理报告使用同一个 Evidence CAS，主上下文只接收有界预览和引用。
 
 ---
 

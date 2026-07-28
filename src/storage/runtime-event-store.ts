@@ -17,7 +17,7 @@ import {
 } from "../engine/session-runtime.js";
 import type { SessionCursor } from "../engine/session-persistence.js";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
-import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   decodeRuntimeEvent,
@@ -46,8 +46,8 @@ import {
   type WorkspaceStorageRootIdentity,
 } from "./workspace-storage-layout.js";
 
-const RUNTIME_SESSION_MANIFEST_VERSION = 1 as const;
-const RUNTIME_SESSION_FILE_VERSION = 1 as const;
+const RUNTIME_SESSION_MANIFEST_VERSION = 2 as const;
+const RUNTIME_SESSION_FILE_VERSION = 2 as const;
 const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
 const SESSION_FILE_NAME = "session.jsonl";
 const MANIFEST_FILE_NAME = "manifest.json";
@@ -58,7 +58,7 @@ export interface RuntimeSessionManifest {
   readonly schemaVersion: typeof RUNTIME_SESSION_MANIFEST_VERSION;
   readonly sessionId: string;
   readonly workDir: string;
-  readonly historySource: "runtime-event-v1";
+  readonly historySource: "runtime-event-v2";
   readonly createdAt: string;
   readonly activeBranchId: string;
 }
@@ -157,7 +157,7 @@ interface RuntimeSessionFileHeader {
   readonly schemaVersion: typeof RUNTIME_SESSION_FILE_VERSION;
   readonly sessionId: string;
   readonly workDir: string;
-  readonly historySource: "runtime-event-v1";
+  readonly historySource: "runtime-event-v2";
   readonly createdAt: string;
 }
 
@@ -172,11 +172,7 @@ interface RuntimeEventBatch {
   readonly schemaVersion: typeof RUNTIME_SESSION_FILE_VERSION;
   readonly txId: string;
   readonly committedAt: string;
-  /**
-   * Added to the v1 envelope after its initial implementation. Missing values remain readable
-   * and force a canonical replay instead of the manifest fast path.
-   */
-  readonly activeBranchId?: string;
+  readonly activeBranchId: string;
   readonly entries: readonly RuntimeEventBatchEntry[];
 }
 
@@ -292,7 +288,7 @@ export class RuntimeEventStore {
         schemaVersion: RUNTIME_SESSION_FILE_VERSION,
         sessionId: options.sessionId,
         workDir,
-        historySource: "runtime-event-v1",
+        historySource: "runtime-event-v2",
         createdAt,
       };
       const manifest = manifestFromHeader(header, "main");
@@ -558,7 +554,7 @@ export class RuntimeEventStore {
 
   async appendTranscriptEvent(
     sessionId: string,
-    event: TranscriptEvent,
+    event: DurableTranscriptEvent,
     options: AppendRuntimeTranscriptEventOptions = {},
   ): Promise<RuntimeEventStoreAppendResult> {
     this.assertWritable();
@@ -838,7 +834,7 @@ export class RuntimeEventStore {
           activeBranchId = batchEntry.event.data.branchId;
         }
       }
-      if (batch.activeBranchId !== undefined && activeBranchId !== batch.activeBranchId) {
+      if (activeBranchId !== batch.activeBranchId) {
         throw new RuntimeEventStoreIntegrityError(
           `Runtime event batch ${batch.txId} active branch does not match its entries`,
         );
@@ -1052,8 +1048,7 @@ export async function readExistingRuntimeSessionProjection(
   const digest = sessionDigest(options.sessionId);
   if (
     !existsSync(join(root, SESSIONS_DIRECTORY_NAME, digest, SESSION_FILE_NAME)) &&
-    !existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE)) &&
-    !existsSync(join(root, "runtime", SESSIONS_DIRECTORY_NAME, digest, SESSION_FILE_NAME))
+    !existsSync(join(root, WORKSPACE_STORAGE_COMMIT_FILE))
   ) {
     return undefined;
   }
@@ -1073,7 +1068,7 @@ function decodeSessionHeader(value: unknown, path: string): RuntimeSessionFileHe
     !value["sessionId"] ||
     typeof value["workDir"] !== "string" ||
     !value["workDir"] ||
-    value["historySource"] !== "runtime-event-v1" ||
+    value["historySource"] !== "runtime-event-v2" ||
     typeof value["createdAt"] !== "string" ||
     !value["createdAt"]
   ) {
@@ -1084,7 +1079,7 @@ function decodeSessionHeader(value: unknown, path: string): RuntimeSessionFileHe
     schemaVersion: RUNTIME_SESSION_FILE_VERSION,
     sessionId: value["sessionId"],
     workDir: value["workDir"],
-    historySource: "runtime-event-v1",
+    historySource: "runtime-event-v2",
     createdAt: value["createdAt"],
   };
 }
@@ -1102,8 +1097,8 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
     !value["txId"] ||
     typeof value["committedAt"] !== "string" ||
     !value["committedAt"] ||
-    (value["activeBranchId"] !== undefined &&
-      (typeof value["activeBranchId"] !== "string" || !value["activeBranchId"])) ||
+    typeof value["activeBranchId"] !== "string" ||
+    !value["activeBranchId"] ||
     !Array.isArray(value["entries"]) ||
     value["entries"].length === 0
   ) {
@@ -1146,9 +1141,7 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
     schemaVersion: RUNTIME_SESSION_FILE_VERSION,
     txId: value["txId"],
     committedAt: value["committedAt"],
-    ...(typeof value["activeBranchId"] === "string"
-      ? { activeBranchId: value["activeBranchId"] }
-      : {}),
+    activeBranchId: value["activeBranchId"],
     entries,
   };
 }
@@ -1199,7 +1192,7 @@ function decodeManifestValue(value: Record<string, unknown>, path: string): Runt
     value["schemaVersion"] !== RUNTIME_SESSION_MANIFEST_VERSION ||
     typeof value["sessionId"] !== "string" ||
     typeof value["workDir"] !== "string" ||
-    value["historySource"] !== "runtime-event-v1" ||
+    value["historySource"] !== "runtime-event-v2" ||
     typeof value["createdAt"] !== "string" ||
     typeof value["activeBranchId"] !== "string" ||
     !value["activeBranchId"]
@@ -1210,7 +1203,7 @@ function decodeManifestValue(value: Record<string, unknown>, path: string): Runt
     schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
     sessionId: value["sessionId"],
     workDir: value["workDir"],
-    historySource: "runtime-event-v1",
+    historySource: "runtime-event-v2",
     createdAt: value["createdAt"],
     activeBranchId: value["activeBranchId"],
   };
@@ -1242,7 +1235,7 @@ function manifestFromHeader(
     schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
     sessionId: header.sessionId,
     workDir: header.workDir,
-    historySource: "runtime-event-v1",
+    historySource: "runtime-event-v2",
     createdAt: header.createdAt,
     activeBranchId,
   };

@@ -106,17 +106,17 @@ await session.commitMessages(
 );
 ```
 
-`rewind` 不删除旧消息，而是追加 `history.rewound`事件改变有效历史投影。`fork` 先冻结源会话游标，再通过 forward-only Saga 克隆 sidecar，最后以 `session.forked` 事件作为唯一发布点。如果中途崩溃，下次 CLI/TUI 启动会自动继续未完成操作；在发布事件落盘前，目标 Session 对用户不可见。
+`rewind` 不删除旧消息，而是追加 `history.rewound`事件改变有效历史投影。`fork` 先冻结源会话游标，再通过 forward-only Saga 克隆 File History 等必要附属状态，最后以 `session.forked` 事件作为唯一发布点。如果中途崩溃，下次 CLI/TUI 启动会自动继续未完成操作；在发布事件落盘前，目标 Session 对用户不可见。
 
 这次收敛不再读取、写入或迁移旧 Session JSONL，也移除了重复的 run JSONL 账本。旧数据如果已明确放弃，保留第二套恢复路径反而会让真源重新变得模糊。
 
 ---
 
-## Summary sidecar：辅助压缩生命周期
+## Runtime checkpoint：摘要也是事件
 
-FullCompactor 成功提交 RuntimeEvent 历史后，会写一份 per-session Summary sidecar，供 compaction、rewind 和 fork 的辅助生命周期使用。旧 `memory/summaries.json` 只迁移一次并归档，运行期不再双写或 fallback。
+FullCompactor 只生成摘要预览；持久化 Session 由 Runtime 追加 `context.checkpoint.recorded`。checkpoint 固定覆盖事件数量、边界事件 ID 和来源摘要，读模型验证覆盖范围后再投影为“摘要 + 完整安全尾部”。原消息、ToolResult 和 Transcript 事实都不改写。
 
-这个 sidecar 不是 Session 恢复真源，也没有跨重启增量摘要读取者；有效模型历史仍从 RuntimeEvent 投影。Pico 当前也没有跨 Session 检索索引、自动学习 Skill 或进程内搜索兜底。
+项目处于开发期，不再读取、迁移或维护 Summary sidecar。旧会话可直接删除；遇到旧 schema 时程序明确拒绝，不靠双读或 fallback 恢复。Pico 当前也没有跨 Session 检索索引、自动学习 Skill 或进程内搜索兜底。
 
 ---
 
@@ -190,10 +190,10 @@ Agent 的记忆系统成形了：
 - **Session 逻辑隔离**：每条会话独立历史与运行态，Promise 队列和 owner lease 保证单写
 - **完整 Model Context**：低于 token 水位时传完整历史，工具协议按局部批次修复
 - **RuntimeEvent 事件溯源**：JSONL 批次事务、稳定游标与精确一次事件 ID 保证可重放
-- **Summary sidecar**：只辅助 compaction/rewind/fork，不升级为第二事实源
+- **Runtime checkpoint 摘要**：追加不可变事件，读模型校验后投影，不建立第二事实源
 - **Prompt 模块化组装**：内核 + AGENTS.md + Skills + Plan Context 动态拼接
 
-Agent 能记住对话了。但上下文还在不断膨胀——下一章用 token 水位、artifact 与安全摘要控制体积。
+Agent 能记住对话了。但上下文还在不断膨胀——下一章用 token 水位、Evidence 与安全摘要控制体积。
 
 所以接下来，给它装一个"垃圾回收器"。
 

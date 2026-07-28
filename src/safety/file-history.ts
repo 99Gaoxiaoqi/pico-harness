@@ -41,7 +41,7 @@ export function fileHistoryDefaultBaseDir(): string {
   return resolve(process.env.PICO_FILE_HISTORY_DIR ?? join(resolvePicoHome(), "file-history"));
 }
 
-export type FileHistoryStorageStatus = "healthy" | "legacy" | "degraded";
+export type FileHistoryStorageStatus = "healthy" | "degraded";
 
 export class FileHistoryDegradedError extends Error {
   constructor(
@@ -70,13 +70,12 @@ export interface FileHistoryCloneResult {
   sourceManifestPath?: string;
   targetManifestPath?: string;
   created: boolean;
-  migratedLegacySource: boolean;
   blobCount: number;
 }
 
 export interface FileHistoryBackup {
   backupFileName: string | null;
-  /** v2 manifest 的权威内容引用；backupFileName 仅作 v1 兼容。 */
+  /** v2 manifest 的权威内容引用；backupFileName 只在本次进程物化 CAS 前使用。 */
   blobRef?: FileHistoryBlobRef;
   version: number;
   backupTime: Date;
@@ -904,7 +903,7 @@ export interface FileHistoryPreparedRewind {
 }
 
 /**
- * 完整读取所有 CAS/legacy preimage 并捕获当前工作区指纹。
+ * 完整读取所有 CAS preimage 并捕获当前工作区指纹。
  * 该函数不修改工作区，可用于 operation journal 的 prepared 阶段。
  */
 export async function fileHistoryPrepareRewind(
@@ -1494,35 +1493,6 @@ function renderDiffLine(prefix: " " | "+" | "-", line: DiffTextLine): string[] {
     : [`${prefix}${line.text}`, "\\ No newline at end of file"];
 }
 
-interface PersistedFileHistoryBackupV1 {
-  backupFileName: string | null;
-  version: number;
-  backupTime: string;
-  originMtimeMs?: number;
-  originSize?: number;
-  originMode?: number;
-}
-
-interface PersistedFileHistorySnapshotV1 {
-  messageId: string;
-  trackedFileBackups: Array<[string, PersistedFileHistoryBackupV1]>;
-  timestamp: string;
-  messageIndex?: number;
-  userPrompt?: string;
-  transcriptIndex?: number;
-  interactionMode?: string;
-  prePlanMode?: string;
-  editedFilePaths?: string[];
-  journalWarnings?: string[];
-}
-
-interface PersistedFileHistoryStateV1 {
-  snapshots: PersistedFileHistorySnapshotV1[];
-  trackedFiles: string[];
-  snapshotSequence: number;
-  fileVersions: Array<[string, number]>;
-}
-
 interface PersistedFileLocationV2 {
   rootId: string;
   relativePath: string;
@@ -1546,7 +1516,6 @@ type PersistedFileHistoryBackupV2 =
   | (PersistedFileHistoryBackupBaseV2 & {
       kind: "blob";
       blob: FileHistoryBlobRef;
-      legacyBackupFileName?: string;
     });
 
 interface PersistedFileHistorySnapshotV2 {
@@ -1600,13 +1569,10 @@ async function saveFileHistoryStateUnlocked(
   }
   const manifestPath = resolveManifestPath(sessionId, baseDir);
   try {
-    if (state.storageStatus === "legacy") {
-      await preserveLegacyManifest(manifestPath);
-    }
     await materializeFileHistoryBlobs(state, sessionId, baseDir);
   } catch (error) {
     state.storageStatus = "degraded";
-    state.storageError = `File History v1 迁移失败: ${errorMessage(error)}`;
+    state.storageError = `File History backup 物化失败: ${errorMessage(error)}`;
     throw new FileHistoryDegradedError(state.storageError, error);
   }
 
@@ -1679,7 +1645,6 @@ function encodeBackupV2(backup: FileHistoryBackup): PersistedFileHistoryBackupV2
   return {
     kind: "blob",
     blob: backup.blobRef,
-    legacyBackupFileName: backup.backupFileName,
     ...metadata,
   };
 }
@@ -1699,16 +1664,8 @@ export async function fileHistoryLoadState(
   }
 
   try {
-    const value = JSON.parse(raw) as unknown;
-    if (isRecordValue(value) && value["schemaVersion"] === FILE_HISTORY_MANIFEST_VERSION) {
-      hydrateFileHistoryV2(state, parseFileHistoryManifestV2(value, sessionId));
-      state.storageStatus = "healthy";
-      state.storageError = undefined;
-      return true;
-    }
-    hydrateFileHistoryV1(state, parseFileHistoryManifestV1(value));
-    state.revision = 0;
-    state.storageStatus = "legacy";
+    hydrateFileHistoryV2(state, parseFileHistoryManifestV2(JSON.parse(raw) as unknown, sessionId));
+    state.storageStatus = "healthy";
     state.storageError = undefined;
     return true;
   } catch (error) {
@@ -1746,19 +1703,11 @@ async function fileHistoryCloneSessionUnlocked(
       sourceSessionId,
       targetSessionId,
       created: false,
-      migratedLegacySource: false,
       blobCount: 0,
     };
   }
   if (state.storageStatus === "degraded") {
     throw new FileHistoryDegradedError(state.storageError ?? "File History 源会话处于只读降级状态");
-  }
-
-  const migratedLegacySource = state.storageStatus === "legacy";
-  if (migratedLegacySource) {
-    // save 会先验证每个 legacy backup 并物化为 CAS；任一缺失都会
-    // 将 state 标记为 degraded 并拒绝发布 v2 manifest。
-    await saveFileHistoryStateUnlocked(state, sourceSessionId, baseDir);
   }
 
   const sourceManifestPath = resolveManifestPath(sourceSessionId, baseDir);
@@ -1782,7 +1731,6 @@ async function fileHistoryCloneSessionUnlocked(
       sourceManifestPath,
       targetManifestPath,
       created: false,
-      migratedLegacySource,
       blobCount: blobRefs.size,
     };
   }
@@ -1805,7 +1753,6 @@ async function fileHistoryCloneSessionUnlocked(
       sourceManifestPath,
       targetManifestPath,
       created: false,
-      migratedLegacySource,
       blobCount: blobRefs.size,
     };
   } catch (error) {
@@ -1826,7 +1773,6 @@ async function fileHistoryCloneSessionUnlocked(
     sourceManifestPath,
     targetManifestPath,
     created: true,
-    migratedLegacySource,
     blobCount: blobRefs.size,
   };
 }
@@ -1848,51 +1794,6 @@ function collectManifestBlobRefs(
     }
   }
   return refs;
-}
-
-function hydrateFileHistoryV1(
-  state: FileHistoryState,
-  manifest: PersistedFileHistoryStateV1,
-): void {
-  state.snapshots = manifest.snapshots.map((snapshot) => ({
-    messageId: snapshot.messageId,
-    trackedFileBackups: new Map(
-      snapshot.trackedFileBackups.map(([filePath, backup]) => [
-        filePath,
-        {
-          backupFileName: backup.backupFileName,
-          version: backup.version,
-          backupTime: new Date(backup.backupTime),
-          ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
-          ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
-          ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
-        },
-      ]),
-    ),
-    timestamp: new Date(snapshot.timestamp),
-    ...(snapshot.editedFilePaths !== undefined
-      ? { editedFilePaths: new Set(snapshot.editedFilePaths) }
-      : {}),
-    ...(snapshot.journalWarnings !== undefined
-      ? { journalWarnings: [...snapshot.journalWarnings] }
-      : {}),
-    ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
-    ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
-    ...(snapshot.transcriptIndex !== undefined
-      ? { transcriptIndex: snapshot.transcriptIndex }
-      : {}),
-    ...(snapshot.interactionMode !== undefined
-      ? { interactionMode: snapshot.interactionMode }
-      : {}),
-    ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
-  }));
-  state.trackedFiles = new Set(manifest.trackedFiles);
-  state.snapshotSequence = manifest.snapshotSequence;
-  state.fileVersions = new Map(manifest.fileVersions);
-  state.pendingTrackEdits = new Map();
-  state.pendingJournalWarnings = new Set();
-  state.currentMessageId = undefined;
-  state.roots = new Map();
 }
 
 function hydrateFileHistoryV2(
@@ -1966,48 +1867,6 @@ async function materializeFileHistoryBlobs(
     backup.blobRef = (
       await store.putFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir))
     ).ref;
-  }
-}
-
-async function preserveLegacyManifest(manifestPath: string): Promise<void> {
-  const backupPath = `${manifestPath}.v1.bak`;
-  const raw = await readFile(manifestPath);
-  let handle;
-  try {
-    handle = await open(backupPath, "wx", 0o600);
-    await handle.writeFile(raw);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await syncFileHistoryDirectory(dirname(backupPath));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existing = await readFile(backupPath);
-    if (!existing.equals(raw)) {
-      throw new Error(`File History v1 备份已存在且内容不一致: ${backupPath}`, {
-        cause: error,
-      });
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
-async function syncFileHistoryDirectory(directory: string): Promise<void> {
-  let handle;
-  try {
-    handle = await open(directory, "r");
-    await handle.sync();
-  } catch (error) {
-    if (
-      !new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(
-        (error as NodeJS.ErrnoException).code ?? "",
-      )
-    ) {
-      throw error;
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -2090,48 +1949,6 @@ function assertSafeRelativePath(path: string): void {
 function isPathWithinRoot(root: string, path: string): boolean {
   const relativePath = relative(resolve(root), resolve(path));
   return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
-}
-
-function parseFileHistoryManifestV1(value: unknown): PersistedFileHistoryStateV1 {
-  const record = requireRecord(value, "v1 manifest");
-  const snapshots = requireArray(record["snapshots"], "snapshots").map((candidate, index) => {
-    const snapshot = requireRecord(candidate, `snapshots[${index}]`);
-    return {
-      messageId: requireString(snapshot["messageId"], `snapshots[${index}].messageId`),
-      trackedFileBackups: requireArray(
-        snapshot["trackedFileBackups"],
-        `snapshots[${index}].trackedFileBackups`,
-      ).map((entry, backupIndex) => {
-        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
-          throw new Error(`snapshots[${index}].trackedFileBackups[${backupIndex}] 无效`);
-        }
-        return [
-          requireAbsolutePath(entry[0], `snapshots[${index}].trackedFileBackups path`),
-          parseBackupV1(entry[1], `snapshots[${index}].trackedFileBackups backup`),
-        ] satisfies [string, PersistedFileHistoryBackupV1];
-      }),
-      timestamp: requireDateString(snapshot["timestamp"], `snapshots[${index}].timestamp`),
-      ...optionalSnapshotFieldsV1(snapshot, index),
-    } satisfies PersistedFileHistorySnapshotV1;
-  });
-  const trackedFiles = requireArray(record["trackedFiles"], "trackedFiles").map((path, index) =>
-    requireAbsolutePath(path, `trackedFiles[${index}]`),
-  );
-  const fileVersions = requireArray(record["fileVersions"], "fileVersions").map((entry, index) => {
-    if (!Array.isArray(entry) || entry.length !== 2) {
-      throw new Error(`fileVersions[${index}] 无效`);
-    }
-    return [
-      requireAbsolutePath(entry[0], `fileVersions[${index}][0]`),
-      requireNonNegativeInteger(entry[1], `fileVersions[${index}][1]`),
-    ] satisfies [string, number];
-  });
-  return {
-    snapshots,
-    trackedFiles,
-    snapshotSequence: requireNonNegativeInteger(record["snapshotSequence"], "snapshotSequence"),
-    fileVersions,
-  };
 }
 
 function parseFileHistoryManifestV2(
@@ -2222,22 +2039,11 @@ function parseFileHistoryManifestV2(
   };
 }
 
-function parseBackupV1(value: unknown, label: string): PersistedFileHistoryBackupV1 {
-  const backup = requireRecord(value, label);
-  const backupFileName = backup["backupFileName"];
-  if (backupFileName !== null && typeof backupFileName !== "string") {
-    throw new Error(`${label}.backupFileName 无效`);
-  }
-  return {
-    backupFileName,
-    version: requireNonNegativeInteger(backup["version"], `${label}.version`),
-    backupTime: requireDateString(backup["backupTime"], `${label}.backupTime`),
-    ...parseBackupMetadata(backup, label),
-  };
-}
-
 function parseBackupV2(value: unknown, label: string): PersistedFileHistoryBackupV2 {
   const backup = requireRecord(value, label);
+  if (Object.hasOwn(backup, "legacyBackupFileName")) {
+    throw new Error(`${label}.legacyBackupFileName 不再受支持`);
+  }
   const metadata = {
     version: requireNonNegativeInteger(backup["version"], `${label}.version`),
     backupTime: requireDateString(backup["backupTime"], `${label}.backupTime`),
@@ -2254,21 +2060,16 @@ function parseBackupV2(value: unknown, label: string): PersistedFileHistoryBacku
   if (ref.algorithm !== "sha256" || !/^[a-f0-9]{64}$/u.test(ref.digest)) {
     throw new Error(`${label}.blob 无效`);
   }
-  const legacy = backup["legacyBackupFileName"];
-  if (legacy !== undefined && typeof legacy !== "string") {
-    throw new Error(`${label}.legacyBackupFileName 无效`);
-  }
   return {
     kind: "blob",
     blob: ref as FileHistoryBlobRef,
-    ...(typeof legacy === "string" ? { legacyBackupFileName: legacy } : {}),
     ...metadata,
   };
 }
 
 function decodeBackupV2(backup: PersistedFileHistoryBackupV2): FileHistoryBackup {
   return {
-    backupFileName: backup.kind === "missing" ? null : (backup.legacyBackupFileName ?? "cas"),
+    backupFileName: backup.kind === "missing" ? null : "cas",
     ...(backup.kind === "blob" ? { blobRef: backup.blob } : {}),
     version: backup.version,
     backupTime: new Date(backup.backupTime),
@@ -2293,21 +2094,6 @@ function parseBackupMetadata(
     ...(originMtimeMs !== undefined ? { originMtimeMs } : {}),
     ...(originSize !== undefined ? { originSize } : {}),
     ...(originMode !== undefined ? { originMode } : {}),
-  };
-}
-
-function optionalSnapshotFieldsV1(
-  snapshot: Record<string, unknown>,
-  index: number,
-): Omit<PersistedFileHistorySnapshotV1, "messageId" | "trackedFileBackups" | "timestamp"> {
-  return {
-    ...optionalIntegerField(snapshot, "messageIndex", `snapshots[${index}]`),
-    ...optionalStringField(snapshot, "userPrompt", `snapshots[${index}]`),
-    ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
-    ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
-    ...optionalStringField(snapshot, "prePlanMode", `snapshots[${index}]`),
-    ...optionalStringArrayField(snapshot, "editedFilePaths", `snapshots[${index}]`, true),
-    ...optionalStringArrayField(snapshot, "journalWarnings", `snapshots[${index}]`, false),
   };
 }
 

@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
-import type { SubagentActivityEvent, SubagentTraceEvent } from "../engine/reporter.js";
+import type { SubagentActivityEvent } from "../engine/reporter.js";
 import type { Session } from "../engine/session.js";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
 import {
-  assertTranscriptEvent,
   projectTranscriptEvents,
-  type TranscriptEntry,
-  type TranscriptEvent,
+  type DurableTranscriptEvent,
+  type TranscriptEntryData,
 } from "../presentation/transcript-event-store.js";
 import {
   isJsonValue,
@@ -131,6 +130,7 @@ async function persistTimelineEvent(
       });
     }
     const providerCallId = optionalNonEmptyText(data["providerCallId"]);
+    if (!providerCallId) return false;
     return persistTranscriptEvent(session, {
       sourceEventId: notification.eventId,
       create: (_snapshot, sequence, eventId) => ({
@@ -140,39 +140,16 @@ async function persistTimelineEvent(
         type: "tool.started",
         entryId: runtimeTranscriptId("tool-entry", runId, notification.eventId),
         toolCallId: runtimeTranscriptId("tool-call", runId, notification.eventId),
-        ...(providerCallId ? { providerCallId } : {}),
+        providerCallId,
         name,
         args,
       }),
     });
   }
 
-  if (eventType === "tool.completed") {
-    const result = runtimeToolResultEnvelope(data["result"]);
-    if (!result || isPlanTimelineTool(result.toolName)) return false;
-    return persistTranscriptEvent(session, {
-      sourceEventId: notification.eventId,
-      create: (snapshot, sequence, eventId) => {
-        const toolCallId = findPendingRuntimeTool(snapshot, result.toolName, result.toolCallId);
-        if (!toolCallId) return undefined;
-        return {
-          eventId,
-          sequence,
-          createdAt: notification.at,
-          type: "tool.completed",
-          toolCallId,
-          status:
-            result.status === "succeeded"
-              ? "success"
-              : result.status === "rejected"
-                ? "denied"
-                : "error",
-          summary: `${result.status === "succeeded" ? "Tool completed" : "Tool failed"} · ${result.rawSizeBytes} bytes${result.projection.truncated ? " · preview" : ""}`,
-          result,
-        };
-      },
-    });
-  }
+  // Completion is a live presentation event. The durable transcript stores only
+  // tool.started; hydration joins it with canonical tool.result.recorded.
+  if (eventType === "tool.completed") return false;
 
   // Raw stdout/stderr stays out of the durable renderer projection. The bounded
   // ToolResult envelope above contains only projection text and an opaque Evidence ref.
@@ -180,7 +157,7 @@ async function persistTimelineEvent(
 
   if (eventType === "subagent.activity") {
     const activity = runtimeSubagentActivity(data);
-    if (!activity) return false;
+    if (!activity || !isTerminalSubagentActivityStatus(activity.activity.status)) return false;
     return persistTranscriptEvent(session, {
       sourceEventId: notification.eventId,
       create: (_snapshot, sequence, eventId) => ({
@@ -195,42 +172,9 @@ async function persistTimelineEvent(
     });
   }
 
-  if (eventType === "subagent.trace") {
-    const trace = runtimeSubagentTrace(data);
-    if (!trace) return false;
-    return persistTranscriptEvent(session, {
-      sourceEventId: notification.eventId,
-      create: (_snapshot, sequence, eventId) => ({
-        eventId,
-        sequence,
-        createdAt: notification.at,
-        type: "subagent.trace.recorded",
-        trace,
-      }),
-    });
-  }
-
-  if (eventType !== "subagent.claimed") return false;
-  const activityIds = Array.isArray(data["activityIds"])
-    ? data["activityIds"].filter(
-        (value): value is string => typeof value === "string" && value.length > 0,
-      )
-    : [];
-  let persisted = false;
-  for (const [index, activityId] of activityIds.entries()) {
-    persisted =
-      (await persistTranscriptEvent(session, {
-        sourceEventId: `${notification.eventId}:${index}`,
-        create: (_snapshot, sequence, eventId) => ({
-          eventId,
-          sequence,
-          createdAt: notification.at,
-          type: "subagent.activity.claimed",
-          activityId,
-        }),
-      })) || persisted;
-  }
-  return persisted;
+  // Subagent trace/claim events are live presentation state. The durable
+  // transcript retains only terminal activity snapshots.
+  return false;
 }
 
 async function persistApprovalRequested(
@@ -369,7 +313,7 @@ function persistTranscriptEntry(
     readonly sourceEventId: string;
     readonly entryId: string;
     readonly createdAt: number;
-    readonly entry: TranscriptEntry;
+    readonly entry: TranscriptEntryData;
   },
 ): Promise<boolean> {
   return persistTranscriptEvent(session, {
@@ -402,7 +346,7 @@ async function persistTranscriptEvent(
       snapshot: SessionHydrationSnapshot,
       sequence: number,
       eventId: string,
-    ) => TranscriptEvent | undefined;
+    ) => DurableTranscriptEvent | undefined;
   },
 ): Promise<boolean> {
   const snapshot = await session.readHydrationSnapshot();
@@ -469,55 +413,6 @@ function safePlanDetail(args: string): string | undefined {
   return args.slice(0, 16_000);
 }
 
-function safeToolResultBytes(data: JsonObject): number {
-  const reported = data["resultBytes"];
-  if (typeof reported === "number" && Number.isSafeInteger(reported) && reported >= 0) {
-    return reported;
-  }
-  return typeof data["result"] === "string" ? Buffer.byteLength(data["result"], "utf8") : 0;
-}
-
-function runtimeToolResultEnvelope(
-  value: unknown,
-): Extract<TranscriptEvent, { type: "tool.completed" }>["result"] | undefined {
-  const candidate: unknown = {
-    eventId: "desktop-envelope-validation",
-    sequence: 1,
-    createdAt: 0,
-    type: "tool.completed",
-    toolCallId: "desktop-envelope-validation",
-    status: "success",
-    summary: "validation",
-    result: value,
-  };
-  try {
-    assertTranscriptEvent(candidate);
-  } catch {
-    return undefined;
-  }
-  return candidate.type === "tool.completed" ? structuredClone(candidate.result) : undefined;
-}
-
-function findPendingRuntimeTool(
-  snapshot: SessionHydrationSnapshot,
-  name: string,
-  providerCallId: string | undefined,
-): string | undefined {
-  const projection = projectTranscriptEvents(snapshot.transcriptEvents);
-  return Object.values(projection.toolCalls)
-    .toReversed()
-    .find(
-      (tool) =>
-        tool.name === name &&
-        !isTerminalTranscriptToolStatus(tool.status) &&
-        (providerCallId === undefined || tool.providerCallId === providerCallId),
-    )?.id;
-}
-
-function isTerminalTranscriptToolStatus(status: string): boolean {
-  return new Set(["success", "error", "denied", "done", "failed"]).has(status);
-}
-
 function runtimeSubagentActivity(data: JsonObject):
   | {
       readonly activityId: string;
@@ -527,7 +422,17 @@ function runtimeSubagentActivity(data: JsonObject):
   const activityId = optionalNonEmptyText(data["activityId"]);
   const task = optionalNonEmptyText(data["task"]);
   const status = data["status"];
-  if (!activityId || !task || !isSubagentActivityStatus(status)) return undefined;
+  const mode = data["mode"];
+  const completionPolicy = data["completionPolicy"];
+  if (
+    !activityId ||
+    !task ||
+    !isSubagentActivityStatus(status) ||
+    !isOneOf(mode, ["explore", "worker"]) ||
+    !isOneOf(completionPolicy, ["required", "optional", "detached"])
+  ) {
+    return undefined;
+  }
   const agentName = optionalNonEmptyText(data["agentName"]);
   const currentAction = optionalNonEmptyText(data["currentAction"]);
   const summary = optionalNonEmptyText(data["summary"]);
@@ -537,11 +442,9 @@ function runtimeSubagentActivity(data: JsonObject):
   const activity: Omit<SubagentActivityEvent, "activityId"> = {
     task,
     status,
+    mode,
+    completionPolicy,
     ...(agentName ? { agentName } : {}),
-    ...(isOneOf(data["mode"], ["explore", "worker"]) ? { mode: data["mode"] } : {}),
-    ...(isOneOf(data["completionPolicy"], ["required", "optional", "detached"])
-      ? { completionPolicy: data["completionPolicy"] }
-      : {}),
     ...(currentAction ? { currentAction } : {}),
     ...(summary ? { summary } : {}),
     ...(requestedModelRoute ? { requestedModelRoute } : {}),
@@ -552,43 +455,6 @@ function runtimeSubagentActivity(data: JsonObject):
       : {}),
   };
   return { activityId, activity };
-}
-
-function runtimeSubagentTrace(data: JsonObject): SubagentTraceEvent | undefined {
-  const activityId = optionalNonEmptyText(data["activityId"]);
-  const traceId = optionalNonEmptyText(data["traceId"]);
-  const type = data["type"];
-  if (!activityId || !traceId) return undefined;
-  if (type === "thinking") return { activityId, traceId, type };
-  if (type === "message" && typeof data["content"] === "string") {
-    return { activityId, traceId, type, content: data["content"].slice(0, 12_000) };
-  }
-  if (
-    type === "tool.started" &&
-    typeof data["name"] === "string" &&
-    typeof data["args"] === "string"
-  ) {
-    return {
-      activityId,
-      traceId,
-      type,
-      name: data["name"],
-      args: data["args"].slice(0, 8_000),
-    };
-  }
-  if (type === "tool.completed") {
-    const isError = data["isError"] === true;
-    const bytes = safeToolResultBytes(data);
-    return {
-      activityId,
-      traceId,
-      type,
-      result: `${isError ? "Tool failed" : "Tool completed"} · ${bytes} bytes`,
-      isError,
-      ...(data["truncated"] === true ? { truncated: true } : {}),
-    };
-  }
-  return undefined;
 }
 
 function isSubagentActivityStatus(value: unknown): value is SubagentActivityEvent["status"] {
@@ -603,9 +469,19 @@ function isSubagentActivityStatus(value: unknown): value is SubagentActivityEven
   ]);
 }
 
+function isTerminalSubagentActivityStatus(value: SubagentActivityEvent["status"]): boolean {
+  return (
+    value === "completed" ||
+    value === "partial" ||
+    value === "failed" ||
+    value === "timed_out" ||
+    value === "cancelled"
+  );
+}
+
 function isRuntimeRunStatus(
   value: unknown,
-): value is Extract<TranscriptEntry, { kind: "run-boundary" }>["status"] {
+): value is Extract<TranscriptEntryData, { kind: "run-boundary" }>["status"] {
   return isOneOf(value, [
     "queued",
     "running",

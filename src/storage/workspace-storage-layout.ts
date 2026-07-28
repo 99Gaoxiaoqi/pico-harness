@@ -27,13 +27,11 @@ import {
 
 const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 2 as const;
 const LEGACY_WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 1 as const;
-const SESSION_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
 const LEGACY_LOCK_TOMBSTONE_PATTERN = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
 const LEGACY_LOCK_CANDIDATE_PATTERN =
   /^\.lock\.candidate-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const LEGACY_RUNTIME_FENCE_REASON = "workspace-session-centric-layout-v1";
 const LEGACY_CONTROL_FILES = ["state.json", "daemon-events.jsonl", "usage-ledger.jsonl"] as const;
-const LEGACY_SESSION_FILES = ["session.jsonl", "manifest.json"] as const;
 const CANONICAL_STORAGE_DIRECTORIES = ["sessions", "task-runs", "control"] as const;
 
 export const WORKSPACE_STORAGE_DIRECTORY = ".storage";
@@ -92,8 +90,9 @@ export function ensurePrivateWorkspaceStorageDirectorySync(path: string): void {
 /**
  * Prepares the workspace-wide Session/TaskRun/control transaction namespace.
  *
- * Existing JSON data under runtime/ is copied once, under both the new and legacy locks, and is
- * deliberately left untouched as a rollback artifact. SQLite and legacy task data are never read.
+ * Existing control JSON under runtime/ is copied once under both locks and left
+ * untouched as a rollback artifact. Legacy Session ledgers are deliberately not
+ * migrated: Runtime v2 is a development hard cut.
  */
 export function prepareWorkspaceStorageLayoutSync(
   workspaceRoot: string,
@@ -573,29 +572,6 @@ function collectLegacyRuntimeReplacements(
     }
   }
 
-  const sessionsRoot = join(legacyRoot, "sessions");
-  if (existsSync(sessionsRoot)) {
-    assertRealDirectory(sessionsRoot, "Legacy Runtime sessions directory");
-    for (const entry of readDirectoryEntries(sessionsRoot)) {
-      if (!entry.isDirectory() || !SESSION_DIRECTORY_PATTERN.test(entry.name)) {
-        throw new FileStorageIntegrityError(
-          `Unexpected entry in legacy Runtime sessions: ${join(sessionsRoot, entry.name)}`,
-        );
-      }
-      const sessionRoot = join(sessionsRoot, entry.name);
-      assertRealDirectory(sessionRoot, "Legacy Runtime session directory");
-      const sessionEntries = readDirectoryEntries(sessionRoot);
-      assertKnownEntries(sessionEntries, new Set(LEGACY_SESSION_FILES), sessionRoot);
-      for (const fileName of LEGACY_SESSION_FILES) {
-        copyLegacyFileIfPresent(
-          workspaceRoot,
-          join(sessionRoot, fileName),
-          join("sessions", entry.name, fileName),
-          replacements,
-        );
-      }
-    }
-  }
   return replacements;
 }
 

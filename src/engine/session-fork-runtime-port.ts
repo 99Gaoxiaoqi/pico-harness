@@ -1,8 +1,8 @@
 import type { Message } from "../schema/message.js";
 import type { Session } from "./session.js";
 import type { RuntimeEvent } from "./session-runtime-event.js";
-import type { RuntimeModelHistoryEvent } from "./runtime-model-message.js";
-import type { EngineRuntimeCapability } from "./runtime-port.js";
+import type { EngineRuntimeCapability, EngineRuntimePort } from "./runtime-port.js";
+import type { RuntimeSessionForkSeedEntry } from "./session-runtime-projection.js";
 import type { SessionRuntimeStateWritePatch } from "./session-runtime.js";
 
 /**
@@ -23,11 +23,6 @@ export type SessionForkRuntimeCapability = EngineRuntimeCapability;
 export interface SessionForkModelCheckpoint {
   readonly coveredMessageCount: number;
   readonly summary: Message;
-}
-
-export interface SessionForkProjectedMessage {
-  readonly eventId: string;
-  readonly message: Message;
 }
 
 export interface SessionForkPublicationCapability {
@@ -51,30 +46,29 @@ export interface SessionForkBootstrapSeed {
   readonly targetSessionId: string;
   readonly operationId?: string;
   readonly operationCreatedAt?: string;
-  readonly messages: readonly Message[];
-  /** Canonical fact kind and Evidence reference for every projected message. */
-  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
+  /** Source-sequenced canonical model and durable transcript facts. */
+  readonly seedEntries: readonly RuntimeSessionForkSeedEntry[];
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceThroughEventId?: string;
+  readonly statePublication?: {
+    readonly patch: SessionRuntimeStateWritePatch;
+    readonly eventId: string;
+    readonly at: string;
+  };
   readonly workDir: string;
   readonly runtimeAuthority: SessionForkRuntimeAuthority;
 }
 
 export interface SessionForkBootstrapOptions extends SessionForkBootstrapSeed {
   readonly publication: SessionForkPublicationCapability;
-  readonly statePublication?: {
-    readonly patch: SessionRuntimeStateWritePatch;
-    readonly eventId: string;
-    readonly at: string;
-  };
 }
 
 export interface SessionForkRuntimePort {
+  /** Explicit RuntimePort attached when fork opens a durable source Session. */
+  readonly engineRuntimePort: EngineRuntimePort;
+
   /** Validate the current model history without exposing Runtime's read-model implementation. */
   validateModelHistory(events: readonly RuntimeEvent[]): void;
-
-  /** Project a frozen event prefix into its model-visible messages and owning event IDs. */
-  projectModelMessages(events: readonly RuntimeEvent[]): readonly SessionForkProjectedMessage[];
 
   reconcileIncompleteRuns(options: {
     readonly capability: SessionForkRuntimeCapability;

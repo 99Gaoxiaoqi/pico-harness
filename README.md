@@ -38,7 +38,7 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 ### 一次运行如何闭环
 
 1. **解析入口与信任**：按工作区真实路径建立信任并读取设备级/项目级配置。模型路由按 Run 固定；TUI 在宿主启动时复用 Plugin 快照，Desktop 未由宿主注入时按 Run 加载和释放；Hook 可热重载但单次 dispatch 使用一致快照；后台 Job 不加载 Plugin，并使用创建时冻结的策略。
-2. **组装上下文**：`PromptComposer` 汇总系统约束、`AGENTS.md`、Skills、会话历史与当前状态；接近预算时先压缩 ToolResult，再摘要完整工具批次。
+2. **组装上下文**：`PromptComposer` 汇总系统约束、`AGENTS.md`、Skills、会话历史与当前状态；接近预算时先缩短旧 ToolResult 请求投影，仍不足时在完整工具批次边界写 Runtime 摘要 checkpoint。
 3. **模型决策**：Engine 通过统一 Message Schema 调用选定模型；单阶段 ReAct 在一轮响应里返回文本和工具调用。
 4. **受控执行**：Engine 的 `ToolScheduler` 根据 Registry 提供的资源访问声明决定并发。每次执行先过 hardline/Plan 门禁，再运行 `PreToolUse`；Hook 改写输入后重跑前置门禁，最后进入模式对应的权限/审批并调用文件、Bash、MCP 或委派能力。
 5. **事实落盘并续跑**：运行事件、文件历史、工具产物和任务状态分别写入对应存储；Engine 将结果加入会话，继续下一轮或生成最终回复。
@@ -69,7 +69,8 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 - `RuntimeStore` 以 `control/state.json` 保存 Job、Cron 与调度状态；`control/daemon-events.jsonl` 是 daemon 通知账本，不是 Agent 事实日志。
 - `.storage/layout.json` 保存稳定 `storageRootId` 与物理目录身份；`.storage/commit.json` 与 `.storage/lock/` 为 Session、TaskRun 和控制面提供共享事务协调。
 - `MemoryRepository` 以 `memory/state.json` 保存版本化的 settings、sources、facts、proposals、审计和幂等记录；忘记操作会清除实时文件中的结构化明文。
-- 文件历史、计划/待办、Skill 结果和大体积工具输出使用独立 sidecar/artifact 存储，避免污染模型消息协议。
+- 文件历史、计划/待办和 Skill 结果使用独立 sidecar；大体积工具输出进入 Evidence CAS，只把
+  canonical 有界投影和 `pico://evidence/...` 引用交给模型。
 
 ## 核心能力
 

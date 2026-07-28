@@ -23,13 +23,13 @@ import {
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
-import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import type { CommitReceipt, SessionCursor } from "./session-persistence.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
 import {
-  normalizeSessionRuntimeStatePatch,
   normalizeSessionRuntimeStateWritePatch,
+  normalizeSessionUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
   type PersistedSessionSettings,
   type SessionHydrationSnapshot,
@@ -38,8 +38,6 @@ import {
   type SessionRuntimeStateSnapshot,
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
-import type { SessionSummaryStore } from "../memory/memory-store.js";
-import { createSessionSummaryStore } from "../memory/summary-store.js";
 import {
   createFileHistoryState,
   type FileHistoryBackup,
@@ -71,7 +69,6 @@ import {
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   createEngineRuntimeCapability,
-  getDefaultEngineRuntimePort,
   type EngineRuntimeCapability,
   type EngineRuntimePort,
   type EngineRuntimeWriteGuard,
@@ -86,7 +83,6 @@ import {
 import {
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
-  type RuntimeModelHistoryEvent,
 } from "./runtime-model-message.js";
 import { materializeRuntimeHistoryEntries } from "./session-runtime-read-model.js";
 import {
@@ -99,36 +95,18 @@ import {
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
-  projectRuntimeSessionModelHistoryEntries,
+  projectRuntimeSessionForkSeedEntries,
+  projectRuntimeSessionModelToolResultEntries,
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
-  projectRuntimeSessionToolResultEntries,
   projectRuntimeSessionTranscriptEventEntries,
+  type RuntimeSessionForkSeedEntry,
 } from "./session-runtime-projection.js";
 import { OwnerLease } from "../storage/owner-lease.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
 import { SessionMessageLedger } from "./session-message-ledger.js";
-const summaryStorePool = new Map<string, { store: SessionSummaryStore; refCount: number }>();
 import { configureDefaultSessionFactory, SessionManager } from "./session-manager.js";
 import { registerSessionDrain, sessionEntryKey } from "./session-manager-state.js";
-
-function acquireSummaryStore(filePath: string): SessionSummaryStore {
-  const existing = summaryStorePool.get(filePath);
-  if (existing) {
-    existing.refCount++;
-    return existing.store;
-  }
-  const store = createSessionSummaryStore({ persistent: true, filePath });
-  summaryStorePool.set(filePath, { store, refCount: 1 });
-  return store;
-}
-
-function releaseSummaryStore(filePath: string): void {
-  const existing = summaryStorePool.get(filePath);
-  if (!existing) return;
-  existing.refCount = Math.max(0, existing.refCount - 1);
-  if (existing.refCount === 0) summaryStorePool.delete(filePath);
-}
 
 class SessionWriteUncertainError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -155,17 +133,10 @@ export interface DurableRuntimeForkCheckpoint {
 
 export interface DurableSessionForkSnapshot {
   readonly hydration: SessionHydrationSnapshot;
-  readonly runtimeHistoryEntries: readonly RuntimeModelHistoryEvent[];
+  readonly runtimeSeedEntries: readonly RuntimeSessionForkSeedEntry[];
   readonly cursor: SessionCursor;
   readonly rootLogId: string;
   readonly modelCheckpoint?: DurableRuntimeForkCheckpoint;
-}
-
-/** Immutable target seed published before the Runtime fork bootstrap begins. */
-export interface DurableRuntimeForkSeed {
-  readonly sourceSessionId: string;
-  readonly messages: readonly Message[];
-  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
 }
 
 export interface DurableTuiRewindHandoff {
@@ -290,7 +261,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private runtimeProjectionBranchId?: string;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
-  /** Runtime lifecycle is injected; absent only for legacy in-memory/direct test hosts. */
+  /** Runtime lifecycle is injected by durable hosts; in-memory Sessions do not need one. */
   private readonly runtimePort?: EngineRuntimePort;
   private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
   private persistenceFailure?: SessionWriteUncertainError;
@@ -315,9 +286,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
    */
   private runQueue: Promise<unknown> = Promise.resolve();
 
-  private summaryStore!: SessionSummaryStore;
-  private summaryStoreLeasePath?: string;
-
   constructor(id: string, workDir: string, options?: SessionOptions) {
     this.id = id;
     this.workDir = workDir;
@@ -335,21 +303,11 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         sessionProjectDir: workDir,
       });
     this.conversationId = id;
-    this.runtimePort = options?.runtimePort ?? getDefaultEngineRuntimePort();
+    this.runtimePort = options?.runtimePort;
     this.createdAt = new Date();
     this.updatedAt = new Date();
     fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(workDir));
     this.initPersistence(options?.persistence);
-    const summaryPath = join(
-      resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.memory,
-      "summaries.json",
-    );
-    if (this.store) {
-      this.summaryStore = acquireSummaryStore(summaryPath);
-      this.summaryStoreLeasePath = summaryPath;
-    } else {
-      this.summaryStore = createSessionSummaryStore({ persistent: false, filePath: summaryPath });
-    }
   }
 
   /**
@@ -706,8 +664,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     this.assertWritable();
     const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) {
-      logger.warn("[session] 忽略无效的 runtime_state 更新");
-      return;
+      throw new Error("Runtime session state update is invalid");
     }
     if (normalized.settings) this.persistedSettings = normalized.settings;
     if (normalized.goal) this.persistedGoal = normalized.goal;
@@ -797,47 +754,13 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const cursor = runtimeCursorForEntries(this.id, entries);
     if (!cursor) throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
     const events = entries.map(({ event }) => event);
-    const modelCheckpoint = durableForkModelCheckpoint(events);
+    const modelCheckpoint = deriveDurableRuntimeForkCheckpoint(events);
     return {
       hydration: this.runtimeHydrationSnapshot(manifest, entries),
-      runtimeHistoryEntries: projectRuntimeSessionModelHistoryEntries(events).map(({ event }) =>
-        structuredClone(event),
-      ),
+      runtimeSeedEntries: projectRuntimeSessionForkSeedEntries(entries),
       rootLogId: await resolveRuntimeRootSessionId(store, this.id),
       cursor,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
-    };
-  }
-
-  /**
-   * Reads the original fork seed rather than the mutable current Session projection.
-   * Runtime uses this durable boundary to resume a fork bootstrap after interruption.
-   */
-  async readDurableRuntimeForkSeed(): Promise<DurableRuntimeForkSeed | undefined> {
-    await this.flushPersistence();
-    const store = this.store;
-    if (!store) return undefined;
-    await this.ensureRuntimeSession();
-    const events = await store.readSession(this.id);
-    const seedIndex = events.findIndex(
-      (event) => event.kind === "session.forked" && event.data.sourceDigest !== undefined,
-    );
-    if (seedIndex < 0) return undefined;
-    const seed = events[seedIndex]!;
-    if (seed.kind !== "session.forked" || seed.data.parentSessionId === this.id) return undefined;
-    const seedEvents = events.slice(0, seedIndex + 1);
-    const messages = projectRuntimeSessionMessages(seedEvents);
-    const historyEntries = projectRuntimeSessionModelHistoryEntries(seedEvents).map(
-      ({ event }) => event,
-    );
-    const canonicalDigest = runtimeForkHistoryDigest(historyEntries);
-    if (seed.data.messageCount !== messages.length || seed.data.sourceDigest !== canonicalDigest) {
-      throw new Error(`Runtime fork seed ${this.id} 与完成标记不一致`);
-    }
-    return {
-      sourceSessionId: seed.data.parentSessionId,
-      messages,
-      historyEntries,
     };
   }
 
@@ -850,7 +773,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const updatedAt = entries.at(-1)?.event.at ?? manifest.createdAt;
     const messages = projectRuntimeSessionSequencedMessageEntries(entries);
     const transcript = projectRuntimeSessionTranscriptEventEntries(entries);
-    const toolResults = projectRuntimeSessionToolResultEntries(entries);
+    const toolResults = projectRuntimeSessionModelToolResultEntries(entries);
     return {
       schemaVersion: 1,
       persistenceSequence: cursor?.seq ?? null,
@@ -918,20 +841,20 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       for (const msg of msgs) this.appendOneInMemory(msg);
       return;
     }
+    const runtimePort = this.runtimePort;
+    if (!runtimePort) {
+      throw new Error(`Durable Session ${this.id} requires an explicit RuntimePort`);
+    }
     await this.enqueuePersistence("messages", async () => {
       await this.ensureRuntimeSession();
-      const runtimeRun = this.runtimePort?.currentRun();
+      const runtimeRun = runtimePort.currentRun();
       if (runtimeRun?.claimsSession(this)) {
         await runtimeRun.commitMessages(this, msgs);
         return;
       }
-      if (this.runtimePort) {
-        if (!(await this.runtimePort.commitExternalMessages(this, msgs))) {
-          throw new Error(`Runtime session ${this.id} is not initialized`);
-        }
-        return;
+      if (!(await runtimePort.commitExternalMessages(this, msgs))) {
+        throw new Error(`Runtime session ${this.id} is not initialized`);
       }
-      await this.commitExternalMessagesWithoutRuntime(msgs);
     });
   }
 
@@ -943,66 +866,20 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
     if (!this.store) return this.commitProjectionMessageOnce(eventId, message);
+    const runtimePort = this.runtimePort;
+    if (!runtimePort) {
+      throw new Error(`Durable Session ${this.id} requires an explicit RuntimePort`);
+    }
     return this.enqueuePersistence("message", async () => {
       await this.ensureRuntimeSession();
-      const runtimeRun = this.runtimePort?.currentRun();
+      const runtimeRun = runtimePort.currentRun();
       if (runtimeRun?.claimsSession(this)) {
         return runtimeRun.commitMessageOnce(this, eventId, message);
       }
-      if (this.runtimePort) {
-        const receipt = await this.runtimePort.commitExternalMessageOnce(this, eventId, message);
-        if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
-        return receipt;
-      }
-      return this.commitExternalMessageOnceWithoutRuntime(eventId, message);
+      const receipt = await runtimePort.commitExternalMessageOnce(this, eventId, message);
+      if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
+      return receipt;
     });
-  }
-
-  /**
-   * Legacy hosts may construct Session without a Runtime adapter. Keep that
-   * path durable and serialized, but intentionally do not synthesize a second
-   * RuntimeRun lifecycle; production hosts inject the adapter above.
-   */
-  private async commitExternalMessagesWithoutRuntime(messages: readonly Message[]): Promise<void> {
-    if (messages.length === 0) return;
-    for (const message of messages) assertRuntimeCommittedMessage(message);
-    const store = this.store;
-    if (!store) throw new Error("Session persistence is disabled");
-    const events: RuntimeMessageCommittedEvent[] = messages.map((message) => ({
-      ...this.runtimeEventBase(`session-external:${randomUUID()}`, "session-external", "model"),
-      kind: "message.committed",
-      data: { message: structuredClone(message) },
-    }));
-    await this.commitRuntimeProjectionBatch(await store.appendBatch(events));
-  }
-
-  private async commitExternalMessageOnceWithoutRuntime(
-    eventId: string,
-    message: Message,
-  ): Promise<CommitReceipt> {
-    assertRuntimeCommittedMessage(message);
-    const store = this.store;
-    if (!store) throw new Error("Session persistence is disabled");
-    const existing = await store.readSessionEvent(this.id, eventId);
-    if (existing) {
-      if (
-        existing.event.kind !== "message.committed" ||
-        !isDeepStrictEqual(existing.event.data.message, message)
-      ) {
-        throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
-      }
-      const persisted = await store.append(existing.event);
-      await this.commitRuntimeProjectionBatch([persisted]);
-      return commitReceiptFromAppend(persisted);
-    }
-    const event: RuntimeMessageCommittedEvent = {
-      ...this.runtimeEventBase(eventId, "session-external", "model"),
-      kind: "message.committed",
-      data: { message: structuredClone(message) },
-    };
-    const persisted = await store.append(event);
-    await this.commitRuntimeProjectionBatch([persisted]);
-    return commitReceiptFromAppend(persisted);
   }
 
   /** Advances the disposable in-memory Session projection once for one durable append batch. */
@@ -1154,7 +1031,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   async replaceRuntimeUsage(usage: SessionUsageSnapshot, projectionEventId: string): Promise<void> {
     this.assertWritable();
     if (!projectionEventId.trim()) throw new Error("Runtime usage projection eventId 不能为空");
-    const normalized = normalizeSessionRuntimeStatePatch({ usage })?.usage;
+    const normalized = normalizeSessionUsageSnapshot(usage);
     if (!normalized) throw new Error("Runtime usage projection is invalid");
     if (!this.store) {
       this.restoreUsage(normalized);
@@ -1465,11 +1342,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
             this.id,
             this.fileHistoryBaseDir,
           );
-          this.summaryStore.invalidateIfBeyond?.(this.id, {
-            throughEventId: operation.target.sourceMessageEventId ?? null,
-            messageCount: operation.target.messageIndex,
-            prefixDigest: null,
-          });
         },
       },
     });
@@ -1638,39 +1510,20 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     }
   }
 
-  /**
-   * 模型摘要压缩:用一条 role:assistant 的 summary 消息替换 history 前 compactedCount 条。
-   * 对标 kimi-code applyCompaction —— 真改 Session.history(与字符级 Compactor 不同,
-   * 字符级只改临时 context 不碰 Session)。
-   *
-   * 内存语义:history = [summaryMsg, ...history.slice(compactedCount)]。
-   * 保留尾部(从 compactedCount 起的消息)不动,前缀浓缩成一条摘要。
-   *
-   * 持久化通过 RuntimeEvent rewind + message facts 重建活动分支。
-   *
-   * 本方法只做纯存储,summary 内容的 REFERENCE-ONLY 包装由调用方(FullCompactor)负责。
-   *
-   * @param summary 摘要消息正文(已由调用方套上 REFERENCE-ONLY 前后标记)
-   * @param compactedCount 被压缩的前缀条数(0..history.length)
-   */
-  async applyCompaction(
-    summary: string,
-    compactedCount: number,
-    options: { readonly summaryProviderData?: Record<string, unknown> } = {},
-  ): Promise<void> {
+  /** Replace an explicitly in-memory Session prefix with one summary message. */
+  async applyInMemoryCompaction(summary: string, compactedCount: number): Promise<void> {
     this.assertWritable();
+    if (this.store) {
+      throw new Error(
+        "Durable Runtime does not support Session.applyInMemoryCompaction; use a canonical Runtime checkpoint",
+      );
+    }
     if (compactedCount < 0) compactedCount = 0;
-    // 摘要消息:role=assistant(对标 kimi-code compaction_summary)
     const summaryMsg: Message = {
       role: "assistant",
       content: summary,
-      providerData: { ...options.summaryProviderData, picoKind: "compaction_summary" },
+      providerData: { picoKind: "compaction_summary" },
     };
-    if (this.store) {
-      throw new Error(
-        "Durable Runtime does not support Session.applyCompaction; use a canonical Runtime checkpoint",
-      );
-    }
     this.messageLedger.compact(summaryMsg, compactedCount);
     this.updatedAt = new Date();
   }
@@ -1725,11 +1578,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     return this.messageLedger.getToolResultMeta();
   }
 
-  saveMemorySummary(summary: string, messageCount: number): void {
-    this.assertWritable();
-    this.summaryStore.save(this.id, summary, messageCount);
-  }
-
   /** Durable event authority; undefined only for explicitly in-memory sessions. */
   get runtimeEventStore(): RuntimeEventStore | undefined {
     return this.store;
@@ -1768,7 +1616,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
 
   /** Append one structured transcript fact to the same canonical RuntimeEvent ledger. */
   async recordTranscriptEvent(
-    event: TranscriptEvent,
+    event: DurableTranscriptEvent,
     options: { readonly eventId?: string } = {},
   ): Promise<CommitReceipt> {
     let durableEvent = structuredClone(event);
@@ -1874,10 +1722,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         try {
           this.goalBinding?.unsubscribe();
           this.goalBinding = undefined;
-          if (this.summaryStoreLeasePath) {
-            releaseSummaryStore(this.summaryStoreLeasePath);
-            this.summaryStoreLeasePath = undefined;
-          }
         } catch (error) {
           closeError = error;
         }
@@ -2041,7 +1885,7 @@ async function syncRewindDirectory(directory: string): Promise<void> {
   }
 }
 
-function durableForkModelCheckpoint(
+export function deriveDurableRuntimeForkCheckpoint(
   events: readonly RuntimeEvent[],
 ): DurableRuntimeForkCheckpoint | undefined {
   const modelHead = materializeRuntimeHistoryEntries(events)[0];
@@ -2052,7 +1896,6 @@ function durableForkModelCheckpoint(
   if (!checkpoint || checkpoint.kind !== "context.checkpoint.recorded") return undefined;
   const summary = checkpoint.data.summary;
   const checkpointThroughEventId = checkpoint.data.throughEventId;
-  if (!summary || !checkpointThroughEventId) return undefined;
 
   const transcript = projectRuntimeSessionMessageEntries(events);
   let throughEventId = checkpointThroughEventId;
@@ -2072,22 +1915,14 @@ function durableForkModelCheckpoint(
     }
 
     const parent = events.find(
-      (event) =>
-        event.eventId === throughEventId &&
-        event.kind === "context.checkpoint.recorded" &&
-        event.data.throughEventId !== undefined &&
-        event.data.summary !== undefined,
+      (event) => event.eventId === throughEventId && event.kind === "context.checkpoint.recorded",
     );
     if (!parent || parent.kind !== "context.checkpoint.recorded") {
       throw new Error(
         `Runtime checkpoint ${checkpoint.eventId} cannot resolve transcript boundary ${throughEventId}`,
       );
     }
-    const parentThroughEventId = parent.data.throughEventId;
-    if (!parentThroughEventId) {
-      throw new Error(`Runtime checkpoint ${parent.eventId} has no transcript boundary`);
-    }
-    throughEventId = parentThroughEventId;
+    throughEventId = parent.data.throughEventId;
   }
 }
 
@@ -2157,39 +1992,15 @@ async function resolveRuntimeRootSessionId(
   throw new Error(`Runtime session lineage contains a cycle at ${current}`);
 }
 
-function runtimeForkHistoryDigest(events: readonly RuntimeModelHistoryEvent[]): string {
-  const payloads = events.map((event) =>
-    event.kind === "message.committed"
-      ? {
-          kind: event.kind,
-          data: { message: stripRuntimeMessageUsage(event.data.message) },
-        }
-      : {
-          kind: event.kind,
-          refs: {
-            toolCallId: event.refs.toolCallId,
-            ...(event.refs.evidence ? { evidence: event.refs.evidence } : {}),
-          },
-          data: event.data,
-        },
-  );
-  return createHash("sha256").update(JSON.stringify(payloads)).digest("hex");
-}
-
-function stripRuntimeMessageUsage(message: Message): Message {
-  const { usage: _usage, ...copy } = structuredClone(message);
-  return copy;
-}
-
 function assertRuntimeCommittedMessage(message: Message): void {
-  if (message.toolCallId !== undefined) {
+  if (message.toolCallId !== undefined || message.toolResultEvidenceUri !== undefined) {
     throw new Error(
-      `Runtime ToolResult ${message.toolCallId} cannot be persisted as message.committed`,
+      `Runtime ToolResult projection ${message.toolCallId ?? "without call ID"} cannot be persisted as message.committed`,
     );
   }
 }
 
-/** 旧 undo 交互语义：跳过 system，且不跨越 compaction summary。 */
+/** Undo skips system messages and never crosses an in-memory compaction boundary. */
 function findUndoCut(
   history: readonly Message[],
   count: number,
@@ -2211,12 +2022,8 @@ function findUndoCut(
 }
 
 function isCompactionSummaryMessage(message: Message): boolean {
-  if (message.role !== "assistant") return false;
-  const marker = message.providerData?.["picoKind"];
   return (
-    marker === "compaction_summary" ||
-    message.content.startsWith("[上下文压缩") ||
-    message.content.includes("--- 历史摘要结束")
+    message.role === "assistant" && message.providerData?.["picoKind"] === "compaction_summary"
   );
 }
 

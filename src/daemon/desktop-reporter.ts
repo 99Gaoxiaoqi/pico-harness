@@ -57,7 +57,7 @@ export class DesktopReporter implements Reporter {
     this.emit("assistant.thinking", { active: false, turn: this.turn });
   }
 
-  onToolCall(toolName: string, args: string, providerCallId?: string): void {
+  onToolCall(toolName: string, args: string, providerCallId: string): void {
     this.onThinkingEnd();
     const bounded = boundedText(args);
     this.emit("tool.started", {
@@ -65,7 +65,7 @@ export class DesktopReporter implements Reporter {
       args: bounded.value,
       truncated: bounded.truncated,
       turn: this.turn,
-      ...(providerCallId ? { providerCallId } : {}),
+      providerCallId,
     });
   }
 
@@ -77,13 +77,13 @@ export class DesktopReporter implements Reporter {
     toolName: string,
     stream: "stdout" | "stderr",
     chunk: string,
-    providerCallId?: string,
+    providerCallId: string,
   ): void {
     this.emit("tool.output", {
       toolName,
       stream,
       chunk: boundedText(chunk).value,
-      ...(providerCallId ? { providerCallId } : {}),
+      providerCallId,
     });
   }
 

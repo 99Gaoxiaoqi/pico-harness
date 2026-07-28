@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
@@ -34,6 +33,7 @@ import type {
 } from "./session-runtime.js";
 import { normalizeSessionRuntimeStatePatch } from "./session-runtime.js";
 import {
+  deriveDurableRuntimeForkCheckpoint,
   globalSessionManager,
   type DurableSessionForkSnapshot,
   type SessionManager,
@@ -44,15 +44,22 @@ import type {
 } from "./session-fork-runtime-port.js";
 import { SessionForkRuntimeConflictError } from "./session-fork-runtime-port.js";
 import {
-  projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
 } from "./runtime-model-message.js";
-import { projectRuntimeSessionModelHistoryEntries } from "./session-runtime-projection.js";
+import {
+  projectRuntimeSessionForkSeedEntries,
+  type RuntimeSessionForkSeedEntry,
+} from "./session-runtime-projection.js";
+import {
+  assertDurableTranscriptEvent,
+  projectTranscriptEvents,
+  type DurableTranscriptEvent,
+} from "../presentation/transcript-event-store.js";
 import { decodeRuntimeEvent } from "../storage/runtime-event.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
-const FROZEN_FORK_BUNDLE_VERSION = 3 as const;
+const FROZEN_FORK_BUNDLE_VERSION = 5 as const;
 const FROZEN_FORK_BUNDLE_NAME = "runtime-fork.json";
 const FORK_SIDECARS_VERSION = 2 as const;
 const FORK_SIDECARS_NAME = "fork-sidecars.json";
@@ -71,7 +78,6 @@ export interface SessionForkServiceOptions {
   readonly journal?: StorageOperationJournal;
   readonly runtimeStore?: RuntimeEventStore;
   readonly fileHistoryBaseDir?: string;
-  readonly summaryIndexPath?: string;
   readonly hooks?: SessionForkServiceHooks;
   readonly createOperationId?: () => string;
   /** Runtime-owned fork lifecycle; keeps the coordinator independent of RuntimeRun. */
@@ -116,8 +122,7 @@ interface FrozenForkBundle {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly sourceCursor: ForkSourceCursor;
-  readonly messages: readonly Message[];
-  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
+  readonly seedEntries: readonly RuntimeSessionForkSeedEntry[];
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
@@ -140,7 +145,6 @@ export class SessionForkService {
   private readonly sessionManager: SessionManager;
   private readonly runtimeStore: RuntimeEventStore;
   private readonly fileHistoryBaseDir: string;
-  private readonly summaryIndexPath: string;
   private readonly hooks?: SessionForkServiceHooks;
   private readonly createOperationId: () => string;
   private readonly runtimePort: SessionForkRuntimePort;
@@ -160,8 +164,6 @@ export class SessionForkService {
     this.fileHistoryBaseDir =
       options.fileHistoryBaseDir ??
       (options.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir());
-    this.summaryIndexPath =
-      options.summaryIndexPath ?? join(this.workspacePaths.memory, "summaries.json");
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
     this.runtimePort = options.runtimePort;
@@ -182,6 +184,7 @@ export class SessionForkService {
     const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
       persistence: true,
       picoHome: this.picoHome,
+      runtimePort: this.runtimePort.engineRuntimePort,
     });
     const sourceRuntimeStore = source.runtimeEventStore;
     if (!sourceRuntimeStore) {
@@ -325,10 +328,6 @@ export class SessionForkService {
         operation.targetSessionId,
         this.fileHistoryBaseDir,
       );
-      new FileSessionSummaryStore(this.summaryIndexPath).cloneSession(
-        operation.sourceSessionId,
-        operation.targetSessionId,
-      );
     } catch (error) {
       throw new ForkOperationConflictError(
         `Fork sidecar 快照无法完整冻结: ${errorMessage(error)}`,
@@ -351,15 +350,11 @@ export class SessionForkService {
     prepared: ForkPreparedBundle,
     publication: ForkRuntimePublicationCapability,
   ): Promise<void> {
-    const { frozen, messages, historyEntries, modelCheckpoint } = await this.readRuntimePublication(
+    const { frozen, seedEntries, modelCheckpoint } = await this.readRuntimePublication(
       operation,
       prepared,
     );
-    const sourceThroughEventId = await resolveFrozenSourceThroughEventId(
-      this.runtimeStore,
-      frozen,
-      this.runtimePort,
-    );
+    const sourceThroughEventId = await resolveFrozenSourceThroughEventId(this.runtimeStore, frozen);
 
     await this.hooks?.beforeRuntimeBootstrap?.(operation);
     try {
@@ -373,8 +368,7 @@ export class SessionForkService {
         targetSessionId: operation.targetSessionId,
         operationId: operation.operationId,
         operationCreatedAt: operation.createdAt,
-        messages,
-        historyEntries,
+        seedEntries,
         ...(modelCheckpoint ? { modelCheckpoint } : {}),
         ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
         workDir: this.workDir,
@@ -407,18 +401,31 @@ export class SessionForkService {
     if (!(await this.runtimeStore.readSessionManifest(operation.targetSessionId))) return;
     const events = await this.runtimeStore.readSession(operation.targetSessionId);
     if (events.length === 0) return;
-    const { messages, historyEntries, modelCheckpoint } = await this.readRuntimePublication(
+    const { frozen, seedEntries, modelCheckpoint } = await this.readRuntimePublication(
       operation,
       prepared,
+    );
+    const runtimePatch = filteredRuntimePatch(
+      frozen,
+      operation.targetMode ?? "yolo",
+      operation.createdAt,
     );
     const expectedRunId = this.runtimePort.deriveBootstrapRunId({
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
       operationId: operation.operationId,
       operationCreatedAt: operation.createdAt,
-      messages,
-      historyEntries,
+      seedEntries,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
+      ...(runtimePatch
+        ? {
+            statePublication: {
+              patch: runtimePatch,
+              eventId: runtimeStateEventId(operation.operationId),
+              at: operation.createdAt,
+            },
+          }
+        : {}),
       workDir: this.workDir,
       runtimeAuthority: this.runtimeStore,
     });
@@ -440,21 +447,18 @@ export class SessionForkService {
     prepared: ForkPreparedBundle,
   ): Promise<{
     readonly frozen: FrozenForkBundle;
-    readonly messages: readonly Message[];
-    readonly historyEntries: readonly RuntimeModelHistoryEvent[];
+    readonly seedEntries: readonly RuntimeSessionForkSeedEntry[];
     readonly modelCheckpoint?: SessionForkModelCheckpoint;
   }> {
     const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
     await this.readSidecars(operation);
-    const messages = structuredClone(frozen.messages);
-    const historyEntries = structuredClone(frozen.historyEntries);
+    const seedEntries = structuredClone(frozen.seedEntries);
     const summary = frozen.modelCheckpoint
       ? structuredClone(frozen.modelCheckpoint.summary)
       : undefined;
     return {
       frozen,
-      messages,
-      historyEntries,
+      seedEntries,
       ...(frozen.modelCheckpoint && summary
         ? {
             modelCheckpoint: {
@@ -575,8 +579,7 @@ function createFrozenForkBundle(
     sourceSessionId: input.sourceSessionId,
     targetSessionId: input.targetSessionId,
     sourceCursor: structuredClone(snapshot.cursor),
-    messages: snapshot.hydration.messages.map(stripMessageUsage),
-    historyEntries: snapshot.runtimeHistoryEntries.map(stripRuntimeHistoryUsage),
+    seedEntries: snapshot.runtimeSeedEntries.map(stripForkSeedUsage),
     ...(snapshot.modelCheckpoint
       ? {
           modelCheckpoint: {
@@ -637,7 +640,7 @@ function filterForkSettings(
     forkFrom: sourceSessionId,
     provider: settings.provider,
     model: settings.model,
-    ...(settings.modelRouteId ? { modelRouteId: settings.modelRouteId } : {}),
+    modelRouteId: settings.modelRouteId,
     mode: targetMode,
     ...(targetMode === "plan" ? { prePlanMode: "yolo" as const } : {}),
     thinkingEffort: settings.thinkingEffort,
@@ -661,10 +664,26 @@ function stripRuntimeHistoryUsage(event: RuntimeModelHistoryEvent): RuntimeModel
     : copy;
 }
 
+function stripForkSeedUsage(entry: RuntimeSessionForkSeedEntry): RuntimeSessionForkSeedEntry {
+  return entry.kind === "model"
+    ? {
+        kind: "model",
+        sourceSequence: entry.sourceSequence,
+        event: stripRuntimeHistoryUsage(entry.event),
+      }
+    : structuredClone(entry);
+}
+
 function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
-  if (isRecord(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === 2)) {
+  if (
+    isRecord(value) &&
+    (value["schemaVersion"] === 1 ||
+      value["schemaVersion"] === 2 ||
+      value["schemaVersion"] === 3 ||
+      value["schemaVersion"] === 4)
+  ) {
     throw new Error(
-      `Frozen Runtime fork bundle v${String(value["schemaVersion"])} is no longer supported; recreate the fork from canonical history`,
+      `Frozen Runtime fork bundle v${String(value["schemaVersion"])} is no longer supported; recreate the fork from canonical Runtime facts`,
     );
   }
   if (
@@ -674,34 +693,38 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     typeof value["sourceSessionId"] !== "string" ||
     typeof value["targetSessionId"] !== "string" ||
     !isForkSourceCursor(value["sourceCursor"]) ||
-    !Array.isArray(value["messages"]) ||
-    !value["messages"].every(isMessageValue) ||
+    Object.hasOwn(value, "messages") ||
+    Object.hasOwn(value, "historyEntries") ||
     !isSessionForkModelCheckpoint(value["modelCheckpoint"]) ||
-    !Array.isArray(value["historyEntries"]) ||
+    !Array.isArray(value["seedEntries"]) ||
     (value["sourceTitle"] !== undefined && typeof value["sourceTitle"] !== "string")
   ) {
     throw new Error("Invalid frozen Runtime fork bundle");
   }
-  const historyEntries = parseFrozenRuntimeHistoryEntries(value["historyEntries"]);
+  assertExactKeys(value, [
+    "schemaVersion",
+    "operationId",
+    "sourceSessionId",
+    "targetSessionId",
+    "sourceCursor",
+    "seedEntries",
+    "modelCheckpoint",
+    "sourceTitle",
+    "settings",
+    "goal",
+  ]);
+  const seedEntries = parseFrozenRuntimeSeedEntries(value["seedEntries"]);
   if (
-    historyEntries.some((event) => event.sessionId !== value["sourceSessionId"]) ||
-    !isDeepStrictEqual(
-      historyEntries.map((event) => {
-        const message = projectRuntimeModelMessage(event);
-        if (!message) throw new Error(`Frozen Runtime event ${event.eventId} has no projection`);
-        return stripMessageUsage(message);
-      }),
-      value["messages"],
+    seedEntries.some(
+      (entry) => entry.kind === "model" && entry.event.sessionId !== value["sourceSessionId"],
     )
   ) {
-    throw new Error("Frozen Runtime v3 history does not match its Message projection");
+    throw new Error("Frozen Runtime v5 model seed belongs to another Session");
   }
   const modelCheckpoint = value["modelCheckpoint"];
-  if (
-    modelCheckpoint &&
-    modelCheckpoint.coveredMessageCount > (value["messages"] as unknown[]).length
-  ) {
-    throw new Error("Frozen Runtime fork checkpoint exceeds its transcript seed");
+  const modelEntryCount = seedEntries.filter((entry) => entry.kind === "model").length;
+  if (modelCheckpoint && modelCheckpoint.coveredMessageCount > modelEntryCount) {
+    throw new Error("Frozen Runtime fork checkpoint exceeds its model seed");
   }
 
   const hasSettings = value["settings"] !== undefined;
@@ -728,8 +751,7 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     sourceSessionId: value["sourceSessionId"],
     targetSessionId: value["targetSessionId"],
     sourceCursor: structuredClone(value["sourceCursor"]),
-    messages: structuredClone(value["messages"] as Message[]),
-    historyEntries,
+    seedEntries,
     ...(modelCheckpoint ? { modelCheckpoint: structuredClone(modelCheckpoint) } : {}),
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
@@ -737,15 +759,39 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
   };
 }
 
-function parseFrozenRuntimeHistoryEntries(value: unknown): RuntimeModelHistoryEvent[] {
-  if (!Array.isArray(value)) throw new Error("Frozen Runtime v3 history must be an array");
-  return value.map((item) => {
-    const event = decodeRuntimeEvent(structuredClone(item));
-    if (!runtimeEventHasModelHistoryEntry(event)) {
-      throw new Error(`Frozen Runtime event ${event.eventId} is not model-visible`);
+function parseFrozenRuntimeSeedEntries(value: unknown): RuntimeSessionForkSeedEntry[] {
+  if (!Array.isArray(value)) throw new Error("Frozen Runtime v5 seed must be an array");
+  let previousSourceSequence = 0;
+  const transcriptEvents: DurableTranscriptEvent[] = [];
+  const parsed = value.map((item, index): RuntimeSessionForkSeedEntry => {
+    if (!isRecord(item)) throw new Error(`Frozen Runtime seed ${index} must be an object`);
+    assertExactKeys(item, ["kind", "sourceSequence", "event"]);
+    const sourceSequence = item["sourceSequence"];
+    if (
+      typeof sourceSequence !== "number" ||
+      !Number.isSafeInteger(sourceSequence) ||
+      sourceSequence <= previousSourceSequence
+    ) {
+      throw new Error("Frozen Runtime seed source sequences must be strictly increasing");
     }
-    return event;
+    previousSourceSequence = sourceSequence;
+    if (item["kind"] === "model") {
+      const event = decodeRuntimeEvent(structuredClone(item["event"]));
+      if (!runtimeEventHasModelHistoryEntry(event)) {
+        throw new Error(`Frozen Runtime event ${event.eventId} is not model-visible`);
+      }
+      return { kind: "model", sourceSequence, event };
+    }
+    if (item["kind"] === "transcript") {
+      const event = structuredClone(item["event"]);
+      assertDurableTranscriptEvent(event);
+      transcriptEvents.push(event);
+      return { kind: "transcript", sourceSequence, event };
+    }
+    throw new Error(`Frozen Runtime seed ${index} has an invalid kind`);
   });
+  projectTranscriptEvents(transcriptEvents);
+  return parsed;
 }
 
 function parseForkSidecarsBundle(value: unknown): ForkSidecarsBundle {
@@ -817,19 +863,21 @@ function isMessageValue(value: unknown): value is Message {
 function isSessionForkModelCheckpoint(
   value: unknown,
 ): value is SessionForkModelCheckpoint | undefined {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  assertExactKeys(value, ["coveredMessageCount", "summary"]);
   return (
-    value === undefined ||
-    (isRecord(value) &&
-      typeof value["coveredMessageCount"] === "number" &&
-      Number.isSafeInteger(value["coveredMessageCount"]) &&
-      value["coveredMessageCount"] > 0 &&
-      isMessageValue(value["summary"]))
+    typeof value["coveredMessageCount"] === "number" &&
+    Number.isSafeInteger(value["coveredMessageCount"]) &&
+    value["coveredMessageCount"] > 0 &&
+    isMessageValue(value["summary"])
   );
 }
 
 function isForkSourceCursor(value: unknown): value is ForkSourceCursor {
+  if (!isRecord(value)) return false;
+  assertExactKeys(value, ["logId", "seq", "epoch", "eventId"]);
   return (
-    isRecord(value) &&
     typeof value["logId"] === "string" &&
     isNonNegativeInteger(value["seq"]) &&
     isNonNegativeInteger(value["epoch"]) &&
@@ -868,7 +916,6 @@ function runtimeStateEventId(operationId: string): string {
 async function resolveFrozenSourceThroughEventId(
   store: RuntimeEventStore,
   frozen: FrozenForkBundle,
-  runtimePort: SessionForkRuntimePort,
 ): Promise<string | undefined> {
   const entries = await store.readSessionEntries(frozen.sourceSessionId);
   const cursorEntry = entries.find((entry) => entry.sequence === frozen.sourceCursor.seq);
@@ -884,24 +931,27 @@ async function resolveFrozenSourceThroughEventId(
   }
   const bounded = entries.filter((entry) => entry.sequence <= frozen.sourceCursor.seq);
   const boundedEvents = bounded.map(({ event }) => event);
-  const projected = runtimePort.projectModelMessages(boundedEvents);
-  const messages = projected.map(({ message }) => stripMessageUsage(message));
-  if (!isDeepStrictEqual(messages, frozen.messages)) {
+  const seedEntries = projectRuntimeSessionForkSeedEntries(bounded).map(stripForkSeedUsage);
+  if (!isDeepStrictEqual(seedEntries, frozen.seedEntries)) {
     throw new ForkOperationConflictError(
-      "Frozen source messages do not match the RuntimeEvent cursor",
+      "Frozen source canonical seed does not match the RuntimeEvent cursor",
       "source_cursor_changed",
     );
   }
-  const historyEntries = projectRuntimeSessionModelHistoryEntries(boundedEvents).map(({ event }) =>
-    stripRuntimeHistoryUsage(event),
-  );
-  if (!isDeepStrictEqual(historyEntries, frozen.historyEntries)) {
+  const checkpoint = deriveDurableRuntimeForkCheckpoint(boundedEvents);
+  const normalizedCheckpoint = checkpoint
+    ? {
+        coveredMessageCount: checkpoint.coveredMessageCount,
+        summary: stripMessageUsage(checkpoint.summary),
+      }
+    : undefined;
+  if (!isDeepStrictEqual(normalizedCheckpoint, frozen.modelCheckpoint)) {
     throw new ForkOperationConflictError(
-      "Frozen source canonical history does not match the RuntimeEvent cursor",
+      "Frozen source checkpoint does not match the RuntimeEvent cursor",
       "source_cursor_changed",
     );
   }
-  return projected.at(-1)?.eventId;
+  return seedEntries.findLast((entry) => entry.kind === "model")?.event.eventId;
 }
 
 function parseForkCreatedAt(createdAt: string): number {
@@ -927,6 +977,14 @@ async function assertTargetNotPublished(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
+  const allowedKeys = new Set(allowed);
+  const unexpected = Object.keys(value).find((key) => !allowedKeys.has(key));
+  if (unexpected !== undefined) {
+    throw new Error(`Frozen Runtime payload contains unsupported field ${unexpected}`);
+  }
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

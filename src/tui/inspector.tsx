@@ -7,7 +7,7 @@ import {
 } from "../context/evidence-archive.js";
 import type { RuntimeEvidenceReference } from "../engine/tool-result-contract.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import type { TuiToolCallProjection } from "./tui-event-store.js";
+import type { TranscriptToolCallProjection as TuiToolCallProjection } from "../presentation/transcript-event-store.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { truncateTerminalText } from "./terminal-width.js";
 
@@ -25,8 +25,8 @@ export interface InlineInspectorSource {
 }
 
 export interface EvidenceInspectorContext {
-  /** 宿主当前 session，不从 URI 推断授权边界。 */
-  expectedSessionId: string;
+  /** 拥有当前 canonical ToolResult 的 session；fork 可引用 source-session Evidence。 */
+  currentSessionId: string;
   /** 由当前 workspace 推导的 Evidence 根目录。 */
   evidenceBaseDir: string;
 }
@@ -36,7 +36,7 @@ export interface EvidenceInspectorSource {
   title: string;
   uri: string;
   ref: RuntimeEvidenceReference;
-  expectedSessionId: string;
+  currentSessionId: string;
   evidenceBaseDir: string;
 }
 
@@ -304,12 +304,12 @@ export function createEvidenceInspectorContext(input: {
 }): EvidenceInspectorContext {
   if (!input.sessionId.trim()) throw new Error("Inspector sessionId must not be empty");
   return Object.freeze({
-    expectedSessionId: input.sessionId,
+    currentSessionId: input.sessionId,
     evidenceBaseDir: input.evidenceBaseDir ?? resolvePicoPaths(input.workDir).workspace.evidence,
   });
 }
 
-export function createEvidenceInspectorSource(input: {
+function createEvidenceInspectorSource(input: {
   title: string;
   uri: string;
   ref: RuntimeEvidenceReference;
@@ -325,7 +325,6 @@ export function createEvidenceInspectorSource(input: {
     return undefined;
   }
   if (
-    parsed.sessionId !== input.context.expectedSessionId ||
     parsed.sessionId !== input.ref.sessionId ||
     parsed.contentHash !== input.ref.contentHash ||
     parsed.kind !== input.ref.kind ||
@@ -338,7 +337,7 @@ export function createEvidenceInspectorSource(input: {
     title: input.title,
     uri: input.uri,
     ref: Object.freeze({ ...input.ref }),
-    expectedSessionId: input.context.expectedSessionId,
+    currentSessionId: input.context.currentSessionId,
     evidenceBaseDir: input.context.evidenceBaseDir,
   });
 }
@@ -394,9 +393,6 @@ export async function readInspectorPage(
     };
   }
 
-  if (source.ref.sessionId !== source.expectedSessionId) {
-    throw new Error("Evidence reference does not belong to the current Inspector session");
-  }
   const parsed = parseEvidenceUri(source.uri);
   if (
     parsed.sessionId !== source.ref.sessionId ||
@@ -407,7 +403,10 @@ export async function readInspectorPage(
   }
   const page = await new EvidenceArchive({
     baseDir: source.evidenceBaseDir,
-  }).readRuntimeToolOutputPage(source.ref, { offsetBytes, limitBytes });
+  }).readEvidencePage(source.ref, { offsetBytes, limitBytes });
+  if (page.kind !== "tool-exchange") {
+    throw new Error("Evidence reference is not a ToolResult exchange");
+  }
   return {
     title: source.title,
     content: page.content,

@@ -38,7 +38,6 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
     [`task-runs/${taskRunDigest}/manifest.json`, '{"taskRunId":"task-1"}\n'],
     ["evidence/tool.json", '{"ok":true}\n'],
     ["traces/run.jsonl", '{"event":"finish"}\n'],
-    ["memory/summaries/session.json", '{"summary":"done"}\n'],
   ]);
   const excludedFiles = new Map([
     [".storage/layout.json", layoutMarker],
@@ -57,7 +56,6 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
     ["evidence/runtime.sqlite", "not exported\n"],
     ["evidence/evidence.sqlite-journal", "rollback journal\n"],
     ["traces/trace.db-journal", "rollback journal\n"],
-    ["memory/summaries/memory.db-journal", "rollback journal\n"],
     ["traces/run.sqlite-wal", "not exported either\n"],
   ]);
   for (const [relativePath, content] of [...portableFiles, ...excludedFiles]) {
@@ -107,11 +105,7 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
     reason: "database_or_journal_file",
     sha256: null,
   });
-  for (const relativePath of [
-    "evidence/evidence.sqlite-journal",
-    "traces/trace.db-journal",
-    "memory/summaries/memory.db-journal",
-  ]) {
+  for (const relativePath of ["evidence/evidence.sqlite-journal", "traces/trace.db-journal"]) {
     assert.deepEqual(pickEntry(byPath, relativePath), {
       classification: "protected",
       reason: "database_or_journal_file",
@@ -422,17 +416,11 @@ async function writeFixtureFile(
 
 function expectedPortableReason(
   relativePath: string,
-):
-  | "canonical_runtime_history"
-  | "durable_task_history"
-  | "portable_evidence"
-  | "portable_trace"
-  | "portable_memory_summary" {
+): "canonical_runtime_history" | "durable_task_history" | "portable_evidence" | "portable_trace" {
   if (relativePath.startsWith("sessions/")) return "canonical_runtime_history";
   if (relativePath.startsWith("task-runs/")) return "durable_task_history";
   if (relativePath.startsWith("evidence/")) return "portable_evidence";
-  if (relativePath.startsWith("traces/")) return "portable_trace";
-  return "portable_memory_summary";
+  return "portable_trace";
 }
 
 function pickEntry(

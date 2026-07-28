@@ -15,6 +15,7 @@ import {
   createRuntimeNotification,
   isEphemeralRuntimeNotificationTopic,
   isRunLiveRuntimeNotification,
+  MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES,
   parseDesktopRuntimeResult,
   RuntimeNotificationBuffer,
 } from "../../src/daemon/protocol.js";
@@ -378,6 +379,159 @@ test("session transcript rejects invalid durable reasoning identities", () => {
         items: [{ ...result.items[1], runId: 123, turnId: { invalid: true } }],
       }),
     /runId|turnId/u,
+  );
+});
+
+test("session transcript accepts Evidence v2 and rejects legacy v1 refs", () => {
+  const contentHash = "a".repeat(64);
+  const evidence = {
+    uri: `pico://evidence/session-1/${contentHash}`,
+    ref: {
+      schemaVersion: 2,
+      contentHash,
+      sessionId: "session-1",
+      kind: "tool-exchange",
+    },
+  };
+  const result = {
+    session: {
+      sessionId: "session-1",
+      workspacePath: "/workspace",
+      title: "Session",
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    items: [
+      {
+        id: "tool-1",
+        kind: "tool",
+        name: "read_file",
+        args: "{}",
+        status: "success",
+        result: {
+          version: 1,
+          toolCallId: "call-1",
+          toolName: "read_file",
+          status: "succeeded",
+          rawSizeBytes: 100_000,
+          sha256: "b".repeat(64),
+          deliveryTruncated: false,
+          projection: {
+            version: 1,
+            mode: "preview",
+            text: "bounded",
+            strategy: "head-tail",
+            truncated: true,
+          },
+          evidence,
+        },
+      },
+    ],
+    queuedInputs: [],
+    revision: "revision-1",
+  };
+
+  assert.deepEqual(parseDesktopRuntimeResult("session.transcript", result), result);
+  const boundaryResult = {
+    ...result,
+    items: [
+      {
+        ...result.items[0],
+        result: {
+          ...result.items[0]!.result,
+          projection: {
+            ...result.items[0]!.result.projection,
+            text: "x".repeat(MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES),
+          },
+        },
+      },
+    ],
+  };
+  assert.deepEqual(parseDesktopRuntimeResult("session.transcript", boundaryResult), boundaryResult);
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        items: [
+          {
+            ...result.items[0],
+            result: {
+              ...result.items[0]!.result,
+              evidence: { ...evidence, ref: { ...evidence.ref, schemaVersion: 1 } },
+            },
+          },
+        ],
+      }),
+    /schemaVersion/u,
+  );
+
+  const validEnvelope = result.items[0]!.result;
+  const invalidEnvelopes = [
+    { ...validEnvelope, rawOutput: "must not cross the renderer boundary" },
+    { ...validEnvelope, body: { content: "must not cross the renderer boundary" } },
+    {
+      ...validEnvelope,
+      projection: {
+        ...validEnvelope.projection,
+        rawOutput: "must not cross the renderer boundary",
+      },
+    },
+    {
+      ...validEnvelope,
+      evidence: {
+        ...evidence,
+        ref: { ...evidence.ref, absolutePath: "/private/evidence/blob" },
+      },
+    },
+    { ...validEnvelope, status: "legacy-success" },
+    { ...validEnvelope, rawSizeBytes: -1 },
+    { ...validEnvelope, sha256: "not-a-sha256" },
+    {
+      ...validEnvelope,
+      projection: { ...validEnvelope.projection, mode: "legacy-preview" },
+    },
+    {
+      ...validEnvelope,
+      projection: { ...validEnvelope.projection, strategy: 42 },
+    },
+    {
+      ...validEnvelope,
+      projection: {
+        ...validEnvelope.projection,
+        text: "x".repeat(MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES + 1),
+      },
+    },
+    {
+      ...validEnvelope,
+      projection: {
+        ...validEnvelope.projection,
+        text: "你".repeat(Math.floor(MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES / 3) + 1),
+      },
+    },
+  ];
+  for (const invalidEnvelope of invalidEnvelopes) {
+    assert.throws(
+      () =>
+        parseDesktopRuntimeResult("session.transcript", {
+          ...result,
+          items: [{ ...result.items[0], result: invalidEnvelope }],
+        }),
+      /不允许字段|status|rawSizeBytes|sha256|projection/u,
+    );
+  }
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        items: [
+          {
+            ...result.items[0],
+            rawOutput: "must not cross beside the canonical envelope",
+          },
+        ],
+      }),
+    /不允许字段 rawOutput/u,
   );
 });
 

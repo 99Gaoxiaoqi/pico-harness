@@ -24,7 +24,7 @@ import {
   type RuntimeToolResultEvidenceManifestV2,
   type SubagentReportEvidenceManifestV2,
 } from "../../src/context/evidence-archive.js";
-import type { RuntimeEvidenceReference } from "../../src/runtime/runtime-event.js";
+import type { RuntimeEvidenceReference } from "../../src/engine/tool-result-contract.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
@@ -118,7 +118,7 @@ test("Subagent reports use the same Evidence URI reader and immutable blob CAS",
   const parsed = parseEvidenceUri(uri);
 
   assert.deepEqual(parsed, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     contentHash: reference.contentHash,
     sessionId: reference.sessionId,
   });
@@ -142,7 +142,7 @@ test("Subagent reports use the same Evidence URI reader and immutable blob CAS",
   );
 });
 
-test("Runtime Evidence rejects legacy v1 manifests while compaction Evidence v1 remains readable", async (context) => {
+test("Runtime Evidence rejects legacy v1 manifests", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-v1-");
   const sessionId = "legacy/session";
   const contentHash = "a".repeat(64);
@@ -176,7 +176,7 @@ test("Runtime Evidence rejects legacy v1 manifests while compaction Evidence v1 
     { encoding: "utf8", mode: 0o600 },
   );
   const reference: RuntimeEvidenceReference = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     contentHash,
     sessionId,
     kind: "tool-exchange",
@@ -186,19 +186,6 @@ test("Runtime Evidence rejects legacy v1 manifests while compaction Evidence v1 
     fixture.archive.readRuntimeToolExchange(reference),
     /invalid schema version/u,
   );
-
-  const compacted = await fixture.archive.archiveToolExchanges("compaction-session", [
-    {
-      role: "assistant",
-      content: "",
-      toolCalls: [{ id: "tool-call", name: "bash", arguments: '{"cmd":"pwd"}' }],
-    },
-    { role: "user", content: "/workspace", toolCallId: "tool-call" },
-  ]);
-  assert.ok(compacted);
-  const compactedManifest = await fixture.archive.read(compacted);
-  assert.equal(compactedManifest.schemaVersion, 1);
-  assert.equal(compactedManifest.content.exchanges[0]?.results[0]?.content, "/workspace");
 });
 
 test("Runtime Evidence rejects manifest and blob tampering", async (context) => {
@@ -390,7 +377,7 @@ test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (conte
   });
 
   await assert.rejects(
-    fixture.archive.readRuntimeToolOutputPage(reference, {
+    fixture.archive.readEvidencePage(reference, {
       offsetBytes: 1,
       limitBytes: 4,
     }),
@@ -398,12 +385,12 @@ test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (conte
   );
   for (const limitBytes of [1, 2, 3]) {
     await assert.rejects(
-      fixture.archive.readRuntimeToolOutputPage(reference, { limitBytes }),
+      fixture.archive.readEvidencePage(reference, { limitBytes }),
       /cannot contain the next complete UTF-8 code point/u,
     );
   }
 
-  const emoji = await fixture.archive.readRuntimeToolOutputPage(reference, {
+  const emoji = await fixture.archive.readEvidencePage(reference, {
     offsetBytes: 0,
     limitBytes: 4,
   });
@@ -411,7 +398,7 @@ test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (conte
   assert.equal(Buffer.byteLength(emoji.content, "utf8"), 4);
   assert.equal(emoji.nextOffsetBytes, 4);
 
-  const ascii = await fixture.archive.readRuntimeToolOutputPage(reference, {
+  const ascii = await fixture.archive.readEvidencePage(reference, {
     offsetBytes: 4,
     limitBytes: 2,
   });
@@ -438,7 +425,7 @@ test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates c
   const reader = new EvidenceArchive({ baseDir: fixture.evidenceRoot });
 
   const beforeFirst = tracker.bytesRead;
-  const first = await reader.readRuntimeToolOutputPage(reference, {
+  const first = await reader.readEvidencePage(reference, {
     offsetBytes: 0,
     limitBytes: 7,
   });
@@ -447,7 +434,7 @@ test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates c
   assert.equal(firstReadBytes, rawOutput.length + 8);
 
   const beforeSecond = tracker.bytesRead;
-  const second = await reader.readRuntimeToolOutputPage(reference, {
+  const second = await reader.readEvidencePage(reference, {
     offsetBytes: 7,
     limitBytes: 7,
   });
@@ -458,7 +445,7 @@ test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates c
   await writeFile(blobPath, "b".repeat(rawOutput.length), "utf8");
   const beforeTamper = tracker.bytesRead;
   await assert.rejects(
-    reader.readRuntimeToolOutputPage(reference, {
+    reader.readEvidencePage(reference, {
       offsetBytes: 14,
       limitBytes: 7,
     }),
@@ -480,7 +467,7 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   });
   const ref = formatEvidenceUri(reference);
   assert.deepEqual(parseEvidenceUri(ref), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     contentHash: reference.contentHash,
     sessionId: reference.sessionId,
   });
@@ -489,7 +476,7 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   let recovered = "";
   const totalBytes = Buffer.byteLength(rawOutput, "utf8");
   while (offsetBytes < totalBytes) {
-    const page = await fixture.archive.readRuntimeToolOutputPage(reference, {
+    const page = await fixture.archive.readEvidencePage(reference, {
       offsetBytes,
       limitBytes: 5,
     });

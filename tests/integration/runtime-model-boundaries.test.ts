@@ -9,9 +9,9 @@ import { DefaultHookExecutor } from "../../src/hooks/executors/index.js";
 import type { HookInput, ResolvedHookHandler } from "../../src/hooks/types.js";
 import { CostTracker } from "../../src/observability/tracker.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
-import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
-import { projectRuntimeSessionUsage } from "../../src/runtime/runtime-session-projection.js";
+import { projectRuntimeSessionUsage } from "../../src/engine/session-runtime-projection.js";
 
 test("CostTracker preserves provider retry classification", () => {
   const retryable = new Error("provider-specific retry");

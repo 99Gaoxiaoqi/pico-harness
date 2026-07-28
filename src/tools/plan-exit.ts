@@ -18,7 +18,7 @@
 // setExitCallback 注入,使工具与 engine 彻底解耦。
 
 import { randomUUID } from "node:crypto";
-import type { BaseTool } from "./registry.js";
+import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
@@ -100,7 +100,7 @@ export class ExitPlanModeTool implements BaseTool {
     return ToolAccessesNs.all();
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     // 参数无业务用途,但延迟解析以防模型误传;非法 JSON 直接忽略(无参工具容错)
     if (args.trim() !== "") {
       try {
@@ -119,6 +119,9 @@ export class ExitPlanModeTool implements BaseTool {
     if (!approval) {
       throw new Error("exit_plan_mode 未配置宿主 ApprovalManager，已安全拒绝审批");
     }
+    if (!context?.toolCallId) {
+      throw new Error("exit_plan_mode 缺少 Provider toolCallId，已安全拒绝审批");
+    }
 
     // 2. 提交审批:plan 内容作为 diff 展示给用户(用户据此决定 approve/reject/modify)
     const taskId = `exit_plan_${Date.now().toString(36)}_${randomUUID()}`;
@@ -129,6 +132,7 @@ export class ExitPlanModeTool implements BaseTool {
       this.notify,
       plan,
       this.abortSignal,
+      { providerCallId: context.toolCallId },
     );
     this.abortSignal?.throwIfAborted();
 

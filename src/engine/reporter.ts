@@ -29,8 +29,8 @@ export interface SubagentActivityEvent {
   task: string;
   status: SubagentActivityStatus;
   agentName?: string;
-  mode?: "explore" | "worker";
-  completionPolicy?: "required" | "optional" | "detached";
+  mode: "explore" | "worker";
+  completionPolicy: "required" | "optional" | "detached";
   currentAction?: string;
   summary?: string;
   requestedModelRoute?: string;
@@ -54,9 +54,7 @@ export type SubagentTraceEvent =
       activityId: string;
       traceId: string;
       type: "tool.completed";
-      result: string;
-      isError: boolean;
-      truncated?: boolean;
+      result: ToolResultEnvelope;
     };
 
 /** Agent 引擎向外界输出信息的规范 */
@@ -66,11 +64,8 @@ export interface Reporter {
   /** Provider 调用结束时收口临时推理状态；不影响已返回的 reasoning 摘要。 */
   onThinkingEnd?(): void;
   /** 当模型决定调用工具时调用 */
-  /**
-   * providerCallId 是 provider 响应内的关联键，跨轮可能重复。
-   * 为兼容旧 Reporter 调用暂时可选；新执行层应始终传入 provider ToolCall.id。
-   */
-  onToolCall(toolName: string, args: string, providerCallId?: string): void;
+  /** providerCallId 是当前 provider 响应内的强关联键，不能按工具名猜测。 */
+  onToolCall(toolName: string, args: string, providerCallId: string): void;
   /** canonical ToolResult 持久化完成后，以有界结构化投影通知宿主。 */
   onToolResult(result: ToolResultEnvelope): void;
   /** 工具执行期间的增量输出；当前主要由前台 Bash 提供。 */
@@ -78,7 +73,7 @@ export interface Reporter {
     toolName: string,
     stream: "stdout" | "stderr",
     chunk: string,
-    providerCallId?: string,
+    providerCallId: string,
   ): void;
   /** 子代理活动的可替换快照，用于宿主展示并行 worker 进度。 */
   onSubagentActivity?(activity: SubagentActivityEvent): void;

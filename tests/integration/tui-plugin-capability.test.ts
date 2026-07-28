@@ -18,7 +18,7 @@ import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
 test("TUI forwards the exact host capability registry into AgentRuntime", async () => {
   const capabilityRegistry = new PluginCapabilityRegistry();
-  const reporter = new TuiReporter(() => undefined);
+  const reporter = new TuiReporter();
   let captured: RunAgentCliDependencies | undefined;
 
   await runTuiAgentPrompt(
@@ -26,6 +26,7 @@ test("TUI forwards the exact host capability registry into AgentRuntime", async 
       prompt: "hello",
       dir: "/tmp/tui-plugin-capability",
       sessionSelection: { mode: "new", sessionId: "tui-plugin-capability" },
+      modelRouteId: "test/test",
     },
     {
       reporter,

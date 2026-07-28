@@ -146,7 +146,7 @@ import {
 } from "../runtime/session-runtime.js";
 import { createTuiTerminalGridSession } from "./terminal-grid.js";
 import { hydrateTuiReporter } from "./session-hydration.js";
-import { projectTuiEntriesForRendering } from "./tui-event-store.js";
+import { projectTranscriptEntriesForRendering as projectTuiEntriesForRendering } from "../presentation/transcript-event-store.js";
 import { createSessionTranscriptSink } from "../presentation/transcript-durability.js";
 import { AskUserHandler } from "../tools/ask-user.js";
 import { bindAskUserDialogs } from "./ask-user-dialog.js";
@@ -184,8 +184,9 @@ import {
   type PluginCapabilityRegistry,
 } from "../plugins/plugin-capability.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
+import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 
 export interface ReplOptions {
@@ -966,7 +967,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       const lease = await globalSessionManager.getOrCreatePinned(
         selection.sessionId,
         opts.workDir,
-        { persistence: true },
+        { persistence: true, runtimePort: createEngineRuntimePort() },
       );
       try {
         const session = lease.session;
@@ -1364,7 +1365,7 @@ export async function startTuiRepl(
         const sourceLease = await globalSessionManager.getOrCreatePinned(
           selection.sourceSessionId,
           opts.workDir,
-          { persistence: true },
+          { persistence: true, runtimePort: createEngineRuntimePort() },
         );
         try {
           const sourceCapability = sourceLease.session.runtimeEventCapability;
@@ -1403,7 +1404,7 @@ export async function startTuiRepl(
     const sessionLease: SessionManagerLease = await globalSessionManager.getOrCreatePinned(
       selection.sessionId,
       opts.workDir,
-      { persistence: true },
+      { persistence: true, runtimePort: createEngineRuntimePort() },
     );
     const session = sessionLease.session;
     let runtimeState: TuiRuntimeState | undefined;
@@ -1425,8 +1426,7 @@ export async function startTuiRepl(
       // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
       const hydration = await session.readHydrationSnapshot();
       const restoredSettings = hydration.runtime.settings;
-      // 已有 route ID 必须精确恢复；真正没有 route ID 的 legacy session
-      // 只有在 provider + model 唯一匹配时才会迁移，避免跨 Provider 静默切换。
+      // 已持久化的 route ID 必须精确恢复，避免按 model 名跨 Provider 猜测。
       const initialRoute = resolveTuiStartupModelRoute(bundleModelRouter, restoredSettings, {
         cliModel: opts.model,
         modelExplicit: opts.modelExplicit,
@@ -1607,7 +1607,7 @@ export async function startTuiRepl(
       const scheduleProjectionUpdate = createTuiUpdateScheduler((next: TuiProjection) => {
         if (activeBundle?.reporter === reporterRef.current) setProjection(next);
       }, 33);
-      const reporter = new TuiReporter(() => undefined, [], {
+      const reporter = new TuiReporter({
         durableTranscriptSink: createSessionTranscriptSink(session),
         durableTranscriptSequence: hydration.transcriptEvents.reduce(
           (max, event) => Math.max(max, event.sequence),

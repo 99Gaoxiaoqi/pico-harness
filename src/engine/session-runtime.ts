@@ -3,11 +3,11 @@ import type { ProviderKind } from "../provider/factory.js";
 import type { Message } from "../schema/message.js";
 import type { Goal, GoalManagerSnapshot, GoalStatus } from "./goal-manager.js";
 import type { SessionIdentity } from "./session-identity.js";
-import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 /** Session runtime-state event schema version. */
-export const SESSION_RUNTIME_STATE_VERSION = 1 as const;
+export const SESSION_RUNTIME_STATE_VERSION = 2 as const;
 
 export type PersistedInteractionMode = "default" | "plan" | "auto" | "yolo";
 
@@ -19,10 +19,10 @@ export interface PersistedSessionSettings {
   forkFrom?: string;
   provider: ProviderKind;
   model: string;
-  modelRouteId?: string;
+  modelRouteId: string;
   mode: PersistedInteractionMode;
   prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
-  /** Current model reasoning level. Field name is retained for old session compatibility. */
+  /** Current model reasoning level. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
   additionalDirectories: readonly string[];
@@ -53,15 +53,9 @@ export interface SessionUsageSnapshot {
 export interface SessionRuntimeStatePatch {
   settings?: PersistedSessionSettings;
   goal?: GoalManagerSnapshot;
-  usage?: SessionUsageSnapshot;
 }
 
-/** 新写入只允许设置与 Goal；usage 仅供 decoder 读取旧累计快照。 */
-export interface SessionRuntimeStateWritePatch {
-  settings?: PersistedSessionSettings;
-  goal?: GoalManagerSnapshot;
-  usage?: never;
-}
+export type SessionRuntimeStateWritePatch = SessionRuntimeStatePatch;
 
 export interface SessionRuntimeStateSnapshot {
   stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
@@ -85,7 +79,7 @@ export interface SessionHydrationSnapshot {
   /** Effective message positions in the canonical RuntimeEvent sequence. */
   messageSequences: readonly number[];
   /** RuntimeEvent 账本中的结构化 Transcript 事件，由共享 projector 重放。 */
-  transcriptEvents: readonly TranscriptEvent[];
+  transcriptEvents: readonly DurableTranscriptEvent[];
   /** RuntimeEvent sequence for each transcriptEvents entry, aligned by index. */
   transcriptEventSequences: readonly number[];
   /** Active-branch ToolResult facts, already reduced to the bounded host envelope. */
@@ -130,7 +124,7 @@ export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
 export function normalizeSessionRuntimeStatePatch(
   value: unknown,
 ): SessionRuntimeStatePatch | undefined {
-  if (!isRecord(value)) return undefined;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["settings", "goal"])) return undefined;
 
   const patch: SessionRuntimeStatePatch = {};
   let sections = 0;
@@ -147,27 +141,13 @@ export function normalizeSessionRuntimeStatePatch(
     patch.goal = goal;
     sections++;
   }
-  if ("usage" in value) {
-    const usage = normalizeSessionUsageSnapshot(value["usage"]);
-    if (!usage) return undefined;
-    patch.usage = usage;
-    sections++;
-  }
-
   return sections > 0 ? patch : undefined;
 }
 
-/** Writer boundary: old usage sections remain decodable but cannot be appended again. */
 export function normalizeSessionRuntimeStateWritePatch(
   value: unknown,
 ): SessionRuntimeStateWritePatch | undefined {
-  if (!isRecord(value) || "usage" in value) return undefined;
-  const patch = normalizeSessionRuntimeStatePatch(value);
-  if (!patch) return undefined;
-  return {
-    ...(patch.settings ? { settings: patch.settings } : {}),
-    ...(patch.goal ? { goal: patch.goal } : {}),
-  };
+  return normalizeSessionRuntimeStatePatch(value);
 }
 
 /** runtime_state 中 Goal section 的唯一入口校验。 */
@@ -197,7 +177,23 @@ export function normalizeGoalManagerSnapshot(value: unknown): GoalManagerSnapsho
 }
 
 function normalizePersistedSessionSettings(value: unknown): PersistedSessionSettings | undefined {
-  if (!isRecord(value)) return undefined;
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "title",
+      "forkFrom",
+      "provider",
+      "model",
+      "modelRouteId",
+      "mode",
+      "prePlanMode",
+      "thinkingEffort",
+      "thinkingEffortExplicit",
+      "additionalDirectories",
+    ])
+  ) {
+    return undefined;
+  }
   const provider = value["provider"];
   const model = value["model"];
   const mode = value["mode"];
@@ -220,7 +216,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   ) {
     return undefined;
   }
-  if (modelRouteId !== undefined && typeof modelRouteId !== "string") return undefined;
+  if (!isModelRouteId(modelRouteId)) return undefined;
   if (title !== undefined && !isSessionTitle(title)) return undefined;
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
@@ -231,7 +227,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     ...(forkFrom !== undefined ? { forkFrom } : {}),
     provider,
     model,
-    ...(modelRouteId !== undefined ? { modelRouteId } : {}),
+    modelRouteId,
     mode,
     ...(prePlanMode !== undefined ? { prePlanMode } : {}),
     thinkingEffort,
@@ -248,7 +244,15 @@ function isNonBlankString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | undefined {
+function isModelRouteId(value: unknown): value is string {
+  return typeof value === "string" && value === value.trim() && /^[^/\s]+\/\S.*$/u.test(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+export function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | undefined {
   if (!isRecord(value)) return undefined;
   const tokenKeys = [
     "totalPromptTokens",
@@ -265,8 +269,6 @@ function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | u
   const lastCostStatus = value["lastCostStatus"];
   if (lastCostStatus !== null && !isCostStatus(lastCostStatus)) return undefined;
 
-  const legacyHadUsage =
-    (value["totalPromptTokens"] as number) > 0 || (value["totalCompletionTokens"] as number) > 0;
   const reportKeys = [
     "totalProviderCalls",
     "totalUsageReports",
@@ -279,7 +281,7 @@ function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | u
     "totalUnknownCostReports",
   ] as const;
   for (const key of reportKeys) {
-    if (value[key] !== undefined && !isNonNegativeInteger(value[key])) return undefined;
+    if (!isNonNegativeInteger(value[key])) return undefined;
   }
 
   return {
@@ -291,23 +293,15 @@ function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | u
     totalReasoningTokens: value["totalReasoningTokens"] as number,
     totalCostCNY: value["totalCostCNY"] as number,
     lastCostStatus,
-    totalProviderCalls:
-      (value["totalProviderCalls"] as number | undefined) ?? (legacyHadUsage ? 1 : 0),
-    totalUsageReports:
-      (value["totalUsageReports"] as number | undefined) ?? (legacyHadUsage ? 1 : 0),
-    totalInputReports: (value["totalInputReports"] as number | undefined) ?? 0,
-    totalCacheReadReports: (value["totalCacheReadReports"] as number | undefined) ?? 0,
-    totalCacheWriteReports: (value["totalCacheWriteReports"] as number | undefined) ?? 0,
-    totalReasoningReports: (value["totalReasoningReports"] as number | undefined) ?? 0,
-    totalEstimatedCostReports:
-      (value["totalEstimatedCostReports"] as number | undefined) ??
-      (lastCostStatus === "estimated" && legacyHadUsage ? 1 : 0),
-    totalIncludedCostReports:
-      (value["totalIncludedCostReports"] as number | undefined) ??
-      (lastCostStatus === "included" && legacyHadUsage ? 1 : 0),
-    totalUnknownCostReports:
-      (value["totalUnknownCostReports"] as number | undefined) ??
-      (lastCostStatus === "unknown" && legacyHadUsage ? 1 : 0),
+    totalProviderCalls: value["totalProviderCalls"] as number,
+    totalUsageReports: value["totalUsageReports"] as number,
+    totalInputReports: value["totalInputReports"] as number,
+    totalCacheReadReports: value["totalCacheReadReports"] as number,
+    totalCacheWriteReports: value["totalCacheWriteReports"] as number,
+    totalReasoningReports: value["totalReasoningReports"] as number,
+    totalEstimatedCostReports: value["totalEstimatedCostReports"] as number,
+    totalIncludedCostReports: value["totalIncludedCostReports"] as number,
+    totalUnknownCostReports: value["totalUnknownCostReports"] as number,
   };
 }
 

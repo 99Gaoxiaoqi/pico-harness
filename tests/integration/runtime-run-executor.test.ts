@@ -17,6 +17,7 @@ import {
 } from "../../src/runtime/runtime-run-executor.js";
 import { recoverMemoryReviewJobs } from "../../src/runtime/memory-review-recovery.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
+import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 
 test("RuntimeRunExecutor executes one assembled turn without owning its resources", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-executor-"));
@@ -25,6 +26,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
   const session = new Session("runtime-run-executor", workDir, {
     persistence: true,
     picoHome,
+    runtimePort: createEngineRuntimePort(),
   });
   try {
     await session.recover();
@@ -80,7 +82,11 @@ test("RuntimeRunExecutor isolates lifecycle observer failures from canonical run
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-observer-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const session = new Session("runtime-run-observer", workDir, { persistence: true, picoHome });
+  const session = new Session("runtime-run-observer", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
   try {
     await session.recover();
     const runtimeState = {
@@ -215,6 +221,7 @@ test("ordinary questions never schedule Memory review", async () => {
   const session = new Session("runtime-memory-signal-gate", workDir, {
     persistence: true,
     picoHome,
+    runtimePort: createEngineRuntimePort(),
   });
   try {
     await session.recover();
@@ -255,6 +262,7 @@ test("a precommitted Desktop user message schedules once while an idle resume do
   const session = new Session("runtime-memory-precommitted", workDir, {
     persistence: true,
     picoHome,
+    runtimePort: createEngineRuntimePort(),
   });
   const prompt = "请记住：这个项目固定使用 npm run desktop-memory 。";
   try {
@@ -331,6 +339,7 @@ test("Desktop resume rejects expanded, internal, and unverifiable Memory evidenc
   const session = new Session("runtime-memory-desktop-evidence", workDir, {
     persistence: true,
     picoHome,
+    runtimePort: createEngineRuntimePort(),
   });
   const stable = "请记住：这个项目固定使用 npm run desktop-evidence 。";
   try {
@@ -396,6 +405,50 @@ test("Desktop resume rejects expanded, internal, and unverifiable Memory evidenc
   }
 });
 
+test("commitMessageOnce remains idempotent inside an active RuntimeRun", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-message-once-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-message-once", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await session.recover();
+    const idleMessage = { role: "user" as const, content: "precommitted" };
+    const idle = await session.commitMessageOnce("message-once:idle", idleMessage);
+    const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+    const receipts = await run.run(async () => {
+      const idleRetry = await session.commitMessageOnce("message-once:idle", idleMessage);
+      const activeMessage = { role: "user" as const, content: "active" };
+      const active = await session.commitMessageOnce("message-once:active", activeMessage);
+      const activeRetry = await session.commitMessageOnce("message-once:active", activeMessage);
+      return { idleRetry, active, activeRetry };
+    });
+    await run.finish("completed");
+
+    assert.equal(receipts.idleRetry.inserted, false);
+    assert.deepEqual(receipts.idleRetry.cursor, idle.cursor);
+    assert.equal(receipts.active.inserted, true);
+    assert.equal(receipts.activeRetry.inserted, false);
+    assert.deepEqual(receipts.activeRetry.cursor, receipts.active.cursor);
+    assert.equal(
+      (await session.runtimeEventStore!.readSession(session.id)).some(
+        (event) =>
+          event.kind === "run.terminal" &&
+          event.runId === run.runId &&
+          event.data.status === "completed",
+      ),
+      true,
+    );
+    await session.commitMessages({ role: "assistant", content: "still writable" });
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory scheduler starts", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-memory-enqueue-blocked-"));
   const workDir = join(root, "workspace");
@@ -403,6 +456,7 @@ test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory 
   const session = new Session("runtime-memory-enqueue-blocked", workDir, {
     persistence: true,
     picoHome,
+    runtimePort: createEngineRuntimePort(),
   });
   let schedulerStarted = false;
   let markSchedulerStarted = (): void => undefined;
@@ -468,7 +522,11 @@ test("failed, cancelled and resumed Runtime executions never enqueue Memory revi
   let enqueued = 0;
   const scheduler = { enqueue: () => void enqueued++ };
   try {
-    const failed = new Session("runtime-memory-failed", workDir, { persistence: true, picoHome });
+    const failed = new Session("runtime-memory-failed", workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
     await failed.recover();
     await assert.rejects(
       new RuntimeRunExecutor({
@@ -494,6 +552,7 @@ test("failed, cancelled and resumed Runtime executions never enqueue Memory revi
     const cancelled = new Session("runtime-memory-cancelled", workDir, {
       persistence: true,
       picoHome,
+      runtimePort: createEngineRuntimePort(),
     });
     await cancelled.recover();
     const controller = new AbortController();
@@ -528,6 +587,7 @@ test("failed, cancelled and resumed Runtime executions never enqueue Memory revi
     const resumed = new Session("runtime-memory-resumed", workDir, {
       persistence: true,
       picoHome,
+      runtimePort: createEngineRuntimePort(),
     });
     await resumed.recover();
     await new RuntimeRunExecutor({

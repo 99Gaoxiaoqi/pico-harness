@@ -16,7 +16,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message } from "../../src/schema/message.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import type { RuntimeToolResultRecordedEvent } from "../../src/runtime/runtime-event.js";
+import type { RuntimeToolResultRecordedEvent } from "../../src/storage/runtime-event.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
 import { ReadEvidenceTool } from "../../src/tools/evidence-read.js";
@@ -153,8 +153,7 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
   assert.match(secondProviderResult.content, new RegExp(escapeRegExp(evidenceUri), "u"));
   assert.doesNotMatch(secondProviderResult.content, new RegExp(canary, "u"));
   assert.ok(secondProviderResult.content.length < 4_000);
-  assert.equal(secondProviderResult.providerData?.["picoToolResultSha256"], rawSha256);
-  assert.equal(secondProviderResult.providerData?.["picoToolResultSizeBytes"], rawSizeBytes);
+  assert.equal(secondProviderResult.providerData, undefined);
 
   assert.ok(ledgerBeforeReadback);
   assert.doesNotMatch(ledgerBeforeReadback, new RegExp(canary, "u"));
@@ -319,9 +318,7 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
   });
   const providerMessages: Message[][] = [];
   const fullReport =
-    "已完成子代理大型工具结果核验，原始证据保持完整且模型上下文仅接收有界投影。\n".repeat(
-      120,
-    );
+    "已完成子代理大型工具结果核验，原始证据保持完整且模型上下文仅接收有界投影。\n".repeat(120);
   const provider: LLMProvider = {
     async generate(messages, availableTools) {
       providerMessages.push(structuredClone(messages));

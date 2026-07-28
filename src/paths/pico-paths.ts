@@ -55,8 +55,7 @@ export interface PicoWorkspacePaths {
   readonly memory: string;
   /** Workspace-private structured long-term memory authority. */
   readonly memoryState: string;
-  readonly summaries: string;
-  /** Immutable raw tool outputs, subagent reports, and compacted exchanges. */
+  /** Immutable raw tool outputs and subagent reports. */
   readonly evidence: string;
   readonly traces: string;
   /** Preserved legacy task files. Current stores never read or migrate this directory. */
@@ -160,7 +159,6 @@ export function resolvePicoPaths(
       legacyRuntime: join(workspaceRoot, "runtime"),
       memory: join(workspaceRoot, "memory"),
       memoryState: join(workspaceRoot, "memory", "state.json"),
-      summaries: join(workspaceRoot, "memory", "summaries"),
       evidence: join(workspaceRoot, "evidence"),
       traces: join(workspaceRoot, "traces"),
       tasks: join(workspaceRoot, "tasks"),

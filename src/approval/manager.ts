@@ -51,7 +51,7 @@ export interface ApprovalNotice {
   toolName: string;
   args: string;
   /** 对应 provider tool call；供 TUI 精确更新同一张工具卡。 */
-  providerCallId?: string;
+  providerCallId: string;
   message: string;
   /** 面向审批 UI/通知通道的极简预览信息。 */
   preview?: ApprovalPreview;
@@ -112,9 +112,9 @@ export class ApprovalManager {
     toolName: string,
     args: string,
     notify: ApprovalNotifier,
-    diff?: string,
-    signal?: AbortSignal,
-    options: { sessionScope?: PermissionSessionScope; providerCallId?: string } = {},
+    diff: string | undefined,
+    signal: AbortSignal | undefined,
+    options: { sessionScope?: PermissionSessionScope; providerCallId: string },
   ): Promise<ApprovalResult> {
     signal?.throwIfAborted();
     const message = `⚠ **高危操作审批请求**
@@ -172,7 +172,7 @@ Agent 试图执行以下动作:
         taskId,
         toolName,
         args,
-        ...(options.providerCallId !== undefined ? { providerCallId: options.providerCallId } : {}),
+        providerCallId: options.providerCallId,
         message,
         preview: buildApprovalPreview(toolName, args, diff),
         ...(diff !== undefined ? { diff } : {}),

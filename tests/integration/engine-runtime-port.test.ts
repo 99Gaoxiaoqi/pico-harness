@@ -8,13 +8,14 @@ import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-a
 
 test("engine runtime port preserves the canonical run and nested tool context", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-engine-runtime-port-"));
+  const port = createEngineRuntimePort();
   const session = new Session("engine-runtime-port", join(root, "workspace"), {
     persistence: true,
     picoHome: join(root, "pico-home"),
+    runtimePort: port,
   });
   try {
     await session.recover();
-    const port = createEngineRuntimePort();
     const capability = session.runtimeEventCapability!;
     const run = await port.startRun({ capability });
     assert.strictEqual(run.runtimeCapability, capability);
@@ -32,6 +33,39 @@ test("engine runtime port preserves the canonical run and nested tool context", 
     assert.equal(result, true);
     assert.equal(port.currentRun(), undefined);
     assert.deepEqual(session.getHistory(), [{ role: "assistant", content: "through-port" }]);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable Session rejects external message commits without an explicit RuntimePort", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-engine-runtime-port-required-"));
+  const session = new Session("engine-runtime-port-required", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+  });
+  try {
+    await session.recover();
+    await assert.rejects(
+      session.commitMessages({ role: "user", content: "must not be persisted" }),
+      /requires an explicit RuntimePort/u,
+    );
+    await assert.rejects(
+      session.commitMessageOnce("external:missing-port", {
+        role: "user",
+        content: "must not be persisted once",
+      }),
+      /requires an explicit RuntimePort/u,
+    );
+    await session.flushPersistence();
+    assert.deepEqual(session.getHistory(), []);
+    assert.deepEqual(
+      (await session.runtimeEventStore!.readSession(session.id)).filter(
+        (event) => event.kind === "message.committed",
+      ),
+      [],
+    );
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });

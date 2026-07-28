@@ -1,16 +1,16 @@
 import type { SessionForkRuntimePort } from "../engine/session-fork-runtime-port.js";
-import { materializeRuntimeHistory } from "./runtime-event-read-model.js";
+import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
 import { deriveRuntimeForkBootstrapRunId, RuntimeRun } from "./runtime-run.js";
-import { projectRuntimeSessionMessageEntries } from "./runtime-session-projection.js";
-import { RuntimeEventStore } from "./runtime-event-store.js";
+import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 
 /** Runtime-owned implementation of the narrow fork lifecycle contract. */
 export function createSessionForkRuntimePort(): SessionForkRuntimePort {
   return {
+    engineRuntimePort: createEngineRuntimePort(),
     validateModelHistory: (events) => {
       void materializeRuntimeHistory(events);
     },
-    projectModelMessages: (events) => projectRuntimeSessionMessageEntries(events),
     reconcileIncompleteRuns: (options) =>
       RuntimeRun.reconcileIncompleteRuns({
         capability: options.capability,
@@ -26,18 +26,17 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         targetSessionId: options.targetSessionId,
         ...(options.operationId ? { operationId: options.operationId } : {}),
         ...(options.operationCreatedAt ? { operationCreatedAt: options.operationCreatedAt } : {}),
-        messages: options.messages,
-        historyEntries: options.historyEntries,
+        seedEntries: options.seedEntries,
         ...(options.modelCheckpoint ? { modelCheckpoint: options.modelCheckpoint } : {}),
         ...(options.sourceThroughEventId
           ? { sourceThroughEventId: options.sourceThroughEventId }
           : {}),
+        ...(options.statePublication ? { statePublication: options.statePublication } : {}),
         workDir: options.workDir,
         store,
         writeGuard: {
           assertRuntimeEventWriteAllowed: () => options.publication.assertOwned(),
         },
-        ...(options.statePublication ? { statePublication: options.statePublication } : {}),
       });
     },
     deriveBootstrapRunId: (options) => {
@@ -47,12 +46,12 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         targetSessionId: options.targetSessionId,
         ...(options.operationId ? { operationId: options.operationId } : {}),
         ...(options.operationCreatedAt ? { operationCreatedAt: options.operationCreatedAt } : {}),
-        messages: options.messages,
-        historyEntries: options.historyEntries,
+        seedEntries: options.seedEntries,
         ...(options.modelCheckpoint ? { modelCheckpoint: options.modelCheckpoint } : {}),
         ...(options.sourceThroughEventId
           ? { sourceThroughEventId: options.sourceThroughEventId }
           : {}),
+        ...(options.statePublication ? { statePublication: options.statePublication } : {}),
         workDir: options.workDir,
         store,
       });

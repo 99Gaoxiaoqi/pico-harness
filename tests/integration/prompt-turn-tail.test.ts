@@ -14,7 +14,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { ContextOverflowError } from "../../src/provider/errors.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
-import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import type { Message } from "../../src/schema/message.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
@@ -276,6 +276,7 @@ test("AgentRuntime puts schedule intent in the current turn tail, not durable ev
       dir: workDir,
       sessionSelection: { mode: "new", sessionId },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider,

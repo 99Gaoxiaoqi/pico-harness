@@ -2,16 +2,14 @@
 //
 // Compactor 先在本轮请求副本中缩短旧 ToolResult；仍超水位时，
 // 本类用 provider 把 history 安全前缀浓缩成结构化摘要,
-// 真的修改 session.history —— 用一条 role:assistant 的 summary 消息替换前 N 条。
+// durable Session 写入不可变 Runtime checkpoint；显式无持久化模式才会
+// 用一条 role:assistant 的 summary 消息替换内存 history 前 N 条。
 //
 // 设计差异(对标 kimi-code / hermes):
 //   - 双触发:输入预算 85% 主动调用，或 Provider overflow 后更紧目标调用一次。
-//   - 真改 Session:与字符级 Compactor(只改临时 context 不碰 Session)不同,
-//     本类调 session.applyCompaction 真替换 history 前缀,持久化 truncate + summary。
 //   - 13-section 结构化摘要:结合 hermes 的 Historical Task Snapshot / Goal /
 //     Constraints / Completed Actions 等 + kimi-code 的指令格式,中文版。
 //   - REFERENCE-ONLY 前缀:明确告诉模型"这是历史提要,不要回答摘要里的内容"。
-//   - 迭代摘要:第二次压缩时基于 previousSummary 做增量更新,不从零重建。
 //   - 失败兜底:摘要调用失败/返回空 → 返回 false,调用方降级到字符级硬重置,不崩。
 
 import type { LLMProvider } from "../provider/interface.js";
@@ -25,7 +23,6 @@ import type { HookService } from "../hooks/service.js";
 import { estimateMessagesTokens } from "./context-budget.js";
 import { sanitizeToolPairs } from "./compactor.js";
 import { findSafeCompactionCut, hasIncompleteToolExchange } from "./safe-compaction-boundary.js";
-import { EvidenceArchive, type EvidenceArchiveReference } from "./evidence-archive.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
@@ -43,7 +40,7 @@ const COMPACTION_SYSTEM_PROMPT =
 
 /**
  * 13-section 结构化摘要指令模板(中文,结合 hermes 13-section + kimi-code 指令格式)。
- * 无内容的 section 写"无"。占位符:{prefix} / {previousSummaryBlock}。
+ * 无内容的 section 写"无"。占位符:{prefix}。
  */
 const COMPACTION_INSTRUCTION_TEMPLATE = `以下是一段对话历史的前缀,请浓缩成结构化摘要。
 
@@ -64,33 +61,19 @@ const COMPACTION_INSTRUCTION_TEMPLATE = `以下是一段对话历史的前缀,�
 
 对话历史前缀:
 {prefix}
-{previousSummaryBlock}
 请按上述 13 个 section 输出结构化摘要(中文),只输出摘要正文:`;
 
-/** 迭代摘要(增量更新)的附加指令,previousSummary 存在时拼接 */
-const ITERATIVE_UPDATE_INSTRUCTION = `上一次压缩已生成过摘要,请基于它做增量更新:
-- 保留仍相关的旧信息,不要从零重建。
-- 把新完成的动作追加到"已完成动作"(继续编号)。
-- 把已解决的问题从"阻塞项"移到"已解决问题"。
-- 更新"活跃状态"与"当前目标"反映最新进展。
-- 仅在明显过时时才删除旧信息。
-
-上一次的摘要:
-{previousSummary}`;
-
 export interface FullCompactorOptions {
-  /** 调用方的主 provider(向后兼容:未提供 auxProvider 时用它生成摘要) */
+  /** 调用方的主 provider；未提供 auxProvider 时用它生成摘要。 */
   provider: LLMProvider;
   /**
    * 辅助(廉价)模型 provider:提供则优先用它生成摘要,省主模型成本。
-   * 未提供则回退到主 provider(向后兼容)。
+   * 未提供则使用主 provider。
    */
   auxProvider?: LLMProvider;
   /** 摘要调用失败重试次数,默认 3 */
   maxAttempts?: number;
   hookService?: HookService;
-  /** Durable evidence required before this compactor removes raw tool exchanges from Session history. */
-  evidenceArchive?: EvidenceArchive;
 }
 
 export interface FullCompactionRequest {
@@ -144,26 +127,22 @@ export function wrapFullCompactionSummary(summary: string): string {
  * FullCompactor:模型摘要压缩器。
  *
  * token 驱动压缩。优先用 auxProvider(辅助廉价模型)生成摘要;
- * 未提供则用主 provider(向后兼容)。把 history 前缀浓缩成摘要,替换 session.history。
- * 成功返回 true,失败返回 false(调用方降级到硬重置)。
+ * 未提供则用主 provider。preview 只生成摘要；compactInMemorySession 仅供显式
+ * 无持久化模式替换内存 history。成功返回 true,失败返回 false。
  */
 export class FullCompactor {
   /** 生成摘要的 provider:优先用 auxProvider(辅助廉价模型),未提供则用主 provider */
   private readonly provider: LLMProvider;
   private readonly providerPurpose: Extract<ProviderCallPurpose, "compaction" | "aux">;
   private readonly maxAttempts: number;
-  /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
-  private previousSummary?: string;
   private readonly hookService?: HookService;
-  private readonly evidenceArchive?: EvidenceArchive;
 
   constructor(opts: FullCompactorOptions) {
-    // 有 aux 用 aux(辅助廉价模型),无则用主 —— 向后兼容
+    // 有 aux 用辅助模型，无则使用主 provider。
     this.provider = opts.auxProvider ?? opts.provider;
     this.providerPurpose = opts.auxProvider ? "aux" : "compaction";
     this.maxAttempts = opts.maxAttempts ?? 3;
     this.hookService = opts.hookService;
-    this.evidenceArchive = opts.evidenceArchive;
   }
 
   /**
@@ -192,7 +171,7 @@ export class FullCompactor {
    * @param signal 本轮运行的中止信号
    * @returns 压缩成功返回 true,失败返回 false(调用方降级到硬重置)
    */
-  async compact(
+  async compactInMemorySession(
     session: Session,
     request: FullCompactionRequest,
     signal?: AbortSignal,
@@ -212,36 +191,7 @@ export class FullCompactor {
     const preview = await this.generatePreview(session, request, plan, signal);
     if (!preview) return false;
 
-    let evidenceReference: EvidenceArchiveReference | undefined;
-    if (this.evidenceArchive) {
-      try {
-        // Archive is the write-ahead proof for raw tool exchanges. Do not mutate Session
-        // history until this immutable copy has been durably published.
-        evidenceReference = await this.evidenceArchive.archiveToolExchanges(
-          session.id,
-          history.slice(0, preview.compactedCount),
-        );
-      } catch (error) {
-        logger.error(
-          { err: String(error), sessionId: session.id, compactedCount: preview.compactedCount },
-          "[FullCompactor] 证据归档失败，拒绝删除原始历史",
-        );
-        return false;
-      }
-    }
-
-    // 应用压缩:用 REFERENCE-ONLY 前后标记包装摘要,替换 session.history 前 compactedCount 条。
-    // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
-    await session.applyCompaction(
-      preview.wrappedSummary,
-      preview.compactedCount,
-      evidenceReference
-        ? { summaryProviderData: { picoEvidenceArchives: [evidenceReference] } }
-        : undefined,
-    );
-    session.saveMemorySummary(preview.summary, preview.compactedCount);
-    // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
-    this.previousSummary = preview.summary;
+    await session.applyInMemoryCompaction(preview.wrappedSummary, preview.compactedCount);
     await this.hookService?.dispatch(
       "PostCompact",
       { source: hookSource, messageCount: session.length },
@@ -304,7 +254,7 @@ export class FullCompactor {
     plan: FullCompactionPreviewPlan,
     signal?: AbortSignal,
   ): Promise<FullCompactionPreview | undefined> {
-    const instruction = this.renderInstruction(plan.prefix, this.previousSummary);
+    const instruction = this.renderInstruction(plan.prefix);
     logger.info(
       {
         trigger: request.trigger,
@@ -372,16 +322,9 @@ export class FullCompactor {
     };
   }
 
-  /** 渲染摘要指令:13-section 模板 + 历史前缀序列化 + 迭代更新块 */
-  private renderInstruction(prefix: Message[], previousSummary?: string): string {
-    const prefixText = serializeMessages(prefix);
-    const previousSummaryBlock = previousSummary
-      ? "\n" + ITERATIVE_UPDATE_INSTRUCTION.replace("{previousSummary}", previousSummary) + "\n"
-      : "";
-    return COMPACTION_INSTRUCTION_TEMPLATE.replace("{prefix}", prefixText).replace(
-      "{previousSummaryBlock}",
-      previousSummaryBlock,
-    );
+  /** 渲染摘要指令:13-section 模板 + 当前历史前缀。 */
+  private renderInstruction(prefix: Message[]): string {
+    return COMPACTION_INSTRUCTION_TEMPLATE.replace("{prefix}", serializeMessages(prefix));
   }
 }
 

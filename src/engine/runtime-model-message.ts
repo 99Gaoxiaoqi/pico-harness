@@ -1,4 +1,4 @@
-import { PICO_TOOL_RESULT_ERROR_KEY, type Message } from "../schema/message.js";
+import type { Message } from "../schema/message.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
 import type {
   RuntimeEvent,
@@ -37,7 +37,6 @@ export function projectRuntimeModelMessage(event: RuntimeEvent): Message | undef
 
 /** Shared projection for model-visible and transcript-only structured ToolResult facts. */
 export function projectRuntimeToolResultMessage(event: RuntimeToolResultRecordedEvent): Message {
-  const synthetic = event.data.projection.mode === "synthetic";
   const evidence = event.refs.evidence;
   const evidenceUri = evidence
     ? `pico://evidence/${encodeURIComponent(evidence.sessionId)}/${evidence.contentHash}`
@@ -50,24 +49,7 @@ export function projectRuntimeToolResultMessage(event: RuntimeToolResultRecorded
     role: "user",
     content,
     toolCallId: event.refs.toolCallId,
-    providerData: {
-      [PICO_TOOL_RESULT_ERROR_KEY]: event.data.status !== "succeeded",
-      picoToolResultToolName: event.data.toolName,
-      picoToolResultStatus: event.data.status,
-      picoToolResultSha256: event.data.body.sha256,
-      picoToolResultSizeBytes: event.data.body.sizeBytes,
-      ...(evidence
-        ? {
-            picoToolResultEvidence: structuredClone(evidence),
-            picoToolResultEvidenceUri: evidenceUri,
-          }
-        : {}),
-      ...(synthetic
-        ? {
-            picoKind: "synthetic_tool_result",
-          }
-        : {}),
-    },
+    ...(evidenceUri ? { toolResultEvidenceUri: evidenceUri } : {}),
   };
 }
 

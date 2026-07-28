@@ -15,16 +15,19 @@ export type TranscriptToolCallStatus =
   | "approval"
   | "success"
   | "error"
-  | "denied"
-  | "done"
-  | "failed";
+  | "denied";
 
-/**
- * 现有渲染层消费的条目数据。
- *
- * 这个联合类型故意不嵌入事件 ID：旧的 onUpdate / entries 用法可以
- * 保持原样，稳定 ID 由 TranscriptProjectedEntry 与事件流承载。
- */
+export type CompletedTranscriptToolCallStatus = "success" | "error" | "denied";
+
+export function transcriptToolStatusFromEnvelope(
+  envelope: ToolResultEnvelope,
+): CompletedTranscriptToolCallStatus {
+  if (envelope.status === "succeeded") return "success";
+  if (envelope.status === "rejected") return "denied";
+  return "error";
+}
+
+/** Transcript 事件与 reducer 共同持有的语义正文，不包含渲染身份。 */
 export type TranscriptEntryData =
   | {
       kind: "logo";
@@ -75,8 +78,8 @@ export type TranscriptEntryData =
       task: string;
       status: SubagentActivityEvent["status"];
       agentName?: string;
-      mode?: SubagentActivityEvent["mode"];
-      completionPolicy?: SubagentActivityEvent["completionPolicy"];
+      mode: SubagentActivityEvent["mode"];
+      completionPolicy: SubagentActivityEvent["completionPolicy"];
       currentAction?: string;
       summary?: string;
       requestedModelRoute?: string;
@@ -98,7 +101,7 @@ export type TranscriptEntry = TranscriptEntryData & TranscriptRenderIdentity;
 export interface TranscriptProjectedEntry {
   /** 条目从创建到流式完成、工具状态变更始终不变。 */
   readonly id: string;
-  readonly entry: TranscriptEntry;
+  readonly entry: TranscriptEntryData;
   readonly streamId?: string;
   readonly toolCallId?: string;
   /** 仅供 reducer 关联同一活动，不会投影到 TranscriptEntry 或渲染层。 */
@@ -120,7 +123,7 @@ export interface TranscriptToolCallProjection {
   /** EventStore 内部生成的全局唯一 ID，所有后续事件都用它关联。 */
   readonly id: string;
   /** Provider 仅保证单次响应内可关联，跨轮可重复（如 Gemini）。 */
-  readonly providerCallId?: string;
+  readonly providerCallId: string;
   readonly entryId: string;
   readonly name: string;
   readonly args: string;
@@ -140,11 +143,6 @@ export interface TranscriptToolCallProjection {
   readonly resultEnvelope?: ToolResultEnvelope;
   /** Inspector 只根据该字段判断完整结果是否仍可用。 */
   readonly resultAvailability?: "inline" | "evidence" | "unavailable";
-}
-
-export interface TranscriptToolOutputChunk {
-  readonly stream: "stdout" | "stderr";
-  readonly chunk: string;
 }
 
 export interface TranscriptToolOutputRun {
@@ -242,15 +240,14 @@ export type TranscriptEvent =
   | (TranscriptEventBase & {
       readonly type: "entry.appended";
       readonly entryId: string;
-      readonly entry: TranscriptEntry;
+      readonly entry: TranscriptEntryData;
     })
   | (TranscriptEventBase & {
       readonly type: "assistant.stream.started";
       readonly entryId: string;
       readonly streamId: string;
       readonly delta: string;
-      /** 旧事件缺省为 assistant；reasoning 使用 thinking 独立投影。 */
-      readonly entryKind?: "assistant" | "thinking";
+      readonly entryKind: "assistant" | "thinking";
     })
   | (TranscriptEventBase & {
       readonly type: "assistant.stream.delta";
@@ -283,7 +280,7 @@ export type TranscriptEvent =
       readonly entryId: string;
       /** EventStore 内部 ID，不得直接使用 provider call ID。 */
       readonly toolCallId: string;
-      readonly providerCallId?: string;
+      readonly providerCallId: string;
       readonly name: string;
       readonly args: string;
     })
@@ -297,13 +294,6 @@ export type TranscriptEvent =
       readonly toolCallId: string;
       readonly segment: TranscriptToolOutputSegment;
     })
-  /** 兼容旧持久化日志；新 Reporter 只写 segment 形式。 */
-  | (TranscriptEventBase & {
-      readonly type: "tool.output";
-      readonly toolCallId: string;
-      readonly stream: "stdout" | "stderr";
-      readonly chunk: string;
-    })
   | (TranscriptEventBase & {
       readonly type: "tool.output.truncated";
       readonly toolCallId: string;
@@ -313,7 +303,6 @@ export type TranscriptEvent =
   | (TranscriptEventBase & {
       readonly type: "tool.completed";
       readonly toolCallId: string;
-      readonly status: TranscriptToolCallStatus;
       readonly summary: string;
       /** 直接持有 canonical ToolResult 的有界宿主投影，不再解析 Message 文本。 */
       readonly result: ToolResultEnvelope;
@@ -345,12 +334,29 @@ export type TranscriptEvent =
   | (TranscriptEventBase & {
       readonly type: "transcript.truncated";
       readonly entryCount: number;
-      /** Rewind saga 的稳定幂等关联键；旧事件可以缺省。 */
-      readonly operationId?: string;
+      /** Rewind saga 的稳定幂等关联键。 */
+      readonly operationId: string;
     })
   | (TranscriptEventBase & {
       readonly type: "transcript.cleared";
     });
+
+type DurableTranscriptEventType =
+  | "entry.appended"
+  | "assistant.stream.started"
+  | "assistant.stream.completed"
+  | "assistant.stream.interrupted"
+  | "assistant.response.suppressed"
+  | "tool.started"
+  | "tool.approval.requested"
+  | "subagent.activity.updated"
+  | "subagent.activity.archived"
+  | "transcript.truncated";
+
+export type DurableTranscriptEvent = Extract<
+  TranscriptEvent,
+  { readonly type: DurableTranscriptEventType }
+>;
 
 const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent["type"]>([
   "entry.appended",
@@ -386,79 +392,351 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
 
   switch (type as TranscriptEvent["type"]) {
     case "entry.appended":
+      transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type", "entryId", "entry");
       transcriptString(value, "entryId");
       transcriptRecord(value, "entry");
+      transcriptEntry(value["entry"] as Record<string, unknown>);
       return;
     case "assistant.stream.started":
-      transcriptStrings(value, "entryId", "streamId", "delta");
-      transcriptOptionalString(value, "entryKind");
-      if (
-        value["entryKind"] !== undefined &&
-        value["entryKind"] !== "assistant" &&
-        value["entryKind"] !== "thinking"
-      ) {
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryId",
+        "streamId",
+        "delta",
+        "entryKind",
+      );
+      transcriptStrings(value, "entryId", "streamId", "delta", "entryKind");
+      if (value["entryKind"] !== "assistant" && value["entryKind"] !== "thinking") {
         throw new Error("Transcript stream entryKind is invalid");
       }
       return;
     case "assistant.stream.delta":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryId",
+        "streamId",
+        "delta",
+      );
       transcriptStrings(value, "entryId", "streamId", "delta");
       return;
     case "assistant.stream.completed":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryId",
+        "streamId",
+        "content",
+      );
       transcriptStrings(value, "entryId", "streamId");
       transcriptOptionalString(value, "content");
       return;
     case "assistant.stream.interrupted":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryId",
+        "streamId",
+        "reason",
+        "content",
+      );
       transcriptStrings(value, "entryId", "streamId", "reason");
+      transcriptEnum(value, "reason", ["new-request", "clear", "truncate", "abort"]);
       transcriptOptionalString(value, "content");
       return;
     case "assistant.response.suppressed":
+      transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type", "entryId", "reason");
       transcriptStrings(value, "entryId", "reason");
+      transcriptEnum(value, "reason", [
+        "required-delegation",
+        "delegation-first-retry",
+        "explore-synthesis-retry",
+      ]);
       return;
     case "tool.started":
-      transcriptStrings(value, "entryId", "toolCallId", "name", "args");
-      transcriptOptionalString(value, "providerCallId");
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryId",
+        "toolCallId",
+        "providerCallId",
+        "name",
+        "args",
+      );
+      transcriptStrings(value, "entryId", "toolCallId", "providerCallId", "name", "args");
       return;
     case "tool.approval.requested":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "toolCallId",
+        "summary",
+      );
       transcriptStrings(value, "toolCallId", "summary");
       return;
     case "tool.output":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "toolCallId",
+        "segment",
+      );
       transcriptString(value, "toolCallId");
-      if (value["segment"] !== undefined) transcriptRecord(value, "segment");
-      else transcriptStrings(value, "stream", "chunk");
+      transcriptRecord(value, "segment");
+      transcriptToolOutputSegment(value["segment"] as Record<string, unknown>);
       return;
     case "tool.output.truncated":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "toolCallId",
+        "droppedChars",
+      );
       transcriptString(value, "toolCallId");
       transcriptNonNegativeInteger(value, "droppedChars");
       return;
     case "tool.completed":
-      transcriptStrings(value, "toolCallId", "status", "summary");
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "toolCallId",
+        "summary",
+        "result",
+      );
+      transcriptStrings(value, "toolCallId", "summary");
       transcriptToolResultEnvelope(value["result"]);
       return;
     case "subagent.activity.updated":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryId",
+        "activityId",
+        "activity",
+      );
       transcriptStrings(value, "entryId", "activityId");
       transcriptRecord(value, "activity");
+      transcriptSubagentActivity(value["activity"] as Record<string, unknown>);
       return;
     case "subagent.trace.recorded":
+      transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type", "trace");
       transcriptRecord(value, "trace");
+      transcriptSubagentTrace(value["trace"] as Record<string, unknown>);
       return;
     case "subagent.activity.claimed":
     case "subagent.activity.archived":
+      transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type", "activityId");
       transcriptString(value, "activityId");
       return;
     case "phase.changed":
+      transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type", "phaseId", "mode");
       transcriptStrings(value, "phaseId", "mode");
+      transcriptEnum(value, "mode", ["idle", "requesting", "thinking", "tool-use", "responding"]);
       return;
     case "transcript.truncated":
+      transcriptExactKeys(
+        value,
+        "eventId",
+        "sequence",
+        "createdAt",
+        "type",
+        "entryCount",
+        "operationId",
+      );
       transcriptNonNegativeInteger(value, "entryCount");
-      transcriptOptionalString(value, "operationId");
+      transcriptString(value, "operationId");
       return;
     case "transcript.cleared":
+      transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type");
       return;
+  }
+}
+
+/** True only for presentation facts allowed in the durable Runtime transcript. */
+export function isDurableTranscriptEvent(event: TranscriptEvent): event is DurableTranscriptEvent {
+  switch (event.type) {
+    case "entry.appended":
+      return event.entry.kind !== "thinking" || Boolean(event.entry.content?.trim());
+    case "assistant.stream.started":
+    case "assistant.stream.completed":
+    case "assistant.stream.interrupted":
+    case "assistant.response.suppressed":
+    case "tool.started":
+    case "tool.approval.requested":
+    case "subagent.activity.archived":
+    case "transcript.truncated":
+      return true;
+    case "subagent.activity.updated":
+      return isTerminalSubagentStatus(event.activity.status);
+    case "assistant.stream.delta":
+    case "tool.output":
+    case "tool.output.truncated":
+    case "tool.completed":
+    case "subagent.trace.recorded":
+    case "subagent.activity.claimed":
+    case "transcript.cleared":
+    case "phase.changed":
+      return false;
+  }
+}
+
+/** RuntimeEvent decode boundary: presentation-only events fail closed. */
+export function assertDurableTranscriptEvent(
+  value: unknown,
+): asserts value is DurableTranscriptEvent {
+  assertTranscriptEvent(value);
+  if (!isDurableTranscriptEvent(value)) {
+    throw new Error(`Transcript event ${value.type} is presentation-only`);
   }
 }
 
 function transcriptStrings(value: Record<string, unknown>, ...keys: string[]): void {
   for (const key of keys) transcriptString(value, key);
+}
+
+function transcriptEntry(value: Record<string, unknown>): void {
+  transcriptString(value, "kind");
+  switch (value["kind"]) {
+    case "logo":
+      transcriptExactKeys(
+        value,
+        "kind",
+        "model",
+        "cwd",
+        "sessionMode",
+        "permissionMode",
+        "mcpSummary",
+        "taskSummary",
+      );
+      for (const key of [
+        "model",
+        "cwd",
+        "sessionMode",
+        "permissionMode",
+        "mcpSummary",
+        "taskSummary",
+      ]) {
+        transcriptOptionalString(value, key);
+      }
+      return;
+    case "user":
+    case "system":
+    case "assistant":
+      transcriptExactKeys(value, "kind", "content");
+      transcriptString(value, "content");
+      return;
+    case "thinking":
+      transcriptExactKeys(value, "kind", "content");
+      transcriptOptionalString(value, "content");
+      return;
+    case "skill":
+      transcriptExactKeys(value, "kind", "name", "args", "trigger");
+      transcriptStrings(value, "name", "args", "trigger");
+      transcriptEnum(value, "trigger", ["user-slash", "model-tool"]);
+      return;
+    case "error":
+      transcriptExactKeys(value, "kind", "message", "retryable", "action");
+      transcriptString(value, "message");
+      transcriptOptionalBoolean(value, "retryable");
+      transcriptOptionalString(value, "action");
+      return;
+    case "tool":
+      transcriptExactKeys(value, "kind", "name", "args", "status", "summary");
+      transcriptStrings(value, "name", "args", "status");
+      transcriptEnum(value, "status", [
+        "queued",
+        "running",
+        "approval",
+        "success",
+        "error",
+        "denied",
+      ]);
+      transcriptOptionalString(value, "summary");
+      return;
+    case "plan":
+      transcriptExactKeys(value, "kind", "title", "detail", "state");
+      transcriptString(value, "title");
+      transcriptOptionalString(value, "detail");
+      transcriptOptionalEnum(value, "state", ["waiting", "active", "done", "failed"]);
+      return;
+    case "approval":
+    case "prompt":
+    case "changes":
+      transcriptExactKeys(value, "kind", "title", "detail", "state", "data");
+      transcriptString(value, "title");
+      transcriptOptionalString(value, "detail");
+      transcriptOptionalString(value, "state");
+      transcriptOptionalRecord(value, "data");
+      return;
+    case "run-boundary":
+      transcriptExactKeys(value, "kind", "runId", "status", "startedAt", "finishedAt", "error");
+      transcriptStrings(value, "runId", "status");
+      transcriptEnum(value, "status", [
+        "queued",
+        "running",
+        "pause_requested",
+        "paused",
+        "cancelling",
+        "cancelled",
+        "failed",
+        "succeeded",
+      ]);
+      transcriptFiniteNumber(value, "startedAt");
+      transcriptOptionalFiniteNumber(value, "finishedAt");
+      transcriptOptionalString(value, "error");
+      return;
+    case "subagent-activity":
+      transcriptExactKeys(
+        value,
+        "kind",
+        "task",
+        "status",
+        "agentName",
+        "mode",
+        "completionPolicy",
+        "currentAction",
+        "summary",
+        "requestedModelRoute",
+        "resolvedModelRoute",
+        "thinkingEffort",
+        "modelSelectionSource",
+      );
+      transcriptSubagentActivity(value);
+      return;
+    default:
+      throw new Error("Transcript entry kind is invalid");
+  }
 }
 
 function transcriptString(value: Record<string, unknown>, key: string): void {
@@ -473,8 +751,23 @@ function transcriptOptionalString(value: Record<string, unknown>, key: string): 
   }
 }
 
+function transcriptOptionalBoolean(value: Record<string, unknown>, key: string): void {
+  if (value[key] !== undefined && typeof value[key] !== "boolean") {
+    throw new Error(`Transcript event ${key} must be boolean`);
+  }
+}
+
 function transcriptFiniteNumber(value: Record<string, unknown>, key: string): void {
   if (typeof value[key] !== "number" || !Number.isFinite(value[key])) {
+    throw new Error(`Transcript event ${key} must be finite`);
+  }
+}
+
+function transcriptOptionalFiniteNumber(value: Record<string, unknown>, key: string): void {
+  if (
+    value[key] !== undefined &&
+    (typeof value[key] !== "number" || !Number.isFinite(value[key]))
+  ) {
     throw new Error(`Transcript event ${key} must be finite`);
   }
 }
@@ -497,6 +790,93 @@ function transcriptBoolean(value: Record<string, unknown>, key: string): void {
 
 function transcriptRecord(value: Record<string, unknown>, key: string): void {
   if (!isTranscriptRecord(value[key])) throw new Error(`Transcript event ${key} must be an object`);
+}
+
+function transcriptOptionalRecord(value: Record<string, unknown>, key: string): void {
+  if (value[key] !== undefined && !isTranscriptRecord(value[key])) {
+    throw new Error(`Transcript event ${key} must be an object`);
+  }
+}
+
+function transcriptEnum(
+  value: Record<string, unknown>,
+  key: string,
+  allowed: readonly string[],
+): void {
+  if (typeof value[key] !== "string" || !allowed.includes(value[key])) {
+    throw new Error(`Transcript event ${key} is invalid`);
+  }
+}
+
+function transcriptOptionalEnum(
+  value: Record<string, unknown>,
+  key: string,
+  allowed: readonly string[],
+): void {
+  if (value[key] !== undefined) transcriptEnum(value, key, allowed);
+}
+
+function transcriptExactKeys(value: Record<string, unknown>, ...allowed: string[]): void {
+  const allowedKeys = new Set(allowed);
+  const extra = Object.keys(value).find((key) => !allowedKeys.has(key));
+  if (extra !== undefined) {
+    throw new Error(`Transcript event contains unsupported field ${extra}`);
+  }
+}
+
+function transcriptSubagentActivity(value: Record<string, unknown>): void {
+  transcriptExactKeys(
+    value,
+    "task",
+    "status",
+    "agentName",
+    "mode",
+    "completionPolicy",
+    "currentAction",
+    "summary",
+    "requestedModelRoute",
+    "resolvedModelRoute",
+    "thinkingEffort",
+    "modelSelectionSource",
+  );
+  transcriptStrings(value, "task", "status", "mode", "completionPolicy");
+  transcriptEnum(value, "status", [
+    "queued",
+    "running",
+    "completed",
+    "partial",
+    "failed",
+    "timed_out",
+    "cancelled",
+  ]);
+  transcriptEnum(value, "mode", ["explore", "worker"]);
+  transcriptEnum(value, "completionPolicy", ["required", "optional", "detached"]);
+  for (const key of [
+    "agentName",
+    "currentAction",
+    "summary",
+    "requestedModelRoute",
+    "resolvedModelRoute",
+    "thinkingEffort",
+  ]) {
+    transcriptOptionalString(value, key);
+  }
+  transcriptOptionalEnum(value, "modelSelectionSource", ["ephemeral", "profile", "parent"]);
+}
+
+function transcriptToolOutputSegment(value: Record<string, unknown>): void {
+  transcriptExactKeys(value, "content", "runs");
+  if (typeof value["content"] !== "string" || !Array.isArray(value["runs"])) {
+    throw new Error("Transcript tool output segment is invalid");
+  }
+  for (const run of value["runs"]) {
+    if (!isTranscriptRecord(run)) {
+      throw new Error("Transcript tool output run is invalid");
+    }
+    transcriptExactKeys(run, "stream", "length");
+    transcriptEnum(run, "stream", ["stdout", "stderr"]);
+    transcriptNonNegativeInteger(run, "length");
+  }
 }
 
 function isTranscriptRecord(value: unknown): value is Record<string, unknown> {
@@ -525,17 +905,10 @@ export interface TranscriptEventStoreOptions {
   now?: () => number;
   /** 从持久化日志水合；原有 eventId / sequence 保持不变。 */
   initialEvents?: readonly TranscriptEvent[];
-  /** 从 checkpoint + 当前事件段水合。 */
-  initialSnapshot?: TranscriptEventStoreSnapshot;
   /** 当前事件段最大长度；达到后投影折叠为新 checkpoint。 */
   maxSegmentEvents?: number;
   /** 事件追加后的只读通知；用于将语义事件接入 durable sink。 */
   onAppend?: (event: TranscriptEvent, projection: TranscriptProjection) => void;
-}
-
-export interface TranscriptEventStoreSnapshot {
-  readonly checkpoint: TranscriptProjection;
-  readonly events: readonly TranscriptEvent[];
 }
 
 export type TranscriptIdentityScope = "event" | "entry" | "phase" | "stream" | "tool";
@@ -564,21 +937,14 @@ export class TranscriptEventStore {
   >();
 
   constructor(options: TranscriptEventStoreOptions = {}) {
-    if (options.initialEvents !== undefined && options.initialSnapshot !== undefined) {
-      throw new Error(
-        "TranscriptEventStore accepts either initialEvents or initialSnapshot, not both",
-      );
-    }
     this.idFactory = options.idFactory ?? createTranscriptIdFactory();
     this.now = options.now ?? Date.now;
     this.maxSegmentEvents = normalizeSegmentLimit(options.maxSegmentEvents);
     if (options.onAppend) this.appendListeners.add(options.onAppend);
-    this.checkpoint = cloneProjection(
-      options.initialSnapshot?.checkpoint ?? initialTranscriptProjection(),
-    );
+    this.checkpoint = initialTranscriptProjection();
     this.projection = this.checkpoint;
     this.rebuildIdentityReservations();
-    const initialEvents = options.initialSnapshot?.events ?? options.initialEvents ?? [];
+    const initialEvents = options.initialEvents ?? [];
     for (const event of initialEvents) this.loadInitialEvent(event);
     if (this.events.length >= this.maxSegmentEvents) this.rollover();
   }
@@ -645,14 +1011,6 @@ export class TranscriptEventStore {
   /** 只返回 checkpoint 之后的当前有界事件段。 */
   getEvents(): readonly TranscriptEvent[] {
     return Object.freeze([...this.events]);
-  }
-
-  /** 持久化/水合应使用该完整单元，不应单独保存 getEvents()。 */
-  getReplaySnapshot(): TranscriptEventStoreSnapshot {
-    return Object.freeze({
-      checkpoint: this.checkpoint,
-      events: Object.freeze([...this.events]),
-    });
   }
 
   getProjection(): TranscriptProjection {
@@ -823,7 +1181,7 @@ export function reduceTranscriptEvent(
   let phase = state.phase;
   let streams = state.streams;
   let toolCalls = state.toolCalls;
-  let subagents = state.subagents ?? {};
+  let subagents = state.subagents;
 
   switch (event.type) {
     case "entry.appended":
@@ -834,7 +1192,7 @@ export function reduceTranscriptEvent(
     case "assistant.stream.started": {
       assertNewEntryId(entries, event.entryId);
       assertNewIdentity(streams, event.streamId, "stream");
-      const entryKind = event.entryKind ?? "assistant";
+      const entryKind = event.entryKind;
       entries = [
         ...entries,
         projectedEntry(
@@ -944,7 +1302,7 @@ export function reduceTranscriptEvent(
         ...toolCalls,
         [event.toolCallId]: Object.freeze({
           id: event.toolCallId,
-          ...(event.providerCallId !== undefined ? { providerCallId: event.providerCallId } : {}),
+          providerCallId: event.providerCallId,
           entryId: event.entryId,
           name: event.name,
           args: event.args,
@@ -1032,10 +1390,8 @@ export function reduceTranscriptEvent(
     case "tool.completed": {
       const tool = requirePendingTool(toolCalls, event.toolCallId);
       const envelope = cloneToolResultEnvelope(event.result);
-      if (
-        envelope.toolName !== tool.name ||
-        (tool.providerCallId !== undefined && envelope.toolCallId !== tool.providerCallId)
-      ) {
+      const canonicalStatus = transcriptToolStatusFromEnvelope(envelope);
+      if (envelope.toolName !== tool.name || envelope.toolCallId !== tool.providerCallId) {
         throw new Error(
           `Transcript tool completion ${event.toolCallId} does not match its canonical envelope`,
         );
@@ -1063,7 +1419,7 @@ export function reduceTranscriptEvent(
         }
         return projectedEntry(
           current.id,
-          { ...current.entry, status: event.status, summary: displayResult },
+          { ...current.entry, status: canonicalStatus, summary: displayResult },
           { toolCallId: event.toolCallId },
         );
       });
@@ -1071,7 +1427,7 @@ export function reduceTranscriptEvent(
         ...toolCalls,
         [event.toolCallId]: Object.freeze({
           ...tool,
-          status: event.status,
+          status: canonicalStatus,
           output: "",
           outputSegments: Object.freeze([]),
           ...(result !== undefined ? { result } : {}),
@@ -1204,13 +1560,16 @@ function reduceSubagentTrace(
     if (current.kind !== "tool" || current.status !== "running") {
       throw new Error(`Transcript subagent trace ${trace.traceId} is not a running tool`);
     }
-    const result = trace.result.slice(0, TRANSCRIPT_SUBAGENT_TOOL_RESULT_LIMIT_CHARS);
+    const envelope = cloneToolResultEnvelope(trace.result);
+    const result = envelope.projection.text.slice(0, TRANSCRIPT_SUBAGENT_TOOL_RESULT_LIMIT_CHARS);
     const next = [...timeline];
     next[index] = Object.freeze({
       ...current,
-      status: trace.isError ? "error" : "success",
+      status: envelope.status === "succeeded" ? "success" : "error",
       result,
-      ...(trace.truncated === true || result.length < trace.result.length
+      ...(envelope.projection.truncated ||
+      envelope.deliveryTruncated ||
+      result.length < envelope.projection.text.length
         ? { resultTruncated: true }
         : {}),
       completedAt: createdAt,
@@ -1287,7 +1646,7 @@ function retainSubagentIndexes(
 
 function projectedEntry(
   id: string,
-  entry: TranscriptEntry,
+  entry: TranscriptEntryData,
   metadata: { streamId?: string; toolCallId?: string; subagentActivityId?: string } = {},
 ): TranscriptProjectedEntry {
   return Object.freeze({
@@ -1357,23 +1716,9 @@ function isPendingToolStatus(status: TranscriptToolCallStatus): boolean {
   return status === "queued" || status === "running" || status === "approval";
 }
 
-export function joinToolOutput(
-  output: string | readonly (TranscriptToolOutputChunk | TranscriptToolOutputSegment)[],
-): string {
-  if (typeof output === "string") return output;
-  return output.map((item) => ("content" in item ? item.content : item.chunk)).join("");
-}
-
 function normalizeToolOutputSegment(
   event: Extract<TranscriptEvent, { type: "tool.output" }>,
 ): TranscriptToolOutputSegment {
-  if (!("segment" in event)) {
-    return Object.freeze({
-      content: event.chunk,
-      runs: Object.freeze([Object.freeze({ stream: event.stream, length: event.chunk.length })]),
-    });
-  }
-
   const content = event.segment.content;
   const runs = event.segment.runs.map((run) => {
     if (!Number.isSafeInteger(run.length) || run.length <= 0) {
@@ -1411,13 +1756,23 @@ function retainEntryIndexes(
 
 function freezeTranscriptEvent(event: TranscriptEvent): TranscriptEvent {
   if (event.type === "entry.appended") {
-    return Object.freeze({ ...event, entry: Object.freeze({ ...event.entry }) as TranscriptEntry });
+    return Object.freeze({
+      ...event,
+      entry: Object.freeze({ ...event.entry }) as TranscriptEntryData,
+    });
   }
   if (event.type === "subagent.activity.updated") {
     return Object.freeze({ ...event, activity: Object.freeze({ ...event.activity }) });
   }
   if (event.type === "subagent.trace.recorded") {
-    return Object.freeze({ ...event, trace: Object.freeze({ ...event.trace }) });
+    return Object.freeze({
+      ...event,
+      trace: Object.freeze(
+        event.trace.type === "tool.completed"
+          ? { ...event.trace, result: cloneToolResultEnvelope(event.trace.result) }
+          : { ...event.trace },
+      ),
+    });
   }
   if (event.type === "tool.completed") {
     return Object.freeze({ ...event, result: cloneToolResultEnvelope(event.result) });
@@ -1512,60 +1867,6 @@ function unavailableResultSummary(summary: string): string {
   return summary.includes(notice) ? summary : `${summary}\n${notice}`;
 }
 
-function cloneProjection(projection: TranscriptProjection): TranscriptProjection {
-  const entries = projection.entries.map((item) =>
-    projectedEntry(item.id, item.entry, {
-      ...(item.streamId !== undefined ? { streamId: item.streamId } : {}),
-      ...(item.toolCallId !== undefined ? { toolCallId: item.toolCallId } : {}),
-      ...(item.subagentActivityId !== undefined
-        ? { subagentActivityId: item.subagentActivityId }
-        : {}),
-    }),
-  );
-  const streams = Object.fromEntries(
-    Object.entries(projection.streams).map(([id, stream]) => [id, Object.freeze({ ...stream })]),
-  );
-  const toolCalls = Object.fromEntries(
-    Object.entries(projection.toolCalls).map(([id, tool]) => [
-      id,
-      Object.freeze({
-        ...tool,
-        ...(tool.resultEnvelope !== undefined
-          ? { resultEnvelope: cloneToolResultEnvelope(tool.resultEnvelope) }
-          : {}),
-        outputSegments: Object.freeze(
-          tool.outputSegments.map((segment) =>
-            Object.freeze({
-              content: segment.content,
-              runs: Object.freeze(segment.runs.map((run) => Object.freeze({ ...run }))),
-            }),
-          ),
-        ),
-      }),
-    ]),
-  );
-  const subagents = Object.fromEntries(
-    Object.entries(projection.subagents ?? {}).map(([id, subagent]) => [
-      id,
-      freezeSubagentProjection({
-        ...subagent,
-        timeline: subagent.timeline.map((item) => Object.freeze({ ...item })),
-        lifecycle:
-          subagent.lifecycle ?? subagentLifecycleForStatus(subagent.activity.status, undefined),
-      }),
-    ]),
-  );
-  return freezeProjection({
-    entries,
-    phase: { ...projection.phase },
-    streams,
-    toolCalls,
-    subagents,
-    ...(projection.lastEventId !== undefined ? { lastEventId: projection.lastEventId } : {}),
-    sequence: projection.sequence,
-  });
-}
-
 function freezeProjection(projection: TranscriptProjection): TranscriptProjection {
   return Object.freeze({
     ...projection,
@@ -1573,7 +1874,7 @@ function freezeProjection(projection: TranscriptProjection): TranscriptProjectio
     phase: Object.freeze({ ...projection.phase }),
     streams: Object.freeze({ ...projection.streams }),
     toolCalls: Object.freeze({ ...projection.toolCalls }),
-    subagents: Object.freeze({ ...(projection.subagents ?? {}) }),
+    subagents: Object.freeze({ ...projection.subagents }),
   });
 }
 
@@ -1598,6 +1899,18 @@ function transcriptToolResultEnvelope(value: unknown): asserts value is ToolResu
   if (!isTranscriptRecord(value) || value["version"] !== 1) {
     throw new Error("Transcript tool result envelope is invalid");
   }
+  transcriptExactKeys(
+    value,
+    "version",
+    "toolCallId",
+    "toolName",
+    "status",
+    "rawSizeBytes",
+    "sha256",
+    "projection",
+    "deliveryTruncated",
+    "evidence",
+  );
   transcriptStrings(value, "toolCallId", "toolName", "status", "sha256");
   if (
     !["succeeded", "failed", "rejected", "cancelled", "interrupted"].includes(
@@ -1615,6 +1928,7 @@ function transcriptToolResultEnvelope(value: unknown): asserts value is ToolResu
   if (!isTranscriptRecord(projection) || projection["version"] !== 1) {
     throw new Error("Transcript tool result projection is invalid");
   }
+  transcriptExactKeys(projection, "version", "mode", "text", "strategy", "truncated");
   transcriptStrings(projection, "mode", "strategy");
   if (typeof projection["text"] !== "string") {
     throw new Error("Transcript tool result projection text must be a string");
@@ -1629,15 +1943,17 @@ function transcriptToolResultEnvelope(value: unknown): asserts value is ToolResu
   if (!isTranscriptRecord(evidence)) {
     throw new Error("Transcript tool result evidence is invalid");
   }
+  transcriptExactKeys(evidence, "uri", "ref");
   transcriptString(evidence, "uri");
   const reference = evidence["ref"];
   if (
     !isTranscriptRecord(reference) ||
-    reference["schemaVersion"] !== 1 ||
+    reference["schemaVersion"] !== 2 ||
     reference["kind"] !== "tool-exchange"
   ) {
     throw new Error("Transcript tool result evidence reference is invalid");
   }
+  transcriptExactKeys(reference, "schemaVersion", "contentHash", "sessionId", "kind");
   transcriptStrings(reference, "contentHash", "sessionId");
   if (!/^[a-f0-9]{64}$/u.test(String(reference["contentHash"]))) {
     throw new Error("Transcript tool result evidence hash is invalid");
@@ -1648,6 +1964,39 @@ function transcriptToolResultEnvelope(value: unknown): asserts value is ToolResu
   if (evidence["uri"] !== expectedUri) {
     throw new Error("Transcript tool result evidence URI does not match its reference");
   }
+}
+
+function transcriptSubagentTrace(value: Record<string, unknown>): void {
+  transcriptStrings(value, "activityId", "traceId", "type");
+  switch (value["type"]) {
+    case "thinking":
+      transcriptExactKeys(value, "activityId", "traceId", "type");
+      return;
+    case "message":
+      transcriptExactKeys(value, "activityId", "traceId", "type", "content");
+      transcriptString(value, "content");
+      return;
+    case "tool.started":
+      transcriptExactKeys(value, "activityId", "traceId", "type", "name", "args");
+      transcriptStrings(value, "name", "args");
+      return;
+    case "tool.completed":
+      transcriptExactKeys(value, "activityId", "traceId", "type", "result");
+      transcriptToolResultEnvelope(value["result"]);
+      return;
+    default:
+      throw new Error("Transcript subagent trace type is invalid");
+  }
+}
+
+function isTerminalSubagentStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "partial" ||
+    status === "failed" ||
+    status === "timed_out" ||
+    status === "cancelled"
+  );
 }
 
 function cloneToolResultEnvelope(envelope: ToolResultEnvelope): ToolResultEnvelope {

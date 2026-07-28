@@ -86,6 +86,11 @@ export interface Message {
   toolCalls?: ToolCall[];
   /** 若本条是对某次工具调用的响应,此字段必填,以维系推理链条 */
   toolCallId?: string;
+  /**
+   * Runtime ToolResult 投影携带的结构化 Evidence 地址。
+   * 只存在于 Provider/压缩器的临时 Message 读模型，不得写成 message.committed。
+   */
+  toolResultEvidenceUri?: string;
   /** 本条助手消息的 Token 用量(仅模型响应填充,用于成本追踪) */
   usage?: Usage;
   /** Provider 返回的 reasoning/thinking 摘要字段(不要求模型重放完整思维链) */
@@ -94,19 +99,6 @@ export interface Message {
   providerData?: Record<string, unknown>;
   /** 图片附件(5.5 Image/Media):user 消息可携带图片,provider 翻译为各端的多模态 block */
   images?: ImagePart[];
-}
-
-export const PICO_TOOL_RESULT_ERROR_KEY = "picoToolResultIsError";
-
-/** 新记录使用结构化标记；`[ERROR]` 仅用于兼容旧 Session。 */
-export function isToolResultErrorMessage(message: Message): boolean {
-  if (
-    message.providerData &&
-    Object.prototype.hasOwnProperty.call(message.providerData, PICO_TOOL_RESULT_ERROR_KEY)
-  ) {
-    return message.providerData[PICO_TOOL_RESULT_ERROR_KEY] === true;
-  }
-  return message.content.startsWith("[ERROR]");
 }
 
 /** Engine 内部注入不应在 resume 后伪装成用户消息。 */
@@ -147,14 +139,4 @@ export interface ToolDefinition {
 /** 构造助手消息的便捷函数 */
 export function assistantMessage(content: string, toolCalls?: ToolCall[]): Message {
   return { role: "assistant", content, toolCalls };
-}
-
-/** 构造工具观察结果消息的便捷函数 */
-export function toolResultMessage(toolCallId: string, output: string, isError = false): Message {
-  return {
-    role: "user",
-    content: isError ? `[ERROR] ${output}` : output,
-    toolCallId,
-    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: isError },
-  };
 }

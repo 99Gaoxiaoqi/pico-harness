@@ -5,14 +5,18 @@ import {
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
 import { toCanonicalUsage, type Message } from "../schema/message.js";
-import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   projectRuntimeModelMessage,
   projectRuntimeToolResultEnvelope,
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
 } from "./runtime-model-message.js";
-import type { RuntimeEvent, RuntimeToolResultRecordedEvent } from "./session-runtime-event.js";
+import type {
+  RuntimeEvent,
+  RuntimeEventVisibility,
+  RuntimeToolResultRecordedEvent,
+} from "./session-runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
 import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
@@ -33,14 +37,28 @@ export interface RuntimeSessionModelHistoryEntry extends RuntimeHistoryProjectio
 
 export interface RuntimeSessionTranscriptEventEntry {
   readonly sequence: number;
-  readonly event: TranscriptEvent;
+  readonly event: DurableTranscriptEvent;
 }
 
 export interface RuntimeSessionToolResultEntry {
   readonly sequence: number;
   readonly eventId: string;
+  readonly visibility: RuntimeEventVisibility;
   readonly envelope: ToolResultEnvelope;
 }
+
+/** Frozen fork input ordered by the source Runtime ledger, not by either projection alone. */
+export type RuntimeSessionForkSeedEntry =
+  | {
+      readonly kind: "model";
+      readonly sourceSequence: number;
+      readonly event: RuntimeModelHistoryEvent;
+    }
+  | {
+      readonly kind: "transcript";
+      readonly sourceSequence: number;
+      readonly event: DurableTranscriptEvent;
+    };
 
 /**
  * Session projection contract. Runtime owns the concrete event store, while
@@ -95,10 +113,43 @@ export function projectRuntimeSessionTranscriptEventEntries(
 }
 
 /**
- * Hydrates only ToolResults that remain on the active Runtime branch. The raw
- * body never crosses this boundary; host surfaces receive the bounded envelope.
+ * Forks must preserve the relative order between canonical model facts and durable
+ * transcript facts. Importing the two projections in separate batches can invert
+ * a reused provider call ID and bind a ToolResult to the wrong UI tool entry.
  */
-export function projectRuntimeSessionToolResultEntries(
+export function projectRuntimeSessionForkSeedEntries(
+  entries: readonly SequencedRuntimeEvent[],
+): RuntimeSessionForkSeedEntry[] {
+  const sequenceByEventId = new Map(
+    entries.map(({ sequence, event }) => [event.eventId, sequence] as const),
+  );
+  const model = projectRuntimeSessionModelHistoryEntries(entries.map(({ event }) => event)).map(
+    ({ event }) => {
+      const sourceSequence = sequenceByEventId.get(event.eventId);
+      if (sourceSequence === undefined) {
+        throw new Error(`Runtime fork model fact ${event.eventId} has no source sequence`);
+      }
+      return {
+        kind: "model" as const,
+        sourceSequence,
+        event: structuredClone(event),
+      };
+    },
+  );
+  const transcript = projectRuntimeSessionTranscriptEventEntries(entries).map(
+    ({ sequence, event }) => ({
+      kind: "transcript" as const,
+      sourceSequence: sequence,
+      event: structuredClone(event),
+    }),
+  );
+  return [...model, ...transcript].toSorted(
+    (left, right) => left.sourceSequence - right.sourceSequence,
+  );
+}
+
+/** Projects ToolResults on the active branch across model and transcript visibility. */
+export function projectRuntimeSessionActiveToolResultEntries(
   entries: readonly SequencedRuntimeEvent[],
 ): RuntimeSessionToolResultEntry[] {
   return projectBranchEventIndexes(
@@ -107,8 +158,18 @@ export function projectRuntimeSessionToolResultEntries(
   ).map(({ eventIndex, event }) => ({
     sequence: entries[eventIndex]!.sequence,
     eventId: event.eventId,
+    visibility: event.visibility,
     envelope: projectRuntimeToolResultEnvelope(event),
   }));
+}
+
+/** Top-level Session/host hydration contains only model-visible ToolResults. */
+export function projectRuntimeSessionModelToolResultEntries(
+  entries: readonly SequencedRuntimeEvent[],
+): RuntimeSessionToolResultEntry[] {
+  return projectRuntimeSessionActiveToolResultEntries(entries).filter(
+    ({ visibility }) => visibility === "model",
+  );
 }
 
 export function projectRuntimeSessionState(
@@ -130,32 +191,9 @@ export function projectRuntimeSessionState(
 }
 
 export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): SessionUsageSnapshot {
-  let usage = createEmptyUsageSnapshot();
-  let sawSuccessfulCallFact = false;
-  let legacyProviderCallBaseline = 0;
-  const successfulCallFacts: Array<Extract<RuntimeEvent, { kind: "model.call.settled" }>> = [];
+  const usage = createEmptyUsageSnapshot();
   for (const event of events) {
-    if (event.kind === "model.call.settled" && event.data.status === "succeeded") {
-      sawSuccessfulCallFact = true;
-      successfulCallFacts.push(event);
-      continue;
-    }
-    if (event.kind !== "session.state.committed" || !event.data.patch.usage) continue;
-    if (!sawSuccessfulCallFact) {
-      legacyProviderCallBaseline = Math.max(
-        legacyProviderCallBaseline,
-        event.data.patch.usage.totalProviderCalls,
-      );
-    }
-    usage = structuredClone(event.data.patch.usage);
-  }
-
-  let coveredCallFacts = Math.max(0, usage.totalProviderCalls - legacyProviderCallBaseline);
-  for (const event of successfulCallFacts) {
-    if (coveredCallFacts > 0) {
-      coveredCallFacts--;
-      continue;
-    }
+    if (event.kind !== "model.call.settled" || event.data.status !== "succeeded") continue;
     usage.totalProviderCalls++;
     const reportedUsage = event.data.usage;
     if (!reportedUsage) continue;

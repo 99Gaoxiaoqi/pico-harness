@@ -16,7 +16,6 @@ import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interfa
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
 import {
-  PICO_TOOL_RESULT_ERROR_KEY,
   type Message,
   type ToolCall,
   type ToolDefinition,
@@ -37,6 +36,7 @@ import type {
   FullCompactionRequest,
   FullCompactor,
 } from "../context/full-compactor.js";
+import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
 import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
 import {
@@ -70,6 +70,7 @@ import type {
   EngineRuntimeEvidenceReference,
   EngineRuntimePort,
   EngineRuntimeRun,
+  EngineRuntimeToolResultInput,
   EngineRuntimeToolResultBody,
   EngineRuntimeToolResultStatus,
 } from "./runtime-port.js";
@@ -175,37 +176,40 @@ function isExploreOnlyRequiredDelegation(call: ToolCall): boolean {
   return call.name === "delegate_task" && isExploreOnlyRequiredDelegationArguments(call.arguments);
 }
 
-function buildSynthesisToolRejection(toolCall: ToolCall, runtimeRun?: EngineRuntimeRun): Message {
+function buildSynthesisToolRejection(
+  toolCall: ToolCall,
+  runtimeRun?: EngineRuntimeRun,
+): ToolExecutionOutcome {
   return buildRejectedToolResult(
     toolCall,
     "工具执行已拒绝：explore-only required 委派收口后必须直接基于聚合结果输出纯文本总结。",
     "explore-synthesis-rejection",
     runtimeRun,
-  ).message;
+  );
 }
 
 function buildRequiredFirstToolRejection(
   toolCall: ToolCall,
   runtimeRun?: EngineRuntimeRun,
-): Message {
+): ToolExecutionOutcome {
   return buildRejectedToolResult(
     toolCall,
     "工具执行已拒绝：用户明确要求首先委派子代理，本轮只允许 required delegate_task。",
     "required-first-delegation-rejection",
     runtimeRun,
-  ).message;
+  );
 }
 
 function buildDelegationRecoveryToolRejection(
   toolCall: ToolCall,
   runtimeRun?: EngineRuntimeRun,
-): Message {
+): ToolExecutionOutcome {
   return buildRejectedToolResult(
     toolCall,
     "工具执行已拒绝：required 委派恢复轮只允许一次缩小范围的 required delegate_task。",
     "required-delegation-recovery-rejection",
     runtimeRun,
-  ).message;
+  );
 }
 
 function latestVisibleUserInput(messages: readonly Message[]): string {
@@ -323,11 +327,6 @@ function buildSyntheticToolObservation(
         role: "user",
         content,
         toolCallId: toolCall.id,
-        providerData: {
-          [PICO_TOOL_RESULT_ERROR_KEY]: true,
-          picoKind: "synthetic_tool_result",
-          picoToolResultStatus: failure.status,
-        },
       };
   return {
     message,
@@ -369,11 +368,6 @@ function buildRejectedToolResult(
         role: "user",
         content,
         toolCallId: toolCall.id,
-        providerData: {
-          [PICO_TOOL_RESULT_ERROR_KEY]: true,
-          picoKind: "synthetic_tool_result",
-          picoToolResultStatus: "rejected",
-        },
       };
   return {
     message,
@@ -909,44 +903,15 @@ export class AgentEngine implements AgentRunner {
     if (!runtimeRun?.claimsSession(session) || !this.fullCompactor) {
       return undefined;
     }
-    const entries = await runtimeRun.readModelHistoryEntries();
-    if (entries.length < 2) return undefined;
-
-    const hookSource = request.trigger === "manual" ? "manual" : "auto";
-    await this.hookService?.dispatch(
-      "PreCompact",
-      { source: hookSource, messageCount: entries.length },
-      { signal },
-    );
-    const preview = await this.fullCompactor.preview(
+    const result = await recordRuntimeCompactionCheckpoint({
       session,
-      entries.map(({ message }) => message),
+      runtimeRun,
+      compactor: this.fullCompactor,
       request,
-      signal,
-    );
-    if (!preview) return undefined;
-
-    const covered = entries.slice(0, preview.compactedCount);
-    const through = covered.at(-1);
-    if (!through) return undefined;
-    const checkpointId = `checkpoint:${randomUUID()}`;
-    await runtimeRun.recordCheckpoint({
-      checkpointId,
-      coveredEventCount: covered.length,
-      sourceDigest: runtimeHistoryDigest(covered.map(({ eventId }) => eventId)),
-      throughEventId: through.eventId,
-      summary: {
-        role: "assistant",
-        content: preview.wrappedSummary,
-        providerData: { picoKind: "runtime_checkpoint", picoCheckpointId: checkpointId },
-      },
+      ...(this.hookService ? { hookService: this.hookService } : {}),
+      ...(signal ? { signal } : {}),
     });
-    await this.hookService?.dispatch(
-      "PostCompact",
-      { source: hookSource, messageCount: (await runtimeRun.readModelHistoryEntries()).length },
-      { signal },
-    );
-    return preview;
+    return result?.preview;
   }
 
   /** Replaces prior context with a minimal, auditable checkpoint while preserving this input. */
@@ -1070,7 +1035,7 @@ export class AgentEngine implements AgentRunner {
         ? true
         : this.isRuntimeSession(session)
           ? false
-          : await this.fullCompactor.compact(session, request, signal);
+          : await this.fullCompactor.compactInMemorySession(session, request, signal);
       signal?.throwIfAborted();
       if (compacted) {
         const compactedCount = runtimePreview?.compactedCount ?? persistentCut?.compactedCount;
@@ -1158,7 +1123,7 @@ export class AgentEngine implements AgentRunner {
         ? true
         : this.isRuntimeSession(session)
           ? false
-          : await this.fullCompactor.compact(session, request, signal);
+          : await this.fullCompactor.compactInMemorySession(session, request, signal);
       if (!compacted) throw err;
       const retryContext = await this.prepareModelContext(
         session,
@@ -1560,11 +1525,20 @@ export class AgentEngine implements AgentRunner {
               },
             };
             const runtimeRun = this.runtimePort?.currentRun();
+            const rejectedOutcomes = toolCalls.map((toolCall) =>
+              buildSynthesisToolRejection(toolCall, runtimeRun),
+            );
             await session.commitMessages(
               rejectedResponse,
-              ...toolCalls.map((toolCall) => buildSynthesisToolRejection(toolCall, runtimeRun)),
+              ...rejectedOutcomes.map((outcome) => outcome.message),
             );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
+            await this.publishCommittedToolBatch(
+              reporter,
+              toolCalls,
+              rejectedOutcomes,
+              toolCalls.map((_toolCall, index) => index),
+            );
 
             if (exploreSynthesisToolRetries >= MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES) {
               const failedResponse: Message = {
@@ -1618,13 +1592,20 @@ export class AgentEngine implements AgentRunner {
               },
             };
             const runtimeRun = this.runtimePort?.currentRun();
+            const rejectedOutcomes = toolCalls.map((toolCall) =>
+              buildDelegationRecoveryToolRejection(toolCall, runtimeRun),
+            );
             await session.commitMessages(
               rejectedResponse,
-              ...toolCalls.map((toolCall) =>
-                buildDelegationRecoveryToolRejection(toolCall, runtimeRun),
-              ),
+              ...rejectedOutcomes.map((outcome) => outcome.message),
             );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
+            await this.publishCommittedToolBatch(
+              reporter,
+              toolCalls,
+              rejectedOutcomes,
+              toolCalls.map((_toolCall, index) => index),
+            );
             const failedResponse: Message = {
               role: "assistant",
               content: requiredFirstDelegationActive
@@ -1648,11 +1629,20 @@ export class AgentEngine implements AgentRunner {
               },
             };
             const runtimeRun = this.runtimePort?.currentRun();
+            const rejectedOutcomes = toolCalls.map((toolCall) =>
+              buildRequiredFirstToolRejection(toolCall, runtimeRun),
+            );
             await session.commitMessages(
               rejectedResponse,
-              ...toolCalls.map((toolCall) => buildRequiredFirstToolRejection(toolCall, runtimeRun)),
+              ...rejectedOutcomes.map((outcome) => outcome.message),
             );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
+            await this.publishCommittedToolBatch(
+              reporter,
+              toolCalls,
+              rejectedOutcomes,
+              toolCalls.map((_toolCall, index) => index),
+            );
             requiredFirstDelegationAttempts++;
 
             if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
@@ -1927,27 +1917,11 @@ export class AgentEngine implements AgentRunner {
           // Reporter 是派生展示层。必须等 canonical ToolResult durable 且 Session
           // 投影完成后再通知；否则 Reporter 异常会让 pending actual 与 synthetic
           // closure 错配。按工具实际完成顺序保持并发批次既有的展示次序。
-          await this.publishCommittedToolResults(
+          await this.publishCommittedToolBatch(
             reporter,
-            completedToolReportIndexes.map((index) => ({
-              call: toolCalls[index]!,
-              envelope: results[index]!.report,
-            })),
-            signal,
-          );
-          await this.hookService?.dispatch(
-            "PostToolBatch",
-            {
-              tools: toolCalls.map((call, index) => {
-                return {
-                  tool_name: call.name,
-                  tool_input: parseHookToolArguments(call.arguments),
-                  tool_call_id: call.id,
-                  tool_result: structuredClone(results[index]!.report),
-                };
-              }),
-            },
-            { signal },
+            toolCalls,
+            results,
+            completedToolReportIndexes,
           );
           if (requiredDelegation && requiredDelegationIndex !== undefined) {
             const assessment = assessRequiredDelegationResult(
@@ -2090,46 +2064,94 @@ export class AgentEngine implements AgentRunner {
     failure: ToolProtocolFailure,
     reporter: Reporter,
   ): Promise<void> {
-    const syntheticOutcomes = new Map<number, ToolExecutionOutcome>();
-    const observations = toolCalls.map((toolCall, index) => {
+    const syntheticIndexes: number[] = [];
+    const outcomes = toolCalls.map((toolCall, index) => {
       const settled = settledResults[index];
-      if (settled) return settled.message;
+      if (settled) return settled;
       const synthetic = buildSyntheticToolObservation(
         toolCall,
         failure,
         this.runtimePort?.currentRun(),
       );
-      syntheticOutcomes.set(index, synthetic);
-      return synthetic.message;
+      syntheticIndexes.push(index);
+      return synthetic;
     });
 
     const reminders = settledResults.flatMap((result) =>
       result?.reminder ? [result.reminder] : [],
     );
-    await session.commitMessages(...observations, ...reminders);
+    await session.commitMessages(...outcomes.map((outcome) => outcome.message), ...reminders);
     // Settled outcomes are notified in their true completion order. Calls without
     // an outcome become synthetic only after the batch closes, so they follow in
     // provider order. Every notification happens after the whole canonical batch
     // is durable, and a broken Reporter cannot mask the original protocol failure.
-    await this.publishCommittedToolResults(
+    await this.publishCommittedToolBatch(
       reporter,
-      [...completedToolReportIndexes, ...syntheticOutcomes.keys()].map((index) => {
-        const toolCall = toolCalls[index]!;
-        const envelope = settledResults[index]?.report ?? syntheticOutcomes.get(index)?.report;
-        if (!envelope) {
-          throw new Error(`ToolResult report is missing for ${toolCall.id}`);
-        }
-        return { call: toolCall, envelope };
-      }),
-      undefined,
+      toolCalls,
+      outcomes,
+      [...completedToolReportIndexes, ...syntheticIndexes],
       false,
     );
+  }
+
+  private async publishCommittedToolBatch(
+    reporter: Reporter,
+    toolCalls: readonly ToolCall[],
+    outcomes: readonly ToolExecutionOutcome[],
+    notificationOrder: readonly number[],
+    propagateErrors = true,
+  ): Promise<void> {
+    if (toolCalls.length !== outcomes.length) {
+      throw new Error("ToolResult batch calls and outcomes must have the same length");
+    }
+    if (toolCalls.length === 0) return;
+    if (
+      notificationOrder.length !== toolCalls.length ||
+      new Set(notificationOrder).size !== toolCalls.length
+    ) {
+      throw new Error("ToolResult notification order must contain every batch index exactly once");
+    }
+
+    let firstError: unknown;
+    try {
+      await this.publishCommittedToolResults(
+        reporter,
+        notificationOrder.map((index) => {
+          const call = toolCalls[index];
+          const outcome = outcomes[index];
+          if (!call || !outcome) {
+            throw new Error(`ToolResult notification index is invalid: ${String(index)}`);
+          }
+          return { call, envelope: outcome.report };
+        }),
+      );
+    } catch (error) {
+      firstError = error;
+    }
+
+    try {
+      await this.hookService?.dispatch("PostToolBatch", {
+        tools: toolCalls.map((call, index) => ({
+          tool_name: call.name,
+          tool_input: parseHookToolArguments(call.arguments),
+          tool_call_id: call.id,
+          tool_result: structuredClone(outcomes[index]!.report),
+        })),
+      });
+    } catch (error) {
+      firstError ??= error;
+      logger.warn(
+        { error: String(error), toolCount: toolCalls.length },
+        "[Engine] ToolResult 批次已持久化，但 PostToolBatch Hook 通知失败",
+      );
+    }
+
+    if (propagateErrors && firstError !== undefined) throw firstError;
   }
 
   private async publishCommittedToolResults(
     reporter: Reporter,
     results: readonly { call: ToolCall; envelope: ToolResultEnvelope }[],
-    signal?: AbortSignal,
     propagateErrors = true,
   ): Promise<void> {
     let firstError: unknown;
@@ -2152,14 +2174,21 @@ export class AgentEngine implements AgentRunner {
             tool_call_id: call.id,
             tool_result: structuredClone(envelope),
           },
-          { signal },
         );
-        await this.postToolResultHook?.(call, envelope);
       } catch (error) {
         firstError ??= error;
         logger.warn(
           { error: String(error), tool: envelope.toolName },
           "[Engine] ToolResult 已持久化，但 PostToolUse Hook 通知失败",
+        );
+      }
+      try {
+        await this.postToolResultHook?.(call, structuredClone(envelope));
+      } catch (error) {
+        firstError ??= error;
+        logger.warn(
+          { error: String(error), tool: envelope.toolName },
+          "[Engine] ToolResult 已持久化，但后台结果 Hook 通知失败",
         );
       }
     }
@@ -2274,8 +2303,27 @@ export class AgentEngine implements AgentRunner {
     result: ToolResult,
     modelOutput: string,
     status: EngineRuntimeToolResultStatus,
-    visibility: "model" | "transcript" = "model",
   ): Promise<{ message: Message; envelope: ToolResultEnvelope }> {
+    const prepared = await this.prepareRuntimeToolResult(
+      runtimeRun,
+      toolCall,
+      result,
+      modelOutput,
+      status,
+    );
+    return {
+      message: runtimeRun.registerToolResult(prepared.input),
+      envelope: prepared.envelope,
+    };
+  }
+
+  private async prepareRuntimeToolResult(
+    runtimeRun: EngineRuntimeRun,
+    toolCall: ToolCall,
+    result: ToolResult,
+    modelOutput: string,
+    status: EngineRuntimeToolResultStatus,
+  ): Promise<{ input: EngineRuntimeToolResultInput; envelope: ToolResultEnvelope }> {
     const built = buildRuntimeToolResultProjection({
       toolCall,
       result,
@@ -2336,7 +2384,7 @@ export class AgentEngine implements AgentRunner {
       }
     }
 
-    const input = {
+    const input: EngineRuntimeToolResultInput = {
       toolCallId: toolCall.id,
       toolName: toolCall.name,
       status,
@@ -2344,12 +2392,8 @@ export class AgentEngine implements AgentRunner {
       projection,
       ...(evidence ? { evidence } : {}),
     };
-    const message =
-      visibility === "transcript"
-        ? await runtimeRun.recordTranscriptToolResult(input)
-        : runtimeRun.registerToolResult(input);
     return {
-      message,
+      input,
       envelope: createToolResultEnvelope(input),
     };
   }
@@ -2382,13 +2426,6 @@ export class AgentEngine implements AgentRunner {
         role: "user",
         content: built.projection.text,
         toolCallId: toolCall.id,
-        providerData: {
-          [PICO_TOOL_RESULT_ERROR_KEY]: result.isError,
-          picoToolResultToolName: toolCall.name,
-          picoToolResultStatus: status,
-          picoToolResultSha256: built.rawSha256,
-          picoToolResultSizeBytes: built.rawSizeBytes,
-        },
       },
       envelope: createToolResultEnvelope(input),
     };
@@ -2921,11 +2958,7 @@ export class AgentEngine implements AgentRunner {
             { turns: turnCount, maxSubTurns },
             `[Subagent] 已进入预留收口轮，以 partial 状态返回已收集证据。`,
           );
-          return this.finalizeSubagentResult(
-            "partial",
-            summary,
-            taskPrompt,
-          );
+          return this.finalizeSubagentResult("partial", summary, taskPrompt);
         }
 
         // 【改动 B】summary 续写:子代理最终汇报过短(< 200 字)时,
@@ -3004,18 +3037,23 @@ export class AgentEngine implements AgentRunner {
 
       // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
       const getAccesses = readOnlyRegistry.getAccesses;
-      const scheduler = new ToolScheduler<Message>({
+      const runtimeRun = this.runtimePort?.currentRun();
+      const completedToolReportIndexes: number[] = [];
+      const scheduler = new ToolScheduler<{
+        readonly message?: Message;
+        readonly input?: EngineRuntimeToolResultInput;
+        readonly report: ToolResultEnvelope;
+      }>({
         maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
         signal,
       });
-      const scheduled = toolCalls.map((tc) =>
+      const scheduled = toolCalls.map((tc, index) =>
         scheduler.add({
           accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
           settleOnAbort: true,
           start: async () => {
             signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
-            const runtimeRun = this.runtimePort?.currentRun();
             await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
             const result = await (this.runtimePort
               ? this.runtimePort.runWithToolCall(tc.id, () =>
@@ -3026,28 +3064,33 @@ export class AgentEngine implements AgentRunner {
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
             }
-            const builtResult = runtimeRun
-              ? await this.buildRuntimeToolResultMessage(
-                  runtimeRun,
-                  tc,
-                  result,
-                  finalOutput,
-                  result.isError ? "failed" : "succeeded",
-                  "transcript",
-                )
-              : this.buildEphemeralToolResult(
-                  tc,
-                  result,
-                  finalOutput,
-                  result.isError ? "failed" : "succeeded",
-                );
-            const { message, envelope } = builtResult;
-            rep.onToolResult(envelope);
-            return message;
+            if (runtimeRun) {
+              const builtResult = await this.prepareRuntimeToolResult(
+                runtimeRun,
+                tc,
+                result,
+                finalOutput,
+                result.isError ? "failed" : "succeeded",
+              );
+              completedToolReportIndexes.push(index);
+              return { input: builtResult.input, report: builtResult.envelope };
+            }
+            const builtResult = this.buildEphemeralToolResult(
+              tc,
+              result,
+              finalOutput,
+              result.isError ? "failed" : "succeeded",
+            );
+            completedToolReportIndexes.push(index);
+            return { message: builtResult.message, report: builtResult.envelope };
           },
         }),
       );
-      let subResults: Message[];
+      let subResults: Array<{
+        readonly message?: Message;
+        readonly input?: EngineRuntimeToolResultInput;
+        readonly report: ToolResultEnvelope;
+      }>;
       try {
         subResults = await Promise.all(scheduled);
         signal?.throwIfAborted();
@@ -3058,12 +3101,34 @@ export class AgentEngine implements AgentRunner {
         scheduler.dispose();
       }
 
-      const observations: Message[] = new Array(toolCalls.length);
-      for (let i = 0; i < subResults.length; i++) {
-        observations[i] = subResults[i]!;
-      }
+      const observations = runtimeRun
+        ? [
+            ...(await runtimeRun.recordTranscriptToolResults(
+              subResults.map((result, index) => {
+                if (!result.input) {
+                  throw new Error(`Subagent ToolResult ${String(index)} has no Runtime input`);
+                }
+                return result.input;
+              }),
+            )),
+          ]
+        : subResults.map((result, index) => {
+            if (!result.message) {
+              throw new Error(`Subagent ToolResult ${String(index)} has no in-memory projection`);
+            }
+            return result.message;
+          });
 
       contextHistory.push(...observations);
+      await this.publishCommittedToolBatch(
+        rep,
+        toolCalls,
+        observations.map((message, index) => ({
+          message,
+          report: subResults[index]!.report,
+        })),
+        completedToolReportIndexes,
+      );
     }
   }
 

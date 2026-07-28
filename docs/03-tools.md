@@ -131,7 +131,7 @@ Shell 是功能最强大的工具，也是最危险的。前台执行有这些�
 2. **工作目录绑定**：`cwd` 从工作区启动，但这不是 OS 沙箱；主 Agent 的 YOLO 仍拥有当前 OS 用户权限。需要隔离的 Worker 由独立 worktree 与 OS 沙箱负责，隔离不可用时拒绝启动。
 3. **宿主 Shell 启动收口**：Bash 使用 `--noprofile --norc -c`，进程环境移除 `BASH_ENV`、`ENV`、导出函数等启动代码入口；YOLO hardline 仍会先拒绝可见文本中已建模的高危入口。
 4. **错误与退出状态回传**：stdout、stderr 按到达顺序合并；无输出的非零退出也会返回明确错误。
-5. **有界输出**：执行缓冲上限为 10 MiB，越界时终止完整子进程树。超过 30,000 字符的已捕获结果由 observation 层完整落盘，只向模型返回摘要和可分页回读的 artifact 引用。
+5. **有界输出**：执行缓冲上限为 10 MiB，越界时终止完整子进程树。Registry 返回已经完整捕获的结果；Engine 在 canonical ToolResult 边界计算哈希、生成确定性有界投影，并把大正文写入可分页回读的 Evidence CAS。
 
 ```typescript
 const shell = resolveShell();

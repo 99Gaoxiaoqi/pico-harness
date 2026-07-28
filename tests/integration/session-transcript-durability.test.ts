@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Session } from "../../src/engine/session.js";
 import type { TranscriptEvent } from "../../src/presentation/transcript-event-store.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 
 test("history rewind preserves transcript facts and Session assigns the next durable sequence", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-transcript-rewind-"));
   const session = new Session("transcript-rewind", join(root, "workspace"), {
     persistence: true,
     picoHome: join(root, "pico-home"),
+    runtimePort: createEngineRuntimePort(),
   });
   context.after(async () => {
     await session.close();
@@ -30,6 +32,7 @@ test("history rewind preserves transcript facts and Session assigns the next dur
     event(99, "start", "assistant.stream.started", {
       entryId: "entry:assistant",
       streamId: "stream:assistant",
+      entryKind: "assistant",
       delta: "rewound ",
     }),
   );

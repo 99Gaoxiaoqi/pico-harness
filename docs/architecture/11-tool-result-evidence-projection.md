@@ -11,7 +11,7 @@ ToolResult 采用一条不可分叉的主链：
 5. 需要原文时用 `read_evidence` 按字节分页回读。
 
 项目处于开发期，本设计是硬切换。旧 Message ToolResult、Runtime ToolResult Evidence v1、
-Fork v1/v2、ToolResultArtifactStore、`read_artifact` 和 Artifact UI 不再读取或迁移。
+Fork v1/v2/v3/v4、ToolResultArtifactStore、`read_artifact` 和 Artifact UI 不再读取或迁移。
 
 ## 唯一持久化不变量
 
@@ -132,8 +132,8 @@ tool.execute
 - UTF-8 offset/limit 边界；
 - 单页读取上限。
 
-FullCompactor 的 compaction Evidence v1 是另一份仍在使用的协议，用于保护被摘要前缀，不属于
-已删除的 Runtime ToolResult Evidence v1。
+FullCompactor 不另写 compaction Evidence。被摘要的 RuntimeEvent 与 ToolResult Evidence
+仍保持不变；checkpoint 只保存覆盖边界和摘要投影。
 
 ## 子代理
 
@@ -146,13 +146,13 @@ FullCompactor 的 compaction Evidence v1 是另一份仍在使用的协议，用
 
 ## Fork、rewind 与恢复
 
-- Fork bundle 只接受 v3 `historyEntries`，ToolResult 以 canonical event 导入；
-- v1/v2 bundle 明确拒绝，不再回落到 Message 导入；
+- Fork bundle 只接受 v5 source-sequenced `seedEntries`，联合冻结 active model facts 与完整 durable transcript；v1-v4 直接拒绝，不再重复保存 `messages` 或单独的 `historyEntries` 投影；
+- v1-v4 bundle 明确拒绝，不再回落到 Message 导入；
 - 同一 workspace 的 fork 继续引用 source-session Evidence URI，不复制或改写 CAS；
 - rewind 只投影当前 active branch；
 - 未闭合 tool call 的恢复结果仍写 `tool.result.recorded`；
 - durable Runtime 禁止使用会把 ToolResult 投影重写为 `message.committed` 的
-  `truncateTo/applyCompaction` 路径；生产压缩通过 Runtime checkpoint 改变读模型。
+  `truncateTo/applyInMemoryCompaction` 路径；生产压缩通过 Runtime checkpoint 改变读模型。
 
 ## 摘要边界
 
@@ -169,7 +169,7 @@ ToolResult 当前轮不使用 LLM 摘要。LLM 摘要只存在于两个明确边
 2. Provider、Hook 和 Reporter 都看不到 raw canary，只拿 bounded projection/hash/size/ref；
 3. `read_evidence` 能分页拼回 tool-exchange 与 subagent-report 原文；
 4. Evidence 写失败时 canonical inline body 完整，Provider/宿主仍有界；
-5. Message ToolResult、Runtime Evidence v1、Fork v1/v2 和 Artifact 引用明确失败；
+5. Message ToolResult、Runtime Evidence v1、Fork v1-v4 和 Artifact 引用明确失败；
 6. fork、rewind、崩溃恢复和 hydration 都保持 structured ToolResult 身份；
 7. 一条真实模型 E2E 能从 preview 识别 Evidence URI，并回读原文 canary。
 

@@ -326,7 +326,7 @@ test("RuntimeStore recovers an EventStore Session marker from the shared workspa
   const transactionId = "cross-store-recovery-transaction";
   const batch = {
     type: "event-batch",
-    schemaVersion: 1,
+    schemaVersion: 2,
     txId: transactionId,
     committedAt: event.at,
     activeBranchId: "main",

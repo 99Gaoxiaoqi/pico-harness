@@ -30,17 +30,19 @@
 
 ## D1：CLI durable transcript 恢复链未闭环
 
-### 当前现象
+### 修整前现象
 
-[`Session.readHydrationSnapshot()`](../../src/engine/session.ts) 已经返回：
+[`Session.readHydrationSnapshot()`](../../src/engine/session.ts) 返回：
 
 - `messages`
 - `transcriptEvents`
+- 当前 active branch 的 `toolResults`
 - `runtime settings / goal / usage`
 
-现在 TUI 优先以 `transcriptEvents` 初始化同一个 `TranscriptEventStore` 并直接重放；只有旧 Session 没有结构化事件时，才调用 `pushUserMessage`、`onMessage`、`onToolCall` 和 `onToolResult` 走 Message 兼容路径。
+TUI 只以 `transcriptEvents` 初始化 `TranscriptEventStore`，并用 canonical `toolResults`
+完成工具条目。缺少任一结构化输入时 hydration 明确拒绝，不再从 Message 或显示字符串重建。
 
-因此恢复后可以重建主干对话，却不保证恢复：
+修整前只能重建主干对话，不能保证恢复：
 
 - reasoning/thinking 内容；
 - Skill 激活与本地 system feedback；
@@ -48,18 +50,19 @@
 - 原来的 UI entry/stream/tool 稳定 ID；
 - UI 事件的精确先后关系。
 
-这正是本轮 D1 修整前 CLI 的缺口；当前实现已让 CLI 与 Desktop 一样优先消费结构化 transcript，Message 路径只保留给旧 Session。
+这正是本轮 D1 修整前 CLI 的缺口；当前实现已让 CLI 与 Desktop 消费同一结构化 transcript
+和 ToolResult Envelope。
 
 ### 根因
 
-历史上项目同时存在两条恢复路径；当前恢复优先级已经收敛为：
+历史上项目同时存在两条恢复路径；当前已经硬切为一条：
 
 ```text
 RuntimeEvent transcript events ──▶ TranscriptEventStore ──▶ TUI Projection
-RuntimeEvent messages ──▶ 旧 Session 兼容重建 ──▶ TUI Projection
+RuntimeEvent tool.result.recorded ──▶ ToolResultEnvelope ──▶ TUI Projection
 ```
 
-结构化事件现在是 CLI 的优先恢复源；Message 路径只作为旧数据兼容回退。
+Message 路径不再作为 hydration 回退。
 
 ### 为什么属于架构债务
 
@@ -72,21 +75,21 @@ RuntimeEvent messages ──▶ 旧 Session 兼容重建 ──▶ TUI Projectio
 ```mermaid
 flowchart LR
   Runtime["RuntimeEventStore"] --> Snapshot["SessionHydrationSnapshot"]
-  Snapshot --> HasEvents{"存在 transcriptEvents？"}
-  HasEvents -->|是| Replay["重放 TranscriptEventStore"]
-  HasEvents -->|否，旧 Session| Legacy["从 Message 兼容重建"]
+  Snapshot --> Validate{"transcriptEvents 与 toolResults 完整？"}
+  Validate -->|是| Replay["重放 Transcript 并应用 ToolResult Envelope"]
+  Validate -->|否| Reject["明确拒绝旧会话"]
   Replay --> TUI["TUI Projection"]
-  Legacy --> TUI
 ```
 
-新 Session 应持久化低频、语义稳定的 Transcript 事实；不能把逐 token delta 或 stdout/stderr 小块直接写入 durable ledger。旧 Session 没有 transcript events 时，继续使用 Message 重建作为只读兼容回退。
+新 Session 持久化低频、语义稳定的 Transcript 事实；不能把逐 token delta 或 stdout/stderr
+小块直接写入 durable ledger。开发期旧 Session 不迁移，可由使用者显式删除。
 
 ### 完成标准
 
 - 恢复前后可见条目、稳定 ID 和顺序一致。
 - reasoning、Skill、system feedback 和子代理终态可以恢复。
 - assistant/tool 不因同时存在 Message 与 TranscriptEvent 而重复。
-- 旧 Session 没有 transcript events 时仍能恢复。
+- 缺少 transcript/toolResults 的旧 Session 明确失败。
 - RuntimeEvent JSONL 不按 token delta 无界增长。
 
 ## D2：Markdown 四套表示不一致
@@ -141,10 +144,10 @@ Markdown source
 ### D1/D2 实施记录
 
 - `src/presentation/transcript-durability.ts` 定义语义事件持久化策略和 Session sink；逐 token delta、phase 和原始工具输出不进入 durable ledger。
-- `src/tui/tui-reporter.ts` 将最终 stream/tool/subagent 事实串行写入同一 Session 事件账本，并提供 flush/hydration 边界。
+- `src/tui/tui-reporter.ts` 将最终 stream/subagent 语义事件串行写入同一 Session 事件账本，并提供 flush/hydration 边界；工具完成由 durable `tool.started` 与 canonical `tool.result.recorded` 在水合时合成，`tool.completed` 本身只用于实时展示。
 - `src/tui/terminal-markdown-model.tsx` 以 `marked` Token tree 同时驱动 Ink render、`measure()` 和 `clip()`；TUI 布局与流式组件共用该模型。
 - `/clear` 后的 rewind 不再按 TUI 局部数组索引裁剪，而是在 durable rewind 成功后重新读取 Session snapshot 并替换同一个 reducer 投影；旧分支、稳定 ID 和结构化事件因而一起恢复。
-- 新增 Transcript 与 Markdown 集成回归，覆盖旧会话 reasoning fallback、稳定 ID、durable 事件有界增长、复杂 Markdown 行高和视觉裁剪。
+- 新增 Transcript 与 Markdown 集成回归，覆盖旧会话拒绝、稳定 ID、durable 事件有界增长、复杂 Markdown 行高和视觉裁剪。
 
 ## D3：`AgentRuntime` 是高变更密度 Composition Root
 
@@ -187,7 +190,7 @@ Markdown source
 
 Runtime reconcile 只在 active Session projection 内匹配 tool call/result。未终结 run 的中断结果写在原 run terminal 之前；若原 run 已终结，则以确定 ID 建立独立 recovery run，并按 `run.started → synthetic result → run.terminal` 记录，避免把恢复事实追加到旧 terminal 之后。
 
-同时新增 `src/engine/runtime-port.ts` 与 `src/runtime/engine-runtime-port-adapter.ts`：AgentEngine 和 Session 只依赖 engine-owned 的运行生命周期/ambient tool-call/外部提交契约，RuntimeRun 的具体实现集中在 adapter；`RuntimeEventStore` 与 event codec 已迁移到中立的 `src/storage/`，Runtime 旧路径仅保留兼容导出。主 Agent 与 Hook verifier 都显式注入该 port；没有为 Engine 增加第二 durable writer。
+同时新增 `src/engine/runtime-port.ts` 与 `src/runtime/engine-runtime-port-adapter.ts`：AgentEngine 和 Session 只依赖 engine-owned 的运行生命周期/ambient tool-call/外部提交契约，RuntimeRun 的具体实现集中在 adapter；`RuntimeEventStore` 与 event codec 已迁移到中立的 `src/storage/`，旧 Runtime facade 已删除。主 Agent 与 Hook verifier 都显式注入该 port；没有为 Engine 增加第二 durable writer。
 
 架构门禁现在同样检查 type-only import，Engine 不能再借类型引用反向依赖 Runtime；门禁的测试根目录也由 fixture 显式注入，避免测试只扫描真实仓库而漏掉构造出的违规样例。
 
@@ -241,14 +244,14 @@ Plugin 资源 owner 的失败语义也已收口：`PluginRuntimeSnapshotRegistry
 Desktop 现在与 CLI 共用同一套 durable transcript 事实，但通过独立的 Web 协议投影：
 
 - `RuntimeConversationItem` 新增 `thinking`，从 Provider 明确返回的 `message.reasoning` 或结构化 Transcript thinking entry 生成；
-- structured Transcript 的 Skill、system、thinking 条目保留稳定 ID，旧 Message 仍可作为兼容来源；
-- Message fallback 与 structured thinking 按规范化正文和出现次数逐一配对；相同 reasoning 不会全部错配到最后一条回答，结构化 tool 调用也按出现次数抵扣；
+- structured Transcript 的 Skill、system、thinking 和 tool 条目保留稳定 ID；
+- thinking 与 tool completion 只按显式 Runtime 身份关联，不用 Message 正文或字符串前缀猜测；
 - 子代理显示名作为 `RuntimeConversationItem` 的独立字段传递，不再编码进标题后由 Renderer 猜测；
 - renderer 使用 `marked` Token tree 渲染标题、列表、引用、表格、代码、链接和未闭合 Markdown；原始 HTML、控制字符和危险链接被过滤；
 - thinking 使用独立浅色样式；逐 token reasoning 通过有界 `run.live` 临时通知显示，完成/中断后收口，但不会写入 replay cursor 或 Desktop durable timeline；
 - Desktop 用户触发的 Skill 会在同一 Session durable ledger 中追加 `entry.appended`，避免只显示一次性的 UI 卡片。
 
-Desktop 的 MCP 目录查询与执行现在都复用同一个 `PluginRuntimeSnapshotRegistry`，project source 与 plugin MCP sources 不再分叉。实时 `run.live` 只负责当前进程的可见反馈；完成后的 durable transcript 仍是恢复与跨端一致性的唯一事实源。
+Desktop 的 MCP 目录查询与执行现在都复用同一个 `PluginRuntimeSnapshotRegistry`，project source 与 plugin MCP sources 不再分叉。实时 `run.live` 只负责当前进程的可见反馈；完成后的 durable Transcript 事件与 canonical ToolResult 事实共同构成可重建的恢复投影。
 
 `run.live` 的 scope/payload Run 身份现在必须一致，terminal event 不得携带 delta/truncated；daemon、Main/Preload buffer 和 Renderer 都保持 stream terminal 单调性，迟到 append 不会重启已完成的 thinking。有界 buffer 在 durable event 入队前优先驱逐 append delta，terminal tombstone 优先于 append，且 live coalesce 不跨越 durable/其他 stream 屏障；驱逐前缀或收到上游 `truncated:true` 后，截断状态会跨 `drain()` 保留到 complete/clear，不会把 suffix 伪装成完整内容。工具轮在 `tool.started` 持久时间线前先完成对应 live stream；message RuntimeEvent 的 `runId + turnId` 会贯通到 durable thinking 和 live item，`session.transcript` 结果边界也会拒绝非字符串身份。hydration 只按显式轮次身份替换 active live，不再用文本相等或前缀猜测轮次。只有无身份的截断旧流保留保守前缀收口，截断提示本身不参与匹配。工具条目按 `providerCallId` 和 durable sequence 选择最近前驱调用，ToolResult 队列在去重前同步消耗，避免跨轮复用 ID 时错配。`LocalRuntimeClient` 在回放失败或 overlap buffer 溢出后保持 recovery fence，成功重放前不交付新 durable event、不推进 cursor；Unix Socket 集成回归覆盖了溢出与重试间隙。
 

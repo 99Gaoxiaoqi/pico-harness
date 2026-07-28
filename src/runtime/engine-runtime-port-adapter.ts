@@ -6,14 +6,13 @@ import type {
   EngineRuntimeRun,
   EngineRuntimeRunStartOptions,
 } from "../engine/runtime-port.js";
-import { configureDefaultEngineRuntimePort } from "../engine/runtime-port.js";
 import {
   currentRuntimeRun,
   currentRuntimeToolCallId,
   runWithRuntimeToolCall,
   RuntimeRun,
 } from "./runtime-run.js";
-import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
+import type { RuntimeHistoryProjectionEntry } from "../engine/session-runtime-read-model.js";
 
 /**
  * Adapts the concrete durable RuntimeRun to the small port consumed by the
@@ -56,7 +55,3 @@ export function asEngineRuntimeHistoryEntry(
 ): EngineRuntimeHistoryEntry {
   return { eventId: entry.eventId, message: entry.message };
 }
-
-// Legacy Session constructors do not carry a port option; the Runtime
-// composition module registers one canonical adapter for those hosts.
-configureDefaultEngineRuntimePort(createEngineRuntimePort());

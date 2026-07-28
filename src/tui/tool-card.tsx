@@ -17,16 +17,7 @@ import { formatOutputPreview } from "./diff-preview.js";
 import { compactText, compactToolName, summarizeToolTarget } from "./tool-format.js";
 import { terminalWidth, truncateTerminalText, visualRows } from "./terminal-width.js";
 
-export type ToolCardStatus =
-  | "queued"
-  | "running"
-  | "approval"
-  | "success"
-  | "error"
-  | "denied"
-  // Legacy aliases accepted at the view boundary while reporters migrate.
-  | "done"
-  | "failed";
+export type ToolCardStatus = "queued" | "running" | "approval" | "success" | "error" | "denied";
 
 const ToolCardExpansionContext = createContext(false);
 
@@ -349,12 +340,11 @@ function agentResultText(status: ToolCardStatus, summary: string | undefined): s
 }
 
 function toolStatusText(status: ToolCardStatus): string {
-  const normalized = normalizeStatus(status);
-  if (normalized === "queued") return "Queued";
-  if (normalized === "running") return "Running";
-  if (normalized === "approval") return "Approval";
-  if (normalized === "denied") return "Denied";
-  if (normalized === "error") return "Error";
+  if (status === "queued") return "Queued";
+  if (status === "running") return "Running";
+  if (status === "approval") return "Approval";
+  if (status === "denied") return "Denied";
+  if (status === "error") return "Error";
   return "Success";
 }
 
@@ -362,17 +352,8 @@ function agentResultHint(summary: string): string {
   return compactText(summary, 24);
 }
 
-function normalizeStatus(
-  status: ToolCardStatus,
-): "queued" | "running" | "approval" | "success" | "error" | "denied" {
-  if (status === "done") return "success";
-  if (status === "failed") return "error";
-  return status;
-}
-
 function isFailureStatus(status: ToolCardStatus): boolean {
-  const normalized = normalizeStatus(status);
-  return normalized === "error" || normalized === "denied";
+  return status === "error" || status === "denied";
 }
 
 function toolResultBadge(summary: string, failure = false): string {

@@ -35,7 +35,6 @@ export const WORKSPACE_PORTABILITY_REASONS = [
   "durable_task_history",
   "portable_evidence",
   "portable_trace",
-  "portable_memory_summary",
   "workspace_transaction_state",
   "runtime_control_state",
   "legacy_runtime_state",
@@ -215,10 +214,6 @@ const HOST_BOUND_TOP_LEVEL_FILES = new Map<string, PathPolicy>([
   ],
 ]);
 
-const PORTABLE_MEMORY_SUMMARY_POLICY = Object.freeze({
-  classification: "portable",
-  reason: "portable_memory_summary",
-}) satisfies PathPolicy;
 const PROTECTED_MEMORY_STATE_POLICY = Object.freeze({
   classification: "protected",
   reason: "memory_state_may_contain_sensitive_data",
@@ -462,24 +457,12 @@ function scanMemoryRoot(
     assertSupportedNode(metadata, relativePath);
     const denylisted = denylistedPolicy(relativePath);
     const policy =
-      denylisted ??
-      (name === "summaries"
-        ? PORTABLE_MEMORY_SUMMARY_POLICY
-        : name === "state.json"
-          ? PROTECTED_MEMORY_STATE_POLICY
-          : undefined);
+      denylisted ?? (name === "state.json" ? PROTECTED_MEMORY_STATE_POLICY : undefined);
     if (!policy) {
       throw planError(
         "unknown_memory_entry",
         relativePath,
         `Unknown memory storage entry has no portability policy: ${relativePath}`,
-      );
-    }
-    if (name === "summaries" && !metadata.isDirectory()) {
-      throw planError(
-        "special_file",
-        relativePath,
-        `Memory summaries entry must be a real directory: ${relativePath}`,
       );
     }
     if (name === "state.json" && !metadata.isFile()) {

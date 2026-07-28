@@ -445,7 +445,7 @@ async function assertNativeHooksTrusted(
   config: HooksConfig,
   trustStore: HookTrustStore,
 ): Promise<void> {
-  for (const event of ["PreToolUse", "PostToolUse"] as const) {
+  for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"] as const) {
     for (const group of config[event] ?? []) {
       for (const handler of group.hooks) {
         if (handler.type !== "command") {

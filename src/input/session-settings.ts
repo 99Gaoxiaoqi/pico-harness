@@ -284,10 +284,15 @@ export function setSessionModel(settings: SessionSettings, model: string): Sessi
   if (!normalized) {
     return { ok: false, message: `Current model: ${settings.model}` };
   }
+  if (persistenceBySettings.has(settings)) {
+    return {
+      ok: false,
+      message: "Durable Sessions require a model route. Use /model with providerID/modelID.",
+    };
+  }
 
   settings.model = normalized;
   delete settings.modelRouteId;
-  persistSessionSettings(settings);
   return { ok: true, message: `Model set to ${settings.model}` };
 }
 
@@ -327,15 +332,12 @@ export function setSessionModelRoute(
   };
 }
 
-/** 将用户显式选择或 legacy 会话唯一匹配出的路由写回运行态。 */
+/** 将用户显式选择的路由写回运行态。 */
 export function migrateSessionModelRoute(settings: SessionSettings, route: ModelRoute): void {
   applySessionModelRoute(settings, route);
 }
 
-/**
- * 恢复会话时以已持久化的 route ID 为权威，不跨 Provider 静默迁移。
- * 只有真正没有 route ID 的 legacy 设置才允许按 provider + model 唯一匹配。
- */
+/** 恢复会话时以已持久化的 route ID 为唯一权威，不按 model 名猜测路由。 */
 export function resolveRestoredSessionModelRoute(
   router: ModelRouter,
   restored: PersistedSessionSettings | undefined,
@@ -345,30 +347,12 @@ export function resolveRestoredSessionModelRoute(
     return router.resolve(fallbackRouteId) ?? router.require(undefined);
   }
 
-  if (restored.modelRouteId !== undefined) {
-    const routeId = restored.modelRouteId.trim();
-    const route = router.routes.find((candidate) => candidate.id === routeId);
-    if (route) return route;
-
-    const available = router.routes.map((candidate) => candidate.id).join(", ") || "none";
-    throw new Error(
-      `会话固定的模型路由 ${routeId || "(empty)"} 已不可用。为避免把会话发送到其他 Provider，Pico 不会自动切换模型。请使用 --model <provider/model> 显式选择。可用模型: ${available}。`,
-    );
-  }
-
-  const legacyMatches = router.routes.filter(
-    (candidate) => candidate.provider === restored.provider && candidate.model === restored.model,
-  );
-  if (legacyMatches.length === 1) return legacyMatches[0]!;
-
-  if (legacyMatches.length === 0) {
-    throw new Error(
-      `旧会话模型 ${restored.provider}/${restored.model} 已不可用。为避免自动切换 Provider，请使用 --model <provider/model> 显式选择。`,
-    );
-  }
-
+  const routeId = restored.modelRouteId;
+  const route = router.routes.find((candidate) => candidate.id === routeId);
+  if (route) return route;
+  const available = router.routes.map((candidate) => candidate.id).join(", ") || "none";
   throw new Error(
-    `旧会话模型 ${restored.provider}/${restored.model} 匹配到多个路由 (${legacyMatches.map((candidate) => candidate.id).join(", ")})。请使用 --model <provider/model> 显式选择。`,
+    `会话固定的模型路由 ${routeId} 已不可用。为避免把会话发送到其他 Provider，Pico 不会自动切换模型。请使用 --model <provider/model> 显式选择。可用模型: ${available}。`,
   );
 }
 
@@ -544,8 +528,8 @@ export function formatSessionReasoningStatus(
 ): string {
   if (!router) {
     return [
-      `路由：legacy/${settings.provider}/${settings.model}`,
-      "推理控制：旧版兼容模式",
+      `路由：${settings.modelRouteId ?? "未配置"}`,
+      "推理控制：未连接模型路由",
       "支持档位：off、low、medium、high",
       "默认档位：high",
       `当前档位：${settings.thinkingEffort}`,
@@ -581,7 +565,7 @@ export function formatSessionStatus(settings: SessionSettings): string {
   return [
     `Mode: ${settings.mode}`,
     `Model: ${settings.model}`,
-    `Model route: ${settings.modelRouteId ?? "legacy"}`,
+    `Model route: ${settings.modelRouteId ?? "unconfigured"}`,
     `Thinking effort: ${settings.thinkingEffort}`,
     `Session: ${settings.sessionId}`,
     `Title: ${settings.title ?? "-"}`,
@@ -620,7 +604,7 @@ function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemin
 }
 
 function resolveSessionModelRoute(settings: SessionSettings, router: ModelRouter) {
-  return router.resolve(settings.modelRouteId) ?? router.resolve(settings.model);
+  return router.routes.find((candidate) => candidate.id === settings.modelRouteId);
 }
 
 function formatThinkingUsage(capability: ResolvedModelReasoningCapability): string {
@@ -709,12 +693,16 @@ function sessionSettingsKey(sessionId: string, cwd: string, picoHome?: string): 
 }
 
 export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {
+  const modelRouteId = settings.modelRouteId?.trim();
+  if (!modelRouteId || !/^[^/\s]+\/\S.*$/u.test(modelRouteId)) {
+    throw new Error("Durable Session settings require a stable providerID/modelID route");
+  }
   return {
     ...(settings.title !== undefined ? { title: settings.title } : {}),
     ...(settings.forkFrom !== undefined ? { forkFrom: settings.forkFrom } : {}),
     provider: settings.provider,
     model: settings.model,
-    ...(settings.modelRouteId !== undefined ? { modelRouteId: settings.modelRouteId } : {}),
+    modelRouteId,
     mode: settings.mode,
     ...(settings.prePlanMode !== undefined ? { prePlanMode: settings.prePlanMode } : {}),
     thinkingEffort: settings.thinkingEffort,
@@ -739,11 +727,7 @@ function applyPersistedSessionSettings(
   }
   settings.provider = persisted.provider;
   settings.model = persisted.model;
-  if (persisted.modelRouteId !== undefined) {
-    settings.modelRouteId = persisted.modelRouteId;
-  } else {
-    delete settings.modelRouteId;
-  }
+  settings.modelRouteId = persisted.modelRouteId;
   settings.mode = persisted.mode;
   if (persisted.prePlanMode !== undefined) {
     settings.prePlanMode = persisted.prePlanMode;

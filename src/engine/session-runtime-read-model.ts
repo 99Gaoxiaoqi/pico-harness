@@ -1,9 +1,6 @@
+import { createHash } from "node:crypto";
 import type { Message, ToolCall } from "../schema/message.js";
-import type {
-  RuntimeCheckpointRecordedEvent,
-  RuntimeEvent,
-  RuntimeRollingCheckpointData,
-} from "./session-runtime-event.js";
+import type { RuntimeCheckpointRecordedEvent, RuntimeEvent } from "./session-runtime-event.js";
 import {
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
@@ -82,7 +79,7 @@ function materializePrefix(
       projected = materializePrefix(events, throughEventIndex + 1, eventIndexes);
       continue;
     }
-    if (event.kind === "context.checkpoint.recorded" && isRollingCheckpoint(event)) {
+    if (event.kind === "context.checkpoint.recorded") {
       replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
       continue;
     }
@@ -101,7 +98,7 @@ function materializePrefix(
 
 function replaceProjectedPrefixWithCheckpoint(
   projected: RuntimeHistoryProjectionEntry[],
-  checkpoint: RuntimeCheckpointRecordedEvent & { readonly data: RuntimeRollingCheckpointData },
+  checkpoint: RuntimeCheckpointRecordedEvent,
   eventIndexes: ReadonlyMap<string, number>,
   checkpointEventIndex: number,
 ): void {
@@ -112,6 +109,18 @@ function replaceProjectedPrefixWithCheckpoint(
     checkpointEventIndex,
     `Runtime checkpoint ${checkpoint.eventId}`,
   );
+  const covered = projected.slice(0, throughProjectedIndex + 1);
+  const sourceDigest = createHash("sha256")
+    .update(covered.map(({ eventId }) => eventId).join("\n"))
+    .digest("hex");
+  if (
+    checkpoint.data.coveredEventCount !== covered.length ||
+    checkpoint.data.sourceDigest !== sourceDigest
+  ) {
+    throw new RuntimeEventReadModelIntegrityError(
+      `Runtime checkpoint ${checkpoint.eventId} does not match its covered model prefix`,
+    );
+  }
   projected.splice(0, throughProjectedIndex + 1, {
     eventId: checkpoint.eventId,
     message: cloneMessage(checkpoint.data.summary),
@@ -135,12 +144,6 @@ function findProjectedEventIndex(
   throw new RuntimeEventReadModelIntegrityError(
     `${referenceKind} references an unknown prior event ${eventId}`,
   );
-}
-
-function isRollingCheckpoint(
-  event: RuntimeCheckpointRecordedEvent,
-): event is RuntimeCheckpointRecordedEvent & { readonly data: RuntimeRollingCheckpointData } {
-  return event.data.throughEventId !== undefined && event.data.summary !== undefined;
 }
 
 function assertToolCallPairing(messages: readonly Message[]): void {

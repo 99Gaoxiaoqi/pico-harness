@@ -1,14 +1,18 @@
 import { createHash } from "node:crypto";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
-import { projectRuntimeToolResultEnvelope } from "../engine/runtime-model-message.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
-import { projectTranscriptEvents } from "../presentation/transcript-event-store.js";
-import type { RuntimeEventStoreEntry } from "../runtime/runtime-event-store.js";
+import {
+  projectTranscriptEvents,
+  type TranscriptToolCallStatus,
+} from "../presentation/transcript-event-store.js";
+import { hydrateCanonicalTranscriptEvents } from "../presentation/transcript-tool-result-hydration.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
 import {
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
+  projectRuntimeSessionModelToolResultEntries,
   projectRuntimeSessionTranscriptEventEntries,
-} from "../runtime/runtime-session-projection.js";
+} from "../engine/session-runtime-projection.js";
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import {
   MAX_RUNTIME_FRAME_BYTES,
@@ -72,17 +76,7 @@ export function projectRuntimeTranscriptEntries(
       messageTurnIds: messages.map(({ turnId }) => turnId),
       transcriptEvents: transcript.map(({ event }) => event),
       transcriptEventSequences: transcript.map(({ sequence }) => sequence),
-      toolResults: entries.flatMap(({ sequence, event }) =>
-        event.kind === "tool.result.recorded"
-          ? [
-              {
-                sequence,
-                eventId: event.eventId,
-                envelope: projectRuntimeToolResultEnvelope(event),
-              },
-            ]
-          : [],
-      ),
+      toolResults: projectRuntimeSessionModelToolResultEntries(entries),
       runtime: projectRuntimeSessionState(events),
     },
     options,
@@ -115,10 +109,8 @@ export class TranscriptRevisionConflict extends Error {
 }
 
 function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConversationItem[] {
-  const toolResults = indexToolResults(snapshot.toolResults);
   const structured = projectStructuredItems(snapshot);
   const structuredItems = structured.items;
-  const representedMessageToolKeys = structured.representedMessageToolKeys;
   const structuredThinkingMatches = matchStructuredThinkingMessages(snapshot, structuredItems);
   const structuredThinkingPlacements = new Map<
     string,
@@ -218,31 +210,6 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
             };
       append(item, sequence);
     }
-    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
-      // The structured transcript entry owns the stable UI identity when it references the
-      // exact Provider call occurrence. Consume its result even when the structured entry is
-      // rendered so a reused Provider call ID cannot shift the following synthetic summary.
-      const result = toolResults.get(call.id)?.shift()?.envelope;
-      if (representedMessageToolKeys.has(messageToolOccurrenceKey(messageIndex, callIndex))) {
-        continue;
-      }
-      const failed = result === undefined || result.status !== "succeeded";
-      append(
-        {
-          id: stableItemId(snapshot.sessionId, messageIndex, `tool:${call.id}`, call.arguments),
-          kind: "tool",
-          name: call.name,
-          args: call.arguments,
-          status: failed ? "error" : "success",
-          summary:
-            result === undefined
-              ? "Interrupted before a result was recorded."
-              : `${failed ? "Tool failed" : "Tool completed"} · ${result.rawSizeBytes} bytes`,
-          ...(result ? { result: protocolToolResultEnvelope(result) } : {}),
-        },
-        sequence,
-      );
-    }
   });
 
   const activeGoal = snapshot.runtime.goal?.goals.find((goal) => goal.status === "active");
@@ -335,16 +302,21 @@ interface OrderedConversationItem {
 
 interface StructuredConversationProjection {
   readonly items: readonly OrderedConversationItem[];
-  readonly representedMessageToolKeys: ReadonlySet<string>;
 }
 
 function projectStructuredItems(
   snapshot: RuntimeTranscriptSnapshot,
 ): StructuredConversationProjection {
-  if (snapshot.transcriptEvents.length === 0) {
-    return { items: [], representedMessageToolKeys: new Set() };
-  }
-  const projection = projectTranscriptEvents(snapshot.transcriptEvents);
+  const projection = projectTranscriptEvents(
+    hydrateCanonicalTranscriptEvents({
+      sessionId: snapshot.sessionId,
+      updatedAt: new Date(snapshot.transcriptEvents.at(-1)?.createdAt ?? 0).toISOString(),
+      transcriptEvents: snapshot.transcriptEvents,
+      transcriptEventSequences: snapshot.transcriptEventSequences,
+      toolResults: snapshot.toolResults,
+      rejectUnmatchedResults: true,
+    }),
+  );
   const createdAtByEntryId = new Map<string, number>();
   const sequenceByEntryId = new Map<string, number>();
   for (const [eventIndex, event] of snapshot.transcriptEvents.entries()) {
@@ -357,23 +329,6 @@ function projectStructuredItems(
         event.entryId,
         snapshot.transcriptEventSequences[eventIndex] ?? snapshot.messages.length + eventIndex + 1,
       );
-    }
-  }
-  const representedMessageToolKeys = matchStructuredProviderCalls(
-    snapshot,
-    projection,
-    sequenceByEntryId,
-  );
-  // Deduplicate only the number of structured tool entries already represented by
-  // message tool calls. A Set would incorrectly drop a second legitimate invocation
-  // when two calls happen to use the same name and arguments.
-  const messageToolSignatures = new Map<string, number>();
-  for (const [messageIndex, message] of snapshot.messages.entries()) {
-    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
-      if (representedMessageToolKeys.has(messageToolOccurrenceKey(messageIndex, callIndex)))
-        continue;
-      const signature = `${call.name}\0${call.arguments}`;
-      messageToolSignatures.set(signature, (messageToolSignatures.get(signature) ?? 0) + 1);
     }
   }
   const items: OrderedConversationItem[] = [];
@@ -477,18 +432,6 @@ function projectStructuredItems(
           projected.toolCallId === undefined
             ? undefined
             : projection.toolCalls[projected.toolCallId]?.resultEnvelope;
-        if (
-          projected.toolCallId === undefined ||
-          projection.toolCalls[projected.toolCallId]?.providerCallId === undefined
-        ) {
-          const signature = `${entry.name}\0${entry.args}`;
-          const representedCount = messageToolSignatures.get(signature) ?? 0;
-          if (representedCount > 0) {
-            if (representedCount === 1) messageToolSignatures.delete(signature);
-            else messageToolSignatures.set(signature, representedCount - 1);
-            break;
-          }
-        }
         items.push(
           ordered({
             id: projected.id,
@@ -544,73 +487,7 @@ function projectStructuredItems(
         break;
     }
   }
-  return { items, representedMessageToolKeys };
-}
-
-interface MessageToolOccurrence {
-  readonly key: string;
-  readonly providerCallId: string;
-  readonly sequence: number;
-  readonly ordinal: number;
-}
-
-interface StructuredProviderCallOccurrence {
-  readonly providerCallId: string;
-  readonly sequence: number;
-  readonly ordinal: number;
-}
-
-function matchStructuredProviderCalls(
-  snapshot: RuntimeTranscriptSnapshot,
-  projection: ReturnType<typeof projectTranscriptEvents>,
-  sequenceByEntryId: ReadonlyMap<string, number>,
-): ReadonlySet<string> {
-  const messages: MessageToolOccurrence[] = [];
-  for (const [messageIndex, message] of snapshot.messages.entries()) {
-    const sequence = snapshot.messageSequences[messageIndex] ?? messageIndex + 1;
-    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
-      messages.push({
-        key: messageToolOccurrenceKey(messageIndex, callIndex),
-        providerCallId: call.id,
-        sequence,
-        ordinal: messageIndex * 1_000_000 + callIndex,
-      });
-    }
-  }
-
-  const structured: StructuredProviderCallOccurrence[] = [];
-  for (const [projectedIndex, projected] of projection.entries.entries()) {
-    if (projected.entry.kind !== "tool" || projected.toolCallId === undefined) continue;
-    const providerCallId = projection.toolCalls[projected.toolCallId]?.providerCallId;
-    if (!providerCallId) continue;
-    structured.push({
-      providerCallId,
-      sequence: sequenceByEntryId.get(projected.id) ?? Number.MAX_SAFE_INTEGER - 1,
-      ordinal: projectedIndex,
-    });
-  }
-  structured.sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
-
-  const matched = new Set<string>();
-  for (const occurrence of structured) {
-    const candidates = messages.filter(
-      (message) =>
-        message.providerCallId === occurrence.providerCallId && !matched.has(message.key),
-    );
-    const preceding = candidates
-      .filter((message) => message.sequence <= occurrence.sequence)
-      .sort((left, right) => right.sequence - left.sequence || right.ordinal - left.ordinal)[0];
-    const following = candidates
-      .filter((message) => message.sequence > occurrence.sequence)
-      .sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal)[0];
-    const selected = preceding ?? following;
-    if (selected) matched.add(selected.key);
-  }
-  return matched;
-}
-
-function messageToolOccurrenceKey(messageIndex: number, callIndex: number): string {
-  return `${messageIndex}:${callIndex}`;
+  return { items };
 }
 
 function structuredItemKey(
@@ -621,18 +498,6 @@ function structuredItemKey(
   const value =
     kind === "approval" ? data["approvalId"] : kind === "prompt" ? data["promptId"] : data["runId"];
   return typeof value === "string" && value ? `${kind}:${value}` : undefined;
-}
-
-function indexToolResults(
-  toolResults: readonly SequencedToolResultEnvelope[],
-): Map<string, SequencedToolResultEnvelope[]> {
-  const results = new Map<string, SequencedToolResultEnvelope[]>();
-  for (const result of toolResults.toSorted((left, right) => left.sequence - right.sequence)) {
-    const ordered = results.get(result.envelope.toolCallId) ?? [];
-    ordered.push(result);
-    results.set(result.envelope.toolCallId, ordered);
-  }
-  return results;
 }
 
 function transcriptRevision(
@@ -865,9 +730,9 @@ function normalizeMaxBytes(value: number | undefined): number {
   return value;
 }
 
-function transcriptToolStatus(status: string): "running" | "success" | "error" {
-  if (status === "success" || status === "done") return "success";
-  if (status === "error" || status === "failed" || status === "denied") return "error";
+function transcriptToolStatus(status: TranscriptToolCallStatus): "running" | "success" | "error" {
+  if (status === "success") return "success";
+  if (status === "error" || status === "denied") return "error";
   return "running";
 }
 
