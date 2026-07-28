@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
+import type { ToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
 import { materializeRuntimeHistory } from "../../src/engine/session-runtime-read-model.js";
 import { Session } from "../../src/engine/session.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
@@ -184,14 +185,14 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
     providerCallId?: string;
   }> = [];
   const reporter = new (class extends SilentReporter {
-    override onToolResult(
-      toolName = "",
-      result = "",
-      isError = false,
-      providerCallId?: string,
-    ): void {
-      reported.push({ toolName, result, isError, providerCallId });
-      if (toolName === "fast_fixture") {
+    override onToolResult(result: ToolResultEnvelope): void {
+      reported.push({
+        toolName: result.toolName,
+        result: result.projection.text,
+        isError: result.status !== "succeeded",
+        providerCallId: result.toolCallId,
+      });
+      if (result.toolName === "fast_fixture") {
         throw new Error("fixture Reporter failure after recording");
       }
     }
@@ -317,13 +318,13 @@ test("required delegation batch reports its synthetic rejection and actual resul
     providerCallId?: string;
   }> = [];
   const reporter = new (class extends SilentReporter {
-    override onToolResult(
-      toolName = "",
-      result = "",
-      isError = false,
-      providerCallId?: string,
-    ): void {
-      reported.push({ toolName, result, isError, providerCallId });
+    override onToolResult(result: ToolResultEnvelope): void {
+      reported.push({
+        toolName: result.toolName,
+        result: result.projection.text,
+        isError: result.status !== "succeeded",
+        providerCallId: result.toolCallId,
+      });
     }
   })();
 

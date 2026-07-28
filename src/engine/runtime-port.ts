@@ -2,6 +2,7 @@ import type { Message } from "../schema/message.js";
 import type { CommitReceipt } from "./session-persistence.js";
 import { Session } from "./session.js";
 import type {
+  RuntimeEvidenceReference,
   RuntimeToolResultBody,
   RuntimeToolResultProjection,
   RuntimeToolResultStatus,
@@ -84,13 +85,7 @@ export interface EngineRuntimeHistoryEntry {
   readonly message: Message;
 }
 
-export interface EngineRuntimeEvidenceReference {
-  readonly schemaVersion: 1;
-  readonly contentHash: string;
-  readonly sessionId: string;
-  readonly kind: "tool-exchange";
-}
-
+export type EngineRuntimeEvidenceReference = RuntimeEvidenceReference;
 export type EngineRuntimeToolResultStatus = RuntimeToolResultStatus;
 export type EngineRuntimeToolResultBody = RuntimeToolResultBody;
 export type EngineRuntimeToolResultProjection = RuntimeToolResultProjection;

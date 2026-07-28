@@ -47,10 +47,6 @@ import {
   type SubagentModelSelectionRequest,
   type SubagentReportArtifactWriter,
 } from "../tools/subagent.js";
-import {
-  createToolResultObservationProcessor,
-  type ToolObservationProcessor,
-} from "../tools/tool-result-observation.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
@@ -911,7 +907,6 @@ export async function executeAgentRuntime(
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
         evidenceArchive,
       }),
-      observationProcessor: artifactRuntime.observationProcessor,
       runtimeEvidenceArchive: evidenceArchive,
       subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
       reporter,
@@ -1593,7 +1588,6 @@ function buildArtifactRuntime(
   sessionId: string,
   artifactBaseDir: string,
 ): {
-  observationProcessor: ToolObservationProcessor;
   subagentReportArtifactWriter: SubagentReportArtifactWriter;
 } {
   const store = new ToolResultArtifactStore({
@@ -1627,7 +1621,6 @@ function buildArtifactRuntime(
     return meta.path;
   };
   return {
-    observationProcessor: createToolResultObservationProcessor({ store }),
     subagentReportArtifactWriter,
   };
 }

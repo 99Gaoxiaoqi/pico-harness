@@ -206,7 +206,7 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
   assert.deepEqual(replayedLargeResult, secondProviderResult);
 });
 
-test("Evidence ENOSPC fails open to one complete inline Runtime ToolResult", async (context) => {
+test("Evidence ENOSPC keeps one complete inline fact but a bounded model projection", async (context) => {
   const sessionId = "runtime-tool-result-fail-open";
   const fixture = await createFixture("pico-runtime-tool-result-fail-open-", sessionId);
   context.after(async () => {
@@ -280,17 +280,17 @@ test("Evidence ENOSPC fails open to one complete inline Runtime ToolResult", asy
   assert.equal(result.data.body.content, rawOutput);
   assert.equal(result.data.body.sha256, sha256(rawOutput));
   assert.equal(result.data.body.sizeBytes, Buffer.byteLength(rawOutput, "utf8"));
-  assert.equal(result.data.projection.mode, "full");
-  assert.equal(result.data.projection.text, rawOutput);
-  assert.equal(result.data.projection.truncated, false);
-  assert.equal(result.data.projection.text.includes(canary), true);
+  assert.equal(result.data.projection.mode, "preview");
+  assert.equal(result.data.projection.truncated, true);
+  assert.equal(result.data.projection.text.includes(canary), false);
+  assert.match(result.data.projection.strategy, /evidence-write-failed/u);
 
   const secondProviderResult = providerMessages[1]?.find(
     (message) => message.toolCallId === "call:fail-open",
   );
   assert.ok(secondProviderResult);
-  assert.equal(secondProviderResult.content, rawOutput);
-  assert.equal(secondProviderResult.content.includes(canary), true);
+  assert.equal(secondProviderResult.content, result.data.projection.text);
+  assert.equal(secondProviderResult.content.includes(canary), false);
   const terminal = events.find(
     (event) => event.kind === "run.terminal" && event.runId === result.runId,
   );

@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
+import { createToolResultEnvelope } from "../engine/tool-result-contract.js";
 import {
   isMessageHiddenFromTranscript,
   isToolResultErrorMessage,
@@ -110,11 +112,27 @@ export function hydrateTuiReporter(
       for (const call of message.toolCalls ?? []) {
         const result = shiftToolResult(toolResults, call.id);
         reporter.onToolCall(call.name, call.arguments, call.id);
+        const content = result?.content ?? "Interrupted before a result was recorded.";
+        const isError = result === undefined || isHydratedToolError(result);
         reporter.onToolResult(
-          call.name,
-          result?.content ?? "Interrupted before a result was recorded.",
-          result === undefined || isHydratedToolError(result),
-          call.id,
+          createToolResultEnvelope({
+            toolCallId: call.id,
+            toolName: call.name,
+            status: isError ? "interrupted" : "succeeded",
+            body: {
+              storage: "inline",
+              content,
+              sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+              sizeBytes: Buffer.byteLength(content, "utf8"),
+            },
+            projection: {
+              version: 1,
+              mode: result === undefined ? "synthetic" : "full",
+              text: content,
+              strategy: "legacy-hydration",
+              truncated: false,
+            },
+          }),
         );
       }
     }
