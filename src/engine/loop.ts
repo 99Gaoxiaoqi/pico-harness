@@ -600,6 +600,8 @@ export interface AgentEngineOptions {
   rebuildProvider?: () => LLMProvider | undefined;
   /** 主会话 Hook 生命周期；子代 verifier/agent 不注入以防递归。 */
   hookService?: HookService;
+  /** 后台沙箱 Hook 的 committed ToolResult 边界；不得在工具执行期读取 raw 输出。 */
+  postToolResultHook?: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
   /** 为主工作区及隔离 worktree 构建同策略 Skill Catalog。 */
   skillLoaderFactory?: (workDir: string) => SkillLoader;
   /** Runtime-owned lifecycle port; the engine never imports the durable implementation. */
@@ -675,6 +677,7 @@ export class AgentEngine implements AgentRunner {
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
   private readonly rebuildProvider?: () => LLMProvider | undefined;
   private readonly hookService?: HookService;
+  private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort;
 
@@ -720,6 +723,7 @@ export class AgentEngine implements AgentRunner {
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
+    this.postToolResultHook = opts.postToolResultHook;
     this.skillLoaderFactory = opts.skillLoaderFactory;
     this.runtimePort = opts.runtimePort;
   }
@@ -1922,21 +1926,23 @@ export class AgentEngine implements AgentRunner {
           // Reporter 是派生展示层。必须等 canonical ToolResult durable 且 Session
           // 投影完成后再通知；否则 Reporter 异常会让 pending actual 与 synthetic
           // closure 错配。按工具实际完成顺序保持并发批次既有的展示次序。
-          for (const index of completedToolReportIndexes) {
-            const outcome = results[index]!;
-            reporter.onToolResult(outcome.report);
-          }
+          await this.publishCommittedToolResults(
+            reporter,
+            completedToolReportIndexes.map((index) => ({
+              call: toolCalls[index]!,
+              envelope: results[index]!.report,
+            })),
+            signal,
+          );
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
               tools: toolCalls.map((call, index) => {
-                const observation = observations[index]!;
                 return {
                   tool_name: call.name,
                   tool_input: parseHookToolArguments(call.arguments),
                   tool_call_id: call.id,
-                  ok: observation.providerData?.[PICO_TOOL_RESULT_ERROR_KEY] !== true,
-                  output: observation.content,
+                  tool_result: structuredClone(results[index]!.report),
                 };
               }),
             },
@@ -2104,22 +2110,59 @@ export class AgentEngine implements AgentRunner {
     // an outcome become synthetic only after the batch closes, so they follow in
     // provider order. Every notification happens after the whole canonical batch
     // is durable, and a broken Reporter cannot mask the original protocol failure.
-    for (const index of [...completedToolReportIndexes, ...syntheticOutcomes.keys()]) {
-      const settled = settledResults[index];
-      const toolCall = toolCalls[index]!;
-      const report = settled?.report ?? syntheticOutcomes.get(index)?.report;
-      if (!report) {
-        throw new Error(`ToolResult report is missing for ${toolCall.id}`);
-      }
+    await this.publishCommittedToolResults(
+      reporter,
+      [...completedToolReportIndexes, ...syntheticOutcomes.keys()].map((index) => {
+        const toolCall = toolCalls[index]!;
+        const envelope = settledResults[index]?.report ?? syntheticOutcomes.get(index)?.report;
+        if (!envelope) {
+          throw new Error(`ToolResult report is missing for ${toolCall.id}`);
+        }
+        return { call: toolCall, envelope };
+      }),
+      undefined,
+      false,
+    );
+  }
+
+  private async publishCommittedToolResults(
+    reporter: Reporter,
+    results: readonly { call: ToolCall; envelope: ToolResultEnvelope }[],
+    signal?: AbortSignal,
+    propagateErrors = true,
+  ): Promise<void> {
+    let firstError: unknown;
+    for (const { call, envelope } of results) {
       try {
-        reporter.onToolResult(report);
+        reporter.onToolResult(structuredClone(envelope));
       } catch (error) {
+        firstError ??= error;
         logger.warn(
-          { error: String(error), tool: report.toolName },
+          { error: String(error), tool: envelope.toolName },
           "[Engine] ToolResult 已持久化，但 Reporter 通知失败",
         );
       }
+      try {
+        await this.hookService?.dispatch(
+          envelope.status === "succeeded" ? "PostToolUse" : "PostToolUseFailure",
+          {
+            tool_name: call.name,
+            tool_input: parseHookToolArguments(call.arguments),
+            tool_call_id: call.id,
+            tool_result: structuredClone(envelope),
+          },
+          { signal },
+        );
+        await this.postToolResultHook?.(call, envelope);
+      } catch (error) {
+        firstError ??= error;
+        logger.warn(
+          { error: String(error), tool: envelope.toolName },
+          "[Engine] ToolResult 已持久化，但 PostToolUse Hook 通知失败",
+        );
+      }
     }
+    if (propagateErrors && firstError !== undefined) throw firstError;
   }
 
   /** 执行单个工具调用并返回观察结果消息 + 原始结果 (带日志 + 错误自愈注入) */

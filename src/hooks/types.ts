@@ -1,4 +1,5 @@
 /** Pico 前台 Hook 的公开事件集合。暂未具备宿主生命周期的事件仍保留类型但不伪造触发。 */
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import type { HookTrustAuthority } from "./trust/store.js";
 
 export const HOOK_EVENTS = [
@@ -136,8 +137,8 @@ export interface HookEventPayloadMap {
   PreToolUse: ToolHookPayload;
   PermissionRequest: ToolHookPayload & { reason?: string };
   PermissionDenied: ToolHookPayload & { source: string; reason: string };
-  PostToolUse: ToolHookPayload & { tool_response: string };
-  PostToolUseFailure: ToolHookPayload & { error: string };
+  PostToolUse: ToolHookPayload & { tool_result: ToolResultEnvelope };
+  PostToolUseFailure: ToolHookPayload & { tool_result: ToolResultEnvelope };
   PostToolBatch: { tools: readonly ToolBatchItem[] };
   SubagentStart: { agentId: string; agentType?: string; prompt?: string };
   SubagentStop: { agentId: string; status: string; result?: string };
@@ -165,11 +166,10 @@ export interface ToolHookPayload {
 }
 
 export interface ToolBatchItem extends ToolHookPayload {
-  ok: boolean;
-  output?: string;
+  tool_result: ToolResultEnvelope;
 }
 
-/** 传给 handler 的稳定 envelope；snake_case 字段兼容现有 command hook。 */
+/** ToolResult 正文只能经 payload.tool_result 的有界投影访问。 */
 export type HookInput<E extends HookEvent = HookEvent> = {
   session_id: string;
   cwd: string;
@@ -177,7 +177,6 @@ export type HookInput<E extends HookEvent = HookEvent> = {
   payload: HookEventPayloadMap[E];
   tool_name?: string;
   tool_input?: unknown;
-  tool_response?: string;
 };
 
 export type HookDecision = "allow" | "ask" | "defer" | "deny";

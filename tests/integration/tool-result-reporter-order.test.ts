@@ -34,7 +34,7 @@ test("Reporter failure happens after canonical ToolResult commit and keeps Sessi
   try {
     await session.recover();
     await session.commitMessages({ role: "user", content: "Run the fixture." });
-    const registry = new ToolRegistry({ truncateResults: false });
+    const registry = new ToolRegistry();
     registry.register(outputTool("reporter_fixture", "actual output"));
     const provider: LLMProvider = {
       async generate() {
@@ -275,7 +275,7 @@ test("required delegation batch reports its synthetic rejection and actual resul
     picoHome,
     runtimePort,
   });
-  const registry = new ToolRegistry({ truncateResults: false });
+  const registry = new ToolRegistry();
   registry.register(outputTool("rejected_fixture", "this output must not be used"));
   registry.register(
     outputTool(

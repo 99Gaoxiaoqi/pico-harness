@@ -11,7 +11,6 @@ import {
   TaskOutputTool,
   TaskStopTool,
   ToolRegistry,
-  type ToolRegistryOptions,
   WriteFileTool,
 } from "./registry-impl.js";
 import { GlobTool } from "./glob.js";
@@ -32,7 +31,7 @@ import { ReadArtifactTool } from "./artifact-read.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
 import type { ApprovalManager } from "../approval/manager.js";
 
-export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
+export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
   workspaceRoots?: WorkspaceRoots;
   /** Host 将工作区 ask/yolo 与审批合并处理时，关闭这里的严格前置拒绝。 */
@@ -103,10 +102,9 @@ export function buildDefaultToolRegistry(
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
-    ...registryOptions
   } = options;
   const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
-  const registry = new ToolRegistry(registryOptions);
+  const registry = new ToolRegistry();
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));

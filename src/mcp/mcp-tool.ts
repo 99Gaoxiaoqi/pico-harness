@@ -23,14 +23,6 @@ import {
   type McpTool,
 } from "./types.js";
 
-export interface McpToolBridgeOptions {
-  /**
-   * 可选的 MCP 本地硬截断上限。默认不截断，将完整结果交给
-   * observation（>50,000 chars 落盘）。仅在宿主明确需要更小上限时设置。
-   */
-  maxResultSizeChars?: number;
-}
-
 /**
  * McpToolBridge:一个 MCP 工具的 BaseTool 适配器。
  *
@@ -41,7 +33,6 @@ export class McpToolBridge implements BaseTool {
   readonly readOnly = false;
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   readonly toolset = "mcp";
-  readonly maxResultSizeChars: number;
 
   /** 只有声明 process_tree 的 client（当前为 POSIX stdio）可做物理收口强承诺。 */
   get handlesAbortSignal(): boolean {
@@ -55,10 +46,8 @@ export class McpToolBridge implements BaseTool {
     private readonly client: McpClient,
     private readonly serverName: string,
     private readonly tool: McpTool,
-    options: McpToolBridgeOptions = {},
   ) {
     this.qualifiedName = qualifyMcpToolName(serverName, tool.name);
-    this.maxResultSizeChars = options.maxResultSizeChars ?? Number.POSITIVE_INFINITY;
     this.toolDefinition = {
       name: this.qualifiedName,
       description: this.buildDescription(),
@@ -99,8 +88,7 @@ export class McpToolBridge implements BaseTool {
           ? `MCP 工具 ${this.tool.name} 返回错误: ${text}`
           : `MCP 工具 ${this.tool.name} 返回错误(无详情)`;
       }
-      const text = mcpResultToText(result);
-      return this.truncate(text);
+      return mcpResultToText(result);
     } catch (err) {
       context?.signal?.throwIfAborted();
       const msg = err instanceof Error ? err.message : String(err);
@@ -117,13 +105,5 @@ export class McpToolBridge implements BaseTool {
   private buildDescription(): string {
     const base = this.tool.description || `(无描述,来自 MCP server "${this.serverName}")`;
     return `${base} [MCP: ${this.serverName}/${this.tool.name}]`;
-  }
-
-  private truncate(text: string): string {
-    if (text.length <= this.maxResultSizeChars) return text;
-    return (
-      text.slice(0, this.maxResultSizeChars) +
-      `\n\n...[MCP 工具输出过长,已截断至前 ${this.maxResultSizeChars} 字符]...`
-    );
   }
 }

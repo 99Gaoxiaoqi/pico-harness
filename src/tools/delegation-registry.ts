@@ -110,7 +110,7 @@ export function createSubagentRegistryFactory(
   const profiles = resolvedConfig.profiles ?? [];
 
   return (request: SubagentRegistryRequest) => {
-    const registry = new ToolRegistry({ truncateResults: false });
+    const registry = new ToolRegistry();
     const activeConfig = request.workDir
       ? {
           ...resolvedConfig,
@@ -146,7 +146,7 @@ function buildProfileRegistry(
   request: SubagentRegistryRequest,
   profile: AgentProfile,
 ): ToolRegistry {
-  const registry = new ToolRegistry({ truncateResults: false });
+  const registry = new ToolRegistry();
   registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
   registry.register(new ReadEvidenceTool(config.workDir, config.evidenceBaseDir));
   for (const toolName of profile.tools) {
