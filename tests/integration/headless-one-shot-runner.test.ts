@@ -143,6 +143,37 @@ test("failed Runtime execution sanitizes its Session-bound trace without a resul
   assert.equal(trace.includes("[REDACTED]"), true);
 });
 
+test("trace baseline detects an in-place overwrite of a colliding Session filename", async (context) => {
+  const fixture = await createFixture(context, "trace-overwrite-collision");
+  await configureFixture(fixture, "secret-canary-trace-overwrite");
+  const request = requestFor(fixture, "trace-overwrite-collision");
+  const fixedNow = 1_785_260_000_000;
+  const traceDirectory = resolvePicoPaths(fixture.workspace, {
+    picoHome: fixture.picoHome,
+  }).workspace.traces;
+  await mkdir(traceDirectory, { recursive: true });
+  const collidingPath = join(traceDirectory, `trace_${request.sessionId}_${fixedNow}.json`);
+  await writeFile(collidingPath, '{"preexisting":true}\n');
+
+  const originalNow = Date.now;
+  Date.now = () => fixedNow;
+  let outcome;
+  try {
+    outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
+      env: {},
+      providerFactory: () => ({ generate: async () => assistant("collision sanitized") }),
+    });
+  } finally {
+    Date.now = originalNow;
+  }
+
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(outcome.result.tracePath, await realpath(collidingPath));
+  const trace = await readFile(outcome.result.tracePath, "utf8");
+  assert.equal(trace.includes(outcome.result.workDir!), false);
+  assert.equal(trace.includes("[REDACTED]"), true);
+});
+
 test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail before generation", async (context) => {
   const fixture = await createFixture(context, "preflight");
   await configureFixture(fixture, "secret-canary-preflight", false);
