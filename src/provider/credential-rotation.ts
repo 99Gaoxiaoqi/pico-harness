@@ -88,6 +88,9 @@ export class CredentialRotationCoordinator {
       get modelName() {
         return next.modelName;
       },
+      get requestCapabilities() {
+        return next.requestCapabilities;
+      },
       ...(next.isRetryableError ? { isRetryableError: next.isRetryableError.bind(next) } : {}),
     };
 

@@ -52,6 +52,9 @@ interface AnthropicResponse {
 
 /** Anthropic (Claude) 兼容协议适配器 */
 export class ClaudeProvider implements LLMProvider {
+  // 协议级假设：选择 claude adapter 即表示端点实现 Anthropic Messages 的 tool_choice:none。
+  // 项目尚无该能力的路由级字段；不满足协议的兼容端点应由上层改用安全降级 Provider。
+  readonly requestCapabilities = { toolChoiceNoneWithTools: true } as const;
   private readonly profile: ProviderProfile;
   private readonly thinkingEffort: string;
 
@@ -73,7 +76,7 @@ export class ClaudeProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 1. 构建请求体(消息翻译 + 工具 schema + thinking + cache 注入)
-    const body = this.buildRequestBody(messages, availableTools);
+    const body = this.buildRequestBody(messages, availableTools, options);
     options?.onRequestPrepared?.({
       provider: "claude",
       model: this.config.model,
@@ -136,7 +139,7 @@ export class ClaudeProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 1. 构建请求体(与 generate 共用,加 stream: true)
-    const body = this.buildRequestBody(messages, availableTools);
+    const body = this.buildRequestBody(messages, availableTools, options);
     body.stream = true;
     options?.onRequestPrepared?.({
       provider: "claude",
@@ -276,6 +279,7 @@ export class ClaudeProvider implements LLMProvider {
   private buildRequestBody(
     messages: Message[],
     availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
   ): Record<string, unknown> {
     let systemPrompt = "";
     const anthropicMsgs: { role: "user" | "assistant"; content: Block[] }[] = [];
@@ -373,6 +377,9 @@ export class ClaudeProvider implements LLMProvider {
           },
         };
       });
+      if (options?.toolChoice === "none") {
+        body.tool_choice = { type: "none" };
+      }
     }
 
     // 3. Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,

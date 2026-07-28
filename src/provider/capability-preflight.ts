@@ -103,6 +103,10 @@ export class CapabilityPreflightProvider implements LLMProvider {
     return this.next.modelName;
   }
 
+  get requestCapabilities() {
+    return this.next.requestCapabilities;
+  }
+
   isRetryableError(error: unknown): boolean {
     if (error instanceof ModelCapabilityError) return false;
     return this.next.isRetryableError?.(error) ?? defaultIsRetryableError(error);

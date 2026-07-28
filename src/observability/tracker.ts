@@ -75,6 +75,10 @@ export class CostTracker implements LLMProvider {
     return typeof this.modelRoute === "string" ? this.modelRoute : this.modelRoute.model;
   }
 
+  get requestCapabilities() {
+    return this.next.requestCapabilities;
+  }
+
   isRetryableError(error: unknown): boolean {
     return this.next.isRetryableError?.(error) ?? defaultIsRetryableError(error);
   }
