@@ -1,20 +1,22 @@
-# ToolResult 事实、证据与模型投影
+# ToolResult 事实、Evidence 与宿主投影
 
 ## 目标
 
-大型 ToolResult 必须同时满足四个约束：
+ToolResult 采用一条不可分叉的主链：
 
-1. 工具真实返回值是可恢复、可校验的 Runtime 事实；
-2. 大正文只保存一份，不同时写 ToolResult Artifact 与 Runtime Evidence；
-3. 模型默认只看到有界、确定性的工具感知预览，并可按需分页回读原文；
-4. 上下文压缩只能改变模型投影，不能改写已经发生的工具事实。
+1. 工具返回原始结果；
+2. Runtime 写入唯一 canonical 事实 `tool.result.recorded`；
+3. 大正文只在 Evidence CAS 保存一份；
+4. Provider、Hook、Reporter、TUI 和 Desktop 都从 canonical 事实取得有界投影；
+5. 需要原文时用 `read_evidence` 按字节分页回读。
 
-本次变更采用 `RuntimeEvent + EvidenceArchive + request projection`，不把大型正文直接嵌入
-Session JSONL，也不把 LLM 摘要放进工具执行的同步提交路径。
+项目处于开发期，本设计是硬切换。旧 Message ToolResult、Runtime ToolResult Evidence v1、
+Fork v1/v2、ToolResultArtifactStore、`read_artifact` 和 Artifact UI 不再读取或迁移。
 
-## Canonical Event
+## 唯一持久化不变量
 
-新增 model-visible RuntimeEvent：
+`message.committed.data.message.toolCallId` 永远不存在。带 `toolCallId` 的 `Message` 只是在
+Provider、压缩器和 UI 边界上的临时投影；持久层中的 ToolResult 只能是：
 
 ```ts
 interface RuntimeToolResultRecordedEvent {
@@ -49,87 +51,129 @@ interface RuntimeToolResultRecordedEvent {
 }
 ```
 
-- `body` 是工具执行事实。Evidence 写入成功时只保存引用及完整性元数据；写入失败时
-  fail-open 为 `inline`，不允许只留下截断文本。
-- `projection` 是可丢弃、可重建的派生数据。当前 Turn 只允许确定性预览，不调用 LLM。
-- `refs.toolCallId` 必填；`body.storage === "evidence"` 时 `refs.evidence` 必填。
-- `body.sha256/sizeBytes` 始终针对原始 `ToolResult.output`，不包含 Recovery 提示或 preview。
-- 旧 `message.committed` ToolResult 继续投影，支持现有 Session、fork seed 与兼容宿主。
+- `body.sha256/sizeBytes` 始终描述工具原始 UTF-8 输出；
+- Evidence 成功后，event 只保留引用和完整性元数据；
+- Evidence 写失败时，原文保存在 inline canonical body，但 Provider 和宿主仍使用有界
+  projection，不能让大正文重新穿透边界；
+- Runtime 的批量 append 与 Session 投影共同完成后，结果才允许发布给 Hook/Reporter。
 
-## 写入顺序
+所有 Runtime 写入口都 fail-closed：未先注册的 Message ToolResult、幂等 Message 写入口中的
+ToolResult、旧账本中的 Message ToolResult都会被拒绝，不再降级成普通消息。
+
+## Provider 投影与宿主 Envelope
+
+当前 Turn 不调用模型生成 ToolResult 摘要。`buildRuntimeToolResultProjection` 只做确定性策略：
+
+- 小结果保留 full；
+- 大结果生成 tool-aware、head/tail 等确定性 preview；
+- 默认阈值按约 2,048 tokens 估算；
+- 默认 preview 不超过约 1,600 字符；
+- Registry 和 MCP bridge 必须返回完整物理结果，不得提前截断；
+- `read_evidence` 自身有分页上限，不再次归档。
+
+Hook、Reporter 和 UI 共用：
+
+```ts
+interface ToolResultEnvelope {
+  version: 1;
+  toolCallId: string;
+  toolName: string;
+  status: RuntimeToolResultStatus;
+  rawSizeBytes: number;
+  sha256: string;
+  projection: RuntimeToolResultProjection;
+  deliveryTruncated: boolean;
+  evidence?: {
+    uri: string;
+    ref: RuntimeEvidenceReference;
+  };
+}
+```
+
+Envelope 不含 raw body。宿主投影另有 UTF-8 16 KiB 上限；二次封顶时
+`deliveryTruncated=true`。UI 只有在 `mode=full`、canonical projection 未截断且
+`deliveryTruncated=false` 时才把正文标记为完整 inline 结果。
+
+## 写入与发布顺序
 
 ```text
 tool.execute
-  → 计算 raw sha256 / chars / bytes
-  → 生成确定性 full/preview 投影
-  → EvidenceArchive manifest 写入 raw blob ref
-      ├─ 成功：register evidence ref
-      └─ 失败：记录告警并选择 inline raw
-  → 原子提交 tool.result.recorded 批次
-  → Session 从 durable event 物化 Message
-  → Reporter/UI 消费同一模型投影
+  → 获取未截断 raw output
+  → 计算 raw sha256 / sizeBytes
+  → 生成确定性 full/preview projection
+  → 大结果写 Evidence CAS
+      ├─ 成功：body=evidence + evidence ref
+      └─ 失败：body=inline raw + 保持 bounded projection
+  → 注册 tool.result.recorded
+  → 原子提交整批 ToolResult
+  → 更新 Session projection
+  → PostToolUse/PostToolUseFailure（ToolResultEnvelope）
+  → Reporter.onToolResult（ToolResultEnvelope）
+  → PostToolBatch（Provider 顺序的 ToolResultEnvelope）
 ```
 
-工具结果必须在 RuntimeEvent durable 后才进入 Session 内存投影。并发工具批次仍保持 assistant
-toolCalls 后紧邻全部 ToolResult 的协议顺序。
+并发批次的 canonical ToolResult 保持 Provider 顺序；单项 Reporter 展示可保持真实完成顺序。
+异常关闭时，已完成与 synthetic cancelled/interrupted 结果都必须各发布一次。
 
-## 投影策略
+## Evidence
 
-- 默认单条结果上限：估算 `2,048 tokens`；
-- 使用项目现有 `countTokens()`，tokenizer 未就绪时才回退 `chars / 4`；
-- 小结果投影为 `full`；
-- 大结果通过现有 tool-aware summarizer 生成不超过约 1,600 字符的 `preview`；
-- 主 Agent 与子代理 Registry 都不得预先截断结果；截断只发生在 Runtime 模型投影层；
-- `read_evidence` 与旧 `read_artifact` 不再次归档，避免回读递归；
-- preview 必须携带工具名、原始大小、hash、evidence URI 和明确回读动作；
-- LLM 语义摘要只用于后续 FullCompaction，不参与当前 ToolResult 提交。
+大正文位于 workspace Evidence 根下的 SHA-256 CAS。manifest 按 kind 区分：
 
-## Evidence 回读
+- `tool-exchange`：Runtime ToolResult 原文；
+- `subagent-report`：超过子代理常规回传预算的完整最终报告。
 
-新增只读能力：
+`read_evidence(ref, offsetBytes?, limitBytes?)` 只接受 `pico://evidence/...`，不接受模型提供的
+文件路径。读取必须验证：
 
-```text
-read_evidence(ref, offsetBytes?, limitBytes?)
-```
-
-`ref` 是不可伪造为任意文件路径的 `pico://evidence/...` 引用。大正文写入
-`workspace.evidence/blobs/sha256/<prefix>/<digest>`，Evidence manifest 只保存 BlobRef。
-读取时必须验证：
-
-- evidence root 边界；
-- evidence root、session、blob 层级的每个目录都必须是身份稳定的普通目录，不能是 symlink；
-- session 与 content hash；
+- Evidence root、session、manifest 和 blob 的目录/普通文件身份；
+- URI 的 canonical session/hash；
 - manifest 内容 hash；
-- blob size 与 SHA-256；
-- blob 和 manifest 都必须是普通文件而不是 symlink；
-- v2 blob 冷读用固定大小缓冲流式验签，同一文件版本的后续分页只读取页窗口；
-- 非 UTF-8 码点边界的 offset，以及容不下下一个完整码点的 limit，必须明确拒绝；
-- 单页上限。
+- blob SHA-256 与 size；
+- UTF-8 offset/limit 边界；
+- 单页读取上限。
 
-旧 `read_artifact` 保留，用于兼容 Artifact 和子代理报告。
+FullCompactor 的 compaction Evidence v1 是另一份仍在使用的协议，用于保护被摘要前缀，不属于
+已删除的 Runtime ToolResult Evidence v1。
 
-## 存储与兼容
+## 子代理
 
-- 生产 Runtime ToolResult 不再写短期 ToolResultArtifactStore；Evidence 下的 SHA-256 CAS 是唯一大正文。
-- ToolResultArtifactStore 继续服务旧宿主、子代理报告和历史 Artifact，暂不迁移磁盘布局。
-- Existing EvidenceArchive v1 manifest 保持可读；新 v2 manifest 引用 BlobRef，不再内嵌
-  `rawOutput` 与 `modelVisibleOutput`。
-- Fork 在同一 workspace 内可继续读取 source-session evidence ref；跨 workspace clone 不在本次范围。
-- 未发布完成的 fork bootstrap 不参与恢复；已发布完成的 bootstrap 在 rewind 后按普通 Runtime
-  run 修复未配对 ToolResult。
-- 本次不删除旧 Artifact，不迁移或重写既有 RuntimeEvent。
+子代理看到的每条工具结果同样来自 structured Runtime ToolResult。最终报告本身仍是子代理模型
+生成的任务总结；当报告超过常规回传预算时，完整报告写入 `subagent-report` Evidence，主 Agent
+只收到确定性预览、Evidence URI 和回读指令。
+
+这里不再写第二份 LLM 摘要，也不再返回 Artifact 路径。`SubagentResult` 和委派聚合只传
+`evidenceRefs`。
+
+## Fork、rewind 与恢复
+
+- Fork bundle 只接受 v3 `historyEntries`，ToolResult 以 canonical event 导入；
+- v1/v2 bundle 明确拒绝，不再回落到 Message 导入；
+- 同一 workspace 的 fork 继续引用 source-session Evidence URI，不复制或改写 CAS；
+- rewind 只投影当前 active branch；
+- 未闭合 tool call 的恢复结果仍写 `tool.result.recorded`；
+- durable Runtime 禁止使用会把 ToolResult 投影重写为 `message.committed` 的
+  `truncateTo/applyCompaction` 路径；生产压缩通过 Runtime checkpoint 改变读模型。
+
+## 摘要边界
+
+ToolResult 当前轮不使用 LLM 摘要。LLM 摘要只存在于两个明确边界：
+
+1. 子代理完成任务时生成自己的最终报告；
+2. 历史仍超过上下文预算时，由 FullCompactor 生成 checkpoint 摘要。
+
+两者都不能改写已经发生的 ToolResult body、hash、status 或 Evidence。
 
 ## 验收
 
-1. 大输出只产生一份 durable Evidence，RuntimeEvent 不包含原始中段正文；
-2. 下一次 Provider 请求只见 bounded preview、完整性元数据与 evidence ref；
-3. `read_evidence` 可分页精确回读原文，错误 session/hash 被拒绝；
-4. Evidence 写入失败时 Provider 收到完整原文，RuntimeEvent 使用 inline raw；
-5. 新旧 ToolResult event 混合的 Session 可恢复、rewind、fork 且保持协议配对；
-6. 重启后模型投影与提交时一致；
-7. 一条真实模型 E2E 能识别 preview，并按 ref 回读原文中的 canary。
+1. 大输出只产生一份 ToolResult Evidence，RuntimeEvent 不含原始中段正文；
+2. Provider、Hook 和 Reporter 都看不到 raw canary，只拿 bounded projection/hash/size/ref；
+3. `read_evidence` 能分页拼回 tool-exchange 与 subagent-report 原文；
+4. Evidence 写失败时 canonical inline body 完整，Provider/宿主仍有界；
+5. Message ToolResult、Runtime Evidence v1、Fork v1/v2 和 Artifact 引用明确失败；
+6. fork、rewind、崩溃恢复和 hydration 都保持 structured ToolResult 身份；
+7. 一条真实模型 E2E 能从 preview 识别 Evidence URI，并回读原文 canary。
 
-## 回滚
+## 开发期清理
 
-回滚代码不会破坏旧 Session；包含新 `tool.result.recorded` 的 Session 需要保留新版 decoder。
-因此发布回滚应优先关闭新写入路径、继续读取新旧事件，而不是降级到不认识新 event kind 的二进制。
+旧会话不在兼容范围。升级后可删除对应 workspace 下旧 Session、fork staging 和 `artifacts/`
+数据；程序不会自动删除用户磁盘数据，也不会尝试迁移或静默跳过旧格式。

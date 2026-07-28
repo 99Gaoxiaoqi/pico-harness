@@ -6,7 +6,7 @@
 
 1. **Prompt 动态组装**（composer）：分层编译 System Prompt
 2. **完整历史 + token 水位整理**（ToolResult 投影 + FullCompactor）：防 OOM
-3. **状态外部化存储**（todo/plan/skill/artifact store）：记忆从易失 RAM 搬到物理文件
+3. **状态外部化存储**（todo/plan/skill/Evidence CAS）：记忆从易失 RAM 搬到物理文件
 
 ---
 
@@ -46,7 +46,9 @@ autoWatermark     = inputBudgetTokens × 85%
 
 输入估算包含 System Prompt、历史消息和工具 Schema。低于 85% 时，除协议修复外不删除历史；超过水位后，`compactOldToolResults()` 只缩短安全尾部之前的旧 ToolResult，近期完整工作段保持原文。
 
-artifact 引用不会被折叠：Bash 超过 30,000 字符、普通工具超过 50,000 字符、委派批次超过 12,000 字符时，原文落盘，模型只看摘要和可回读路径。
+canonical ToolResult 在进入 Session 投影前已经确定性生成有界内容；大输出的原文按 SHA-256
+写入 Evidence CAS，模型通过 `pico://evidence/...` 和 `read_evidence` 显式分页回读。微压缩只处理
+旧请求投影，不改 canonical fact、Evidence 引用或近期安全尾部。
 
 ### 工具协议投影
 
@@ -88,14 +90,14 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 
 ## 4. 两级压缩协作矩阵
 
-| 维度         | 第一级：ToolResult 投影         | 第二级：FullCompactor                      |
-| ------------ | ------------------------------- | ------------------------------------------ |
-| **触发**     | 输入估算超过 85% 水位           | 投影后仍超过水位，或 Provider overflow     |
-| **作用对象** | 临时 Context（发给 API 的副本） | **Session.history**（持久化）              |
-| **持久化**   | 否                              | 是（`session.applyCompaction` 真替换前缀） |
-| **手段**     | 缩短旧 ToolResult，保护安全尾部 | LLM 浓缩成 13-section 结构化摘要           |
-| **边界**     | 不改 toolCalls / artifact 引用  | 完整并发工具批次必须在边界同侧             |
-| **失败兜底** | 继续尝试 FullCompactor          | 一次紧急重试后才允许硬重置                 |
+| 维度         | 第一级：ToolResult 投影                       | 第二级：FullCompactor                                 |
+| ------------ | --------------------------------------------- | ----------------------------------------------------- |
+| **触发**     | 输入估算超过 85% 水位                         | 投影后仍超过水位，或 Provider overflow                |
+| **作用对象** | 临时 Context（发给 API 的副本）               | **Session.history**（持久化）                         |
+| **持久化**   | canonical projection 已随 ToolResult 事实保存 | Runtime 写 checkpoint；非 Runtime 才替换 Session 前缀 |
+| **手段**     | 缩短旧 ToolResult，保护安全尾部               | LLM 浓缩成 13-section 结构化摘要                      |
+| **边界**     | 不改 ToolResult body / Evidence               | 完整并发工具批次必须在边界同侧                        |
+| **失败兜底** | 继续尝试 FullCompactor                        | 一次紧急重试后才允许硬重置                            |
 
 ---
 
@@ -115,11 +117,11 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 - `buildPlanContext()`：嗅探文件 —— 均不存在 → 引导建文件；存在 → 注入当前进度
 - Plan Mode 下用 ExitPlanModeTool 走审批流
 
-### ArtifactStore (`artifact-store.ts`)
+### EvidenceArchive (`evidence-archive.ts`)
 
-- 把大体积 ToolResult 落盘到 `$PICO_HOME/workspaces/<workspace-id>/artifacts/`
-- TTL 清理（默认 168 小时），总量超 200MB 按 LRU 删
-- `argsHash`（SHA256）供去重
+- ToolResult 原文和长子代理报告写入 workspace Evidence SHA-256 CAS
+- Session/hash/manifest/blob 全链路校验，模型只持有 `pico://evidence/...`
+- `read_evidence` 按 UTF-8 字节分页回读，不暴露任意文件路径
 
 ### SkillLoader (`skill.ts`)
 
