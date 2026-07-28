@@ -1884,7 +1884,7 @@ function createChangesCommand(options: PicoCommandRegistryOptions): SlashCommand
         return filterArgumentCandidates(
           listFileHistorySnapshotSummaries(resolved.session).map((snapshot) => ({
             value: snapshot.messageId,
-            description: snapshot.userPrompt ?? snapshot.changeSummary,
+            description: snapshot.userPrompt,
           })),
           query,
         );
@@ -1899,7 +1899,7 @@ function createChangesCommand(options: PicoCommandRegistryOptions): SlashCommand
         const requested = input.argv[0];
         const target = requested
           ? snapshots.find((snapshot) => snapshot.messageId === requested)
-          : (snapshots.findLast((snapshot) => !snapshot.legacy) ?? snapshots.at(-1));
+          : snapshots.at(-1);
         if (!target) {
           return {
             type: "local",

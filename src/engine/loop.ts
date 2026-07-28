@@ -91,7 +91,6 @@ import {
   fileHistoryCommitJournal,
   fileHistoryJournalCoversPath,
   fileHistoryTrackEdit,
-  fileHistoryMakeSnapshot,
   type FileHistoryJournal,
 } from "../safety/file-history.js";
 
@@ -1277,9 +1276,7 @@ export class AgentEngine implements AgentRunner {
     let consecutiveHookStopBlocks = 0;
     let graceCandidateTools: ToolDefinition[] = [];
     const userRewindPointId = session.fileHistory.snapshots.findLast(
-      (snapshot) =>
-        snapshot.messageId === session.fileHistory.currentMessageId &&
-        snapshot.userPrompt !== undefined,
+      (snapshot) => snapshot.messageId === session.fileHistory.currentMessageId,
     )?.messageId;
     const journalRoots =
       this.workspaceRoots?.list() ?? (this.registry.setPreWriteHook ? [this.workDir] : []);
@@ -1313,12 +1310,11 @@ export class AgentEngine implements AgentRunner {
         await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
-        const currentMessageId =
-          userRewindPointId ?? `turn-${session.fileHistory.snapshotSequence + 1}`;
         this.registry.setPreWriteHook?.(async (toolName, args) => {
+          if (!userRewindPointId) return;
           try {
             const effects = this.registry.getFileSideEffects?.({
-              id: `file-history:${currentMessageId}`,
+              id: `file-history:${userRewindPointId}`,
               name: toolName,
               arguments: args,
             });
@@ -1335,7 +1331,7 @@ export class AgentEngine implements AgentRunner {
               await fileHistoryTrackEdit(
                 session.fileHistory,
                 resolvedPath,
-                currentMessageId,
+                userRewindPointId,
                 session.id,
                 session.fileHistoryBaseDir,
               );
@@ -1803,7 +1799,6 @@ export class AgentEngine implements AgentRunner {
           // 以维持 provider 要求的 tool-call/result 完整配对。
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
-          let turnFileJournal: FileHistoryJournal | undefined;
           let scheduler: ToolScheduler<ToolExecutionOutcome> | undefined;
           let results: ToolExecutionOutcome[] = [];
           try {
@@ -1815,26 +1810,16 @@ export class AgentEngine implements AgentRunner {
                   : "none",
               );
               const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
-              if (hasFileEffects && journalRoots.length > 0) {
-                if (userRewindPointId) {
-                  runFileJournal ??= await fileHistoryBeginJournal(
-                    journalRoots,
-                    session.id,
-                    signal,
-                    session.fileHistoryBaseDir,
-                  );
-                } else {
-                  turnFileJournal = await fileHistoryBeginJournal(
-                    journalRoots,
-                    session.id,
-                    signal,
-                    session.fileHistoryBaseDir,
-                  );
-                }
-                const activeJournal = runFileJournal ?? turnFileJournal;
-                activeFileJournal = activeJournal;
+              if (hasFileEffects && journalRoots.length > 0 && userRewindPointId) {
+                runFileJournal ??= await fileHistoryBeginJournal(
+                  journalRoots,
+                  session.id,
+                  signal,
+                  session.fileHistoryBaseDir,
+                );
+                activeFileJournal = runFileJournal;
                 if (
-                  activeJournal &&
+                  runFileJournal &&
                   toolCalls.some(
                     (call, index) =>
                       (requiredDelegationIndex === undefined ||
@@ -1843,7 +1828,7 @@ export class AgentEngine implements AgentRunner {
                   )
                 ) {
                   fileHistoryAddJournalWarning(
-                    activeJournal,
+                    runFileJournal,
                     "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
                   );
                 }
@@ -1891,23 +1876,6 @@ export class AgentEngine implements AgentRunner {
               // 异常时也要先等已启动任务收口，再提交文件 journal 和协议闭合结果。
               await Promise.allSettled(scheduled);
               scheduler?.dispose();
-              if (turnFileJournal) {
-                try {
-                  const changedPaths = await commitFileJournal(
-                    session,
-                    turnFileJournal,
-                    currentMessageId,
-                  );
-                  if (changedPaths.length > 0) {
-                    await this.hookService?.dispatch("FileChanged", {
-                      paths: changedPaths,
-                      origin: "internal",
-                    });
-                  }
-                } finally {
-                  activeFileJournal = runFileJournal;
-                }
-              }
             }
           } catch (error) {
             await failToolProtocol(error);
@@ -2013,15 +1981,6 @@ export class AgentEngine implements AgentRunner {
             });
           }
         } finally {
-          if (!userRewindPointId) {
-            await fileHistoryMakeSnapshot(
-              session.fileHistory,
-              currentMessageId,
-              session.id,
-              session.fileHistoryBaseDir,
-              session.length,
-            ).catch((err) => logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"));
-          }
           turnSpan?.end();
         }
       }

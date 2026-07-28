@@ -73,12 +73,7 @@ export function moveRewindSelection(
   if (state.phase === "confirm") {
     return {
       ...state,
-      selectedAction: moveConfirmAction(
-        state.selectedAction,
-        state.diffStat,
-        direction,
-        usesLegacySelectorData(snapshots),
-      ),
+      selectedAction: moveConfirmAction(state.selectedAction, state.diffStat, direction),
     };
   }
   if (snapshots.length === 0) return state;
@@ -100,7 +95,7 @@ export function selectRewindPreview(
     ...diffStat,
     messageId: selected.messageId,
   });
-  return next.phase === "confirm" && selected.userPrompt !== undefined
+  return next.phase === "confirm"
     ? {
         ...next,
         selectedAction: diffStat.changedFileCount > 0 ? "both" : "conversation",
@@ -157,9 +152,6 @@ export function formatRewindSelectorState(
 ): string {
   if (state.phase === "confirm") {
     const snapshot = snapshots.find((item) => item.messageId === state.messageId);
-    if (snapshot?.userPrompt === undefined) {
-      return formatLegacyRewindConfirmText(snapshot, state.diffStat, options);
-    }
     return formatRewindConfirmText(snapshot, state.diffStat, state.selectedAction, options);
   }
   return formatRewindMessageList(snapshots, { ...options, selectedIndex: state.selectedIndex });
@@ -185,7 +177,6 @@ function formatRewindMessageList(
   options: { maxItems?: number; maxSummaryLength?: number; selectedIndex?: number } = {},
 ): string {
   if (snapshots.length === 0) return "Rewind\nNothing to rewind to yet.";
-  if (usesLegacySelectorData(snapshots)) return formatLegacyRewindMessageList(snapshots, options);
 
   const itemCount = snapshots.length;
   const maxItems = options.maxItems ?? 7;
@@ -197,7 +188,7 @@ function formatRewindMessageList(
   for (let index = firstVisibleIndex; index < lastVisibleIndex; index++) {
     const marker = index === selectedIndex ? "❯" : " ";
     const snapshot = snapshots[index]!;
-    lines.push(`${marker} ${truncateText(oneLine(snapshot.userPrompt ?? snapshot.messageId), 72)}`);
+    lines.push(`${marker} ${truncateText(oneLine(snapshot.userPrompt), 72)}`);
     lines.push(
       `  ${formatSnapshotChange(snapshot)} · ${formatRelativeTime(new Date(snapshot.timestamp))}`,
     );
@@ -220,14 +211,11 @@ export function formatRewindConfirm(
   snapshot: FileHistorySnapshotSummary | undefined,
   diffStat: FileHistoryDiffStat,
 ): React.ReactNode {
-  const content =
-    snapshot?.userPrompt === undefined
-      ? formatLegacyRewindConfirmText(snapshot, diffStat, {})
-      : formatRewindConfirmText(
-          snapshot,
-          diffStat,
-          diffStat.changedFileCount > 0 ? "both" : "conversation",
-        );
+  const content = formatRewindConfirmText(
+    snapshot,
+    diffStat,
+    diffStat.changedFileCount > 0 ? "both" : "conversation",
+  );
   return (
     <Box flexDirection="column">
       {content.split("\n").map((line, index) => (
@@ -245,7 +233,7 @@ function formatRewindConfirmText(
 ): string {
   const maxItems = options.maxItems ?? 10;
   const maxPathLength = options.maxIdLength ?? 72;
-  const prompt = snapshot?.userPrompt ?? snapshot?.messageId ?? "Selected message";
+  const prompt = snapshot?.userPrompt ?? "Selected message";
   const lines = [
     "Rewind",
     "Confirm you want to restore to the point before you sent this message:",
@@ -372,11 +360,8 @@ function moveConfirmAction(
   action: RewindConfirmAction,
   diffStat: FileHistoryDiffStat,
   direction: "up" | "down",
-  legacy: boolean,
 ): RewindConfirmAction {
-  const actions = (
-    legacy ? codeRestoreActions(diffStat.incomplete === true) : restoreActions(diffStat)
-  ).map(([value]) => value);
+  const actions = restoreActions(diffStat).map(([value]) => value);
   const index = actions.indexOf(action);
   return actions[moveIndex(index === -1 ? 0 : index, actions.length, direction)]!;
 }
@@ -393,89 +378,4 @@ function truncateText(value: string, maxLength: number): string {
 
 function oneLine(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
-}
-
-function truncateLegacyText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  const sliced = value.slice(0, Math.max(0, maxLength - 3));
-  const punctuationIndex = Math.max(
-    sliced.lastIndexOf(","),
-    sliced.lastIndexOf("，"),
-    sliced.lastIndexOf(";"),
-    sliced.lastIndexOf("；"),
-  );
-  return `${punctuationIndex > 0 ? sliced.slice(0, punctuationIndex) : sliced}...`;
-}
-
-function usesLegacySelectorData(snapshots: readonly FileHistorySnapshotSummary[]): boolean {
-  return (
-    snapshots.length > 0 &&
-    snapshots.some((snapshot) => snapshot.legacy === true || snapshot.userPrompt === undefined)
-  );
-}
-
-function formatLegacyRewindMessageList(
-  snapshots: readonly FileHistorySnapshotSummary[],
-  options: { maxItems?: number; maxSummaryLength?: number; selectedIndex?: number },
-): string {
-  const maxItems = options.maxItems ?? 7;
-  const selectedIndex = clampIndex(options.selectedIndex ?? snapshots.length - 1, snapshots.length);
-  const firstVisibleIndex = visibleWindowStart(selectedIndex, snapshots.length, maxItems);
-  const lastVisibleIndex = Math.min(snapshots.length, firstVisibleIndex + maxItems);
-  const lines = [
-    "Rewind",
-    "Choose a message to preview before deciding whether to rewind.",
-    "Preview first; confirm happens on the next screen.",
-  ];
-  for (let index = firstVisibleIndex; index < lastVisibleIndex; index++) {
-    const snapshot = snapshots[index]!;
-    const marker = index === selectedIndex ? ">" : " ";
-    const fileLabel =
-      snapshot.trackedFileCount === 1
-        ? "1 file changed"
-        : `${snapshot.trackedFileCount} files changed`;
-    const summary = `${fileLabel} · ${snapshot.changeSummary ?? "No code changes"}`;
-    lines.push(`${marker} ${truncateLegacyText(snapshot.messageId, 24)}`);
-    lines.push(`  ${truncateLegacyText(summary, options.maxSummaryLength ?? 72)}`);
-    if (snapshot.incomplete) {
-      lines.push(
-        `  ⚠ Partial restore${snapshot.warnings?.[0] ? `: ${truncateLegacyText(snapshot.warnings[0], 48)}` : ""}`,
-      );
-    }
-  }
-  lines.push("Up/Down to choose · Enter to preview · Esc to cancel");
-  return lines.join("\n");
-}
-
-function formatLegacyRewindConfirmText(
-  snapshot: FileHistorySnapshotSummary | undefined,
-  diffStat: FileHistoryDiffStat,
-  options: { maxItems?: number; maxIdLength?: number },
-): string {
-  const lines = [
-    "Rewind",
-    "Preview changes before confirming rewind:",
-    `- ${snapshot?.messageId ?? diffStat.messageId}`,
-    "The conversation will be forked.",
-    `${diffStat.incomplete ? "Partial restore of known code" : "The code will be restored"} +${diffStat.addedLines} -${diffStat.removedLines}.`,
-  ];
-  if (diffStat.incomplete) {
-    lines.push("⚠ File capture was incomplete; untracked side effects may remain.");
-    for (const warning of (diffStat.warnings ?? []).slice(0, 3)) lines.push(`  ${warning}`);
-  }
-  for (const file of diffStat.files.slice(0, options.maxItems ?? 20)) {
-    lines.push(`- ${file.filePath} ${file.status} +${file.addedLines} -${file.removedLines}`);
-  }
-  lines.push(
-    diffStat.incomplete
-      ? "Confirm: Partial restore known code and conversation"
-      : "Confirm: restore code and conversation",
-  );
-  lines.push("Confirm: restore conversation only");
-  lines.push(
-    diffStat.incomplete ? "Confirm: Partial restore known code only" : "Confirm: restore code only",
-  );
-  lines.push("Cancel: keep current session");
-  lines.push("Up/Down to choose · Enter to confirm selected action · Esc to cancel");
-  return lines.join("\n");
 }
