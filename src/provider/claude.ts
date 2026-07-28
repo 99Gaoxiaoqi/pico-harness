@@ -31,6 +31,7 @@ import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from ".
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
+import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
 
 /** Anthropic content block: 文本、图片或工具调用 */
 type Block =
@@ -52,9 +53,7 @@ interface AnthropicResponse {
 
 /** Anthropic (Claude) 兼容协议适配器 */
 export class ClaudeProvider implements LLMProvider {
-  // 协议级假设：选择 claude adapter 即表示端点实现 Anthropic Messages 的 tool_choice:none。
-  // 项目尚无该能力的路由级字段；不满足协议的兼容端点应由上层改用安全降级 Provider。
-  readonly requestCapabilities = { toolChoiceNoneWithTools: true } as const;
+  readonly requestCapabilities: { readonly toolChoiceNoneWithTools: true } | undefined;
   private readonly profile: ProviderProfile;
   private readonly thinkingEffort: string;
 
@@ -64,6 +63,11 @@ export class ClaudeProvider implements LLMProvider {
   ) {
     this.profile = profile ?? resolveProviderProfile("claude", config.model);
     this.thinkingEffort = config.thinkingEffort ?? "off";
+    const supportsToolChoiceNoneWithTools =
+      config.capabilities?.toolChoiceNoneWithTools ??
+      defaultToolChoiceNoneWithTools("claude", config.baseURL);
+    this.requestCapabilities =
+      supportsToolChoiceNoneWithTools === true ? { toolChoiceNoneWithTools: true } : undefined;
   }
 
   get modelName(): string {
