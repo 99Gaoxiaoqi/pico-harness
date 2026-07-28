@@ -6,8 +6,10 @@ import test from "node:test";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import type { ToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
+import type { CanonicalTranscriptToolStart } from "../../src/engine/transcript-tool-start.js";
 import { materializeRuntimeHistory } from "../../src/engine/session-runtime-read-model.js";
 import { Session } from "../../src/engine/session.js";
+import { hydrateCanonicalTranscriptEvents } from "../../src/presentation/transcript-tool-result-hydration.js";
 import { HookService, type HookExecutor } from "../../src/hooks/service.js";
 import {
   HOOK_EVENTS,
@@ -470,7 +472,21 @@ test("required delegation batch reports its synthetic rejection and actual resul
     isError: boolean;
     providerCallId?: string;
   }> = [];
+  const started: CanonicalTranscriptToolStart[] = [];
   const reporter = new (class extends SilentReporter {
+    override onToolCall(
+      toolName: string,
+      args: string,
+      providerCallId: string,
+      durableStart?: CanonicalTranscriptToolStart,
+    ): void {
+      assert.ok(durableStart);
+      assert.equal(durableStart.name, toolName);
+      assert.equal(durableStart.args, args);
+      assert.equal(durableStart.providerCallId, providerCallId);
+      started.push(structuredClone(durableStart));
+    }
+
     override onToolResult(result: ToolResultEnvelope): void {
       reported.push({
         toolName: result.toolName,
@@ -495,6 +511,11 @@ test("required delegation batch reports its synthetic rejection and actual resul
 
     await engine.run(session);
 
+    assert.deepEqual(
+      started.map((start) => start.providerCallId),
+      ["call:rejected", "call:delegate"],
+    );
+    assert.equal(new Set(started.map((start) => start.eventId)).size, 2);
     assert.equal(reported.length, 2);
     assert.deepEqual(
       reported.map(({ toolName, isError, providerCallId }) => ({
@@ -530,6 +551,135 @@ test("required delegation batch reports its synthetic rejection and actual resul
         { toolCallId: "call:rejected", status: "rejected" },
         { toolCallId: "call:delegate", status: "succeeded" },
       ],
+    );
+    const hydration = await session.readHydrationSnapshot();
+    const hydrated = hydrateCanonicalTranscriptEvents({
+      sessionId: hydration.sessionId,
+      updatedAt: hydration.updatedAt,
+      transcriptEvents: hydration.transcriptEvents,
+      transcriptEventSequences: hydration.transcriptEventSequences,
+      toolResults: hydration.toolResults,
+      rejectUnmatchedResults: true,
+    });
+    assert.deepEqual(
+      hydrated
+        .filter((event) => event.type === "tool.completed")
+        .map((event) => (event.type === "tool.completed" ? event.result.toolCallId : undefined)),
+      ["call:rejected", "call:delegate"],
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pre-execution budget closure keeps one durable start recoverable with its synthetic result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-pre-execution-budget-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const sessionId = "tool-result-pre-execution-budget";
+  const runtimePort = createEngineRuntimePort();
+  let session = new Session(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  let executions = 0;
+  const registry = new ToolRegistry();
+  registry.register({
+    readOnly: true,
+    fileSideEffects: NO_FILE_SIDE_EFFECTS,
+    name: () => "budget_fixture",
+    definition: () => fixtureDefinition("budget_fixture"),
+    async execute() {
+      executions++;
+      return "must not execute";
+    },
+  });
+  let providerCallCount = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      providerCallCount++;
+      if (providerCallCount === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call:budget", name: "budget_fixture", arguments: "{}" }],
+          usage: { promptTokens: 2, completionTokens: 1 },
+        };
+      }
+      return { role: "assistant", content: "Budget closure complete." };
+    },
+  };
+  const starts: CanonicalTranscriptToolStart[] = [];
+  const results: ToolResultEnvelope[] = [];
+  const reporter = new (class extends SilentReporter {
+    override onToolCall(
+      _toolName: string,
+      _args: string,
+      _providerCallId: string,
+      durableStart?: CanonicalTranscriptToolStart,
+    ): void {
+      assert.ok(durableStart);
+      starts.push(structuredClone(durableStart));
+    }
+
+    override onToolResult(result: ToolResultEnvelope): void {
+      results.push(structuredClone(result));
+    }
+  })();
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run the budget fixture." });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      reporter,
+      maxTurns: 3,
+      budgetConfig: { maxTokens: 1 },
+    });
+
+    await engine.run(session);
+
+    assert.equal(executions, 0);
+    assert.deepEqual(
+      starts.map((start) => start.providerCallId),
+      ["call:budget"],
+    );
+    assert.deepEqual(
+      results.map((result) => ({
+        toolCallId: result.toolCallId,
+        status: result.status,
+        mode: result.projection.mode,
+      })),
+      [{ toolCallId: "call:budget", status: "cancelled", mode: "synthetic" }],
+    );
+
+    await session.close();
+    session = new Session(sessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort,
+    });
+    await session.recover();
+    const hydration = await session.readHydrationSnapshot();
+    const hydrated = hydrateCanonicalTranscriptEvents({
+      sessionId: hydration.sessionId,
+      updatedAt: hydration.updatedAt,
+      transcriptEvents: hydration.transcriptEvents,
+      transcriptEventSequences: hydration.transcriptEventSequences,
+      toolResults: hydration.toolResults,
+      rejectUnmatchedResults: true,
+    });
+    assert.equal(hydrated.filter((event) => event.type === "tool.started").length, 1);
+    assert.deepEqual(
+      hydrated
+        .filter((event) => event.type === "tool.completed")
+        .map((event) => (event.type === "tool.completed" ? event.result.toolCallId : undefined)),
+      ["call:budget"],
     );
   } finally {
     await session.close();

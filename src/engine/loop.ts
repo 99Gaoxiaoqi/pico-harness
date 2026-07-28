@@ -75,6 +75,7 @@ import type {
   EngineRuntimeToolResultStatus,
 } from "./runtime-port.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
+import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 import type { HookService } from "../hooks/service.js";
 import { buildRuntimeToolResultProjection } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
@@ -1536,16 +1537,14 @@ export class AgentEngine implements AgentRunner {
             const rejectedOutcomes = toolCalls.map((toolCall) =>
               buildSynthesisToolRejection(toolCall, runtimeRun),
             );
-            await session.commitMessages(
-              rejectedResponse,
-              ...rejectedOutcomes.map((outcome) => outcome.message),
-            );
+            await session.commitMessages(rejectedResponse);
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await this.publishCommittedToolBatch(
+            await this.commitRejectedToolBatch(
+              session,
               reporter,
               toolCalls,
               rejectedOutcomes,
-              toolCalls.map((_toolCall, index) => index),
+              runtimeRun,
             );
 
             if (exploreSynthesisToolRetries >= MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES) {
@@ -1603,16 +1602,14 @@ export class AgentEngine implements AgentRunner {
             const rejectedOutcomes = toolCalls.map((toolCall) =>
               buildDelegationRecoveryToolRejection(toolCall, runtimeRun),
             );
-            await session.commitMessages(
-              rejectedResponse,
-              ...rejectedOutcomes.map((outcome) => outcome.message),
-            );
+            await session.commitMessages(rejectedResponse);
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await this.publishCommittedToolBatch(
+            await this.commitRejectedToolBatch(
+              session,
               reporter,
               toolCalls,
               rejectedOutcomes,
-              toolCalls.map((_toolCall, index) => index),
+              runtimeRun,
             );
             const failedResponse: Message = {
               role: "assistant",
@@ -1640,16 +1637,14 @@ export class AgentEngine implements AgentRunner {
             const rejectedOutcomes = toolCalls.map((toolCall) =>
               buildRequiredFirstToolRejection(toolCall, runtimeRun),
             );
-            await session.commitMessages(
-              rejectedResponse,
-              ...rejectedOutcomes.map((outcome) => outcome.message),
-            );
+            await session.commitMessages(rejectedResponse);
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await this.publishCommittedToolBatch(
+            await this.commitRejectedToolBatch(
+              session,
               reporter,
               toolCalls,
               rejectedOutcomes,
-              toolCalls.map((_toolCall, index) => index),
+              runtimeRun,
             );
             requiredFirstDelegationAttempts++;
 
@@ -1715,6 +1710,12 @@ export class AgentEngine implements AgentRunner {
 
           try {
             this.onTurn?.({ turn: turnCount, message: responseMsg });
+            await this.publishAcceptedToolCalls(
+              session,
+              reporter,
+              toolCalls,
+              this.runtimePort?.currentRun(),
+            );
             if (exhaustedReason) {
               await closeToolProtocol({
                 status: "cancelled",
@@ -2028,6 +2029,81 @@ export class AgentEngine implements AgentRunner {
     return session.getHistory().slice(beforeLen);
   }
 
+  private async commitRejectedToolBatch(
+    session: Session,
+    reporter: Reporter,
+    toolCalls: readonly ToolCall[],
+    outcomes: readonly ToolExecutionOutcome[],
+    runtimeRun: EngineRuntimeRun | undefined,
+  ): Promise<void> {
+    let startNotificationError: unknown;
+    try {
+      await this.publishAcceptedToolCalls(session, reporter, toolCalls, runtimeRun);
+    } catch (error) {
+      startNotificationError = error;
+    }
+
+    try {
+      await session.commitMessages(...outcomes.map((outcome) => outcome.message));
+      await this.publishCommittedToolBatch(
+        reporter,
+        toolCalls,
+        outcomes,
+        toolCalls.map((_toolCall, index) => index),
+      );
+    } catch (error) {
+      if (startNotificationError !== undefined) {
+        throw new AggregateError(
+          [startNotificationError, error],
+          "Accepted tool starts were reported with an error and the rejected batch failed to close",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+
+    if (startNotificationError !== undefined) throw startNotificationError;
+  }
+
+  /**
+   * Acceptance is the single start boundary: first persist the whole structured
+   * batch, then notify every Reporter callback exactly once in provider order.
+   */
+  private async publishAcceptedToolCalls(
+    session: Session,
+    reporter: Reporter,
+    toolCalls: readonly ToolCall[],
+    runtimeRun: EngineRuntimeRun | undefined,
+  ): Promise<void> {
+    if (toolCalls.length === 0) return;
+    const durableStarts = runtimeRun
+      ? await runtimeRun.recordTranscriptToolStarts(session, toolCalls)
+      : undefined;
+    if (durableStarts && durableStarts.length !== toolCalls.length) {
+      throw new Error("Durable tool start batch must contain every accepted provider call");
+    }
+
+    let firstError: unknown;
+    for (const [index, toolCall] of toolCalls.entries()) {
+      const durableStart: CanonicalTranscriptToolStart | undefined = durableStarts?.[index];
+      try {
+        reporter.onToolCall(
+          toolCall.name,
+          toolCall.arguments,
+          toolCall.id,
+          durableStart ? structuredClone(durableStart) : undefined,
+        );
+      } catch (error) {
+        firstError ??= error;
+        logger.warn(
+          { error: String(error), tool: toolCall.name },
+          "[Engine] ToolCall start 已持久化，但 Reporter 通知失败",
+        );
+      }
+    }
+    if (firstError !== undefined) throw firstError;
+  }
+
   private async closeToolProtocolBatch(
     session: Session,
     toolCalls: readonly ToolCall[],
@@ -2181,7 +2257,6 @@ export class AgentEngine implements AgentRunner {
     });
     try {
       signal?.throwIfAborted();
-      reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
       const runtimeRun = this.runtimePort?.currentRun();
       let result: ToolResult;

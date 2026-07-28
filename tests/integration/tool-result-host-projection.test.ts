@@ -11,6 +11,7 @@ import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
 } from "../../src/engine/tool-result-contract.js";
+import { createCanonicalTranscriptToolStart } from "../../src/engine/transcript-tool-start.js";
 import { Session } from "../../src/engine/session.js";
 import type { DurableTranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
@@ -56,6 +57,31 @@ test("TUI derives completion from the canonical envelope without persisting a du
     (candidate) => candidate.providerCallId === "call-rejected",
   );
   assert.equal(rejectedTool?.status, "denied");
+});
+
+test("TUI projects a Runtime-owned tool start without persisting it twice", async () => {
+  const events: DurableTranscriptEvent[] = [];
+  const reporter = new TuiReporter({
+    durableTranscriptSink: { append: async (event) => void events.push(event) },
+  });
+  const start = createCanonicalTranscriptToolStart({
+    sessionId: "session-runtime-start",
+    runId: "run-runtime-start",
+    turnId: "turn-runtime-start",
+    callIndex: 0,
+    toolCall: { id: "call-runtime-start", name: "read_file", arguments: "{}" },
+    sequence: 7,
+    createdAt: 1,
+  });
+
+  reporter.onToolCall("read_file", "{}", "call-runtime-start", start);
+  await reporter.flushDurableTranscript();
+
+  assert.deepEqual(events, []);
+  const tool = reporter.getProjection().toolCalls[start.toolCallId];
+  assert.ok(tool);
+  assert.equal(tool.entryId, start.entryId);
+  assert.equal(tool.providerCallId, start.providerCallId);
 });
 
 test("TUI Inspector pages canonical Evidence retained from a fork source Session", async (context) => {

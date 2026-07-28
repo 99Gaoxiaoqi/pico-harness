@@ -5,6 +5,7 @@ import type {
   SubagentTraceEvent,
 } from "../engine/reporter.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
+import type { CanonicalTranscriptToolStart } from "../engine/transcript-tool-start.js";
 
 const MAX_EVENT_TEXT_LENGTH = 64 * 1024;
 
@@ -57,7 +58,12 @@ export class DesktopReporter implements Reporter {
     this.emit("assistant.thinking", { active: false, turn: this.turn });
   }
 
-  onToolCall(toolName: string, args: string, providerCallId: string): void {
+  onToolCall(
+    toolName: string,
+    args: string,
+    providerCallId: string,
+    durableStart?: CanonicalTranscriptToolStart,
+  ): void {
     this.onThinkingEnd();
     const bounded = boundedText(args);
     this.emit("tool.started", {
@@ -66,6 +72,16 @@ export class DesktopReporter implements Reporter {
       truncated: bounded.truncated,
       turn: this.turn,
       providerCallId,
+      ...(durableStart
+        ? {
+            canonicalTranscriptStart: {
+              eventId: durableStart.eventId,
+              sequence: durableStart.sequence,
+              entryId: durableStart.entryId,
+              toolCallId: durableStart.toolCallId,
+            },
+          }
+        : {}),
     });
   }
 

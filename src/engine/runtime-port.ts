@@ -1,6 +1,7 @@
-import type { Message } from "../schema/message.js";
+import type { Message, ToolCall } from "../schema/message.js";
 import type { CommitReceipt } from "./session-persistence.js";
 import { Session } from "./session.js";
+import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 import type {
   RuntimeEvidenceReference,
   RuntimeToolResultBody,
@@ -126,6 +127,10 @@ export interface EngineRuntimeRun {
   recordTurnStarted(turn: number): Promise<void>;
   recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
   recordToolStarted(toolCallId: string, toolName: string, argumentsJson: string): Promise<void>;
+  recordTranscriptToolStarts(
+    session: Session,
+    toolCalls: readonly ToolCall[],
+  ): Promise<readonly CanonicalTranscriptToolStart[]>;
   recordTranscriptMessage(message: Message): Promise<void>;
   recordTranscriptToolResults(
     inputs: readonly EngineRuntimeToolResultInput[],

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Session } from "../../src/engine/session.js";
+import { hydrateCanonicalTranscriptEvents } from "../../src/presentation/transcript-tool-result-hydration.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "../../src/runtime/runtime-run.js";
 
@@ -102,6 +103,21 @@ test("reconciliation replaces a tool result that was rewound after its active ca
   });
   assert.equal(session.getHistory().at(-1)?.toolCallId, "call:kept");
   assert.match(session.getHistory().at(-1)?.content ?? "", /中断/u);
+  const hydration = await session.readHydrationSnapshot();
+  const hydrated = hydrateCanonicalTranscriptEvents({
+    sessionId: hydration.sessionId,
+    updatedAt: hydration.updatedAt,
+    transcriptEvents: hydration.transcriptEvents,
+    transcriptEventSequences: hydration.transcriptEventSequences,
+    toolResults: hydration.toolResults,
+    rejectUnmatchedResults: true,
+  });
+  assert.deepEqual(
+    hydrated
+      .filter((event) => event.type === "tool.completed")
+      .map((event) => (event.type === "tool.completed" ? event.result.toolCallId : undefined)),
+    ["call:kept"],
+  );
 });
 
 test("reconciliation repairs a completed run in a separate terminal recovery run", async (context) => {
@@ -138,7 +154,7 @@ test("reconciliation repairs a completed run in a separate terminal recovery run
   const recoveryEvents = await session.runtimeEventStore!.readRun(session.id, recoveryRunId);
   assert.deepEqual(
     recoveryEvents.map((event) => event.kind),
-    ["run.started", "tool.result.recorded", "run.terminal"],
+    ["run.started", "transcript.event.recorded", "tool.result.recorded", "run.terminal"],
   );
   const recoveryTerminal = recoveryEvents.at(-1);
   assert.equal(recoveryTerminal?.kind, "run.terminal");

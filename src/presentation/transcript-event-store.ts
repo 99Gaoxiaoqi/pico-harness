@@ -894,10 +894,10 @@ type TranscriptToolStartedDraft = Extract<
   { type: "tool.started" }
 >;
 
-/** tool.started 的内部 toolCallId 由 store 生成，不对调用方开放。 */
+/** 常规 live 事件由 store 分配 toolCallId；canonical Runtime start 可注入稳定 ID。 */
 export type TranscriptEventDraft =
   | Exclude<TranscriptEventDraftWithIdentities, TranscriptToolStartedDraft>
-  | Omit<TranscriptToolStartedDraft, "toolCallId">;
+  | (Omit<TranscriptToolStartedDraft, "toolCallId"> & { readonly toolCallId?: string });
 
 export interface TranscriptEventStoreOptions {
   /** 测试、回放或水合时可注入可预测 ID。 */
@@ -955,7 +955,9 @@ export class TranscriptEventStore {
 
   append(draft: TranscriptEventDraft): TranscriptEvent {
     const identifiedDraft =
-      draft.type === "tool.started" ? { ...draft, toolCallId: this.createId("tool") } : draft;
+      draft.type === "tool.started" && draft.toolCallId === undefined
+        ? { ...draft, toolCallId: this.createId("tool") }
+        : draft;
     const event = freezeTranscriptEvent({
       ...identifiedDraft,
       eventId: this.idFactory("event"),
