@@ -1107,10 +1107,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     });
   }
 
-  async rewindTo(messageIndex: number): Promise<void> {
-    await this.rewindConversationOnce(undefined, messageIndex);
-  }
-
   /** Rewind Saga 以 operationId 作事件幂等键。 */
   async rewindOnce(operationId: string, messageIndex: number): Promise<CommitReceipt | undefined> {
     if (!operationId.trim()) throw new Error("Rewind operationId 不能为空");
@@ -1118,12 +1114,11 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 
   private async rewindConversationOnce(
-    eventId: string | undefined,
+    eventId: string,
     messageIndex: number,
   ): Promise<CommitReceipt | undefined> {
     this.assertWritable();
-    const runtimeBranchId = eventId ?? `rewind:${randomUUID()}`;
-    if (this.store) return this.commitRuntimeRewind(messageIndex, runtimeBranchId);
+    if (this.store) return this.commitRuntimeRewind(messageIndex, eventId);
     this.messageLedger.retainPrefix(messageIndex, { resetOrderingState: true });
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
@@ -1163,13 +1158,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   ): Promise<void> {
     this.assertWritable();
     const snapshot = this.requireRewindSnapshot(messageId);
-    await this.executeRewindOperation(
-      "code",
-      snapshot,
-      snapshot.messageIndex,
-      randomUUID(),
-      expectedCurrentFingerprints,
-    );
+    await this.executeRewindOperation("code", snapshot, randomUUID(), expectedCurrentFingerprints);
   }
 
   async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
@@ -1185,29 +1174,19 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     );
   }
 
-  async rewindConversation(messageIndex: number, messageId?: string): Promise<void> {
+  async rewindConversation(messageId: string): Promise<void> {
     this.assertWritable();
-    if (!messageId) {
-      await this.rewindTo(messageIndex);
-      return;
-    }
-    await this.executeRewindOperation(
-      "conversation",
-      this.requireRewindSnapshot(messageId),
-      messageIndex,
-    );
+    await this.executeRewindOperation("conversation", this.requireRewindSnapshot(messageId));
   }
 
   async rewindBoth(
     messageId: string,
-    messageIndex: number,
     expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<void> {
     this.assertWritable();
     await this.executeRewindOperation(
       "both",
       this.requireRewindSnapshot(messageId),
-      messageIndex,
       randomUUID(),
       expectedCurrentFingerprints,
     );
@@ -1224,7 +1203,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private async executeRewindOperation(
     mode: NewRewindStorageOperation["mode"],
     snapshot: FileHistoryState["snapshots"][number],
-    messageIndex: number,
     operationId = randomUUID(),
     expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<void> {
@@ -1249,7 +1227,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         target: {
           messageId: snapshot.messageId,
           sourceMessageEventId: snapshot.sourceMessageEventId,
-          messageIndex,
+          messageIndex: snapshot.messageIndex,
           userPrompt: snapshot.userPrompt,
           ...(snapshot.transcriptIndex !== undefined
             ? { transcriptIndex: snapshot.transcriptIndex }
