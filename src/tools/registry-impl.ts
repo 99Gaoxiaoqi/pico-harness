@@ -49,14 +49,8 @@ import {
   type YoloSandboxConfig,
 } from "../safety/yolo-sandbox.js";
 
-const DEFAULT_RESULT_SIZE_CHARS = 8000;
 const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
 const NON_BLOCKING_FLAG = constants.O_NONBLOCK ?? 0;
-
-export interface ToolRegistryOptions {
-  defaultResultSizeChars?: number;
-  truncateResults?: boolean;
-}
 
 export interface ToolRegistrationOwner {
   readonly kind: "plugin" | "mcp" | "host";
@@ -125,8 +119,6 @@ function exactPathSideEffects(args: string): ToolFileSideEffects {
 export class ToolRegistry implements Registry {
   private readonly tools = new Map<string, BaseTool>();
   private readonly toolOwners = new Map<string, ToolRegistrationOwner>();
-  private readonly defaultResultSizeChars: number;
-  private readonly truncateResults: boolean;
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
   private readonly requestMiddlewares: RequestMiddleware[] = [];
   private readonly safetyMiddlewares: RequestMiddleware[] = [];
@@ -134,11 +126,6 @@ export class ToolRegistry implements Registry {
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
   private preWriteHook?: (toolName: string, args: string) => Promise<void>;
   private hookService?: HookService;
-
-  constructor(opts: ToolRegistryOptions = {}) {
-    this.defaultResultSizeChars = opts.defaultResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS;
-    this.truncateResults = opts.truncateResults ?? true;
-  }
 
   setPreWriteHook(hook: (toolName: string, args: string) => Promise<void>): void {
     this.preWriteHook = hook;
@@ -409,28 +396,9 @@ export class ToolRegistry implements Registry {
         const next = chain;
         chain = (nextCall) => mw(nextCall, next, context);
       }
-      const output = await chain(currentCall);
-      const finalOutput = this.truncateResults
-        ? truncateToolOutput(output, tool.maxResultSizeChars ?? this.defaultResultSizeChars)
-        : output;
-
-      // 5. 工具成功后通过同一 HookService 分发 PostToolUse。
-      if (this.hookService) {
-        await this.hookService.dispatch(
-          "PostToolUse",
-          {
-            tool_name: currentCall.name,
-            tool_input: toolInput,
-            tool_call_id: currentCall.id,
-            tool_response: finalOutput,
-          },
-          { signal: context?.signal },
-        );
-      }
-
       return {
         toolCallId: currentCall.id,
-        output: finalOutput,
+        output: await chain(currentCall),
         isError: false,
       };
     } catch (err) {
@@ -441,18 +409,6 @@ export class ToolRegistry implements Registry {
           : new DOMException("aborted", "AbortError");
       }
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (this.hookService) {
-        await this.hookService.dispatch(
-          "PostToolUseFailure",
-          {
-            tool_name: currentCall.name,
-            tool_input: toolInput,
-            tool_call_id: currentCall.id,
-            error: errMsg,
-          },
-          { signal: context?.signal },
-        );
-      }
       return {
         toolCallId: currentCall.id,
         output: `Error executing ${currentCall.name}: ${errMsg}`,
@@ -490,13 +446,6 @@ function parseToolInput(argumentsJson: string): unknown {
   }
 }
 
-function truncateToolOutput(output: string, limit: number): string {
-  if (output.length <= limit) {
-    return output;
-  }
-  return `${output.slice(0, limit)}\n\n...[工具输出过长,已截断至前 ${limit} 字符]...`;
-}
-
 // ==========================================
 // ReadFileTool (第 05 讲核心)
 // 防御底线:WorkDir 边界限制 + 路径穿越防护 + 行分页保护
@@ -517,8 +466,6 @@ function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
 
 export class ReadFileTool implements BaseTool {
   readonly readOnly = true;
-  // read_file 由自身的 offset/limit 和页字符上限保护，Registry 不再二次截断。
-  readonly maxResultSizeChars = Number.POSITIVE_INFINITY;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {
@@ -864,8 +811,6 @@ const BASH_EXEC_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const BASH_KILL_GRACE_MS = 750;
 
 export class BashTool implements BaseTool {
-  // 完整已捕获输出必须交给 observation 外部化，Registry 不再提前截断。
-  readonly maxResultSizeChars = Number.POSITIVE_INFINITY;
   readonly handlesAbortSignal = true;
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
 
