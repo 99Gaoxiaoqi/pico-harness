@@ -382,6 +382,74 @@ test("session transcript rejects invalid durable reasoning identities", () => {
   );
 });
 
+test("session transcript accepts only canonical queued user inputs", () => {
+  const result = {
+    session: {
+      sessionId: "session-1",
+      workspacePath: "/workspace",
+      title: "Session",
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    items: [],
+    queuedInputs: [
+      {
+        queueId: "queue-text",
+        sessionId: "session-1",
+        input: { kind: "text", text: "continue" },
+        createdAt: 2,
+      },
+      {
+        queueId: "queue-skill",
+        sessionId: "session-1",
+        input: { kind: "skill", name: "review", args: "--strict" },
+        createdAt: 3,
+      },
+      {
+        queueId: "queue-agent",
+        sessionId: "session-1",
+        input: { kind: "agent", name: "reviewer", task: "inspect" },
+        createdAt: 4,
+      },
+    ],
+    revision: "revision-1",
+  } as const;
+
+  assert.deepEqual(parseDesktopRuntimeResult("session.transcript", result), result);
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        queuedInputs: [
+          {
+            queueId: "legacy-missing-kind",
+            sessionId: "session-1",
+            input: { text: "legacy" },
+            createdAt: 5,
+          },
+        ],
+      }),
+    /kind/u,
+  );
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        queuedInputs: [
+          {
+            queueId: "legacy-top-level-text",
+            sessionId: "session-1",
+            input: { kind: "text", text: "canonical" },
+            text: "legacy",
+            createdAt: 5,
+          },
+        ],
+      }),
+    /不允许字段 text/u,
+  );
+});
+
 test("session transcript accepts Evidence v2 and rejects legacy v1 refs", () => {
   const contentHash = "a".repeat(64);
   const evidence = {

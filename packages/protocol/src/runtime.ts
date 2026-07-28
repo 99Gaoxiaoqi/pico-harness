@@ -2991,10 +2991,38 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
   }
 };
 
-const runtimeQueuedInputResult = resultShape({
+const runtimeQueuedInputResult = exactResultShape({
   queueId: resultString,
   sessionId: resultString,
-  input: resultJsonObject,
+  input: (value, path) => {
+    if (!isJsonObject(value)) throw invalidResult(`${path} 必须是用户输入对象`);
+    if (value["kind"] === "text") {
+      exactResultShape({
+        kind: resultOneOf(["text"]),
+        text: resultString,
+      })(value, path);
+      return;
+    }
+    if (value["kind"] === "skill") {
+      exactResultShape(
+        {
+          kind: resultOneOf(["skill"]),
+          name: resultString,
+        },
+        { args: resultString },
+      )(value, path);
+      return;
+    }
+    if (value["kind"] === "agent") {
+      exactResultShape({
+        kind: resultOneOf(["agent"]),
+        name: resultString,
+        task: resultString,
+      })(value, path);
+      return;
+    }
+    throw invalidResult(`${path}.kind 必须是 text | skill | agent 之一`);
+  },
   createdAt: resultFiniteNumber,
 });
 
