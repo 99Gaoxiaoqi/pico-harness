@@ -31,6 +31,7 @@ import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from ".
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
+import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
 
 /** Anthropic content block: 文本、图片或工具调用 */
 type Block =
@@ -52,6 +53,7 @@ interface AnthropicResponse {
 
 /** Anthropic (Claude) 兼容协议适配器 */
 export class ClaudeProvider implements LLMProvider {
+  readonly requestCapabilities: { readonly toolChoiceNoneWithTools: true } | undefined;
   private readonly profile: ProviderProfile;
   private readonly thinkingEffort: string;
 
@@ -61,6 +63,11 @@ export class ClaudeProvider implements LLMProvider {
   ) {
     this.profile = profile ?? resolveProviderProfile("claude", config.model);
     this.thinkingEffort = config.thinkingEffort ?? "off";
+    const supportsToolChoiceNoneWithTools =
+      config.capabilities?.toolChoiceNoneWithTools ??
+      defaultToolChoiceNoneWithTools("claude", config.baseURL);
+    this.requestCapabilities =
+      supportsToolChoiceNoneWithTools === true ? { toolChoiceNoneWithTools: true } : undefined;
   }
 
   get modelName(): string {
@@ -73,7 +80,7 @@ export class ClaudeProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 1. 构建请求体(消息翻译 + 工具 schema + thinking + cache 注入)
-    const body = this.buildRequestBody(messages, availableTools);
+    const body = this.buildRequestBody(messages, availableTools, options);
     options?.onRequestPrepared?.({
       provider: "claude",
       model: this.config.model,
@@ -136,7 +143,7 @@ export class ClaudeProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 1. 构建请求体(与 generate 共用,加 stream: true)
-    const body = this.buildRequestBody(messages, availableTools);
+    const body = this.buildRequestBody(messages, availableTools, options);
     body.stream = true;
     options?.onRequestPrepared?.({
       provider: "claude",
@@ -276,6 +283,7 @@ export class ClaudeProvider implements LLMProvider {
   private buildRequestBody(
     messages: Message[],
     availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
   ): Record<string, unknown> {
     let systemPrompt = "";
     const anthropicMsgs: { role: "user" | "assistant"; content: Block[] }[] = [];
@@ -373,6 +381,9 @@ export class ClaudeProvider implements LLMProvider {
           },
         };
       });
+      if (options?.toolChoice === "none") {
+        body.tool_choice = { type: "none" };
+      }
     }
 
     // 3. Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,

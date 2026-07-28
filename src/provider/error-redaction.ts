@@ -54,6 +54,9 @@ export function withProviderErrorRedaction(
 ): LLMProvider {
   const wrapped: LLMProvider = {
     ...(provider.modelName !== undefined ? { modelName: provider.modelName } : {}),
+    get requestCapabilities() {
+      return provider.requestCapabilities;
+    },
     generate: async (
       messages: Message[],
       availableTools: ToolDefinition[],

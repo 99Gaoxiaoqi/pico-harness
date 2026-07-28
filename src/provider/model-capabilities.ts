@@ -36,6 +36,8 @@ export interface ModelRouteCapabilities {
   reasoningProfile: ResolvedModelReasoningCapability;
   toolCall: CapabilitySupport;
   cache: CapabilitySupport;
+  /** Whether tools may stay on the wire while tool_choice:none forbids their use. */
+  toolChoiceNoneWithTools: CapabilitySupport;
   /** Whether this route accepts OpenAI stream_options.include_usage. */
   streamUsage: CapabilitySupport;
   price: ModelPrice;
@@ -51,6 +53,7 @@ export interface ModelCapabilityConfig {
   reasoning?: ModelReasoningCapabilityInput;
   toolCall?: boolean;
   cache?: boolean;
+  toolChoiceNoneWithTools?: boolean;
   streamUsage?: boolean;
   price?: Omit<ModelPrice, "currency" | "source">;
 }
@@ -83,11 +86,34 @@ export function resolveModelRouteCapabilities(
     reasoningProfile,
     toolCall: override?.toolCall ?? "unknown",
     cache: override?.cache ?? "unknown",
+    toolChoiceNoneWithTools:
+      override?.toolChoiceNoneWithTools ??
+      defaultToolChoiceNoneWithTools(provider, context.baseURL),
     streamUsage: override?.streamUsage ?? "unknown",
     price: override?.price
       ? { currency: "USD", source: "config", ...override.price }
       : unknownModelPrice(),
   };
+}
+
+/**
+ * Only the official Anthropic endpoint is safe to infer. Compatible gateways
+ * must opt in per model because partial Messages API implementations are common.
+ */
+export function defaultToolChoiceNoneWithTools(
+  provider: ProviderKind,
+  baseURL: string | undefined,
+): CapabilitySupport {
+  if (provider !== "claude") return false;
+  if (!baseURL) return "unknown";
+  try {
+    const endpoint = new URL(baseURL);
+    return endpoint.protocol === "https:" && endpoint.hostname.toLowerCase() === "api.anthropic.com"
+      ? true
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function defaultOpenAIOutputTokenField(

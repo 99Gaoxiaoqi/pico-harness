@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { CostTracker, type ProviderCallLedger } from "../../src/observability/tracker.js";
+import { LLMStatusError } from "../../src/provider/errors.js";
 import { createProvider } from "../../src/provider/factory.js";
-import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import { toCanonicalUsage } from "../../src/schema/message.js";
+import type { Message, ToolDefinition, Usage } from "../../src/schema/message.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;
@@ -13,7 +14,7 @@ const RUN_REAL_MODEL = process.env.RUN_ANTHROPIC_CACHE_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 
 realModelTest(
-  "real Anthropic request writes then reads the same prompt cache prefix",
+  "real Anthropic multi-turn requests write, read, and extend the prompt cache prefix",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
     const model = requiredEnvironment("CLAUDE_DEFAULT_MODEL");
@@ -53,7 +54,7 @@ realModelTest(
           stableCorpus,
         ].join("\n"),
       },
-      { role: "user", content: "Reply with exactly CACHE_OK." },
+      { role: "user", content: "Reply with exactly CACHE_R1_READY. Do not call tools." },
     ];
     const tools: ToolDefinition[] = [
       {
@@ -66,32 +67,136 @@ realModelTest(
         },
       },
     ];
+    const r1ToolLoopMessages: Message[] = [
+      ...messages,
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "cache-probe-r1",
+            name: "cache_probe",
+            arguments: '{"value":"r1"}',
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: "CACHE_PROBE_RESULT_R1",
+        toolCallId: "cache-probe-r1",
+      },
+    ];
+    const r2Messages: Message[] = [
+      ...r1ToolLoopMessages,
+      { role: "assistant", content: "CACHE_R1_COMPLETE" },
+      { role: "user", content: "Reply with exactly CACHE_R2_READY. Do not call tools." },
+    ];
 
-    const first = await tracked.generate(messages, tools);
-    const second = await tracked.generate(messages, tools);
-    assert.ok(first.usage);
-    assert.ok(second.usage);
-    assert.ok((first.usage.cacheWriteTokens ?? 0) > 0, "first request must create cache tokens");
-    assert.ok((second.usage.cacheReadTokens ?? 0) > 0, "second request must read cache tokens");
+    const first = await realAnthropicRequest("r1-write", () => tracked.generate(messages, tools));
+    const second = await realAnthropicRequest("r1-tool-loop", () =>
+      tracked.generate(r1ToolLoopMessages, tools),
+    );
+    const third = await realAnthropicRequest("r2-external-turn", () =>
+      tracked.generate(r2Messages, tools),
+    );
 
-    const firstCanonical = toCanonicalUsage(first.usage);
-    const secondCanonical = toCanonicalUsage(second.usage);
-    assert.equal(
-      firstCanonical.totalPromptTokens,
-      firstCanonical.inputTokens + firstCanonical.cacheReadTokens + firstCanonical.cacheWriteTokens,
+    const firstUsage = requiredUsage(first.usage, "R1 first request");
+    const secondUsage = requiredUsage(second.usage, "R1 tool loop");
+    const thirdUsage = requiredUsage(third.usage, "R2 external turn");
+    assert.ok(
+      (firstUsage.cacheWriteTokens ?? 0) > 0,
+      "cache assertion: R1 first request must write the stable prefix",
     );
-    assert.equal(
-      secondCanonical.totalPromptTokens,
-      secondCanonical.inputTokens +
-        secondCanonical.cacheReadTokens +
-        secondCanonical.cacheWriteTokens,
+    assert.ok(
+      (secondUsage.cacheReadTokens ?? 0) > 0,
+      "cache assertion: the R1 tool loop must read the stable tools/system prefix",
     );
-    assert.equal(records.length, 2);
+    assert.ok(
+      (secondUsage.cacheWriteTokens ?? 0) > 0,
+      "cache assertion: the R1 tool loop must write its deeper history prefix",
+    );
+    assert.ok(
+      (thirdUsage.cacheReadTokens ?? 0) > 0,
+      "cache assertion: R2 must read a prefix written by R1",
+    );
+    assert.ok(
+      (thirdUsage.cacheWriteTokens ?? 0) > 0,
+      "cache assertion: R2 must reheat the newly extended history prefix",
+    );
+    for (const usage of [firstUsage, secondUsage, thirdUsage]) {
+      assertCanonicalPromptTotal(usage);
+    }
+
+    assert.equal(records.length, 3);
     assert.equal(requestChangeReason(records[0]), "first_request");
-    assert.equal(requestChangeReason(records[1]), "stable");
+    assert.equal(requestChangeReason(records[1]), "cacheable_prefix_changed");
+    assert.equal(requestChangeReason(records[2]), "cacheable_prefix_changed");
     assert.equal(JSON.stringify(records).includes(marker), false);
   },
 );
+
+type RealAnthropicRequestPhase = "r1-write" | "r1-tool-loop" | "r2-external-turn";
+type RealAnthropicFailureKind =
+  | "credential"
+  | "credential_or_quota"
+  | "quota"
+  | "protocol"
+  | "transport";
+
+class RealAnthropicRequestFailure extends Error {
+  constructor(
+    readonly kind: RealAnthropicFailureKind,
+    phase: RealAnthropicRequestPhase,
+    statusCode?: number,
+  ) {
+    super(
+      [
+        `真实 Anthropic cache E2E 请求失败 [${kind}]`,
+        `phase=${phase}`,
+        ...(statusCode === undefined ? [] : [`status=${statusCode}`]),
+        "请求明文与凭证已省略",
+      ].join("; "),
+    );
+    this.name = "RealAnthropicRequestFailure";
+  }
+}
+
+async function realAnthropicRequest<T>(
+  phase: RealAnthropicRequestPhase,
+  request: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await request();
+  } catch (error) {
+    const statusCode = error instanceof LLMStatusError ? error.statusCode : undefined;
+    const kind = classifyRealAnthropicFailure(error, statusCode);
+    throw new RealAnthropicRequestFailure(kind, phase, statusCode);
+  }
+}
+
+function classifyRealAnthropicFailure(
+  error: unknown,
+  statusCode: number | undefined,
+): RealAnthropicFailureKind {
+  const detail = error instanceof Error ? error.message : "";
+  if (
+    statusCode === 402 ||
+    statusCode === 429 ||
+    /\b(?:quota|billing|credits?|insufficient[_ -]?(?:quota|credits?|balance)|balance)\b|额度(?:不足|用尽)|余额不足|欠费|配额(?:不足|用尽)/iu.test(
+      detail,
+    )
+  ) {
+    return "quota";
+  }
+  if (statusCode === 401 || statusCode === 403) {
+    return /\b(?:authentication|unauthorized|forbidden|invalid[_ -]?(?:api[_ -]?)?key)\b|鉴权失败|认证失败|无效(?:密钥|凭证)/iu.test(
+      detail,
+    )
+      ? "credential"
+      : "credential_or_quota";
+  }
+  return statusCode === undefined ? "transport" : "protocol";
+}
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -102,6 +207,20 @@ function requiredEnvironment(name: string): string {
 function anthropicBaseUrl(value: string): string {
   const normalized = value.replace(/\/+$/u, "");
   return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function requiredUsage(usage: Usage | undefined, phase: string): Usage {
+  assert.ok(usage, `cache assertion: ${phase} must report Anthropic usage`);
+  return usage;
+}
+
+function assertCanonicalPromptTotal(usage: Usage): void {
+  const canonical = toCanonicalUsage(usage);
+  assert.equal(
+    canonical.totalPromptTokens,
+    canonical.inputTokens + canonical.cacheReadTokens + canonical.cacheWriteTokens,
+    "cache assertion: prompt token buckets must reconcile",
+  );
 }
 
 function requestChangeReason(record: ProviderCallRecord | undefined): unknown {
