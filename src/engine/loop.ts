@@ -2426,7 +2426,7 @@ export class AgentEngine implements AgentRunner {
         signal,
       );
       const costBefore = session.totalCostCNY;
-      const response = await withProviderCallContext({ purpose: "grace" }, () =>
+      const providerResponse = await withProviderCallContext({ purpose: "grace" }, () =>
         this.generateWithOverflowRetry(
           session,
           systemPrompt,
@@ -2441,6 +2441,16 @@ export class AgentEngine implements AgentRunner {
         ),
       );
       signal?.throwIfAborted();
+      // A compatible endpoint may ignore tool_choice:none. Grace never executes tools,
+      // and it must not persist an unmatched assistant tool_use into the next request.
+      const response: Message = { ...providerResponse };
+      if (response.toolCalls !== undefined) {
+        graceSpan?.addAttributes({ discardedToolCallCount: response.toolCalls.length });
+        delete response.toolCalls;
+      }
+      if (response.content.trim().length === 0) {
+        response.content = "已达执行预算，但模型未返回可用的纯文本总结。";
+      }
       recordLlmResponse(graceSpan, response);
       // Grace Call is the one permitted over-budget summary. It does not consume another
       // goal turn, but its measurable token/cost usage remains part of the goal totals.
