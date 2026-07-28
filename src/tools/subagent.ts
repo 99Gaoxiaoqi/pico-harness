@@ -790,9 +790,7 @@ export class DelegateTaskTool implements BaseTool {
         taskIndex,
         status: subResult.status,
         summary: subResult.summary,
-        ...(subResult.evidenceRefs.length > 0
-          ? { evidenceRefs: subResult.evidenceRefs }
-          : {}),
+        ...(subResult.evidenceRefs.length > 0 ? { evidenceRefs: subResult.evidenceRefs } : {}),
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
