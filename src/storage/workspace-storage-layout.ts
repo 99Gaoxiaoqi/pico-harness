@@ -14,9 +14,6 @@ import {
 } from "./local-file-storage.js";
 
 const WORKSPACE_STORAGE_LAYOUT_SCHEMA_VERSION = 2 as const;
-const LEGACY_LOCK_TOMBSTONE_PATTERN = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
-const LEGACY_LOCK_CANDIDATE_PATTERN =
-  /^\.lock\.candidate-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const CANONICAL_STORAGE_DIRECTORIES = ["sessions", "task-runs", "control"] as const;
 
 export const WORKSPACE_STORAGE_DIRECTORY = ".storage";
@@ -421,17 +418,9 @@ function assertNoUnsupportedLegacyRuntimeData(root: string): void {
   const legacyRoot = join(root, "runtime");
   if (!existsSync(legacyRoot)) return;
   assertRealDirectory(legacyRoot, "Legacy Runtime directory");
-  if (!readDirectoryEntries(legacyRoot).some(isLegacyDataEntry)) return;
+  if (readDirectoryEntries(legacyRoot).length === 0) return;
   throw new FileStorageIntegrityError(
-    `Unsupported pre-v2 Runtime storage exists: ${legacyRoot}; automatic migration is disabled`,
-  );
-}
-
-function isLegacyDataEntry(entry: Dirent): boolean {
-  return (
-    entry.name !== "lock" &&
-    !LEGACY_LOCK_TOMBSTONE_PATTERN.test(entry.name) &&
-    !LEGACY_LOCK_CANDIDATE_PATTERN.test(entry.name)
+    `Unsupported pre-v2 Runtime storage exists: ${legacyRoot}; automatic migration is disabled; delete the obsolete Runtime state before initializing version 2 storage`,
   );
 }
 

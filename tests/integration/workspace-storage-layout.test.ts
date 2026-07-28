@@ -94,6 +94,29 @@ test("workspace storage rejects legacy Runtime data without migrating or fencing
   await assert.rejects(stat(join(storageRoot, "runtime", "lock")), { code: "ENOENT" });
 });
 
+test("workspace storage rejects obsolete Runtime lock remnants before v2 initialization", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-legacy-locks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const remnants = [
+    ["lock", "lock"],
+    ["tombstone", `.lock.tombstone-${"a".repeat(64)}`],
+    ["candidate", ".lock.candidate-12345678-1234-4234-9234-123456789abc"],
+  ] as const;
+
+  for (const [name, entry] of remnants) {
+    const storageRoot = join(root, name);
+    const remnantPath = join(storageRoot, "runtime", entry);
+    await mkdir(remnantPath, { recursive: true, mode: 0o700 });
+
+    assert.throws(
+      () => new RuntimeEventStore({ storageRoot }),
+      /Unsupported pre-v2 Runtime storage exists.*delete the obsolete Runtime state/u,
+    );
+    assert.equal((await stat(remnantPath)).isDirectory(), true);
+    await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_DIRECTORY)), { code: "ENOENT" });
+  }
+});
+
 test("workspace storage rejects a symbolic-link root without touching its target", async (t) => {
   if (process.platform === "win32") {
     t.skip("symbolic-link setup requires elevated privileges on Windows");
