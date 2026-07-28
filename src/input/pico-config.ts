@@ -90,7 +90,8 @@ export function loadPicoConfig(workDir: string): Promise<PicoProjectConfig> {
   return loadPicoProjectConfig(workDir);
 }
 
-function defaultPicoConfig(workDir: string): PicoProjectConfig {
+/** @internal Host-owned empty project snapshot for isolated non-interactive execution. */
+export function createIsolatedPicoConfig(workDir: string): PicoProjectConfig {
   return {
     version: CONFIG_VERSION,
     commandsDir: join(workDir, ".pico", "commands"),
@@ -99,6 +100,20 @@ function defaultPicoConfig(workDir: string): PicoProjectConfig {
     providers: {},
     sandbox: { network: "deny" },
     lspServers: [],
+    compatibility: {
+      claude: {
+        enabled: false,
+        projectResources: false,
+        userResources: false,
+        modelAliases: {},
+      },
+    },
+  };
+}
+
+function defaultPicoConfig(workDir: string): PicoProjectConfig {
+  return {
+    ...createIsolatedPicoConfig(workDir),
     compatibility: defaultCompatibility(),
   };
 }

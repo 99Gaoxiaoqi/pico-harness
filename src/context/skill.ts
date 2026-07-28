@@ -80,7 +80,7 @@ export interface SkillLoaderOptions {
   readonly includeClaudeProjectResources?: boolean;
   readonly includeClaudeUserResources?: boolean;
   /** 仅扫描用户目录；该模式不会构造项目或 Plugin 来源。 */
-  readonly catalogScope?: "effective" | "user";
+  readonly catalogScope?: "effective" | "user" | "none";
 }
 
 export interface SkillCatalogSnapshot {
@@ -252,6 +252,7 @@ export class SkillLoader {
   }
 
   private catalogSources(): ResourceCatalogSource[] {
+    if (this.options.catalogScope === "none") return [];
     const homeDir = this.options.homeDir ?? homedir();
     const paths = resolvePicoPaths(this.workDir, {
       homeDir,

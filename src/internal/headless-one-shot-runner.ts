@@ -1,32 +1,29 @@
 import { createHash } from "node:crypto";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  realpath,
-  unlink,
-  writeFile,
-  type FileHandle,
-} from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { SilentReporter } from "../engine/reporter.js";
-import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
-import { EffectiveConfigResolver } from "../input/effective-config.js";
+import type { EffectiveConfigSnapshot } from "../input/effective-config.js";
 import type { SessionSettings } from "../input/session-settings.js";
-import { UserConfigStore } from "../input/user-config-store.js";
+import {
+  EMPTY_USER_CONFIG_REVISION,
+  UserConfigStore,
+  type UserConfigSnapshot,
+  type UserModelProviderConfig,
+} from "../input/user-config-store.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CredentialVault } from "../provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
+import type { ModelProviderConfig } from "../provider/model-router.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
+import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
 import {
   executeAgentRuntime,
   type RunAgentCliDependencies,
   type RunAgentProviderFactory,
 } from "../runtime/agent-runtime.js";
 import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
+import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "../security/workspace-trust.js";
 
@@ -36,7 +33,18 @@ const MAX_PROMPT_LENGTH = 1024 * 1024;
 const MAX_SHUTDOWN_GRACE_MS = 60_000;
 const MAX_TIMEOUT_MS = 7_200_000;
 const LOCK_DIRECTORY_MODE = 0o700;
-const LOCK_FILE_MODE = 0o600;
+const HEADLESS_TOOL_NAMES = new Set([
+  "bash",
+  "edit_file",
+  "fetch_url",
+  "glob",
+  "grep",
+  "read_evidence",
+  "read_file",
+  "todo",
+  "web_search",
+  "write_file",
+]);
 const REQUEST_FIELDS = new Set([
   "schemaVersion",
   "requestId",
@@ -121,6 +129,8 @@ export interface HeadlessOneShotResultV1 {
   readonly tracePath: string | null;
   readonly effective: HeadlessOneShotEffectivePolicy;
   readonly error: HeadlessOneShotError | null;
+  /** True only when all Runtime execution has settled before this payload is emitted. */
+  readonly terminationConfirmed: boolean;
 }
 
 export interface HeadlessOneShotOutcome {
@@ -153,21 +163,17 @@ class HeadlessRequestError extends Error {
   }
 }
 
-class HeadlessPolicyReporter extends SilentReporter {
-  policyBlocked = false;
-
-  override onToolResult(result: ToolResultEnvelope): void {
-    if (
-      result.status === "rejected" ||
-      /执行被(?:系统|Guardrail)拦截|安全拒绝|拒绝了该工具调用/u.test(result.projection.text)
-    ) {
-      this.policyBlocked = true;
-    }
+class HeadlessCancellationError extends Error {
+  constructor(readonly cancelCause: CancelCause) {
+    super(cancelCause);
+    this.name = "HeadlessCancellationError";
   }
 }
 
 class ExclusiveCaseLocks {
-  private constructor(private readonly files: readonly { path: string; handle: FileHandle }[]) {}
+  private released = false;
+
+  private constructor(private readonly leases: readonly OwnerLease[]) {}
 
   static async acquire(
     request: HeadlessOneShotRequestV1,
@@ -181,35 +187,37 @@ class ExclusiveCaseLocks {
       `workspace:${workDir}`,
       `session:${picoHome}\0${workDir}\0${request.sessionId}`,
     ].sort();
-    const acquired: { path: string; handle: FileHandle }[] = [];
+    const acquired: OwnerLease[] = [];
     try {
       for (const key of keys) {
-        const name = createHash("sha256").update(key).digest("hex");
-        const path = join(root, `${name}.lock`);
-        let handle: FileHandle;
-        try {
-          handle = await open(path, "wx", LOCK_FILE_MODE);
-        } catch (error) {
-          if (isErrnoCode(error, "EEXIST")) {
-            throw new HeadlessRequestError(
-              "CASE_RESOURCE_CONFLICT",
-              "The requested PICO_HOME, workspace, or Session is already owned by another case.",
-            );
-          }
-          throw error;
-        }
-        await handle.writeFile(`${process.pid}\n`, "utf8");
-        acquired.push({ path, handle });
+        const hash = createHash("sha256").update(key).digest("hex");
+        await recoverLegacyLock(root, hash);
+        acquired.push(
+          await OwnerLease.acquire({
+            leaseDirectory: join(root, `${hash}.lease`),
+            ownerId: `headless:${request.requestId}:${request.sessionId}:${hash}`,
+            staleAfterMs: 0,
+            heartbeatIntervalMs: 1_000,
+          }),
+        );
       }
       return new ExclusiveCaseLocks(acquired);
     } catch (error) {
-      await releaseLockFiles(acquired, true);
+      await releaseLeases(acquired);
+      if (error instanceof LeaseConflictError) {
+        throw new HeadlessRequestError(
+          "CASE_RESOURCE_CONFLICT",
+          "Another live or unverifiable headless case owns one of the requested resources.",
+        );
+      }
       throw error;
     }
   }
 
-  release(removeFiles: boolean): Promise<void> {
-    return releaseLockFiles(this.files, removeFiles);
+  async release(): Promise<void> {
+    if (this.released) return;
+    this.released = true;
+    await releaseLeases(this.leases);
   }
 }
 
@@ -262,7 +270,7 @@ async function runValidatedRequest(
   startedAt: number,
   dependencies: HeadlessOneShotDependencies,
 ): Promise<HeadlessOneShotOutcome> {
-  const baseEffective: HeadlessOneShotEffectivePolicy = {
+  let effective: HeadlessOneShotEffectivePolicy = {
     modelRouteId: request.modelRouteId,
     thinkingEffort: request.thinkingEffort ?? null,
     permissionMode: request.permissionMode,
@@ -270,52 +278,43 @@ async function runValidatedRequest(
   };
   let workDir: string | null = null;
   let locks: ExclusiveCaseLocks | undefined;
-  let shutdownConfirmed = true;
   const cancellation = createCancellation(
     request.timeoutMs,
     dependencies.signal,
     dependencies.signalKind,
   );
   try {
-    const casePaths = await canonicalizeCasePaths(request);
+    const casePaths = await racePreflight(canonicalizeCasePaths(request), cancellation);
     workDir = casePaths.workDir;
     const picoHome = casePaths.picoHome;
-    locks = await ExclusiveCaseLocks.acquire(request, workDir, picoHome, dependencies.lockRoot);
 
     const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
     try {
-      await ensureWorkspaceTrusted(workDir, { store: trustStore });
-    } catch {
+      await racePreflight(ensureWorkspaceTrusted(workDir, { store: trustStore }), cancellation);
+    } catch (error) {
+      if (error instanceof HeadlessCancellationError) throw error;
       throw new HeadlessRequestError(
         "WORKSPACE_UNTRUSTED",
         "The workspace is not trusted by this isolated PICO_HOME.",
       );
     }
 
-    await assertNewSession(request.sessionId, workDir, picoHome);
-    const env = Object.freeze({
-      ...(dependencies.env ?? process.env),
-      PICO_HOME: picoHome,
-    });
-    const userConfigStore = new UserConfigStore({ picoHome });
-    const configResolver = new EffectiveConfigResolver({ userConfigStore });
     let modelRuntime;
     try {
-      modelRuntime = await loadEffectiveModelRuntime({
+      modelRuntime = await loadTrustedModelRuntime(
+        request,
         workDir,
-        projectTrusted: true,
-        legacyProvider: "openai",
-        legacyModel: "unused-headless-model",
-        legacyModelExplicit: false,
-        env,
-        userConfigStore,
-        configResolver,
-        ...(dependencies.credentialVault ? { credentialVault: dependencies.credentialVault } : {}),
-      });
-    } catch {
+        picoHome,
+        dependencies,
+        cancellation,
+      );
+    } catch (error) {
+      if (error instanceof HeadlessCancellationError || error instanceof HeadlessRequestError) {
+        throw error;
+      }
       throw new HeadlessRequestError(
         "MODEL_RUNTIME_INVALID",
-        "The effective model configuration could not be loaded.",
+        "The trusted user model configuration could not be loaded.",
       );
     }
 
@@ -348,19 +347,33 @@ async function runValidatedRequest(
       );
     }
 
-    const effective: HeadlessOneShotEffectivePolicy = {
+    effective = {
       modelRouteId: selected.route.id,
       thinkingEffort: effectiveThinking ?? null,
       permissionMode: request.permissionMode,
       allowedTools: request.allowedTools,
     };
-    const reporter = new HeadlessPolicyReporter();
+    locks = await racePreflight(
+      ExclusiveCaseLocks.acquire(request, workDir, picoHome, dependencies.lockRoot),
+      cancellation,
+      (lateLocks) => lateLocks.release(),
+    );
+    await racePreflight(assertNewSession(request.sessionId, workDir, picoHome), cancellation);
+
+    let policyBlocked = false;
+    const reporter = new SilentReporter();
+    const runtimeEnv = isolatedRuntimeEnvironment(picoHome, dependencies.env ?? process.env);
     const runtimeDependencies: RunAgentCliDependencies = {
       signal: cancellation.signal,
       reporter,
       modelRouter: modelRuntime.router,
       picoHome,
-      env: { ...env },
+      env: runtimeEnv,
+      isolatedHeadless: true,
+      pluginSnapshot: emptyPluginSnapshot(),
+      onPolicyDenied: () => {
+        policyBlocked = true;
+      },
       ...(dependencies.providerFactory ? { providerFactory: dependencies.providerFactory } : {}),
     };
     const executeRuntime = dependencies.executeRuntime ?? executeAgentRuntime;
@@ -383,7 +396,16 @@ async function runValidatedRequest(
       runtimeDependencies,
     );
     const settled = await settleRuntime(runtimePromise, cancellation, request.shutdownGraceMs);
-    shutdownConfirmed = settled.shutdownConfirmed;
+    if (!settled.shutdownConfirmed && locks) {
+      const heldLocks = locks;
+      locks = undefined;
+      void runtimePromise
+        .then(
+          () => heldLocks.release(),
+          () => heldLocks.release(),
+        )
+        .catch(() => undefined);
+    }
 
     if (settled.cancelCause) {
       const mapped = cancellationOutcome(
@@ -397,18 +419,6 @@ async function runValidatedRequest(
       return mapped;
     }
     if (settled.error !== undefined) {
-      if (/allowed-tools.*未知工具|allowed-tools.*空值/iu.test(errorText(settled.error))) {
-        return invalidOutcome(
-          request,
-          new HeadlessRequestError(
-            "ALLOWED_TOOLS_INVALID",
-            "The tool allowlist contains an unavailable tool.",
-          ),
-          elapsed(startedAt, dependencies.now),
-          workDir,
-          effective,
-        );
-      }
       return failedOutcome(
         request,
         workDir,
@@ -428,9 +438,9 @@ async function runValidatedRequest(
         elapsed(startedAt, dependencies.now),
       );
     }
-    const secrets = credentialCandidates(env, selected.config.apiKey);
+    const secrets = credentialCandidates(selected.config.apiKey);
     await redactTrace(settled.result.tracePath, secrets);
-    if (reporter.policyBlocked) {
+    if (policyBlocked) {
       return {
         result: resultPayload({
           request,
@@ -438,6 +448,7 @@ async function runValidatedRequest(
           workDir,
           effective,
           durationMs: elapsed(startedAt, dependencies.now),
+          usage: settled.result.usage,
           tracePath: settled.result.tracePath ?? null,
           error: {
             code: "POLICY_BLOCKED",
@@ -463,27 +474,190 @@ async function runValidatedRequest(
       shutdownConfirmed: true,
     };
   } catch (error) {
+    if (error instanceof HeadlessCancellationError) {
+      return cancellationOutcome(
+        request,
+        workDir,
+        effective,
+        error.cancelCause,
+        true,
+        elapsed(startedAt, dependencies.now),
+      );
+    }
     if (error instanceof HeadlessRequestError) {
       return invalidOutcome(
         request,
         error,
         elapsed(startedAt, dependencies.now),
         workDir,
-        baseEffective,
+        effective,
       );
     }
     return failedOutcome(
       request,
       workDir,
-      baseEffective,
+      effective,
       "INTERNAL_FAILURE",
       "The headless runner failed.",
       elapsed(startedAt, dependencies.now),
     );
   } finally {
     cancellation.dispose();
-    if (locks) await locks.release(shutdownConfirmed);
+    if (locks) await locks.release();
   }
+}
+
+async function loadTrustedModelRuntime(
+  request: HeadlessOneShotRequestV1,
+  workDir: string,
+  picoHome: string,
+  dependencies: HeadlessOneShotDependencies,
+  cancellation: ReturnType<typeof createCancellation>,
+) {
+  const routeParts = splitModelRoute(request.modelRouteId);
+  const durableStore = new UserConfigStore({ picoHome });
+  const durableSnapshot = await racePreflight(durableStore.read(), cancellation);
+  const provider = durableSnapshot.config.providers[routeParts.providerId];
+  if (!provider || !provider.models?.includes(routeParts.modelId)) {
+    throw new HeadlessRequestError(
+      "MODEL_ROUTE_INVALID",
+      "The requested model route is absent from the trusted user model catalog.",
+    );
+  }
+
+  const selectedProvider: UserModelProviderConfig = Object.freeze({
+    ...provider,
+    models: Object.freeze([routeParts.modelId]),
+    discoverModels: false,
+  });
+  const filteredSnapshot: UserConfigSnapshot = Object.freeze({
+    revision: durableSnapshot.revision,
+    config: Object.freeze({
+      version: 1,
+      defaults: Object.freeze({
+        modelRouteId: request.modelRouteId,
+        mode: request.permissionMode,
+        ...(request.thinkingEffort ? { thinkingEffort: request.thinkingEffort } : {}),
+      }),
+      providers: Object.freeze({ [routeParts.providerId]: selectedProvider }),
+    }),
+  });
+  const { apiKey: _configuredSecret, ...effectiveProvider } = selectedProvider;
+  const config: EffectiveConfigSnapshot = Object.freeze({
+    defaults: filteredSnapshot.config.defaults ?? {},
+    defaultModelRouteId: request.modelRouteId,
+    providers: Object.freeze({
+      [routeParts.providerId]: Object.freeze(effectiveProvider as ModelProviderConfig),
+    }),
+    sources: Object.freeze({ [`providers.${routeParts.providerId}`]: "user" as const }),
+    revisions: Object.freeze({
+      user: filteredSnapshot.revision,
+      project: EMPTY_USER_CONFIG_REVISION,
+    }),
+  });
+  const modelEnv: Record<string, string | undefined> = { PICO_HOME: picoHome };
+  const credentialName = selectedProvider.apiKeyEnv;
+  if (credentialName) {
+    modelEnv[credentialName] = (dependencies.env ?? process.env)[credentialName];
+  }
+  return await racePreflight(
+    loadEffectiveModelRuntime({
+      workDir,
+      projectTrusted: false,
+      legacyProvider: selectedProvider.protocol,
+      legacyModel: routeParts.modelId,
+      legacyModelExplicit: false,
+      env: Object.freeze(modelEnv),
+      userConfigStore: { read: async () => filteredSnapshot },
+      configResolver: { resolve: async () => config },
+      ...(dependencies.credentialVault ? { credentialVault: dependencies.credentialVault } : {}),
+    }),
+    cancellation,
+  );
+}
+
+function splitModelRoute(routeId: string): { providerId: string; modelId: string } {
+  const separator = routeId.indexOf("/");
+  if (separator <= 0 || separator === routeId.length - 1) {
+    throw new HeadlessRequestError(
+      "MODEL_ROUTE_INVALID",
+      "modelRouteId must identify an exact trusted provider/model route.",
+    );
+  }
+  return {
+    providerId: routeId.slice(0, separator),
+    modelId: routeId.slice(separator + 1),
+  };
+}
+
+function isolatedRuntimeEnvironment(
+  picoHome: string,
+  source: Readonly<Record<string, string | undefined>>,
+): RunAgentCliDependencies["env"] {
+  const runtimeHome = join(picoHome, "headless-home");
+  const env: Record<string, string | undefined> = {
+    PICO_HOME: picoHome,
+    HOME: runtimeHome,
+    USERPROFILE: runtimeHome,
+    XDG_CONFIG_HOME: join(runtimeHome, ".config"),
+    XDG_DATA_HOME: join(runtimeHome, ".local", "share"),
+    XDG_CACHE_HOME: join(runtimeHome, ".cache"),
+  };
+  for (const name of [
+    "PATH",
+    "SHELL",
+    "SystemRoot",
+    "COMSPEC",
+    "PATHEXT",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+  ]) {
+    if (source[name] !== undefined) env[name] = source[name];
+  }
+  return Object.freeze(env);
+}
+
+function emptyPluginSnapshot(): PluginRuntimeSnapshot {
+  return Object.freeze({
+    pluginIds: Object.freeze([]),
+    skillSources: Object.freeze([]),
+    commandSources: Object.freeze([]),
+    agentSources: Object.freeze([]),
+    hookSources: Object.freeze([]),
+    mcpSources: Object.freeze([]),
+    lspServers: Object.freeze([]),
+    capabilities: Object.freeze([]),
+    diagnostics: Object.freeze([]),
+    dispose: async () => undefined,
+  });
+}
+
+async function racePreflight<T>(
+  promise: Promise<T>,
+  cancellation: ReturnType<typeof createCancellation>,
+  cleanupLateValue?: (value: T) => void | Promise<void>,
+): Promise<T> {
+  const outcome = promise.then(
+    (value) => ({ kind: "value" as const, value }),
+    (error: unknown) => ({ kind: "error" as const, error }),
+  );
+  const first = await Promise.race([
+    outcome,
+    cancellation.canceled.then((cause) => ({ kind: "canceled" as const, cause })),
+  ]);
+  if (first.kind === "canceled") {
+    if (cleanupLateValue) {
+      void outcome
+        .then(async (late) => {
+          if (late.kind === "value") await cleanupLateValue(late.value);
+        })
+        .catch(() => undefined);
+    }
+    throw new HeadlessCancellationError(first.cause);
+  }
+  if (first.kind === "error") throw first.error;
+  return first.value;
 }
 
 function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
@@ -533,6 +707,12 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     throw new HeadlessRequestError(
       "INVALID_ALLOWED_TOOLS",
       "allowedTools must not contain duplicate names.",
+    );
+  }
+  if (allowedTools.some((tool) => !HEADLESS_TOOL_NAMES.has(tool))) {
+    throw new HeadlessRequestError(
+      "ALLOWED_TOOLS_INVALID",
+      "allowedTools contains a tool unavailable to the isolated headless runner.",
     );
   }
   const timeoutMs = requiredInteger(value["timeoutMs"], "timeoutMs", 1, MAX_TIMEOUT_MS);
@@ -731,13 +911,13 @@ async function settleRuntime(
 
 function cancellationOutcome(
   request: HeadlessOneShotRequestV1,
-  workDir: string,
+  workDir: string | null,
   effective: HeadlessOneShotEffectivePolicy,
   cause: CancelCause,
   shutdownConfirmed: boolean,
   durationMs: number,
 ): HeadlessOneShotOutcome {
-  const status = shutdownConfirmed ? (cause === "timeout" ? "timed_out" : "canceled") : "failed";
+  const status = cause === "timeout" ? "timed_out" : "canceled";
   const exitCode = cause === "timeout" ? 124 : cause === "SIGTERM" ? 143 : 130;
   return {
     result: resultPayload({
@@ -758,6 +938,7 @@ function cancellationOutcome(
             : "The Agent Runtime was canceled by the host signal."
           : "The cancellation grace period elapsed before Runtime shutdown could be confirmed.",
       },
+      terminationConfirmed: shutdownConfirmed,
     }),
     exitCode,
     shutdownConfirmed,
@@ -817,6 +998,7 @@ function resultPayload(input: {
   usage?: RunAgentUsage;
   tracePath?: string | null;
   error?: HeadlessOneShotError;
+  terminationConfirmed?: boolean;
 }): HeadlessOneShotResultV1 {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -830,6 +1012,7 @@ function resultPayload(input: {
     tracePath: input.tracePath ?? null,
     effective: input.effective,
     error: input.error ?? null,
+    terminationConfirmed: input.terminationConfirmed ?? true,
   };
 }
 
@@ -906,10 +1089,6 @@ function normalizeRequestError(error: unknown): HeadlessRequestError {
     : new HeadlessRequestError("INVALID_REQUEST", "The headless request is invalid.");
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function elapsed(startedAt: number, now?: () => number): number {
   return (now?.() ?? Date.now()) - startedAt;
 }
@@ -930,26 +1109,44 @@ async function secureLockDirectory(path: string): Promise<void> {
   await chmod(path, LOCK_DIRECTORY_MODE);
 }
 
-async function releaseLockFiles(
-  files: readonly { path: string; handle: FileHandle }[],
-  removeFiles: boolean,
-): Promise<void> {
-  for (const file of [...files].reverse()) {
-    await file.handle.close().catch(() => undefined);
-    if (removeFiles) await unlink(file.path).catch(() => undefined);
+async function recoverLegacyLock(root: string, hash: string): Promise<void> {
+  const path = join(root, `${hash}.lock`);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isErrnoCode(error, "ENOENT")) return;
+    throw error;
+  }
+  const pid = Number(raw.trim());
+  if (!Number.isSafeInteger(pid) || pid <= 0 || isProcessAlive(pid)) {
+    throw new HeadlessRequestError(
+      "CASE_RESOURCE_CONFLICT",
+      "Another live or unverifiable headless case owns one of the requested resources.",
+    );
+  }
+  await unlink(path).catch((error: unknown) => {
+    if (!isErrnoCode(error, "ENOENT")) throw error;
+  });
+}
+
+async function releaseLeases(leases: readonly OwnerLease[]): Promise<void> {
+  for (const lease of [...leases].reverse()) {
+    await lease.release().catch(() => undefined);
   }
 }
 
-function credentialCandidates(
-  env: Readonly<Record<string, string | undefined>>,
-  routeCredential: string,
-): readonly string[] {
-  const candidates = [routeCredential];
-  for (const [name, value] of Object.entries(env)) {
-    if (!/(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/iu.test(name)) continue;
-    if (value) candidates.push(value);
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isErrnoCode(error, "ESRCH");
   }
-  return [...new Set(candidates.filter((candidate) => candidate.length >= 6))].sort(
+}
+
+function credentialCandidates(routeCredential: string): readonly string[] {
+  return [...new Set([routeCredential].filter((candidate) => candidate.length >= 6))].sort(
     (left, right) => right.length - left.length,
   );
 }

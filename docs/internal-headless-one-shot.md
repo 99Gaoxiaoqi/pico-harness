@@ -4,7 +4,7 @@
 
 Runner 只是一层宿主适配器，执行链固定为：
 
-`严格 JSON 校验 → 非交互工作区信任 → loadEffectiveModelRuntime / ModelRouter → executeAgentRuntime → 单个 JSON 终态`
+`严格 JSON/工具预检 → 非交互工作区信任 → 仅用户模型目录的精确路由 → 独占租约 → executeAgentRuntime → 单个 JSON 终态`
 
 它不会另建 Engine、Provider、Tool Registry、Session 或安全中间件。
 
@@ -47,10 +47,11 @@ node dist/internal/headless-one-shot-main.js < request.json
 - `workspacePath` 和 `picoHome` 必须是两个互不包含的现存绝对真实目录。
 - Runner 拒绝默认 `~/.pico`。调用方必须为每个 case 准备独占 `PICO_HOME`、唯一新 `sessionId` 和独立 workspace copy/worktree。
 - workspace 必须预先记录在该 `PICO_HOME/trusted-workspaces.json` 中。Runner 不显示信任提示，未知 workspace 会在读取项目配置前 fail-closed。
-- `modelRouteId` 由现有有效配置和 `ModelRouter` 精确解析；凭证只从现有用户配置、系统凭证库或兼容环境边界进入进程。
-- `permissionMode` 和 `allowedTools` 必填，不继承新 Session 的默认 YOLO。支持 `default`、`auto`、`plan`、`yolo`；无 UI 的审批请求会立即拒绝。
+- `modelRouteId` 只从隔离 `PICO_HOME/config.json` 的用户模型目录精确解析。Runner 不读取项目 Provider，不使用旧 `LLM_*` 路由；传给模型装配的环境也只包含该可信 route 声明的一个凭证变量。
+- Runtime 使用隔离的 `HOME`/XDG 根和显式空 Plugin 快照，不加载宿主或项目的 Claude、Plugin、Skill、Agent、MCP、LSP、Hook、Memory 资源。
+- `permissionMode` 和 `allowedTools` 必填，不继承新 Session 的默认 YOLO。支持 `default`、`auto`、`plan`、`yolo`；工具白名单只接受 `read_file`、`read_evidence`、`write_file`、`edit_file`、`bash`、`glob`、`grep`、`todo`、`fetch_url`、`web_search`，无 UI 的审批请求会立即拒绝。
 - YOLO 是当前 OS 用户权限下的全程放权，不是完整沙箱。外层调度器必须使用一次性低权限账户或容器、独占 `PICO_HOME` 和可丢弃 workspace copy/worktree。
-- 同机并发通过 `PICO_HOME`、workspace、Session 三个独占锁 fail-closed；已有 Session ID 也会在 Runtime 执行前拒绝。
+- 同机并发通过 `PICO_HOME`、workspace、Session 三个按序获取的 owner lease fail-closed；部分获取会回滚，正常/失败/已确认取消会释放，进程崩溃后的 dead owner 可由下一个 case 安全接管。已有 Session ID 也会在 Runtime 执行前拒绝。
 
 ## 输出与退出码
 
@@ -77,7 +78,8 @@ node dist/internal/headless-one-shot-main.js < request.json
     "permissionMode": "plan",
     "allowedTools": ["read_file", "grep"]
   },
-  "error": null
+  "error": null,
+  "terminationConfirmed": true
 }
 ```
 
@@ -92,7 +94,7 @@ node dist/internal/headless-one-shot-main.js < request.json
 | `timed_out`       | `124`       | `timeoutMs` 到期                           |
 | `canceled`        | `130`/`143` | SIGINT / SIGTERM（其他宿主取消映射为 130） |
 
-timeout、SIGINT 和 SIGTERM 合并为同一个 Runtime `AbortSignal`。Runner 最多等待 `shutdownGraceMs` 让 Runtime 和工具完成清理；若无法证明外部副作用已经停止，错误码为 `SHUTDOWN_UNCONFIRMED`，不会宣称取消已完全收口。父调度器仍应设置独立 hard deadline。
+timeout、SIGINT 和 SIGTERM 合并为同一个 Runtime `AbortSignal`，同一 deadline 覆盖路径、信任、凭证和模型装配等异步预检。Runner 最多等待 `shutdownGraceMs` 让 Runtime 和工具完成清理；若无法证明外部副作用已经停止，仍按原始原因返回 `timed_out`/`canceled` 及对应退出码，同时输出 `error.code: "SHUTDOWN_UNCONFIRMED"` 和 `terminationConfirmed: false`。进程内调用会继续持有三项租约，直到后台 Runtime Promise 真正 settle；CLI 退出或崩溃后由 dead-owner 协议恢复。父调度器仍应设置独立 hard deadline。
 
 ## 确定性边界
 
