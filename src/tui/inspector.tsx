@@ -3,7 +3,7 @@ import { Box, Text, useInput } from "ink";
 import {
   EvidenceArchive,
   MAX_EVIDENCE_PAGE_LIMIT_BYTES,
-  parseRuntimeEvidenceUri,
+  parseEvidenceUri,
 } from "../context/evidence-archive.js";
 import type { RuntimeEvidenceReference } from "../engine/tool-result-contract.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
@@ -317,7 +317,10 @@ export function createEvidenceInspectorSource(input: {
 }): EvidenceInspectorSource | undefined {
   let parsed: RuntimeEvidenceReference;
   try {
-    parsed = parseRuntimeEvidenceUri(input.uri);
+    parsed = {
+      ...parseEvidenceUri(input.uri),
+      kind: "tool-exchange",
+    };
   } catch {
     return undefined;
   }
@@ -394,11 +397,11 @@ export async function readInspectorPage(
   if (source.ref.sessionId !== source.expectedSessionId) {
     throw new Error("Evidence reference does not belong to the current Inspector session");
   }
-  const parsed = parseRuntimeEvidenceUri(source.uri);
+  const parsed = parseEvidenceUri(source.uri);
   if (
     parsed.sessionId !== source.ref.sessionId ||
     parsed.contentHash !== source.ref.contentHash ||
-    parsed.kind !== source.ref.kind
+    parsed.schemaVersion !== source.ref.schemaVersion
   ) {
     throw new Error("Evidence URI does not match its canonical reference");
   }
