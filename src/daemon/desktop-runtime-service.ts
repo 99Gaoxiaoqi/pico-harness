@@ -9,7 +9,7 @@ import {
   removeCliSessionFile,
 } from "../cli/session-resolver.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
-import { EvidenceArchive, parseRuntimeEvidenceUri } from "../context/evidence-archive.js";
+import { EvidenceArchive, parseEvidenceUri } from "../context/evidence-archive.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
@@ -1481,29 +1481,30 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
 
-    let reference;
+    let uriReference;
     try {
-      reference = parseRuntimeEvidenceUri(params.evidenceUri);
+      uriReference = parseEvidenceUri(params.evidenceUri);
     } catch (error) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
         error instanceof Error ? error.message : String(error),
       );
     }
-    if (reference.sessionId !== params.sessionId) {
+    if (uriReference.sessionId !== params.sessionId) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
         "Evidence 引用不属于当前 Session",
       );
     }
-    const referencedBySession = projection.entries.some(
-      ({ event }) =>
-        event.kind === "tool.result.recorded" &&
-        event.refs.evidence?.sessionId === reference.sessionId &&
-        event.refs.evidence.contentHash === reference.contentHash &&
-        event.refs.evidence.kind === reference.kind,
-    );
-    if (!referencedBySession) {
+    const reference = projection.entries
+      .map(({ event }) => (event.kind === "tool.result.recorded" ? event.refs.evidence : undefined))
+      .find(
+        (candidate) =>
+          candidate?.sessionId === uriReference.sessionId &&
+          candidate.contentHash === uriReference.contentHash &&
+          candidate.kind === "tool-exchange",
+      );
+    if (!reference) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         "当前 Session 未引用该 Evidence",
