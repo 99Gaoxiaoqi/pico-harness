@@ -32,6 +32,10 @@ test("desktop session handlers keep protocol mapping separate from the service o
       return { disposition: "started" };
     },
     getSessionTranscript: async () => ({ items: [] }),
+    readSessionEvidence: async (params) => ({
+      evidenceUri: params.evidenceUri,
+      content: "page",
+    }),
     cancelRun: async (_workspacePath, runId) => ({ runId, cancelled: true }),
     withProviderDependencyLock: async (operation) => await operation(),
     runStart: async () => ({ started: true }),
@@ -86,5 +90,23 @@ test("desktop session handlers keep protocol mapping separate from the service o
       }),
     ),
     { sessionId: "session-1", deleted: true },
+  );
+
+  const readEvidence = handlers[
+    "session.evidence.read"
+  ] as DesktopRequestHandlers["session.evidence.read"];
+  assert.ok(readEvidence);
+  assert.deepEqual(
+    await readEvidence(
+      createTypedRuntimeRequest("session.evidence.read", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+        evidenceUri: `pico://evidence/session-1/${"a".repeat(64)}`,
+      }),
+    ),
+    {
+      evidenceUri: `pico://evidence/session-1/${"a".repeat(64)}`,
+      content: "page",
+    },
   );
 });

@@ -3,6 +3,7 @@ import type { SubagentActivityEvent, SubagentTraceEvent } from "../engine/report
 import type { Session } from "../engine/session.js";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
 import {
+  assertTranscriptEvent,
   projectTranscriptEvents,
   type TranscriptEntry,
   type TranscriptEvent,
@@ -147,16 +148,12 @@ async function persistTimelineEvent(
   }
 
   if (eventType === "tool.completed") {
-    const name = optionalNonEmptyText(data["toolName"]);
-    if (!name || isPlanTimelineTool(name)) return false;
-    const providerCallId = optionalNonEmptyText(data["providerCallId"]);
-    const isError = data["isError"] === true;
-    const size = safeToolResultBytes(data);
-    const truncated = data["truncated"] === true;
+    const result = runtimeToolResultEnvelope(data["result"]);
+    if (!result || isPlanTimelineTool(result.toolName)) return false;
     return persistTranscriptEvent(session, {
       sourceEventId: notification.eventId,
       create: (snapshot, sequence, eventId) => {
-        const toolCallId = findPendingRuntimeTool(snapshot, name, providerCallId);
+        const toolCallId = findPendingRuntimeTool(snapshot, result.toolName, result.toolCallId);
         if (!toolCallId) return undefined;
         return {
           eventId,
@@ -164,17 +161,21 @@ async function persistTimelineEvent(
           createdAt: notification.at,
           type: "tool.completed",
           toolCallId,
-          status: isError ? "error" : "success",
-          summary: `${isError ? "Tool failed" : "Tool completed"} · ${size} bytes${truncated ? " · truncated" : ""}`,
-          size,
-          truncated,
+          status:
+            result.status === "succeeded"
+              ? "success"
+              : result.status === "rejected"
+                ? "denied"
+                : "error",
+          summary: `${result.status === "succeeded" ? "Tool completed" : "Tool failed"} · ${result.rawSizeBytes} bytes${result.projection.truncated ? " · preview" : ""}`,
+          result,
         };
       },
     });
   }
 
-  // Raw stdout/stderr and ToolResult text are deliberately absent from the durable
-  // renderer projection. tool.completed above records only a bounded status summary.
+  // Raw stdout/stderr stays out of the durable renderer projection. The bounded
+  // ToolResult envelope above contains only projection text and an opaque Evidence ref.
   if (eventType === "tool.output") return false;
 
   if (eventType === "subagent.activity") {
@@ -474,6 +475,27 @@ function safeToolResultBytes(data: JsonObject): number {
     return reported;
   }
   return typeof data["result"] === "string" ? Buffer.byteLength(data["result"], "utf8") : 0;
+}
+
+function runtimeToolResultEnvelope(
+  value: unknown,
+): Extract<TranscriptEvent, { type: "tool.completed" }>["result"] | undefined {
+  const candidate: unknown = {
+    eventId: "desktop-envelope-validation",
+    sequence: 1,
+    createdAt: 0,
+    type: "tool.completed",
+    toolCallId: "desktop-envelope-validation",
+    status: "success",
+    summary: "validation",
+    result: value,
+  };
+  try {
+    assertTranscriptEvent(candidate);
+  } catch {
+    return undefined;
+  }
+  return candidate.type === "tool.completed" ? structuredClone(candidate.result) : undefined;
 }
 
 function findPendingRuntimeTool(

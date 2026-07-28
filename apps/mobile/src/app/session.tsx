@@ -376,7 +376,12 @@ function summarizeItem(item: MobileRenderedConversationItem): { label: string; d
     case "error":
       return { label: item.kind === "error" ? "错误" : "系统", detail: item.content };
     case "tool":
-      return { label: `工具·${item.name}·${item.status}`, detail: item.summary ?? item.args };
+      return {
+        label: `工具·${item.name}·${item.status}`,
+        detail: item.result
+          ? `${item.result.projection.text || item.summary || item.args}\n${item.result.rawSizeBytes} bytes · ${item.result.sha256.slice(0, 12)}${item.result.evidence ? " · Evidence" : ""}`
+          : (item.summary ?? item.args),
+      };
     case "skill":
       return { label: `Skill·${item.name}`, detail: item.args };
     case "runBoundary":

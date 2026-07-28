@@ -1336,15 +1336,49 @@ function ConversationPage() {
       return;
     }
     if (item.kind === "tool") {
+      const result = item.result;
+      const evidenceUri = result?.evidence?.uri;
+      const inspectorContent = (content: string, pageLabel?: string) => (
+        <div>
+          {result && (
+            <p>
+              状态：{result.status} · 原始大小：{result.rawSizeBytes} bytes · SHA-256：
+              <code>{result.sha256}</code>
+              {result.deliveryTruncated ? " · Host 投影已截断" : ""}
+            </p>
+          )}
+          {evidenceUri && <p>Evidence：{evidenceUri}</p>}
+          {pageLabel && <p>{pageLabel}</p>}
+          <pre className="conversation-inspector-output">{content}</pre>
+        </div>
+      );
       setInspector({
         title: item.title,
         subtitle: item.toolName,
-        content: (
-          <pre className="conversation-inspector-output">
-            {item.output ?? item.detail ?? "没有可显示的输出。"}
-          </pre>
-        ),
+        content: inspectorContent(item.output ?? item.detail ?? "没有可显示的输出。"),
       });
+      if (evidenceUri && sessionId) {
+        void actions
+          .readToolEvidence({
+            workspacePath,
+            sessionId,
+            evidenceUri,
+            limitBytes: 64 * 1024,
+          })
+          .then((page) => {
+            if (!page) return;
+            setInspector({
+              title: item.title,
+              subtitle: item.toolName,
+              content: inspectorContent(
+                page.content,
+                `Evidence bytes ${page.offsetBytes}-${page.endOffsetBytes} / ${page.totalBytes}${
+                  page.truncated ? " · 尚有后续分页" : ""
+                }`,
+              ),
+            });
+          });
+      }
       return;
     }
     if (item.kind === "subagent") {

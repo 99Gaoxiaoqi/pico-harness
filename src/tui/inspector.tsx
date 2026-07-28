@@ -1,9 +1,11 @@
-import { createHash } from "node:crypto";
-import { open, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { hashToolResultArtifactArgs, ToolResultArtifactStore } from "../context/artifact-store.js";
+import {
+  EvidenceArchive,
+  MAX_EVIDENCE_PAGE_LIMIT_BYTES,
+  parseRuntimeEvidenceUri,
+} from "../context/evidence-archive.js";
+import type { RuntimeEvidenceReference } from "../engine/tool-result-contract.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { TuiToolCallProjection } from "./tui-event-store.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
@@ -11,10 +13,9 @@ import { truncateTerminalText } from "./terminal-width.js";
 
 const DEFAULT_PAGE_BYTES = 16 * 1024;
 const MIN_PAGE_BYTES = 256;
-const MAX_PAGE_BYTES = 256 * 1024;
-const SAFE_ARTIFACT_SEGMENT_RE = /^[A-Za-z0-9._-]+$/u;
+const MAX_PAGE_BYTES = MAX_EVIDENCE_PAGE_LIMIT_BYTES;
 
-export type InspectorSource = InlineInspectorSource | ArtifactInspectorSource;
+export type InspectorSource = InlineInspectorSource | EvidenceInspectorSource;
 
 export interface InlineInspectorSource {
   kind: "inline";
@@ -23,26 +24,20 @@ export interface InlineInspectorSource {
   availability: "complete" | "unavailable";
 }
 
-export interface ArtifactInspectorContext {
-  /** 宿主当前 session，不从工具输出或 artifact URI 推断。 */
+export interface EvidenceInspectorContext {
+  /** 宿主当前 session，不从 URI 推断授权边界。 */
   expectedSessionId: string;
-  trustedRoot: string;
+  /** 由当前 workspace 推导的 Evidence 根目录。 */
+  evidenceBaseDir: string;
 }
 
-export interface ArtifactInspectorSource {
-  kind: "artifact";
+export interface EvidenceInspectorSource {
+  kind: "evidence";
   title: string;
-  artifactRef: string;
-  artifactId: string;
-  sessionId: string;
+  uri: string;
+  ref: RuntimeEvidenceReference;
   expectedSessionId: string;
-  expectedToolName: string;
-  expectedArgsHash: string;
-  /** 必须由宿主显式传入，一般为当前 workspace 的 artifacts 目录。 */
-  trustedRoot: string;
-  /** 仅用于降级展示；分页和 locate 从可信 meta 重新解析，绝不直接使用它。 */
-  markerPath?: string;
-  summary?: string;
+  evidenceBaseDir: string;
 }
 
 export interface InspectorPageRequest {
@@ -60,11 +55,7 @@ export interface InspectorPage {
   truncated: boolean;
   /** 宿主可直接交给剪贴板动作。 */
   copyText: string;
-  /** 仅在 artifact meta 与可信根校验通过后提供。 */
-  locatePath?: string;
-  artifactRef?: string;
-  /** 旧 meta 可能缺 argsHash；此时明确标记为仅 toolName 绑定。 */
-  artifactBinding?: "tool+args" | "tool-only-legacy";
+  evidenceUri?: string;
   availability?: "complete" | "unavailable";
 }
 
@@ -108,13 +99,11 @@ export function Inspector({
       ))}
       <Text dimColor>
         {truncateTerminalText(
-          `${
-            page.availability === "unavailable"
-              ? "Complete result unavailable"
-              : page.eof
-                ? "End"
-                : "More bytes available"
-          }${page.artifactBinding === "tool-only-legacy" ? " · legacy tool-only binding" : ""}`,
+          page.availability === "unavailable"
+            ? "Complete result unavailable"
+            : page.eof
+              ? "End"
+              : "More bytes available",
           renderWidth,
         )}
       </Text>
@@ -130,8 +119,7 @@ export interface InspectorDialogContentProps {
   compact?: boolean;
   onClose: () => void;
   onCopy?: (text: string) => void | Promise<void>;
-  onLocate?: (path: string) => void | Promise<void>;
-  /** 可注入 Session 层分页器；默认使用本地安全读取。 */
+  /** 可注入 Session 层分页器；默认使用 EvidenceArchive 的安全分页 API。 */
   loadPage?: typeof readInspectorPage;
 }
 
@@ -143,7 +131,6 @@ export function InspectorDialogContent({
   compact = false,
   onClose,
   onCopy,
-  onLocate,
   loadPage: loadPageCallback = readInspectorPage,
 }: InspectorDialogContentProps): React.ReactNode {
   const [page, setPage] = useState<InspectorPage>();
@@ -239,15 +226,6 @@ export function InspectorDialogContent({
           if (mounted.current) setError(message);
         },
       );
-      return;
-    }
-    if (input === "l" && page?.locatePath && onLocate) {
-      invokeDialogAction(
-        () => onLocate(page.locatePath!),
-        (message) => {
-          if (mounted.current) setError(message);
-        },
-      );
     }
   });
 
@@ -293,7 +271,7 @@ export function InspectorDialogContent({
             {truncateTerminalText(
               `↑/↓ scroll · PgUp/[ previous bytes · PgDn/] next bytes${
                 onCopy ? " · c copy" : ""
-              }${onLocate && page?.locatePath ? " · l locate" : ""} · Esc close`,
+              } · Esc close`,
               renderWidth,
             )}
           </Text>
@@ -319,65 +297,67 @@ export function createInlineInspectorSource(title: string, content: string): Inl
   return { kind: "inline", title, content, availability: "complete" };
 }
 
-/** TUI 中央装配只需 workDir + 权威 sessionId，不接受工具文本给出的根目录。 */
-export function createArtifactInspectorContext(input: {
+export function createEvidenceInspectorContext(input: {
   workDir: string;
   sessionId: string;
-  trustedRoot?: string;
-}): ArtifactInspectorContext {
+  evidenceBaseDir?: string;
+}): EvidenceInspectorContext {
   if (!input.sessionId.trim()) throw new Error("Inspector sessionId must not be empty");
   return Object.freeze({
     expectedSessionId: input.sessionId,
-    trustedRoot: resolve(input.trustedRoot ?? resolvePicoPaths(input.workDir).workspace.artifacts),
+    evidenceBaseDir: input.evidenceBaseDir ?? resolvePicoPaths(input.workDir).workspace.evidence,
   });
 }
 
-export function createArtifactInspectorSource(input: {
+export function createEvidenceInspectorSource(input: {
   title: string;
-  artifactRef: string;
-  context: ArtifactInspectorContext;
-  expectedToolName: string;
-  expectedArgsHash: string;
-  markerPath?: string;
-  summary?: string;
-}): ArtifactInspectorSource | undefined {
-  const identity = parseArtifactRef(input.artifactRef);
-  if (!identity || identity.sessionId !== input.context.expectedSessionId) return undefined;
+  uri: string;
+  ref: RuntimeEvidenceReference;
+  context: EvidenceInspectorContext;
+}): EvidenceInspectorSource | undefined {
+  let parsed: RuntimeEvidenceReference;
+  try {
+    parsed = parseRuntimeEvidenceUri(input.uri);
+  } catch {
+    return undefined;
+  }
+  if (
+    parsed.sessionId !== input.context.expectedSessionId ||
+    parsed.sessionId !== input.ref.sessionId ||
+    parsed.contentHash !== input.ref.contentHash ||
+    parsed.kind !== input.ref.kind ||
+    parsed.schemaVersion !== input.ref.schemaVersion
+  ) {
+    return undefined;
+  }
   return Object.freeze({
-    kind: "artifact",
+    kind: "evidence",
     title: input.title,
-    artifactRef: input.artifactRef,
-    artifactId: identity.artifactId,
-    sessionId: identity.sessionId,
+    uri: input.uri,
+    ref: Object.freeze({ ...input.ref }),
     expectedSessionId: input.context.expectedSessionId,
-    expectedToolName: input.expectedToolName,
-    expectedArgsHash: input.expectedArgsHash,
-    trustedRoot: input.context.trustedRoot,
-    ...(input.markerPath !== undefined ? { markerPath: input.markerPath } : {}),
-    ...(input.summary !== undefined ? { summary: input.summary } : {}),
+    evidenceBaseDir: input.context.evidenceBaseDir,
   });
 }
 
-/** 把权威 tool projection 转为 Inspector 数据源；无效 artifactRef 自动降级为文本。 */
+/** 把权威 ToolResult envelope 转为 Inspector 数据源。 */
 export function createToolInspectorSource(
   tool: TuiToolCallProjection,
-  context: ArtifactInspectorContext,
+  context: EvidenceInspectorContext,
 ): InspectorSource | undefined {
   const title = `${tool.name} result`;
-  if (tool.resultAvailability === "artifact" && tool.artifactRef) {
-    const artifact = createArtifactInspectorSource({
+  const envelope = tool.resultEnvelope;
+  if (tool.resultAvailability === "evidence" && envelope?.evidence) {
+    const evidence = createEvidenceInspectorSource({
       title,
-      artifactRef: tool.artifactRef,
+      uri: envelope.evidence.uri,
+      ref: envelope.evidence.ref,
       context,
-      expectedToolName: tool.name,
-      expectedArgsHash: hashToolResultArtifactArgs(parseToolArguments(tool.args)),
-      ...(tool.artifactPath !== undefined ? { markerPath: tool.artifactPath } : {}),
-      ...(tool.summary !== undefined ? { summary: tool.summary } : {}),
     });
-    if (artifact) return artifact;
+    if (evidence) return evidence;
     return createUnavailableInspectorSource(
       title,
-      `${tool.summary ?? "Artifact result"}\nArtifact is unavailable for the current session.`,
+      `${tool.summary ?? "Evidence result"}\nEvidence is unavailable for the current session.`,
     );
   }
   if (tool.resultAvailability === "unavailable") {
@@ -387,7 +367,9 @@ export function createToolInspectorSource(
     );
   }
   const content =
-    tool.result !== undefined ? tool.result : tool.output.length > 0 ? tool.output : tool.summary;
+    tool.result ??
+    envelope?.projection.text ??
+    (tool.output.length > 0 ? tool.output : tool.summary);
   return content === undefined ? undefined : createInlineInspectorSource(title, content);
 }
 
@@ -409,144 +391,50 @@ export async function readInspectorPage(
     };
   }
 
-  const refIdentity = parseArtifactRef(source.artifactRef);
+  if (source.ref.sessionId !== source.expectedSessionId) {
+    throw new Error("Evidence reference does not belong to the current Inspector session");
+  }
+  const parsed = parseRuntimeEvidenceUri(source.uri);
   if (
-    !refIdentity ||
-    refIdentity.sessionId !== source.expectedSessionId ||
-    refIdentity.sessionId !== source.sessionId ||
-    refIdentity.artifactId !== source.artifactId
+    parsed.sessionId !== source.ref.sessionId ||
+    parsed.contentHash !== source.ref.contentHash ||
+    parsed.kind !== source.ref.kind
   ) {
-    throw new Error("Artifact reference does not belong to the current Inspector session");
+    throw new Error("Evidence URI does not match its canonical reference");
   }
-  const store = new ToolResultArtifactStore({ baseDir: source.trustedRoot });
-  const meta = await store.readMeta(source.artifactId, source.expectedSessionId);
-  if (
-    !meta ||
-    meta.id !== source.artifactId ||
-    meta.sessionId !== source.expectedSessionId ||
-    meta.sessionId !== source.sessionId ||
-    meta.safeSessionId !== safeArtifactSessionId(source.expectedSessionId) ||
-    meta.toolName !== source.expectedToolName ||
-    (meta.argsHash !== undefined && meta.argsHash !== source.expectedArgsHash)
-  ) {
-    throw new Error(`Artifact metadata not found: ${source.artifactRef}`);
-  }
-  const artifactPath = await resolveTrustedArtifactPath(source.trustedRoot, meta.path, {
-    safeSessionId: meta.safeSessionId,
-    artifactId: meta.id,
-  });
-  const handle = await open(artifactPath, "r");
-  try {
-    const info = await handle.stat();
-    const safeOffset = Math.min(offsetBytes, info.size);
-    // 多读 3 字节：起点可能落在 UTF-8 continuation byte，页尾也可能跨 code point。
-    const bytesToRead = Math.min(limitBytes + 3, Math.max(0, info.size - safeOffset));
-    const buffer = Buffer.alloc(bytesToRead);
-    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, safeOffset);
-    const page = readBufferPage(
-      buffer.subarray(0, bytesRead),
-      0,
-      limitBytes,
-      safeOffset,
-      info.size,
-    );
-    return {
-      title: source.title,
-      ...page,
-      truncated: !page.eof,
-      copyText: page.content,
-      locatePath: artifactPath,
-      artifactRef: source.artifactRef,
-      artifactBinding: meta.argsHash === undefined ? "tool-only-legacy" : "tool+args",
-      availability: "complete",
-    };
-  } finally {
-    await handle.close();
-  }
-}
-
-export function parseArtifactRef(
-  artifactRef: string,
-): { sessionId: string; artifactId: string } | undefined {
-  const match = /^artifact:\/\/([^/]+)\/([^/?#]+)$/u.exec(artifactRef.trim());
-  if (!match) return undefined;
-  try {
-    const sessionId = decodeURIComponent(match[1]!);
-    const artifactId = decodeURIComponent(match[2]!);
-    if (!sessionId || !isSafeArtifactSegment(artifactId)) {
-      return undefined;
-    }
-    return { sessionId, artifactId };
-  } catch {
-    return undefined;
-  }
-}
-
-async function resolveTrustedArtifactPath(
-  trustedRoot: string,
-  metadataPath: string,
-  identity: { safeSessionId: string; artifactId: string },
-): Promise<string> {
-  if (!isAbsolute(metadataPath)) throw new Error("Artifact metadata path must be absolute");
-  if (
-    !isSafeArtifactSegment(identity.safeSessionId) ||
-    !isSafeArtifactSegment(identity.artifactId)
-  ) {
-    throw new Error("Artifact metadata contains an unsafe path segment");
-  }
-  const root = resolve(trustedRoot);
-  const expected = resolve(
-    root,
-    "sessions",
-    identity.safeSessionId,
-    "tool-results",
-    `${identity.artifactId}.txt`,
-  );
-  if (resolve(metadataPath) !== expected) {
-    throw new Error("Artifact metadata path does not match the artifact store layout");
-  }
-  const [realRoot, realArtifact] = await Promise.all([realpath(root), realpath(expected)]);
-  const child = relative(realRoot, realArtifact);
-  if (!child || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
-    throw new Error("Artifact path escapes the trusted artifact root");
-  }
-  return realArtifact;
-}
-
-function isSafeArtifactSegment(value: string): boolean {
-  return value !== "." && value !== ".." && SAFE_ARTIFACT_SEGMENT_RE.test(value);
-}
-
-function safeArtifactSessionId(sessionId: string): string {
-  const sanitized = sessionId.replace(/[^A-Za-z0-9._-]/g, "_");
-  const safeBase = sanitized === "" || sanitized === "." || sanitized === ".." ? "_" : sanitized;
-  if (safeBase === sessionId) return safeBase;
-  const suffix = createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
-  return `${safeBase}-${suffix}`;
+  const page = await new EvidenceArchive({
+    baseDir: source.evidenceBaseDir,
+  }).readRuntimeToolOutputPage(source.ref, { offsetBytes, limitBytes });
+  return {
+    title: source.title,
+    content: page.content,
+    offsetBytes: page.offsetBytes,
+    nextOffsetBytes: page.endOffsetBytes,
+    totalBytes: page.totalBytes,
+    eof: !page.truncated,
+    truncated: page.truncated,
+    copyText: page.content,
+    evidenceUri: source.uri,
+    availability: "complete",
+  };
 }
 
 function readBufferPage(
   buffer: Buffer,
   offsetBytes: number,
   limitBytes: number,
-  absoluteOffset = offsetBytes,
-  absoluteTotal = buffer.length,
-): Omit<InspectorPage, "title" | "truncated" | "copyText" | "locatePath" | "artifactRef"> {
-  const requestedLocalOffset =
-    absoluteOffset === offsetBytes ? Math.min(offsetBytes, buffer.length) : 0;
-  const localOffset = alignUtf8StartForward(buffer, requestedLocalOffset);
-  const pageOffset = absoluteOffset === offsetBytes ? localOffset : absoluteOffset + localOffset;
+): Omit<InspectorPage, "title" | "truncated" | "copyText"> {
+  const localOffset = alignUtf8StartForward(buffer, Math.min(offsetBytes, buffer.length));
   const available = buffer.subarray(localOffset, Math.min(buffer.length, localOffset + limitBytes));
-  const candidateEnd = pageOffset + available.length;
-  const reachesEof = candidateEnd >= absoluteTotal;
+  const reachesEof = localOffset + available.length >= buffer.length;
   const utf8Length = validUtf8PrefixLength(available, reachesEof);
   const content = available.subarray(0, utf8Length).toString("utf8");
   return {
     content,
-    offsetBytes: pageOffset,
-    nextOffsetBytes: pageOffset + utf8Length,
-    totalBytes: absoluteTotal,
-    eof: pageOffset + utf8Length >= absoluteTotal,
+    offsetBytes: localOffset,
+    nextOffsetBytes: localOffset + utf8Length,
+    totalBytes: buffer.length,
+    eof: localOffset + utf8Length >= buffer.length,
   };
 }
 
@@ -587,14 +475,6 @@ function invokeDialogAction(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function parseToolArguments(args: string): unknown {
-  try {
-    return JSON.parse(args) as unknown;
-  } catch {
-    return { raw: args };
-  }
 }
 
 function normalizeOffset(value: number | undefined): number {

@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 8;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v8";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 9;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v9";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
@@ -335,6 +335,32 @@ export type RuntimeQueuedInput = JsonObject & {
   readonly createdAt: number;
 };
 
+export type RuntimeToolResultEnvelope = JsonObject & {
+  readonly version: 1;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly status: "succeeded" | "failed" | "rejected" | "cancelled" | "interrupted";
+  readonly rawSizeBytes: number;
+  readonly sha256: string;
+  readonly deliveryTruncated: boolean;
+  readonly projection: JsonObject & {
+    readonly version: 1;
+    readonly mode: "full" | "preview" | "synthetic";
+    readonly text: string;
+    readonly strategy: string;
+    readonly truncated: boolean;
+  };
+  readonly evidence?: JsonObject & {
+    readonly uri: string;
+    readonly ref: JsonObject & {
+      readonly schemaVersion: 1;
+      readonly contentHash: string;
+      readonly sessionId: string;
+      readonly kind: "tool-exchange";
+    };
+  };
+};
+
 export type RuntimeConversationItem = (
   | (JsonObject & {
       readonly id: string;
@@ -384,6 +410,8 @@ export type RuntimeConversationItem = (
       readonly args: string;
       readonly status: "running" | "success" | "error";
       readonly summary?: string;
+      /** Present only after a canonical tool.result.recorded fact exists. */
+      readonly result?: RuntimeToolResultEnvelope;
       readonly at?: number;
     })
   | (JsonObject & {
@@ -636,6 +664,24 @@ export type RuntimeMethodMap = {
       readonly queuedInputs: readonly RuntimeQueuedInput[];
       readonly nextBefore?: string;
       readonly revision: string;
+    };
+  };
+  readonly "session.evidence.read": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly evidenceUri: string;
+      readonly offsetBytes?: number;
+      readonly limitBytes?: number;
+    };
+    readonly result: {
+      readonly evidenceUri: string;
+      readonly content: string;
+      readonly offsetBytes: number;
+      readonly endOffsetBytes: number;
+      readonly totalBytes: number;
+      readonly limitBytes: number;
+      readonly truncated: boolean;
+      readonly nextOffsetBytes?: number;
     };
   };
   readonly "run.start": {
@@ -1145,6 +1191,7 @@ export const RUNTIME_METHODS = [
   "goal.get",
   "session.send",
   "session.transcript",
+  "session.evidence.read",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -1245,6 +1292,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "goal.get",
   "session.send",
   "session.transcript",
+  "session.evidence.read",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -2229,6 +2277,10 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     { workspacePath: stringParam, sessionId: stringParam },
     { before: stringParam, limit: finiteNumberParam, expectedRevision: stringParam },
   ),
+  "session.evidence.read": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam, evidenceUri: stringParam },
+    { offsetBytes: finiteNumberParam, limitBytes: finiteNumberParam },
+  ),
   "run.start": exactParamShape(
     { workspacePath: stringParam, prompt: stringParam },
     { sessionId: stringParam, idempotencyKey: stringParam },
@@ -2774,6 +2826,57 @@ const workspaceStatusResultRule = resultShape({
   }),
 });
 
+const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
+  resultShape(
+    {
+      version: resultOneOf([1]),
+      toolCallId: resultString,
+      toolName: resultString,
+      status: resultOneOf(["succeeded", "failed", "rejected", "cancelled", "interrupted"]),
+      rawSizeBytes: resultNonNegativeInteger,
+      sha256: resultString,
+      deliveryTruncated: resultBoolean,
+      projection: resultJsonObject,
+    },
+    {
+      evidence: resultJsonObject,
+    },
+  )(value, path);
+  if (!isJsonObject(value)) return;
+  if (!/^[a-f0-9]{64}$/u.test(String(value["sha256"]))) {
+    throw invalidResult(`${path}.sha256 必须是 SHA-256`);
+  }
+  const projection = value["projection"];
+  resultShape({
+    version: resultOneOf([1]),
+    mode: resultOneOf(["full", "preview", "synthetic"]),
+    text: resultString,
+    strategy: resultString,
+    truncated: resultBoolean,
+  })(projection, `${path}.projection`);
+
+  const evidence = value["evidence"];
+  if (evidence === undefined) return;
+  resultShape({ uri: resultString, ref: resultJsonObject })(evidence, `${path}.evidence`);
+  if (!isJsonObject(evidence)) return;
+  const reference = evidence["ref"];
+  resultShape({
+    schemaVersion: resultOneOf([1]),
+    contentHash: resultString,
+    sessionId: resultString,
+    kind: resultOneOf(["tool-exchange"]),
+  })(reference, `${path}.evidence.ref`);
+  if (!isJsonObject(reference) || !/^[a-f0-9]{64}$/u.test(String(reference["contentHash"]))) {
+    throw invalidResult(`${path}.evidence.ref.contentHash 必须是 SHA-256`);
+  }
+  const expectedUri = `pico://evidence/${encodeURIComponent(
+    String(reference["sessionId"]),
+  )}/${String(reference["contentHash"])}`;
+  if (evidence["uri"] !== expectedUri) {
+    throw invalidResult(`${path}.evidence.uri 与 ref 不一致`);
+  }
+};
+
 const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是对象`);
   const kind = value["kind"];
@@ -2843,7 +2946,7 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
         args: resultString,
         status: resultOneOf(["running", "success", "error"]),
       },
-      { summary: resultString },
+      { summary: resultString, result: runtimeToolResultEnvelopeResult },
     )(value, path);
     return;
   }
@@ -2935,6 +3038,18 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       revision: resultString,
     },
     { activeRun: runtimeRunResult, nextBefore: resultString },
+  ),
+  "session.evidence.read": resultShape(
+    {
+      evidenceUri: resultString,
+      content: resultString,
+      offsetBytes: resultNonNegativeInteger,
+      endOffsetBytes: resultNonNegativeInteger,
+      totalBytes: resultNonNegativeInteger,
+      limitBytes: resultNonNegativeInteger,
+      truncated: resultBoolean,
+    },
+    { nextOffsetBytes: resultNonNegativeInteger },
   ),
   "runs.list": resultShape({ runs: resultArray(runtimeRunResult) }),
   "changes.list": resultShape({

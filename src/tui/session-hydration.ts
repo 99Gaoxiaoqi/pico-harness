@@ -1,320 +1,176 @@
-import { createHash } from "node:crypto";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
-import { createToolResultEnvelope } from "../engine/tool-result-contract.js";
-import {
-  isMessageHiddenFromTranscript,
-  isToolResultErrorMessage,
-  type Message,
-  type ToolCall,
-} from "../schema/message.js";
-import type { TuiEntry } from "./tui-reporter.js";
-import type { TuiReporter } from "./tui-reporter.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import {
   projectTranscriptEntriesForRendering,
   projectTranscriptEvents,
   type TranscriptEvent,
 } from "../presentation/transcript-event-store.js";
-
-type HydrationEventDraft<Event extends TranscriptEvent = TranscriptEvent> = Event extends unknown
-  ? Omit<Event, "eventId" | "sequence" | "createdAt">
-  : never;
+import type { TuiEntry, TuiReporter } from "./tui-reporter.js";
 
 /**
- * RuntimeEventStore 是模型上下文的权威源，TUI EventStore 是当前界面 segment。
- * 恢复/热切换时从前者重建最小可见 transcript，不暴露 system injection。
+ * Runtime owner 在硬切换后提供的 canonical ToolResult 水合队列。
+ *
+ * 该本地交叉类型让本分支可独立 typecheck；集成时 SessionHydrationSnapshot
+ * 会直接声明同一字段。
+ */
+interface CanonicalHydrationToolResult {
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly envelope: ToolResultEnvelope;
+}
+
+type CanonicalSessionHydrationSnapshot = SessionHydrationSnapshot & {
+  readonly toolResults: readonly CanonicalHydrationToolResult[];
+};
+
+/**
+ * 恢复/热切换只重放结构化 transcript，并用 canonical tool.result.recorded
+ * envelope 覆盖或补齐 completion。旧 Message/providerData 不再是 UI 数据源。
  */
 export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[] {
-  const hydrationEvents = combinedHydrationEvents(snapshot);
-  if (hydrationEvents.length > 0) return projectHydratedTranscriptEntries(hydrationEvents);
-
-  // 防御旧的非结构化快照；正常 SessionHydrationSnapshot 会由上面的兼容事件覆盖。
-  const toolResults = indexToolResults(snapshot.messages);
-  const entries: TuiEntry[] = [];
-
-  for (const message of snapshot.messages) {
-    if (
-      message.role === "system" ||
-      message.toolCallId !== undefined ||
-      isMessageHiddenFromTranscript(message)
-    ) {
-      continue;
-    }
-
-    if (message.role === "user") {
-      const content = visibleText(message.content);
-      if (content) entries.push({ kind: "user", content });
-      continue;
-    }
-
-    const content = visibleText(message.content);
-    const reasoning = visibleText(message.reasoning ?? "");
-    if (reasoning) entries.push({ kind: "thinking", content: reasoning });
-    if (content) entries.push({ kind: "assistant", content });
-    for (const call of message.toolCalls ?? []) {
-      entries.push(hydrateToolEntry(call, shiftToolResult(toolResults, call.id)));
-    }
-  }
-
-  return entries;
-}
-
-/**
- * 用 Reporter 的领域事件重建权威投影。工具必须走 started/completed，
- * 否则内部 tool ID、完整 inline result 与 artifactRef 会在热切换后丢失。
- */
-export function hydrateTuiReporter(
-  reporter: Pick<
-    TuiReporter,
-    | "pushUserMessage"
-    | "onMessage"
-    | "onReasoningDelta"
-    | "onToolCall"
-    | "onToolResult"
-    | "onFinish"
-  > & {
-    hydrateTranscriptEvents?: (events: SessionHydrationSnapshot["transcriptEvents"]) => void;
-    replaceTranscriptEvents?: (events: SessionHydrationSnapshot["transcriptEvents"]) => void;
-    withoutDurableTranscript?: (callback: () => void) => void;
-  },
-  snapshot: SessionHydrationSnapshot,
-  options: { readonly replace?: boolean } = {},
-): void {
-  const hydrationEvents = combinedHydrationEvents(snapshot);
-  if (options.replace && reporter.replaceTranscriptEvents) {
-    reporter.replaceTranscriptEvents(hydrationEvents);
-    if (hydrationEvents.length > 0) return;
-  }
-  if (reporter.hydrateTranscriptEvents && hydrationEvents.length > 0) {
-    reporter.hydrateTranscriptEvents(hydrationEvents);
-    return;
-  }
-  const hydrateLegacyMessages = (): void => {
-    const toolResults = indexToolResults(snapshot.messages);
-    for (const message of snapshot.messages) {
-      if (
-        message.role === "system" ||
-        message.toolCallId !== undefined ||
-        isMessageHiddenFromTranscript(message)
-      ) {
-        continue;
-      }
-
-      if (message.role === "user") {
-        const content = visibleText(message.content);
-        if (content) reporter.pushUserMessage(content);
-        continue;
-      }
-
-      const content = visibleText(message.content);
-      const reasoning = visibleText(message.reasoning ?? "");
-      if (reasoning && reporter.onReasoningDelta) reporter.onReasoningDelta(reasoning);
-      if (content) reporter.onMessage(content);
-      for (const call of message.toolCalls ?? []) {
-        const result = shiftToolResult(toolResults, call.id);
-        reporter.onToolCall(call.name, call.arguments, call.id);
-        const content = result?.content ?? "Interrupted before a result was recorded.";
-        const isError = result === undefined || isHydratedToolError(result);
-        reporter.onToolResult(
-          createToolResultEnvelope({
-            toolCallId: call.id,
-            toolName: call.name,
-            status: isError ? "interrupted" : "succeeded",
-            body: {
-              storage: "inline",
-              content,
-              sha256: createHash("sha256").update(content, "utf8").digest("hex"),
-              sizeBytes: Buffer.byteLength(content, "utf8"),
-            },
-            projection: {
-              version: 1,
-              mode: result === undefined ? "synthetic" : "full",
-              text: content,
-              strategy: "legacy-hydration",
-              truncated: false,
-            },
-          }),
-        );
-      }
-    }
-    reporter.onFinish();
-  };
-  if (reporter.withoutDurableTranscript) {
-    reporter.withoutDurableTranscript(hydrateLegacyMessages);
-  } else {
-    hydrateLegacyMessages();
-  }
-}
-
-/**
- * 旧 Session 在第一次结构化写入后会形成 legacy messages + transcript events 的混合快照。
- * 只把首条结构化 RuntimeEvent 之前的 message 前缀合成为稳定事件，再接上真实事件；
- * 本地 sequence 只服务 reducer，durable sequence 仍由 Session 账本保存。
- */
-function combinedHydrationEvents(snapshot: SessionHydrationSnapshot): TranscriptEvent[] {
-  const structured = snapshot.transcriptEvents;
-  const sequencesAligned =
-    snapshot.messageSequences.length === snapshot.messages.length &&
-    snapshot.transcriptEventSequences.length === structured.length;
-  if (!sequencesAligned)
-    return structured.map((event, index) => ({ ...event, sequence: index + 1 }));
-
-  const firstStructuredSequence =
-    structured.length > 0
-      ? Math.min(...snapshot.transcriptEventSequences)
-      : Number.POSITIVE_INFINITY;
-  const legacyMessageIndexes = snapshot.messageSequences.flatMap((sequence, index) =>
-    sequence < firstStructuredSequence ? [index] : [],
-  );
-  const legacy = synthesizeLegacyTranscriptEvents(snapshot, legacyMessageIndexes);
-  return [...legacy, ...structured].map((event, index) => ({ ...event, sequence: index + 1 }));
-}
-
-function synthesizeLegacyTranscriptEvents(
-  snapshot: SessionHydrationSnapshot,
-  messageIndexes: readonly number[],
-): TranscriptEvent[] {
-  const events: TranscriptEvent[] = [];
-  const toolResults = indexToolResults(snapshot.messages);
-  const selected = new Set(messageIndexes);
-  const baseCreatedAt = Number.isFinite(Date.parse(snapshot.createdAt))
-    ? Date.parse(snapshot.createdAt)
-    : 0;
-  const append = (draft: HydrationEventDraft): TranscriptEvent => {
-    const event = {
-      ...draft,
-      eventId: `legacy:${snapshot.sessionId}:event:${events.length + 1}`,
-      sequence: events.length + 1,
-      createdAt: baseCreatedAt + events.length,
-    } as TranscriptEvent;
-    events.push(event);
-    return event;
-  };
-
-  for (const [messageIndex, message] of snapshot.messages.entries()) {
-    if (!selected.has(messageIndex)) continue;
-    if (
-      message.role === "system" ||
-      message.toolCallId !== undefined ||
-      isMessageHiddenFromTranscript(message)
-    ) {
-      continue;
-    }
-    const runtimeSequence = snapshot.messageSequences[messageIndex]!;
-    const entryId = (kind: string, ordinal = 0): string =>
-      `legacy:${snapshot.sessionId}:message:${runtimeSequence}:${kind}:${ordinal}`;
-
-    if (message.role === "user") {
-      const content = visibleText(message.content);
-      if (content) {
-        append({
-          type: "entry.appended",
-          entryId: entryId("user"),
-          entry: { kind: "user", content },
-        });
-      }
-      continue;
-    }
-
-    const reasoning = visibleText(message.reasoning ?? "");
-    const content = visibleText(message.content);
-    if (reasoning) {
-      append({
-        type: "entry.appended",
-        entryId: entryId("thinking"),
-        entry: { kind: "thinking", content: reasoning },
-      });
-    }
-    if (content) {
-      append({
-        type: "entry.appended",
-        entryId: entryId("assistant"),
-        entry: { kind: "assistant", content },
-      });
-    }
-    for (const [callIndex, call] of (message.toolCalls ?? []).entries()) {
-      const result = shiftToolResult(toolResults, call.id);
-      const toolCallId = entryId("tool-call", callIndex);
-      append({
-        type: "tool.started",
-        entryId: entryId("tool", callIndex),
-        toolCallId,
-        providerCallId: call.id,
-        name: call.name,
-        args: call.arguments,
-      });
-      const failed = result === undefined || isHydratedToolError(result);
-      const rawResult = result?.content ?? "Interrupted before a result was recorded.";
-      const summary = compactToolResult(rawResult);
-      append({
-        type: "tool.completed",
-        toolCallId,
-        status: failed ? "error" : "success",
-        summary,
-        inlineResult: summary,
-        size: rawResult.length,
-        truncated: summary.length < rawResult.length,
-      });
-    }
-  }
-  return events;
-}
-
-function projectHydratedTranscriptEntries(
-  events: SessionHydrationSnapshot["transcriptEvents"],
-): TuiEntry[] {
+  const events = canonicalHydrationEvents(snapshot);
   return projectTranscriptEntriesForRendering(projectTranscriptEvents(events));
 }
 
-function indexToolResults(messages: readonly Message[]): Map<string, Message[]> {
-  const results = new Map<string, Message[]>();
-  for (const message of messages) {
-    if (message.role === "user" && message.toolCallId !== undefined) {
-      const ordered = results.get(message.toolCallId) ?? [];
-      ordered.push(message);
-      results.set(message.toolCallId, ordered);
-    }
+export function hydrateTuiReporter(
+  reporter: Pick<TuiReporter, "hydrateTranscriptEvents" | "replaceTranscriptEvents">,
+  snapshot: SessionHydrationSnapshot,
+  options: { readonly replace?: boolean } = {},
+): void {
+  const events = canonicalHydrationEvents(snapshot);
+  if (options.replace) {
+    reporter.replaceTranscriptEvents(events);
+    return;
   }
-  return results;
+  if (events.length > 0) reporter.hydrateTranscriptEvents(events);
 }
 
-function shiftToolResult(results: Map<string, Message[]>, toolCallId: string): Message | undefined {
-  const ordered = results.get(toolCallId);
-  const result = ordered?.shift();
-  if (ordered?.length === 0) results.delete(toolCallId);
+function canonicalHydrationEvents(snapshot: SessionHydrationSnapshot): TranscriptEvent[] {
+  const canonical = readCanonicalToolResults(snapshot);
+  if (snapshot.transcriptEventSequences.length !== snapshot.transcriptEvents.length) {
+    throw new Error(
+      `Session ${snapshot.sessionId} transcript sequence index is incompatible with structured hydration`,
+    );
+  }
+
+  const events = snapshot.transcriptEvents.map((event, index) => ({
+    event,
+    runtimeSequence: snapshot.transcriptEventSequences[index]!,
+    ordinal: index,
+  }));
+  const completions = new Map<
+    string,
+    { readonly event: Extract<TranscriptEvent, { type: "tool.completed" }>; readonly index: number }
+  >();
+  for (const [index, entry] of events.entries()) {
+    if (entry.event.type === "tool.completed") {
+      completions.set(entry.event.toolCallId, { event: entry.event, index });
+    }
+  }
+
+  const resultQueues = new Map<string, CanonicalHydrationToolResult[]>();
+  for (const result of canonical.toSorted((left, right) => left.sequence - right.sequence)) {
+    const queue = resultQueues.get(result.envelope.toolCallId) ?? [];
+    queue.push(result);
+    resultQueues.set(result.envelope.toolCallId, queue);
+  }
+
+  const matchedCompletions = new Set<string>();
+  const synthetic: Array<{
+    readonly event: TranscriptEvent;
+    readonly runtimeSequence: number;
+    readonly ordinal: number;
+  }> = [];
+  for (const entry of events) {
+    if (entry.event.type !== "tool.started" || !entry.event.providerCallId) continue;
+    const result = shiftCanonicalResult(
+      resultQueues,
+      entry.event.providerCallId,
+      entry.runtimeSequence,
+    );
+    if (!result) continue;
+    const completion = completions.get(entry.event.toolCallId);
+    if (completion) {
+      events[completion.index] = {
+        ...events[completion.index]!,
+        event: {
+          ...completion.event,
+          result: result.envelope,
+        },
+      };
+      matchedCompletions.add(entry.event.toolCallId);
+      continue;
+    }
+    synthetic.push({
+      runtimeSequence: result.sequence,
+      ordinal: Number.MAX_SAFE_INTEGER,
+      event: {
+        eventId: `canonical-tool-result:${result.eventId}`,
+        sequence: 1,
+        createdAt: hydrationTimestamp(snapshot.updatedAt),
+        type: "tool.completed",
+        toolCallId: entry.event.toolCallId,
+        status: transcriptStatus(result.envelope),
+        summary: toolResultSummary(result.envelope),
+        result: result.envelope,
+      },
+    });
+  }
+
+  const unmatchedCompletion = [...completions.keys()].find(
+    (toolCallId) => !matchedCompletions.has(toolCallId),
+  );
+  if (unmatchedCompletion) {
+    throw new Error(
+      `Session ${snapshot.sessionId} tool completion ${unmatchedCompletion} has no canonical ToolResult`,
+    );
+  }
+
+  return [...events, ...synthetic]
+    .toSorted(
+      (left, right) => left.runtimeSequence - right.runtimeSequence || left.ordinal - right.ordinal,
+    )
+    .map(({ event }, index) => ({ ...event, sequence: index + 1 }));
+}
+
+function readCanonicalToolResults(
+  snapshot: SessionHydrationSnapshot,
+): readonly CanonicalHydrationToolResult[] {
+  const value = (snapshot as Partial<CanonicalSessionHydrationSnapshot>).toolResults;
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `Session ${snapshot.sessionId} does not contain canonical ToolResult hydration data`,
+    );
+  }
+  return value;
+}
+
+function shiftCanonicalResult(
+  queues: Map<string, CanonicalHydrationToolResult[]>,
+  toolCallId: string,
+  startedSequence: number,
+): CanonicalHydrationToolResult | undefined {
+  const queue = queues.get(toolCallId);
+  if (!queue || queue.length === 0) return undefined;
+  const index = queue.findIndex((result) => result.sequence >= startedSequence);
+  const selectedIndex = index >= 0 ? index : 0;
+  const [result] = queue.splice(selectedIndex, 1);
+  if (queue.length === 0) queues.delete(toolCallId);
   return result;
 }
 
-function hydrateToolEntry(call: ToolCall, result: Message | undefined): TuiEntry {
-  if (!result) {
-    return {
-      kind: "tool",
-      name: call.name,
-      args: call.arguments,
-      status: "error",
-      summary: "Interrupted before a result was recorded.",
-    };
-  }
-
-  const failed = isHydratedToolError(result);
-  return {
-    kind: "tool",
-    name: call.name,
-    args: call.arguments,
-    status: failed ? "error" : "success",
-    summary: compactToolResult(result.content),
-  };
+function transcriptStatus(envelope: ToolResultEnvelope): "success" | "error" | "denied" {
+  if (envelope.status === "succeeded") return "success";
+  if (envelope.status === "rejected") return "denied";
+  return "error";
 }
 
-function isHydratedToolError(result: Message): boolean {
-  return isToolResultErrorMessage(result);
+function toolResultSummary(envelope: ToolResultEnvelope): string {
+  const outcome = envelope.status === "succeeded" ? "Tool completed" : "Tool failed";
+  return `${outcome} · ${envelope.rawSizeBytes} bytes`;
 }
 
-function visibleText(value: string): string {
-  return value.trim();
-}
-
-function compactToolResult(value: string): string {
-  const inline = value.replace(/\s+/gu, " ").trim();
-  if (inline.length <= 160) return inline;
-  return `${inline.slice(0, 159)}…`;
+function hydrationTimestamp(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }

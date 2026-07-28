@@ -172,6 +172,13 @@ function renderDefaultItem(
               <StateIcon state={item.state} /> {stateLabels[item.state]}
             </span>
           </header>
+          {item.result && (
+            <p>
+              {item.result.rawSizeBytes} bytes · {item.result.status} ·
+              <code>{item.result.sha256.slice(0, 12)}</code>
+              {item.result.evidence ? " · Evidence" : ""}
+            </p>
+          )}
           {item.detail && <p>{item.detail}</p>}
           {item.output && <pre className="conversation-tool-output">{item.output}</pre>}
           {onOpenItem && <DetailButton label="查看工具详情" onClick={() => onOpenItem(item)} />}

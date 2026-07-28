@@ -4,6 +4,7 @@ import type {
   SubagentActivityEvent,
   SubagentTraceEvent,
 } from "../engine/reporter.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 /** 与具体渲染框架无关的执行阶段。 */
 export type TranscriptPhaseMode = "idle" | "requesting" | "thinking" | "tool-use" | "responding";
 
@@ -135,13 +136,10 @@ export interface TranscriptToolCallProjection {
   readonly result?: string;
   /** 折叠态与外部化结果使用的短摘要。 */
   readonly summary?: string;
-  /** 大结果的可信定位信息；读取时仍须由 Inspector 校验 artifact store。 */
-  readonly artifactRef?: string;
-  readonly artifactPath?: string;
-  readonly size?: number;
-  readonly truncated: boolean;
+  /** Reporter 从 canonical tool.result.recorded 生成的唯一宿主投影。 */
+  readonly resultEnvelope?: ToolResultEnvelope;
   /** Inspector 只根据该字段判断完整结果是否仍可用。 */
-  readonly resultAvailability?: "inline" | "artifact" | "unavailable";
+  readonly resultAvailability?: "inline" | "evidence" | "unavailable";
 }
 
 export interface TranscriptToolOutputChunk {
@@ -317,12 +315,8 @@ export type TranscriptEvent =
       readonly toolCallId: string;
       readonly status: TranscriptToolCallStatus;
       readonly summary: string;
-      /** 仅在结果无法由已记录的 output chunks 重建时携带。 */
-      readonly inlineResult?: string;
-      readonly artifactRef?: string;
-      readonly artifactPath?: string;
-      readonly size: number;
-      readonly truncated: boolean;
+      /** 直接持有 canonical ToolResult 的有界宿主投影，不再解析 Message 文本。 */
+      readonly result: ToolResultEnvelope;
     })
   | (TranscriptEventBase & {
       readonly type: "subagent.activity.updated";
@@ -438,11 +432,7 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
       return;
     case "tool.completed":
       transcriptStrings(value, "toolCallId", "status", "summary");
-      transcriptOptionalString(value, "inlineResult");
-      transcriptOptionalString(value, "artifactRef");
-      transcriptOptionalString(value, "artifactPath");
-      transcriptNonNegativeInteger(value, "size");
-      transcriptBoolean(value, "truncated");
+      transcriptToolResultEnvelope(value["result"]);
       return;
     case "subagent.activity.updated":
       transcriptStrings(value, "entryId", "activityId");
@@ -964,7 +954,6 @@ export function reduceTranscriptEvent(
           outputChars: 0,
           droppedOutputChars: 0,
           outputTruncated: false,
-          truncated: false,
         }),
       };
       break;
@@ -1042,15 +1031,25 @@ export function reduceTranscriptEvent(
 
     case "tool.completed": {
       const tool = requirePendingTool(toolCalls, event.toolCallId);
-      const streamedResult = tool.output;
-      // 11.4 持久化日志中的旧 completion 事件没有 size/truncated，水合时按非截断摘要兼容。
-      const truncated = event.truncated === true;
+      const envelope = cloneToolResultEnvelope(event.result);
+      if (
+        envelope.toolName !== tool.name ||
+        (tool.providerCallId !== undefined && envelope.toolCallId !== tool.providerCallId)
+      ) {
+        throw new Error(
+          `Transcript tool completion ${event.toolCallId} does not match its canonical envelope`,
+        );
+      }
       const result =
-        event.inlineResult ??
-        (!truncated && streamedResult.length > 0 ? streamedResult : undefined);
+        envelope.evidence === undefined &&
+        envelope.projection.mode === "full" &&
+        !envelope.projection.truncated &&
+        !envelope.deliveryTruncated
+          ? envelope.projection.text
+          : undefined;
       const resultAvailability =
-        event.artifactRef !== undefined
-          ? ("artifact" as const)
+        envelope.evidence !== undefined
+          ? ("evidence" as const)
           : result !== undefined
             ? ("inline" as const)
             : ("unavailable" as const);
@@ -1077,10 +1076,7 @@ export function reduceTranscriptEvent(
           outputSegments: Object.freeze([]),
           ...(result !== undefined ? { result } : {}),
           summary: displayResult,
-          ...(event.artifactRef !== undefined ? { artifactRef: event.artifactRef } : {}),
-          ...(event.artifactPath !== undefined ? { artifactPath: event.artifactPath } : {}),
-          size: event.size ?? result?.length ?? event.summary.length,
-          truncated,
+          resultEnvelope: envelope,
           resultAvailability,
         }),
       };
@@ -1423,6 +1419,9 @@ function freezeTranscriptEvent(event: TranscriptEvent): TranscriptEvent {
   if (event.type === "subagent.trace.recorded") {
     return Object.freeze({ ...event, trace: Object.freeze({ ...event.trace }) });
   }
+  if (event.type === "tool.completed") {
+    return Object.freeze({ ...event, result: cloneToolResultEnvelope(event.result) });
+  }
   if (event.type === "tool.output" && "segment" in event) {
     return Object.freeze({ ...event, segment: normalizeToolOutputSegment(event) });
   }
@@ -1465,7 +1464,16 @@ function compactProjectionForCheckpoint(projection: TranscriptProjection): Trans
         tool.result === undefined ||
         retainedInlineResults.has(tool.id)
       ) {
-        return [id, Object.freeze(compactBase)];
+        if (tool.resultAvailability !== "evidence" || tool.resultEnvelope === undefined) {
+          return [id, Object.freeze(compactBase)];
+        }
+        return [
+          id,
+          Object.freeze({
+            ...compactBase,
+            resultEnvelope: compactEvidenceEnvelope(tool.resultEnvelope, tool.summary),
+          }),
+        ];
       }
 
       return [
@@ -1473,6 +1481,7 @@ function compactProjectionForCheckpoint(projection: TranscriptProjection): Trans
         Object.freeze({
           ...compactBase,
           result: undefined,
+          resultEnvelope: undefined,
           summary: unavailableResultSummary(tool.summary ?? "Tool result"),
           resultAvailability: "unavailable" as const,
         }),
@@ -1521,6 +1530,9 @@ function cloneProjection(projection: TranscriptProjection): TranscriptProjection
       id,
       Object.freeze({
         ...tool,
+        ...(tool.resultEnvelope !== undefined
+          ? { resultEnvelope: cloneToolResultEnvelope(tool.resultEnvelope) }
+          : {}),
         outputSegments: Object.freeze(
           tool.outputSegments.map((segment) =>
             Object.freeze({
@@ -1580,4 +1592,92 @@ function normalizeSegmentLimit(value: number | undefined): number {
 function assertUnique(target: Set<string>, id: string, label: string): void {
   if (!id.trim()) throw new Error(`Transcript ${label} ID must not be empty`);
   if (target.has(id)) throw new Error(`Duplicate Transcript ${label} ID: ${id}`);
+}
+
+function transcriptToolResultEnvelope(value: unknown): asserts value is ToolResultEnvelope {
+  if (!isTranscriptRecord(value) || value["version"] !== 1) {
+    throw new Error("Transcript tool result envelope is invalid");
+  }
+  transcriptStrings(value, "toolCallId", "toolName", "status", "sha256");
+  if (
+    !["succeeded", "failed", "rejected", "cancelled", "interrupted"].includes(
+      String(value["status"]),
+    )
+  ) {
+    throw new Error("Transcript tool result status is invalid");
+  }
+  transcriptNonNegativeInteger(value, "rawSizeBytes");
+  transcriptBoolean(value, "deliveryTruncated");
+  if (!/^[a-f0-9]{64}$/u.test(String(value["sha256"]))) {
+    throw new Error("Transcript tool result sha256 is invalid");
+  }
+  const projection = value["projection"];
+  if (!isTranscriptRecord(projection) || projection["version"] !== 1) {
+    throw new Error("Transcript tool result projection is invalid");
+  }
+  transcriptStrings(projection, "mode", "strategy");
+  if (typeof projection["text"] !== "string") {
+    throw new Error("Transcript tool result projection text must be a string");
+  }
+  if (!["full", "preview", "synthetic"].includes(String(projection["mode"]))) {
+    throw new Error("Transcript tool result projection mode is invalid");
+  }
+  transcriptBoolean(projection, "truncated");
+
+  const evidence = value["evidence"];
+  if (evidence === undefined) return;
+  if (!isTranscriptRecord(evidence)) {
+    throw new Error("Transcript tool result evidence is invalid");
+  }
+  transcriptString(evidence, "uri");
+  const reference = evidence["ref"];
+  if (
+    !isTranscriptRecord(reference) ||
+    reference["schemaVersion"] !== 1 ||
+    reference["kind"] !== "tool-exchange"
+  ) {
+    throw new Error("Transcript tool result evidence reference is invalid");
+  }
+  transcriptStrings(reference, "contentHash", "sessionId");
+  if (!/^[a-f0-9]{64}$/u.test(String(reference["contentHash"]))) {
+    throw new Error("Transcript tool result evidence hash is invalid");
+  }
+  const expectedUri = `pico://evidence/${encodeURIComponent(
+    String(reference["sessionId"]),
+  )}/${String(reference["contentHash"])}`;
+  if (evidence["uri"] !== expectedUri) {
+    throw new Error("Transcript tool result evidence URI does not match its reference");
+  }
+}
+
+function cloneToolResultEnvelope(envelope: ToolResultEnvelope): ToolResultEnvelope {
+  return Object.freeze({
+    ...envelope,
+    projection: Object.freeze({ ...envelope.projection }),
+    ...(envelope.evidence
+      ? {
+          evidence: Object.freeze({
+            ...envelope.evidence,
+            ref: Object.freeze({ ...envelope.evidence.ref }),
+          }),
+        }
+      : {}),
+  });
+}
+
+function compactEvidenceEnvelope(
+  envelope: ToolResultEnvelope,
+  summary: string | undefined,
+): ToolResultEnvelope {
+  if (!envelope.evidence) return cloneToolResultEnvelope(envelope);
+  return cloneToolResultEnvelope({
+    ...envelope,
+    projection: {
+      ...envelope.projection,
+      mode: "preview",
+      text: summary ?? "",
+      strategy: `${envelope.projection.strategy}+transcript-checkpoint`,
+      truncated: true,
+    },
+  });
 }

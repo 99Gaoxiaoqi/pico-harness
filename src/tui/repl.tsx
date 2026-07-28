@@ -153,11 +153,11 @@ import { bindAskUserDialogs } from "./ask-user-dialog.js";
 import { bindMcpElicitationDialogs } from "./mcp-elicitation-dialog.js";
 import { createHooksPanelDialogRequest, HOOKS_PANEL_DIALOG_ID } from "./hooks-panel.js";
 import {
-  createArtifactInspectorContext,
+  createEvidenceInspectorContext,
   createInspectorDialogRequest,
   createToolInspectorSource,
 } from "./inspector.js";
-import { copyTextToClipboard, locateFileInShell } from "./system-actions.js";
+import { copyTextToClipboard } from "./system-actions.js";
 import { imagePasteShortcutLabel } from "./system-actions.js";
 import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-history.js";
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
@@ -2489,7 +2489,7 @@ export async function startTuiRepl(
           }
           const source = createToolInspectorSource(
             tool,
-            createArtifactInspectorContext({ workDir: opts.workDir, sessionId: current.sessionId }),
+            createEvidenceInspectorContext({ workDir: opts.workDir, sessionId: current.sessionId }),
           );
           if (!source) {
             current.reporter.pushSystemMessage("This tool call has no inspectable output yet.");
@@ -2500,7 +2500,6 @@ export async function startTuiRepl(
             onClose: () =>
               setDialogRequests((items) => items.filter((item) => item.id !== request.id)),
             onCopy: (text) => trackDialogAction(() => copyTextToClipboard(text)),
-            onLocate: (path) => trackDialogAction(() => locateFileInShell(path)),
           });
           setDialogRequests((items) => [
             ...items.filter((item) => item.id !== request.id),

@@ -246,10 +246,30 @@ function parseConversationItem(value: unknown): MobileConversationItem {
     (contentKinds.has(kind) && typeof value["content"] === "string") ||
     (titledKinds.has(kind) && typeof value["title"] === "string") ||
     (kind === "skill" && typeof value["name"] === "string" && typeof value["args"] === "string") ||
-    (kind === "tool" && typeof value["name"] === "string" && typeof value["status"] === "string") ||
+    (kind === "tool" &&
+      typeof value["name"] === "string" &&
+      typeof value["status"] === "string" &&
+      (value["result"] === undefined || isToolResultEnvelope(value["result"]))) ||
     (kind === "runBoundary" && typeof value["status"] === "string");
   if (!valid) throw new Error("Gateway 会话条目响应格式无效");
   return value as unknown as MobileConversationItem;
+}
+
+function isToolResultEnvelope(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value["version"] === 1 &&
+    typeof value["toolCallId"] === "string" &&
+    typeof value["toolName"] === "string" &&
+    typeof value["status"] === "string" &&
+    typeof value["rawSizeBytes"] === "number" &&
+    typeof value["sha256"] === "string" &&
+    typeof value["deliveryTruncated"] === "boolean" &&
+    isRecord(value["projection"]) &&
+    value["projection"]["version"] === 1 &&
+    typeof value["projection"]["text"] === "string" &&
+    typeof value["projection"]["truncated"] === "boolean"
+  );
 }
 
 function containsPrivateField(value: unknown): boolean {

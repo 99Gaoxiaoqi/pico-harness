@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
+import { projectRuntimeToolResultEnvelope } from "../engine/runtime-model-message.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import { projectTranscriptEvents } from "../presentation/transcript-event-store.js";
 import type { RuntimeEventStoreEntry } from "../runtime/runtime-event-store.js";
 import {
@@ -7,15 +9,12 @@ import {
   projectRuntimeSessionState,
   projectRuntimeSessionTranscriptEventEntries,
 } from "../runtime/runtime-session-projection.js";
-import {
-  isMessageHiddenFromTranscript,
-  isToolResultErrorMessage,
-  type Message,
-} from "../schema/message.js";
+import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import {
   MAX_RUNTIME_FRAME_BYTES,
   type JsonObject,
   type RuntimeConversationItem,
+  type RuntimeToolResultEnvelope,
 } from "./protocol.js";
 
 const DEFAULT_TRANSCRIPT_PAGE_BYTES = MAX_RUNTIME_FRAME_BYTES - 64 * 1024;
@@ -45,7 +44,14 @@ type RuntimeTranscriptSnapshot = Pick<
 > & {
   readonly messageRunIds?: readonly (string | undefined)[];
   readonly messageTurnIds?: readonly (string | undefined)[];
+  readonly toolResults: readonly SequencedToolResultEnvelope[];
 };
+
+interface SequencedToolResultEnvelope {
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly envelope: ToolResultEnvelope;
+}
 
 /** Builds the Desktop transcript read model directly from canonical RuntimeEvent facts. */
 export function projectRuntimeTranscriptEntries(
@@ -66,6 +72,17 @@ export function projectRuntimeTranscriptEntries(
       messageTurnIds: messages.map(({ turnId }) => turnId),
       transcriptEvents: transcript.map(({ event }) => event),
       transcriptEventSequences: transcript.map(({ sequence }) => sequence),
+      toolResults: entries.flatMap(({ sequence, event }) =>
+        event.kind === "tool.result.recorded"
+          ? [
+              {
+                sequence,
+                eventId: event.eventId,
+                envelope: projectRuntimeToolResultEnvelope(event),
+              },
+            ]
+          : [],
+      ),
       runtime: projectRuntimeSessionState(events),
     },
     options,
@@ -98,7 +115,7 @@ export class TranscriptRevisionConflict extends Error {
 }
 
 function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConversationItem[] {
-  const toolResults = indexToolResults(snapshot.messages);
+  const toolResults = indexToolResults(snapshot.toolResults);
   const structured = projectStructuredItems(snapshot);
   const structuredItems = structured.items;
   const representedMessageToolKeys = structured.representedMessageToolKeys;
@@ -205,11 +222,11 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
       // The structured transcript entry owns the stable UI identity when it references the
       // exact Provider call occurrence. Consume its result even when the structured entry is
       // rendered so a reused Provider call ID cannot shift the following synthetic summary.
-      const result = toolResults.get(call.id)?.shift();
+      const result = toolResults.get(call.id)?.shift()?.envelope;
       if (representedMessageToolKeys.has(messageToolOccurrenceKey(messageIndex, callIndex))) {
         continue;
       }
-      const failed = result === undefined || isToolResultErrorMessage(result);
+      const failed = result === undefined || result.status !== "succeeded";
       append(
         {
           id: stableItemId(snapshot.sessionId, messageIndex, `tool:${call.id}`, call.arguments),
@@ -220,7 +237,8 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
           summary:
             result === undefined
               ? "Interrupted before a result was recorded."
-              : `${failed ? "Tool failed" : "Tool completed"} · ${Buffer.byteLength(result.content, "utf8")} bytes`,
+              : `${failed ? "Tool failed" : "Tool completed"} · ${result.rawSizeBytes} bytes`,
+          ...(result ? { result: protocolToolResultEnvelope(result) } : {}),
         },
         sequence,
       );
@@ -454,7 +472,11 @@ function projectStructuredItems(
           }),
         );
         break;
-      case "tool":
+      case "tool": {
+        const result =
+          projected.toolCallId === undefined
+            ? undefined
+            : projection.toolCalls[projected.toolCallId]?.resultEnvelope;
         if (
           projected.toolCallId === undefined ||
           projection.toolCalls[projected.toolCallId]?.providerCallId === undefined
@@ -475,10 +497,12 @@ function projectStructuredItems(
             args: entry.args,
             status: transcriptToolStatus(entry.status),
             ...(entry.summary ? { summary: entry.summary } : {}),
+            ...(result ? { result: protocolToolResultEnvelope(result) } : {}),
             ...(at === undefined ? {} : { at }),
           }),
         );
         break;
+      }
       case "error":
         items.push(
           ordered({
@@ -599,13 +623,14 @@ function structuredItemKey(
   return typeof value === "string" && value ? `${kind}:${value}` : undefined;
 }
 
-function indexToolResults(messages: readonly Message[]): Map<string, Message[]> {
-  const results = new Map<string, Message[]>();
-  for (const message of messages) {
-    if (message.role !== "user" || message.toolCallId === undefined) continue;
-    const ordered = results.get(message.toolCallId) ?? [];
-    ordered.push(message);
-    results.set(message.toolCallId, ordered);
+function indexToolResults(
+  toolResults: readonly SequencedToolResultEnvelope[],
+): Map<string, SequencedToolResultEnvelope[]> {
+  const results = new Map<string, SequencedToolResultEnvelope[]>();
+  for (const result of toolResults.toSorted((left, right) => left.sequence - right.sequence)) {
+    const ordered = results.get(result.envelope.toolCallId) ?? [];
+    ordered.push(result);
+    results.set(result.envelope.toolCallId, ordered);
   }
   return results;
 }
@@ -758,6 +783,20 @@ function truncateConversationItem(
         name: text(item.name) ?? "",
         args: text(item.args) ?? "",
         ...(item.summary === undefined ? {} : { summary: text(item.summary) ?? "" }),
+        ...(item.result === undefined
+          ? {}
+          : {
+              result: {
+                ...item.result,
+                projection: {
+                  ...item.result.projection,
+                  text: text(item.result.projection.text) ?? "",
+                  truncated:
+                    item.result.projection.truncated ||
+                    Array.from(item.result.projection.text).length > maxCodePoints,
+                },
+              },
+            }),
         ...metadata,
       };
     case "runBoundary":
@@ -842,6 +881,12 @@ function toJsonObject(
       return converted === undefined ? [] : [[key, converted]];
     }),
   );
+}
+
+function protocolToolResultEnvelope(envelope: ToolResultEnvelope): RuntimeToolResultEnvelope {
+  const result = toJsonObject(envelope as unknown as Readonly<Record<string, unknown>>);
+  if (!result) throw new Error("ToolResult envelope is not JSON serializable");
+  return result as RuntimeToolResultEnvelope;
 }
 
 function toJsonValue(value: unknown): JsonObject[string] | undefined {
