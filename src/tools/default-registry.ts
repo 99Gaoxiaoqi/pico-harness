@@ -11,7 +11,6 @@ import {
   TaskOutputTool,
   TaskStopTool,
   ToolRegistry,
-  type ToolRegistryOptions,
   WriteFileTool,
 } from "./registry-impl.js";
 import { GlobTool } from "./glob.js";
@@ -28,11 +27,10 @@ import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-ro
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
-import { ReadArtifactTool } from "./artifact-read.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
 import type { ApprovalManager } from "../approval/manager.js";
 
-export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
+export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
   workspaceRoots?: WorkspaceRoots;
   /** Host 将工作区 ask/yolo 与审批合并处理时，关闭这里的严格前置拒绝。 */
@@ -74,8 +72,6 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   skillLoader?: SkillLoader;
   /** exit_plan_mode 使用的宿主审批实例；缺失时该工具 fail-closed。 */
   approvalManager?: ApprovalManager;
-  /** Host-owned artifact root shared by writer and read_artifact. */
-  artifactBaseDir?: string;
   /** Host-owned durable Evidence root shared by Runtime and read_evidence. */
   evidenceBaseDir?: string;
   /** Host-owned process environment for tools that intentionally inherit it. */
@@ -97,20 +93,17 @@ export function buildDefaultToolRegistry(
     activateSkillHooks,
     skillLoader,
     approvalManager,
-    artifactBaseDir,
     evidenceBaseDir,
     env,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
-    ...registryOptions
   } = options;
   const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
-  const registry = new ToolRegistry(registryOptions);
+  const registry = new ToolRegistry();
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
-  registry.register(new ReadArtifactTool(workDir, artifactBaseDir));
   registry.register(new ReadEvidenceTool(workDir, evidenceBaseDir));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));

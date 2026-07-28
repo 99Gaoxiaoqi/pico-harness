@@ -11,8 +11,8 @@ export interface DelegationResult {
   taskIndex: number;
   status: DelegationResultStatus;
   summary?: string;
-  /** 子任务探索期间被外部化的大型工具输出磁盘路径(均在 workDir 内,主 Agent 可 read_file 回查) */
-  artifacts?: string[];
+  /** 完整子代理报告的受校验 pico://evidence 引用。 */
+  evidenceRefs?: string[];
   error?: string;
   durationMs: number;
 }
@@ -22,8 +22,8 @@ export interface DelegationBatchResult {
   status: DelegationBatchStatus;
   results: DelegationResult[];
   totalDurationMs: number;
-  /** 为了遵守工具返回总预算而省略的 artifact 路径数。 */
-  omittedArtifacts?: number;
+  /** 为了遵守工具返回总预算而省略的 Evidence 引用数。 */
+  omittedEvidenceRefs?: number;
   /** 极端大批次下为了遵守总预算而省略的结果数。 */
   omittedResults?: number;
 }
@@ -352,8 +352,8 @@ export class DelegationManager {
         ...(record.result.omittedResults
           ? [`omittedResults: ${record.result.omittedResults}`]
           : []),
-        ...(record.result.omittedArtifacts
-          ? [`omittedArtifacts: ${record.result.omittedArtifacts}`]
+        ...(record.result.omittedEvidenceRefs
+          ? [`omittedEvidenceRefs: ${record.result.omittedEvidenceRefs}`]
           : []),
       ];
       return truncateSummary(lines.join("\n"), this.maxOutputSummaryChars);
@@ -470,14 +470,14 @@ function delegationCompletionPriority(result: DelegationResult): number {
     return 0;
   }
   if (result.status === "partial") return 1;
-  if ((result.artifacts?.length ?? 0) > 0) return 2;
+  if ((result.evidenceRefs?.length ?? 0) > 0) return 2;
   return 3;
 }
 
 function formatDelegationCompletionResult(result: DelegationResult): string {
   const lines = [`task ${result.taskIndex} ${result.status}:`];
-  if (result.artifacts?.length) {
-    lines.push("artifacts:", ...result.artifacts.map((artifact) => `- ${artifact}`));
+  if (result.evidenceRefs?.length) {
+    lines.push("evidenceRefs:", ...result.evidenceRefs.map((ref) => `- ${ref}`));
   }
   const detail = result.error ?? result.summary;
   if (detail) lines.push(detail);
