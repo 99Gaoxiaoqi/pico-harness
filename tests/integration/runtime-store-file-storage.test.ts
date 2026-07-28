@@ -107,7 +107,7 @@ test("RuntimeStore commits job state and replay ledgers without SQLite", async (
     /"layout": "session-centric-v1"/u,
   );
   await assert.rejects(stat(join(root, WORKSPACE_STORAGE_COMMIT_FILE)), { code: "ENOENT" });
-  assert.equal((await stat(join(root, "runtime", "lock"))).mode & 0o777, 0o700);
+  await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
 });
 
 test("RuntimeStore rejects orphan merge and provider-call relationships without committing", async (context) => {
