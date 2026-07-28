@@ -26,7 +26,6 @@ import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
 import type { HookService } from "../hooks/service.js";
-import { ReadArtifactTool } from "./artifact-read.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
@@ -52,8 +51,6 @@ export interface SubagentRegistryFactoryConfig {
   hookService?: HookService;
   /** 持久 Agent 按每次运行激活内联 Hook 的租约工厂。 */
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
-  /** 父会话的受信 artifact 根；worker worktree 不得改变此边界。 */
-  artifactBaseDir?: string;
   /** 父会话的受信 Evidence 根；worker worktree 不得改变此边界。 */
   evidenceBaseDir?: string;
   /** Runtime host environment used only by tools that intentionally consume host config. */
@@ -104,7 +101,6 @@ export function createSubagentRegistryFactory(
   const resolvedConfig: ResolvedSubagentRegistryFactoryConfig = {
     ...config,
     workspaceRoots: config.workspaceRoots ?? WorkspaceRoots.createSync(config.workDir),
-    artifactBaseDir: config.artifactBaseDir ?? resolvePicoPaths(config.workDir).workspace.artifacts,
     evidenceBaseDir: config.evidenceBaseDir ?? resolvePicoPaths(config.workDir).workspace.evidence,
   };
   const profiles = resolvedConfig.profiles ?? [];
@@ -136,7 +132,6 @@ export function createSubagentRegistryFactory(
 
 interface ResolvedSubagentRegistryFactoryConfig extends SubagentRegistryFactoryConfig {
   workspaceRoots: WorkspaceRoots;
-  artifactBaseDir: string;
   evidenceBaseDir: string;
 }
 
@@ -147,7 +142,6 @@ function buildProfileRegistry(
   profile: AgentProfile,
 ): ToolRegistry {
   const registry = new ToolRegistry();
-  registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
   registry.register(new ReadEvidenceTool(config.workDir, config.evidenceBaseDir));
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
@@ -179,7 +173,6 @@ function buildModeRegistry(
   registry: ToolRegistry,
 ): ToolRegistry {
   registry.register(new ReadFileTool(config.workspaceRoots));
-  registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
   registry.register(new ReadEvidenceTool(config.workDir, config.evidenceBaseDir));
   registry.register(
     new SkillViewTool(

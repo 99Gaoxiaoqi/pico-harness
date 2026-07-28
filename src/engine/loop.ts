@@ -26,7 +26,7 @@ import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
 import type {
   AgentRunner,
   SubagentModelSelectionRequest,
-  SubagentReportArtifactWriter,
+  SubagentReportEvidenceWriter,
   SubagentRunOptions,
   SubagentResult,
 } from "../tools/subagent.js";
@@ -116,7 +116,7 @@ const SUBAGENT_FINALIZE_PROMPT =
   "[FINALIZE] 已进入预留的最终收口轮。立即停止探索和工具调用，只基于当前上下文中已收集的证据输出纯文本汇报：" +
   "1) 结论；2) 已确认的事实与文件:行号证据；3) 未完成或未验证风险；4) 主 Agent 可直接采取的下一步。通常控制在 1000–2000 字符，简单任务可更短，不要重放原始日志。";
 const SUBAGENT_EMPTY_SUMMARY_FALLBACK =
-  "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据和 artifact 继续收口。";
+  "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据和 Evidence 继续收口。";
 
 const EXPLORE_SYNTHESIS_PROMPT =
   "[DELEGATION SYNTHESIS] 本批 required 委派的实际任务均为 explore，子代理已全部收口。" +
@@ -414,8 +414,9 @@ function assessRequiredDelegationResult(message: Message): RequiredDelegationAss
       if (record["status"] !== "completed" && record["status"] !== "partial") continue;
       const hasSummary =
         typeof record["summary"] === "string" && record["summary"].trim().length > 0;
-      const hasArtifacts = Array.isArray(record["artifacts"]) && record["artifacts"].length > 0;
-      if (hasSummary || hasArtifacts) usableResults++;
+      const hasEvidenceRefs =
+        Array.isArray(record["evidenceRefs"]) && record["evidenceRefs"].length > 0;
+      if (hasSummary || hasEvidenceRefs) usableResults++;
     }
     if (
       (parsed.status === "completed" || parsed.status === "partial") &&
@@ -561,8 +562,8 @@ export interface AgentEngineOptions {
   reporter?: Reporter;
   /** 完整原始工具交换的不可变归档；仅 RuntimeEvent 主链启用。 */
   runtimeEvidenceArchive?: EvidenceArchive;
-  /** 子代理完整报告写入器；超过常规摘要目标时先落盘，再向主上下文回灌预览。 */
-  subagentReportArtifactWriter?: SubagentReportArtifactWriter;
+  /** 子代理完整报告写入器；超过常规摘要目标时写入 Evidence，再回灌有界预览。 */
+  subagentReportEvidenceWriter?: SubagentReportEvidenceWriter;
   /**
    * 链路追踪器：记录决策树到 workspace traces 目录（第 19 讲）。
    * 未提供则不追踪。
@@ -664,7 +665,7 @@ export class AgentEngine implements AgentRunner {
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
   private readonly runtimeEvidenceArchive?: EvidenceArchive;
-  private readonly subagentReportArtifactWriter?: SubagentReportArtifactWriter;
+  private readonly subagentReportEvidenceWriter?: SubagentReportEvidenceWriter;
   private readonly tracer?: Tracer;
   /**
    * Steer 队列(运行时注入引导文本)。host 持有同一实例在 run 期间 push。
@@ -716,7 +717,7 @@ export class AgentEngine implements AgentRunner {
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.runtimeEvidenceArchive = opts.runtimeEvidenceArchive;
-    this.subagentReportArtifactWriter = opts.subagentReportArtifactWriter;
+    this.subagentReportEvidenceWriter = opts.subagentReportEvidenceWriter;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
     this.waitAtSafeBoundary = opts.waitAtSafeBoundary;
@@ -2667,7 +2668,7 @@ export class AgentEngine implements AgentRunner {
    * - maxSubTurns 最后一轮预留为 tools=[] FINALIZE，耗尽时以 partial 返回证据
    * - 正常退出条件:不调工具且生成非空总结
    *
-   * @returns 子智能体的纯文本总结汇报及外部化产物引用
+   * @returns 子智能体的纯文本总结汇报及完整报告 Evidence 引用
    */
   private async reportMessage(
     reporter: Reporter,
@@ -2730,7 +2731,9 @@ export class AgentEngine implements AgentRunner {
         providerData: {
           picoKind: "subagent_report",
           picoSubagentStatus: result.status,
-          ...(result.artifacts.length > 0 ? { picoSubagentArtifacts: result.artifacts } : {}),
+          ...(result.evidenceRefs.length > 0
+            ? { picoSubagentEvidenceRefs: result.evidenceRefs }
+            : {}),
         },
       });
       return result;
@@ -2833,8 +2836,6 @@ export class AgentEngine implements AgentRunner {
       throw new Error(`子智能体超过最大委派深度 ${maxSpawnDepth}`);
     }
     let turnCount = 0;
-    // 收集子代理探索期间被外部化的大型工具输出磁盘路径,回传给主 Agent 供回查。
-    const artifactPaths: string[] = [];
 
     for (;;) {
       signal?.throwIfAborted();
@@ -2843,9 +2844,7 @@ export class AgentEngine implements AgentRunner {
         return this.finalizeSubagentResult(
           "partial",
           `子代理已停止：${availableBudget.reason ?? "执行预算已用尽"}。`,
-          artifactPaths,
           taskPrompt,
-          runtimeWorkspaceRoot,
         );
       }
       turnCount++;
@@ -2887,10 +2886,8 @@ export class AgentEngine implements AgentRunner {
         );
         return this.finalizeSubagentResult(
           "partial",
-          buildSubagentPartialSummary(contextHistory, artifactPaths),
-          artifactPaths,
+          buildSubagentPartialSummary(contextHistory),
           taskPrompt,
-          runtimeWorkspaceRoot,
         );
       }
       const budgetDecision = this.consumeSubagentResponseBudget(runtime, actionResp, costBefore);
@@ -2904,13 +2901,11 @@ export class AgentEngine implements AgentRunner {
       // 并发子代理可能同时在途，因此限额最多被已在途的单次响应超出。
       // 每个响应结算后立即停止该子代理，且其他子代理在下一次调用前会共享检查。
       if (!budgetDecision.allowed) {
-        const evidence = buildSubagentPartialSummary(contextHistory, artifactPaths);
+        const evidence = buildSubagentPartialSummary(contextHistory);
         return this.finalizeSubagentResult(
           "partial",
           `${evidence}\n\n子代理已停止：${budgetDecision.reason ?? "执行预算已用尽"}。`,
-          artifactPaths,
           taskPrompt,
-          runtimeWorkspaceRoot,
         );
       }
 
@@ -2921,7 +2916,7 @@ export class AgentEngine implements AgentRunner {
           const summary =
             toolCalls.length === 0 && usableSummary(actionResp.content)
               ? actionResp.content
-              : buildSubagentPartialSummary(contextHistory, artifactPaths);
+              : buildSubagentPartialSummary(contextHistory);
           logger.warn(
             { turns: turnCount, maxSubTurns },
             `[Subagent] 已进入预留收口轮，以 partial 状态返回已收集证据。`,
@@ -2929,9 +2924,7 @@ export class AgentEngine implements AgentRunner {
           return this.finalizeSubagentResult(
             "partial",
             summary,
-            artifactPaths,
             taskPrompt,
-            runtimeWorkspaceRoot,
           );
         }
 
@@ -2956,9 +2949,7 @@ export class AgentEngine implements AgentRunner {
               return this.finalizeSubagentResult(
                 "partial",
                 `${summary}\n\n子代理已停止：${continuationBudget.reason ?? "执行预算已用尽"}。`,
-                artifactPaths,
                 taskPrompt,
-                runtimeWorkspaceRoot,
               );
             }
             const continuationCostBefore = usageSession?.totalCostCNY ?? 0;
@@ -2985,10 +2976,8 @@ export class AgentEngine implements AgentRunner {
             if (!continuationDecision.allowed) {
               return this.finalizeSubagentResult(
                 "partial",
-                `${buildSubagentPartialSummary(contextHistory, artifactPaths)}\n\n子代理已停止：${continuationDecision.reason ?? "执行预算已用尽"}。`,
-                artifactPaths,
+                `${buildSubagentPartialSummary(contextHistory)}\n\n子代理已停止：${continuationDecision.reason ?? "执行预算已用尽"}。`,
                 taskPrompt,
-                runtimeWorkspaceRoot,
               );
             }
           } catch (error) {
@@ -3001,7 +2990,7 @@ export class AgentEngine implements AgentRunner {
           }
         }
         const completed = usableSummary(summary);
-        if (!completed) summary = buildSubagentPartialSummary(contextHistory, artifactPaths);
+        if (!completed) summary = buildSubagentPartialSummary(contextHistory);
         logger.info(
           { turns: turnCount, status: completed ? "completed" : "partial" },
           `[Subagent] ✅ 探路者完成收口,返回总结。`,
@@ -3009,15 +2998,13 @@ export class AgentEngine implements AgentRunner {
         return this.finalizeSubagentResult(
           completed ? "completed" : "partial",
           summary,
-          artifactPaths,
           taskPrompt,
-          runtimeWorkspaceRoot,
         );
       }
 
       // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
       const getAccesses = readOnlyRegistry.getAccesses;
-      const scheduler = new ToolScheduler<{ message: Message; artifactPath?: string }>({
+      const scheduler = new ToolScheduler<Message>({
         maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
         signal,
       });
@@ -3055,17 +3042,12 @@ export class AgentEngine implements AgentRunner {
                   result.isError ? "failed" : "succeeded",
                 );
             const { message, envelope } = builtResult;
-            // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
-            const artifactPath = extractArtifactPath(message.content);
             rep.onToolResult(envelope);
-            return {
-              message,
-              ...(artifactPath !== undefined ? { artifactPath } : {}),
-            };
+            return message;
           },
         }),
       );
-      let subResults: Array<{ message: Message; artifactPath?: string }>;
+      let subResults: Message[];
       try {
         subResults = await Promise.all(scheduled);
         signal?.throwIfAborted();
@@ -3078,11 +3060,7 @@ export class AgentEngine implements AgentRunner {
 
       const observations: Message[] = new Array(toolCalls.length);
       for (let i = 0; i < subResults.length; i++) {
-        const { message, artifactPath } = subResults[i]!;
-        observations[i] = message;
-        if (artifactPath !== undefined) {
-          artifactPaths.push(artifactPath);
-        }
+        observations[i] = subResults[i]!;
       }
 
       contextHistory.push(...observations);
@@ -3092,36 +3070,33 @@ export class AgentEngine implements AgentRunner {
   private async finalizeSubagentResult(
     status: "completed" | "partial",
     report: string,
-    artifactPaths: readonly string[],
     taskPrompt: string,
-    workDir: string,
   ): Promise<SubagentResult> {
-    const artifacts = [...new Set(artifactPaths)];
+    const evidenceRefs: string[] = [];
     let summary = report;
 
     if (
       report.length > SUBAGENT_OUTPUT_BUDGET.summary.softMax &&
-      this.subagentReportArtifactWriter
+      this.subagentReportEvidenceWriter
     ) {
       try {
-        const artifactPath = await this.subagentReportArtifactWriter({
+        const evidenceRef = await this.subagentReportEvidenceWriter({
           taskPrompt,
           report,
           status,
-          workDir,
         });
-        if (artifactPath) {
-          artifacts.push(artifactPath);
+        if (evidenceRef) {
+          evidenceRefs.push(evidenceRef);
           summary = buildExternalizedSubagentPreview(
             report,
-            artifactPath,
+            evidenceRef,
             SUBAGENT_OUTPUT_BUDGET.summary.softMax,
           );
         }
       } catch (error) {
         logger.warn(
           { error: error instanceof Error ? error.message : String(error) },
-          "[Subagent] 完整报告外部化失败，回退到单次硬上限。",
+          "[Subagent] 完整报告 Evidence 归档失败，回退到单次硬上限。",
         );
       }
     }
@@ -3129,7 +3104,7 @@ export class AgentEngine implements AgentRunner {
     return {
       status,
       summary: truncateSubagentSummary(summary, SUBAGENT_OUTPUT_BUDGET.summary.hardMax),
-      artifacts: [...new Set(artifacts)],
+      evidenceRefs,
     };
   }
 }
@@ -3168,16 +3143,8 @@ function usableSummary(summary: string): boolean {
   return summary.trim().length > 0;
 }
 
-function buildSubagentPartialSummary(
-  contextHistory: readonly Message[],
-  artifactPaths: readonly string[],
-): string {
-  const evidence = buildSubagentEvidenceSnapshot(contextHistory);
-  const lines = [evidence ?? SUBAGENT_EMPTY_SUMMARY_FALLBACK];
-  if (artifactPaths.length > 0) {
-    lines.push("", "[已外部化证据]", ...artifactPaths.map((artifactPath) => `- ${artifactPath}`));
-  }
-  return lines.join("\n");
+function buildSubagentPartialSummary(contextHistory: readonly Message[]): string {
+  return buildSubagentEvidenceSnapshot(contextHistory) ?? SUBAGENT_EMPTY_SUMMARY_FALLBACK;
 }
 
 function truncateSubagentSummary(summary: string, maxChars: number): string {
@@ -3188,15 +3155,15 @@ function truncateSubagentSummary(summary: string, maxChars: number): string {
 
 function buildExternalizedSubagentPreview(
   report: string,
-  artifactPath: string,
+  evidenceRef: string,
   maxChars: number,
 ): string {
   const marker = [
     "",
-    "[完整子代理报告已外部化]",
-    `artifactPath: ${artifactPath}`,
+    "[完整子代理报告已归档为 Evidence]",
+    `Evidence: ${evidenceRef}`,
     `originalChars: ${report.length}`,
-    "当前仅保留结论/证据预览，需要细节时再按路径回查。",
+    `需要完整原文时调用 read_evidence(ref="${evidenceRef}", offsetBytes?, limitBytes?)。`,
   ].join("\n");
   if (marker.length >= maxChars) {
     return truncateSubagentSummary(marker, maxChars);
@@ -3298,21 +3265,6 @@ function buildSubagentTaskPrompt(runtimeWorkspaceRoot: string, taskPrompt: strin
     "- 证据尽量使用 `文件路径:行号`；明确标出未验证风险与建议下一步。",
     `- 常规目标为 ${SUBAGENT_OUTPUT_BUDGET.summary.softMin}–${SUBAGENT_OUTPUT_BUDGET.summary.softMax} 字符；简单任务可以更短，单次硬上限 ${SUBAGENT_OUTPUT_BUDGET.summary.hardMax} 字符。`,
   ].join("\n");
-}
-
-/**
- * 从 observationProcessor 返回的"已外部化"占位文本中提取 artifactPath。
- * 该文本形如(tool-result-observation.ts 产物):
- *   [大型工具输出已外部化]
- *   tool: bash
- *   ...
- *   artifactPath: <绝对磁盘路径>
- *   ...
- * 提取出 path 行的值返回;无则返回 undefined。
- */
-function extractArtifactPath(observation: string): string | undefined {
-  const match = /^artifactPath:\s*(.+)$/m.exec(observation);
-  return match?.[1]?.trim() || undefined;
 }
 
 function estimateTraceLength(messages: Message[]): number {

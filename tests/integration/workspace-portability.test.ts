@@ -36,7 +36,6 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
     [`sessions/${sessionDigest}/manifest.json`, '{"sessionId":"session-1"}\n'],
     [`task-runs/${taskRunDigest}/task.jsonl`, '{"type":"task-run"}\n'],
     [`task-runs/${taskRunDigest}/manifest.json`, '{"taskRunId":"task-1"}\n'],
-    ["artifacts/report.md", "# report\n"],
     ["evidence/tool.json", '{"ok":true}\n'],
     ["traces/run.jsonl", '{"event":"finish"}\n'],
     ["memory/summaries/session.json", '{"summary":"done"}\n'],
@@ -54,9 +53,8 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
     ["plugins.json", '{"plugins":[]}\n'],
     ["hooks-state.json", '{"hooks":[]}\n'],
     ["tui-debug.log", "private prompt\n"],
-    ["artifacts/.env", "API_KEY=secret\n"],
-    ["artifacts/runtime.sqlite", "not exported\n"],
-    ["artifacts/runtime.sqlite-journal", "rollback journal\n"],
+    ["evidence/.env", "API_KEY=secret\n"],
+    ["evidence/runtime.sqlite", "not exported\n"],
     ["evidence/evidence.sqlite-journal", "rollback journal\n"],
     ["traces/trace.db-journal", "rollback journal\n"],
     ["memory/summaries/memory.db-journal", "rollback journal\n"],
@@ -99,18 +97,17 @@ test("workspace portability builds a deterministic allowlisted export plan", asy
     reason: "memory_state_may_contain_sensitive_data",
     sha256: null,
   });
-  assert.deepEqual(pickEntry(byPath, "artifacts/.env"), {
+  assert.deepEqual(pickEntry(byPath, "evidence/.env"), {
     classification: "protected",
     reason: "credential_or_secret_material",
     sha256: null,
   });
-  assert.deepEqual(pickEntry(byPath, "artifacts/runtime.sqlite"), {
+  assert.deepEqual(pickEntry(byPath, "evidence/runtime.sqlite"), {
     classification: "protected",
     reason: "database_or_journal_file",
     sha256: null,
   });
   for (const relativePath of [
-    "artifacts/runtime.sqlite-journal",
     "evidence/evidence.sqlite-journal",
     "traces/trace.db-journal",
     "memory/summaries/memory.db-journal",
@@ -199,15 +196,15 @@ test("workspace portability recovers one pending cross-Session transaction befor
 test("workspace portability waits for the shared writer lock before scanning", async (t) => {
   const fixture = await createFixture("pico-portability-lock-");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const artifactPath = join(fixture.storageRoot, "artifacts", "concurrent.txt");
-  await writeFixtureFile(fixture.storageRoot, "artifacts/concurrent.txt", "before writer\n");
+  const evidencePath = join(fixture.storageRoot, "evidence", "concurrent.txt");
+  await writeFixtureFile(fixture.storageRoot, "evidence/concurrent.txt", "before writer\n");
   const childScript = `
     import { writeFileSync } from "node:fs";
     import { withFileLockSync } from "./src/storage/local-file-storage.ts";
     withFileLockSync(process.env.TEST_LOCK_PATH, "portability-concurrent-writer", () => {
       console.log("locked");
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
-      writeFileSync(process.env.TEST_ARTIFACT_PATH, "after writer\\n", { mode: 0o600 });
+      writeFileSync(process.env.TEST_EVIDENCE_PATH, "after writer\\n", { mode: 0o600 });
     });
   `;
   const child = spawn(
@@ -217,7 +214,7 @@ test("workspace portability waits for the shared writer lock before scanning", a
       cwd: process.cwd(),
       env: {
         ...process.env,
-        TEST_ARTIFACT_PATH: artifactPath,
+        TEST_EVIDENCE_PATH: evidencePath,
         TEST_LOCK_PATH: join(fixture.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -242,13 +239,13 @@ test("workspace portability waits for the shared writer lock before scanning", a
   assert.equal(exitCode, 0, childStderr);
   const content = "after writer\n";
   assert.deepEqual(
-    plan.entries.find((entry) => entry.relativePath === "artifacts/concurrent.txt"),
+    plan.entries.find((entry) => entry.relativePath === "evidence/concurrent.txt"),
     {
-      relativePath: "artifacts/concurrent.txt",
+      relativePath: "evidence/concurrent.txt",
       size: Buffer.byteLength(content),
       sha256: createHash("sha256").update(content).digest("hex"),
       classification: "portable",
-      reason: "portable_artifact",
+      reason: "portable_evidence",
     },
   );
 });
@@ -267,6 +264,16 @@ test("workspace portability fails closed for unknown storage surfaces", async (t
   );
 
   await rm(join(fixture.storageRoot, "new-store"), { recursive: true, force: true });
+  await writeFixtureFile(fixture.storageRoot, "artifacts/legacy.txt", "obsolete\n");
+  assert.throws(
+    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
+    (error: unknown) =>
+      error instanceof WorkspacePortabilityPlanError &&
+      error.code === "unknown_top_level_entry" &&
+      error.relativePath === "artifacts",
+  );
+
+  await rm(join(fixture.storageRoot, "artifacts"), { recursive: true, force: true });
   await writeFixtureFile(fixture.storageRoot, "memory/unreviewed.json", "{}\n");
   assert.throws(
     () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
@@ -330,15 +337,15 @@ test("workspace portability rejects symbolic links instead of following path esc
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
   const outside = join(fixture.root, "outside.txt");
   await writeFile(outside, "outside\n", { mode: 0o600 });
-  await mkdir(join(fixture.storageRoot, "artifacts"), { mode: 0o700 });
-  await symlink(outside, join(fixture.storageRoot, "artifacts", "escape"));
+  await mkdir(join(fixture.storageRoot, "evidence"), { mode: 0o700 });
+  await symlink(outside, join(fixture.storageRoot, "evidence", "escape"));
 
   assert.throws(
     () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
     (error: unknown) =>
       error instanceof WorkspacePortabilityPlanError &&
       error.code === "symbolic_link" &&
-      error.relativePath === "artifacts/escape",
+      error.relativePath === "evidence/escape",
   );
 });
 
@@ -348,9 +355,9 @@ test(
   async (t) => {
     const fixture = await createFixture("pico-portability-special-");
     t.after(() => rm(fixture.root, { recursive: true, force: true }));
-    const artifacts = join(fixture.storageRoot, "artifacts");
-    const fifo = join(artifacts, "stream");
-    await mkdir(artifacts, { mode: 0o700 });
+    const evidence = join(fixture.storageRoot, "evidence");
+    const fifo = join(evidence, "stream");
+    await mkdir(evidence, { mode: 0o700 });
     const result = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
 
@@ -359,7 +366,7 @@ test(
       (error: unknown) =>
         error instanceof WorkspacePortabilityPlanError &&
         error.code === "special_file" &&
-        error.relativePath === "artifacts/stream",
+        error.relativePath === "evidence/stream",
     );
   },
 );
@@ -418,13 +425,11 @@ function expectedPortableReason(
 ):
   | "canonical_runtime_history"
   | "durable_task_history"
-  | "portable_artifact"
   | "portable_evidence"
   | "portable_trace"
   | "portable_memory_summary" {
   if (relativePath.startsWith("sessions/")) return "canonical_runtime_history";
   if (relativePath.startsWith("task-runs/")) return "durable_task_history";
-  if (relativePath.startsWith("artifacts/")) return "portable_artifact";
   if (relativePath.startsWith("evidence/")) return "portable_evidence";
   if (relativePath.startsWith("traces/")) return "portable_trace";
   return "portable_memory_summary";

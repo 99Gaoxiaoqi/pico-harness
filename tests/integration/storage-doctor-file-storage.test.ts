@@ -448,7 +448,6 @@ test("StorageDoctor limits Runtime permission scans to canonical ledgers and .st
   }).close();
   const unrelatedRoots = [
     paths.workspace.memory,
-    paths.workspace.artifacts,
     paths.workspace.evidence,
     paths.workspace.traces,
     paths.workspace.tasks,

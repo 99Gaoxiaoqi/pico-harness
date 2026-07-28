@@ -12,7 +12,7 @@ import {
 } from "./evidence-blob-store.js";
 
 const EVIDENCE_ARCHIVE_SCHEMA_VERSION = 1 as const;
-const RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION = 2 as const;
+const BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_EVIDENCE_PAGE_LIMIT_BYTES = 16 * 1024;
 export const MAX_EVIDENCE_PAGE_LIMIT_BYTES = 64 * 1024;
 
@@ -43,27 +43,11 @@ export interface EvidenceArchiveReference {
   readonly exchangeCount: number;
 }
 
-/** Legacy v1 evidence embedded both raw and model-visible output in the manifest. */
-export interface RuntimeToolExchangeEvidenceV1 {
-  readonly kind: "tool-exchange";
-  readonly sessionId: string;
-  readonly toolCallId: string;
-  readonly toolName: string;
-  readonly arguments: string;
-  readonly rawOutput: string;
-  readonly modelVisibleOutput: string;
-  readonly isError: boolean;
-}
-
-/** @deprecated Runtime writes use RuntimeToolResultEvidenceV2; retained for v1 readers. */
-export type RuntimeToolExchangeEvidence = RuntimeToolExchangeEvidenceV1;
-
-export interface RuntimeToolExchangeEvidenceManifestV1 {
+/** Opaque address decoded from a model-visible pico://evidence URI. */
+export interface EvidenceUriReference {
   readonly schemaVersion: typeof EVIDENCE_ARCHIVE_SCHEMA_VERSION;
   readonly contentHash: string;
-  readonly archivedAt: string;
-  readonly kind: "tool-exchange";
-  readonly content: RuntimeToolExchangeEvidenceV1;
+  readonly sessionId: string;
 }
 
 /** Runtime ToolResult v2 keeps the original body once in the Evidence CAS. */
@@ -78,16 +62,37 @@ export interface RuntimeToolResultEvidenceV2 {
 }
 
 export interface RuntimeToolResultEvidenceManifestV2 {
-  readonly schemaVersion: typeof RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION;
+  readonly schemaVersion: typeof BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION;
   readonly contentHash: string;
   readonly archivedAt: string;
   readonly kind: "tool-exchange";
   readonly content: RuntimeToolResultEvidenceV2;
 }
 
-export type RuntimeToolExchangeEvidenceManifest =
-  | RuntimeToolExchangeEvidenceManifestV1
-  | RuntimeToolResultEvidenceManifestV2;
+/** Complete subagent reports share the same immutable Evidence blob CAS. */
+export interface SubagentReportEvidenceV2 {
+  readonly kind: "subagent-report";
+  readonly sessionId: string;
+  readonly taskPrompt: string;
+  readonly status: "completed" | "partial";
+  readonly report: EvidenceBlobRef;
+}
+
+export interface SubagentReportEvidenceManifestV2 {
+  readonly schemaVersion: typeof BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION;
+  readonly contentHash: string;
+  readonly archivedAt: string;
+  readonly kind: "subagent-report";
+  readonly content: SubagentReportEvidenceV2;
+}
+
+export interface SubagentReportEvidenceReference extends EvidenceUriReference {
+  readonly kind: "subagent-report";
+}
+
+export type BlobEvidenceManifest =
+  | RuntimeToolResultEvidenceManifestV2
+  | SubagentReportEvidenceManifestV2;
 
 export interface ArchiveRuntimeToolResultInput {
   readonly sessionId: string;
@@ -98,12 +103,20 @@ export interface ArchiveRuntimeToolResultInput {
   readonly isError: boolean;
 }
 
-export interface RuntimeToolOutputPageOptions {
+export interface ArchiveSubagentReportInput {
+  readonly sessionId: string;
+  readonly taskPrompt: string;
+  readonly report: string;
+  readonly status: "completed" | "partial";
+}
+
+export interface EvidencePageOptions {
   readonly offsetBytes?: number;
   readonly limitBytes?: number;
 }
 
-export interface RuntimeToolOutputPage {
+export interface EvidencePage {
+  readonly kind: BlobEvidenceManifest["kind"];
   readonly content: string;
   readonly offsetBytes: number;
   readonly endOffsetBytes: number;
@@ -112,6 +125,9 @@ export interface RuntimeToolOutputPage {
   readonly truncated: boolean;
   readonly nextOffsetBytes?: number;
 }
+
+export type RuntimeToolOutputPageOptions = EvidencePageOptions;
+export type RuntimeToolOutputPage = Omit<EvidencePage, "kind">;
 
 export interface EvidenceArchiveOptions {
   readonly baseDir: string;
@@ -125,11 +141,7 @@ export class EvidenceArchiveIntegrityError extends Error {
   }
 }
 
-/**
- * Immutable, content-addressed evidence for raw tool exchanges removed by full compaction.
- * This store is intentionally separate from short-lived tool-result artifacts: the latter
- * optimize a live turn, while this preserves the source material behind a durable summary.
- */
+/** Immutable, content-addressed evidence for compaction, ToolResults, and subagent reports. */
 export class EvidenceArchive {
   private readonly baseDir: string;
   private readonly now: () => Date;
@@ -184,25 +196,6 @@ export class EvidenceArchive {
     return reference;
   }
 
-  async archiveRuntimeToolExchange(
-    sessionId: string,
-    toolCallId: string,
-    toolName: string,
-    rawArguments: string,
-    rawOutput: string,
-    _modelVisibleOutput: string,
-    isError: boolean,
-  ): Promise<RuntimeEvidenceReference> {
-    return this.archiveRuntimeToolResult({
-      sessionId,
-      toolCallId,
-      toolName,
-      rawArguments,
-      rawOutput,
-      isError,
-    });
-  }
-
   async archiveRuntimeToolResult(
     input: ArchiveRuntimeToolResultInput,
   ): Promise<RuntimeEvidenceReference> {
@@ -238,7 +231,7 @@ export class EvidenceArchive {
     }
 
     const manifest: RuntimeToolResultEvidenceManifestV2 = {
-      schemaVersion: RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION,
+      schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
       contentHash,
       archivedAt: this.now().toISOString(),
       kind: "tool-exchange",
@@ -254,18 +247,89 @@ export class EvidenceArchive {
     return reference;
   }
 
+  async archiveSubagentReport(
+    input: ArchiveSubagentReportInput,
+  ): Promise<SubagentReportEvidenceReference> {
+    assertSubagentReportInput(input);
+    await withVerifiedEvidenceDirectory(
+      this.baseDir,
+      [sanitizeFilePart(input.sessionId)],
+      { create: true },
+      async () => undefined,
+    );
+    const report = (await this.blobs.putUtf8(input.report)).ref;
+    const content: SubagentReportEvidenceV2 = {
+      kind: "subagent-report",
+      sessionId: input.sessionId,
+      taskPrompt: input.taskPrompt,
+      status: input.status,
+      report,
+    };
+    const contentHash = hashContent(content);
+    const reference: SubagentReportEvidenceReference = {
+      schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+      contentHash,
+      sessionId: input.sessionId,
+      kind: "subagent-report",
+    };
+    try {
+      await this.readSubagentReportEvidence(reference);
+      return reference;
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    const manifest: SubagentReportEvidenceManifestV2 = {
+      schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
+      contentHash,
+      archivedAt: this.now().toISOString(),
+      kind: "subagent-report",
+      content,
+    };
+    const created = await writeImmutableJson(
+      this.baseDir,
+      [sanitizeFilePart(input.sessionId)],
+      `${contentHash}.json`,
+      manifest,
+    );
+    if (!created) await this.readSubagentReportEvidence(reference);
+    return reference;
+  }
+
   async readRuntimeToolOutput(reference: RuntimeEvidenceReference): Promise<string> {
     const manifest = await this.readRuntimeToolExchange(reference);
-    if (manifest.schemaVersion === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
-      return manifest.content.rawOutput;
-    }
     return (await this.blobs.read(manifest.content.rawOutput)).toString("utf8");
+  }
+
+  async readSubagentReport(reference: SubagentReportEvidenceReference): Promise<string> {
+    const manifest = await this.readSubagentReportEvidence(reference);
+    return (await this.blobs.read(manifest.content.report)).toString("utf8");
   }
 
   async readRuntimeToolOutputPage(
     reference: RuntimeEvidenceReference,
     options: RuntimeToolOutputPageOptions = {},
   ): Promise<RuntimeToolOutputPage> {
+    const page = await this.readEvidencePage(reference, options);
+    if (page.kind !== "tool-exchange") {
+      throw new EvidenceArchiveIntegrityError("Evidence kind is not tool-exchange");
+    }
+    return {
+      content: page.content,
+      offsetBytes: page.offsetBytes,
+      endOffsetBytes: page.endOffsetBytes,
+      totalBytes: page.totalBytes,
+      limitBytes: page.limitBytes,
+      truncated: page.truncated,
+      ...(page.nextOffsetBytes === undefined
+        ? {}
+        : { nextOffsetBytes: page.nextOffsetBytes }),
+    };
+  }
+
+  async readEvidencePage(
+    reference: EvidenceUriReference,
+    options: EvidencePageOptions = {},
+  ): Promise<EvidencePage> {
     const offsetBytes = pageInteger(
       options.offsetBytes,
       "offsetBytes",
@@ -280,16 +344,12 @@ export class EvidenceArchive {
       1,
       MAX_EVIDENCE_PAGE_LIMIT_BYTES,
     );
-    const manifest = await this.readRuntimeToolExchange(reference);
-    if (manifest.schemaVersion === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
-      return buildRuntimeToolOutputPage(
-        Buffer.from(manifest.content.rawOutput, "utf8"),
-        offsetBytes,
-        limitBytes,
-      );
-    }
-    const page = await this.blobs.readPage(manifest.content.rawOutput, offsetBytes, limitBytes);
+    const manifest = await this.readBlobEvidenceManifest(reference);
+    const blob =
+      manifest.kind === "tool-exchange" ? manifest.content.rawOutput : manifest.content.report;
+    const page = await this.blobs.readPage(blob, offsetBytes, limitBytes);
     return {
+      kind: manifest.kind,
       content: page.bytes.toString("utf8"),
       offsetBytes: page.offsetBytes,
       endOffsetBytes: page.endOffsetBytes,
@@ -301,10 +361,10 @@ export class EvidenceArchive {
   }
 
   async read(reference: EvidenceArchiveReference): Promise<EvidenceArchiveManifest>;
-  async read(reference: RuntimeEvidenceReference): Promise<RuntimeToolExchangeEvidenceManifest>;
+  async read(reference: RuntimeEvidenceReference): Promise<RuntimeToolResultEvidenceManifestV2>;
   async read(
     reference: EvidenceArchiveReference | RuntimeEvidenceReference,
-  ): Promise<EvidenceArchiveManifest | RuntimeToolExchangeEvidenceManifest> {
+  ): Promise<EvidenceArchiveManifest | RuntimeToolResultEvidenceManifestV2> {
     if (hasRuntimeEvidenceKind(reference)) return this.readRuntimeToolExchange(reference);
     assertEvidenceArchiveReference(reference);
     const manifest = await readImmutableJson(
@@ -329,60 +389,76 @@ export class EvidenceArchive {
 
   async readRuntimeToolExchange(
     reference: RuntimeEvidenceReference,
-  ): Promise<RuntimeToolExchangeEvidenceManifest> {
+  ): Promise<RuntimeToolResultEvidenceManifestV2> {
     assertRuntimeEvidenceReference(reference);
+    const manifest = await this.readBlobEvidenceManifest(reference);
+    if (manifest.kind !== "tool-exchange") {
+      throw new EvidenceArchiveIntegrityError("Evidence kind is not tool-exchange");
+    }
+    return manifest;
+  }
+
+  async readSubagentReportEvidence(
+    reference: SubagentReportEvidenceReference,
+  ): Promise<SubagentReportEvidenceManifestV2> {
+    assertSubagentReportReference(reference);
+    const manifest = await this.readBlobEvidenceManifest(reference);
+    if (manifest.kind !== "subagent-report") {
+      throw new EvidenceArchiveIntegrityError("Evidence kind is not subagent-report");
+    }
+    return manifest;
+  }
+
+  private async readBlobEvidenceManifest(
+    reference: EvidenceUriReference,
+  ): Promise<BlobEvidenceManifest> {
+    assertEvidenceUriReference(reference);
     const manifest = await readImmutableJson(
       this.baseDir,
       [sanitizeFilePart(reference.sessionId)],
       `${reference.contentHash}.json`,
-      decodeRuntimeToolExchangeManifest,
-      "Runtime tool-exchange evidence manifest",
+      decodeBlobEvidenceManifest,
+      "Evidence blob manifest",
     );
     if (
       manifest.contentHash !== reference.contentHash ||
-      manifest.kind !== reference.kind ||
-      manifest.content.kind !== reference.kind ||
-      manifest.content.sessionId !== reference.sessionId
+      manifest.content.sessionId !== reference.sessionId ||
+      manifest.content.kind !== manifest.kind
     ) {
-      throw new EvidenceArchiveIntegrityError(
-        "Runtime tool-exchange evidence reference does not match manifest",
-      );
+      throw new EvidenceArchiveIntegrityError("Evidence reference does not match manifest");
     }
     if (hashContent(manifest.content) !== manifest.contentHash) {
-      throw new EvidenceArchiveIntegrityError(
-        "Runtime tool-exchange evidence content hash mismatch",
-      );
+      throw new EvidenceArchiveIntegrityError("Evidence content hash mismatch");
     }
     return manifest;
   }
 }
 
-export function formatRuntimeEvidenceUri(reference: RuntimeEvidenceReference): string {
-  assertRuntimeEvidenceReference(reference);
+export function formatEvidenceUri(reference: EvidenceUriReference): string {
+  assertEvidenceUriReference(reference);
   return `pico://evidence/${encodeURIComponent(reference.sessionId)}/${reference.contentHash}`;
 }
 
-export function parseRuntimeEvidenceUri(value: string): RuntimeEvidenceReference {
+export function parseEvidenceUri(value: string): EvidenceUriReference {
   const match = /^pico:\/\/evidence\/([^/]+)\/([a-f0-9]{64})$/u.exec(value);
   if (!match) {
-    throw new EvidenceArchiveIntegrityError("Runtime evidence ref is invalid");
+    throw new EvidenceArchiveIntegrityError("Evidence ref is invalid");
   }
   let sessionId: string;
   try {
     sessionId = decodeURIComponent(match[1]!);
   } catch (error) {
     throw new EvidenceArchiveIntegrityError(
-      `Runtime evidence ref has invalid session encoding: ${errorMessage(error)}`,
+      `Evidence ref has invalid session encoding: ${errorMessage(error)}`,
     );
   }
   if (!isNonEmptyString(sessionId) || encodeURIComponent(sessionId) !== match[1]) {
-    throw new EvidenceArchiveIntegrityError("Runtime evidence ref has a non-canonical session");
+    throw new EvidenceArchiveIntegrityError("Evidence ref has a non-canonical session");
   }
   return {
     schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
     contentHash: match[2]!,
     sessionId,
-    kind: "tool-exchange",
   };
 }
 
@@ -457,40 +533,32 @@ function decodeManifest(value: unknown): EvidenceArchiveManifest {
   };
 }
 
-function decodeRuntimeToolExchangeManifest(value: unknown): RuntimeToolExchangeEvidenceManifest {
-  if (
-    !isRecord(value) ||
-    (value["schemaVersion"] !== EVIDENCE_ARCHIVE_SCHEMA_VERSION &&
-      value["schemaVersion"] !== RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION)
-  ) {
-    throw new EvidenceArchiveIntegrityError(
-      "Runtime tool-exchange evidence has an invalid schema version",
-    );
+function decodeBlobEvidenceManifest(value: unknown): BlobEvidenceManifest {
+  if (!isRecord(value) || value["schemaVersion"] !== BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION) {
+    throw new EvidenceArchiveIntegrityError("Evidence blob manifest has an invalid schema version");
   }
   if (
     !isNonEmptyString(value["contentHash"]) ||
     !isNonEmptyString(value["archivedAt"]) ||
-    value["kind"] !== "tool-exchange"
+    (value["kind"] !== "tool-exchange" && value["kind"] !== "subagent-report")
   ) {
-    throw new EvidenceArchiveIntegrityError(
-      "Runtime tool-exchange evidence has an invalid envelope",
-    );
+    throw new EvidenceArchiveIntegrityError("Evidence blob manifest has an invalid envelope");
   }
-  if (value["schemaVersion"] === EVIDENCE_ARCHIVE_SCHEMA_VERSION) {
+  if (value["kind"] === "tool-exchange") {
     return {
-      schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+      schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
       contentHash: value["contentHash"],
       archivedAt: value["archivedAt"],
       kind: "tool-exchange",
-      content: decodeRuntimeToolExchangeEvidenceV1(value["content"]),
+      content: decodeRuntimeToolResultEvidenceV2(value["content"]),
     };
   }
   return {
-    schemaVersion: RUNTIME_TOOL_RESULT_EVIDENCE_SCHEMA_VERSION,
+    schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
     contentHash: value["contentHash"],
     archivedAt: value["archivedAt"],
-    kind: "tool-exchange",
-    content: decodeRuntimeToolResultEvidenceV2(value["content"]),
+    kind: "subagent-report",
+    content: decodeSubagentReportEvidenceV2(value["content"]),
   };
 }
 
@@ -515,30 +583,17 @@ function assertRuntimeToolResultInput(
   }
 }
 
-function decodeRuntimeToolExchangeEvidenceV1(value: unknown): RuntimeToolExchangeEvidenceV1 {
+function assertSubagentReportInput(
+  input: ArchiveSubagentReportInput,
+): asserts input is ArchiveSubagentReportInput {
   if (
-    !isRecord(value) ||
-    value["kind"] !== "tool-exchange" ||
-    !isNonEmptyString(value["sessionId"]) ||
-    !isNonEmptyString(value["toolCallId"]) ||
-    !isNonEmptyString(value["toolName"]) ||
-    typeof value["arguments"] !== "string" ||
-    typeof value["rawOutput"] !== "string" ||
-    typeof value["modelVisibleOutput"] !== "string" ||
-    typeof value["isError"] !== "boolean"
+    !isNonEmptyString(input.sessionId) ||
+    typeof input.taskPrompt !== "string" ||
+    typeof input.report !== "string" ||
+    (input.status !== "completed" && input.status !== "partial")
   ) {
-    throw new EvidenceArchiveIntegrityError("Runtime tool-exchange evidence has invalid content");
+    throw new EvidenceArchiveIntegrityError("Subagent report evidence payload is invalid");
   }
-  return {
-    kind: "tool-exchange",
-    sessionId: value["sessionId"],
-    toolCallId: value["toolCallId"],
-    toolName: value["toolName"],
-    arguments: value["arguments"],
-    rawOutput: value["rawOutput"],
-    modelVisibleOutput: value["modelVisibleOutput"],
-    isError: value["isError"],
-  };
 }
 
 function decodeRuntimeToolResultEvidenceV2(value: unknown): RuntimeToolResultEvidenceV2 {
@@ -568,6 +623,32 @@ function decodeRuntimeToolResultEvidenceV2(value: unknown): RuntimeToolResultEvi
     arguments: value["arguments"],
     rawOutput: value["rawOutput"],
     isError: value["isError"],
+  };
+}
+
+function decodeSubagentReportEvidenceV2(value: unknown): SubagentReportEvidenceV2 {
+  if (
+    !isRecord(value) ||
+    value["kind"] !== "subagent-report" ||
+    !isNonEmptyString(value["sessionId"]) ||
+    typeof value["taskPrompt"] !== "string" ||
+    (value["status"] !== "completed" && value["status"] !== "partial")
+  ) {
+    throw new EvidenceArchiveIntegrityError("Subagent report evidence has invalid content");
+  }
+  try {
+    assertEvidenceBlobRef(value["report"]);
+  } catch (error) {
+    throw new EvidenceArchiveIntegrityError(
+      `Subagent report evidence has invalid blob reference: ${errorMessage(error)}`,
+    );
+  }
+  return {
+    kind: "subagent-report",
+    sessionId: value["sessionId"],
+    taskPrompt: value["taskPrompt"],
+    status: value["status"],
+    report: value["report"],
   };
 }
 
@@ -704,13 +785,31 @@ function assertEvidenceArchiveReference(reference: EvidenceArchiveReference): vo
 
 function assertRuntimeEvidenceReference(reference: RuntimeEvidenceReference): void {
   if (
-    reference.schemaVersion !== EVIDENCE_ARCHIVE_SCHEMA_VERSION ||
-    !isContentHash(reference.contentHash) ||
-    !isNonEmptyString(reference.sessionId) ||
+    !isValidEvidenceUriReference(reference) ||
     reference.kind !== "tool-exchange"
   ) {
     throw new EvidenceArchiveIntegrityError("Runtime tool-exchange evidence reference is invalid");
   }
+}
+
+function assertSubagentReportReference(reference: SubagentReportEvidenceReference): void {
+  if (!isValidEvidenceUriReference(reference) || reference.kind !== "subagent-report") {
+    throw new EvidenceArchiveIntegrityError("Subagent report evidence reference is invalid");
+  }
+}
+
+function assertEvidenceUriReference(reference: EvidenceUriReference): void {
+  if (!isValidEvidenceUriReference(reference)) {
+    throw new EvidenceArchiveIntegrityError("Evidence URI reference is invalid");
+  }
+}
+
+function isValidEvidenceUriReference(reference: EvidenceUriReference): boolean {
+  return (
+    reference.schemaVersion === EVIDENCE_ARCHIVE_SCHEMA_VERSION &&
+    isContentHash(reference.contentHash) &&
+    isNonEmptyString(reference.sessionId)
+  );
 }
 
 async function readImmutableJson<T>(
@@ -755,48 +854,6 @@ function pageInteger(
     );
   }
   return value;
-}
-
-function isUtf8ContinuationByte(byte: number): boolean {
-  return (byte & 0xc0) === 0x80;
-}
-
-function buildRuntimeToolOutputPage(
-  bytes: Buffer,
-  offsetBytes: number,
-  limitBytes: number,
-): RuntimeToolOutputPage {
-  if (offsetBytes > bytes.byteLength) {
-    throw new EvidenceArchiveIntegrityError(
-      `Evidence offsetBytes ${offsetBytes} exceeds output size ${bytes.byteLength}`,
-    );
-  }
-  if (offsetBytes < bytes.byteLength && isUtf8ContinuationByte(bytes[offsetBytes]!)) {
-    throw new EvidenceArchiveIntegrityError(
-      `Evidence offsetBytes ${offsetBytes} is not a UTF-8 code point boundary`,
-    );
-  }
-
-  let endOffsetBytes = Math.min(bytes.byteLength, offsetBytes + limitBytes);
-  if (endOffsetBytes < bytes.byteLength) {
-    while (endOffsetBytes > offsetBytes && isUtf8ContinuationByte(bytes[endOffsetBytes]!)) {
-      endOffsetBytes--;
-    }
-  }
-  if (endOffsetBytes === offsetBytes && offsetBytes < bytes.byteLength) {
-    throw new EvidenceArchiveIntegrityError(
-      `Evidence limitBytes ${limitBytes} cannot contain the next complete UTF-8 code point`,
-    );
-  }
-  return {
-    content: bytes.subarray(offsetBytes, endOffsetBytes).toString("utf8"),
-    offsetBytes,
-    endOffsetBytes,
-    totalBytes: bytes.byteLength,
-    limitBytes,
-    truncated: endOffsetBytes < bytes.byteLength,
-    ...(endOffsetBytes < bytes.byteLength ? { nextOffsetBytes: endOffsetBytes } : {}),
-  };
 }
 
 async function writeImmutableJson(
