@@ -86,7 +86,9 @@ function rewindOperation(operationId: string): StorageOperation {
     },
     target: {
       messageId: "message",
+      sourceMessageEventId: "user-message:message",
       messageIndex: 0,
+      userPrompt: "canonical rewind point",
     },
     files: [],
   };
