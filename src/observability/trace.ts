@@ -17,6 +17,7 @@ import { join } from "pathe";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export type TraceAttributes = Record<string, unknown>;
+export type TraceAttributePolicy = "full" | "metadata-only";
 
 /** A timed operation node in the trace tree. */
 export class Span {
@@ -35,6 +36,7 @@ export class Span {
     parent: Span | null,
     now: () => number = Date.now,
     attributes: TraceAttributes = {},
+    private readonly attributePolicy: TraceAttributePolicy = "full",
   ) {
     this.name = name;
     this.parent = parent;
@@ -45,7 +47,7 @@ export class Span {
 
   /** Start an explicit child span without relying on ambient context. */
   startChild(name: string, attributes: TraceAttributes = {}): Span {
-    const span = new Span(name, this, this.now, attributes);
+    const span = new Span(name, this, this.now, attributes, this.attributePolicy);
     this.children.push(span);
     return span;
   }
@@ -64,7 +66,8 @@ export class Span {
     if (value === undefined) {
       return;
     }
-    this.attributes[key] = value;
+    this.attributes[key] =
+      this.attributePolicy === "metadata-only" ? metadataOnlyAttribute(value) : value;
   }
 
   /** Record multiple metadata fields. */
@@ -94,6 +97,8 @@ export class Span {
 export interface TracerOptions {
   now?: () => number;
   picoHome?: string;
+  /** Redact every string attribute before it can enter an in-memory or persisted trace. */
+  attributePolicy?: TraceAttributePolicy;
 }
 
 export class Tracer {
@@ -104,7 +109,13 @@ export class Tracer {
 
   /** Start the root span for one agent run. */
   startRoot(name: string, attributes: TraceAttributes = {}): Span {
-    this.rootSpan = new Span(name, null, this.options.now ?? Date.now, attributes);
+    this.rootSpan = new Span(
+      name,
+      null,
+      this.options.now ?? Date.now,
+      attributes,
+      this.options.attributePolicy,
+    );
     this.currentSpan = this.rootSpan;
     return this.rootSpan;
   }
@@ -189,4 +200,13 @@ export function truncate(s: string, max: number): string {
 /** Keep session ids safe inside trace filenames. */
 function sanitizeFilePart(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
+}
+
+function metadataOnlyAttribute(value: unknown): unknown {
+  if (typeof value === "string") return "[REDACTED]";
+  if (Array.isArray(value)) return value.map(metadataOnlyAttribute);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, metadataOnlyAttribute(item)]),
+  );
 }

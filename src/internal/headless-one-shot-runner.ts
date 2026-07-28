@@ -164,6 +164,8 @@ export interface HeadlessOneShotDependencies {
   readonly lockRoot?: string;
   /** Test seam for machine-local owner-lease deletion fault injection. */
   readonly lockRemoveLeaseDirectory?: (leaseDirectory: string) => Promise<void>;
+  /** Test seam that opens a deterministic crash window after Runtime trace export. */
+  readonly beforeTraceSanitize?: () => Promise<void>;
 }
 
 type CancelCause = "timeout" | "SIGINT" | "SIGTERM" | "canceled";
@@ -450,6 +452,7 @@ async function runValidatedRequest(
       runtimeDependencies,
     );
     const settled = await settleRuntime(runtimePromise, cancellation, request.shutdownGraceMs);
+    if (request.trace) await dependencies.beforeTraceSanitize?.();
     const traceWorkDir = workDir;
     const secrets = credentialCandidates(selected.config.apiKey);
     const safeTracePath = request.trace
