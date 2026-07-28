@@ -412,7 +412,7 @@ async function runValidatedRequest(
           snapshotSessionTraceFiles(workDir, picoHome, request.sessionId),
           cancellation,
         )
-      : new Set<string>();
+      : new Map<string, string>();
 
     let policyBlocked = false;
     const reporter = new SilentReporter();
@@ -1265,7 +1265,7 @@ interface RuntimeTraceSanitizationInput {
   readonly workDir: string;
   readonly picoHome: string;
   readonly sessionId: string;
-  readonly baseline: ReadonlySet<string>;
+  readonly baseline: ReadonlyMap<string, string>;
   readonly secrets: readonly string[];
   readonly tracePath?: string;
 }
@@ -1278,8 +1278,8 @@ async function sanitizeRuntimeTraces(
   }).workspace.traces;
   const current = await snapshotSessionTraceFiles(input.workDir, input.picoHome, input.sessionId);
   const createdPaths = [...current]
-    .filter((name) => !input.baseline.has(name))
-    .map((name) => join(traceDirectory, name));
+    .filter(([name, signature]) => input.baseline.get(name) !== signature)
+    .map(([name]) => join(traceDirectory, name));
   const paths = new Set(createdPaths);
   if (input.tracePath) paths.add(input.tracePath);
 
@@ -1295,21 +1295,32 @@ async function snapshotSessionTraceFiles(
   workDir: string,
   picoHome: string,
   sessionId: string,
-): Promise<Set<string>> {
+): Promise<Map<string, string>> {
   const traceDirectory = resolvePicoPaths(workDir, { picoHome }).workspace.traces;
   const prefix = `trace_${sessionId.replaceAll(/[^a-zA-Z0-9_-]/gu, "_")}_`;
   try {
     const entries = await readdir(traceDirectory, { withFileTypes: true });
-    return new Set(
-      entries
-        .filter(
-          (entry) =>
-            entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".json"),
-        )
-        .map((entry) => entry.name),
+    const candidates = entries.filter(
+      (entry) => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".json"),
     );
+    const snapshots = await Promise.all(
+      candidates.map(async (entry): Promise<readonly [string, string] | undefined> => {
+        try {
+          const info = await lstat(join(traceDirectory, entry.name), { bigint: true });
+          if (!info.isFile()) return undefined;
+          return [
+            entry.name,
+            `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`,
+          ] as const;
+        } catch (error) {
+          if (isErrnoCode(error, "ENOENT")) return undefined;
+          throw error;
+        }
+      }),
+    );
+    return new Map(snapshots.filter((entry) => entry !== undefined));
   } catch (error) {
-    if (isErrnoCode(error, "ENOENT")) return new Set();
+    if (isErrnoCode(error, "ENOENT")) return new Map();
     throw error;
   }
 }
