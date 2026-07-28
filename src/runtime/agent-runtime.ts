@@ -107,7 +107,6 @@ import { RuntimeStore } from "../tasks/runtime-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   BackgroundPolicyViolationError,
-  buildBackgroundYoloHookExecutionMiddleware,
   buildBackgroundYoloMiddleware,
   prepareBackgroundYoloPolicy,
   type BackgroundWorkspaceTrustVerifier,
@@ -916,6 +915,17 @@ export async function executeAgentRuntime(
         ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }
         : {}),
       ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+      ...(backgroundPolicy?.hookRunner
+        ? {
+            postToolResultHook: (call, result) =>
+              backgroundPolicy.hookRunner!.runPostToolResult(
+                call.name,
+                parseHookToolInput(call.arguments),
+                result,
+                session.id,
+              ),
+          }
+        : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
@@ -925,12 +935,6 @@ export async function executeAgentRuntime(
         buildBackgroundYoloMiddleware({
           policy: backgroundPolicy,
           workspaceRoots,
-          sessionId: session.id,
-        }),
-      );
-      registry.useExecution?.(
-        buildBackgroundYoloHookExecutionMiddleware({
-          policy: backgroundPolicy,
           sessionId: session.id,
         }),
       );
@@ -1281,7 +1285,6 @@ function buildRegistry(
   env?: NodeJS.ProcessEnv,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
-    truncateResults: false,
     deferWorkspaceBoundary: true,
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),

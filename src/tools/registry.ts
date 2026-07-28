@@ -101,8 +101,6 @@ export interface BaseTool {
    * readOnly 字段仍保留,供 Guardrail 无进展告警等布尔语义场景使用。
    */
   accesses?(args: string): ToolAccesses;
-  /** 该工具单次返回的最大字符数;未设置时使用 Registry 默认值 */
-  maxResultSizeChars?: number;
   /** 工具所属工具集,供未来 subagent/MCP 分组授权 */
   toolset?: string;
 }

@@ -41,7 +41,7 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
   const evidenceArchive = new EvidenceArchive({
     baseDir: fixture.paths.workspace.evidence,
   });
-  const registry = new ToolRegistry({ truncateResults: false });
+  const registry = new ToolRegistry();
   registry.register(outputTool(LARGE_TOOL_NAME, rawOutput));
   registry.register(new ReadEvidenceTool(fixture.workDir, fixture.paths.workspace.evidence));
 
@@ -215,7 +215,7 @@ test("Evidence ENOSPC keeps one complete inline fact but a bounded model project
   });
   const canary = "PICO_FAIL_OPEN_MIDDLE_CANARY";
   const rawOutput = buildLargeOutput(canary);
-  const registry = new ToolRegistry({ truncateResults: false });
+  const registry = new ToolRegistry();
   registry.register(outputTool("fail_open_fixture", rawOutput));
   const providerMessages: Message[][] = [];
   const provider: LLMProvider = {
@@ -347,7 +347,7 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
   await session.recover();
   const engine = new AgentEngine({
     provider,
-    registry: new ToolRegistry({ truncateResults: false }),
+    registry: new ToolRegistry(),
     workDir: fixture.workDir,
     runtimePort,
     runtimeEvidenceArchive: evidenceArchive,
