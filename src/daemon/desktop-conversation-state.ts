@@ -289,9 +289,9 @@ function parseStoredInput(value: Record<string, unknown>, filePath: string): Run
   }
   const candidate = value["input"];
   const kind = candidate["kind"];
-  if ((kind === undefined || kind === "text") && typeof candidate["text"] === "string") {
+  if (kind === "text" && typeof candidate["text"] === "string") {
     return {
-      ...(kind === "text" ? { kind } : {}),
+      kind,
       text: requireNonEmpty(candidate["text"], "input.text"),
     };
   }

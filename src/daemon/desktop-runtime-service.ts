@@ -1291,7 +1291,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           disposition: behavior === "replace" ? "replaced" : "queued",
         };
       }
-      if (params.input.kind !== undefined && params.input.kind !== "text") {
+      if (params.input.kind !== "text") {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "无法 Steer 非文本输入");
       }
       const run = await this.options.runtimeService.handle(
@@ -1659,7 +1659,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     input: RuntimeUserInput,
   ): Promise<ResolvedRuntimeUserInput> {
-    if (input.kind === undefined || input.kind === "text") return { prompt: input.text };
+    if (input.kind === "text") return { prompt: input.text };
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
     const config = await loadPicoConfig(canonical);
@@ -4355,9 +4355,9 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input 必须是对象");
   }
   const kind = value["kind"];
-  if (kind === undefined || kind === "text") {
+  if (kind === "text") {
     return {
-      ...(kind === "text" ? { kind } : {}),
+      kind,
       text: requireText(value["text"], "input.text"),
     };
   }

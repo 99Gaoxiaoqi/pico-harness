@@ -29,6 +29,23 @@ const capabilityMethods = [
   "mcp.effective.list",
 ] as const;
 
+test("session.send requires the canonical input discriminator", () => {
+  const canonical = {
+    workspacePath: "/workspace",
+    input: { kind: "text", text: "hello" },
+    idempotencyKey: "send-1",
+  } as const;
+  assert.deepEqual(parseStrictRuntimeParams("session.send", canonical), canonical);
+  assertProtocolError(
+    () =>
+      parseStrictRuntimeParams("session.send", {
+        ...canonical,
+        input: { text: "legacy" },
+      }),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
+});
+
 test("scoped capability methods are explicit Desktop capabilities with strict write contracts", () => {
   for (const method of capabilityMethods) {
     assert.equal(RUNTIME_METHODS.includes(method), true);
@@ -246,15 +263,20 @@ test("scoped capability results expose opaque provenance without source paths or
 });
 
 test("runtime schema and config notifications advertise scoped capabilities without secret data", () => {
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 9);
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v9");
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 10);
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v10");
   const ping = {
     pong: true,
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     desktopSchemaRevision: DESKTOP_RUNTIME_SCHEMA_REVISION,
     capabilities: [DESKTOP_RUNTIME_SCHEMA_CAPABILITY, CAPABILITY_SCOPE_RUNTIME_CAPABILITY],
+    picoHome: "/state/pico",
   } as const;
   assert.deepEqual(parseDesktopRuntimeResult("runtime.ping", ping), ping);
+  assertProtocolError(() => {
+    const { picoHome: _picoHome, ...legacyPing } = ping;
+    parseDesktopRuntimeResult("runtime.ping", legacyPing);
+  }, RUNTIME_ERROR_CODES.INVALID_REQUEST);
   assertProtocolError(
     () =>
       parseDesktopRuntimeResult("runtime.ping", {
