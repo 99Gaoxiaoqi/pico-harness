@@ -47,6 +47,8 @@ export interface ToolResultEnvelope {
   readonly rawSizeBytes: number;
   readonly sha256: string;
   readonly projection: RuntimeToolResultProjection;
+  /** canonical projection 到宿主边界是否又受 16 KiB UTF-8 上限约束。 */
+  readonly deliveryTruncated: boolean;
   readonly evidence?: {
     readonly uri: string;
     readonly ref: RuntimeEvidenceReference;
@@ -62,8 +64,11 @@ export interface ToolResultEnvelopeInput {
   readonly evidence?: RuntimeEvidenceReference;
 }
 
+export const MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES = 16 * 1024;
+
 export function createToolResultEnvelope(input: ToolResultEnvelopeInput): ToolResultEnvelope {
   const evidence = input.evidence;
+  const projectionText = sliceUtf8Bytes(input.projection.text, MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES);
   return {
     version: 1,
     toolCallId: input.toolCallId,
@@ -71,7 +76,11 @@ export function createToolResultEnvelope(input: ToolResultEnvelopeInput): ToolRe
     status: input.status,
     rawSizeBytes: input.body.sizeBytes,
     sha256: input.body.sha256,
-    projection: structuredClone(input.projection),
+    projection: {
+      ...structuredClone(input.projection),
+      text: projectionText,
+    },
+    deliveryTruncated: projectionText !== input.projection.text,
     ...(evidence
       ? {
           evidence: {
@@ -81,4 +90,17 @@ export function createToolResultEnvelope(input: ToolResultEnvelopeInput): ToolRe
         }
       : {}),
   };
+}
+
+function sliceUtf8Bytes(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let bytes = 0;
+  let end = 0;
+  for (const symbol of value) {
+    const symbolBytes = Buffer.byteLength(symbol, "utf8");
+    if (bytes + symbolBytes > maxBytes) break;
+    bytes += symbolBytes;
+    end += symbol.length;
+  }
+  return value.slice(0, end);
 }
