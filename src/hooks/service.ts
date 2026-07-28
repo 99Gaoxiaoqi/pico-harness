@@ -240,8 +240,6 @@ function makeInput<E extends HookEvent>(
   payload: HookEventPayloadMap[E],
 ): HookInput<E> {
   const toolPayload = isToolPayload(payload) ? payload : undefined;
-  const response =
-    "tool_response" in Object(payload) ? Reflect.get(payload, "tool_response") : undefined;
   return {
     session_id: sessionId,
     cwd,
@@ -250,7 +248,6 @@ function makeInput<E extends HookEvent>(
     ...(toolPayload
       ? { tool_name: toolPayload.tool_name, tool_input: toolPayload.tool_input }
       : {}),
-    ...(typeof response === "string" ? { tool_response: response } : {}),
   };
 }
 
