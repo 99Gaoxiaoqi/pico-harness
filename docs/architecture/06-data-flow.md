@@ -54,7 +54,9 @@
 │ │     ├─ preWriteHook(写工具记录 File History preimage)        │ │
 │ │     └─ tool.execute(args) → 未截断 ToolResult                 │ │
 │ │   生成 deterministic projection，必要时写 Evidence CAS       │ │
-│ │   await session.commitMessages(...toolResults)               │ │
+│ │   runtimeRun.registerToolResult(structured input)            │ │
+│ │   runtimeRun.commitMessages(...registered projections)       │ │
+│ │     └─ 只落 canonical tool.result.recorded，不落 Message 结果  │ │
 │ │     └─ durable 后分发结构化 Hook / Reporter / PostToolBatch   │ │
 │ │                                                              │ │
 │ │ ⑤ 文件历史 journal(工具批次 finally)                         │ │
@@ -83,11 +85,11 @@
 旧 ToolResult 请求投影（只改 Provider 请求副本）
     │
     ├─ 回到 85% 以下 → 发送投影（Session 不变）
-    └─ 仍超水位 → FullCompactor
+    └─ 仍超水位 → FullCompactor + Runtime checkpoint
         ├─ findSafeCompactionCut(token 目标)
         ├─ toolCalls 与整批 results 不跨边界
-        ├─ session.applyCompaction(summary, compactedCount)
-        └─ 重新组装“摘要 + 完整安全尾部”
+        ├─ 追加 context.checkpoint.recorded(count + digest + throughEventId)
+        └─ 读模型校验后组装“摘要 + 完整安全尾部”
 
 provider.generate() 若仍返回 ContextOverflowError
     │
@@ -153,7 +155,7 @@ session.rewindBoth(messageId, messageIndex):
       ├─ 原子恢复 workspace；外部变化则 needs_attention，不覆盖后来修改
       ├─ 追加幂等 history.rewound(throughEventId)
       │   └─ 旧 RuntimeEvent 不删除，只改变活动历史投影
-      ├─ 修剪 File History 和失效的 Summary sidecar
+      ├─ 修剪与回退点对应的 File History
       └─ journal: completed
 
 进程在中间崩溃时，下次启动从 journal 当前阶段继续向前收敛。

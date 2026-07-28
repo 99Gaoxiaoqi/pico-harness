@@ -1,9 +1,9 @@
 import type { Session } from "../engine/session.js";
-import type { TranscriptEvent, TranscriptProjection } from "./transcript-event-store.js";
+import { isDurableTranscriptEvent, type DurableTranscriptEvent } from "./transcript-event-store.js";
 
 /** 窄持久化边界：调用方只负责提交已经过策略筛选的语义事件。 */
 export interface DurableTranscriptSink {
-  append(event: TranscriptEvent): Promise<void>;
+  append(event: DurableTranscriptEvent): Promise<void>;
 }
 
 /**
@@ -11,38 +11,9 @@ export interface DurableTranscriptSink {
  * 混进 EventStore reducer。流式 delta、phase 和原始工具 stdout/stderr
  * 不落盘；最终 entry/tool/subagent 状态仍可在重启后确定性恢复。
  */
-export type TranscriptDurabilityPolicy = (
-  event: TranscriptEvent,
-  projection: TranscriptProjection,
-) => boolean;
+export type TranscriptDurabilityPolicy = (event: DurableTranscriptEvent) => boolean;
 
-export const defaultTranscriptDurabilityPolicy: TranscriptDurabilityPolicy = (event) => {
-  switch (event.type) {
-    case "entry.appended":
-      return event.entry.kind !== "thinking" || Boolean(event.entry.content?.trim());
-    case "assistant.stream.started":
-    case "assistant.stream.completed":
-    case "assistant.stream.interrupted":
-    case "assistant.response.suppressed":
-    case "tool.started":
-    case "tool.approval.requested":
-    case "tool.completed":
-    case "transcript.truncated":
-      return true;
-    case "subagent.activity.updated":
-      return isTerminalSubagentStatus(event.activity.status);
-    case "subagent.activity.archived":
-      return true;
-    case "assistant.stream.delta":
-    case "tool.output":
-    case "tool.output.truncated":
-    case "subagent.trace.recorded":
-    case "subagent.activity.claimed":
-    case "transcript.cleared":
-    case "phase.changed":
-      return false;
-  }
-};
+export const defaultTranscriptDurabilityPolicy: TranscriptDurabilityPolicy = () => true;
 
 /** Session.recordTranscriptEvent 的适配器，复用同一 RuntimeEvent 写入队列。 */
 export function createSessionTranscriptSink(
@@ -58,12 +29,4 @@ export function createSessionTranscriptSink(
   };
 }
 
-function isTerminalSubagentStatus(status: string): boolean {
-  return (
-    status === "completed" ||
-    status === "partial" ||
-    status === "failed" ||
-    status === "timed_out" ||
-    status === "cancelled"
-  );
-}
+export { isDurableTranscriptEvent };

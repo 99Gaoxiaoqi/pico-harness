@@ -549,7 +549,7 @@ function eventBase(
   visibility: "model" | "internal",
 ) {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     eventId,
     sessionId: ref.sessionId,
     invocationId: `invocation-${ref.runId}`,

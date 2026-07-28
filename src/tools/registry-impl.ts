@@ -363,7 +363,6 @@ export class ToolRegistry implements Registry {
       forceApproval = hookResult.decision === "ask" || hookResult.decision === "defer";
       if (hookResult.modifiedInput !== undefined) {
         currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
-        toolInput = hookResult.modifiedInput;
         const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
         if (rewrittenRejection) return rewrittenRejection;
       }
@@ -389,12 +388,16 @@ export class ToolRegistry implements Registry {
       }
     }
     try {
+      const executionContext: ToolExecutionContext = {
+        ...(context ?? {}),
+        toolCallId: currentCall.id,
+      };
       let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) =>
-        tool.execute(nextCall.arguments, context);
+        tool.execute(nextCall.arguments, executionContext);
       for (let i = this.executionMiddlewares.length - 1; i >= 0; i--) {
         const mw = this.executionMiddlewares[i]!;
         const next = chain;
-        chain = (nextCall) => mw(nextCall, next, context);
+        chain = (nextCall) => mw(nextCall, next, executionContext);
       }
       return {
         toolCallId: currentCall.id,

@@ -11,11 +11,13 @@ import {
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { EvidenceArchive, parseEvidenceUri } from "../context/evidence-archive.js";
 import { FullCompactor } from "../context/full-compactor.js";
+import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
 import { SkillLoader } from "../context/skill.js";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
 import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
+import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -85,8 +87,7 @@ import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   readExistingRuntimeSessionProjection,
   RuntimeEventStoreIntegrityError,
-  type RuntimeEventStoreEntry,
-} from "../runtime/runtime-event-store.js";
+} from "../storage/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
@@ -122,10 +123,7 @@ import type {
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
 } from "./service.js";
-import {
-  DesktopSessionStateStore,
-  type LegacyDesktopSessionTitleMetadata,
-} from "./desktop-session-state.js";
+import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
 import {
@@ -305,7 +303,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       options.sessionStateStore ??
       new DesktopSessionStateStore({
         picoHome: this.picoHome,
-        migrateLegacyTitle: (metadata) => this.migrateLegacySessionTitle(metadata),
       });
     this.conversationStateStore =
       options.conversationStateStore ??
@@ -683,7 +680,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async runDiagnostics(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const effective = await this.loadSessionModelRuntime(canonical);
-    const defaults = effectiveSessionSettingDefaults(effective, this.env);
+    const defaults = effectiveSessionSettingDefaults(effective);
     return toJsonValue(
       await runWorkspaceDoctor({
         workDir: canonical,
@@ -750,7 +747,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    // v1 metadata migration commits legacy titles to RuntimeEvent before summaries are projected.
     const metadata = await this.sessionStateStore.list(canonical);
     const summaries = await listCliSessionSummaries(canonical, { picoHome: this.picoHome });
     const metadataById = new Map(metadata.map((entry) => [entry.sessionId, entry]));
@@ -868,53 +864,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return { session };
   }
 
-  private async migrateLegacySessionTitle(
-    metadata: LegacyDesktopSessionTitleMetadata,
-  ): Promise<"migrated" | "orphan"> {
-    const projection = await readExistingRuntimeSessionProjection({
-      storageRoot: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
-        .root,
-      sessionId: metadata.sessionId,
-    });
-    // Read the canonical ledger before Session hydration can append another settings snapshot.
-    if (!projection) return "orphan";
-    const initialTitle = latestRuntimeTitle(projection.entries);
-    if (canonicalTitleWins(initialTitle, metadata) || initialTitle.title === metadata.title) {
-      return "migrated";
-    }
-
-    await this.withSession(metadata.workspacePath, metadata.sessionId, async (session) => {
-      // A queued Session operation may have renamed the title after the first read. Re-read while
-      // serialized, still before getSessionSettings() can enqueue its hydration snapshot.
-      const currentProjection = await readExistingRuntimeSessionProjection({
-        storageRoot: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
-          .root,
-        sessionId: metadata.sessionId,
-      });
-      if (!currentProjection) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime session ${metadata.sessionId} disappeared during title migration`,
-        );
-      }
-      const currentTitle = latestRuntimeTitle(currentProjection.entries);
-      if (canonicalTitleWins(currentTitle, metadata) || currentTitle.title === metadata.title)
-        return;
-
-      const settings = await this.getSessionSettings(metadata.workspacePath, session);
-      if (settings.title !== metadata.title) {
-        const result = setSessionTitle(settings, metadata.title);
-        if (!result.ok) throw new Error(result.message);
-      }
-      await session.flushPersistence();
-    });
-    return "migrated";
-  }
-
   private async forkSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "分叉");
     const sourceLease = await globalSessionManager.getOrCreatePinned(sessionId, canonical, {
       persistence: true,
       picoHome: this.picoHome,
+      runtimePort: createEngineRuntimePort(),
     });
     const targetSessionId = this.createSessionId();
     try {
@@ -1039,7 +994,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const result = await this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
       const effective = await this.loadSessionModelRuntime(canonical, settings);
-      const active = effective.router.providerConfig(settings.modelRouteId ?? settings.model);
+      const active = effective.router.providerConfig(settings.modelRouteId);
       const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
       const pluginActivationScope = new PluginCapabilityActivationScope();
       let ledger: RuntimeStore | undefined;
@@ -1090,21 +1045,29 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             },
           },
         );
-        const beforeMessageCount = session.length;
-        const historyTokens = estimateMessagesTokens(session.getHistory());
         const profile = resolveProviderProfile(active.provider, active.config.model);
         const budget = createContextBudget(profile);
         const runtimeRun = await RuntimeRun.start({
           capability: runtimeCapability,
         });
-        await runtimeRun.run(async () => {
-          const result = await new FullCompactor({ provider }).compact(session, {
-            inputBudgetTokens: budget.inputBudgetTokens,
-            targetRetainedTokens: Math.max(
-              1,
-              Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
-            ),
-            trigger: "manual",
+        const checkpoint = await runtimeRun.run(async () => {
+          const entries = await runtimeRun.readModelHistoryEntries();
+          const historyTokens = estimateMessagesTokens(entries.map(({ message }) => message));
+          const result = await recordRuntimeCompactionCheckpoint({
+            session,
+            runtimeRun,
+            compactor: new FullCompactor({ provider }),
+            request: {
+              inputBudgetTokens: budget.inputBudgetTokens,
+              targetRetainedTokens: Math.max(
+                1,
+                Math.min(
+                  Math.floor(budget.inputBudgetTokens * 0.5),
+                  Math.floor(historyTokens * 0.5),
+                ),
+              ),
+              trigger: "manual",
+            },
           });
           if (!result) {
             throw new RuntimeProtocolError(
@@ -1112,10 +1075,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
             );
           }
-          await session.flushPersistence();
-          return true;
+          return result;
         });
-        compactResult = { beforeMessageCount, afterMessageCount: session.length };
+        compactResult = {
+          beforeMessageCount: checkpoint.beforeMessageCount,
+          afterMessageCount: checkpoint.afterMessageCount,
+        };
       } catch (error) {
         operationError = error;
       }
@@ -1164,10 +1129,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const requestFingerprint = firstSendRequestFingerprint({ ...params, input });
     const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
     if (stored) {
-      if (
-        stored.requestFingerprint !== undefined &&
-        stored.requestFingerprint !== requestFingerprint
-      ) {
+      if (stored.requestFingerprint !== requestFingerprint) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
           `idempotencyKey ${idempotencyKey} 已绑定不同的发送请求`,
@@ -1490,14 +1452,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         error instanceof Error ? error.message : String(error),
       );
     }
-    if (uriReference.sessionId !== params.sessionId) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "Evidence 引用不属于当前 Session",
-      );
-    }
-    const reference = projection.entries
-      .map(({ event }) => (event.kind === "tool.result.recorded" ? event.refs.evidence : undefined))
+    // Fork 会保留 source-session Evidence ref。授权边界不是 URI 内的 sessionId，
+    // 而是当前 active branch 是否确实包含引用它的 canonical ToolResult。
+    const reference = projectRuntimeSessionActiveToolResultEntries(projection.entries)
+      .map(({ envelope }) => envelope.evidence?.ref)
       .find(
         (candidate) =>
           candidate?.sessionId === uriReference.sessionId &&
@@ -1512,10 +1470,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const page = await new EvidenceArchive({
       baseDir: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.evidence,
-    }).readRuntimeToolOutputPage(reference, {
+    }).readEvidencePage(reference, {
       ...(params.offsetBytes !== undefined ? { offsetBytes: params.offsetBytes } : {}),
       ...(params.limitBytes !== undefined ? { limitBytes: params.limitBytes } : {}),
     });
+    if (page.kind !== "tool-exchange") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        "Evidence 不是 ToolResult exchange",
+      );
+    }
     return {
       evidenceUri: params.evidenceUri,
       content: page.content,
@@ -3241,7 +3205,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const persisted = session.getRuntimeStateSnapshot().settings;
     const defaults =
       persisted ??
-      effectiveSessionSettingDefaults(await this.loadSessionModelRuntime(workspacePath), this.env);
+      effectiveSessionSettingDefaults(await this.loadSessionModelRuntime(workspacePath));
     return getOrCreateSessionSettings(
       {
         sessionId: session.id,
@@ -3249,7 +3213,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         picoHome: this.picoHome,
         provider: defaults.provider,
         model: defaults.model,
-        ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),
+        modelRouteId: defaults.modelRouteId,
         ...(defaults.mode ? { mode: defaults.mode } : {}),
         ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
       },
@@ -3289,6 +3253,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
       persistence: true,
       picoHome: this.picoHome,
+      runtimePort: createEngineRuntimePort(),
     });
     try {
       return await lease.session.withSerializedExecution(() => operation(lease.session));
@@ -3610,45 +3575,6 @@ function firstSendRequestFingerprint(params: {
 function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): string {
   const digest = createHash("sha256").update(key).digest("hex");
   return `desktop-${source}-run:${digest}`;
-}
-
-interface RuntimeTitleVersion {
-  readonly title?: string;
-  readonly changedAt?: number;
-}
-
-function latestRuntimeTitle(entries: readonly RuntimeEventStoreEntry[]): RuntimeTitleVersion {
-  let observedSettings = false;
-  let title: string | undefined;
-  let changedAt: number | undefined;
-  for (const { event } of entries) {
-    if (event.kind !== "session.state.committed" || !event.data.patch.settings) continue;
-    const nextTitle = event.data.patch.settings.title;
-    const titleChanged = observedSettings ? nextTitle !== title : nextTitle !== undefined;
-    observedSettings = true;
-    title = nextTitle;
-    if (!titleChanged) continue;
-    const eventAt = Date.parse(event.at);
-    if (!Number.isFinite(eventAt)) {
-      throw new Error(`RuntimeEvent ${event.eventId} has an invalid title timestamp`);
-    }
-    changedAt = eventAt;
-  }
-  return {
-    ...(title === undefined ? {} : { title }),
-    ...(changedAt === undefined ? {} : { changedAt }),
-  };
-}
-
-function canonicalTitleWins(
-  canonical: RuntimeTitleVersion,
-  legacy: LegacyDesktopSessionTitleMetadata,
-): boolean {
-  return (
-    canonical.title !== undefined &&
-    canonical.changedAt !== undefined &&
-    canonical.changedAt > legacy.updatedAt
-  );
 }
 
 function sessionPayload(
@@ -4064,11 +3990,17 @@ function stableJson(value: unknown): string {
 }
 
 function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter): JsonObject {
+  if (!settings.modelRouteId) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      "Durable Session settings are missing modelRouteId",
+    );
+  }
   return {
     sessionId: settings.sessionId,
     provider: settings.provider,
     model: settings.model,
-    ...(settings.modelRouteId ? { modelRouteId: settings.modelRouteId } : {}),
+    modelRouteId: settings.modelRouteId,
     mode: settings.mode,
     // Deliberately derived from mode: `/permissions` does not own persisted state.
     permissions: settings.mode,
@@ -4102,11 +4034,11 @@ function resolveRequestedModelRoute(
 }
 
 function resolveCurrentModelRoute(router: ModelRouter, settings: SessionSettings): ModelRoute {
-  const route = router.resolve(settings.modelRouteId) ?? router.resolve(settings.model);
+  const route = router.routes.find((candidate) => candidate.id === settings.modelRouteId);
   if (route) return route;
   throw new RuntimeProtocolError(
     RUNTIME_ERROR_CODES.CONFLICT,
-    `当前模型路由 ${settings.modelRouteId ?? settings.model} 已不可用，请先选择有效模型`,
+    `当前模型路由 ${settings.modelRouteId ?? "(missing)"} 已不可用，请先选择有效模型`,
   );
 }
 
@@ -4125,31 +4057,18 @@ function invalidSessionSetting(message: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }
 
-function effectiveSessionSettingDefaults(
-  runtime: EffectiveModelRuntime,
-  env: Readonly<Record<string, string | undefined>>,
-): {
+function effectiveSessionSettingDefaults(runtime: EffectiveModelRuntime): {
   provider: ProviderKind;
   model: string;
-  modelRouteId?: string;
+  modelRouteId: string;
   mode?: SessionSettings["mode"];
   thinkingEffort?: string;
 } {
-  const route = runtime.router.resolve(runtime.config.defaultModelRouteId);
-  if (route) {
-    return {
-      provider: route.provider,
-      model: route.model,
-      modelRouteId: route.id,
-      ...(runtime.config.defaults.mode ? { mode: runtime.config.defaults.mode } : {}),
-      ...(runtime.config.defaults.thinkingEffort
-        ? { thinkingEffort: runtime.config.defaults.thinkingEffort }
-        : {}),
-    };
-  }
+  const route = runtime.router.require(runtime.config.defaultModelRouteId);
   return {
-    provider: "openai",
-    model: env["LLM_MODEL"]?.trim() || "glm-5.2",
+    provider: route.provider,
+    model: route.model,
+    modelRouteId: route.id,
     ...(runtime.config.defaults.mode ? { mode: runtime.config.defaults.mode } : {}),
     ...(runtime.config.defaults.thinkingEffort
       ? { thinkingEffort: runtime.config.defaults.thinkingEffort }

@@ -17,8 +17,6 @@
 // 掩码替换(而非删除)既释放内存又保住意图连贯。
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { LLMProvider } from "../provider/interface.js";
-import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { countTokens } from "./token-counter.js";
@@ -164,72 +162,6 @@ export class ContextCompactionError extends Error {
   }
 }
 
-export interface SummaryInput {
-  newMessages: Message[];
-  previousSummary?: string;
-  focusTopic?: string;
-}
-
-/** 摘要器函数:把一批远期消息浓缩成一段"剧情提要"(第 12 讲前沿升级) */
-export type Summarizer = (input: SummaryInput) => Promise<string>;
-
-/**
- * 用辅助 provider 创建 Summarizer(供 Compactor.compactWithSummary 使用)。
- * 让压缩摘要走廉价模型而非主模型,降低成本。
- *
- * SummaryInput 没有 historyText 字段,这里把 newMessages 序列化成可读文本喂给小模型;
- * previousSummary / focusTopic 拼进 user prompt,便于做增量摘要与主题聚焦。
- */
-export function createAuxSummarizer(provider: LLMProvider): Summarizer {
-  return async (input: SummaryInput): Promise<string> => {
-    const historyText = serializeForSummary(input.newMessages);
-    const previousSummaryBlock = input.previousSummary
-      ? `\n\n上一次的摘要(请基于它做增量更新,保留仍相关的旧信息):\n${input.previousSummary}`
-      : "";
-    const focusTopicBlock = input.focusTopic ? `\n\n请重点关注以下主题:\n${input.focusTopic}` : "";
-    const messages: Message[] = [
-      {
-        role: "system",
-        content: "你是上下文压缩器。把对话历史浓缩成简洁摘要,保留关键信息。",
-      },
-      {
-        role: "user",
-        content: `请压缩以下对话历史:\n\n${historyText}${previousSummaryBlock}${focusTopicBlock}`,
-      },
-    ];
-    const result = await withProviderCallContext({ purpose: "aux" }, () =>
-      provider.generate(messages, []),
-    );
-    return result.content;
-  };
-}
-
-/**
- * 把远期消息序列化成可读文本,供辅助摘要器输入。
- * 复用 FullCompactor 的格式约定(role 标签 + 截断防单条暴击)。
- */
-function serializeForSummary(msgs: Message[]): string {
-  const lines: string[] = [];
-  for (const msg of msgs) {
-    if (msg.role === "user" && msg.toolCallId !== undefined) {
-      lines.push(`[工具结果] ${msg.content}`);
-      continue;
-    }
-    if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
-      for (const tc of msg.toolCalls) {
-        lines.push(`[助手→工具: ${tc.name}] ${tc.arguments}`);
-      }
-      if (msg.content && msg.content.trim().length > 0) {
-        lines.push(`[助手] ${msg.content}`);
-      }
-      continue;
-    }
-    const tag = msg.role === "user" ? "用户" : msg.role === "assistant" ? "助手" : "系统";
-    lines.push(`[${tag}] ${msg.content}`);
-  }
-  return lines.join("\n");
-}
-
 /**
  * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 3.1 判断
  * 缓存年龄与使用率。由 Session.getToolResultMeta() 提供。
@@ -248,14 +180,6 @@ export interface CompactorOptions {
   retainLastMsgs: number;
   /** WorkingMemory 保护区:最近约 N 个 token,优先级高于 retainLastMsgs */
   retainLastTokens?: number;
-  /** 摘要时希望保留的主题 */
-  focusTopic?: string;
-  /**
-   * 可选的 LLM 摘要器(第 12 讲前沿升级)。
-   * 提供时,远期历史不再粗暴掩码,而是异步调小模型浓缩成"剧情提要"替换。
-   * 未提供时退回字符级掩码(极简模式)。
-   */
-  summarizer?: Summarizer;
   /**
    * MicroCompaction 3.1:ToolResult 元数据提供者(按 toolCallId 索引)。
    * 提供 cachedAt(缓存时间)+ accessCount(被读次数),用于按年龄 + 使用率
@@ -268,23 +192,17 @@ export interface CompactorOptions {
    * 不影响现有 retainLastMsgs 的生产配置(6 条)。
    */
   retainLastMsgsMicro?: number;
-  /** 压缩成功后追加的恢复消息,用于重新注入计划/关键文件等轻量上下文。 */
-  postCompactRestore?: () => Message[];
 }
 
 interface CompactorRuntimeState {
   ineffectiveCount: number;
   usedStrongerCompact: boolean;
-  previousSummary: string | undefined;
-  summarizedRemoteCount: number;
 }
 
 function createCompactorRuntimeState(): CompactorRuntimeState {
   return {
     ineffectiveCount: 0,
     usedStrongerCompact: false,
-    previousSummary: undefined,
-    summarizedRemoteCount: 0,
   };
 }
 
@@ -299,13 +217,10 @@ export class Compactor {
   readonly maxChars: number;
   readonly retainLastMsgs: number;
   readonly retainLastTokens?: number;
-  private readonly summarizer?: Summarizer;
-  private readonly focusTopic?: string;
   /** MicroCompaction 3.1:ToolResult 元数据提供者 */
   private readonly toolResultMetaProvider?: () => ReadonlyMap<string, ToolResultMetaEntry>;
   /** MicroCompaction 3.1:保护区最近消息条数(默认 20) */
   private readonly retainLastMsgsMicro: number;
-  private readonly postCompactRestore?: () => Message[];
   /** 主 Agent 与非隔离调用沿用原有的持久状态语义。 */
   private readonly defaultRuntimeState = createCompactorRuntimeState();
   /** 并行子代理共享配置与自定义行为，但不共享压缩进度。 */
@@ -315,11 +230,8 @@ export class Compactor {
     this.maxChars = opts.maxChars;
     this.retainLastMsgs = opts.retainLastMsgs;
     this.retainLastTokens = opts.retainLastTokens;
-    this.summarizer = opts.summarizer;
-    this.focusTopic = opts.focusTopic;
     this.toolResultMetaProvider = opts.toolResultMetaProvider;
     this.retainLastMsgsMicro = opts.retainLastMsgsMicro ?? MICRO_RETAIN_LAST_MSGS_DEFAULT;
-    this.postCompactRestore = opts.postCompactRestore;
   }
 
   get ineffectiveCompressionCount(): number {
@@ -329,9 +241,9 @@ export class Compactor {
   /**
    * 在独立的压缩状态域中执行一次完整调用链。
    *
-   * 不复制 Compactor 实例：调用方注入的子类覆写、summarizer 和
-   * metadata provider 仍按原样执行；只隔离 stronger compact、无效压缩
-   * 计数与增量摘要游标。AsyncLocalStorage 保证并行/嵌套子代理互不污染。
+   * 不复制 Compactor 实例：调用方注入的子类覆写和 metadata provider
+   * 仍按原样执行；只隔离 stronger compact 与无效压缩计数。
+   * AsyncLocalStorage 保证并行/嵌套子代理互不污染。
    */
   runInIsolatedScope<T>(callback: () => T): T {
     return this.runtimeStateStorage.run(createCompactorRuntimeState(), callback);
@@ -468,7 +380,7 @@ export class Compactor {
         currentTokens <= options.targetTokens ||
         index >= cutoff ||
         !isToolResult(message) ||
-        message.content.startsWith("[大型工具输出已外部化]")
+        message.toolResultEvidenceUri !== undefined
       ) {
         return next;
       }
@@ -481,69 +393,6 @@ export class Compactor {
       return next;
     });
     return sanitizeToolPairs(compacted);
-  }
-
-  /**
-   * 带摘要的异步压缩(第 12 讲前沿升级)。
-   *
-   * 当总长度超标且提供了 summarizer 时,把远期历史(保护区之前的消息)
-   * 异步调小模型浓缩成一段"剧情提要",替换掉粗暴的字符级掩码。
-   * 保护区内的消息仍走 compact() 的掐头去尾逻辑。
-   *
-   * 未提供 summarizer 时,直接退化为同步 compact()。
-   *
-   * @returns 压缩后的消息数组
-   */
-  async compactWithSummary(msgs: Message[]): Promise<Message[]> {
-    // 无 summarizer 或未超标:退化为同步 compact
-    if (!this.summarizer) {
-      return this.compact(msgs);
-    }
-    const currentLength = this.estimateLength(msgs);
-    if (currentLength < this.maxChars) {
-      return this.compact(msgs);
-    }
-
-    // 分割:远期历史 + 保护区
-    const protectStartIndex = this.protectStartIndex(msgs);
-    const remoteMsgs = msgs.slice(0, protectStartIndex);
-    const protectedMsgs = msgs.slice(protectStartIndex);
-    const runtimeState = this.runtimeState;
-    const newMessages = remoteMsgs.slice(runtimeState.summarizedRemoteCount);
-
-    // 远期历史调小模型摘要
-    let summaryText: string;
-    try {
-      logger.info(
-        { remoteCount: newMessages.length },
-        `[Compactor] 调用 LLM 摘要 ${newMessages.length} 条远期历史...`,
-      );
-      summaryText = await this.summarizer({
-        newMessages,
-        ...(runtimeState.previousSummary ? { previousSummary: runtimeState.previousSummary } : {}),
-        ...(this.focusTopic ? { focusTopic: this.focusTopic } : {}),
-      });
-    } catch (err) {
-      logger.warn({ err }, `[Compactor] LLM 摘要失败,退回字符级掩码`);
-      return this.appendPostCompactRestore(this.compactToBudget(msgs));
-    }
-    runtimeState.previousSummary = summaryText;
-    runtimeState.summarizedRemoteCount = remoteMsgs.length;
-
-    // 摘要消息替换远期历史,保护区走 compact 逻辑
-    const summaryMsg: Message = {
-      role: "system",
-      content: `[历史摘要]: ${summaryText}`,
-    };
-    const protectedCompacted = this.compact([...protectedMsgs.filter((m) => m.role !== "system")]);
-
-    const result = sanitizeToolPairs([summaryMsg, ...protectedCompacted]);
-    const newLength = this.estimateLength(result);
-    this.recordCompressionEffect(currentLength, newLength);
-    logger.warn(
-      `[Compactor] ✅ LLM 摘要压缩完成。${currentLength} → ${newLength} 字符(远期 ${remoteMsgs.length} 条 → 摘要)。`,
-    );
-    return this.appendPostCompactRestore(result);
   }
 
   /** 粗略计算当前上下文的总字符长度(用 char count 代替 token) */
@@ -611,23 +460,6 @@ export class Compactor {
 
   private get runtimeState(): CompactorRuntimeState {
     return this.runtimeStateStorage.getStore() ?? this.defaultRuntimeState;
-  }
-
-  private appendPostCompactRestore(msgs: Message[]): Message[] {
-    if (!this.postCompactRestore) {
-      return msgs;
-    }
-    let restored: Message[];
-    try {
-      restored = this.postCompactRestore();
-    } catch (err) {
-      logger.warn({ err }, `[Compactor] postCompactRestore 失败,跳过恢复消息`);
-      return msgs;
-    }
-    if (restored.length === 0) {
-      return msgs;
-    }
-    return sanitizeToolPairs([...msgs, ...restored]);
   }
 
   private strongerCompact(msgs: Message[], maxChars: number): Message[] {

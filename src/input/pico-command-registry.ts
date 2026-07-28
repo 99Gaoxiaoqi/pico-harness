@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
 import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
+import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
+import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
@@ -690,8 +691,12 @@ function createCompactCommand(
         if (!runtimeCapability) {
           throw new Error(`Manual compaction requires a durable Session: ${session.id}`);
         }
+        await RuntimeRun.reconcileIncompleteRuns({ capability: runtimeCapability });
+        await RuntimeRun.repairSessionProjection(session, {
+          capability: runtimeCapability,
+        });
         const runtimeRun = await RuntimeRun.start({ capability: runtimeCapability });
-        const preview = await runtimeRun.run(async () => {
+        const checkpoint = await runtimeRun.run(async () => {
           const entries = await runtimeRun.readModelHistoryEntries();
           const runtimeHistoryTokens = estimateMessagesTokens(
             entries.map(({ message }) => message),
@@ -706,47 +711,19 @@ function createCompactCommand(
               ),
             ),
           };
-          await options.hookService?.dispatch("PreCompact", {
-            source: "manual",
-            messageCount: entries.length,
-          });
-          const candidate = await fullCompactor.preview(
+          return await recordRuntimeCompactionCheckpoint({
             session,
-            entries.map(({ message }) => message),
-            runtimeRequest,
-          );
-          if (!candidate) return undefined;
-          const covered = entries.slice(0, candidate.compactedCount);
-          const through = covered.at(-1);
-          if (!through) return undefined;
-          const checkpointId = `checkpoint:${randomUUID()}`;
-          await runtimeRun.recordCheckpoint({
-            checkpointId,
-            coveredEventCount: covered.length,
-            sourceDigest: createHash("sha256")
-              .update(covered.map(({ eventId }) => eventId).join("\n"))
-              .digest("hex"),
-            throughEventId: through.eventId,
-            summary: {
-              role: "assistant",
-              content: candidate.wrappedSummary,
-              providerData: {
-                picoKind: "runtime_checkpoint",
-                picoCheckpointId: checkpointId,
-              },
-            },
+            runtimeRun,
+            compactor: fullCompactor,
+            request: runtimeRequest,
+            ...(options.hookService ? { hookService: options.hookService } : {}),
           });
-          await options.hookService?.dispatch("PostCompact", {
-            source: "manual",
-            messageCount: (await runtimeRun.readModelHistoryEntries()).length,
-          });
-          return candidate;
         });
         return {
           type: "local",
           action: "message",
-          message: preview
-            ? `Compact complete: recorded a RuntimeEvent checkpoint for ${preview.compactedCount} messages; session transcript remains ${before} messages.`
+          message: checkpoint
+            ? `Compact complete: recorded a RuntimeEvent checkpoint for ${checkpoint.preview.compactedCount} messages; session transcript remains ${before} messages.`
             : "Compact unavailable: FullCompactor could not produce a valid summary.",
         };
       } catch (error) {
@@ -1984,6 +1961,7 @@ async function resolveCommandSession(
         options.workDir,
         {
           persistence: true,
+          runtimePort: createEngineRuntimePort(),
           ...(options.picoHome ? { picoHome: options.picoHome } : {}),
         },
       );

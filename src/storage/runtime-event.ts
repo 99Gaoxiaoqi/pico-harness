@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertTranscriptEvent } from "../presentation/transcript-event-store.js";
+import { assertDurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
@@ -25,7 +25,6 @@ export type {
   RuntimeMessageCommittedEvent,
   RuntimeModelCallSettledEvent,
   RuntimeModelCallStartedEvent,
-  RuntimeRollingCheckpointData,
   RuntimeRunStartedEvent,
   RuntimeRunTerminalEvent,
   RuntimeSessionForkedEvent,
@@ -158,9 +157,12 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "message.committed":
       assertMessage(value["data"]["message"]);
-      if (value["data"]["message"].toolCallId !== undefined) {
+      if (
+        value["data"]["message"].toolCallId !== undefined ||
+        value["data"]["message"].toolResultEvidenceUri !== undefined
+      ) {
         throw new RuntimeEventIntegrityError(
-          "Runtime message.committed cannot contain a ToolResult; use tool.result.recorded",
+          "Runtime message.committed cannot contain a ToolResult projection; use tool.result.recorded",
         );
       }
       return;
@@ -208,8 +210,11 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "context.checkpoint.recorded":
       assertString(value["data"]["checkpointId"], "context.checkpoint.recorded.checkpointId");
-      assertString(value["data"]["sourceDigest"], "context.checkpoint.recorded.sourceDigest");
-      if (!isNonNegativeNumber(value["data"]["coveredEventCount"])) {
+      assertSha256(value["data"]["sourceDigest"], "context.checkpoint.recorded.sourceDigest");
+      if (
+        !isNonNegativeInteger(value["data"]["coveredEventCount"]) ||
+        value["data"]["coveredEventCount"] === 0
+      ) {
         throw new RuntimeEventIntegrityError("Runtime checkpoint event count is invalid");
       }
       assertCheckpointSummary(value["data"]);
@@ -235,6 +240,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       return;
     case "session.state.committed": {
+      assertOnlyKeys(value["data"], ["stateVersion", "patch"], "session.state.committed.data");
       if (value["data"]["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION) {
         throw new RuntimeEventIntegrityError("Runtime session state version is invalid");
       }
@@ -246,7 +252,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
     }
     case "transcript.event.recorded":
       try {
-        assertTranscriptEvent(value["data"]["event"]);
+        assertDurableTranscriptEvent(value["data"]["event"]);
       } catch (error) {
         throw new RuntimeEventIntegrityError(
           `Runtime transcript event is invalid: ${errorMessage(error)}`,
@@ -311,16 +317,8 @@ function assertUsage(value: unknown): asserts value is Usage {
 }
 
 function assertCheckpointSummary(value: Record<string, unknown>): void {
-  const throughEventId = value["throughEventId"];
-  const summary = value["summary"];
-  if (throughEventId === undefined && summary === undefined) return;
-  if (throughEventId === undefined || summary === undefined) {
-    throw new RuntimeEventIntegrityError(
-      "Runtime checkpoint must include throughEventId and summary together",
-    );
-  }
-  assertString(throughEventId, "context.checkpoint.recorded.throughEventId");
-  assertMessage(summary);
+  assertString(value["throughEventId"], "context.checkpoint.recorded.throughEventId");
+  assertMessage(value["summary"]);
 }
 
 function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
@@ -464,7 +462,7 @@ function assertRuntimeEvidenceReference(value: unknown): void {
     ["schemaVersion", "contentHash", "sessionId", "kind"],
     "tool.result.recorded.refs.evidence",
   );
-  assertEqual(value["schemaVersion"], 1, "tool.result.recorded.refs.evidence.schemaVersion");
+  assertEqual(value["schemaVersion"], 2, "tool.result.recorded.refs.evidence.schemaVersion");
   assertSha256(value["contentHash"], "tool.result.recorded.refs.evidence.contentHash");
   assertString(value["sessionId"], "tool.result.recorded.refs.evidence.sessionId");
   assertEqual(value["kind"], "tool-exchange", "tool.result.recorded.refs.evidence.kind");

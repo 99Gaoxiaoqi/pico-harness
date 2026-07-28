@@ -5,6 +5,8 @@ export const DESKTOP_RUNTIME_SCHEMA_REVISION = 9;
 export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v9";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
+/** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
+export const MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES = 16 * 1024;
 export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
 
 export type JsonScalar = boolean | null | number | string;
@@ -353,7 +355,7 @@ export type RuntimeToolResultEnvelope = JsonObject & {
   readonly evidence?: JsonObject & {
     readonly uri: string;
     readonly ref: JsonObject & {
-      readonly schemaVersion: 1;
+      readonly schemaVersion: 2;
       readonly contentHash: string;
       readonly sessionId: string;
       readonly kind: "tool-exchange";
@@ -2527,6 +2529,10 @@ type RuntimeResultShape = Readonly<Record<string, RuntimeResultRule>>;
 const resultString: RuntimeResultRule = (value, path) => {
   if (typeof value !== "string") throw invalidResult(`${path} 必须是字符串`);
 };
+const resultNonEmptyString: RuntimeResultRule = (value, path) => {
+  resultString(value, path);
+  if ((value as string).length === 0) throw invalidResult(`${path} 不能为空`);
+};
 const resultBoolean: RuntimeResultRule = (value, path) => {
   if (typeof value !== "boolean") throw invalidResult(`${path} 必须是布尔值`);
 };
@@ -2827,11 +2833,11 @@ const workspaceStatusResultRule = resultShape({
 });
 
 const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
-  resultShape(
+  exactResultShape(
     {
       version: resultOneOf([1]),
-      toolCallId: resultString,
-      toolName: resultString,
+      toolCallId: resultNonEmptyString,
+      toolName: resultNonEmptyString,
       status: resultOneOf(["succeeded", "failed", "rejected", "cancelled", "interrupted"]),
       rawSizeBytes: resultNonNegativeInteger,
       sha256: resultString,
@@ -2847,23 +2853,39 @@ const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
     throw invalidResult(`${path}.sha256 必须是 SHA-256`);
   }
   const projection = value["projection"];
-  resultShape({
+  exactResultShape({
     version: resultOneOf([1]),
     mode: resultOneOf(["full", "preview", "synthetic"]),
     text: resultString,
-    strategy: resultString,
+    strategy: resultNonEmptyString,
     truncated: resultBoolean,
   })(projection, `${path}.projection`);
+  if (
+    isJsonObject(projection) &&
+    typeof projection["text"] === "string" &&
+    Buffer.byteLength(projection["text"], "utf8") > MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES
+  ) {
+    throw invalidResult(
+      `${path}.projection.text 超过 ${MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES} 字节上限`,
+    );
+  }
+  if (
+    isJsonObject(projection) &&
+    projection["mode"] === "synthetic" &&
+    (value["status"] === "succeeded" || value["status"] === "failed")
+  ) {
+    throw invalidResult(`${path}.projection.mode 与 status 不兼容`);
+  }
 
   const evidence = value["evidence"];
   if (evidence === undefined) return;
-  resultShape({ uri: resultString, ref: resultJsonObject })(evidence, `${path}.evidence`);
+  exactResultShape({ uri: resultString, ref: resultJsonObject })(evidence, `${path}.evidence`);
   if (!isJsonObject(evidence)) return;
   const reference = evidence["ref"];
-  resultShape({
-    schemaVersion: resultOneOf([1]),
+  exactResultShape({
+    schemaVersion: resultOneOf([2]),
     contentHash: resultString,
-    sessionId: resultString,
+    sessionId: resultNonEmptyString,
     kind: resultOneOf(["tool-exchange"]),
   })(reference, `${path}.evidence.ref`);
   if (!isJsonObject(reference) || !/^[a-f0-9]{64}$/u.test(String(reference["contentHash"]))) {
@@ -2940,13 +2962,21 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     return;
   }
   if (kind === "tool") {
-    resultShape(
+    exactResultShape(
       {
+        id: resultString,
+        kind: resultOneOf(["tool"]),
         name: resultString,
         args: resultString,
         status: resultOneOf(["running", "success", "error"]),
       },
-      { summary: resultString, result: runtimeToolResultEnvelopeResult },
+      {
+        summary: resultString,
+        result: runtimeToolResultEnvelopeResult,
+        at: resultFiniteNumber,
+        truncated: resultOneOf([true]),
+        originalBytes: resultNonNegativeInteger,
+      },
     )(value, path);
     return;
   }

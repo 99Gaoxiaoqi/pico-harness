@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Session } from "../../src/engine/session.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "../../src/runtime/runtime-run.js";
 
 test("late async work cannot reuse a terminal RuntimeRun context", async (context) => {
@@ -194,6 +195,7 @@ async function createFixture(context: test.TestContext, suffix: string) {
   const session = new Session(`runtime-run-${suffix}`, join(root, "workspace"), {
     persistence: true,
     picoHome: join(root, "pico-home"),
+    runtimePort: createEngineRuntimePort(),
   });
   context.after(async () => {
     await session.close();

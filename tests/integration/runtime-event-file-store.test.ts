@@ -73,10 +73,10 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   assert.equal(lines.length, 2);
   assert.deepEqual(JSON.parse(lines[0]!), {
     type: "session",
-    schemaVersion: 1,
+    schemaVersion: 2,
     sessionId: manifest.sessionId,
     workDir: manifest.workDir,
-    historySource: "runtime-event-v1",
+    historySource: "runtime-event-v2",
     createdAt: manifest.createdAt,
   });
   const batch = JSON.parse(lines[1]!) as Record<string, unknown>;
@@ -88,14 +88,47 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   assert.equal((await stat(join(root, ".storage"))).mode & 0o777, 0o700);
   assert.equal((await stat(join(root, "runtime", "lock"))).mode & 0o777, 0o700);
 
-  delete batch["activeBranchId"];
-  await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batch)}\n`, { mode: 0o600 });
   await unlink(manifestPath);
   assert.equal((await store.readSessionManifest(manifest.sessionId))?.activeBranchId, "branch-2");
   assert.equal(
     JSON.parse(await readFile(manifestPath, "utf8")).manifest.activeBranchId,
     "branch-2",
   );
+
+  delete batch["activeBranchId"];
+  await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batch)}\n`, { mode: 0o600 });
+  await unlink(manifestPath);
+  await assert.rejects(store.readSessionManifest(manifest.sessionId), /event batch.+invalid/u);
+});
+
+test("RuntimeEventStore rejects a canonical-location v1 Session without rewriting it", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-v1-session-"));
+  const workspace = join(root, "workspace");
+  const sessionId = "legacy-v1-session";
+  await mkdir(workspace);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const store = new RuntimeEventStore({ storageRoot: root });
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  const sessionDirectory = join(store.storageRoot, "sessions", digest);
+  const logPath = join(sessionDirectory, "session.jsonl");
+  await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
+  const ledger = Buffer.from(
+    `${JSON.stringify({
+      type: "session",
+      schemaVersion: 1,
+      sessionId,
+      workDir: workspace,
+      historySource: "runtime-event-v1",
+      createdAt: "2026-07-25T00:00:00.000Z",
+    })}\n`,
+    "utf8",
+  );
+  await writeFile(logPath, ledger, { mode: 0o600 });
+
+  await assert.rejects(store.readSessionManifest(sessionId), /Runtime session header is invalid/u);
+  assert.deepEqual(await readFile(logPath), ledger);
+  await assert.rejects(stat(join(sessionDirectory, "manifest.json")), { code: "ENOENT" });
 });
 
 test("RuntimeEventStore rejects a forged manifest branch and rebuilds it from the ledger tail", async (context) => {
@@ -240,7 +273,7 @@ test("RuntimeEventStore recovers a published cross-file commit before reading", 
   const transactionId = "recovery-transaction";
   const batch = {
     type: "event-batch",
-    schemaVersion: 1,
+    schemaVersion: 2,
     txId: transactionId,
     committedAt: event.at,
     activeBranchId: "main",

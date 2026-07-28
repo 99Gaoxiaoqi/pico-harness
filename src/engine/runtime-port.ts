@@ -127,7 +127,9 @@ export interface EngineRuntimeRun {
   recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
   recordToolStarted(toolCallId: string, toolName: string, argumentsJson: string): Promise<void>;
   recordTranscriptMessage(message: Message): Promise<void>;
-  recordTranscriptToolResult(input: EngineRuntimeToolResultInput): Promise<Message>;
+  recordTranscriptToolResults(
+    inputs: readonly EngineRuntimeToolResultInput[],
+  ): Promise<readonly Message[]>;
   registerToolResult(input: EngineRuntimeToolResultInput): Message;
 }
 
@@ -167,15 +169,4 @@ export interface EngineRuntimePort {
     eventId: string,
     message: Message,
   ): Promise<CommitReceipt | undefined>;
-}
-
-let defaultEngineRuntimePort: EngineRuntimePort | undefined;
-
-/** Runtime composition may register its adapter for Sessions created by legacy hosts. */
-export function configureDefaultEngineRuntimePort(port: EngineRuntimePort): void {
-  defaultEngineRuntimePort = port;
-}
-
-export function getDefaultEngineRuntimePort(): EngineRuntimePort | undefined {
-  return defaultEngineRuntimePort;
 }

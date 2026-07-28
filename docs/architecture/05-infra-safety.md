@@ -54,10 +54,10 @@ CanonicalUsage = {
   ├─ journal 发布 prepared operation
   ├─ code/both：恢复 workspace，外部变化时 fail-closed
   ├─ conversation/both：追加幂等 history.rewound RuntimeEvent
-  └─ 修剪 File History / Summary sidecar 后将 operation 置为 completed
+  └─ 修剪与回退点对应的 File History 后将 operation 置为 completed
 ```
 
-旧版 `backupFileName` 只用于读取和物化 legacy manifest，不是当前权威存储格式。`ContentAddressedBlobGarbageCollector` 与声明式 retention policy 目前保留但未接入生产调度，因此不能假定存在自动全局 GC。
+File History 只接受 v2 manifest 和 CAS blob 引用；开发期旧 manifest 不读取、不迁移，遇到时由恢复与 Storage Doctor 明确拒绝。`ContentAddressedBlobGarbageCollector` 与声明式 retention policy 目前保留但未接入生产调度，因此不能假定存在自动全局 GC。
 
 公开交互入口在 TUI 内：`/snapshots` 列出快照，`/rewind` 选择 code / conversation / both。
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES } from "../../src/daemon/protocol.js";
 import {
   MobileGatewayClient,
   normalizeGatewayOrigin,
@@ -108,6 +109,217 @@ test("mobile client reads a sanitized session transcript", async () => {
     { id: "assistant-1", kind: "assistantMessage", content: "Done" },
   ]);
   assert.equal(transcript.revision, "revision-1");
+});
+
+test("mobile client accepts ToolResult Evidence v2 and rejects legacy v1", async () => {
+  const contentHash = "a".repeat(64);
+  const response = (schemaVersion: number) => ({
+    session: {
+      sessionId: "session-1",
+      title: "Mobile foundation",
+      status: "active",
+      pinned: false,
+      createdAt: 10,
+      updatedAt: 20,
+    },
+    items: [
+      {
+        id: "tool-1",
+        kind: "tool",
+        name: "read_file",
+        args: "{}",
+        status: "success",
+        result: {
+          version: 1,
+          toolCallId: "call-1",
+          toolName: "read_file",
+          status: "succeeded",
+          rawSizeBytes: 100_000,
+          sha256: "b".repeat(64),
+          deliveryTruncated: false,
+          projection: {
+            version: 1,
+            mode: "preview",
+            text: "bounded",
+            strategy: "head-tail",
+            truncated: true,
+          },
+          evidence: {
+            uri: `pico://evidence/session-1/${contentHash}`,
+            ref: {
+              schemaVersion,
+              contentHash,
+              sessionId: "session-1",
+              kind: "tool-exchange",
+            },
+          },
+        },
+      },
+    ],
+    revision: "revision-1",
+  });
+  const client = (schemaVersion: number) =>
+    new MobileGatewayClient(
+      { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+      async () => Response.json(response(schemaVersion)),
+    );
+
+  assert.equal((await client(2).getTranscript("opaque", "session-1")).items.length, 1);
+  await assert.rejects(
+    () => client(1).getTranscript("opaque", "session-1"),
+    /会话条目响应格式无效/u,
+  );
+});
+
+test("mobile client rejects malformed or overexposed ToolResult envelopes", async () => {
+  const contentHash = "a".repeat(64);
+  const validEnvelope = {
+    version: 1,
+    toolCallId: "call-1",
+    toolName: "read_file",
+    status: "succeeded",
+    rawSizeBytes: 100_000,
+    sha256: "b".repeat(64),
+    deliveryTruncated: false,
+    projection: {
+      version: 1,
+      mode: "preview",
+      text: "bounded",
+      strategy: "head-tail",
+      truncated: true,
+    },
+    evidence: {
+      uri: `pico://evidence/session-1/${contentHash}`,
+      ref: {
+        schemaVersion: 2,
+        contentHash,
+        sessionId: "session-1",
+        kind: "tool-exchange",
+      },
+    },
+  };
+  const invalidEnvelopes = [
+    { ...validEnvelope, rawOutput: "must not cross the mobile boundary" },
+    { ...validEnvelope, body: { content: "must not cross the mobile boundary" } },
+    {
+      ...validEnvelope,
+      projection: {
+        ...validEnvelope.projection,
+        rawOutput: "must not cross the mobile boundary",
+      },
+    },
+    {
+      ...validEnvelope,
+      evidence: {
+        ...validEnvelope.evidence,
+        ref: {
+          ...validEnvelope.evidence.ref,
+          absolutePath: "/private/evidence/blob",
+        },
+      },
+    },
+    { ...validEnvelope, status: "legacy-success" },
+    { ...validEnvelope, rawSizeBytes: -1 },
+    { ...validEnvelope, sha256: "not-a-sha256" },
+    {
+      ...validEnvelope,
+      projection: { ...validEnvelope.projection, mode: "legacy-preview" },
+    },
+    {
+      ...validEnvelope,
+      projection: { ...validEnvelope.projection, strategy: 42 },
+    },
+  ];
+  const toolItem = {
+    id: "tool-1",
+    kind: "tool",
+    name: "read_file",
+    args: "{}",
+    status: "success",
+  };
+  const invalidItems = [
+    ...invalidEnvelopes.map((result) => ({ ...toolItem, result })),
+    {
+      ...toolItem,
+      result: validEnvelope,
+      rawOutput: "must not cross beside the canonical envelope",
+    },
+  ];
+
+  const boundaryClient = new MobileGatewayClient(
+    { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+    async () =>
+      Response.json({
+        session: {
+          sessionId: "session-1",
+          title: "Mobile foundation",
+          status: "active",
+          pinned: false,
+          createdAt: 10,
+          updatedAt: 20,
+        },
+        items: [
+          {
+            ...toolItem,
+            result: {
+              ...validEnvelope,
+              projection: {
+                ...validEnvelope.projection,
+                text: "x".repeat(MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES),
+              },
+            },
+          },
+        ],
+        revision: "revision-1",
+      }),
+  );
+  assert.equal((await boundaryClient.getTranscript("opaque", "session-1")).items.length, 1);
+
+  invalidItems.push(
+    {
+      ...toolItem,
+      result: {
+        ...validEnvelope,
+        projection: {
+          ...validEnvelope.projection,
+          text: "x".repeat(MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES + 1),
+        },
+      },
+    },
+    {
+      ...toolItem,
+      result: {
+        ...validEnvelope,
+        projection: {
+          ...validEnvelope.projection,
+          text: "你".repeat(Math.floor(MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES / 3) + 1),
+        },
+      },
+    },
+  );
+
+  for (const invalidItem of invalidItems) {
+    const client = new MobileGatewayClient(
+      { origin: "http://127.0.0.1:47831", token: "temporary-token" },
+      async () =>
+        Response.json({
+          session: {
+            sessionId: "session-1",
+            title: "Mobile foundation",
+            status: "active",
+            pinned: false,
+            createdAt: 10,
+            updatedAt: 20,
+          },
+          items: [invalidItem],
+          revision: "revision-1",
+        }),
+    );
+    await assert.rejects(
+      () => client.getTranscript("opaque", "session-1"),
+      /会话条目响应格式无效/u,
+    );
+  }
 });
 
 test("mobile client rejects private Runtime fields in transcript items", async () => {

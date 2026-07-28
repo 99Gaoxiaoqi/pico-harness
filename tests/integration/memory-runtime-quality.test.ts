@@ -19,7 +19,7 @@ import {
   executeAgentRuntime,
   type RunAgentProviderFactory,
 } from "../../src/runtime/agent-runtime.js";
-import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import type { Message } from "../../src/schema/message.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
@@ -581,6 +581,7 @@ function runtimeRequest(workspace: string, sessionId: string, prompt: string) {
     dir: workspace,
     sessionSelection: { mode: "new" as const, sessionId },
     provider: "openai" as const,
+    modelRouteId: "test/test",
     allowedTools: [] as const,
   };
 }

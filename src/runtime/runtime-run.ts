@@ -19,7 +19,15 @@ import {
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
 } from "../engine/runtime-model-message.js";
-import type { SessionRuntimeStateWritePatch } from "../engine/session-runtime.js";
+import {
+  normalizeSessionRuntimeStatePatch,
+  type SessionRuntimeStateWritePatch,
+} from "../engine/session-runtime.js";
+import {
+  assertDurableTranscriptEvent,
+  projectTranscriptEvents,
+  type DurableTranscriptEvent,
+} from "../presentation/transcript-event-store.js";
 import type { Message, ToolCall } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -38,20 +46,21 @@ import {
   type RuntimeTerminalStatus,
   type RuntimeToolStartedEvent,
   type RuntimeToolResultRecordedEvent,
-} from "./runtime-event.js";
-import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
+  type RuntimeTranscriptEventRecordedEvent,
+} from "../storage/runtime-event.js";
+import type { RuntimeHistoryProjectionEntry } from "../engine/session-runtime-read-model.js";
 import {
   RuntimeEventStore,
   RuntimeEventStoreIntegrityError,
   createRuntimeEventId,
   type RuntimeEventStoreAppendResult,
-} from "./runtime-event-store.js";
+} from "../storage/runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
-  projectRuntimeSessionModelHistoryEntries,
   projectRuntimeSessionState,
-} from "./runtime-session-projection.js";
+  type RuntimeSessionForkSeedEntry,
+} from "../engine/session-runtime-projection.js";
 
 interface RuntimeRunContext {
   readonly run: RuntimeRun;
@@ -117,25 +126,25 @@ export interface RuntimeForkBootstrapSeed {
   readonly operationId?: string;
   /** Durable operation timestamp; required for byte-identical cross-process retries. */
   readonly operationCreatedAt?: string;
-  /** The immutable, usage-free Session seed published by SessionForkService. */
-  readonly messages: readonly Message[];
-  /** Frozen canonical fact history. Message-only v1/v2 fork seeds are unsupported. */
-  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
-  /** Effective model prefix replacement frozen at the same source cursor as messages. */
+  /** Frozen source-sequenced model and durable transcript facts. */
+  readonly seedEntries: readonly RuntimeSessionForkSeedEntry[];
+  /** Effective model prefix replacement frozen at the same source cursor as seedEntries. */
   readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
   /** Last source message included in the frozen seed, before target-side rewrites. */
   readonly sourceThroughEventId?: string;
+  readonly statePublication?: RuntimeForkStatePublication;
   readonly workDir: string;
   readonly store: RuntimeEventStore;
 }
 
+export interface RuntimeForkStatePublication {
+  readonly patch: SessionRuntimeStateWritePatch;
+  readonly eventId: string;
+  readonly at: string;
+}
+
 export interface BootstrapRuntimeForkOptions extends RuntimeForkBootstrapSeed {
   readonly writeGuard: RuntimeEventWriteGuard;
-  readonly statePublication?: {
-    readonly patch: SessionRuntimeStateWritePatch;
-    readonly eventId: string;
-    readonly at: string;
-  };
 }
 
 export interface RuntimeForkModelCheckpointSeed {
@@ -182,7 +191,7 @@ interface RuntimeForkBootstrapIdentity {
   readonly terminalEventId: string;
   readonly checkpointEventId: string;
   readonly checkpointId: string;
-  messageEventId(index: number): string;
+  seedEventId(index: number): string;
 }
 
 interface PendingRuntimeToolCall {
@@ -195,6 +204,12 @@ interface PendingRuntimeToolCall {
 interface PendingRegisteredToolResult {
   readonly event: RuntimeToolResultRecordedEvent;
   readonly message: Message;
+}
+
+interface PendingMessageCommitBatch {
+  readonly messages: readonly Message[];
+  readonly events: readonly RuntimeEvent[];
+  readonly consumedByToolCallId: ReadonlyMap<string, number>;
 }
 
 /** The canonical run bound to the current asynchronous Agent execution. */
@@ -210,14 +225,29 @@ export function currentRuntimeToolCallId(): string | undefined {
 
 /** Pure identity helper used by fork recovery before it trusts target Runtime facts. */
 export function deriveRuntimeForkBootstrapRunId(options: RuntimeForkBootstrapSeed): string {
-  const messages = options.messages.map(stripMessageUsage);
-  const historyEntries = normalizeForkHistoryEntries(options.historyEntries, messages);
+  const seedEntries = normalizeForkSeedEntries(options.seedEntries, options.sourceSessionId);
+  const modelEntryCount = countForkModelSeedEntries(seedEntries);
+  const canonicalWorkDir = canonicalizeWorkspacePath(options.workDir);
+  const operationCreatedAt = normalizeForkOperationCreatedAt(options.operationCreatedAt);
+  const sourceThroughEventId = normalizeForkSourceThroughEventId(
+    seedEntries,
+    options.sourceThroughEventId,
+  );
+  const statePublication = normalizeForkStatePublication(options.statePublication);
   const completion: RuntimeForkBootstrapCompletion = {
-    sourceDigest: forkHistorySeedDigest(historyEntries),
-    messageCount: messages.length,
+    sourceDigest: forkSeedDigest(seedEntries),
+    messageCount: modelEntryCount,
   };
-  const checkpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
-  return runtimeForkBootstrapIdentity(options, completion, checkpoint).runId;
+  const checkpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, modelEntryCount);
+  return runtimeForkBootstrapIdentity(
+    options,
+    completion,
+    checkpoint,
+    sourceThroughEventId,
+    statePublication,
+    canonicalWorkDir,
+    operationCreatedAt,
+  ).runId;
 }
 
 export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Result): Result {
@@ -240,6 +270,7 @@ export class RuntimeRun {
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
+  private pendingMessageCommitBatch?: PendingMessageCommitBatch;
   private turnId: string;
   private stepId: string;
   private terminal?: RuntimeRunTerminalEvent;
@@ -402,26 +433,40 @@ export class RuntimeRun {
   }
 
   /**
-   * Creates the canonical history for a fork from a frozen source snapshot. The copied
-   * message facts remain immutable and the target gets
-   * its own bootstrap run, rather than silently inheriting the parent's run files.
+   * Creates a fork from one source-sequenced model/transcript seed. The target owns
+   * new immutable wrappers while durable transcript identities remain stable for UI hydration.
    */
   static async bootstrapFork(options: BootstrapRuntimeForkOptions): Promise<boolean> {
     if (options.sourceSessionId === options.targetSessionId) {
       throw new Error("Runtime fork source 与 target sessionId 不能相同");
     }
     const store = options.store;
-    const messages = options.messages.map(stripMessageUsage);
-    const historyEntries = normalizeForkHistoryEntries(options.historyEntries, messages);
-    const modelCheckpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
+    const seedEntries = normalizeForkSeedEntries(options.seedEntries, options.sourceSessionId);
+    const modelEntryCount = countForkModelSeedEntries(seedEntries);
+    const canonicalWorkDir = canonicalizeWorkspacePath(options.workDir);
+    const operationCreatedAt = normalizeForkOperationCreatedAt(options.operationCreatedAt);
+    const sourceThroughEventId = normalizeForkSourceThroughEventId(
+      seedEntries,
+      options.sourceThroughEventId,
+    );
+    const statePublication = normalizeForkStatePublication(options.statePublication);
+    const modelCheckpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, modelEntryCount);
     const completion: RuntimeForkBootstrapCompletion = {
-      sourceDigest: forkHistorySeedDigest(historyEntries),
-      messageCount: messages.length,
+      sourceDigest: forkSeedDigest(seedEntries),
+      messageCount: modelEntryCount,
     };
-    const identity = runtimeForkBootstrapIdentity(options, completion, modelCheckpoint);
+    const identity = runtimeForkBootstrapIdentity(
+      options,
+      completion,
+      modelCheckpoint,
+      sourceThroughEventId,
+      statePublication,
+      canonicalWorkDir,
+      operationCreatedAt,
+    );
     const targetSessionKey = runtimeSessionKey(
       store.storageRoot,
-      options.workDir,
+      canonicalWorkDir,
       options.targetSessionId,
     );
 
@@ -438,42 +483,64 @@ export class RuntimeRun {
           `Runtime fork target ${options.targetSessionId} is already bound to parent ${conflictingMarker.data.parentSessionId}`,
         );
       }
+      const existingStart = assertForkBootstrapStart(
+        existingEvents,
+        identity,
+        options.targetSessionId,
+        canonicalWorkDir,
+        operationCreatedAt,
+      );
+      const importedCount = assertForkSeedPrefix(
+        existingEvents,
+        seedEntries,
+        options.targetSessionId,
+        identity,
+        existingStart?.at,
+      );
+      assertRuntimeForkState(existingEvents, statePublication, options.targetSessionId, false);
       const completedMarker = forkMarkers.find((event) => event.data.sourceDigest !== undefined);
       if (completedMarker) {
         if (
           completedMarker.data.sourceDigest !== completion.sourceDigest ||
-          completedMarker.data.messageCount !== completion.messageCount
+          completedMarker.data.messageCount !== completion.messageCount ||
+          completedMarker.data.throughEventId !== sourceThroughEventId
         ) {
           throw runtimeForkConflict(
             `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
           );
         }
-        if (completedMarker.runId !== identity.runId) {
+        if (
+          completedMarker.runId !== identity.runId ||
+          completedMarker.eventId !== identity.markerEventId
+        ) {
           throw runtimeForkConflict(
             `Runtime fork target ${options.targetSessionId} has a conflicting canonical seed`,
           );
         }
-        if (completedMarker.runId === identity.runId) {
-          assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint);
-          await RuntimeRun.ensureForkTerminal(options, store, existingEvents, identity, writeGuard);
-          await RuntimeRun.ensureForkState(options, store, writeGuard);
+        if (!existingStart || importedCount !== seedEntries.length) {
+          throw runtimeForkConflict(
+            `Runtime fork target ${options.targetSessionId} published an incomplete canonical seed`,
+          );
         }
+        assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint, seedEntries);
+        assertRuntimeForkState(existingEvents, statePublication, options.targetSessionId, true);
+        assertRuntimeForkPublicationOrder(
+          existingEvents,
+          identity,
+          seedEntries,
+          modelCheckpoint,
+          statePublication,
+          completedMarker,
+          options.targetSessionId,
+        );
+        await RuntimeRun.ensureForkTerminal(options, store, existingEvents, identity, writeGuard);
         return false;
       }
 
-      const importedCount = assertForkHistoryPrefix(
-        existingEvents,
-        historyEntries,
-        options.targetSessionId,
-      );
-
-      const existingStart = existingEvents.find(
-        (event) => event.kind === "run.started" && event.runId === identity.runId,
-      );
-      const bootstrapAt = existingStart?.at ?? runtimeForkBootstrapAt(options.operationCreatedAt);
+      const bootstrapAt = existingStart?.at ?? runtimeForkBootstrapAt(operationCreatedAt);
       const forkRun = await RuntimeRun.startDetached({
         sessionId: options.targetSessionId,
-        workDir: options.workDir,
+        workDir: canonicalWorkDir,
         runId: identity.runId,
         invocationId: identity.invocationId,
         runStartedEventId: identity.runStartedEventId,
@@ -482,35 +549,46 @@ export class RuntimeRun {
         store,
         writeGuard,
       });
-      const throughEventId =
-        options.sourceThroughEventId ??
-        (await resolveForkSourceThroughEventId(store, options.sourceSessionId, messages));
-      for (let index = importedCount; index < messages.length; index += 1) {
-        await forkRun.recordImportedHistoryEvent(
-          historyEntries[index]!,
-          identity.messageEventId(index),
-        );
+      for (let index = importedCount; index < seedEntries.length; index += 1) {
+        await forkRun.recordImportedSeedEntry(seedEntries[index]!, identity.seedEventId(index));
       }
       if (modelCheckpoint) {
-        const coveredEventIds = Array.from(
-          { length: modelCheckpoint.coveredMessageCount },
-          (_, index) => identity.messageEventId(index),
+        const coveredEventIds = forkModelSeedEventIds(seedEntries, identity).slice(
+          0,
+          modelCheckpoint.coveredMessageCount,
         );
         await forkRun.recordCheckpoint({
           eventId: identity.checkpointEventId,
           checkpointId: identity.checkpointId,
           coveredEventCount: modelCheckpoint.coveredMessageCount,
           sourceDigest: runtimeEventIdDigest(coveredEventIds),
-          throughEventId: identity.messageEventId(modelCheckpoint.coveredMessageCount - 1),
+          throughEventId: coveredEventIds.at(-1)!,
           summary: modelCheckpoint.summary,
         });
       }
       // State is part of the published fork payload. Persist it before the marker so every
-      // consumer that observes session.forked also observes messages, checkpoint, and state.
-      await RuntimeRun.ensureForkState(options, store, writeGuard);
+      // consumer that observes session.forked also observes history, checkpoint, and state.
+      await RuntimeRun.ensureForkState(
+        options.targetSessionId,
+        statePublication,
+        store,
+        writeGuard,
+      );
+      const publicationEvents = await store.readSession(options.targetSessionId);
+      assertRuntimeForkCheckpoint(publicationEvents, identity, modelCheckpoint, seedEntries);
+      assertRuntimeForkState(publicationEvents, statePublication, options.targetSessionId, true);
+      assertRuntimeForkPublicationOrder(
+        publicationEvents,
+        identity,
+        seedEntries,
+        modelCheckpoint,
+        statePublication,
+        undefined,
+        options.targetSessionId,
+      );
       await forkRun.recordSessionForked(
         options.sourceSessionId,
-        throughEventId,
+        sourceThroughEventId,
         completion,
         identity.markerEventId,
       );
@@ -560,7 +638,7 @@ export class RuntimeRun {
     }
     const run = await RuntimeRun.startDetached({
       sessionId: options.targetSessionId,
-      workDir: options.workDir,
+      workDir: started.data.workDir,
       runId: identity.runId,
       invocationId: identity.invocationId,
       runStartedEventId: identity.runStartedEventId,
@@ -573,13 +651,13 @@ export class RuntimeRun {
   }
 
   private static async ensureForkState(
-    options: BootstrapRuntimeForkOptions,
+    targetSessionId: string,
+    publication: RuntimeForkStatePublication | undefined,
     store: RuntimeEventStore,
     writeGuard: RuntimeEventWriteGuard,
   ): Promise<void> {
-    const publication = options.statePublication;
     if (!publication) return;
-    const existing = await store.readSessionEvent(options.targetSessionId, publication.eventId);
+    const existing = await store.readSessionEvent(targetSessionId, publication.eventId);
     if (existing) {
       if (
         existing.event.kind !== "session.state.committed" ||
@@ -596,7 +674,7 @@ export class RuntimeRun {
     await writeWithRuntimeEventGuard(
       writeGuard,
       () =>
-        store.appendSessionState(options.targetSessionId, publication.patch, {
+        store.appendSessionState(targetSessionId, publication.patch, {
           eventId: publication.eventId,
           now: () => new Date(publication.at),
         }),
@@ -667,7 +745,7 @@ export class RuntimeRun {
   }
 
   async readModelHistory(): Promise<Message[]> {
-    const { materializeRuntimeHistory } = await import("./runtime-event-read-model.js");
+    const { materializeRuntimeHistory } = await import("../engine/session-runtime-read-model.js");
     return materializeRuntimeHistory(await this.store.readSession(this.sessionId));
   }
 
@@ -692,7 +770,8 @@ export class RuntimeRun {
   }
 
   async readModelHistoryEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
-    const { materializeRuntimeHistoryEntries } = await import("./runtime-event-read-model.js");
+    const { materializeRuntimeHistoryEntries } =
+      await import("../engine/session-runtime-read-model.js");
     return materializeRuntimeHistoryEntries(await this.store.readSession(this.sessionId));
   }
 
@@ -737,36 +816,53 @@ export class RuntimeRun {
     if (messages.length === 0) return;
     this.assertSession(session);
     this.assertOpen();
-    const consumedByToolCallId = new Map<string, number>();
-    const events = messages.map((message) => {
-      const canonicalMessage = canonicalizeRuntimeMessage(message);
-      const toolCallId = canonicalMessage.toolCallId;
-      if (toolCallId) {
-        const consumed = consumedByToolCallId.get(toolCallId) ?? 0;
-        const registered = this.pendingToolResults.get(toolCallId)?.[consumed];
-        if (!registered) {
-          throw new Error(
-            `Runtime ToolResult ${toolCallId} must be registered as tool.result.recorded before commit`,
-          );
-        }
-        if (!isDeepStrictEqual(canonicalMessage, registered.message)) {
-          throw new Error(
-            `Registered Runtime tool result ${toolCallId} must be committed with its canonical projection`,
-          );
-        }
-        consumedByToolCallId.set(toolCallId, consumed + 1);
-        return registered.event;
+    const canonicalMessages = messages.map((message) => canonicalizeRuntimeMessage(message));
+    let batch = this.pendingMessageCommitBatch;
+    if (batch) {
+      if (!isDeepStrictEqual(batch.messages, canonicalMessages)) {
+        throw new Error(
+          `Runtime run ${this.runId} must retry its pending message batch before committing different messages`,
+        );
       }
-      return this.messageCommittedEvent(createRuntimeEventId("message"), canonicalMessage);
-    });
-    const persisted = await this.appendBatch(events);
+    } else {
+      const consumedByToolCallId = new Map<string, number>();
+      const events = canonicalMessages.map((canonicalMessage) => {
+        const toolCallId = canonicalMessage.toolCallId;
+        if (toolCallId) {
+          const consumed = consumedByToolCallId.get(toolCallId) ?? 0;
+          const registered = this.pendingToolResults.get(toolCallId)?.[consumed];
+          if (!registered) {
+            throw new Error(
+              `Runtime ToolResult ${toolCallId} must be registered as tool.result.recorded before commit`,
+            );
+          }
+          if (!isDeepStrictEqual(canonicalMessage, registered.message)) {
+            throw new Error(
+              `Registered Runtime tool result ${toolCallId} must be committed with its canonical projection`,
+            );
+          }
+          consumedByToolCallId.set(toolCallId, consumed + 1);
+          return registered.event;
+        }
+        return this.messageCommittedEvent(createRuntimeEventId("message"), canonicalMessage);
+      });
+      batch = {
+        messages: structuredClone(canonicalMessages),
+        events,
+        consumedByToolCallId,
+      };
+      this.pendingMessageCommitBatch = batch;
+    }
+
+    const persisted = await this.appendBatch(batch.events);
     await session.commitRuntimeProjectionBatch(persisted);
-    for (const [toolCallId, consumed] of consumedByToolCallId) {
+    for (const [toolCallId, consumed] of batch.consumedByToolCallId) {
       const queue = this.pendingToolResults.get(toolCallId);
       if (!queue) continue;
       queue.splice(0, consumed);
       if (queue.length === 0) this.pendingToolResults.delete(toolCallId);
     }
+    this.pendingMessageCommitBatch = undefined;
   }
 
   async commitMessageOnce(
@@ -776,8 +872,21 @@ export class RuntimeRun {
   ): Promise<CommitReceipt> {
     this.assertSession(session);
     this.assertOpen();
-    assertRuntimeCommittedMessage(message);
-    const event = this.messageCommittedEvent(eventId, message);
+    const canonicalMessage = canonicalizeRuntimeMessage(message);
+    assertRuntimeCommittedMessage(canonicalMessage);
+    const existing = await this.store.readSessionEvent(session.id, eventId);
+    if (existing) {
+      if (
+        existing.event.kind !== "message.committed" ||
+        !isDeepStrictEqual(existing.event.data.message, canonicalMessage)
+      ) {
+        throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
+      }
+      const persisted = await this.append(existing.event);
+      await session.commitRuntimeProjectionBatch([persisted]);
+      return runtimeCommitReceipt(persisted);
+    }
+    const event = this.messageCommittedEvent(eventId, canonicalMessage);
     const persisted = await this.append(event);
     await session.commitRuntimeProjectionBatch([persisted]);
     return runtimeCommitReceipt(persisted);
@@ -800,25 +909,46 @@ export class RuntimeRun {
     });
   }
 
-  /** Imports one frozen v3 model fact without degrading a ToolResult to Message. */
-  async recordImportedHistoryEvent(
-    source: RuntimeModelHistoryEvent,
+  /** Imports one frozen v5 fact without degrading a ToolResult or rebuilding transcript data. */
+  private async recordImportedSeedEntry(
+    source: RuntimeSessionForkSeedEntry,
     eventId = createRuntimeEventId("fork-history"),
   ): Promise<void> {
     this.assertOpen();
-    if (source.kind === "message.committed") {
-      await this.recordImportedMessage(source.data.message, eventId);
+    if (source.kind === "transcript") {
+      await this.recordImportedTranscriptEvent(source.event, eventId);
+      return;
+    }
+    if (source.event.kind === "message.committed") {
+      await this.recordImportedMessage(source.event.data.message, eventId);
       return;
     }
     const event: RuntimeToolResultRecordedEvent = {
       ...this.base(eventId),
       refs: {
         ...(this.refs() ?? {}),
-        toolCallId: source.refs.toolCallId,
-        ...(source.refs.evidence ? { evidence: structuredClone(source.refs.evidence) } : {}),
+        toolCallId: source.event.refs.toolCallId,
+        ...(source.event.refs.evidence
+          ? { evidence: structuredClone(source.event.refs.evidence) }
+          : {}),
       },
       kind: "tool.result.recorded",
-      data: structuredClone(source.data),
+      data: structuredClone(source.event.data),
+    };
+    assertRuntimeEvent(event);
+    await this.append(event);
+  }
+
+  private async recordImportedTranscriptEvent(
+    source: DurableTranscriptEvent,
+    eventId: string,
+  ): Promise<void> {
+    this.assertOpen();
+    assertDurableTranscriptEvent(source);
+    const event: RuntimeTranscriptEventRecordedEvent = {
+      ...this.base(eventId, false, "transcript"),
+      kind: "transcript.event.recorded",
+      data: { event: structuredClone(source) },
     };
     assertRuntimeEvent(event);
     await this.append(event);
@@ -857,31 +987,37 @@ export class RuntimeRun {
   }
 
   /**
-   * Persists one child-agent ToolResult as an audit fact without changing the
-   * parent Session model projection.
+   * Persists one complete child-agent ToolResult batch in Provider order
+   * without changing the parent Session model projection.
    */
-  async recordTranscriptToolResult(input: EngineRuntimeToolResultInput): Promise<Message> {
+  async recordTranscriptToolResults(
+    inputs: readonly EngineRuntimeToolResultInput[],
+  ): Promise<readonly Message[]> {
     this.assertOpen();
-    const canonical = canonicalizeRuntimeToolResultInput(input);
-    const event: RuntimeToolResultRecordedEvent = {
-      ...this.base(createRuntimeEventId("transcript-tool-result"), true, "transcript"),
-      refs: {
-        ...(this.refs() ?? {}),
-        toolCallId: canonical.toolCallId,
-        ...(canonical.evidence ? { evidence: canonical.evidence } : {}),
-      },
-      kind: "tool.result.recorded",
-      data: {
-        toolName: canonical.toolName,
-        status: canonical.status,
-        body: canonical.body,
-        projection: canonical.projection,
-      },
-    };
-    assertRuntimeEvent(event);
-    const message = projectRuntimeToolResultMessage(event);
-    await this.append(event);
-    return structuredClone(message);
+    if (inputs.length === 0) return [];
+    const events = inputs.map((input): RuntimeToolResultRecordedEvent => {
+      const canonical = canonicalizeRuntimeToolResultInput(input);
+      const event: RuntimeToolResultRecordedEvent = {
+        ...this.base(createRuntimeEventId("transcript-tool-result"), true, "transcript"),
+        refs: {
+          ...(this.refs() ?? {}),
+          toolCallId: canonical.toolCallId,
+          ...(canonical.evidence ? { evidence: canonical.evidence } : {}),
+        },
+        kind: "tool.result.recorded",
+        data: {
+          toolName: canonical.toolName,
+          status: canonical.status,
+          body: canonical.body,
+          projection: canonical.projection,
+        },
+      };
+      assertRuntimeEvent(event);
+      return event;
+    });
+    const messages = events.map(projectRuntimeToolResultMessage);
+    await this.appendBatch(events);
+    return structuredClone(messages);
   }
 
   registerToolResult(input: EngineRuntimeToolResultInput): Message {
@@ -1362,9 +1498,16 @@ function runtimeForkBootstrapIdentity(
   options: RuntimeForkBootstrapSeed,
   completion: RuntimeForkBootstrapCompletion,
   modelCheckpoint: RuntimeForkModelCheckpointSeed | undefined,
+  sourceThroughEventId: string | undefined,
+  statePublication: RuntimeForkStatePublication | undefined,
+  canonicalWorkDir: string,
+  operationCreatedAt: string | undefined,
 ): RuntimeForkBootstrapIdentity {
   const checkpointSeed = modelCheckpoint
     ? [modelCheckpoint.coveredMessageCount, modelCheckpoint.summary]
+    : undefined;
+  const stateSeed = statePublication
+    ? [statePublication.eventId, statePublication.at, statePublication.patch]
     : undefined;
   const digest = createHash("sha256")
     .update(
@@ -1374,7 +1517,11 @@ function runtimeForkBootstrapIdentity(
         options.targetSessionId,
         completion.sourceDigest,
         completion.messageCount,
+        sourceThroughEventId ?? null,
+        canonicalWorkDir,
+        operationCreatedAt ?? null,
         ...(checkpointSeed ? [checkpointSeed] : []),
+        ...(stateSeed ? [stateSeed] : []),
       ]),
     )
     .digest("hex");
@@ -1387,7 +1534,7 @@ function runtimeForkBootstrapIdentity(
     terminalEventId: `${eventNamespace}:terminal`,
     checkpointEventId: `${eventNamespace}:checkpoint`,
     checkpointId: `${eventNamespace}:checkpoint`,
-    messageEventId: (index) => `${eventNamespace}:message:${index}`,
+    seedEventId: (index) => `${eventNamespace}:seed:${index}`,
   };
 }
 
@@ -1409,10 +1556,49 @@ function normalizeForkModelCheckpoint(
   };
 }
 
+function normalizeForkSourceThroughEventId(
+  seedEntries: readonly RuntimeSessionForkSeedEntry[],
+  explicit: string | undefined,
+): string | undefined {
+  const derived = seedEntries.findLast((entry) => entry.kind === "model")?.event.eventId;
+  if (explicit !== undefined && explicit !== derived) {
+    throw new Error(`Runtime fork source boundary ${explicit} does not match its canonical seed`);
+  }
+  return derived;
+}
+
+function normalizeForkStatePublication(
+  publication: RuntimeForkStatePublication | undefined,
+): RuntimeForkStatePublication | undefined {
+  if (!publication) return undefined;
+  if (!publication.eventId) throw new Error("Runtime fork state eventId must be non-empty");
+  const timestamp = Date.parse(publication.at);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`Runtime fork state has an invalid timestamp: ${publication.at}`);
+  }
+  const patch = normalizeSessionRuntimeStatePatch(publication.patch);
+  if (!patch) throw new Error("Runtime fork state patch is invalid");
+  return {
+    eventId: publication.eventId,
+    at: new Date(timestamp).toISOString(),
+    patch,
+  };
+}
+
+function normalizeForkOperationCreatedAt(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`Fork operation has an invalid createdAt timestamp: ${value}`);
+  }
+  return new Date(timestamp).toISOString();
+}
+
 function assertRuntimeForkCheckpoint(
   events: readonly RuntimeEvent[],
   identity: RuntimeForkBootstrapIdentity,
   checkpoint: RuntimeForkModelCheckpointSeed | undefined,
+  seedEntries: readonly RuntimeSessionForkSeedEntry[],
 ): void {
   const existing = events.find((event) => event.eventId === identity.checkpointEventId);
   if (!checkpoint) {
@@ -1423,8 +1609,9 @@ function assertRuntimeForkCheckpoint(
     }
     return;
   }
-  const coveredEventIds = Array.from({ length: checkpoint.coveredMessageCount }, (_, index) =>
-    identity.messageEventId(index),
+  const coveredEventIds = forkModelSeedEventIds(seedEntries, identity).slice(
+    0,
+    checkpoint.coveredMessageCount,
   );
   if (
     !existing ||
@@ -1442,6 +1629,155 @@ function assertRuntimeForkCheckpoint(
   }
 }
 
+function assertRuntimeForkState(
+  events: readonly RuntimeEvent[],
+  publication: RuntimeForkStatePublication | undefined,
+  targetSessionId: string,
+  required: boolean,
+): void {
+  const stateEvents = events.filter((event) => event.kind === "session.state.committed");
+  if (!publication) {
+    if (stateEvents.length > 0) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} has an unexpected state publication`,
+      );
+    }
+    return;
+  }
+  const unexpected = stateEvents.find((event) => event.eventId !== publication.eventId);
+  if (unexpected) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} has unexpected state fact ${unexpected.eventId}`,
+    );
+  }
+  const existing = stateEvents.find((event) => event.eventId === publication.eventId);
+  if (!existing) {
+    if (required) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} published before its state fact`,
+      );
+    }
+    return;
+  }
+  if (
+    existing.at !== publication.at ||
+    !isDeepStrictEqual(existing.data.patch, publication.patch)
+  ) {
+    throw runtimeForkConflict(
+      `Runtime fork state event ${publication.eventId} has a conflicting payload`,
+    );
+  }
+}
+
+function assertRuntimeForkPublicationOrder(
+  events: readonly RuntimeEvent[],
+  identity: RuntimeForkBootstrapIdentity,
+  seedEntries: readonly RuntimeSessionForkSeedEntry[],
+  checkpoint: RuntimeForkModelCheckpointSeed | undefined,
+  statePublication: RuntimeForkStatePublication | undefined,
+  marker: RuntimeSessionForkedEvent | undefined,
+  targetSessionId: string,
+): void {
+  const startIndex = requiredForkEventIndex(
+    events,
+    identity.runStartedEventId,
+    targetSessionId,
+    "start",
+  );
+  let payloadTailIndex = startIndex;
+  for (const [index] of seedEntries.entries()) {
+    const seedIndex = requiredForkEventIndex(
+      events,
+      identity.seedEventId(index),
+      targetSessionId,
+      `seed ${index}`,
+    );
+    if (seedIndex <= payloadTailIndex) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} has canonical facts outside publication order`,
+      );
+    }
+    payloadTailIndex = seedIndex;
+  }
+  if (checkpoint) {
+    const checkpointIndex = requiredForkEventIndex(
+      events,
+      identity.checkpointEventId,
+      targetSessionId,
+      "checkpoint",
+    );
+    if (checkpointIndex <= payloadTailIndex) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} has a checkpoint outside publication order`,
+      );
+    }
+    payloadTailIndex = checkpointIndex;
+  }
+  if (statePublication) {
+    const stateIndex = requiredForkEventIndex(
+      events,
+      statePublication.eventId,
+      targetSessionId,
+      "state",
+    );
+    if (stateIndex <= payloadTailIndex) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} has state outside publication order`,
+      );
+    }
+    payloadTailIndex = stateIndex;
+  }
+  if (!marker) {
+    const prematureTerminal = events.find(
+      (event) => event.kind === "run.terminal" && event.runId === identity.runId,
+    );
+    if (prematureTerminal) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} reached terminal before publication`,
+      );
+    }
+    return;
+  }
+  const markerIndex = requiredForkEventIndex(
+    events,
+    marker.eventId,
+    targetSessionId,
+    "publication marker",
+  );
+  if (markerIndex <= payloadTailIndex) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} published before its canonical payload`,
+    );
+  }
+  const terminal = events.find(
+    (event) => event.kind === "run.terminal" && event.runId === identity.runId,
+  );
+  if (terminal) {
+    const terminalIndex = requiredForkEventIndex(
+      events,
+      terminal.eventId,
+      targetSessionId,
+      "terminal",
+    );
+    if (terminalIndex <= markerIndex) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} reached terminal before publication`,
+      );
+    }
+  }
+}
+
+function requiredForkEventIndex(
+  events: readonly RuntimeEvent[],
+  eventId: string,
+  targetSessionId: string,
+  fact: string,
+): number {
+  const index = events.findIndex((event) => event.eventId === eventId);
+  if (index >= 0) return index;
+  throw runtimeForkConflict(`Runtime fork target ${targetSessionId} is missing its ${fact} fact`);
+}
+
 function runtimeForkConflict(message: string): SessionForkRuntimeConflictError {
   return new SessionForkRuntimeConflictError(message, "target_conflict");
 }
@@ -1451,11 +1787,7 @@ function runtimeEventIdDigest(eventIds: readonly string[]): string {
 }
 
 function runtimeForkBootstrapAt(operationCreatedAt: string | undefined): string {
-  const timestamp = operationCreatedAt === undefined ? Date.now() : Date.parse(operationCreatedAt);
-  if (!Number.isFinite(timestamp)) {
-    throw new Error(`Fork operation has an invalid createdAt timestamp: ${operationCreatedAt}`);
-  }
-  return new Date(timestamp).toISOString();
+  return operationCreatedAt ?? new Date().toISOString();
 }
 
 function stripMessageUsage(message: Message): Message {
@@ -1474,9 +1806,9 @@ function canonicalizeRuntimeMessage(message: Message): Message {
 }
 
 function assertRuntimeCommittedMessage(message: Message): void {
-  if (message.toolCallId !== undefined) {
+  if (message.toolCallId !== undefined || message.toolResultEvidenceUri !== undefined) {
     throw new Error(
-      `Runtime ToolResult ${message.toolCallId} cannot be persisted as message.committed`,
+      `Runtime ToolResult projection ${message.toolCallId ?? "without call ID"} cannot be persisted as message.committed`,
     );
   }
 }
@@ -1493,67 +1825,222 @@ function canonicalizeRuntimeToolResultInput(
   }
 }
 
-function forkHistorySeedDigest(entries: readonly RuntimeModelHistoryEvent[]): string {
+function forkSeedDigest(entries: readonly RuntimeSessionForkSeedEntry[]): string {
   return createHash("sha256")
-    .update(JSON.stringify(entries.map(forkHistoryPayload)))
+    .update(JSON.stringify(entries.map(forkSeedPayload)))
     .digest("hex");
 }
 
-function isMessagePrefix(prefix: readonly Message[], messages: readonly Message[]): boolean {
-  return (
-    prefix.length <= messages.length &&
-    prefix.every((message, index) => isDeepStrictEqual(message, messages[index]))
-  );
-}
-
-function normalizeForkHistoryEntries(
-  entries: readonly RuntimeModelHistoryEvent[],
-  messages: readonly Message[],
-): RuntimeModelHistoryEvent[] {
-  const normalized = entries.map((source) => {
-    const event = structuredClone(source);
-    const eventId = event.eventId;
-    assertRuntimeEvent(event);
-    if (!runtimeEventHasModelHistoryEntry(event)) {
-      throw new Error(`Runtime fork history event ${eventId} is not model-visible`);
+function normalizeForkSeedEntries(
+  entries: readonly RuntimeSessionForkSeedEntry[],
+  sourceSessionId: string,
+): RuntimeSessionForkSeedEntry[] {
+  let previousSourceSequence = 0;
+  const transcriptEvents: DurableTranscriptEvent[] = [];
+  const normalized = entries.map((source, index): RuntimeSessionForkSeedEntry => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      throw new Error(`Runtime fork seed ${index} must be an object`);
     }
-    if (event.kind === "message.committed") {
+    if (
+      !Number.isSafeInteger(source.sourceSequence) ||
+      source.sourceSequence <= previousSourceSequence
+    ) {
+      throw new Error("Runtime fork seed source sequences must be strictly increasing");
+    }
+    previousSourceSequence = source.sourceSequence;
+    if (source.kind === "model") {
+      const event = structuredClone(source.event);
+      const eventId = event.eventId;
+      assertRuntimeEvent(event);
+      if (!runtimeEventHasModelHistoryEntry(event)) {
+        throw new Error(`Runtime fork seed event ${eventId} is not model-visible`);
+      }
+      if (event.sessionId !== sourceSessionId) {
+        throw new Error(`Runtime fork seed event ${eventId} belongs to another Session`);
+      }
       return {
-        ...event,
-        data: { message: stripMessageUsage(event.data.message) },
-      } satisfies RuntimeModelHistoryEvent;
+        kind: "model",
+        sourceSequence: source.sourceSequence,
+        event:
+          event.kind === "message.committed"
+            ? {
+                ...event,
+                data: { message: stripMessageUsage(event.data.message) },
+              }
+            : event,
+      };
     }
-    return event;
+    if (source.kind === "transcript") {
+      const event = structuredClone(source.event);
+      assertDurableTranscriptEvent(event);
+      transcriptEvents.push(event);
+      return {
+        kind: "transcript",
+        sourceSequence: source.sourceSequence,
+        event,
+      };
+    }
+    throw new Error(`Runtime fork seed ${index} has an invalid kind`);
   });
-  const projected = normalized.map((event) => {
-    const message = projectRuntimeModelMessage(event);
-    if (!message) throw new Error(`Runtime fork history event ${event.eventId} has no projection`);
-    return stripMessageUsage(message);
-  });
-  if (!isDeepStrictEqual(projected, messages)) {
-    throw new Error("Runtime fork v3 history does not match its projected Message seed");
-  }
+  projectTranscriptEvents(transcriptEvents);
   return normalized;
 }
 
-function assertForkHistoryPrefix(
+function assertForkBootstrapStart(
   existingEvents: readonly RuntimeEvent[],
-  expected: readonly RuntimeModelHistoryEvent[],
+  identity: RuntimeForkBootstrapIdentity,
   targetSessionId: string,
-): number {
-  const imported = projectRuntimeSessionModelHistoryEntries(existingEvents).map(({ event }) =>
-    forkHistoryPayload(event),
+  canonicalWorkDir: string,
+  operationCreatedAt: string | undefined,
+): RuntimeRunStartedEvent | undefined {
+  const starts = existingEvents.filter(
+    (event): event is RuntimeRunStartedEvent =>
+      event.kind === "run.started" &&
+      (event.runId === identity.runId || event.eventId === identity.runStartedEventId),
   );
-  const expectedPayloads = expected.map(forkHistoryPayload);
-  if (
-    imported.length > expectedPayloads.length ||
-    !imported.every((entry, index) => isDeepStrictEqual(entry, expectedPayloads[index]))
-  ) {
+  if (starts.length > 1) {
     throw runtimeForkConflict(
-      `Runtime fork target ${targetSessionId} has incomplete facts that diverge from its frozen v3 history`,
+      `Runtime fork target ${targetSessionId} has conflicting bootstrap start facts`,
     );
   }
-  return imported.length;
+  const started = starts[0];
+  if (
+    started &&
+    (started.eventId !== identity.runStartedEventId ||
+      started.runId !== identity.runId ||
+      started.invocationId !== identity.invocationId ||
+      started.sessionId !== targetSessionId ||
+      started.turnId !== `turn:${identity.runId}:input` ||
+      started.data.workDir !== canonicalWorkDir ||
+      (operationCreatedAt !== undefined && started.at !== operationCreatedAt) ||
+      started.partial ||
+      started.visibility !== "internal")
+  ) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} has a conflicting bootstrap start fact`,
+    );
+  }
+  return started;
+}
+
+function assertForkSeedPrefix(
+  existingEvents: readonly RuntimeEvent[],
+  expected: readonly RuntimeSessionForkSeedEntry[],
+  targetSessionId: string,
+  identity: RuntimeForkBootstrapIdentity,
+  bootstrapAt: string | undefined,
+): number {
+  if (existingEvents.some((event) => event.kind === "history.rewound")) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} contains a rewind inside bootstrap facts`,
+    );
+  }
+  const expectedIds = new Set(expected.map((_, index) => identity.seedEventId(index)));
+  const unexpected = existingEvents.find(
+    (event) =>
+      (runtimeEventHasModelHistoryEntry(event) || event.kind === "transcript.event.recorded") &&
+      !expectedIds.has(event.eventId),
+  );
+  if (unexpected) {
+    throw runtimeForkConflict(
+      `Runtime fork target ${targetSessionId} contains unexpected canonical fact ${unexpected.eventId}`,
+    );
+  }
+
+  let importedCount = 0;
+  let missing = false;
+  let previousLedgerIndex = -1;
+  for (const [index, seed] of expected.entries()) {
+    const eventId = identity.seedEventId(index);
+    const ledgerIndex = existingEvents.findIndex((event) => event.eventId === eventId);
+    if (ledgerIndex < 0) {
+      missing = true;
+      continue;
+    }
+    if (
+      missing ||
+      bootstrapAt === undefined ||
+      ledgerIndex <= previousLedgerIndex ||
+      !matchesImportedForkSeedEvent(
+        existingEvents[ledgerIndex]!,
+        seed,
+        targetSessionId,
+        identity,
+        bootstrapAt,
+      )
+    ) {
+      throw runtimeForkConflict(
+        `Runtime fork target ${targetSessionId} diverges from its frozen v5 canonical seed`,
+      );
+    }
+    previousLedgerIndex = ledgerIndex;
+    importedCount += 1;
+  }
+  return importedCount;
+}
+
+function matchesImportedForkSeedEvent(
+  actual: RuntimeEvent,
+  expected: RuntimeSessionForkSeedEntry,
+  targetSessionId: string,
+  identity: RuntimeForkBootstrapIdentity,
+  bootstrapAt: string,
+): boolean {
+  if (
+    actual.sessionId !== targetSessionId ||
+    actual.invocationId !== identity.invocationId ||
+    actual.runId !== identity.runId ||
+    actual.turnId !== `turn:${identity.runId}:input` ||
+    actual.at !== bootstrapAt ||
+    actual.partial
+  ) {
+    return false;
+  }
+  if (expected.kind === "transcript") {
+    return (
+      actual.kind === "transcript.event.recorded" &&
+      actual.visibility === "transcript" &&
+      actual.refs === undefined &&
+      isDeepStrictEqual(actual.data.event, expected.event)
+    );
+  }
+  if (!runtimeEventHasModelHistoryEntry(actual) || actual.visibility !== "model") return false;
+  const stepId = `step:${identity.runId}:input`;
+  const expectedRefs =
+    expected.event.kind === "message.committed"
+      ? { stepId }
+      : {
+          stepId,
+          toolCallId: expected.event.refs.toolCallId,
+          ...(expected.event.refs.evidence
+            ? { evidence: structuredClone(expected.event.refs.evidence) }
+            : {}),
+        };
+  return (
+    isDeepStrictEqual(actual.refs, expectedRefs) &&
+    isDeepStrictEqual(forkHistoryPayload(actual), forkHistoryPayload(expected.event))
+  );
+}
+
+function countForkModelSeedEntries(entries: readonly RuntimeSessionForkSeedEntry[]): number {
+  return entries.reduce((count, entry) => count + (entry.kind === "model" ? 1 : 0), 0);
+}
+
+function forkModelSeedEventIds(
+  entries: readonly RuntimeSessionForkSeedEntry[],
+  identity: RuntimeForkBootstrapIdentity,
+): string[] {
+  return entries.flatMap((entry, index) =>
+    entry.kind === "model" ? [identity.seedEventId(index)] : [],
+  );
+}
+
+function forkSeedPayload(entry: RuntimeSessionForkSeedEntry): unknown {
+  return {
+    kind: entry.kind,
+    sourceSequence: entry.sourceSequence,
+    event: entry.kind === "model" ? forkHistoryPayload(entry.event) : entry.event,
+  };
 }
 
 function forkHistoryPayload(event: RuntimeModelHistoryEvent): unknown {
@@ -1571,20 +2058,6 @@ function forkHistoryPayload(event: RuntimeModelHistoryEvent): unknown {
     },
     data: event.data,
   };
-}
-
-async function resolveForkSourceThroughEventId(
-  store: RuntimeEventStore,
-  sourceSessionId: string,
-  frozenMessages: readonly Message[],
-): Promise<string | undefined> {
-  if (!(await store.readSessionManifest(sourceSessionId))) return undefined;
-  const sourceMessages = projectRuntimeSessionMessageEntries(
-    await store.readSession(sourceSessionId),
-  );
-  const normalizedSource = sourceMessages.map(({ message }) => stripMessageUsage(message));
-  if (!isMessagePrefix(frozenMessages, normalizedSource)) return undefined;
-  return sourceMessages[frozenMessages.length - 1]?.eventId;
 }
 
 function runtimeFailureReason(error: unknown): string {

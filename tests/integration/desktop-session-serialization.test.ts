@@ -9,6 +9,7 @@ import {
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
 import { globalSessionManager } from "../../src/engine/session.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 
 test(
   "Desktop transcript persistence reuses the active Session serialization scope",
@@ -30,6 +31,7 @@ test(
     const lease = await globalSessionManager.getOrCreatePinned(sessionId, canonicalWorkspace, {
       persistence: true,
       picoHome,
+      runtimePort: createEngineRuntimePort(),
     });
     const runtimeErrors: unknown[] = [];
     let resolveProjection!: () => void;
@@ -97,7 +99,11 @@ test(
             runId: "run-serialized",
             item: {
               eventType: "tool.started",
-              data: { toolName: "read_file", args: "{}" },
+              data: {
+                providerCallId: "provider-call-serialized",
+                toolName: "read_file",
+                args: "{}",
+              },
             },
           },
         }),

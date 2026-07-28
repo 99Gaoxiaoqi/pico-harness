@@ -2,7 +2,10 @@ import { resolve } from "node:path";
 import { setImmediate as yieldToHost } from "node:timers/promises";
 import type { Message } from "../schema/message.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
-import { RUNTIME_EVENT_STORE_MAX_PAGE_SIZE, RuntimeEventStore } from "./runtime-event-store.js";
+import {
+  RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
+  RuntimeEventStore,
+} from "../storage/runtime-event-store.js";
 import { detectStableMemorySignal } from "../memory/proposal-signal.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";

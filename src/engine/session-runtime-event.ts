@@ -1,4 +1,4 @@
-import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import type { Message, Usage } from "../schema/message.js";
 import { SESSION_RUNTIME_STATE_VERSION, type SessionRuntimeStatePatch } from "./session-runtime.js";
 import type {
@@ -10,7 +10,7 @@ import type {
 export type { RuntimeEvidenceReference } from "./tool-result-contract.js";
 
 /** Durable Session event contract. Runtime owns validation and storage adapters. */
-export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
+export const RUNTIME_EVENT_SCHEMA_VERSION = 2 as const;
 
 export type RuntimeEventVisibility = "model" | "transcript" | "internal";
 export type RuntimeTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
@@ -99,22 +99,13 @@ export interface RuntimeModelCallSettledEvent extends RuntimeEventBase {
   };
 }
 
-interface RuntimeCheckpointRecordedEventDataBase {
+export interface RuntimeCheckpointRecordedEventData {
   readonly checkpointId: string;
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
-}
-export interface RuntimeRollingCheckpointData extends RuntimeCheckpointRecordedEventDataBase {
   readonly throughEventId: string;
   readonly summary: Message;
 }
-interface RuntimeLegacyCheckpointData extends RuntimeCheckpointRecordedEventDataBase {
-  readonly throughEventId?: undefined;
-  readonly summary?: undefined;
-}
-export type RuntimeCheckpointRecordedEventData =
-  | RuntimeLegacyCheckpointData
-  | RuntimeRollingCheckpointData;
 
 export interface RuntimeCheckpointRecordedEvent extends RuntimeEventBase {
   readonly kind: "context.checkpoint.recorded";
@@ -142,7 +133,7 @@ export interface RuntimeSessionStateCommittedEvent extends RuntimeEventBase {
 }
 export interface RuntimeTranscriptEventRecordedEvent extends RuntimeEventBase {
   readonly kind: "transcript.event.recorded";
-  readonly data: { readonly event: TranscriptEvent };
+  readonly data: { readonly event: DurableTranscriptEvent };
 }
 export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
   readonly kind: "run.terminal";

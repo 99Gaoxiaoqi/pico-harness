@@ -1,8 +1,8 @@
 import type {
-  TuiProjection,
-  TuiSubagentLifecycle,
-  TuiSubagentTraceItem,
-} from "./tui-event-store.js";
+  TranscriptProjection as TuiProjection,
+  TranscriptSubagentLifecycle as TuiSubagentLifecycle,
+  TranscriptSubagentTraceItem as TuiSubagentTraceItem,
+} from "../presentation/transcript-event-store.js";
 import { summarizeToolTarget } from "./tool-format.js";
 
 export const MAIN_AGENT_ID = "main";
@@ -94,10 +94,8 @@ export function projectAgentNavigationItems(
         ? { agentName: subagent.activity.agentName }
         : {}),
       task: subagent.activity.task,
-      ...(subagent.activity.mode !== undefined ? { mode: subagent.activity.mode } : {}),
-      ...(subagent.activity.completionPolicy !== undefined
-        ? { completionPolicy: subagent.activity.completionPolicy }
-        : {}),
+      mode: subagent.activity.mode,
+      completionPolicy: subagent.activity.completionPolicy,
       ...(subagent.activity.currentAction !== undefined
         ? { currentAction: subagent.activity.currentAction }
         : {}),

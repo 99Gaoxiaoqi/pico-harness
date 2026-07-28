@@ -8,10 +8,17 @@ import { SilentReporter } from "../../src/engine/reporter.js";
 import type { ToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
 import { materializeRuntimeHistory } from "../../src/engine/session-runtime-read-model.js";
 import { Session } from "../../src/engine/session.js";
+import { HookService, type HookExecutor } from "../../src/hooks/service.js";
+import {
+  HOOK_EVENTS,
+  type HookInput,
+  type HookSnapshot,
+  type ResolvedHookHandler,
+} from "../../src/hooks/types.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import type { RuntimeToolResultRecordedEvent } from "../../src/runtime/runtime-event.js";
-import type { ToolCall, ToolDefinition, ToolResult } from "../../src/schema/message.js";
+import type { RuntimeToolResultRecordedEvent } from "../../src/storage/runtime-event.js";
+import type { Message, ToolCall, ToolDefinition, ToolResult } from "../../src/schema/message.js";
 import { ToolAccesses } from "../../src/tools/tool-access.js";
 import {
   NO_FILE_SIDE_EFFECTS,
@@ -20,6 +27,8 @@ import {
   type ToolExecutionContext,
 } from "../../src/tools/registry.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
+
+type PostToolHookEvent = "PostToolUse" | "PostToolUseFailure" | "PostToolBatch";
 
 test("Reporter failure happens after canonical ToolResult commit and keeps Session writable", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-result-reporter-order-"));
@@ -57,12 +66,20 @@ test("Reporter failure happens after canonical ToolResult commit and keeps Sessi
         throw reporterFailure;
       }
     })();
+    const hookInputs: HookInput[] = [];
+    const hookService = recordingHookService(
+      workDir,
+      session.id,
+      ["PostToolUse", "PostToolBatch"],
+      hookInputs,
+    );
     const engine = new AgentEngine({
       provider,
       registry,
       workDir,
       runtimePort,
       reporter,
+      hookService,
       maxTurns: 2,
     });
 
@@ -87,6 +104,10 @@ test("Reporter failure happens after canonical ToolResult commit and keeps Sessi
     );
     assert.ok(terminal?.kind === "run.terminal");
     assert.equal(terminal.data.status, "failed");
+    assert.deepEqual(
+      hookInputs.map((input) => input.hook_event_name),
+      ["PostToolUse", "PostToolBatch"],
+    );
 
     const history = materializeRuntimeHistory(events);
     assert.deepEqual(
@@ -172,8 +193,8 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
         role: "assistant",
         content: "",
         toolCalls: [
-          { id: "call:fast", name: "fast_fixture", arguments: "{}" },
           { id: "call:slow", name: "slow_fixture", arguments: "{}" },
+          { id: "call:fast", name: "fast_fixture", arguments: "{}" },
         ],
       };
     },
@@ -197,6 +218,13 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
       }
     }
   })();
+  const hookInputs: HookInput[] = [];
+  const hookService = recordingHookService(
+    workDir,
+    session.id,
+    ["PostToolUse", "PostToolUseFailure", "PostToolBatch"],
+    hookInputs,
+  );
 
   try {
     await session.recover();
@@ -207,6 +235,7 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
       workDir,
       runtimePort,
       reporter,
+      hookService,
       maxTurns: 2,
     });
 
@@ -237,6 +266,16 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
     );
     assert.equal(reported[0]?.result, "fast actual output");
     assert.match(reported[1]?.result ?? "", /^工具执行已取消:/u);
+    assert.deepEqual(
+      hookInputs.map((input) => input.hook_event_name),
+      ["PostToolUse", "PostToolUseFailure", "PostToolBatch"],
+    );
+    const batch = hookInputs[2] as HookInput<"PostToolBatch"> | undefined;
+    assert.equal(batch?.hook_event_name, "PostToolBatch");
+    assert.deepEqual(
+      batch.payload.tools.map((tool) => tool.tool_call_id),
+      ["call:slow", "call:fast"],
+    );
 
     const events = await session.runtimeEventStore!.readSession(session.id);
     const recorded = events.filter(
@@ -250,16 +289,130 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
         mode: event.data.projection.mode,
       })),
       [
-        { toolCallId: "call:fast", status: "succeeded", mode: "full" },
         { toolCallId: "call:slow", status: "cancelled", mode: "synthetic" },
+        { toolCallId: "call:fast", status: "succeeded", mode: "full" },
       ],
     );
     const history = materializeRuntimeHistory(events);
     assert.deepEqual(
       history.filter((message) => message.toolCallId).map((message) => message.toolCallId),
-      ["call:fast", "call:slow"],
+      ["call:slow", "call:fast"],
     );
   } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("subagent parallel ToolResults commit in Provider order and publish the complete Hook batch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-subagent-tool-result-batch-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("subagent-tool-result-batch", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const bothStarted = deferred<void>();
+  const releaseSlow = deferred<void>();
+  let startedCount = 0;
+  const providerRequests: Message[][] = [];
+  const registry: Registry = {
+    register() {},
+    use() {},
+    getAvailableTools: () => [fixtureDefinition("slow_fixture"), fixtureDefinition("fast_fixture")],
+    isReadOnlyTool: () => true,
+    getFileSideEffects: () => NO_FILE_SIDE_EFFECTS,
+    getAccesses: () => ToolAccesses.none(),
+    async execute(call: ToolCall): Promise<ToolResult> {
+      startedCount++;
+      if (startedCount === 2) bothStarted.resolve();
+      await bothStarted.promise;
+      if (call.name === "slow_fixture") {
+        await releaseSlow.promise;
+        return { toolCallId: call.id, output: "slow output", isError: false };
+      }
+      setTimeout(() => releaseSlow.resolve(), 25);
+      return { toolCallId: call.id, output: "fast output", isError: false };
+    },
+  };
+  const provider: LLMProvider = {
+    async generate(messages) {
+      providerRequests.push(structuredClone(messages));
+      if (providerRequests.length === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "call:slow", name: "slow_fixture", arguments: "{}" },
+            { id: "call:fast", name: "fast_fixture", arguments: "{}" },
+          ],
+        };
+      }
+      assert.deepEqual(
+        messages.filter((message) => message.toolCallId).map((message) => message.toolCallId),
+        ["call:slow", "call:fast"],
+      );
+      return {
+        role: "assistant",
+        content: "子代理已完成并行工具核验。".repeat(20),
+      };
+    },
+  };
+  const reported: string[] = [];
+  const reporter = new (class extends SilentReporter {
+    override onToolResult(result: ToolResultEnvelope): void {
+      reported.push(result.toolCallId);
+    }
+  })();
+  const hookInputs: HookInput[] = [];
+  const hookService = recordingHookService(
+    workDir,
+    session.id,
+    ["PostToolUse", "PostToolBatch"],
+    hookInputs,
+  );
+
+  try {
+    await session.recover();
+    const engine = new AgentEngine({
+      provider,
+      registry: new ToolRegistry(),
+      workDir,
+      runtimePort,
+      reporter,
+      hookService,
+    });
+    const parentRun = await runtimePort.startRun({
+      capability: session.runtimeEventCapability!,
+    });
+    const result = await parentRun.run(() =>
+      engine.runSub("并行检查两个只读工具。", registry, reporter, {
+        maxTurns: 3,
+        workDir,
+      }),
+    );
+
+    assert.equal(result.status, "completed");
+    assert.deepEqual(reported, ["call:fast", "call:slow"]);
+    assert.deepEqual(
+      hookInputs.map((input) => input.hook_event_name),
+      ["PostToolUse", "PostToolUse", "PostToolBatch"],
+    );
+
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    const transcriptResults = events.filter(
+      (event): event is RuntimeToolResultRecordedEvent =>
+        event.kind === "tool.result.recorded" && event.visibility === "transcript",
+    );
+    assert.deepEqual(
+      transcriptResults.map((event) => event.refs.toolCallId),
+      ["call:slow", "call:fast"],
+    );
+    assert.deepEqual(materializeRuntimeHistory(events), []);
+  } finally {
+    releaseSlow.resolve();
     await session.close();
     await rm(root, { recursive: true, force: true });
   }
@@ -383,6 +536,273 @@ test("required delegation batch reports its synthetic rejection and actual resul
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("required-first rejection publishes its durable ToolResult to every observer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-required-first-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-result-required-first", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const registry = new ToolRegistry();
+  registry.register(outputTool("rejected_fixture", "must not execute"));
+  registry.register(
+    outputTool(
+      "delegate_task",
+      JSON.stringify({
+        status: "completed",
+        results: [{ status: "completed", summary: "delegation completed" }],
+      }),
+    ),
+  );
+  let turn = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      turn++;
+      if (turn === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "call:required-first-rejected", name: "rejected_fixture", arguments: "{}" },
+          ],
+        };
+      }
+      if (turn === 2) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call:required-first-delegate",
+              name: "delegate_task",
+              arguments: JSON.stringify({
+                goal: "Run the delegated fixture.",
+                mode: "worker",
+                completion_policy: "required",
+              }),
+            },
+          ],
+        };
+      }
+      return { role: "assistant", content: "Done." };
+    },
+  };
+  const reported: ToolResultEnvelope[] = [];
+  const reporter = new (class extends SilentReporter {
+    override onToolResult(result: ToolResultEnvelope): void {
+      reported.push(structuredClone(result));
+    }
+  })();
+  const hookInputs: HookInput[] = [];
+  const hookService = recordingHookService(
+    workDir,
+    session.id,
+    ["PostToolUse", "PostToolUseFailure", "PostToolBatch"],
+    hookInputs,
+  );
+
+  try {
+    await session.recover();
+    await session.commitMessages({
+      role: "user",
+      content: "请先启动一个子代理排查，再继续回答。",
+    });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      reporter,
+      hookService,
+      maxTurns: 4,
+    });
+
+    await engine.run(session);
+
+    const rejectedReports = reported.filter(
+      (result) => result.toolCallId === "call:required-first-rejected",
+    );
+    assert.equal(rejectedReports.length, 1);
+    assert.equal(rejectedReports[0]?.status, "rejected");
+    const failureHooks = hookInputs.filter((input) => {
+      if (input.hook_event_name !== "PostToolUseFailure") return false;
+      const failure = input as HookInput<"PostToolUseFailure">;
+      return failure.payload.tool_call_id === "call:required-first-rejected";
+    });
+    assert.equal(failureHooks.length, 1);
+    const rejectedBatches = hookInputs.filter((input) => {
+      if (input.hook_event_name !== "PostToolBatch") return false;
+      const batch = input as HookInput<"PostToolBatch">;
+      return batch.payload.tools.some(
+        (tool) => tool.tool_call_id === "call:required-first-rejected",
+      );
+    });
+    assert.equal(rejectedBatches.length, 1);
+
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    const rejectedFacts = events.filter(
+      (event) =>
+        event.kind === "tool.result.recorded" &&
+        event.refs.toolCallId === "call:required-first-rejected",
+    );
+    assert.equal(rejectedFacts.length, 1);
+    assert.equal(rejectedFacts[0]?.kind, "tool.result.recorded");
+    if (rejectedFacts[0]?.kind === "tool.result.recorded") {
+      assert.equal(rejectedFacts[0].data.status, "rejected");
+    }
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("post-commit abort still publishes the durable ToolResult hooks once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-post-commit-abort-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-result-post-commit-abort", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const controller = new AbortController();
+  const cancellation = new DOMException("post-commit fixture cancellation", "AbortError");
+  const registry = new ToolRegistry();
+  registry.register(outputTool("post_commit_fixture", "durable output"));
+  let providerTurn = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      providerTurn++;
+      if (providerTurn === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call:post-commit-abort",
+              name: "post_commit_fixture",
+              arguments: "{}",
+            },
+          ],
+        };
+      }
+      return { role: "assistant", content: "unreachable" };
+    },
+  };
+  const reported: ToolResultEnvelope[] = [];
+  const reporter = new (class extends SilentReporter {
+    override onToolResult(result: ToolResultEnvelope): void {
+      reported.push(structuredClone(result));
+    }
+  })();
+  const hookInputs: HookInput[] = [];
+  const hookService = recordingHookService(
+    workDir,
+    session.id,
+    ["PostToolUse", "PostToolBatch"],
+    hookInputs,
+  );
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run the fixture." });
+    const commitMessages = session.commitMessages.bind(session);
+    session.commitMessages = async (...messages) => {
+      await commitMessages(...messages);
+      if (messages.some((message) => message.toolCallId === "call:post-commit-abort")) {
+        controller.abort(cancellation);
+      }
+    };
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      reporter,
+      hookService,
+      maxTurns: 3,
+    });
+
+    await assert.rejects(
+      engine.run(session, undefined, undefined, controller.signal),
+      (error: unknown) => error === cancellation,
+    );
+
+    assert.deepEqual(
+      reported.map((result) => result.toolCallId),
+      ["call:post-commit-abort"],
+    );
+    assert.deepEqual(
+      hookInputs.map((input) => input.hook_event_name),
+      ["PostToolUse", "PostToolBatch"],
+    );
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    assert.equal(
+      events.filter(
+        (event) =>
+          event.kind === "tool.result.recorded" &&
+          event.refs.toolCallId === "call:post-commit-abort",
+      ).length,
+      1,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function recordingHookService(
+  workDir: string,
+  sessionId: string,
+  events: readonly PostToolHookEvent[],
+  inputs: HookInput[],
+): HookService {
+  const executor: HookExecutor = {
+    async execute(_resolved, input) {
+      inputs.push(structuredClone(input));
+      return { decision: "allow" };
+    },
+  };
+  return new HookService({
+    workDir,
+    sessionId,
+    executor,
+    snapshot: postToolHookSnapshot(events),
+  });
+}
+
+function postToolHookSnapshot(events: readonly PostToolHookEvent[]): HookSnapshot {
+  const selected = new Set<PostToolHookEvent>(events);
+  const handlers = Object.fromEntries(
+    HOOK_EVENTS.map((event) => [
+      event,
+      selected.has(event as PostToolHookEvent) ? [postToolHookHandler(event)] : [],
+    ]),
+  ) as unknown as HookSnapshot["handlers"];
+  return {
+    id: "tool-result-reporter-order",
+    version: 1,
+    createdAt: new Date(0).toISOString(),
+    handlers,
+    diagnostics: [],
+  };
+}
+
+function postToolHookHandler(event: (typeof HOOK_EVENTS)[number]): ResolvedHookHandler {
+  return {
+    id: `fixture:${event}`,
+    event,
+    source: { kind: "project", path: "/fixture/hooks.json", version: 1 },
+    order: 0,
+    handler: { type: "command", command: "fixture" },
+    trusted: true,
+  };
+}
 
 function outputTool(name: string, output: string): BaseTool {
   return {

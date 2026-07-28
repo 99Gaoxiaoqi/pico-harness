@@ -25,7 +25,6 @@ export class ScopedSubagentActivityReporter implements Reporter {
     "requestedModelRoute" | "resolvedModelRoute" | "thinkingEffort" | "modelSelectionSource"
   > = {};
   private readonly pendingToolTraceIdsByProviderCallId = new Map<string, string[]>();
-  private readonly pendingToolTraceIdsByName = new Map<string, string[]>();
 
   constructor(
     private readonly reporter: Reporter,
@@ -41,12 +40,9 @@ export class ScopedSubagentActivityReporter implements Reporter {
     this.emit({ currentAction: `正在思考：${compact(this.scope.task, 48)}` });
   }
 
-  onToolCall(toolName: string, args: string, providerCallId?: string): void {
+  onToolCall(toolName: string, args: string, providerCallId: string): void {
     const traceId = randomUUID();
-    appendPendingTraceId(this.pendingToolTraceIdsByName, toolName, traceId);
-    if (providerCallId) {
-      appendPendingTraceId(this.pendingToolTraceIdsByProviderCallId, providerCallId, traceId);
-    }
+    appendPendingTraceId(this.pendingToolTraceIdsByProviderCallId, providerCallId, traceId);
     this.reporter.onSubagentTrace?.({
       activityId: this.scope.activityId,
       traceId,
@@ -60,15 +56,13 @@ export class ScopedSubagentActivityReporter implements Reporter {
 
   onToolResult(result: ToolResultEnvelope): void {
     const isError = result.status !== "succeeded";
-    const traceId = this.takePendingToolTraceId(result.toolName, result.toolCallId);
+    const traceId = this.takePendingToolTraceId(result.toolCallId);
     if (traceId) {
       this.reporter.onSubagentTrace?.({
         activityId: this.scope.activityId,
         traceId,
         type: "tool.completed",
-        result: result.projection.text,
-        isError,
-        truncated: result.projection.truncated,
+        result: structuredClone(result),
       });
     }
     const action = this.latestAction ?? compact(result.toolName, 40);
@@ -134,14 +128,11 @@ export class ScopedSubagentActivityReporter implements Reporter {
     });
   }
 
-  private takePendingToolTraceId(toolName: string, providerCallId?: string): string | undefined {
-    const ids =
-      (providerCallId ? this.pendingToolTraceIdsByProviderCallId.get(providerCallId) : undefined) ??
-      this.pendingToolTraceIdsByName.get(toolName);
+  private takePendingToolTraceId(providerCallId: string): string | undefined {
+    const ids = this.pendingToolTraceIdsByProviderCallId.get(providerCallId);
     const traceId = ids?.shift();
     if (!traceId) return undefined;
-    removePendingTraceId(this.pendingToolTraceIdsByName, toolName, traceId);
-    removePendingTraceIdEverywhere(this.pendingToolTraceIdsByProviderCallId, traceId);
+    removePendingTraceId(this.pendingToolTraceIdsByProviderCallId, providerCallId, traceId);
     return traceId;
   }
 }
@@ -158,10 +149,6 @@ function removePendingTraceId(target: Map<string, string[]>, key: string, traceI
   const next = ids.filter((id) => id !== traceId);
   if (next.length === 0) target.delete(key);
   else target.set(key, next);
-}
-
-function removePendingTraceIdEverywhere(target: Map<string, string[]>, traceId: string): void {
-  for (const key of target.keys()) removePendingTraceId(target, key, traceId);
 }
 
 export function compactActivityText(value: string, maxLength = 80): string {

@@ -300,6 +300,7 @@ test("background runs reject injected user MCP sources before model or tool exec
         prompt: "must not run",
         dir: workspace,
         provider: "openai",
+        modelRouteId: "test/test",
         execution: {
           kind: "background",
           policy: {

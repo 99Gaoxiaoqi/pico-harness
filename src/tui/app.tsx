@@ -957,6 +957,7 @@ function approvalNoticeFromContent(content: React.ReactNode): ApprovalNotice | u
     typeof props.taskId !== "string" ||
     typeof props.toolName !== "string" ||
     typeof props.args !== "string" ||
+    typeof props.providerCallId !== "string" ||
     typeof props.message !== "string"
   ) {
     return undefined;
@@ -965,6 +966,7 @@ function approvalNoticeFromContent(content: React.ReactNode): ApprovalNotice | u
     taskId: props.taskId,
     toolName: props.toolName,
     args: props.args,
+    providerCallId: props.providerCallId,
     message: props.message,
     ...(props.preview ? { preview: props.preview } : {}),
     ...(props.diff ? { diff: props.diff } : {}),

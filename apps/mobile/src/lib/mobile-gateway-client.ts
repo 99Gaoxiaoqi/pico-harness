@@ -22,6 +22,18 @@ const RUN_STATUSES = new Set<MobileRun["status"]>([
   "failed",
   "succeeded",
 ]);
+const TOOL_RESULT_STATUSES = new Set([
+  "succeeded",
+  "failed",
+  "rejected",
+  "cancelled",
+  "interrupted",
+]);
+const TOOL_RESULT_PROJECTION_MODES = new Set(["full", "preview", "synthetic"]);
+const SHA256_DIGEST = /^[a-f0-9]{64}$/u;
+// Keep aligned with @pico/protocol MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES without
+// introducing a runtime package dependency into the React Native client.
+const MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES = 16 * 1024;
 
 export interface MobileGatewayConnection {
   readonly origin: string;
@@ -246,30 +258,136 @@ function parseConversationItem(value: unknown): MobileConversationItem {
     (contentKinds.has(kind) && typeof value["content"] === "string") ||
     (titledKinds.has(kind) && typeof value["title"] === "string") ||
     (kind === "skill" && typeof value["name"] === "string" && typeof value["args"] === "string") ||
-    (kind === "tool" &&
-      typeof value["name"] === "string" &&
-      typeof value["status"] === "string" &&
-      (value["result"] === undefined || isToolResultEnvelope(value["result"]))) ||
+    (kind === "tool" && isToolConversationItem(value)) ||
     (kind === "runBoundary" && typeof value["status"] === "string");
   if (!valid) throw new Error("Gateway 会话条目响应格式无效");
   return value as unknown as MobileConversationItem;
 }
 
-function isToolResultEnvelope(value: unknown): boolean {
+function isToolConversationItem(value: Record<string, unknown>): boolean {
   return (
-    isRecord(value) &&
-    value["version"] === 1 &&
-    typeof value["toolCallId"] === "string" &&
-    typeof value["toolName"] === "string" &&
-    typeof value["status"] === "string" &&
-    typeof value["rawSizeBytes"] === "number" &&
-    typeof value["sha256"] === "string" &&
-    typeof value["deliveryTruncated"] === "boolean" &&
-    isRecord(value["projection"]) &&
-    value["projection"]["version"] === 1 &&
-    typeof value["projection"]["text"] === "string" &&
-    typeof value["projection"]["truncated"] === "boolean"
+    hasExactKeys(
+      value,
+      ["id", "kind", "name", "args", "status"],
+      ["summary", "result", "at", "truncated", "originalBytes"],
+    ) &&
+    value["kind"] === "tool" &&
+    typeof value["name"] === "string" &&
+    typeof value["args"] === "string" &&
+    (value["status"] === "running" ||
+      value["status"] === "success" ||
+      value["status"] === "error") &&
+    (value["summary"] === undefined || typeof value["summary"] === "string") &&
+    (value["result"] === undefined || isToolResultEnvelope(value["result"])) &&
+    (value["at"] === undefined ||
+      (typeof value["at"] === "number" && Number.isFinite(value["at"]))) &&
+    (value["truncated"] === undefined || value["truncated"] === true) &&
+    (value["originalBytes"] === undefined || isNonNegativeSafeInteger(value["originalBytes"]))
   );
+}
+
+function isToolResultEnvelope(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (
+    !hasExactKeys(
+      value,
+      [
+        "version",
+        "toolCallId",
+        "toolName",
+        "status",
+        "rawSizeBytes",
+        "sha256",
+        "deliveryTruncated",
+        "projection",
+      ],
+      ["evidence"],
+    )
+  ) {
+    return false;
+  }
+  const projection = value["projection"];
+  const evidence = value["evidence"];
+  return (
+    value["version"] === 1 &&
+    isNonEmptyString(value["toolCallId"]) &&
+    isNonEmptyString(value["toolName"]) &&
+    typeof value["status"] === "string" &&
+    TOOL_RESULT_STATUSES.has(value["status"]) &&
+    isNonNegativeSafeInteger(value["rawSizeBytes"]) &&
+    typeof value["sha256"] === "string" &&
+    SHA256_DIGEST.test(value["sha256"]) &&
+    typeof value["deliveryTruncated"] === "boolean" &&
+    isRecord(projection) &&
+    hasExactKeys(projection, ["version", "mode", "text", "strategy", "truncated"]) &&
+    projection["version"] === 1 &&
+    typeof projection["mode"] === "string" &&
+    TOOL_RESULT_PROJECTION_MODES.has(projection["mode"]) &&
+    typeof projection["text"] === "string" &&
+    utf8ByteLength(projection["text"]) <= MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES &&
+    isNonEmptyString(projection["strategy"]) &&
+    typeof projection["truncated"] === "boolean" &&
+    !(
+      projection["mode"] === "synthetic" &&
+      (value["status"] === "succeeded" || value["status"] === "failed")
+    ) &&
+    (evidence === undefined || isToolResultEvidence(evidence))
+  );
+}
+
+function isToolResultEvidence(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["uri", "ref"]) ||
+    typeof value["uri"] !== "string" ||
+    !isRecord(value["ref"])
+  ) {
+    return false;
+  }
+  const reference = value["ref"];
+  if (
+    !hasExactKeys(reference, ["schemaVersion", "contentHash", "sessionId", "kind"]) ||
+    reference["schemaVersion"] !== 2 ||
+    typeof reference["contentHash"] !== "string" ||
+    !SHA256_DIGEST.test(reference["contentHash"]) ||
+    !isNonEmptyString(reference["sessionId"]) ||
+    reference["kind"] !== "tool-exchange"
+  ) {
+    return false;
+  }
+  return (
+    value["uri"] ===
+    `pico://evidence/${encodeURIComponent(reference["sessionId"])}/${reference["contentHash"]}`
+  );
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const keys = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  return (
+    required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => allowed.has(key))
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (const symbol of value) {
+    const codePoint = symbol.codePointAt(0)!;
+    bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+  }
+  return bytes;
 }
 
 function containsPrivateField(value: unknown): boolean {

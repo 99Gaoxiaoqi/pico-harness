@@ -56,7 +56,7 @@ export interface ForkOperationCallbacks {
     operation: ForkStorageOperation,
     bundle: ForkPreparedBundle,
   ): Promise<void>;
-  /** 克隆 File History / Summary / Artifact；必须以 operationId 幂等。 */
+  /** 克隆 File History 等必要 sidecar；必须以 operationId 幂等。 */
   cloneSidecars(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
   /** 向 RuntimeEventStore 发布消息、fork marker 与过滤后的 Session state。 */
   publishRuntime(

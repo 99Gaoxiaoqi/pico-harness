@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,4 +29,28 @@ test("desktop session state persists pinning and removes deleted metadata", asyn
   assert.equal((await reloaded.get(workspacePath, "session-1"))?.pinnedAt, undefined);
   assert.equal(await reloaded.remove(workspacePath, "session-1"), true);
   assert.equal(await reloaded.get(workspacePath, "session-1"), undefined);
+});
+
+test("desktop session state rejects legacy v1 instead of migrating it", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-session-state-v1-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const filePath = join(root, "session-state.json");
+  const workspacePath = join(root, "workspace");
+  await writeFile(
+    filePath,
+    `${JSON.stringify({
+      version: 1,
+      sessions: [
+        {
+          workspacePath,
+          sessionId: "legacy-session",
+          title: "legacy title",
+          updatedAt: 100,
+        },
+      ],
+    })}\n`,
+  );
+
+  const store = new DesktopSessionStateStore({ filePath });
+  await assert.rejects(store.list(workspacePath), /format is invalid/u);
 });

@@ -63,13 +63,14 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 ## 路径边界
 
 - `$PICO_HOME`：用户和设备级状态根，默认 `~/.pico`。
-- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 文件账本、Summary sidecar、Evidence、
+- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 文件账本、Evidence、
   Trace、Task 和 storage operation。
 - `<workDir>/.pico/`：项目配置、commands、skills、agents、hooks、MCP 和 plugins。
 - 旧 `runtime.sqlite`、`memory.sqlite`、WAL/SHM 与 legacy task 文件保留原样，但当前版本不读取、迁移或自动删除。
 - `runtime/lock/` 只作为升级 fence 保留，使旧版本 fail closed，避免与新布局形成双写分叉；
-  若存在旧 `runtime/` JSON 账本，它们在一次性迁移后仍保留为回退副本。回滚前必须先停止
-  所有新版本进程，再显式移除该 fence；新旧版本不得并行运行。
+  旧 `runtime/control/` 可一次性复制到新控制面并保留源文件作为回退副本，但
+  `runtime/sessions/` 不读取也不迁移。回滚前必须先停止所有新版本进程，再显式移除该
+  fence；新旧版本不得并行运行。
 
 ```text
 workspace/
@@ -84,7 +85,6 @@ workspace/
   memory/
     state.json
     lock/
-    summaries/
 ```
 
 目录使用 `0700`，数据文件使用 `0600`。Session、TaskRun 与控制面读写先取得
@@ -112,7 +112,7 @@ owner/lease epoch 的 checkpoint、launch 与完成写入会被拒绝。
 既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为 `host_bound`，
 进程退出后只收敛为 `interrupted`。
 
-`sessions/`、`task-runs/`、Evidence、Trace 和 Memory summaries 可进入只读导出计划；
+`sessions/`、`task-runs/`、Evidence 和 Trace 可进入只读导出计划；
 其中 Session/TaskRun 只接受完整 SHA-256 目录和固定 canonical 文件名，计划在共享事务锁内
 恢复 pending commit 后生成一致性哈希；
 `.storage/`、`control/`、Memory state、锁、凭据、临时文件和 legacy SQLite 属于 host-bound

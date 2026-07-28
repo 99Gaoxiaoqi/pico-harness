@@ -3,13 +3,12 @@ import type { Stats } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
+import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
 import {
   projectRuntimeSessionMessages,
   projectRuntimeSessionState,
-} from "../runtime/runtime-session-projection.js";
+} from "../engine/session-runtime-projection.js";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
-import { quarantineCorruptJson, type QuarantinedJson } from "./atomic-json.js";
 import { FileHistoryBlobStore } from "./file-history-blob-store.js";
 import {
   isTerminalStorageOperation,
@@ -44,7 +43,6 @@ import {
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
 } from "./workspace-storage-layout.js";
 
-const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
 const LEGACY_LOCK_TOMBSTONE_RE = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
 const LEGACY_LOCK_CANDIDATE_RE =
@@ -60,7 +58,6 @@ export const STORAGE_DOCTOR_COMPONENTS = [
   "memory",
   "operation",
   "file_history",
-  "summary",
   "projection",
 ] as const;
 export type StorageDoctorComponent = (typeof STORAGE_DOCTOR_COMPONENTS)[number];
@@ -90,13 +87,10 @@ export interface StorageDoctorOptions {
   readonly fileHistoryDir?: string;
   /** Canonical workspace state root; retained name preserves the diagnostic API. */
   readonly runtimeStorageRoot?: string;
-  readonly summariesDir?: string;
   readonly now?: () => Date;
 }
 
 export interface StorageDoctorRepairOptions {
-  /** 只隔离可重建的 Summary，不触碰 Session/FileHistory/Runtime。 */
-  readonly quarantineMalformedSidecars?: boolean;
   /** 投影具体实现由组装层提供，Doctor 不反向修改真源。 */
   readonly rebuildDerivedProjections?: () => void | Promise<void>;
   /** 从 canonical Session JSONL 重建可丢弃的 manifest.json 投影。 */
@@ -113,7 +107,6 @@ export interface StorageDoctorRepairOptions {
 }
 
 export interface StorageDoctorRepairResult {
-  readonly quarantined: readonly QuarantinedJson[];
   readonly rebuiltDerivedProjections: boolean;
   readonly rebuiltRuntimeManifests: boolean;
   readonly rebuiltTaskRunManifests: boolean;
@@ -135,7 +128,6 @@ export class StorageDoctor {
   private readonly legacyStoragePaths: readonly string[];
   private readonly legacyJsonRuntimePath: string;
   private readonly legacyTasksPath: string;
-  private readonly summariesDir: string;
   private readonly now: () => Date;
 
   constructor(options: StorageDoctorOptions) {
@@ -158,7 +150,6 @@ export class StorageDoctor {
     ];
     this.legacyJsonRuntimePath = resolve(paths.workspace.legacyRuntime);
     this.legacyTasksPath = resolve(paths.workspace.tasks);
-    this.summariesDir = resolve(options.summariesDir ?? paths.workspace.summaries);
     this.now = options.now ?? (() => new Date());
   }
 
@@ -226,7 +217,6 @@ export class StorageDoctor {
     }
     await this.scanOperations(findings, scanned);
     await this.scanFileHistory(findings, scanned);
-    await this.scanSummaries(findings, scanned);
     findings.sort(compareFindings);
     return {
       scannedAt: this.now().toISOString(),
@@ -239,24 +229,6 @@ export class StorageDoctor {
   }
 
   async repair(options: StorageDoctorRepairOptions): Promise<StorageDoctorRepairResult> {
-    const quarantined: QuarantinedJson[] = [];
-    if (options.quarantineMalformedSidecars === true) {
-      const report = await this.scan();
-      const safeFindings = report.findings.filter(
-        (finding) =>
-          finding.authority !== "authoritative" && finding.code === "summary_malformed",
-      );
-      for (const finding of safeFindings) {
-        quarantined.push(
-          await quarantineCorruptJson(finding.path, {
-            component: finding.component,
-            findingCode: finding.code,
-            reason: finding.message,
-          }),
-        );
-      }
-    }
-
     let rebuiltDerivedProjections = false;
     if (options.rebuildDerivedProjections) {
       await options.rebuildDerivedProjections();
@@ -330,7 +302,6 @@ export class StorageDoctor {
     }
 
     return {
-      quarantined,
       rebuiltDerivedProjections,
       rebuiltRuntimeManifests,
       rebuiltTaskRunManifests,
@@ -685,12 +656,7 @@ export class StorageDoctor {
     const commitPath = join(this.memoryStorageRoot, "commit.json");
     if (!(await pathExists(statePath)) && !(await pathExists(commitPath))) return;
     scanned.memory++;
-    await this.scanPrivateModes(
-      this.memoryStorageRoot,
-      "memory",
-      findings,
-      new Set(["lock", "summaries"]),
-    );
+    await this.scanPrivateModes(this.memoryStorageRoot, "memory", findings, new Set(["lock"]));
 
     if (await pathExists(commitPath)) {
       try {
@@ -943,25 +909,6 @@ export class StorageDoctor {
       try {
         const value = parseJson(await readFile(path, "utf8"), "File History manifest");
         if (
-          isRecord(value) &&
-          value["schemaVersion"] === undefined &&
-          Array.isArray(value["snapshots"]) &&
-          Array.isArray(value["trackedFiles"])
-        ) {
-          findings.push(
-            finding(
-              "file_history_legacy",
-              "warning",
-              "file_history",
-              path,
-              "File History still uses the supported legacy manifest",
-              "Let the owning Session migrate it to v2 on its next explicit write",
-              "authoritative",
-            ),
-          );
-          continue;
-        }
-        if (
           !isRecord(value) ||
           value["schemaVersion"] !== 2 ||
           typeof value["sessionId"] !== "string"
@@ -1001,64 +948,6 @@ export class StorageDoctor {
         );
       }
     }
-  }
-
-  private async scanSummaries(
-    findings: StorageDoctorFinding[],
-    scanned: Record<StorageDoctorComponent, number>,
-  ): Promise<void> {
-    for (const entry of await readDirectoryEntries(this.summariesDir)) {
-      if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue;
-      const path = join(this.summariesDir, entry.name);
-      scanned.summary++;
-      try {
-        parseSummaryV2(parseJson(await readFile(path, "utf8"), "summary"), entry.name);
-      } catch (error) {
-        findings.push(
-          finding(
-            "summary_malformed",
-            "error",
-            "summary",
-            path,
-            errorMessage(error),
-            "Quarantine this derived sidecar and rebuild it from the RuntimeEvent ledger",
-            "derived",
-          ),
-        );
-      }
-    }
-  }
-
-}
-
-function parseSummaryV2(value: unknown, fileName: string): void {
-  if (!isRecord(value) || value["schemaVersion"] !== 2 || typeof value["sessionId"] !== "string") {
-    throw new Error("invalid summary v2 header");
-  }
-  const expectedName = `${createHash("sha256").update(value["sessionId"]).digest("hex")}.json`;
-  if (fileName !== expectedName) throw new Error("summary filename/sessionId mismatch");
-  const summary = value["summary"];
-  if (
-    !isRecord(summary) ||
-    summary["sessionId"] !== value["sessionId"] ||
-    typeof summary["summary"] !== "string" ||
-    !isNonNegativeInteger(summary["messageCount"]) ||
-    typeof summary["createdAt"] !== "string" ||
-    typeof summary["updatedAt"] !== "string"
-  ) {
-    throw new Error("invalid summary v2 payload");
-  }
-  const basis = summary["basis"];
-  if (
-    !isRecord(basis) ||
-    basis["messageCount"] !== summary["messageCount"] ||
-    !(basis["throughEventId"] === null || typeof basis["throughEventId"] === "string") ||
-    !(
-      basis["prefixDigest"] === null ||
-      (typeof basis["prefixDigest"] === "string" && SHA256_RE.test(basis["prefixDigest"]))
-    )
-  ) {
-    throw new Error("invalid summary v2 basis");
   }
 }
 
@@ -1152,10 +1041,6 @@ function invalidStorageDirectoryFinding(
     "Move the data to a private real directory and preserve this path for inspection",
     "authoritative",
   );
-}
-
-function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isNodeCode(error: unknown, code: string): boolean {

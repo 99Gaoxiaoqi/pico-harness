@@ -131,7 +131,7 @@ test("reasoning 状态显示已配置档位的中文说明", () => {
 });
 
 test("思考过程与最终回答作为独立 transcript 条目流式投影", () => {
-  const reporter = new TuiReporter(() => undefined);
+  const reporter = new TuiReporter();
 
   reporter.onThinking();
   reporter.onReasoningDelta("先分析");

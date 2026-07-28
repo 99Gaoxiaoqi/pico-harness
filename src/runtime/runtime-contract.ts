@@ -49,7 +49,8 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   /** 后台执行只持有非秘密引用；明文由 Runtime Host 在系统凭证库边界解析。 */
   credentialRef?: CredentialRef;
   model?: string;
-  modelRouteId?: string;
+  /** Stable providerID/modelID identity required by every durable Runtime Session. */
+  modelRouteId: string;
   modelCapabilities?: ModelRouteCapabilities;
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;

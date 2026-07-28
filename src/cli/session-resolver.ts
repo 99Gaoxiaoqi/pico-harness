@@ -6,11 +6,11 @@ import {
   RuntimeEventStore,
   type RuntimeEventStoreEntry,
   type RuntimeSessionManifest,
-} from "../runtime/runtime-event-store.js";
+} from "../storage/runtime-event-store.js";
 import {
   projectRuntimeSessionMessages,
   projectRuntimeSessionState,
-} from "../runtime/runtime-session-projection.js";
+} from "../engine/session-runtime-projection.js";
 import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../runtime/runtime-run.js";
 import { StorageOperationJournal } from "../storage/operation-journal.js";
 

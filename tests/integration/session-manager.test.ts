@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "../../src/engine/session.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 
 test("SessionManager reuses an entry and drains it after eviction", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-manager-"));
@@ -353,12 +354,18 @@ test("SessionManager eviction keeps the Session durable history recoverable", as
   await mkdir(workDir, { recursive: true });
   const manager = new SessionManager();
   try {
-    const session = await manager.getOrCreate("manager-durable", workDir, { picoHome });
+    const session = await manager.getOrCreate("manager-durable", workDir, {
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
     await session.commitMessages({ role: "user", content: "durable" });
     const removed = manager.delete("manager-durable", workDir, { picoHome });
     await removed?.close();
 
-    const recovered = await manager.getOrCreate("manager-durable", workDir, { picoHome });
+    const recovered = await manager.getOrCreate("manager-durable", workDir, {
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
     assert.deepEqual(recovered.getHistory(), [{ role: "user", content: "durable" }]);
     const removedAgain = manager.delete("manager-durable", workDir, { picoHome });
     await removedAgain?.close();

@@ -7,7 +7,7 @@ import { resolveCliStartupSession } from "../../src/cli/session-args.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
 
 test("--session and -S reject a missing session in the current workspace", async (context) => {

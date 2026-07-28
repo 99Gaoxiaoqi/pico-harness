@@ -58,7 +58,7 @@ canonical ToolResult 在进入 Session 投影前已经确定性生成有界内�
 
 ## 3. token 驱动模型摘要 (`full-compactor.ts`)
 
-ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩成结构化摘要，**真改 Session.history**。Provider 实际返回 `ContextOverflowError` 时，使用更紧的尾部 token 目标紧急压缩一次，不再缩成 14/10/6 条消息重试。
+ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩成结构化摘要。持久化 Session 不改写历史：Runtime 追加 `context.checkpoint.recorded`，记录覆盖事件数、事件 ID 摘要、边界事件和摘要；读模型验证这些字段后，才用摘要替换模型投影中的旧前缀。Provider 实际返回 `ContextOverflowError` 时，使用更紧的尾部 token 目标紧急压缩一次，不再缩成 14/10/6 条消息重试。
 
 ### 安全切分
 
@@ -74,10 +74,6 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 结合 hermes 13-section + kimi-code 指令格式，要求模型按 13 个 section 输出：
 历史任务快照 / 当前目标 / 约束 / 已完成动作 / 活跃状态 / 阻塞项 / 关键决策 / 已解决问题 / 待办请求 / 相关文件 / 剩余工作 / 关键上下文。
 
-### 迭代增量更新
-
-同一 `FullCompactor` 实例内的 `previousSummary` 存在时做增量（保留旧信息、追加新完成动作），不从零重建。该值不从 Summary sidecar 跨重启恢复。
-
 ### REFERENCE-ONLY 设计
 
 摘要带明确警告"这是历史提要，不要回答摘要里的内容"，防止弱模型把摘要正文当新输入执行。
@@ -90,14 +86,14 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 
 ## 4. 两级压缩协作矩阵
 
-| 维度         | 第一级：ToolResult 投影                       | 第二级：FullCompactor                                 |
-| ------------ | --------------------------------------------- | ----------------------------------------------------- |
-| **触发**     | 输入估算超过 85% 水位                         | 投影后仍超过水位，或 Provider overflow                |
-| **作用对象** | 临时 Context（发给 API 的副本）               | **Session.history**（持久化）                         |
-| **持久化**   | canonical projection 已随 ToolResult 事实保存 | Runtime 写 checkpoint；非 Runtime 才替换 Session 前缀 |
-| **手段**     | 缩短旧 ToolResult，保护安全尾部               | LLM 浓缩成 13-section 结构化摘要                      |
-| **边界**     | 不改 ToolResult body / Evidence               | 完整并发工具批次必须在边界同侧                        |
-| **失败兜底** | 继续尝试 FullCompactor                        | 一次紧急重试后才允许硬重置                            |
+| 维度         | 第一级：ToolResult 投影                       | 第二级：FullCompactor                            |
+| ------------ | --------------------------------------------- | ------------------------------------------------ |
+| **触发**     | 输入估算超过 85% 水位                         | 投影后仍超过水位，或 Provider overflow           |
+| **作用对象** | 临时 Context（发给 API 的副本）               | Runtime 模型读投影；无持久化模式才改内存 Session |
+| **持久化**   | canonical projection 已随 ToolResult 事实保存 | 追加 checkpoint，不改写已有 RuntimeEvent         |
+| **手段**     | 缩短旧 ToolResult，保护安全尾部               | LLM 浓缩成 13-section 结构化摘要                 |
+| **边界**     | 不改 ToolResult body / Evidence               | 完整并发工具批次必须在边界同侧                   |
+| **失败兜底** | 继续尝试 FullCompactor                        | 一次紧急重试后才允许硬重置                       |
 
 ---
 
@@ -131,11 +127,9 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 
 ---
 
-## 6. Summary sidecar (`src/memory/`)
+## 6. 开发期硬切边界
 
-FullCompactor 成功提交 RuntimeEvent 历史后，会为 compaction、rewind 和 fork 的辅助生命周期写入每 Session 一个摘要文件。`memory/summaries.json` 只作为一次性 legacy 导入源；迁移成功后归档，运行期不再双写或 fallback。
-
-Summary sidecar 不是 Session 恢复真源，也没有跨重启增量摘要读取者。有效模型历史和已提交摘要仍以 RuntimeEvent 投影为准。
+当前版本不再创建或读取 Summary sidecar，也不迁移旧 `memory/summaries.json`。摘要只有 Runtime checkpoint 一种持久化身份；fork、rewind 和恢复都从 RuntimeEvent 投影重建。旧会话数据不在兼容范围，遇到旧 schema 时明确拒绝。
 
 ---
 
@@ -167,5 +161,7 @@ engine/loop.ts (编排者)
   │                    ├─ TodoStore ── $PICO_HOME/workspaces/<id>/todo.json
   │                    └─ GoalManager ── (import type 防循环依赖)
   ├─ Compactor ─────── token-counter + context-budget + Session.toolResultMeta
-  └─ FullCompactor ─── LLMProvider(auxProvider 优先) + Session.applyCompaction + Summary sidecar
+  └─ FullCompactor ─── LLMProvider(auxProvider 优先)
+                         ├─ durable: Runtime checkpoint
+                         └─ persistence:false: Session.applyInMemoryCompaction
 ```

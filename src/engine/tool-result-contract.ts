@@ -6,7 +6,7 @@ export type RuntimeToolResultStatus =
   | "interrupted";
 
 export interface RuntimeEvidenceReference {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly contentHash: string;
   readonly sessionId: string;
   readonly kind: "tool-exchange";

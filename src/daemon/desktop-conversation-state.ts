@@ -5,7 +5,7 @@ import { resolvePicoHome } from "../paths/pico-paths.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 
-const DESKTOP_CONVERSATION_STATE_VERSION = 1 as const;
+const DESKTOP_CONVERSATION_STATE_VERSION = 2 as const;
 const MAX_IDEMPOTENCY_RECORDS = 500;
 const MAX_FIRST_SEND_CLAIMS = 500;
 const FIRST_SEND_CLAIM_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -21,8 +21,7 @@ export interface DesktopQueuedInput {
 interface DesktopIdempotencyRecord {
   readonly workspacePath: string;
   readonly key: string;
-  /** Added in v1 as a backward-compatible field; absent only on legacy records. */
-  readonly requestFingerprint?: string;
+  readonly requestFingerprint: string;
   readonly result: JsonObject;
   readonly createdAt: number;
 }
@@ -128,7 +127,7 @@ export class DesktopConversationStateStore {
     );
     return record
       ? {
-          ...(record.requestFingerprint ? { requestFingerprint: record.requestFingerprint } : {}),
+          requestFingerprint: record.requestFingerprint,
           result: record.result,
         }
       : undefined;
@@ -252,7 +251,7 @@ function parseState(value: unknown, filePath: string): DesktopConversationStateF
     value["version"] !== DESKTOP_CONVERSATION_STATE_VERSION ||
     !Array.isArray(value["queuedInputs"]) ||
     !Array.isArray(value["idempotency"]) ||
-    (value["firstSendClaims"] !== undefined && !Array.isArray(value["firstSendClaims"]))
+    !Array.isArray(value["firstSendClaims"])
   ) {
     throw new Error(`Desktop conversation state format is invalid: ${filePath}`);
   }
@@ -260,9 +259,7 @@ function parseState(value: unknown, filePath: string): DesktopConversationStateF
     version: DESKTOP_CONVERSATION_STATE_VERSION,
     queuedInputs: value["queuedInputs"].map((item) => parseQueued(item, filePath)),
     idempotency: value["idempotency"].map((item) => parseIdempotency(item, filePath)),
-    firstSendClaims: (value["firstSendClaims"] ?? []).map((item) =>
-      parseFirstSendClaim(item, filePath),
-    ),
+    firstSendClaims: value["firstSendClaims"].map((item) => parseFirstSendClaim(item, filePath)),
   };
 }
 
@@ -287,8 +284,10 @@ function parseQueued(value: unknown, filePath: string): DesktopQueuedInput {
 }
 
 function parseStoredInput(value: Record<string, unknown>, filePath: string): RuntimeUserInput {
-  // Version 1 originally stored only `text`; retain migration compatibility for queued entries.
-  const candidate = isRecord(value["input"]) ? value["input"] : { text: value["text"] };
+  if (!isRecord(value["input"])) {
+    throw new Error(`Desktop conversation queue is missing canonical input: ${filePath}`);
+  }
+  const candidate = value["input"];
   const kind = candidate["kind"];
   if ((kind === undefined || kind === "text") && typeof candidate["text"] === "string") {
     return {
@@ -326,8 +325,7 @@ function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyR
     !isRecord(value) ||
     typeof value["workspacePath"] !== "string" ||
     typeof value["key"] !== "string" ||
-    (value["requestFingerprint"] !== undefined &&
-      typeof value["requestFingerprint"] !== "string") ||
+    typeof value["requestFingerprint"] !== "string" ||
     !isRecord(value["result"]) ||
     typeof value["createdAt"] !== "number" ||
     !Number.isFinite(value["createdAt"])
@@ -337,11 +335,7 @@ function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyR
   return {
     workspacePath: normalizeWorkspacePath(value["workspacePath"]),
     key: requireNonEmpty(value["key"], "idempotencyKey"),
-    ...(typeof value["requestFingerprint"] === "string"
-      ? {
-          requestFingerprint: requireNonEmpty(value["requestFingerprint"], "requestFingerprint"),
-        }
-      : {}),
+    requestFingerprint: requireNonEmpty(value["requestFingerprint"], "requestFingerprint"),
     result: value["result"] as JsonObject,
     createdAt: value["createdAt"],
   };

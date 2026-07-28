@@ -2,7 +2,7 @@
 //
 // 设计:Reporter 接口是 engine 与 I/O 的解耦点(reporter.ts)。
 // 本类把 engine 回调追加为不可变事件，再由纯 reducer 投影为现有
-// entries 快照。onUpdate 由 ink 的 <App> 组件注册为 setState。
+// projection 快照。宿主通过唯一的 onProjectionUpdate 接入 setState。
 //
 // 状态机:TUI EventStore 维护 append-only 日志，投影层生成对话流:
 //   - user 消息(由 repl 主动 push,非 reporter 回调)
@@ -22,50 +22,38 @@ import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
 } from "../engine/tool-result-contract.js";
-import { formatOutputPreview } from "./diff-preview.js";
+import { summarizeTranscriptToolResult } from "../presentation/transcript-tool-result-hydration.js";
 import {
   defaultTranscriptDurabilityPolicy,
+  isDurableTranscriptEvent,
   type DurableTranscriptSink,
   type TranscriptDurabilityPolicy,
 } from "../presentation/transcript-durability.js";
-import type { ToolCardStatus } from "./tool-card.js";
 import {
-  TUI_SUBAGENT_MESSAGE_LIMIT_CHARS,
-  TUI_SUBAGENT_TOOL_ARGS_LIMIT_CHARS,
-  TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS,
-  TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS,
-  TuiEventStore,
-} from "./tui-event-store.js";
+  TRANSCRIPT_SUBAGENT_MESSAGE_LIMIT_CHARS as TUI_SUBAGENT_MESSAGE_LIMIT_CHARS,
+  TRANSCRIPT_SUBAGENT_TOOL_ARGS_LIMIT_CHARS as TUI_SUBAGENT_TOOL_ARGS_LIMIT_CHARS,
+  TRANSCRIPT_SUBAGENT_TOOL_RESULT_LIMIT_CHARS as TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS,
+  TRANSCRIPT_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS as TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS,
+  TranscriptEventStore,
+} from "../presentation/transcript-event-store.js";
 import type {
-  TuiEntry,
-  TuiEvent,
-  TuiEventStoreSnapshot,
-  TuiProjection,
-  TuiToolCallProjection,
-  TuiToolOutputRun,
-  UiMode,
-} from "./tui-event-store.js";
+  TranscriptEntry as TuiEntry,
+  TranscriptEvent,
+  TranscriptProjection as TuiProjection,
+  TranscriptToolCallProjection,
+  TranscriptToolOutputRun,
+  TranscriptPhaseMode as UiMode,
+} from "../presentation/transcript-event-store.js";
+import type { ToolCardStatus } from "./tool-card.js";
 
 /** Bash 的外部化阈值是 30k；多留少量余量后立即停止向 append-only 日志写正文。 */
 export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS = TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS;
 const TUI_TOOL_OUTPUT_EVENT_SEGMENT_CHARS = 2_048;
 
-export { TuiEventStore };
-
 export type {
-  TuiEntry,
-  TuiEvent,
-  TuiEventDraft,
-  TuiEventStoreSnapshot,
-  TuiPhaseProjection,
-  TuiProjectedEntry,
-  TuiProjection,
-  TuiStreamProjection,
-  TuiSubagentProjection,
-  TuiSubagentTraceItem,
-  TuiToolCallProjection,
-  UiMode,
-} from "./tui-event-store.js";
+  TranscriptEntry as TuiEntry,
+  TranscriptProjection as TuiProjection,
+} from "../presentation/transcript-event-store.js";
 
 interface PendingToolOutputSegment {
   pieces: string[];
@@ -75,8 +63,8 @@ interface PendingToolOutputSegment {
 
 export interface TuiReporterOptions {
   /** 水合或回放时可以传入已有事件库。 */
-  eventStore?: TuiEventStore;
-  /** 11.4/11.5 可直接消费带稳定 ID 的投影，旧 UI 无需立即改造。 */
+  eventStore?: TranscriptEventStore;
+  /** 消费带稳定 ID 的唯一权威投影。 */
   onProjectionUpdate?: (projection: TuiProjection) => void;
   /** 将语义 transcript 事件串行写入 Session；不持久化逐 token delta。 */
   durableTranscriptSink?: DurableTranscriptSink;
@@ -86,10 +74,7 @@ export interface TuiReporterOptions {
 }
 
 /**
- * TuiReporter:把 engine 事件翻译成 TuiEntry 数组的增量更新。
- *
- * 每次 engine 回调触发,调用注入的 onUpdate(entries => 新 entries),
- * 让 ink 组件的 setState 驱动重渲染。
+ * TuiReporter:把 engine 事件翻译成唯一的结构化 Transcript 投影。
  */
 export class TuiReporter implements Reporter {
   private currentStream: { entryId: string; streamId: string } | null = null;
@@ -100,12 +85,10 @@ export class TuiReporter implements Reporter {
    * EventStore 内部 tool ID 的待完成索引。Provider call ID 仅作
    * 当前 pending 队列的关联键，不作为事件全局 ID，因为 Gemini 会跨轮复用它。
    */
-  private readonly pendingToolIdsByName = new Map<string, string[]>();
   private readonly pendingToolIdsByProviderCallId = new Map<string, string[]>();
   /** 小 chunk 先在有界 segment 内聚合，避免每次输出都生成事件和重放拷贝。 */
   private readonly pendingToolOutput = new Map<string, PendingToolOutputSegment>();
-  private readonly eventStore: TuiEventStore;
-  private readonly legacyEntries: TuiEntry[];
+  private readonly eventStore: TranscriptEventStore;
   private readonly onProjectionUpdate?: (projection: TuiProjection) => void;
   private readonly durableTranscriptSink?: DurableTranscriptSink;
   private readonly durableTranscriptPolicy: TranscriptDurabilityPolicy;
@@ -115,33 +98,20 @@ export class TuiReporter implements Reporter {
   private durableTranscriptSuppressed = false;
   private readonly removeAppendListener: () => void;
 
-  constructor(
-    /** 由 App.tsx 注册:收到新 entries 快照后 setState 触发重渲染 */
-    private readonly onUpdate: (entries: TuiEntry[]) => void,
-    /** 兼容旧用法：投影后同步此数组引用，但它不再是状态源。 */
-    entries: TuiEntry[] = [],
-    options: TuiReporterOptions = {},
-  ) {
-    this.eventStore = options.eventStore ?? new TuiEventStore();
-    this.legacyEntries = entries;
+  constructor(options: TuiReporterOptions = {}) {
+    this.eventStore = options.eventStore ?? new TranscriptEventStore();
     this.onProjectionUpdate = options.onProjectionUpdate;
     this.durableTranscriptSink = options.durableTranscriptSink;
     this.durableTranscriptPolicy =
       options.durableTranscriptPolicy ?? defaultTranscriptDurabilityPolicy;
     this.durableTranscriptSequence = Math.max(0, options.durableTranscriptSequence ?? 0);
 
-    // 旧调用方可以传入已有 transcript。仅当 store 为空时将它转换为
-    // 初始 append 事件；已有事件的 store 始终是权威源。
-    if (this.eventStore.size === 0) {
-      for (const entry of entries) this.appendEntry(entry);
-    }
     // Initial entries/events are already a snapshot; only subsequent appends
     // belong to the durable sink.
-    this.removeAppendListener = this.eventStore.addAppendListener((event, projection) => {
-      this.enqueueDurableTranscript(event, projection);
+    this.removeAppendListener = this.eventStore.addAppendListener((event) => {
+      this.enqueueDurableTranscript(event);
     });
     this.rebuildRuntimeTracking();
-    this.syncLegacyEntries(this.eventStore.getProjection());
   }
 
   /** user 消息由 repl 主动 push(不在 Reporter 接口里),暴露此方法供调用 */
@@ -155,13 +125,8 @@ export class TuiReporter implements Reporter {
   }
 
   /** 只返回当前 checkpoint 之后的有界事件段。 */
-  getEvents(): readonly TuiEvent[] {
+  getEvents(): readonly TranscriptEvent[] {
     return this.eventStore.getEvents();
-  }
-
-  /** 持久化与水合的权威单元：checkpoint + 当前事件段。 */
-  getReplaySnapshot(): TuiEventStoreSnapshot {
-    return this.eventStore.getReplaySnapshot();
   }
 
   /** 带 entry / stream / tool / phase 稳定 ID 的权威投影。 */
@@ -169,27 +134,21 @@ export class TuiReporter implements Reporter {
     return this.eventStore.getProjection();
   }
 
-  getEventStore(): TuiEventStore {
-    return this.eventStore;
-  }
-
   /** 供独立 hydration 调用方装载结构化事件；重复装载同一快照是幂等的。 */
-  hydrateTranscriptEvents(events: readonly TuiEvent[]): void {
+  hydrateTranscriptEvents(events: readonly TranscriptEvent[]): void {
     this.eventStore.loadInitialEvents(events);
     this.rebuildRuntimeTracking();
-    this.syncLegacyEntries(this.eventStore.getProjection());
   }
 
   /** Rebuild the visible projection from Session after a durable branch change. */
-  replaceTranscriptEvents(events: readonly TuiEvent[]): void {
+  replaceTranscriptEvents(events: readonly TranscriptEvent[]): void {
     this.clearRuntimeTracking();
     this.eventStore.replaceEvents(events);
     this.rebuildRuntimeTracking();
-    this.syncLegacyEntries(this.eventStore.getProjection());
     this.emit();
   }
 
-  /** 旧 messages fallback 只用于显示，不应在启动时被当成新事件再次落盘。 */
+  /** 水合/回放期间抑制事件再次落盘。 */
   withoutDurableTranscript(callback: () => void): void {
     const previous = this.durableTranscriptSuppressed;
     this.durableTranscriptSuppressed = true;
@@ -231,14 +190,14 @@ export class TuiReporter implements Reporter {
   }
 
   /** 对话 rewind 后让可见 transcript 与 Session 使用同一截断边界。 */
-  truncateTo(entryIndex: number, options: { readonly operationId?: string } = {}): void {
+  truncateTo(entryIndex: number, options: { readonly operationId: string }): void {
     const entryCount = this.eventStore.getProjection().entries.length;
     const safeIndex = Math.min(Math.max(0, entryIndex), entryCount);
     this.interruptActiveStreams("truncate");
     this.eventStore.append({
       type: "transcript.truncated",
       entryCount: safeIndex,
-      ...(options.operationId ? { operationId: options.operationId } : {}),
+      operationId: options.operationId,
     });
     this.clearRuntimeTracking();
     this.appendPhase("idle", true);
@@ -281,7 +240,7 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  /** 读当前 UI 模式,供 app.tsx 的 spinner 用(repl 每次 onUpdate 后调一次,极简)。 */
+  /** 读当前 UI 模式，供 app.tsx 的 spinner 使用。 */
   getMode(): UiMode {
     return this.eventStore.getProjection().phase.mode;
   }
@@ -309,20 +268,21 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  onToolCall(toolName: string, args: string, providerCallId?: string): void {
+  onToolCall(toolName: string, args: string, providerCallId: string): void {
     this.completeReasoningStream();
     if (isRequiredDelegation(toolName, args)) {
       this.suppressCurrentTurnAssistantResponse("required-delegation");
     }
     this.appendPhase("tool-use");
     const normalizedProviderCallId = normalizeIdentity(providerCallId);
+    if (normalizedProviderCallId === undefined) {
+      throw new Error("TUI ToolCall providerCallId must not be empty");
+    }
     const entryId = this.eventStore.createId("entry");
     const event = this.eventStore.append({
       type: "tool.started",
       entryId,
-      ...(normalizedProviderCallId !== undefined
-        ? { providerCallId: normalizedProviderCallId }
-        : {}),
+      providerCallId: normalizedProviderCallId,
       name: toolName,
       args,
     });
@@ -335,8 +295,8 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  onToolAwaitingApproval(toolName: string, args: string, providerCallId?: string): void {
-    const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId, args);
+  onToolAwaitingApproval(_toolName: string, args: string, providerCallId: string): void {
+    const internalToolCallId = this.resolvePendingToolId(providerCallId, args);
     if (internalToolCallId !== undefined) {
       this.eventStore.append({
         type: "tool.approval.requested",
@@ -349,13 +309,13 @@ export class TuiReporter implements Reporter {
   }
 
   onToolOutput(
-    toolName: string,
+    _toolName: string,
     stream: "stdout" | "stderr",
     chunk: string,
-    providerCallId?: string,
+    providerCallId: string,
   ): void {
     if (chunk.length === 0) return;
-    const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId);
+    const internalToolCallId = this.resolvePendingToolId(providerCallId);
     if (internalToolCallId === undefined) return;
     const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
     if (!tool || tool.outputTruncated) return;
@@ -390,7 +350,7 @@ export class TuiReporter implements Reporter {
   }
 
   onToolResult(result: ToolResultEnvelope): void {
-    const internalToolCallId = this.resolvePendingToolId(result.toolName, result.toolCallId);
+    const internalToolCallId = this.resolvePendingToolId(result.toolCallId);
     if (internalToolCallId === undefined) {
       // rewind/clear 后到达的旧结果不再污染当前 transcript。
       this.emit();
@@ -399,16 +359,14 @@ export class TuiReporter implements Reporter {
     this.flushToolOutput(internalToolCallId);
     const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
     if (!tool) {
-      this.removePendingToolId(result.toolName, internalToolCallId, result.toolCallId);
+      this.removePendingToolId(internalToolCallId, result.toolCallId);
       this.emit();
       return;
     }
-    const isError = result.status !== "succeeded";
-    const summary = summarizeResult(result.toolName, tool.args, result.projection.text, isError);
+    const summary = summarizeTranscriptToolResult(result.toolName, tool.args, result);
     this.eventStore.append({
       type: "tool.completed",
       toolCallId: internalToolCallId,
-      status: resolveToolStatus(result.toolName, result.projection.text, isError),
       summary,
       result,
     });
@@ -428,11 +386,9 @@ export class TuiReporter implements Reporter {
       activity: {
         task: activity.task,
         status: activity.status,
+        mode: activity.mode,
+        completionPolicy: activity.completionPolicy,
         ...(activity.agentName !== undefined ? { agentName: activity.agentName } : {}),
-        ...(activity.mode !== undefined ? { mode: activity.mode } : {}),
-        ...(activity.completionPolicy !== undefined
-          ? { completionPolicy: activity.completionPolicy }
-          : {}),
         ...(activity.currentAction !== undefined ? { currentAction: activity.currentAction } : {}),
         ...(activity.summary !== undefined ? { summary: activity.summary } : {}),
         ...(activity.requestedModelRoute !== undefined
@@ -470,10 +426,10 @@ export class TuiReporter implements Reporter {
           : trace.type === "tool.completed"
             ? {
                 ...trace,
-                result: trace.result.slice(0, TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS),
-                ...(trace.result.length > TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS
-                  ? { truncated: true }
-                  : {}),
+                result: boundSubagentToolResultEnvelope(
+                  trace.result,
+                  TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS,
+                ),
               }
             : trace;
     this.eventStore.append({ type: "subagent.trace.recorded", trace: boundedTrace });
@@ -512,10 +468,9 @@ export class TuiReporter implements Reporter {
       this.eventStore.append({
         type: "tool.completed",
         toolCallId: tool.id,
-        status: "error",
         summary: "Interrupted by user.",
         result: createToolResultEnvelope({
-          toolCallId: tool.providerCallId ?? tool.id,
+          toolCallId: tool.providerCallId,
           toolName: tool.name,
           status: "interrupted",
           body: {
@@ -557,6 +512,7 @@ export class TuiReporter implements Reporter {
       this.eventStore.append({
         type: "assistant.stream.started",
         ...this.currentStream,
+        entryKind: "assistant",
         delta,
       });
     }
@@ -597,11 +553,9 @@ export class TuiReporter implements Reporter {
       if (subagent.lifecycle === "terminal_claimed") return true;
       if (subagent.lifecycle !== "terminal_unconsumed") return false;
       const policy = subagent.activity.completionPolicy;
-      // required/legacy 结果由当前工具轮同步消费；detached 成功无需进入主上下文。
+      // required 结果由当前工具轮同步消费；detached 成功无需进入主上下文。
       return (
-        policy === undefined ||
-        policy === "required" ||
-        (policy === "detached" && subagent.activity.status === "completed")
+        policy === "required" || (policy === "detached" && subagent.activity.status === "completed")
       );
     });
     for (const subagent of terminal) {
@@ -681,7 +635,6 @@ export class TuiReporter implements Reporter {
     this.currentStream = null;
     this.currentReasoningStream = null;
     this.currentTurnAssistantEntryId = null;
-    this.pendingToolIdsByName.clear();
     this.pendingToolIdsByProviderCallId.clear();
     this.pendingToolOutput.clear();
   }
@@ -728,27 +681,17 @@ export class TuiReporter implements Reporter {
       : undefined;
   }
 
-  private registerPendingTool(tool: TuiToolCallProjection): void {
-    appendPendingId(this.pendingToolIdsByName, tool.name, tool.id);
-    if (tool.providerCallId !== undefined) {
-      appendPendingId(this.pendingToolIdsByProviderCallId, tool.providerCallId, tool.id);
-    }
+  private registerPendingTool(tool: TranscriptToolCallProjection): void {
+    appendPendingId(this.pendingToolIdsByProviderCallId, tool.providerCallId, tool.id);
   }
 
-  private resolvePendingToolId(
-    toolName: string,
-    providerCallId?: string,
-    expectedArgs?: string,
-  ): string | undefined {
+  private resolvePendingToolId(providerCallId: string, expectedArgs?: string): string | undefined {
     const normalizedProviderCallId = normalizeIdentity(providerCallId);
+    if (normalizedProviderCallId === undefined) return undefined;
     const projection = this.eventStore.getProjection();
-    const pendingIds =
-      normalizedProviderCallId !== undefined
-        ? (this.pendingToolIdsByProviderCallId.get(normalizedProviderCallId) ?? [])
-        : (this.pendingToolIdsByName.get(toolName) ?? []);
+    const pendingIds = this.pendingToolIdsByProviderCallId.get(normalizedProviderCallId) ?? [];
 
-    // Provider ID 跨轮可复用，因此只在当前 pending 队列中 FIFO 解析；
-    // 无 ID 的旧调用则按同名工具 FIFO 降级。
+    // Provider ID 跨轮可复用，因此只在当前 pending 队列中 FIFO 解析。
     return pendingIds.find((id) => {
       const tool = projection.toolCalls[id];
       return (
@@ -759,20 +702,13 @@ export class TuiReporter implements Reporter {
     });
   }
 
-  private removePendingTool(tool: TuiToolCallProjection): void {
-    this.removePendingToolId(tool.name, tool.id, tool.providerCallId);
+  private removePendingTool(tool: TranscriptToolCallProjection): void {
+    this.removePendingToolId(tool.id, tool.providerCallId);
   }
 
-  private removePendingToolId(
-    toolName: string,
-    internalToolCallId: string,
-    providerCallId?: string,
-  ): void {
+  private removePendingToolId(internalToolCallId: string, providerCallId: string): void {
     this.pendingToolOutput.delete(internalToolCallId);
-    removePendingId(this.pendingToolIdsByName, toolName, internalToolCallId);
-    if (providerCallId !== undefined) {
-      removePendingId(this.pendingToolIdsByProviderCallId, providerCallId, internalToolCallId);
-    }
+    removePendingId(this.pendingToolIdsByProviderCallId, providerCallId, internalToolCallId);
   }
 
   private bufferToolOutput(
@@ -812,32 +748,29 @@ export class TuiReporter implements Reporter {
       toolCallId,
       segment: {
         content: pending.pieces.join(""),
-        runs: pending.runs.map((run): TuiToolOutputRun => ({ ...run })),
+        runs: pending.runs.map((run): TranscriptToolOutputRun => ({ ...run })),
       },
     });
     this.pendingToolOutput.delete(toolCallId);
     return true;
   }
 
-  /** 投影是唯一条目源；legacyEntries 仅作引用兼容镜像。 */
   private emit(): void {
-    const projection = this.eventStore.getProjection();
-    this.syncLegacyEntries(projection);
-    this.onProjectionUpdate?.(projection);
-    this.onUpdate(projection.entries.map(({ entry }) => entry));
+    this.onProjectionUpdate?.(this.eventStore.getProjection());
   }
 
-  private enqueueDurableTranscript(event: TuiEvent, projection: TuiProjection): void {
+  private enqueueDurableTranscript(event: TranscriptEvent): void {
     if (
       this.durableTranscriptSuppressed ||
       !this.durableTranscriptSink ||
-      !this.durableTranscriptPolicy(event, projection)
+      !isDurableTranscriptEvent(event) ||
+      !this.durableTranscriptPolicy(event)
     )
       return;
     const durableEvent = {
       ...event,
       sequence: ++this.durableTranscriptSequence,
-    } as TuiEvent;
+    };
     this.durableTranscriptTail = this.durableTranscriptTail
       .then(() => this.durableTranscriptSink!.append(durableEvent))
       .catch((error: unknown) => {
@@ -845,14 +778,6 @@ export class TuiReporter implements Reporter {
         // Session.recordTranscriptEvent 自身会进入 write-uncertain；这里保留
         // 队列可排空，让 shutdown 的 flushPersistence 观察真实错误。
       });
-  }
-
-  private syncLegacyEntries(projection: TuiProjection): void {
-    this.legacyEntries.splice(
-      0,
-      this.legacyEntries.length,
-      ...projection.entries.map(({ entry }) => entry),
-    );
   }
 }
 
@@ -903,166 +828,21 @@ function removePendingId(index: Map<string, string[]>, key: string, id: string):
   else index.set(key, next);
 }
 
-/** 工具结果摘要:默认短输出;写入类和 bash 保留路径/命令上下文,错误保留可复制摘要。 */
-function summarizeResult(toolName: string, args: string, result: string, isError: boolean): string {
-  if (isError) return formatErrorSummary(result);
-
-  if (isAgentToolName(toolName)) {
-    return summarizeAgentResult(toolName, result);
-  }
-
-  const target = toolTargetSummary(toolName, args);
-  const output = formatOutputPreview(result, { maxLines: 3 });
-  if (target) return `${target} · ${result.length} 字节 · ${output}`;
-
-  const lines = result.split("\n");
-  const head = lines.slice(0, 3).map((l) => l.slice(0, 100));
-  const suffix = lines.length > 3 ? ` …(+${lines.length - 3} 行)` : "";
-  return `${result.length} 字节 · ${head.join(" ⏎ ").slice(0, 120)}${suffix}`;
-}
-
-function resolveToolStatus(toolName: string, result: string, isError: boolean): ToolCardStatus {
-  if (!isError)
-    return isAgentToolName(toolName) && agentResultHasFailure(result) ? "error" : "success";
-  return isDeniedResult(result) ? "denied" : "error";
-}
-
 function isPendingToolStatus(status: ToolCardStatus): boolean {
   return status === "queued" || status === "running" || status === "approval";
 }
 
-function isAgentToolName(toolName: string): boolean {
-  return (
-    toolName === "spawn_subagent" ||
-    toolName === "delegate_task" ||
-    toolName === "delegate_status" ||
-    toolName.startsWith("[Subagent]")
-  );
-}
-
-function isDeniedResult(result: string): boolean {
-  return (
-    result.includes("执行被系统拦截") ||
-    result.includes("执行被 Guardrail 阻断") ||
-    result.includes("被 PreToolUse hook 阻断") ||
-    result.includes("permissionDecision: deny")
-  );
-}
-
-function toolTargetSummary(toolName: string, args: string): string | undefined {
-  if (!["edit_file", "write_file", "bash"].includes(toolName)) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(args);
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const obj = parsed as Record<string, unknown>;
-  const value = toolName === "bash" ? obj["command"] : obj["path"];
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  return compactText(value.trim(), 64);
-}
-
-function formatErrorSummary(error: string): string {
-  const firstUsefulLine = error
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  return `可复制错误: ${compactText(firstUsefulLine ?? error, 166)}`;
-}
-
-function compactText(text: string, max: number): string {
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
-}
-
-function summarizeAgentResult(toolName: string, result: string): string {
-  const parsed = parseJsonObject(result);
-  if (!parsed) return summarizePlainAgentResult(toolName, result);
-
-  const topLevelError = stringField(parsed, "error");
-  if (topLevelError) return formatErrorSummary(topLevelError);
-
-  const status = stringField(parsed, "status");
-  const delegationId = stringField(parsed, "delegationId") ?? stringField(parsed, "delegation_id");
-  const batch = extractDelegationBatch(parsed);
-  if (batch) return summarizeDelegationBatch(batch);
-
-  if (status) {
-    const idPart = delegationId ? ` · ${compactText(delegationId, 48)}` : "";
-    return `${status}${idPart}`;
-  }
-
-  return summarizePlainAgentResult(toolName, result);
-}
-
-function summarizePlainAgentResult(toolName: string, result: string): string {
-  const label = toolName.startsWith("[Subagent]") ? "Subagent" : "Agent";
-  return `${label} · ${formatOutputPreview(result, { maxLines: 3 })}`;
-}
-
-function agentResultHasFailure(result: string): boolean {
-  const parsed = parseJsonObject(result);
-  if (!parsed) return result.startsWith("子智能体执行失败:");
-  if (stringField(parsed, "error")) return true;
-
-  const batch = extractDelegationBatch(parsed);
-  return batch ? batch.results.some((item) => stringField(item, "status") === "error") : false;
-}
-
-function extractDelegationBatch(
-  value: Record<string, unknown>,
-): { results: Record<string, unknown>[] } | undefined {
-  const direct = value["results"];
-  if (Array.isArray(direct)) return { results: direct.filter(isRecord) };
-
-  const nestedResult = value["result"];
-  if (isRecord(nestedResult)) {
-    const nested = nestedResult["results"];
-    if (Array.isArray(nested)) return { results: nested.filter(isRecord) };
-  }
-
-  return undefined;
-}
-
-function summarizeDelegationBatch(batch: { results: Record<string, unknown>[] }): string {
-  const total = batch.results.length;
-  const completed = batch.results.filter(
-    (item) => stringField(item, "status") === "completed",
-  ).length;
-  const failed = batch.results.filter((item) => stringField(item, "status") === "error").length;
-
-  const parts = [`${completed}/${total} completed`];
-  if (failed > 0) parts.push(`${failed} failed`);
-
-  const success = batch.results.find((item) => stringField(item, "status") === "completed");
-  const failure = batch.results.find((item) => stringField(item, "status") === "error");
-  const successSummary = success ? stringField(success, "summary") : undefined;
-  const failureSummary = failure
-    ? (stringField(failure, "error") ?? stringField(failure, "summary"))
-    : undefined;
-
-  if (successSummary) parts.push(`ok: ${compactText(successSummary, 72)}`);
-  if (failureSummary) parts.push(`failed: ${compactText(failureSummary, 88)}`);
-
-  return compactText(parts.join(" · "), 220);
-}
-
-function parseJsonObject(text: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringField(value: Record<string, unknown>, key: string): string | undefined {
-  const raw = value[key];
-  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+function boundSubagentToolResultEnvelope(
+  result: ToolResultEnvelope,
+  maxChars: number,
+): ToolResultEnvelope {
+  const text = result.projection.text.slice(0, maxChars);
+  return {
+    ...structuredClone(result),
+    projection: {
+      ...structuredClone(result.projection),
+      text,
+    },
+    deliveryTruncated: result.deliveryTruncated || text.length < result.projection.text.length,
+  };
 }

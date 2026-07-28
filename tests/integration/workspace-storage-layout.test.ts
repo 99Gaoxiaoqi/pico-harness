@@ -22,7 +22,10 @@ import {
   FileStorageIntegrityError,
   withFileLockSync,
 } from "../../src/storage/local-file-storage.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import {
+  readExistingRuntimeSessionProjection,
+  RuntimeEventStore,
+} from "../../src/storage/runtime-event-store.js";
 import {
   adoptWorkspaceStorageRootIdentitySync,
   WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
@@ -35,7 +38,7 @@ import {
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { hashTaskRunInput, TaskRunStore, taskRunDigest } from "../../src/tasks/task-run-store.js";
 
-test("workspace storage copies legacy Runtime JSON without modifying rollback ledgers", async (t) => {
+test("workspace storage leaves legacy Session ledgers unsupported and untouched", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-layout-migrate-"));
   const workDir = join(root, "project");
   const storageRoot = join(root, "state");
@@ -64,12 +67,15 @@ test("workspace storage copies legacy Runtime JSON without modifying rollback le
   })}\n`;
   await writeFile(legacyLogPath, legacyLedger, { mode: 0o600 });
 
-  const store = new RuntimeEventStore({ storageRoot });
-  assert.equal((await store.readSessionManifest(sessionId))?.sessionId, sessionId);
+  assert.equal(await readExistingRuntimeSessionProjection({ storageRoot, sessionId }), undefined);
+  await assert.rejects(stat(join(storageRoot, WORKSPACE_STORAGE_LAYOUT_FILE)), { code: "ENOENT" });
 
-  assert.equal(
-    await readFile(join(storageRoot, "sessions", digest, "session.jsonl"), "utf8"),
-    legacyLedger,
+  const store = new RuntimeEventStore({ storageRoot });
+  assert.equal(await store.readSessionManifest(sessionId), undefined);
+
+  await assert.rejects(
+    stat(join(storageRoot, "sessions", digest, "session.jsonl")),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
   );
   assert.equal(await readFile(legacyLogPath, "utf8"), legacyLedger);
   assert.equal(

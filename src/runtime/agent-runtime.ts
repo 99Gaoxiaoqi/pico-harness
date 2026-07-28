@@ -124,7 +124,7 @@ import {
 import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
-import { RuntimeEventStore } from "./runtime-event-store.js";
+import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import { emitRuntimeLifecycleEvent, RuntimeRunExecutor } from "./runtime-run-executor.js";
@@ -903,7 +903,6 @@ export async function executeAgentRuntime(
         provider: trackedProvider,
         ...(auxProvider ? { auxProvider } : {}),
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
-        evidenceArchive,
       }),
       runtimeEvidenceArchive: evidenceArchive,
       subagentReportEvidenceWriter,

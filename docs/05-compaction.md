@@ -40,7 +40,7 @@ Agent 读了一个 1MB 的日志文件。单条 ToolResult 就可能把上下文
 
 3. **丢失细节。** 摘要可能丢掉关键信息。"那个报错里有一个 IP 地址 `10.0.3.42`"被摘要成了"有个网络错误"。Agent 在后续排查中需要那个 IP 地址，但已经被摘要吃掉了。
 
-因此先采用零成本的 ToolResult 投影；达到水位且投影仍不足时，再调用 FullCompactor 持久化“摘要 + 完整安全尾部”。
+因此先采用零成本的 ToolResult 投影；达到水位且投影仍不足时，再调用 FullCompactor 生成摘要并追加 Runtime checkpoint。已有历史不改写，读模型投影为“摘要 + 完整安全尾部”。
 
 ---
 
@@ -100,7 +100,7 @@ Session 前已经留下确定性预览、内容哈希、原始字节数和 Evide
 
 ### 第四道防线：token 水位模型摘要
 
-请求投影后仍超过 85% 水位时调用模型摘要压缩——按 token 目标选择安全切分点，把早期对话浓缩成结构化摘要并替换原始消息。Provider 实际 overflow 时只再做一次更紧的摘要重试。
+请求投影后仍超过 85% 水位时调用模型摘要压缩——按 token 目标选择安全切分点，把早期对话浓缩成结构化摘要。持久化模式追加 Runtime checkpoint，由读模型替换请求投影中的旧前缀；只有显式 `persistence:false` 模式才替换内存 Session。Provider 实际 overflow 时只再做一次更紧的摘要重试。
 
 ```typescript
 // 13-section 结构化摘要模板

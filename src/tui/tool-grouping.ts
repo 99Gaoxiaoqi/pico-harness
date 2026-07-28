@@ -72,13 +72,13 @@ function groupedToolCallIds(
 
 function groupStatus(group: ToolEntry[]): ToolEntry["status"] {
   if (group.some((entry) => entry.status === "denied")) return "denied";
-  if (group.some((entry) => entry.status === "error" || entry.status === "failed")) return "error";
+  if (group.some((entry) => entry.status === "error")) return "error";
   return "success";
 }
 
 function groupSummary(group: ToolEntry[]): string {
   const status = groupStatus(group);
-  const ok = group.filter((entry) => entry.status === "success" || entry.status === "done").length;
+  const ok = group.filter((entry) => entry.status === "success").length;
   const failed = group.length - ok;
   const parts = [`${group.length} calls`, failed > 0 ? `${failed} failed` : `${ok} success`];
   const first = callLine(group[0]!);

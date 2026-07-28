@@ -10,12 +10,12 @@ import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
 } from "../../src/engine/tool-result-contract.js";
-import type { TranscriptEvent } from "../../src/presentation/transcript-event-store.js";
+import type { DurableTranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import type { Message } from "../../src/schema/message.js";
 
 function snapshot(
   messages: readonly Message[],
-  transcriptEvents: readonly TranscriptEvent[] = [],
+  transcriptEvents: readonly DurableTranscriptEvent[] = [],
   identities: readonly { readonly runId: string; readonly turnId: string }[] = [],
   toolResults: readonly {
     readonly sequence: number;
@@ -33,7 +33,7 @@ function snapshot(
     transcriptEvents,
     transcriptEventSequences: transcriptEvents.map((event) => event.sequence),
     toolResults,
-    runtime: { stateVersion: 1 as const, usage: createEmptyUsageSnapshot() },
+    runtime: { stateVersion: 2 as const, usage: createEmptyUsageSnapshot() },
   };
 }
 
@@ -85,7 +85,7 @@ test("Desktop transcript projects provider reasoning before the answer", () => {
 });
 
 test("Desktop transcript restores structured thinking, Skill and system entries with stable IDs", () => {
-  const events: TranscriptEvent[] = [
+  const events: DurableTranscriptEvent[] = [
     {
       eventId: "skill-event",
       sequence: 1,
@@ -139,7 +139,7 @@ test("Desktop transcript restores structured thinking, Skill and system entries 
 });
 
 test("Desktop transcript places repeated identical reasoning before its matching answer", () => {
-  const events: TranscriptEvent[] = [
+  const events: DurableTranscriptEvent[] = [
     {
       eventId: "thinking-start-1",
       sequence: 1,
@@ -203,7 +203,7 @@ test("Desktop transcript places repeated identical reasoning before its matching
 });
 
 test("Desktop transcript preserves the subagent display name as structured data", () => {
-  const events: TranscriptEvent[] = [
+  const events: DurableTranscriptEvent[] = [
     {
       eventId: "subagent-update",
       sequence: 1,
@@ -216,6 +216,7 @@ test("Desktop transcript preserves the subagent display name as structured data"
         status: "running",
         agentName: "Explore",
         mode: "explore",
+        completionPolicy: "required",
       },
     },
   ];
@@ -241,8 +242,8 @@ test("Desktop Markdown renders structure while blocking raw HTML and unsafe link
   assert.doesNotMatch(html, /<script/i);
 });
 
-test("Desktop transcript preserves repeated structured tool calls during dedupe", () => {
-  const events: TranscriptEvent[] = [
+test("Desktop transcript preserves repeated structured tool calls without signature fallback", () => {
+  const events: DurableTranscriptEvent[] = [
     {
       eventId: "tool-start-1",
       sequence: 1,
@@ -250,38 +251,20 @@ test("Desktop transcript preserves repeated structured tool calls during dedupe"
       type: "tool.started",
       entryId: "tool-entry-1",
       toolCallId: "tool-call-1",
+      providerCallId: "model-call-1",
       name: "read_file",
       args: '{"path":"README.md"}',
     },
     {
-      eventId: "tool-complete-1",
-      sequence: 2,
-      createdAt: 2,
-      type: "tool.completed",
-      toolCallId: "tool-call-1",
-      status: "success",
-      summary: "Tool completed · 1 bytes",
-      result: toolResultEnvelope("tool-call-1", "read_file", "1"),
-    },
-    {
       eventId: "tool-start-2",
-      sequence: 3,
+      sequence: 2,
       createdAt: 3,
       type: "tool.started",
       entryId: "tool-entry-2",
       toolCallId: "tool-call-2",
+      providerCallId: "tool-call-2",
       name: "read_file",
       args: '{"path":"README.md"}',
-    },
-    {
-      eventId: "tool-complete-2",
-      sequence: 4,
-      createdAt: 4,
-      type: "tool.completed",
-      toolCallId: "tool-call-2",
-      status: "success",
-      summary: "Tool completed · 2 bytes",
-      result: toolResultEnvelope("tool-call-2", "read_file", "22"),
     },
   ];
   const page = projectRuntimeTranscript(
@@ -294,19 +277,42 @@ test("Desktop transcript preserves repeated structured tool calls during dedupe"
         },
       ],
       events,
+      [],
+      [
+        {
+          sequence: 3,
+          eventId: "tool-result-1",
+          envelope: toolResultEnvelope("model-call-1", "read_file", "1"),
+        },
+        {
+          sequence: 4,
+          eventId: "tool-result-2",
+          envelope: toolResultEnvelope("tool-call-2", "read_file", "22"),
+        },
+      ],
     ),
     {},
   );
 
   const tools = page.items.filter((item) => item.kind === "tool");
   assert.equal(tools.length, 2);
-  assert.equal(tools[0]?.id, "tool-entry-2");
-  assert.match(tools[1]?.id ?? "", /^item_[0-9a-f]{20}$/);
+  assert.deepEqual(
+    tools.map((tool) => tool.id),
+    ["tool-entry-1", "tool-entry-2"],
+  );
+  assert.deepEqual(
+    tools.map((tool) => (tool.kind === "tool" ? tool.status : undefined)),
+    ["success", "success"],
+  );
+  assert.deepEqual(
+    tools.map((tool) => (tool.kind === "tool" ? tool.result?.projection.text : undefined)),
+    ["1", "22"],
+  );
 });
 
-test("Desktop transcript matches structured tools by providerCallId before legacy signatures", () => {
+test("Desktop transcript matches structured tools by providerCallId only", () => {
   const args = '{"path":"README.md"}';
-  const events: TranscriptEvent[] = [
+  const events: DurableTranscriptEvent[] = [
     {
       eventId: "tool-start-b",
       sequence: 1,
@@ -350,64 +356,33 @@ test("Desktop transcript matches structured tools by providerCallId before legac
   );
 });
 
-test("Desktop transcript matches a reused providerCallId to the nearest preceding call", () => {
+test("Desktop transcript rejects Message fallback for an unmatched canonical ToolResult", () => {
   const args = '{"path":"README.md"}';
-  const messages: Message[] = [
-    {
-      role: "assistant",
-      content: "first",
-      toolCalls: [{ id: "reused-call", name: "read_file", arguments: args }],
-    },
-    {
-      role: "assistant",
-      content: "second",
-      toolCalls: [{ id: "reused-call", name: "read_file", arguments: args }],
-    },
-  ];
-  const events: TranscriptEvent[] = [
-    {
-      eventId: "tool-start-reused",
-      sequence: 1,
-      createdAt: 5,
-      type: "tool.started",
-      entryId: "tool-entry-reused",
-      toolCallId: "tool-call-reused",
-      providerCallId: "reused-call",
-      name: "read_file",
-      args,
-    },
-  ];
-  const page = projectRuntimeTranscript(
-    {
-      ...snapshot(
-        messages,
-        events,
-        [],
-        [
-          {
-            sequence: 2,
-            eventId: "result-1",
-            envelope: toolResultEnvelope("reused-call", "read_file", "1"),
-          },
-          {
-            sequence: 4,
-            eventId: "result-2",
-            envelope: toolResultEnvelope("reused-call", "read_file", "22"),
-          },
-        ],
+  assert.throws(
+    () =>
+      projectRuntimeTranscript(
+        snapshot(
+          [
+            {
+              role: "assistant",
+              content: "legacy fallback must not render",
+              toolCalls: [{ id: "unmatched-call", name: "read_file", arguments: args }],
+            },
+          ],
+          [],
+          [],
+          [
+            {
+              sequence: 2,
+              eventId: "unmatched-result",
+              envelope: toolResultEnvelope("unmatched-call", "read_file", "result"),
+            },
+          ],
+        ),
+        {},
       ),
-      persistenceSequence: 5,
-      messageSequences: [1, 3],
-      transcriptEventSequences: [5],
-    },
-    {},
+    /canonical ToolResult unmatched-call has no structured tool start/u,
   );
-
-  const tools = page.items.filter((item) => item.kind === "tool");
-  assert.equal(tools.length, 2);
-  assert.match(tools[0]?.id ?? "", /^item_[0-9a-f]{20}$/u);
-  assert.match(tools[0]?.kind === "tool" ? (tools[0].summary ?? "") : "", /1 bytes/u);
-  assert.equal(tools[1]?.id, "tool-entry-reused");
 });
 
 test("Desktop transcript binds duplicate reasoning text to the nearest structured turn", () => {
@@ -416,7 +391,7 @@ test("Desktop transcript binds duplicate reasoning text to the nearest structure
     { role: "user", content: "next" },
     { role: "assistant", content: "new answer", reasoning: "same" },
   ];
-  const events: TranscriptEvent[] = [
+  const events: DurableTranscriptEvent[] = [
     {
       eventId: "thinking-start-new",
       sequence: 1,

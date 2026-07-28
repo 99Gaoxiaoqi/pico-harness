@@ -90,7 +90,7 @@ Engine 更像一次执行所需的机器和线路；Session 才是长期记忆�
 - 长期记忆提醒。
 - 当前已经渐进披露给模型的工具定义。
 
-随后，上下文治理模块会检查这批内容是否超过模型预算。必要时会清理旧工具结果、压缩长内容，或者让辅助模型生成结构化摘要。特别大的工具输出不会一直塞在对话里，而是写入 Artifact 文件，只在上下文中保留摘要和路径。
+随后，上下文治理模块会检查这批内容是否超过模型预算。当前 ToolResult 只做确定性投影；只有旧历史前缀在投影后仍超预算时，才让辅助模型生成结构化 checkpoint 摘要。特别大的工具输出只在 Runtime 留下 canonical 事实，原文写入 Evidence CAS，上下文持有确定性预览、哈希、大小和 `pico://evidence/...` 回读引用。
 
 ### 第四步：模型决定“回答”还是“行动”
 
@@ -121,7 +121,7 @@ Engine 更像一次执行所需的机器和线路；Session 才是长期记忆�
 
 代码理解也已经进入同一套工具体系。TUI 启动时会优先连接项目配置或 PATH 中发现的 Language Server；LSP 不可用时快速降级为渐进式 Repo Map。定义、引用、符号、诊断、调用层级和仓库地图六类工具默认不全部塞进模型上下文，而是通过 `search_tools` 按需披露。
 
-更大的变化是 `delegate_task` 已经从“后台任务”演进成主 Agent 的核心编排工具。用户明确要求并行、子代理或分工时，主 Agent 首轮优先委派；默认 `required` 委派会形成硬等待边界，所有 worker 收口前主 Provider 不继续下一轮。worker 的结果会被聚合成摘要，超长内容写入 Artifact，再由主 Agent 做统一判断、必要验证和最终回答。
+更大的变化是 `delegate_task` 已经从“后台任务”演进成主 Agent 的核心编排工具。用户明确要求并行、子代理或分工时，主 Agent 首轮优先委派；默认 `required` 委派会形成硬等待边界，所有 worker 收口前主 Provider 不继续下一轮。worker 的结果会被聚合成总结，超长最终报告写入 `subagent-report` Evidence，再由主 Agent 做统一判断、必要验证和最终回答。
 
 ### 第六步：结果重新成为模型的观察
 
@@ -157,16 +157,16 @@ TUI 使用 `providerID/modelID` 选择稳定的模型路由。路由层不仅负
 
 很多 Agent Demo 把历史只放在一个内存数组里，进程一停，任务就消失。`pico-harness` 把 Session 当成需要恢复的正式状态。
 
-消息会追加写入 `.claw/sessions/*.jsonl`。这种事件日志不要求频繁重写完整会话，程序异常退出后也可以重放恢复。日志末行即使只写了一半，加载时也会容忍并保留前面的有效记录。
+消息会作为 RuntimeEvent v2 追加写入 `$PICO_HOME/workspaces/<workspace-id>/sessions/<sha256(sessionId)>/session.jsonl`。这种事件日志不要求频繁重写完整会话，程序异常退出后也可以重放恢复。日志末行即使只写了一半，加载时也会容忍并保留前面的有效记录；旧 Session schema 不迁移。
 
 同时，Session 还维护几个关键不变量：
 
 - 同一个 Session 的多次运行串行执行，避免同时修改 History。
 - Assistant Tool Call 后面必须跟对应的 Tool Result。
 - Tool Result 未到齐时，后续普通消息暂存，避免产生模型 API 无法接受的顺序。
-- Working Memory 只取近期有效消息，并丢弃孤儿 Tool Result。
+- 模型读投影保留完整有效历史，并在预算水位处安全整理旧前缀。
 
-对话内容以 Session JSONL 为事实源，并在进程内建立可丢弃索引供恢复和 Memory 读取；索引可以从日志重建，不升级为第二事实源。大结果进入 workspace artifacts，决策链路进入 traces，摘要独立持久化。这些外部化状态共同构成了 Agent 的“硬盘”。
+对话内容以 Session JSONL 为事实源，并在进程内建立可丢弃索引供恢复和 Memory 读取；索引可以从日志重建，不升级为第二事实源。大结果进入 workspace Evidence CAS，决策链路进入 traces，摘要以同一 Runtime ledger 中的 checkpoint 事件持久化，不再维护 Summary sidecar。这些外部化状态共同构成了 Agent 的“硬盘”。
 
 ## 六、Rewind 为什么不等于 Git Reset
 
@@ -208,7 +208,7 @@ Session 可以恢复，文件可以 Rewind，Transcript 可以重新投影，模
 
 ### 5. 危险能力必须有宿主边界
 
-安全不能只靠 System Prompt 中的一句“不要执行危险命令”。Hardline、Plan 守卫、Hook deny、工作区信任门、Fetch URL 防护、工具 artifact 大小上限、worker 沙箱和写前历史都位于模型之外，不能靠模型自觉维持。
+安全不能只靠 System Prompt 中的一句“不要执行危险命令”。Hardline、Plan 守卫、Hook deny、工作区信任门、Fetch URL 防护、工具执行与宿主投影大小上限、worker 沙箱和写前历史都位于模型之外，不能靠模型自觉维持。
 
 ### 6. 代码理解必须可以降级
 
@@ -247,7 +247,7 @@ MCP 不再只是每轮临时注册工具，而是 TUI Runtime 级资源。连接
 | `provider/`                              | 模型协议、能力预检、路由、计费和凭证     |
 | `code-intelligence/`                     | LSP 生命周期、代码导航和 Repo Map        |
 | `tools/`、`mcp/`                         | 工具注册、调度、子代理和外部扩展         |
-| `context/`、`memory/`                    | Prompt、压缩、Artifact、Skill 和长期检索 |
+| `context/`、`memory/`                    | Prompt、压缩、Evidence、Skill 和长期检索 |
 | `approval/`、`safety/`、`observability/` | 审批、宿主沙箱、文件历史、成本和追踪     |
 
 但从运行角度看，仍然只有一条主线：

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assistantMessage, toolResultMessage, type Message } from "../../src/schema/message.js";
+import { assistantMessage, type Message } from "../../src/schema/message.js";
 import { Session } from "../../src/engine/session.js";
 import { SessionMessageLedger } from "../../src/engine/session-message-ledger.js";
+
+function toolResultMessage(toolCallId: string, output: string): Message {
+  return { role: "user", content: output, toolCallId };
+}
 
 test("SessionMessageLedger defers ordinary messages until every tool result is released", () => {
   let now = 10;

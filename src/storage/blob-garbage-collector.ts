@@ -17,7 +17,7 @@ export interface BlobGarbageCollectorOptions {
   readonly baseDir: string;
   readonly gracePeriodMs: number;
   readonly now?: () => number;
-  /** 未来 fork/summary 将 File History CAS 引用外部化时可显式增加根。 */
+  /** Additional roots that may contain File History CAS references. */
   readonly additionalReferenceRoots?: readonly string[];
 }
 
@@ -224,8 +224,7 @@ export class ContentAddressedBlobGarbageCollector {
     }
     const gcEligible = new Set(globalOperationReferences.gcEligibleDigests);
 
-    const defaultReferenceRoots = [workspacePaths.summaries];
-    for (const root of [...defaultReferenceRoots, ...this.additionalReferenceRoots]) {
+    for (const root of this.additionalReferenceRoots) {
       await collectReferencesFromTree(root, reachable, false);
     }
     return { reachable, gcEligible, blockedReasons };

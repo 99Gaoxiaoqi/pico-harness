@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
+import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import type { MemoryProposalPublishedNotice } from "../memory/worker.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
@@ -172,6 +173,7 @@ export function createProductionLocalDaemonHost(
         {
           persistence: true,
           picoHome,
+          runtimePort: createEngineRuntimePort(),
         },
       );
       const session = sessionLease.session;
@@ -188,7 +190,7 @@ export function createProductionLocalDaemonHost(
           credentialVault,
           userConfigStore,
           effectiveConfigResolver,
-          execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
+          execution?.requestedModel ?? persistedSettings?.modelRouteId,
           persistedSettings?.provider,
           env,
         );
@@ -985,7 +987,6 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
       : "active";
   const detail = firstString(
     safePayload["content"],
-    safePayload["resultSummary"],
     toolResultTimelineSummary(safePayload["result"]),
     safePayload["currentAction"],
     safePayload["summary"],
@@ -1014,17 +1015,11 @@ function safeTimelinePayload(
     return isJsonObject(payload["result"]) ? { result: payload["result"] } : {};
   }
   if (type === "subagent.trace" && payload["type"] === "tool.completed") {
-    const resultBytes =
-      typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
-    const isError = payload["isError"] === true;
     return {
       activityId: payload["activityId"],
       traceId: payload["traceId"],
       type: payload["type"],
-      isError,
-      truncated: payload["truncated"] === true,
-      resultBytes,
-      resultSummary: `${isError ? "Tool failed" : "Tool completed"} · ${resultBytes} bytes`,
+      ...(isJsonObject(payload["result"]) ? { result: payload["result"] } : {}),
     };
   }
   return payload;

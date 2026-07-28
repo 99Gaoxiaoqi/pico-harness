@@ -106,8 +106,8 @@ export class SessionMessageLedger {
   truncateTo(fromIndex: number): void {
     const start = Math.max(0, Math.trunc(fromIndex));
     this.history = structuredClone(start >= this.history.length ? [] : this.history.slice(start));
-    // Keep ordering state compatible with the legacy Session hard-reset path:
-    // truncate only removes metadata for results that no longer exist.
+    // The explicit in-memory hard-reset path retains ordering state; truncate
+    // only removes metadata for results that no longer exist.
     this.pruneToolResultMeta();
   }
 

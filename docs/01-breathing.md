@@ -144,7 +144,7 @@ export interface Reporter {
   onTurnStart(turn: number): void;
   onThinking(): void;
   onToolCall(toolName: string, args: string): void;
-  onToolResult(toolName: string, result: string, isError: boolean): void;
+  onToolResult(result: ToolResultEnvelope): void;
   onMessage(content: string): void;
   onFinish(): void;
 }

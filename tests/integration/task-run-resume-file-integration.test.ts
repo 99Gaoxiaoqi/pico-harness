@@ -264,11 +264,10 @@ test("an expired launch lease is taken over after a crash between durable claim 
 });
 
 test("an expired claimed successor re-proves every live source-boundary condition", async (t) => {
-  await t.test("an adapter-specific checkpoint removed after the claim parks recovery", async (t) => {
-    const fixture = await prepareFileRecovery(
-      t,
-      runtimeFacts,
-      (storageRootId, workspace) =>
+  await t.test(
+    "an adapter-specific checkpoint removed after the claim parks recovery",
+    async (t) => {
+      const fixture = await prepareFileRecovery(t, runtimeFacts, (storageRootId, workspace) =>
         initialAttemptFacts(storageRootId, workspace).map(
           (event): TaskRunEvent =>
             event.kind === "attempt.checkpointed"
@@ -284,16 +283,17 @@ test("an expired claimed successor re-proves every live source-boundary conditio
                 }
               : event,
         ),
-    );
-    fixture.liveEvidence.additionalCheckpointRefs = ["checkpoint:external"];
-    await assertClaimedSuccessorReproofParks(
-      fixture,
-      () => {
-        fixture.liveEvidence.additionalCheckpointRefs = [];
-      },
-      "checkpoint_unavailable",
-    );
-  });
+      );
+      fixture.liveEvidence.additionalCheckpointRefs = ["checkpoint:external"];
+      await assertClaimedSuccessorReproofParks(
+        fixture,
+        () => {
+          fixture.liveEvidence.additionalCheckpointRefs = [];
+        },
+        "checkpoint_unavailable",
+      );
+    },
+  );
 
   await t.test("a changed tool catalog after the claim parks recovery", async (t) => {
     const fixture = await prepareFileRecovery(t);
@@ -358,7 +358,7 @@ test("settlement recovery accepts the expected H+1 after the Session advances to
     "claimed",
   );
   await fixture.runtimeEvents.append({
-    schemaVersion: 1,
+    schemaVersion: 2,
     eventId: "runtime-later-run-started",
     sessionId: SESSION_ID,
     invocationId: "invocation:later-run",
@@ -387,7 +387,7 @@ test("settlement recovery accepts the expected H+1 after the Session advances to
   const laterStart = runtimeEntries.find(
     ({ event }) => event.eventId === "runtime-later-run-started",
   );
-  assert.equal(expectedStart?.sequence, 8);
+  assert.equal(expectedStart?.sequence, 9);
   assert.equal(laterStart?.sequence, expectedStart!.sequence + 1);
   assert.equal(
     runtimeEntries.filter(
@@ -427,7 +427,7 @@ test("verified H+1 still re-proves pending source effects before adapter ensure"
   );
 
   await fixture.runtimeEvents.append({
-    schemaVersion: 1,
+    schemaVersion: 2,
     eventId: "runtime-late-source-tool",
     sessionId: SESSION_ID,
     invocationId: "invocation:late-source-tool",
@@ -451,35 +451,29 @@ test("verified H+1 still re-proves pending source effects before adapter ensure"
   if (recovered.status !== "parked") assert.fail("late pending source effect must park");
   assert.ok(recovered.plan.reasons.includes("pending_tool_effect"));
   assert.equal(resumeCalls.length, 1);
-  assert.equal(
-    (await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.status,
-    "parked",
-  );
+  assert.equal((await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID))?.status, "parked");
 });
 
 test("source Run cannot advance after terminal H while a verified successor starts at H+1", async (t) => {
-  const fixture = await prepareFileRecovery(
-    t,
-    minimalRuntimeFacts,
-    (storageRootId, workspace) =>
-      initialAttemptFacts(storageRootId, workspace).map(
-        (event): TaskRunEvent =>
-          event.kind === "attempt.checkpointed"
-            ? {
-                ...event,
-                data: {
-                  ...event.data,
-                  boundary: {
-                    ...event.data.boundary,
-                    runtime: {
-                      ...event.data.boundary.runtime!,
-                      eventHighWater: 3,
-                    },
+  const fixture = await prepareFileRecovery(t, minimalRuntimeFacts, (storageRootId, workspace) =>
+    initialAttemptFacts(storageRootId, workspace).map(
+      (event): TaskRunEvent =>
+        event.kind === "attempt.checkpointed"
+          ? {
+              ...event,
+              data: {
+                ...event.data,
+                boundary: {
+                  ...event.data.boundary,
+                  runtime: {
+                    ...event.data.boundary.runtime!,
+                    eventHighWater: 4,
                   },
                 },
-              }
-            : event,
-      ),
+              },
+            }
+          : event,
+    ),
   );
   const registry = new RecoverableTaskRegistry();
   let adapterCalls = 0;
@@ -491,7 +485,7 @@ test("source Run cannot advance after terminal H while a verified successor star
       adapterCalls += 1;
       const receipt = await appendExpectedRunStarted(fixture, context);
       await fixture.runtimeEvents.append({
-        schemaVersion: 1,
+        schemaVersion: 2,
         eventId: "runtime-source-message-after-terminal",
         sessionId: SESSION_ID,
         invocationId: "invocation:late-source-message",
@@ -522,10 +516,11 @@ test("source Run cannot advance after terminal H while a verified successor star
   assert.ok(result.plan.reasons.includes("runtime_high_water_mismatch"));
   assert.equal(adapterCalls, 1);
   const entries = await fixture.runtimeEvents.readSessionEntries(SESSION_ID);
-  assert.equal(entries.find(({ event }) => event.kind === "run.terminal")?.sequence, 3);
+  assert.equal(entries.find(({ event }) => event.kind === "run.terminal")?.sequence, 4);
   assert.equal(
-    entries.find(({ event }) => event.eventId === "runtime-source-message-after-terminal")?.sequence,
-    5,
+    entries.find(({ event }) => event.eventId === "runtime-source-message-after-terminal")
+      ?.sequence,
+    6,
   );
   const projection = await fixture.taskRuns.readTaskRunProjection(TASK_RUN_ID);
   assert.equal(projection?.status, "parked");
@@ -595,7 +590,7 @@ test("Runtime high-water CAS prevents adapter side effects when an unknown H+1 w
     async resume(_input, context) {
       expectedRunStartedEventId = context.expectedRunStartedEventId;
       await fixture.runtimeEvents.append({
-        schemaVersion: 1,
+        schemaVersion: 2,
         eventId: "runtime-unknown-h-plus-one",
         sessionId: context.runtimeSessionId,
         invocationId: "invocation:unknown",
@@ -1040,7 +1035,7 @@ function initialAttemptFacts(storageRootId: string, workspace: string): TaskRunE
     runtime: {
       sessionId: SESSION_ID,
       runId: RUN_ID,
-      eventHighWater: 7,
+      eventHighWater: 8,
       terminalEventId: "runtime-terminal",
     },
     toolCatalogHash: "tools:stable",
@@ -1108,7 +1103,7 @@ async function appendExpectedRunStarted(
   const [result] = await fixture.runtimeEvents.appendBatch(
     [
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         eventId: context.expectedRunStartedEventId,
         sessionId: context.runtimeSessionId,
         invocationId: `invocation:${context.expectedRuntimeRunId}`,
@@ -1160,9 +1155,13 @@ function expectedLaunchId(): string {
   return `launch:${identity}`;
 }
 
+function checkpointSourceDigest(...eventIds: string[]): string {
+  return createHash("sha256").update(eventIds.join("\n")).digest("hex");
+}
+
 function minimalRuntimeFacts(workspace: string): RuntimeEvent[] {
   const base = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     sessionId: SESSION_ID,
     invocationId: "invocation-1",
     runId: RUN_ID,
@@ -1180,13 +1179,22 @@ function minimalRuntimeFacts(workspace: string): RuntimeEvent[] {
     },
     {
       ...base,
+      eventId: "runtime-message",
+      visibility: "model",
+      kind: "message.committed",
+      data: { message: { role: "user", content: "checkpoint source" } },
+    },
+    {
+      ...base,
       eventId: "runtime-checkpoint",
       visibility: "internal",
       kind: "context.checkpoint.recorded",
       data: {
         checkpointId: "checkpoint-1",
-        sourceDigest: "digest-1",
-        coveredEventCount: 2,
+        sourceDigest: checkpointSourceDigest("runtime-message"),
+        coveredEventCount: 1,
+        throughEventId: "runtime-message",
+        summary: { role: "assistant", content: "checkpoint summary" },
       },
     },
     {
@@ -1204,7 +1212,7 @@ function minimalRuntimeFacts(workspace: string): RuntimeEvent[] {
 
 function runtimeFacts(workspace: string): RuntimeEvent[] {
   const base = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     sessionId: SESSION_ID,
     invocationId: "invocation-1",
     runId: RUN_ID,
@@ -1219,6 +1227,19 @@ function runtimeFacts(workspace: string): RuntimeEvent[] {
       visibility: "internal",
       kind: "run.started",
       data: { workDir: canonicalizeWorkspacePath(workspace) },
+    },
+    {
+      ...base,
+      eventId: "runtime-assistant-tool-call",
+      visibility: "model",
+      kind: "message.committed",
+      data: {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "tool-call-1", name: "write_file", arguments: "{}" }],
+        },
+      },
     },
     {
       ...base,
@@ -1273,8 +1294,10 @@ function runtimeFacts(workspace: string): RuntimeEvent[] {
       kind: "context.checkpoint.recorded",
       data: {
         checkpointId: "checkpoint-1",
-        sourceDigest: "digest-1",
-        coveredEventCount: 5,
+        sourceDigest: checkpointSourceDigest("runtime-assistant-tool-call", "runtime-tool-result"),
+        coveredEventCount: 2,
+        throughEventId: "runtime-tool-result",
+        summary: { role: "assistant", content: "checkpoint summary" },
       },
     },
     {

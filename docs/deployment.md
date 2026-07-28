@@ -42,12 +42,12 @@ TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配
 每个 workspace 的 Session、TaskRun 账本和控制面分别位于 `sessions/`、`task-runs/` 与 `control/`；同级
 `.storage/layout.json`、`.storage/commit.json` 和 `.storage/lock/` 负责布局标记与跨文件事务协调。
 这些目录必须位于同一个支持原子 rename、原子 `mkdir` 和文件/目录 `fsync` 的本地文件系统。
-`memory/`、`artifacts/`、`evidence/` 与 `traces/` 仍是独立的同级存储领域。
+`memory/`、`evidence/` 与 `traces/` 仍是独立的同级存储领域。
 
 `layout.json` 同时保存稳定 `storageRootId` 和当前物理目录身份。运行中的 Store 会在每次事务
 入口重新校验；目录被复制、替换或移动后会 fail closed。确认副本来源后只能通过显式 adopt API
 更新物理身份，不能由普通启动流程静默接管。可移植导出计划默认只包含 Session、TaskRun、
-Artifact、Evidence、Trace 和 Memory summary；控制面、事务协调、Memory state、凭据、临时文件
+Evidence 和 Trace；控制面、事务协调、Memory state、凭据、临时文件
 及 SQLite/WAL/SHM 不随包导出。
 
 显式 recoverable 任务的执行权由 `task.jsonl` 中的 TaskRun execution lease 决定；进程重启后

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TuiEventStore } from "../../src/tui/tui-event-store.js";
+import {
+  TranscriptEventStore as TuiEventStore,
+  assertTranscriptEvent,
+} from "../../src/presentation/transcript-event-store.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import { hydrateTuiEntries, hydrateTuiReporter } from "../../src/tui/session-hydration.js";
 import type { SessionHydrationSnapshot } from "../../src/engine/session-runtime.js";
@@ -8,9 +11,69 @@ import type { TranscriptEvent } from "../../src/presentation/transcript-event-st
 import type { Session } from "../../src/engine/session.js";
 import { applyTuiRewind } from "../../src/tui/rewind-runtime.js";
 
+test("Transcript hard cut rejects legacy event shapes", () => {
+  const base = { eventId: "legacy", sequence: 1, createdAt: 0 };
+  const legacyEvents: unknown[] = [
+    {
+      ...base,
+      type: "assistant.stream.started",
+      entryId: "entry",
+      streamId: "stream",
+      delta: "text",
+    },
+    {
+      ...base,
+      type: "tool.output",
+      toolCallId: "tool",
+      stream: "stdout",
+      chunk: "text",
+    },
+    {
+      ...base,
+      type: "entry.appended",
+      entryId: "entry",
+      entry: { kind: "tool", name: "read_file", args: "{}", status: "done" },
+    },
+    {
+      ...base,
+      type: "transcript.truncated",
+      entryCount: 0,
+    },
+    {
+      ...base,
+      type: "entry.appended",
+      entryId: "entry",
+      entry: { kind: "legacy-message", content: "old" },
+    },
+    {
+      ...base,
+      type: "entry.appended",
+      entryId: "entry",
+      entry: { kind: "assistant", content: 42 },
+    },
+    {
+      ...base,
+      type: "subagent.activity.updated",
+      entryId: "entry",
+      activityId: "activity",
+      activity: {
+        task: "audit",
+        status: "completed",
+        mode: "explore",
+        completionPolicy: "required",
+        legacy: true,
+      },
+    },
+  ];
+
+  for (const event of legacyEvents) {
+    assert.throws(() => assertTranscriptEvent(event));
+  }
+});
+
 test("TUI durable transcript drops deltas but restores final reasoning and answer", async () => {
   const persisted: TranscriptEvent[] = [];
-  const reporter = new TuiReporter(() => undefined, [], {
+  const reporter = new TuiReporter({
     durableTranscriptSink: {
       append: async (event) => {
         persisted.push(event);
@@ -52,7 +115,7 @@ test("TUI durable transcript drops deltas but restores final reasoning and answe
 
 test("interrupted durable streams restore the complete live assistant and reasoning text", async () => {
   const persisted: TranscriptEvent[] = [];
-  const reasoningReporter = new TuiReporter(() => undefined, [], {
+  const reasoningReporter = new TuiReporter({
     durableTranscriptSink: { append: async (event) => void persisted.push(event) },
   });
 
@@ -61,7 +124,7 @@ test("interrupted durable streams restore the complete live assistant and reason
   reasoningReporter.onInterrupted();
   await reasoningReporter.flushDurableTranscript();
 
-  const assistantReporter = new TuiReporter(() => undefined, [], {
+  const assistantReporter = new TuiReporter({
     durableTranscriptSink: { append: async (event) => void persisted.push(event) },
     durableTranscriptSequence: persisted.at(-1)?.sequence ?? 0,
   });
@@ -101,7 +164,7 @@ test("TUI rejects snapshots without canonical ToolResult hydration data", () => 
     messageSequences: [1],
     transcriptEvents: [],
     transcriptEventSequences: [],
-    runtime: { stateVersion: 1, usage: {} },
+    runtime: { stateVersion: 2, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
   assert.throws(
@@ -110,9 +173,200 @@ test("TUI rejects snapshots without canonical ToolResult hydration data", () => 
   );
 });
 
+test("TUI rejects a canonical ToolResult without a structured tool start", () => {
+  const snapshot = {
+    schemaVersion: 1,
+    persistenceSequence: 1,
+    sessionId: "orphan-tool-result",
+    conversationId: "orphan-tool-result",
+    workDir: "/tmp",
+    identity: {},
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    messages: [],
+    messageSequences: [],
+    transcriptEvents: [],
+    transcriptEventSequences: [],
+    toolResults: [
+      {
+        sequence: 1,
+        eventId: "orphan-result",
+        envelope: {
+          version: 1,
+          toolCallId: "call:orphan",
+          toolName: "read_file",
+          status: "succeeded",
+          rawSizeBytes: 2,
+          sha256: "a".repeat(64),
+          projection: {
+            version: 1,
+            mode: "full",
+            text: "ok",
+            strategy: "test",
+            truncated: false,
+          },
+          deliveryTruncated: false,
+        },
+      },
+    ],
+    runtime: { stateVersion: 2, usage: {} },
+  } as unknown as SessionHydrationSnapshot;
+
+  assert.throws(
+    () => hydrateTuiEntries(snapshot),
+    /canonical ToolResult call:orphan has no structured tool start/u,
+  );
+});
+
+test("reused provider call IDs keep FIFO result pairing when transcript persistence lags", () => {
+  const transcriptEvents = [
+    {
+      eventId: "start:first",
+      sequence: 1,
+      createdAt: 10,
+      type: "tool.started",
+      entryId: "entry:first",
+      toolCallId: "ui-tool:first",
+      providerCallId: "provider-call:reused",
+      name: "read_file",
+      args: '{"path":"first"}',
+    },
+    {
+      eventId: "start:second",
+      sequence: 2,
+      createdAt: 11,
+      type: "tool.started",
+      entryId: "entry:second",
+      toolCallId: "ui-tool:second",
+      providerCallId: "provider-call:reused",
+      name: "read_file",
+      args: '{"path":"second"}',
+    },
+  ] as const;
+  const snapshot = {
+    schemaVersion: 1,
+    persistenceSequence: 11,
+    sessionId: "reused-provider-call",
+    conversationId: "reused-provider-call",
+    workDir: "/tmp",
+    identity: {},
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    messages: [],
+    messageSequences: [],
+    transcriptEvents,
+    transcriptEventSequences: [10, 30],
+    toolResults: ["first result", "second result"].map((text, index) => ({
+      sequence: index === 0 ? 5 : 20,
+      eventId: `result:${index + 1}`,
+      envelope: {
+        version: 1 as const,
+        toolCallId: "provider-call:reused",
+        toolName: "read_file",
+        status: "succeeded" as const,
+        rawSizeBytes: text.length,
+        sha256: String(index + 1).repeat(64),
+        projection: {
+          version: 1 as const,
+          mode: "full" as const,
+          text,
+          strategy: "test",
+          truncated: false,
+        },
+        deliveryTruncated: false,
+      },
+    })),
+    runtime: { stateVersion: 2, usage: {} },
+  } as unknown as SessionHydrationSnapshot;
+
+  assert.deepEqual(
+    hydrateTuiEntries(snapshot)
+      .filter((entry) => entry.kind === "tool")
+      .map((entry) => entry.summary),
+    ["12 字节 · first result", "13 字节 · second result"],
+  );
+});
+
+test("rewind removes obsolete tool starts before reused provider call IDs are paired", () => {
+  const snapshot = {
+    schemaVersion: 1,
+    persistenceSequence: 4,
+    sessionId: "rewound-provider-call",
+    conversationId: "rewound-provider-call",
+    workDir: "/tmp",
+    identity: {},
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    messages: [],
+    messageSequences: [],
+    transcriptEvents: [
+      {
+        eventId: "start:old",
+        sequence: 1,
+        createdAt: 1,
+        type: "tool.started",
+        entryId: "entry:old",
+        toolCallId: "ui-tool:old",
+        providerCallId: "provider-call:reused",
+        name: "read_file",
+        args: '{"path":"old"}',
+      },
+      {
+        eventId: "truncate:old",
+        sequence: 2,
+        createdAt: 2,
+        type: "transcript.truncated",
+        entryCount: 0,
+        operationId: "rewind:old",
+      },
+      {
+        eventId: "start:new",
+        sequence: 3,
+        createdAt: 3,
+        type: "tool.started",
+        entryId: "entry:new",
+        toolCallId: "ui-tool:new",
+        providerCallId: "provider-call:reused",
+        name: "read_file",
+        args: '{"path":"new"}',
+      },
+    ],
+    transcriptEventSequences: [1, 2, 3],
+    toolResults: [
+      {
+        sequence: 4,
+        eventId: "result:new",
+        envelope: {
+          version: 1,
+          toolCallId: "provider-call:reused",
+          toolName: "read_file",
+          status: "succeeded",
+          rawSizeBytes: 10,
+          sha256: "a".repeat(64),
+          projection: {
+            version: 1,
+            mode: "full",
+            text: "new result",
+            strategy: "test",
+            truncated: false,
+          },
+          deliveryTruncated: false,
+        },
+      },
+    ],
+    runtime: { stateVersion: 2, usage: {} },
+  } as unknown as SessionHydrationSnapshot;
+
+  const tools = hydrateTuiEntries(snapshot).filter((entry) => entry.kind === "tool");
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0]?.uiToolCallId, "ui-tool:new");
+  assert.equal(tools[0]?.status, "success");
+  assert.match(tools[0]?.summary ?? "", /new result/u);
+});
+
 test("incompatible hydration does not migrate display-only messages", async () => {
   const persisted: TranscriptEvent[] = [];
-  const reporter = new TuiReporter(() => undefined, [], {
+  const reporter = new TuiReporter({
     durableTranscriptSink: { append: async (event) => void persisted.push(event) },
   });
   const snapshot = {
@@ -128,7 +382,7 @@ test("incompatible hydration does not migrate display-only messages", async () =
     messageSequences: [1],
     transcriptEvents: [],
     transcriptEventSequences: [],
-    runtime: { stateVersion: 1, usage: {} },
+    runtime: { stateVersion: 2, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
   assert.throws(
@@ -140,7 +394,7 @@ test("incompatible hydration does not migrate display-only messages", async () =
 });
 
 test("structured transcript hydration keeps stable IDs and ignores message fallback", () => {
-  const source = new TuiReporter(() => undefined);
+  const source = new TuiReporter();
   source.pushUserMessage("durable user");
   source.onThinking();
   source.onReasoningDelta("durable reasoning");
@@ -162,7 +416,7 @@ test("structured transcript hydration keeps stable IDs and ignores message fallb
     transcriptEvents: source.getEvents(),
     transcriptEventSequences: source.getEvents().map((event) => event.sequence),
     toolResults: [],
-    runtime: { stateVersion: 1, usage: {} },
+    runtime: { stateVersion: 2, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
   const hydrated = hydrateTuiEntries(snapshot);
@@ -177,7 +431,7 @@ test("structured transcript hydration keeps stable IDs and ignores message fallb
 });
 
 test("structured hydration never synthesizes a legacy Message prefix", () => {
-  const source = new TuiReporter(() => undefined);
+  const source = new TuiReporter();
   source.pushUserMessage("new user");
   source.onReasoningDelta("new reasoning");
   source.onMessage("new answer");
@@ -201,7 +455,7 @@ test("structured hydration never synthesizes a legacy Message prefix", () => {
     transcriptEvents: structured,
     transcriptEventSequences: structured.map((_, index) => 10 + index),
     toolResults: [],
-    runtime: { stateVersion: 1, usage: {} },
+    runtime: { stateVersion: 2, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
   const first = hydrateTuiEntries(snapshot);
@@ -217,7 +471,7 @@ test("structured hydration never synthesizes a legacy Message prefix", () => {
 
 test("UI-only transcript clear is not persisted as a durable session fact", async () => {
   const persisted: TranscriptEvent[] = [];
-  const reporter = new TuiReporter(() => undefined, [], {
+  const reporter = new TuiReporter({
     durableTranscriptSink: {
       append: async (event) => {
         persisted.push(event);
@@ -236,7 +490,7 @@ test("UI-only transcript clear is not persisted as a durable session fact", asyn
 });
 
 test("rewind after a local clear rehydrates the durable transcript branch", async () => {
-  const durable = new TuiReporter(() => undefined);
+  const durable = new TuiReporter();
   durable.pushUserMessage("durable old user");
   const hydration = {
     schemaVersion: 1,
@@ -252,9 +506,9 @@ test("rewind after a local clear rehydrates the durable transcript branch", asyn
     transcriptEvents: durable.getEvents(),
     transcriptEventSequences: durable.getEvents().map((event) => event.sequence),
     toolResults: [],
-    runtime: { stateVersion: 1, usage: {} },
+    runtime: { stateVersion: 2, usage: {} },
   } as unknown as SessionHydrationSnapshot;
-  const reporter = new TuiReporter(() => undefined);
+  const reporter = new TuiReporter();
   hydrateTuiReporter(reporter, hydration);
   reporter.clear();
   reporter.pushUserMessage("local post-clear user");

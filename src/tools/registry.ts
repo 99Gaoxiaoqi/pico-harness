@@ -23,6 +23,8 @@ export interface ToolOutputChunk {
 export interface ToolExecutionContext {
   readonly signal?: AbortSignal;
   readonly onOutput?: (output: ToolOutputChunk) => void;
+  /** 当前 Provider tool call 的精确关联键。 */
+  readonly toolCallId?: string;
 }
 
 export type ToolFileSideEffects =

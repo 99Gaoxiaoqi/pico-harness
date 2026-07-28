@@ -41,7 +41,7 @@ import {
 import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
   RuntimeEventStore,
-} from "../../src/runtime/runtime-event-store.js";
+} from "../../src/storage/runtime-event-store.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
@@ -236,6 +236,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-runtime-session" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
   );
@@ -304,6 +305,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-runtime-disabled" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
   );
@@ -327,6 +329,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-runtime-untrusted" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
   );
@@ -382,6 +385,7 @@ test("the second turn in one Session schedules Memory only when it carries a sta
         dir: workspace,
         sessionSelection: { mode: "resume", sessionId },
         provider: "openai",
+        modelRouteId: "test/test",
       },
       {
         provider,
@@ -424,7 +428,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
   await runtimeStore.initializeSession({ sessionId, workDir: fixture.workspace });
   await runtimeStore.appendBatch([
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       eventId: "started-before-crash",
       sessionId,
       invocationId: "invocation-before-crash",
@@ -437,7 +441,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
       data: { workDir: fixture.workspace },
     },
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       eventId: "user-before-crash",
       sessionId,
       invocationId: "invocation-before-crash",
@@ -455,7 +459,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
       },
     },
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       eventId: "assistant-before-crash",
       sessionId,
       invocationId: "invocation-before-crash",
@@ -468,7 +472,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
       data: { message: { role: "assistant", content: "foreground complete" } },
     },
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       eventId: "terminal-before-crash",
       sessionId,
       invocationId: "invocation-before-crash",
@@ -492,6 +496,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-gap-restart-trigger" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider: {
@@ -535,6 +540,7 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
         dir: fixture.workspace,
         sessionSelection: { mode: "new", sessionId },
         provider: "openai",
+        modelRouteId: "test/test",
       },
       {
         provider,
@@ -587,7 +593,7 @@ test("an invalidated in-flight recovery continues with the current generation", 
   const appendCompletedRun = async (suffix: string): Promise<void> => {
     const runId = `generation-run-${suffix}`;
     const base = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       sessionId,
       invocationId: `invocation-${suffix}`,
       runId,
@@ -730,7 +736,7 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
     Array.from({ length: 26 }, (_, index) => {
       const runId = `batch-run-${index}`;
       const base = {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         sessionId,
         invocationId: `invocation-${index}`,
         runId,
@@ -796,7 +802,7 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
   const sessionId = "memory-terminal-job-gap-rewound";
   const at = "2026-07-22T00:00:00.000Z";
   const base = (eventId: string, runId: string, visibility: "internal" | "model") => ({
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     eventId,
     sessionId,
     invocationId: `invocation:${runId}`,
@@ -858,6 +864,7 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-rewind-restart-trigger" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider: {
@@ -889,7 +896,7 @@ test("compact recovery restores an active Run at a rewind target before its term
   const sessionId = "memory-compact-preterminal-rewind";
   const runId = "memory-compact-replayed-run";
   const base = (eventId: string, visibility: "internal" | "model") => ({
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     eventId,
     sessionId,
     invocationId: "memory-compact-invocation",
@@ -960,6 +967,7 @@ test("an ordinary question wakes an existing durable review without enqueueing a
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-ordinary-recovery-trigger" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider: {
@@ -1000,6 +1008,7 @@ test("proposal notification outbox retries across workers without repeating extr
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-worker-session" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider: foregroundProvider,
@@ -1194,6 +1203,7 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId: "memory-deterministic-session" },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider: {
@@ -1827,6 +1837,7 @@ async function enqueueCompletedReview(
       dir: fixture.workspace,
       sessionSelection: { mode: "new", sessionId },
       provider: "openai",
+      modelRouteId: "test/test",
     },
     {
       provider: {
