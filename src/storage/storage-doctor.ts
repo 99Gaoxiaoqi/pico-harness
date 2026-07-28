@@ -1158,10 +1158,6 @@ function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function isInspectableJsonSidecar(name: string): boolean {
-  return name.endsWith(".json") && !name.startsWith(".") && !name.includes(".corrupt.");
-}
-
 function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
