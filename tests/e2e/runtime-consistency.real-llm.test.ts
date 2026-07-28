@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { globalApprovalManager } from "../../src/approval/manager.js";
-import { EvidenceArchive, formatRuntimeEvidenceUri } from "../../src/context/evidence-archive.js";
+import { EvidenceArchive, formatEvidenceUri } from "../../src/context/evidence-archive.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import type {
@@ -318,7 +318,7 @@ realModelTest(
     const evidenceRead = singleToolExchange(events, "read_evidence");
     assert.ok(events.indexOf(fileRead.result) < events.indexOf(evidenceRead.callEvent));
     assert.deepEqual(JSON.parse(evidenceRead.call.arguments), {
-      ref: formatRuntimeEvidenceUri(evidence),
+      ref: formatEvidenceUri(evidence),
       offsetBytes,
       limitBytes,
     });
@@ -330,7 +330,7 @@ realModelTest(
     }
     const readback = evidenceRead.result.data.body.content;
     assert.match(readback, new RegExp(marker, "u"));
-    assert.match(readback, /\[Evidence bytes \d+-\d+\/\d+\]/u);
+    assert.match(readback, /\[Evidence tool-exchange bytes \d+-\d+\/\d+\]/u);
     assert.ok(readback.includes(`/${expectedBytes}]`));
     assert.equal(evidenceRead.result.data.body.sha256, sha256Utf8(readback));
     assert.equal(evidenceRead.result.data.body.sizeBytes, Buffer.byteLength(readback, "utf8"));

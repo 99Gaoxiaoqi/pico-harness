@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { EvidenceArchive, formatRuntimeEvidenceUri } from "../../src/context/evidence-archive.js";
+import {
+  EvidenceArchive,
+  formatEvidenceUri,
+  parseEvidenceUri,
+} from "../../src/context/evidence-archive.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
@@ -139,7 +143,7 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
   assert.ok(largeResult.refs.evidence);
 
   const evidenceRef = largeResult.refs.evidence;
-  const evidenceUri = formatRuntimeEvidenceUri(evidenceRef);
+  const evidenceUri = formatEvidenceUri(evidenceRef);
   const secondProviderResult = providerMessages[1]?.find(
     (message) => message.toolCallId === LARGE_TOOL_CALL_ID,
   );
@@ -314,8 +318,10 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
     baseDir: fixture.paths.workspace.evidence,
   });
   const providerMessages: Message[][] = [];
-  const summary =
-    "已完成子代理大型工具结果核验，原始证据保持完整且模型上下文仅接收有界投影。".repeat(10);
+  const fullReport =
+    "已完成子代理大型工具结果核验，原始证据保持完整且模型上下文仅接收有界投影。\n".repeat(
+      120,
+    );
   const provider: LLMProvider = {
     async generate(messages, availableTools) {
       providerMessages.push(structuredClone(messages));
@@ -332,7 +338,7 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
         assert.ok(projected);
         assert.match(projected.content, /pico:\/\/evidence\/[^\s"]+\/[a-f0-9]{64}/u);
         assert.doesNotMatch(projected.content, new RegExp(canary, "u"));
-        return { role: "assistant", content: summary };
+        return { role: "assistant", content: fullReport };
       }
       throw new Error("unexpected subagent Provider turn");
     },
@@ -351,6 +357,15 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
     workDir: fixture.workDir,
     runtimePort,
     runtimeEvidenceArchive: evidenceArchive,
+    subagentReportEvidenceWriter: async (input) =>
+      formatEvidenceUri(
+        await evidenceArchive.archiveSubagentReport({
+          sessionId,
+          taskPrompt: input.taskPrompt,
+          report: input.report,
+          status: input.status,
+        }),
+      ),
     reporter: new SilentReporter(),
   });
   const subagentRegistry = createSubagentRegistryFactory({
@@ -377,7 +392,14 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
   );
 
   assert.equal(result.status, "completed");
-  assert.equal(result.summary, summary);
+  assert.ok(result.summary.length <= 2_000);
+  assert.match(result.summary, /\[完整子代理报告已归档为 Evidence\]/u);
+  assert.equal(result.evidenceRefs.length, 1);
+  const reportReference = {
+    ...parseEvidenceUri(result.evidenceRefs[0]!),
+    kind: "subagent-report" as const,
+  };
+  assert.equal(await evidenceArchive.readSubagentReport(reportReference), fullReport);
   assert.equal(providerMessages.length, 2);
   const events = await session.runtimeEventStore!.readSession(session.id);
   const recorded = requireToolResult(
@@ -424,10 +446,6 @@ async function createFixture(prefix: string, sessionId: string): Promise<Runtime
 
 class EnospcEvidenceArchive extends EvidenceArchive {
   override async archiveRuntimeToolResult(): Promise<never> {
-    throw enospc();
-  }
-
-  override async archiveRuntimeToolExchange(): Promise<never> {
     throw enospc();
   }
 }

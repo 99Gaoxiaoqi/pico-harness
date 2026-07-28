@@ -61,7 +61,6 @@ export const STORAGE_DOCTOR_COMPONENTS = [
   "operation",
   "file_history",
   "summary",
-  "artifact",
   "projection",
 ] as const;
 export type StorageDoctorComponent = (typeof STORAGE_DOCTOR_COMPONENTS)[number];
@@ -92,12 +91,11 @@ export interface StorageDoctorOptions {
   /** Canonical workspace state root; retained name preserves the diagnostic API. */
   readonly runtimeStorageRoot?: string;
   readonly summariesDir?: string;
-  readonly artifactsDir?: string;
   readonly now?: () => Date;
 }
 
 export interface StorageDoctorRepairOptions {
-  /** 只隔离可重建的 Summary/损坏 Artifact metadata，不触碰 Session/FileHistory/Runtime。 */
+  /** 只隔离可重建的 Summary，不触碰 Session/FileHistory/Runtime。 */
   readonly quarantineMalformedSidecars?: boolean;
   /** 投影具体实现由组装层提供，Doctor 不反向修改真源。 */
   readonly rebuildDerivedProjections?: () => void | Promise<void>;
@@ -138,7 +136,6 @@ export class StorageDoctor {
   private readonly legacyJsonRuntimePath: string;
   private readonly legacyTasksPath: string;
   private readonly summariesDir: string;
-  private readonly artifactsDir: string;
   private readonly now: () => Date;
 
   constructor(options: StorageDoctorOptions) {
@@ -162,7 +159,6 @@ export class StorageDoctor {
     this.legacyJsonRuntimePath = resolve(paths.workspace.legacyRuntime);
     this.legacyTasksPath = resolve(paths.workspace.tasks);
     this.summariesDir = resolve(options.summariesDir ?? paths.workspace.summaries);
-    this.artifactsDir = resolve(options.artifactsDir ?? paths.workspace.artifacts);
     this.now = options.now ?? (() => new Date());
   }
 
@@ -231,7 +227,6 @@ export class StorageDoctor {
     await this.scanOperations(findings, scanned);
     await this.scanFileHistory(findings, scanned);
     await this.scanSummaries(findings, scanned);
-    await this.scanArtifacts(findings, scanned);
     findings.sort(compareFindings);
     return {
       scannedAt: this.now().toISOString(),
@@ -249,8 +244,7 @@ export class StorageDoctor {
       const report = await this.scan();
       const safeFindings = report.findings.filter(
         (finding) =>
-          finding.authority !== "authoritative" &&
-          (finding.code === "summary_malformed" || finding.code === "artifact_metadata_malformed"),
+          finding.authority !== "authoritative" && finding.code === "summary_malformed",
       );
       for (const finding of safeFindings) {
         quarantined.push(
@@ -1035,71 +1029,6 @@ export class StorageDoctor {
     }
   }
 
-  private async scanArtifacts(
-    findings: StorageDoctorFinding[],
-    scanned: Record<StorageDoctorComponent, number>,
-  ): Promise<void> {
-    const sessionsDirectory = join(this.artifactsDir, "sessions");
-    for (const sessionEntry of await readDirectoryEntries(sessionsDirectory)) {
-      if (!sessionEntry.isDirectory()) continue;
-      const artifactDirectory = join(sessionsDirectory, sessionEntry.name, "tool-results");
-      const entries = await readDirectoryEntries(artifactDirectory);
-      const markers = new Set(
-        entries
-          .filter((entry) => entry.isFile() && isInspectableJsonSidecar(entry.name))
-          .map((entry) => entry.name.slice(0, -5)),
-      );
-      for (const entry of entries) {
-        const path = join(artifactDirectory, entry.name);
-        if (entry.isFile() && entry.name.endsWith(".txt")) {
-          const id = entry.name.slice(0, -4);
-          if (!markers.has(id)) {
-            findings.push(
-              finding(
-                "artifact_missing_commit_marker",
-                "warning",
-                "artifact",
-                path,
-                "Artifact content has no v2 metadata commit marker",
-                "Retain for grace-period recovery or explicitly quarantine as uncommitted content",
-                "sidecar",
-              ),
-            );
-          }
-          continue;
-        }
-        if (!entry.isFile() || !isInspectableJsonSidecar(entry.name)) continue;
-        scanned.artifact++;
-        try {
-          const value = parseArtifactMetaV2(
-            parseJson(await readFile(path, "utf8"), "artifact metadata"),
-            sessionEntry.name,
-            entry.name,
-          );
-          const contentPath = join(artifactDirectory, `${value.id}.txt`);
-          if (value.availability === "available") {
-            const contents = await readFile(contentPath);
-            if (contents.byteLength !== value.sizeBytes) throw new Error("artifact size mismatch");
-            if (createHash("sha256").update(contents).digest("hex") !== value.contentHash) {
-              throw new Error("artifact content hash mismatch");
-            }
-          }
-        } catch (error) {
-          findings.push(
-            finding(
-              "artifact_metadata_malformed",
-              "error",
-              "artifact",
-              path,
-              errorMessage(error),
-              "Quarantine the bad metadata marker; do not modify the RuntimeEvent ledger",
-              "sidecar",
-            ),
-          );
-        }
-      }
-    }
-  }
 }
 
 function parseSummaryV2(value: unknown, fileName: string): void {
@@ -1133,13 +1062,6 @@ function parseSummaryV2(value: unknown, fileName: string): void {
   }
 }
 
-interface ParsedArtifactMeta {
-  readonly id: string;
-  readonly sizeBytes: number;
-  readonly contentHash: string;
-  readonly availability: "available" | "evicted";
-}
-
 function sessionReplayFinding(path: string, error: unknown): StorageDoctorFinding {
   return finding(
     "session_replay_failed",
@@ -1150,31 +1072,6 @@ function sessionReplayFinding(path: string, error: unknown): StorageDoctorFindin
     "Keep the Session ledger unchanged and restore it from a verified backup",
     "authoritative",
   );
-}
-
-function parseArtifactMetaV2(
-  value: unknown,
-  safeSessionId: string,
-  fileName: string,
-): ParsedArtifactMeta {
-  if (!isRecord(value) || value["schemaVersion"] !== 2) throw new Error("artifact is not v2");
-  if (
-    typeof value["id"] !== "string" ||
-    fileName !== `${value["id"]}.json` ||
-    value["safeSessionId"] !== safeSessionId ||
-    !isNonNegativeInteger(value["sizeBytes"]) ||
-    typeof value["contentHash"] !== "string" ||
-    !SHA256_RE.test(value["contentHash"]) ||
-    (value["availability"] !== "available" && value["availability"] !== "evicted")
-  ) {
-    throw new Error("invalid artifact v2 metadata");
-  }
-  return {
-    id: value["id"],
-    sizeBytes: value["sizeBytes"],
-    contentHash: value["contentHash"],
-    availability: value["availability"],
-  };
 }
 
 function finding(
@@ -1259,10 +1156,6 @@ function invalidStorageDirectoryFinding(
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isInspectableJsonSidecar(name: string): boolean {
-  return name.endsWith(".json") && !name.startsWith(".") && !name.includes(".corrupt.");
 }
 
 function isNodeCode(error: unknown, code: string): boolean {

@@ -2,7 +2,7 @@ import {
   DEFAULT_EVIDENCE_PAGE_LIMIT_BYTES,
   EvidenceArchive,
   MAX_EVIDENCE_PAGE_LIMIT_BYTES,
-  parseRuntimeEvidenceUri,
+  parseEvidenceUri,
 } from "../context/evidence-archive.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { ToolDefinition } from "../schema/message.js";
@@ -24,7 +24,6 @@ interface ReadEvidenceInput {
 export class ReadEvidenceTool implements BaseTool {
   readonly readOnly = true;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
-  readonly maxResultSizeChars = MAX_EVIDENCE_PAGE_LIMIT_BYTES + 2_048;
   private readonly archive: EvidenceArchive;
 
   constructor(workDir: string, evidenceBaseDir = resolvePicoPaths(workDir).workspace.evidence) {
@@ -43,7 +42,7 @@ export class ReadEvidenceTool implements BaseTool {
     return {
       name: this.name(),
       description:
-        "按字节分页回读 Pico 已归档的原始工具输出。只接受工具预览中的 pico://evidence/... 引用，并在返回前校验 manifest、内容哈希和 blob 完整性。",
+        "按字节分页回读 Pico 已归档的原始工具输出或完整子代理报告。只接受 pico://evidence/... 引用，并在返回前校验 manifest、内容哈希和 blob 完整性。",
       inputSchema: {
         type: "object",
         properties: {
@@ -71,13 +70,13 @@ export class ReadEvidenceTool implements BaseTool {
 
   async execute(args: string): Promise<string> {
     const input = parseInput(args);
-    const reference = parseRuntimeEvidenceUri(input.ref);
-    const page = await this.archive.readRuntimeToolOutputPage(reference, {
+    const reference = parseEvidenceUri(input.ref);
+    const page = await this.archive.readEvidencePage(reference, {
       offsetBytes: input.offsetBytes,
       limitBytes: input.limitBytes,
     });
     const pageMetadata = [
-      `[Evidence bytes ${page.offsetBytes}-${page.endOffsetBytes}/${page.totalBytes}]`,
+      `[Evidence ${page.kind} bytes ${page.offsetBytes}-${page.endOffsetBytes}/${page.totalBytes}]`,
       `ref: ${input.ref}`,
       `truncated: ${String(page.truncated)}`,
       ...(page.nextOffsetBytes === undefined

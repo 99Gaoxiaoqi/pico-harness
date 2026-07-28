@@ -12,8 +12,7 @@ import {
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
-import { EvidenceArchive } from "../context/evidence-archive.js";
-import { ToolResultArtifactStore } from "../context/artifact-store.js";
+import { EvidenceArchive, formatEvidenceUri } from "../context/evidence-archive.js";
 import {
   createContextBudget,
   estimateTokenBudgetAsChars,
@@ -45,7 +44,7 @@ import {
   DelegateTaskTool,
   SpawnSubagentTool,
   type SubagentModelSelectionRequest,
-  type SubagentReportArtifactWriter,
+  type SubagentReportEvidenceWriter,
 } from "../tools/subagent.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -556,9 +555,12 @@ export async function executeAgentRuntime(
     const workspaceStatePaths = resolvePicoPaths(workDir, {
       picoHome: session.picoHome,
     }).workspace;
-    const artifactBaseDir = workspaceStatePaths.artifacts;
     const evidenceBaseDir = workspaceStatePaths.evidence;
     const evidenceArchive = new EvidenceArchive({ baseDir: evidenceBaseDir });
+    const subagentReportEvidenceWriter = buildSubagentReportEvidenceWriter(
+      session.id,
+      evidenceArchive,
+    );
     // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
     // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
     let currentConfig: ProviderConfig = providerConfig;
@@ -734,7 +736,6 @@ export async function executeAgentRuntime(
             maxSpawnDepth: 0,
             yoloSandbox: { config: picoConfig.sandbox },
             ownerSessionId: session.id,
-            artifactBaseDir,
             evidenceBaseDir,
             env: runtimeEnv,
           })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
@@ -800,7 +801,6 @@ export async function executeAgentRuntime(
       },
       skillLoaderFactory(workDir),
       approvalManager,
-      artifactBaseDir,
       evidenceBaseDir,
       runtimeEnv,
     );
@@ -818,7 +818,6 @@ export async function executeAgentRuntime(
     if (runtimeState.hookService) {
       registry.setHookService?.(runtimeState.hookService);
     }
-    const artifactRuntime = buildArtifactRuntime(session.id, artifactBaseDir);
     // Inject steer text into the session-scoped queue before the next provider turn.
     const steerQueue = runtimeState.steerQueue;
     if (options.steer) {
@@ -907,7 +906,7 @@ export async function executeAgentRuntime(
         evidenceArchive,
       }),
       runtimeEvidenceArchive: evidenceArchive,
-      subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
+      subagentReportEvidenceWriter,
       reporter,
       tracer: traceEnabled ? new Tracer({ picoHome }) : undefined,
       steerQueue,
@@ -978,7 +977,6 @@ export async function executeAgentRuntime(
       skillLoaderFactory,
       runtimeState.hookService,
       subagentModelCatalog,
-      artifactBaseDir,
       evidenceBaseDir,
       runtimeEnv,
       async (profile) => {
@@ -1280,7 +1278,6 @@ function buildRegistry(
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
   skillLoader?: SkillLoader,
   approvalManager?: ApprovalManager,
-  artifactBaseDir?: string,
   evidenceBaseDir?: string,
   env?: NodeJS.ProcessEnv,
 ): ToolRegistry {
@@ -1298,7 +1295,6 @@ function buildRegistry(
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(approvalManager !== undefined ? { approvalManager } : {}),
-    ...(artifactBaseDir !== undefined ? { artifactBaseDir } : {}),
     ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
   });
@@ -1427,7 +1423,6 @@ function registerDelegationTools(
   skillLoaderFactory?: (workDir: string) => SkillLoader,
   hookService?: HookService,
   modelCatalog?: SubagentModelCatalog,
-  artifactBaseDir?: string,
   evidenceBaseDir?: string,
   env?: Readonly<Record<string, string | undefined>>,
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
@@ -1443,7 +1438,6 @@ function registerDelegationTools(
     ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
     ...(hookService ? { hookService } : {}),
     ...(modelCatalog ? { modelCatalog } : {}),
-    ...(artifactBaseDir ? { artifactBaseDir } : {}),
     ...(evidenceBaseDir ? { evidenceBaseDir } : {}),
     ...(env ? { env } : {}),
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
@@ -1587,44 +1581,18 @@ function loadAuxProvider(
   );
 }
 
-function buildArtifactRuntime(
+function buildSubagentReportEvidenceWriter(
   sessionId: string,
-  artifactBaseDir: string,
-): {
-  subagentReportArtifactWriter: SubagentReportArtifactWriter;
-} {
-  const store = new ToolResultArtifactStore({
-    baseDir: artifactBaseDir,
-  });
-  const subagentReportArtifactWriter: SubagentReportArtifactWriter = async (input) => {
-    const meta = await store.write({
+  archive: EvidenceArchive,
+): SubagentReportEvidenceWriter {
+  return async (input) => {
+    const reference = await archive.archiveSubagentReport({
       sessionId,
-      toolName: "subagent_report",
-      args: {
-        taskPrompt: input.taskPrompt,
-        status: input.status,
-        workDir: input.workDir,
-      },
-      output: input.report,
-      summary: `子代理 ${input.status} 完整报告，${input.report.length} 字符`,
-      pinned: input.status === "partial",
+      taskPrompt: input.taskPrompt,
+      report: input.report,
+      status: input.status,
     });
-    try {
-      const cleanup = await store.cleanup();
-      if (cleanup.deleted.includes(meta.id)) {
-        logger.warn(
-          { artifactId: meta.id },
-          "[Subagent] 完整报告因 artifact 全局配额被清理，回退到内联摘要。",
-        );
-        return undefined;
-      }
-    } catch (error) {
-      logger.warn({ error }, "[Subagent] 完整报告 artifact cleanup 失败");
-    }
-    return meta.path;
-  };
-  return {
-    subagentReportArtifactWriter,
+    return formatEvidenceUri(reference);
   };
 }
 

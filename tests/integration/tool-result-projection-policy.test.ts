@@ -99,25 +99,23 @@ test("ToolResult projection creates a bounded deterministic preview above an inj
 
 test("bounded evidence readers always return full projections without recursive archiving", () => {
   const output = `PAGE\n${"有界回读😀".repeat(3_000)}`;
-  for (const toolName of ["read_evidence", "read_artifact"]) {
-    const toolCall = call(toolName);
-    const result = buildRuntimeToolResultProjection({
-      toolCall,
-      result: toolResult(toolCall, output),
-      modelOutput: output,
-      thresholdTokens: 0,
-      maxPreviewChars: 1,
-    });
+  const toolCall = call("read_evidence");
+  const result = buildRuntimeToolResultProjection({
+    toolCall,
+    result: toolResult(toolCall, output),
+    modelOutput: output,
+    thresholdTokens: 0,
+    maxPreviewChars: 1,
+  });
 
-    assert.equal(result.shouldArchive, false);
-    assert.deepEqual(result.projection, {
-      version: 1,
-      mode: "full",
-      text: output,
-      strategy: "bounded-readback",
-      truncated: false,
-    });
-  }
+  assert.equal(result.shouldArchive, false);
+  assert.deepEqual(result.projection, {
+    version: 1,
+    mode: "full",
+    text: output,
+    strategy: "bounded-readback",
+    truncated: false,
+  });
 });
 
 function call(name: string): ToolCall {

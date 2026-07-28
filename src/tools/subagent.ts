@@ -56,27 +56,24 @@ export type { SubagentMode, SubagentRole } from "./delegation-contract.js";
 /**
  * 子智能体执行结果。
  * - summary: 最终纯文本总结汇报(主 Agent 直接可见)
- * - artifacts: 探索期间被外部化的大型工具输出磁盘路径(相对 workDir)。
- *   这些文件落在当前 workspace artifacts 内，主 Agent 可用 read_artifact 分页回查，
- *   避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
+ * - evidenceRefs: 完整报告的受校验 pico://evidence 引用。
  */
 export interface SubagentResult {
-  /** 未设置时按 completed 兼容旧 runner；partial 表示保留了轮次耗尽前的有效证据。 */
-  status?: "completed" | "partial";
+  /** partial 表示保留了轮次耗尽前的有效证据。 */
+  status: "completed" | "partial";
   summary: string;
-  artifacts: string[];
+  evidenceRefs: string[];
 }
 
-export interface SubagentReportArtifactInput {
+export interface SubagentReportEvidenceInput {
   taskPrompt: string;
   report: string;
   status: "completed" | "partial";
-  workDir: string;
 }
 
-/** 宿主注入的完整子代理报告写入器；返回可供主 Agent 回查的路径。 */
-export type SubagentReportArtifactWriter = (
-  input: SubagentReportArtifactInput,
+/** 宿主注入的完整子代理报告写入器；返回可供主 Agent 安全回查的 Evidence URI。 */
+export type SubagentReportEvidenceWriter = (
+  input: SubagentReportEvidenceInput,
 ) => Promise<string | undefined>;
 
 export interface AgentRunner {
@@ -791,9 +788,11 @@ export class DelegateTaskTool implements BaseTool {
       signal?.throwIfAborted();
       return {
         taskIndex,
-        status: subResult.status ?? "completed",
+        status: subResult.status,
         summary: subResult.summary,
-        ...(subResult.artifacts.length > 0 ? { artifacts: subResult.artifacts } : {}),
+        ...(subResult.evidenceRefs.length > 0
+          ? { evidenceRefs: subResult.evidenceRefs }
+          : {}),
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
@@ -879,16 +878,15 @@ export { SpawnSubagentTool as SubagentTool };
 
 /**
  * 把子智能体执行结果格式化为回传给主 Agent 的文本。
- * summary 是轻量总结;若有被外部化的大型工具输出,附上其磁盘路径,
- * 提示主 Agent 可用 read_file 回查原文(路径均在 workDir 内)。
+ * summary 是轻量总结；完整报告只通过受校验 Evidence URI 回查。
  */
 function formatSubagentReport(header: string, result: SubagentResult): string {
   const lines = [`${header}:`, result.summary];
-  if (result.artifacts.length > 0) {
+  if (result.evidenceRefs.length > 0) {
     lines.push(
       "",
-      `[大型探索输出已外部化,可用 read_file 回查原文]:`,
-      ...result.artifacts.map((path) => `  - ${path}`),
+      "[完整报告 Evidence，可用 read_evidence 分页回查]:",
+      ...result.evidenceRefs.map((ref) => `  - ${ref}`),
     );
   }
   return lines.join("\n");
@@ -914,7 +912,7 @@ interface DelegationTextField {
 
 /**
  * 批量委派的正常结果按 6k–8k 动态软目标收口。12k 只是硬熔断：
- * 在软目标容纳不下失败原因、partial 证据或 artifact 引用时才使用。
+ * 在软目标容纳不下失败原因、partial 证据或 Evidence 引用时才使用。
  * 状态和耗时始终保留，文本按“失败 > partial > 带证据完成 > 普通完成”
  * 分配，避免长日志与关键证据被等额切割。
  */
@@ -939,23 +937,23 @@ function capDelegationBatchText(batch: DelegationBatchResult): DelegationBatchRe
     results[field.resultIndex]![field.key] = "";
   }
 
-  let omittedArtifacts = 0;
+  let omittedEvidenceRefs = 0;
   let structuralBatch: DelegationBatchResult = { ...batch, results };
   if (JSON.stringify(structuralBatch).length > hardMax) {
-    omittedArtifacts = results.reduce(
-      (count, result) => count + (result.artifacts?.length ?? 0),
+    omittedEvidenceRefs = results.reduce(
+      (count, result) => count + (result.evidenceRefs?.length ?? 0),
       0,
     );
-    results = results.map(({ artifacts: _artifacts, ...result }) => result);
+    results = results.map(({ evidenceRefs: _evidenceRefs, ...result }) => result);
     structuralBatch = {
       ...batch,
       results,
-      ...(omittedArtifacts > 0 ? { omittedArtifacts } : {}),
+      ...(omittedEvidenceRefs > 0 ? { omittedEvidenceRefs } : {}),
     };
   }
 
   if (JSON.stringify(structuralBatch).length > hardMax) {
-    return omitDelegationResults(batch, omittedArtifacts);
+    return omitDelegationResults(batch, omittedEvidenceRefs);
   }
 
   const fixedChars = JSON.stringify(structuralBatch).length;
@@ -982,7 +980,7 @@ function capDelegationBatchText(batch: DelegationBatchResult): DelegationBatchRe
     { hardMax, actualChars: JSON.stringify(capped).length },
     "[Subagent] 批量委派结果超出硬上限，已启用结构化降级。",
   );
-  return omitDelegationResults(batch, omittedArtifacts);
+  return omitDelegationResults(batch, omittedEvidenceRefs);
 }
 
 function calculateDelegationSoftTarget(
@@ -991,11 +989,11 @@ function calculateDelegationSoftTarget(
   softMax: number,
 ): number {
   const nonCompleted = batch.results.filter((result) => result.status !== "completed").length;
-  const withArtifacts = batch.results.filter(
-    (result) => (result.artifacts?.length ?? 0) > 0,
+  const withEvidence = batch.results.filter(
+    (result) => (result.evidenceRefs?.length ?? 0) > 0,
   ).length;
   const resultAllowance = Math.min(1_200, batch.results.length * 200);
-  const evidenceAllowance = nonCompleted * 400 + withArtifacts * 200;
+  const evidenceAllowance = nonCompleted * 400 + withEvidence * 200;
   return Math.min(softMax, softMin + resultAllowance + evidenceAllowance);
 }
 
@@ -1025,7 +1023,7 @@ function buildDelegationTextField(
       preferredChars: 2_200,
     };
   }
-  if ((result.artifacts?.length ?? 0) > 0) {
+  if ((result.evidenceRefs?.length ?? 0) > 0) {
     return {
       resultIndex,
       key,
@@ -1131,14 +1129,14 @@ function allocateWeightedRemainder(
 
 function omitDelegationResults(
   batch: DelegationBatchResult,
-  omittedArtifacts: number,
+  omittedEvidenceRefs: number,
 ): DelegationBatchResult {
   return {
     status: batch.status,
     results: [],
     totalDurationMs: batch.totalDurationMs,
     omittedResults: batch.results.length,
-    ...(omittedArtifacts > 0 ? { omittedArtifacts } : {}),
+    ...(omittedEvidenceRefs > 0 ? { omittedEvidenceRefs } : {}),
   };
 }
 
