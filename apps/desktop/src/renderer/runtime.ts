@@ -14,6 +14,7 @@ import {
   type RuntimeResult,
   type RuntimeScopedMcpServer,
   type RuntimeScopedSkill,
+  type RuntimeToolResultEnvelope,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
@@ -111,6 +112,54 @@ function recordArray(value: unknown): readonly JsonRecord[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
 }
 
+function runtimeToolResultEnvelope(value: unknown): RuntimeToolResultEnvelope | undefined {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    typeof value.toolCallId !== "string" ||
+    typeof value.toolName !== "string" ||
+    typeof value.status !== "string" ||
+    typeof value.rawSizeBytes !== "number" ||
+    typeof value.sha256 !== "string" ||
+    typeof value.deliveryTruncated !== "boolean" ||
+    !isRecord(value.projection) ||
+    value.projection.version !== 1 ||
+    typeof value.projection.mode !== "string" ||
+    typeof value.projection.text !== "string" ||
+    typeof value.projection.strategy !== "string" ||
+    typeof value.projection.truncated !== "boolean"
+  ) {
+    return undefined;
+  }
+  return value as unknown as RuntimeToolResultEnvelope;
+}
+
+function toolEvidencePage(value: unknown, expectedUri: string): ToolEvidencePage {
+  if (
+    !isRecord(value) ||
+    value.evidenceUri !== expectedUri ||
+    typeof value.content !== "string" ||
+    typeof value.offsetBytes !== "number" ||
+    typeof value.endOffsetBytes !== "number" ||
+    typeof value.totalBytes !== "number" ||
+    typeof value.truncated !== "boolean" ||
+    (value.nextOffsetBytes !== undefined && typeof value.nextOffsetBytes !== "number")
+  ) {
+    throw new Error("Evidence 分页响应格式无效");
+  }
+  return {
+    evidenceUri: expectedUri,
+    content: value.content,
+    offsetBytes: value.offsetBytes,
+    endOffsetBytes: value.endOffsetBytes,
+    totalBytes: value.totalBytes,
+    truncated: value.truncated,
+    ...(typeof value.nextOffsetBytes === "number"
+      ? { nextOffsetBytes: value.nextOffsetBytes }
+      : {}),
+  };
+}
+
 function progressState(value: unknown): ConversationProgressState {
   return value === "done" || value === "failed" || value === "waiting" ? value : "active";
 }
@@ -183,14 +232,16 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   if (item.kind === "tool") {
+    const result = runtimeToolResultEnvelope(item.result);
     return {
       id,
       kind: "tool",
       toolName: stringValue(item.name, "tool"),
       title: stringValue(item.name, "工具调用"),
       detail: stringValue(item.args) || undefined,
-      output: stringValue(item.summary) || undefined,
+      output: result?.projection.text || stringValue(item.summary) || undefined,
       state: item.status === "success" ? "done" : item.status === "error" ? "failed" : "active",
+      ...(result ? { result } : {}),
       ...meta,
     };
   }
@@ -943,6 +994,13 @@ export interface RuntimeActions {
   reload(): Promise<void>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
+  readToolEvidence(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly evidenceUri: string;
+    readonly offsetBytes?: number;
+    readonly limitBytes?: number;
+  }): Promise<ToolEvidencePage | undefined>;
   sendMessage(input: {
     readonly workspacePath: string;
     readonly sessionId?: string;
@@ -1040,6 +1098,16 @@ export interface RuntimeActions {
   openWorkspace(): Promise<void>;
   initializeWorkspace(): Promise<void>;
   runDiagnostics(kind: "runtime" | "resources"): Promise<string | undefined>;
+}
+
+export interface ToolEvidencePage {
+  readonly evidenceUri: string;
+  readonly content: string;
+  readonly offsetBytes: number;
+  readonly endOffsetBytes: number;
+  readonly totalBytes: number;
+  readonly truncated: boolean;
+  readonly nextOffsetBytes?: number;
 }
 
 export interface RuntimeStore {
@@ -2128,6 +2196,21 @@ export function useRuntimeStore(): RuntimeStore {
             };
           });
         });
+      },
+      async readToolEvidence(input) {
+        if (preview) return undefined;
+        let page: ToolEvidencePage | undefined;
+        await perform("read-tool-evidence", async (bridge) => {
+          const value = await invoke(bridge, "session.evidence.read", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+            evidenceUri: input.evidenceUri,
+            ...(input.offsetBytes !== undefined ? { offsetBytes: input.offsetBytes } : {}),
+            ...(input.limitBytes !== undefined ? { limitBytes: input.limitBytes } : {}),
+          });
+          page = toolEvidencePage(value, input.evidenceUri);
+        });
+        return page;
       },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;

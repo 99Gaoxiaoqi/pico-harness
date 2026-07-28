@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { RuntimeToolResultEnvelope } from "@pico/protocol";
 
 export type ConversationRunStatus = "started" | "completed" | "interrupted" | "failed";
 
@@ -74,6 +75,7 @@ export interface ToolItemView extends ConversationItemBase {
   readonly detail?: string | undefined;
   readonly output?: string | undefined;
   readonly state: ConversationProgressState;
+  readonly result?: RuntimeToolResultEnvelope | undefined;
 }
 
 export interface StatusItemView extends ConversationItemBase {

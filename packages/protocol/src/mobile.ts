@@ -2,6 +2,7 @@ import type {
   RunId,
   RuntimeRunStatus,
   RuntimeSessionStatus,
+  RuntimeToolResultEnvelope,
   SessionId,
   SessionSendDisposition,
 } from "./runtime.js";
@@ -77,6 +78,7 @@ export type MobileConversationItem = MobileConversationItemBase &
         readonly args: string;
         readonly status: "running" | "success" | "error";
         readonly summary?: string;
+        readonly result?: RuntimeToolResultEnvelope;
       }
     | {
         readonly kind: "runBoundary";

@@ -986,6 +986,7 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
   const detail = firstString(
     safePayload["content"],
     safePayload["resultSummary"],
+    toolResultTimelineSummary(safePayload["result"]),
     safePayload["currentAction"],
     safePayload["summary"],
   );
@@ -1010,19 +1011,7 @@ function safeTimelinePayload(
   payload: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
   if (type === "tool.completed") {
-    const resultBytes =
-      typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
-    const isError = payload["isError"] === true;
-    return {
-      toolName: payload["toolName"],
-      isError,
-      truncated: payload["truncated"] === true,
-      resultBytes,
-      resultSummary: `${isError ? "Tool failed" : "Tool completed"} · ${resultBytes} bytes`,
-      ...(typeof payload["providerCallId"] === "string"
-        ? { providerCallId: payload["providerCallId"] }
-        : {}),
-    };
+    return isJsonObject(payload["result"]) ? { result: payload["result"] } : {};
   }
   if (type === "subagent.trace" && payload["type"] === "tool.completed") {
     const resultBytes =
@@ -1044,7 +1033,10 @@ function safeTimelinePayload(
 function timelineTitle(type: string, payload: Readonly<Record<string, unknown>>): string {
   if (type === "assistant.thinking") return "Pico 正在推理";
   if (type === "tool.started") return `开始 ${firstString(payload["toolName"]) ?? "工具"}`;
-  if (type === "tool.completed") return `完成 ${firstString(payload["toolName"]) ?? "工具"}`;
+  if (type === "tool.completed") {
+    const result = isJsonObject(payload["result"]) ? payload["result"] : undefined;
+    return `完成 ${firstString(result?.["toolName"]) ?? "工具"}`;
+  }
   if (type === "subagent.activity") {
     return firstString(payload["task"], payload["agentName"]) ?? "子代理状态更新";
   }
@@ -1052,6 +1044,14 @@ function timelineTitle(type: string, payload: Readonly<Record<string, unknown>>)
   if (type === "run.finished") return "任务执行完成";
   if (type === "run.interrupted") return "任务已中断";
   return type;
+}
+
+function toolResultTimelineSummary(value: unknown): string | undefined {
+  if (!isJsonObject(value)) return undefined;
+  const size = value["rawSizeBytes"];
+  const status = value["status"];
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return undefined;
+  return `${status === "succeeded" ? "Tool completed" : "Tool failed"} · ${size} bytes`;
 }
 
 function publishInteractionEvent(

@@ -219,6 +219,7 @@ function toMobileConversationItem(item: RuntimeConversationItem): MobileConversa
         args: item.args,
         status: item.status,
         ...(item.summary ? { summary: item.summary } : {}),
+        ...(item.result ? { result: item.result } : {}),
       };
     case "runBoundary":
       return {

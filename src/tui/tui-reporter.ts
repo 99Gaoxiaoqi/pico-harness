@@ -18,7 +18,10 @@ import type {
   SubagentActivityEvent,
   SubagentTraceEvent,
 } from "../engine/reporter.js";
-import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
+import {
+  createToolResultEnvelope,
+  type ToolResultEnvelope,
+} from "../engine/tool-result-contract.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import {
   defaultTranscriptDurabilityPolicy,
@@ -45,7 +48,6 @@ import type {
 
 /** Bash 的外部化阈值是 30k；多留少量余量后立即停止向 append-only 日志写正文。 */
 export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS = TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS;
-export const TUI_INLINE_TOOL_RESULT_LIMIT_CHARS = 50_000;
 const TUI_TOOL_OUTPUT_EVENT_SEGMENT_CHARS = 2_048;
 
 export { TuiEventStore };
@@ -402,17 +404,13 @@ export class TuiReporter implements Reporter {
       return;
     }
     const isError = result.status !== "succeeded";
-    const truncated = result.projection.truncated || result.evidence !== undefined;
     const summary = summarizeResult(result.toolName, tool.args, result.projection.text, isError);
     this.eventStore.append({
       type: "tool.completed",
       toolCallId: internalToolCallId,
       status: resolveToolStatus(result.toolName, result.projection.text, isError),
       summary,
-      // stdout/stderr 增量不落盘；小结果必须由 completion 自包含，保证重启可恢复。
-      ...(!truncated ? { inlineResult: result.projection.text } : {}),
-      size: result.rawSizeBytes,
-      truncated,
+      result,
     });
     this.removePendingTool(tool);
     this.emit();
@@ -516,8 +514,24 @@ export class TuiReporter implements Reporter {
         toolCallId: tool.id,
         status: "error",
         summary: "Interrupted by user.",
-        size: 0,
-        truncated: false,
+        result: createToolResultEnvelope({
+          toolCallId: tool.providerCallId ?? tool.id,
+          toolName: tool.name,
+          status: "interrupted",
+          body: {
+            storage: "inline",
+            content: "",
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            sizeBytes: 0,
+          },
+          projection: {
+            version: 1,
+            mode: "synthetic",
+            text: "Interrupted by user.",
+            strategy: "tui-interrupted",
+            truncated: false,
+          },
+        }),
       });
       this.removePendingTool(tool);
     }
@@ -857,43 +871,6 @@ function isRequiredDelegation(toolName: string, rawArgs: string): boolean {
   }
   if (input["completion_policy"] === "required") return true;
   return input["background"] !== true;
-}
-
-export interface ExternalizedToolResultMetadata {
-  artifactRef?: string;
-  artifactPath?: string;
-  artifactId?: string;
-  originalChars?: number;
-  summary: string;
-}
-
-/** 只识别 observation processor 的结构化占位格式，不从普通工具文本猜路径。 */
-export function parseExternalizedToolResult(
-  result: string,
-): ExternalizedToolResultMetadata | undefined {
-  if (!result.startsWith("[大型工具输出已外部化]\n")) return undefined;
-  const lines = result.split("\n");
-  const summaryIndex = lines.indexOf("summary:");
-  const metadataLines = lines.slice(1, summaryIndex === -1 ? lines.length : summaryIndex);
-  const metadata = new Map<string, string>();
-  for (const line of metadataLines) {
-    const separator = line.indexOf(":");
-    if (separator <= 0) continue;
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim();
-    if (value.length > 0) metadata.set(key, value);
-  }
-  const parsedSize = Number(metadata.get("originalChars"));
-  return {
-    ...(metadata.has("artifactUri") ? { artifactRef: metadata.get("artifactUri")! } : {}),
-    ...(metadata.has("artifactPath") ? { artifactPath: metadata.get("artifactPath")! } : {}),
-    ...(metadata.has("artifactId") ? { artifactId: metadata.get("artifactId")! } : {}),
-    ...(Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? { originalChars: parsedSize } : {}),
-    summary:
-      summaryIndex === -1
-        ? "大型工具输出已保存到 artifact。"
-        : lines.slice(summaryIndex + 1).join("\n"),
-  };
 }
 
 function normalizeIdentity(value: string | undefined): string | undefined {

@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { MarkdownText } from "../../apps/desktop/src/renderer/conversation/MarkdownText.js";
 import { projectRuntimeTranscript } from "../../src/daemon/desktop-transcript.js";
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
+import {
+  createToolResultEnvelope,
+  type ToolResultEnvelope,
+} from "../../src/engine/tool-result-contract.js";
 import type { TranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import type { Message } from "../../src/schema/message.js";
 
@@ -12,6 +17,11 @@ function snapshot(
   messages: readonly Message[],
   transcriptEvents: readonly TranscriptEvent[] = [],
   identities: readonly { readonly runId: string; readonly turnId: string }[] = [],
+  toolResults: readonly {
+    readonly sequence: number;
+    readonly eventId: string;
+    readonly envelope: ToolResultEnvelope;
+  }[] = [],
 ) {
   return {
     persistenceSequence: messages.length + transcriptEvents.length,
@@ -22,6 +32,7 @@ function snapshot(
     messageTurnIds: messages.map((_, index) => identities[index]?.turnId),
     transcriptEvents,
     transcriptEventSequences: transcriptEvents.map((event) => event.sequence),
+    toolResults,
     runtime: { stateVersion: 1 as const, usage: createEmptyUsageSnapshot() },
   };
 }
@@ -250,8 +261,7 @@ test("Desktop transcript preserves repeated structured tool calls during dedupe"
       toolCallId: "tool-call-1",
       status: "success",
       summary: "Tool completed · 1 bytes",
-      size: 1,
-      truncated: false,
+      result: toolResultEnvelope("tool-call-1", "read_file", "1"),
     },
     {
       eventId: "tool-start-2",
@@ -271,8 +281,7 @@ test("Desktop transcript preserves repeated structured tool calls during dedupe"
       toolCallId: "tool-call-2",
       status: "success",
       summary: "Tool completed · 2 bytes",
-      size: 2,
-      truncated: false,
+      result: toolResultEnvelope("tool-call-2", "read_file", "22"),
     },
   ];
   const page = projectRuntimeTranscript(
@@ -349,13 +358,11 @@ test("Desktop transcript matches a reused providerCallId to the nearest precedin
       content: "first",
       toolCalls: [{ id: "reused-call", name: "read_file", arguments: args }],
     },
-    { role: "user", content: "1", toolCallId: "reused-call" },
     {
       role: "assistant",
       content: "second",
       toolCalls: [{ id: "reused-call", name: "read_file", arguments: args }],
     },
-    { role: "user", content: "22", toolCallId: "reused-call" },
   ];
   const events: TranscriptEvent[] = [
     {
@@ -372,9 +379,25 @@ test("Desktop transcript matches a reused providerCallId to the nearest precedin
   ];
   const page = projectRuntimeTranscript(
     {
-      ...snapshot(messages, events),
+      ...snapshot(
+        messages,
+        events,
+        [],
+        [
+          {
+            sequence: 2,
+            eventId: "result-1",
+            envelope: toolResultEnvelope("reused-call", "read_file", "1"),
+          },
+          {
+            sequence: 4,
+            eventId: "result-2",
+            envelope: toolResultEnvelope("reused-call", "read_file", "22"),
+          },
+        ],
+      ),
       persistenceSequence: 5,
-      messageSequences: [1, 2, 3, 4],
+      messageSequences: [1, 3],
       transcriptEventSequences: [5],
     },
     {},
@@ -433,3 +456,28 @@ test("Desktop transcript binds duplicate reasoning text to the nearest structure
   assert.equal(thinking[1]?.runId, "run-new");
   assert.equal(thinking[1]?.turnId, "turn-new");
 });
+
+function toolResultEnvelope(
+  toolCallId: string,
+  toolName: string,
+  content: string,
+): ToolResultEnvelope {
+  return createToolResultEnvelope({
+    toolCallId,
+    toolName,
+    status: "succeeded",
+    body: {
+      storage: "inline",
+      content,
+      sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+    },
+    projection: {
+      version: 1,
+      mode: "full",
+      text: content,
+      strategy: "desktop-transcript-test",
+      truncated: false,
+    },
+  });
+}

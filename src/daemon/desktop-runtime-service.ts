@@ -9,6 +9,7 @@ import {
   removeCliSessionFile,
 } from "../cli/session-resolver.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
+import { EvidenceArchive, parseRuntimeEvidenceUri } from "../context/evidence-archive.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
@@ -522,6 +523,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         getGoal: this.getGoal.bind(this),
         sendSession: this.sendSession.bind(this),
         getSessionTranscript: this.getSessionTranscript.bind(this),
+        readSessionEvidence: this.readSessionEvidence.bind(this),
         cancelRun: this.cancelRun.bind(this),
         withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
         runStart: (request) => this.options.runtimeService.handle(request),
@@ -1461,6 +1463,68 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     return result;
+  }
+
+  private async readSessionEvidence(
+    params: RuntimeRequest<"session.evidence.read">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    await this.requireSession(canonical, params.sessionId);
+    const projection = await readExistingRuntimeSessionProjection({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      sessionId: params.sessionId,
+    });
+    if (!projection || projection.manifest.workDir !== canonical) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `Session ${params.sessionId} 不属于工作区 ${canonical}`,
+      );
+    }
+
+    let reference;
+    try {
+      reference = parseRuntimeEvidenceUri(params.evidenceUri);
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (reference.sessionId !== params.sessionId) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "Evidence 引用不属于当前 Session",
+      );
+    }
+    const referencedBySession = projection.entries.some(
+      ({ event }) =>
+        event.kind === "tool.result.recorded" &&
+        event.refs.evidence?.sessionId === reference.sessionId &&
+        event.refs.evidence.contentHash === reference.contentHash &&
+        event.refs.evidence.kind === reference.kind,
+    );
+    if (!referencedBySession) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        "当前 Session 未引用该 Evidence",
+      );
+    }
+    const page = await new EvidenceArchive({
+      baseDir: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.evidence,
+    }).readRuntimeToolOutputPage(reference, {
+      ...(params.offsetBytes !== undefined ? { offsetBytes: params.offsetBytes } : {}),
+      ...(params.limitBytes !== undefined ? { limitBytes: params.limitBytes } : {}),
+    });
+    return {
+      evidenceUri: params.evidenceUri,
+      content: page.content,
+      offsetBytes: page.offsetBytes,
+      endOffsetBytes: page.endOffsetBytes,
+      totalBytes: page.totalBytes,
+      limitBytes: page.limitBytes,
+      truncated: page.truncated,
+      ...(page.nextOffsetBytes !== undefined ? { nextOffsetBytes: page.nextOffsetBytes } : {}),
+    };
   }
 
   private async ensureSessionForMessage(

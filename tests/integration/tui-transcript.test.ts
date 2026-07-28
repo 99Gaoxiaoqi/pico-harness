@@ -87,7 +87,7 @@ test("interrupted durable streams restore the complete live assistant and reason
   );
 });
 
-test("legacy messages hydration preserves provider reasoning when structured events are absent", () => {
+test("TUI rejects snapshots without canonical ToolResult hydration data", () => {
   const snapshot = {
     schemaVersion: 1,
     persistenceSequence: null,
@@ -104,19 +104,13 @@ test("legacy messages hydration preserves provider reasoning when structured eve
     runtime: { stateVersion: 1, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
-  assert.deepEqual(
-    hydrateTuiEntries(snapshot).map((entry) => ({
-      kind: entry.kind,
-      content: "content" in entry ? entry.content : undefined,
-    })),
-    [
-      { kind: "thinking", content: "分析中" },
-      { kind: "assistant", content: "答案" },
-    ],
+  assert.throws(
+    () => hydrateTuiEntries(snapshot),
+    /does not contain canonical ToolResult hydration data/u,
   );
 });
 
-test("legacy hydration does not migrate display-only messages into durable transcript", async () => {
+test("incompatible hydration does not migrate display-only messages", async () => {
   const persisted: TranscriptEvent[] = [];
   const reporter = new TuiReporter(() => undefined, [], {
     durableTranscriptSink: { append: async (event) => void persisted.push(event) },
@@ -137,7 +131,10 @@ test("legacy hydration does not migrate display-only messages into durable trans
     runtime: { stateVersion: 1, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
-  hydrateTuiReporter(reporter, snapshot);
+  assert.throws(
+    () => hydrateTuiReporter(reporter, snapshot),
+    /does not contain canonical ToolResult hydration data/u,
+  );
   await reporter.flushDurableTranscript();
   assert.deepEqual(persisted, []);
 });
@@ -164,6 +161,7 @@ test("structured transcript hydration keeps stable IDs and ignores message fallb
     messageSequences: [1],
     transcriptEvents: source.getEvents(),
     transcriptEventSequences: source.getEvents().map((event) => event.sequence),
+    toolResults: [],
     runtime: { stateVersion: 1, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
@@ -178,7 +176,7 @@ test("structured transcript hydration keeps stable IDs and ignores message fallb
   );
 });
 
-test("mixed legacy and structured hydration keeps the legacy prefix after new durable turns", () => {
+test("structured hydration never synthesizes a legacy Message prefix", () => {
   const source = new TuiReporter(() => undefined);
   source.pushUserMessage("new user");
   source.onReasoningDelta("new reasoning");
@@ -202,26 +200,18 @@ test("mixed legacy and structured hydration keeps the legacy prefix after new du
     messageSequences: [1, 20, 30],
     transcriptEvents: structured,
     transcriptEventSequences: structured.map((_, index) => 10 + index),
+    toolResults: [],
     runtime: { stateVersion: 1, usage: {} },
   } as unknown as SessionHydrationSnapshot;
 
   const first = hydrateTuiEntries(snapshot);
   const second = hydrateTuiEntries(snapshot);
-  assert.deepEqual(first.map(summarizeEntry), [
-    {
-      kind: "thinking",
-      content: "legacy reasoning",
-      uiEntryId: "legacy:mixed:message:1:thinking:0",
-    },
-    {
-      kind: "assistant",
-      content: "legacy answer",
-      uiEntryId: "legacy:mixed:message:1:assistant:0",
-    },
-    ...source
+  assert.deepEqual(
+    first.map(summarizeEntry),
+    source
       .getProjection()
       .entries.map(({ entry, id }) => summarizeEntry({ ...entry, uiEntryId: id })),
-  ]);
+  );
   assert.deepEqual(second, first);
 });
 
@@ -261,6 +251,7 @@ test("rewind after a local clear rehydrates the durable transcript branch", asyn
     messageSequences: [1],
     transcriptEvents: durable.getEvents(),
     transcriptEventSequences: durable.getEvents().map((event) => event.sequence),
+    toolResults: [],
     runtime: { stateVersion: 1, usage: {} },
   } as unknown as SessionHydrationSnapshot;
   const reporter = new TuiReporter(() => undefined);
