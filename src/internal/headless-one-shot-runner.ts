@@ -45,6 +45,10 @@ const HEADLESS_TOOL_NAMES = new Set([
   "web_search",
   "write_file",
 ]);
+const pendingLockReleases = new Map<
+  ExclusiveCaseLocks,
+  { attempt: number; timer?: NodeJS.Timeout }
+>();
 const REQUEST_FIELDS = new Set([
   "schemaVersion",
   "requestId",
@@ -149,6 +153,8 @@ export interface HeadlessOneShotDependencies {
   readonly executeRuntime?: typeof executeAgentRuntime;
   readonly now?: () => number;
   readonly lockRoot?: string;
+  /** Test seam for machine-local owner-lease deletion fault injection. */
+  readonly lockRemoveLeaseDirectory?: (leaseDirectory: string) => Promise<void>;
 }
 
 type CancelCause = "timeout" | "SIGINT" | "SIGTERM" | "canceled";
@@ -171,15 +177,16 @@ class HeadlessCancellationError extends Error {
 }
 
 class ExclusiveCaseLocks {
-  private released = false;
+  private releasePromise?: Promise<void>;
 
-  private constructor(private readonly leases: readonly OwnerLease[]) {}
+  private constructor(private leases: OwnerLease[]) {}
 
   static async acquire(
     request: HeadlessOneShotRequestV1,
     workDir: string,
     picoHome: string,
     root = join(tmpdir(), "pico-headless-one-shot-locks"),
+    removeLeaseDirectory?: (leaseDirectory: string) => Promise<void>,
   ): Promise<ExclusiveCaseLocks> {
     await secureLockDirectory(root);
     const keys = [
@@ -198,12 +205,15 @@ class ExclusiveCaseLocks {
             ownerId: `headless:${request.requestId}:${request.sessionId}:${hash}`,
             staleAfterMs: 0,
             heartbeatIntervalMs: 1_000,
+            ...(removeLeaseDirectory ? { removeLeaseDirectory } : {}),
           }),
         );
       }
       return new ExclusiveCaseLocks(acquired);
     } catch (error) {
-      await releaseLeases(acquired);
+      if (acquired.length > 0) {
+        await releaseCaseLocks(new ExclusiveCaseLocks(acquired));
+      }
       if (error instanceof LeaseConflictError) {
         throw new HeadlessRequestError(
           "CASE_RESOURCE_CONFLICT",
@@ -215,9 +225,30 @@ class ExclusiveCaseLocks {
   }
 
   async release(): Promise<void> {
-    if (this.released) return;
-    this.released = true;
-    await releaseLeases(this.leases);
+    if (this.leases.length === 0) return;
+    if (this.releasePromise) return this.releasePromise;
+    const release = this.releaseOnce();
+    this.releasePromise = release;
+    try {
+      await release;
+    } finally {
+      if (this.releasePromise === release) this.releasePromise = undefined;
+    }
+  }
+
+  private async releaseOnce(): Promise<void> {
+    const remaining: OwnerLease[] = [];
+    let firstError: unknown;
+    for (const lease of [...this.leases].reverse()) {
+      try {
+        await lease.release();
+      } catch (error) {
+        remaining.unshift(lease);
+        firstError ??= error;
+      }
+    }
+    this.leases = remaining;
+    if (firstError !== undefined) throw firstError;
   }
 }
 
@@ -354,9 +385,17 @@ async function runValidatedRequest(
       allowedTools: request.allowedTools,
     };
     locks = await racePreflight(
-      ExclusiveCaseLocks.acquire(request, workDir, picoHome, dependencies.lockRoot),
+      ExclusiveCaseLocks.acquire(
+        request,
+        workDir,
+        picoHome,
+        dependencies.lockRoot,
+        dependencies.lockRemoveLeaseDirectory,
+      ),
       cancellation,
-      (lateLocks) => lateLocks.release(),
+      async (lateLocks) => {
+        await releaseCaseLocks(lateLocks);
+      },
     );
     await racePreflight(assertNewSession(request.sessionId, workDir, picoHome), cancellation);
 
@@ -396,14 +435,18 @@ async function runValidatedRequest(
       runtimeDependencies,
     );
     const settled = await settleRuntime(runtimePromise, cancellation, request.shutdownGraceMs);
+    const secrets = credentialCandidates(selected.config.apiKey);
+    const safeTracePath = settled.result?.tracePath
+      ? await sanitizeTrace(settled.result.tracePath, secrets)
+      : undefined;
     if (!settled.shutdownConfirmed && locks) {
       const heldLocks = locks;
       locks = undefined;
       void runtimePromise
-        .then(
-          () => heldLocks.release(),
-          () => heldLocks.release(),
-        )
+        .then(async (lateResult) => {
+          if (lateResult.tracePath) await sanitizeTrace(lateResult.tracePath, secrets);
+        })
+        .finally(() => releaseCaseLocks(heldLocks))
         .catch(() => undefined);
     }
 
@@ -438,8 +481,6 @@ async function runValidatedRequest(
         elapsed(startedAt, dependencies.now),
       );
     }
-    const secrets = credentialCandidates(selected.config.apiKey);
-    await redactTrace(settled.result.tracePath, secrets);
     if (policyBlocked) {
       return {
         result: resultPayload({
@@ -449,7 +490,7 @@ async function runValidatedRequest(
           effective,
           durationMs: elapsed(startedAt, dependencies.now),
           usage: settled.result.usage,
-          tracePath: settled.result.tracePath ?? null,
+          tracePath: safeTracePath ?? null,
           error: {
             code: "POLICY_BLOCKED",
             summary: "The requested tool action was blocked by the effective policy.",
@@ -468,7 +509,7 @@ async function runValidatedRequest(
         durationMs: elapsed(startedAt, dependencies.now),
         finalMessage: redactSecrets(settled.result.finalMessage, secrets),
         usage: settled.result.usage,
-        tracePath: settled.result.tracePath ?? null,
+        tracePath: safeTracePath ?? null,
       }),
       exitCode: 0,
       shutdownConfirmed: true,
@@ -503,7 +544,7 @@ async function runValidatedRequest(
     );
   } finally {
     cancellation.dispose();
-    if (locks) await locks.release();
+    if (locks) await releaseCaseLocks(locks);
   }
 }
 
@@ -1130,10 +1171,34 @@ async function recoverLegacyLock(root: string, hash: string): Promise<void> {
   });
 }
 
-async function releaseLeases(leases: readonly OwnerLease[]): Promise<void> {
-  for (const lease of [...leases].reverse()) {
-    await lease.release().catch(() => undefined);
+async function releaseCaseLocks(locks: ExclusiveCaseLocks): Promise<boolean> {
+  try {
+    await locks.release();
+    clearPendingLockRelease(locks);
+    return true;
+  } catch {
+    schedulePendingLockRelease(locks);
+    return false;
   }
+}
+
+function schedulePendingLockRelease(locks: ExclusiveCaseLocks): void {
+  const state = pendingLockReleases.get(locks) ?? { attempt: 0 };
+  if (state.timer) return;
+  const delayMs = Math.min(1_000, 10 * 2 ** Math.min(state.attempt, 7));
+  state.attempt++;
+  state.timer = setTimeout(() => {
+    state.timer = undefined;
+    void releaseCaseLocks(locks);
+  }, delayMs);
+  state.timer.unref();
+  pendingLockReleases.set(locks, state);
+}
+
+function clearPendingLockRelease(locks: ExclusiveCaseLocks): void {
+  const state = pendingLockReleases.get(locks);
+  if (state?.timer) clearTimeout(state.timer);
+  pendingLockReleases.delete(locks);
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -1157,17 +1222,36 @@ function redactSecrets(value: string, secrets: readonly string[]): string {
   return redacted;
 }
 
-async function redactTrace(
-  tracePath: string | undefined,
+async function sanitizeTrace(
+  tracePath: string,
   secrets: readonly string[],
-): Promise<void> {
-  if (!tracePath || secrets.length === 0) return;
-  const raw = await readFile(tracePath, "utf8");
-  const redacted = redactSecrets(raw, secrets);
-  if (redacted === raw) return;
-  await mkdir(dirname(tracePath), { recursive: true, mode: 0o700 });
-  await writeFile(tracePath, redacted, { encoding: "utf8", mode: 0o600 });
-  await chmod(tracePath, 0o600);
+): Promise<string | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(tracePath, "utf8")) as unknown;
+    const metadataOnly = sanitizeTraceNode(parsed);
+    const redacted = redactSecrets(JSON.stringify(metadataOnly, null, 2), secrets);
+    await mkdir(dirname(tracePath), { recursive: true, mode: 0o700 });
+    await writeFile(tracePath, redacted, { encoding: "utf8", mode: 0o600 });
+    await chmod(tracePath, 0o600);
+    return tracePath;
+  } catch {
+    await unlink(tracePath).catch(() => undefined);
+    return undefined;
+  }
+}
+
+function sanitizeTraceNode(value: unknown, insideAttributes = false): unknown {
+  if (typeof value === "string") return insideAttributes ? "[REDACTED]" : value;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeTraceNode(item, insideAttributes));
+  }
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      sanitizeTraceNode(item, insideAttributes || key === "attributes"),
+    ]),
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

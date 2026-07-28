@@ -38,7 +38,7 @@ npm run build
 node dist/internal/headless-one-shot-main.js < request.json
 ```
 
-开发态命令中的 `--silent` 用来阻止 npm 自己把 lifecycle 标题写到 stdout；需要精确保留退出码的自动化调用应直接执行构建入口。stdin 必须只包含一个 `schemaVersion: 1` JSON 对象。Runner 的 stdout 对成功、请求错误和运行失败都只输出一行 JSON；Runtime 日志只允许写入 stderr。请求不接受 `apiKey`、`baseURL`、resume、continue 或 fork 字段，未知字段直接拒绝。
+开发态命令中的 `--silent` 用来阻止 npm 自己把 lifecycle 标题写到 stdout；需要精确保留退出码的自动化调用应直接执行构建入口。stdin 必须只包含一个 `schemaVersion: 1` JSON 对象。Runner 的 stdout 对成功、请求错误和运行失败都只输出一行 JSON；机器入口会在动态加载 Runtime 前把内部日志固定为静默，stdout/stderr 都不会混入 Runtime 日志。请求不接受 `apiKey`、`baseURL`、resume、continue 或 fork 字段，未知字段直接拒绝。
 
 `thinkingEffort` 是可选的显式 route 能力选择；省略时使用有效配置的 route 默认值。若显式值不被该 route 支持，请求会在模型生成前失败。
 
@@ -51,7 +51,7 @@ node dist/internal/headless-one-shot-main.js < request.json
 - Runtime 使用隔离的 `HOME`/XDG 根和显式空 Plugin 快照，不加载宿主或项目的 Claude、Plugin、Skill、Agent、MCP、LSP、Hook、Memory 资源。
 - `permissionMode` 和 `allowedTools` 必填，不继承新 Session 的默认 YOLO。支持 `default`、`auto`、`plan`、`yolo`；工具白名单只接受 `read_file`、`read_evidence`、`write_file`、`edit_file`、`bash`、`glob`、`grep`、`todo`、`fetch_url`、`web_search`，无 UI 的审批请求会立即拒绝。
 - YOLO 是当前 OS 用户权限下的全程放权，不是完整沙箱。外层调度器必须使用一次性低权限账户或容器、独占 `PICO_HOME` 和可丢弃 workspace copy/worktree。
-- 同机并发通过 `PICO_HOME`、workspace、Session 三个按序获取的 owner lease fail-closed；部分获取会回滚，正常/失败/已确认取消会释放，进程崩溃后的 dead owner 可由下一个 case 安全接管。已有 Session ID 也会在 Runtime 执行前拒绝。
+- 同机并发通过 `PICO_HOME`、workspace、Session 三个按序获取的 owner lease fail-closed；部分获取会回滚，正常/失败/已确认取消会请求释放。瞬态删除失败时，进程内的持久清理队列会继续持有 owner，并以最大 1 秒的有界退避重试到成功；进程崩溃后的 dead owner 可由下一个 case 安全接管。已有 Session ID 也会在 Runtime 执行前拒绝。
 
 ## 输出与退出码
 
@@ -84,6 +84,7 @@ node dist/internal/headless-one-shot-main.js < request.json
 ```
 
 失败只输出稳定错误码和脱敏摘要，不输出 stack、完整 Messages 或原始 ToolResult。
+返回的 Trace 会保留 span 结构、时间与数值/布尔指标，但所有字符串属性（包括工具 arguments、输出预览、错误文本和路径）统一替换为 `[REDACTED]`；取消后延迟 settle 的 Runtime 也执行同一净化后才释放租约。
 
 | status            | 退出码      | 含义                                       |
 | ----------------- | ----------- | ------------------------------------------ |

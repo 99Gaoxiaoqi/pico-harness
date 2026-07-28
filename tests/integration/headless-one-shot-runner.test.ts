@@ -57,6 +57,46 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
   assert.equal(JSON.stringify(outcome.result).includes(secret), false);
 });
 
+test("headless traces retain metadata but remove tool arguments and workspace output", async (context) => {
+  const fixture = await createFixture(context, "trace-sanitization");
+  await configureFixture(fixture, "secret-canary-trace-route");
+  const workspaceCanary = "WORKSPACE_TOOL_OUTPUT_CANARY_MUST_NOT_APPEAR";
+  const secretPath = join(fixture.workspace, "fixture-secret.txt");
+  await writeFile(secretPath, workspaceCanary);
+  let calls = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "trace-sanitization"),
+      allowedTools: ["read_file"],
+    }),
+    {
+      env: {},
+      providerFactory: () => ({
+        async generate() {
+          calls++;
+          return calls === 1
+            ? assistant("", undefined, [
+                {
+                  id: "read-secret",
+                  name: "read_file",
+                  arguments: JSON.stringify({ path: secretPath }),
+                },
+              ])
+            : assistant("trace sanitized");
+        },
+      }),
+    },
+  );
+
+  assert.equal(outcome.result.status, "completed");
+  assert.ok(outcome.result.tracePath);
+  const trace = await readFile(outcome.result.tracePath, "utf8");
+  assert.equal(trace.includes(workspaceCanary), false);
+  assert.equal(trace.includes(secretPath), false);
+  assert.equal(trace.includes("[REDACTED]"), true);
+  assert.equal(JSON.stringify(outcome.result).includes(workspaceCanary), false);
+});
+
 test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail before generation", async (context) => {
   const fixture = await createFixture(context, "preflight");
   await configureFixture(fixture, "secret-canary-preflight", false);
@@ -376,6 +416,45 @@ test("failed Runtime execution releases case resources for a corrected retry", a
   assert.equal(recovered.result.status, "completed");
 });
 
+test("persistent background cleanup retains and retries owner leases after repeated deletion failures", async (context) => {
+  const fixture = await createFixture(context, "release-retry");
+  await configureFixture(fixture, "secret-canary-release-retry");
+  let deletionCalls = 0;
+  const first = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "release-retry-first")),
+    {
+      env: {},
+      executeRuntime: async (options) => runtimeResult(options, "first completed"),
+      lockRemoveLeaseDirectory: async (leaseDirectory) => {
+        deletionCalls++;
+        if (deletionCalls <= 5) {
+          throw new Error("injected transient rm failure");
+        }
+        await rm(leaseDirectory, { recursive: true, force: true });
+      },
+    },
+  );
+  assert.equal(first.result.status, "completed");
+  assert.equal(first.exitCode, 0);
+  assert.equal(deletionCalls, 3);
+
+  const secondRequest = JSON.stringify(requestFor(fixture, "release-retry-second"));
+  let second;
+  const deadline = Date.now() + 2_000;
+  do {
+    second = await runHeadlessOneShotJson(secondRequest, {
+      env: {},
+      executeRuntime: async (options) => runtimeResult(options, "second completed"),
+    });
+    if (second.result.status !== "completed") {
+      assert.equal(second.result.error?.code, "CASE_RESOURCE_CONFLICT");
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+  } while (second.result.status !== "completed" && Date.now() < deadline);
+  assert.ok(deletionCalls >= 6);
+  assert.equal(second.result.status, "completed");
+});
+
 test("unconfirmed in-process cancellation retains locks until Runtime settles", async (context) => {
   const fixture = await createFixture(context, "unconfirmed-in-process");
   await configureFixture(fixture, "secret-canary-unconfirmed");
@@ -487,7 +566,7 @@ test("the internal process entry emits exactly one JSON line for success and inv
   const successResult = JSON.parse(success.stdout) as { status: string; finalMessage: string };
   assert.equal(successResult.status, "completed");
   assert.equal(successResult.finalMessage, "process-ok");
-  assert.equal(success.stderr.includes("secret-canary-process"), false);
+  assert.equal(success.stderr, "");
 
   const invalid = await runProcess("{");
   assert.equal(invalid.code, 2);
@@ -792,21 +871,11 @@ async function runProcess(input: string): Promise<{
 }
 
 function spawnHeadlessProcess(): ChildProcessWithoutNullStreams {
-  return spawn(
-    process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--import",
-      "./src/tui/preload-env.ts",
-      "src/internal/headless-one-shot-main.ts",
-    ],
-    {
-      cwd: process.cwd(),
-      env: { ...process.env, NODE_ENV: "test", LOG_LEVEL: "fatal" },
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-  );
+  return spawn(process.execPath, ["--import", "tsx", "src/internal/headless-one-shot-main.ts"], {
+    cwd: process.cwd(),
+    env: { ...process.env, NODE_ENV: "test", LOG_LEVEL: "trace" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
 }
 
 function spawnUnconfirmedChild(mode: "timeout" | "hang"): ChildProcessWithoutNullStreams {
