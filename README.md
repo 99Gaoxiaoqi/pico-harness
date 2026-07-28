@@ -20,7 +20,7 @@
 | Desktop     | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
 | 本机 daemon | 内部 Runtime 宿主 | 承载 Desktop 和持久 Cron，通过本机 IPC 通信，不监听网络端口                          |
 
-当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。
+当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它不是产品入口，也不构成兼容性承诺。
 
 ## 架构概览
 

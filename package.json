@@ -20,6 +20,8 @@
   "scripts": {
     "predev": "npm run check:storage && npm run build:protocol",
     "dev": "tsx --env-file-if-exists=.env --import ./src/tui/preload-env.ts src/cli/main.ts",
+    "internal:headless:dev": "tsx --env-file-if-exists=.env --import ./src/tui/preload-env.ts src/internal/headless-one-shot-main.ts",
+    "internal:headless": "node dist/internal/headless-one-shot-main.js",
     "desktop:dev": "npm run start --workspace @pico/desktop",
     "desktop:package": "npm run package --workspace @pico/desktop",
     "desktop:make": "npm run make --workspace @pico/desktop",
