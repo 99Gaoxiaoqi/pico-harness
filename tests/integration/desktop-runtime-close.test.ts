@@ -223,7 +223,7 @@ test(
       await desktop.handle(
         createRuntimeRequest("session.send", {
           workspacePath: workspace,
-          input: { text: "first" },
+          input: { kind: "text", text: "first" },
           idempotencyKey: "close-queue-first",
         }),
       ),
@@ -243,7 +243,7 @@ test(
         createRuntimeRequest("session.send", {
           workspacePath: workspace,
           sessionId,
-          input: { text },
+          input: { kind: "text", text },
           behavior: "queue",
           expectedRunId: firstRunId,
           idempotencyKey: key,
@@ -278,7 +278,7 @@ test(
     const queued = await originalListQueued(canonicalWorkspace, sessionId);
     assert.deepEqual(
       queued.map((entry) => entry.input),
-      [{ text: "third" }],
+      [{ kind: "text", text: "third" }],
     );
     assert.ok(order.indexOf("queue-started") < order.indexOf("close-runtimes"));
   },

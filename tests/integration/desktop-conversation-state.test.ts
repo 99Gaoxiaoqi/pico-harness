@@ -72,4 +72,23 @@ test("desktop conversation state rejects legacy v1 and old field fallbacks", asy
     })}\n`,
   );
   await assert.rejects(store.listQueued(workspacePath, "session-1"), /missing canonical input/u);
+
+  await writeFile(
+    filePath,
+    `${JSON.stringify({
+      version: 2,
+      queuedInputs: [
+        {
+          queueId: "legacy-input-kind",
+          workspacePath,
+          sessionId: "session-1",
+          input: { text: "missing discriminator" },
+          createdAt: 100,
+        },
+      ],
+      idempotency: [],
+      firstSendClaims: [],
+    })}\n`,
+  );
+  await assert.rejects(store.listQueued(workspacePath, "session-1"), /invalid input/u);
 });

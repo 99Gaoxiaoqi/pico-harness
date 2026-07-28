@@ -48,7 +48,7 @@ test("desktop session handlers keep protocol mapping separate from the service o
     await send(
       createTypedRuntimeRequest("session.send", {
         workspacePath: "/workspace",
-        input: { text: "hello" },
+        input: { kind: "text", text: "hello" },
         idempotencyKey: "request-1",
       }),
     ),

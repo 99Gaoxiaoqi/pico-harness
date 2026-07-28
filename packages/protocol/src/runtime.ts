@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 9;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v9";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 10;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v10";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
@@ -225,8 +225,7 @@ export type RuntimeGoalSnapshot = {
 };
 
 export type RuntimeTextUserInput = JsonObject & {
-  /** Omitted by legacy desktop clients; new clients should send the explicit discriminator. */
-  readonly kind?: "text";
+  readonly kind: "text";
   readonly text: string;
 };
 
@@ -554,8 +553,8 @@ export type RuntimeMethodMap = {
       readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
       readonly desktopSchemaRevision: typeof DESKTOP_RUNTIME_SCHEMA_REVISION;
       readonly capabilities: readonly string[];
-      /** Canonical state root used by this daemon. Omitted by legacy runtimes. */
-      readonly picoHome?: string;
+      /** Canonical state root used by this daemon. */
+      readonly picoHome: string;
     };
   };
   readonly "workspace.init": {
@@ -2069,7 +2068,10 @@ const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
     });
     return;
   }
-  assertNestedShape(value, path, { text: stringParam }, { kind: oneOfParam(["text"]) });
+  assertNestedShape(value, path, {
+    kind: oneOfParam(["text"]),
+    text: stringParam,
+  });
 };
 
 const runtimeProviderParam: RuntimeParamRule = (value, path) => {
@@ -3017,14 +3019,13 @@ const durableRuntimeNotificationResult: RuntimeResultRule = (value, path) => {
 };
 
 const runtimePingResult: RuntimeResultRule = (value, path) => {
-  resultShape(
-    {
-      pong: resultOneOf([true]),
-      protocolVersion: resultOneOf([LOCAL_RUNTIME_PROTOCOL_VERSION]),
-      capabilities: resultStringArray,
-    },
-    { desktopSchemaRevision: resultFiniteNumber, picoHome: resultString },
-  )(value, path);
+  resultShape({
+    pong: resultOneOf([true]),
+    protocolVersion: resultOneOf([LOCAL_RUNTIME_PROTOCOL_VERSION]),
+    desktopSchemaRevision: resultFiniteNumber,
+    capabilities: resultStringArray,
+    picoHome: resultString,
+  })(value, path);
   if (!isJsonObject(value)) return;
   const capabilities = value["capabilities"];
   if (
