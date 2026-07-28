@@ -115,6 +115,9 @@ async function persistTimelineEvent(
     const name = optionalNonEmptyText(data["toolName"]);
     const args = typeof data["args"] === "string" ? data["args"] : "";
     if (!name) return false;
+    // AgentEngine persisted this structured start atomically before emitting the
+    // live timeline callback. Desktop must not create a second durable projection.
+    if (isJsonRecord(data["canonicalTranscriptStart"])) return false;
     if (isPlanTimelineTool(name)) {
       const detail = safePlanDetail(args);
       return persistTranscriptEntry(session, {
@@ -129,9 +132,6 @@ async function persistTimelineEvent(
         },
       });
     }
-    // AgentEngine persisted this structured start atomically before emitting the
-    // live timeline callback. Desktop must not create a second durable start.
-    if (isJsonRecord(data["canonicalTranscriptStart"])) return false;
     const providerCallId = optionalNonEmptyText(data["providerCallId"]);
     if (!providerCallId) return false;
     return persistTranscriptEvent(session, {

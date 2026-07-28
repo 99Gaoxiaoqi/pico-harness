@@ -8,7 +8,8 @@ import {
   DesktopRuntimeService,
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
-import { globalSessionManager } from "../../src/engine/session.js";
+import { ingestDesktopRuntimeNotification } from "../../src/daemon/desktop-transcript-persistence.js";
+import { globalSessionManager, Session } from "../../src/engine/session.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 
 test(
@@ -120,3 +121,69 @@ test(
     );
   },
 );
+
+test("Desktop does not persist a second plan entry for a Runtime-owned tool start", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-canonical-plan-start-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  const canonicalWorkspace = await realpath(workspace);
+  const session = new Session("desktop-canonical-plan-start", canonicalWorkspace, {
+    persistence: true,
+    picoHome,
+  });
+  context.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await session.recover();
+  const args = JSON.stringify({
+    plan: [{ step: "核对 canonical start", status: "in_progress" }],
+  });
+  const [start] = await session.recordRuntimeTranscriptToolStarts({
+    invocationId: "invocation:desktop-plan",
+    runId: "run-desktop-plan",
+    turnId: "turn:run-desktop-plan:1",
+    createdAt: 1,
+    toolCalls: [{ id: "call-desktop-plan", name: "update_plan", arguments: args }],
+  });
+  assert.ok(start);
+
+  const inserted = await ingestDesktopRuntimeNotification(
+    session,
+    createRuntimeNotification({
+      eventId: "canonical-plan-tool-started",
+      topic: "run.timeline",
+      scope: {
+        workspacePath: canonicalWorkspace,
+        sessionId: session.id,
+        runId: "run-desktop-plan",
+      },
+      resourceVersion: 1,
+      at: 2,
+      payload: {
+        runId: "run-desktop-plan",
+        item: {
+          eventType: "tool.started",
+          data: {
+            providerCallId: start.providerCallId,
+            toolName: start.name,
+            args: start.args,
+            canonicalTranscriptStart: {
+              eventId: start.eventId,
+              sequence: start.sequence,
+              entryId: start.entryId,
+              toolCallId: start.toolCallId,
+            },
+          },
+        },
+      },
+    }),
+  );
+
+  assert.equal(inserted, false);
+  const hydration = await session.readHydrationSnapshot();
+  assert.deepEqual(hydration.transcriptEvents, [start]);
+});
