@@ -8,11 +8,13 @@ import { toCanonicalUsage, type Message } from "../schema/message.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   projectRuntimeModelMessage,
+  projectRuntimeToolResultEnvelope,
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
 } from "./runtime-model-message.js";
-import type { RuntimeEvent } from "./session-runtime-event.js";
+import type { RuntimeEvent, RuntimeToolResultRecordedEvent } from "./session-runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
+import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 export interface SequencedRuntimeEvent {
   readonly sequence: number;
@@ -32,6 +34,12 @@ export interface RuntimeSessionModelHistoryEntry extends RuntimeHistoryProjectio
 export interface RuntimeSessionTranscriptEventEntry {
   readonly sequence: number;
   readonly event: TranscriptEvent;
+}
+
+export interface RuntimeSessionToolResultEntry {
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly envelope: ToolResultEnvelope;
 }
 
 /**
@@ -84,6 +92,23 @@ export function projectRuntimeSessionTranscriptEventEntries(
       ? [{ sequence, event: structuredClone(event.data.event) }]
       : [],
   );
+}
+
+/**
+ * Hydrates only ToolResults that remain on the active Runtime branch. The raw
+ * body never crosses this boundary; host surfaces receive the bounded envelope.
+ */
+export function projectRuntimeSessionToolResultEntries(
+  entries: readonly SequencedRuntimeEvent[],
+): RuntimeSessionToolResultEntry[] {
+  return projectBranchEventIndexes(
+    entries.map(({ event }) => event),
+    isRuntimeToolResult,
+  ).map(({ eventIndex, event }) => ({
+    sequence: entries[eventIndex]!.sequence,
+    eventId: event.eventId,
+    envelope: projectRuntimeToolResultEnvelope(event),
+  }));
 }
 
 export function projectRuntimeSessionState(
@@ -205,4 +230,8 @@ function requiredRuntimeModelMessage(event: RuntimeModelHistoryEvent): Message {
     throw new Error(`Runtime event ${event.eventId} has no model projection`);
   }
   return message;
+}
+
+function isRuntimeToolResult(event: RuntimeEvent): event is RuntimeToolResultRecordedEvent {
+  return event.kind === "tool.result.recorded";
 }

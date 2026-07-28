@@ -158,6 +158,11 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "message.committed":
       assertMessage(value["data"]["message"]);
+      if (value["data"]["message"].toolCallId !== undefined) {
+        throw new RuntimeEventIntegrityError(
+          "Runtime message.committed cannot contain a ToolResult; use tool.result.recorded",
+        );
+      }
       return;
     case "tool.started":
       assertString(value["data"]["toolName"], "tool.started.toolName");

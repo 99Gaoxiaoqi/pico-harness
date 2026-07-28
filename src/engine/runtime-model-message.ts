@@ -27,6 +27,9 @@ export function runtimeEventHasModelHistoryEntry(
 export function projectRuntimeModelMessage(event: RuntimeEvent): Message | undefined {
   if (!runtimeEventHasModelHistoryEntry(event)) return undefined;
   if (event.kind === "message.committed") {
+    if (event.data.message.toolCallId !== undefined) {
+      throw new Error(`Runtime message.committed ${event.eventId} cannot contain a ToolResult`);
+    }
     return structuredClone(event.data.message);
   }
   return projectRuntimeToolResultMessage(event);

@@ -4,6 +4,7 @@ import type { Message } from "../schema/message.js";
 import type { Goal, GoalManagerSnapshot, GoalStatus } from "./goal-manager.js";
 import type { SessionIdentity } from "./session-identity.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 /** Session runtime-state event schema version. */
 export const SESSION_RUNTIME_STATE_VERSION = 1 as const;
@@ -87,7 +88,15 @@ export interface SessionHydrationSnapshot {
   transcriptEvents: readonly TranscriptEvent[];
   /** RuntimeEvent sequence for each transcriptEvents entry, aligned by index. */
   transcriptEventSequences: readonly number[];
+  /** Active-branch ToolResult facts, already reduced to the bounded host envelope. */
+  toolResults: readonly SessionHydrationToolResult[];
   runtime: SessionRuntimeStateSnapshot;
+}
+
+export interface SessionHydrationToolResult {
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly envelope: ToolResultEnvelope;
 }
 
 /** 避免 input 层反向依赖 Session 具体类。 */

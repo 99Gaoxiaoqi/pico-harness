@@ -102,6 +102,7 @@ import {
   projectRuntimeSessionModelHistoryEntries,
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
+  projectRuntimeSessionToolResultEntries,
   projectRuntimeSessionTranscriptEventEntries,
 } from "./session-runtime-projection.js";
 import { OwnerLease } from "../storage/owner-lease.js";
@@ -164,6 +165,7 @@ export interface DurableSessionForkSnapshot {
 export interface DurableRuntimeForkSeed {
   readonly sourceSessionId: string;
   readonly messages: readonly Message[];
+  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
 }
 
 export interface DurableTuiRewindHandoff {
@@ -770,6 +772,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         messageSequences: this.messageLedger.readHistory().map((_, index) => index + 1),
         transcriptEvents: [],
         transcriptEventSequences: [],
+        toolResults: [],
         runtime: this.getRuntimeStateSnapshot(),
       };
     }
@@ -824,19 +827,17 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     if (seed.kind !== "session.forked" || seed.data.parentSessionId === this.id) return undefined;
     const seedEvents = events.slice(0, seedIndex + 1);
     const messages = projectRuntimeSessionMessages(seedEvents);
-    const canonicalDigest = runtimeForkHistoryDigest(
-      projectRuntimeSessionModelHistoryEntries(seedEvents).map(({ event }) => event),
+    const historyEntries = projectRuntimeSessionModelHistoryEntries(seedEvents).map(
+      ({ event }) => event,
     );
-    if (
-      seed.data.messageCount !== messages.length ||
-      (seed.data.sourceDigest !== messageDigest(messages) &&
-        seed.data.sourceDigest !== canonicalDigest)
-    ) {
+    const canonicalDigest = runtimeForkHistoryDigest(historyEntries);
+    if (seed.data.messageCount !== messages.length || seed.data.sourceDigest !== canonicalDigest) {
       throw new Error(`Runtime fork seed ${this.id} 与完成标记不一致`);
     }
     return {
       sourceSessionId: seed.data.parentSessionId,
       messages,
+      historyEntries,
     };
   }
 
@@ -849,6 +850,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const updatedAt = entries.at(-1)?.event.at ?? manifest.createdAt;
     const messages = projectRuntimeSessionSequencedMessageEntries(entries);
     const transcript = projectRuntimeSessionTranscriptEventEntries(entries);
+    const toolResults = projectRuntimeSessionToolResultEntries(entries);
     return {
       schemaVersion: 1,
       persistenceSequence: cursor?.seq ?? null,
@@ -862,6 +864,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       messageSequences: messages.map(({ sequence }) => sequence),
       transcriptEvents: transcript.map(({ event }) => event),
       transcriptEventSequences: transcript.map(({ sequence }) => sequence),
+      toolResults,
       runtime: projectRuntimeSessionState(events),
     };
   }
@@ -962,6 +965,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
    */
   private async commitExternalMessagesWithoutRuntime(messages: readonly Message[]): Promise<void> {
     if (messages.length === 0) return;
+    for (const message of messages) assertRuntimeCommittedMessage(message);
     const store = this.store;
     if (!store) throw new Error("Session persistence is disabled");
     const events: RuntimeMessageCommittedEvent[] = messages.map((message) => ({
@@ -976,6 +980,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     eventId: string,
     message: Message,
   ): Promise<CommitReceipt> {
+    assertRuntimeCommittedMessage(message);
     const store = this.store;
     if (!store) throw new Error("Session persistence is disabled");
     const existing = await store.readSessionEvent(this.id, eventId);
@@ -1076,6 +1081,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   async commitProjectionMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
     if (!eventId.trim()) throw new Error("Session eventId 不能为空");
+    if (this.store) assertRuntimeCommittedMessage(message);
     if (!this.store) {
       const existing = this.inMemoryCommitReceipts.get(eventId);
       if (existing) {
@@ -1179,11 +1185,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   async truncateTo(fromIndex: number): Promise<void> {
     this.assertWritable();
     if (fromIndex < 0) fromIndex = 0;
-    const history = this.messageLedger.readHistory();
-    const nextHistory = fromIndex >= history.length ? [] : history.slice(fromIndex);
     if (this.store) {
-      await this.replaceRuntimeHistory(nextHistory, "truncate");
-      return;
+      throw new Error(
+        "Durable Runtime does not support Session.truncateTo; use canonical checkpoint or rewind",
+      );
     }
     this.messageLedger.truncateTo(fromIndex);
     this.updatedAt = new Date();
@@ -1662,36 +1667,12 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       providerData: { ...options.summaryProviderData, picoKind: "compaction_summary" },
     };
     if (this.store) {
-      const count = Math.max(0, Math.min(this.messageLedger.length, Math.trunc(compactedCount)));
-      const retained = this.messageLedger.readHistory().slice(count);
-      await this.replaceRuntimeHistory([summaryMsg, ...retained], "compaction");
-      return;
+      throw new Error(
+        "Durable Runtime does not support Session.applyCompaction; use a canonical Runtime checkpoint",
+      );
     }
     this.messageLedger.compact(summaryMsg, compactedCount);
     this.updatedAt = new Date();
-  }
-
-  private replaceRuntimeHistory(messages: readonly Message[], reason: string): Promise<void> {
-    const operationId = `${reason}:${randomUUID()}`;
-    return this.enqueuePersistence(reason, async (store) => {
-      await this.ensureRuntimeSession();
-      const rewindEvent: RuntimeHistoryRewoundEvent = {
-        ...this.runtimeEventBase(`${operationId}:rewind`, "session-history", "internal"),
-        kind: "history.rewound",
-        data: { branchId: operationId },
-      };
-      const events: RuntimeEvent[] = [rewindEvent];
-      for (const [index, message] of messages.entries()) {
-        const event: RuntimeMessageCommittedEvent = {
-          ...this.runtimeEventBase(`${operationId}:message:${index}`, "session-history", "model"),
-          kind: "message.committed",
-          data: { message: structuredClone(message) },
-        };
-        events.push(event);
-      }
-      await store.appendBatch(events);
-      await this.replayRuntimeHistoryProjection();
-    });
   }
 
   private runtimeEventBase(
@@ -2176,10 +2157,6 @@ async function resolveRuntimeRootSessionId(
   throw new Error(`Runtime session lineage contains a cycle at ${current}`);
 }
 
-function messageDigest(messages: readonly Message[]): string {
-  return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
-}
-
 function runtimeForkHistoryDigest(events: readonly RuntimeModelHistoryEvent[]): string {
   const payloads = events.map((event) =>
     event.kind === "message.committed"
@@ -2202,6 +2179,14 @@ function runtimeForkHistoryDigest(events: readonly RuntimeModelHistoryEvent[]): 
 function stripRuntimeMessageUsage(message: Message): Message {
   const { usage: _usage, ...copy } = structuredClone(message);
   return copy;
+}
+
+function assertRuntimeCommittedMessage(message: Message): void {
+  if (message.toolCallId !== undefined) {
+    throw new Error(
+      `Runtime ToolResult ${message.toolCallId} cannot be persisted as message.committed`,
+    );
+  }
 }
 
 /** 旧 undo 交互语义：跳过 system，且不跨越 compaction summary。 */

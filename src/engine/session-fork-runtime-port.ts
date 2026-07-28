@@ -52,8 +52,8 @@ export interface SessionForkBootstrapSeed {
   readonly operationId?: string;
   readonly operationCreatedAt?: string;
   readonly messages: readonly Message[];
-  /** v3 seeds retain the canonical fact kind and evidence reference for each message. */
-  readonly historyEntries?: readonly RuntimeModelHistoryEvent[];
+  /** Canonical fact kind and Evidence reference for every projected message. */
+  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceThroughEventId?: string;
   readonly workDir: string;

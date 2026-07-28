@@ -27,7 +27,6 @@ import {
   type RuntimeApprovalRequestedEvent,
   type RuntimeApprovalSettledEvent,
   type RuntimeCheckpointRecordedEvent,
-  type RuntimeEvidenceReference,
   type RuntimeEvent,
   type RuntimeEventBase,
   type RuntimeEventRefs,
@@ -120,8 +119,8 @@ export interface RuntimeForkBootstrapSeed {
   readonly operationCreatedAt?: string;
   /** The immutable, usage-free Session seed published by SessionForkService. */
   readonly messages: readonly Message[];
-  /** Frozen v3 fact history; v1/v2 callers omit it and use legacy Message imports. */
-  readonly historyEntries?: readonly RuntimeModelHistoryEvent[];
+  /** Frozen canonical fact history. Message-only v1/v2 fork seeds are unsupported. */
+  readonly historyEntries: readonly RuntimeModelHistoryEvent[];
   /** Effective model prefix replacement frozen at the same source cursor as messages. */
   readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
   /** Last source message included in the frozen seed, before target-side rewrites. */
@@ -214,7 +213,7 @@ export function deriveRuntimeForkBootstrapRunId(options: RuntimeForkBootstrapSee
   const messages = options.messages.map(stripMessageUsage);
   const historyEntries = normalizeForkHistoryEntries(options.historyEntries, messages);
   const completion: RuntimeForkBootstrapCompletion = {
-    sourceDigest: historyEntries ? forkHistorySeedDigest(historyEntries) : forkSeedDigest(messages),
+    sourceDigest: forkHistorySeedDigest(historyEntries),
     messageCount: messages.length,
   };
   const checkpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
@@ -240,7 +239,6 @@ export class RuntimeRun {
   private readonly terminalEventId?: string;
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
-  private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
   private turnId: string;
   private stepId: string;
@@ -417,9 +415,7 @@ export class RuntimeRun {
     const historyEntries = normalizeForkHistoryEntries(options.historyEntries, messages);
     const modelCheckpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
     const completion: RuntimeForkBootstrapCompletion = {
-      sourceDigest: historyEntries
-        ? forkHistorySeedDigest(historyEntries)
-        : forkSeedDigest(messages),
+      sourceDigest: forkHistorySeedDigest(historyEntries),
       messageCount: messages.length,
     };
     const identity = runtimeForkBootstrapIdentity(options, completion, modelCheckpoint);
@@ -452,7 +448,7 @@ export class RuntimeRun {
             `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
           );
         }
-        if ((historyEntries || modelCheckpoint) && completedMarker.runId !== identity.runId) {
+        if (completedMarker.runId !== identity.runId) {
           throw runtimeForkConflict(
             `Runtime fork target ${options.targetSessionId} has a conflicting canonical seed`,
           );
@@ -465,18 +461,11 @@ export class RuntimeRun {
         return false;
       }
 
-      const imported = projectRuntimeSessionMessageEntries(existingEvents).map(({ message }) =>
-        stripMessageUsage(message),
+      const importedCount = assertForkHistoryPrefix(
+        existingEvents,
+        historyEntries,
+        options.targetSessionId,
       );
-      const importedCount = historyEntries
-        ? assertForkHistoryPrefix(existingEvents, historyEntries, options.targetSessionId)
-        : assertMessageForkPrefix(imported, messages, options.targetSessionId);
-      // Compatibility: old bootstrap wrote session.forked before its copied messages.
-      // A complete old fork is already a usable history; only incomplete prefixes resume.
-      if (!modelCheckpoint && forkMarkers.length > 0 && importedCount === messages.length) {
-        await RuntimeRun.ensureForkState(options, store, writeGuard);
-        return false;
-      }
 
       const existingStart = existingEvents.find(
         (event) => event.kind === "run.started" && event.runId === identity.runId,
@@ -497,14 +486,10 @@ export class RuntimeRun {
         options.sourceThroughEventId ??
         (await resolveForkSourceThroughEventId(store, options.sourceSessionId, messages));
       for (let index = importedCount; index < messages.length; index += 1) {
-        if (historyEntries) {
-          await forkRun.recordImportedHistoryEvent(
-            historyEntries[index]!,
-            identity.messageEventId(index),
-          );
-        } else {
-          await forkRun.recordImportedMessage(messages[index]!, identity.messageEventId(index));
-        }
+        await forkRun.recordImportedHistoryEvent(
+          historyEntries[index]!,
+          identity.messageEventId(index),
+        );
       }
       if (modelCheckpoint) {
         const coveredEventIds = Array.from(
@@ -629,12 +614,17 @@ export class RuntimeRun {
     messages: readonly Message[],
   ): Promise<boolean> {
     if (messages.length === 0) return true;
+    const canonicalMessages = messages.map((message) => {
+      const canonical = canonicalizeRuntimeMessage(message);
+      assertRuntimeCommittedMessage(canonical);
+      return canonical;
+    });
     const capability = session.runtimeEventCapability;
     if (!capability) return false;
     const store = runtimeEventStoreFromCapability(capability);
     if (!(await store.readSessionManifest(session.id))) return false;
     const run = await RuntimeRun.start({ capability });
-    await run.run(() => run.commitMessages(session, messages));
+    await run.run(() => run.commitMessages(session, canonicalMessages));
     return true;
   }
 
@@ -648,6 +638,7 @@ export class RuntimeRun {
     message: Message,
   ): Promise<CommitReceipt | undefined> {
     const canonicalMessage = canonicalizeRuntimeMessage(message);
+    assertRuntimeCommittedMessage(canonicalMessage);
     const capability = session.runtimeEventCapability;
     if (!capability) return undefined;
     const store = runtimeEventStoreFromCapability(capability);
@@ -753,15 +744,18 @@ export class RuntimeRun {
       if (toolCallId) {
         const consumed = consumedByToolCallId.get(toolCallId) ?? 0;
         const registered = this.pendingToolResults.get(toolCallId)?.[consumed];
-        if (registered) {
-          if (!isDeepStrictEqual(canonicalMessage, registered.message)) {
-            throw new Error(
-              `Registered Runtime tool result ${toolCallId} must be committed with its canonical projection`,
-            );
-          }
-          consumedByToolCallId.set(toolCallId, consumed + 1);
-          return registered.event;
+        if (!registered) {
+          throw new Error(
+            `Runtime ToolResult ${toolCallId} must be registered as tool.result.recorded before commit`,
+          );
         }
+        if (!isDeepStrictEqual(canonicalMessage, registered.message)) {
+          throw new Error(
+            `Registered Runtime tool result ${toolCallId} must be committed with its canonical projection`,
+          );
+        }
+        consumedByToolCallId.set(toolCallId, consumed + 1);
+        return registered.event;
       }
       return this.messageCommittedEvent(createRuntimeEventId("message"), canonicalMessage);
     });
@@ -782,6 +776,7 @@ export class RuntimeRun {
   ): Promise<CommitReceipt> {
     this.assertSession(session);
     this.assertOpen();
+    assertRuntimeCommittedMessage(message);
     const event = this.messageCommittedEvent(eventId, message);
     const persisted = await this.append(event);
     await session.commitRuntimeProjectionBatch([persisted]);
@@ -789,13 +784,14 @@ export class RuntimeRun {
   }
 
   /** Writes one immutable, usage-free message from a fork's frozen Session seed. */
-  async recordImportedMessage(
+  private async recordImportedMessage(
     source: Message,
     eventId = createRuntimeEventId("fork-message"),
   ): Promise<void> {
     this.assertOpen();
     const message = canonicalizeRuntimeMessage(stripMessageUsage(source));
-    const refs = this.messageRefs(message);
+    assertRuntimeCommittedMessage(message);
+    const refs = this.refs();
     await this.append({
       ...this.base(eventId),
       ...(refs ? { refs } : {}),
@@ -832,7 +828,8 @@ export class RuntimeRun {
   async recordTranscriptMessage(message: Message): Promise<void> {
     this.assertOpen();
     const canonicalMessage = canonicalizeRuntimeMessage(message);
-    const refs = this.messageRefs(canonicalMessage);
+    assertRuntimeCommittedMessage(canonicalMessage);
+    const refs = this.refs();
     await this.append({
       ...this.base(createRuntimeEventId("transcript-message"), true, "transcript"),
       ...(refs ? { refs } : {}),
@@ -857,10 +854,6 @@ export class RuntimeRun {
       },
     };
     await this.append(event);
-  }
-
-  registerToolEvidence(toolCallId: string, evidence: RuntimeEvidenceReference): void {
-    this.evidenceByToolCallId.set(toolCallId, evidence);
   }
 
   /**
@@ -1064,18 +1057,10 @@ export class RuntimeRun {
     });
   }
 
-  private messageRefs(message: Message): RuntimeEventRefs | undefined {
-    if (!message.toolCallId) return this.refs();
-    const evidence = this.evidenceByToolCallId.get(message.toolCallId);
-    return this.refs({
-      toolCallId: message.toolCallId,
-      ...(evidence ? { evidence } : {}),
-    });
-  }
-
   private messageCommittedEvent(eventId: string, message: Message): RuntimeMessageCommittedEvent {
     const canonicalMessage = canonicalizeRuntimeMessage(message);
-    const refs = this.messageRefs(canonicalMessage);
+    assertRuntimeCommittedMessage(canonicalMessage);
+    const refs = this.refs();
     return {
       ...this.base(eventId),
       ...(refs ? { refs } : {}),
@@ -1151,9 +1136,9 @@ function findDanglingRuntimeToolCalls(
     // Rewind keeps canonical facts but removes them from the active Session projection.
     // Both a call and its result must be matched inside that same active projection.
     if (!activeMessageEventIds.has(event.eventId)) continue;
-    const message = projectRuntimeModelMessage(event);
-    if (!message) continue;
-    if (event.kind === "message.committed" && message.role === "assistant") {
+    if (event.kind === "message.committed") {
+      const message = projectRuntimeModelMessage(event);
+      if (!message || message.role !== "assistant") continue;
       for (const [callIndex, toolCall] of (message.toolCalls ?? []).entries()) {
         const entry: PendingRuntimeToolCall = {
           source: event,
@@ -1168,12 +1153,11 @@ function findDanglingRuntimeToolCalls(
       }
       continue;
     }
-    if (message.role !== "user" || message.toolCallId === undefined) continue;
-
-    const unresolved = unresolvedByToolCallId.get(message.toolCallId);
+    const toolCallId = event.refs.toolCallId;
+    const unresolved = unresolvedByToolCallId.get(toolCallId);
     const matched = unresolved?.shift();
     if (matched) matched.resolved = true;
-    if (unresolved?.length === 0) unresolvedByToolCallId.delete(message.toolCallId);
+    if (unresolved?.length === 0) unresolvedByToolCallId.delete(toolCallId);
   }
 
   return pending.filter((entry) => !entry.resolved);
@@ -1489,6 +1473,14 @@ function canonicalizeRuntimeMessage(message: Message): Message {
   }
 }
 
+function assertRuntimeCommittedMessage(message: Message): void {
+  if (message.toolCallId !== undefined) {
+    throw new Error(
+      `Runtime ToolResult ${message.toolCallId} cannot be persisted as message.committed`,
+    );
+  }
+}
+
 function canonicalizeRuntimeToolResultInput(
   input: EngineRuntimeToolResultInput,
 ): EngineRuntimeToolResultInput {
@@ -1499,10 +1491,6 @@ function canonicalizeRuntimeToolResultInput(
   } catch (error) {
     throw new Error("Runtime tool result must be JSON-serializable", { cause: error });
   }
-}
-
-function forkSeedDigest(messages: readonly Message[]): string {
-  return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 }
 
 function forkHistorySeedDigest(entries: readonly RuntimeModelHistoryEvent[]): string {
@@ -1519,10 +1507,9 @@ function isMessagePrefix(prefix: readonly Message[], messages: readonly Message[
 }
 
 function normalizeForkHistoryEntries(
-  entries: readonly RuntimeModelHistoryEvent[] | undefined,
+  entries: readonly RuntimeModelHistoryEvent[],
   messages: readonly Message[],
-): RuntimeModelHistoryEvent[] | undefined {
-  if (!entries) return undefined;
+): RuntimeModelHistoryEvent[] {
   const normalized = entries.map((source) => {
     const event = structuredClone(source);
     const eventId = event.eventId;
@@ -1564,19 +1551,6 @@ function assertForkHistoryPrefix(
   ) {
     throw runtimeForkConflict(
       `Runtime fork target ${targetSessionId} has incomplete facts that diverge from its frozen v3 history`,
-    );
-  }
-  return imported.length;
-}
-
-function assertMessageForkPrefix(
-  imported: readonly Message[],
-  expected: readonly Message[],
-  targetSessionId: string,
-): number {
-  if (!isMessagePrefix(imported, expected)) {
-    throw runtimeForkConflict(
-      `Runtime fork target ${targetSessionId} has incomplete facts that diverge from its frozen Session seed`,
     );
   }
   return imported.length;

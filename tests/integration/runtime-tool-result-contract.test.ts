@@ -10,6 +10,7 @@ import {
   runtimeEventHasModelHistoryEntry,
 } from "../../src/engine/runtime-model-message.js";
 import { materializeRuntimeHistory } from "../../src/engine/session-runtime-read-model.js";
+import { projectRuntimeSessionToolResultEntries } from "../../src/engine/session-runtime-projection.js";
 import { Session } from "../../src/engine/session.js";
 import type {
   RuntimeEvent,
@@ -85,19 +86,31 @@ test("tool.result.recorded codec enforces inline integrity and evidence refs", (
   );
 });
 
-test("mixed legacy and structured ToolResults replay in one ordered model history", () => {
+test("legacy Message ToolResults are rejected instead of replayed beside structured facts", () => {
   const assistant = messageEvent("assistant", {
     role: "assistant",
     content: "",
-    toolCalls: [
-      { id: "call:legacy", name: "legacy", arguments: "{}" },
-      { id: "call:new", name: "new", arguments: "{}" },
-    ],
+    toolCalls: [{ id: "call:legacy", name: "legacy", arguments: "{}" }],
   });
   const legacy = messageEvent("legacy-result", {
     role: "user",
     content: "legacy output",
     toolCallId: "call:legacy",
+  });
+  assert.throws(
+    () => decodeRuntimeEvent(legacy),
+    (error: unknown) =>
+      error instanceof RuntimeEventDecodeError && error.code === "invalid_payload",
+  );
+  assert.throws(
+    () => materializeRuntimeHistory([assistant, legacy]),
+    /cannot contain a ToolResult/u,
+  );
+
+  const canonicalAssistant = messageEvent("canonical-assistant", {
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id: "call:new", name: "new", arguments: "{}" }],
   });
   const structured = toolResultEvent({
     eventId: "structured-result",
@@ -112,12 +125,11 @@ test("mixed legacy and structured ToolResults replay in one ordered model histor
     },
   });
 
-  const history = materializeRuntimeHistory([assistant, legacy, structured]);
+  const history = materializeRuntimeHistory([canonicalAssistant, structured]);
   assert.deepEqual(
     history.map((message) => [message.toolCallId, message.content]),
     [
       [undefined, ""],
-      ["call:legacy", "legacy output"],
       ["call:new", "new output"],
     ],
   );
@@ -128,23 +140,23 @@ test("mixed legacy and structured ToolResults replay in one ordered model histor
     kind: "context.checkpoint.recorded",
     data: {
       checkpointId: "checkpoint",
-      coveredEventCount: 3,
-      sourceDigest: sha256("assistant\nlegacy-result\nstructured-result"),
+      coveredEventCount: 2,
+      sourceDigest: sha256("canonical-assistant\nstructured-result"),
       throughEventId: structured.eventId,
       summary: { role: "system", content: "compacted tool exchange" },
     },
   };
-  assert.deepEqual(materializeRuntimeHistory([assistant, legacy, structured, checkpoint]), [
+  assert.deepEqual(materializeRuntimeHistory([canonicalAssistant, structured, checkpoint]), [
     { role: "system", content: "compacted tool exchange" },
   ]);
 
   const rewound: RuntimeEvent = {
     ...baseEvent("rewind", "internal"),
     kind: "history.rewound",
-    data: { branchId: "rewind", throughEventId: assistant.eventId },
+    data: { branchId: "rewind", throughEventId: canonicalAssistant.eventId },
   };
   assert.throws(
-    () => materializeRuntimeHistory([assistant, legacy, structured, rewound]),
+    () => materializeRuntimeHistory([canonicalAssistant, structured, rewound]),
     /missing/u,
   );
 });
@@ -196,6 +208,95 @@ test("RuntimeRun registers one structured fact and commits its projected Message
     },
     result,
   ]);
+  const hydration = await session.readHydrationSnapshot();
+  assert.equal(hydration.toolResults.length, 1);
+  assert.equal(hydration.toolResults[0]?.eventId, events.at(-1)?.eventId);
+  assert.equal(hydration.toolResults[0]?.envelope.toolCallId, "call:registered");
+  assert.equal(hydration.toolResults[0]?.envelope.toolName, "read_file");
+  assert.equal(hydration.toolResults[0]?.envelope.status, "failed");
+  assert.equal(
+    hydration.toolResults[0]?.envelope.rawSizeBytes,
+    Buffer.byteLength("permission denied"),
+  );
+  assert.equal(hydration.toolResults[0]?.envelope.sha256, sha256("permission denied"));
+  assert.equal(hydration.toolResults[0]?.envelope.projection.text, "permission denied");
+  assert.equal("body" in (hydration.toolResults[0]?.envelope ?? {}), false);
+});
+
+test("RuntimeRun rejects an unregistered Message ToolResult before appending the batch", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-hard-cutover-"));
+  const session = new Session("tool-result-hard-cutover", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+  });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+
+  await assert.rejects(
+    run.commitMessages(session, [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call:legacy", name: "read_file", arguments: "{}" }],
+      },
+      { role: "user", content: "legacy result", toolCallId: "call:legacy" },
+    ]),
+    /must be registered as tool\.result\.recorded/u,
+  );
+  assert.deepEqual(
+    (await session.runtimeEventStore!.readRun(session.id, run.runId)).map((event) => event.kind),
+    ["run.started"],
+  );
+  await run.finish("failed", "expected test rejection");
+});
+
+test("ToolResult hydration envelopes exclude facts removed from the active branch", () => {
+  const removed = toolResultEvent({ eventId: "removed-result" });
+  const rewind: RuntimeEvent = {
+    ...baseEvent("clear-branch", "internal"),
+    kind: "history.rewound",
+    data: { branchId: "clear-branch" },
+  };
+  const active = toolResultEvent({
+    eventId: "active-result",
+    refs: { toolCallId: "call:active" },
+  });
+
+  const projected = projectRuntimeSessionToolResultEntries([
+    { sequence: 10, event: removed },
+    { sequence: 11, event: rewind },
+    { sequence: 12, event: active },
+  ]);
+  assert.deepEqual(
+    projected.map(({ sequence, eventId, envelope }) => [sequence, eventId, envelope.toolCallId]),
+    [[12, "active-result", "call:active"]],
+  );
+});
+
+test("durable Session disables Message-based truncate and compaction rewrites", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-history-hard-cutover-"));
+  const session = new Session("runtime-history-hard-cutover", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+  });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  await session.commitMessages({ role: "user", content: "keep canonical history" });
+  const before = await session.runtimeEventStore!.readSession(session.id);
+
+  await assert.rejects(session.truncateTo(0), /does not support Session\.truncateTo/u);
+  await assert.rejects(
+    session.applyCompaction("summary", 1),
+    /does not support Session\.applyCompaction/u,
+  );
+  assert.deepEqual(await session.runtimeEventStore!.readSession(session.id), before);
 });
 
 test("RuntimeRun durably records transcript ToolResult without polluting model history", async (t) => {

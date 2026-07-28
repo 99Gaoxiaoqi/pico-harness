@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,17 +69,14 @@ test("reconciliation replaces a tool result that was rewound after its active ca
   const { session } = await createFixture(context, "rewound-result");
   await session.commitMessages({ role: "user", content: "kept" });
   const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const result = registerInlineToolResult(run, "call:kept", "old result");
   await run.commitMessages(session, [
     {
       role: "assistant",
       content: "",
       toolCalls: [{ id: "call:kept", name: "read_file", arguments: "{}" }],
     },
-    {
-      role: "user",
-      content: "old result",
-      toolCallId: "call:kept",
-    },
+    result,
   ]);
   await session.rewindOnce("remove-only-result", 2);
 
@@ -94,9 +92,7 @@ test("reconciliation replaces a tool result that was rewound after its active ca
   );
   assert.equal(
     events.filter(
-      (event) =>
-        (event.kind === "message.committed" && event.data.message.toolCallId === "call:kept") ||
-        (event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:kept"),
+      (event) => event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:kept",
     ).length,
     2,
   );
@@ -111,17 +107,14 @@ test("reconciliation repairs a completed run in a separate terminal recovery run
   const { session } = await createFixture(context, "completed-rewound-result");
   await session.commitMessages({ role: "user", content: "kept" });
   const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const result = registerInlineToolResult(run, "call:completed", "old result");
   await run.commitMessages(session, [
     {
       role: "assistant",
       content: "",
       toolCalls: [{ id: "call:completed", name: "read_file", arguments: "{}" }],
     },
-    {
-      role: "user",
-      content: "old result",
-      toolCallId: "call:completed",
-    },
+    result,
   ]);
   await run.finish("completed");
   await session.rewindOnce("remove-completed-result", 2);
@@ -132,7 +125,7 @@ test("reconciliation repairs a completed run in a separate terminal recovery run
   assert.equal(
     originalEvents.filter(
       (event) =>
-        event.kind === "message.committed" && event.data.message.toolCallId === "call:completed",
+        event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:completed",
     ).length,
     1,
   );
@@ -208,4 +201,25 @@ async function createFixture(context: test.TestContext, suffix: string) {
   });
   await session.recover();
   return { root, session };
+}
+
+function registerInlineToolResult(run: RuntimeRun, toolCallId: string, content: string) {
+  return run.registerToolResult({
+    toolCallId,
+    toolName: "read_file",
+    status: "succeeded",
+    body: {
+      storage: "inline",
+      content,
+      sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+    },
+    projection: {
+      version: 1,
+      mode: "full",
+      text: content,
+      strategy: "full",
+      truncated: false,
+    },
+  });
 }
