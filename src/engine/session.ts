@@ -23,7 +23,10 @@ import {
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
-import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
+import {
+  assertDurableTranscriptEvent,
+  type DurableTranscriptEvent,
+} from "../presentation/transcript-event-store.js";
 import type { CommitReceipt, SessionCursor } from "./session-persistence.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
@@ -79,6 +82,12 @@ import {
   type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
 } from "./session-runtime-event.js";
+import {
+  createCanonicalTranscriptToolStart,
+  createRuntimeTranscriptToolStartEvent,
+  createTranscriptToolStartIdentity,
+  type CanonicalTranscriptToolStart,
+} from "./transcript-tool-start.js";
 import {
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
@@ -1597,6 +1606,122 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       return commitReceiptFromAppend(
         await store.appendTranscriptEvent(this.id, durableEvent, { eventId: runtimeEventId }),
       );
+    });
+  }
+
+  /**
+   * Atomically records the structured starts for one accepted provider batch.
+   * The whole batch is durable before Reporter callbacks or tool execution begin.
+   */
+  async recordRuntimeTranscriptToolStarts(input: {
+    readonly invocationId: string;
+    readonly runId: string;
+    readonly turnId: string;
+    readonly createdAt: number;
+    readonly toolCalls: readonly {
+      readonly id: string;
+      readonly name: string;
+      readonly arguments: string;
+    }[];
+    readonly refs?: RuntimeEventBase["refs"];
+  }): Promise<readonly CanonicalTranscriptToolStart[]> {
+    if (input.toolCalls.length === 0) return [];
+    const toolCalls = structuredClone(input.toolCalls);
+    const batch = {
+      invocationId: input.invocationId,
+      runId: input.runId,
+      turnId: input.turnId,
+      createdAt: input.createdAt,
+      ...(input.refs ? { refs: structuredClone(input.refs) } : {}),
+    };
+    const identities = toolCalls.map((_toolCall, callIndex) =>
+      createTranscriptToolStartIdentity({
+        sessionId: this.id,
+        runId: batch.runId,
+        turnId: batch.turnId,
+        callIndex,
+      }),
+    );
+
+    return this.enqueuePersistence("transcript tool start batch", async (store) => {
+      await this.ensureRuntimeSession();
+      const entries = await store.readSessionEntries(this.id);
+      const existing = identities.map(({ runtimeEventId }) =>
+        entries.find((entry) => entry.event.eventId === runtimeEventId),
+      );
+      const existingCount = existing.filter(Boolean).length;
+      if (existingCount !== 0) {
+        if (existingCount !== toolCalls.length) {
+          throw new Error(
+            `Runtime transcript tool start batch ${batch.runId}/${batch.turnId} is partially durable`,
+          );
+        }
+        return existing.map((entry, callIndex) => {
+          if (!entry || entry.event.kind !== "transcript.event.recorded") {
+            throw new Error(
+              `Runtime transcript tool start ${identities[callIndex]!.runtimeEventId} is bound to another payload`,
+            );
+          }
+          const start = entry.event.data.event;
+          assertDurableTranscriptEvent(start);
+          if (start.type !== "tool.started") {
+            throw new Error(
+              `Runtime transcript tool start ${entry.event.eventId} has an incompatible event type`,
+            );
+          }
+          const expected = createRuntimeTranscriptToolStartEvent({
+            sessionId: this.id,
+            invocationId: batch.invocationId,
+            runId: batch.runId,
+            turnId: batch.turnId,
+            start: createCanonicalTranscriptToolStart({
+              sessionId: this.id,
+              runId: batch.runId,
+              turnId: batch.turnId,
+              callIndex,
+              toolCall: toolCalls[callIndex]!,
+              sequence: start.sequence,
+              createdAt: start.createdAt,
+            }),
+            ...(batch.refs ? { refs: batch.refs } : {}),
+          });
+          if (!isDeepStrictEqual(entry.event, expected)) {
+            throw new Error(
+              `Runtime transcript tool start ${entry.event.eventId} is bound to another payload`,
+            );
+          }
+          return structuredClone(start);
+        });
+      }
+
+      const nextSequence =
+        projectRuntimeSessionTranscriptEventEntries(entries).reduce(
+          (maximum, entry) => Math.max(maximum, entry.event.sequence),
+          0,
+        ) + 1;
+      const starts = toolCalls.map((toolCall, callIndex) =>
+        createCanonicalTranscriptToolStart({
+          sessionId: this.id,
+          runId: batch.runId,
+          turnId: batch.turnId,
+          callIndex,
+          toolCall,
+          sequence: nextSequence + callIndex,
+          createdAt: batch.createdAt,
+        }),
+      );
+      const events = starts.map((start) =>
+        createRuntimeTranscriptToolStartEvent({
+          sessionId: this.id,
+          invocationId: batch.invocationId,
+          runId: batch.runId,
+          turnId: batch.turnId,
+          start,
+          ...(batch.refs ? { refs: batch.refs } : {}),
+        }),
+      );
+      await store.appendBatch(events);
+      return structuredClone(starts);
     });
   }
 

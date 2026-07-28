@@ -129,6 +129,9 @@ async function persistTimelineEvent(
         },
       });
     }
+    // AgentEngine persisted this structured start atomically before emitting the
+    // live timeline callback. Desktop must not create a second durable start.
+    if (isJsonRecord(data["canonicalTranscriptStart"])) return false;
     const providerCallId = optionalNonEmptyText(data["providerCallId"]);
     if (!providerCallId) return false;
     return persistTranscriptEvent(session, {

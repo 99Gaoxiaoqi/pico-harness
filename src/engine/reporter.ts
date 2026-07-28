@@ -7,6 +7,7 @@
 
 import pc from "picocolors";
 import type { ToolResultEnvelope } from "./tool-result-contract.js";
+import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 
 const diffColors = pc.createColors(true);
 
@@ -65,7 +66,13 @@ export interface Reporter {
   onThinkingEnd?(): void;
   /** 当模型决定调用工具时调用 */
   /** providerCallId 是当前 provider 响应内的强关联键，不能按工具名猜测。 */
-  onToolCall(toolName: string, args: string, providerCallId: string): void;
+  onToolCall(
+    toolName: string,
+    args: string,
+    providerCallId: string,
+    /** 已由 Runtime 原子持久化；宿主只能投影，不能再次落盘。 */
+    durableStart?: CanonicalTranscriptToolStart,
+  ): void;
   /** canonical ToolResult 持久化完成后，以有界结构化投影通知宿主。 */
   onToolResult(result: ToolResultEnvelope): void;
   /** 工具执行期间的增量输出；当前主要由前台 Bash 提供。 */
@@ -216,7 +223,12 @@ export class SilentReporter implements Reporter {
   onStart(): void {}
   onTurnStart(): void {}
   onThinking(): void {}
-  onToolCall(): void {}
+  onToolCall(
+    _toolName: string,
+    _args: string,
+    _providerCallId: string,
+    _durableStart?: CanonicalTranscriptToolStart,
+  ): void {}
   onToolResult(_result: ToolResultEnvelope): void {}
   onMessage(): void {}
   onFinish(): void {}

@@ -20,6 +20,12 @@ import {
   type RuntimeModelHistoryEvent,
 } from "../engine/runtime-model-message.js";
 import {
+  createCanonicalTranscriptToolStart,
+  createRuntimeTranscriptToolStartEvent,
+  createTranscriptToolStartIdentity,
+  type CanonicalTranscriptToolStart,
+} from "../engine/transcript-tool-start.js";
+import {
   normalizeSessionRuntimeStatePatch,
   type SessionRuntimeStateWritePatch,
 } from "../engine/session-runtime.js";
@@ -54,11 +60,13 @@ import {
   RuntimeEventStoreIntegrityError,
   createRuntimeEventId,
   type RuntimeEventStoreAppendResult,
+  type RuntimeEventStoreEntry,
 } from "../storage/runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
   projectRuntimeSessionState,
+  projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
 } from "../engine/session-runtime-projection.js";
 
@@ -359,15 +367,22 @@ export class RuntimeRun {
       );
       const last = events.at(-1) ?? started;
       const recoveryAt = existingTerminal?.at ?? last.at;
-      const syntheticToolResults = findDanglingRuntimeToolCalls(events, activeMessageEventIds).map(
-        (pending) =>
-          buildInterruptedToolResultEvent(events, pending, recoveryAt, manifest.activeBranchId),
+      const pendingToolCalls = findDanglingRuntimeToolCalls(events, activeMessageEventIds);
+      const syntheticToolResults = pendingToolCalls.map((pending) =>
+        buildInterruptedToolResultEvent(events, pending, recoveryAt, manifest.activeBranchId),
       );
+      const syntheticToolStarts = buildInterruptedTranscriptToolStartEvents({
+        entries: await store.readSessionEntries(sessionId),
+        pendingToolCalls,
+        activeBranchId: manifest.activeBranchId,
+        at: recoveryAt,
+      });
       if (existingTerminal && syntheticToolResults.length === 0) continue;
       const recoveryEvents = existingTerminal
         ? buildInterruptedToolRecoveryRun({
             sourceStarted: started,
             sourceTerminal: existingTerminal,
+            toolStarts: syntheticToolStarts,
             toolResults: syntheticToolResults,
             at: recoveryAt,
           })
@@ -392,7 +407,10 @@ export class RuntimeRun {
       };
       const results = await writeWithRuntimeEventGuard(
         capability.writeGuard,
-        () => store.appendBatch(recoveryEvents ?? [...syntheticToolResults, terminal]),
+        () =>
+          store.appendBatch(
+            recoveryEvents ?? [...syntheticToolStarts, ...syntheticToolResults, terminal],
+          ),
         `Runtime reconciliation for session ${sessionId}`,
       );
       if (results.some((result) => result.inserted)) reconciled.push(runId);
@@ -986,6 +1004,24 @@ export class RuntimeRun {
     await this.append(event);
   }
 
+  async recordTranscriptToolStarts(
+    session: Session,
+    toolCalls: readonly ToolCall[],
+  ): Promise<readonly CanonicalTranscriptToolStart[]> {
+    if (toolCalls.length === 0) return [];
+    this.assertSession(session);
+    this.assertOpen();
+    const refs = this.refs();
+    return session.recordRuntimeTranscriptToolStarts({
+      invocationId: this.invocationId,
+      runId: this.runId,
+      turnId: this.turnId,
+      createdAt: this.now().getTime(),
+      toolCalls,
+      ...(refs ? { refs } : {}),
+    });
+  }
+
   /**
    * Persists one complete child-agent ToolResult batch in Provider order
    * without changing the parent Session model projection.
@@ -1307,6 +1343,76 @@ function isPublishedCompletedForkBootstrap(events: readonly RuntimeEvent[]): boo
   return published && completed;
 }
 
+function buildInterruptedTranscriptToolStartEvents(options: {
+  readonly entries: readonly RuntimeEventStoreEntry[];
+  readonly pendingToolCalls: readonly PendingRuntimeToolCall[];
+  readonly activeBranchId: string;
+  readonly at: string;
+}): RuntimeTranscriptEventRecordedEvent[] {
+  if (options.pendingToolCalls.length === 0) return [];
+  const transcriptEntries = projectRuntimeSessionTranscriptEventEntries(options.entries);
+  const activeToolCallIds = new Set(
+    Object.keys(projectTranscriptEvents(transcriptEntries.map(({ event }) => event)).toolCalls),
+  );
+  const runtimeEventById = new Map(
+    options.entries.map(({ event }) => [event.eventId, event] as const),
+  );
+  let nextSequence =
+    transcriptEntries.reduce((maximum, { event }) => Math.max(maximum, event.sequence), 0) + 1;
+  const starts: RuntimeTranscriptEventRecordedEvent[] = [];
+
+  for (const pending of options.pendingToolCalls) {
+    const source = pending.source;
+    const identityInput = {
+      sessionId: source.sessionId,
+      runId: source.runId,
+      turnId: source.turnId,
+      callIndex: pending.callIndex,
+    };
+    const acceptedIdentity = createTranscriptToolStartIdentity(identityInput);
+    const recoveryIdentity = createTranscriptToolStartIdentity({
+      ...identityInput,
+      scope: `runtime-recovery:${options.activeBranchId}`,
+    });
+    const hasActiveStart = [acceptedIdentity.runtimeEventId, recoveryIdentity.runtimeEventId].some(
+      (eventId) => {
+        const event = runtimeEventById.get(eventId);
+        return (
+          event?.kind === "transcript.event.recorded" &&
+          event.data.event.type === "tool.started" &&
+          activeToolCallIds.has(event.data.event.toolCallId)
+        );
+      },
+    );
+    if (hasActiveStart) continue;
+
+    const createdAt = Date.parse(source.at);
+    if (!Number.isFinite(createdAt)) {
+      throw new Error(`Runtime tool-call source ${source.eventId} has an invalid timestamp`);
+    }
+    const start = createCanonicalTranscriptToolStart({
+      ...identityInput,
+      scope: `runtime-recovery:${options.activeBranchId}`,
+      toolCall: pending.toolCall,
+      sequence: nextSequence++,
+      createdAt,
+    });
+    starts.push({
+      ...createRuntimeTranscriptToolStartEvent({
+        sessionId: source.sessionId,
+        invocationId: source.invocationId,
+        runId: source.runId,
+        turnId: source.turnId,
+        start,
+        ...(source.refs ? { refs: source.refs } : {}),
+      }),
+      at: options.at,
+    });
+  }
+
+  return starts;
+}
+
 function buildInterruptedToolResultEvent(
   events: readonly RuntimeEvent[],
   pending: PendingRuntimeToolCall,
@@ -1369,10 +1475,11 @@ function buildInterruptedToolResultEvent(
 function buildInterruptedToolRecoveryRun(options: {
   readonly sourceStarted: RuntimeRunStartedEvent;
   readonly sourceTerminal: RuntimeRunTerminalEvent;
+  readonly toolStarts: readonly RuntimeTranscriptEventRecordedEvent[];
   readonly toolResults: readonly RuntimeToolResultRecordedEvent[];
   readonly at: string;
 }): RuntimeEvent[] {
-  const { sourceStarted, sourceTerminal, toolResults, at } = options;
+  const { sourceStarted, sourceTerminal, toolStarts, toolResults, at } = options;
   const recoveryRunId = runtimeInterruptionRecoveryEventId("run", [
     sourceStarted.sessionId,
     sourceStarted.runId,
@@ -1404,6 +1511,16 @@ function buildInterruptedToolRecoveryRun(options: {
       refs: { ...(event.refs ?? {}), ...parentRefs },
     }),
   );
+  const recoveredStarts = toolStarts.map(
+    (event): RuntimeTranscriptEventRecordedEvent => ({
+      ...event,
+      invocationId,
+      runId: recoveryRunId,
+      turnId,
+      at,
+      refs: { ...(event.refs ?? {}), ...parentRefs },
+    }),
+  );
   const terminal: RuntimeRunTerminalEvent = {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
     eventId: runtimeInterruptionRecoveryEventId("terminal", [recoveryRunId]),
@@ -1422,7 +1539,7 @@ function buildInterruptedToolRecoveryRun(options: {
       recovered: true,
     },
   };
-  return [started, ...recoveredResults, terminal];
+  return [started, ...recoveredStarts, ...recoveredResults, terminal];
 }
 
 function runtimeInterruptionRecoveryEventId(

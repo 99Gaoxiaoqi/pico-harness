@@ -22,6 +22,7 @@ import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
 } from "../engine/tool-result-contract.js";
+import type { CanonicalTranscriptToolStart } from "../engine/transcript-tool-start.js";
 import { summarizeTranscriptToolResult } from "../presentation/transcript-tool-result-hydration.js";
 import {
   defaultTranscriptDurabilityPolicy,
@@ -268,7 +269,12 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  onToolCall(toolName: string, args: string, providerCallId: string): void {
+  onToolCall(
+    toolName: string,
+    args: string,
+    providerCallId: string,
+    durableStart?: CanonicalTranscriptToolStart,
+  ): void {
     this.completeReasoningStream();
     if (isRequiredDelegation(toolName, args)) {
       this.suppressCurrentTurnAssistantResponse("required-delegation");
@@ -278,15 +284,38 @@ export class TuiReporter implements Reporter {
     if (normalizedProviderCallId === undefined) {
       throw new Error("TUI ToolCall providerCallId must not be empty");
     }
-    const entryId = this.eventStore.createId("entry");
-    const event = this.eventStore.append({
-      type: "tool.started",
-      entryId,
-      providerCallId: normalizedProviderCallId,
-      name: toolName,
-      args,
-    });
-    if (event.type !== "tool.started") {
+    if (
+      durableStart &&
+      (normalizeIdentity(durableStart.providerCallId) !== normalizedProviderCallId ||
+        durableStart.name !== toolName ||
+        durableStart.args !== args)
+    ) {
+      throw new Error("TUI canonical ToolCall start does not match the Reporter callback");
+    }
+    const entryId = durableStart?.entryId ?? this.eventStore.createId("entry");
+    let event: TranscriptEvent | undefined;
+    const append = (): void => {
+      event = this.eventStore.append({
+        type: "tool.started",
+        entryId,
+        ...(durableStart ? { toolCallId: durableStart.toolCallId } : {}),
+        providerCallId: normalizedProviderCallId,
+        name: toolName,
+        args,
+      });
+    };
+    if (durableStart) {
+      // Runtime already owns this durable fact. Keep the live projection identity
+      // aligned while suppressing the old Reporter-owned persistence path.
+      this.withoutDurableTranscript(append);
+      this.durableTranscriptSequence = Math.max(
+        this.durableTranscriptSequence,
+        durableStart.sequence,
+      );
+    } else {
+      append();
+    }
+    if (!event || event.type !== "tool.started") {
       throw new Error("TUI EventStore returned an unexpected event for tool.started");
     }
     const internalToolCallId = event.toolCallId;
