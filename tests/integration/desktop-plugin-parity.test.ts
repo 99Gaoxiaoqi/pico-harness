@@ -31,6 +31,23 @@ test("Desktop catalog and session activation share one Plugin snapshot", async (
   await mkdir(join(skillRoot, "plugin-skill"), { recursive: true });
   await mkdir(picoHome, { recursive: true });
   await writeFile(
+    join(workspace, ".pico", "config.json"),
+    JSON.stringify({
+      version: 1,
+      model: "test/coder",
+      providers: {
+        test: {
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "PICO_TEST_TOKEN",
+          discoverModels: false,
+          models: ["coder"],
+        },
+      },
+    }),
+    "utf8",
+  );
+  await writeFile(
     join(skillRoot, "plugin-skill", "SKILL.md"),
     [
       "---",
@@ -55,7 +72,7 @@ test("Desktop catalog and session activation share one Plugin snapshot", async (
     "utf8",
   );
   const canonicalWorkspace = await realpath(workspace);
-  const env = { PICO_HOME: picoHome };
+  const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   await trustStore.trust(canonicalWorkspace);
 

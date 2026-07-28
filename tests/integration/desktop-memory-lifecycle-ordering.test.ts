@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,7 +24,7 @@ test("session delete is blocked when lifecycle prepare cannot become durable", a
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
   await trustStore.trust(canonical);
   const runtime = new WorkspaceRuntimeService({
-    env: { PICO_HOME: fixture.picoHome },
+    env: fixture.env,
     execute: async () => undefined,
   });
   const memory = new PrepareFailingMemoryService({
@@ -35,7 +35,7 @@ test("session delete is blocked when lifecycle prepare cannot become durable", a
     runtimeService: runtime,
     trustStore,
     memoryService: memory,
-    env: { PICO_HOME: fixture.picoHome },
+    env: fixture.env,
   });
   context.after(async () => {
     await desktop.close();
@@ -76,14 +76,14 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
     join(paths.workspace.memory, "lock"),
   );
   const runtime = new WorkspaceRuntimeService({
-    env: { PICO_HOME: fixture.picoHome },
+    env: fixture.env,
     execute: async () => undefined,
   });
   const desktop = new DesktopRuntimeService({
     runtimeService: runtime,
     trustStore,
     memoryService: memory,
-    env: { PICO_HOME: fixture.picoHome },
+    env: fixture.env,
   });
   context.after(async () => {
     await desktop.close();
@@ -160,7 +160,7 @@ test("a delete failure after destructive work starts still commits lifecycle inv
     publish: () => undefined,
   });
   const runtime = new WorkspaceRuntimeService({
-    env: { PICO_HOME: fixture.picoHome },
+    env: fixture.env,
     execute: async () => undefined,
   });
   const desktop = new DesktopRuntimeService({
@@ -170,7 +170,7 @@ test("a delete failure after destructive work starts still commits lifecycle inv
     conversationStateStore: new FailingClearConversationStateStore({
       picoHome: fixture.picoHome,
     }),
-    env: { PICO_HOME: fixture.picoHome },
+    env: fixture.env,
   });
   context.after(async () => {
     await desktop.close();
@@ -329,12 +329,38 @@ async function createFixture(name: string): Promise<{
   readonly root: string;
   readonly picoHome: string;
   readonly workspace: string;
+  readonly env: Readonly<Record<string, string>>;
 }> {
   const root = await mkdtemp(join(tmpdir(), `pico-memory-lifecycle-${name}-`));
   const picoHome = join(root, "pico-home");
   const workspace = join(root, "workspace");
-  await Promise.all([mkdir(picoHome, { recursive: true }), mkdir(workspace, { recursive: true })]);
-  return { root, picoHome, workspace };
+  await Promise.all([
+    mkdir(picoHome, { recursive: true }),
+    mkdir(join(workspace, ".pico"), { recursive: true }),
+  ]);
+  await writeFile(
+    join(workspace, ".pico", "config.json"),
+    JSON.stringify({
+      version: 1,
+      model: "test/coder",
+      providers: {
+        test: {
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "PICO_TEST_TOKEN",
+          discoverModels: false,
+          models: ["coder"],
+        },
+      },
+    }),
+    "utf8",
+  );
+  return {
+    root,
+    picoHome,
+    workspace,
+    env: { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" },
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
