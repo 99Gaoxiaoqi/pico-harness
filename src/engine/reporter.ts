@@ -6,6 +6,7 @@
 // 注入不同实现即可切换展现层:TerminalReporter(CLI)/ WebReporter(HTTP)等。
 
 import pc from "picocolors";
+import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 const diffColors = pc.createColors(true);
 
@@ -70,9 +71,8 @@ export interface Reporter {
    * 为兼容旧 Reporter 调用暂时可选；新执行层应始终传入 provider ToolCall.id。
    */
   onToolCall(toolName: string, args: string, providerCallId?: string): void;
-  /** 当工具在底层执行完毕并返回结果时调用 */
-  /** providerCallId 应与 onToolCall 传入的 ID 相同。 */
-  onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void;
+  /** canonical ToolResult 持久化完成后，以有界结构化投影通知宿主。 */
+  onToolResult(result: ToolResultEnvelope): void;
   /** 工具执行期间的增量输出；当前主要由前台 Bash 提供。 */
   onToolOutput?(
     toolName: string,
@@ -140,18 +140,18 @@ export class TerminalReporter implements Reporter {
     console.log(`    -> 🛠️ 执行工具: ${toolName}, 参数: ${args}`);
   }
 
-  onToolResult(toolName: string, result: string, isError: boolean): void {
+  onToolResult(result: ToolResultEnvelope): void {
     this.stopSpinner();
-    if (isError) {
-      console.log(pc.red(`    -> ❌ 工具执行报错: ${result.slice(0, 200)}`));
+    if (result.status !== "succeeded") {
+      console.log(pc.red(`    -> ❌ 工具执行报错: ${result.projection.text.slice(0, 200)}`));
       return;
     }
     // 摘要:前 3 行(每行截断 100 字符),让用户知道工具读了啥。
-    const allLines = result.split("\n");
+    const allLines = result.projection.text.split("\n");
     const lines = allLines.slice(0, 3).map((l) => l.slice(0, 100));
     const summary = lines.join("\n    | ");
     const more = allLines.length > 3 ? `\n    | ... (共 ${allLines.length} 行)` : "";
-    console.log(pc.green(`    -> ✅ ${toolName}`) + ` (返回 ${result.length} 字节)`);
+    console.log(pc.green(`    -> ✅ ${result.toolName}`) + ` (返回 ${result.rawSizeBytes} 字节)`);
     if (summary.trim()) console.log(pc.dim(`    | ${summary}${more}`));
   }
 
@@ -222,7 +222,7 @@ export class SilentReporter implements Reporter {
   onTurnStart(): void {}
   onThinking(): void {}
   onToolCall(): void {}
-  onToolResult(): void {}
+  onToolResult(_result: ToolResultEnvelope): void {}
   onMessage(): void {}
   onFinish(): void {}
 }

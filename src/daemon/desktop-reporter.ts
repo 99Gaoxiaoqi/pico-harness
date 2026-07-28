@@ -4,6 +4,7 @@ import type {
   SubagentActivityEvent,
   SubagentTraceEvent,
 } from "../engine/reporter.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 
 const MAX_EVENT_TEXT_LENGTH = 64 * 1024;
 
@@ -68,15 +69,8 @@ export class DesktopReporter implements Reporter {
     });
   }
 
-  onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
-    const bounded = boundedText(result);
-    this.emit("tool.completed", {
-      toolName,
-      result: bounded.value,
-      isError,
-      truncated: bounded.truncated,
-      ...(providerCallId ? { providerCallId } : {}),
-    });
+  onToolResult(result: ToolResultEnvelope): void {
+    this.emit("tool.completed", { result });
   }
 
   onToolOutput(

@@ -18,6 +18,7 @@ import type {
   SubagentActivityEvent,
   SubagentTraceEvent,
 } from "../engine/reporter.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import {
   defaultTranscriptDurabilityPolicy,
@@ -386,8 +387,8 @@ export class TuiReporter implements Reporter {
     if (projectionChanged) this.emit();
   }
 
-  onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
-    const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId);
+  onToolResult(result: ToolResultEnvelope): void {
+    const internalToolCallId = this.resolvePendingToolId(result.toolName, result.toolCallId);
     if (internalToolCallId === undefined) {
       // rewind/clear 后到达的旧结果不再污染当前 transcript。
       this.emit();
@@ -396,29 +397,21 @@ export class TuiReporter implements Reporter {
     this.flushToolOutput(internalToolCallId);
     const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
     if (!tool) {
-      this.removePendingToolId(toolName, internalToolCallId, normalizeIdentity(providerCallId));
+      this.removePendingToolId(result.toolName, internalToolCallId, result.toolCallId);
       this.emit();
       return;
     }
-    const externalized = parseExternalizedToolResult(result);
-    const oversizedWithoutArtifact =
-      externalized === undefined && result.length > TUI_INLINE_TOOL_RESULT_LIMIT_CHARS;
-    const truncated = externalized !== undefined || oversizedWithoutArtifact;
-    const summary = externalized
-      ? formatExternalizedResultSummary(externalized)
-      : summarizeResult(toolName, tool.args, result, isError);
+    const isError = result.status !== "succeeded";
+    const truncated = result.projection.truncated || result.evidence !== undefined;
+    const summary = summarizeResult(result.toolName, tool.args, result.projection.text, isError);
     this.eventStore.append({
       type: "tool.completed",
       toolCallId: internalToolCallId,
-      status: resolveToolStatus(toolName, result, isError),
+      status: resolveToolStatus(result.toolName, result.projection.text, isError),
       summary,
       // stdout/stderr 增量不落盘；小结果必须由 completion 自包含，保证重启可恢复。
-      ...(!truncated ? { inlineResult: result } : {}),
-      ...(externalized?.artifactRef !== undefined ? { artifactRef: externalized.artifactRef } : {}),
-      ...(externalized?.artifactPath !== undefined
-        ? { artifactPath: externalized.artifactPath }
-        : {}),
-      size: externalized?.originalChars ?? result.length,
+      ...(!truncated ? { inlineResult: result.projection.text } : {}),
+      size: result.rawSizeBytes,
       truncated,
     });
     this.removePendingTool(tool);
@@ -901,12 +894,6 @@ export function parseExternalizedToolResult(
         ? "大型工具输出已保存到 artifact。"
         : lines.slice(summaryIndex + 1).join("\n"),
   };
-}
-
-function formatExternalizedResultSummary(metadata: ExternalizedToolResultMetadata): string {
-  const summary = metadata.summary.trim() || "大型工具输出已保存到 artifact。";
-  const location = metadata.artifactRef ?? metadata.artifactId;
-  return location ? `${summary}\n\n完整结果: ${location}` : summary;
 }
 
 function normalizeIdentity(value: string | undefined): string | undefined {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Reporter, SubagentActivityEvent } from "../engine/reporter.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 
 export interface SubagentActivityScope {
   activityId: string;
@@ -57,18 +58,20 @@ export class ScopedSubagentActivityReporter implements Reporter {
     this.emit({ currentAction: this.latestAction });
   }
 
-  onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
-    const traceId = this.takePendingToolTraceId(toolName, providerCallId);
+  onToolResult(result: ToolResultEnvelope): void {
+    const isError = result.status !== "succeeded";
+    const traceId = this.takePendingToolTraceId(result.toolName, result.toolCallId);
     if (traceId) {
       this.reporter.onSubagentTrace?.({
         activityId: this.scope.activityId,
         traceId,
         type: "tool.completed",
-        result,
+        result: result.projection.text,
         isError,
+        truncated: result.projection.truncated,
       });
     }
-    const action = this.latestAction ?? compact(toolName, 40);
+    const action = this.latestAction ?? compact(result.toolName, 40);
     this.emit({ currentAction: `${isError ? "工具失败" : "已完成"}：${action}` });
   }
 

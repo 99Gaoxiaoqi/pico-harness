@@ -1,4 +1,5 @@
 import { PICO_TOOL_RESULT_ERROR_KEY, type Message } from "../schema/message.js";
+import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
 import type {
   RuntimeEvent,
   RuntimeMessageCommittedEvent,
@@ -65,6 +66,20 @@ export function projectRuntimeToolResultMessage(event: RuntimeToolResultRecorded
         : {}),
     },
   };
+}
+
+/** Shared bounded host projection derived directly from the canonical fact. */
+export function projectRuntimeToolResultEnvelope(
+  event: RuntimeToolResultRecordedEvent,
+): ToolResultEnvelope {
+  return createToolResultEnvelope({
+    toolCallId: event.refs.toolCallId,
+    toolName: event.data.toolName,
+    status: event.data.status,
+    body: event.data.body,
+    projection: event.data.projection,
+    ...(event.refs.evidence ? { evidence: event.refs.evidence } : {}),
+  });
 }
 
 function renderEvidenceProjection(

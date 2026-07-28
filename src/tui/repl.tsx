@@ -106,6 +106,7 @@ import {
   SessionForkService,
 } from "../engine/session-fork-service.js";
 import type { Reporter } from "../engine/reporter.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
@@ -1117,10 +1118,10 @@ class LineModeReporter implements Reporter {
     this.output.write(`执行工具：${toolName}\n`);
   }
 
-  onToolResult(toolName: string, result: string, isError: boolean): void {
-    const summary = result.replace(/\s+/gu, " ").trim().slice(0, 180);
+  onToolResult(result: ToolResultEnvelope): void {
+    const summary = result.projection.text.replace(/\s+/gu, " ").trim().slice(0, 180);
     this.output.write(
-      `${isError ? "工具失败" : "工具完成"}：${toolName}${summary ? ` · ${summary}` : ""}\n`,
+      `${result.status !== "succeeded" ? "工具失败" : "工具完成"}：${result.toolName}${summary ? ` · ${summary}` : ""}\n`,
     );
   }
 

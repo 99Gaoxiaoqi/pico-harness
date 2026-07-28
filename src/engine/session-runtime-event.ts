@@ -2,23 +2,18 @@ import type { TranscriptEvent } from "../presentation/transcript-event-store.js"
 import type { Message, Usage } from "../schema/message.js";
 import { SESSION_RUNTIME_STATE_VERSION, type SessionRuntimeStatePatch } from "./session-runtime.js";
 import type {
+  RuntimeEvidenceReference,
   RuntimeToolResultBody,
   RuntimeToolResultProjection,
   RuntimeToolResultStatus,
 } from "./tool-result-contract.js";
+export type { RuntimeEvidenceReference } from "./tool-result-contract.js";
 
 /** Durable Session event contract. Runtime owns validation and storage adapters. */
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
 
 export type RuntimeEventVisibility = "model" | "transcript" | "internal";
 export type RuntimeTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
-
-export interface RuntimeEvidenceReference {
-  readonly schemaVersion: 1;
-  readonly contentHash: string;
-  readonly sessionId: string;
-  readonly kind: "tool-exchange";
-}
 
 export interface RuntimeEventRefs {
   readonly stepId?: string;
