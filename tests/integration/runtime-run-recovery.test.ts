@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Session } from "../../src/engine/session.js";
+import { createCanonicalTranscriptToolStart } from "../../src/engine/transcript-tool-start.js";
 import { hydrateCanonicalTranscriptEvents } from "../../src/presentation/transcript-tool-result-hydration.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "../../src/runtime/runtime-run.js";
@@ -117,6 +118,82 @@ test("reconciliation replaces a tool result that was rewound after its active ca
       .filter((event) => event.type === "tool.completed")
       .map((event) => (event.type === "tool.completed" ? event.result.toolCallId : undefined)),
     ["call:kept"],
+  );
+});
+
+test("reconciliation reuses a rewritten active model start despite a transcript-only result", async (context) => {
+  const { session } = await createFixture(context, "rewritten-active-start");
+  await session.commitMessages({ role: "user", content: "kept" });
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  await run.recordTurnStarted(1);
+  const toolCall = {
+    id: "call:rewritten-start",
+    name: "read_file",
+    arguments: '{"path":"README.md"}',
+  } as const;
+  await run.commitMessages(session, [
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [toolCall],
+    },
+  ]);
+  await session.recordTranscriptEvent(
+    createCanonicalTranscriptToolStart({
+      sessionId: session.id,
+      runId: run.runId,
+      turnId: `turn:${run.runId}:1`,
+      callIndex: 0,
+      scope: "runtime-recovery:previous-branch",
+      toolCall,
+      sequence: 1,
+      createdAt: 1,
+    }),
+    { eventId: "fork-rewritten:active-tool-start" },
+  );
+  const transcriptOnlyContent = "subagent result with a reused provider call ID";
+  await run.recordTranscriptToolResults([
+    {
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      status: "succeeded",
+      body: {
+        storage: "inline",
+        content: transcriptOnlyContent,
+        sha256: createHash("sha256").update(transcriptOnlyContent, "utf8").digest("hex"),
+        sizeBytes: Buffer.byteLength(transcriptOnlyContent, "utf8"),
+      },
+      projection: {
+        version: 1,
+        mode: "full",
+        text: transcriptOnlyContent,
+        strategy: "full",
+        truncated: false,
+      },
+    },
+  ]);
+
+  await RuntimeRun.reconcileIncompleteRuns({ capability: session.runtimeEventCapability! });
+
+  const hydration = await session.readHydrationSnapshot();
+  const starts = hydration.transcriptEvents.filter(
+    (event) => event.type === "tool.started" && event.providerCallId === toolCall.id,
+  );
+  assert.equal(starts.length, 1);
+  assert.equal(hydration.toolResults.length, 1);
+  const hydrated = hydrateCanonicalTranscriptEvents({
+    sessionId: hydration.sessionId,
+    updatedAt: hydration.updatedAt,
+    transcriptEvents: hydration.transcriptEvents,
+    transcriptEventSequences: hydration.transcriptEventSequences,
+    toolResults: hydration.toolResults,
+    rejectUnmatchedResults: true,
+  });
+  assert.deepEqual(
+    hydrated
+      .filter((event) => event.type === "tool.completed")
+      .map((event) => (event.type === "tool.completed" ? event.result.toolCallId : undefined)),
+    [toolCall.id],
   );
 });
 

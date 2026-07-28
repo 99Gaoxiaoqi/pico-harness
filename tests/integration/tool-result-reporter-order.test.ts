@@ -146,6 +146,116 @@ test("Reporter failure happens after canonical ToolResult commit and keeps Sessi
   }
 });
 
+test("onTurn failure closes a committed tool batch only after its durable start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-start-on-turn-failure-"));
+  const workDir = join(root, "workspace");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-start-on-turn-failure", workDir, {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+    runtimePort,
+  });
+  const failure = new Error("fixture onTurn failure");
+  const registry = new ToolRegistry();
+  registry.register(outputTool("on_turn_fixture", "must not execute"));
+  const provider: LLMProvider = {
+    async generate() {
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call:on-turn", name: "on_turn_fixture", arguments: "{}" }],
+      };
+    },
+  };
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run the fixture." });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      maxTurns: 2,
+      onTurn: () => {
+        throw failure;
+      },
+    });
+
+    await assert.rejects(engine.run(session), failure);
+
+    const hydration = await session.readHydrationSnapshot();
+    assert.equal(
+      hydration.transcriptEvents.filter((event) => event.type === "tool.started").length,
+      1,
+    );
+    assert.equal(hydration.toolResults.length, 1);
+    assert.doesNotThrow(() =>
+      hydrateCanonicalTranscriptEvents({
+        sessionId: hydration.sessionId,
+        updatedAt: hydration.updatedAt,
+        transcriptEvents: hydration.transcriptEvents,
+        transcriptEventSequences: hydration.transcriptEventSequences,
+        toolResults: hydration.toolResults,
+        rejectUnmatchedResults: true,
+      }),
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tool start persistence failure never commits an unmatched synthetic result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-start-persistence-failure-"));
+  const workDir = join(root, "workspace");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-start-persistence-failure", workDir, {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+    runtimePort,
+  });
+  const failure = new Error("fixture tool start persistence failure");
+  const registry = new ToolRegistry();
+  registry.register(outputTool("start_failure_fixture", "must not execute"));
+  const provider: LLMProvider = {
+    async generate() {
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call:start-failure", name: "start_failure_fixture", arguments: "{}" }],
+      };
+    },
+  };
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run the fixture." });
+    session.recordRuntimeTranscriptToolStarts = async () => {
+      throw failure;
+    };
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      maxTurns: 2,
+    });
+
+    await assert.rejects(engine.run(session), failure);
+
+    const hydration = await session.readHydrationSnapshot();
+    assert.equal(
+      hydration.transcriptEvents.filter((event) => event.type === "tool.started").length,
+      0,
+    );
+    assert.deepEqual(hydration.toolResults, []);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("abnormal parallel batch reports settled and synthetic ToolResults once after commit", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-result-reporter-batch-"));
   const workDir = join(root, "workspace");
