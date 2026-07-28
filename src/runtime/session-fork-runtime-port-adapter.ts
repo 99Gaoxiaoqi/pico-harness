@@ -27,7 +27,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         ...(options.operationId ? { operationId: options.operationId } : {}),
         ...(options.operationCreatedAt ? { operationCreatedAt: options.operationCreatedAt } : {}),
         messages: options.messages,
-        ...(options.historyEntries ? { historyEntries: options.historyEntries } : {}),
+        historyEntries: options.historyEntries,
         ...(options.modelCheckpoint ? { modelCheckpoint: options.modelCheckpoint } : {}),
         ...(options.sourceThroughEventId
           ? { sourceThroughEventId: options.sourceThroughEventId }
@@ -48,7 +48,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         ...(options.operationId ? { operationId: options.operationId } : {}),
         ...(options.operationCreatedAt ? { operationCreatedAt: options.operationCreatedAt } : {}),
         messages: options.messages,
-        ...(options.historyEntries ? { historyEntries: options.historyEntries } : {}),
+        historyEntries: options.historyEntries,
         ...(options.modelCheckpoint ? { modelCheckpoint: options.modelCheckpoint } : {}),
         ...(options.sourceThroughEventId
           ? { sourceThroughEventId: options.sourceThroughEventId }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import { SessionForkRuntimeConflictError } from "../../src/engine/session-fork-r
 import { createSessionForkRuntimePort } from "../../src/runtime/session-fork-runtime-port-adapter.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
 
 test("session fork runtime port preserves the durable fork lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-port-"));
@@ -25,13 +26,16 @@ test("session fork runtime port preserves the durable fork lifecycle", async () 
     const port = createSessionForkRuntimePort();
     await port.reconcileIncompleteRuns({ capability });
 
-    const messages = source.getHistory();
+    const snapshot = await source.readDurableForkSnapshot();
+    const messages = snapshot.hydration.messages;
+    const historyEntries = snapshot.runtimeHistoryEntries;
     const runId = port.deriveBootstrapRunId({
       sourceSessionId: source.id,
       targetSessionId: "fork-port-target",
       operationId: "fork-port-operation",
       operationCreatedAt: "2026-01-01T00:00:00.000Z",
       messages,
+      historyEntries,
       workDir,
       runtimeAuthority: store,
     });
@@ -49,6 +53,7 @@ test("session fork runtime port preserves the durable fork lifecycle", async () 
       operationId: "fork-port-operation",
       operationCreatedAt: "2026-01-01T00:00:00.000Z",
       messages,
+      historyEntries,
       workDir,
       runtimeAuthority: store,
       publication,
@@ -151,6 +156,65 @@ test("session fork rejects a Runtime store that differs from the source Session"
   }
 });
 
+test("SessionForkService explicitly rejects legacy v1/v2 Message-only bundles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-bundle-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const journal = new StorageOperationJournal({ workDir, picoHome });
+  const service = new SessionForkService({
+    workDir,
+    picoHome,
+    journal,
+    runtimePort: createSessionForkRuntimePort(),
+  });
+  try {
+    for (const version of [1, 2] as const) {
+      const operationId = `legacy-fork-v${version}`;
+      const stagingDirectory = join(root, "staging", operationId);
+      const sourceCursor = {
+        logId: "legacy-source",
+        seq: version,
+        epoch: 0,
+        eventId: `source-event-v${version}`,
+      };
+      await mkdir(stagingDirectory, { recursive: true });
+      await writeFile(
+        join(stagingDirectory, "runtime-fork.json"),
+        `${JSON.stringify({
+          schemaVersion: version,
+          operationId,
+          sourceSessionId: "legacy-source",
+          targetSessionId: `legacy-target-v${version}`,
+          sourceCursor,
+          messages: [],
+        })}\n`,
+      );
+      await journal.create({
+        kind: "fork",
+        operationId,
+        sessionId: "legacy-source",
+        sourceSessionId: "legacy-source",
+        sourceCursor,
+        targetSessionId: `legacy-target-v${version}`,
+        targetMode: "default",
+        stagingDirectory,
+      });
+    }
+
+    await service.reconcileUnfinished();
+    for (const version of [1, 2] as const) {
+      const operation = await journal.get(`legacy-fork-v${version}`);
+      assert.equal(operation?.state, "needs_attention");
+      assert.match(
+        operation?.error?.message ?? "",
+        new RegExp(`v${version} is no longer supported`, "u"),
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("fork bootstrap reports a conflicting terminal as a typed durable conflict", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-terminal-conflict-"));
   const workDir = join(root, "workspace");
@@ -161,12 +225,14 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
     await source.commitMessages({ role: "user", content: "seed" });
     const store = source.runtimeEventStore!;
     const port = createSessionForkRuntimePort();
+    const snapshot = await source.readDurableForkSnapshot();
     const bootstrap = {
       sourceSessionId: source.id,
       targetSessionId: "fork-terminal-target",
       operationId: "fork-terminal-operation",
       operationCreatedAt: "2026-01-01T00:00:00.000Z",
-      messages: source.getHistory(),
+      messages: snapshot.hydration.messages,
+      historyEntries: snapshot.runtimeHistoryEntries,
       workDir,
       runtimeAuthority: store,
       publication: { async assertOwned() {} },

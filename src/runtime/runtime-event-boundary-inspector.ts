@@ -271,15 +271,6 @@ function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] 
       pending.add(toolCallId);
       continue;
     }
-    if (
-      event.kind === "message.committed" &&
-      event.data.message.role === "user" &&
-      event.data.message.toolCallId &&
-      event.data.message.providerData?.["picoKind"] !== "synthetic_tool_result"
-    ) {
-      pending.delete(event.data.message.toolCallId);
-      continue;
-    }
     if (event.kind === "tool.result.recorded" && event.data.projection.mode !== "synthetic") {
       pending.delete(event.refs.toolCallId);
     }

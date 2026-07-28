@@ -729,21 +729,27 @@ test("an expired launched successor is interrupted and parks without its own bou
 test("synthetic interrupted tool results remain pending and park file-backed recovery", async (t) => {
   const fixture = await prepareFileRecovery(t, (workspace) =>
     runtimeFacts(workspace).map((event): RuntimeEvent => {
-      if (event.kind !== "message.committed" || event.eventId !== "runtime-tool-result") {
+      if (event.kind !== "tool.result.recorded" || event.eventId !== "runtime-tool-result") {
         return event;
       }
+      const content = "tool execution was interrupted";
       return {
         ...event,
         data: {
-          message: {
-            role: "user",
-            content: "tool execution was interrupted",
-            toolCallId: "tool-call-1",
-            providerData: {
-              picoToolResultIsError: true,
-              picoKind: "synthetic_tool_result",
-              picoToolResultStatus: "interrupted",
-            },
+          ...event.data,
+          status: "interrupted",
+          body: {
+            storage: "inline",
+            content,
+            sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+            sizeBytes: Buffer.byteLength(content, "utf8"),
+          },
+          projection: {
+            version: 1,
+            mode: "synthetic",
+            text: content,
+            strategy: "runtime-interruption-recovery",
+            truncated: false,
           },
         },
       };
@@ -1241,12 +1247,22 @@ function runtimeFacts(workspace: string): RuntimeEvent[] {
       eventId: "runtime-tool-result",
       visibility: "model",
       refs: { toolCallId: "tool-call-1" },
-      kind: "message.committed",
+      kind: "tool.result.recorded",
       data: {
-        message: {
-          role: "user",
+        toolName: "write_file",
+        status: "succeeded",
+        body: {
+          storage: "inline",
           content: "tool completed",
-          toolCallId: "tool-call-1",
+          sha256: createHash("sha256").update("tool completed", "utf8").digest("hex"),
+          sizeBytes: Buffer.byteLength("tool completed", "utf8"),
+        },
+        projection: {
+          version: 1,
+          mode: "full",
+          text: "tool completed",
+          strategy: "full",
+          truncated: false,
         },
       },
     },
