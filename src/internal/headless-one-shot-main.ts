@@ -27,13 +27,13 @@ async function main(): Promise<void> {
 
   let outcome: HeadlessOneShotOutcome;
   try {
-    const raw = await readStdin();
+    const raw = await readStdin(abortController.signal);
     outcome = await runHeadlessOneShotJson(raw, {
       signal: abortController.signal,
       ...(signalKind ? { signalKind } : {}),
     });
   } catch {
-    outcome = fallbackFailure();
+    outcome = signalKind ? signalBeforeRequest(signalKind) : fallbackFailure();
   } finally {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
@@ -43,7 +43,24 @@ async function main(): Promise<void> {
   stdout.write(line, () => process.exit(outcome.exitCode));
 }
 
-async function readStdin(): Promise<string> {
+async function readStdin(signal: AbortSignal): Promise<string> {
+  const reading = collectStdin();
+  let rejectCanceled!: (reason: unknown) => void;
+  const canceled = new Promise<never>((_resolve, reject) => {
+    rejectCanceled = reject;
+  });
+  const onAbort = () =>
+    rejectCanceled(signal.reason ?? new DOMException("stdin read canceled", "AbortError"));
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([reading, canceled]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function collectStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of stdin) {
@@ -55,6 +72,32 @@ async function readStdin(): Promise<string> {
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+function signalBeforeRequest(signal: "SIGINT" | "SIGTERM"): HeadlessOneShotOutcome {
+  const exitCode = signal === "SIGTERM" ? 143 : 130;
+  const result: HeadlessOneShotResultV1 = {
+    schemaVersion: 1,
+    requestId: null,
+    status: "canceled",
+    sessionId: null,
+    workDir: null,
+    finalMessage: null,
+    usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+    durationMs: 0,
+    tracePath: null,
+    effective: {
+      modelRouteId: null,
+      thinkingEffort: null,
+      permissionMode: null,
+      allowedTools: [],
+    },
+    error: {
+      code: signal,
+      summary: "The headless process was canceled before a complete request was received.",
+    },
+  };
+  return { result, exitCode, shutdownConfirmed: true };
 }
 
 function fallbackFailure(): HeadlessOneShotOutcome {
