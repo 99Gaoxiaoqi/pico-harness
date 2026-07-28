@@ -7,7 +7,7 @@ import {
   createRuntimeAuthRequest,
   createRuntimeRequest,
   encodeRuntimeFrame,
-  isJsonObject,
+  parseDesktopRuntimeResult,
   RuntimeFrameDecoder,
 } from "./protocol.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
@@ -124,18 +124,16 @@ export async function pingLocalRuntimeDaemon(
 ): Promise<boolean> {
   try {
     const token = await createLocalIpcAuthTokenStore(endpoint).read();
-    if (await probeRuntimeDaemon(endpoint, timeoutMs, token)) return true;
+    return await probeRuntimeDaemon(endpoint, timeoutMs, token);
   } catch {
-    // An unavailable token may indicate a pre-authentication daemon. Probe it below only for
-    // singleton migration; current daemons never service an unauthenticated ping.
+    return false;
   }
-  return await probeRuntimeDaemon(endpoint, timeoutMs);
 }
 
 async function probeRuntimeDaemon(
   endpoint: LocalDaemonEndpoint,
   timeoutMs: number,
-  authToken?: string,
+  authToken: string,
 ): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     const socket = connect(endpoint.address);
@@ -151,7 +149,7 @@ async function probeRuntimeDaemon(
     };
     const timeout = setTimeout(() => finish(false), timeoutMs);
     socket.once("connect", () => {
-      socket.write(encodeRuntimeFrame(authToken ? createRuntimeAuthRequest(authToken) : request));
+      socket.write(encodeRuntimeFrame(createRuntimeAuthRequest(authToken)));
     });
     socket.once("error", () => finish(false));
     socket.on("data", (chunk: Buffer) => {
@@ -163,7 +161,16 @@ async function probeRuntimeDaemon(
             continue;
           }
           if (message.kind !== "response" || message.requestId !== request.requestId) continue;
-          finish(message.ok && isJsonObject(message.result) && message.result.pong === true);
+          if (!message.ok) {
+            finish(false);
+            continue;
+          }
+          try {
+            parseDesktopRuntimeResult("runtime.ping", message.result);
+            finish(true);
+          } catch {
+            finish(false);
+          }
         }
       } catch {
         finish(false);
