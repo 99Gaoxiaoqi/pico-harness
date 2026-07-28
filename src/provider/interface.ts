@@ -9,6 +9,11 @@ const PROVIDER_TIMEOUT_MS = 120_000;
 export interface LLMProviderRequestOptions {
   /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
   signal?: AbortSignal;
+  /**
+   * 禁止本次响应调用工具。支持该语义的 Provider 可保留工具 Schema，
+   * 不支持的 Provider 必须由调用方通过 requestCapabilities 能力门控后传空工具集。
+   */
+  toolChoice?: "none";
   /** 请求用途，供计费、审计与可观测层区分普通 Agent 与 Hook 判定。 */
   purpose?: "hook";
   /** Provider 返回可展示的 reasoning/thinking 增量时调用；不得混入最终回答正文。 */
@@ -27,6 +32,12 @@ export interface PreparedProviderRequest {
   provider: "claude" | "openai" | "gemini";
   model: string;
   body: Readonly<Record<string, unknown>>;
+}
+
+/** Provider 对请求级协议选项的显式支持；未声明一律按不支持处理。 */
+export interface LLMProviderRequestCapabilities {
+  /** 能否在保留工具 Schema 的同时，通过 wire 参数可靠禁止工具调用。 */
+  readonly toolChoiceNoneWithTools: boolean;
 }
 
 /** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */
@@ -50,6 +61,8 @@ export interface LLMProvider {
   isRetryableError?(error: unknown): boolean;
   /** 可选:模型名,供重试 / 计费日志打点。 */
   readonly modelName?: string;
+  /** 可选:请求级协议能力；装饰器必须透明转发，未声明时调用方安全降级。 */
+  readonly requestCapabilities?: LLMProviderRequestCapabilities;
   /**
    * 可选:流式生成。与非流式 generate 行为一致,但每收到一段文本就调 onDelta 回调。
    * 如果 Provider 未实现此方法,loop.ts 自动降级到非流式 generate。

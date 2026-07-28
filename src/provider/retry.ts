@@ -6,7 +6,7 @@
 // 因此即便 provider 没有自定义判定,也用 defaultIsRetryableError 兜底继续重试,
 // 而非像 kimi-code 那样直接走单次快路径(默认兜底始终生效)。
 
-import type { LLMProvider } from "./interface.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import { ContextOverflowError, isAbortError, isTimeoutError, LLMStatusError } from "./errors.js";
 import { logger } from "../observability/logger.js";
@@ -30,6 +30,8 @@ export interface RetryOptions {
   maxAttempts?: number;
   /** 可选中止信号:已 abort 时不再重试,sleep 期间也响应 abort */
   signal?: AbortSignal;
+  /** 透传给每次实际 Provider 请求；重试和凭证轮换期间保持不变。 */
+  toolChoice?: LLMProviderRequestOptions["toolChoice"];
   /** 重试事件回调:每次决定重试时触发,供上层打点 / Tracing */
   onRetry?: (info: RetryInfo) => void;
   /**
@@ -128,12 +130,16 @@ export async function generateWithRetry(
   const signal = options?.signal;
   const onRetry = options?.onRetry;
   const onRateLimited = options?.onRateLimited;
+  const requestOptions: LLMProviderRequestOptions = {
+    signal,
+    ...(options?.toolChoice ? { toolChoice: options.toolChoice } : {}),
+  };
   let timeoutRetries = 0;
 
   // 快路径:只允许调用一次,失败即抛(兜底失败日志仍记录)
   if (maxAttempts <= 1) {
     try {
-      const result = await provider.generate(messages, tools, { signal });
+      const result = await provider.generate(messages, tools, requestOptions);
       signal?.throwIfAborted();
       return result;
     } catch (error) {
@@ -151,7 +157,7 @@ export async function generateWithRetry(
   for (let attempt = 1; ; attempt++) {
     try {
       if (attempt > 1) signal?.throwIfAborted();
-      const result = await activeProvider.generate(messages, tools, { signal });
+      const result = await activeProvider.generate(messages, tools, requestOptions);
       signal?.throwIfAborted();
       return result;
     } catch (error) {
