@@ -63,9 +63,9 @@ adapter 必须避免重复真实副作用，且只有确认执行已经安装后
 SQLite/WAL/SHM/rollback journal、锁与事务文件一律不进入计划。Portable TaskRun 的
 `storageRootId` 不匹配时只能只读审计，不能 repair、追加 park 或接管执行。
 
-首次打开工作区时会在旧 `runtime/lock/` 位置保留升级 fence。旧版本会因此拒绝写入，避免
-旧 `runtime/` 与新 `sessions/`、`control/` 静默分叉。若必须回滚，先停止所有新版本进程，
-再显式移除 fence；不要让两个布局版本并行运行。
+当前版本不会创建或保留旧 `runtime/lock/` 升级 fence。任意非空旧 `runtime/`，包括
+lock、tombstone、candidate、control 和 sessions，都会阻止 v2 初始化，且不会被自动删除、
+复制或迁移。开发期确认放弃旧会话后，应由使用者显式删除旧目录；不要让两个布局版本并行运行。
 
 运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。TUI 在下一轮发送前重新解析配置；Desktop 通过 Runtime 事件刷新，并在窗口重新聚焦时补一次读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
 
