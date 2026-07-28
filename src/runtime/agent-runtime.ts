@@ -924,7 +924,12 @@ export async function executeAgentRuntime(
       runtimeEvidenceArchive: evidenceArchive,
       subagentReportEvidenceWriter,
       reporter,
-      tracer: traceEnabled ? new Tracer({ picoHome }) : undefined,
+      tracer: traceEnabled
+        ? new Tracer({
+            picoHome,
+            ...(dependencies.isolatedHeadless ? { attributePolicy: "metadata-only" as const } : {}),
+          })
+        : undefined,
       steerQueue,
       ...(dependencies.waitAtSafeBoundary
         ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }

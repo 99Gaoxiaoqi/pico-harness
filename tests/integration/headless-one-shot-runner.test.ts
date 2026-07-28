@@ -174,6 +174,35 @@ test("trace baseline detects an in-place overwrite of a colliding Session filena
   assert.equal(trace.includes("[REDACTED]"), true);
 });
 
+test("metadata-only trace attributes survive SIGKILL before post-processing", async (context) => {
+  const fixture = await createFixture(context, "trace-sigkill");
+  await configureFixture(fixture, "secret-canary-trace-sigkill-route");
+  const workspaceCanary = "SIGKILL_TRACE_SECRET_CANARY_MUST_NOT_APPEAR";
+  const secretPath = join(fixture.workspace, "sigkill-secret.txt");
+  await writeFile(secretPath, workspaceCanary);
+  const request = {
+    ...requestFor(fixture, "trace-sigkill"),
+    allowedTools: ["read_file"],
+  };
+  const child = spawnTraceKillChild(secretPath);
+  const exported = waitForStreamText(child.stderr, "TRACE_EXPORTED");
+  child.stdin.end(JSON.stringify(request));
+  await exported;
+  child.kill("SIGKILL");
+  const [, signal] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
+  assert.equal(signal, "SIGKILL");
+
+  const traceDirectory = resolvePicoPaths(await realpath(fixture.workspace), {
+    picoHome: await realpath(fixture.picoHome),
+  }).workspace.traces;
+  const traceFiles = (await readdir(traceDirectory)).filter((name) => name.endsWith(".json"));
+  assert.equal(traceFiles.length, 1);
+  const trace = await readFile(join(traceDirectory, traceFiles[0]!), "utf8");
+  assert.equal(trace.includes(workspaceCanary), false);
+  assert.equal(trace.includes(secretPath), false);
+  assert.equal(trace.includes("[REDACTED]"), true);
+});
+
 test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail before generation", async (context) => {
   const fixture = await createFixture(context, "preflight");
   await configureFixture(fixture, "secret-canary-preflight", false);
@@ -966,6 +995,23 @@ function spawnUnconfirmedChild(mode: "timeout" | "hang"): ChildProcessWithoutNul
         NODE_ENV: "test",
         LOG_LEVEL: "fatal",
         HEADLESS_CHILD_MODE: mode,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+}
+
+function spawnTraceKillChild(secretPath: string): ChildProcessWithoutNullStreams {
+  return spawn(
+    process.execPath,
+    ["--import", "tsx", "tests/fixtures/headless-one-shot-trace-kill-child.ts"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        LOG_LEVEL: "fatal",
+        TRACE_KILL_SECRET_PATH: secretPath,
       },
       stdio: ["pipe", "pipe", "pipe"],
     },
