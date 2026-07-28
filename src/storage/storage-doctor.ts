@@ -35,7 +35,6 @@ import {
 } from "./local-file-storage.js";
 import {
   decodeWorkspaceStorageLayout,
-  decodeWorkspaceStorageLayoutMarker,
   readWorkspaceStorageRootIdentitySync,
   WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
   WORKSPACE_STORAGE_COMMIT_FILE,
@@ -466,44 +465,34 @@ export class StorageDoctor {
     }
 
     const layoutPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
-    let legacyLayoutRequiresUpgrade = false;
+    let layoutSupported = true;
     if (await pathExists(layoutPath)) {
       try {
-        const layout = decodeWorkspaceStorageLayoutMarker(
+        decodeWorkspaceStorageLayout(
           parseJson(await readFile(layoutPath, "utf8"), "Workspace storage layout"),
           layoutPath,
         );
-        if (layout.schemaVersion === 1) {
-          findings.push(
-            finding(
-              "runtime_layout_upgrade_required",
-              "warning",
-              "runtime",
-              layoutPath,
-              "Workspace storage layout predates stable root identity",
-              "Open the workspace with the current pico build to upgrade the marker under lock",
-              "authoritative",
-            ),
-          );
-          legacyLayoutRequiresUpgrade = true;
-        } else {
-          decodeWorkspaceStorageLayout(layout, layoutPath);
-        }
       } catch (error) {
+        const message = errorMessage(error);
+        const unsupported = message.includes(
+          "Unsupported workspace storage layout schema version 1",
+        );
         findings.push(
           finding(
-            "runtime_layout_invalid",
+            unsupported ? "runtime_layout_unsupported" : "runtime_layout_invalid",
             "critical",
             "runtime",
             layoutPath,
-            errorMessage(error),
-            "Preserve the marker and restore it from a verified copy",
+            message,
+            unsupported
+              ? "Back up or delete the unsupported development state, then initialize a fresh version 2 workspace"
+              : "Preserve the marker and restore it from a verified copy",
             "authoritative",
           ),
         );
-        return false;
+        layoutSupported = false;
       }
-      if (!legacyLayoutRequiresUpgrade) {
+      if (layoutSupported) {
         try {
           readWorkspaceStorageRootIdentitySync(this.runtimeStorageRoot);
         } catch (error) {
@@ -558,7 +547,7 @@ export class StorageDoctor {
       );
       return false;
     }
-    if (legacyLayoutRequiresUpgrade) return false;
+    if (!layoutSupported) return false;
 
     const statePath = join(this.runtimeStorageRoot, "control", "state.json");
     let stateNextSequence: number | undefined;
@@ -749,13 +738,13 @@ export class StorageDoctor {
     ) {
       findings.push(
         finding(
-          "legacy_runtime_json_preserved",
-          "warning",
+          "legacy_runtime_json_unsupported",
+          "critical",
           "runtime",
           this.legacyJsonRuntimePath,
-          "The pre-v2 Runtime JSON directory is preserved and is not used after layout migration",
-          "Keep it as a rollback artifact until the new sessions/control layout is verified",
-          "sidecar",
+          "Pre-v2 Runtime JSON exists, but current stores do not read, migrate, or rewrite it",
+          "Back it up for manual inspection or delete it before initializing fresh Runtime v2 state",
+          "authoritative",
         ),
       );
     }
