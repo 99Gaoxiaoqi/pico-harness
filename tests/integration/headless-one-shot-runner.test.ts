@@ -281,6 +281,17 @@ test("the internal process entry maps SIGTERM to canceled/143 with one JSON line
   assert.equal(result.stderr.includes("secret-canary-process-signal"), false);
 });
 
+test("SIGINT and SIGTERM cancel while stdin remains open", async () => {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const result = await runProcessWithOpenStdin(signal);
+    assert.equal(result.code, signal === "SIGTERM" ? 143 : 130);
+    assert.equal(result.stdout.trim().split("\n").length, 1);
+    const payload = JSON.parse(result.stdout) as { status: string; error: { code: string } };
+    assert.equal(payload.status, "canceled");
+    assert.equal(payload.error.code, signal);
+  }
+});
+
 interface Fixture {
   readonly root: string;
   readonly workspace: string;
@@ -457,6 +468,25 @@ async function collectChild(
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
   child.stdin.end(input);
+  const [code] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
+  return {
+    code,
+    stdout: Buffer.concat(stdout).toString("utf8"),
+    stderr: Buffer.concat(stderr).toString("utf8"),
+  };
+}
+
+async function runProcessWithOpenStdin(
+  signal: "SIGINT" | "SIGTERM",
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawnHeadlessProcess();
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.stdin.write("{");
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 1_500));
+  child.kill(signal);
   const [code] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
   return {
     code,
