@@ -52,6 +52,11 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   /** Stable providerID/modelID identity required by every durable Runtime Session. */
   modelRouteId: string;
   modelCapabilities?: ModelRouteCapabilities;
+  /**
+   * Host-selected interaction policy for a new foreground Session.
+   * Non-interactive hosts must provide this explicitly instead of inheriting the YOLO default.
+   */
+  interactionMode?: SessionSettings["mode"];
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;
   planMode?: boolean;

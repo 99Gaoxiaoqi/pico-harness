@@ -340,7 +340,11 @@ export async function executeAgentRuntime(
         cwd: workDir,
         picoHome: session.picoHome,
         provider: kind,
-        ...(backgroundPolicy ? { mode: "yolo" as const } : {}),
+        ...(backgroundPolicy
+          ? { mode: "yolo" as const }
+          : options.interactionMode !== undefined
+            ? { mode: options.interactionMode }
+            : {}),
         model: defaultConfigModel,
         ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
         ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
