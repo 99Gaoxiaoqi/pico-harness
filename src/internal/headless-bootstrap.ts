@@ -16,7 +16,7 @@ const REQUEST_FIELDS = new Set(["schemaVersion", "workspacePath", "picoHome", "r
 const ROUTE_FIELDS = new Set(["id", "protocol", "baseURL", "apiKeyEnv"]);
 const FORBIDDEN_SECRET_FIELDS =
   /^(?:apiKey|token|accessToken|refreshToken|secret|password|authorization|credentials?)$/iu;
-const BENCHMARK_API_KEY_ENV = "PICO_TB_PROVIDER_API_KEY";
+const BENCHMARK_API_KEY_ENV = "PICO_TB_GATEWAY_TOKEN";
 
 export interface HeadlessBootstrapRequestV1 {
   readonly schemaVersion: typeof SCHEMA_VERSION;

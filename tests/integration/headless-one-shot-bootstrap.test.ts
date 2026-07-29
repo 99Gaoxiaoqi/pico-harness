@@ -23,7 +23,7 @@ test("headless bootstrap writes a secret-free route and trusts the isolated work
         id: "fixture/model",
         protocol: "openai",
         baseURL: "https://provider.invalid/v1",
-        apiKeyEnv: "PICO_TB_PROVIDER_API_KEY",
+        apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
       },
     }),
   );
@@ -55,7 +55,7 @@ test("headless bootstrap rejects plaintext provider credentials", async (context
         id: "fixture/model",
         protocol: "openai",
         baseURL: "https://provider.invalid/v1",
-        apiKeyEnv: "PICO_TB_PROVIDER_API_KEY",
+        apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
         apiKey: "secret-canary",
       },
     }),

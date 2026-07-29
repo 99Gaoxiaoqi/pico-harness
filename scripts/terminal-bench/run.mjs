@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rename } from "node:fs/promises";
+import { createHash, createHmac } from "node:crypto";
+import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -13,7 +13,9 @@ const datasetRef =
 const datasetSourceCommit = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
 const harborVersion = "0.20.0";
 const harborCommit = "459ff6ec99417589b7f679d14ddf3b3f0ae4f1dc";
-const harborWheelSha256 = "4b7e981739e64be41c9828022af547532657c955705828ac0c13dd7a6687b556";
+const harborWheelSha256 = "4b7e48223aea2384cdb8c9eff35eaebd482fc9b1ec09f8193a121c47356ff19a";
+const harborWheelUrl =
+  "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
 const nodeArchives = {
   x64: {
@@ -45,7 +47,7 @@ if (!provider || typeof provider !== "object") {
 if (!Array.isArray(provider.models) || !provider.models.includes(model)) {
   throw new Error("The selected model is not declared by the provider");
 }
-provider.baseURL = rewriteLoopback(provider.baseURL, options.dockerHostGateway);
+assertLoopbackAllowed(provider.baseURL, options.dockerHostGateway);
 provider.discoverModels ??= false;
 const sourceApiKeyEnv = provider.apiKeyEnv;
 const providerSecret =
@@ -60,7 +62,7 @@ if (!providerSecret) {
 delete provider.apiKey;
 provider.apiKeyEnv = benchmarkApiKeyEnv;
 const harborEnv = {
-  ...process.env,
+  ...allowlistedHostEnv(process.env),
   [benchmarkApiKeyEnv]: providerSecret,
   PYTHONPATH: [projectRoot, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
 };
@@ -72,7 +74,9 @@ if (dirty) throw new Error("Benchmark runs require a clean Pico worktree");
 const mode = options.mode ?? "canary";
 const timestamp = new Date().toISOString().replace(/[:.]/gu, "-");
 const runId = `${mode}-${timestamp}-${picoCommit.slice(0, 12)}`;
-const runRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "runs", runId);
+const runsRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "runs");
+const publishedRunRoot = join(runsRoot, runId);
+const runRoot = join(runsRoot, `.${runId}.staging`);
 await mkdir(runRoot, { recursive: true, mode: 0o700 });
 const nodeCacheRoot = join(
   projectRoot,
@@ -86,6 +90,14 @@ const nodeArchivePaths = {
   x64: await ensurePinnedDownload(nodeArchives.x64, nodeCacheRoot),
   arm64: await ensurePinnedDownload(nodeArchives.arm64, nodeCacheRoot),
 };
+const harborWheelPath = await ensurePinnedArtifact(
+  {
+    name: "harbor-0.20.0-py3-none-any.whl",
+    sha256: harborWheelSha256,
+    urls: [harborWheelUrl],
+  },
+  join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "cache", "harbor"),
+);
 await run("npm", ["run", "build"], projectRoot, process.env);
 const bundle = await buildPicoBundle(join(runRoot, "pico-bundle.tar.gz"));
 const routeConfig = {
@@ -102,6 +114,8 @@ const routeConfig = {
 const routeConfigPath = join(runRoot, "route-config.json");
 await atomicWritePrivateJson(routeConfigPath, routeConfig);
 const tasks = await resolveTasks(mode, options.task);
+const scheduledTasks = mode === "full" ? 89 : tasks.length;
+const expectedTrials = scheduledTasks * options.attempts;
 const canaryHash = createHash("sha256").update(tasks.join("\n")).digest("hex");
 const manifest = {
   schemaVersion: 1,
@@ -117,7 +131,7 @@ const manifest = {
   dataset: {
     id: datasetRef,
     sourceCommit: datasetSourceCommit,
-    taskCount: tasks.length,
+    taskCount: scheduledTasks,
     taskListSha256: canaryHash,
   },
   nodeRuntime: {
@@ -132,7 +146,7 @@ const manifest = {
     modelRouteId,
     protocol: provider.protocol ?? "openai",
     baseURL: redactUrl(provider.baseURL),
-    endpointRewritten: provider.baseURL !== userConfig.providers[providerId].baseURL,
+    endpointRewritten: false,
     thinkingEffort: routeConfig.thinkingEffort ?? null,
     apiKeyEnv: benchmarkApiKeyEnv,
   },
@@ -141,7 +155,7 @@ const manifest = {
     allowedTools: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "read_evidence"],
     localCanaryOnly: true,
     leaderboardComparable: false,
-    secretInjection: "docker-compose-exec-stdin-frame",
+    secretInjection: "host-credential-gateway",
     dockerDelete: true,
     keepContainers: false,
   },
@@ -158,7 +172,7 @@ await atomicWritePrivateJson(join(runRoot, "manifest.json"), manifest);
 
 const harborArgs = [
   "--from",
-  `harbor==${harborVersion}`,
+  harborWheelPath,
   "harbor",
   "run",
   "--env",
@@ -172,6 +186,10 @@ const harborArgs = [
   modelRouteId,
   "--ak",
   `bundle_path=${bundle.path}`,
+  "--ak",
+  `bundle_sha256=${bundle.sha256}`,
+  "--ak",
+  `bundle_lockfile_sha256=${bundle.lockfileSha256}`,
   "--ak",
   `route_config_path=${routeConfigPath}`,
   "--ak",
@@ -191,36 +209,53 @@ const harborArgs = [
   "--yes",
 ];
 for (const task of tasks) harborArgs.push("--include-task-name", task);
-let harborExitCode = 0;
-try {
-  await run("uvx", harborArgs, projectRoot, harborEnv);
-} catch (error) {
-  harborExitCode = error.exitCode ?? 1;
-}
-const secretScan = await scanTreeForSecret(runRoot, providerSecret);
-if (secretScan.matches.length > 0) {
-  await atomicWritePrivateJson(join(runRoot, "SECURITY-FAILURE.json"), {
-    schemaVersion: 1,
-    status: "blocked",
-    matches: secretScan.matches,
-  });
-  throw new Error("Secret canary scan failed; result publication is blocked");
-}
+const harborExecution = await runCaptured("uvx", harborArgs, projectRoot, harborEnv);
+const harborExitCode = harborExecution.exitCode;
+await atomicWritePrivateText(
+  join(runRoot, "harbor-stdout.log"),
+  redactSecrets(harborExecution.stdout, [providerSecret]),
+);
+await atomicWritePrivateText(
+  join(runRoot, "harbor-stderr.log"),
+  redactSecrets(harborExecution.stderr, [providerSecret]),
+);
 const summary = await normalizeHarborJob({
   jobDir: join(runRoot, "harbor-job", "job"),
   runDir: runRoot,
   runId,
-  expectedTasks: tasks.length || null,
+  expectedTasks: expectedTrials,
+  expectedTaskNames: mode === "full" ? null : tasks,
+  expectedAttempts: options.attempts,
 });
 await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
   schemaVersion: 1,
   harborExitCode,
   normalized: true,
-  secretScan: { status: "passed", filesScanned: secretScan.filesScanned },
+  secretScan: { status: "passed" },
   completedAt: new Date().toISOString(),
 });
-process.stdout.write(`${JSON.stringify({ runId, runRoot, harborExitCode, summary }, null, 2)}\n`);
-if (harborExitCode !== 0) process.exitCode = harborExitCode;
+const gatewayCapabilities = summary.trials
+  .map((trial) => trial.trialId)
+  .filter((trialId) => typeof trialId === "string")
+  .map((trialId) =>
+    createHmac("sha256", providerSecret).update(`pico-terminal-bench:${trialId}`).digest("hex"),
+  );
+const secretScan = await scanTreeForSecrets(runRoot, [providerSecret, ...gatewayCapabilities]);
+if (secretScan.matches.length > 0) {
+  await rm(runRoot, { recursive: true, force: true });
+  throw new Error("Secret canary scan failed; staging results were destroyed");
+}
+await rename(runRoot, publishedRunRoot);
+process.stdout.write(
+  `${JSON.stringify({ runId, runRoot: publishedRunRoot, harborExitCode, summary }, null, 2)}\n`,
+);
+const gateFailed = summary.trials.some(
+  (trial) =>
+    trial.infra.status !== "ok" ||
+    trial.adapter.status !== "ok" ||
+    trial.verifier.status !== "completed",
+);
+if (harborExitCode !== 0 || gateFailed || !summary.sealed) process.exitCode = harborExitCode || 1;
 
 function parseArgs(args) {
   const parsed = { mode: "canary", attempts: 1, concurrency: 1, dockerHostGateway: false };
@@ -263,16 +298,14 @@ async function resolveTasks(mode, singleTask) {
     .filter(Boolean);
 }
 
-export function rewriteLoopback(baseURL, enabled) {
+export function assertLoopbackAllowed(baseURL, enabled) {
   const url = new URL(baseURL);
   if (url.username || url.password || url.search || url.hash) {
     throw new Error("Provider URL must not contain userinfo, query, or fragment");
   }
   const loopback = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
-  if (!loopback) return baseURL;
+  if (!loopback) return;
   if (!enabled) throw new Error("Loopback provider requires explicit --docker-host-gateway");
-  url.hostname = "host.docker.internal";
-  return url.toString().replace(/\/$/u, "");
 }
 
 function redactUrl(value) {
@@ -294,6 +327,29 @@ function positiveInteger(value, flag) {
   return parsed;
 }
 
+function allowlistedHostEnv(source) {
+  const allowed = {};
+  for (const name of [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "UV_CACHE_DIR",
+    "XDG_CACHE_HOME",
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+  ]) {
+    if (source[name] !== undefined) allowed[name] = source[name];
+  }
+  return allowed;
+}
+
 async function atomicWritePrivateJson(path, value) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -313,33 +369,55 @@ async function atomicWritePrivateJson(path, value) {
   }
 }
 
+async function atomicWritePrivateText(path, value) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(value);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(temporary, path);
+}
+
 async function ensurePinnedDownload(archive, cacheRoot) {
+  return ensurePinnedArtifact(
+    {
+      ...archive,
+      urls: [
+        `https://nodejs.org/dist/v22.14.0/${archive.name}`,
+        `https://npmmirror.com/mirrors/node/v22.14.0/${archive.name}`,
+      ],
+    },
+    cacheRoot,
+  );
+}
+
+async function ensurePinnedArtifact(artifact, cacheRoot) {
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
-  const destination = join(cacheRoot, archive.name);
+  const destination = join(cacheRoot, artifact.name);
   try {
     if (
       createHash("sha256")
         .update(await readFile(destination))
-        .digest("hex") === archive.sha256
+        .digest("hex") === artifact.sha256
     ) {
       return destination;
     }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  const urls = [
-    `https://nodejs.org/dist/v22.14.0/${archive.name}`,
-    `https://npmmirror.com/mirrors/node/v22.14.0/${archive.name}`,
-  ];
   let lastError;
-  for (const url of urls) {
+  for (const url of artifact.urls) {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         const response = await fetch(url);
-        if (!response.ok) throw new Error(`Node archive download returned ${response.status}`);
+        if (!response.ok) throw new Error(`Pinned artifact download returned ${response.status}`);
         const data = Buffer.from(await response.arrayBuffer());
         const digest = createHash("sha256").update(data).digest("hex");
-        if (digest !== archive.sha256) throw new Error("Node archive digest mismatch");
+        if (digest !== artifact.sha256) throw new Error("Pinned artifact digest mismatch");
         const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
         const handle = await open(temporary, "wx", 0o600);
         try {
@@ -359,13 +437,13 @@ async function ensurePinnedDownload(archive, cacheRoot) {
   throw lastError;
 }
 
-async function scanTreeForSecret(root, secret) {
-  const encoded = [
+async function scanTreeForSecrets(root, secrets) {
+  const encoded = secrets.flatMap((secret) => [
     ["raw", Buffer.from(secret)],
     ["json", Buffer.from(JSON.stringify(secret).slice(1, -1))],
     ["url", Buffer.from(encodeURIComponent(secret))],
     ["base64", Buffer.from(Buffer.from(secret).toString("base64"))],
-  ];
+  ]);
   const matches = [];
   let filesScanned = 0;
   async function visit(path) {
@@ -401,6 +479,49 @@ function run(command, args, cwd, env) {
       }
     });
   });
+}
+
+function runCaptured(command, args, cwd, env) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = [];
+    const stderr = [];
+    let bytes = 0;
+    const collect = (target) => (chunk) => {
+      bytes += chunk.length;
+      if (bytes > 64 * 1024 * 1024) {
+        child.kill("SIGKILL");
+        reject(new Error(`${command} output exceeded the benchmark capture limit`));
+        return;
+      }
+      target.push(Buffer.from(chunk));
+    };
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      resolvePromise({
+        exitCode: code ?? 1,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
+  });
+}
+
+function redactSecrets(value, secrets) {
+  let redacted = value;
+  for (const secret of secrets.filter(Boolean).sort((left, right) => right.length - left.length)) {
+    for (const candidate of [
+      secret,
+      JSON.stringify(secret).slice(1, -1),
+      encodeURIComponent(secret),
+      Buffer.from(secret).toString("base64"),
+    ]) {
+      redacted = redacted.split(candidate).join("[REDACTED]");
+    }
+  }
+  return redacted;
 }
 
 function capture(command, args, cwd) {
