@@ -591,7 +591,7 @@ async function scanTreeForSecrets(root, secrets) {
     const data = await readFile(path);
     const candidates = [["file", data]];
     if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
-      candidates.push(["gzip", gunzipSync(data, { maxOutputLength: 64 * 1024 * 1024 })]);
+      candidates.push(["gzip", gunzipSync(data, { maxOutputLength: 512 * 1024 * 1024 })]);
     }
     for (const [containerEncoding, candidate] of candidates) {
       for (const [encoding, needle] of encoded) {
