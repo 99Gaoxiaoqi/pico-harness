@@ -253,6 +253,12 @@ def assert_usage_parsers(gateway: Any) -> None:
         b'"thoughtsTokenCount":5,"totalTokenCount":10}}',
         "gemini",
     ) == (2, 8)
+    assert gateway.parse_usage(
+        b'{"usageMetadata":{"promptTokenCount":27,"candidatesTokenCount":45,'
+        b'"toolUsePromptTokenCount":31,"thoughtsTokenCount":10309,'
+        b'"totalTokenCount":10412}}',
+        "gemini",
+    ) == (58, 10_354)
     invalid = (
         (b'{"usage":{"prompt_tokens":true,"completion_tokens":1}}', "openai"),
         (b'{"usage":{"input_tokens":-1,"output_tokens":1}}', "claude"),
@@ -308,6 +314,125 @@ def assert_spawn_cancel_race(gateway: Any) -> None:
     gateway.subprocess.Popen = original_popen
     assert cancel_elapsed < 0.1
     assert outcome == ["rejected"]
+    assert active.reaped()
+
+
+def assert_spawn_revoke_race(
+    gateway: Any, route_config: dict[str, Any]
+) -> None:
+    original_popen = gateway.subprocess.Popen
+    spawn_entered = threading.Event()
+    release_spawn = threading.Event()
+
+    def blocked_popen(*args: Any, **kwargs: Any) -> Any:
+        spawn_entered.set()
+        assert release_spawn.wait(timeout=2)
+        return original_popen(*args, **kwargs)
+
+    gateway.subprocess.Popen = blocked_popen
+    state = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "spawn-revoke",
+        "4" * 64,
+    )
+    active = gateway.UpstreamRequest(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"]
+    )
+    state.upstream_request_factory = lambda: active
+    state.register(
+        {
+            "trialId": "trial-spawn-revoke",
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    proxy_outcome: list[str] = []
+    revoke_outcome: list[dict[str, Any]] = []
+
+    def execute_proxy() -> None:
+        try:
+            state.proxy({"trialId": "trial-spawn-revoke", **proxy_frame({})})
+            proxy_outcome.append("success")
+        except Exception:
+            proxy_outcome.append("rejected")
+
+    def execute_revoke() -> None:
+        revoke_outcome.append(state.revoke("trial-spawn-revoke"))
+
+    proxy_thread = threading.Thread(target=execute_proxy)
+    revoke_thread = threading.Thread(target=execute_revoke)
+    try:
+        proxy_thread.start()
+        assert spawn_entered.wait(timeout=1)
+        revoke_thread.start()
+        time.sleep(0.05)
+        assert revoke_thread.is_alive()
+        release_spawn.set()
+        proxy_thread.join(1)
+        revoke_thread.join(1)
+    finally:
+        gateway.subprocess.Popen = original_popen
+        release_spawn.set()
+    assert proxy_outcome == ["rejected"]
+    assert len(revoke_outcome) == 1
+    assert revoke_outcome[0]["status"] == "unreconciled"
+    assert active.reaped()
+    with state.lock:
+        assert state.trials["trial-spawn-revoke"]["active"] == set()
+
+
+def assert_stubborn_worker_revoke_fails_closed(
+    gateway: Any, route_config: dict[str, Any]
+) -> None:
+    class StubbornProcess:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+        def wait(self, timeout: float) -> None:
+            raise subprocess.TimeoutExpired("stubborn-worker", timeout)
+
+    state = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "stubborn-worker",
+        "3" * 64,
+    )
+    state.register(
+        {
+            "trialId": "trial-stubborn",
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    active = gateway.UpstreamRequest()
+    process = StubbornProcess()
+    active.process = process
+    with state.lock:
+        state.trials["trial-stubborn"]["active"].add(active)
+    try:
+        state.revoke("trial-stubborn")
+    except ValueError as error:
+        assert "termination was not confirmed" in str(error)
+    else:
+        raise AssertionError("revoke succeeded before the worker was reaped")
+    with state.lock:
+        assert active in state.trials["trial-stubborn"]["active"]
+    assert process.poll() is None
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
 
 
 def assert_exact_reconciliation(
@@ -361,6 +486,43 @@ def assert_exact_reconciliation(
             gateway.MAX_COST_MICRO_CNY
             - gateway.token_cost_micro_cny(5_000, 1, state.pricing)
         )
+    receipt = state.revoke("trial-exact")
+    assert receipt == state.revoke("trial-exact")
+    actual_cost = gateway.token_cost_micro_cny(5_000, 1, state.pricing)
+    assert receipt["status"] == "reconciled"
+    assert receipt["withinBudget"] is True
+    assert receipt["requests"] == {
+        "attempted": 1,
+        "reconciled": 1,
+        "unreconciled": 0,
+    }
+    assert receipt["actual"] == {
+        "inputTokens": 5_000,
+        "outputTokens": 1,
+        "costMicroCNY": actual_cost,
+        "costCNY": actual_cost / 1_000_000,
+    }
+    for field in ("inputTokens", "outputTokens", "costMicroCNY"):
+        assert (
+            receipt["reservation"][field]
+            + receipt["supplement"][field]
+            - receipt["refund"][field]
+            - receipt["unreconciledReservation"][field]
+            == receipt["actual"][field]
+        )
+    unsigned = dict(receipt)
+    unsigned.pop("receiptSha256")
+    assert receipt["receiptSha256"] == hashlib.sha256(
+        gateway.canonical_json(unsigned)
+    ).hexdigest()
+    signed = dict(unsigned)
+    auth = signed.pop("auth")
+    assert auth["tag"] == hmac.new(
+        ("2" * 64).encode(),
+        b"pico-gateway-accounting-receipt-v1\0"
+        + gateway.canonical_json(signed),
+        "sha256",
+    ).hexdigest()
 
 
 def main() -> None:
@@ -396,6 +558,8 @@ def main() -> None:
         spec.loader.exec_module(gateway)
         assert_usage_parsers(gateway)
         assert_spawn_cancel_race(gateway)
+        assert_spawn_revoke_race(gateway, route_config)
+        assert_stubborn_worker_revoke_fails_closed(gateway, route_config)
         assert_exact_reconciliation(gateway, route_config)
         assert_synthetic_stage_cancel(gateway, route_config, root, "dns")
         assert_synthetic_stage_cancel(gateway, route_config, root, "connect")
