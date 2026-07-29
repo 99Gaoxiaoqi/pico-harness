@@ -11,6 +11,7 @@ import re
 import secrets
 import shlex
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -947,7 +948,7 @@ async def assert_running_container_policy(
                 source_info = Path(source).lstat()
             except OSError as error:
                 raise RuntimeError("Harbor container host mount is unavailable") from error
-            if not (source_info.is_file() or source_info.is_dir()):
+            if not (stat.S_ISREG(source_info.st_mode) or stat.S_ISDIR(source_info.st_mode)):
                 raise RuntimeError("Harbor container host mount has an unsafe type")
             if not any(
                 source_path == root or root in source_path.parents for root in allowed_roots
