@@ -33,8 +33,8 @@ class PicoInstalledAgent(BaseInstalledAgent):
     _SECRET_ENV = "PICO_TB_PROVIDER_API_KEY"
     _NODE_VERSION = "22.14.0"
     _NODE_SHA256 = {
-        "x64": "69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec",
-        "arm64": "08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050",
+        "x64": "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
+        "arm64": "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
     }
 
     @staticmethod
@@ -98,20 +98,20 @@ set -eu
 if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node')" = "{self._NODE_VERSION}" ]; then
   exit 0
 fi
-if ! command -v curl >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
+if ! command -v curl >/dev/null 2>&1; then
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates xz-utils
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
 fi
 case "$(uname -m)" in
   x86_64|amd64) arch=x64; expected={self._NODE_SHA256["x64"]} ;;
   aarch64|arm64) arch=arm64; expected={self._NODE_SHA256["arm64"]} ;;
   *) echo "unsupported architecture" >&2; exit 2 ;;
 esac
-archive="node-v{self._NODE_VERSION}-linux-${{arch}}.tar.xz"
+archive="node-v{self._NODE_VERSION}-linux-${{arch}}.tar.gz"
 curl -fsSLo "/tmp/${{archive}}" "https://nodejs.org/dist/v{self._NODE_VERSION}/${{archive}}"
 printf '%s  %s\\n' "$expected" "/tmp/${{archive}}" | sha256sum -c -
-tar -tf "/tmp/${{archive}}" | awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'
-tar -xJf "/tmp/${{archive}}" -C /usr/local --strip-components=1
+tar -tzf "/tmp/${{archive}}" | awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'
+tar -xzf "/tmp/${{archive}}" -C /usr/local --strip-components=1
 [ "$(node -p 'process.versions.node')" = "{self._NODE_VERSION}" ]
 rm -f "/tmp/${{archive}}"
 """
