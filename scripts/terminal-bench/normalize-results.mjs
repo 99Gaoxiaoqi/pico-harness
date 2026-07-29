@@ -69,9 +69,9 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
     const taskSlug = slug(trialResult.task_name);
     const caseDir = join(destination, "cases", taskSlug, entry.name);
     await mkdir(caseDir, { recursive: true, mode: 0o700 });
-    if (headless) await atomicWriteJson(join(caseDir, "headless-result.json"), headless);
-    await atomicWriteJson(join(caseDir, "normalized-result.json"), normalized);
-    await atomicWriteJson(join(caseDir, "provenance.json"), {
+    if (headless) await writeOnceJson(join(caseDir, "headless-result.json"), headless);
+    await writeOnceJson(join(caseDir, "normalized-result.json"), normalized);
+    await writeOnceJson(join(caseDir, "provenance.json"), {
       schemaVersion: 1,
       normalizerVersion: 2,
       runId,
@@ -84,7 +84,7 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
     });
     const traceSource = join(trialDir, "agent", "trace.json");
     try {
-      await cp(traceSource, join(caseDir, "trace.json"), { errorOnExist: true });
+      await copyOnce(traceSource, join(caseDir, "trace.json"));
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
@@ -112,12 +112,12 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
     counts,
     trials,
   };
-  await atomicWriteJson(join(destination, "source-hashes.json"), {
+  await writeOnceJson(join(destination, "source-hashes.json"), {
     schemaVersion: 1,
     sealed,
     sources: sourceHashes,
   });
-  await atomicWriteJson(join(destination, "summary.json"), summary);
+  await writeOnceJson(join(destination, "summary.json"), summary);
   return summary;
 }
 
@@ -258,6 +258,30 @@ async function atomicWriteJson(path, value) {
   } finally {
     await directory.close();
   }
+}
+
+async function writeOnceJson(path, value) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  try {
+    const existing = await readFile(path, "utf8");
+    if (existing === serialized) return;
+    throw new Error(`sealed benchmark artifact changed: ${path}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await atomicWriteJson(path, value);
+}
+
+async function copyOnce(source, destination) {
+  const sourceBytes = await readFile(source);
+  try {
+    const existing = await readFile(destination);
+    if (existing.equals(sourceBytes)) return;
+    throw new Error(`sealed benchmark artifact changed: ${destination}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await cp(source, destination, { errorOnExist: true });
 }
 
 function relativeSource(jobDir, path) {

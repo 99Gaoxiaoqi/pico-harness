@@ -7,7 +7,6 @@ import os
 import re
 import shlex
 import tomllib
-import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, override
 
@@ -71,7 +70,6 @@ class PicoInstalledAgent(BaseInstalledAgent):
             result_flush_margin_ms, "result_flush_margin_ms"
         )
         self._route_config = load_route_config(self._route_config_path, self._SECRET_ENV)
-        self._context_id = uuid.uuid4().hex
         self._provider_secret = os.environ.get(self._SECRET_ENV)
         if not self._provider_secret or "\n" in self._provider_secret:
             raise ValueError(f"{self._SECRET_ENV} must contain one non-empty line")
@@ -140,7 +138,9 @@ rm -f {remote_archive}
         if workspace_result.return_code != 0 or not workspace_result.stdout:
             raise RuntimeError("Could not resolve the Harbor task workspace")
         workspace = workspace_result.stdout.strip()
-        context_id = safe_trial_key(self._context_id)
+        if self.context_id is None:
+            raise RuntimeError("Harbor did not assign the trial context_id")
+        context_id = safe_trial_key(str(self.context_id))
         trial_key = safe_trial_key(f"{self.session_id or 'session'}-{context_id}")
         pico_home = f"/tmp/pico-tb21/{trial_key}/pico-home"
         outer_timeout_sec = task_agent_timeout(environment)
