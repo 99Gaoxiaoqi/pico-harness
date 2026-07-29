@@ -23,6 +23,7 @@ import { buildPicoBundle } from "./build-bundle.mjs";
 import { runCaptured } from "./captured-process.mjs";
 import { assertTaskComposePolicy, prestartNetworkOverlay } from "./container-policy.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
+import { verifyApprovedHarborWheelhouse } from "./harbor-wheelhouse.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
 import {
@@ -39,6 +40,8 @@ const datasetSourceCommit = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
 const harborVersion = "0.20.0";
 const harborCommit = "459ff6ec99417589b7f679d14ddf3b3f0ae4f1dc";
 const harborWheelSha256 = "4b7e48223aea2384cdb8c9eff35eaebd482fc9b1ec09f8193a121c47356ff19a";
+const harborArtifactManifestSha256 =
+  "2a1ee868d8f3b488d49bf08aa405d81cc19a044317335fd3ef0ac12368068cd6";
 const harborWheelUrl =
   "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
@@ -159,7 +162,7 @@ const nodeArchivePaths = {
   x64: await ensurePinnedDownload(nodeArchives.x64, nodeCacheRoot),
   arm64: await ensurePinnedDownload(nodeArchives.arm64, nodeCacheRoot),
 };
-const harborWheelPath = await ensurePinnedArtifact(
+await ensurePinnedArtifact(
   {
     name: "harbor-0.20.0-py3-none-any.whl",
     sha256: harborWheelSha256,
@@ -167,6 +170,20 @@ const harborWheelPath = await ensurePinnedArtifact(
   },
   join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "cache", "harbor"),
 );
+const harborConstraintsPath = join(
+  projectRoot,
+  "benchmarks/terminal_bench_2_1/harbor-constraints.txt",
+);
+const harborWheelhousePath = join(
+  projectRoot,
+  "output/benchmarks/terminal-bench-2.1/cache/harbor-wheelhouse",
+);
+const harborArtifactLock = await verifyApprovedHarborWheelhouse({
+  manifestPath: join(harborWheelhousePath, "artifact-manifest.json"),
+  wheelhousePath: harborWheelhousePath,
+  constraintsPath: harborConstraintsPath,
+  expectedManifestSha256: harborArtifactManifestSha256,
+});
 await run("npm", ["run", "build"], projectRoot, process.env);
 const bundle = await buildPicoBundle(join(runRoot, "pico-bundle.tar.gz"));
 const routeConfig = {
@@ -223,10 +240,11 @@ const manifest = {
     commit: harborCommit,
     wheelSha256: harborWheelSha256,
     constraintsSha256: createHash("sha256")
-      .update(
-        await readFile(join(projectRoot, "benchmarks/terminal_bench_2_1/harbor-constraints.txt")),
-      )
+      .update(await readFile(harborConstraintsPath))
       .digest("hex"),
+    artifactManifestSha256: harborArtifactLock.manifestSha256,
+    artifactCount: harborArtifactLock.artifactCount,
+    artifactPlatform: harborArtifactLock.platform,
     offline: true,
   },
   dataset: {
@@ -292,16 +310,41 @@ const manifest = {
 };
 await atomicWritePrivateJson(join(runRoot, "manifest.json"), manifest);
 
+const harborVirtualEnvironment = join(runRoot, "harbor-venv");
+await run(
+  "uv",
+  [
+    "venv",
+    "--offline",
+    "--no-config",
+    "--python",
+    harborArtifactLock.python,
+    harborVirtualEnvironment,
+  ],
+  projectRoot,
+  harborEnv,
+);
+await run(
+  "uv",
+  [
+    "pip",
+    "install",
+    "--python",
+    join(harborVirtualEnvironment, "bin/python"),
+    "--offline",
+    "--no-config",
+    "--no-cache",
+    "--no-index",
+    "--find-links",
+    harborWheelhousePath,
+    "--constraint",
+    harborConstraintsPath,
+    `harbor==${harborVersion}`,
+  ],
+  projectRoot,
+  harborEnv,
+);
 const harborArgs = [
-  "--offline",
-  "--no-env-file",
-  "--no-config",
-  "--no-python-downloads",
-  "--constraints",
-  join(projectRoot, "benchmarks/terminal_bench_2_1/harbor-constraints.txt"),
-  "--from",
-  harborWheelPath,
-  "harbor",
   "run",
   "--env",
   "docker",
@@ -358,7 +401,7 @@ try {
     throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
   }
   harborExecution = await runCaptured(
-    "uvx",
+    join(harborVirtualEnvironment, "bin/harbor"),
     harborArgs,
     runRoot,
     harborEnv,
@@ -389,6 +432,11 @@ try {
   }
   try {
     await datasetGuard?.verifyAndDetach();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await rm(harborVirtualEnvironment, { recursive: true, force: true });
   } catch (error) {
     cleanupErrors.push(error);
   }
