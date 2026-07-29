@@ -325,6 +325,15 @@ const gatewayCapabilities = summary.trials
       .update(`pico-terminal-bench:${trialId}`)
       .digest("hex"),
   );
+const gateFailed = summary.trials.some(
+  (trial) =>
+    trial.infra.status !== "ok" ||
+    trial.adapter.status !== "ok" ||
+    trial.verifier.status !== "completed",
+);
+if (harborExitCode !== 0 || gateFailed || !summary.sealed) {
+  throw new Error("Terminal-Bench run did not satisfy the publication gate");
+}
 try {
   const prePublishScan = await scanTreeForSecrets(runRoot, [
     providerSecret,
@@ -380,13 +389,6 @@ publicationComplete = true;
 process.stdout.write(
   `${JSON.stringify({ runId, runRoot: publishedRunRoot, harborExitCode, summary }, null, 2)}\n`,
 );
-const gateFailed = summary.trials.some(
-  (trial) =>
-    trial.infra.status !== "ok" ||
-    trial.adapter.status !== "ok" ||
-    trial.verifier.status !== "completed",
-);
-if (harborExitCode !== 0 || gateFailed || !summary.sealed) process.exitCode = harborExitCode || 1;
 
 function parseArgs(args) {
   const parsed = { mode: "canary", attempts: 1, concurrency: 1, dockerHostGateway: false };
@@ -513,10 +515,15 @@ async function recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantine
         throw new Error("published benchmark entry is not a directory");
       }
       const marker = JSON.parse(await readFile(join(path, "PUBLISHED.json"), "utf8"));
+      const summary = JSON.parse(await readFile(join(path, "summary.json"), "utf8"));
+      const status = JSON.parse(await readFile(join(path, "run-status.json"), "utf8"));
       if (
         marker.schemaVersion !== 1 ||
         marker.runId !== entry.name ||
         (marker.sealed !== undefined && marker.sealed !== true) ||
+        summary.runId !== entry.name ||
+        summary.sealed !== true ||
+        status.harborExitCode !== 0 ||
         !/^[0-9a-f]{64}$/u.test(marker.fullTreeExcludingMarkerSha256)
       ) {
         throw new Error("published benchmark marker is invalid");
