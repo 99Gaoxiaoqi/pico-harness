@@ -76,7 +76,8 @@ export async function normalizeHarborJob({
         headlessResultSha256: headlessSha256,
       },
     });
-    const taskSlug = slug(trialResult.task_name);
+    const taskName = canonicalTaskName(trialResult.task_name);
+    const taskSlug = slug(taskName);
     const caseDir = join(destination, "cases", taskSlug, entry.name);
     await mkdir(caseDir, { recursive: true, mode: 0o700 });
     if (headless) await writeOnceJson(join(caseDir, "headless-result.json"), headless);
@@ -85,7 +86,8 @@ export async function normalizeHarborJob({
       schemaVersion: 1,
       normalizerVersion: 2,
       runId,
-      taskName: trialResult.task_name,
+      taskName,
+      harborTaskName: trialResult.task_name,
       taskChecksum: trialResult.task_checksum ?? null,
       trialId: trialResult.id ?? null,
       harborConfig: trialResult.config ?? null,
@@ -170,7 +172,8 @@ export function normalizeTrial({
     schemaVersion: 2,
     normalizerVersion: 2,
     runId,
-    taskId: trialResult.task_name ?? null,
+    taskId:
+      typeof trialResult.task_name === "string" ? canonicalTaskName(trialResult.task_name) : null,
     trialId: trialResult.id ?? null,
     primaryStatus,
     infra,
@@ -352,6 +355,10 @@ function relativeSource(jobDir, path) {
 
 function slug(value) {
   return value.replace(/^terminal-bench\//u, "").replace(/[^A-Za-z0-9._-]+/gu, "-");
+}
+
+function canonicalTaskName(value) {
+  return value.startsWith("terminal-bench/") ? value : `terminal-bench/${value}`;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

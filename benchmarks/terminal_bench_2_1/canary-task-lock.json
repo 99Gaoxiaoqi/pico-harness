@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "tasks": {
+    "terminal-bench/log-summary-date-ranges": {
+      "cacheDigest": "27b074a2f10fff7606e096f3abd8dced418ad8fda0f53d88acbe477f2d9ceaf6",
+      "treeSha256": "52ec980638e1bf9a7d633d4cbd3d70c88966f7709aa55d782a060bc7abb9211b"
+    },
+    "terminal-bench/cancel-async-tasks": {
+      "cacheDigest": "a3d048d351136e48070696cda8bb79660dfd74db1fea3b6da88559f0332699c1",
+      "treeSha256": "1bc704865fdd5b2ac6fc251737d55dea22b89eeb6f36f546f9d13f1a0abeec5f"
+    },
+    "terminal-bench/sqlite-db-truncate": {
+      "cacheDigest": "956f038b479cc3b9b493553b57a60a8ff4154526386c3914c0b99e93e1ab6e87",
+      "treeSha256": "c4e43c358f160b48f7f319ed3ff379f39c06695f7a5311087460353404e2ea42"
+    },
+    "terminal-bench/extract-elf": {
+      "cacheDigest": "1ef31d566be4fe3459d5368621ae7ef7a31b23ef675737e473bbc43c8c7b3fce",
+      "treeSha256": "158972adcc196b95d8c749d79b01a96f540fdcd6012ad85b1fa513fc455dd119"
+    },
+    "terminal-bench/build-cython-ext": {
+      "cacheDigest": "35dc561790e73f13e59837828ac0863c0893edc6b71d42cf7d58656c843adf12",
+      "treeSha256": "02513c500d8b328a8a5269a379138202ecc45cb10a106b15904f75fb85446616"
+    },
+    "terminal-bench/custom-memory-heap-crash": {
+      "cacheDigest": "61e021e0304c9818a9be2c9173c8a0938ce5d136e95c5422e099f1fdb2dc080e",
+      "treeSha256": "3f9998a076d1714325be112c62d23c2d62597785c96613cfa8fc6adde6556385"
+    },
+    "terminal-bench/headless-terminal": {
+      "cacheDigest": "203953871ebdae4efbf163af9499849368dab5e219b70d447e5ee9701ad382d9",
+      "treeSha256": "3a62046ffa1e7489b73a85300d93e7242d717d8e4d50c97adcd31980c7f9bf85"
+    },
+    "terminal-bench/polyglot-c-py": {
+      "cacheDigest": "25570ccacf63f573a252eaa2a9c62ee8b55f5aa228cc803b5beb39dd6d8afeb7",
+      "treeSha256": "761474864d8935a46e7b4ab1ec768ce8a3a13961383dbc5c22776dc6535cd846"
+    },
+    "terminal-bench/configure-git-webserver": {
+      "cacheDigest": "e3dc712acfecdb1338a889f86c97b37422c3778351253f9aca4236e895fdb36e",
+      "treeSha256": "0b8ecb7a621573532d0720080b2d508d4a67e9e8819ae58e65d2be5bf18ffc94"
+    },
+    "terminal-bench/filter-js-from-html": {
+      "cacheDigest": "2d1496b6fc62adeccdba7a56f4bc24e5ef265840434d2011234ed20b6c240759",
+      "treeSha256": "769e2cd874827d4b67ddd51fcd9f325ef3e54a24555b48a343ea3c99c07d2b1d"
+    },
+    "terminal-bench/query-optimize": {
+      "cacheDigest": "169496ea6843cb403b0860132675baf7aa0df0ac8b86221068e27d86395260f4",
+      "treeSha256": "542de7e94b9238bb3092c1e3a7433340e29201805ca2b0da8702b1c1a79c2421"
+    },
+    "terminal-bench/fix-git": {
+      "cacheDigest": "16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e",
+      "treeSha256": "7b4a6e7bcf816b78da817add3e28bd3e977fb85a1829ff6830c143227a90b2c0"
+    }
+  }
+}
