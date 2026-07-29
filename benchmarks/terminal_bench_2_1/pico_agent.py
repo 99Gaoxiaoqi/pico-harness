@@ -19,7 +19,7 @@ import time
 import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, override
+from typing import Any, NamedTuple, override
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
@@ -32,6 +32,11 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
 _RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
+
+
+class TrialNetworks(NamedTuple):
+    task: str
+    gateway: str
 
 
 class PicoInstalledAgent(BaseInstalledAgent):
@@ -97,7 +102,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
         self._result_flush_margin_ms = require_positive_int(
             result_flush_margin_ms, "result_flush_margin_ms"
         )
-        self._trial_network = ""
+        self._trial_networks: TrialNetworks | None = None
         self._route_config = load_route_config(self._route_config_path)
         self._supervisor_config = read_supervisor_config(self._SUPERVISOR_SOCKET_FD)
         if self.model_name != self._route_config["modelRouteId"]:
@@ -116,34 +121,43 @@ class PicoInstalledAgent(BaseInstalledAgent):
             self.logs_dir,
             self._supervisor_config["runId"],
         )
-        self._trial_network = await isolate_container_network(
+        self._trial_networks = await isolate_container_network(
             environment,
             container_ids,
             self._supervisor_config["runId"],
         )
-        await self._install_node(environment)
-        remote_bundle = "/installed-agent/pico-bundle.tar.gz"
-        await environment.upload_file(self._bundle_path, remote_bundle)
-        await self.exec_as_root(
-            environment,
-            command=(
-                "set -eu; "
-                f"printf '%s  %s\\n' {shlex.quote(self._bundle_sha256)} "
-                f"{shlex.quote(remote_bundle)} "
-                "| sha256sum -c -; "
-                f"tar -tzf {shlex.quote(remote_bundle)} "
-                "| awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'; "
-                f"tar -tvzf {shlex.quote(remote_bundle)} "
-                "| awk 'substr($1,1,1) == \"l\" || substr($1,1,1) == \"h\" "
-                "{{ exit 2 }}'; "
-                f"rm -rf {self._REMOTE_ROOT.as_posix()}; "
-                f"mkdir -p {self._REMOTE_ROOT.as_posix()}; "
-                f"tar -xzf {shlex.quote(remote_bundle)} -C {self._REMOTE_ROOT.as_posix()}; "
-                f"printf '%s  %s\\n' {shlex.quote(self._bundle_lockfile_sha256)} "
-                f"{self._REMOTE_ROOT.as_posix()}/package-lock.json | sha256sum -c -; "
-                f"chmod -R a-w {self._REMOTE_ROOT.as_posix()}"
-            ),
-        )
+        try:
+            await self._install_node(environment)
+            remote_bundle = "/installed-agent/pico-bundle.tar.gz"
+            await environment.upload_file(self._bundle_path, remote_bundle)
+            await self.exec_as_root(
+                environment,
+                command=(
+                    "set -eu; "
+                    f"printf '%s  %s\\n' {shlex.quote(self._bundle_sha256)} "
+                    f"{shlex.quote(remote_bundle)} "
+                    "| sha256sum -c -; "
+                    f"tar -tzf {shlex.quote(remote_bundle)} "
+                    "| awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'; "
+                    f"tar -tvzf {shlex.quote(remote_bundle)} "
+                    "| awk 'substr($1,1,1) == \"l\" || substr($1,1,1) == \"h\" "
+                    "{{ exit 2 }}'; "
+                    f"rm -rf {self._REMOTE_ROOT.as_posix()}; "
+                    f"mkdir -p {self._REMOTE_ROOT.as_posix()}; "
+                    f"tar -xzf {shlex.quote(remote_bundle)} -C {self._REMOTE_ROOT.as_posix()}; "
+                    f"printf '%s  %s\\n' {shlex.quote(self._bundle_lockfile_sha256)} "
+                    f"{self._REMOTE_ROOT.as_posix()}/package-lock.json | sha256sum -c -; "
+                    f"chmod -R a-w {self._REMOTE_ROOT.as_posix()}"
+                ),
+            )
+        except BaseException:
+            await remove_owned_trial_networks(
+                environment,
+                self._trial_networks,
+                self._supervisor_config["runId"],
+            )
+            self._trial_networks = None
+            raise
 
     async def _install_node(self, environment: BaseEnvironment) -> None:
         architecture = await environment.exec(command="uname -m")
@@ -192,6 +206,8 @@ rm -f {remote_archive}
         workspace = workspace_result.stdout.strip()
         if self.context_id is None:
             raise RuntimeError("Harbor did not assign the trial context_id")
+        if self._trial_networks is None:
+            raise RuntimeError("Trial networks were not initialized")
         context_id = safe_trial_key(str(self.context_id))
         trial_key = safe_trial_key(f"{self.session_id or 'session'}-{context_id}")
         pico_home = f"/tmp/pico-tb21/{trial_key}/pico-home"
@@ -203,7 +219,7 @@ rm -f {remote_archive}
             supervisor_socket=self._supervisor_config["socketPath"],
             capability_seed=self._supervisor_config["capabilitySeed"],
             run_id=self._supervisor_config["runId"],
-            network_name=self._trial_network,
+            network_name=self._trial_networks.gateway,
             context_id=context_id,
             ttl_sec=outer_timeout_sec,
             pricing_sha256=route_config["pricingSha256"],
@@ -233,7 +249,12 @@ rm -f {remote_archive}
                 accounting_receipt = gateway.stop()
                 apply_gateway_accounting(context, accounting_receipt)
             finally:
-                await enable_verifier_network(environment)
+                await restore_verifier_and_remove_trial_networks(
+                    environment,
+                    self._trial_networks,
+                    self._supervisor_config["runId"],
+                )
+                self._trial_networks = None
 
     async def _run_with_gateway(
         self,
@@ -1280,110 +1301,188 @@ async def isolate_container_network(
     environment: DockerEnvironment,
     container_ids: list[str],
     run_id: str,
-) -> str:
+) -> TrialNetworks:
     suffix = hashlib.sha256(environment.session_id.encode()).hexdigest()[:18]
     task_network = f"pico-tb-task-{suffix}"
     gateway_network = f"pico-tb-gw-{suffix}"
-    for network_name in [task_network, gateway_network]:
-        create_code, _, create_stderr = await run_docker(
-            [
-                "network",
-                "create",
-                "--internal",
-                "--label",
-                f"pico.terminal-bench.run={run_id}",
-                network_name,
-            ],
-            environment,
-            allowed_exit_codes={0, 1},
-        )
-        if create_code == 1 and "already exists" not in create_stderr.decode():
-            raise RuntimeError("Could not create the isolated trial network")
-        _, network_stdout, _ = await run_docker(
-            ["network", "inspect", network_name],
-            environment,
-        )
-        network_config = json.loads(network_stdout)[0]
-        if (
-            network_config.get("Internal") is not True
-            or (network_config.get("Labels") or {}).get("pico.terminal-bench.run")
-            != run_id
-        ):
-            raise RuntimeError("Trial network identity or isolation is invalid")
-    _, inspect_stdout, _ = await run_docker(["inspect", *container_ids], environment)
-    values = json.loads(inspect_stdout)
-    initial_networks = sorted(
-        {
-            network
-            for value in values
-            for network in (
-                value.get("NetworkSettings", {}).get("Networks") or {}
-            )
-        }
-    )
-    if not initial_networks:
-        raise RuntimeError("Harbor container pre-start network isolation is missing")
-    _, initial_network_stdout, _ = await run_docker(
-        ["network", "inspect", *initial_networks],
-        environment,
-    )
-    compose_project = _sanitize_docker_compose_project_name(environment.session_id)
-    initial_network_values = json.loads(initial_network_stdout)
-    if len(initial_network_values) != 1 or any(
-        network.get("Internal") is not True
-        or (network.get("Labels") or {}).get("pico.terminal-bench.run") != run_id
-        or (network.get("Labels") or {}).get("com.docker.compose.project")
-        != compose_project
-        or set((network.get("Containers") or {}).keys()) != set(container_ids)
-        for network in initial_network_values
-    ):
-        raise RuntimeError("Harbor container started with provider egress")
-    main_values = [
-        value
-        for value in values
-        if (value.get("Config", {}).get("Labels") or {}).get(
-            "com.docker.compose.service"
-        )
-        == "main"
-    ]
-    if len(main_values) != 1:
-        raise RuntimeError("Harbor Compose must contain exactly one main workload")
-    main_id = main_values[0]["Id"]
-    for value in values:
-        container_id = value["Id"]
-        service = (value.get("Config", {}).get("Labels") or {}).get(
-            "com.docker.compose.service"
-        )
-        connect_args = ["network", "connect"]
-        if service:
-            connect_args.extend(["--alias", service])
-        connect_args.extend([task_network, container_id])
-        await run_docker(connect_args, environment, allowed_exit_codes={0, 1})
-        if container_id == main_id:
-            await run_docker(
-                ["network", "connect", "--alias", "main", gateway_network, container_id],
+    networks = TrialNetworks(task=task_network, gateway=gateway_network)
+    owned_networks: list[str] = []
+    try:
+        for network_name in networks:
+            create_code, _, create_stderr = await run_docker(
+                [
+                    "network",
+                    "create",
+                    "--internal",
+                    "--label",
+                    f"pico.terminal-bench.run={run_id}",
+                    network_name,
+                ],
                 environment,
                 allowed_exit_codes={0, 1},
             )
-    for value in values:
-        container_id = value["Id"]
-        for existing_network in (value.get("NetworkSettings", {}).get("Networks") or {}):
-            if existing_network not in {task_network, gateway_network}:
-                await run_docker(
-                    ["network", "disconnect", existing_network, container_id],
-                    environment,
+            if create_code == 1 and "already exists" not in create_stderr.decode():
+                raise RuntimeError("Could not create the isolated trial network")
+            _, network_stdout, _ = await run_docker(
+                ["network", "inspect", network_name],
+                environment,
+            )
+            network_config = json.loads(network_stdout)[0]
+            if not is_owned_trial_network(network_config, run_id):
+                raise RuntimeError("Trial network identity or isolation is invalid")
+            owned_networks.append(network_name)
+        _, inspect_stdout, _ = await run_docker(["inspect", *container_ids], environment)
+        values = json.loads(inspect_stdout)
+        initial_networks = sorted(
+            {
+                network
+                for value in values
+                for network in (
+                    value.get("NetworkSettings", {}).get("Networks") or {}
                 )
-    _, verify_stdout, _ = await run_docker(["inspect", *container_ids], environment)
-    for value in json.loads(verify_stdout):
-        networks = set((value.get("NetworkSettings", {}).get("Networks") or {}))
-        expected = (
-            {task_network, gateway_network}
-            if value["Id"] == main_id
-            else {task_network}
+            }
         )
-        if networks != expected:
-            raise RuntimeError("Harbor container retained direct provider egress")
-    return gateway_network
+        if not initial_networks:
+            raise RuntimeError("Harbor container pre-start network isolation is missing")
+        _, initial_network_stdout, _ = await run_docker(
+            ["network", "inspect", *initial_networks],
+            environment,
+        )
+        compose_project = _sanitize_docker_compose_project_name(environment.session_id)
+        initial_network_values = json.loads(initial_network_stdout)
+        if len(initial_network_values) != 1 or any(
+            network.get("Internal") is not True
+            or (network.get("Labels") or {}).get("pico.terminal-bench.run") != run_id
+            or (network.get("Labels") or {}).get("com.docker.compose.project")
+            != compose_project
+            or set((network.get("Containers") or {}).keys()) != set(container_ids)
+            for network in initial_network_values
+        ):
+            raise RuntimeError("Harbor container started with provider egress")
+        main_values = [
+            value
+            for value in values
+            if (value.get("Config", {}).get("Labels") or {}).get(
+                "com.docker.compose.service"
+            )
+            == "main"
+        ]
+        if len(main_values) != 1:
+            raise RuntimeError("Harbor Compose must contain exactly one main workload")
+        main_id = main_values[0]["Id"]
+        for value in values:
+            container_id = value["Id"]
+            service = (value.get("Config", {}).get("Labels") or {}).get(
+                "com.docker.compose.service"
+            )
+            connect_args = ["network", "connect"]
+            if service:
+                connect_args.extend(["--alias", service])
+            connect_args.extend([task_network, container_id])
+            await run_docker(connect_args, environment, allowed_exit_codes={0, 1})
+            if container_id == main_id:
+                await run_docker(
+                    [
+                        "network",
+                        "connect",
+                        "--alias",
+                        "main",
+                        gateway_network,
+                        container_id,
+                    ],
+                    environment,
+                    allowed_exit_codes={0, 1},
+                )
+        for value in values:
+            container_id = value["Id"]
+            for existing_network in (
+                value.get("NetworkSettings", {}).get("Networks") or {}
+            ):
+                if existing_network not in set(networks):
+                    await run_docker(
+                        ["network", "disconnect", existing_network, container_id],
+                        environment,
+                    )
+        _, verify_stdout, _ = await run_docker(["inspect", *container_ids], environment)
+        for value in json.loads(verify_stdout):
+            connected_networks = set(
+                (value.get("NetworkSettings", {}).get("Networks") or {})
+            )
+            expected = (
+                {task_network, gateway_network}
+                if value["Id"] == main_id
+                else {task_network}
+            )
+            if connected_networks != expected:
+                raise RuntimeError("Harbor container retained direct provider egress")
+        return networks
+    except BaseException:
+        await remove_owned_trial_networks(
+            environment,
+            TrialNetworks(
+                task=task_network if task_network in owned_networks else "",
+                gateway=gateway_network if gateway_network in owned_networks else "",
+            ),
+            run_id,
+        )
+        raise
+
+
+def is_owned_trial_network(network: dict[str, Any], run_id: str) -> bool:
+    return (
+        network.get("Internal") is True
+        and (network.get("Labels") or {}).get("pico.terminal-bench.run") == run_id
+    )
+
+
+async def remove_owned_trial_networks(
+    environment: DockerEnvironment,
+    networks: TrialNetworks,
+    run_id: str,
+) -> None:
+    failures: list[str] = []
+    for network_name in reversed(networks):
+        if not network_name:
+            continue
+        inspect_code, inspect_stdout, _ = await run_docker(
+            ["network", "inspect", network_name],
+            environment,
+            allowed_exit_codes={0, 1},
+        )
+        if inspect_code == 1:
+            continue
+        network_values = json.loads(inspect_stdout)
+        if len(network_values) != 1 or not is_owned_trial_network(
+            network_values[0], run_id
+        ):
+            failures.append(network_name)
+            continue
+        for container_id in (network_values[0].get("Containers") or {}):
+            await run_docker(
+                ["network", "disconnect", "--force", network_name, container_id],
+                environment,
+                allowed_exit_codes={0, 1},
+            )
+        remove_code, _, _ = await run_docker(
+            ["network", "rm", network_name],
+            environment,
+            allowed_exit_codes={0, 1},
+        )
+        if remove_code != 0:
+            failures.append(network_name)
+    if failures:
+        raise RuntimeError(
+            "Could not remove owned trial networks: " + ", ".join(failures)
+        )
+
+
+async def restore_verifier_and_remove_trial_networks(
+    environment: DockerEnvironment,
+    networks: TrialNetworks,
+    run_id: str,
+) -> None:
+    await enable_verifier_network(environment)
+    await remove_owned_trial_networks(environment, networks, run_id)
 
 
 async def enable_verifier_network(environment: DockerEnvironment) -> None:

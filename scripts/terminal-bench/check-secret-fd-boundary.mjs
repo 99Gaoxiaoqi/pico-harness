@@ -110,6 +110,7 @@ try {
     [join(import.meta.dirname, "check-gateway-supervisor-security.py")],
     childEnv,
   );
+  await run("python3", [join(import.meta.dirname, "check-trial-network-lifecycle.py")], childEnv);
   await run(process.execPath, [join(import.meta.dirname, "check-network-boundary.mjs")], childEnv);
   await run(
     process.execPath,
