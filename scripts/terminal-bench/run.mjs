@@ -610,34 +610,22 @@ async function prepareLocalDataset(tasks, runRoot) {
     if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
       throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
     }
-    await setTaskNetworkBaseline(taskDestination);
+    await setTaskPrestartNetworkIsolation(taskDestination);
     await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(process.env));
   }
   await makeTreeReadOnly(destination);
   return destination;
 }
 
-async function setTaskNetworkBaseline(taskRoot) {
-  const path = join(taskRoot, "task.toml");
-  const original = await readFile(path, "utf8");
-  const lines = original.split(/\r?\n/u);
-  let inEnvironment = false;
-  let environmentFound = false;
-  const rewritten = [];
-  for (const line of lines) {
-    const section = line.match(/^\s*\[([^\]]+)\]\s*$/u);
-    if (section) {
-      inEnvironment = section[1] === "environment";
-      environmentFound ||= inEnvironment;
-    }
-    if (inEnvironment && /^\s*(?:allow_internet|network_mode|allowed_hosts)\s*=/u.test(line)) {
-      continue;
-    }
-    rewritten.push(line);
-    if (section?.[1] === "environment") rewritten.push('network_mode = "no-network"');
+async function setTaskPrestartNetworkIsolation(taskRoot) {
+  const path = join(taskRoot, "environment", "docker-compose.yaml");
+  try {
+    await lstat(path);
+    throw new Error("Terminal-Bench canary task defines unsupported Compose services");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
-  if (!environmentFound) throw new Error("Terminal-Bench task is missing [environment]");
-  await writeFile(path, rewritten.join("\n"), { mode: 0o600 });
+  await writeFile(path, "services:\n  main:\n    network_mode: none\n", { mode: 0o600 });
 }
 
 async function makeTreeReadOnly(root) {
