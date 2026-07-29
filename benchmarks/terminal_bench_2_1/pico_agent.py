@@ -206,6 +206,8 @@ rm -f {remote_archive}
             network_name=self._trial_network,
             context_id=context_id,
             ttl_sec=outer_timeout_sec,
+            pricing_sha256=route_config["pricingSha256"],
+            receipt_path=self.logs_dir / "gateway-accounting-receipt.json",
         )
         gateway.start()
         try:
@@ -228,7 +230,8 @@ rm -f {remote_archive}
             )
         finally:
             try:
-                gateway.stop()
+                accounting_receipt = gateway.stop()
+                apply_gateway_accounting(context, accounting_receipt)
             finally:
                 await enable_verifier_network(environment)
 
@@ -377,6 +380,190 @@ rm -f {remote_archive}
             raise RuntimeError("Pico provider returned an empty model response")
 
 
+def apply_gateway_accounting(
+    context: AgentContext, receipt: dict[str, Any]
+) -> None:
+    actual = receipt["actual"]
+    context.n_input_tokens = actual["inputTokens"]
+    context.n_output_tokens = actual["outputTokens"]
+    metadata = context.metadata if isinstance(context.metadata, dict) else {}
+    pico = metadata.get("pico")
+    if not isinstance(pico, dict):
+        pico = {}
+    runtime_reported_cost = pico.get("costCNY")
+    pico["runtimeReportedCostCNY"] = runtime_reported_cost
+    pico["costCNY"] = actual["costCNY"]
+    pico["gatewayAccounting"] = {
+        "schemaVersion": receipt["schemaVersion"],
+        "status": receipt["status"],
+        "withinBudget": receipt["withinBudget"],
+        "pricingSha256": receipt["pricingSha256"],
+        "receiptSha256": receipt["receiptSha256"],
+        "costMicroCNY": actual["costMicroCNY"],
+        "costCNY": actual["costCNY"],
+    }
+    metadata["pico"] = pico
+    context.metadata = metadata
+    if (
+        receipt["status"] != "reconciled"
+        or receipt["withinBudget"] is not True
+        or receipt["requests"]["attempted"] != 1
+    ):
+        raise RuntimeError("Gateway accounting could not be reconciled")
+
+
+def validate_gateway_accounting_receipt(
+    value: Any,
+    *,
+    expected_run_id: str,
+    expected_trial_id: str,
+    expected_protocol: str,
+    expected_pricing_sha256: str,
+    capability_seed: str,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schemaVersion",
+        "runId",
+        "trialId",
+        "protocol",
+        "modelRouteId",
+        "pricing",
+        "pricingSha256",
+        "rounding",
+        "status",
+        "withinBudget",
+        "requests",
+        "reservation",
+        "actual",
+        "refund",
+        "supplement",
+        "unreconciledReservation",
+        "receiptSha256",
+        "auth",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError("Gateway accounting receipt schema is invalid")
+    if (
+        value["schemaVersion"] != 1
+        or value["runId"] != expected_run_id
+        or value["trialId"] != expected_trial_id
+        or value["protocol"] != expected_protocol
+        or not isinstance(value["modelRouteId"], str)
+        or not value["modelRouteId"]
+        or value["pricingSha256"] != expected_pricing_sha256
+        or value["rounding"] != "ceil-per-request"
+        or value["status"] not in {"reconciled", "unreconciled"}
+        or not isinstance(value["withinBudget"], bool)
+    ):
+        raise ValueError("Gateway accounting receipt identity is invalid")
+    pricing = value["pricing"]
+    if not isinstance(pricing, dict):
+        raise ValueError("Gateway accounting receipt pricing is invalid")
+    pricing_digest = hashlib.sha256(
+        json.dumps(
+            pricing,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    if not hmac.compare_digest(pricing_digest, expected_pricing_sha256):
+        raise ValueError("Gateway accounting receipt pricing digest is invalid")
+    auth = value["auth"]
+    signed = dict(value)
+    signed.pop("receiptSha256")
+    signed.pop("auth")
+    expected_tag = hmac.new(
+        capability_seed.encode(),
+        b"pico-gateway-accounting-receipt-v1\0"
+        + json.dumps(
+            signed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode(),
+        "sha256",
+    ).hexdigest()
+    if (
+        not isinstance(auth, dict)
+        or set(auth) != {"algorithm", "keyId", "tag"}
+        or auth["algorithm"] != "hmac-sha256"
+        or auth["keyId"] != "run-capability-v1"
+        or not isinstance(auth["tag"], str)
+        or not hmac.compare_digest(auth["tag"], expected_tag)
+    ):
+        raise ValueError("Gateway accounting receipt authentication is invalid")
+    unsigned = dict(value)
+    receipt_digest = unsigned.pop("receiptSha256")
+    expected_receipt_digest = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    if (
+        not isinstance(receipt_digest, str)
+        or not hmac.compare_digest(receipt_digest, expected_receipt_digest)
+    ):
+        raise ValueError("Gateway accounting receipt digest is invalid")
+    requests = value["requests"]
+    if (
+        not isinstance(requests, dict)
+        or set(requests) != {"attempted", "reconciled", "unreconciled"}
+    ):
+        raise ValueError("Gateway accounting request totals are invalid")
+    for field in requests:
+        require_nonnegative_int(requests[field], f"requests.{field}")
+    if requests["attempted"] != requests["reconciled"] + requests["unreconciled"]:
+        raise ValueError("Gateway accounting request totals are inconsistent")
+    buckets = (
+        "reservation",
+        "actual",
+        "refund",
+        "supplement",
+        "unreconciledReservation",
+    )
+    for bucket_name in buckets:
+        bucket = value[bucket_name]
+        expected_bucket_keys = {"inputTokens", "outputTokens", "costMicroCNY"}
+        if bucket_name == "actual":
+            expected_bucket_keys.add("costCNY")
+        if not isinstance(bucket, dict) or set(bucket) != expected_bucket_keys:
+            raise ValueError("Gateway accounting token totals are invalid")
+        for field in ("inputTokens", "outputTokens", "costMicroCNY"):
+            require_nonnegative_int(bucket[field], f"{bucket_name}.{field}")
+    actual = value["actual"]
+    if (
+        isinstance(actual["costCNY"], bool)
+        or not isinstance(actual["costCNY"], (int, float))
+        or actual["costCNY"] != actual["costMicroCNY"] / 1_000_000
+    ):
+        raise ValueError("Gateway accounting cost projection is invalid")
+    for field in ("inputTokens", "outputTokens", "costMicroCNY"):
+        if (
+            value["reservation"][field]
+            + value["supplement"][field]
+            - value["refund"][field]
+            - value["unreconciledReservation"][field]
+            != actual[field]
+        ):
+            raise ValueError("Gateway accounting reconciliation is invalid")
+    if (
+        (value["status"] == "reconciled") != (requests["unreconciled"] == 0)
+        or (requests["attempted"] == 0 and actual["costMicroCNY"] != 0)
+    ):
+        raise ValueError("Gateway accounting status is inconsistent")
+    return value
+
+
+def require_nonnegative_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be a nonnegative integer")
+    return value
+
+
 class ProviderGateway:
     def __init__(
         self,
@@ -388,6 +575,8 @@ class ProviderGateway:
         network_name: str,
         context_id: str,
         ttl_sec: float,
+        pricing_sha256: str,
+        receipt_path: Path,
     ):
         self._protocol = protocol
         self._supervisor_socket = supervisor_socket
@@ -395,6 +584,8 @@ class ProviderGateway:
         self._network_name = network_name
         self._context_id = context_id
         self._ttl_sec = ttl_sec
+        self._pricing_sha256 = pricing_sha256
+        self._receipt_path = receipt_path
         self._capability_seed = capability_seed
         self._expires_at = time.monotonic() + ttl_sec
         self._request_lock = threading.Lock()
@@ -505,31 +696,40 @@ class ProviderGateway:
         if self._workload_peer is None:
             raise RuntimeError("Pico could not bind the gateway workload identity")
 
-    def stop(self) -> None:
+    def stop(self) -> dict[str, Any]:
         with self._request_lock:
             self._revoked = True
         try:
-            self._signed_supervisor_request(
+            response = self._signed_supervisor_request(
                 {
                     "action": "revoke",
                     "trialId": self._context_id,
                 }
             )
-        except Exception:
-            pass
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-        subprocess.run(
-            ["docker", "rm", "--force", self._relay_name],
-            env=compose_subprocess_env_from_host(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+            receipt = validate_gateway_accounting_receipt(
+                response.get("accountingReceipt"),
+                expected_run_id=self._run_id,
+                expected_trial_id=self._context_id,
+                expected_protocol=self._protocol,
+                expected_pricing_sha256=self._pricing_sha256,
+                capability_seed=self._capability_seed,
+            )
+            write_private_json_once(self._receipt_path, receipt)
+        finally:
+            if self._server is not None:
+                self._server.shutdown()
+                self._server.server_close()
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+            subprocess.run(
+                ["docker", "rm", "--force", self._relay_name],
+                env=compose_subprocess_env_from_host(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        return receipt
 
     def _proxy(self, handler: BaseHTTPRequestHandler) -> None:
         if not self._request_slot.acquire(blocking=False):
@@ -1282,6 +1482,33 @@ def write_private_json(path: Path, value: Any) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_private_json_once(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data = (json.dumps(value, separators=(",", ":")) + "\n").encode()
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != data:
+                raise ValueError("Gateway accounting receipt already changed")
+            return
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
