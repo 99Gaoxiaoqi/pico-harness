@@ -61,10 +61,10 @@ class UpstreamRequest:
         )
         with self.lock:
             cancelled = self.cancelled
-            if not cancelled:
-                self.process = process
+            self.process = process
         if cancelled:
-            terminate_process(process, time.monotonic() + 0.4)
+            if not terminate_process(process, time.monotonic() + 0.4):
+                raise ValueError("gateway upstream worker termination was not confirmed")
             raise ValueError("gateway upstream request was cancelled")
         try:
             try:
@@ -90,7 +90,7 @@ class UpstreamRequest:
             return value
         finally:
             with self.lock:
-                if self.process is process:
+                if self.process is process and process.poll() is not None:
                     self.process = None
 
     def cancel(self, deadline: float | None = None) -> None:
@@ -99,7 +99,13 @@ class UpstreamRequest:
             process = self.process
         if process is None or process.poll() is not None:
             return
-        terminate_process(process, deadline)
+        if not terminate_process(process, deadline):
+            raise ValueError("gateway upstream worker termination was not confirmed")
+
+    def reaped(self) -> bool:
+        with self.lock:
+            process = self.process
+        return process is None or process.poll() is not None
 
 
 class GatewayState:
@@ -113,6 +119,8 @@ class GatewayState:
         self.provider = route_config["provider"]
         self.model = route_config["modelRouteId"].split("/", 1)[1]
         self.pricing, self.pricing_sha256 = require_pricing(route_config, self.model)
+        self.pricing_descriptor = dict(route_config["pricing"])
+        self.model_route_id = route_config["modelRouteId"]
         self.provider_secret = provider_secret
         self.run_id = run_id
         self.capability_seed = capability_seed
@@ -183,6 +191,9 @@ class GatewayState:
                 "pricingSha256": self.pricing_sha256,
                 "revoked": False,
                 "active": set(),
+                "accounting": new_accounting(),
+                "withinBudget": True,
+                "receipt": None,
             }
 
     def proxy(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +233,14 @@ class GatewayState:
             trial["outputTokensRemaining"] -= output_limit
             trial["costMicroCNYRemaining"] -= cost_reservation
             trial["active"].add(active)
+            accounting = trial["accounting"]
+            accounting["requests"]["attempted"] += 1
+            add_accounting(
+                accounting["reservation"],
+                input_reservation,
+                output_limit,
+                cost_reservation,
+            )
         try:
             upstream = active.execute(
                 {
@@ -257,11 +276,29 @@ class GatewayState:
                 "body": base64.b64encode(response_body).decode(),
             }
             with self.condition:
-                if trial["revoked"]:
-                    raise ValueError("gateway trial revoked during upstream request")
                 trial["inputTokensRemaining"] += input_reservation - actual_input
                 trial["outputTokensRemaining"] += output_limit - actual_output
                 trial["costMicroCNYRemaining"] += cost_reservation - actual_cost
+                accounting = trial["accounting"]
+                accounting["requests"]["reconciled"] += 1
+                add_accounting(
+                    accounting["actual"],
+                    actual_input,
+                    actual_output,
+                    actual_cost,
+                )
+                add_accounting(
+                    accounting["refund"],
+                    max(input_reservation - actual_input, 0),
+                    max(output_limit - actual_output, 0),
+                    max(cost_reservation - actual_cost, 0),
+                )
+                add_accounting(
+                    accounting["supplement"],
+                    max(actual_input - input_reservation, 0),
+                    max(actual_output - output_limit, 0),
+                    max(actual_cost - cost_reservation, 0),
+                )
                 over_quota = (
                     actual_input > MAX_INPUT_TOKENS
                     or actual_output > output_limit
@@ -271,22 +308,33 @@ class GatewayState:
                 )
                 if over_quota:
                     trial["revoked"] = True
+                    trial["withinBudget"] = False
+                revoked = trial["revoked"]
                 trial["active"].discard(active)
                 self.condition.notify_all()
             if over_quota:
                 raise ValueError("gateway response usage exceeds quota")
+            if revoked:
+                raise ValueError("gateway trial revoked during upstream request")
             return response
         except Exception:
+            active.cancel()
             with self.condition:
                 if active in trial["active"]:
+                    accounting = trial["accounting"]
+                    accounting["requests"]["unreconciled"] += 1
+                    add_accounting(
+                        accounting["unreconciledReservation"],
+                        input_reservation,
+                        output_limit,
+                        cost_reservation,
+                    )
                     trial["revoked"] = True
                     trial["active"].discard(active)
                     self.condition.notify_all()
             raise
-        finally:
-            active.cancel()
 
-    def revoke(self, trial_id: Any) -> None:
+    def revoke(self, trial_id: Any) -> dict[str, Any]:
         key = require_trial_id(trial_id)
         deadline = time.monotonic() + REVOKE_DEADLINE_SEC
         with self.lock:
@@ -301,9 +349,14 @@ class GatewayState:
                     "pricingSha256": self.pricing_sha256,
                     "revoked": True,
                     "active": set(),
+                    "accounting": new_accounting(),
+                    "withinBudget": True,
+                    "receipt": None,
                 }
-                return
+                trial = self.trials[key]
             trial["revoked"] = True
+            if trial["receipt"] is not None:
+                return trial["receipt"]
             active = list(trial["active"])
         for connection in active:
             connection.cancel(deadline)
@@ -313,6 +366,19 @@ class GatewayState:
                 if remaining <= 0:
                     raise ValueError("gateway revoke deadline exceeded")
                 self.condition.wait(timeout=min(remaining, 0.05))
+            receipt = freeze_accounting_receipt(
+                run_id=self.run_id,
+                trial_id=key,
+                protocol=self.provider["protocol"],
+                model_route_id=self.model_route_id,
+                pricing=self.pricing_descriptor,
+                pricing_sha256=self.pricing_sha256,
+                accounting=trial["accounting"],
+                within_budget=trial["withinBudget"],
+                capability_seed=self.capability_seed,
+            )
+            trial["receipt"] = receipt
+            return receipt
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -332,8 +398,13 @@ class Handler(BaseHTTPRequestHandler):
             elif request.get("action") == "proxy":
                 response = self.server.state.proxy(request)
             elif request.get("action") == "revoke":
-                self.server.state.revoke(request.get("trialId"))
-                response = {"status": 204, "headers": [], "body": ""}
+                receipt = self.server.state.revoke(request.get("trialId"))
+                response = {
+                    "status": 204,
+                    "headers": [],
+                    "body": "",
+                    "accountingReceipt": receipt,
+                }
             else:
                 raise ValueError("unsupported supervisor action")
             data = json.dumps(response, separators=(",", ":")).encode()
@@ -457,9 +528,9 @@ def remaining_cancel_time(deadline: float | None, maximum: float) -> float:
 
 def terminate_process(
     process: subprocess.Popen[bytes], deadline: float | None
-) -> None:
+) -> bool:
     if process.poll() is not None:
-        return
+        return True
     process.terminate()
     try:
         process.wait(timeout=remaining_cancel_time(deadline, 0.2))
@@ -468,7 +539,85 @@ def terminate_process(
         try:
             process.wait(timeout=remaining_cancel_time(deadline, 0.2))
         except subprocess.TimeoutExpired:
-            pass
+            return False
+    return process.poll() is not None
+
+
+def new_accounting() -> dict[str, Any]:
+    return {
+        "requests": {"attempted": 0, "reconciled": 0, "unreconciled": 0},
+        "reservation": zero_accounting_bucket(),
+        "actual": zero_accounting_bucket(),
+        "refund": zero_accounting_bucket(),
+        "supplement": zero_accounting_bucket(),
+        "unreconciledReservation": zero_accounting_bucket(),
+    }
+
+
+def zero_accounting_bucket() -> dict[str, int]:
+    return {"inputTokens": 0, "outputTokens": 0, "costMicroCNY": 0}
+
+
+def add_accounting(
+    bucket: dict[str, int],
+    input_tokens: int,
+    output_tokens: int,
+    cost_micro_cny: int,
+) -> None:
+    bucket["inputTokens"] += input_tokens
+    bucket["outputTokens"] += output_tokens
+    bucket["costMicroCNY"] += cost_micro_cny
+
+
+def freeze_accounting_receipt(
+    *,
+    run_id: str,
+    trial_id: str,
+    protocol: str,
+    model_route_id: str,
+    pricing: dict[str, Any],
+    pricing_sha256: str,
+    accounting: dict[str, Any],
+    within_budget: bool,
+    capability_seed: str,
+) -> dict[str, Any]:
+    actual = dict(accounting["actual"])
+    actual["costCNY"] = actual["costMicroCNY"] / 1_000_000
+    receipt = {
+        "schemaVersion": 1,
+        "runId": run_id,
+        "trialId": trial_id,
+        "protocol": protocol,
+        "modelRouteId": model_route_id,
+        "pricing": pricing,
+        "pricingSha256": pricing_sha256,
+        "rounding": "ceil-per-request",
+        "status": (
+            "reconciled"
+            if accounting["requests"]["unreconciled"] == 0
+            else "unreconciled"
+        ),
+        "withinBudget": within_budget,
+        "requests": dict(accounting["requests"]),
+        "reservation": dict(accounting["reservation"]),
+        "actual": actual,
+        "refund": dict(accounting["refund"]),
+        "supplement": dict(accounting["supplement"]),
+        "unreconciledReservation": dict(
+            accounting["unreconciledReservation"]
+        ),
+    }
+    receipt["auth"] = {
+        "algorithm": "hmac-sha256",
+        "keyId": "run-capability-v1",
+        "tag": hmac.new(
+            capability_seed.encode(),
+            b"pico-gateway-accounting-receipt-v1\0" + canonical_json(receipt),
+            "sha256",
+        ).hexdigest(),
+    }
+    receipt["receiptSha256"] = hashlib.sha256(canonical_json(receipt)).hexdigest()
+    return receipt
 
 
 def require_pricing(
@@ -577,14 +726,23 @@ def parse_usage(response_body: bytes, protocol: str) -> tuple[int, int]:
         candidates = require_usage_int(
             usage.get("candidatesTokenCount"), "candidatesTokenCount"
         )
+        tool_use = (
+            require_usage_int(
+                usage["toolUsePromptTokenCount"], "toolUsePromptTokenCount"
+            )
+            if "toolUsePromptTokenCount" in usage
+            else 0
+        )
+        thoughts = (
+            require_usage_int(usage["thoughtsTokenCount"], "thoughtsTokenCount")
+            if "thoughtsTokenCount" in usage
+            else 0
+        )
         total = require_usage_int(usage.get("totalTokenCount"), "totalTokenCount")
-        if total < input_tokens + candidates:
+        input_tokens += tool_use
+        output_tokens = candidates + thoughts
+        if total != input_tokens + output_tokens:
             raise ValueError("gateway response usage total is inconsistent")
-        output_tokens = total - input_tokens
-        if "thoughtsTokenCount" in usage and require_usage_int(
-            usage["thoughtsTokenCount"], "thoughtsTokenCount"
-        ) != output_tokens - candidates:
-            raise ValueError("gateway response reasoning usage is inconsistent")
         return input_tokens, output_tokens
     raise ValueError("gateway usage protocol is unsupported")
 
