@@ -57,9 +57,22 @@ try {
   const recoveredCorrupt = await acquireBenchmarkLock(root);
   await recoveredCorrupt.release();
 
-  await mkdir(join(root, ".run-lock"));
-  const contenderResults = await Promise.all(Array.from({ length: 12 }, () => runContender(root)));
-  assert.equal(contenderResults.includes(9), false);
+  for (let round = 0; round < 30; round += 1) {
+    await mkdir(join(root, ".run-lock"));
+    await writeFile(
+      join(root, ".run-lock", "owner.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        pid: 2_147_483_647,
+        token: `stale-round-${round}`,
+        startedAt: new Date(0).toISOString(),
+      })}\n`,
+    );
+    const contenderResults = await Promise.all(
+      Array.from({ length: 12 }, () => runContender(root)),
+    );
+    assert.equal(contenderResults.includes(9), false);
+  }
   await access(join(root, "acquired"));
 } finally {
   await rm(root, { recursive: true, force: true });

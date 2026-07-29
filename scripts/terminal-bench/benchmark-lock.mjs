@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export async function acquireBenchmarkLock(benchmarkRoot) {
@@ -48,27 +48,43 @@ export async function acquireBenchmarkLock(benchmarkRoot) {
         await rm(candidatePath, { recursive: true, force: true });
         throw error;
       }
-      const current = await readOwner(ownerPath);
-      if (current !== null && isProcessAlive(current.pid)) {
+      const observed = await observeLock(lockPath, ownerPath);
+      if (observed === null) continue;
+      if (observed.owner !== null && isProcessAlive(observed.owner.pid)) {
         await rm(candidatePath, { recursive: true, force: true });
         throw new Error("Another Terminal-Bench publication process owns the benchmark lock", {
           cause: error,
         });
       }
-      const stalePath = `${lockPath}.stale-${token}-${attempt}`;
+      const generation =
+        observed.owner?.token ?? `${observed.identity.dev}-${observed.identity.ino}`;
+      const generationHash = createHash("sha256").update(generation).digest("hex").slice(0, 32);
+      const stalePath = `${lockPath}.stale-${generationHash}`;
       try {
         await rename(lockPath, stalePath);
       } catch (renameError) {
-        if (renameError?.code === "ENOENT") continue;
+        if (["EEXIST", "ENOTEMPTY", "ENOENT"].includes(renameError?.code)) continue;
         await rm(candidatePath, { recursive: true, force: true });
         throw renameError;
       }
       await fsyncPath(benchmarkRoot);
-      await rm(stalePath, { recursive: true, force: true });
     }
   }
   await rm(candidatePath, { recursive: true, force: true });
   throw new Error("Could not acquire the Terminal-Bench publication lock");
+}
+
+async function observeLock(lockPath, ownerPath) {
+  try {
+    const before = await stat(lockPath);
+    const owner = await readOwner(ownerPath);
+    const after = await stat(lockPath);
+    if (before.dev !== after.dev || before.ino !== after.ino) return null;
+    return { owner, identity: { dev: before.dev, ino: before.ino } };
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 async function readOwner(ownerPath) {

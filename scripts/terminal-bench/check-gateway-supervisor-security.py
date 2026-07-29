@@ -236,8 +236,29 @@ def main() -> None:
             str(socket_path),
             sign(seed, run_id, "trial-in-flight", {"action": "revoke"}),
         )[0] == 200
+        revoked_at = time.monotonic()
         thread.join(4)
         assert result == [502]
+        assert time.monotonic() - revoked_at < 1
+
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-ambiguous",
+                {"action": "register", "protocol": "openai", "ttlSec": 60},
+            ),
+        )[0] == 200
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-ambiguous",
+                proxy_frame({"max_tokens": 8, "max_completion_tokens": 1_000_000}),
+            ),
+        )[0] == 502
         process.terminate()
         process.wait(timeout=5)
     provider.shutdown()
