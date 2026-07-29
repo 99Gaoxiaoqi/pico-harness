@@ -8,15 +8,16 @@ import http.client
 import json
 import os
 import re
+import secrets
 import shlex
 import socket
+import subprocess
 import threading
 import time
 import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, override
-from urllib.parse import parse_qsl, urlsplit
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
@@ -89,6 +90,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
         self._result_flush_margin_ms = require_positive_int(
             result_flush_margin_ms, "result_flush_margin_ms"
         )
+        self._trial_network = ""
         self._route_config = load_route_config(self._route_config_path)
         self._supervisor_config = read_supervisor_config(self._SUPERVISOR_SOCKET_FD)
         if self.model_name != self._route_config["modelRouteId"]:
@@ -97,7 +99,12 @@ class PicoInstalledAgent(BaseInstalledAgent):
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         assert_secure_docker_environment(environment)
-        await assert_running_container_policy(environment, self.logs_dir)
+        container_ids = await assert_running_container_policy(environment, self.logs_dir)
+        self._trial_network = await isolate_container_network(
+            environment,
+            container_ids,
+            self._supervisor_config["runId"],
+        )
         await self._install_node(environment)
         remote_bundle = "/installed-agent/pico-bundle.tar.gz"
         await environment.upload_file(self._bundle_path, remote_bundle)
@@ -175,10 +182,18 @@ rm -f {remote_archive}
             protocol=route_config["provider"]["protocol"],
             supervisor_socket=self._supervisor_config["socketPath"],
             capability_seed=self._supervisor_config["capabilitySeed"],
+            run_id=self._supervisor_config["runId"],
+            network_name=self._trial_network,
             context_id=context_id,
             ttl_sec=outer_timeout_sec,
         )
         gateway.start()
+        try:
+            await gateway.start_relay(environment)
+            await gateway.enroll(environment)
+        except Exception:
+            gateway.stop()
+            raise
         bootstrap_request = {
             "schemaVersion": 1,
             "workspacePath": workspace,
@@ -317,51 +332,130 @@ class ProviderGateway:
         protocol: str,
         supervisor_socket: str,
         capability_seed: str,
+        run_id: str,
+        network_name: str,
         context_id: str,
         ttl_sec: float,
     ):
         self._protocol = protocol
         self._supervisor_socket = supervisor_socket
+        self._run_id = run_id
+        self._network_name = network_name
         self._context_id = context_id
         self._ttl_sec = ttl_sec
+        self._capability_seed = capability_seed
         self._expires_at = time.monotonic() + ttl_sec
         self._request_lock = threading.Lock()
         self._request_slot = threading.BoundedSemaphore(1)
         self._revoked = False
-        self.capability = hmac.new(
-            capability_seed.encode(),
-            f"pico-terminal-bench:{context_id}".encode(),
-            hashlib.sha256,
-        ).hexdigest()
+        self.capability = "pico-workload-identity"
+        self._enrollment_token = secrets.token_hex(32)
+        self._workload_peer: str | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._relay_name = (
+            f"pico-tb-relay-{hashlib.sha256(context_id.encode()).hexdigest()[:20]}"
+        )
+        self._host_port = 0
         self.base_url = ""
 
     def start(self) -> None:
+        self._signed_supervisor_request(
+            {
+                "action": "register",
+                "trialId": self._context_id,
+                "ttlSec": self._ttl_sec,
+                "protocol": self._protocol,
+            }
+        )
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
             def do_POST(self) -> None:
-                gateway._proxy(self)
+                if self.path == "/__pico_enroll__":
+                    gateway._enroll(self)
+                else:
+                    gateway._proxy(self)
 
             def log_message(self, _format: str, *args: Any) -> None:
                 del args
 
         self._server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
         self._server.daemon_threads = True
-        port = self._server.server_address[1]
-        self.base_url = f"http://host.docker.internal:{port}"
+        self._host_port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    async def start_relay(self, environment: DockerEnvironment) -> None:
+        script = (
+            "const net=require('node:net');"
+            "const port=Number(process.argv[1]);"
+            "net.createServer(client=>{"
+            "const upstream=net.connect(port,'host.docker.internal');"
+            "client.pipe(upstream);upstream.pipe(client);"
+            "const close=()=>{client.destroy();upstream.destroy()};"
+            "client.on('error',close);upstream.on('error',close);"
+            "}).listen(8080,'0.0.0.0');"
+        )
+        await run_docker(
+            [
+                "run",
+                "--detach",
+                "--pull",
+                "never",
+                "--name",
+                self._relay_name,
+                "--label",
+                f"pico.terminal-bench.run={self._run_id}",
+                "--network",
+                self._network_name,
+                "--network-alias",
+                "pico-gateway",
+                "node:22-bookworm",
+                "node",
+                "-e",
+                script,
+                str(self._host_port),
+            ],
+            environment,
+        )
+        await run_docker(
+            ["network", "connect", "bridge", self._relay_name],
+            environment,
+        )
+        _, inspect_stdout, _ = await run_docker(
+            ["inspect", self._relay_name],
+            environment,
+        )
+        relay = json.loads(inspect_stdout)[0]
+        if (
+            relay.get("State", {}).get("Running") is not True
+            or set((relay.get("NetworkSettings", {}).get("Networks") or {}))
+            != {self._network_name, "bridge"}
+        ):
+            raise RuntimeError("Pico workload relay isolation is invalid")
+        self.base_url = "http://pico-gateway:8080"
+
+    async def enroll(self, environment: DockerEnvironment) -> None:
+        await docker_enroll_gateway(
+            environment,
+            self.base_url,
+            self._enrollment_token.encode(),
+        )
+        if self._workload_peer is None:
+            raise RuntimeError("Pico could not bind the gateway workload identity")
 
     def stop(self) -> None:
         with self._request_lock:
             self._revoked = True
         try:
-            self._supervisor_request(
-                {"action": "revoke", "trialId": self._context_id}
+            self._signed_supervisor_request(
+                {
+                    "action": "revoke",
+                    "trialId": self._context_id,
+                }
             )
         except Exception:
             pass
@@ -370,24 +464,35 @@ class ProviderGateway:
             self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=5)
+        subprocess.run(
+            ["docker", "rm", "--force", self._relay_name],
+            env=compose_subprocess_env_from_host(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
     def _proxy(self, handler: BaseHTTPRequestHandler) -> None:
         if not self._request_slot.acquire(blocking=False):
             handler.send_error(429, "Pico benchmark gateway concurrency limit")
             return
         try:
-            self._authenticate(handler)
+            if (
+                self._workload_peer is None
+                or handler.client_address[0] != self._workload_peer
+            ):
+                raise ValueError("gateway workload identity mismatch")
             length = int(handler.headers.get("content-length", "0"))
             if length < 1 or length > 8 * 1024 * 1024:
                 raise ValueError("request body is outside the gateway limit")
             with self._request_lock:
                 if self._revoked or time.monotonic() >= self._expires_at:
                     raise ValueError("gateway capability expired")
-            response = self._supervisor_request(
+            response = self._signed_supervisor_request(
                 {
                     "action": "proxy",
                     "trialId": self._context_id,
-                    "ttlSec": self._ttl_sec,
                     "protocol": self._protocol,
                     "path": handler.path,
                     "headers": {
@@ -417,19 +522,47 @@ class ProviderGateway:
         finally:
             self._request_slot.release()
 
-    def _authenticate(self, handler: BaseHTTPRequestHandler) -> None:
-        if self._protocol == "openai":
-            if handler.headers.get("authorization") != f"Bearer {self.capability}":
-                raise ValueError("invalid gateway capability")
-        elif self._protocol == "claude":
-            if handler.headers.get("x-api-key") != self.capability:
-                raise ValueError("invalid gateway capability")
-        elif self._protocol == "gemini":
-            query = dict(parse_qsl(urlsplit(handler.path).query, keep_blank_values=True))
-            if query.get("key") != self.capability:
-                raise ValueError("invalid gateway capability")
-        else:
-            raise ValueError("unsupported gateway protocol")
+    def _enroll(self, handler: BaseHTTPRequestHandler) -> None:
+        with self._request_lock:
+            if (
+                self._workload_peer is not None
+                or not hmac.compare_digest(
+                    handler.headers.get("x-pico-enrollment", ""),
+                    self._enrollment_token,
+                )
+            ):
+                handler.send_error(403, "Pico gateway enrollment rejected")
+                return
+            self._workload_peer = handler.client_address[0]
+            self._enrollment_token = ""
+        handler.send_response(204)
+        handler.send_header("Content-Length", "0")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.close_connection = True
+
+    def _signed_supervisor_request(self, value: dict[str, Any]) -> dict[str, Any]:
+        now = int(time.time())
+        auth = {
+            "runId": self._run_id,
+            "trialId": self._context_id,
+            "nonce": secrets.token_hex(16),
+            "issuedAt": now,
+            "expiresAt": now + min(int(self._ttl_sec), 7_200),
+        }
+        value["auth"] = auth
+        signature = hmac.new(
+            self._capability_seed.encode(),
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        value["auth"] = {**auth, "signature": signature}
+        return self._supervisor_request(value)
 
     def _supervisor_request(self, value: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(value, separators=(",", ":")).encode()
@@ -465,6 +598,63 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(self.timeout)
         self.sock.connect(self._path)
+
+
+async def docker_enroll_gateway(
+    environment: DockerEnvironment,
+    base_url: str,
+    enrollment_token: bytes,
+) -> None:
+    assert_secure_docker_environment(environment)
+    command = [
+        "docker",
+        "compose",
+        "--project-name",
+        _sanitize_docker_compose_project_name(environment.session_id),
+        "--project-directory",
+        str(environment.environment_dir.resolve().absolute()),
+    ]
+    for path in environment._docker_compose_paths:
+        command.extend(["-f", str(path.resolve().absolute())])
+    script = (
+        "let data='';"
+        "process.stdin.setEncoding('utf8');"
+        "process.stdin.on('data',chunk=>data+=chunk);"
+        "process.stdin.on('end',async()=>{"
+        "for(let attempt=0;attempt<50;attempt++){try{"
+        "const response=await fetch(process.argv[1]+'/__pico_enroll__',"
+        "{method:'POST',headers:{'x-pico-enrollment':data}});"
+        "if(response.status===204)return;"
+        "}catch{}await new Promise(resolve=>setTimeout(resolve,100));}"
+        "process.exit(2);"
+        "});"
+    )
+    command.extend(
+        [
+            "exec",
+            "-T",
+            "-u",
+            str(environment.default_user or "root"),
+            "main",
+            f"{PicoInstalledAgent._REMOTE_NODE.as_posix()}/bin/node",
+            "-e",
+            script,
+            base_url,
+        ]
+    )
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        env=compose_subprocess_env(environment),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(
+        process.communicate(input=enrollment_token),
+        timeout=15,
+    )
+    if process.returncode != 0 or enrollment_token in stdout or enrollment_token in stderr:
+        raise RuntimeError("Pico gateway workload enrollment failed")
 
 
 async def docker_exec_secret_stdin(
@@ -613,6 +803,22 @@ def compose_subprocess_env(environment: DockerEnvironment) -> dict[str, str]:
     return child_env
 
 
+def compose_subprocess_env_from_host() -> dict[str, str]:
+    return {
+        name: value
+        for name in [
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "XDG_CONFIG_HOME",
+        ]
+        if (value := os.environ.get(name)) is not None
+    }
+
+
 def assert_secure_docker_environment(environment: BaseEnvironment) -> None:
     if type(environment) is not DockerEnvironment:
         raise RuntimeError("Pico benchmark requires the exact Harbor Docker backend")
@@ -625,7 +831,7 @@ def assert_secure_docker_environment(environment: BaseEnvironment) -> None:
 async def assert_running_container_policy(
     environment: DockerEnvironment,
     logs_dir: Path,
-) -> None:
+) -> list[str]:
     command = [
         "docker",
         "compose",
@@ -673,9 +879,13 @@ async def assert_running_container_policy(
             or host.get("IpcMode") == "host"
             or host.get("UTSMode") == "host"
             or host.get("CgroupnsMode") == "host"
+            or host.get("UsernsMode") == "host"
             or host.get("CapAdd")
             or host.get("Devices")
             or host.get("DeviceRequests")
+            or host.get("SecurityOpt")
+            or host.get("VolumesFrom")
+            or host.get("PortBindings")
             or any("docker.sock" in item for item in host.get("Binds") or [])
         ):
             raise RuntimeError("Harbor container violates the Pico yolo isolation policy")
@@ -687,6 +897,25 @@ async def assert_running_container_policy(
             destination = mount.get("Destination")
             if "docker.sock" in str(source) or "docker.sock" in str(destination):
                 raise RuntimeError("Harbor container exposes the Docker control socket")
+            if mount.get("Type") not in {"bind", "volume", "tmpfs"}:
+                raise RuntimeError("Harbor container has an unsupported mount type")
+            if not isinstance(destination, str) or not destination.startswith("/"):
+                raise RuntimeError("Harbor container has an invalid mount destination")
+            if any(
+                destination == root or destination.startswith(f"{root}/")
+                for root in [
+                    "/",
+                    "/boot",
+                    "/dev",
+                    "/etc",
+                    "/proc",
+                    "/root",
+                    "/run",
+                    "/sys",
+                    "/var/run",
+                ]
+            ):
+                raise RuntimeError("Harbor container has a sensitive mount destination")
             if not source:
                 continue
             source_path = Path(source).resolve()
@@ -694,6 +923,85 @@ async def assert_running_container_policy(
                 source_path == root or root in source_path.parents for root in allowed_roots
             ):
                 raise RuntimeError("Harbor container has an unexpected host mount")
+    return container_ids
+
+
+async def isolate_container_network(
+    environment: DockerEnvironment,
+    container_ids: list[str],
+    run_id: str,
+) -> str:
+    network_name = f"pico-tb-{hashlib.sha256(environment.session_id.encode()).hexdigest()[:20]}"
+    create_code, _, create_stderr = await run_docker(
+        [
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            f"pico.terminal-bench.run={run_id}",
+            network_name,
+        ],
+        environment,
+        allowed_exit_codes={0, 1},
+    )
+    if create_code == 1 and "already exists" not in create_stderr.decode():
+        raise RuntimeError("Could not create the isolated trial network")
+    _, network_stdout, _ = await run_docker(
+        ["network", "inspect", network_name],
+        environment,
+    )
+    network_config = json.loads(network_stdout)[0]
+    if (
+        network_config.get("Internal") is not True
+        or (network_config.get("Labels") or {}).get("pico.terminal-bench.run")
+        != run_id
+    ):
+        raise RuntimeError("Trial network identity or isolation is invalid")
+    _, inspect_stdout, _ = await run_docker(["inspect", *container_ids], environment)
+    values = json.loads(inspect_stdout)
+    for value in values:
+        container_id = value["Id"]
+        service = (value.get("Config", {}).get("Labels") or {}).get(
+            "com.docker.compose.service"
+        )
+        connect_args = ["network", "connect"]
+        if service:
+            connect_args.extend(["--alias", service])
+        connect_args.extend([network_name, container_id])
+        await run_docker(connect_args, environment, allowed_exit_codes={0, 1})
+    for value in values:
+        container_id = value["Id"]
+        for existing_network in (value.get("NetworkSettings", {}).get("Networks") or {}):
+            if existing_network != network_name:
+                await run_docker(
+                    ["network", "disconnect", existing_network, container_id],
+                    environment,
+                )
+    _, verify_stdout, _ = await run_docker(["inspect", *container_ids], environment)
+    for value in json.loads(verify_stdout):
+        networks = value.get("NetworkSettings", {}).get("Networks") or {}
+        if set(networks) != {network_name}:
+            raise RuntimeError("Harbor container retained direct provider egress")
+    return network_name
+
+
+async def run_docker(
+    args: list[str],
+    environment: DockerEnvironment,
+    *,
+    allowed_exit_codes: set[int] = {0},
+) -> tuple[int, bytes, bytes]:
+    process = await asyncio.create_subprocess_exec(
+        "docker",
+        *args,
+        env=compose_subprocess_env(environment),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode not in allowed_exit_codes:
+        raise RuntimeError(f"Docker command failed: {' '.join(args[:2])}")
+    return process.returncode, stdout, stderr
 
 
 def read_supervisor_config(descriptor: int) -> dict[str, str]:
@@ -714,8 +1022,10 @@ def read_supervisor_config(descriptor: int) -> dict[str, str]:
     value = json.loads(raw)
     if (
         not isinstance(value, dict)
-        or set(value) != {"socketPath", "capabilitySeed"}
+        or set(value) != {"socketPath", "capabilitySeed", "runId"}
         or not isinstance(value["socketPath"], str)
+        or not isinstance(value["runId"], str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value["runId"])
         or not re.fullmatch(r"[0-9a-f]{64}", value["capabilitySeed"])
     ):
         raise ValueError("Gateway supervisor descriptor is invalid")
@@ -725,6 +1035,7 @@ def read_supervisor_config(descriptor: int) -> dict[str, str]:
     _SUPERVISOR_CONFIG = {
         "socketPath": str(path),
         "capabilitySeed": value["capabilitySeed"],
+        "runId": value["runId"],
     }
     return _SUPERVISOR_CONFIG
 

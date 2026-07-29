@@ -1,6 +1,3 @@
-import { open, rm, unlink } from "node:fs/promises";
-import { join } from "node:path";
-
 export function allowlistedHostEnv(source) {
   const allowed = {};
   for (const name of [
@@ -22,19 +19,4 @@ export function allowlistedHostEnv(source) {
     if (source[name] !== undefined) allowed[name] = source[name];
   }
   return allowed;
-}
-
-export async function openUnlinkedSecret(secret, directory) {
-  const path = join(directory, `.provider-secret-${process.pid}-${Date.now()}`);
-  const handle = await open(path, "wx+", 0o600);
-  try {
-    await handle.writeFile(secret);
-    await handle.sync();
-    await unlink(path);
-    return handle;
-  } catch (error) {
-    await handle.close();
-    await rm(path, { force: true });
-    throw error;
-  }
 }

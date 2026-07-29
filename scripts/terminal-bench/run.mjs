@@ -5,8 +5,10 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { rmSync } from "node:fs";
 import { buildPicoBundle } from "./build-bundle.mjs";
-import { allowlistedHostEnv, openUnlinkedSecret } from "./host-secret-boundary.mjs";
+import { assertTaskComposePolicy } from "./container-policy.mjs";
+import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -74,10 +76,24 @@ if (dirty) throw new Error("Benchmark runs require a clean Pico worktree");
 const mode = options.mode ?? "canary";
 const timestamp = new Date().toISOString().replace(/[:.]/gu, "-");
 const runId = `${mode}-${timestamp}-${picoCommit.slice(0, 12)}`;
-const runsRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "runs");
-const runRoot = join(runsRoot, runId);
+const benchmarkRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1");
+const runsRoot = join(benchmarkRoot, "runs");
+const workRunsRoot = join(benchmarkRoot, "work");
+const quarantineRoot = join(benchmarkRoot, "quarantine");
+const runRoot = join(workRunsRoot, runId);
+const publishedRunRoot = join(runsRoot, runId);
 await mkdir(runsRoot, { recursive: true, mode: 0o700 });
+await mkdir(workRunsRoot, { recursive: true, mode: 0o700 });
+await mkdir(quarantineRoot, { recursive: true, mode: 0o700 });
+await recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantineRoot });
 await mkdir(runRoot, { mode: 0o700 });
+let publicationComplete = false;
+process.once("exit", () => {
+  if (!publicationComplete) {
+    rmSync(runRoot, { recursive: true, force: true });
+    rmSync(publishedRunRoot, { recursive: true, force: true });
+  }
+});
 const nodeCacheRoot = join(
   projectRoot,
   "output",
@@ -113,12 +129,14 @@ const routeConfig = {
 };
 const routeConfigPath = join(runRoot, "route-config.json");
 await atomicWritePrivateJson(routeConfigPath, routeConfig);
+const gatewayCapabilitySeed = randomBytes(32).toString("hex");
 const gatewaySupervisor = await startGatewaySupervisor({
   routeConfigPath,
   providerSecret,
+  runId,
+  capabilitySeed: gatewayCapabilitySeed,
   env: allowlistedHostEnv(process.env),
 });
-const gatewayCapabilitySeed = randomBytes(32).toString("hex");
 const tasks = await resolveTasks(mode, options.task);
 const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
@@ -135,7 +153,17 @@ const manifest = {
     bundleLockfileSha256: bundle.lockfileSha256,
     dirty: false,
   },
-  harbor: { version: harborVersion, commit: harborCommit, wheelSha256: harborWheelSha256 },
+  harbor: {
+    version: harborVersion,
+    commit: harborCommit,
+    wheelSha256: harborWheelSha256,
+    constraintsSha256: createHash("sha256")
+      .update(
+        await readFile(join(projectRoot, "benchmarks/terminal_bench_2_1/harbor-constraints.txt")),
+      )
+      .digest("hex"),
+    offline: true,
+  },
   dataset: {
     id: datasetRef,
     sourceCommit: datasetSourceCommit,
@@ -172,6 +200,13 @@ const manifest = {
     secretInjection: "host-credential-gateway",
     dockerDelete: true,
     keepContainers: false,
+    providerBudget: {
+      maxCalls: 128,
+      maxInputTokenUpperBound: 1_000_000,
+      maxOutputTokens: 65_536,
+      maxCostCNYAtWorstCaseRate: 250,
+      maxConcurrentRequests: 1,
+    },
   },
   execution: {
     mode,
@@ -185,6 +220,12 @@ const manifest = {
 await atomicWritePrivateJson(join(runRoot, "manifest.json"), manifest);
 
 const harborArgs = [
+  "--offline",
+  "--no-env-file",
+  "--no-config",
+  "--no-python-downloads",
+  "--constraints",
+  join(projectRoot, "benchmarks/terminal_bench_2_1/harbor-constraints.txt"),
   "--from",
   harborWheelPath,
   "harbor",
@@ -227,13 +268,6 @@ const harborArgs = [
 if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
 else harborArgs.push("--path", localDatasetPath);
 const dockerContainersBefore = await captureDockerContainerIds(harborEnv);
-const supervisorSocketHandle = await openUnlinkedSecret(
-  JSON.stringify({
-    socketPath: gatewaySupervisor.socketPath,
-    capabilitySeed: gatewayCapabilitySeed,
-  }),
-  runRoot,
-);
 let harborExecution;
 try {
   harborExecution = await runCaptured(
@@ -241,10 +275,13 @@ try {
     harborArgs,
     runRoot,
     harborEnv,
-    supervisorSocketHandle.fd,
+    JSON.stringify({
+      socketPath: gatewaySupervisor.socketPath,
+      capabilitySeed: gatewayCapabilitySeed,
+      runId,
+    }),
   );
 } finally {
-  await supervisorSocketHandle.close();
   await gatewaySupervisor.stop();
 }
 const harborExitCode = harborExecution.exitCode;
@@ -256,6 +293,7 @@ await atomicWritePrivateText(
   join(runRoot, "harbor-stderr.log"),
   redactSecrets(harborExecution.stderr, [providerSecret]),
 );
+await cleanupDockerNetworks(harborEnv, runId);
 const dockerContainersAfter = await captureDockerContainerIds(harborEnv);
 const addedDockerContainers = [...dockerContainersAfter].filter(
   (containerId) => !dockerContainersBefore.has(containerId),
@@ -263,6 +301,7 @@ const addedDockerContainers = [...dockerContainersAfter].filter(
 if (addedDockerContainers.length > 0) {
   throw new Error("Harbor left benchmark containers behind after --delete");
 }
+await rewriteTextPaths(runRoot, runRoot, publishedRunRoot);
 const summary = await normalizeHarborJob({
   jobDir: join(runRoot, "harbor-job", "job"),
   runDir: runRoot,
@@ -289,6 +328,7 @@ const gatewayCapabilities = summary.trials
 try {
   const prePublishScan = await scanTreeForSecrets(runRoot, [
     providerSecret,
+    gatewayCapabilitySeed,
     ...gatewayCapabilities,
   ]);
   if (prePublishScan.matches.length > 0) {
@@ -298,6 +338,7 @@ try {
   await atomicWritePrivateJson(join(runRoot, "PUBLISHED.json"), {
     schemaVersion: 1,
     runId,
+    sealed: true,
     secretScan: {
       status: "passed",
       filesScanned: prePublishScan.filesScanned,
@@ -312,16 +353,33 @@ try {
       .update(await readFile(join(runRoot, "source-hashes.json")))
       .digest("hex"),
   });
-  const finalScan = await scanTreeForSecrets(runRoot, [providerSecret, ...gatewayCapabilities]);
+  const finalScan = await scanTreeForSecrets(runRoot, [
+    providerSecret,
+    gatewayCapabilitySeed,
+    ...gatewayCapabilities,
+  ]);
   const finalTreeSha256 = await hashDirectory(runRoot, new Set(["PUBLISHED.json"]));
   if (finalScan.matches.length > 0 || finalTreeSha256 !== prePublishTreeSha256) {
     throw new Error("Final benchmark publication verification failed");
   }
+  await fsyncTree(runRoot);
+  await rename(runRoot, publishedRunRoot);
+  await fsyncDirectory(runsRoot);
+  await fsyncDirectory(workRunsRoot);
+  const publishedTreeSha256 = await hashDirectory(publishedRunRoot, new Set(["PUBLISHED.json"]));
+  if (publishedTreeSha256 !== prePublishTreeSha256) {
+    throw new Error("Atomic benchmark publication changed the result tree");
+  }
+  await fsyncDirectory(runsRoot);
 } catch (error) {
   await rm(runRoot, { recursive: true, force: true });
+  await rm(publishedRunRoot, { recursive: true, force: true });
   throw error;
 }
-process.stdout.write(`${JSON.stringify({ runId, runRoot, harborExitCode, summary }, null, 2)}\n`);
+publicationComplete = true;
+process.stdout.write(
+  `${JSON.stringify({ runId, runRoot: publishedRunRoot, harborExitCode, summary }, null, 2)}\n`,
+);
 const gateFailed = summary.trials.some(
   (trial) =>
     trial.infra.status !== "ok" ||
@@ -414,6 +472,7 @@ async function prepareLocalDataset(tasks, runRoot) {
     if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
       throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
     }
+    await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(process.env));
   }
   return destination;
 }
@@ -440,6 +499,91 @@ async function hashDirectory(root, ignored = new Set()) {
   }
   await visit(root, "");
   return hash.digest("hex");
+}
+
+async function recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantineRoot }) {
+  for (const entry of await readdir(workRunsRoot, { withFileTypes: true })) {
+    const path = join(workRunsRoot, entry.name);
+    await quarantine(path, quarantineRoot, "staging");
+  }
+  for (const entry of await readdir(runsRoot, { withFileTypes: true })) {
+    const path = join(runsRoot, entry.name);
+    try {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new Error("published benchmark entry is not a directory");
+      }
+      const marker = JSON.parse(await readFile(join(path, "PUBLISHED.json"), "utf8"));
+      if (
+        marker.schemaVersion !== 1 ||
+        marker.runId !== entry.name ||
+        (marker.sealed !== undefined && marker.sealed !== true) ||
+        !/^[0-9a-f]{64}$/u.test(marker.fullTreeExcludingMarkerSha256)
+      ) {
+        throw new Error("published benchmark marker is invalid");
+      }
+      const treeHash = await hashDirectory(path, new Set(["PUBLISHED.json"]));
+      if (treeHash !== marker.fullTreeExcludingMarkerSha256) {
+        throw new Error("published benchmark tree hash is invalid");
+      }
+    } catch {
+      await quarantine(path, quarantineRoot, "invalid-published");
+    }
+  }
+}
+
+async function rewriteTextPaths(root, from, to) {
+  const extensions = new Set([".json", ".jsonl", ".log", ".md", ".txt", ".toml", ".yaml", ".yml"]);
+  async function visit(path) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`Result tree contains symlink: ${path}`);
+    if (info.isDirectory()) {
+      for (const entry of await readdir(path)) await visit(join(path, entry));
+      return;
+    }
+    if (!info.isFile() || ![...extensions].some((extension) => path.endsWith(extension))) return;
+    const value = await readFile(path, "utf8");
+    if (!value.includes(from)) return;
+    await atomicWritePrivateText(path, value.replaceAll(from, to));
+  }
+  await visit(root);
+}
+
+async function quarantine(path, root, reason) {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  await rename(
+    path,
+    join(root, `${reason}-${name}-${Date.now()}-${randomBytes(4).toString("hex")}`),
+  );
+  await fsyncDirectory(root);
+}
+
+async function fsyncTree(root) {
+  async function visit(path) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`Result tree contains symlink: ${path}`);
+    if (info.isDirectory()) {
+      for (const entry of await readdir(path)) await visit(join(path, entry));
+      await fsyncDirectory(path);
+      return;
+    }
+    if (!info.isFile()) return;
+    const handle = await open(path, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+  await visit(root);
+}
+
+async function fsyncDirectory(path) {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 export function assertLoopbackAllowed(baseURL, enabled) {
@@ -572,6 +716,70 @@ async function scanTreeForSecrets(root, secrets) {
   const matches = [];
   let filesScanned = 0;
   let bytesScanned = 0;
+  let expandedBytesScanned = 0;
+  const maxExpandedBytes = 4 * 1024 * 1024 * 1024;
+  function scanCandidate(path, containerEncoding, candidate, depth = 0) {
+    if (depth > 8) throw new Error("Result archive nesting exceeds the secret scan limit");
+    expandedBytesScanned += candidate.length;
+    if (expandedBytesScanned > maxExpandedBytes) {
+      throw new Error("Result archive expansion exceeds the secret scan byte budget");
+    }
+    for (const [encoding, needle] of encoded) {
+      if (needle.length > 0 && candidate.includes(needle)) {
+        matches.push({
+          path: path.slice(root.length + 1),
+          encoding: `${containerEncoding}:${encoding}`,
+        });
+      }
+    }
+    if (candidate.length >= 2 && candidate[0] === 0x1f && candidate[1] === 0x8b) {
+      scanCandidate(
+        path,
+        `${containerEncoding}>gzip`,
+        gunzipSync(candidate, { maxOutputLength: 512 * 1024 * 1024 }),
+        depth + 1,
+      );
+      return;
+    }
+    if (
+      candidate.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ||
+      candidate.subarray(0, 6).equals(Buffer.from([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) ||
+      candidate.subarray(0, 3).equals(Buffer.from("BZh")) ||
+      candidate.subarray(0, 6).equals(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) ||
+      candidate.subarray(0, 4).equals(Buffer.from([0x28, 0xb5, 0x2f, 0xfd]))
+    ) {
+      throw new Error("Result tree contains an unsupported compressed archive");
+    }
+    if (candidate.length >= 512 && candidate.subarray(257, 262).toString("ascii") === "ustar") {
+      for (let offset = 0; offset + 512 <= candidate.length; ) {
+        const header = candidate.subarray(offset, offset + 512);
+        if (header.every((byte) => byte === 0)) break;
+        const type = String.fromCharCode(header[156] || 0x30);
+        if (["1", "2"].includes(type)) {
+          throw new Error("Result archive contains a link entry");
+        }
+        const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/u, "").trim();
+        const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
+        if (!Number.isSafeInteger(size) || size < 0) {
+          throw new Error("Result archive contains an invalid entry size");
+        }
+        const bodyStart = offset + 512;
+        const bodyEnd = bodyStart + size;
+        if (bodyEnd > candidate.length) {
+          throw new Error("Result archive is truncated");
+        }
+        if (type === "0" || type === "\0") {
+          scanCandidate(
+            path,
+            `${containerEncoding}>tar`,
+            candidate.subarray(bodyStart, bodyEnd),
+            depth + 1,
+          );
+        }
+        offset = bodyStart + Math.ceil(size / 512) * 512;
+      }
+    }
+  }
   async function visit(path) {
     const info = await lstat(path);
     if (info.isSymbolicLink()) throw new Error(`Result tree contains symlink: ${path}`);
@@ -589,20 +797,7 @@ async function scanTreeForSecrets(root, secrets) {
       throw new Error("Result tree exceeds the secret scan byte budget");
     }
     const data = await readFile(path);
-    const candidates = [["file", data]];
-    if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
-      candidates.push(["gzip", gunzipSync(data, { maxOutputLength: 512 * 1024 * 1024 })]);
-    }
-    for (const [containerEncoding, candidate] of candidates) {
-      for (const [encoding, needle] of encoded) {
-        if (needle.length > 0 && candidate.includes(needle)) {
-          matches.push({
-            path: path.slice(root.length + 1),
-            encoding: `${containerEncoding}:${encoding}`,
-          });
-        }
-      }
-    }
+    scanCandidate(path, "file", data);
   }
   await visit(root);
   return { matches, filesScanned, bytesScanned };
@@ -623,10 +818,15 @@ function run(command, args, cwd, env) {
   });
 }
 
-async function startGatewaySupervisor({ routeConfigPath, providerSecret, env }) {
+async function startGatewaySupervisor({
+  routeConfigPath,
+  providerSecret,
+  runId,
+  capabilitySeed,
+  env,
+}) {
   const directory = await mkdtemp(join(tmpdir(), "pico-tb-gateway-"));
   const socketPath = join(directory, "gateway.sock");
-  const secretHandle = await openUnlinkedSecret(providerSecret, directory);
   const child = spawn(
     "python3",
     [
@@ -639,10 +839,10 @@ async function startGatewaySupervisor({ routeConfigPath, providerSecret, env }) 
     {
       cwd: directory,
       env,
-      stdio: ["ignore", "pipe", "pipe", "ignore", secretHandle.fd],
+      stdio: ["pipe", "pipe", "pipe"],
     },
   );
-  await secretHandle.close();
+  child.stdin.end(JSON.stringify({ providerSecret, runId, capabilitySeed }));
   let stderr = "";
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
@@ -683,13 +883,14 @@ async function startGatewaySupervisor({ routeConfigPath, providerSecret, env }) 
   };
 }
 
-function runCaptured(command, args, cwd, env, secretFd) {
+function runCaptured(command, args, cwd, env, supervisorConfig) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe", secretFd],
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
     });
+    child.stdio[3].end(supervisorConfig);
     const stdout = [];
     const stderr = [];
     let bytes = 0;
@@ -753,6 +954,22 @@ async function captureDockerContainerIds(env) {
       .map((line) => line.trim())
       .filter((line) => /^[0-9a-f]{64}$/u.test(line)),
   );
+}
+
+async function cleanupDockerNetworks(env, runId) {
+  const output = await captureWithEnv(
+    "docker",
+    ["network", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
+    projectRoot,
+    env,
+  );
+  const networkIds = output
+    .split(/\s+/u)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const networkId of networkIds) {
+    await run("docker", ["network", "rm", networkId], projectRoot, env);
+  }
 }
 
 function captureWithEnv(command, args, cwd, env) {

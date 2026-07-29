@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import hmac
 import http.client
 import json
 import os
+import re
 import signal
 import socketserver
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -16,46 +20,106 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+AUTH_WINDOW_SEC = 300
+MAX_TRIAL_TTL_SEC = 7_200
+MAX_REQUESTS = 128
+MAX_INPUT_TOKENS = 1_000_000
+MAX_OUTPUT_TOKENS = 65_536
+MAX_COST_MICRO_CNY = 250_000_000
+WORST_CASE_MICRO_CNY_PER_TOKEN = 1_000
 
 
 class GatewayState:
-    def __init__(self, route_config: dict[str, Any], provider_secret: str):
+    def __init__(
+        self,
+        route_config: dict[str, Any],
+        provider_secret: str,
+        run_id: str,
+        capability_seed: str,
+    ):
         self.provider = route_config["provider"]
         self.model = route_config["modelRouteId"].split("/", 1)[1]
         self.provider_secret = provider_secret
+        self.run_id = run_id
+        self.capability_seed = capability_seed
+        self.owner_uid = os.getuid()
         self.lock = threading.Lock()
         self.trials: dict[str, dict[str, Any]] = {}
+        self.nonces: set[str] = set()
+
+    def authenticate(self, request: dict[str, Any], peer_uid: int) -> None:
+        if peer_uid != self.owner_uid:
+            raise ValueError("gateway supervisor peer identity mismatch")
+        auth = request.get("auth")
+        if not isinstance(auth, dict) or set(auth) != {
+            "runId",
+            "trialId",
+            "nonce",
+            "issuedAt",
+            "expiresAt",
+            "signature",
+        }:
+            raise ValueError("invalid supervisor authentication frame")
+        if auth["runId"] != self.run_id or auth["trialId"] != request.get("trialId"):
+            raise ValueError("supervisor authentication identity mismatch")
+        now = int(time.time())
+        issued_at = int(auth["issuedAt"])
+        expires_at = int(auth["expiresAt"])
+        if (
+            issued_at > now + 5
+            or issued_at < now - AUTH_WINDOW_SEC
+            or expires_at < now
+            or expires_at > now + MAX_TRIAL_TTL_SEC
+            or not re.fullmatch(r"[0-9a-f]{32}", str(auth["nonce"]))
+        ):
+            raise ValueError("expired supervisor authentication")
+        signature = str(auth["signature"])
+        unsigned = dict(request)
+        unsigned_auth = dict(auth)
+        unsigned_auth.pop("signature")
+        unsigned["auth"] = unsigned_auth
+        expected = hmac.new(
+            self.capability_seed.encode(),
+            canonical_json(unsigned),
+            "sha256",
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("invalid supervisor authentication")
+        with self.lock:
+            if auth["nonce"] in self.nonces:
+                raise ValueError("replayed supervisor authentication")
+            self.nonces.add(auth["nonce"])
+
+    def register(self, request: dict[str, Any]) -> None:
+        trial_id = require_trial_id(request.get("trialId"))
+        ttl_sec = min(float(request.get("ttlSec", 0)), MAX_TRIAL_TTL_SEC)
+        if request.get("protocol") != self.provider["protocol"] or ttl_sec <= 0:
+            raise ValueError("gateway route mismatch")
+        with self.lock:
+            if trial_id in self.trials:
+                raise ValueError("gateway trial is already registered")
+            self.trials[trial_id] = {
+                "expiresAt": time.monotonic() + ttl_sec,
+                "requestsRemaining": MAX_REQUESTS,
+                "inputTokensRemaining": MAX_INPUT_TOKENS,
+                "outputTokensRemaining": MAX_OUTPUT_TOKENS,
+                "costMicroCNYRemaining": MAX_COST_MICRO_CNY,
+                "revoked": False,
+                "active": set(),
+            }
 
     def proxy(self, request: dict[str, Any]) -> dict[str, Any]:
         trial_id = require_trial_id(request.get("trialId"))
-        ttl_sec = min(float(request.get("ttlSec", 0)), 7_200)
         protocol = request.get("protocol")
-        if protocol != self.provider["protocol"] or ttl_sec <= 0:
+        if protocol != self.provider["protocol"]:
             raise ValueError("gateway route mismatch")
         body = base64.b64decode(request.get("body", ""), validate=True)
         path = require_path(request.get("path"), protocol, self.model)
         bounded_body, output_limit = bound_request(body, path, protocol, self.model)
-        with self.lock:
-            trial = self.trials.setdefault(
-                trial_id,
-                {
-                    "expiresAt": time.monotonic() + ttl_sec,
-                    "requestsRemaining": 128,
-                    "outputTokensRemaining": 65_536,
-                    "revoked": False,
-                    "active": set(),
-                },
-            )
-            if (
-                trial["revoked"]
-                or time.monotonic() >= trial["expiresAt"]
-                or trial["requestsRemaining"] <= 0
-                or trial["outputTokensRemaining"] < output_limit
-                or trial["active"]
-            ):
-                raise ValueError("gateway trial quota exhausted")
-            trial["requestsRemaining"] -= 1
-            trial["outputTokensRemaining"] -= output_limit
+        input_limit = len(bounded_body)
+        cost_reservation = (
+            input_limit + output_limit
+        ) * WORST_CASE_MICRO_CNY_PER_TOKEN
         upstream = urlsplit(self.provider["baseURL"])
         connection_class = (
             http.client.HTTPSConnection
@@ -64,8 +128,23 @@ class GatewayState:
         )
         connection = connection_class(upstream.hostname, upstream.port, timeout=120)
         with self.lock:
-            if trial["revoked"]:
-                raise ValueError("gateway trial revoked")
+            trial = self.trials.get(trial_id)
+            if trial is None:
+                raise ValueError("gateway trial is not registered")
+            if (
+                trial["revoked"]
+                or time.monotonic() >= trial["expiresAt"]
+                or trial["requestsRemaining"] <= 0
+                or trial["inputTokensRemaining"] < input_limit
+                or trial["outputTokensRemaining"] < output_limit
+                or trial["costMicroCNYRemaining"] < cost_reservation
+                or trial["active"]
+            ):
+                raise ValueError("gateway trial quota exhausted")
+            trial["requestsRemaining"] -= 1
+            trial["inputTokensRemaining"] -= input_limit
+            trial["outputTokensRemaining"] -= output_limit
+            trial["costMicroCNYRemaining"] -= cost_reservation
             trial["active"].add(connection)
         try:
             connection.request(
@@ -78,6 +157,9 @@ class GatewayState:
             response_body = response.read(MAX_RESPONSE_BYTES + 1)
             if len(response_body) > MAX_RESPONSE_BYTES:
                 raise ValueError("gateway response exceeds limit")
+            with self.lock:
+                if trial["revoked"]:
+                    raise ValueError("gateway trial revoked during upstream request")
             return {
                 "status": response.status,
                 "headers": [
@@ -104,6 +186,15 @@ class GatewayState:
         with self.lock:
             trial = self.trials.get(key)
             if trial is None:
+                self.trials[key] = {
+                    "expiresAt": 0.0,
+                    "requestsRemaining": 0,
+                    "inputTokensRemaining": 0,
+                    "outputTokensRemaining": 0,
+                    "costMicroCNYRemaining": 0,
+                    "revoked": True,
+                    "active": set(),
+                }
                 return
             trial["revoked"] = True
             active = list(trial["active"])
@@ -121,7 +212,11 @@ class Handler(BaseHTTPRequestHandler):
             if length < 1 or length > MAX_FRAME_BYTES:
                 raise ValueError("invalid supervisor frame")
             request = json.loads(self.rfile.read(length))
-            if request.get("action") == "proxy":
+            self.server.state.authenticate(request, peer_uid(self.connection))
+            if request.get("action") == "register":
+                self.server.state.register(request)
+                response = {"status": 204, "headers": [], "body": ""}
+            elif request.get("action") == "proxy":
                 response = self.server.state.proxy(request)
             elif request.get("action") == "revoke":
                 self.server.state.revoke(request.get("trialId"))
@@ -158,9 +253,25 @@ def main() -> None:
     parser.add_argument("--route-config", required=True)
     args = parser.parse_args()
     route_config = json.loads(Path(args.route_config).read_text(encoding="utf-8"))
-    provider_secret = os.pread(4, 64 * 1024, 0).decode()
-    os.close(4)
-    if not provider_secret or "\n" in provider_secret:
+    secret_frame = json.loads(os.read(0, 64 * 1024))
+    os.close(0)
+    if (
+        not isinstance(secret_frame, dict)
+        or set(secret_frame) != {"providerSecret", "runId", "capabilitySeed"}
+        or not isinstance(secret_frame["providerSecret"], str)
+        or not isinstance(secret_frame["runId"], str)
+        or not isinstance(secret_frame["capabilitySeed"], str)
+    ):
+        raise ValueError("invalid gateway supervisor secret frame")
+    provider_secret = secret_frame["providerSecret"]
+    run_id = secret_frame["runId"]
+    capability_seed = secret_frame["capabilitySeed"]
+    if (
+        not provider_secret
+        or "\n" in provider_secret
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id)
+        or not re.fullmatch(r"[0-9a-f]{64}", capability_seed)
+    ):
         raise ValueError("invalid provider credential descriptor")
     for name, value in os.environ.items():
         if value == provider_secret or name == "PICO_TB_PROVIDER_API_KEY":
@@ -171,7 +282,10 @@ def main() -> None:
         socket_path.unlink()
     except FileNotFoundError:
         pass
-    server = SupervisorServer(str(socket_path), GatewayState(route_config, provider_secret))
+    server = SupervisorServer(
+        str(socket_path),
+        GatewayState(route_config, provider_secret, run_id, capability_seed),
+    )
     os.chmod(socket_path, 0o600)
     parent_pid = os.getppid()
     threading.Thread(
@@ -206,6 +320,35 @@ def require_trial_id(value: Any) -> str:
     if not isinstance(value, str) or not value or len(value) > 128:
         raise ValueError("invalid trial identity")
     return value
+
+
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+def peer_uid(connection: Any) -> int:
+    if hasattr(connection, "getpeereid"):
+        return int(connection.getpeereid()[0])
+    if hasattr(os, "uname") and os.uname().sysname == "Darwin":
+        uid = ctypes.c_uint()
+        gid = ctypes.c_uint()
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.getpeereid(connection.fileno(), ctypes.byref(uid), ctypes.byref(gid)) != 0:
+            raise OSError(ctypes.get_errno(), "getpeereid failed")
+        return int(uid.value)
+    if hasattr(__import__("socket"), "SO_PEERCRED"):
+        credentials = connection.getsockopt(
+            __import__("socket").SOL_SOCKET,
+            __import__("socket").SO_PEERCRED,
+            struct.calcsize("3i"),
+        )
+        return int(struct.unpack("3i", credentials)[1])
+    raise RuntimeError("peer credential verification is unavailable")
 
 
 def require_path(value: Any, protocol: str, model: str) -> str:
