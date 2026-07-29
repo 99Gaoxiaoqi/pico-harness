@@ -357,7 +357,34 @@ const gateFailed = summary.trials.some(
     trial.verifier.status !== "completed",
 );
 if (harborExitCode !== 0 || gateFailed || !summary.sealed) {
-  throw new Error("Terminal-Bench run did not satisfy the publication gate");
+  const failureScan = await scanTreeForSecrets(runRoot, [
+    providerSecret,
+    gatewayCapabilitySeed,
+    ...gatewayCapabilities,
+  ]);
+  if (failureScan.matches.length > 0) {
+    throw new Error("Failed Terminal-Bench run contained a protected secret");
+  }
+  await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
+    schemaVersion: 1,
+    harborExitCode,
+    normalized: true,
+    publicationGate: "failed",
+    secretScan: {
+      status: "passed",
+      filesScanned: failureScan.filesScanned,
+      bytesScanned: failureScan.bytesScanned,
+    },
+    completedAt: new Date().toISOString(),
+  });
+  await fsyncTree(runRoot);
+  const failedRunRoot = join(quarantineRoot, `failed-${runId}`);
+  await rename(runRoot, failedRunRoot);
+  await fsyncDirectory(workRunsRoot);
+  await fsyncDirectory(quarantineRoot);
+  publicationComplete = true;
+  await benchmarkLock.release();
+  throw new Error(`Terminal-Bench run did not satisfy the publication gate: ${failedRunRoot}`);
 }
 try {
   const prePublishScan = await scanTreeForSecrets(runRoot, [
