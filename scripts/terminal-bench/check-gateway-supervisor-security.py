@@ -478,13 +478,14 @@ def assert_exact_reconciliation(
         }
     )
     assert state.proxy({"trialId": "trial-exact", **proxy_frame({})})["status"] == 200
+    assert state.proxy({"trialId": "trial-exact", **proxy_frame({})})["status"] == 200
     with state.lock:
         trial = state.trials["trial-exact"]
-        assert trial["inputTokensRemaining"] == gateway.MAX_INPUT_TOKENS - 5_000
-        assert trial["outputTokensRemaining"] == gateway.MAX_OUTPUT_TOKENS - 1
+        assert trial["inputTokensRemaining"] == gateway.MAX_INPUT_TOKENS - 10_000
+        assert trial["outputTokensRemaining"] == gateway.MAX_OUTPUT_TOKENS - 2
         assert trial["costMicroCNYRemaining"] == (
             gateway.MAX_COST_MICRO_CNY
-            - gateway.token_cost_micro_cny(5_000, 1, state.pricing)
+            - 2 * gateway.token_cost_micro_cny(5_000, 1, state.pricing)
         )
     receipt = state.revoke("trial-exact")
     assert receipt == state.revoke("trial-exact")
@@ -492,16 +493,25 @@ def assert_exact_reconciliation(
     assert receipt["status"] == "reconciled"
     assert receipt["withinBudget"] is True
     assert receipt["requests"] == {
-        "attempted": 1,
-        "reconciled": 1,
+        "attempted": 2,
+        "reconciled": 2,
         "unreconciled": 0,
     }
     assert receipt["actual"] == {
-        "inputTokens": 5_000,
-        "outputTokens": 1,
-        "costMicroCNY": actual_cost,
-        "costCNY": actual_cost / 1_000_000,
+        "inputTokens": 10_000,
+        "outputTokens": 2,
+        "costMicroCNY": actual_cost * 2,
+        "costCNY": actual_cost * 2 / 1_000_000,
     }
+    assert len(receipt["requestEntries"]) == 2
+    for sequence, entry in enumerate(receipt["requestEntries"], start=1):
+        assert entry["sequence"] == sequence
+        assert entry["status"] == "reconciled"
+        assert entry["actual"] == {
+            "inputTokens": 5_000,
+            "outputTokens": 1,
+            "costMicroCNY": actual_cost,
+        }
     for field in ("inputTokens", "outputTokens", "costMicroCNY"):
         assert (
             receipt["reservation"][field]
@@ -510,17 +520,13 @@ def assert_exact_reconciliation(
             - receipt["unreconciledReservation"][field]
             == receipt["actual"][field]
         )
-    unsigned = dict(receipt)
-    unsigned.pop("receiptSha256")
     assert receipt["receiptSha256"] == hashlib.sha256(
-        gateway.canonical_json(unsigned)
+        gateway.canonical_accounting_receipt(receipt, include_auth=True)
     ).hexdigest()
-    signed = dict(unsigned)
-    auth = signed.pop("auth")
-    assert auth["tag"] == hmac.new(
+    assert receipt["auth"]["tag"] == hmac.new(
         ("2" * 64).encode(),
         b"pico-gateway-accounting-receipt-v1\0"
-        + gateway.canonical_json(signed),
+        + gateway.canonical_accounting_receipt(receipt, include_auth=False),
         "sha256",
     ).hexdigest()
 

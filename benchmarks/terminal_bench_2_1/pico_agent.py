@@ -407,7 +407,6 @@ def apply_gateway_accounting(
     if (
         receipt["status"] != "reconciled"
         or receipt["withinBudget"] is not True
-        or receipt["requests"]["attempted"] != 1
     ):
         raise RuntimeError("Gateway accounting could not be reconciled")
 
@@ -433,6 +432,7 @@ def validate_gateway_accounting_receipt(
         "status",
         "withinBudget",
         "requests",
+        "requestEntries",
         "reservation",
         "actual",
         "refund",
@@ -470,18 +470,10 @@ def validate_gateway_accounting_receipt(
     if not hmac.compare_digest(pricing_digest, expected_pricing_sha256):
         raise ValueError("Gateway accounting receipt pricing digest is invalid")
     auth = value["auth"]
-    signed = dict(value)
-    signed.pop("receiptSha256")
-    signed.pop("auth")
     expected_tag = hmac.new(
         capability_seed.encode(),
         b"pico-gateway-accounting-receipt-v1\0"
-        + json.dumps(
-            signed,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode(),
+        + canonical_gateway_accounting_receipt(value, include_auth=False),
         "sha256",
     ).hexdigest()
     if (
@@ -493,15 +485,9 @@ def validate_gateway_accounting_receipt(
         or not hmac.compare_digest(auth["tag"], expected_tag)
     ):
         raise ValueError("Gateway accounting receipt authentication is invalid")
-    unsigned = dict(value)
-    receipt_digest = unsigned.pop("receiptSha256")
+    receipt_digest = value["receiptSha256"]
     expected_receipt_digest = hashlib.sha256(
-        json.dumps(
-            unsigned,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode()
+        canonical_gateway_accounting_receipt(value, include_auth=True)
     ).hexdigest()
     if (
         not isinstance(receipt_digest, str)
@@ -534,6 +520,89 @@ def validate_gateway_accounting_receipt(
             raise ValueError("Gateway accounting token totals are invalid")
         for field in ("inputTokens", "outputTokens", "costMicroCNY"):
             require_nonnegative_int(bucket[field], f"{bucket_name}.{field}")
+    entries = value["requestEntries"]
+    if not isinstance(entries, list) or len(entries) != requests["attempted"]:
+        raise ValueError("Gateway accounting request entries are invalid")
+    entry_totals = {
+        bucket_name: {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "costMicroCNY": 0,
+        }
+        for bucket_name in buckets
+    }
+    observed_reconciled = 0
+    observed_unreconciled = 0
+    for index, entry in enumerate(entries, start=1):
+        if (
+            not isinstance(entry, dict)
+            or set(entry)
+            != {
+                "sequence",
+                "status",
+                "reservation",
+                "actual",
+                "refund",
+                "supplement",
+                "unreconciledReservation",
+            }
+            or entry["sequence"] != index
+            or entry["status"] not in {"reconciled", "unreconciled"}
+        ):
+            raise ValueError("Gateway accounting request entry is invalid")
+        for bucket_name in buckets:
+            bucket = entry[bucket_name]
+            if (
+                not isinstance(bucket, dict)
+                or set(bucket)
+                != {"inputTokens", "outputTokens", "costMicroCNY"}
+            ):
+                raise ValueError("Gateway accounting request bucket is invalid")
+            for field in ("inputTokens", "outputTokens", "costMicroCNY"):
+                require_nonnegative_int(
+                    bucket[field], f"requestEntries.{bucket_name}.{field}"
+                )
+                entry_totals[bucket_name][field] += bucket[field]
+        for field in ("inputTokens", "outputTokens", "costMicroCNY"):
+            if (
+                entry["reservation"][field]
+                + entry["supplement"][field]
+                - entry["refund"][field]
+                - entry["unreconciledReservation"][field]
+                != entry["actual"][field]
+            ):
+                raise ValueError("Gateway accounting request is inconsistent")
+        if entry["status"] == "reconciled":
+            observed_reconciled += 1
+            expected_cost = (
+                entry["actual"]["inputTokens"] * pricing["input"]
+                + entry["actual"]["outputTokens"] * pricing["output"]
+                + 999_999
+            ) // 1_000_000
+            if (
+                entry["actual"]["costMicroCNY"] != expected_cost
+                or any(entry["unreconciledReservation"].values())
+            ):
+                raise ValueError("Gateway accounting request cost is invalid")
+        else:
+            observed_unreconciled += 1
+            if (
+                any(entry["actual"].values())
+                or any(entry["refund"].values())
+                or any(entry["supplement"].values())
+                or entry["unreconciledReservation"] != entry["reservation"]
+            ):
+                raise ValueError("Gateway accounting ambiguity is invalid")
+    if (
+        observed_reconciled != requests["reconciled"]
+        or observed_unreconciled != requests["unreconciled"]
+        or any(
+            entry_totals[bucket_name][field] != value[bucket_name][field]
+            for bucket_name in buckets
+            for field in ("inputTokens", "outputTokens", "costMicroCNY")
+        )
+    ):
+        raise ValueError("Gateway accounting request totals are inconsistent")
     actual = value["actual"]
     if (
         isinstance(actual["costCNY"], bool)
@@ -556,6 +625,22 @@ def validate_gateway_accounting_receipt(
     ):
         raise ValueError("Gateway accounting status is inconsistent")
     return value
+
+
+def canonical_gateway_accounting_receipt(
+    value: dict[str, Any], *, include_auth: bool
+) -> bytes:
+    payload = json.loads(json.dumps(value, separators=(",", ":")))
+    payload.pop("receiptSha256", None)
+    if not include_auth:
+        payload.pop("auth", None)
+    payload["actual"].pop("costCNY", None)
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
 
 
 def require_nonnegative_int(value: Any, field: str) -> int:
