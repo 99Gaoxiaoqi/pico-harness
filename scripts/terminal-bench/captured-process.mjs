@@ -7,7 +7,11 @@ export function runCaptured(
   cwd,
   env,
   supervisorConfig,
-  { maxOutputBytes = 64 * 1024 * 1024, processGroupExitTimeoutMs = 10_000 } = {},
+  {
+    maxOutputBytes = 64 * 1024 * 1024,
+    processGroupExitTimeoutMs = 10_000,
+    inheritedFileDescriptors = [],
+  } = {},
 ) {
   return new Promise((resolvePromise, reject) => {
     const detached = process.platform !== "win32";
@@ -15,7 +19,7 @@ export function runCaptured(
       cwd,
       env,
       detached,
-      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "pipe", ...inheritedFileDescriptors],
     });
     child.stdio[3].end(supervisorConfig);
     const stdout = [];
