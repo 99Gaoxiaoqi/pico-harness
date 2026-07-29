@@ -1444,12 +1444,14 @@ async def remove_owned_trial_networks(
     for network_name in reversed(networks):
         if not network_name:
             continue
-        inspect_code, inspect_stdout, _ = await run_docker(
+        inspect_code, inspect_stdout, inspect_stderr = await run_docker(
             ["network", "inspect", network_name],
             environment,
             allowed_exit_codes={0, 1},
         )
         if inspect_code == 1:
+            if not is_missing_docker_network_error(inspect_stderr):
+                failures.append(network_name)
             continue
         network_values = json.loads(inspect_stdout)
         if len(network_values) != 1 or not is_owned_trial_network(
@@ -1463,17 +1465,24 @@ async def remove_owned_trial_networks(
                 environment,
                 allowed_exit_codes={0, 1},
             )
-        remove_code, _, _ = await run_docker(
+        remove_code, _, remove_stderr = await run_docker(
             ["network", "rm", network_name],
             environment,
             allowed_exit_codes={0, 1},
         )
-        if remove_code != 0:
+        if remove_code != 0 and not is_missing_docker_network_error(remove_stderr):
             failures.append(network_name)
     if failures:
         raise RuntimeError(
             "Could not remove owned trial networks: " + ", ".join(failures)
         )
+
+
+def is_missing_docker_network_error(stderr: bytes) -> bool:
+    message = stderr.decode(errors="replace").lower()
+    return "no such network" in message or (
+        "network " in message and " not found" in message
+    )
 
 
 async def restore_verifier_and_remove_trial_networks(
