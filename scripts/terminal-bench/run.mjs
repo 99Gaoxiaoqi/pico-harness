@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -116,7 +116,9 @@ await atomicWritePrivateJson(routeConfigPath, routeConfig);
 const tasks = await resolveTasks(mode, options.task);
 const scheduledTasks = mode === "full" ? 89 : tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
+const localDatasetPath = mode === "full" ? null : await prepareLocalDataset(tasks, runRoot);
 const canaryHash = createHash("sha256").update(tasks.join("\n")).digest("hex");
+const taskLockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
 const manifest = {
   schemaVersion: 1,
   runId,
@@ -133,6 +135,12 @@ const manifest = {
     sourceCommit: datasetSourceCommit,
     taskCount: scheduledTasks,
     taskListSha256: canaryHash,
+    localTaskLockSha256:
+      localDatasetPath === null
+        ? null
+        : createHash("sha256")
+            .update(await readFile(taskLockPath))
+            .digest("hex"),
   },
   nodeRuntime: {
     version: "22.14.0",
@@ -178,8 +186,6 @@ const harborArgs = [
   "--env",
   "docker",
   "--delete",
-  "--dataset",
-  datasetRef,
   "--agent",
   "benchmarks.terminal_bench_2_1.pico_agent:PicoInstalledAgent",
   "--model",
@@ -208,7 +214,8 @@ const harborArgs = [
   "job",
   "--yes",
 ];
-for (const task of tasks) harborArgs.push("--include-task-name", task);
+if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
+else harborArgs.push("--path", localDatasetPath);
 const harborExecution = await runCaptured("uvx", harborArgs, projectRoot, harborEnv);
 const harborExitCode = harborExecution.exitCode;
 await atomicWritePrivateText(
@@ -296,6 +303,65 @@ async function resolveTasks(mode, singleTask) {
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+async function prepareLocalDataset(tasks, runRoot) {
+  const lockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
+  const lock = JSON.parse(await readFile(lockPath, "utf8"));
+  if (lock.schemaVersion !== 1 || typeof lock.tasks !== "object") {
+    throw new Error("Terminal-Bench canary task lock is invalid");
+  }
+  const destination = join(runRoot, "local-dataset");
+  await mkdir(destination, { recursive: true, mode: 0o700 });
+  for (const taskName of tasks) {
+    const expected = lock.tasks[taskName];
+    if (
+      !expected ||
+      !/^[0-9a-f]{64}$/u.test(expected.cacheDigest) ||
+      !/^[0-9a-f]{64}$/u.test(expected.treeSha256)
+    ) {
+      throw new Error(`Terminal-Bench task is absent from the local lock: ${taskName}`);
+    }
+    const shortName = taskName.replace(/^terminal-bench\//u, "");
+    const source = join(
+      homedir(),
+      ".cache/harbor/tasks/packages/terminal-bench",
+      shortName,
+      expected.cacheDigest,
+    );
+    if ((await hashDirectory(source)) !== expected.treeSha256) {
+      throw new Error(`Terminal-Bench cached task digest mismatch: ${taskName}`);
+    }
+    const taskDestination = join(destination, shortName);
+    await cp(source, taskDestination, { recursive: true, errorOnExist: true });
+    if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
+      throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
+    }
+  }
+  return destination;
+}
+
+async function hashDirectory(root) {
+  const hash = createHash("sha256");
+  async function visit(path, relative) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`Pinned task contains a symlink: ${path}`);
+    if (info.isDirectory()) {
+      const entries = (await readdir(path, { withFileTypes: true })).sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
+      for (const entry of entries) {
+        await visit(join(path, entry.name), relative ? `${relative}/${entry.name}` : entry.name);
+      }
+      return;
+    }
+    if (!info.isFile()) return;
+    const data = await readFile(path);
+    hash.update(`${relative}\0${data.length}\0`);
+    hash.update(data);
+  }
+  await visit(root, "");
+  return hash.digest("hex");
 }
 
 export function assertLoopbackAllowed(baseURL, enabled) {
