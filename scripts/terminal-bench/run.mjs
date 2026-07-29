@@ -15,6 +15,16 @@ const harborVersion = "0.20.0";
 const harborCommit = "459ff6ec99417589b7f679d14ddf3b3f0ae4f1dc";
 const harborWheelSha256 = "4b7e981739e64be41c9828022af547532657c955705828ac0c13dd7a6687b556";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
+const nodeArchives = {
+  x64: {
+    name: "node-v22.14.0-linux-x64.tar.gz",
+    sha256: "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
+  },
+  arm64: {
+    name: "node-v22.14.0-linux-arm64.tar.gz",
+    sha256: "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
+  },
+};
 
 const options = parseArgs(process.argv.slice(2));
 const envFile = resolve(options.envFile ?? join(projectRoot, ".env"));
@@ -64,6 +74,18 @@ const timestamp = new Date().toISOString().replace(/[:.]/gu, "-");
 const runId = `${mode}-${timestamp}-${picoCommit.slice(0, 12)}`;
 const runRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "runs", runId);
 await mkdir(runRoot, { recursive: true, mode: 0o700 });
+const nodeCacheRoot = join(
+  projectRoot,
+  "output",
+  "benchmarks",
+  "terminal-bench-2.1",
+  "cache",
+  "node",
+);
+const nodeArchivePaths = {
+  x64: await ensurePinnedDownload(nodeArchives.x64, nodeCacheRoot),
+  arm64: await ensurePinnedDownload(nodeArchives.arm64, nodeCacheRoot),
+};
 await run("npm", ["run", "build"], projectRoot, process.env);
 const bundle = await buildPicoBundle(join(runRoot, "pico-bundle.tar.gz"));
 const routeConfig = {
@@ -151,6 +173,10 @@ const harborArgs = [
   `bundle_path=${bundle.path}`,
   "--ak",
   `route_config_path=${routeConfigPath}`,
+  "--ak",
+  `node_x64_path=${nodeArchivePaths.x64}`,
+  "--ak",
+  `node_arm64_path=${nodeArchivePaths.arm64}`,
   "--ak",
   `pico_commit=${picoCommit}`,
   "--n-attempts",
@@ -284,6 +310,47 @@ async function atomicWritePrivateJson(path, value) {
   } finally {
     await directory.close();
   }
+}
+
+async function ensurePinnedDownload(archive, cacheRoot) {
+  await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+  const destination = join(cacheRoot, archive.name);
+  try {
+    if (
+      createHash("sha256")
+        .update(await readFile(destination))
+        .digest("hex") === archive.sha256
+    ) {
+      return destination;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const url = `https://nodejs.org/dist/v22.14.0/${archive.name}`;
+  let lastError;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Node archive download returned ${response.status}`);
+      const data = Buffer.from(await response.arrayBuffer());
+      const digest = createHash("sha256").update(data).digest("hex");
+      if (digest !== archive.sha256) throw new Error("Node archive digest mismatch");
+      const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(data);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporary, destination);
+      return destination;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, attempt * 1_000));
+    }
+  }
+  throw lastError;
 }
 
 async function scanTreeForSecret(root, secret) {

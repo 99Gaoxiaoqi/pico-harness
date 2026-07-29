@@ -46,6 +46,8 @@ class PicoInstalledAgent(BaseInstalledAgent):
         self,
         bundle_path: str,
         route_config_path: str,
+        node_x64_path: str,
+        node_arm64_path: str,
         pico_commit: str,
         shutdown_grace_ms: int = 30_000,
         result_flush_margin_ms: int = 5_000,
@@ -57,6 +59,10 @@ class PicoInstalledAgent(BaseInstalledAgent):
             raise ValueError("AgentConfig.env/--agent-env is forbidden for Pico benchmarks")
         self._bundle_path = require_file(bundle_path, "bundle_path")
         self._route_config_path = require_file(route_config_path, "route_config_path")
+        self._node_archives = {
+            "x64": require_file(node_x64_path, "node_x64_path"),
+            "arm64": require_file(node_arm64_path, "node_arm64_path"),
+        }
         self._pico_commit = require_hex(pico_commit, "pico_commit")
         self._shutdown_grace_ms = require_positive_int(
             shutdown_grace_ms, "shutdown_grace_ms"
@@ -93,27 +99,31 @@ class PicoInstalledAgent(BaseInstalledAgent):
         )
 
     async def _install_node(self, environment: BaseEnvironment) -> None:
+        existing = await environment.exec(
+            command=(
+                "command -v node >/dev/null 2>&1 && "
+                f"[ \"$(node -p 'process.versions.node')\" = \"{self._NODE_VERSION}\" ]"
+            )
+        )
+        if existing.return_code == 0:
+            return
+        architecture = await environment.exec(command="uname -m")
+        machine = (architecture.stdout or "").strip()
+        if machine in {"x86_64", "amd64"}:
+            arch = "x64"
+        elif machine in {"aarch64", "arm64"}:
+            arch = "arm64"
+        else:
+            raise RuntimeError("unsupported Node runtime architecture")
+        remote_archive = f"/tmp/node-v{self._NODE_VERSION}-linux-{arch}.tar.gz"
+        await environment.upload_file(self._node_archives[arch], remote_archive)
         script = f"""
 set -eu
-if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node')" = "{self._NODE_VERSION}" ]; then
-  exit 0
-fi
-if ! command -v curl >/dev/null 2>&1; then
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
-fi
-case "$(uname -m)" in
-  x86_64|amd64) arch=x64; expected={self._NODE_SHA256["x64"]} ;;
-  aarch64|arm64) arch=arm64; expected={self._NODE_SHA256["arm64"]} ;;
-  *) echo "unsupported architecture" >&2; exit 2 ;;
-esac
-archive="node-v{self._NODE_VERSION}-linux-${{arch}}.tar.gz"
-curl -fsSLo "/tmp/${{archive}}" "https://nodejs.org/dist/v{self._NODE_VERSION}/${{archive}}"
-printf '%s  %s\\n' "$expected" "/tmp/${{archive}}" | sha256sum -c -
-tar -tzf "/tmp/${{archive}}" | awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'
-tar -xzf "/tmp/${{archive}}" -C /usr/local --strip-components=1
+printf '%s  %s\\n' {self._NODE_SHA256[arch]} {remote_archive} | sha256sum -c -
+tar -tzf {remote_archive} | awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'
+tar -xzf {remote_archive} -C /usr/local --strip-components=1
 [ "$(node -p 'process.versions.node')" = "{self._NODE_VERSION}" ]
-rm -f "/tmp/${{archive}}"
+rm -f {remote_archive}
 """
         await self.exec_as_root(environment, command=script, timeout_sec=300)
 
