@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 
 const projectPattern = /^[a-z0-9][a-z0-9_-]{0,127}$/u;
 
@@ -16,18 +17,40 @@ export async function captureDockerResourceSnapshot(env, cwd) {
   };
 }
 
-export async function cleanupDockerResources({ env, cwd, runId, before, registryPath }) {
+export async function cleanupDockerResources({
+  env,
+  cwd,
+  runId,
+  before,
+  registryPath,
+  quietPeriodMs = 2_000,
+  pollIntervalMs = 100,
+  maxWaitMs = 10_000,
+}) {
   const projects = await readOwnedProjects(registryPath, runId);
   const cleanupErrors = [];
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const startedAt = Date.now();
+  let quietSince = null;
+  while (Date.now() - startedAt < maxWaitMs) {
     const owned = await findOwnedResources(env, cwd, runId, projects);
     await removeEach("container", owned.containers, env, cwd, cleanupErrors);
     await removeEach("network", owned.networks, env, cwd, cleanupErrors);
     await removeEach("volume", owned.volumes, env, cwd, cleanupErrors);
+    const observed = owned.containers.size > 0 || owned.networks.size > 0 || owned.volumes.size > 0;
+    if (observed) quietSince = null;
+    else quietSince ??= Date.now();
+    if (quietSince !== null && Date.now() - quietSince >= quietPeriodMs) break;
+    await delay(pollIntervalMs);
   }
 
   const remaining = await findOwnedResources(env, cwd, runId, projects);
-  if (remaining.containers.size > 0 || remaining.networks.size > 0 || remaining.volumes.size > 0) {
+  if (
+    quietSince === null ||
+    Date.now() - quietSince < quietPeriodMs ||
+    remaining.containers.size > 0 ||
+    remaining.networks.size > 0 ||
+    remaining.volumes.size > 0
+  ) {
     cleanupErrors.push(new Error("Terminal-Bench owned Docker resource cleanup was unconfirmed"));
   }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
@@ -56,6 +56,9 @@ test("Terminal-Bench cleanup preserves concurrent unowned Docker resources", asy
       runId: "fixture-run",
       before,
       registryPath,
+      quietPeriodMs: 100,
+      pollIntervalMs: 10,
+      maxWaitMs: 1_000,
     }),
     /cleanup encountered errors/u,
   );
@@ -64,6 +67,49 @@ test("Terminal-Bench cleanup preserves concurrent unowned Docker resources", asy
   assert.deepEqual([...after.containers].sort(), ["baseline-container", "unrelated-container"]);
   assert.deepEqual([...after.networks].sort(), ["baseline-network", "unrelated-network"]);
   assert.deepEqual([...after.volumes].sort(), ["baseline-volume", "unrelated-volume"]);
+});
+
+test("Terminal-Bench cleanup removes owned resources created during the quiet window", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-docker-late-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const dockerPath = join(root, "docker");
+  const registryPath = join(root, "registry.jsonl");
+  await writeFile(dockerPath, fakeDockerScript, { mode: 0o700 });
+  await chmod(dockerPath, 0o700);
+  await writeState(root, "containers", ["baseline-container baseline=true"]);
+  await writeState(root, "networks", ["baseline-network baseline=true"]);
+  await writeState(root, "volumes", ["baseline-volume baseline=true"]);
+  await writeFile(registryPath, "");
+  const env = {
+    ...process.env,
+    PATH: `${root}${delimiter}${process.env.PATH ?? ""}`,
+    FAKE_DOCKER_STATE: root,
+  };
+  const delayedCreate = new Promise<void>((resolvePromise) => {
+    setTimeout(() => {
+      void appendFile(
+        join(root, "containers"),
+        "late-container pico.terminal-bench.run=fixture-run\n",
+      ).then(resolvePromise);
+    }, 75);
+  });
+  await cleanupDockerResources({
+    env,
+    cwd: root,
+    runId: "fixture-run",
+    before: {
+      containers: new Set(["baseline-container"]),
+      networks: new Set(["baseline-network"]),
+      volumes: new Set(["baseline-volume"]),
+    },
+    registryPath,
+    quietPeriodMs: 200,
+    pollIntervalMs: 25,
+    maxWaitMs: 2_000,
+  });
+  await delayedCreate;
+  const after = await captureDockerResourceSnapshot(env, root);
+  assert.deepEqual([...after.containers], ["baseline-container"]);
 });
 
 async function writeState(root: string, name: string, values: string[]) {

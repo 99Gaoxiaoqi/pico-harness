@@ -197,6 +197,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   picoHome?: string;
   provider?: LLMProvider;
   providerFactory?: RunAgentProviderFactory;
+  /** Host-owned request policy wrapper applied after plugin provider capabilities. */
+  providerDecorator?: (provider: LLMProvider) => LLMProvider;
   /** 前台宿主持有的完整可信模型目录；子代理不得自行读取 endpoint 或凭证。 */
   modelRouter?: ModelRouter;
   toolDisclosure?: ToolDisclosure;
@@ -585,13 +587,15 @@ export async function executeAgentRuntime(
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
-    const providerDecorator = (provider: LLMProvider): LLMProvider =>
-      activatePluginProviderCapabilities(
+    const providerDecorator = (provider: LLMProvider): LLMProvider => {
+      const activated = activatePluginProviderCapabilities(
         pluginSnapshot,
         dependencies.pluginCapabilityRegistry,
         provider,
         pluginActivationScope,
       );
+      return dependencies.providerDecorator ? dependencies.providerDecorator(activated) : activated;
+    };
     const subagentModelRouter =
       dependencies.modelRouter ??
       (effectiveOptions.modelRouteId && dependencies.provider === undefined
