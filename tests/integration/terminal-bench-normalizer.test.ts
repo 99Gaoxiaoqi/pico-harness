@@ -409,6 +409,44 @@ test("Terminal-Bench normalizer rejects a forged accounting HMAC", async (contex
   assert.equal(summary.trials[0].adapter.code, "accounting_auth_invalid");
 });
 
+test("Terminal-Bench normalizer rejects runtime or Harbor token mismatches", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-token-mismatch-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "runtime-mismatch", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "token-mismatch-run",
+    runtimeUsage: { promptTokens: 2, completionTokens: 1 },
+  });
+  await writeTrial(jobDir, "harbor-mismatch", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "token-mismatch-run",
+    harborUsage: { inputTokens: 2, outputTokens: 1 },
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "token-mismatch-run",
+    expectedTasks: 2,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.deepEqual(
+    summary.trials.map((trial: { adapter: { code: string } }) => trial.adapter.code),
+    ["accounting_token_mismatch", "accounting_token_mismatch"],
+  );
+  assert.equal(
+    summary.trials.every(
+      (trial: { primaryStatus: string }) => trial.primaryStatus === "adapter_error",
+    ),
+    true,
+  );
+});
+
 test("Terminal-Bench normalizer fails closed without a valid accounting receipt", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-invalid-"));
   const jobDir = join(root, "job");
@@ -455,10 +493,28 @@ async function writeTrial(
     taskName?: string;
     runId: string;
     accounting?: ReturnType<typeof accountingReceipt>;
+    runtimeUsage?: { promptTokens: number; completionTokens: number };
+    harborUsage?: { inputTokens: number; outputTokens: number };
   },
 ) {
   const trialDir = join(jobDir, name);
   const accounting = options.accounting ?? accountingReceipt(options.runId, name, 1, 1);
+  const runtimeUsage = options.runtimeUsage ?? {
+    promptTokens: accounting.actual.inputTokens,
+    completionTokens: accounting.actual.outputTokens,
+  };
+  const harborUsage = options.harborUsage ?? {
+    inputTokens: runtimeUsage.promptTokens,
+    outputTokens: runtimeUsage.completionTokens,
+  };
+  const headlessResult = {
+    ...options.headless,
+    usage: {
+      ...options.headless.usage,
+      promptTokens: runtimeUsage.promptTokens,
+      completionTokens: runtimeUsage.completionTokens,
+    },
+  };
   await mkdir(join(trialDir, "agent"), { recursive: true });
   await mkdir(join(trialDir, "verifier"), { recursive: true });
   await writeFile(
@@ -470,12 +526,14 @@ async function writeTrial(
       config: { job_id: "job" },
       agent_info: { name: "pico-headless", version: "fixture" },
       agent_result: {
+        n_input_tokens: harborUsage.inputTokens,
+        n_output_tokens: harborUsage.outputTokens,
         metadata: {
           pico: {
             exitCode:
-              options.headless.status === "timed_out"
+              headlessResult.status === "timed_out"
                 ? 124
-                : options.headless.status === "invalid_request"
+                : headlessResult.status === "invalid_request"
                   ? 2
                   : 0,
             costCNY: accounting.actual.costCNY,
@@ -495,7 +553,7 @@ async function writeTrial(
       exception_info: options.exception ?? null,
     }),
   );
-  await writeFile(join(trialDir, "agent", "pico-result.json"), JSON.stringify(options.headless));
+  await writeFile(join(trialDir, "agent", "pico-result.json"), JSON.stringify(headlessResult));
   await writeFile(
     join(trialDir, "agent", "gateway-accounting-receipt.json"),
     JSON.stringify(accounting),

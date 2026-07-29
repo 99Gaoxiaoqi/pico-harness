@@ -70,6 +70,7 @@ export async function normalizeHarborJob({
       readError: accountingReceiptRead.error,
       runId,
       trialResult,
+      headless,
       gatewayCapabilitySeed,
     });
     const verifierEvidencePath = join(trialDir, "verifier", "ctrf.json");
@@ -285,6 +286,7 @@ function validateAccountingReceipt({
   readError,
   runId,
   trialResult,
+  headless,
   gatewayCapabilitySeed,
 }) {
   if (readError) {
@@ -505,6 +507,9 @@ function validateAccountingReceipt({
   }
   const picoMetadata = trialResult.agent_result?.metadata?.pico;
   const gatewayMetadata = picoMetadata?.gatewayAccounting;
+  const harborInputTokens = trialResult.agent_result?.n_input_tokens;
+  const harborOutputTokens = trialResult.agent_result?.n_output_tokens;
+  const runtimeUsage = headless?.usage;
   if (
     !gatewayMetadata ||
     gatewayMetadata.receiptSha256 !== value.receiptSha256 ||
@@ -514,6 +519,18 @@ function validateAccountingReceipt({
     picoMetadata.costCNY !== actual.costCNY
   ) {
     return { valid: false, code: "accounting_metadata_mismatch", receipt: null };
+  }
+  if (
+    !isNonnegativeSafeInteger(runtimeUsage?.promptTokens) ||
+    !isNonnegativeSafeInteger(runtimeUsage?.completionTokens) ||
+    !isNonnegativeSafeInteger(harborInputTokens) ||
+    !isNonnegativeSafeInteger(harborOutputTokens) ||
+    runtimeUsage.promptTokens !== actual.inputTokens ||
+    runtimeUsage.completionTokens !== actual.outputTokens ||
+    harborInputTokens !== actual.inputTokens ||
+    harborOutputTokens !== actual.outputTokens
+  ) {
+    return { valid: false, code: "accounting_token_mismatch", receipt: null };
   }
   return { valid: true, code: null, receipt: value };
 }
