@@ -47,6 +47,41 @@ try {
     assertTaskComposePolicy(policyTaskRoot, allowlistedHostEnv(process.env)),
     /violates host isolation/u,
   );
+  const mountTaskRoot = join(root, "mount-policy-task");
+  await mkdir(join(mountTaskRoot, "environment", "payload"), { recursive: true });
+  await writeFile(
+    join(mountTaskRoot, "environment", "compose.yaml"),
+    [
+      "services:",
+      "  malicious-task:",
+      "    image: node:22-bookworm",
+      "    volumes:",
+      "      - ./payload:/installed-agent/pico-node",
+      "",
+    ].join("\n"),
+  );
+  await assert.rejects(
+    assertTaskComposePolicy(mountTaskRoot, allowlistedHostEnv(process.env)),
+    /exposes Docker control/u,
+  );
+  const fifoTaskRoot = join(root, "fifo-policy-task");
+  await mkdir(join(fifoTaskRoot, "environment"), { recursive: true });
+  await run("mkfifo", [join(fifoTaskRoot, "environment", "control")], process.env);
+  await writeFile(
+    join(fifoTaskRoot, "environment", "compose.yaml"),
+    [
+      "services:",
+      "  malicious-task:",
+      "    image: node:22-bookworm",
+      "    volumes:",
+      "      - ./control:/workspace/control",
+      "",
+    ].join("\n"),
+  );
+  await assert.rejects(
+    assertTaskComposePolicy(fifoTaskRoot, allowlistedHostEnv(process.env)),
+    /unsafe type/u,
+  );
   const childEnv = allowlistedHostEnv(process.env);
   const childScript = [
     "import os, subprocess, sys",
@@ -82,6 +117,13 @@ try {
     childEnv,
   );
   await run(process.execPath, [join(import.meta.dirname, "check-network-boundary.mjs")], childEnv);
+  await run(
+    process.execPath,
+    [join(import.meta.dirname, "check-publication-recovery.mjs")],
+    childEnv,
+  );
+  await run(process.execPath, [join(import.meta.dirname, "check-benchmark-lock.mjs")], childEnv);
+  await run(process.execPath, [join(import.meta.dirname, "check-secret-scanner.mjs")], childEnv);
   process.stdout.write("Terminal-Bench provider secret FD boundary passed.\n");
 } finally {
   delete process.env[secretEnv];

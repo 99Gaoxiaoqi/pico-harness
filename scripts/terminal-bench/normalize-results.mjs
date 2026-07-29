@@ -112,8 +112,19 @@ export async function normalizeHarborJob({
     counts[trial.primaryStatus] = (counts[trial.primaryStatus] ?? 0) + 1;
   }
   const observedTaskCounts = Object.create(null);
+  const trialIds = new Set();
+  let trialIdentityValid = true;
   for (const trial of trials) {
     observedTaskCounts[trial.taskId] = (observedTaskCounts[trial.taskId] ?? 0) + 1;
+    if (
+      typeof trial.trialId !== "string" ||
+      trial.trialId.length === 0 ||
+      trialIds.has(trial.trialId)
+    ) {
+      trialIdentityValid = false;
+    } else {
+      trialIds.add(trial.trialId);
+    }
   }
   const expectedSetMatches =
     expectedTaskNames === null ||
@@ -122,7 +133,10 @@ export async function normalizeHarborJob({
   const sealed =
     expectedTasks === null
       ? false
-      : trials.length === expectedTasks && expectedSetMatches && rawTreeSha256 !== null;
+      : trials.length === expectedTasks &&
+        expectedSetMatches &&
+        trialIdentityValid &&
+        rawTreeSha256 !== null;
   const summary = {
     schemaVersion: 2,
     runId,

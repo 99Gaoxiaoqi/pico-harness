@@ -33,8 +33,9 @@ export async function assertTaskComposePolicy(taskRoot, env) {
       throw new Error("Terminal-Bench task Compose violates host isolation");
     }
     for (const volume of service.volumes ?? []) {
-      const source = typeof volume === "string" ? volume.split(":", 1)[0] : volume.source;
-      const target = typeof volume === "string" ? volume.split(":")[1] : volume.target;
+      const parts = typeof volume === "string" ? volume.split(":") : null;
+      const source = parts ? parts[0] : volume.source;
+      const target = parts ? parts[1] : volume.target;
       const type = typeof volume === "string" ? "bind" : volume.type;
       if (
         !["bind", "volume", "tmpfs"].includes(type) ||
@@ -50,6 +51,10 @@ export async function assertTaskComposePolicy(taskRoot, env) {
           throw new Error("Terminal-Bench task Compose has an invalid host bind");
         }
         const resolvedSource = resolve(environmentRoot, source);
+        const sourceInfo = await lstat(resolvedSource);
+        if (!sourceInfo.isFile() && !sourceInfo.isDirectory()) {
+          throw new Error("Terminal-Bench task Compose bind source has an unsafe type");
+        }
         if (
           resolvedSource !== environmentRoot &&
           !resolvedSource.startsWith(`${environmentRoot}/`)
@@ -84,7 +89,8 @@ async function findComposeFiles(root) {
 }
 
 function sensitiveTarget(target) {
-  return ["/", "/boot", "/dev", "/etc", "/proc", "/root", "/run", "/sys", "/var/run"].some(
+  if (target === "/tmp/pico-tb21" || target.startsWith("/tmp/pico-tb21/")) return true;
+  return !["/workspace", "/logs", "/tests", "/solution", "/tmp"].some(
     (root) => target === root || target.startsWith(`${root}/`),
   );
 }
