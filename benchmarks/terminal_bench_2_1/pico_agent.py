@@ -1006,6 +1006,26 @@ async def isolate_container_network(
             raise RuntimeError("Trial network identity or isolation is invalid")
     _, inspect_stdout, _ = await run_docker(["inspect", *container_ids], environment)
     values = json.loads(inspect_stdout)
+    initial_networks = sorted(
+        {
+            network
+            for value in values
+            for network in (
+                value.get("NetworkSettings", {}).get("Networks") or {}
+            )
+        }
+    )
+    if not initial_networks:
+        raise RuntimeError("Harbor container pre-start network isolation is missing")
+    _, initial_network_stdout, _ = await run_docker(
+        ["network", "inspect", *initial_networks],
+        environment,
+    )
+    if any(
+        network.get("Internal") is not True
+        for network in json.loads(initial_network_stdout)
+    ):
+        raise RuntimeError("Harbor container started with provider egress")
     main_values = [
         value
         for value in values

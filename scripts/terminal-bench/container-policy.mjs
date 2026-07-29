@@ -2,7 +2,8 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-export const prestartNetworkOverlay = "services:\n  main:\n    network_mode: none\n";
+export const prestartNetworkOverlay =
+  "services:\n  main:\n    networks:\n      - default\nnetworks:\n  default:\n    internal: true\n";
 
 export async function assertTaskComposePolicy(taskRoot, env) {
   const environmentRoot = resolve(taskRoot, "environment");
