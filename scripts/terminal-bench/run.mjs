@@ -486,6 +486,7 @@ const summary = await normalizeHarborJob({
   expectedTasks: expectedTrials,
   expectedTaskNames: tasks,
   expectedAttempts: options.attempts,
+  gatewayCapabilitySeed,
 });
 await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
   schemaVersion: 1,
