@@ -1,0 +1,12 @@
+terminal-bench/log-summary-date-ranges
+terminal-bench/cancel-async-tasks
+terminal-bench/sqlite-db-truncate
+terminal-bench/extract-elf
+terminal-bench/build-cython-ext
+terminal-bench/custom-memory-heap-crash
+terminal-bench/headless-terminal
+terminal-bench/polyglot-c-py
+terminal-bench/configure-git-webserver
+terminal-bench/filter-js-from-html
+terminal-bench/query-optimize
+terminal-bench/fix-git
