@@ -36,7 +36,13 @@ const configErrors = new Set([
 export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks = null }) {
   const source = resolve(jobDir);
   const destination = resolve(runDir);
-  const names = await readdir(source, { withFileTypes: true });
+  let names;
+  try {
+    names = await readdir(source, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    names = [];
+  }
   const trials = [];
   const sourceHashes = [];
   for (const entry of names) {
