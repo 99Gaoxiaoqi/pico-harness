@@ -98,7 +98,10 @@ set -eu
 if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node')" = "{self._NODE_VERSION}" ]; then
   exit 0
 fi
-command -v curl >/dev/null 2>&1 || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates xz-utils)
+if ! command -v curl >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates xz-utils
+fi
 case "$(uname -m)" in
   x86_64|amd64) arch=x64; expected={self._NODE_SHA256["x64"]} ;;
   aarch64|arm64) arch=arm64; expected={self._NODE_SHA256["arm64"]} ;;
@@ -302,8 +305,10 @@ async def docker_exec_secret_stdin(
         process.terminate()
         await process.wait()
         raise RuntimeError("outer_timeout_budget_violation") from None
-    if stdout or stderr:
+    if stdout:
         raise RuntimeError("Secret launcher emitted unexpected output")
+    if secret in stderr:
+        raise RuntimeError("Secret launcher leaked its input")
     return process
 
 
