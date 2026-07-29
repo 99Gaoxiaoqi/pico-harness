@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export async function acquireBenchmarkLock(benchmarkRoot) {
   const lockPath = join(benchmarkRoot, ".run-lock");
   const ownerPath = join(lockPath, "owner.json");
   const token = randomBytes(16).toString("hex");
+  const candidatePath = `${lockPath}.candidate-${token}`;
   const owner = {
     schemaVersion: 1,
     pid: process.pid,
@@ -14,10 +15,19 @@ export async function acquireBenchmarkLock(benchmarkRoot) {
     startedAt: new Date().toISOString(),
   };
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  await mkdir(candidatePath, { mode: 0o700 });
+  const candidateOwnerPath = join(candidatePath, "owner.json");
+  await writeFile(candidateOwnerPath, `${JSON.stringify(owner)}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  await fsyncPath(candidateOwnerPath);
+  await fsyncPath(candidatePath);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await mkdir(lockPath, { mode: 0o700 });
-      await writeFile(ownerPath, `${JSON.stringify(owner)}\n`, { mode: 0o600, flag: "wx" });
+      await rename(candidatePath, lockPath);
+      await fsyncPath(benchmarkRoot);
       return {
         async release() {
           if ((await readOwner(ownerPath))?.token === token) {
@@ -34,16 +44,30 @@ export async function acquireBenchmarkLock(benchmarkRoot) {
         },
       };
     } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+      if (!["EEXIST", "ENOTEMPTY"].includes(error?.code)) {
+        await rm(candidatePath, { recursive: true, force: true });
+        throw error;
+      }
       const current = await readOwner(ownerPath);
-      if (current === null || isProcessAlive(current.pid)) {
+      if (current !== null && isProcessAlive(current.pid)) {
+        await rm(candidatePath, { recursive: true, force: true });
         throw new Error("Another Terminal-Bench publication process owns the benchmark lock", {
           cause: error,
         });
       }
-      await rm(lockPath, { recursive: true, force: true });
+      const stalePath = `${lockPath}.stale-${token}-${attempt}`;
+      try {
+        await rename(lockPath, stalePath);
+      } catch (renameError) {
+        if (renameError?.code === "ENOENT") continue;
+        await rm(candidatePath, { recursive: true, force: true });
+        throw renameError;
+      }
+      await fsyncPath(benchmarkRoot);
+      await rm(stalePath, { recursive: true, force: true });
     }
   }
+  await rm(candidatePath, { recursive: true, force: true });
   throw new Error("Could not acquire the Terminal-Bench publication lock");
 }
 
@@ -70,5 +94,14 @@ function isProcessAlive(pid) {
     return true;
   } catch (error) {
     return error?.code !== "ESRCH";
+  }
+}
+
+async function fsyncPath(path) {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
 }
