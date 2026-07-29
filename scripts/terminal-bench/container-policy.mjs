@@ -32,7 +32,7 @@ export async function assertTaskComposePolicy(taskRoot, env) {
   }
   const args = ["compose", "--project-directory", environmentRoot];
   for (const path of composeFiles) args.push("-f", path);
-  args.push("config", "--format", "json");
+  args.push("config", "--format", "json", "--no-normalize");
   const output = await capture("docker", args, environmentRoot, env);
   const config = JSON.parse(output);
   const services = Object.entries(config.services ?? {});
