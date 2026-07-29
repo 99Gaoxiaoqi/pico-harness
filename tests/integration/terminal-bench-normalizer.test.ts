@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 // @ts-expect-error The benchmark orchestrator is intentionally plain Node ESM.
-import { normalizeHarborJob } from "../../scripts/terminal-bench/normalize-results.mjs";
+import { normalizeHarborJob as normalizeHarborJobRaw } from "../../scripts/terminal-bench/normalize-results.mjs";
+
+const gatewayCapabilitySeed = "b".repeat(64);
+
+function normalizeHarborJob(options: Record<string, unknown>) {
+  return normalizeHarborJobRaw({ ...options, gatewayCapabilitySeed });
+}
 
 test("Terminal-Bench normalizer separates task failures from infrastructure failures", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-normalize-"));
@@ -304,6 +310,105 @@ test("Terminal-Bench normalizer publishes locked-pricing gateway accounting", as
   );
 });
 
+test("Terminal-Bench normalizer reconciles multi-request tool-use accounting", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-multi-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "multi-request", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "multi-request-run",
+    accounting: accountingReceiptForRequests("multi-request-run", "multi-request", [
+      [27, 45],
+      [31, 10_309],
+    ]),
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "multi-request-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.trials[0].accounting.requestCounts.attempted, 2);
+  assert.equal(summary.trials[0].accounting.requests.length, 2);
+  assert.deepEqual(summary.trials[0].agent.usage, {
+    promptTokens: 58,
+    completionTokens: 10_354,
+    costCNY: 10.3598,
+  });
+});
+
+test("Terminal-Bench normalizer verifies zero and integer-CNY receipts", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-numeric-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "zero-cost", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "numeric-run",
+    accounting: accountingReceipt("numeric-run", "zero-cost", 0, 0),
+  });
+  await writeTrial(jobDir, "integer-cost", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "numeric-run",
+    accounting: accountingReceipt("numeric-run", "integer-cost", 10_000, 0),
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "numeric-run",
+    expectedTasks: 2,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.deepEqual(
+    summary.trials
+      .map((trial: { agent: { usage: { costCNY: number } } }) => {
+        return trial.agent.usage.costCNY;
+      })
+      .sort((left: number, right: number) => left - right),
+    [0, 1],
+  );
+});
+
+test("Terminal-Bench normalizer rejects a forged accounting HMAC", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-forged-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "forged", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "forged-run",
+  });
+  const receiptPath = join(jobDir, "forged", "agent", "gateway-accounting-receipt.json");
+  const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+  receipt.auth.tag = "f".repeat(64);
+  receipt.receiptSha256 = sha256Canonical(accountingReceiptPayload(receipt, true));
+  await writeFile(receiptPath, JSON.stringify(receipt));
+  const resultPath = join(jobDir, "forged", "result.json");
+  const result = JSON.parse(await readFile(resultPath, "utf8"));
+  result.agent_result.metadata.pico.gatewayAccounting.receiptSha256 = receipt.receiptSha256;
+  await writeFile(resultPath, JSON.stringify(result));
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "forged-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(summary.trials[0].adapter.code, "accounting_auth_invalid");
+});
+
 test("Terminal-Bench normalizer fails closed without a valid accounting receipt", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-invalid-"));
   const jobDir = join(root, "job");
@@ -413,6 +518,14 @@ function accountingReceipt(
   inputTokens: number,
   outputTokens: number,
 ) {
+  return accountingReceiptForRequests(runId, trialId, [[inputTokens, outputTokens]]);
+}
+
+function accountingReceiptForRequests(
+  runId: string,
+  trialId: string,
+  usage: ReadonlyArray<readonly [number, number]>,
+) {
   const pricing = {
     schemaVersion: 1,
     providerId: "fixture",
@@ -423,9 +536,31 @@ function accountingReceipt(
     output: 1_000_000_000,
   };
   const pricingSha256 = sha256Canonical(pricing);
-  const costMicroCNY = Math.ceil(
-    (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000,
+  const requestEntries = usage.map(([inputTokens, outputTokens], index) => {
+    const costMicroCNY = Math.ceil(
+      (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000,
+    );
+    const actual = { inputTokens, outputTokens, costMicroCNY };
+    const zero = { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 };
+    return {
+      sequence: index + 1,
+      status: "reconciled",
+      reservation: actual,
+      actual,
+      refund: zero,
+      supplement: zero,
+      unreconciledReservation: zero,
+    };
+  });
+  const actualTotals = requestEntries.reduce(
+    (totals, entry) => ({
+      inputTokens: totals.inputTokens + entry.actual.inputTokens,
+      outputTokens: totals.outputTokens + entry.actual.outputTokens,
+      costMicroCNY: totals.costMicroCNY + entry.actual.costMicroCNY,
+    }),
+    { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 },
   );
+  const zeroTotals = { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 };
   const receipt = {
     schemaVersion: 1,
     runId,
@@ -437,32 +572,54 @@ function accountingReceipt(
     rounding: "ceil-per-request",
     status: "reconciled",
     withinBudget: true,
-    requests: { attempted: 1, reconciled: 1, unreconciled: 0 },
-    reservation: { inputTokens, outputTokens, costMicroCNY },
+    requests: {
+      attempted: requestEntries.length,
+      reconciled: requestEntries.length,
+      unreconciled: 0,
+    },
+    requestEntries,
+    reservation: actualTotals,
     actual: {
-      inputTokens,
-      outputTokens,
-      costMicroCNY,
-      costCNY: costMicroCNY / 1_000_000,
+      ...actualTotals,
+      costCNY: actualTotals.costMicroCNY / 1_000_000,
     },
-    refund: { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 },
-    supplement: { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 },
-    unreconciledReservation: {
-      inputTokens: 0,
-      outputTokens: 0,
-      costMicroCNY: 0,
-    },
-    auth: {
-      algorithm: "hmac-sha256",
-      keyId: "run-capability-v1",
-      tag: "a".repeat(64),
-    },
+    refund: zeroTotals,
+    supplement: zeroTotals,
+    unreconciledReservation: zeroTotals,
   };
-  return { ...receipt, receiptSha256: sha256Canonical(receipt) };
+  const auth = {
+    algorithm: "hmac-sha256",
+    keyId: "run-capability-v1",
+    tag: createHmac("sha256", gatewayCapabilitySeed)
+      .update("pico-gateway-accounting-receipt-v1\0")
+      .update(canonicalJson(accountingReceiptPayload(receipt, false)))
+      .digest("hex"),
+  };
+  const authenticated = { ...receipt, auth };
+  return {
+    ...authenticated,
+    receiptSha256: sha256Canonical(accountingReceiptPayload(authenticated, true)),
+  };
 }
 
 function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function accountingReceiptPayload(
+  value: {
+    actual: Record<string, unknown>;
+    auth?: unknown;
+    receiptSha256?: unknown;
+    [key: string]: unknown;
+  },
+  includeAuth: boolean,
+): Record<string, unknown> {
+  const payload = structuredClone(value);
+  delete payload.receiptSha256;
+  if (!includeAuth) delete payload.auth;
+  delete payload.actual.costCNY;
+  return payload;
 }
 
 function canonicalJson(value: unknown): string {

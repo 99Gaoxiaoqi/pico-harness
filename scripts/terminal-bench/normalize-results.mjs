@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { lstat, link, mkdir, open, readFile, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,7 @@ export async function normalizeHarborJob({
   expectedTasks = null,
   expectedTaskNames = null,
   expectedAttempts = 1,
+  gatewayCapabilitySeed = null,
 }) {
   const source = resolve(jobDir);
   const destination = resolve(runDir);
@@ -69,6 +70,7 @@ export async function normalizeHarborJob({
       readError: accountingReceiptRead.error,
       runId,
       trialResult,
+      gatewayCapabilitySeed,
     });
     const verifierEvidencePath = join(trialDir, "verifier", "ctrf.json");
     const verifierEvidenceRead = await readJsonEvidence(verifierEvidencePath);
@@ -258,6 +260,8 @@ export function normalizeTrial({
           withinBudget: accounting.receipt.withinBudget,
           pricingSha256: accounting.receipt.pricingSha256,
           receiptSha256: accounting.receipt.receiptSha256,
+          requestCounts: accounting.receipt.requests,
+          requests: accounting.receipt.requestEntries,
           reservation: accounting.receipt.reservation,
           actual: accounting.receipt.actual,
           refund: accounting.receipt.refund,
@@ -276,7 +280,13 @@ export function normalizeTrial({
   };
 }
 
-function validateAccountingReceipt({ value, readError, runId, trialResult }) {
+function validateAccountingReceipt({
+  value,
+  readError,
+  runId,
+  trialResult,
+  gatewayCapabilitySeed,
+}) {
   if (readError) {
     return { valid: false, code: "accounting_receipt_invalid", receipt: null };
   }
@@ -293,6 +303,7 @@ function validateAccountingReceipt({ value, readError, runId, trialResult }) {
     "receiptSha256",
     "refund",
     "requests",
+    "requestEntries",
     "reservation",
     "rounding",
     "runId",
@@ -336,6 +347,16 @@ function validateAccountingReceipt({ value, readError, runId, trialResult }) {
   ) {
     return { valid: false, code: "accounting_auth_invalid", receipt: null };
   }
+  if (typeof gatewayCapabilitySeed !== "string" || !/^[0-9a-f]{64}$/u.test(gatewayCapabilitySeed)) {
+    return { valid: false, code: "accounting_auth_key_missing", receipt: null };
+  }
+  const expectedTag = createHmac("sha256", gatewayCapabilitySeed)
+    .update("pico-gateway-accounting-receipt-v1\0")
+    .update(canonicalJson(accountingReceiptPayload(value, false)))
+    .digest("hex");
+  if (value.auth.tag !== expectedTag) {
+    return { valid: false, code: "accounting_auth_invalid", receipt: null };
+  }
   if (
     !isExactObject(pricing, pricingKeys) ||
     pricing.schemaVersion !== 1 ||
@@ -350,20 +371,17 @@ function validateAccountingReceipt({ value, readError, runId, trialResult }) {
   ) {
     return { valid: false, code: "accounting_pricing_invalid", receipt: null };
   }
-  const unsigned = { ...value };
-  delete unsigned.receiptSha256;
   if (
     typeof value.receiptSha256 !== "string" ||
     !/^[0-9a-f]{64}$/u.test(value.receiptSha256) ||
-    sha256Canonical(unsigned) !== value.receiptSha256
+    sha256Canonical(accountingReceiptPayload(value, true)) !== value.receiptSha256
   ) {
     return { valid: false, code: "accounting_receipt_digest_invalid", receipt: null };
   }
   if (
     !isExactObject(value.requests, ["attempted", "reconciled", "unreconciled"]) ||
     !Object.values(value.requests).every(isNonnegativeSafeInteger) ||
-    value.requests.attempted !== value.requests.reconciled + value.requests.unreconciled ||
-    value.requests.attempted !== 1
+    value.requests.attempted !== value.requests.reconciled + value.requests.unreconciled
   ) {
     return { valid: false, code: "accounting_requests_invalid", receipt: null };
   }
@@ -401,18 +419,89 @@ function validateAccountingReceipt({ value, readError, runId, trialResult }) {
       return { valid: false, code: "accounting_reconciliation_invalid", receipt: null };
     }
   }
-  const expectedCost =
-    value.requests.reconciled === 0
-      ? 0n
-      : (BigInt(actual.inputTokens) * BigInt(pricing.input) +
-          BigInt(actual.outputTokens) * BigInt(pricing.output) +
+  const entries = value.requestEntries;
+  if (!Array.isArray(entries) || entries.length !== value.requests.attempted) {
+    return { valid: false, code: "accounting_request_entries_invalid", receipt: null };
+  }
+  const bucketFields = ["inputTokens", "outputTokens", "costMicroCNY"];
+  const entryTotals = Object.fromEntries(
+    bucketNames.map((name) => [name, { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 }]),
+  );
+  let observedReconciled = 0;
+  let observedUnreconciled = 0;
+  for (const [index, entry] of entries.entries()) {
+    if (
+      !isExactObject(entry, [
+        "actual",
+        "refund",
+        "reservation",
+        "sequence",
+        "status",
+        "supplement",
+        "unreconciledReservation",
+      ]) ||
+      entry.sequence !== index + 1 ||
+      !["reconciled", "unreconciled"].includes(entry.status)
+    ) {
+      return { valid: false, code: "accounting_request_entry_invalid", receipt: null };
+    }
+    for (const name of bucketNames) {
+      if (
+        !isExactObject(entry[name], bucketFields) ||
+        !bucketFields.every((field) => isNonnegativeSafeInteger(entry[name][field]))
+      ) {
+        return { valid: false, code: "accounting_request_bucket_invalid", receipt: null };
+      }
+      for (const field of bucketFields) entryTotals[name][field] += entry[name][field];
+    }
+    if (
+      bucketFields.some(
+        (field) =>
+          entry.reservation[field] +
+            entry.supplement[field] -
+            entry.refund[field] -
+            entry.unreconciledReservation[field] !==
+          entry.actual[field],
+      )
+    ) {
+      return { valid: false, code: "accounting_request_reconciliation_invalid", receipt: null };
+    }
+    if (entry.status === "reconciled") {
+      observedReconciled += 1;
+      const expectedCost =
+        (BigInt(entry.actual.inputTokens) * BigInt(pricing.input) +
+          BigInt(entry.actual.outputTokens) * BigInt(pricing.output) +
           999_999n) /
         1_000_000n;
+      if (
+        BigInt(entry.actual.costMicroCNY) !== expectedCost ||
+        Object.values(entry.unreconciledReservation).some((amount) => amount !== 0)
+      ) {
+        return { valid: false, code: "accounting_request_cost_invalid", receipt: null };
+      }
+    } else {
+      observedUnreconciled += 1;
+      if (
+        ["actual", "refund", "supplement"].some((name) =>
+          Object.values(entry[name]).some((amount) => amount !== 0),
+        ) ||
+        bucketFields.some(
+          (field) => entry.unreconciledReservation[field] !== entry.reservation[field],
+        )
+      ) {
+        return { valid: false, code: "accounting_request_ambiguity_invalid", receipt: null };
+      }
+    }
+  }
   if (
-    BigInt(actual.costMicroCNY) !== expectedCost ||
+    observedReconciled !== value.requests.reconciled ||
+    observedUnreconciled !== value.requests.unreconciled ||
+    bucketNames.some((name) =>
+      bucketFields.some((field) => entryTotals[name][field] !== value[name][field]),
+    ) ||
     (value.status === "reconciled") !== (value.requests.unreconciled === 0)
   ) {
-    return { valid: false, code: "accounting_cost_invalid", receipt: null };
+    return { valid: false, code: "accounting_request_totals_invalid", receipt: null };
   }
   const picoMetadata = trialResult.agent_result?.metadata?.pico;
   const gatewayMetadata = picoMetadata?.gatewayAccounting;
@@ -440,6 +529,14 @@ function isExactObject(value, keys) {
 
 function isNonnegativeSafeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+function accountingReceiptPayload(value, includeAuth) {
+  const payload = structuredClone(value);
+  delete payload.receiptSha256;
+  if (!includeAuth) delete payload.auth;
+  delete payload.actual.costCNY;
+  return payload;
 }
 
 function canonicalJson(value) {

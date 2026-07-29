@@ -235,6 +235,18 @@ class GatewayState:
             trial["active"].add(active)
             accounting = trial["accounting"]
             accounting["requests"]["attempted"] += 1
+            request_accounting = {
+                "sequence": accounting["requests"]["attempted"],
+                "status": "pending",
+                "reservation": accounting_bucket(
+                    input_reservation, output_limit, cost_reservation
+                ),
+                "actual": zero_accounting_bucket(),
+                "refund": zero_accounting_bucket(),
+                "supplement": zero_accounting_bucket(),
+                "unreconciledReservation": zero_accounting_bucket(),
+            }
+            accounting["requestEntries"].append(request_accounting)
             add_accounting(
                 accounting["reservation"],
                 input_reservation,
@@ -281,6 +293,20 @@ class GatewayState:
                 trial["costMicroCNYRemaining"] += cost_reservation - actual_cost
                 accounting = trial["accounting"]
                 accounting["requests"]["reconciled"] += 1
+                request_accounting["status"] = "reconciled"
+                request_accounting["actual"] = accounting_bucket(
+                    actual_input, actual_output, actual_cost
+                )
+                request_accounting["refund"] = accounting_bucket(
+                    max(input_reservation - actual_input, 0),
+                    max(output_limit - actual_output, 0),
+                    max(cost_reservation - actual_cost, 0),
+                )
+                request_accounting["supplement"] = accounting_bucket(
+                    max(actual_input - input_reservation, 0),
+                    max(actual_output - output_limit, 0),
+                    max(actual_cost - cost_reservation, 0),
+                )
                 add_accounting(
                     accounting["actual"],
                     actual_input,
@@ -323,6 +349,10 @@ class GatewayState:
                 if active in trial["active"]:
                     accounting = trial["accounting"]
                     accounting["requests"]["unreconciled"] += 1
+                    request_accounting["status"] = "unreconciled"
+                    request_accounting["unreconciledReservation"] = dict(
+                        request_accounting["reservation"]
+                    )
                     add_accounting(
                         accounting["unreconciledReservation"],
                         input_reservation,
@@ -546,6 +576,7 @@ def terminate_process(
 def new_accounting() -> dict[str, Any]:
     return {
         "requests": {"attempted": 0, "reconciled": 0, "unreconciled": 0},
+        "requestEntries": [],
         "reservation": zero_accounting_bucket(),
         "actual": zero_accounting_bucket(),
         "refund": zero_accounting_bucket(),
@@ -556,6 +587,16 @@ def new_accounting() -> dict[str, Any]:
 
 def zero_accounting_bucket() -> dict[str, int]:
     return {"inputTokens": 0, "outputTokens": 0, "costMicroCNY": 0}
+
+
+def accounting_bucket(
+    input_tokens: int, output_tokens: int, cost_micro_cny: int
+) -> dict[str, int]:
+    return {
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "costMicroCNY": cost_micro_cny,
+    }
 
 
 def add_accounting(
@@ -599,6 +640,9 @@ def freeze_accounting_receipt(
         ),
         "withinBudget": within_budget,
         "requests": dict(accounting["requests"]),
+        "requestEntries": json.loads(
+            json.dumps(accounting["requestEntries"], separators=(",", ":"))
+        ),
         "reservation": dict(accounting["reservation"]),
         "actual": actual,
         "refund": dict(accounting["refund"]),
@@ -612,12 +656,26 @@ def freeze_accounting_receipt(
         "keyId": "run-capability-v1",
         "tag": hmac.new(
             capability_seed.encode(),
-            b"pico-gateway-accounting-receipt-v1\0" + canonical_json(receipt),
+            b"pico-gateway-accounting-receipt-v1\0"
+            + canonical_accounting_receipt(receipt, include_auth=False),
             "sha256",
         ).hexdigest(),
     }
-    receipt["receiptSha256"] = hashlib.sha256(canonical_json(receipt)).hexdigest()
+    receipt["receiptSha256"] = hashlib.sha256(
+        canonical_accounting_receipt(receipt, include_auth=True)
+    ).hexdigest()
     return receipt
+
+
+def canonical_accounting_receipt(
+    value: dict[str, Any], *, include_auth: bool
+) -> bytes:
+    payload = json.loads(json.dumps(value, separators=(",", ":")))
+    payload.pop("receiptSha256", None)
+    if not include_auth:
+        payload.pop("auth", None)
+    payload["actual"].pop("costCNY", None)
+    return canonical_json(payload)
 
 
 def require_pricing(
