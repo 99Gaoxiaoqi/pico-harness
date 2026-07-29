@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, inflateRawSync } from "node:zlib";
 import { rmSync } from "node:fs";
 import { buildPicoBundle } from "./build-bundle.mjs";
 import { assertTaskComposePolicy } from "./container-policy.mjs";
@@ -741,8 +741,11 @@ async function scanTreeForSecrets(root, secrets) {
       );
       return;
     }
+    if (candidate.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+      scanZip(path, containerEncoding, candidate, depth);
+      return;
+    }
     if (
-      candidate.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ||
       candidate.subarray(0, 6).equals(Buffer.from([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) ||
       candidate.subarray(0, 3).equals(Buffer.from("BZh")) ||
       candidate.subarray(0, 6).equals(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) ||
@@ -778,6 +781,67 @@ async function scanTreeForSecrets(root, secrets) {
         }
         offset = bodyStart + Math.ceil(size / 512) * 512;
       }
+    }
+  }
+  function scanZip(path, containerEncoding, candidate, depth) {
+    const minimum = Math.max(0, candidate.length - 65_557);
+    let eocd = -1;
+    for (let offset = candidate.length - 22; offset >= minimum; offset -= 1) {
+      if (candidate.readUInt32LE(offset) === 0x06054b50) {
+        eocd = offset;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error("Result ZIP archive has no central directory");
+    const entries = candidate.readUInt16LE(eocd + 10);
+    const centralSize = candidate.readUInt32LE(eocd + 12);
+    const centralOffset = candidate.readUInt32LE(eocd + 16);
+    if (centralOffset + centralSize > candidate.length || entries > 100_000) {
+      throw new Error("Result ZIP archive exceeds the scan limit");
+    }
+    let offset = centralOffset;
+    for (let index = 0; index < entries; index += 1) {
+      if (candidate.readUInt32LE(offset) !== 0x02014b50) {
+        throw new Error("Result ZIP central directory is invalid");
+      }
+      const flags = candidate.readUInt16LE(offset + 8);
+      const method = candidate.readUInt16LE(offset + 10);
+      const compressedSize = candidate.readUInt32LE(offset + 20);
+      const uncompressedSize = candidate.readUInt32LE(offset + 24);
+      const nameLength = candidate.readUInt16LE(offset + 28);
+      const extraLength = candidate.readUInt16LE(offset + 30);
+      const commentLength = candidate.readUInt16LE(offset + 32);
+      const externalAttributes = candidate.readUInt32LE(offset + 38);
+      const localOffset = candidate.readUInt32LE(offset + 42);
+      const unixMode = externalAttributes >>> 16;
+      if ((flags & 1) !== 0 || (unixMode & 0o170000) === 0o120000) {
+        throw new Error("Result ZIP archive contains an encrypted or linked entry");
+      }
+      if (candidate.readUInt32LE(localOffset) !== 0x04034b50) {
+        throw new Error("Result ZIP local header is invalid");
+      }
+      const localNameLength = candidate.readUInt16LE(localOffset + 26);
+      const localExtraLength = candidate.readUInt16LE(localOffset + 28);
+      const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+      const dataEnd = dataStart + compressedSize;
+      if (dataEnd > candidate.length || uncompressedSize > 512 * 1024 * 1024) {
+        throw new Error("Result ZIP entry exceeds the scan limit");
+      }
+      const compressed = candidate.subarray(dataStart, dataEnd);
+      const expanded =
+        method === 0
+          ? compressed
+          : method === 8
+            ? inflateRawSync(compressed, { maxOutputLength: 512 * 1024 * 1024 })
+            : null;
+      if (expanded === null || expanded.length !== uncompressedSize) {
+        throw new Error("Result ZIP entry uses an unsupported encoding");
+      }
+      scanCandidate(path, `${containerEncoding}>zip`, expanded, depth + 1);
+      offset += 46 + nameLength + extraLength + commentLength;
+    }
+    if (offset !== centralOffset + centralSize) {
+      throw new Error("Result ZIP central directory length is invalid");
     }
   }
   async function visit(path) {
