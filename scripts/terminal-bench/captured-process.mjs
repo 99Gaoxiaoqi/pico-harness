@@ -29,6 +29,21 @@ export function runCaptured(
       settled = true;
       reject(error);
     };
+    const enforceOutputLimit = async () => {
+      try {
+        if (killError) throw killError;
+        if (detached && child.pid) {
+          await confirmProcessGroupExit(child.pid, processGroupExitTimeoutMs);
+        }
+        settleReject(new Error(`${command} output exceeded the benchmark capture limit`));
+      } catch (error) {
+        settleReject(
+          new Error(`${command} output-limit process-group cleanup was unconfirmed`, {
+            cause: error,
+          }),
+        );
+      }
+    };
     const collect = (target) => (chunk) => {
       bytes += chunk.length;
       if (!outputLimitExceeded && bytes > maxOutputBytes) {
@@ -38,31 +53,19 @@ export function runCaptured(
         } catch (error) {
           killError = error;
         }
+        void enforceOutputLimit();
         return;
       }
       if (!outputLimitExceeded) target.push(Buffer.from(chunk));
     };
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
-    child.once("error", settleReject);
-    child.once("close", async (code) => {
+    child.once("error", (error) => {
+      if (!outputLimitExceeded) settleReject(error);
+    });
+    child.once("close", (code) => {
       if (settled) return;
-      if (outputLimitExceeded) {
-        try {
-          if (killError) throw killError;
-          if (detached && child.pid) {
-            await confirmProcessGroupExit(child.pid, processGroupExitTimeoutMs);
-          }
-          settleReject(new Error(`${command} output exceeded the benchmark capture limit`));
-        } catch (error) {
-          settleReject(
-            new Error(`${command} output-limit process-group cleanup was unconfirmed`, {
-              cause: error,
-            }),
-          );
-        }
-        return;
-      }
+      if (outputLimitExceeded) return;
       settled = true;
       resolvePromise({
         exitCode: code ?? 1,
