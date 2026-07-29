@@ -21,7 +21,7 @@ import { gunzipSync, inflateRawSync } from "node:zlib";
 import { rmSync } from "node:fs";
 import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
-import { assertTaskComposePolicy } from "./container-policy.mjs";
+import { assertTaskComposePolicy, prestartNetworkOverlay } from "./container-policy.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
@@ -625,7 +625,7 @@ async function setTaskPrestartNetworkIsolation(taskRoot) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  await writeFile(path, "services:\n  main:\n    network_mode: none\n", { mode: 0o600 });
+  await writeFile(path, prestartNetworkOverlay, { mode: 0o600 });
 }
 
 async function makeTreeReadOnly(root) {

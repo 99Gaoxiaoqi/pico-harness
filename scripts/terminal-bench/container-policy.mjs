@@ -1,11 +1,19 @@
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+
+export const prestartNetworkOverlay = "services:\n  main:\n    network_mode: none\n";
 
 export async function assertTaskComposePolicy(taskRoot, env) {
   const environmentRoot = resolve(taskRoot, "environment");
   const composeFiles = await findComposeFiles(environmentRoot);
   if (composeFiles.length === 0) return;
+  if (
+    composeFiles.length === 1 &&
+    (await readFile(composeFiles[0], "utf8")) === prestartNetworkOverlay
+  ) {
+    return;
+  }
   const args = ["compose", "--project-directory", environmentRoot];
   for (const path of composeFiles) args.push("-f", path);
   args.push("config", "--format", "json");
