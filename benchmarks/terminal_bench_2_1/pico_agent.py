@@ -305,9 +305,7 @@ async def docker_exec_secret_stdin(
         process.terminate()
         await process.wait()
         raise RuntimeError("outer_timeout_budget_violation") from None
-    if stdout:
-        raise RuntimeError("Secret launcher emitted unexpected output")
-    if secret in stderr:
+    if secret in stdout or secret in stderr:
         raise RuntimeError("Secret launcher leaked its input")
     return process
 
