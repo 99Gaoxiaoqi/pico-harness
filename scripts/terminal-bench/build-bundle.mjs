@@ -30,8 +30,8 @@ export async function buildPicoBundle(outputPath) {
     recursive: true,
   });
   await cp(
-    join(projectRoot, "scripts/terminal-bench/container-launcher.py"),
-    join(stage, "container-launcher.py"),
+    join(projectRoot, "scripts/terminal-bench/container-launcher.mjs"),
+    join(stage, "container-launcher.mjs"),
   );
   await writeFile(join(stage, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
   await writeFile(
