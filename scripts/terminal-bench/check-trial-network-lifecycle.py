@@ -69,8 +69,14 @@ class FakeEnvironment:
 
 
 class FakeDocker:
-    def __init__(self, *, fail_gateway_create: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_gateway_create: bool = False,
+        inspect_error: bytes | None = None,
+    ) -> None:
         self.fail_gateway_create = fail_gateway_create
+        self.inspect_error = inspect_error
         self.networks: dict[str, dict[str, Any]] = {}
         self.commands: list[list[str]] = []
 
@@ -96,6 +102,8 @@ class FakeDocker:
             }
             return 0, network_name.encode(), b""
         if args[:2] == ["network", "inspect"]:
+            if self.inspect_error is not None:
+                return 1, b"", self.inspect_error
             names = args[2:]
             values = [self.networks[name] for name in names if name in self.networks]
             if len(values) != len(names):
@@ -170,6 +178,19 @@ async def main() -> None:
         command[:2] == ["network", "rm"] and command[2] == networks.task
         for command in unowned.commands
     )
+
+    unavailable = FakeDocker(inspect_error=b"Cannot connect to the Docker daemon")
+    adapter.run_docker = unavailable.run
+    unavailable.networks[networks.task] = owned_network(run_id, "main")
+    unavailable.networks[networks.gateway] = owned_network(run_id, "main")
+    try:
+        await adapter.remove_owned_trial_networks(environment, networks, run_id)
+    except RuntimeError as error:
+        assert networks.task in str(error)
+        assert networks.gateway in str(error)
+    else:
+        raise AssertionError("Docker inspect failure was mistaken for an absent network")
+    assert set(unavailable.networks) == {networks.task, networks.gateway}
 
     order: list[str] = []
 
