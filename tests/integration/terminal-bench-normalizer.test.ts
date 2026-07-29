@@ -210,6 +210,49 @@ test("Terminal-Bench normalizer rejects empty or inconsistent CTRF evidence", as
   assert.equal(summary.trials[0].primaryStatus, "verifier_error");
 });
 
+test("Terminal-Bench normalizer rejects incomplete or contradictory CTRF summaries", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-ctrf-summary-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  for (const [name, evidence] of [
+    [
+      "missing-tool",
+      {
+        results: {
+          summary: { tests: 1, passed: 1, failed: 0, skipped: 0, pending: 0, other: 0 },
+          tests: [{ name: "fixture", status: "passed" }],
+        },
+      },
+    ],
+    [
+      "contradictory-counts",
+      {
+        results: {
+          tool: { name: "pytest", version: "8.4.1" },
+          summary: { tests: 1, passed: 0, failed: 1, skipped: 0, pending: 0, other: 0 },
+          tests: [{ name: "fixture", status: "passed" }],
+        },
+      },
+    ],
+  ] as const) {
+    const jobDir = join(root, name, "job");
+    const runDir = join(root, name, "run");
+    await writeTrial(jobDir, name, {
+      reward: 1,
+      headless: headless("completed", true),
+    });
+    await writeFile(join(jobDir, name, "verifier", "ctrf.json"), JSON.stringify(evidence));
+    const summary = await normalizeHarborJob({
+      jobDir,
+      runDir,
+      runId: name,
+      expectedTasks: 1,
+    });
+    assert.equal(summary.sealed, false);
+    assert.equal(summary.trials[0].verifier.exceptionType, "VerifierEvidenceInvalid");
+    assert.equal(summary.trials[0].primaryStatus, "verifier_error");
+  }
+});
+
 function headless(status: string, terminationConfirmed: boolean) {
   return {
     schemaVersion: 1,
@@ -264,6 +307,7 @@ async function writeTrial(
     join(trialDir, "verifier", "ctrf.json"),
     JSON.stringify({
       results: {
+        tool: { name: "pytest", version: "8.4.1" },
         summary: { tests: 1, passed: 1, failed: 0, skipped: 0, pending: 0, other: 0 },
         tests: [{ name: "fixture", status: "passed" }],
       },

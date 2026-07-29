@@ -21,6 +21,7 @@ import { gunzipSync, inflateRawSync } from "node:zlib";
 import { rmSync } from "node:fs";
 import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
+import { runCaptured } from "./captured-process.mjs";
 import { assertTaskComposePolicy, prestartNetworkOverlay } from "./container-policy.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
@@ -1105,47 +1106,6 @@ async function startGatewaySupervisor({
       rmSync(directory, { recursive: true, force: true });
     },
   };
-}
-
-function runCaptured(command, args, cwd, env, supervisorConfig) {
-  return new Promise((resolvePromise, reject) => {
-    const detached = process.platform !== "win32";
-    const child = spawn(command, args, {
-      cwd,
-      env,
-      detached,
-      stdio: ["ignore", "pipe", "pipe", "pipe"],
-    });
-    child.stdio[3].end(supervisorConfig);
-    const stdout = [];
-    const stderr = [];
-    let bytes = 0;
-    let outputLimitExceeded = false;
-    const collect = (target) => (chunk) => {
-      bytes += chunk.length;
-      if (!outputLimitExceeded && bytes > 64 * 1024 * 1024) {
-        outputLimitExceeded = true;
-        if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-        return;
-      }
-      if (!outputLimitExceeded) target.push(Buffer.from(chunk));
-    };
-    child.stdout.on("data", collect(stdout));
-    child.stderr.on("data", collect(stderr));
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (outputLimitExceeded) {
-        reject(new Error(`${command} output exceeded the benchmark capture limit`));
-        return;
-      }
-      resolvePromise({
-        exitCode: code ?? 1,
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
-      });
-    });
-  });
 }
 
 function redactSecrets(value, secrets) {

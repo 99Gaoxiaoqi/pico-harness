@@ -246,21 +246,30 @@ function validateCtrfEvidence(value, readError) {
     };
   }
   const results = value?.results;
+  const tool = results?.tool;
   const tests = results?.tests;
   const summary = results?.summary;
+  const statuses = ["passed", "failed", "skipped", "pending", "other"];
   if (
     !results ||
     typeof results !== "object" ||
+    !tool ||
+    typeof tool !== "object" ||
+    tool.name !== "pytest" ||
+    typeof tool.version !== "string" ||
+    tool.version.length === 0 ||
     !Array.isArray(tests) ||
     tests.length === 0 ||
     !summary ||
     typeof summary !== "object" ||
     !Number.isInteger(summary.tests) ||
-    summary.tests !== tests.length
+    summary.tests !== tests.length ||
+    statuses.some((status) => !Number.isInteger(summary[status]) || summary[status] < 0) ||
+    statuses.reduce((total, status) => total + summary[status], 0) !== tests.length
   ) {
     return { valid: false, error: "VerifierEvidenceInvalid" };
   }
-  const validStatuses = new Set(["passed", "failed", "skipped", "pending", "other"]);
+  const validStatuses = new Set(statuses);
   if (
     tests.some(
       (test) =>
@@ -271,6 +280,11 @@ function validateCtrfEvidence(value, readError) {
         !validStatuses.has(test.status),
     )
   ) {
+    return { valid: false, error: "VerifierEvidenceInvalid" };
+  }
+  const observed = Object.fromEntries(statuses.map((status) => [status, 0]));
+  for (const test of tests) observed[test.status] += 1;
+  if (statuses.some((status) => observed[status] !== summary[status])) {
     return { valid: false, error: "VerifierEvidenceInvalid" };
   }
   return { valid: true, error: null };
