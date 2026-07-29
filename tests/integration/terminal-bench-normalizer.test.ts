@@ -76,6 +76,29 @@ test("Terminal-Bench normalizer refuses to overwrite sealed case evidence", asyn
   );
 });
 
+test("Terminal-Bench normalizer fails closed under concurrent publishers", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-concurrent-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "passed", {
+    reward: 1,
+    headless: headless("completed", true),
+  });
+
+  const attempts = await Promise.allSettled([
+    normalizeHarborJob({ jobDir, runDir, runId: "publisher-a", expectedTasks: 1 }),
+    normalizeHarborJob({ jobDir, runDir, runId: "publisher-b", expectedTasks: 1 }),
+  ]);
+
+  assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length <= 1, true);
+  const summary = JSON.parse(await readFile(join(runDir, "summary.json"), "utf8"));
+  const normalized = JSON.parse(
+    await readFile(join(runDir, "cases", "passed", "passed", "normalized-result.json"), "utf8"),
+  );
+  assert.equal(normalized.runId, summary.runId);
+});
+
 test("Terminal-Bench normalizer requires the expected task attempt matrix", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-attempts-"));
   const jobDir = join(root, "job");

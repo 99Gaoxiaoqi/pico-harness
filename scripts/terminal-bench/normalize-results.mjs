@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, open, readFile, readdir, rename } from "node:fs/promises";
+import { lstat, link, mkdir, open, readFile, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -306,17 +306,39 @@ async function hashTree(root) {
   return hash.digest("hex");
 }
 
-async function atomicWriteJson(path, value) {
+async function writeOnceJson(path, value) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  return writeOnceBytes(path, Buffer.from(serialized));
+}
+
+async function writeOnceBytes(path, value) {
+  try {
+    const existing = await readFile(path);
+    if (existing.equals(value)) return;
+    throw new Error(`sealed benchmark artifact changed: ${path}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await handle.writeFile(value);
     await handle.sync();
   } finally {
     await handle.close();
   }
-  await rename(temporary, path);
+  try {
+    await link(temporary, path);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = await readFile(path);
+    if (!existing.equals(value)) {
+      throw new Error(`sealed benchmark artifact changed: ${path}`, { cause: error });
+    }
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
   const directory = await open(dirname(path), "r");
   try {
     await directory.sync();
@@ -325,28 +347,9 @@ async function atomicWriteJson(path, value) {
   }
 }
 
-async function writeOnceJson(path, value) {
-  const serialized = `${JSON.stringify(value, null, 2)}\n`;
-  try {
-    const existing = await readFile(path, "utf8");
-    if (existing === serialized) return;
-    throw new Error(`sealed benchmark artifact changed: ${path}`);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  await atomicWriteJson(path, value);
-}
-
 async function copyOnce(source, destination) {
   const sourceBytes = await readFile(source);
-  try {
-    const existing = await readFile(destination);
-    if (existing.equals(sourceBytes)) return;
-    throw new Error(`sealed benchmark artifact changed: ${destination}`);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  await cp(source, destination, { errorOnExist: true });
+  await writeOnceBytes(destination, sourceBytes);
 }
 
 function relativeSource(jobDir, path) {

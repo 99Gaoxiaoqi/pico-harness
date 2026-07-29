@@ -379,6 +379,22 @@ test("a non-policy rejected envelope does not become policy_blocked", async (con
   assert.equal(outcome.result.finalMessage, "continued safely");
 });
 
+test("an empty zero-usage runtime response fails closed", async (context) => {
+  const fixture = await createFixture(context, "empty-runtime-response");
+  await configureFixture(fixture, "secret-canary-empty-runtime-response");
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "empty-runtime-response")),
+    {
+      env: {},
+      executeRuntime: async (options) => runtimeResult(options, ""),
+    },
+  );
+
+  assert.equal(outcome.exitCode, 3);
+  assert.equal(outcome.result.status, "failed");
+  assert.equal(outcome.result.error?.code, "RUNTIME_EMPTY_RESPONSE");
+});
+
 test("trusted user routing ignores project providers and host extension canaries", async (context) => {
   const fixture = await createFixture(context, "host-isolation");
   const routeSecret = "secret-canary-trusted-route";

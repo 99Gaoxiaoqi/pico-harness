@@ -295,6 +295,12 @@ rm -f {remote_archive}
         }
         if result["terminationConfirmed"] is not True:
             raise RuntimeError("Pico could not confirm runtime termination")
+        result_error = result.get("error")
+        if (
+            isinstance(result_error, dict)
+            and result_error.get("code") == "RUNTIME_EMPTY_RESPONSE"
+        ):
+            raise RuntimeError("Pico provider returned an empty model response")
 
 
 class ProviderGateway:
@@ -505,18 +511,38 @@ async def docker_exec_secret_stdin(
         stdout, stderr = await asyncio.wait_for(
             process.communicate(input=frame), timeout=timeout_sec
         )
-    except TimeoutError:
-        await terminate_container_launcher(environment, child_env)
-        process.terminate()
+    except asyncio.CancelledError:
         try:
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+            await asyncio.shield(terminate_container_launcher(environment, child_env))
+        finally:
+            await asyncio.shield(terminate_host_process(process))
+        raise
+    except TimeoutError:
+        try:
+            await terminate_container_launcher(environment, child_env)
+        finally:
+            await terminate_host_process(process)
         raise RuntimeError("outer_timeout_budget_violation") from None
     if secret in stdout or secret in stderr:
         raise RuntimeError("Secret launcher leaked its input")
     return process
+
+
+async def terminate_host_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        await process.wait()
 
 
 async def terminate_container_launcher(

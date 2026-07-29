@@ -18,10 +18,11 @@ CLI，也不宣称官方 leaderboard parity。
 `--docker-host-gateway`，脚本只会把 loopback host 改写为
 `host.docker.internal`。
 
-真实凭据不会经过 Harbor `--agent-env`。adapter 只接受 Harbor 0.20.0 的 Docker
-backend，通过固定 `docker compose exec` argv 的 stdin 帧把凭据交给容器内 launcher；
-PICO_HOME 只保存固定的 `PICO_TB_PROVIDER_API_KEY` 引用。运行后会扫描完整结果树的
-raw、JSON escaped、URL encoded 与 Base64 形态，命中时阻止归一化和发布。
+真实凭据不会进入 Harbor task container，也不会经过 Harbor `--agent-env`。每个 trial
+在宿主启动独立、固定路由和模型、限时限流的 Provider gateway；container launcher
+通过 stdin 只接收该 trial 的 HMAC capability，且不会把 capability 留在子 shell 环境。
+运行后会扫描完整结果树中真实凭据及全部 trial capability 的 raw、JSON escaped、
+URL encoded 与 Base64 形态，命中时删除该次结果并阻止发布。
 
 ```bash
 npm run benchmark:terminal-bench:single -- \
@@ -38,6 +39,7 @@ output/benchmarks/terminal-bench-2.1/runs/<run-id>/
   summary.json
   source-hashes.json
   run-status.json
+  PUBLISHED.json
   harbor-job/job/
   cases/<task>/<trial>/
 ```
@@ -45,7 +47,9 @@ output/benchmarks/terminal-bench-2.1/runs/<run-id>/
 `harbor-job` 是 verifier/reward 的原始事实源；`summary.json` 和
 `normalized-result.json` 只做分类投影。结果目录默认忽略，不提交 Git。
 
-首批固定 12 题见 `canary-task-names.txt`。Harbor 外层保留题目原始 timeout，
+首批固定 12 题见 `canary-task-names.txt`；full 模式的固定 89 题 identity matrix
+见 `full-task-names.txt`。canary 从本机 Harbor content-addressed cache 按
+`canary-task-lock.json` 校验并离线 staging，避免运行中依赖 registry。Harbor 外层保留题目原始 timeout，
 Headless 内层预算按 `outer - shutdownGrace(30s) - flushMargin(5s)` 收缩，避免外层
 先取消而丢失可信终态。因此结果明确标记为 `localCanaryOnly` /
 `leaderboardComparable: false`。官方榜要求 89 题、每题至少 5 trials、不得覆盖
