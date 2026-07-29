@@ -54,6 +54,28 @@ test("Terminal-Bench normalizer records a pre-job infrastructure failure", async
   assert.equal(summary.sealed, false);
 });
 
+test("Terminal-Bench normalizer refuses to overwrite sealed case evidence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-sealed-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "passed", {
+    reward: 1,
+    headless: headless("completed", true),
+  });
+  await normalizeHarborJob({ jobDir, runDir, runId: "sealed-run", expectedTasks: 1 });
+
+  const resultPath = join(jobDir, "passed", "result.json");
+  const changed = JSON.parse(await readFile(resultPath, "utf8"));
+  changed.verifier_result.rewards.reward = 0;
+  await writeFile(resultPath, JSON.stringify(changed));
+
+  await assert.rejects(
+    normalizeHarborJob({ jobDir, runDir, runId: "sealed-run", expectedTasks: 1 }),
+    /sealed benchmark artifact changed/u,
+  );
+});
+
 function headless(status: string, terminationConfirmed: boolean) {
   return {
     schemaVersion: 1,
