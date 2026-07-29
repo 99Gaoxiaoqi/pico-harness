@@ -47,6 +47,7 @@ interface GeminiResponse {
   usageMetadata?: {
     promptTokenCount?: number;
     candidatesTokenCount?: number;
+    toolUsePromptTokenCount?: number;
     cachedContentTokenCount?: number;
     thoughtsTokenCount?: number;
   };
@@ -352,14 +353,22 @@ export class GeminiProvider implements LLMProvider {
 
   /** Gemini usageMetadata → 内部 Usage 五桶 */
   private translateUsage(meta: NonNullable<GeminiResponse["usageMetadata"]>): Usage {
+    const toolUsePromptTokens = meta.toolUsePromptTokenCount ?? 0;
+    const reasoningTokens = meta.thoughtsTokenCount ?? 0;
     return {
-      promptTokens: meta.promptTokenCount ?? 0,
-      completionTokens: meta.candidatesTokenCount ?? 0,
+      promptTokens: (meta.promptTokenCount ?? 0) + toolUsePromptTokens,
+      completionTokens: (meta.candidatesTokenCount ?? 0) + reasoningTokens,
       cacheReadTokens: meta.cachedContentTokenCount ?? 0,
-      reasoningTokens: meta.thoughtsTokenCount ?? 0,
+      reasoningTokens,
       reportedFields: [
-        ...(typeof meta.promptTokenCount === "number" ? (["prompt"] as const) : []),
-        ...(typeof meta.candidatesTokenCount === "number" ? (["completion"] as const) : []),
+        ...(typeof meta.promptTokenCount === "number" ||
+        typeof meta.toolUsePromptTokenCount === "number"
+          ? (["prompt"] as const)
+          : []),
+        ...(typeof meta.candidatesTokenCount === "number" ||
+        typeof meta.thoughtsTokenCount === "number"
+          ? (["completion"] as const)
+          : []),
         ...(typeof meta.cachedContentTokenCount === "number" ? (["cacheRead"] as const) : []),
         ...(typeof meta.thoughtsTokenCount === "number" ? (["reasoning"] as const) : []),
       ],

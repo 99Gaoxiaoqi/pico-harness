@@ -384,8 +384,8 @@ def apply_gateway_accounting(
     context: AgentContext, receipt: dict[str, Any]
 ) -> None:
     actual = receipt["actual"]
-    context.n_input_tokens = actual["inputTokens"]
-    context.n_output_tokens = actual["outputTokens"]
+    runtime_input_tokens = context.n_input_tokens
+    runtime_output_tokens = context.n_output_tokens
     metadata = context.metadata if isinstance(context.metadata, dict) else {}
     pico = metadata.get("pico")
     if not isinstance(pico, dict):
@@ -409,6 +409,11 @@ def apply_gateway_accounting(
         or receipt["withinBudget"] is not True
     ):
         raise RuntimeError("Gateway accounting could not be reconciled")
+    if (
+        runtime_input_tokens != actual["inputTokens"]
+        or runtime_output_tokens != actual["outputTokens"]
+    ):
+        raise RuntimeError("Gateway accounting tokens do not match runtime usage")
 
 
 def validate_gateway_accounting_receipt(
