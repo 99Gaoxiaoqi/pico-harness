@@ -1,14 +1,28 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { watch } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { gunzipSync, inflateRawSync } from "node:zlib";
 import { rmSync } from "node:fs";
 import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
 import { assertTaskComposePolicy } from "./container-policy.mjs";
+import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
 import {
@@ -147,6 +161,7 @@ const routeConfig = {
       : {}),
 };
 const routeConfigPath = join(runRoot, "route-config.json");
+const dockerOwnershipRegistryPath = join(runRoot, "docker-ownership.jsonl");
 await atomicWritePrivateJson(routeConfigPath, routeConfig);
 const gatewayCapabilitySeed = randomBytes(32).toString("hex");
 const gatewaySupervisor = await startGatewaySupervisor({
@@ -270,6 +285,8 @@ const harborArgs = [
   "--ak",
   `route_config_path=${routeConfigPath}`,
   "--ak",
+  `resource_registry_path=${dockerOwnershipRegistryPath}`,
+  "--ak",
   `node_x64_path=${nodeArchivePaths.x64}`,
   "--ak",
   `node_arm64_path=${nodeArchivePaths.arm64}`,
@@ -291,7 +308,7 @@ const harborArgs = [
 ];
 if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
 else harborArgs.push("--path", localDatasetPath);
-const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv);
+const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv, projectRoot);
 if (
   localDatasetPath !== null &&
   (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
@@ -301,6 +318,10 @@ if (
 let harborExecution;
 let harborExecutionError;
 const cleanupErrors = [];
+const datasetGuard =
+  localDatasetPath === null
+    ? null
+    : await guardDatasetIntegrity(localDatasetPath, localDatasetTreeSha256);
 try {
   harborExecution = await runCaptured(
     "uvx",
@@ -322,7 +343,18 @@ try {
     cleanupErrors.push(error);
   }
   try {
-    await cleanupDockerResources(harborEnv, runId, dockerResourcesBefore);
+    await cleanupDockerResources({
+      env: harborEnv,
+      cwd: projectRoot,
+      runId,
+      before: dockerResourcesBefore,
+      registryPath: dockerOwnershipRegistryPath,
+    });
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await datasetGuard?.verifyAndClose();
   } catch (error) {
     cleanupErrors.push(error);
   }
@@ -348,13 +380,6 @@ await atomicWritePrivateText(
   join(runRoot, "harbor-stderr.log"),
   redactSecrets(harborExecution.stderr, [providerSecret]),
 );
-const dockerContainersAfter = await captureDockerContainerIds(harborEnv);
-const addedDockerContainers = [...dockerContainersAfter].filter(
-  (containerId) => !dockerResourcesBefore.containers.has(containerId),
-);
-if (addedDockerContainers.length > 0) {
-  throw new Error("Harbor left benchmark containers behind after --delete");
-}
 await rewriteTextPaths(runRoot, runRoot, publishedRunRoot);
 const summary = await normalizeHarborJob({
   jobDir: join(runRoot, "harbor-job", "job"),
@@ -585,9 +610,95 @@ async function prepareLocalDataset(tasks, runRoot) {
     if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
       throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
     }
+    await setTaskNetworkBaseline(taskDestination);
     await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(process.env));
   }
+  await makeTreeReadOnly(destination);
   return destination;
+}
+
+async function setTaskNetworkBaseline(taskRoot) {
+  const path = join(taskRoot, "task.toml");
+  const original = await readFile(path, "utf8");
+  const lines = original.split(/\r?\n/u);
+  let inEnvironment = false;
+  let environmentFound = false;
+  const rewritten = [];
+  for (const line of lines) {
+    const section = line.match(/^\s*\[([^\]]+)\]\s*$/u);
+    if (section) {
+      inEnvironment = section[1] === "environment";
+      environmentFound ||= inEnvironment;
+    }
+    if (inEnvironment && /^\s*(?:allow_internet|network_mode|allowed_hosts)\s*=/u.test(line)) {
+      continue;
+    }
+    rewritten.push(line);
+    if (section?.[1] === "environment") rewritten.push('network_mode = "no-network"');
+  }
+  if (!environmentFound) throw new Error("Terminal-Bench task is missing [environment]");
+  await writeFile(path, rewritten.join("\n"), { mode: 0o600 });
+}
+
+async function makeTreeReadOnly(root) {
+  async function visit(path) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`Terminal-Bench dataset contains symlink: ${path}`);
+    if (info.isDirectory()) {
+      for (const entry of await readdir(path)) await visit(join(path, entry));
+      await chmod(path, 0o500);
+      return;
+    }
+    if (!info.isFile()) throw new Error(`Terminal-Bench dataset contains unsafe entry: ${path}`);
+    await chmod(path, 0o400);
+  }
+  await visit(root);
+}
+
+async function makeTreeOwnerWritable(root) {
+  async function visit(path) {
+    const info = await lstat(path);
+    if (info.isDirectory()) {
+      await chmod(path, 0o700);
+      for (const entry of await readdir(path)) await visit(join(path, entry));
+      return;
+    }
+    if (info.isFile()) await chmod(path, 0o600);
+  }
+  await visit(root);
+}
+
+async function guardDatasetIntegrity(root, expectedHash) {
+  let changed = false;
+  let watchError = null;
+  const watchers = [];
+  async function visit(path) {
+    const info = await lstat(path);
+    if (!info.isDirectory()) return;
+    const watcher = watch(path, (eventType) => {
+      if (eventType === "change" || eventType === "rename") changed = true;
+    });
+    watcher.on("error", (error) => {
+      watchError = error;
+    });
+    watchers.push(watcher);
+    for (const entry of await readdir(path)) await visit(join(path, entry));
+  }
+  await visit(root);
+  return {
+    async verifyAndClose() {
+      for (const watcher of watchers) watcher.close();
+      try {
+        if (watchError)
+          throw new Error("Terminal-Bench dataset watcher failed", { cause: watchError });
+        if (changed || (await hashDirectory(root)) !== expectedHash) {
+          throw new Error("Terminal-Bench staged dataset changed during Harbor execution");
+        }
+      } finally {
+        await makeTreeOwnerWritable(root);
+      }
+    },
+  };
 }
 
 async function rewriteTextPaths(root, from, to) {
@@ -1010,28 +1121,36 @@ async function startGatewaySupervisor({
 
 function runCaptured(command, args, cwd, env, supervisorConfig) {
   return new Promise((resolvePromise, reject) => {
+    const detached = process.platform !== "win32";
     const child = spawn(command, args, {
       cwd,
       env,
+      detached,
       stdio: ["ignore", "pipe", "pipe", "pipe"],
     });
     child.stdio[3].end(supervisorConfig);
     const stdout = [];
     const stderr = [];
     let bytes = 0;
+    let outputLimitExceeded = false;
     const collect = (target) => (chunk) => {
       bytes += chunk.length;
-      if (bytes > 64 * 1024 * 1024) {
-        child.kill("SIGKILL");
-        reject(new Error(`${command} output exceeded the benchmark capture limit`));
+      if (!outputLimitExceeded && bytes > 64 * 1024 * 1024) {
+        outputLimitExceeded = true;
+        if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
         return;
       }
-      target.push(Buffer.from(chunk));
+      if (!outputLimitExceeded) target.push(Buffer.from(chunk));
     };
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
     child.once("error", reject);
-    child.once("exit", (code) => {
+    child.once("close", (code) => {
+      if (outputLimitExceeded) {
+        reject(new Error(`${command} output exceeded the benchmark capture limit`));
+        return;
+      }
       resolvePromise({
         exitCode: code ?? 1,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -1067,152 +1186,6 @@ function capture(command, args, cwd) {
     child.once("exit", (code) => {
       if (code === 0) resolvePromise(output);
       else reject(new Error(`${command} exited with ${code}`));
-    });
-  });
-}
-
-async function captureDockerContainerIds(env) {
-  const output = await captureWithEnv("docker", ["ps", "-aq", "--no-trunc"], projectRoot, env);
-  return new Set(
-    output
-      .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .filter((line) => /^[0-9a-f]{64}$/u.test(line)),
-  );
-}
-
-async function captureDockerResourceSnapshot(env) {
-  const [containers, networksRaw, volumesRaw] = await Promise.all([
-    captureDockerContainerIds(env),
-    captureWithEnv(
-      "docker",
-      ["network", "ls", "--quiet", "--filter", "type=custom"],
-      projectRoot,
-      env,
-    ),
-    captureWithEnv("docker", ["volume", "ls", "--quiet"], projectRoot, env),
-  ]);
-  return {
-    containers,
-    networks: new Set(networksRaw.split(/\s+/u).filter(Boolean)),
-    volumes: new Set(volumesRaw.split(/\s+/u).filter(Boolean)),
-  };
-}
-
-async function cleanupDockerResources(env, runId, before) {
-  const cleanupErrors = [];
-  const current = await captureDockerResourceSnapshot(env);
-  const containerOutput = await captureWithEnv(
-    "docker",
-    ["ps", "-aq", "--filter", `label=pico.terminal-bench.run=${runId}`],
-    projectRoot,
-    env,
-  );
-  const containerIds = containerOutput
-    .split(/\s+/u)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  for (const containerId of current.containers) {
-    if (!before.containers.has(containerId)) containerIds.push(containerId);
-  }
-  for (const containerId of new Set(containerIds)) {
-    try {
-      await run("docker", ["rm", "--force", containerId], projectRoot, env);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-  const networkOutput = await captureWithEnv(
-    "docker",
-    ["network", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
-    projectRoot,
-    env,
-  );
-  const networkIds = networkOutput
-    .split(/\s+/u)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  for (const networkId of current.networks) {
-    if (!before.networks.has(networkId)) networkIds.push(networkId);
-  }
-  for (const networkId of new Set(networkIds)) {
-    try {
-      await run("docker", ["network", "rm", networkId], projectRoot, env);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-  const volumeOutput = await captureWithEnv(
-    "docker",
-    ["volume", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
-    projectRoot,
-    env,
-  );
-  const volumeNames = volumeOutput
-    .split(/\s+/u)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  for (const volumeName of current.volumes) {
-    if (!before.volumes.has(volumeName)) volumeNames.push(volumeName);
-  }
-  for (const volumeName of new Set(volumeNames)) {
-    try {
-      await run("docker", ["volume", "rm", "--force", volumeName], projectRoot, env);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-  const [remainingContainers, remainingNetworks, remainingVolumes] = await Promise.all([
-    captureWithEnv(
-      "docker",
-      ["ps", "-aq", "--filter", `label=pico.terminal-bench.run=${runId}`],
-      projectRoot,
-      env,
-    ),
-    captureWithEnv(
-      "docker",
-      ["network", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
-      projectRoot,
-      env,
-    ),
-    captureWithEnv(
-      "docker",
-      ["volume", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
-      projectRoot,
-      env,
-    ),
-  ]);
-  if ([remainingContainers, remainingNetworks, remainingVolumes].some((value) => value.trim())) {
-    throw new Error("Terminal-Bench Docker resource cleanup was unconfirmed");
-  }
-  const after = await captureDockerResourceSnapshot(env);
-  if (
-    [...after.containers].some((value) => !before.containers.has(value)) ||
-    [...after.networks].some((value) => !before.networks.has(value)) ||
-    [...after.volumes].some((value) => !before.volumes.has(value))
-  ) {
-    throw new Error("Terminal-Bench left unlabeled Docker resources behind");
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "Terminal-Bench Docker cleanup encountered errors");
-  }
-}
-
-function captureWithEnv(command, args, cwd, env) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code === 0) resolvePromise(stdout);
-      else reject(new Error(`${command} exited with ${code}: ${stderr}`));
     });
   });
 }

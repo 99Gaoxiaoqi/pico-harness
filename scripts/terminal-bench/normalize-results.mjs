@@ -64,9 +64,13 @@ export async function normalizeHarborJob({
     const headless = headlessRead.value;
     const verifierEvidencePath = join(trialDir, "verifier", "ctrf.json");
     const verifierEvidenceRead = await readJsonEvidence(verifierEvidencePath);
+    const verifierEvidence = validateCtrfEvidence(
+      verifierEvidenceRead.value,
+      verifierEvidenceRead.error,
+    );
     const trialResultSha256 = await sha256File(trialResultPath);
     const headlessSha256 = headless ? await sha256File(headlessPath) : null;
-    const verifierEvidenceSha256 = verifierEvidenceRead.value
+    const verifierEvidenceSha256 = verifierEvidence.valid
       ? await sha256File(verifierEvidencePath)
       : null;
     const normalized = normalizeTrial({
@@ -74,13 +78,14 @@ export async function normalizeHarborJob({
       trialResult,
       headless,
       headlessReadError: headlessRead.error,
-      verifierEvidence: verifierEvidenceRead.value,
+      verifierEvidence: verifierEvidence.valid ? verifierEvidenceRead.value : null,
+      verifierEvidenceError: verifierEvidence.error,
       source: {
         trialResult: relativeSource(jobDir, trialResultPath),
         trialResultSha256,
         headlessResult: headless ? relativeSource(jobDir, headlessPath) : null,
         headlessResultSha256: headlessSha256,
-        verifierEvidence: verifierEvidenceRead.value
+        verifierEvidence: verifierEvidence.valid
           ? relativeSource(jobDir, verifierEvidencePath)
           : null,
         verifierEvidenceSha256,
@@ -183,6 +188,7 @@ export function normalizeTrial({
   headless,
   headlessReadError = null,
   verifierEvidence = null,
+  verifierEvidenceError = null,
   source = null,
 }) {
   const verifierResult = trialResult.verifier_result;
@@ -206,7 +212,9 @@ export function normalizeTrial({
             : "missing"
           : "completed",
     exceptionType:
-      verifierEvidence === null ? "VerifierEvidenceMissing" : (exception?.exception_type ?? null),
+      verifierEvidence === null
+        ? verifierEvidenceError || "VerifierEvidenceMissing"
+        : (exception?.exception_type ?? null),
   };
   const primaryStatus = classifyPrimary({ infra, adapter, agent, verifier, reward: overall });
   return {
@@ -228,6 +236,44 @@ export function normalizeTrial({
     source,
     provenanceRef: "provenance.json",
   };
+}
+
+function validateCtrfEvidence(value, readError) {
+  if (value === null) {
+    return {
+      valid: false,
+      error: readError ? "VerifierEvidenceInvalid" : "VerifierEvidenceMissing",
+    };
+  }
+  const results = value?.results;
+  const tests = results?.tests;
+  const summary = results?.summary;
+  if (
+    !results ||
+    typeof results !== "object" ||
+    !Array.isArray(tests) ||
+    tests.length === 0 ||
+    !summary ||
+    typeof summary !== "object" ||
+    !Number.isInteger(summary.tests) ||
+    summary.tests !== tests.length
+  ) {
+    return { valid: false, error: "VerifierEvidenceInvalid" };
+  }
+  const validStatuses = new Set(["passed", "failed", "skipped", "pending", "other"]);
+  if (
+    tests.some(
+      (test) =>
+        !test ||
+        typeof test !== "object" ||
+        typeof test.name !== "string" ||
+        test.name.length === 0 ||
+        !validStatuses.has(test.status),
+    )
+  ) {
+    return { valid: false, error: "VerifierEvidenceInvalid" };
+  }
+  return { valid: true, error: null };
 }
 
 function classifyInfra({ headless, exception }) {
