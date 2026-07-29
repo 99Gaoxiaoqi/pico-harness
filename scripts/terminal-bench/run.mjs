@@ -1,11 +1,11 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import {
-  chmod,
   cp,
   lstat,
   mkdir,
   mkdtemp,
   open,
+  realpath,
   readFile,
   readdir,
   rename,
@@ -15,7 +15,6 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { watch } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { gunzipSync, inflateRawSync } from "node:zlib";
 import { rmSync } from "node:fs";
@@ -74,6 +73,26 @@ if (typeof modelRouteId !== "string" || !modelRouteId.includes("/")) {
 const slash = modelRouteId.indexOf("/");
 const providerId = modelRouteId.slice(0, slash);
 const model = modelRouteId.slice(slash + 1);
+const pricing = {
+  schemaVersion: 1,
+  providerId,
+  model,
+  currency: "CNY",
+  unit: "microCNYPerMillionTokens",
+  input: 100_000_000,
+  output: 1_000_000_000,
+};
+const pricingSha256 = createHash("sha256")
+  .update(
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(pricing).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+      ),
+    ),
+  )
+  .digest("hex");
 const provider = structuredClone(userConfig.providers?.[providerId]);
 if (!provider || typeof provider !== "object") {
   throw new Error("The selected route must identify a configured provider");
@@ -155,6 +174,8 @@ const routeConfig = {
   modelRouteId,
   providerId,
   provider,
+  pricing,
+  pricingSha256,
   ...(options.thinkingEffort
     ? { thinkingEffort: options.thinkingEffort }
     : userConfig.defaults?.thinkingEffort
@@ -176,9 +197,15 @@ process.once("exit", () => gatewaySupervisor.stopSync());
 const tasks = await resolveTasks(mode, options.task);
 const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
-const localDatasetPath = mode === "full" ? null : await prepareLocalDataset(tasks, runRoot);
+const localDatasetSourcePath =
+  mode === "full" ? null : await prepareLocalDataset(tasks, runRoot, runId);
 const localDatasetTreeSha256 =
-  localDatasetPath === null ? null : await hashDirectory(localDatasetPath);
+  localDatasetSourcePath === null ? null : await hashDirectory(localDatasetSourcePath);
+const localDatasetSnapshot =
+  localDatasetSourcePath === null
+    ? null
+    : await materializeReadOnlyDatasetSnapshot(localDatasetSourcePath, runRoot);
+const localDatasetPath = localDatasetSnapshot?.mountPath ?? null;
 const canaryHash = createHash("sha256").update(tasks.join("\n")).digest("hex");
 const taskLockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
 const manifest = {
@@ -208,12 +235,14 @@ const manifest = {
     taskCount: scheduledTasks,
     taskListSha256: canaryHash,
     localTaskLockSha256:
-      localDatasetPath === null
+      localDatasetSourcePath === null
         ? null
         : createHash("sha256")
             .update(await readFile(taskLockPath))
             .digest("hex"),
     localDatasetTreeSha256,
+    localDatasetImageSha256: localDatasetSnapshot?.imageSha256 ?? null,
+    executionSnapshot: localDatasetSnapshot === null ? null : "read-only-udro",
   },
   nodeRuntime: {
     version: "22.14.0",
@@ -231,6 +260,8 @@ const manifest = {
     endpointRewritten: false,
     thinkingEffort: routeConfig.thinkingEffort ?? null,
     apiKeyEnv: benchmarkApiKeyEnv,
+    pricing,
+    pricingSha256,
   },
   policy: {
     permissionMode: "yolo",
@@ -245,6 +276,8 @@ const manifest = {
       maxInputTokenUpperBound: 1_000_000,
       maxOutputTokens: 65_536,
       maxCostCNYAtWorstCaseRate: 250,
+      lockedPricingSha256: pricingSha256,
+      lockedRateMaximumCostCNY: 165.536,
       maxConcurrentRequests: 1,
     },
   },
@@ -310,20 +343,20 @@ const harborArgs = [
 if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
 else harborArgs.push("--path", localDatasetPath);
 const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv, projectRoot);
-if (
-  localDatasetPath !== null &&
-  (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
-) {
-  throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
-}
+const datasetGuard =
+  localDatasetSnapshot === null
+    ? null
+    : await attachReadOnlyDatasetSnapshot(localDatasetSnapshot, localDatasetTreeSha256);
 let harborExecution;
 let harborExecutionError;
 const cleanupErrors = [];
-const datasetGuard =
-  localDatasetPath === null
-    ? null
-    : await guardDatasetIntegrity(localDatasetPath, localDatasetTreeSha256);
 try {
+  if (
+    localDatasetPath !== null &&
+    (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
+  ) {
+    throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
+  }
   harborExecution = await runCaptured(
     "uvx",
     harborArgs,
@@ -355,7 +388,7 @@ try {
     cleanupErrors.push(error);
   }
   try {
-    await datasetGuard?.verifyAndClose();
+    await datasetGuard?.verifyAndDetach();
   } catch (error) {
     cleanupErrors.push(error);
   }
@@ -367,8 +400,8 @@ if (harborExecutionError || cleanupErrors.length > 0) {
   );
 }
 if (
-  localDatasetPath !== null &&
-  (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
+  localDatasetSourcePath !== null &&
+  (await hashDirectory(localDatasetSourcePath)) !== localDatasetTreeSha256
 ) {
   throw new Error("Terminal-Bench staged dataset changed during Harbor execution");
 }
@@ -381,6 +414,13 @@ await atomicWritePrivateText(
   join(runRoot, "harbor-stderr.log"),
   redactSecrets(harborExecution.stderr, [providerSecret]),
 );
+if (localDatasetSnapshot !== null) {
+  await rewriteTextPaths(
+    runRoot,
+    localDatasetSnapshot.mountPath,
+    join(publishedRunRoot, "local-dataset"),
+  );
+}
 await rewriteTextPaths(runRoot, runRoot, publishedRunRoot);
 const summary = await normalizeHarborJob({
   jobDir: join(runRoot, "harbor-job", "job"),
@@ -579,7 +619,7 @@ async function resolveTasks(mode, singleTask) {
   return names;
 }
 
-async function prepareLocalDataset(tasks, runRoot) {
+async function prepareLocalDataset(tasks, runRoot, runId) {
   const lockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
   const lock = JSON.parse(await readFile(lockPath, "utf8"));
   if (lock.schemaVersion !== 1 || typeof lock.tasks !== "object") {
@@ -611,14 +651,13 @@ async function prepareLocalDataset(tasks, runRoot) {
     if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
       throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
     }
-    await setTaskPrestartNetworkIsolation(taskDestination);
+    await setTaskPrestartNetworkIsolation(taskDestination, runId);
     await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(process.env));
   }
-  await makeTreeReadOnly(destination);
   return destination;
 }
 
-async function setTaskPrestartNetworkIsolation(taskRoot) {
+async function setTaskPrestartNetworkIsolation(taskRoot, runId) {
   const path = join(taskRoot, "environment", "docker-compose.yaml");
   try {
     await lstat(path);
@@ -626,68 +665,100 @@ async function setTaskPrestartNetworkIsolation(taskRoot) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  await writeFile(path, prestartNetworkOverlay, { mode: 0o600 });
+  await writeFile(path, prestartNetworkOverlay(runId), { mode: 0o600 });
 }
 
-async function makeTreeReadOnly(root) {
-  async function visit(path) {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) throw new Error(`Terminal-Bench dataset contains symlink: ${path}`);
-    if (info.isDirectory()) {
-      for (const entry of await readdir(path)) await visit(join(path, entry));
-      await chmod(path, 0o500);
-      return;
+async function materializeReadOnlyDatasetSnapshot(sourcePath, runRoot) {
+  if (process.platform !== "darwin") {
+    throw new Error("Terminal-Bench immutable dataset snapshots currently require macOS");
+  }
+  const imagePath = join(runRoot, "local-dataset.dmg");
+  const mountPath = join(runRoot, "local-dataset-mounted");
+  await run(
+    "hdiutil",
+    ["create", "-quiet", "-srcfolder", sourcePath, "-format", "UDRO", imagePath],
+    projectRoot,
+    allowlistedHostEnv(process.env),
+  );
+  const imageSha256 = createHash("sha256")
+    .update(await readFile(imagePath))
+    .digest("hex");
+  return { imagePath, imageSha256, mountPath };
+}
+
+async function attachReadOnlyDatasetSnapshot(snapshot, expectedHash) {
+  await mkdir(snapshot.mountPath, { mode: 0o700 });
+  let realMountPath;
+  try {
+    await run(
+      "hdiutil",
+      [
+        "attach",
+        "-quiet",
+        "-readonly",
+        "-nobrowse",
+        "-mountpoint",
+        snapshot.mountPath,
+        snapshot.imagePath,
+      ],
+      projectRoot,
+      allowlistedHostEnv(process.env),
+    );
+    realMountPath = await realpath(snapshot.mountPath);
+    const mountIdentity = await readOnlyMountIdentity(realMountPath);
+    if ((await hashDirectory(snapshot.mountPath)) !== expectedHash) {
+      throw new Error("Terminal-Bench read-only dataset snapshot digest mismatch");
     }
-    if (!info.isFile()) throw new Error(`Terminal-Bench dataset contains unsafe entry: ${path}`);
-    await chmod(path, 0o400);
-  }
-  await visit(root);
-}
-
-async function makeTreeOwnerWritable(root) {
-  async function visit(path) {
-    const info = await lstat(path);
-    if (info.isDirectory()) {
-      await chmod(path, 0o700);
-      for (const entry of await readdir(path)) await visit(join(path, entry));
-      return;
-    }
-    if (info.isFile()) await chmod(path, 0o600);
-  }
-  await visit(root);
-}
-
-async function guardDatasetIntegrity(root, expectedHash) {
-  let changed = false;
-  let watchError = null;
-  const watchers = [];
-  async function visit(path) {
-    const info = await lstat(path);
-    if (!info.isDirectory()) return;
-    const watcher = watch(path, (eventType) => {
-      if (eventType === "change" || eventType === "rename") changed = true;
-    });
-    watcher.on("error", (error) => {
-      watchError = error;
-    });
-    watchers.push(watcher);
-    for (const entry of await readdir(path)) await visit(join(path, entry));
-  }
-  await visit(root);
-  return {
-    async verifyAndClose() {
-      for (const watcher of watchers) watcher.close();
-      try {
-        if (watchError)
-          throw new Error("Terminal-Bench dataset watcher failed", { cause: watchError });
-        if (changed || (await hashDirectory(root)) !== expectedHash) {
-          throw new Error("Terminal-Bench staged dataset changed during Harbor execution");
+    return {
+      async verifyAndDetach() {
+        try {
+          const currentImageSha256 = createHash("sha256")
+            .update(await readFile(snapshot.imagePath))
+            .digest("hex");
+          if (
+            currentImageSha256 !== snapshot.imageSha256 ||
+            (await hashDirectory(snapshot.mountPath)) !== expectedHash ||
+            (await readOnlyMountIdentity(realMountPath)) !== mountIdentity
+          ) {
+            throw new Error("Terminal-Bench read-only dataset snapshot identity changed");
+          }
+        } finally {
+          try {
+            await run(
+              "hdiutil",
+              ["detach", "-quiet", realMountPath],
+              projectRoot,
+              allowlistedHostEnv(process.env),
+            );
+          } finally {
+            await rm(snapshot.mountPath, { recursive: true, force: true });
+          }
         }
-      } finally {
-        await makeTreeOwnerWritable(root);
-      }
-    },
-  };
+      },
+    };
+  } catch (error) {
+    if (realMountPath !== undefined) {
+      await run(
+        "hdiutil",
+        ["detach", "-quiet", realMountPath],
+        projectRoot,
+        allowlistedHostEnv(process.env),
+      ).catch(() => undefined);
+    }
+    await rm(snapshot.mountPath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function readOnlyMountIdentity(realMountPath) {
+  const output = await capture("mount", [], projectRoot);
+  const line = output
+    .split(/\r?\n/u)
+    .find((candidate) => candidate.includes(` on ${realMountPath} (`));
+  if (!line || !line.includes("read-only")) {
+    throw new Error("Terminal-Bench dataset snapshot is not mounted read-only");
+  }
+  return line;
 }
 
 async function rewriteTextPaths(root, from, to) {

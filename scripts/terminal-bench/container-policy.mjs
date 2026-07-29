@@ -2,8 +2,23 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-export const prestartNetworkOverlay =
-  "services:\n  main:\n    networks:\n      - default\nnetworks:\n  default:\n    internal: true\n";
+export function prestartNetworkOverlay(runId) {
+  if (!/^[A-Za-z0-9._-]{1,160}$/u.test(runId)) {
+    throw new Error("Terminal-Bench run ID is invalid for Compose");
+  }
+  return `services:
+  main:
+    labels:
+      pico.terminal-bench.run: ${runId}
+    networks:
+      - default
+networks:
+  default:
+    internal: true
+    labels:
+      pico.terminal-bench.run: ${runId}
+`;
+}
 
 export async function assertTaskComposePolicy(taskRoot, env) {
   const environmentRoot = resolve(taskRoot, "environment");
@@ -11,7 +26,7 @@ export async function assertTaskComposePolicy(taskRoot, env) {
   if (composeFiles.length === 0) return;
   if (
     composeFiles.length === 1 &&
-    (await readFile(composeFiles[0], "utf8")) === prestartNetworkOverlay
+    isTrustedPrestartOverlay(await readFile(composeFiles[0], "utf8"))
   ) {
     return;
   }
@@ -20,7 +35,26 @@ export async function assertTaskComposePolicy(taskRoot, env) {
   args.push("config", "--format", "json");
   const output = await capture("docker", args, environmentRoot, env);
   const config = JSON.parse(output);
-  for (const service of Object.values(config.services ?? {})) {
+  const services = Object.entries(config.services ?? {});
+  if (services.length !== 1 || services[0][0] !== "main") {
+    throw new Error("Terminal-Bench task Compose may only define the main service");
+  }
+  const networks = Object.entries(config.networks ?? {});
+  if (
+    networks.some(
+      ([name, network]) =>
+        name !== "default" || network.external === true || typeof network.name === "string",
+    )
+  ) {
+    throw new Error("Terminal-Bench task Compose defines an unsafe network");
+  }
+  for (const [, service] of services) {
+    if (
+      Array.isArray(service.networks) &&
+      service.networks.some((network) => network !== "default")
+    ) {
+      throw new Error("Terminal-Bench task Compose defines an unsafe service network");
+    }
     const networkMode = String(service.network_mode ?? "");
     if (
       service.privileged ||
@@ -73,6 +107,13 @@ export async function assertTaskComposePolicy(taskRoot, env) {
       }
     }
   }
+}
+
+function isTrustedPrestartOverlay(value) {
+  const match = value.match(
+    /^services:\n\x20{2}main:\n\x20{4}labels:\n\x20{6}pico\.terminal-bench\.run: ([A-Za-z0-9._-]{1,160})\n\x20{4}networks:\n\x20{6}- default\nnetworks:\n\x20{2}default:\n\x20{4}internal: true\n\x20{4}labels:\n\x20{6}pico\.terminal-bench\.run: ([A-Za-z0-9._-]{1,160})\n$/u,
+  );
+  return match !== null && match[1] === match[2];
 }
 
 async function findComposeFiles(root) {

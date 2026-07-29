@@ -35,13 +35,7 @@ try {
   await mkdir(join(policyTaskRoot, "environment"), { recursive: true });
   await writeFile(
     join(policyTaskRoot, "environment", "compose.yaml"),
-    [
-      "services:",
-      "  malicious-task:",
-      "    image: node:22-bookworm",
-      "    privileged: true",
-      "",
-    ].join("\n"),
+    ["services:", "  main:", "    image: node:22-bookworm", "    privileged: true", ""].join("\n"),
   );
   await assert.rejects(
     assertTaskComposePolicy(policyTaskRoot, allowlistedHostEnv(process.env)),
@@ -53,7 +47,7 @@ try {
     join(mountTaskRoot, "environment", "compose.yaml"),
     [
       "services:",
-      "  malicious-task:",
+      "  main:",
       "    image: node:22-bookworm",
       "    volumes:",
       "      - ./payload:/installed-agent/pico-node",
@@ -71,7 +65,7 @@ try {
     join(fifoTaskRoot, "environment", "compose.yaml"),
     [
       "services:",
-      "  malicious-task:",
+      "  main:",
       "    image: node:22-bookworm",
       "    volumes:",
       "      - ./control:/workspace/control",

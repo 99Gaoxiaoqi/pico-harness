@@ -111,7 +111,11 @@ class PicoInstalledAgent(BaseInstalledAgent):
             self._supervisor_config["runId"],
             _sanitize_docker_compose_project_name(environment.session_id),
         )
-        container_ids = await assert_running_container_policy(environment, self.logs_dir)
+        container_ids = await assert_running_container_policy(
+            environment,
+            self.logs_dir,
+            self._supervisor_config["runId"],
+        )
         self._trial_network = await isolate_container_network(
             environment,
             container_ids,
@@ -177,7 +181,11 @@ rm -f {remote_archive}
         assert_secure_docker_environment(environment)
         outer_timeout_sec = task_agent_timeout(environment)
         outer_deadline = started_at + outer_timeout_sec
-        await assert_running_container_policy(environment, self.logs_dir)
+        await assert_running_container_policy(
+            environment,
+            self.logs_dir,
+            self._supervisor_config["runId"],
+        )
         workspace_result = await environment.exec(command="pwd -P")
         if workspace_result.return_code != 0 or not workspace_result.stdout:
             raise RuntimeError("Could not resolve the Harbor task workspace")
@@ -289,6 +297,7 @@ rm -f {remote_archive}
             "sessionId": session_id,
             "prompt": instruction,
             "modelRouteId": route_config["modelRouteId"],
+            "providerRequestMode": "single_non_stream",
             **(
                 {"thinkingEffort": route_config["thinkingEffort"]}
                 if route_config.get("thinkingEffort")
@@ -880,6 +889,7 @@ def assert_secure_docker_environment(environment: BaseEnvironment) -> None:
 async def assert_running_container_policy(
     environment: DockerEnvironment,
     logs_dir: Path,
+    run_id: str,
 ) -> list[str]:
     command = [
         "docker",
@@ -900,7 +910,7 @@ async def assert_running_container_policy(
     )
     stdout, _ = await probe.communicate()
     container_ids = stdout.decode().split()
-    if probe.returncode != 0 or not container_ids or any(
+    if probe.returncode != 0 or len(container_ids) != 1 or any(
         not re.fullmatch(r"[0-9a-f]{12,64}", item) for item in container_ids
     ):
         raise RuntimeError("Could not identify the isolated Harbor container")
@@ -920,6 +930,12 @@ async def assert_running_container_policy(
         logs_dir.resolve().parent,
     }
     for value in json.loads(raw):
+        labels = value.get("Config", {}).get("Labels") or {}
+        if (
+            labels.get("com.docker.compose.service") != "main"
+            or labels.get("pico.terminal-bench.run") != run_id
+        ):
+            raise RuntimeError("Harbor container ownership identity is invalid")
         host = value.get("HostConfig") or {}
         if (
             host.get("Privileged")
@@ -1021,9 +1037,15 @@ async def isolate_container_network(
         ["network", "inspect", *initial_networks],
         environment,
     )
-    if any(
+    compose_project = _sanitize_docker_compose_project_name(environment.session_id)
+    initial_network_values = json.loads(initial_network_stdout)
+    if len(initial_network_values) != 1 or any(
         network.get("Internal") is not True
-        for network in json.loads(initial_network_stdout)
+        or (network.get("Labels") or {}).get("pico.terminal-bench.run") != run_id
+        or (network.get("Labels") or {}).get("com.docker.compose.project")
+        != compose_project
+        or set((network.get("Containers") or {}).keys()) != set(container_ids)
+        for network in initial_network_values
     ):
         raise RuntimeError("Harbor container started with provider egress")
     main_values = [

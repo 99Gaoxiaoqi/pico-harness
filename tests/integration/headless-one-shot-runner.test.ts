@@ -58,6 +58,36 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
   assert.equal(JSON.stringify(outcome.result).includes(secret), false);
 });
 
+test("headless single_non_stream mode uses one non-streaming provider attempt", async (context) => {
+  const fixture = await createFixture(context, "single-non-stream");
+  await configureFixture(fixture, "secret-canary-single-non-stream");
+  let generateCalls = 0;
+  let streamCalls = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "single-non-stream"),
+      providerRequestMode: "single_non_stream",
+    }),
+    {
+      env: {},
+      providerFactory: () => ({
+        async generate() {
+          generateCalls++;
+          throw new TypeError("synthetic retryable network failure");
+        },
+        async generateStream() {
+          streamCalls++;
+          return assistant("must not stream");
+        },
+      }),
+    },
+  );
+
+  assert.equal(outcome.result.status, "failed");
+  assert.equal(generateCalls, 1);
+  assert.equal(streamCalls, 0);
+});
+
 test("headless traces retain metadata but remove tool arguments and workspace output", async (context) => {
   const fixture = await createFixture(context, "trace-sanitization");
   await configureFixture(fixture, "secret-canary-trace-route");

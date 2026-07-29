@@ -23,6 +23,7 @@ import {
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CredentialVault } from "../provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
+import type { LLMProvider } from "../provider/interface.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
@@ -66,6 +67,7 @@ const REQUEST_FIELDS = new Set([
   "sessionId",
   "prompt",
   "modelRouteId",
+  "providerRequestMode",
   "thinkingEffort",
   "permissionMode",
   "allowedTools",
@@ -110,6 +112,7 @@ export interface HeadlessOneShotRequestV1 {
   readonly sessionId: string;
   readonly prompt: string;
   readonly modelRouteId: string;
+  readonly providerRequestMode?: "single_non_stream";
   readonly thinkingEffort?: string;
   readonly permissionMode: SessionSettings["mode"];
   readonly allowedTools: readonly string[];
@@ -430,6 +433,9 @@ async function runValidatedRequest(
       onPolicyDenied: () => {
         policyBlocked = true;
       },
+      ...(request.providerRequestMode === "single_non_stream"
+        ? { providerDecorator: singleNonStreamingProvider }
+        : {}),
       ...(dependencies.providerFactory ? { providerFactory: dependencies.providerFactory } : {}),
     };
     const executeRuntime = dependencies.executeRuntime ?? executeAgentRuntime;
@@ -826,6 +832,13 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     value["thinkingEffort"] === undefined
       ? undefined
       : requiredString(value["thinkingEffort"], "thinkingEffort", 64);
+  const providerRequestMode = value["providerRequestMode"];
+  if (providerRequestMode !== undefined && providerRequestMode !== "single_non_stream") {
+    throw new HeadlessRequestError(
+      "INVALID_PROVIDER_REQUEST_MODE",
+      "providerRequestMode must be single_non_stream when provided.",
+    );
+  }
 
   if (!isAbsolute(workspacePath) || !isAbsolute(picoHome)) {
     throw new HeadlessRequestError(
@@ -847,12 +860,33 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     sessionId,
     prompt,
     modelRouteId,
+    ...(providerRequestMode !== undefined ? { providerRequestMode } : {}),
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
     permissionMode: permissionMode as SessionSettings["mode"],
     allowedTools: Object.freeze(allowedTools),
     timeoutMs,
     shutdownGraceMs,
     trace: value["trace"],
+  };
+}
+
+function singleNonStreamingProvider(provider: LLMProvider): LLMProvider {
+  return {
+    async generate(messages, tools, options) {
+      try {
+        return await provider.generate(messages, tools, options);
+      } catch (error) {
+        options?.signal?.throwIfAborted();
+        throw new Error("Single-call headless provider request failed", { cause: error });
+      }
+    },
+    get modelName() {
+      return provider.modelName;
+    },
+    get requestCapabilities() {
+      return provider.requestCapabilities;
+    },
+    isRetryableError: () => false,
   };
 }
 
