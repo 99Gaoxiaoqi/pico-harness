@@ -41,6 +41,19 @@ test("Terminal-Bench normalizer separates task failures from infrastructure fail
   assert.equal(normalized.infra.code, "termination_unconfirmed");
 });
 
+test("Terminal-Bench normalizer records a pre-job infrastructure failure", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-pre-job-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const summary = await normalizeHarborJob({
+    jobDir: join(root, "missing-job"),
+    runDir: join(root, "run"),
+    runId: "pre-job",
+    expectedTasks: 1,
+  });
+  assert.equal(summary.observed, 0);
+  assert.equal(summary.sealed, false);
+});
+
 function headless(status: string, terminationConfirmed: boolean) {
   return {
     schemaVersion: 1,
