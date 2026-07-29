@@ -17,7 +17,11 @@ try {
   await unlink(zipPayload);
   await writeFile(
     join(root, "self-extracting.zip"),
-    Buffer.concat([Buffer.from("#!/bin/sh\nexit 0\n"), await readFile(zipPath)]),
+    Buffer.concat([
+      Buffer.from("#!/bin/sh\nexit 0\n"),
+      await readFile(zipPath),
+      Buffer.from([0x50, 0x4b, 0x05, 0x06, ...Array(18).fill(0)]),
+    ]),
   );
   await unlink(zipPath);
 

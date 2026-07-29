@@ -40,10 +40,15 @@ export async function recoverBenchmarkPublications({ runsRoot, workRunsRoot, qua
       const summaryRaw = await readFile(join(path, "summary.json"));
       const sourceHashesRaw = await readFile(join(path, "source-hashes.json"));
       const summary = JSON.parse(summaryRaw);
+      const sourceHashes = JSON.parse(sourceHashesRaw);
       const status = JSON.parse(await readFile(join(path, "run-status.json"), "utf8"));
       const trialIds = new Set();
       const trialGatePassed =
         Array.isArray(summary.trials) &&
+        Number.isSafeInteger(summary.scheduled) &&
+        summary.scheduled > 0 &&
+        summary.observed === summary.scheduled &&
+        summary.trials.length === summary.scheduled &&
         summary.trials.every((trial) => {
           if (
             trial?.infra?.status !== "ok" ||
@@ -65,9 +70,14 @@ export async function recoverBenchmarkPublications({ runsRoot, workRunsRoot, qua
         marker.secretScan?.status !== "passed" ||
         summary.runId !== entry.name ||
         summary.sealed !== true ||
+        sourceHashes.sealed !== true ||
+        !Array.isArray(sourceHashes.sources) ||
+        sourceHashes.sources.length !== summary.scheduled ||
         status.harborExitCode !== 0 ||
         status.normalized !== true ||
         status.secretScan?.status !== "passed" ||
+        status.secretScan.filesScanned !== marker.secretScan.filesScanned ||
+        status.secretScan.bytesScanned !== marker.secretScan.bytesScanned ||
         !trialGatePassed ||
         marker.summarySha256 !== createHash("sha256").update(summaryRaw).digest("hex") ||
         marker.sourceHashesSha256 !== createHash("sha256").update(sourceHashesRaw).digest("hex") ||

@@ -166,6 +166,27 @@ test("Terminal-Bench normalizer classifies malformed Headless evidence", async (
   assert.equal(summary.trials[0].primaryStatus, "adapter_error");
 });
 
+test("Terminal-Bench normalizer requires verifier execution evidence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-verifier-evidence-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "missing-ctrf", {
+    reward: 0,
+    headless: headless("completed", true),
+  });
+  await rm(join(jobDir, "missing-ctrf", "verifier", "ctrf.json"));
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "missing-verifier-evidence",
+    expectedTasks: 1,
+  });
+  assert.equal(summary.sealed, false);
+  assert.equal(summary.trials[0].verifier.status, "error");
+  assert.equal(summary.trials[0].primaryStatus, "verifier_error");
+});
+
 function headless(status: string, terminationConfirmed: boolean) {
   return {
     schemaVersion: 1,
@@ -190,6 +211,7 @@ async function writeTrial(
 ) {
   const trialDir = join(jobDir, name);
   await mkdir(join(trialDir, "agent"), { recursive: true });
+  await mkdir(join(trialDir, "verifier"), { recursive: true });
   await writeFile(
     join(trialDir, "result.json"),
     JSON.stringify({
@@ -215,4 +237,8 @@ async function writeTrial(
     }),
   );
   await writeFile(join(trialDir, "agent", "pico-result.json"), JSON.stringify(options.headless));
+  await writeFile(
+    join(trialDir, "verifier", "ctrf.json"),
+    JSON.stringify({ results: { tests: 1 } }),
+  );
 }

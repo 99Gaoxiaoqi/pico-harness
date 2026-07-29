@@ -210,6 +210,7 @@ rm -f {remote_archive}
             )
         finally:
             gateway.stop()
+        await enable_verifier_network(environment)
 
     async def _run_with_gateway(
         self,
@@ -1039,6 +1040,35 @@ async def isolate_container_network(
         if networks != expected:
             raise RuntimeError("Harbor container retained direct provider egress")
     return gateway_network
+
+
+async def enable_verifier_network(environment: DockerEnvironment) -> None:
+    command = [
+        "docker",
+        "compose",
+        "--project-name",
+        _sanitize_docker_compose_project_name(environment.session_id),
+        "--project-directory",
+        str(environment.environment_dir.resolve().absolute()),
+    ]
+    for path in environment._docker_compose_paths:
+        command.extend(["-f", str(path.resolve().absolute())])
+    command.extend(["ps", "-q", "main"])
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        env=compose_subprocess_env(environment),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate()
+    main_id = stdout.decode().strip()
+    if process.returncode != 0 or not re.fullmatch(r"[0-9a-f]{12,64}", main_id):
+        raise RuntimeError("Could not identify the verifier main container")
+    await run_docker(
+        ["network", "connect", "bridge", main_id],
+        environment,
+        allowed_exit_codes={0, 1},
+    )
 
 
 def allowed_mount_destination(destination: str) -> bool:

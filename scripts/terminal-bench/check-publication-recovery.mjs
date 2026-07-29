@@ -78,6 +78,8 @@ async function createRun(runId) {
     `${JSON.stringify({
       runId,
       sealed: true,
+      scheduled: 1,
+      observed: 1,
       trials: [
         {
           trialId: `${runId}-trial`,
@@ -88,7 +90,9 @@ async function createRun(runId) {
       ],
     })}\n`,
   );
-  const sources = Buffer.from(`${JSON.stringify({ sealed: true, sources: [] })}\n`);
+  const sources = Buffer.from(
+    `${JSON.stringify({ sealed: true, sources: [{ trial: `${runId}-trial` }] })}\n`,
+  );
   await writeFile(join(path, "summary.json"), summary);
   await writeFile(join(path, "source-hashes.json"), sources);
   await writeFile(
@@ -96,7 +100,7 @@ async function createRun(runId) {
     `${JSON.stringify({
       harborExitCode: 0,
       normalized: true,
-      secretScan: { status: "passed" },
+      secretScan: { status: "passed", filesScanned: 4, bytesScanned: 100 },
     })}\n`,
   );
   await writeFile(join(path, "payload.txt"), "payload\n");
@@ -104,7 +108,7 @@ async function createRun(runId) {
     schemaVersion: 1,
     runId,
     sealed: true,
-    secretScan: { status: "passed" },
+    secretScan: { status: "passed", filesScanned: 4, bytesScanned: 100 },
     summarySha256: createHash("sha256").update(summary).digest("hex"),
     sourceHashesSha256: createHash("sha256").update(sources).digest("hex"),
     fullTreeExcludingMarkerSha256: await hashDirectory(path),

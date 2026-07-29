@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import socket
 import socketserver
 import struct
 import threading
@@ -199,6 +200,11 @@ class GatewayState:
             trial["revoked"] = True
             active = list(trial["active"])
         for connection in active:
+            if connection.sock is not None:
+                try:
+                    connection.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
             connection.close()
 
 
@@ -398,6 +404,11 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
     else:
         if value.get("model") != model:
             raise ValueError("gateway model mismatch")
+        if protocol == "openai" and {
+            "max_tokens",
+            "max_completion_tokens",
+        }.issubset(value):
+            raise ValueError("gateway request has ambiguous output token limits")
         output_limit = min(
             int(value.get("max_tokens", value.get("max_completion_tokens", 8_192))),
             8_192,

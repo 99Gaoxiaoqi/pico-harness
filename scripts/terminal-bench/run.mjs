@@ -161,6 +161,8 @@ const tasks = await resolveTasks(mode, options.task);
 const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
 const localDatasetPath = mode === "full" ? null : await prepareLocalDataset(tasks, runRoot);
+const localDatasetTreeSha256 =
+  localDatasetPath === null ? null : await hashDirectory(localDatasetPath);
 const canaryHash = createHash("sha256").update(tasks.join("\n")).digest("hex");
 const taskLockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
 const manifest = {
@@ -195,6 +197,7 @@ const manifest = {
         : createHash("sha256")
             .update(await readFile(taskLockPath))
             .digest("hex"),
+    localDatasetTreeSha256,
   },
   nodeRuntime: {
     version: "22.14.0",
@@ -288,9 +291,16 @@ const harborArgs = [
 ];
 if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
 else harborArgs.push("--path", localDatasetPath);
-const dockerContainersBefore = await captureDockerContainerIds(harborEnv);
+const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv);
+if (
+  localDatasetPath !== null &&
+  (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
+) {
+  throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
+}
 let harborExecution;
 let harborExecutionError;
+const cleanupErrors = [];
 try {
   harborExecution = await runCaptured(
     "uvx",
@@ -306,10 +316,29 @@ try {
 } catch (error) {
   harborExecutionError = error;
 } finally {
-  await gatewaySupervisor.stop();
-  await cleanupDockerResources(harborEnv, runId);
+  try {
+    await gatewaySupervisor.stop();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await cleanupDockerResources(harborEnv, runId, dockerResourcesBefore);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
 }
-if (harborExecutionError) throw harborExecutionError;
+if (harborExecutionError || cleanupErrors.length > 0) {
+  throw new AggregateError(
+    [harborExecutionError, ...cleanupErrors].filter(Boolean),
+    "Terminal-Bench execution or cleanup failed",
+  );
+}
+if (
+  localDatasetPath !== null &&
+  (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
+) {
+  throw new Error("Terminal-Bench staged dataset changed during Harbor execution");
+}
 const harborExitCode = harborExecution.exitCode;
 await atomicWritePrivateText(
   join(runRoot, "harbor-stdout.log"),
@@ -321,7 +350,7 @@ await atomicWritePrivateText(
 );
 const dockerContainersAfter = await captureDockerContainerIds(harborEnv);
 const addedDockerContainers = [...dockerContainersAfter].filter(
-  (containerId) => !dockerContainersBefore.has(containerId),
+  (containerId) => !dockerResourcesBefore.containers.has(containerId),
 );
 if (addedDockerContainers.length > 0) {
   throw new Error("Harbor left benchmark containers behind after --delete");
@@ -387,7 +416,7 @@ if (harborExitCode !== 0 || gateFailed || !summary.sealed) {
   throw new Error(`Terminal-Bench run did not satisfy the publication gate: ${failedRunRoot}`);
 }
 try {
-  const prePublishScan = await scanTreeForSecrets(runRoot, [
+  let prePublishScan = await scanTreeForSecrets(runRoot, [
     providerSecret,
     gatewayCapabilitySeed,
     ...gatewayCapabilities,
@@ -395,17 +424,35 @@ try {
   if (prePublishScan.matches.length > 0) {
     throw new Error("Secret canary scan failed");
   }
-  await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
-    schemaVersion: 1,
-    harborExitCode,
-    normalized: true,
-    secretScan: {
-      status: "passed",
-      filesScanned: prePublishScan.filesScanned,
-      bytesScanned: prePublishScan.bytesScanned,
-    },
-    completedAt: new Date().toISOString(),
-  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
+      schemaVersion: 1,
+      harborExitCode,
+      normalized: true,
+      secretScan: {
+        status: "passed",
+        filesScanned: prePublishScan.filesScanned,
+        bytesScanned: prePublishScan.bytesScanned,
+      },
+      completedAt: new Date().toISOString(),
+    });
+    const nextScan = await scanTreeForSecrets(runRoot, [
+      providerSecret,
+      gatewayCapabilitySeed,
+      ...gatewayCapabilities,
+    ]);
+    if (
+      nextScan.filesScanned === prePublishScan.filesScanned &&
+      nextScan.bytesScanned === prePublishScan.bytesScanned
+    ) {
+      prePublishScan = nextScan;
+      break;
+    }
+    prePublishScan = nextScan;
+    if (attempt === 2) {
+      throw new Error("Terminal-Bench scan metadata did not stabilize");
+    }
+  }
   const prePublishTreeSha256 = await hashDirectory(runRoot);
   await atomicWritePrivateJson(join(runRoot, "PUBLISHED.json"), {
     schemaVersion: 1,
@@ -745,6 +792,9 @@ async function scanTreeForSecrets(root, secrets) {
         if (["1", "2"].includes(type)) {
           throw new Error("Result archive contains a link entry");
         }
+        if (!["0", "\0", "5", "7", "x", "g", "L", "K"].includes(type)) {
+          throw new Error("Result tar archive contains an unsupported entry type");
+        }
         const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/u, "").trim();
         const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
         if (!Number.isSafeInteger(size) || size < 0) {
@@ -775,7 +825,12 @@ async function scanTreeForSecrets(root, secrets) {
     const centralOffset = candidate.readUInt32LE(eocd + 16);
     const archiveBase = eocd - centralSize - centralOffset;
     const centralStart = archiveBase + centralOffset;
-    if (archiveBase < 0 || centralStart + centralSize > candidate.length || entries > 100_000) {
+    if (
+      entries < 1 ||
+      archiveBase < 0 ||
+      centralStart + centralSize > candidate.length ||
+      entries > 100_000
+    ) {
       throw new Error("Result ZIP archive exceeds the scan limit");
     }
     let offset = centralStart;
@@ -826,7 +881,12 @@ async function scanTreeForSecrets(root, secrets) {
   function findZipEnd(candidate) {
     const minimum = Math.max(0, candidate.length - 65_557);
     for (let offset = candidate.length - 22; offset >= minimum; offset -= 1) {
-      if (candidate.readUInt32LE(offset) === 0x06054b50) return offset;
+      if (
+        candidate.readUInt32LE(offset) === 0x06054b50 &&
+        candidate.readUInt16LE(offset + 10) > 0
+      ) {
+        return offset;
+      }
     }
     return -1;
   }
@@ -1021,7 +1081,22 @@ async function captureDockerContainerIds(env) {
   );
 }
 
-async function cleanupDockerResources(env, runId) {
+async function captureDockerResourceSnapshot(env) {
+  const [containers, networksRaw, volumesRaw] = await Promise.all([
+    captureDockerContainerIds(env),
+    captureWithEnv("docker", ["network", "ls", "--quiet"], projectRoot, env),
+    captureWithEnv("docker", ["volume", "ls", "--quiet"], projectRoot, env),
+  ]);
+  return {
+    containers,
+    networks: new Set(networksRaw.split(/\s+/u).filter(Boolean)),
+    volumes: new Set(volumesRaw.split(/\s+/u).filter(Boolean)),
+  };
+}
+
+async function cleanupDockerResources(env, runId, before) {
+  const cleanupErrors = [];
+  const current = await captureDockerResourceSnapshot(env);
   const containerOutput = await captureWithEnv(
     "docker",
     ["ps", "-aq", "--filter", `label=pico.terminal-bench.run=${runId}`],
@@ -1032,8 +1107,15 @@ async function cleanupDockerResources(env, runId) {
     .split(/\s+/u)
     .map((value) => value.trim())
     .filter(Boolean);
-  for (const containerId of containerIds) {
-    await run("docker", ["rm", "--force", containerId], projectRoot, env);
+  for (const containerId of current.containers) {
+    if (!before.containers.has(containerId)) containerIds.push(containerId);
+  }
+  for (const containerId of new Set(containerIds)) {
+    try {
+      await run("docker", ["rm", "--force", containerId], projectRoot, env);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
   const networkOutput = await captureWithEnv(
     "docker",
@@ -1045,8 +1127,15 @@ async function cleanupDockerResources(env, runId) {
     .split(/\s+/u)
     .map((value) => value.trim())
     .filter(Boolean);
-  for (const networkId of networkIds) {
-    await run("docker", ["network", "rm", networkId], projectRoot, env);
+  for (const networkId of current.networks) {
+    if (!before.networks.has(networkId)) networkIds.push(networkId);
+  }
+  for (const networkId of new Set(networkIds)) {
+    try {
+      await run("docker", ["network", "rm", networkId], projectRoot, env);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
   const volumeOutput = await captureWithEnv(
     "docker",
@@ -1058,8 +1147,15 @@ async function cleanupDockerResources(env, runId) {
     .split(/\s+/u)
     .map((value) => value.trim())
     .filter(Boolean);
-  for (const volumeName of volumeNames) {
-    await run("docker", ["volume", "rm", "--force", volumeName], projectRoot, env);
+  for (const volumeName of current.volumes) {
+    if (!before.volumes.has(volumeName)) volumeNames.push(volumeName);
+  }
+  for (const volumeName of new Set(volumeNames)) {
+    try {
+      await run("docker", ["volume", "rm", "--force", volumeName], projectRoot, env);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
   const [remainingContainers, remainingNetworks, remainingVolumes] = await Promise.all([
     captureWithEnv(
@@ -1083,6 +1179,17 @@ async function cleanupDockerResources(env, runId) {
   ]);
   if ([remainingContainers, remainingNetworks, remainingVolumes].some((value) => value.trim())) {
     throw new Error("Terminal-Bench Docker resource cleanup was unconfirmed");
+  }
+  const after = await captureDockerResourceSnapshot(env);
+  if (
+    [...after.containers].some((value) => !before.containers.has(value)) ||
+    [...after.networks].some((value) => !before.networks.has(value)) ||
+    [...after.volumes].some((value) => !before.volumes.has(value))
+  ) {
+    throw new Error("Terminal-Bench left unlabeled Docker resources behind");
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, "Terminal-Bench Docker cleanup encountered errors");
   }
 }
 

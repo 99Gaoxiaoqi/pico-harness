@@ -62,18 +62,28 @@ export async function normalizeHarborJob({
     const headlessPath = join(trialDir, "agent", "pico-result.json");
     const headlessRead = await readJsonEvidence(headlessPath);
     const headless = headlessRead.value;
+    const verifierEvidencePath = join(trialDir, "verifier", "ctrf.json");
+    const verifierEvidenceRead = await readJsonEvidence(verifierEvidencePath);
     const trialResultSha256 = await sha256File(trialResultPath);
     const headlessSha256 = headless ? await sha256File(headlessPath) : null;
+    const verifierEvidenceSha256 = verifierEvidenceRead.value
+      ? await sha256File(verifierEvidencePath)
+      : null;
     const normalized = normalizeTrial({
       runId,
       trialResult,
       headless,
       headlessReadError: headlessRead.error,
+      verifierEvidence: verifierEvidenceRead.value,
       source: {
         trialResult: relativeSource(jobDir, trialResultPath),
         trialResultSha256,
         headlessResult: headless ? relativeSource(jobDir, headlessPath) : null,
         headlessResultSha256: headlessSha256,
+        verifierEvidence: verifierEvidenceRead.value
+          ? relativeSource(jobDir, verifierEvidencePath)
+          : null,
+        verifierEvidenceSha256,
       },
     });
     const taskName = canonicalTaskName(trialResult.task_name);
@@ -105,6 +115,7 @@ export async function normalizeHarborJob({
       trial: entry.name,
       trialResultSha256,
       headlessResultSha256: headlessSha256,
+      verifierEvidenceSha256,
     });
   }
   const counts = Object.create(null);
@@ -130,12 +141,19 @@ export async function normalizeHarborJob({
     expectedTaskNames === null ||
     (Object.keys(observedTaskCounts).length === expectedTaskNames.length &&
       expectedTaskNames.every((name) => observedTaskCounts[name] === expectedAttempts));
+  const trialGateValid = trials.every(
+    (trial) =>
+      trial.infra.status === "ok" &&
+      trial.adapter.status === "ok" &&
+      trial.verifier.status === "completed",
+  );
   const sealed =
     expectedTasks === null
       ? false
       : trials.length === expectedTasks &&
         expectedSetMatches &&
         trialIdentityValid &&
+        trialGateValid &&
         rawTreeSha256 !== null;
   const summary = {
     schemaVersion: 2,
@@ -164,6 +182,7 @@ export function normalizeTrial({
   trialResult,
   headless,
   headlessReadError = null,
+  verifierEvidence = null,
   source = null,
 }) {
   const verifierResult = trialResult.verifier_result;
@@ -178,8 +197,16 @@ export function normalizeTrial({
   const adapter = classifyAdapter({ headless, exitCode, headlessReadError });
   const agent = classifyAgent(headless, exitCode);
   const verifier = {
-    status: overall === null ? (exception ? "error" : "missing") : "completed",
-    exceptionType: exception?.exception_type ?? null,
+    status:
+      verifierEvidence === null
+        ? "error"
+        : overall === null
+          ? exception
+            ? "error"
+            : "missing"
+          : "completed",
+    exceptionType:
+      verifierEvidence === null ? "VerifierEvidenceMissing" : (exception?.exception_type ?? null),
   };
   const primaryStatus = classifyPrimary({ infra, adapter, agent, verifier, reward: overall });
   return {
