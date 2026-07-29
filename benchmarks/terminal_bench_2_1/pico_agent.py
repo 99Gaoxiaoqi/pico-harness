@@ -282,8 +282,8 @@ async def docker_exec_secret_stdin(
             "-u",
             str(environment.default_user or "root"),
             "main",
-            "python3",
-            f"{PicoInstalledAgent._REMOTE_ROOT.as_posix()}/container-launcher.py",
+            "node",
+            f"{PicoInstalledAgent._REMOTE_ROOT.as_posix()}/container-launcher.mjs",
         ]
     )
     child_env = environment._compose_env_vars(include_os_env=True)
