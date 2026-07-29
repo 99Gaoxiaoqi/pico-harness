@@ -122,6 +122,7 @@ const manifest = {
   },
   nodeRuntime: {
     version: "22.14.0",
+    sources: ["https://nodejs.org/dist/v22.14.0/", "https://npmmirror.com/mirrors/node/v22.14.0/"],
     archives: {
       linuxX64: "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
       linuxArm64: "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
@@ -326,28 +327,33 @@ async function ensurePinnedDownload(archive, cacheRoot) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  const url = `https://nodejs.org/dist/v22.14.0/${archive.name}`;
+  const urls = [
+    `https://nodejs.org/dist/v22.14.0/${archive.name}`,
+    `https://npmmirror.com/mirrors/node/v22.14.0/${archive.name}`,
+  ];
   let lastError;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Node archive download returned ${response.status}`);
-      const data = Buffer.from(await response.arrayBuffer());
-      const digest = createHash("sha256").update(data).digest("hex");
-      if (digest !== archive.sha256) throw new Error("Node archive digest mismatch");
-      const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
-      const handle = await open(temporary, "wx", 0o600);
+  for (const url of urls) {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        await handle.writeFile(data);
-        await handle.sync();
-      } finally {
-        await handle.close();
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Node archive download returned ${response.status}`);
+        const data = Buffer.from(await response.arrayBuffer());
+        const digest = createHash("sha256").update(data).digest("hex");
+        if (digest !== archive.sha256) throw new Error("Node archive digest mismatch");
+        const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
+        const handle = await open(temporary, "wx", 0o600);
+        try {
+          await handle.writeFile(data);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await rename(temporary, destination);
+        return destination;
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, attempt * 1_000));
       }
-      await rename(temporary, destination);
-      return destination;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, attempt * 1_000));
     }
   }
   throw lastError;
