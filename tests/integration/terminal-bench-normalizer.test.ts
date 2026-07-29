@@ -76,6 +76,47 @@ test("Terminal-Bench normalizer refuses to overwrite sealed case evidence", asyn
   );
 });
 
+test("Terminal-Bench normalizer requires the expected task attempt matrix", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-attempts-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "attempt-1", {
+    reward: 1,
+    headless: headless("completed", true),
+    taskName: "terminal-bench/example",
+  });
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "attempt-run",
+    expectedTasks: 2,
+    expectedTaskNames: ["terminal-bench/example"],
+    expectedAttempts: 2,
+  });
+  assert.equal(summary.sealed, false);
+});
+
+test("Terminal-Bench normalizer classifies malformed Headless evidence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-malformed-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "malformed", {
+    reward: 0,
+    headless: headless("completed", true),
+  });
+  await writeFile(join(jobDir, "malformed", "agent", "pico-result.json"), "{");
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "malformed-run",
+    expectedTasks: 1,
+  });
+  assert.equal(summary.trials[0].adapter.code, "headless_result_invalid");
+  assert.equal(summary.trials[0].primaryStatus, "adapter_error");
+});
+
 function headless(status: string, terminationConfirmed: boolean) {
   return {
     schemaVersion: 1,
@@ -95,6 +136,7 @@ async function writeTrial(
     reward: number | null;
     headless: ReturnType<typeof headless>;
     exception?: { exception_type: string };
+    taskName?: string;
   },
 ) {
   const trialDir = join(jobDir, name);
@@ -103,7 +145,7 @@ async function writeTrial(
     join(trialDir, "result.json"),
     JSON.stringify({
       id: name,
-      task_name: `terminal-bench/${name}`,
+      task_name: options.taskName ?? `terminal-bench/${name}`,
       task_checksum: `${name}-checksum`,
       config: { job_id: "job" },
       agent_info: { name: "pico-headless", version: "fixture" },

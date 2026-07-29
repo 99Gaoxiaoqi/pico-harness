@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, open, readFile, readdir, rename } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readFile, readdir, rename } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,7 +33,14 @@ const configErrors = new Set([
   "THINKING_EFFORT_INVALID",
 ]);
 
-export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks = null }) {
+export async function normalizeHarborJob({
+  jobDir,
+  runDir,
+  runId,
+  expectedTasks = null,
+  expectedTaskNames = null,
+  expectedAttempts = 1,
+}) {
   const source = resolve(jobDir);
   const destination = resolve(runDir);
   let names;
@@ -45,6 +52,7 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
   }
   const trials = [];
   const sourceHashes = [];
+  const rawTreeSha256 = names.length > 0 ? await hashTree(source) : null;
   for (const entry of names) {
     if (!entry.isDirectory()) continue;
     const trialDir = join(source, entry.name);
@@ -52,13 +60,15 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
     const trialResult = await readJson(trialResultPath);
     if (!trialResult || typeof trialResult.task_name !== "string") continue;
     const headlessPath = join(trialDir, "agent", "pico-result.json");
-    const headless = await readJson(headlessPath);
+    const headlessRead = await readJsonEvidence(headlessPath);
+    const headless = headlessRead.value;
     const trialResultSha256 = await sha256File(trialResultPath);
     const headlessSha256 = headless ? await sha256File(headlessPath) : null;
     const normalized = normalizeTrial({
       runId,
       trialResult,
       headless,
+      headlessReadError: headlessRead.error,
       source: {
         trialResult: relativeSource(jobDir, trialResultPath),
         trialResultSha256,
@@ -99,7 +109,18 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
   for (const trial of trials) {
     counts[trial.primaryStatus] = (counts[trial.primaryStatus] ?? 0) + 1;
   }
-  const sealed = expectedTasks === null ? trials.length > 0 : trials.length === expectedTasks;
+  const observedTaskCounts = Object.create(null);
+  for (const trial of trials) {
+    observedTaskCounts[trial.taskId] = (observedTaskCounts[trial.taskId] ?? 0) + 1;
+  }
+  const expectedSetMatches =
+    expectedTaskNames === null ||
+    (Object.keys(observedTaskCounts).length === expectedTaskNames.length &&
+      expectedTaskNames.every((name) => observedTaskCounts[name] === expectedAttempts));
+  const sealed =
+    expectedTasks === null
+      ? false
+      : trials.length === expectedTasks && expectedSetMatches && rawTreeSha256 !== null;
   const summary = {
     schemaVersion: 2,
     runId,
@@ -115,13 +136,20 @@ export async function normalizeHarborJob({ jobDir, runDir, runId, expectedTasks 
   await writeOnceJson(join(destination, "source-hashes.json"), {
     schemaVersion: 1,
     sealed,
+    rawTreeSha256,
     sources: sourceHashes,
   });
   await writeOnceJson(join(destination, "summary.json"), summary);
   return summary;
 }
 
-export function normalizeTrial({ runId, trialResult, headless, source = null }) {
+export function normalizeTrial({
+  runId,
+  trialResult,
+  headless,
+  headlessReadError = null,
+  source = null,
+}) {
   const verifierResult = trialResult.verifier_result;
   const rewards =
     verifierResult && typeof verifierResult === "object" && verifierResult.rewards
@@ -131,7 +159,7 @@ export function normalizeTrial({ runId, trialResult, headless, source = null }) 
   const exitCode = trialResult.agent_result?.metadata?.pico?.exitCode ?? null;
   const exception = trialResult.exception_info;
   const infra = classifyInfra({ headless, exception });
-  const adapter = classifyAdapter({ headless, exitCode });
+  const adapter = classifyAdapter({ headless, exitCode, headlessReadError });
   const agent = classifyAgent(headless, exitCode);
   const verifier = {
     status: overall === null ? (exception ? "error" : "missing") : "completed",
@@ -176,7 +204,8 @@ function classifyInfra({ headless, exception }) {
   return { status: "ok", code: null };
 }
 
-function classifyAdapter({ headless, exitCode }) {
+function classifyAdapter({ headless, exitCode, headlessReadError }) {
+  if (headlessReadError) return { status: "error", code: "headless_result_invalid" };
   if (!headless) return { status: "error", code: "headless_result_missing" };
   const expected = {
     completed: [0],
@@ -235,10 +264,43 @@ async function readJson(path) {
   }
 }
 
+async function readJsonEvidence(path) {
+  try {
+    return { value: JSON.parse(await readFile(path, "utf8")), error: null };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { value: null, error: null };
+    if (error instanceof SyntaxError) return { value: null, error: "invalid_json" };
+    throw error;
+  }
+}
+
 async function sha256File(path) {
   return createHash("sha256")
     .update(await readFile(path))
     .digest("hex");
+}
+
+async function hashTree(root) {
+  const hash = createHash("sha256");
+  async function visit(path, relative) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`Harbor result tree contains symlink: ${path}`);
+    if (info.isDirectory()) {
+      const entries = (await readdir(path, { withFileTypes: true })).sort((a, b) =>
+        a.name.localeCompare(b.name),
+      );
+      for (const entry of entries) {
+        await visit(join(path, entry.name), relative ? `${relative}/${entry.name}` : entry.name);
+      }
+      return;
+    }
+    if (!info.isFile()) return;
+    const data = await readFile(path);
+    hash.update(`${relative}\0${data.length}\0`);
+    hash.update(data);
+  }
+  await visit(root, "");
+  return hash.digest("hex");
 }
 
 async function atomicWriteJson(path, value) {
