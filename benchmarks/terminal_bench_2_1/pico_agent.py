@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import hmac
 import http.client
@@ -62,6 +63,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
         bundle_sha256: str,
         bundle_lockfile_sha256: str,
         route_config_path: str,
+        resource_registry_path: str,
         node_x64_path: str,
         node_arm64_path: str,
         pico_commit: str,
@@ -81,6 +83,9 @@ class PicoInstalledAgent(BaseInstalledAgent):
         if sha256_file(self._bundle_path) != self._bundle_sha256:
             raise ValueError("bundle_path does not match bundle_sha256")
         self._route_config_path = require_file(route_config_path, "route_config_path")
+        self._resource_registry_path = Path(resource_registry_path).resolve()
+        if not self._resource_registry_path.parent.is_dir():
+            raise ValueError("resource_registry_path parent must exist")
         self._node_archives = {
             "x64": require_file(node_x64_path, "node_x64_path"),
             "arm64": require_file(node_arm64_path, "node_arm64_path"),
@@ -101,6 +106,11 @@ class PicoInstalledAgent(BaseInstalledAgent):
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         assert_secure_docker_environment(environment)
+        register_compose_project(
+            self._resource_registry_path,
+            self._supervisor_config["runId"],
+            _sanitize_docker_compose_project_name(environment.session_id),
+        )
         container_ids = await assert_running_container_policy(environment, self.logs_dir)
         self._trial_network = await isolate_container_network(
             environment,
@@ -209,8 +219,10 @@ rm -f {remote_archive}
                 loop=loop,
             )
         finally:
-            gateway.stop()
-        await enable_verifier_network(environment)
+            try:
+                gateway.stop()
+            finally:
+                await enable_verifier_network(environment)
 
     async def _run_with_gateway(
         self,
@@ -1227,6 +1239,30 @@ def write_private_json(path: Path, value: Any) -> None:
             os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def register_compose_project(path: Path, run_id: str, compose_project: str) -> None:
+    record = json.dumps(
+        {
+            "schemaVersion": 1,
+            "runId": run_id,
+            "composeProject": compose_project,
+        },
+        separators=(",", ":"),
+    )
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        with os.fdopen(descriptor, "a", encoding="utf-8", closefd=True) as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.write(f"{record}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def parse_single_json_line(raw: str) -> dict[str, Any]:
