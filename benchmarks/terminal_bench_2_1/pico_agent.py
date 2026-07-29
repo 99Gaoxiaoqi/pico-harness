@@ -1009,7 +1009,17 @@ def read_supervisor_config(descriptor: int) -> dict[str, str]:
     if _SUPERVISOR_CONFIG is not None:
         return _SUPERVISOR_CONFIG
     try:
-        raw = os.read(descriptor, 64 * 1024)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(8 * 1024, 64 * 1024 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= 64 * 1024:
+                raise ValueError("Gateway supervisor descriptor is too large")
+        raw = b"".join(chunks)
     except OSError as error:
         raise ValueError("Gateway supervisor descriptor is unavailable") from error
     finally:
