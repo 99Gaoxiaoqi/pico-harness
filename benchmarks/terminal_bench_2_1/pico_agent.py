@@ -29,6 +29,7 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
 
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
+_RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
 
 
 class PicoInstalledAgent(BaseInstalledAgent):
@@ -191,9 +192,41 @@ rm -f {remote_archive}
         try:
             await gateway.start_relay(environment)
             await gateway.enroll(environment)
-        except Exception:
+            await self._run_with_gateway(
+                instruction=instruction,
+                environment=environment,
+                context=context,
+                gateway=gateway,
+                route_config=route_config,
+                workspace=workspace,
+                pico_home=pico_home,
+                request_id=request_id,
+                session_id=session_id,
+                context_id=context_id,
+                outer_timeout_sec=outer_timeout_sec,
+                outer_deadline=outer_deadline,
+                loop=loop,
+            )
+        finally:
             gateway.stop()
-            raise
+
+    async def _run_with_gateway(
+        self,
+        *,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+        gateway: ProviderGateway,
+        route_config: dict[str, Any],
+        workspace: str,
+        pico_home: str,
+        request_id: str,
+        session_id: str,
+        context_id: str,
+        outer_timeout_sec: float,
+        outer_deadline: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
         bootstrap_request = {
             "schemaVersion": 1,
             "workspacePath": workspace,
@@ -224,7 +257,6 @@ rm -f {remote_archive}
             timeout_sec=min(60, bootstrap_budget),
         )
         if bootstrap.return_code != 0:
-            gateway.stop()
             raise RuntimeError("Pico isolated bootstrap failed")
 
         remaining_sec = remaining_budget(outer_deadline, loop.time())
@@ -263,15 +295,12 @@ rm -f {remote_archive}
             "trace": True,
         }
         write_private_json(self.logs_dir / "headless-request.json", headless_request)
-        try:
-            execution = await docker_exec_secret_stdin(
-                environment,
-                gateway.capability.encode("utf-8"),
-                timeout_sec=remaining_budget(outer_deadline, loop.time()),
-                secret_env_names={self._SECRET_ENV},
-            )
-        finally:
-            gateway.stop()
+        await docker_exec_secret_stdin(
+            environment,
+            gateway.capability.encode("utf-8"),
+            timeout_sec=remaining_budget(outer_deadline, loop.time()),
+            secret_env_names={self._SECRET_ENV},
+        )
         raw_result = await environment.exec(command=f"cat {self._PICO_RESULT.as_posix()}")
         raw_exit = await environment.exec(command=f"cat {self._EXIT_CODE.as_posix()}")
         if raw_result.return_code != 0 or not raw_result.stdout:
@@ -413,7 +442,7 @@ class ProviderGateway:
                 self._network_name,
                 "--network-alias",
                 "pico-gateway",
-                "node:22-bookworm",
+                _RELAY_IMAGE_ID,
                 "node",
                 "-e",
                 script,
@@ -425,6 +454,12 @@ class ProviderGateway:
             ["network", "connect", "bridge", self._relay_name],
             environment,
         )
+        _, relay_image_stdout, _ = await run_docker(
+            ["inspect", "--format", "{{.Image}}", self._relay_name],
+            environment,
+        )
+        if relay_image_stdout.decode().strip() != _RELAY_IMAGE_ID:
+            raise RuntimeError("Pico workload relay image identity is invalid")
         _, inspect_stdout, _ = await run_docker(
             ["inspect", self._relay_name],
             environment,
@@ -901,24 +936,19 @@ async def assert_running_container_policy(
                 raise RuntimeError("Harbor container has an unsupported mount type")
             if not isinstance(destination, str) or not destination.startswith("/"):
                 raise RuntimeError("Harbor container has an invalid mount destination")
-            if any(
-                destination == root or destination.startswith(f"{root}/")
-                for root in [
-                    "/",
-                    "/boot",
-                    "/dev",
-                    "/etc",
-                    "/proc",
-                    "/root",
-                    "/run",
-                    "/sys",
-                    "/var/run",
-                ]
-            ):
+            if not allowed_mount_destination(destination):
                 raise RuntimeError("Harbor container has a sensitive mount destination")
-            if not source:
+            if mount.get("Type") != "bind":
                 continue
+            if not source:
+                raise RuntimeError("Harbor container has an invalid host mount")
             source_path = Path(source).resolve()
+            try:
+                source_info = Path(source).lstat()
+            except OSError as error:
+                raise RuntimeError("Harbor container host mount is unavailable") from error
+            if not (source_info.is_file() or source_info.is_dir()):
+                raise RuntimeError("Harbor container host mount has an unsafe type")
             if not any(
                 source_path == root or root in source_path.parents for root in allowed_roots
             ):
@@ -931,34 +961,48 @@ async def isolate_container_network(
     container_ids: list[str],
     run_id: str,
 ) -> str:
-    network_name = f"pico-tb-{hashlib.sha256(environment.session_id.encode()).hexdigest()[:20]}"
-    create_code, _, create_stderr = await run_docker(
-        [
-            "network",
-            "create",
-            "--internal",
-            "--label",
-            f"pico.terminal-bench.run={run_id}",
-            network_name,
-        ],
-        environment,
-        allowed_exit_codes={0, 1},
-    )
-    if create_code == 1 and "already exists" not in create_stderr.decode():
-        raise RuntimeError("Could not create the isolated trial network")
-    _, network_stdout, _ = await run_docker(
-        ["network", "inspect", network_name],
-        environment,
-    )
-    network_config = json.loads(network_stdout)[0]
-    if (
-        network_config.get("Internal") is not True
-        or (network_config.get("Labels") or {}).get("pico.terminal-bench.run")
-        != run_id
-    ):
-        raise RuntimeError("Trial network identity or isolation is invalid")
+    suffix = hashlib.sha256(environment.session_id.encode()).hexdigest()[:18]
+    task_network = f"pico-tb-task-{suffix}"
+    gateway_network = f"pico-tb-gw-{suffix}"
+    for network_name in [task_network, gateway_network]:
+        create_code, _, create_stderr = await run_docker(
+            [
+                "network",
+                "create",
+                "--internal",
+                "--label",
+                f"pico.terminal-bench.run={run_id}",
+                network_name,
+            ],
+            environment,
+            allowed_exit_codes={0, 1},
+        )
+        if create_code == 1 and "already exists" not in create_stderr.decode():
+            raise RuntimeError("Could not create the isolated trial network")
+        _, network_stdout, _ = await run_docker(
+            ["network", "inspect", network_name],
+            environment,
+        )
+        network_config = json.loads(network_stdout)[0]
+        if (
+            network_config.get("Internal") is not True
+            or (network_config.get("Labels") or {}).get("pico.terminal-bench.run")
+            != run_id
+        ):
+            raise RuntimeError("Trial network identity or isolation is invalid")
     _, inspect_stdout, _ = await run_docker(["inspect", *container_ids], environment)
     values = json.loads(inspect_stdout)
+    main_values = [
+        value
+        for value in values
+        if (value.get("Config", {}).get("Labels") or {}).get(
+            "com.docker.compose.service"
+        )
+        == "main"
+    ]
+    if len(main_values) != 1:
+        raise RuntimeError("Harbor Compose must contain exactly one main workload")
+    main_id = main_values[0]["Id"]
     for value in values:
         container_id = value["Id"]
         service = (value.get("Config", {}).get("Labels") or {}).get(
@@ -967,22 +1011,42 @@ async def isolate_container_network(
         connect_args = ["network", "connect"]
         if service:
             connect_args.extend(["--alias", service])
-        connect_args.extend([network_name, container_id])
+        connect_args.extend([task_network, container_id])
         await run_docker(connect_args, environment, allowed_exit_codes={0, 1})
+        if container_id == main_id:
+            await run_docker(
+                ["network", "connect", "--alias", "main", gateway_network, container_id],
+                environment,
+                allowed_exit_codes={0, 1},
+            )
     for value in values:
         container_id = value["Id"]
         for existing_network in (value.get("NetworkSettings", {}).get("Networks") or {}):
-            if existing_network != network_name:
+            if existing_network not in {task_network, gateway_network}:
                 await run_docker(
                     ["network", "disconnect", existing_network, container_id],
                     environment,
                 )
     _, verify_stdout, _ = await run_docker(["inspect", *container_ids], environment)
     for value in json.loads(verify_stdout):
-        networks = value.get("NetworkSettings", {}).get("Networks") or {}
-        if set(networks) != {network_name}:
+        networks = set((value.get("NetworkSettings", {}).get("Networks") or {}))
+        expected = (
+            {task_network, gateway_network}
+            if value["Id"] == main_id
+            else {task_network}
+        )
+        if networks != expected:
             raise RuntimeError("Harbor container retained direct provider egress")
-    return network_name
+    return gateway_network
+
+
+def allowed_mount_destination(destination: str) -> bool:
+    if destination == "/tmp/pico-tb21" or destination.startswith("/tmp/pico-tb21/"):
+        return False
+    return any(
+        destination == root or destination.startswith(f"{root}/")
+        for root in ["/workspace", "/logs", "/tests", "/solution", "/tmp"]
+    )
 
 
 async def run_docker(

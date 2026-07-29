@@ -120,6 +120,32 @@ test("Terminal-Bench normalizer requires the expected task attempt matrix", asyn
   assert.equal(summary.sealed, false);
 });
 
+test("Terminal-Bench normalizer rejects duplicate trial identities", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-trial-id-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "first", {
+    reward: 1,
+    headless: headless("completed", true),
+  });
+  await writeTrial(jobDir, "second", {
+    reward: 1,
+    headless: headless("completed", true),
+  });
+  const second = JSON.parse(await readFile(join(jobDir, "second", "result.json"), "utf8"));
+  second.id = "first";
+  await writeFile(join(jobDir, "second", "result.json"), JSON.stringify(second));
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "duplicate-trial-run",
+    expectedTasks: 2,
+  });
+  assert.equal(summary.sealed, false);
+});
+
 test("Terminal-Bench normalizer classifies malformed Headless evidence", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-malformed-"));
   const jobDir = join(root, "job");

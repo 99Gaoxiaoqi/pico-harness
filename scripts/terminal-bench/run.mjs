@@ -6,10 +6,17 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { gunzipSync, inflateRawSync } from "node:zlib";
 import { rmSync } from "node:fs";
+import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
 import { assertTaskComposePolicy } from "./container-policy.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
+import {
+  fsyncDirectory,
+  fsyncTree,
+  hashDirectory,
+  recoverBenchmarkPublications,
+} from "./publication.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const datasetRef =
@@ -31,6 +38,14 @@ const nodeArchives = {
     sha256: "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
   },
 };
+
+if (process.env.PICO_TB_SECRET_SCAN_ROOT && process.env.PICO_TB_SECRET_SCAN_CANARY) {
+  const result = await scanTreeForSecrets(process.env.PICO_TB_SECRET_SCAN_ROOT, [
+    process.env.PICO_TB_SECRET_SCAN_CANARY,
+  ]);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  process.exit(0);
+}
 
 const options = parseArgs(process.argv.slice(2));
 const envFile = resolve(options.envFile ?? join(projectRoot, ".env"));
@@ -74,6 +89,9 @@ const picoCommit = (await capture("git", ["rev-parse", "HEAD"], projectRoot)).tr
 const dirty = (await capture("git", ["status", "--porcelain"], projectRoot)).trim().length > 0;
 if (dirty) throw new Error("Benchmark runs require a clean Pico worktree");
 const mode = options.mode ?? "canary";
+if (mode === "full") {
+  throw new Error("Full Terminal-Bench runs are disabled until dataset preflight is materialized");
+}
 const timestamp = new Date().toISOString().replace(/[:.]/gu, "-");
 const runId = `${mode}-${timestamp}-${picoCommit.slice(0, 12)}`;
 const benchmarkRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1");
@@ -85,6 +103,7 @@ const publishedRunRoot = join(runsRoot, runId);
 await mkdir(runsRoot, { recursive: true, mode: 0o700 });
 await mkdir(workRunsRoot, { recursive: true, mode: 0o700 });
 await mkdir(quarantineRoot, { recursive: true, mode: 0o700 });
+const benchmarkLock = await acquireBenchmarkLock(benchmarkRoot);
 await recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantineRoot });
 await mkdir(runRoot, { mode: 0o700 });
 let publicationComplete = false;
@@ -137,6 +156,7 @@ const gatewaySupervisor = await startGatewaySupervisor({
   capabilitySeed: gatewayCapabilitySeed,
   env: allowlistedHostEnv(process.env),
 });
+process.once("exit", () => gatewaySupervisor.stopSync());
 const tasks = await resolveTasks(mode, options.task);
 const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
@@ -183,6 +203,7 @@ const manifest = {
       linuxX64: "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
       linuxArm64: "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
     },
+    relayImageId: "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37",
   },
   model: {
     modelRouteId,
@@ -269,6 +290,7 @@ if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
 else harborArgs.push("--path", localDatasetPath);
 const dockerContainersBefore = await captureDockerContainerIds(harborEnv);
 let harborExecution;
+let harborExecutionError;
 try {
   harborExecution = await runCaptured(
     "uvx",
@@ -281,9 +303,13 @@ try {
       runId,
     }),
   );
+} catch (error) {
+  harborExecutionError = error;
 } finally {
   await gatewaySupervisor.stop();
+  await cleanupDockerResources(harborEnv, runId);
 }
+if (harborExecutionError) throw harborExecutionError;
 const harborExitCode = harborExecution.exitCode;
 await atomicWritePrivateText(
   join(runRoot, "harbor-stdout.log"),
@@ -293,7 +319,6 @@ await atomicWritePrivateText(
   join(runRoot, "harbor-stderr.log"),
   redactSecrets(harborExecution.stderr, [providerSecret]),
 );
-await cleanupDockerNetworks(harborEnv, runId);
 const dockerContainersAfter = await captureDockerContainerIds(harborEnv);
 const addedDockerContainers = [...dockerContainersAfter].filter(
   (containerId) => !dockerContainersBefore.has(containerId),
@@ -343,6 +368,17 @@ try {
   if (prePublishScan.matches.length > 0) {
     throw new Error("Secret canary scan failed");
   }
+  await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
+    schemaVersion: 1,
+    harborExitCode,
+    normalized: true,
+    secretScan: {
+      status: "passed",
+      filesScanned: prePublishScan.filesScanned,
+      bytesScanned: prePublishScan.bytesScanned,
+    },
+    completedAt: new Date().toISOString(),
+  });
   const prePublishTreeSha256 = await hashDirectory(runRoot);
   await atomicWritePrivateJson(join(runRoot, "PUBLISHED.json"), {
     schemaVersion: 1,
@@ -386,6 +422,7 @@ try {
   throw error;
 }
 publicationComplete = true;
+await benchmarkLock.release();
 process.stdout.write(
   `${JSON.stringify({ runId, runRoot: publishedRunRoot, harborExitCode, summary }, null, 2)}\n`,
 );
@@ -479,65 +516,6 @@ async function prepareLocalDataset(tasks, runRoot) {
   return destination;
 }
 
-async function hashDirectory(root, ignored = new Set()) {
-  const hash = createHash("sha256");
-  async function visit(path, relative) {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) throw new Error(`Pinned task contains a symlink: ${path}`);
-    if (info.isDirectory()) {
-      const entries = (await readdir(path, { withFileTypes: true })).sort((left, right) =>
-        left.name.localeCompare(right.name),
-      );
-      for (const entry of entries) {
-        const entryRelative = relative ? `${relative}/${entry.name}` : entry.name;
-        if (!ignored.has(entryRelative)) await visit(join(path, entry.name), entryRelative);
-      }
-      return;
-    }
-    if (!info.isFile()) return;
-    const data = await readFile(path);
-    hash.update(`${relative}\0${data.length}\0`);
-    hash.update(data);
-  }
-  await visit(root, "");
-  return hash.digest("hex");
-}
-
-async function recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantineRoot }) {
-  for (const entry of await readdir(workRunsRoot, { withFileTypes: true })) {
-    const path = join(workRunsRoot, entry.name);
-    await quarantine(path, quarantineRoot, "staging");
-  }
-  for (const entry of await readdir(runsRoot, { withFileTypes: true })) {
-    const path = join(runsRoot, entry.name);
-    try {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) {
-        throw new Error("published benchmark entry is not a directory");
-      }
-      const marker = JSON.parse(await readFile(join(path, "PUBLISHED.json"), "utf8"));
-      const summary = JSON.parse(await readFile(join(path, "summary.json"), "utf8"));
-      const status = JSON.parse(await readFile(join(path, "run-status.json"), "utf8"));
-      if (
-        marker.schemaVersion !== 1 ||
-        marker.runId !== entry.name ||
-        (marker.sealed !== undefined && marker.sealed !== true) ||
-        summary.runId !== entry.name ||
-        summary.sealed !== true ||
-        status.harborExitCode !== 0 ||
-        !/^[0-9a-f]{64}$/u.test(marker.fullTreeExcludingMarkerSha256)
-      ) {
-        throw new Error("published benchmark marker is invalid");
-      }
-      const treeHash = await hashDirectory(path, new Set(["PUBLISHED.json"]));
-      if (treeHash !== marker.fullTreeExcludingMarkerSha256) {
-        throw new Error("published benchmark tree hash is invalid");
-      }
-    } catch {
-      await quarantine(path, quarantineRoot, "invalid-published");
-    }
-  }
-}
-
 async function rewriteTextPaths(root, from, to) {
   const extensions = new Set([".json", ".jsonl", ".log", ".md", ".txt", ".toml", ".yaml", ".yml"]);
   const replacements = [
@@ -560,44 +538,6 @@ async function rewriteTextPaths(root, from, to) {
     if (rewritten !== value) await atomicWritePrivateText(path, rewritten);
   }
   await visit(root);
-}
-
-async function quarantine(path, root, reason) {
-  const name = path.slice(path.lastIndexOf("/") + 1);
-  await rename(
-    path,
-    join(root, `${reason}-${name}-${Date.now()}-${randomBytes(4).toString("hex")}`),
-  );
-  await fsyncDirectory(root);
-}
-
-async function fsyncTree(root) {
-  async function visit(path) {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) throw new Error(`Result tree contains symlink: ${path}`);
-    if (info.isDirectory()) {
-      for (const entry of await readdir(path)) await visit(join(path, entry));
-      await fsyncDirectory(path);
-      return;
-    }
-    if (!info.isFile()) return;
-    const handle = await open(path, "r");
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  }
-  await visit(root);
-}
-
-async function fsyncDirectory(path) {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
 }
 
 export function assertLoopbackAllowed(baseURL, enabled) {
@@ -755,7 +695,7 @@ async function scanTreeForSecrets(root, secrets) {
       );
       return;
     }
-    if (candidate.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+    if (findZipEnd(candidate) >= 0) {
       scanZip(path, containerEncoding, candidate, depth);
       return;
     }
@@ -767,10 +707,13 @@ async function scanTreeForSecrets(root, secrets) {
     ) {
       throw new Error("Result tree contains an unsupported compressed archive");
     }
-    if (candidate.length >= 512 && candidate.subarray(257, 262).toString("ascii") === "ustar") {
+    if (candidate.length >= 512 && validTarHeader(candidate.subarray(0, 512))) {
       for (let offset = 0; offset + 512 <= candidate.length; ) {
         const header = candidate.subarray(offset, offset + 512);
         if (header.every((byte) => byte === 0)) break;
+        if (!validTarHeader(header)) {
+          throw new Error("Result tar archive has an invalid header checksum");
+        }
         const type = String.fromCharCode(header[156] || 0x30);
         if (["1", "2"].includes(type)) {
           throw new Error("Result archive contains a link entry");
@@ -785,7 +728,7 @@ async function scanTreeForSecrets(root, secrets) {
         if (bodyEnd > candidate.length) {
           throw new Error("Result archive is truncated");
         }
-        if (type === "0" || type === "\0") {
+        if (["0", "\0", "7", "x", "g", "L", "K"].includes(type)) {
           scanCandidate(
             path,
             `${containerEncoding}>tar`,
@@ -798,22 +741,17 @@ async function scanTreeForSecrets(root, secrets) {
     }
   }
   function scanZip(path, containerEncoding, candidate, depth) {
-    const minimum = Math.max(0, candidate.length - 65_557);
-    let eocd = -1;
-    for (let offset = candidate.length - 22; offset >= minimum; offset -= 1) {
-      if (candidate.readUInt32LE(offset) === 0x06054b50) {
-        eocd = offset;
-        break;
-      }
-    }
+    const eocd = findZipEnd(candidate);
     if (eocd < 0) throw new Error("Result ZIP archive has no central directory");
     const entries = candidate.readUInt16LE(eocd + 10);
     const centralSize = candidate.readUInt32LE(eocd + 12);
     const centralOffset = candidate.readUInt32LE(eocd + 16);
-    if (centralOffset + centralSize > candidate.length || entries > 100_000) {
+    const archiveBase = eocd - centralSize - centralOffset;
+    const centralStart = archiveBase + centralOffset;
+    if (archiveBase < 0 || centralStart + centralSize > candidate.length || entries > 100_000) {
       throw new Error("Result ZIP archive exceeds the scan limit");
     }
-    let offset = centralOffset;
+    let offset = centralStart;
     for (let index = 0; index < entries; index += 1) {
       if (candidate.readUInt32LE(offset) !== 0x02014b50) {
         throw new Error("Result ZIP central directory is invalid");
@@ -826,7 +764,7 @@ async function scanTreeForSecrets(root, secrets) {
       const extraLength = candidate.readUInt16LE(offset + 30);
       const commentLength = candidate.readUInt16LE(offset + 32);
       const externalAttributes = candidate.readUInt32LE(offset + 38);
-      const localOffset = candidate.readUInt32LE(offset + 42);
+      const localOffset = archiveBase + candidate.readUInt32LE(offset + 42);
       const unixMode = externalAttributes >>> 16;
       if ((flags & 1) !== 0 || (unixMode & 0o170000) === 0o120000) {
         throw new Error("Result ZIP archive contains an encrypted or linked entry");
@@ -854,9 +792,27 @@ async function scanTreeForSecrets(root, secrets) {
       scanCandidate(path, `${containerEncoding}>zip`, expanded, depth + 1);
       offset += 46 + nameLength + extraLength + commentLength;
     }
-    if (offset !== centralOffset + centralSize) {
+    if (offset !== centralStart + centralSize) {
       throw new Error("Result ZIP central directory length is invalid");
     }
+  }
+  function findZipEnd(candidate) {
+    const minimum = Math.max(0, candidate.length - 65_557);
+    for (let offset = candidate.length - 22; offset >= minimum; offset -= 1) {
+      if (candidate.readUInt32LE(offset) === 0x06054b50) return offset;
+    }
+    return -1;
+  }
+  function validTarHeader(header) {
+    if (header.length !== 512 || header.every((byte) => byte === 0)) return false;
+    const checksumText = header.subarray(148, 156).toString("ascii").replace(/\0.*$/u, "").trim();
+    const expected = Number.parseInt(checksumText, 8);
+    if (!Number.isSafeInteger(expected)) return false;
+    let actual = 0;
+    for (let index = 0; index < header.length; index += 1) {
+      actual += index >= 148 && index < 156 ? 0x20 : header[index];
+    }
+    return actual === expected;
   }
   async function visit(path) {
     const info = await lstat(path);
@@ -958,6 +914,10 @@ async function startGatewaySupervisor({
       });
       await rm(directory, { recursive: true, force: true });
     },
+    stopSync() {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      rmSync(directory, { recursive: true, force: true });
+    },
   };
 }
 
@@ -1034,19 +994,68 @@ async function captureDockerContainerIds(env) {
   );
 }
 
-async function cleanupDockerNetworks(env, runId) {
-  const output = await captureWithEnv(
+async function cleanupDockerResources(env, runId) {
+  const containerOutput = await captureWithEnv(
+    "docker",
+    ["ps", "-aq", "--filter", `label=pico.terminal-bench.run=${runId}`],
+    projectRoot,
+    env,
+  );
+  const containerIds = containerOutput
+    .split(/\s+/u)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const containerId of containerIds) {
+    await run("docker", ["rm", "--force", containerId], projectRoot, env);
+  }
+  const networkOutput = await captureWithEnv(
     "docker",
     ["network", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
     projectRoot,
     env,
   );
-  const networkIds = output
+  const networkIds = networkOutput
     .split(/\s+/u)
     .map((value) => value.trim())
     .filter(Boolean);
   for (const networkId of networkIds) {
     await run("docker", ["network", "rm", networkId], projectRoot, env);
+  }
+  const volumeOutput = await captureWithEnv(
+    "docker",
+    ["volume", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
+    projectRoot,
+    env,
+  );
+  const volumeNames = volumeOutput
+    .split(/\s+/u)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const volumeName of volumeNames) {
+    await run("docker", ["volume", "rm", "--force", volumeName], projectRoot, env);
+  }
+  const [remainingContainers, remainingNetworks, remainingVolumes] = await Promise.all([
+    captureWithEnv(
+      "docker",
+      ["ps", "-aq", "--filter", `label=pico.terminal-bench.run=${runId}`],
+      projectRoot,
+      env,
+    ),
+    captureWithEnv(
+      "docker",
+      ["network", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
+      projectRoot,
+      env,
+    ),
+    captureWithEnv(
+      "docker",
+      ["volume", "ls", "--quiet", "--filter", `label=pico.terminal-bench.run=${runId}`],
+      projectRoot,
+      env,
+    ),
+  ]);
+  if ([remainingContainers, remainingNetworks, remainingVolumes].some((value) => value.trim())) {
+    throw new Error("Terminal-Bench Docker resource cleanup was unconfirmed");
   }
 }
 
