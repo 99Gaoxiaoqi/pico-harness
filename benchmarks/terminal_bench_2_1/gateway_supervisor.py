@@ -253,8 +253,7 @@ def main() -> None:
     parser.add_argument("--route-config", required=True)
     args = parser.parse_args()
     route_config = json.loads(Path(args.route_config).read_text(encoding="utf-8"))
-    secret_frame = json.loads(os.read(0, 64 * 1024))
-    os.close(0)
+    secret_frame = json.loads(read_pipe_frame(0))
     if (
         not isinstance(secret_frame, dict)
         or set(secret_frame) != {"providerSecret", "runId", "capabilitySeed"}
@@ -329,6 +328,25 @@ def canonical_json(value: Any) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode()
+
+
+def read_pipe_frame(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        while True:
+            chunk = os.read(descriptor, min(8 * 1024, 64 * 1024 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= 64 * 1024:
+                raise ValueError("gateway supervisor secret frame is too large")
+    finally:
+        os.close(descriptor)
+    if size == 0:
+        raise ValueError("gateway supervisor secret frame is empty")
+    return b"".join(chunks)
 
 
 def peer_uid(connection: Any) -> int:
