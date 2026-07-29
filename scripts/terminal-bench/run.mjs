@@ -1084,7 +1084,12 @@ async function captureDockerContainerIds(env) {
 async function captureDockerResourceSnapshot(env) {
   const [containers, networksRaw, volumesRaw] = await Promise.all([
     captureDockerContainerIds(env),
-    captureWithEnv("docker", ["network", "ls", "--quiet"], projectRoot, env),
+    captureWithEnv(
+      "docker",
+      ["network", "ls", "--quiet", "--filter", "type=custom"],
+      projectRoot,
+      env,
+    ),
     captureWithEnv("docker", ["volume", "ls", "--quiet"], projectRoot, env),
   ]);
   return {
