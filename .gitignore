@@ -12,6 +12,7 @@ coverage/
 test-results/
 playwright-report/
 output/playwright/
+output/benchmarks/
 
 # Environment variables(含密钥,绝不提交)
 .env
