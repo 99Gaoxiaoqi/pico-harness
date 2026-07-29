@@ -540,6 +540,10 @@ async function recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantine
 
 async function rewriteTextPaths(root, from, to) {
   const extensions = new Set([".json", ".jsonl", ".log", ".md", ".txt", ".toml", ".yaml", ".yml"]);
+  const replacements = [
+    [from, to],
+    [encodeURI(from), encodeURI(to)],
+  ];
   async function visit(path) {
     const info = await lstat(path);
     if (info.isSymbolicLink()) throw new Error(`Result tree contains symlink: ${path}`);
@@ -549,8 +553,11 @@ async function rewriteTextPaths(root, from, to) {
     }
     if (!info.isFile() || ![...extensions].some((extension) => path.endsWith(extension))) return;
     const value = await readFile(path, "utf8");
-    if (!value.includes(from)) return;
-    await atomicWritePrivateText(path, value.replaceAll(from, to));
+    const rewritten = replacements.reduce(
+      (current, [source, destination]) => current.replaceAll(source, destination),
+      value,
+    );
+    if (rewritten !== value) await atomicWritePrivateText(path, rewritten);
   }
   await visit(root);
 }
