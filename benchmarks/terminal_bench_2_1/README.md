@@ -12,8 +12,9 @@ CLI，也不宣称官方 leaderboard parity。
 - 官方源仓 commit `5c8eadf1f393183288fa08b8f73ca9a469cc5e00`
 - Node `22.14.0`（下载包 SHA-256 固定在 `pico_agent.py`）
 
-运行默认使用 `~/.pico/config.json` 的默认模型路由，并从项目 `.env` 加载该路由声明
-的凭据环境变量。若路由指向本机 loopback 服务，必须显式传
+运行默认使用 `~/.pico/config.json` 的默认模型路由，并优先使用其中受保护的凭据，
+否则从项目 `.env` 加载该路由声明的凭据环境变量；两者都只在宿主进程内存中解析。
+若路由指向本机 loopback 服务，必须显式传
 `--docker-host-gateway`，脚本只会把 loopback host 改写为
 `host.docker.internal`。
 

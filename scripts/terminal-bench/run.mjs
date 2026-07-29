@@ -29,8 +29,8 @@ const slash = modelRouteId.indexOf("/");
 const providerId = modelRouteId.slice(0, slash);
 const model = modelRouteId.slice(slash + 1);
 const provider = structuredClone(userConfig.providers?.[providerId]);
-if (!provider || typeof provider !== "object" || provider.apiKey) {
-  throw new Error("The selected route must use a secret-free provider declaration");
+if (!provider || typeof provider !== "object") {
+  throw new Error("The selected route must identify a configured provider");
 }
 if (!Array.isArray(provider.models) || !provider.models.includes(model)) {
   throw new Error("The selected model is not declared by the provider");
@@ -39,10 +39,15 @@ provider.baseURL = rewriteLoopback(provider.baseURL, options.dockerHostGateway);
 provider.discoverModels ??= false;
 const sourceApiKeyEnv = provider.apiKeyEnv;
 const providerSecret =
-  typeof sourceApiKeyEnv === "string" ? process.env[sourceApiKeyEnv] : undefined;
+  typeof provider.apiKey === "string" && provider.apiKey.length > 0
+    ? provider.apiKey
+    : typeof sourceApiKeyEnv === "string"
+      ? process.env[sourceApiKeyEnv]
+      : undefined;
 if (!providerSecret) {
-  throw new Error(`Missing credential environment ${String(sourceApiKeyEnv)}`);
+  throw new Error("The selected provider credential is unavailable");
 }
+delete provider.apiKey;
 provider.apiKeyEnv = benchmarkApiKeyEnv;
 const harborEnv = { ...process.env, [benchmarkApiKeyEnv]: providerSecret };
 if (sourceApiKeyEnv !== benchmarkApiKeyEnv) delete harborEnv[sourceApiKeyEnv];
