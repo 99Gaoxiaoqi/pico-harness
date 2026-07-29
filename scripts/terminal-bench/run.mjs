@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, readdir, rename } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { buildPicoBundle } from "./build-bundle.mjs";
@@ -49,7 +49,11 @@ if (!providerSecret) {
 }
 delete provider.apiKey;
 provider.apiKeyEnv = benchmarkApiKeyEnv;
-const harborEnv = { ...process.env, [benchmarkApiKeyEnv]: providerSecret };
+const harborEnv = {
+  ...process.env,
+  [benchmarkApiKeyEnv]: providerSecret,
+  PYTHONPATH: [projectRoot, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
+};
 if (sourceApiKeyEnv !== benchmarkApiKeyEnv) delete harborEnv[sourceApiKeyEnv];
 
 const picoCommit = (await capture("git", ["rev-parse", "HEAD"], projectRoot)).trim();
