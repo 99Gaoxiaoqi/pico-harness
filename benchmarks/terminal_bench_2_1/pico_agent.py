@@ -250,8 +250,6 @@ rm -f {remote_archive}
             )
         finally:
             gateway.stop()
-        if execution.returncode != 0:
-            raise RuntimeError("Pico headless launcher did not return a terminal result")
         raw_result = await environment.exec(command=f"cat {self._PICO_RESULT.as_posix()}")
         raw_exit = await environment.exec(command=f"cat {self._EXIT_CODE.as_posix()}")
         if raw_result.return_code != 0 or not raw_result.stdout:

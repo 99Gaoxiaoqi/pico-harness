@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-const secretEnv = "PICO_TB_PROVIDER_API_KEY";
+const secretEnv = "PICO_TB_GATEWAY_TOKEN";
 const requestPath = "/logs/agent/headless-request.json";
 const resultPath = "/logs/agent/pico-result.json";
 const exitCodePath = "/logs/agent/pico-exit-code.txt";
