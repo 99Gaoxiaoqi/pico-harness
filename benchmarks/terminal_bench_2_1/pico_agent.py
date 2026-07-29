@@ -1009,7 +1009,7 @@ def read_supervisor_config(descriptor: int) -> dict[str, str]:
     if _SUPERVISOR_CONFIG is not None:
         return _SUPERVISOR_CONFIG
     try:
-        raw = os.pread(descriptor, 64 * 1024, 0)
+        raw = os.read(descriptor, 64 * 1024)
     except OSError as error:
         raise ValueError("Gateway supervisor descriptor is unavailable") from error
     finally:
