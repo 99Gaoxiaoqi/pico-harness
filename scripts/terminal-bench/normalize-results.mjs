@@ -62,6 +62,14 @@ export async function normalizeHarborJob({
     const headlessPath = join(trialDir, "agent", "pico-result.json");
     const headlessRead = await readJsonEvidence(headlessPath);
     const headless = headlessRead.value;
+    const accountingReceiptPath = join(trialDir, "agent", "gateway-accounting-receipt.json");
+    const accountingReceiptRead = await readJsonEvidence(accountingReceiptPath);
+    const accounting = validateAccountingReceipt({
+      value: accountingReceiptRead.value,
+      readError: accountingReceiptRead.error,
+      runId,
+      trialResult,
+    });
     const verifierEvidencePath = join(trialDir, "verifier", "ctrf.json");
     const verifierEvidenceRead = await readJsonEvidence(verifierEvidencePath);
     const verifierEvidence = validateCtrfEvidence(
@@ -69,15 +77,19 @@ export async function normalizeHarborJob({
       verifierEvidenceRead.error,
     );
     const trialResultSha256 = await sha256File(trialResultPath);
-    const headlessSha256 = headless ? await sha256File(headlessPath) : null;
+    const headlessSha256 = headless ? sha256Bytes(headlessRead.bytes) : null;
+    const accountingReceiptSha256 = accountingReceiptRead.value
+      ? sha256Bytes(accountingReceiptRead.bytes)
+      : null;
     const verifierEvidenceSha256 = verifierEvidence.valid
-      ? await sha256File(verifierEvidencePath)
+      ? sha256Bytes(verifierEvidenceRead.bytes)
       : null;
     const normalized = normalizeTrial({
       runId,
       trialResult,
       headless,
       headlessReadError: headlessRead.error,
+      accounting,
       verifierEvidence: verifierEvidence.valid ? verifierEvidenceRead.value : null,
       verifierEvidenceError: verifierEvidence.error,
       source: {
@@ -85,6 +97,10 @@ export async function normalizeHarborJob({
         trialResultSha256,
         headlessResult: headless ? relativeSource(jobDir, headlessPath) : null,
         headlessResultSha256: headlessSha256,
+        accountingReceipt: accountingReceiptRead.value
+          ? relativeSource(jobDir, accountingReceiptPath)
+          : null,
+        accountingReceiptSha256,
         verifierEvidence: verifierEvidence.valid
           ? relativeSource(jobDir, verifierEvidencePath)
           : null,
@@ -96,6 +112,12 @@ export async function normalizeHarborJob({
     const caseDir = join(destination, "cases", taskSlug, entry.name);
     await mkdir(caseDir, { recursive: true, mode: 0o700 });
     if (headless) await writeOnceJson(join(caseDir, "headless-result.json"), headless);
+    if (accountingReceiptRead.value) {
+      await writeOnceBytes(
+        join(caseDir, "gateway-accounting-receipt.json"),
+        accountingReceiptRead.bytes,
+      );
+    }
     await writeOnceJson(join(caseDir, "normalized-result.json"), normalized);
     await writeOnceJson(join(caseDir, "provenance.json"), {
       schemaVersion: 1,
@@ -120,6 +142,7 @@ export async function normalizeHarborJob({
       trial: entry.name,
       trialResultSha256,
       headlessResultSha256: headlessSha256,
+      accountingReceiptSha256,
       verifierEvidenceSha256,
     });
   }
@@ -187,6 +210,7 @@ export function normalizeTrial({
   trialResult,
   headless,
   headlessReadError = null,
+  accounting = { valid: false, code: "accounting_receipt_missing", receipt: null },
   verifierEvidence = null,
   verifierEvidenceError = null,
   source = null,
@@ -200,8 +224,8 @@ export function normalizeTrial({
   const exitCode = trialResult.agent_result?.metadata?.pico?.exitCode ?? null;
   const exception = trialResult.exception_info;
   const infra = classifyInfra({ headless, exception });
-  const adapter = classifyAdapter({ headless, exitCode, headlessReadError });
-  const agent = classifyAgent(headless, exitCode);
+  const adapter = classifyAdapter({ headless, exitCode, headlessReadError, accounting });
+  const agent = classifyAgent(headless, exitCode, accounting);
   const verifier = {
     status:
       verifierEvidence === null
@@ -228,6 +252,20 @@ export function normalizeTrial({
     infra,
     adapter,
     agent,
+    accounting: accounting.valid
+      ? {
+          status: accounting.receipt.status,
+          withinBudget: accounting.receipt.withinBudget,
+          pricingSha256: accounting.receipt.pricingSha256,
+          receiptSha256: accounting.receipt.receiptSha256,
+          reservation: accounting.receipt.reservation,
+          actual: accounting.receipt.actual,
+          refund: accounting.receipt.refund,
+          supplement: accounting.receipt.supplement,
+          unreconciledReservation: accounting.receipt.unreconciledReservation,
+          receiptRef: "gateway-accounting-receipt.json",
+        }
+      : { status: "error", code: accounting.code, receiptRef: null },
     verifier,
     reward: {
       overall: verifier.status === "completed" ? overall : null,
@@ -236,6 +274,187 @@ export function normalizeTrial({
     source,
     provenanceRef: "provenance.json",
   };
+}
+
+function validateAccountingReceipt({ value, readError, runId, trialResult }) {
+  if (readError) {
+    return { valid: false, code: "accounting_receipt_invalid", receipt: null };
+  }
+  if (value === null) {
+    return { valid: false, code: "accounting_receipt_missing", receipt: null };
+  }
+  const keys = [
+    "actual",
+    "auth",
+    "modelRouteId",
+    "pricing",
+    "pricingSha256",
+    "protocol",
+    "receiptSha256",
+    "refund",
+    "requests",
+    "reservation",
+    "rounding",
+    "runId",
+    "schemaVersion",
+    "status",
+    "supplement",
+    "trialId",
+    "unreconciledReservation",
+    "withinBudget",
+  ];
+  if (
+    !isExactObject(value, keys) ||
+    value.schemaVersion !== 1 ||
+    value.runId !== runId ||
+    value.trialId !== trialResult.id ||
+    typeof value.modelRouteId !== "string" ||
+    value.modelRouteId.length === 0 ||
+    !["openai", "claude", "gemini"].includes(value.protocol) ||
+    value.rounding !== "ceil-per-request" ||
+    !["reconciled", "unreconciled"].includes(value.status) ||
+    typeof value.withinBudget !== "boolean"
+  ) {
+    return { valid: false, code: "accounting_receipt_identity_invalid", receipt: null };
+  }
+  const pricingKeys = [
+    "currency",
+    "input",
+    "model",
+    "output",
+    "providerId",
+    "schemaVersion",
+    "unit",
+  ];
+  const pricing = value.pricing;
+  if (
+    !isExactObject(value.auth, ["algorithm", "keyId", "tag"]) ||
+    value.auth.algorithm !== "hmac-sha256" ||
+    value.auth.keyId !== "run-capability-v1" ||
+    typeof value.auth.tag !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(value.auth.tag)
+  ) {
+    return { valid: false, code: "accounting_auth_invalid", receipt: null };
+  }
+  if (
+    !isExactObject(pricing, pricingKeys) ||
+    pricing.schemaVersion !== 1 ||
+    pricing.currency !== "CNY" ||
+    pricing.unit !== "microCNYPerMillionTokens" ||
+    typeof pricing.providerId !== "string" ||
+    typeof pricing.model !== "string" ||
+    value.modelRouteId !== `${pricing.providerId}/${pricing.model}` ||
+    !isNonnegativeSafeInteger(pricing.input) ||
+    !isNonnegativeSafeInteger(pricing.output) ||
+    sha256Canonical(pricing) !== value.pricingSha256
+  ) {
+    return { valid: false, code: "accounting_pricing_invalid", receipt: null };
+  }
+  const unsigned = { ...value };
+  delete unsigned.receiptSha256;
+  if (
+    typeof value.receiptSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(value.receiptSha256) ||
+    sha256Canonical(unsigned) !== value.receiptSha256
+  ) {
+    return { valid: false, code: "accounting_receipt_digest_invalid", receipt: null };
+  }
+  if (
+    !isExactObject(value.requests, ["attempted", "reconciled", "unreconciled"]) ||
+    !Object.values(value.requests).every(isNonnegativeSafeInteger) ||
+    value.requests.attempted !== value.requests.reconciled + value.requests.unreconciled ||
+    value.requests.attempted !== 1
+  ) {
+    return { valid: false, code: "accounting_requests_invalid", receipt: null };
+  }
+  const bucketNames = ["reservation", "actual", "refund", "supplement", "unreconciledReservation"];
+  for (const name of bucketNames) {
+    const bucketKeys =
+      name === "actual"
+        ? ["costCNY", "costMicroCNY", "inputTokens", "outputTokens"]
+        : ["costMicroCNY", "inputTokens", "outputTokens"];
+    if (
+      !isExactObject(value[name], bucketKeys) ||
+      !["costMicroCNY", "inputTokens", "outputTokens"].every((field) =>
+        isNonnegativeSafeInteger(value[name][field]),
+      )
+    ) {
+      return { valid: false, code: "accounting_totals_invalid", receipt: null };
+    }
+  }
+  const actual = value.actual;
+  if (
+    typeof actual.costCNY !== "number" ||
+    !Number.isFinite(actual.costCNY) ||
+    actual.costCNY !== actual.costMicroCNY / 1_000_000
+  ) {
+    return { valid: false, code: "accounting_cost_invalid", receipt: null };
+  }
+  for (const field of ["inputTokens", "outputTokens", "costMicroCNY"]) {
+    if (
+      value.reservation[field] +
+        value.supplement[field] -
+        value.refund[field] -
+        value.unreconciledReservation[field] !==
+      actual[field]
+    ) {
+      return { valid: false, code: "accounting_reconciliation_invalid", receipt: null };
+    }
+  }
+  const expectedCost =
+    value.requests.reconciled === 0
+      ? 0n
+      : (BigInt(actual.inputTokens) * BigInt(pricing.input) +
+          BigInt(actual.outputTokens) * BigInt(pricing.output) +
+          999_999n) /
+        1_000_000n;
+  if (
+    BigInt(actual.costMicroCNY) !== expectedCost ||
+    (value.status === "reconciled") !== (value.requests.unreconciled === 0)
+  ) {
+    return { valid: false, code: "accounting_cost_invalid", receipt: null };
+  }
+  const picoMetadata = trialResult.agent_result?.metadata?.pico;
+  const gatewayMetadata = picoMetadata?.gatewayAccounting;
+  if (
+    !gatewayMetadata ||
+    gatewayMetadata.receiptSha256 !== value.receiptSha256 ||
+    gatewayMetadata.pricingSha256 !== value.pricingSha256 ||
+    gatewayMetadata.costMicroCNY !== actual.costMicroCNY ||
+    gatewayMetadata.costCNY !== actual.costCNY ||
+    picoMetadata.costCNY !== actual.costCNY
+  ) {
+    return { valid: false, code: "accounting_metadata_mismatch", receipt: null };
+  }
+  return { valid: true, code: null, receipt: value };
+}
+
+function isExactObject(value, keys) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0")
+  );
+}
+
+function isNonnegativeSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Canonical(value) {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 function validateCtrfEvidence(value, readError) {
@@ -308,9 +527,16 @@ function classifyInfra({ headless, exception }) {
   return { status: "ok", code: null };
 }
 
-function classifyAdapter({ headless, exitCode, headlessReadError }) {
+function classifyAdapter({ headless, exitCode, headlessReadError, accounting }) {
   if (headlessReadError) return { status: "error", code: "headless_result_invalid" };
   if (!headless) return { status: "error", code: "headless_result_missing" };
+  if (!accounting.valid) return { status: "error", code: accounting.code };
+  if (accounting.receipt.status !== "reconciled") {
+    return { status: "error", code: "accounting_unreconciled" };
+  }
+  if (accounting.receipt.withinBudget !== true) {
+    return { status: "error", code: "accounting_budget_exceeded" };
+  }
   const expected = {
     completed: [0],
     invalid_request: [2],
@@ -328,14 +554,23 @@ function classifyAdapter({ headless, exitCode, headlessReadError }) {
   return { status: "ok", code: null };
 }
 
-function classifyAgent(headless, exitCode) {
+function classifyAgent(headless, exitCode, accounting) {
+  const actual = accounting.valid ? accounting.receipt.actual : null;
   return {
     status: headless?.status ?? "missing",
     exitCode,
     errorCode: headless?.error?.code ?? null,
     terminationConfirmed: headless?.terminationConfirmed ?? null,
     durationMs: headless?.durationMs ?? null,
-    usage: headless?.usage ?? null,
+    usage:
+      actual === null
+        ? null
+        : {
+            promptTokens: actual.inputTokens,
+            completionTokens: actual.outputTokens,
+            costCNY: actual.costCNY,
+          },
+    runtimeReportedUsage: headless?.usage ?? null,
   };
 }
 
@@ -370,12 +605,17 @@ async function readJson(path) {
 
 async function readJsonEvidence(path) {
   try {
-    return { value: JSON.parse(await readFile(path, "utf8")), error: null };
+    const bytes = await readFile(path);
+    return { value: JSON.parse(bytes.toString("utf8")), error: null, bytes };
   } catch (error) {
-    if (error?.code === "ENOENT") return { value: null, error: null };
-    if (error instanceof SyntaxError) return { value: null, error: "invalid_json" };
+    if (error?.code === "ENOENT") return { value: null, error: null, bytes: null };
+    if (error instanceof SyntaxError) return { value: null, error: "invalid_json", bytes: null };
     throw error;
   }
+}
+
+function sha256Bytes(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function sha256File(path) {

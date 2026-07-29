@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,15 +15,18 @@ test("Terminal-Bench normalizer separates task failures from infrastructure fail
   await writeTrial(jobDir, "passed", {
     reward: 1,
     headless: headless("completed", true),
+    runId: "fixture-run",
   });
   await writeTrial(jobDir, "task-failed", {
     reward: 0,
     headless: headless("completed", true),
+    runId: "fixture-run",
   });
   await writeTrial(jobDir, "unconfirmed", {
     reward: null,
     headless: headless("timed_out", false),
     exception: { exception_type: "RuntimeError" },
+    runId: "fixture-run",
   });
 
   const summary = await normalizeHarborJob({ jobDir, runDir, runId: "fixture-run" });
@@ -62,6 +66,7 @@ test("Terminal-Bench normalizer refuses to overwrite sealed case evidence", asyn
   await writeTrial(jobDir, "passed", {
     reward: 1,
     headless: headless("completed", true),
+    runId: "sealed-run",
   });
   await normalizeHarborJob({ jobDir, runDir, runId: "sealed-run", expectedTasks: 1 });
 
@@ -84,6 +89,7 @@ test("Terminal-Bench normalizer fails closed under concurrent publishers", async
   await writeTrial(jobDir, "passed", {
     reward: 1,
     headless: headless("completed", true),
+    runId: "publisher-a",
   });
 
   const attempts = await Promise.allSettled([
@@ -108,6 +114,7 @@ test("Terminal-Bench normalizer requires the expected task attempt matrix", asyn
     reward: 1,
     headless: headless("completed", true),
     taskName: "terminal-bench/example",
+    runId: "attempt-run",
   });
   const summary = await normalizeHarborJob({
     jobDir,
@@ -128,10 +135,12 @@ test("Terminal-Bench normalizer rejects duplicate trial identities", async (cont
   await writeTrial(jobDir, "first", {
     reward: 1,
     headless: headless("completed", true),
+    runId: "duplicate-trial-run",
   });
   await writeTrial(jobDir, "second", {
     reward: 1,
     headless: headless("completed", true),
+    runId: "duplicate-trial-run",
   });
   const second = JSON.parse(await readFile(join(jobDir, "second", "result.json"), "utf8"));
   second.id = "first";
@@ -154,6 +163,7 @@ test("Terminal-Bench normalizer classifies malformed Headless evidence", async (
   await writeTrial(jobDir, "malformed", {
     reward: 0,
     headless: headless("completed", true),
+    runId: "malformed-run",
   });
   await writeFile(join(jobDir, "malformed", "agent", "pico-result.json"), "{");
   const summary = await normalizeHarborJob({
@@ -174,6 +184,7 @@ test("Terminal-Bench normalizer requires verifier execution evidence", async (co
   await writeTrial(jobDir, "missing-ctrf", {
     reward: 0,
     headless: headless("completed", true),
+    runId: "missing-verifier-evidence",
   });
   await rm(join(jobDir, "missing-ctrf", "verifier", "ctrf.json"));
   const summary = await normalizeHarborJob({
@@ -195,6 +206,7 @@ test("Terminal-Bench normalizer rejects empty or inconsistent CTRF evidence", as
   await writeTrial(jobDir, "empty-ctrf", {
     reward: 1,
     headless: headless("completed", true),
+    runId: "invalid-verifier-evidence",
   });
   await writeFile(join(jobDir, "empty-ctrf", "verifier", "ctrf.json"), "{}");
   const summary = await normalizeHarborJob({
@@ -239,6 +251,7 @@ test("Terminal-Bench normalizer rejects incomplete or contradictory CTRF summari
     await writeTrial(jobDir, name, {
       reward: 1,
       headless: headless("completed", true),
+      runId: name,
     });
     await writeFile(join(jobDir, name, "verifier", "ctrf.json"), JSON.stringify(evidence));
     const summary = await normalizeHarborJob({
@@ -251,6 +264,68 @@ test("Terminal-Bench normalizer rejects incomplete or contradictory CTRF summari
     assert.equal(summary.trials[0].verifier.exceptionType, "VerifierEvidenceInvalid");
     assert.equal(summary.trials[0].primaryStatus, "verifier_error");
   }
+});
+
+test("Terminal-Bench normalizer publishes locked-pricing gateway accounting", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "accounted", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "accounted-run",
+    accounting: accountingReceipt("accounted-run", "accounted", 125_481, 4_697),
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "accounted-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.deepEqual(summary.trials[0].agent.usage, {
+    promptTokens: 125_481,
+    completionTokens: 4_697,
+    costCNY: 17.2451,
+  });
+  assert.equal(summary.trials[0].accounting.actual.costMicroCNY, 17_245_100);
+  assert.match(summary.trials[0].accounting.receiptSha256, /^[0-9a-f]{64}$/u);
+  assert.equal(
+    JSON.parse(
+      await readFile(
+        join(runDir, "cases", "accounted", "accounted", "gateway-accounting-receipt.json"),
+        "utf8",
+      ),
+    ).actual.costCNY,
+    17.2451,
+  );
+});
+
+test("Terminal-Bench normalizer fails closed without a valid accounting receipt", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-invalid-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "missing-accounting", {
+    reward: 1,
+    headless: headless("completed", true),
+    runId: "missing-accounting-run",
+  });
+  await rm(join(jobDir, "missing-accounting", "agent", "gateway-accounting-receipt.json"));
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "missing-accounting-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(summary.trials[0].adapter.code, "accounting_receipt_missing");
+  assert.equal(summary.trials[0].primaryStatus, "adapter_error");
 });
 
 function headless(status: string, terminationConfirmed: boolean) {
@@ -273,9 +348,12 @@ async function writeTrial(
     headless: ReturnType<typeof headless>;
     exception?: { exception_type: string };
     taskName?: string;
+    runId: string;
+    accounting?: ReturnType<typeof accountingReceipt>;
   },
 ) {
   const trialDir = join(jobDir, name);
+  const accounting = options.accounting ?? accountingReceipt(options.runId, name, 1, 1);
   await mkdir(join(trialDir, "agent"), { recursive: true });
   await mkdir(join(trialDir, "verifier"), { recursive: true });
   await writeFile(
@@ -295,6 +373,16 @@ async function writeTrial(
                 : options.headless.status === "invalid_request"
                   ? 2
                   : 0,
+            costCNY: accounting.actual.costCNY,
+            gatewayAccounting: {
+              schemaVersion: accounting.schemaVersion,
+              status: accounting.status,
+              withinBudget: accounting.withinBudget,
+              pricingSha256: accounting.pricingSha256,
+              receiptSha256: accounting.receiptSha256,
+              costMicroCNY: accounting.actual.costMicroCNY,
+              costCNY: accounting.actual.costCNY,
+            },
           },
         },
       },
@@ -303,6 +391,10 @@ async function writeTrial(
     }),
   );
   await writeFile(join(trialDir, "agent", "pico-result.json"), JSON.stringify(options.headless));
+  await writeFile(
+    join(trialDir, "agent", "gateway-accounting-receipt.json"),
+    JSON.stringify(accounting),
+  );
   await writeFile(
     join(trialDir, "verifier", "ctrf.json"),
     JSON.stringify({
@@ -313,4 +405,74 @@ async function writeTrial(
       },
     }),
   );
+}
+
+function accountingReceipt(
+  runId: string,
+  trialId: string,
+  inputTokens: number,
+  outputTokens: number,
+) {
+  const pricing = {
+    schemaVersion: 1,
+    providerId: "fixture",
+    model: "fixture-model",
+    currency: "CNY",
+    unit: "microCNYPerMillionTokens",
+    input: 100_000_000,
+    output: 1_000_000_000,
+  };
+  const pricingSha256 = sha256Canonical(pricing);
+  const costMicroCNY = Math.ceil(
+    (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000,
+  );
+  const receipt = {
+    schemaVersion: 1,
+    runId,
+    trialId,
+    protocol: "openai",
+    modelRouteId: "fixture/fixture-model",
+    pricing,
+    pricingSha256,
+    rounding: "ceil-per-request",
+    status: "reconciled",
+    withinBudget: true,
+    requests: { attempted: 1, reconciled: 1, unreconciled: 0 },
+    reservation: { inputTokens, outputTokens, costMicroCNY },
+    actual: {
+      inputTokens,
+      outputTokens,
+      costMicroCNY,
+      costCNY: costMicroCNY / 1_000_000,
+    },
+    refund: { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 },
+    supplement: { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 },
+    unreconciledReservation: {
+      inputTokens: 0,
+      outputTokens: 0,
+      costMicroCNY: 0,
+    },
+    auth: {
+      algorithm: "hmac-sha256",
+      keyId: "run-capability-v1",
+      tag: "a".repeat(64),
+    },
+  };
+  return { ...receipt, receiptSha256: sha256Canonical(receipt) };
+}
+
+function sha256Canonical(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
