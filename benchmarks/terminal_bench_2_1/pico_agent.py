@@ -1207,7 +1207,15 @@ def load_route_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("route config must be an object")
-    allowed = {"schemaVersion", "modelRouteId", "providerId", "provider", "thinkingEffort"}
+    allowed = {
+        "schemaVersion",
+        "modelRouteId",
+        "providerId",
+        "provider",
+        "pricing",
+        "pricingSha256",
+        "thinkingEffort",
+    }
     if set(value) - allowed or value.get("schemaVersion") != 1:
         raise ValueError("route config contains unsupported fields")
     provider = value.get("provider")
