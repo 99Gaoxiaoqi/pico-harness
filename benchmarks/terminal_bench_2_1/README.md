@@ -18,11 +18,18 @@ CLI，也不宣称官方 leaderboard parity。
 `--docker-host-gateway`，脚本只会把 loopback host 改写为
 `host.docker.internal`。
 
-真实凭据不会进入 Harbor task container，也不会经过 Harbor `--agent-env`。每个 trial
-在宿主启动独立、固定路由和模型、限时限流的 Provider gateway；container launcher
-通过 stdin 只接收该 trial 的 HMAC capability，且不会把 capability 留在子 shell 环境。
-运行后会扫描完整结果树中真实凭据及全部 trial capability 的 raw、JSON escaped、
-URL encoded 与 Base64 形态，命中时删除该次结果并阻止发布。
+真实凭据不会进入 Harbor/uvx/Compose 的 ambient env、cwd `.env` 或 task container。
+运行器先以 unlinked FD 把凭据交给独立 Gateway Supervisor；Harbor 是无凭据的同级进程，
+只通过另一个 unlinked FD 获得 supervisor socket 与本次随机 capability seed。每个
+trial 在宿主启动独立、固定路由和模型、限时限流的 workload gateway；container
+launcher 通过 stdin 只接收绑定 trial 的 HMAC capability，且不会把 capability 留在
+子 shell 环境。`npm run benchmark:terminal-bench:check-secret-boundary` 会用恶意
+Compose 变量插值验证真实 key 不可见。
+
+发布前后都会扫描完整结果树中真实凭据及全部 trial capability 的 raw、JSON escaped、
+URL encoded、Base64/Base64URL、hex、UTF-16 与有界 gzip 形态；命中或扫描超限时删除
+该次结果。`PUBLISHED.json` 记录 final scan 后、排除 marker 自身的完整树 hash，并在
+atomic marker 写入后复算一致。
 
 ```bash
 npm run benchmark:terminal-bench:single -- \

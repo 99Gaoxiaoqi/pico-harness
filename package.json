@@ -23,6 +23,7 @@
     "internal:headless:dev": "tsx --env-file-if-exists=.env --import ./src/tui/preload-env.ts src/internal/headless-one-shot-main.ts",
     "internal:headless": "node dist/internal/headless-one-shot-main.js",
     "benchmark:terminal-bench:canary": "node scripts/terminal-bench/run.mjs --mode canary --docker-host-gateway",
+    "benchmark:terminal-bench:check-secret-boundary": "node scripts/terminal-bench/check-secret-fd-boundary.mjs",
     "benchmark:terminal-bench:single": "node scripts/terminal-bench/run.mjs --mode single --docker-host-gateway",
     "benchmark:terminal-bench:normalize": "node scripts/terminal-bench/normalize-results.mjs",
     "desktop:dev": "npm run start --workspace @pico/desktop",
