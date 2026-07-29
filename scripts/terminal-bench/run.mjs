@@ -384,12 +384,18 @@ const harborArgs = [
   "RuntimeError",
 ];
 if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
-else harborArgs.push("--path", localDatasetPath);
+else harborArgs.push("--path", ".");
 const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv, projectRoot);
 const datasetGuard =
   localDatasetSnapshot === null
     ? null
     : await attachReadOnlyDatasetSnapshot(localDatasetSnapshot, localDatasetTreeSha256);
+const harborExecutionEnv = {
+  ...harborEnv,
+  PICO_TB_RESOURCE_REGISTRY_PATH: dockerOwnershipRegistryPath,
+  PICO_TB_RUN_ID: runId,
+  ...(datasetGuard === null ? {} : { PICO_TB_DATASET_FD: "4" }),
+};
 let harborExecution;
 let harborExecutionError;
 const cleanupErrors = [];
@@ -401,15 +407,18 @@ try {
     throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
   }
   harborExecution = await runCaptured(
-    join(harborVirtualEnvironment, "bin/harbor"),
-    harborArgs,
+    join(harborVirtualEnvironment, "bin/python"),
+    [join(projectRoot, "benchmarks/terminal_bench_2_1/harbor_bootstrap.py"), ...harborArgs],
     runRoot,
-    harborEnv,
+    harborExecutionEnv,
     JSON.stringify({
       socketPath: gatewaySupervisor.socketPath,
       capabilitySeed: gatewayCapabilitySeed,
       runId,
     }),
+    {
+      inheritedFileDescriptors: datasetGuard === null ? [] : [datasetGuard.descriptor],
+    },
   );
 } catch (error) {
   harborExecutionError = error;
@@ -757,7 +766,9 @@ async function attachReadOnlyDatasetSnapshot(snapshot, expectedHash) {
     if ((await hashDirectory(snapshot.mountPath)) !== expectedHash) {
       throw new Error("Terminal-Bench read-only dataset snapshot digest mismatch");
     }
+    const directoryHandle = await open(realMountPath, "r");
     return {
+      descriptor: directoryHandle.fd,
       async verifyAndDetach() {
         try {
           const currentImageSha256 = createHash("sha256")
@@ -772,14 +783,18 @@ async function attachReadOnlyDatasetSnapshot(snapshot, expectedHash) {
           }
         } finally {
           try {
-            await run(
-              "hdiutil",
-              ["detach", "-quiet", realMountPath],
-              projectRoot,
-              allowlistedHostEnv(process.env),
-            );
+            await directoryHandle.close();
           } finally {
-            await rm(snapshot.mountPath, { recursive: true, force: true });
+            try {
+              await run(
+                "hdiutil",
+                ["detach", "-quiet", realMountPath],
+                projectRoot,
+                allowlistedHostEnv(process.env),
+              );
+            } finally {
+              await rm(snapshot.mountPath, { recursive: true, force: true });
+            }
           }
         }
       },
