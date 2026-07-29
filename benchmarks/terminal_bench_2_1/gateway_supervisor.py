@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import hashlib
 import hmac
 import http.client
 import json
@@ -12,6 +13,8 @@ import signal
 import socket
 import socketserver
 import struct
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -27,7 +30,76 @@ MAX_REQUESTS = 128
 MAX_INPUT_TOKENS = 1_000_000
 MAX_OUTPUT_TOKENS = 65_536
 MAX_COST_MICRO_CNY = 250_000_000
-WORST_CASE_MICRO_CNY_PER_TOKEN = 1_000
+MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
+INPUT_RESERVATION_MARGIN_TOKENS = 1_024
+UPSTREAM_TIMEOUT_SEC = 120
+REVOKE_DEADLINE_SEC = 0.75
+
+
+class UpstreamRequest:
+    def __init__(self, worker_command: list[str] | None = None):
+        self.lock = threading.Lock()
+        self.process: subprocess.Popen[bytes] | None = None
+        self.cancelled = False
+        self.worker_command = worker_command
+
+    def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            if self.cancelled:
+                raise ValueError("gateway upstream request was cancelled")
+        process = subprocess.Popen(
+            self.worker_command
+            or [sys.executable, str(Path(__file__).resolve()), "--upstream-worker"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={
+                "PATH": str(Path(sys.executable).parent),
+                "PYTHONUNBUFFERED": "1",
+            },
+            start_new_session=True,
+        )
+        with self.lock:
+            cancelled = self.cancelled
+            if not cancelled:
+                self.process = process
+        if cancelled:
+            terminate_process(process, time.monotonic() + 0.4)
+            raise ValueError("gateway upstream request was cancelled")
+        try:
+            try:
+                stdout, _ = process.communicate(
+                    input=canonical_json(payload), timeout=UPSTREAM_TIMEOUT_SEC
+                )
+            except subprocess.TimeoutExpired as error:
+                self.cancel()
+                raise ValueError("gateway upstream request timed out") from error
+            with self.lock:
+                cancelled = self.cancelled
+            if cancelled:
+                raise ValueError("gateway upstream request was cancelled")
+            if process.returncode != 0 or len(stdout) > MAX_RESPONSE_BYTES * 2:
+                raise ValueError("gateway upstream worker failed")
+            value = json.loads(stdout)
+            if not isinstance(value, dict) or set(value) != {
+                "status",
+                "headers",
+                "body",
+            }:
+                raise ValueError("gateway upstream worker returned an invalid frame")
+            return value
+        finally:
+            with self.lock:
+                if self.process is process:
+                    self.process = None
+
+    def cancel(self, deadline: float | None = None) -> None:
+        with self.lock:
+            self.cancelled = True
+            process = self.process
+        if process is None or process.poll() is not None:
+            return
+        terminate_process(process, deadline)
 
 
 class GatewayState:
@@ -40,11 +112,14 @@ class GatewayState:
     ):
         self.provider = route_config["provider"]
         self.model = route_config["modelRouteId"].split("/", 1)[1]
+        self.pricing, self.pricing_sha256 = require_pricing(route_config, self.model)
         self.provider_secret = provider_secret
         self.run_id = run_id
         self.capability_seed = capability_seed
         self.owner_uid = os.getuid()
         self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
+        self.upstream_request_factory = UpstreamRequest
         self.trials: dict[str, dict[str, Any]] = {}
         self.nonces: set[str] = set()
 
@@ -105,6 +180,7 @@ class GatewayState:
                 "inputTokensRemaining": MAX_INPUT_TOKENS,
                 "outputTokensRemaining": MAX_OUTPUT_TOKENS,
                 "costMicroCNYRemaining": MAX_COST_MICRO_CNY,
+                "pricingSha256": self.pricing_sha256,
                 "revoked": False,
                 "active": set(),
             }
@@ -117,55 +193,58 @@ class GatewayState:
         body = base64.b64decode(request.get("body", ""), validate=True)
         path = require_path(request.get("path"), protocol, self.model)
         bounded_body, output_limit = bound_request(body, path, protocol, self.model)
-        input_limit = len(bounded_body)
-        cost_reservation = (
-            input_limit + output_limit
-        ) * WORST_CASE_MICRO_CNY_PER_TOKEN
-        upstream = urlsplit(self.provider["baseURL"])
-        connection_class = (
-            http.client.HTTPSConnection
-            if upstream.scheme == "https"
-            else http.client.HTTPConnection
-        )
-        connection = connection_class(upstream.hostname, upstream.port, timeout=120)
+        if len(bounded_body) > MAX_INPUT_TOKENS:
+            raise ValueError("gateway request exceeds input limit")
+        active = self.upstream_request_factory()
         with self.lock:
             trial = self.trials.get(trial_id)
             if trial is None:
                 raise ValueError("gateway trial is not registered")
+            input_reservation = min(
+                trial["inputTokensRemaining"],
+                len(bounded_body) + INPUT_RESERVATION_MARGIN_TOKENS,
+            )
+            cost_reservation = token_cost_micro_cny(
+                input_reservation, output_limit, self.pricing
+            )
             if (
                 trial["revoked"]
                 or time.monotonic() >= trial["expiresAt"]
                 or trial["requestsRemaining"] <= 0
-                or trial["inputTokensRemaining"] < input_limit
+                or input_reservation < len(bounded_body)
                 or trial["outputTokensRemaining"] < output_limit
                 or trial["costMicroCNYRemaining"] < cost_reservation
                 or trial["active"]
             ):
                 raise ValueError("gateway trial quota exhausted")
             trial["requestsRemaining"] -= 1
-            trial["inputTokensRemaining"] -= input_limit
+            trial["inputTokensRemaining"] -= input_reservation
             trial["outputTokensRemaining"] -= output_limit
             trial["costMicroCNYRemaining"] -= cost_reservation
-            trial["active"].add(connection)
+            trial["active"].add(active)
         try:
-            connection.request(
-                "POST",
-                upstream_path(upstream.path, path, protocol, self.provider_secret),
-                body=bounded_body,
-                headers=upstream_headers(protocol, self.provider_secret, request.get("headers")),
+            upstream = active.execute(
+                {
+                    "baseURL": self.provider["baseURL"],
+                    "protocol": protocol,
+                    "providerSecret": self.provider_secret,
+                    "path": path,
+                    "body": base64.b64encode(bounded_body).decode(),
+                    "headers": request.get("headers"),
+                }
             )
-            response = connection.getresponse()
-            response_body = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(response_body) > MAX_RESPONSE_BYTES:
-                raise ValueError("gateway response exceeds limit")
-            with self.lock:
-                if trial["revoked"]:
-                    raise ValueError("gateway trial revoked during upstream request")
-            return {
-                "status": response.status,
+            status, response_headers, response_body = decode_upstream_result(upstream)
+            if status < 200 or status >= 300:
+                raise ValueError("gateway does not retry upstream responses")
+            actual_input, actual_output = parse_usage(response_body, protocol)
+            actual_cost = token_cost_micro_cny(
+                actual_input, actual_output, self.pricing
+            )
+            response = {
+                "status": status,
                 "headers": [
                     [name, value]
-                    for name, value in response.getheaders()
+                    for name, value in response_headers
                     if name.lower()
                     in {
                         "content-type",
@@ -177,13 +256,39 @@ class GatewayState:
                 ],
                 "body": base64.b64encode(response_body).decode(),
             }
+            with self.condition:
+                if trial["revoked"]:
+                    raise ValueError("gateway trial revoked during upstream request")
+                trial["inputTokensRemaining"] += input_reservation - actual_input
+                trial["outputTokensRemaining"] += output_limit - actual_output
+                trial["costMicroCNYRemaining"] += cost_reservation - actual_cost
+                over_quota = (
+                    actual_input > MAX_INPUT_TOKENS
+                    or actual_output > output_limit
+                    or trial["inputTokensRemaining"] < 0
+                    or trial["outputTokensRemaining"] < 0
+                    or trial["costMicroCNYRemaining"] < 0
+                )
+                if over_quota:
+                    trial["revoked"] = True
+                trial["active"].discard(active)
+                self.condition.notify_all()
+            if over_quota:
+                raise ValueError("gateway response usage exceeds quota")
+            return response
+        except Exception:
+            with self.condition:
+                if active in trial["active"]:
+                    trial["revoked"] = True
+                    trial["active"].discard(active)
+                    self.condition.notify_all()
+            raise
         finally:
-            with self.lock:
-                trial["active"].discard(connection)
-            connection.close()
+            active.cancel()
 
     def revoke(self, trial_id: Any) -> None:
         key = require_trial_id(trial_id)
+        deadline = time.monotonic() + REVOKE_DEADLINE_SEC
         with self.lock:
             trial = self.trials.get(key)
             if trial is None:
@@ -193,6 +298,7 @@ class GatewayState:
                     "inputTokensRemaining": 0,
                     "outputTokensRemaining": 0,
                     "costMicroCNYRemaining": 0,
+                    "pricingSha256": self.pricing_sha256,
                     "revoked": True,
                     "active": set(),
                 }
@@ -200,12 +306,13 @@ class GatewayState:
             trial["revoked"] = True
             active = list(trial["active"])
         for connection in active:
-            if connection.sock is not None:
-                try:
-                    connection.sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-            connection.close()
+            connection.cancel(deadline)
+        with self.condition:
+            while trial["active"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("gateway revoke deadline exceeded")
+                self.condition.wait(timeout=min(remaining, 0.05))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -255,9 +362,15 @@ class SupervisorServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--socket", required=True)
-    parser.add_argument("--route-config", required=True)
+    parser.add_argument("--socket")
+    parser.add_argument("--route-config")
+    parser.add_argument("--upstream-worker", action="store_true")
     args = parser.parse_args()
+    if args.upstream_worker:
+        run_upstream_worker()
+        return
+    if not args.socket or not args.route_config:
+        parser.error("--socket and --route-config are required")
     route_config = json.loads(Path(args.route_config).read_text(encoding="utf-8"))
     secret_frame = json.loads(read_pipe_frame(0))
     if (
@@ -336,6 +449,247 @@ def canonical_json(value: Any) -> bytes:
     ).encode()
 
 
+def remaining_cancel_time(deadline: float | None, maximum: float) -> float:
+    if deadline is None:
+        return maximum
+    return max(0.0, min(maximum, deadline - time.monotonic()))
+
+
+def terminate_process(
+    process: subprocess.Popen[bytes], deadline: float | None
+) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=remaining_cancel_time(deadline, 0.2))
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=remaining_cancel_time(deadline, 0.2))
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def require_pricing(
+    route_config: dict[str, Any], model: str
+) -> tuple[dict[str, int], str]:
+    pricing = route_config.get("pricing")
+    provider_id = route_config.get("providerId")
+    expected_keys = {
+        "schemaVersion",
+        "providerId",
+        "model",
+        "currency",
+        "unit",
+        "input",
+        "output",
+    }
+    if (
+        not isinstance(provider_id, str)
+        or not provider_id
+        or not isinstance(model, str)
+        or not model
+        or route_config.get("modelRouteId") != f"{provider_id}/{model}"
+        or not isinstance(pricing, dict)
+        or set(pricing) != expected_keys
+    ):
+        raise ValueError("gateway pricing contract is invalid")
+    if (
+        pricing["schemaVersion"] != 1
+        or pricing["providerId"] != provider_id
+        or pricing["model"] != model
+        or pricing["currency"] != "CNY"
+        or pricing["unit"] != "microCNYPerMillionTokens"
+    ):
+        raise ValueError("gateway pricing route mismatch")
+    for field in ("input", "output"):
+        value = pricing[field]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > MAX_PRICE_MICRO_CNY_PER_MILLION
+        ):
+            raise ValueError("gateway pricing rate is invalid")
+    digest = route_config.get("pricingSha256")
+    expected = hashlib.sha256(canonical_json(pricing)).hexdigest()
+    if (
+        not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or not hmac.compare_digest(digest, expected)
+    ):
+        raise ValueError("gateway pricing digest mismatch")
+    return {"input": pricing["input"], "output": pricing["output"]}, digest
+
+
+def token_cost_micro_cny(
+    input_tokens: int, output_tokens: int, pricing: dict[str, int]
+) -> int:
+    numerator = input_tokens * pricing["input"] + output_tokens * pricing["output"]
+    return (numerator + 999_999) // 1_000_000
+
+
+def require_usage_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"gateway usage field {field} is invalid")
+    return value
+
+
+def parse_usage(response_body: bytes, protocol: str) -> tuple[int, int]:
+    try:
+        value = json.loads(response_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("gateway response is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError("gateway response must be an object")
+    if protocol == "openai":
+        usage = value.get("usage")
+        if not isinstance(usage, dict):
+            raise ValueError("gateway response is missing usage")
+        input_tokens = require_usage_int(usage.get("prompt_tokens"), "prompt_tokens")
+        output_tokens = require_usage_int(
+            usage.get("completion_tokens"), "completion_tokens"
+        )
+        if "total_tokens" in usage and require_usage_int(
+            usage["total_tokens"], "total_tokens"
+        ) != input_tokens + output_tokens:
+            raise ValueError("gateway response usage total is inconsistent")
+        return input_tokens, output_tokens
+    if protocol == "claude":
+        usage = value.get("usage")
+        if not isinstance(usage, dict):
+            raise ValueError("gateway response is missing usage")
+        input_tokens = require_usage_int(usage.get("input_tokens"), "input_tokens")
+        for field in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+            if field in usage:
+                input_tokens += require_usage_int(usage[field], field)
+        return input_tokens, require_usage_int(
+            usage.get("output_tokens"), "output_tokens"
+        )
+    if protocol == "gemini":
+        usage = value.get("usageMetadata")
+        if not isinstance(usage, dict):
+            raise ValueError("gateway response is missing usage")
+        input_tokens = require_usage_int(
+            usage.get("promptTokenCount"), "promptTokenCount"
+        )
+        candidates = require_usage_int(
+            usage.get("candidatesTokenCount"), "candidatesTokenCount"
+        )
+        total = require_usage_int(usage.get("totalTokenCount"), "totalTokenCount")
+        if total < input_tokens + candidates:
+            raise ValueError("gateway response usage total is inconsistent")
+        output_tokens = total - input_tokens
+        if "thoughtsTokenCount" in usage and require_usage_int(
+            usage["thoughtsTokenCount"], "thoughtsTokenCount"
+        ) != output_tokens - candidates:
+            raise ValueError("gateway response reasoning usage is inconsistent")
+        return input_tokens, output_tokens
+    raise ValueError("gateway usage protocol is unsupported")
+
+
+def decode_upstream_result(
+    value: dict[str, Any]
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    status = value.get("status")
+    headers = value.get("headers")
+    encoded_body = value.get("body")
+    if (
+        isinstance(status, bool)
+        or not isinstance(status, int)
+        or status < 100
+        or status > 599
+        or not isinstance(headers, list)
+        or len(headers) > 256
+        or not isinstance(encoded_body, str)
+    ):
+        raise ValueError("gateway upstream worker returned an invalid response")
+    parsed_headers: list[tuple[str, str]] = []
+    for header in headers:
+        if (
+            not isinstance(header, list)
+            or len(header) != 2
+            or not all(isinstance(part, str) for part in header)
+            or any(len(part) > 8_192 for part in header)
+        ):
+            raise ValueError("gateway upstream worker returned invalid headers")
+        parsed_headers.append((header[0], header[1]))
+    body = base64.b64decode(encoded_body, validate=True)
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ValueError("gateway response exceeds limit")
+    return status, parsed_headers, body
+
+
+def run_upstream_worker() -> None:
+    parent_pid = os.getppid()
+    threading.Thread(
+        target=exit_when_parent_exits,
+        args=(parent_pid,),
+        daemon=True,
+    ).start()
+    raw = sys.stdin.buffer.read(MAX_FRAME_BYTES * 2 + 1)
+    if not raw or len(raw) > MAX_FRAME_BYTES * 2:
+        raise ValueError("gateway upstream worker frame is invalid")
+    request = json.loads(raw)
+    if not isinstance(request, dict) or set(request) != {
+        "baseURL",
+        "protocol",
+        "providerSecret",
+        "path",
+        "body",
+        "headers",
+    }:
+        raise ValueError("gateway upstream worker frame is invalid")
+    base_url = request["baseURL"]
+    protocol = request["protocol"]
+    secret = request["providerSecret"]
+    path = request["path"]
+    encoded_body = request["body"]
+    if not all(
+        isinstance(item, str)
+        for item in (base_url, protocol, secret, path, encoded_body)
+    ):
+        raise ValueError("gateway upstream worker fields are invalid")
+    upstream = urlsplit(base_url)
+    if upstream.scheme not in {"http", "https"} or not upstream.hostname:
+        raise ValueError("gateway upstream URL is invalid")
+    body = base64.b64decode(encoded_body, validate=True)
+    connection_class = (
+        http.client.HTTPSConnection
+        if upstream.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    connection = connection_class(upstream.hostname, upstream.port, timeout=UPSTREAM_TIMEOUT_SEC)
+    try:
+        connection.request(
+            "POST",
+            upstream_path(upstream.path, path, protocol, secret),
+            body=body,
+            headers=upstream_headers(protocol, secret, request.get("headers")),
+        )
+        response = connection.getresponse()
+        response_body = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(response_body) > MAX_RESPONSE_BYTES:
+            raise ValueError("gateway response exceeds limit")
+        result = {
+            "status": response.status,
+            "headers": [[name, value] for name, value in response.getheaders()],
+            "body": base64.b64encode(response_body).decode(),
+        }
+        sys.stdout.buffer.write(canonical_json(result))
+        sys.stdout.buffer.flush()
+    finally:
+        connection.close()
+
+
+def exit_when_parent_exits(parent_pid: int) -> None:
+    while True:
+        time.sleep(0.05)
+        if os.getppid() != parent_pid:
+            os._exit(1)
+
+
 def read_pipe_frame(descriptor: int) -> bytes:
     chunks: list[bytes] = []
     size = 0
@@ -383,10 +737,7 @@ def require_path(value: Any, protocol: str, model: str) -> str:
         raise ValueError("gateway path mismatch")
     if protocol == "claude" and split.path != "/messages":
         raise ValueError("gateway path mismatch")
-    if protocol == "gemini" and split.path not in {
-        f"/v1beta/models/{model}:generateContent",
-        f"/v1beta/models/{model}:streamGenerateContent",
-    }:
+    if protocol == "gemini" and split.path != f"/v1beta/models/{model}:generateContent":
         raise ValueError("gateway path mismatch")
     return value
 
@@ -395,6 +746,8 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
     value = json.loads(body)
     if not isinstance(value, dict):
         raise ValueError("gateway request must be an object")
+    if value.get("stream") not in {None, False}:
+        raise ValueError("gateway streaming requests are unsupported")
     if protocol == "gemini":
         generation = value.setdefault("generationConfig", {})
         if not isinstance(generation, dict):
@@ -431,6 +784,9 @@ def upstream_headers(
     protocol: str, provider_secret: str, incoming: Any
 ) -> dict[str, str]:
     incoming_headers = incoming if isinstance(incoming, dict) else {}
+    for field in ("x-stainless-retry-count", "x-retry-count"):
+        if field in incoming_headers and str(incoming_headers[field]) not in {"", "0"}:
+            raise ValueError("gateway retried requests are unsupported")
     headers = {
         "Content-Type": str(incoming_headers.get("content-type", "application/json")),
         "Accept": str(incoming_headers.get("accept", "*/*")),
