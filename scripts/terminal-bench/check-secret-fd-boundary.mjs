@@ -1,8 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { allowlistedHostEnv, openUnlinkedSecret } from "./host-secret-boundary.mjs";
+import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
+import { assertTaskComposePolicy } from "./container-policy.mjs";
 
 const secretEnv = "PICO_TB_PROVIDER_API_KEY";
 const secret = `PICO_TB_FD_BOUNDARY_${process.pid}_${Date.now()}`;
@@ -29,40 +31,57 @@ try {
       "",
     ].join("\n"),
   );
-  const secretHandle = await openUnlinkedSecret(secret, root);
+  const policyTaskRoot = join(root, "policy-task");
+  await mkdir(join(policyTaskRoot, "environment"), { recursive: true });
+  await writeFile(
+    join(policyTaskRoot, "environment", "compose.yaml"),
+    [
+      "services:",
+      "  malicious-task:",
+      "    image: node:22-bookworm",
+      "    privileged: true",
+      "",
+    ].join("\n"),
+  );
+  await assert.rejects(
+    assertTaskComposePolicy(policyTaskRoot, allowlistedHostEnv(process.env)),
+    /violates host isolation/u,
+  );
   const childEnv = allowlistedHostEnv(process.env);
   const childScript = [
     "import os, subprocess, sys",
-    `secret = os.pread(3, 65536, 0).decode()`,
+    `secret = os.read(3, 65536).decode()`,
     "os.close(3)",
     `assert secret == ${JSON.stringify(secret)}`,
     `assert ${JSON.stringify(secretEnv)} not in os.environ`,
     "result = subprocess.run(sys.argv[1:], check=True, capture_output=True, text=True)",
     "assert result.stdout == 'ABSENT'",
   ].join("; ");
-  try {
-    await run(
-      "python3",
-      [
-        "-c",
-        childScript,
-        "docker",
-        "compose",
-        "--project-name",
-        project,
-        "-f",
-        composePath,
-        "run",
-        "--rm",
-        "--no-deps",
-        "malicious-task",
-      ],
-      childEnv,
-      secretHandle.fd,
-    );
-  } finally {
-    await secretHandle.close();
-  }
+  await run(
+    "python3",
+    [
+      "-c",
+      childScript,
+      "docker",
+      "compose",
+      "--project-name",
+      project,
+      "-f",
+      composePath,
+      "run",
+      "--rm",
+      "--no-deps",
+      "malicious-task",
+    ],
+    childEnv,
+    secret,
+  );
+  await run(
+    "python3",
+    [join(import.meta.dirname, "check-gateway-supervisor-security.py")],
+    childEnv,
+  );
+  await run(process.execPath, [join(import.meta.dirname, "check-network-boundary.mjs")], childEnv);
   process.stdout.write("Terminal-Bench provider secret FD boundary passed.\n");
 } finally {
   delete process.env[secretEnv];
@@ -74,12 +93,13 @@ try {
   await rm(root, { recursive: true, force: true });
 }
 
-function run(command, args, env, secretFd = "ignore") {
+function run(command, args, env, secret = null) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       env,
-      stdio: ["ignore", "inherit", "inherit", secretFd],
+      stdio: ["ignore", "inherit", "inherit", secret === null ? "ignore" : "pipe"],
     });
+    if (secret !== null) child.stdio[3].end(secret);
     child.once("error", reject);
     child.once("exit", (code) => {
       if (code === 0) resolvePromise();

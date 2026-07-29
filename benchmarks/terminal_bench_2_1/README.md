@@ -19,17 +19,23 @@ CLI，也不宣称官方 leaderboard parity。
 `host.docker.internal`。
 
 真实凭据不会进入 Harbor/uvx/Compose 的 ambient env、cwd `.env` 或 task container。
-运行器先以 unlinked FD 把凭据交给独立 Gateway Supervisor；Harbor 是无凭据的同级进程，
-只通过另一个 unlinked FD 获得 supervisor socket 与本次随机 capability seed。每个
-trial 在宿主启动独立、固定路由和模型、限时限流的 workload gateway；container
-launcher 通过 stdin 只接收绑定 trial 的 HMAC capability，且不会把 capability 留在
-子 shell 环境。`npm run benchmark:terminal-bench:check-secret-boundary` 会用恶意
-Compose 变量插值验证真实 key 不可见。
+运行器通过匿名 pipe 把凭据交给独立 Gateway Supervisor；Harbor 是无凭据的同级进程，
+只通过另一个匿名 pipe 获得 supervisor socket、本次 run identity 与随机 root seed。
+Supervisor control plane 同时校验同 UID peer credential、run/trial identity、HMAC、
+时钟窗与单次 nonce；trial 必须先注册，不能由 proxy 请求自动创建。每个 trial 在宿主
+启动独立 workload gateway，通过一次性 stdin enrollment 绑定 task container 的网络
+peer identity；container 内只获得无权限含义的固定 SDK 占位值。Supervisor 对固定
+route/model/path、TTL、并发、调用次数、input/output token 与最坏价格上限做原子预留，
+revoke 会拒绝新请求、关闭在途上游并丢弃迟到响应。
+`npm run benchmark:terminal-bench:check-secret-boundary` 会验证恶意 Compose 插值、
+pre-start container profile、无 root seed 同 UID 调用、nonce 重放、未注册 trial、
+并发超卖、revoke-before-use 与在途 revoke。
 
-发布前后都会扫描完整结果树中真实凭据及全部 trial capability 的 raw、JSON escaped、
-URL encoded、Base64/Base64URL、hex、UTF-16 与有界 gzip 形态；命中或扫描超限时删除
-该次结果。`PUBLISHED.json` 记录 final scan 后、排除 marker 自身的完整树 hash，并在
-atomic marker 写入后复算一致。
+发布前后都会扫描完整结果树中真实凭据与 root seed 的 raw、JSON escaped、URL encoded、
+Base64/Base64URL、hex、UTF-16，以及有界嵌套 gzip/tar 形态；不支持的压缩归档、命中或
+扫描/展开超限都会 fail closed。全部结果先写 `work/` staging，重写内部路径、扫描、计算
+完整树 hash、写 sealed marker 并 fsync 后，才原子 rename 到 `runs/`，随后 fsync parent
+并复算 hash；启动恢复会把残留 staging 或 marker/hash 不一致的结果移入 `quarantine/`。
 
 ```bash
 npm run benchmark:terminal-bench:single -- \
@@ -57,6 +63,8 @@ output/benchmarks/terminal-bench-2.1/runs/<run-id>/
 首批固定 12 题见 `canary-task-names.txt`；full 模式的固定 89 题 identity matrix
 见 `full-task-names.txt`。canary 从本机 Harbor content-addressed cache 按
 `canary-task-lock.json` 校验并离线 staging，避免运行中依赖 registry。Harbor 外层保留题目原始 timeout，
+Harbor 自身及其 82 个传递依赖由 `harbor-constraints.txt` 固定，并以 `uvx --offline`
+运行；本机 cache 不完整时直接失败，不回退到网络解析。
 Headless 内层预算按 `outer - shutdownGrace(30s) - flushMargin(5s)` 收缩，避免外层
 先取消而丢失可信终态。因此结果明确标记为 `localCanaryOnly` /
 `leaderboardComparable: false`。官方榜要求 89 题、每题至少 5 trials、不得覆盖
