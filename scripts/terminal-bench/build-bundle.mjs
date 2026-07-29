@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -57,6 +57,21 @@ export async function buildPicoBundle(outputPath) {
   const lockfileSha256 = createHash("sha256")
     .update(await readFile(join(stage, "package-lock.json")))
     .digest("hex");
+  const approvedLockfileSha256 = (
+    await readFile(
+      join(projectRoot, "benchmarks/terminal_bench_2_1/bundle-lock-sha256.txt"),
+      "utf8",
+    )
+  ).trim();
+  if (lockfileSha256 !== approvedLockfileSha256) {
+    throw new Error("Terminal-Bench bundle dependency lock is not pre-approved");
+  }
+  await rm(join(stage, "node_modules/.bin"), { recursive: true, force: true });
+  await rm(join(stage, "node_modules/@pico/protocol"), { recursive: true, force: true });
+  await cp(join(stage, "packages/protocol"), join(stage, "node_modules/@pico/protocol"), {
+    recursive: true,
+  });
+  await assertNoLinks(stage);
   await mkdir(dirname(destination), { recursive: true });
   await run("tar", ["-czf", destination, "-C", stage, "."], projectRoot);
   const digest = createHash("sha256")
@@ -64,6 +79,18 @@ export async function buildPicoBundle(outputPath) {
     .digest("hex");
   await rm(stage, { recursive: true, force: true });
   return { path: destination, sha256: digest, lockfileSha256 };
+}
+
+async function assertNoLinks(root) {
+  async function visit(path) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      throw new Error(`Terminal-Bench bundle contains a symbolic link: ${path}`);
+    }
+    if (!info.isDirectory()) return;
+    for (const entry of await readdir(path)) await visit(join(path, entry));
+  }
+  await visit(root);
 }
 
 function run(command, args, cwd) {

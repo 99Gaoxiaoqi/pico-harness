@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import http.client
@@ -8,13 +9,14 @@ import json
 import os
 import re
 import shlex
+import socket
 import threading
 import time
 import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, override
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
@@ -24,6 +26,8 @@ from harbor.environments.docker.docker import (
 )
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
+
+_SUPERVISOR_CONFIG: dict[str, str] | None = None
 
 
 class PicoInstalledAgent(BaseInstalledAgent):
@@ -36,7 +40,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
     _PICO_RESULT = PurePosixPath(EnvironmentPaths.agent_dir / "pico-result.json")
     _EXIT_CODE = PurePosixPath(EnvironmentPaths.agent_dir / "pico-exit-code.txt")
     _TRACE_EXPORT = PurePosixPath(EnvironmentPaths.agent_dir / "trace.json")
-    _HOST_SECRET_ENV = "PICO_TB_PROVIDER_API_KEY"
+    _SUPERVISOR_SOCKET_FD = 3
     _SECRET_ENV = "PICO_TB_GATEWAY_TOKEN"
     _NODE_VERSION = "22.14.0"
     _NODE_SHA256 = {
@@ -86,9 +90,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
             result_flush_margin_ms, "result_flush_margin_ms"
         )
         self._route_config = load_route_config(self._route_config_path)
-        self._provider_secret = os.environ.get(self._HOST_SECRET_ENV)
-        if not self._provider_secret or "\n" in self._provider_secret:
-            raise ValueError(f"{self._HOST_SECRET_ENV} must contain one non-empty line")
+        self._supervisor_config = read_supervisor_config(self._SUPERVISOR_SOCKET_FD)
         if self.model_name != self._route_config["modelRouteId"]:
             raise ValueError("Harbor --model must exactly match route_config.modelRouteId")
 
@@ -106,6 +108,11 @@ class PicoInstalledAgent(BaseInstalledAgent):
                 f"printf '%s  %s\\n' {shlex.quote(self._bundle_sha256)} "
                 f"{shlex.quote(remote_bundle)} "
                 "| sha256sum -c -; "
+                f"tar -tzf {shlex.quote(remote_bundle)} "
+                "| awk '/^\\// || /(^|\\/)\\.\\.($|\\/)/ {{ exit 2 }}'; "
+                f"tar -tvzf {shlex.quote(remote_bundle)} "
+                "| awk 'substr($1,1,1) == \"l\" || substr($1,1,1) == \"h\" "
+                "{{ exit 2 }}'; "
                 f"rm -rf {self._REMOTE_ROOT.as_posix()}; "
                 f"mkdir -p {self._REMOTE_ROOT.as_posix()}; "
                 f"tar -xzf {shlex.quote(remote_bundle)} -C {self._REMOTE_ROOT.as_posix()}; "
@@ -165,9 +172,9 @@ rm -f {remote_archive}
         session_id = f"tb21-{context_id[:24]}-{trial_key[:24]}"
         route_config = self._route_config
         gateway = ProviderGateway(
-            provider=route_config["provider"],
-            model=route_config["modelRouteId"].split("/", 1)[1],
-            provider_secret=self._provider_secret,
+            protocol=route_config["provider"]["protocol"],
+            supervisor_socket=self._supervisor_config["socketPath"],
+            capability_seed=self._supervisor_config["capabilitySeed"],
             context_id=context_id,
             ttl_sec=outer_timeout_sec,
         )
@@ -246,7 +253,7 @@ rm -f {remote_archive}
                 environment,
                 gateway.capability.encode("utf-8"),
                 timeout_sec=remaining_budget(outer_deadline, loop.time()),
-                secret_env_names={self._HOST_SECRET_ENV, self._SECRET_ENV},
+                secret_env_names={self._SECRET_ENV},
             )
         finally:
             gateway.stop()
@@ -307,21 +314,22 @@ class ProviderGateway:
     def __init__(
         self,
         *,
-        provider: dict[str, Any],
-        model: str,
-        provider_secret: str,
+        protocol: str,
+        supervisor_socket: str,
+        capability_seed: str,
         context_id: str,
         ttl_sec: float,
     ):
-        self._provider = provider
-        self._model = model
-        self._provider_secret = provider_secret
+        self._protocol = protocol
+        self._supervisor_socket = supervisor_socket
+        self._context_id = context_id
+        self._ttl_sec = ttl_sec
         self._expires_at = time.monotonic() + ttl_sec
-        self._requests_remaining = 128
         self._request_lock = threading.Lock()
         self._request_slot = threading.BoundedSemaphore(1)
+        self._revoked = False
         self.capability = hmac.new(
-            provider_secret.encode(),
+            capability_seed.encode(),
             f"pico-terminal-bench:{context_id}".encode(),
             hashlib.sha256,
         ).hexdigest()
@@ -349,6 +357,14 @@ class ProviderGateway:
         self._thread.start()
 
     def stop(self) -> None:
+        with self._request_lock:
+            self._revoked = True
+        try:
+            self._supervisor_request(
+                {"action": "revoke", "trialId": self._context_id}
+            )
+        except Exception:
+            pass
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -360,111 +376,95 @@ class ProviderGateway:
             handler.send_error(429, "Pico benchmark gateway concurrency limit")
             return
         try:
-            with self._request_lock:
-                if time.monotonic() >= self._expires_at or self._requests_remaining <= 0:
-                    raise ValueError("gateway capability expired")
-                self._requests_remaining -= 1
+            self._authenticate(handler)
             length = int(handler.headers.get("content-length", "0"))
             if length < 1 or length > 8 * 1024 * 1024:
                 raise ValueError("request body is outside the gateway limit")
-            body = self._bound_request(handler.rfile.read(length), handler.path)
-            upstream = urlsplit(self._provider["baseURL"])
-            path = self._upstream_path(upstream.path, handler.path)
-            headers = self._upstream_headers(handler)
-            connection_class = (
-                http.client.HTTPSConnection
-                if upstream.scheme == "https"
-                else http.client.HTTPConnection
+            with self._request_lock:
+                if self._revoked or time.monotonic() >= self._expires_at:
+                    raise ValueError("gateway capability expired")
+            response = self._supervisor_request(
+                {
+                    "action": "proxy",
+                    "trialId": self._context_id,
+                    "ttlSec": self._ttl_sec,
+                    "protocol": self._protocol,
+                    "path": handler.path,
+                    "headers": {
+                        "content-type": handler.headers.get(
+                            "content-type", "application/json"
+                        ),
+                        "accept": handler.headers.get("accept", "*/*"),
+                        "anthropic-version": handler.headers.get(
+                            "anthropic-version"
+                        ),
+                    },
+                    "body": base64.b64encode(handler.rfile.read(length)).decode(),
+                }
             )
-            connection = connection_class(upstream.hostname, upstream.port, timeout=120)
-            try:
-                connection.request("POST", path, body=body, headers=headers)
-                response = connection.getresponse()
-                handler.send_response(response.status)
-                for name, value in response.getheaders():
-                    if name.lower() in {
-                        "content-type",
-                        "retry-after",
-                        "x-ratelimit-limit-requests",
-                        "x-ratelimit-remaining-requests",
-                        "x-ratelimit-reset-requests",
-                    }:
-                        handler.send_header(name, value)
-                handler.send_header("Connection", "close")
-                handler.end_headers()
-                while chunk := response.read(64 * 1024):
-                    handler.wfile.write(chunk)
-                    handler.wfile.flush()
-            finally:
-                connection.close()
-                handler.close_connection = True
+            handler.send_response(int(response["status"]))
+            for name, value in response.get("headers", []):
+                handler.send_header(str(name), str(value))
+            body = base64.b64decode(response.get("body", ""), validate=True)
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(body)
+            handler.wfile.flush()
+            handler.close_connection = True
         except Exception:
             handler.send_error(502, "Pico benchmark credential gateway rejected the request")
         finally:
             self._request_slot.release()
 
-    def _bound_request(self, body: bytes, path: str) -> bytes:
-        protocol = self._provider["protocol"]
-        if protocol == "gemini":
-            if f"/models/{self._model}:" not in urlsplit(path).path:
-                raise ValueError("gateway model mismatch")
-            value = json.loads(body)
-            if not isinstance(value, dict):
-                raise ValueError("gateway request must be an object")
-            generation = value.setdefault("generationConfig", {})
-            if not isinstance(generation, dict):
-                raise ValueError("gateway generation config must be an object")
-            requested = generation.get("maxOutputTokens", 8_192)
-            generation["maxOutputTokens"] = min(int(requested), 8_192)
-            return json.dumps(value, separators=(",", ":")).encode()
-        value = json.loads(body)
-        if not isinstance(value, dict) or value.get("model") != self._model:
-            raise ValueError("gateway model mismatch")
-        requested = value.get("max_tokens", value.get("max_completion_tokens", 8_192))
-        limit = min(int(requested), 8_192)
-        if protocol == "openai":
-            field = "max_completion_tokens" if "max_completion_tokens" in value else "max_tokens"
-            value[field] = limit
-        else:
-            value["max_tokens"] = limit
-        return json.dumps(value, separators=(",", ":")).encode()
-
-    def _upstream_headers(self, handler: BaseHTTPRequestHandler) -> dict[str, str]:
-        protocol = self._provider["protocol"]
-        if protocol == "openai":
+    def _authenticate(self, handler: BaseHTTPRequestHandler) -> None:
+        if self._protocol == "openai":
             if handler.headers.get("authorization") != f"Bearer {self.capability}":
                 raise ValueError("invalid gateway capability")
-        elif protocol == "claude":
+        elif self._protocol == "claude":
             if handler.headers.get("x-api-key") != self.capability:
                 raise ValueError("invalid gateway capability")
-        elif protocol == "gemini":
+        elif self._protocol == "gemini":
             query = dict(parse_qsl(urlsplit(handler.path).query, keep_blank_values=True))
             if query.get("key") != self.capability:
                 raise ValueError("invalid gateway capability")
         else:
             raise ValueError("unsupported gateway protocol")
-        headers = {
-            "Content-Type": handler.headers.get("content-type", "application/json"),
-            "Accept": handler.headers.get("accept", "*/*"),
-        }
-        if version := handler.headers.get("anthropic-version"):
-            headers["anthropic-version"] = version
-        if protocol == "openai":
-            headers["Authorization"] = f"Bearer {self._provider_secret}"
-        elif protocol == "claude":
-            headers["x-api-key"] = self._provider_secret
-        return headers
 
-    def _upstream_path(self, base_path: str, incoming: str) -> str:
-        split = urlsplit(incoming)
-        query = parse_qsl(split.query, keep_blank_values=True)
-        if self._provider["protocol"] == "gemini":
-            query = [
-                (name, self._provider_secret if name == "key" else value)
-                for name, value in query
-            ]
-        path = f"{base_path.rstrip('/')}/{split.path.lstrip('/')}"
-        return urlunsplit(("", "", path, urlencode(query), ""))
+    def _supervisor_request(self, value: dict[str, Any]) -> dict[str, Any]:
+        data = json.dumps(value, separators=(",", ":")).encode()
+        connection = UnixHTTPConnection(self._supervisor_socket, timeout=130)
+        try:
+            connection.request(
+                "POST",
+                "/",
+                body=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(data)),
+                },
+            )
+            response = connection.getresponse()
+            body = response.read(96 * 1024 * 1024 + 1)
+            if response.status != 200 or len(body) > 96 * 1024 * 1024:
+                raise ValueError("gateway supervisor rejected the request")
+            parsed = json.loads(body)
+            if not isinstance(parsed, dict):
+                raise ValueError("gateway supervisor returned invalid data")
+            return parsed
+        finally:
+            connection.close()
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
 
 
 async def docker_exec_secret_stdin(
@@ -623,7 +623,8 @@ def assert_secure_docker_environment(environment: BaseEnvironment) -> None:
 
 
 async def assert_running_container_policy(
-    environment: DockerEnvironment, logs_dir: Path
+    environment: DockerEnvironment,
+    logs_dir: Path,
 ) -> None:
     command = [
         "docker",
@@ -668,12 +669,24 @@ async def assert_running_container_policy(
         if (
             host.get("Privileged")
             or host.get("NetworkMode") == "host"
+            or host.get("PidMode") == "host"
+            or host.get("IpcMode") == "host"
+            or host.get("UTSMode") == "host"
+            or host.get("CgroupnsMode") == "host"
             or host.get("CapAdd")
+            or host.get("Devices")
+            or host.get("DeviceRequests")
             or any("docker.sock" in item for item in host.get("Binds") or [])
         ):
             raise RuntimeError("Harbor container violates the Pico yolo isolation policy")
+        configured_env = value.get("Config", {}).get("Env") or []
+        if any(item.startswith("PICO_TB_PROVIDER_API_KEY=") for item in configured_env):
+            raise RuntimeError("Harbor container received the host provider credential")
         for mount in value.get("Mounts") or []:
             source = mount.get("Source")
+            destination = mount.get("Destination")
+            if "docker.sock" in str(source) or "docker.sock" in str(destination):
+                raise RuntimeError("Harbor container exposes the Docker control socket")
             if not source:
                 continue
             source_path = Path(source).resolve()
@@ -681,6 +694,39 @@ async def assert_running_container_policy(
                 source_path == root or root in source_path.parents for root in allowed_roots
             ):
                 raise RuntimeError("Harbor container has an unexpected host mount")
+
+
+def read_supervisor_config(descriptor: int) -> dict[str, str]:
+    global _SUPERVISOR_CONFIG
+    if _SUPERVISOR_CONFIG is not None:
+        return _SUPERVISOR_CONFIG
+    try:
+        raw = os.pread(descriptor, 64 * 1024, 0)
+    except OSError as error:
+        raise ValueError("Gateway supervisor descriptor is unavailable") from error
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    if not raw or b"\n" in raw or len(raw) >= 64 * 1024:
+        raise ValueError("Gateway supervisor descriptor must contain one frame")
+    value = json.loads(raw)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"socketPath", "capabilitySeed"}
+        or not isinstance(value["socketPath"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", value["capabilitySeed"])
+    ):
+        raise ValueError("Gateway supervisor descriptor is invalid")
+    path = Path(value["socketPath"])
+    if not path.is_socket():
+        raise ValueError("Gateway supervisor socket is unavailable")
+    _SUPERVISOR_CONFIG = {
+        "socketPath": str(path),
+        "capabilitySeed": value["capabilitySeed"],
+    }
+    return _SUPERVISOR_CONFIG
 
 
 def require_file(value: str, field: str) -> Path:
