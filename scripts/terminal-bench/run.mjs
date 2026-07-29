@@ -75,9 +75,9 @@ const mode = options.mode ?? "canary";
 const timestamp = new Date().toISOString().replace(/[:.]/gu, "-");
 const runId = `${mode}-${timestamp}-${picoCommit.slice(0, 12)}`;
 const runsRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1", "runs");
-const publishedRunRoot = join(runsRoot, runId);
-const runRoot = join(runsRoot, `.${runId}.staging`);
-await mkdir(runRoot, { recursive: true, mode: 0o700 });
+const runRoot = join(runsRoot, runId);
+await mkdir(runsRoot, { recursive: true, mode: 0o700 });
+await mkdir(runRoot, { mode: 0o700 });
 const nodeCacheRoot = join(
   projectRoot,
   "output",
@@ -114,7 +114,7 @@ const routeConfig = {
 const routeConfigPath = join(runRoot, "route-config.json");
 await atomicWritePrivateJson(routeConfigPath, routeConfig);
 const tasks = await resolveTasks(mode, options.task);
-const scheduledTasks = mode === "full" ? 89 : tasks.length;
+const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
 const localDatasetPath = mode === "full" ? null : await prepareLocalDataset(tasks, runRoot);
 const canaryHash = createHash("sha256").update(tasks.join("\n")).digest("hex");
@@ -213,6 +213,10 @@ const harborArgs = [
   "--job-name",
   "job",
   "--yes",
+  "--max-retries",
+  "2",
+  "--retry-include",
+  "RuntimeError",
 ];
 if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
 else harborArgs.push("--path", localDatasetPath);
@@ -231,7 +235,7 @@ const summary = await normalizeHarborJob({
   runDir: runRoot,
   runId,
   expectedTasks: expectedTrials,
-  expectedTaskNames: mode === "full" ? null : tasks,
+  expectedTaskNames: tasks,
   expectedAttempts: options.attempts,
 });
 await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
@@ -240,6 +244,16 @@ await atomicWritePrivateJson(join(runRoot, "run-status.json"), {
   normalized: true,
   secretScan: { status: "passed" },
   completedAt: new Date().toISOString(),
+});
+await atomicWritePrivateJson(join(runRoot, "PUBLISHED.json"), {
+  schemaVersion: 1,
+  runId,
+  summarySha256: createHash("sha256")
+    .update(await readFile(join(runRoot, "summary.json")))
+    .digest("hex"),
+  sourceHashesSha256: createHash("sha256")
+    .update(await readFile(join(runRoot, "source-hashes.json")))
+    .digest("hex"),
 });
 const gatewayCapabilities = summary.trials
   .map((trial) => trial.trialId)
@@ -252,10 +266,7 @@ if (secretScan.matches.length > 0) {
   await rm(runRoot, { recursive: true, force: true });
   throw new Error("Secret canary scan failed; staging results were destroyed");
 }
-await rename(runRoot, publishedRunRoot);
-process.stdout.write(
-  `${JSON.stringify({ runId, runRoot: publishedRunRoot, harborExitCode, summary }, null, 2)}\n`,
-);
+process.stdout.write(`${JSON.stringify({ runId, runRoot, harborExitCode, summary }, null, 2)}\n`);
 const gateFailed = summary.trials.some(
   (trial) =>
     trial.infra.status !== "ok" ||
@@ -288,7 +299,6 @@ function parseArgs(args) {
 }
 
 async function resolveTasks(mode, singleTask) {
-  if (mode === "full") return [];
   if (mode === "single") {
     if (!singleTask?.startsWith("terminal-bench/")) {
       throw new Error("--task must use terminal-bench/<name>");
@@ -296,13 +306,25 @@ async function resolveTasks(mode, singleTask) {
     return [singleTask];
   }
   const raw = await readFile(
-    join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-names.txt"),
+    join(
+      projectRoot,
+      mode === "full"
+        ? "benchmarks/terminal_bench_2_1/full-task-names.txt"
+        : "benchmarks/terminal_bench_2_1/canary-task-names.txt",
+    ),
     "utf8",
   );
-  return raw
+  const names = raw
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean);
+  if (new Set(names).size !== names.length) {
+    throw new Error(`Terminal-Bench ${mode} task list contains duplicates`);
+  }
+  if (mode === "full" && names.length !== 89) {
+    throw new Error(`Terminal-Bench full task list must contain exactly 89 tasks`);
+  }
+  return names;
 }
 
 async function prepareLocalDataset(tasks, runRoot) {

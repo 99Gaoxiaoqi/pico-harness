@@ -523,6 +523,20 @@ async function runValidatedRequest(
         elapsed(startedAt, dependencies.now),
       );
     }
+    if (
+      settled.result.finalMessage.trim().length === 0 &&
+      settled.result.usage.promptTokens === 0 &&
+      settled.result.usage.completionTokens === 0
+    ) {
+      return failedOutcome(
+        request,
+        workDir,
+        effective,
+        "RUNTIME_EMPTY_RESPONSE",
+        "The Agent Runtime returned an empty model response.",
+        elapsed(startedAt, dependencies.now),
+      );
+    }
     if (policyBlocked) {
       return {
         result: resultPayload({
