@@ -1,13 +1,16 @@
 %%{init: {"theme":"base","themeVariables":{"background":"#F8F9FA","fontFamily":"Arial, PingFang SC, sans-serif","lineColor":"#64748B","primaryTextColor":"#2F2B42"},"flowchart":{"curve":"basis","nodeSpacing":38,"rankSpacing":52}}}%%
 flowchart TB
   TUI["命令行 / TUI 终端"]
-  DESKTOP["桌面 Renderer 界面"]
+  DESKTOP["Desktop Renderer 界面"]
+  MOBILE["Mobile / Expo 模拟器<br/>仓库内开发预览"]
 
-  BRIDGE["Preload / Main IPC<br/>本机 Runtime 客户端"]
-  DAEMON["认证本机守护进程"]
-  DRS["桌面 Runtime 控制服务"]
+  BRIDGE["Preload / Main IPC<br/>allowlist<br/>LocalRuntimeClient&nbsp;"]
+  GATEWAY["认证回环 Gateway<br/>HTTP / WebSocket<br/>Bearer Token"]
+  MOBILE_CLIENT["LocalRuntimeClient&nbsp;<br/>认证本机 IPC"]
+  DAEMON["本机 daemon<br/>内部 Runtime 宿主"]
+  DRS["DesktopRuntimeService&nbsp;<br/>daemon Runtime 控制服务"]
   TRUST["工作区信任 / 配置"]
-  WRS["工作区 Runtime 服务"]
+  WRS["WorkspaceRuntimeService&nbsp;<br/>工作区 Runtime 服务"]
 
   RUNTIME["Agent Runtime 核心"]
   ENGINE["Agent Engine / 工具调度器"]
@@ -20,13 +23,15 @@ flowchart TB
   COMMANDS["TUI Markdown 命令"]
   TASKS["任务控制<br/>TUI：TaskHost<br/>Daemon：周期任务"]
   PROJECT["项目工作区"]
-  DATABASE[("Runtime JSON / JSONL<br/>Agent 事实 / 控制面")]
-  SIDECAR[("文件历史 / 产物")]
+  STATE[("Workspace JSON / JSONL<br/>状态账本<br/>sessions/ · task-runs/<br/>control/")]
+  COORD[(".storage 共享事务协调<br/>layout.json · commit.json&nbsp;<br/>lock/")]
+  SIDECAR[("文件历史 / Evidence CAS<br/>产物")]
 
   TUI --> TRUST
   DESKTOP --> BRIDGE --> DAEMON --> DRS --> TRUST
+  MOBILE --> GATEWAY --> MOBILE_CLIENT --> DAEMON
   TRUST -->|TUI 进程内| RUNTIME
-  TRUST -->|桌面入口| WRS --> RUNTIME
+  TRUST -->|daemon 入口| WRS --> RUNTIME
 
   RUNTIME --> ENGINE
   RUNTIME --> CONTEXT
@@ -39,8 +44,9 @@ flowchart TB
   TUI -.->|加载命令| COMMANDS
   RUNTIME -->|前台任务宿主| TASKS
   DAEMON -->|周期任务生命周期| TASKS
-  RUNTIME --> DATABASE
-  TASKS --> DATABASE
+  RUNTIME --> STATE
+  TASKS --> STATE
+  STATE -.->|共享事务| COORD
   REGISTRY --> SIDECAR
 
   classDef input fill:#d3f9d8,stroke:#2f9e44,color:#1a1a1a
@@ -50,10 +56,10 @@ flowchart TB
   classDef output fill:#c5f6fa,stroke:#0c8599,color:#1a1a1a
   classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
   classDef meta fill:#e7f5ff,stroke:#1971c2,color:#1a1a1a
-  class TUI,DESKTOP input
+  class TUI,DESKTOP,MOBILE input
   class RUNTIME,ENGINE,CONTEXT,PROVIDER process
   class GATES decision
   class REGISTRY,EXT,COMMANDS action
   class PROJECT output
-  class DATABASE,TASKS,SIDECAR storage
-  class BRIDGE,DAEMON,DRS,TRUST,WRS meta
+  class STATE,COORD,TASKS,SIDECAR storage
+  class BRIDGE,GATEWAY,MOBILE_CLIENT,DAEMON,DRS,TRUST,WRS meta
