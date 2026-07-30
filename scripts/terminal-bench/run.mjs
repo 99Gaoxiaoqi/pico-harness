@@ -44,6 +44,8 @@ const harborWheelUrl =
   "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
 const benchmarkBashTimeoutMs = 180_000;
+const defaultRunCostCNY = 250;
+const maximumRunCostCNY = 1_000_000;
 const nodeArchives = {
   x64: {
     name: "node-v22.14.0-linux-x64.tar.gz",
@@ -208,6 +210,10 @@ const routeConfig = {
   provider,
   pricing,
   pricingSha256,
+  runBudget: {
+    currency: "CNY",
+    maxCostMicroCNY: options.maxRunCostCNY * 1_000_000,
+  },
   ...(options.thinkingEffort
     ? { thinkingEffort: options.thinkingEffort }
     : userConfig.defaults?.thinkingEffort
@@ -313,6 +319,10 @@ const manifest = {
       lockedPricingSha256: pricingSha256,
       lockedRateMaximumCostCNY: 165.536,
       maxConcurrentRequests: 1,
+    },
+    runBudget: {
+      currency: "CNY",
+      maxCostCNY: options.maxRunCostCNY,
     },
   },
   execution: {
@@ -635,7 +645,13 @@ process.stdout.write(
 );
 
 function parseArgs(args) {
-  const parsed = { mode: "canary", attempts: 1, concurrency: 1, dockerHostGateway: false };
+  const parsed = {
+    mode: "canary",
+    attempts: 1,
+    concurrency: 1,
+    dockerHostGateway: false,
+    maxRunCostCNY: defaultRunCostCNY,
+  };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--docker-host-gateway") parsed.dockerHostGateway = true;
@@ -649,7 +665,12 @@ function parseArgs(args) {
       parsed.attempts = positiveInteger(requiredValue(args, ++index, arg), arg);
     else if (arg === "--concurrency")
       parsed.concurrency = positiveInteger(requiredValue(args, ++index, arg), arg);
-    else throw new Error(`Unknown argument: ${arg}`);
+    else if (arg === "--max-run-cost-cny") {
+      parsed.maxRunCostCNY = positiveInteger(requiredValue(args, ++index, arg), arg);
+      if (parsed.maxRunCostCNY > maximumRunCostCNY) {
+        throw new Error(`--max-run-cost-cny must not exceed ${maximumRunCostCNY}`);
+      }
+    } else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!["single", "canary", "full"].includes(parsed.mode)) {
     throw new Error("--mode must be single, canary, or full");

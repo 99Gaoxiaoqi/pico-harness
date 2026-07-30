@@ -1,0 +1,361 @@
+{
+  "schemaVersion": 1,
+  "tasks": {
+    "terminal-bench/write-compressor": {
+      "cacheDigest": "d9ddd9a8e925e2c566b37b2492cbf995afecefe58874e4043ef78d7f3c892c7e",
+      "treeSha256": "eb21cf511408bb59fc6e2714219d411ad9cade396d042f5728805391d834842a"
+    },
+    "terminal-bench/torch-tensor-parallelism": {
+      "cacheDigest": "f32ce74a5aeb6638480247ab799fe46127bbee631acdd0921b0f394ec49b3684",
+      "treeSha256": "002385f8b22f91d9c0a510260d7a4e64ae33c199f197d95de388c1150019f9a5"
+    },
+    "terminal-bench/schemelike-metacircular-eval": {
+      "cacheDigest": "58130c2166c3115276dc8592f358e326ff2d81ea852e3d88636c82fd1dff57e6",
+      "treeSha256": "6da94639f2da974c50949bbe9ca8480e829a4324ee6f01a66acf6c479b44f9ce"
+    },
+    "terminal-bench/kv-store-grpc": {
+      "cacheDigest": "973c5d4c111fb61a344457936f1c36400acd2d9e44389e7b319586fe23a7a307",
+      "treeSha256": "03adc4cfdbc6fa74ed9c9d46b0f5177855c9adf08723ec8a6d16f005e638f5a9"
+    },
+    "terminal-bench/pypi-server": {
+      "cacheDigest": "1a1e0542f58e2d3362fec17a9bbb98667717d9a4a3e9a4c8413d3150a4fa0ff1",
+      "treeSha256": "f913af4a586dab0a559802b4a0301d5f456ab8c0f90d961df09b4f5dd2ac0db1"
+    },
+    "terminal-bench/dna-assembly": {
+      "cacheDigest": "e41a8e94d86019949b08d3b5f88a85f6d943ba0fd85d5e1d5ebb95cb8f66223f",
+      "treeSha256": "6ddfe2a93bd27852170526660aaded9af87bc9e199369e8aa69607e633d8d19f"
+    },
+    "terminal-bench/torch-pipeline-parallelism": {
+      "cacheDigest": "db605337c749a872cea7b5b413429b3915bb4c3efe0f7875f0c46ce81bd8c4fb",
+      "treeSha256": "f10a370d5dfca1a2e98328148b542f834970ceb02542331feb7fdb8a2e1d6d1b"
+    },
+    "terminal-bench/qemu-alpine-ssh": {
+      "cacheDigest": "60b7050b0e0aa51641208cf65766743d340e59575db2c4d2f8628240846c2a28",
+      "treeSha256": "e16af10aade49db398336de17dcdc7cb6bd97f57d2e360ebac1dec3fe4e8c9c1"
+    },
+    "terminal-bench/openssl-selfsigned-cert": {
+      "cacheDigest": "d4afa2bd2a9ba1420db8d6cfde42ffdb4873ae2d955c35014e8da94444c83302",
+      "treeSha256": "af354a30bee536c51667033bb3e040a5942c6f97630477e3aef011e65401afb9"
+    },
+    "terminal-bench/regex-chess": {
+      "cacheDigest": "e763e0ac1c9759081af0a4a82ba51b8cf9ae5485a93de3bbe42d7d344597bd78",
+      "treeSha256": "7747c463c7f6d75e1637bcd2a4d45039bac281510a17a697e49b1f3464ab6804"
+    },
+    "terminal-bench/log-summary-date-ranges": {
+      "cacheDigest": "27b074a2f10fff7606e096f3abd8dced418ad8fda0f53d88acbe477f2d9ceaf6",
+      "treeSha256": "52ec980638e1bf9a7d633d4cbd3d70c88966f7709aa55d782a060bc7abb9211b"
+    },
+    "terminal-bench/model-extraction-relu-logits": {
+      "cacheDigest": "1ae5045ad68b5d34c3398b612066a07c4a08b6dc330d28868ec4021e17c94b17",
+      "treeSha256": "747dd044ed910846256bc38432f898dfbd32d8a98fee2a9eb0e6ceb8a3c47ae7"
+    },
+    "terminal-bench/path-tracing": {
+      "cacheDigest": "cf56094c881a488b27e9f204a638a7e78ed7d55e12dc3064108c93357190314c",
+      "treeSha256": "e4eee96fc8465f47bc328b0ed8e00c841afe268ee73daf8f5709e4694b7427ec"
+    },
+    "terminal-bench/regex-log": {
+      "cacheDigest": "802c16cfd132e6c457529cb864be5a757c1b23b6cadc57f2d01983cb0110292a",
+      "treeSha256": "5e573361cbefd3d2c4ce56189bc363b1bf49bad22639b87262c7d9ed2bf8023a"
+    },
+    "terminal-bench/caffe-cifar-10": {
+      "cacheDigest": "7b0045106d7d5af724efe96b610ba64f7893f5c88528401c573c4d47e384e2bf",
+      "treeSha256": "6c4570bb76c956dbdc260f84e6a1b3799637e558ce11c213805476e13f1a29d4"
+    },
+    "terminal-bench/mteb-leaderboard": {
+      "cacheDigest": "484f6d7008a05b5b8640fc6618a384b8c9447cd76f85416c8a595028d29bff9c",
+      "treeSha256": "6966f3a1b6cc3541b14cd45d03e1badbb752bdcc43defca18ee2c4d50e31be0b"
+    },
+    "terminal-bench/llm-inference-batching-scheduler": {
+      "cacheDigest": "a3bf47589118daec5124fe3689b4439802c805b2f4ed9d402a48ae73ca2fea67",
+      "treeSha256": "54990d3f9a9aee4f1e73b1fa9a9462ce27b7135f022f1b34c4813008e602b175"
+    },
+    "terminal-bench/pytorch-model-recovery": {
+      "cacheDigest": "2e628841cff93290919172398e573e794f34c95d9382b7425adde4364022decc",
+      "treeSha256": "33799d4f4aeef3647d2267176f906f906736c8ba370769b1164f29ebb08b68e5"
+    },
+    "terminal-bench/circuit-fibsqrt": {
+      "cacheDigest": "9bcffe1054bb33249aa578a9a2a74f3c8cca66b0cb7aa1328233f1d31822aae3",
+      "treeSha256": "104246da581acc7d40b9204390ed9cf6f408891c83d8456dd2aa2937d7adf1ab"
+    },
+    "terminal-bench/merge-diff-arc-agi-task": {
+      "cacheDigest": "6aab6511a5344ce87698293bb1ce4cc51d9a45f1ad9f0c075d2a83197b36727d",
+      "treeSha256": "aa6b9be458c36bc573fcbd32394fe1ca2c67bbd58e204cff7706278329313840"
+    },
+    "terminal-bench/build-pov-ray": {
+      "cacheDigest": "4f08dab602fe2e9e2f42051cc6aef684a88cf2822e8b499b3ca19e670759fddb",
+      "treeSha256": "f00831a789dc2f9b0aa80ed375b5fc55949681809c441a73944b1db8e2918004"
+    },
+    "terminal-bench/cobol-modernization": {
+      "cacheDigest": "e03aa03965eee48c9f772d566ff9bcd741fceeac9693123f82a13fdd46be0d88",
+      "treeSha256": "9665046834798a516a5fc648b0f0af767ecb41ae43be485168623f83cdc961ce"
+    },
+    "terminal-bench/mcmc-sampling-stan": {
+      "cacheDigest": "443cd2b94ed797944793e97a56527a5dc0f8ad40f78ed418fe1b2e367cf22546",
+      "treeSha256": "c0bf3df68b01cf937d033fcd8a011f0c113c45ca7ccfd3b2f66f58bc3adc9fc0"
+    },
+    "terminal-bench/gpt2-codegolf": {
+      "cacheDigest": "fe42af8e9c5aa927c3b680acd08e43032c84088fa9d770b03ce63dbc66fea4e7",
+      "treeSha256": "516fc5a8b013b93e0ef445d751a3a8e9b493d1784f97b60a1c86afd1b5769ae5"
+    },
+    "terminal-bench/filter-js-from-html": {
+      "cacheDigest": "2d1496b6fc62adeccdba7a56f4bc24e5ef265840434d2011234ed20b6c240759",
+      "treeSha256": "769e2cd874827d4b67ddd51fcd9f325ef3e54a24555b48a343ea3c99c07d2b1d"
+    },
+    "terminal-bench/sam-cell-seg": {
+      "cacheDigest": "37c182b91df18b9c2ea2dceda47430bbd585e7880c56fca2f1975907ce0df8ce",
+      "treeSha256": "a60b92c288dd65319bf63baa898dc98ada3e2d54c470c72c0bcde452ec9d843c"
+    },
+    "terminal-bench/mteb-retrieve": {
+      "cacheDigest": "fa7c777df6ed8987a2bb144b4b73a1200935bbea69da03a2aaa1dc8aa9bd9dc9",
+      "treeSha256": "0754f50f2009c8b1a8ee77373bbccf10a1485cd31fd4e7e92c8649cc7883da32"
+    },
+    "terminal-bench/adaptive-rejection-sampler": {
+      "cacheDigest": "bcaa2399985cd57666018025846289ab25e193ae0dd8fb7f0ffab2410c24d4de",
+      "treeSha256": "fb5e147426c11bae1ebc4fa6bf21072fc71ee1ab09ff62df79cb7c0a636eb45c"
+    },
+    "terminal-bench/vulnerable-secret": {
+      "cacheDigest": "d76dfa9e256487c5542905b892156f694137aeef784e1abf3f41e15a8c946eac",
+      "treeSha256": "9aa8e2f80d9a4a7ac1121b9d44e2ebedf8f58f6c7559d86e5e8b9ad4f86779a0"
+    },
+    "terminal-bench/extract-elf": {
+      "cacheDigest": "1ef31d566be4fe3459d5368621ae7ef7a31b23ef675737e473bbc43c8c7b3fce",
+      "treeSha256": "158972adcc196b95d8c749d79b01a96f540fdcd6012ad85b1fa513fc455dd119"
+    },
+    "terminal-bench/nginx-request-logging": {
+      "cacheDigest": "9d1b8bebd989ea0bc8080c3b159480068caf183c5fd61385868b2574b206e097",
+      "treeSha256": "32a284c8c04d839a793b06591d1ed0ae96cb837e5165ed158d52cc33cec216b3"
+    },
+    "terminal-bench/make-doom-for-mips": {
+      "cacheDigest": "2d83dd3dee8e0f055e09973934cf0d7e3169a9cd90704cba5c8940b170be9498",
+      "treeSha256": "6740c1b2cdd91aa62f5e4f2ec195a5a9d784585fddcf74e161bfe0954aa09fda"
+    },
+    "terminal-bench/configure-git-webserver": {
+      "cacheDigest": "e3dc712acfecdb1338a889f86c97b37422c3778351253f9aca4236e895fdb36e",
+      "treeSha256": "0b8ecb7a621573532d0720080b2d508d4a67e9e8819ae58e65d2be5bf18ffc94"
+    },
+    "terminal-bench/build-cython-ext": {
+      "cacheDigest": "35dc561790e73f13e59837828ac0863c0893edc6b71d42cf7d58656c843adf12",
+      "treeSha256": "02513c500d8b328a8a5269a379138202ecc45cb10a106b15904f75fb85446616"
+    },
+    "terminal-bench/train-fasttext": {
+      "cacheDigest": "460fc0818971ec83545a76805267b65459128fad52e68c26a199a0d74022badb",
+      "treeSha256": "51a84b5b440e9c3f35c6ff37f6f02a4fbb5219a96a6e16af5347ee3735f06f39"
+    },
+    "terminal-bench/compile-compcert": {
+      "cacheDigest": "22bde2a73d62fa46f5ab96f710561a72e8d1aa4266f008605a17f174622ad785",
+      "treeSha256": "52c8db7d887f4a33925377c61b11a45d6b4fd9d0f8466fcc1da62e20ba2e3601"
+    },
+    "terminal-bench/fix-ocaml-gc": {
+      "cacheDigest": "2031f3d5224b891fe443a31526b569eb756be2f88b663cb025448af9c4f97e2c",
+      "treeSha256": "d00f16401336ef1a80425e3ae5efedcdb68703779c57076d3a44d060bcaa265f"
+    },
+    "terminal-bench/gcode-to-text": {
+      "cacheDigest": "7dd2af04820e71ecaba96bc493cbffa16317e96816c6c8003385c034adf6c23b",
+      "treeSha256": "ede756a42d83ebb5cac9cba95e02426f40d75050f380862bddef696c93fd0e0f"
+    },
+    "terminal-bench/dna-insert": {
+      "cacheDigest": "37fc023970e3464c1acc31f43e04a0b4b94758130d340788f261f00764d9e530",
+      "treeSha256": "017f7e51af38ecebeda1ebe97ae8c77213ca1665447b5b5bfae79ff496bd5d32"
+    },
+    "terminal-bench/raman-fitting": {
+      "cacheDigest": "97ca4025332b20739da553cab0658f2ead925d1b5b3b9b7664dc9eb5e7fbeab7",
+      "treeSha256": "a2bc44c676b344ba175350500b4f112520fb63a4413ccf4ab1f9ca01e1ac030f"
+    },
+    "terminal-bench/overfull-hbox": {
+      "cacheDigest": "3c3b16e4b2de5fea90ca98db242b155a6843f9cc4dfd00be3479985a34bab4f7",
+      "treeSha256": "080cdb3bd33635989ae9590fa77344035087ba456c750aef31f2b567b431c793"
+    },
+    "terminal-bench/video-processing": {
+      "cacheDigest": "d3f02e177b49e5768b6ce6709fc4ae3ef2ce0cdecb63b09fc9b07f9d3ddb7203",
+      "treeSha256": "7436054b7de7080484e3148f7396503c94f2cf65c99a6a9b309585f9c0927539"
+    },
+    "terminal-bench/sanitize-git-repo": {
+      "cacheDigest": "6e86297715fae62cd499fbdd27013e11a38d05d7e05b7f661cb50b4ecead128f",
+      "treeSha256": "72229387699ac3d206fab511f7460bdbe10353ee923f03ce534b834aa39371ed"
+    },
+    "terminal-bench/qemu-startup": {
+      "cacheDigest": "8e58263747da7dc688ad470688fb72825c4ba2c1c40443fa0f52963645bbd999",
+      "treeSha256": "debefd88e2123b188bf4ba5d538b9b07b851d6d9f4047e6f7c1926e7a3252589"
+    },
+    "terminal-bench/hf-model-inference": {
+      "cacheDigest": "01370f37e61286f920dfca1e471496640ebcc8d06e1cc48d874c790715dbd4ad",
+      "treeSha256": "3846874922cd0dfab87f90e0097e1d655225e28cf399d42048844e5c454c214c"
+    },
+    "terminal-bench/reshard-c4-data": {
+      "cacheDigest": "a402bbfede73dd04168d697de9b9146026f69e14c8cd333b6a91fc87e44ecd4b",
+      "treeSha256": "a58cad5572808fda423c421c2f21cfa309f292461e1ea1220b1f48dd770fe660"
+    },
+    "terminal-bench/feal-differential-cryptanalysis": {
+      "cacheDigest": "8ea56995fcc43fb94f0e4e15adb12dd28836bf3e9c766b2cc7ae78a7ce90341f",
+      "treeSha256": "9fbcff4fb68d537b9d78f5865d20788ad18b74f9723f6ddf542c0c52255e9527"
+    },
+    "terminal-bench/rstan-to-pystan": {
+      "cacheDigest": "592f15f75751f3c4999c3d05087f2f8b2a4dbaaedbfad5a30ae54058b80b925f",
+      "treeSha256": "6bfbc3e074f40867e4778e28643c80d2bcda055d245fb494c351bdeabb9a1d4d"
+    },
+    "terminal-bench/make-mips-interpreter": {
+      "cacheDigest": "41a55da0abec5d7b32a0c2321f8b18e84000ca8074ae62c6874d6ed4a3a1cd3c",
+      "treeSha256": "44f0382e91257981072bce5bc185ffb6b441b8d221c80a7892d1c687c26598bb"
+    },
+    "terminal-bench/password-recovery": {
+      "cacheDigest": "9b5c6bdce0cf03f075b21f6a7af5030b825ce07d7b16b37610f3964217ab84a4",
+      "treeSha256": "d196dc1aa49e6d96647c8fd8d8a4ce53693a3351d94d10e062df2e3d314495e5"
+    },
+    "terminal-bench/sqlite-db-truncate": {
+      "cacheDigest": "956f038b479cc3b9b493553b57a60a8ff4154526386c3914c0b99e93e1ab6e87",
+      "treeSha256": "c4e43c358f160b48f7f319ed3ff379f39c06695f7a5311087460353404e2ea42"
+    },
+    "terminal-bench/query-optimize": {
+      "cacheDigest": "169496ea6843cb403b0860132675baf7aa0df0ac8b86221068e27d86395260f4",
+      "treeSha256": "542de7e94b9238bb3092c1e3a7433340e29201805ca2b0da8702b1c1a79c2421"
+    },
+    "terminal-bench/cancel-async-tasks": {
+      "cacheDigest": "a3d048d351136e48070696cda8bb79660dfd74db1fea3b6da88559f0332699c1",
+      "treeSha256": "1bc704865fdd5b2ac6fc251737d55dea22b89eeb6f36f546f9d13f1a0abeec5f"
+    },
+    "terminal-bench/financial-document-processor": {
+      "cacheDigest": "63dc43a15d9ec401613016e9114d1a93ec860eea63b2db02abfe8060deea30fb",
+      "treeSha256": "6d1e59a1a444d88c5ab98e2e4939126707efa9033b25e74d0dff5c03112f8631"
+    },
+    "terminal-bench/install-windows-3.11": {
+      "cacheDigest": "1f1361b0012e1ad24054e7cfc039829459e8ab0631b3573d9b93499bf6b3563e",
+      "treeSha256": "d3051aad04d2a4f801af03b05d28cfb35538f2d8ae533b90e7f06449763529ec"
+    },
+    "terminal-bench/polyglot-c-py": {
+      "cacheDigest": "25570ccacf63f573a252eaa2a9c62ee8b55f5aa228cc803b5beb39dd6d8afeb7",
+      "treeSha256": "761474864d8935a46e7b4ab1ec768ce8a3a13961383dbc5c22776dc6535cd846"
+    },
+    "terminal-bench/pytorch-model-cli": {
+      "cacheDigest": "6f11544dcc81a380dc4611902961f5520259c462d9fceb413419d66ab9a96c79",
+      "treeSha256": "92b387f6fc8c29632d5d226e5b09f8f096be566c3094bff57ddbb8647c8421b2"
+    },
+    "terminal-bench/db-wal-recovery": {
+      "cacheDigest": "07e9193513bfce038b9f9d84962ecc85683eee0a642d14ee6fb7104b086ddab4",
+      "treeSha256": "5bdf12b25c46e8e2cecca6a89c3efd3b6d261313af1b11c85ca66eee8f702776"
+    },
+    "terminal-bench/largest-eigenval": {
+      "cacheDigest": "1b6f17c344d23e97435ba3fa93400d141f6bb7763ed2014fab418830983791b3",
+      "treeSha256": "bdb41c7389848a7189b158a684860f32a5d60ab10188e9cb3082f93287fc468a"
+    },
+    "terminal-bench/large-scale-text-editing": {
+      "cacheDigest": "1f1cddc3df15e452fe2d3c6928f6b1e5b5330a7ae67cab373a0d089ea7d334a2",
+      "treeSha256": "b15c53accb04c9b1d4a1113ec75661a6d4a5bd7a6a677bc60f961f052b4d1510"
+    },
+    "terminal-bench/break-filter-js-from-html": {
+      "cacheDigest": "678008d1a4fd1e6e1b9b3cc9a327219fe4b410a31eafc52e9099bbf947eea600",
+      "treeSha256": "afb05c9a60191734413c127b6bee0a35fae2d0fdf5f1b1d2fb3b018108b56ee6"
+    },
+    "terminal-bench/count-dataset-tokens": {
+      "cacheDigest": "cd0574ec8281f53854256acc93702ed1441407c0428849e1dd4f27e863c6b08a",
+      "treeSha256": "d3fd9f0e350634818e0ace7ec6bf080f42c9b115ac0f7bda86c777d6a108d9bc"
+    },
+    "terminal-bench/extract-moves-from-video": {
+      "cacheDigest": "168e2b9168511b8f8d32b1697f4703b08626203e7949ad396658f4bef7dee66e",
+      "treeSha256": "381a326114efa70ace6451804c14e201313b51d79dd9f78e76a17fb56035c67a"
+    },
+    "terminal-bench/path-tracing-reverse": {
+      "cacheDigest": "035880d7ef5554b217e53a75ce5e87e43193b7a44c30ad17226a6ab10fc11a6c",
+      "treeSha256": "eca5b0b29e8dde1eb4f72ce6f14b4e0b86c9775032ddf935a68c3a9a5fea6cee"
+    },
+    "terminal-bench/chess-best-move": {
+      "cacheDigest": "9ab8e4b3674282e751edafbd9b5bd551fef995fd6601585a2cdb04fd70c520da",
+      "treeSha256": "b1e86e9de32e0557d4fecf6556c2c9018ed565cba9aeb5cc8d3ce37759ef38ea"
+    },
+    "terminal-bench/prove-plus-comm": {
+      "cacheDigest": "d5ae25720df1f7cd619ed8408cda4b87b79a3d8b0ff4f1919e2c96e9547339c2",
+      "treeSha256": "613fcb50db10660e8b66b9152021dbfa2d3eb861b927fec25afb2b9ba7bda09a"
+    },
+    "terminal-bench/git-multibranch": {
+      "cacheDigest": "7759a92a373c967dd31535975bad8659410644025673fe62385444fd2605c5fa",
+      "treeSha256": "a1cb84fd8614ac20c6204d79139699c7cd2bc05e33a4c97690d7242b6397d503"
+    },
+    "terminal-bench/multi-source-data-merger": {
+      "cacheDigest": "70367c38732e1beda7b229968a48d60242277c2fa4db91339c3f064c4c230d49",
+      "treeSha256": "94c652c9bf8895d5525036651e8081b4c04afd9a5b106306eeffec10d3a11ca7"
+    },
+    "terminal-bench/sqlite-with-gcov": {
+      "cacheDigest": "9f9bd57fbf9f4831e9031755e83aea6b9d60d2b2d54e8a12d48cff4dca3c231d",
+      "treeSha256": "3ad12cbd88897f7d7e34e41d59c6d28c081706ceb9ec3b4f041f6d1d62a75a03"
+    },
+    "terminal-bench/polyglot-rust-c": {
+      "cacheDigest": "a33dc72e2278d225513c0724abe2e4539653d5ee7e4c2a90ba2d676586ba9f3d",
+      "treeSha256": "d62f5051ca7816294cfb19210744982c0a05392a7f9b99fec886004ec6a2b0c9"
+    },
+    "terminal-bench/feal-linear-cryptanalysis": {
+      "cacheDigest": "0f3234c5fde85f9dc610d94cfefd4c892afb75c9e571f21f18fee66972b67332",
+      "treeSha256": "98d2dec49f920ab17abbe0b4c8b50ebf3633d7dd143a95b2801b3c0aa77ae906"
+    },
+    "terminal-bench/crack-7z-hash": {
+      "cacheDigest": "99cbb2269f6bd112d3387fd01cb6900118fe4aded3f75a8d656580a8296a1ae5",
+      "treeSha256": "336b0b91d2bc82b688571a279b4e3bf41ce0f67446677fe056530786912d6333"
+    },
+    "terminal-bench/sparql-university": {
+      "cacheDigest": "02aeca67b6c5b0d2d72c91ab471beb51ded6f42f0dc3dec580e20d489f09a867",
+      "treeSha256": "a8a08a1c1a8cfb12f6acb2904c25459f2e9ab9a9e372b6737033736e8914e31f"
+    },
+    "terminal-bench/protein-assembly": {
+      "cacheDigest": "c491d45acce234e1aa1d44dcc6778c55fcf875e9eb254b8dd3ae5ef58119621b",
+      "treeSha256": "dbbc5623352ec220d4bd4dc2924b661713ec77cd7a96d5f31d69aa47c529b891"
+    },
+    "terminal-bench/custom-memory-heap-crash": {
+      "cacheDigest": "61e021e0304c9818a9be2c9173c8a0938ce5d136e95c5422e099f1fdb2dc080e",
+      "treeSha256": "3f9998a076d1714325be112c62d23c2d62597785c96613cfa8fc6adde6556385"
+    },
+    "terminal-bench/code-from-image": {
+      "cacheDigest": "ef2907bb300d9b3352410c2a75dbf831278c187c073298371870ea9c83526f78",
+      "treeSha256": "9efa94d81344a3873fefb32306ede741e2850a839fcbc5e98016bef57962a9d6"
+    },
+    "terminal-bench/fix-git": {
+      "cacheDigest": "16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e",
+      "treeSha256": "7b4a6e7bcf816b78da817add3e28bd3e977fb85a1829ff6830c143227a90b2c0"
+    },
+    "terminal-bench/winning-avg-corewars": {
+      "cacheDigest": "a9f2c630fb7d656e96f3a42ade600a8abcb500631d153d62d5ceb2df073bc256",
+      "treeSha256": "2a517cdee6d96193870ae5657a31b2424de0f41b56990d7bf089596ac7362e57"
+    },
+    "terminal-bench/modernize-scientific-stack": {
+      "cacheDigest": "67a9952aca67df9c70510acf62faea336644a0e9d379f3aaf9df79f14c8fcb12",
+      "treeSha256": "10c69356af1466bd3b8e08237f0e43b76dc83d247dd7e1c2a28dd94a59edd366"
+    },
+    "terminal-bench/git-leak-recovery": {
+      "cacheDigest": "22a9ec10dbd4cd8b99477b70e1944103775ca41de9b9e0025ec4898cd17bd334",
+      "treeSha256": "fd256eb677d40c443fb8a19871a46870379f0cf807104a5fc3ba8099a2c8ddff"
+    },
+    "terminal-bench/distribution-search": {
+      "cacheDigest": "8787d3004ac4dd9d78f0c14f5b5ef94a4ad3e69d8828d7d35b9fbd7828a69ed1",
+      "treeSha256": "b0557c66ce3da6ba29e73fbe96a2f630c4b3cb998c3905e4b6eecadb550e97dc"
+    },
+    "terminal-bench/build-pmars": {
+      "cacheDigest": "63f0449b276f081986740c941ea9372068b310a02b062c1e5e3400f575241893",
+      "treeSha256": "7ba7c9791ca72203e271820d2a2ccccdc5533bd5b51fe088cf420e2accc65fb5"
+    },
+    "terminal-bench/mailman": {
+      "cacheDigest": "831b3ed00807153963c05f91599443e4839099521d1d56db811c5547ab280dbe",
+      "treeSha256": "f22be6355498374c465b25b51b2bd00048e53c24a0be0682cd7d33bb64b8f067"
+    },
+    "terminal-bench/headless-terminal": {
+      "cacheDigest": "203953871ebdae4efbf163af9499849368dab5e219b70d447e5ee9701ad382d9",
+      "treeSha256": "3a62046ffa1e7489b73a85300d93e7242d717d8e4d50c97adcd31980c7f9bf85"
+    },
+    "terminal-bench/bn-fit-modify": {
+      "cacheDigest": "b5f9644970c17ad9ddb46b7266f7bcd87c761d77d7e6f55d7cfe7284d5ff66e9",
+      "treeSha256": "6c10200a5e8249f6f875e1d01e72cae04f2a96d9f272601cd6428234bbac21fc"
+    },
+    "terminal-bench/constraints-scheduling": {
+      "cacheDigest": "91dd6f87e1ee508328d5aafbd99a6bd1ccc47bc22671b4aaa4060bda492deb53",
+      "treeSha256": "e7d82eaa4ac233af776bca6648a06419bd98564632d8b3e130d8f31af3edfc3c"
+    },
+    "terminal-bench/tune-mjcf": {
+      "cacheDigest": "7da0fd3b906624df9eff8829ccd4f19cbb1ba967411b6d64d92b85b2f3fbdfb0",
+      "treeSha256": "573292c353c183a5426952b4ada4a455f3ea72da353661f36d3f37f519fc9346"
+    },
+    "terminal-bench/fix-code-vulnerability": {
+      "cacheDigest": "d31348aa16b533a15f013420e4d9726dc529e6086adc7d6d48067d22cc18fe71",
+      "treeSha256": "d2463580685018ac1b844ec116a808206aac682c7a93fa019a669ec7a23a6457"
+    },
+    "terminal-bench/portfolio-optimization": {
+      "cacheDigest": "d112f8945600f18ec47bbbe76935dc05953173cc3d0a375a7aa2712b091584e4",
+      "treeSha256": "4e6f1986ed73cf49238fbe6b5c139d5287e54310eb8fcdb35aff155e6e78e08d"
+    }
+  }
+}
