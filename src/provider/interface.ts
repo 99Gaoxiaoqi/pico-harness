@@ -19,8 +19,10 @@ export interface LLMProviderRequestOptions {
    * Callers must never pass raw prompt text, credentials, or a random Session ID here.
    */
   promptCacheShardSeed?: string;
-  /** 请求用途，供计费、审计与可观测层区分普通 Agent 与 Hook 判定。 */
-  purpose?: "hook";
+  /** 仅供显式 Claude 预热请求；Provider 不得把它传播为未知 wire 字段。 */
+  promptCachePrewarm?: boolean;
+  /** 请求用途，供计费、审计与可观测层区分普通 Agent、预热与 Hook 判定。 */
+  purpose?: "hook" | "prewarm";
   /** Provider 返回可展示的 reasoning/thinking 增量时调用；不得混入最终回答正文。 */
   onReasoningDelta?: (delta: string) => void;
   /**

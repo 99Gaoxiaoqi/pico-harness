@@ -254,7 +254,7 @@ export class CostTracker implements LLMProvider {
       typeof this.options.context === "function" ? this.options.context() : this.options.context;
     const scoped = getProviderCallContext();
     const context = { purpose: "main", ...configured, ...scoped } satisfies ProviderCallContext;
-    return purpose === "hook" ? { ...context, purpose: "hook" } : context;
+    return purpose ? { ...context, purpose } : context;
   }
 
   private recordSessionUsage(response: Message, latencyMs: number, streaming: boolean): void {
@@ -304,13 +304,19 @@ export class CostTracker implements LLMProvider {
     const route = normalizeRoute(this.modelRoute);
     const usage = response?.usage;
     const cost = usage ? estimateCost(this.modelRoute, usage) : undefined;
+    const cacheSupport =
+      route.cacheSupported === true
+        ? { cacheSupport: "supported" }
+        : route.cacheSupported === false
+          ? { cacheSupport: "unsupported" }
+          : {};
     try {
       this.options.ledger.recordProviderCall({
         callId,
         ...context,
         provider: route.provider,
         model: route.model,
-        ...(route.baseUrl ? { route: route.baseUrl } : {}),
+        ...(route.baseUrl ? { route: safeRouteBaseUrl(route.baseUrl) } : {}),
         status,
         inputTokens: cost?.usage.inputTokens ?? 0,
         // provider_calls 没有独立 reasoning 列；output 保留厂商 completion 总数，
@@ -326,12 +332,14 @@ export class CostTracker implements LLMProvider {
               reasoningTokens: cost?.usage.reasoningTokens ?? 0,
               costStatus: cost?.status ?? "unknown",
               latencyMs,
+              ...cacheSupport,
               ...(requestDiagnostic ? { requestDiagnostic } : {}),
             }
           : {
               usageMetadata: "unknown",
               costStatus: "unknown",
               latencyMs,
+              ...cacheSupport,
               ...(requestDiagnostic ? { requestDiagnostic } : {}),
               ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
             },
@@ -348,6 +356,15 @@ export class CostTracker implements LLMProvider {
 
 function normalizeRoute(route: string | BillingRoute): BillingRoute {
   return typeof route === "string" ? { provider: "unknown", model: route } : route;
+}
+
+function safeRouteBaseUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return value.replace(/^[^@/\s]+@/u, "").replace(/[?#].*$/u, "");
+  }
 }
 
 function withRequestObserver(

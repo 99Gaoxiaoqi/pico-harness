@@ -203,6 +203,7 @@ export interface UsageView {
   readonly cacheRequestHitRate?: number | undefined;
   readonly cachePromptTokenReuseRate?: number | undefined;
   readonly cacheReadToWriteRatio?: number | undefined;
+  readonly cacheAlerts?: readonly string[] | undefined;
   readonly cost?: number | undefined;
   readonly period?: string | undefined;
 }

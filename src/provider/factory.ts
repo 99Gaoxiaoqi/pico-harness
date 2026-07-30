@@ -9,12 +9,14 @@ import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capab
 import { CapabilityPreflightProvider } from "./capability-preflight.js";
 import { providerProfileForRoute } from "./model-capabilities.js";
 import { withProviderErrorRedaction } from "./error-redaction.js";
+import type { PromptCachePrewarmCoordinator } from "./prompt-cache-prewarm.js";
 
 export type ProviderKind = "openai" | "claude" | "gemini";
 
 /** Runtime-owned dependencies that are deliberately kept outside credential-bearing ProviderConfig. */
 export interface ProviderRuntimeDependencies {
   readonly gemini?: GeminiProviderDependencies;
+  readonly promptCachePrewarm?: PromptCachePrewarmCoordinator;
 }
 
 /**

@@ -11,6 +11,10 @@ import { CredentialPool } from "../provider/credential-pool.js";
 import type { LLMProvider } from "../provider/interface.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import type { BillingRoute } from "../observability/pricing.js";
+import {
+  PromptCachePrewarmCoordinator,
+  withPromptCachePrewarm,
+} from "../provider/prompt-cache-prewarm.js";
 
 /** Runtime-owned provider factory. Network configuration stays outside this assembly boundary. */
 export type RuntimeProviderFactory = (
@@ -60,12 +64,19 @@ export function assembleRuntimeProvider(
 ): RuntimeProviderAssembly {
   const providerFactory = context.providerFactory ?? createRawProvider;
   const decorate = context.providerDecorator ?? ((provider: LLMProvider) => provider);
+  const promptCachePrewarm =
+    context.providerDependencies?.promptCachePrewarm ?? new PromptCachePrewarmCoordinator();
   const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
-    new CostTracker(
-      decorate(providerFactory(context.kind, config, undefined, context.providerDependencies)),
-      billingRouteForProvider(context.kind, config),
-      context.session,
-      context.trackerOptions,
+    withPromptCachePrewarm(
+      context.kind,
+      new CostTracker(
+        decorate(providerFactory(context.kind, config, undefined, context.providerDependencies)),
+        billingRouteForProvider(context.kind, config),
+        context.session,
+        context.trackerOptions,
+      ),
+      config,
+      promptCachePrewarm,
     );
 
   if (context.provider !== undefined) {
@@ -105,6 +116,7 @@ export function billingRouteForProvider(
     provider: kind,
     model: config.model,
     baseUrl: config.baseURL,
+    cacheSupported: config.capabilities.cache,
     pricing:
       price?.source === "config"
         ? {

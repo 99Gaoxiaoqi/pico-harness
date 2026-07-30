@@ -13,6 +13,10 @@ import type { ReasoningLevel } from "../provider/reasoning-capability.js";
 import type { LLMProvider } from "../provider/interface.js";
 import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
+import {
+  PromptCachePrewarmCoordinator,
+  withPromptCachePrewarm,
+} from "../provider/prompt-cache-prewarm.js";
 import type { ResolvedSubagentModelSelection } from "./subagent-model-selection.js";
 
 export type SubagentProviderFactory = (
@@ -56,11 +60,16 @@ export function createSubagentModelRuntime(
   } = options.router.providerConfig(options.selection.route.id, options.selection.thinking.level);
   const providerFactory = options.providerFactory ?? createRawProvider;
   const rawProvider = providerFactory(kind, config, undefined, options.providerDependencies);
-  const provider = new CostTracker(
-    options.providerDecorator ? options.providerDecorator(rawProvider) : rawProvider,
-    trackingRoute(kind, config),
-    options.session,
-    options.trackerOptions,
+  const provider = withPromptCachePrewarm(
+    kind,
+    new CostTracker(
+      options.providerDecorator ? options.providerDecorator(rawProvider) : rawProvider,
+      trackingRoute(kind, config),
+      options.session,
+      options.trackerOptions,
+    ),
+    config,
+    options.providerDependencies?.promptCachePrewarm ?? new PromptCachePrewarmCoordinator(),
   );
 
   return {
@@ -90,6 +99,7 @@ function trackingRoute(kind: ProviderKind, config: ProviderConfig): BillingRoute
     provider: kind,
     model: config.model,
     baseUrl: config.baseURL,
+    cacheSupported: config.capabilities.cache,
     pricing:
       price?.source === "config"
         ? {

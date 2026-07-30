@@ -115,12 +115,12 @@ export class ClaudeProvider implements LLMProvider {
     }
 
     const data = (await resp.json()) as AnthropicResponse;
-    if (!data.content || data.content.length === 0) {
+    if ((!data.content || data.content.length === 0) && options?.promptCachePrewarm !== true) {
       throw new Error("API 返回了空的 content");
     }
 
     // 3. 反向翻译:content blocks → 内部 schema.Message
-    return this.translateContentBlocks(data.content, data.usage);
+    return this.translateContentBlocks(data.content ?? [], data.usage);
   }
 
   /**
@@ -411,7 +411,8 @@ export class ClaudeProvider implements LLMProvider {
     const patched = capability
       ? applyReasoningRequestPatch(body, capability, this.thinkingEffort, "claude")
       : body;
-    return ensureThinkingBudgetFitsOutput(patched, this.profile.maxOutputTokens);
+    const finalized = ensureThinkingBudgetFitsOutput(patched, this.profile.maxOutputTokens);
+    return options?.promptCachePrewarm === true ? { ...finalized, max_tokens: 0 } : finalized;
   }
 
   /**

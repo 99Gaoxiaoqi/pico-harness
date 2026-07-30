@@ -723,6 +723,9 @@ export function parseUsage(value: unknown): UsageView {
   const cache = isRecord(usage.cache) ? usage.cache : {};
   const cacheReadTokens = optionalNumberValue(total.cacheReadTokens ?? total.cache_read_tokens);
   const cacheWriteTokens = optionalNumberValue(total.cacheWriteTokens ?? total.cache_write_tokens);
+  const cacheAlerts = recordArray(cache.operationalAlerts)
+    .map((alert) => stringValue(alert.message))
+    .filter((message) => message.length > 0);
   return {
     inputTokens: optionalNumberValue(total.inputTokens ?? total.input_tokens),
     outputTokens: optionalNumberValue(total.outputTokens ?? total.output_tokens),
@@ -734,6 +737,7 @@ export function parseUsage(value: unknown): UsageView {
     cacheRequestHitRate: optionalNumberValue(cache.requestHitRate),
     cachePromptTokenReuseRate: optionalNumberValue(cache.promptTokenReuseRate),
     cacheReadToWriteRatio: optionalNumberValue(cache.cacheReadToWriteRatio),
+    ...(cacheAlerts.length > 0 ? { cacheAlerts } : {}),
     cost: optionalNumberValue(total.cost),
     period: stringValue(usage.period || usage.rangeAccuracy),
   };

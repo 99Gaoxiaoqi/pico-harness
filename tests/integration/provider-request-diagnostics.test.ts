@@ -111,7 +111,12 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
 
   await new CostTracker(
     new PreparedClaudeProvider(64),
-    { provider: "claude", model: "claude-cache-test" },
+    {
+      provider: "claude",
+      model: "claude-cache-test",
+      baseUrl: "https://user:route-secret@example.test/v1?api_key=route-secret#fragment",
+      cacheSupported: false,
+    },
     undefined,
     trackerOptions,
   ).generate(firstMessages, tools);
@@ -154,6 +159,9 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
   ).generate(changedPrefixMessages, tools);
 
   const first = requestDiagnostic(records[0]);
+  assert.equal(records[0]?.route, "https://example.test/v1");
+  assert.equal(records[0]?.reported?.["cacheSupport"], "unsupported");
+  assert.doesNotMatch(JSON.stringify(records[0]), /route-secret|api_key/u);
   assert.equal(first["changeReason"], "first_request");
   assert.equal(String(first["requestHash"]).length, 64);
   assert.ok(Number(first["requestBytes"]) > 0);
