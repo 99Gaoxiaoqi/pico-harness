@@ -35,6 +35,7 @@ import {
   normalizeSessionUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
   type PersistedSessionSettings,
+  type PersistedPromptCacheState,
   type SessionHydrationSnapshot,
   type SessionRuntimePersistence,
   type SessionRuntimeStateWritePatch,
@@ -239,6 +240,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   totalUsageReports = 0;
   totalInputReports = 0;
   totalCacheReadReports = 0;
+  totalCacheHitCalls: number | null = 0;
   totalCacheWriteReports = 0;
   totalReasoningReports = 0;
   totalEstimatedCostReports = 0;
@@ -284,6 +286,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
 
   private persistedSettings?: PersistedSessionSettings;
   private persistedGoal?: ReturnType<GoalManager["snapshot"]>;
+  private persistedPromptCache?: PersistedPromptCacheState;
   private goalBinding?: { unsubscribe: () => void };
 
   /**
@@ -353,6 +356,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       this.createdAt = new Date(manifest.createdAt);
       this.persistedSettings = runtime.settings;
       this.persistedGoal = runtime.goal;
+      this.persistedPromptCache = runtime.promptCache;
       this.restoreUsage(runtime.usage);
       this.applyRuntimeHistoryProjection(projection);
     } catch (error) {
@@ -609,7 +613,12 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     }
     const reported = new Set(reportedFields);
     if (reported.has("input")) this.totalInputReports++;
-    if (reported.has("cacheRead")) this.totalCacheReadReports++;
+    if (reported.has("cacheRead")) {
+      this.totalCacheReadReports++;
+      if (this.totalCacheHitCalls !== null && (canonical?.cacheReadTokens ?? 0) > 0) {
+        this.totalCacheHitCalls++;
+      }
+    }
     if (reported.has("cacheWrite")) this.totalCacheWriteReports++;
     if (reported.has("reasoning")) this.totalReasoningReports++;
     this.updatedAt = new Date();
@@ -628,6 +637,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       stateVersion: SESSION_RUNTIME_STATE_VERSION,
       ...(this.persistedSettings ? { settings: this.persistedSettings } : {}),
       ...(this.persistedGoal ? { goal: this.persistedGoal } : {}),
+      ...(this.persistedPromptCache ? { promptCache: this.persistedPromptCache } : {}),
       usage: this.getUsageSnapshot(),
     };
     return structuredClone(snapshot);
@@ -642,6 +652,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     }
     if (normalized.settings) this.persistedSettings = normalized.settings;
     if (normalized.goal) this.persistedGoal = normalized.goal;
+    if (normalized.promptCache) this.persistedPromptCache = normalized.promptCache;
     this.updatedAt = new Date();
 
     if (this.store) {
@@ -653,6 +664,51 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         logger.error({ error: String(error) }, "[session] runtime state 持久化失败");
       });
     }
+  }
+
+  /**
+   * Resolve one Session's stable shard identity. Crossing the route RPM threshold is persisted as
+   * once per route so crossing a threshold never changes an existing Session's key. Sessions
+   * created after route activation receive the sharded key.
+   */
+  preparePromptCacheSharding(
+    routeIdentity: string,
+    messages: readonly Message[],
+    routeThresholdActive: boolean,
+  ): { shardSeed?: string; active: boolean } {
+    this.assertWritable();
+    const anchor = messages.find((message) => message.role !== "system");
+    const shardSeed =
+      this.persistedPromptCache?.shardSeed ??
+      (anchor
+        ? createHash("sha256")
+            .update(JSON.stringify({ role: anchor.role, content: anchor.content }))
+            .digest("hex")
+        : undefined);
+    const routeDigest = createHash("sha256").update(routeIdentity).digest("hex");
+    const routeShardDecisions: Record<string, boolean> = {
+      ...(this.persistedPromptCache?.routeShardDecisions ?? {}),
+    };
+    const hasDecision = Object.hasOwn(routeShardDecisions, routeDigest);
+    const active = hasDecision ? routeShardDecisions[routeDigest]! : routeThresholdActive;
+    if (!hasDecision) {
+      routeShardDecisions[routeDigest] = active;
+      while (Object.keys(routeShardDecisions).length > 64) {
+        const oldest = Object.keys(routeShardDecisions)[0];
+        if (oldest === undefined) break;
+        delete routeShardDecisions[oldest];
+      }
+    }
+    if (shardSeed && (!this.persistedPromptCache || !hasDecision)) {
+      this.updateRuntimeState({
+        promptCache: {
+          stateVersion: 1,
+          shardSeed,
+          routeShardDecisions,
+        },
+      });
+    }
+    return { ...(shardSeed ? { shardSeed } : {}), active };
   }
 
   /**
@@ -780,6 +836,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       totalUsageReports: this.totalUsageReports,
       totalInputReports: this.totalInputReports,
       totalCacheReadReports: this.totalCacheReadReports,
+      totalCacheHitCalls: this.totalCacheHitCalls,
       totalCacheWriteReports: this.totalCacheWriteReports,
       totalReasoningReports: this.totalReasoningReports,
       totalEstimatedCostReports: this.totalEstimatedCostReports,
@@ -801,6 +858,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     this.totalUsageReports = usage.totalUsageReports;
     this.totalInputReports = usage.totalInputReports;
     this.totalCacheReadReports = usage.totalCacheReadReports;
+    this.totalCacheHitCalls = usage.totalCacheHitCalls;
     this.totalCacheWriteReports = usage.totalCacheWriteReports;
     this.totalReasoningReports = usage.totalReasoningReports;
     this.totalEstimatedCostReports = usage.totalEstimatedCostReports;

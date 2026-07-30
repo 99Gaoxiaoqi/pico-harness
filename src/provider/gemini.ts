@@ -29,6 +29,8 @@ import {
   type GeminiPromptCacheStore,
   type GeminiPromptCacheTransport,
 } from "./gemini-prompt-cache.js";
+import { appendProviderEndpointPath } from "./provider-endpoint.js";
+import { snapshotToolDefinitions } from "./prompt-cache.js";
 
 /** Gemini content part:文本 / 工具调用 / 工具响应 */
 interface GeminiPart {
@@ -65,11 +67,14 @@ export interface GeminiProviderDependencies {
   readonly promptCacheTransport?: GeminiPromptCacheTransport;
   readonly now?: () => number;
   /** Set only after the native cachedContents spike has passed for this route. Defaults false. */
-  readonly enableExplicitPromptCache?: boolean;
+  readonly enableExplicitPromptCache?:
+    | boolean
+    | ((route: { readonly baseURL: string; readonly model: string }) => boolean);
 }
 
 /** Google (Gemini) 原生协议适配器 */
 export class GeminiProvider implements LLMProvider {
+  readonly requestCapabilities;
   private readonly profile: ProviderProfile;
   private readonly promptCache?: GeminiPromptCacheController;
   private readonly cacheWriteTokensByBody = new WeakMap<object, number>();
@@ -80,8 +85,18 @@ export class GeminiProvider implements LLMProvider {
     dependencies: GeminiProviderDependencies = {},
   ) {
     this.profile = profile ?? resolveProviderProfile("gemini", config.model);
+    this.requestCapabilities = {
+      toolChoiceNoneWithTools: config.capabilities?.toolChoiceNoneWithTools === true,
+    };
+    const explicitPromptCacheEnabled =
+      typeof dependencies.enableExplicitPromptCache === "function"
+        ? dependencies.enableExplicitPromptCache({
+            baseURL: config.baseURL,
+            model: config.model,
+          })
+        : dependencies.enableExplicitPromptCache === true;
     if (
-      dependencies.enableExplicitPromptCache === true &&
+      explicitPromptCacheEnabled &&
       config.capabilities?.cache !== false &&
       config.capabilities?.promptCache.mode === "explicit"
     ) {
@@ -103,14 +118,19 @@ export class GeminiProvider implements LLMProvider {
 
   /** 拼装非流式 generateContent 端点；凭证仅放 x-goog-api-key header。 */
   private generateUrl(): string {
-    const base = this.config.baseURL.replace(/\/+$/, "");
-    return `${base}/v1beta/models/${this.config.model}:generateContent`;
+    return appendProviderEndpointPath(
+      this.config.baseURL,
+      `v1beta/models/${this.config.model}:generateContent`,
+    );
   }
 
   /** 拼装流式 streamGenerateContent 端点(alt=sse,凭证仅在 header)。 */
   private streamUrl(): string {
-    const base = this.config.baseURL.replace(/\/+$/, "");
-    return `${base}/v1beta/models/${this.config.model}:streamGenerateContent?alt=sse`;
+    return appendProviderEndpointPath(
+      this.config.baseURL,
+      `v1beta/models/${this.config.model}:streamGenerateContent`,
+      { alt: "sse" },
+    );
   }
 
   async generate(
@@ -118,7 +138,7 @@ export class GeminiProvider implements LLMProvider {
     availableTools: ToolDefinition[],
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const body = await this.buildRequestBody(messages, availableTools);
+    const body = await this.buildRequestBody(messages, availableTools, true, options);
     const cacheWriteTokens = this.cacheWriteTokensByBody.get(body);
     options?.onRequestPrepared?.({
       provider: "gemini",
@@ -133,12 +153,14 @@ export class GeminiProvider implements LLMProvider {
       signal: providerRequestSignal(options?.signal),
     });
 
-    if (!resp.ok && body["cachedContent"] !== undefined) {
+    if (
+      !resp.ok &&
+      body["cachedContent"] !== undefined &&
+      isRejectedCachedContentStatus(resp.status)
+    ) {
       await resp.body?.cancel().catch(() => undefined);
-      if (isRejectedCachedContentStatus(resp.status)) {
-        await this.promptCache?.invalidateName(String(body["cachedContent"]));
-      }
-      const fallback = await this.buildRequestBody(messages, availableTools, false);
+      await this.promptCache?.invalidateName(String(body["cachedContent"]));
+      const fallback = await this.buildRequestBody(messages, availableTools, false, options);
       options?.onRequestPrepared?.({
         provider: "gemini",
         model: this.config.model,
@@ -155,9 +177,12 @@ export class GeminiProvider implements LLMProvider {
     if (!resp.ok) {
       const text = await resp.text();
       if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`Gemini API 上下文溢出 [${resp.status}]: ${text}`);
+        throw new ContextOverflowError(`Gemini API 上下文溢出 [${resp.status}]; response omitted`);
       }
-      throw new LLMStatusError(resp.status, `Gemini API 请求失败 [${resp.status}]: ${text}`);
+      throw new LLMStatusError(
+        resp.status,
+        `Gemini API 请求失败 [${resp.status}]; response omitted`,
+      );
     }
 
     // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
@@ -189,7 +214,7 @@ export class GeminiProvider implements LLMProvider {
     onDelta: (delta: string) => void,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const body = await this.buildRequestBody(messages, availableTools);
+    const body = await this.buildRequestBody(messages, availableTools, true, options);
     const cacheWriteTokens = this.cacheWriteTokensByBody.get(body);
     options?.onRequestPrepared?.({
       provider: "gemini",
@@ -204,12 +229,14 @@ export class GeminiProvider implements LLMProvider {
       signal: providerRequestSignal(options?.signal),
     });
 
-    if (!resp.ok && body["cachedContent"] !== undefined) {
+    if (
+      !resp.ok &&
+      body["cachedContent"] !== undefined &&
+      isRejectedCachedContentStatus(resp.status)
+    ) {
       await resp.body?.cancel().catch(() => undefined);
-      if (isRejectedCachedContentStatus(resp.status)) {
-        await this.promptCache?.invalidateName(String(body["cachedContent"]));
-      }
-      const fallback = await this.buildRequestBody(messages, availableTools, false);
+      await this.promptCache?.invalidateName(String(body["cachedContent"]));
+      const fallback = await this.buildRequestBody(messages, availableTools, false, options);
       options?.onRequestPrepared?.({
         provider: "gemini",
         model: this.config.model,
@@ -226,9 +253,12 @@ export class GeminiProvider implements LLMProvider {
     if (!resp.ok) {
       const text = await resp.text();
       if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`Gemini API 上下文溢出 [${resp.status}]: ${text}`);
+        throw new ContextOverflowError(`Gemini API 上下文溢出 [${resp.status}]; response omitted`);
       }
-      throw new LLMStatusError(resp.status, `Gemini API 流式请求失败 [${resp.status}]: ${text}`);
+      throw new LLMStatusError(
+        resp.status,
+        `Gemini API 流式请求失败 [${resp.status}]; response omitted`,
+      );
     }
 
     // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
@@ -319,6 +349,7 @@ export class GeminiProvider implements LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     useExplicitCache = true,
+    options?: LLMProviderRequestOptions,
   ): Promise<Record<string, unknown>> {
     let systemPrompt = "";
     const contents: GeminiContent[] = [];
@@ -386,23 +417,29 @@ export class GeminiProvider implements LLMProvider {
       body.system_instruction = { parts: [{ text: systemPrompt }] };
     }
     // 无可用工具时不挂载 tools
-    if (availableTools.length > 0) {
+    const tools = snapshotToolDefinitions(availableTools);
+    if (tools.length > 0) {
       body.tools = [
         {
-          functionDeclarations: availableTools.map((t) => ({
+          functionDeclarations: tools.map((t) => ({
             name: t.name,
             description: t.description,
             parameters: t.inputSchema,
           })),
         },
       ];
+      if (options?.toolChoice === "none") {
+        body.toolConfig = { functionCallingConfig: { mode: "NONE" } };
+      }
     }
     body.generationConfig = { maxOutputTokens: this.profile.maxOutputTokens };
     const capability = this.config.capabilities?.reasoningProfile;
     const translated = capability
       ? applyReasoningRequestPatch(body, capability, this.config.thinkingEffort ?? "off", "gemini")
       : body;
-    return useExplicitCache ? this.attachExplicitPromptCache(translated) : translated;
+    return useExplicitCache
+      ? this.attachExplicitPromptCache(translated, options?.signal)
+      : translated;
   }
 
   /**
@@ -411,6 +448,7 @@ export class GeminiProvider implements LLMProvider {
    */
   private async attachExplicitPromptCache(
     body: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     if (!this.promptCache) return body;
     const source: Record<string, unknown> = {};
@@ -419,7 +457,7 @@ export class GeminiProvider implements LLMProvider {
     }
     if (body["tools"] !== undefined) source["tools"] = body["tools"];
     if (Object.keys(source).length === 0) return body;
-    const cachedContent = await this.promptCache.getOrCreate(source);
+    const cachedContent = await this.promptCache.getOrCreate(source, signal);
     if (!cachedContent) return body;
     const { system_instruction: _systemInstruction, tools: _tools, ...remaining } = body;
     const cachedBody = { ...remaining, cachedContent: cachedContent.name };
@@ -430,10 +468,9 @@ export class GeminiProvider implements LLMProvider {
   }
 
   private createPromptCacheTransport(): GeminiPromptCacheTransport {
-    const base = this.config.baseURL.replace(/\/+$/, "");
-    const endpoint = `${base}/v1beta/cachedContents`;
+    const endpoint = appendProviderEndpointPath(this.config.baseURL, "v1beta/cachedContents");
     return {
-      create: async ({ model, ttlSeconds, source }) => {
+      create: async ({ model, ttlSeconds, source, signal }) => {
         const response = await fetch(endpoint, {
           method: "POST",
           headers: this.headers(),
@@ -442,6 +479,7 @@ export class GeminiProvider implements LLMProvider {
             ...source,
             ttl: `${ttlSeconds}s`,
           }),
+          signal: providerRequestSignal(signal),
         });
         if (!response.ok)
           throw new LLMStatusError(response.status, "Gemini cachedContents create failed");
@@ -463,11 +501,35 @@ export class GeminiProvider implements LLMProvider {
             : {}),
         };
       },
+      updateTtl: async (name, ttlSeconds, signal) => {
+        const response = await fetch(
+          appendProviderEndpointPath(this.config.baseURL, `v1beta/${name}`, {
+            updateMask: "ttl",
+          }),
+          {
+            method: "PATCH",
+            headers: this.headers(),
+            body: JSON.stringify({ ttl: `${ttlSeconds}s` }),
+            signal: providerRequestSignal(signal),
+          },
+        );
+        if (!response.ok) {
+          throw new LLMStatusError(response.status, "Gemini cachedContents update failed");
+        }
+        const data = (await response.json()) as { expireTime?: unknown };
+        const parsedExpiry =
+          typeof data.expireTime === "string" ? Date.parse(data.expireTime) : NaN;
+        return Number.isFinite(parsedExpiry) ? { expireAt: parsedExpiry } : {};
+      },
       delete: async (name) => {
-        const response = await fetch(`${base}/v1beta/${encodeURI(name)}`, {
-          method: "DELETE",
-          headers: { "x-goog-api-key": this.config.apiKey },
-        });
+        const response = await fetch(
+          appendProviderEndpointPath(this.config.baseURL, `v1beta/${name}`),
+          {
+            method: "DELETE",
+            headers: { "x-goog-api-key": this.config.apiKey },
+            signal: providerRequestSignal(),
+          },
+        );
         if (!response.ok && response.status !== 404) {
           throw new LLMStatusError(response.status, "Gemini cachedContents delete failed");
         }

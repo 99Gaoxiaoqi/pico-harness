@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Message, ToolDefinition } from "../schema/message.js";
+import { normalizePromptCacheEndpoint } from "./provider-endpoint.js";
 
 /**
  * Serialize JSON-shaped provider inputs deterministically.  Prompt-cache
@@ -110,7 +111,7 @@ export function promptCacheRouteIdentity(input: {
     stableJson({
       provider: input.provider,
       model: input.model,
-      baseURL: normalizeBaseURL(input.baseURL),
+      baseURL: normalizePromptCacheEndpoint(input.baseURL),
       policy: input.policy,
     }),
   );
@@ -128,16 +129,6 @@ export function promptCacheConversationShardSeed(messages: readonly Message[]): 
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function normalizeBaseURL(value: string): string {
-  try {
-    const parsed = new URL(value);
-    const path = parsed.pathname.replace(/\/+$/u, "");
-    return `${parsed.protocol}//${parsed.host}${path}`;
-  } catch {
-    return value.replace(/[?#].*$/u, "").replace(/\/+$/u, "");
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -36,9 +36,8 @@ export interface ModelUsageReport {
     cacheWriteTokens: UsageFieldReport;
     reasoningTokens: UsageFieldReport;
   };
-  /** 会话快照没有逐调用账本，因此请求命中率只能明确标为 unavailable。 */
   cache: {
-    requestHitRate: null;
+    requestHitRate: number | null;
     promptTokenReuseRate: number | null;
     cacheReadToWriteRatio: number | null;
     uncachedInputTokens: UsageFieldReport;
@@ -117,14 +116,10 @@ export function createModelUsageReport(
     totalCalls,
   );
   const promptTokens = usageField(usage.totalPromptTokens, usageReports, totalCalls);
-  const reuseDenominator =
-    inputTokens.value === null || cacheReadTokens.value === null || cacheWriteTokens.value === null
-      ? null
-      : inputTokens.value + cacheReadTokens.value + cacheWriteTokens.value;
-  const cacheRatiosFullyReported =
-    inputTokens.status === "reported" &&
-    cacheReadTokens.status === "reported" &&
-    cacheWriteTokens.status === "reported";
+  const cacheReadCoverageComplete =
+    totalCalls > 0 &&
+    usage.totalCacheReadReports === totalCalls &&
+    usage.totalCacheHitCalls !== null;
   return {
     routeId: route.id,
     providerCalls: totalCalls,
@@ -142,16 +137,20 @@ export function createModelUsageReport(
       ),
     },
     cache: {
-      requestHitRate: null,
+      requestHitRate: cacheReadCoverageComplete
+        ? (usage.totalCacheHitCalls ?? 0) / usage.totalCacheReadReports
+        : null,
       promptTokenReuseRate:
-        !cacheRatiosFullyReported ||
+        promptTokens.status !== "reported" ||
+        cacheReadTokens.status !== "reported" ||
+        promptTokens.value === null ||
         cacheReadTokens.value === null ||
-        reuseDenominator === null ||
-        reuseDenominator === 0
+        promptTokens.value === 0
           ? null
-          : cacheReadTokens.value / reuseDenominator,
+          : cacheReadTokens.value / promptTokens.value,
       cacheReadToWriteRatio:
-        !cacheRatiosFullyReported ||
+        cacheReadTokens.status !== "reported" ||
+        cacheWriteTokens.status !== "reported" ||
         cacheReadTokens.value === null ||
         cacheWriteTokens.value === null ||
         cacheWriteTokens.value === 0
@@ -222,7 +221,7 @@ export function formatModelUsageReport(report: ModelUsageReport): string {
     field("Input tokens", report.fields.inputTokens),
     field("Cache read tokens", report.fields.cacheReadTokens),
     field("Cache write tokens", report.fields.cacheWriteTokens),
-    "Cache request hit rate: unavailable (requires provider_calls ledger)",
+    `Cache request hit rate: ${ratio(report.cache.requestHitRate)}`,
     `Cache prompt-token reuse: ${ratio(report.cache.promptTokenReuseRate)}`,
     `Cache read/write ratio: ${multiple(report.cache.cacheReadToWriteRatio)}`,
     field("Uncached input tokens", report.cache.uncachedInputTokens),

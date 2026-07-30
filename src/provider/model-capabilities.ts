@@ -24,14 +24,20 @@ export type PromptCacheTtl = "5m" | "1h" | "30m" | "24h" | `${number}s`;
 export interface PromptCachePolicyConfig {
   mode: PromptCacheMode;
   ttl?: PromptCacheTtl;
+  /** OpenAI GPT-5.6 content-block breakpoints; enable only after route capability probing. */
+  explicitBreakpoints?: boolean;
   keyShards?: number;
+  /** Activate configured key sharding after this route exceeds the calls-per-minute threshold. */
+  shardThresholdRpm?: number;
   prewarm?: boolean;
 }
 
 export interface PromptCachePolicy {
   mode: PromptCacheMode;
   ttl?: PromptCacheTtl;
+  explicitBreakpoints?: boolean;
   keyShards: number;
+  shardThresholdRpm?: number;
   prewarm: boolean;
 }
 
@@ -132,16 +138,47 @@ function resolvePromptCachePolicy(
   }
 
   const keyShards = configured.keyShards ?? 1;
+  if (!Number.isSafeInteger(keyShards) || keyShards < 1 || keyShards > 64) {
+    throw new Error("promptCache.keyShards must be an integer between 1 and 64");
+  }
+  const shardThresholdRpm = configured.shardThresholdRpm ?? (keyShards > 1 ? 15 : undefined);
+  if (
+    shardThresholdRpm !== undefined &&
+    (!Number.isSafeInteger(shardThresholdRpm) ||
+      shardThresholdRpm < 1 ||
+      shardThresholdRpm > 1_000_000)
+  ) {
+    throw new Error("promptCache.shardThresholdRpm must be an integer between 1 and 1000000");
+  }
+  if (configured.shardThresholdRpm !== undefined && keyShards <= 1) {
+    throw new Error("promptCache.shardThresholdRpm requires keyShards greater than 1");
+  }
   const prewarm = configured.prewarm ?? false;
   if (provider === "openai") {
-    if (configured.ttl !== undefined && configured.ttl !== "30m" && configured.ttl !== "24h") {
-      throw new Error("OpenAI promptCache.ttl must be 30m or 24h");
+    if (
+      configured.mode !== "explicit" &&
+      (keyShards > 1 || configured.shardThresholdRpm !== undefined)
+    ) {
+      throw new Error("OpenAI prompt-cache key sharding requires promptCache.mode=explicit");
+    }
+    if (configured.ttl !== undefined && configured.ttl !== "30m") {
+      throw new Error("OpenAI promptCache.ttl must be 30m");
+    }
+    if (configured.explicitBreakpoints === true && configured.mode !== "explicit") {
+      throw new Error("OpenAI explicitBreakpoints requires promptCache.mode=explicit");
+    }
+    if (configured.ttl !== undefined && configured.explicitBreakpoints !== true) {
+      throw new Error("OpenAI promptCache.ttl requires explicitBreakpoints=true");
     }
     if (prewarm) throw new Error("OpenAI promptCache.prewarm is not supported");
     return {
       mode: configured.mode,
       ...(configured.ttl ? { ttl: configured.ttl } : {}),
+      ...(configured.explicitBreakpoints !== undefined
+        ? { explicitBreakpoints: configured.explicitBreakpoints }
+        : {}),
       keyShards,
+      ...(shardThresholdRpm !== undefined ? { shardThresholdRpm } : {}),
       prewarm: false,
     };
   }
@@ -153,6 +190,12 @@ function resolvePromptCachePolicy(
       throw new Error("Claude promptCache.ttl must be 5m or 1h");
     }
     if (keyShards !== 1) throw new Error("Claude promptCache.keyShards must be 1");
+    if (configured.shardThresholdRpm !== undefined) {
+      throw new Error("Claude promptCache.shardThresholdRpm is not supported");
+    }
+    if (configured.explicitBreakpoints !== undefined) {
+      throw new Error("Claude promptCache.explicitBreakpoints is not supported");
+    }
     return {
       mode: "explicit",
       ttl: configured.ttl ?? "5m",
@@ -169,6 +212,12 @@ function resolvePromptCachePolicy(
     throw new Error("Gemini promptCache.ttl must be a positive integer number of seconds");
   }
   if (keyShards !== 1) throw new Error("Gemini promptCache.keyShards must be 1");
+  if (configured.shardThresholdRpm !== undefined) {
+    throw new Error("Gemini promptCache.shardThresholdRpm is not supported");
+  }
+  if (configured.explicitBreakpoints !== undefined) {
+    throw new Error("Gemini promptCache.explicitBreakpoints is not supported");
+  }
   if (prewarm) throw new Error("Gemini promptCache.prewarm is not supported");
   return {
     mode: configured.mode,
@@ -183,20 +232,21 @@ function resolvePromptCachePolicy(
 }
 
 /**
- * Only the official Anthropic endpoint is safe to infer. Compatible gateways
- * must opt in per model because partial Messages API implementations are common.
+ * Official Anthropic and OpenAI endpoints are safe defaults. Compatible gateways must opt in per
+ * model because partial protocol implementations are common.
  */
 export function defaultToolChoiceNoneWithTools(
   provider: ProviderKind,
   baseURL: string | undefined,
 ): CapabilitySupport {
-  if (provider !== "claude") return false;
+  if (provider !== "claude" && provider !== "openai") return false;
   if (!baseURL) return "unknown";
   try {
     const endpoint = new URL(baseURL);
-    return endpoint.protocol === "https:" && endpoint.hostname.toLowerCase() === "api.anthropic.com"
-      ? true
-      : "unknown";
+    if (endpoint.protocol !== "https:") return "unknown";
+    const hostname = endpoint.hostname.toLowerCase();
+    if (provider === "claude") return hostname === "api.anthropic.com" ? true : "unknown";
+    return hostname === "api.openai.com" ? true : "unknown";
   } catch {
     return "unknown";
   }

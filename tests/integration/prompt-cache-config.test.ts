@@ -19,6 +19,49 @@ test("prompt-cache policies resolve provider defaults and configured behavior", 
     prewarm: false,
   });
   assert.deepEqual(
+    resolveModelRouteCapabilities("openai", "gpt-test", {
+      cache: true,
+      promptCache: {
+        mode: "explicit",
+        ttl: "30m",
+        explicitBreakpoints: true,
+        keyShards: 4,
+      },
+    }).promptCache,
+    {
+      mode: "explicit",
+      ttl: "30m",
+      explicitBreakpoints: true,
+      keyShards: 4,
+      shardThresholdRpm: 15,
+      prewarm: false,
+    },
+  );
+  assert.throws(
+    () =>
+      resolveModelRouteCapabilities("openai", "gpt-test", {
+        cache: true,
+        promptCache: { mode: "explicit", ttl: "30m" },
+      }),
+    /ttl requires explicitBreakpoints=true/u,
+  );
+  assert.throws(
+    () =>
+      resolveModelRouteCapabilities("openai", "gpt-test", {
+        cache: true,
+        promptCache: { mode: "implicit", keyShards: 4 },
+      }),
+    /key sharding requires promptCache\.mode=explicit/u,
+  );
+  assert.throws(
+    () =>
+      resolveModelRouteCapabilities("openai", "gpt-test", {
+        cache: true,
+        promptCache: { mode: "explicit", shardThresholdRpm: 15 },
+      }),
+    /requires keyShards greater than 1/u,
+  );
+  assert.deepEqual(
     resolveModelRouteCapabilities("gemini", "gemini-test", {
       cache: true,
       promptCache: { mode: "explicit" },

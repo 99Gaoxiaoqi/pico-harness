@@ -34,6 +34,8 @@ export interface RetryOptions {
   toolChoice?: LLMProviderRequestOptions["toolChoice"];
   /** 缓存分片身份在普通重试与凭证轮换期间保持不变。 */
   promptCacheShardSeed?: LLMProviderRequestOptions["promptCacheShardSeed"];
+  /** 缓存分片流量门槛决定在普通重试与凭证轮换期间保持不变。 */
+  promptCacheShardActive?: LLMProviderRequestOptions["promptCacheShardActive"];
   /** 重试事件回调:每次决定重试时触发,供上层打点 / Tracing */
   onRetry?: (info: RetryInfo) => void;
   /**
@@ -137,6 +139,9 @@ export async function generateWithRetry(
     ...(options?.toolChoice ? { toolChoice: options.toolChoice } : {}),
     ...(options?.promptCacheShardSeed
       ? { promptCacheShardSeed: options.promptCacheShardSeed }
+      : {}),
+    ...(options?.promptCacheShardActive !== undefined
+      ? { promptCacheShardActive: options.promptCacheShardActive }
       : {}),
   };
   let timeoutRetries = 0;
@@ -373,14 +378,12 @@ function logRequestFailure(
 
 interface RetryErrorFields {
   errorName: string;
-  errorMessage: string;
   statusCode?: number;
 }
 
 function retryErrorFields(error: unknown): RetryErrorFields {
   return {
     errorName: error instanceof Error ? error.name : typeof error,
-    errorMessage: error instanceof Error ? error.message : String(error),
     statusCode: maybeStatusCode(error),
   };
 }

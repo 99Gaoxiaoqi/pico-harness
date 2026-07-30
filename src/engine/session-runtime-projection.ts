@@ -177,15 +177,20 @@ export function projectRuntimeSessionState(
 ): SessionRuntimeStateSnapshot {
   let settings: SessionRuntimeStateSnapshot["settings"];
   let goal: SessionRuntimeStateSnapshot["goal"];
+  let promptCache: SessionRuntimeStateSnapshot["promptCache"];
   for (const event of events) {
     if (event.kind !== "session.state.committed") continue;
     if (event.data.patch.settings) settings = structuredClone(event.data.patch.settings);
     if (event.data.patch.goal) goal = structuredClone(event.data.patch.goal);
+    if (event.data.patch.promptCache) {
+      promptCache = structuredClone(event.data.patch.promptCache);
+    }
   }
   return {
     stateVersion: SESSION_RUNTIME_STATE_VERSION,
     ...(settings ? { settings } : {}),
     ...(goal ? { goal } : {}),
+    ...(promptCache ? { promptCache } : {}),
     usage: projectRuntimeSessionUsage(events),
   };
 }
@@ -216,7 +221,12 @@ export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): Ses
 
     const fields = new Set(reportedUsage.reportedFields ?? ["prompt", "completion"]);
     if (fields.has("input")) usage.totalInputReports++;
-    if (fields.has("cacheRead")) usage.totalCacheReadReports++;
+    if (fields.has("cacheRead")) {
+      usage.totalCacheReadReports++;
+      if (canonical.cacheReadTokens > 0) {
+        usage.totalCacheHitCalls = (usage.totalCacheHitCalls ?? 0) + 1;
+      }
+    }
     if (fields.has("cacheWrite")) usage.totalCacheWriteReports++;
     if (fields.has("reasoning")) usage.totalReasoningReports++;
   }

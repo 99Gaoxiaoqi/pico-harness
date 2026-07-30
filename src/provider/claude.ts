@@ -32,6 +32,7 @@ import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
 import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
+import { appendProviderEndpointPath } from "./provider-endpoint.js";
 import { snapshotToolDefinitions } from "./prompt-cache.js";
 
 /** Anthropic content block: 文本、图片或工具调用 */
@@ -89,7 +90,7 @@ export class ClaudeProvider implements LLMProvider {
     });
 
     // 2. 构建请求并发送
-    const resp = await fetch(`${this.config.baseURL}/messages`, {
+    const resp = await fetch(appendProviderEndpointPath(this.config.baseURL, "messages"), {
       method: "POST",
       headers: {
         "x-api-key": this.config.apiKey,
@@ -103,9 +104,12 @@ export class ClaudeProvider implements LLMProvider {
     if (!resp.ok) {
       const text = await resp.text();
       if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
+        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]; response omitted`);
       }
-      throw new LLMStatusError(resp.status, `Claude API 请求失败 [${resp.status}]: ${text}`);
+      throw new LLMStatusError(
+        resp.status,
+        `Claude API 请求失败 [${resp.status}]; response omitted`,
+      );
     }
 
     // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
@@ -153,7 +157,7 @@ export class ClaudeProvider implements LLMProvider {
     });
 
     // 2. 构建请求并发送
-    const resp = await fetch(`${this.config.baseURL}/messages`, {
+    const resp = await fetch(appendProviderEndpointPath(this.config.baseURL, "messages"), {
       method: "POST",
       headers: {
         "x-api-key": this.config.apiKey,
@@ -167,9 +171,12 @@ export class ClaudeProvider implements LLMProvider {
     if (!resp.ok) {
       const text = await resp.text();
       if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
+        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]; response omitted`);
       }
-      throw new LLMStatusError(resp.status, `Claude API 流式请求失败 [${resp.status}]: ${text}`);
+      throw new LLMStatusError(
+        resp.status,
+        `Claude API 流式请求失败 [${resp.status}]; response omitted`,
+      );
     }
 
     // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
@@ -594,9 +601,7 @@ export class ClaudeProvider implements LLMProvider {
         // 心跳,忽略
         break;
       case "error": {
-        const err = payload.error as { message?: string; type?: string } | undefined;
-        const errMsg = err?.message ?? err?.type ?? "未知 Anthropic 流式错误";
-        throw new Error(`Claude 流式错误: ${errMsg}`);
+        throw new Error("Claude 流式错误; response omitted");
       }
       default:
         // 未知事件类型,忽略(向前兼容未来新增事件)

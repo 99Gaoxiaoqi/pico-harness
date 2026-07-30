@@ -8,13 +8,14 @@ import {
   GeminiPromptCacheController,
   MemoryGeminiPromptCacheStore,
   stableDigest,
+  type GeminiPromptCacheStore,
   type GeminiPromptCacheTransport,
 } from "../../src/provider/gemini-prompt-cache.js";
 import { GeminiProvider } from "../../src/provider/gemini.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 
 function controller(options: {
-  readonly store?: MemoryGeminiPromptCacheStore | FileGeminiPromptCacheStore;
+  readonly store?: GeminiPromptCacheStore;
   readonly transport: GeminiPromptCacheTransport;
   readonly model?: string;
   readonly now?: () => number;
@@ -102,6 +103,66 @@ test("Gemini explicit cache deduplicates concurrent create and renews below rema
   assert.equal((await cache.getOrCreate(source))?.name, "cachedContents/2");
 });
 
+test("Gemini renewal preserves the still-valid cache when replacement creation fails", async () => {
+  let now = 1_000;
+  let creates = 0;
+  const deleted: string[] = [];
+  const store = new MemoryGeminiPromptCacheStore();
+  const cache = controller({
+    store,
+    now: () => now,
+    transport: {
+      async create() {
+        creates++;
+        if (creates > 1) throw new Error("renewal unavailable");
+        return { name: "cachedContents/still-valid", expireAt: now + 100_000 };
+      },
+      async delete(name) {
+        deleted.push(name);
+      },
+    },
+  });
+  const source = { systemInstruction: { parts: [{ text: "stable" }] } };
+  assert.equal((await cache.getOrCreate(source))?.name, "cachedContents/still-valid");
+
+  now = 82_000;
+  assert.equal((await cache.getOrCreate(source))?.name, "cachedContents/still-valid");
+  assert.equal((await store.list())[0]?.name, "cachedContents/still-valid");
+  assert.deepEqual(deleted, []);
+});
+
+test("Gemini renewal updates TTL in place when the native transport supports PATCH", async () => {
+  let now = 1_000;
+  let creates = 0;
+  let updates = 0;
+  const store = new MemoryGeminiPromptCacheStore();
+  const cache = controller({
+    store,
+    now: () => now,
+    transport: {
+      async create() {
+        creates++;
+        return { name: "cachedContents/renewed", expireAt: now + 100_000 };
+      },
+      async updateTtl(name, ttlSeconds) {
+        updates++;
+        assert.equal(name, "cachedContents/renewed");
+        assert.equal(ttlSeconds, 100);
+        return { expireAt: now + ttlSeconds * 1_000 };
+      },
+      async delete() {},
+    },
+  });
+  const source = { systemInstruction: { parts: [{ text: "stable" }] } };
+  await cache.getOrCreate(source);
+  now = 82_000;
+
+  assert.equal((await cache.getOrCreate(source))?.name, "cachedContents/renewed");
+  assert.equal(creates, 1);
+  assert.equal(updates, 1);
+  assert.equal((await store.list())[0]?.expireAt, 182_000);
+});
+
 test("Gemini create dedupe never shares a remote name across workspace stores", async () => {
   let creates = 0;
   const transport: GeminiPromptCacheTransport = {
@@ -129,7 +190,42 @@ test("Gemini create dedupe never shares a remote name across workspace stores", 
   assert.notEqual(results[0]?.name, results[1]?.name);
 });
 
-test("Gemini startup cleanup serializes with first create for the same cache identity", async () => {
+test("Gemini shared file store reuses one process lock identity per metadata path", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-gemini-shared-store-"));
+  const path = join(root, "control", "gemini-prompt-cache.json");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  assert.equal(FileGeminiPromptCacheStore.shared(path), FileGeminiPromptCacheStore.shared(path));
+});
+
+test("Gemini removes a created remote object when metadata commit fails", async () => {
+  const deleted: string[] = [];
+  const failingStore: GeminiPromptCacheStore = {
+    async list() {
+      return [];
+    },
+    async put() {
+      throw new Error("metadata unavailable");
+    },
+    async remove() {},
+  };
+  const cache = controller({
+    store: failingStore,
+    transport: {
+      async create() {
+        return { name: "cachedContents/orphan", expireAt: Date.now() + 100_000 };
+      },
+      async delete(name) {
+        deleted.push(name);
+      },
+    },
+  });
+
+  assert.equal(await cache.getOrCreate({ tools: [] }), undefined);
+  assert.deepEqual(deleted, ["cachedContents/orphan"]);
+});
+
+test("Gemini startup cleanup cannot remove a replacement and remote delete does not block it", async () => {
   let now = 1_000;
   let creates = 0;
   let releaseDelete: (() => void) | undefined;
@@ -159,13 +255,91 @@ test("Gemini startup cleanup serializes with first create for the same cache ide
   const startupCleanup = controller({ store, transport, now: () => now }).cleanupExpiredEntries();
   await deleteStarted;
   const firstRequest = controller({ store, transport, now: () => now }).getOrCreate(source);
-  await Promise.resolve();
-  assert.equal(creates, 1, "first request must wait for same-key startup cleanup");
-  releaseDelete?.();
-
   await startupCleanup;
   assert.equal((await firstRequest)?.name, "cachedContents/2");
   assert.equal((await store.list())[0]?.name, "cachedContents/2");
+  releaseDelete?.();
+});
+
+test("Gemini cached-content creation receives the caller abort signal", async () => {
+  const signal = new AbortController().signal;
+  let receivedSignal: AbortSignal | undefined;
+  const cache = controller({
+    transport: {
+      async create(input) {
+        receivedSignal = input.signal;
+        return { name: "cachedContents/signal", expireAt: Date.now() + 100_000 };
+      },
+      async delete() {},
+    },
+  });
+
+  assert.equal((await cache.getOrCreate({ tools: [] }, signal))?.name, "cachedContents/signal");
+  assert.equal(receivedSignal, signal);
+});
+
+test("Gemini same-key lock wait honors caller cancellation", async () => {
+  let releaseCreate: (() => void) | undefined;
+  let markCreateStarted: (() => void) | undefined;
+  const createStarted = new Promise<void>((resolve) => {
+    markCreateStarted = resolve;
+  });
+  const createBlocked = new Promise<void>((resolve) => {
+    releaseCreate = resolve;
+  });
+  const store = new MemoryGeminiPromptCacheStore();
+  const cache = controller({
+    store,
+    transport: {
+      async create() {
+        markCreateStarted?.();
+        await createBlocked;
+        return { name: "cachedContents/locked", expireAt: Date.now() + 100_000 };
+      },
+      async delete() {},
+    },
+  });
+  const source = { tools: [{ functionDeclarations: [{ name: "lookup" }] }] };
+  const first = cache.getOrCreate(source);
+  await createStarted;
+
+  const abort = new AbortController();
+  const waiting = cache.getOrCreate(source, abort.signal);
+  abort.abort(new DOMException("cancelled", "AbortError"));
+  await assert.rejects(waiting, { name: "AbortError" });
+
+  releaseCreate?.();
+  assert.equal((await first)?.name, "cachedContents/locked");
+});
+
+test("Gemini cached-content creation propagates a host abort instead of failing open", async () => {
+  let markCreateStarted: (() => void) | undefined;
+  const createStarted = new Promise<void>((resolve) => {
+    markCreateStarted = resolve;
+  });
+  const abort = new AbortController();
+  const cache = controller({
+    transport: {
+      async create(input): Promise<never> {
+        markCreateStarted?.();
+        return await new Promise<never>((_resolve, reject) => {
+          const onAbort = () =>
+            reject(
+              input.signal?.reason instanceof Error
+                ? input.signal.reason
+                : new DOMException("cancelled", "AbortError"),
+            );
+          input.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      },
+      async delete() {},
+    },
+  });
+  const creating = cache.getOrCreate({ tools: [] }, abort.signal);
+  await createStarted;
+  abort.abort(new DOMException("cancelled", "AbortError"));
+
+  await assert.rejects(creating, { name: "AbortError" });
 });
 
 test("Gemini explicit cache separates models, removes expired metadata, and fails open on permission/delete errors", async () => {
@@ -332,6 +506,56 @@ test("Gemini cachedContent rejection retries once with the complete non-cached r
   assert.equal("cachedContent" in (generated[1] ?? {}), false);
   assert.ok(generated[1]?.["system_instruction"]);
   assert.equal((await store.list()).length, 0, "a rejected cache name must not be reused");
+});
+
+test("Gemini cachedContent quota/server errors do not double-send a full-body fallback", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  let generated = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("cachedContents")) {
+      return Response.json({
+        name: "cachedContents/rate-limited",
+        expireTime: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+    }
+    generated++;
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.equal(body["cachedContent"], "cachedContents/rate-limited");
+    return new Response("quota response with echoed content", { status: 429 });
+  };
+  const provider = new GeminiProvider(
+    {
+      baseURL: "https://gemini.example.test",
+      apiKey: "test-key",
+      model: "gemini-2.5-flash",
+      capabilities: resolveModelRouteCapabilities("gemini", "gemini-2.5-flash", {
+        cache: true,
+        promptCache: { mode: "explicit", ttl: "3600s" },
+      }),
+    },
+    undefined,
+    { enableExplicitPromptCache: true },
+  );
+
+  await assert.rejects(
+    provider.generate(
+      [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "question" },
+      ],
+      [],
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "statusCode" in error &&
+      (error as { statusCode: unknown }).statusCode === 429 &&
+      !error.message.includes("echoed content"),
+  );
+  assert.equal(generated, 1);
 });
 
 test("Gemini explicit cachedContents remains disabled until the native production gate is enabled", async (context) => {

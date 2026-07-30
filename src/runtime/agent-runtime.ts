@@ -28,7 +28,10 @@ import {
   type ProviderKind,
   type ProviderRuntimeDependencies,
 } from "../provider/factory.js";
-import { FileGeminiPromptCacheStore } from "../provider/gemini-prompt-cache.js";
+import {
+  FileGeminiPromptCacheStore,
+  geminiPromptCacheGateId,
+} from "../provider/gemini-prompt-cache.js";
 import { PromptCachePrewarmCoordinator } from "../provider/prompt-cache-prewarm.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
@@ -596,13 +599,16 @@ export async function executeAgentRuntime(
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
     const providerDependencies: ProviderRuntimeDependencies = {
-      promptCachePrewarm: new PromptCachePrewarmCoordinator(),
+      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.control),
       gemini: {
-        promptCacheStore: new FileGeminiPromptCacheStore(
+        promptCacheStore: FileGeminiPromptCacheStore.shared(
           resolve(workspaceStatePaths.control, "gemini-prompt-cache.json"),
         ),
-        // Native cachedContents must be explicitly enabled only after the dedicated spike passes.
-        enableExplicitPromptCache: runtimeEnv.PICO_ENABLE_GEMINI_NATIVE_CACHE === "1",
+        // Evaluate every parent/subagent route independently against the native-spike allowlist.
+        enableExplicitPromptCache: ({ baseURL, model }) =>
+          enabledGeminiPromptCacheRoutes(runtimeEnv.PICO_GEMINI_NATIVE_CACHE_ROUTE_IDS).has(
+            geminiPromptCacheGateId(baseURL, model),
+          ),
       },
     };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
@@ -2037,6 +2043,15 @@ function firstApiKey(value: string | undefined): string | undefined {
     ?.split(",")
     .map((key) => key.trim())
     .find(Boolean);
+}
+
+function enabledGeminiPromptCacheRoutes(value: string | undefined): ReadonlySet<string> {
+  return new Set(
+    (value ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^gemini-cache:[a-f0-9]{64}$/u.test(item)),
+  );
 }
 
 /** @internal Pure runtime-env boundary used by executeAgentRuntime. */
