@@ -195,6 +195,11 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   env?: RunAgentEnv;
   /** Trusted host override for foreground Bash calls; validated to 1..300 seconds. */
   bashTimeoutMs?: number;
+  /**
+   * Trusted host-owned exact values removed from every ToolResult before transcript/persistence.
+   * Tool calls and tool arguments cannot modify this list.
+   */
+  toolResultRedactionSecrets?: readonly string[];
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   picoHome?: string;
   provider?: LLMProvider;
@@ -750,6 +755,9 @@ export async function executeAgentRuntime(
             usageSession: session,
             goalManager: runtimeState.goalManager,
             runtimeEvidenceArchive: evidenceArchive,
+            ...(dependencies.toolResultRedactionSecrets
+              ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
+              : {}),
           });
           const verifierRegistry = createSubagentRegistryFactory({
             workDir,
@@ -920,6 +928,9 @@ export async function executeAgentRuntime(
       goalManager,
       todoStore,
       toolDisclosure,
+      ...(dependencies.toolResultRedactionSecrets
+        ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
+        : {}),
       compactor: contextRuntime.compactor,
       contextBudget: contextRuntime.budget,
       // 模型摘要压缩:85% 水位主动整理 + Provider overflow 紧急重试。
