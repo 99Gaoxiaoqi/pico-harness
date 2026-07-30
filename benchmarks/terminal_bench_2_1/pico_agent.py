@@ -69,7 +69,7 @@ _PUBLIC_EGRESS_RELAY_SCRIPT = (
     "}).listen(8081,'0.0.0.0');"
 )
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
-_COMPLETION_TOKEN_FIELD_ROUTES = {"codex-oauth/gpt-5.4"}
+_BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = {"codex-oauth/gpt-5.4": 8_192}
 
 
 class TrialNetworks(NamedTuple):
@@ -351,6 +351,10 @@ rm -f {remote_archive}
         loop: asyncio.AbstractEventLoop,
         public_proxy_env: dict[str, str],
     ) -> None:
+        route_model = route_config["modelRouteId"].split("/", 1)[1]
+        route_output = route_config["provider"]["modelCapabilities"][route_model][
+            "output"
+        ]
         bootstrap_request = {
             "schemaVersion": 1,
             "workspacePath": workspace,
@@ -360,6 +364,7 @@ rm -f {remote_archive}
                 "protocol": route_config["provider"]["protocol"],
                 "baseURL": gateway.base_url,
                 "apiKeyEnv": self._SECRET_ENV,
+                "output": route_output,
             },
         }
         write_private_json(self.logs_dir / "bootstrap-request.json", bootstrap_request)
@@ -2422,7 +2427,8 @@ def validate_benchmark_route_contract(
     value: dict[str, Any], provider: dict[str, Any]
 ) -> None:
     model_route_id = value.get("modelRouteId")
-    if model_route_id not in _COMPLETION_TOKEN_FIELD_ROUTES:
+    expected_output = _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(model_route_id)
+    if expected_output is None:
         return
     provider_id, model = model_route_id.split("/", 1)
     capabilities = provider.get("modelCapabilities")
@@ -2430,16 +2436,25 @@ def validate_benchmark_route_contract(
     model_capability = (
         capabilities.get(model) if isinstance(capabilities, dict) else None
     )
+    output = (
+        model_capability.get("output")
+        if isinstance(model_capability, dict)
+        else None
+    )
     if (
         value.get("providerId") != provider_id
         or provider.get("protocol") != "openai"
         or not isinstance(models, list)
         or model not in models
         or not isinstance(model_capability, dict)
+        or isinstance(output, bool)
+        or not isinstance(output, int)
+        or output != expected_output
         or model_capability.get("outputTokenField") != "max_completion_tokens"
     ):
         raise ValueError(
-            f"{model_route_id} benchmark route must use max_completion_tokens"
+            f"{model_route_id} benchmark route must pin output={expected_output} "
+            "and use max_completion_tokens"
         )
 
 
