@@ -20,6 +20,7 @@ from typing import Any
 
 class ProviderHandler(BaseHTTPRequestHandler):
     calls = 0
+    last_request_body: dict[str, Any] | None = None
     read_started = threading.Event()
     release_read = threading.Event()
 
@@ -27,6 +28,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
         type(self).calls += 1
         body = self.rfile.read(int(self.headers.get("content-length", "0")))
         request_body = json.loads(body)
+        type(self).last_request_body = request_body
         usage_case = request_body.get("usage_case")
         if usage_case == "missing":
             response = {"choices": [{"message": {"content": "ok"}}]}
@@ -125,14 +127,18 @@ def request(path: str, value: dict[str, Any]) -> tuple[int, dict[str, Any] | Non
         connection.close()
 
 
-def proxy_frame(body: dict[str, Any]) -> dict[str, Any]:
+def proxy_frame(
+    body: dict[str, Any], *, output_token_field: str = "max_tokens"
+) -> dict[str, Any]:
     return {
         "action": "proxy",
         "protocol": "openai",
         "path": "/chat/completions",
         "headers": {"content-type": "application/json"},
         "body": base64.b64encode(
-            json.dumps({"model": "test-model", "max_tokens": 8, **body}).encode()
+            json.dumps(
+                {"model": "test-model", output_token_field: 8, **body}
+            ).encode()
         ).decode(),
     }
 
@@ -929,6 +935,29 @@ def main() -> None:
 
         assert request(
             str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-completion-limit",
+                {"action": "register", "protocol": "openai", "ttlSec": 60},
+            ),
+        )[0] == 200
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-completion-limit",
+                proxy_frame({}, output_token_field="max_completion_tokens"),
+            ),
+        )[0] == 200
+        assert ProviderHandler.calls == 2
+        assert ProviderHandler.last_request_body is not None
+        assert ProviderHandler.last_request_body["max_completion_tokens"] == 8
+        assert "max_tokens" not in ProviderHandler.last_request_body
+
+        assert request(
+            str(socket_path),
             sign(seed, run_id, "trial-revoked", {"action": "revoke"}),
         )[0] == 200
         assert request(
@@ -954,7 +983,7 @@ def main() -> None:
             str(socket_path),
             sign(seed, run_id, "trial-large", proxy_frame({"padding": "x" * 1_100_000})),
         )[0] == 502
-        assert ProviderHandler.calls == 1
+        assert ProviderHandler.calls == 2
 
         assert request(
             str(socket_path),

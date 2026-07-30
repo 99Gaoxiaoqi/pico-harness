@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import sys
+import tempfile
 import types
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,95 @@ def load_adapter() -> Any:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def benchmark_route_config(
+    output_token_field: str | None = "max_completion_tokens",
+) -> dict[str, Any]:
+    capability: dict[str, Any] = {"toolCall": True}
+    if output_token_field is not None:
+        capability["outputTokenField"] = output_token_field
+    return {
+        "schemaVersion": 1,
+        "modelRouteId": "codex-oauth/gpt-5.4",
+        "providerId": "codex-oauth",
+        "provider": {
+            "protocol": "openai",
+            "baseURL": "http://pico-gateway:8080",
+            "models": ["gpt-5.4"],
+            "discoverModels": False,
+            "modelCapabilities": {"gpt-5.4": capability},
+        },
+        "pricing": {},
+        "pricingSha256": "0" * 64,
+        "runBudget": {"currency": "CNY", "maxCostMicroCNY": 1_000_000},
+    }
+
+
+def assert_route_config_contract(adapter: Any) -> None:
+    with tempfile.TemporaryDirectory(prefix="pico-route-contract-") as directory:
+        path = Path(directory) / "route.json"
+        valid = benchmark_route_config()
+        path.write_text(json.dumps(valid))
+        assert adapter.load_route_config(path) == valid
+
+        for invalid_field in (None, "max_tokens"):
+            path.write_text(json.dumps(benchmark_route_config(invalid_field)))
+            try:
+                adapter.load_route_config(path)
+            except ValueError as error:
+                assert str(error) == (
+                    "codex-oauth/gpt-5.4 benchmark route must use "
+                    "max_completion_tokens"
+                )
+            else:
+                raise AssertionError(
+                    f"invalid output token field was accepted: {invalid_field!r}"
+                )
+
+
+def assert_accounting_failure_messages(adapter: Any) -> None:
+    class AccountingContext:
+        def __init__(self) -> None:
+            self.n_input_tokens = 2
+            self.n_output_tokens = 1
+            self.metadata: dict[str, Any] = {}
+
+    def receipt(status: str, within_budget: bool) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "status": status,
+            "withinBudget": within_budget,
+            "pricingSha256": "0" * 64,
+            "receiptSha256": "1" * 64,
+            "actual": {
+                "inputTokens": 2,
+                "outputTokens": 1,
+                "costMicroCNY": 3,
+                "costCNY": 0.000003,
+            },
+        }
+
+    for value, expected in (
+        (
+            receipt("unreconciled", False),
+            "Gateway accounting could not be reconciled",
+        ),
+        (
+            receipt("reconciled", False),
+            "Gateway usage exceeded the configured budget or quota",
+        ),
+    ):
+        try:
+            adapter.apply_gateway_accounting(AccountingContext(), value)
+        except RuntimeError as error:
+            assert str(error) == expected
+        else:
+            raise AssertionError(f"accounting failure was accepted: {expected}")
+
+    adapter.apply_gateway_accounting(
+        AccountingContext(), receipt("reconciled", True)
+    )
 
 
 class FakeEnvironment:
@@ -133,6 +223,8 @@ def owned_network(run_id: str, *container_ids: str) -> dict[str, Any]:
 
 async def main() -> None:
     adapter = load_adapter()
+    assert_route_config_contract(adapter)
+    assert_accounting_failure_messages(adapter)
     assert adapter.PicoInstalledAgent._POLICY_DENIAL_MODE == "incident"
     assert adapter.require_bounded_int(180_000, "bash_timeout_ms", 1_000, 300_000) == 180_000
     for invalid in (999, 300_001, 1.5, True, "180000.0", None):

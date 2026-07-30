@@ -33,6 +33,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
 _RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
+_COMPLETION_TOKEN_FIELD_ROUTES = {"codex-oauth/gpt-5.4"}
 
 
 class TrialNetworks(NamedTuple):
@@ -438,11 +439,10 @@ def apply_gateway_accounting(
     }
     metadata["pico"] = pico
     context.metadata = metadata
-    if (
-        receipt["status"] != "reconciled"
-        or receipt["withinBudget"] is not True
-    ):
+    if receipt["status"] != "reconciled":
         raise RuntimeError("Gateway accounting could not be reconciled")
+    if receipt["withinBudget"] is not True:
+        raise RuntimeError("Gateway usage exceeded the configured budget or quota")
     if (
         runtime_input_tokens != actual["inputTokens"]
         or runtime_output_tokens != actual["outputTokens"]
@@ -1672,6 +1672,7 @@ def load_route_config(path: Path) -> dict[str, Any]:
     required_provider = {"protocol", "baseURL", "models", "discoverModels"}
     if not required_provider.issubset(provider):
         raise ValueError("route config provider is incomplete")
+    validate_benchmark_route_contract(value, provider)
     run_budget = value.get("runBudget")
     if (
         not isinstance(run_budget, dict)
@@ -1686,6 +1687,31 @@ def load_route_config(path: Path) -> dict[str, Any]:
         _MAX_RUN_COST_MICRO_CNY,
     )
     return value
+
+
+def validate_benchmark_route_contract(
+    value: dict[str, Any], provider: dict[str, Any]
+) -> None:
+    model_route_id = value.get("modelRouteId")
+    if model_route_id not in _COMPLETION_TOKEN_FIELD_ROUTES:
+        return
+    provider_id, model = model_route_id.split("/", 1)
+    capabilities = provider.get("modelCapabilities")
+    models = provider.get("models")
+    model_capability = (
+        capabilities.get(model) if isinstance(capabilities, dict) else None
+    )
+    if (
+        value.get("providerId") != provider_id
+        or provider.get("protocol") != "openai"
+        or not isinstance(models, list)
+        or model not in models
+        or not isinstance(model_capability, dict)
+        or model_capability.get("outputTokenField") != "max_completion_tokens"
+    ):
+        raise ValueError(
+            f"{model_route_id} benchmark route must use max_completion_tokens"
+        )
 
 
 def task_agent_timeout(environment: BaseEnvironment) -> float:
