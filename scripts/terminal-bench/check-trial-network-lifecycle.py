@@ -133,6 +133,16 @@ def owned_network(run_id: str, *container_ids: str) -> dict[str, Any]:
 
 async def main() -> None:
     adapter = load_adapter()
+    assert adapter.PicoInstalledAgent._POLICY_DENIAL_MODE == "incident"
+    assert adapter.require_bounded_int(180_000, "bash_timeout_ms", 1_000, 300_000) == 180_000
+    for invalid in (999, 300_001, 1.5, True, "180000.0", None):
+        try:
+            adapter.require_bounded_int(invalid, "bash_timeout_ms", 1_000, 300_000)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid bash timeout was accepted: {invalid!r}")
+
     environment = FakeEnvironment()
     run_id = "network-lifecycle-test"
 

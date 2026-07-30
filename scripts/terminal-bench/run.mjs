@@ -45,6 +45,7 @@ const harborArtifactManifestSha256 =
 const harborWheelUrl =
   "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
+const benchmarkBashTimeoutMs = 180_000;
 const nodeArchives = {
   x64: {
     name: "node-v22.14.0-linux-x64.tar.gz",
@@ -283,7 +284,20 @@ const manifest = {
   },
   policy: {
     permissionMode: "yolo",
-    allowedTools: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "read_evidence"],
+    policyDenialMode: "incident",
+    allowedTools: [
+      "bash",
+      "read_file",
+      "write_file",
+      "edit_file",
+      "glob",
+      "grep",
+      "read_evidence",
+      "task_list",
+      "task_output",
+      "task_stop",
+    ],
+    bashTimeoutMs: benchmarkBashTimeoutMs,
     localCanaryOnly: true,
     leaderboardComparable: false,
     secretInjection: "host-credential-gateway",
@@ -369,6 +383,8 @@ const harborArgs = [
   `node_arm64_path=${nodeArchivePaths.arm64}`,
   "--ak",
   `pico_commit=${picoCommit}`,
+  "--ak",
+  `bash_timeout_ms=${benchmarkBashTimeoutMs}`,
   "--n-attempts",
   String(options.attempts),
   "--n-concurrent",

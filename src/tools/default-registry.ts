@@ -76,6 +76,8 @@ export interface DefaultToolRegistryOptions {
   evidenceBaseDir?: string;
   /** Host-owned process environment for tools that intentionally inherit it. */
   env?: NodeJS.ProcessEnv;
+  /** Host-owned foreground Bash deadline; omitted callers retain the 30s default. */
+  bashTimeoutMs?: number;
 }
 
 export function buildDefaultToolRegistry(
@@ -95,6 +97,7 @@ export function buildDefaultToolRegistry(
     approvalManager,
     evidenceBaseDir,
     env,
+    bashTimeoutMs,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
@@ -118,6 +121,7 @@ export function buildDefaultToolRegistry(
           }
         : {}),
       ...(env ? { env } : {}),
+      ...(bashTimeoutMs !== undefined ? { timeoutMs: bashTimeoutMs } : {}),
     }),
   );
   registry.register(new TaskListTool(backgroundManager));
