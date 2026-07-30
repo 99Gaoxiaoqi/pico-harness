@@ -6,7 +6,7 @@
 
 ![pico-harness：面向本地工程的 Agent Runtime](./docs/readme-assets/pico-harness-cover.png)
 
-一个面向本地工程、用 TypeScript 实现的 Agent Harness。它把模型调用、上下文、工具、安全门禁、会话状态和后台任务装配成同一套 Runtime，并为 TUI 与 Desktop 提供一致的执行语义。
+一个面向本地工程、用 TypeScript 实现的 Agent Harness。它把模型调用、上下文、工具、安全门禁、会话状态和后台任务装配成同一套 Runtime，并为 TUI、Desktop 与仓库内 Mobile 开发预览提供一致的执行语义。
 
 > **Agent = Model + Harness**
 >
@@ -14,13 +14,14 @@
 
 ## 当前产品面
 
-| 入口        | 状态              | 说明                                                                                 |
-| ----------- | ----------------- | ------------------------------------------------------------------------------------ |
-| CLI / TUI   | 主要公开入口      | 源码运行使用 `npm run dev`；构建并 `npm link` 后使用 `pico`                          |
-| Desktop     | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
-| 本机 daemon | 内部 Runtime 宿主 | 承载 Desktop 和持久 Cron，通过本机 IPC 通信，不监听网络端口                          |
+| 入口             | 状态              | 说明                                                                                           |
+| ---------------- | ----------------- | ---------------------------------------------------------------------------------------------- |
+| CLI / TUI        | 主要公开入口      | 源码运行使用 `npm run dev`；构建并 `npm link` 后使用 `pico`                                    |
+| Desktop          | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64           |
+| Mobile / Gateway | 仓库内开发预览    | Expo 客户端通过带认证的回环 Gateway 访问本机 daemon；仅供本机 iOS / Android 模拟器，不支持远程 |
+| 本机 daemon      | 内部 Runtime 宿主 | 承载 Desktop、Mobile 开发预览和持久 Cron；通过本机 IPC 通信，自身不监听网络端口                |
 
-当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它不是产品入口，也不构成兼容性承诺。
+当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。Mobile Gateway 的 HTTP 请求使用 Bearer Token；WebSocket 则在连接后用首个 JSON 帧提交同一 Token。Gateway 固定绑定 `127.0.0.1`，只服务本机模拟器开发预览，不构成公开 API 或兼容性承诺。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它同样不是产品入口。
 
 ## 架构概览
 
@@ -28,12 +29,13 @@
 
 [查看 Mermaid 源图](./docs/readme-assets/pico-harness-architecture.mmd)
 
-两类前台入口最终复用同一个 [`executeAgentRuntime`](./src/runtime/agent-runtime.ts)：
+两类正式前台入口与 Mobile 开发预览最终复用同一个 [`executeAgentRuntime`](./src/runtime/agent-runtime.ts)：
 
 - TUI：`CLI → TUI → 工作区信任/配置 → AgentRuntime`，前台执行不需要绕行 daemon。
 - Desktop：`Renderer → sandbox preload bridge → Electron IPC allowlist → LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
+- Mobile 开发预览：`Expo 模拟器客户端 → 回环 Gateway（HTTP Bearer Token；WebSocket 首个 JSON 帧使用同一 Token 鉴权）→ LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
 
-Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧上限；端点是 POSIX socket 或 Windows named pipe，并带本机认证。它是同一用户边界内的内部协议，不是网络服务。
+Desktop 与 Mobile Gateway 进入 daemon 后都使用版本化本机 IPC 协议、4 字节长度前缀 JSON 帧和 1 MiB 帧上限；端点是 POSIX socket 或 Windows named pipe，并带本机认证。它是同一用户边界内的内部协议，不是网络服务。
 
 ### 一次运行如何闭环
 
@@ -45,20 +47,21 @@ Desktop IPC 使用版本化协议、4 字节长度前缀 JSON 帧和 1 MiB 帧�
 
 ### 模块地图
 
-| 路径                                                               | 职责                                                           |
-| ------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `src/runtime/`                                                     | 共用装配入口、运行策略、Agent 事件事实/投影与子代理编排        |
-| `src/engine/`                                                      | ReAct 主循环、Session、ToolScheduler、Reporter、Reminder       |
-| `src/context/`                                                     | Prompt、Skills、Compaction、Goal/Todo、恢复提示与上下文预算    |
-| `src/provider/`                                                    | OpenAI、Claude、Gemini 协议适配，模型路由、能力与凭证解析      |
-| `src/tools/`                                                       | Registry、文件/Bash/网络工具、资源访问声明与子代理工具         |
-| `src/safety/`、`src/security/`、`src/approval/`                    | hardline、路径与文件安全、权限判定、人工审批                   |
-| `src/hooks/`、`src/mcp/`、`src/plugins/`、`src/code-intelligence/` | Hooks、MCP、受信 Plugin 快照、LSP/Repo Map                     |
-| `src/tasks/`、`src/daemon/`                                        | RuntimeStore、Job、Cron、后台策略、本机 daemon 与通知          |
-| `src/storage/`、`src/memory/`                                      | 原子存储、文件历史、产物与长期记忆                             |
-| `src/input/`、`src/tui/`、`src/cli/`                               | 输入协议、交互式终端和公开 CLI 外壳                            |
-| `apps/desktop/`、`packages/protocol/`                              | Electron UI，以及 renderer/preload/main/client/daemon 共用协议 |
-| `src/paths/`                                                       | `PICO_HOME`、工作区和 Runtime 数据路径的统一解析               |
+| 路径                                                               | 职责                                                        |
+| ------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `src/runtime/`                                                     | 共用装配入口、运行策略、Agent 事件事实/投影与子代理编排     |
+| `src/engine/`                                                      | ReAct 主循环、Session、ToolScheduler、Reporter、Reminder    |
+| `src/context/`                                                     | Prompt、Skills、Compaction、Goal/Todo、恢复提示与上下文预算 |
+| `src/provider/`                                                    | OpenAI、Claude、Gemini 协议适配，模型路由、能力与凭证解析   |
+| `src/tools/`                                                       | Registry、文件/Bash/网络工具、资源访问声明与子代理工具      |
+| `src/safety/`、`src/security/`、`src/approval/`                    | hardline、路径与文件安全、权限判定、人工审批                |
+| `src/hooks/`、`src/mcp/`、`src/plugins/`、`src/code-intelligence/` | Hooks、MCP、受信 Plugin 快照、LSP/Repo Map                  |
+| `src/tasks/`、`src/daemon/`                                        | RuntimeStore、Job、Cron、后台策略、本机 daemon 与通知       |
+| `src/storage/`、`src/memory/`                                      | 原子存储、文件历史、产物与长期记忆                          |
+| `src/input/`、`src/tui/`、`src/cli/`                               | 输入协议、交互式终端和公开 CLI 外壳                         |
+| `apps/desktop/`、`apps/mobile/`、`src/mobile-gateway/`             | Electron UI，以及仅供本机模拟器使用的 Mobile 开发预览       |
+| `packages/protocol/`                                               | Desktop、Mobile、client 与 daemon 的共用协议                |
+| `src/paths/`                                                       | `PICO_HOME`、工作区和 Runtime 数据路径的统一解析            |
 
 ### 状态所有权
 
@@ -202,6 +205,8 @@ TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `
 | Windows | 支持；Bash 依赖 Git for Windows，并运行独立安全集成测试 | CI 类型检查、安全集成与未签名打包；暂不公开签名发布 |
 | Linux   | 支持；主 CI、构建与包内容验证在 Ubuntu 执行             | 当前没有 Desktop CI 或发布入口                      |
 
+Mobile 不属于上表的正式发布面：主 CI 只执行类型检查和 Android Expo 导出验证；当前仍限本机 iOS / Android 模拟器开发预览，没有移动端发布工作流。具体启动与安全边界见 [Mobile 开发说明](./apps/mobile/README.md)。
+
 Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin` 等系统工具；CI 会显式安装它们。
 
 ## 开发与验证
@@ -246,7 +251,9 @@ npm pack --dry-run
 - [完整数据流](./docs/architecture/06-data-flow.md)
 - [多 Agent 并发](./docs/architecture/08-multi-agent-concurrency.md)
 - [Desktop 架构](./docs/desktop-architecture.md)
+- [Mobile 本机开发预览](./apps/mobile/README.md)
 - [TUI 交互指南](./docs/tui-claude-code-parity.md)
+- [Terminal-Bench 2.1 内部 canary](./benchmarks/terminal_bench_2_1/README.md)
 - [课程章节索引](./docs/README.md)
 
 ## License
