@@ -31,9 +31,17 @@ test("Terminal-Bench selects mode-specific local locks and caches", () => {
     resolveTaskLockPath(projectRoot, "full"),
     join(projectRoot, "benchmarks", "terminal_bench_2_1", "full-task-lock.json"),
   );
+  assert.equal(
+    resolveTaskLockPath(projectRoot, "cached-full"),
+    join(projectRoot, "benchmarks", "terminal_bench_2_1", "full-task-lock.json"),
+  );
   assert.equal(resolveImageLockPath(projectRoot, "canary"), null);
   assert.equal(
     resolveImageLockPath(projectRoot, "full"),
+    join(projectRoot, "benchmarks", "terminal_bench_2_1", "full-image-lock.json"),
+  );
+  assert.equal(
+    resolveImageLockPath(projectRoot, "cached-full"),
     join(projectRoot, "benchmarks", "terminal_bench_2_1", "full-image-lock.json"),
   );
   assert.equal(
@@ -51,6 +59,30 @@ test("Terminal-Bench selects mode-specific local locks and caches", () => {
       "harbor-tasks",
       "packages",
     ),
+  );
+  assert.equal(
+    resolveTaskCachePackagesRoot(projectRoot, "cached-full", homeDirectory),
+    resolveTaskCachePackagesRoot(projectRoot, "full", homeDirectory),
+  );
+});
+
+test("Terminal-Bench full mode still rejects a task subset", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-full-subset-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const tasks = fullFixtureTasks();
+  await writeFullTaskList(root, tasks);
+
+  await assert.rejects(
+    prepareLocalDataset({
+      mode: "full",
+      tasks: tasks.slice(0, 2),
+      projectRoot: root,
+      runRoot: join(root, "run"),
+      runId: "fixture-run",
+      homeDirectory: join(root, "home"),
+      env: {},
+    }),
+    /full task set does not match the fixed 89-task list/u,
   );
 });
 
@@ -196,6 +228,56 @@ test("Terminal-Bench full mode pins every staged image by digest before isolatio
       await readFile(join(result.path, shortName, "environment", "docker-compose.yaml"), "utf8"),
       /internal: true/u,
     );
+  }
+});
+
+test("Terminal-Bench cached-full stages a locked subset without image pulls", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-cached-full-stage-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const fullTasks = fullFixtureTasks();
+  const selectedTasks = fullTasks.slice(0, 2);
+  const imageEntries = imageLockEntries(fullTasks);
+  const taskEntries = Object.fromEntries(
+    fullTasks.map((taskName, index) => [
+      taskName,
+      {
+        cacheDigest: fixtureHash(index + 1),
+        treeSha256: fixtureHash(index + 500),
+      },
+    ]),
+  );
+  for (const [index, taskName] of selectedTasks.entries()) {
+    const image = imageEntries[taskName];
+    assert.ok(image);
+    const cacheDigest = fixtureHash(index + 1);
+    const source = await writeCachedTask(root, taskName, cacheDigest, image.source);
+    taskEntries[taskName] = {
+      cacheDigest,
+      treeSha256: await hashDirectory(source),
+    };
+  }
+  await writeFullTaskList(root, fullTasks);
+  await writeTaskLock(root, taskEntries);
+  await writeImageLock(root, imageEntries);
+
+  const result = await prepareLocalDataset({
+    mode: "cached-full",
+    tasks: selectedTasks,
+    projectRoot: root,
+    runRoot: join(root, "run"),
+    runId: "fixture-run",
+    homeDirectory: join(root, "home"),
+    env: {},
+  });
+
+  for (const taskName of selectedTasks) {
+    const shortName = taskName.slice("terminal-bench/".length);
+    const compose = await readFile(
+      join(result.path, shortName, "environment", "docker-compose.yaml"),
+      "utf8",
+    );
+    assert.match(compose, /pull_policy: never/u);
+    assert.match(compose, /internal: true/u);
   }
 });
 

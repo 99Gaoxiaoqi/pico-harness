@@ -2,22 +2,24 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-export function prestartNetworkOverlay(runId) {
+export function prestartNetworkOverlay(runId, { localImagesOnly = false } = {}) {
   if (!/^[A-Za-z0-9._-]{1,160}$/u.test(runId)) {
     throw new Error("Terminal-Bench run ID is invalid for Compose");
   }
-  return `services:
-  main:
-    labels:
-      pico.terminal-bench.run: ${runId}
-    networks:
-      - default
-networks:
-  default:
-    internal: true
-    labels:
-      pico.terminal-bench.run: ${runId}
-`;
+  return `${[
+    "services:",
+    "  main:",
+    ...(localImagesOnly ? ["    pull_policy: never"] : []),
+    "    labels:",
+    `      pico.terminal-bench.run: ${runId}`,
+    "    networks:",
+    "      - default",
+    "networks:",
+    "  default:",
+    "    internal: true",
+    "    labels:",
+    `      pico.terminal-bench.run: ${runId}`,
+  ].join("\n")}\n`;
 }
 
 export async function assertTaskComposePolicy(taskRoot, env) {
@@ -111,7 +113,7 @@ export async function assertTaskComposePolicy(taskRoot, env) {
 
 function isTrustedPrestartOverlay(value) {
   const match = value.match(
-    /^services:\n\x20{2}main:\n\x20{4}labels:\n\x20{6}pico\.terminal-bench\.run: ([A-Za-z0-9._-]{1,160})\n\x20{4}networks:\n\x20{6}- default\nnetworks:\n\x20{2}default:\n\x20{4}internal: true\n\x20{4}labels:\n\x20{6}pico\.terminal-bench\.run: ([A-Za-z0-9._-]{1,160})\n$/u,
+    /^services:\n\x20{2}main:\n(?:\x20{4}pull_policy: never\n)?\x20{4}labels:\n\x20{6}pico\.terminal-bench\.run: ([A-Za-z0-9._-]{1,160})\n\x20{4}networks:\n\x20{6}- default\nnetworks:\n\x20{2}default:\n\x20{4}internal: true\n\x20{4}labels:\n\x20{6}pico\.terminal-bench\.run: ([A-Za-z0-9._-]{1,160})\n$/u,
   );
   return match !== null && match[1] === match[2];
 }
