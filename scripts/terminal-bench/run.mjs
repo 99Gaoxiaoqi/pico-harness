@@ -34,6 +34,7 @@ import {
   hashDirectory,
   recoverBenchmarkPublications,
 } from "./publication.mjs";
+import { buildBenchmarkRouteConfig } from "./route-config.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const datasetRef =
@@ -221,23 +222,16 @@ const harborArtifactLock = await verifyApprovedHarborWheelhouse({
 });
 await run("npm", ["run", "build"], projectRoot, process.env);
 const bundle = await buildPicoBundle(join(runRoot, "pico-bundle.tar.gz"));
-const routeConfig = {
-  schemaVersion: 1,
+const routeConfig = buildBenchmarkRouteConfig({
   modelRouteId,
   providerId,
+  model,
   provider,
   pricing,
   pricingSha256,
-  runBudget: {
-    currency: "CNY",
-    maxCostMicroCNY: options.maxRunCostCNY * 1_000_000,
-  },
-  ...(options.thinkingEffort
-    ? { thinkingEffort: options.thinkingEffort }
-    : userConfig.defaults?.thinkingEffort
-      ? { thinkingEffort: userConfig.defaults.thinkingEffort }
-      : {}),
-};
+  maxRunCostCNY: options.maxRunCostCNY,
+  thinkingEffort: options.thinkingEffort ?? userConfig.defaults?.thinkingEffort,
+});
 const routeConfigPath = join(runRoot, "route-config.json");
 const dockerOwnershipRegistryPath = join(runRoot, "docker-ownership.jsonl");
 await atomicWritePrivateJson(routeConfigPath, routeConfig);
