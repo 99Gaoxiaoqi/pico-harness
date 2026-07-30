@@ -9,6 +9,11 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from benchmarks.terminal_bench_2_1.harbor_runtime import (
+    install_verifier_exec_env_overlay,
+    install_verifier_phase_activation,
+)
+
 _PROJECT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 
 
@@ -72,8 +77,11 @@ def main() -> None:
         raise RuntimeError("Harbor resource registry parent is unavailable")
 
     from harbor.environments.docker.docker import DockerEnvironment
+    from harbor.trial.single_step import SingleStepTrial
 
     install_project_registration(DockerEnvironment, registry_path, run_id)
+    install_verifier_exec_env_overlay(DockerEnvironment)
+    install_verifier_phase_activation(SingleStepTrial)
     if dataset_fd_raw is not None:
         dataset_fd = int(dataset_fd_raw)
         if not stat.S_ISDIR(os.fstat(dataset_fd).st_mode):
