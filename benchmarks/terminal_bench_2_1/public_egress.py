@@ -20,6 +20,8 @@ from urllib.parse import SplitResult, urlsplit
 PROXY_POLICY_VERSION = 1
 DEFAULT_MAX_CONNECTIONS = 32
 DEFAULT_MAX_TOTAL_BYTES = 1_073_741_824
+DEFAULT_MAX_REQUESTS = 4_096
+MAX_CONFIGURED_REQUESTS = 1_000_000
 ALLOWED_HTTP_PORTS = (80,)
 ALLOWED_CONNECT_PORTS = (443,)
 PUBLIC_EGRESS_BIND_HOST = "0.0.0.0"  # nosec B104
@@ -30,13 +32,16 @@ MAX_AUDIT_DECISIONS = 256
 MAX_HOST_LENGTH = 253
 MAX_TOKEN_LENGTH = 1_024
 MAX_TTL_SEC = 12_000.0
+MAX_CONTENT_LENGTH_DIGITS = 20
 TRANSFER_CHUNK_BYTES = 64 * 1024
 DOH_HOST = "cloudflare-dns.com"
 DOH_ENDPOINT_IPS = ("1.1.1.1", "1.0.0.1")
 DOH_TIMEOUT_SEC = 5.0
 DOH_MAX_RESPONSE_BYTES = 64 * 1024
 DOH_MAX_ANSWERS = 64
-_DOH_RECORD_TYPES = (("A", 1, 4), ("AAAA", 28, 6))
+_DOH_RECORD_NAME = "A"
+_DOH_RECORD_CODE = 1
+_DOH_ADDRESS_VERSION = 4
 _HTTP_TOKEN_CHARACTERS = frozenset(
     "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
@@ -61,13 +66,6 @@ _METADATA_NAMES = {
     "metadata.oraclecloud.com",
     "metadata.packet.net",
 }
-_BLOCKED_IPV6_TRANSITION_NETWORKS = (
-    ipaddress.ip_network("64:ff9b::/96"),
-    ipaddress.ip_network("64:ff9b:1::/48"),
-    ipaddress.ip_network("2001::/32"),
-    ipaddress.ip_network("2002::/16"),
-    ipaddress.ip_network("fec0::/10"),
-)
 _BLOCKED_IPV4_NETWORKS = (ipaddress.ip_network("198.18.0.0/15"),)
 
 Resolver = Callable[[str, int], Iterable[Any]]
@@ -93,28 +91,49 @@ class _DoHResponse(NamedTuple):
     body: bytes
 
 
+DoHRequester = Callable[[str, str, str, float], _DoHResponse]
+DoHSocketFactory = Callable[[], socket.socket]
+DoHSocketConnect = Callable[[socket.socket, tuple[str, int]], None]
+
+
 def _default_connector(ip: str, port: int, timeout_sec: float) -> socket.socket:
     address = ipaddress.ip_address(ip)
-    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-    connection = socket.socket(family, socket.SOCK_STREAM)
+    if not isinstance(address, ipaddress.IPv4Address):
+        raise ProxyRequestError("ipv6_address")
+    connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connection.settimeout(timeout_sec)
     try:
-        if address.version == 6:
-            connection.connect((ip, port, 0, 0))
-        else:
-            connection.connect((ip, port))
+        connection.connect((ip, port))
     except BaseException:
         connection.close()
         raise
     return connection
 
 
+def _new_ipv4_stream_socket() -> socket.socket:
+    return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+
+def _connect_ipv4_socket(
+    connection: socket.socket,
+    address: tuple[str, int],
+) -> None:
+    connection.connect(address)
+
+
 class _PinnedDoHConnection(http.client.HTTPSConnection):
-    def __init__(self, endpoint_ip: str):
+    def __init__(
+        self,
+        endpoint_ip: str,
+        proxy: PublicEgressProxy,
+        deadline: float,
+    ):
         context = ssl.create_default_context()
         if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
             raise RuntimeError("pinned DoH TLS verification is unavailable")
         self._endpoint_ip = endpoint_ip
+        self._proxy = proxy
+        self._deadline = deadline
         self._verified_context = context
         super().__init__(
             DOH_HOST,
@@ -124,43 +143,56 @@ class _PinnedDoHConnection(http.client.HTTPSConnection):
         )
 
     def connect(self) -> None:
-        raw_connection = _default_connector(
+        raw_connection = self._proxy._open_doh_socket(
             self._endpoint_ip,
-            443,
-            DOH_TIMEOUT_SEC,
+            self._deadline,
         )
+        wrapped_connection: socket.socket | None = None
         try:
-            self.sock = self._verified_context.wrap_socket(
+            self._proxy._require_live(self._deadline)
+            wrapped_connection = self._verified_context.wrap_socket(
                 raw_connection,
                 server_hostname=DOH_HOST,
+                do_handshake_on_connect=False,
             )
+            wrapped_connection.settimeout(
+                min(
+                    DOH_TIMEOUT_SEC,
+                    self._proxy._remaining_connection_time(self._deadline),
+                )
+            )
+            self._proxy._replace_registered_socket(
+                raw_connection,
+                wrapped_connection,
+            )
+            wrapped_connection.do_handshake()
+            self._proxy._require_live(self._deadline)
+            self.sock = wrapped_connection
         except BaseException:
+            if wrapped_connection is not None:
+                self._proxy._unregister_socket(wrapped_connection)
+                _safe_close(wrapped_connection)
+            self._proxy._unregister_socket(raw_connection)
             raw_connection.close()
             raise
 
+    def apply_deadline(self) -> None:
+        self._proxy._require_live(self._deadline)
+        if self.sock is not None:
+            self.sock.settimeout(
+                min(
+                    DOH_TIMEOUT_SEC,
+                    self._proxy._remaining_connection_time(self._deadline),
+                )
+            )
 
-def _doh_https_request(endpoint_ip: str, host: str, record_name: str) -> _DoHResponse:
-    connection = _PinnedDoHConnection(endpoint_ip)
-    try:
-        connection.request(
-            "GET",
-            f"/dns-query?name={host}&type={record_name}",
-            headers={
-                "Accept": "application/dns-json",
-                "Connection": "keep-alive",
-                "Host": DOH_HOST,
-                "User-Agent": "pico-public-egress/1",
-            },
-        )
-        response = connection.getresponse()
-        body = response.read(DOH_MAX_RESPONSE_BYTES + 1)
-        return _DoHResponse(
-            status=response.status,
-            headers=tuple(response.getheaders()),
-            body=body,
-        )
-    finally:
-        connection.close()
+    def close(self) -> None:
+        active_socket = self.sock
+        try:
+            super().close()
+        finally:
+            if active_socket is not None:
+                self._proxy._unregister_socket(active_socket)
 
 
 def _single_doh_header(headers: tuple[tuple[str, str], ...], name: str) -> str | None:
@@ -200,20 +232,12 @@ def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _address_rejection_reason(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> str | None:
+    if isinstance(address, ipaddress.IPv6Address):
+        return "ipv6_address"
     if isinstance(address, ipaddress.IPv4Address) and any(
         address in network for network in _BLOCKED_IPV4_NETWORKS
     ):
         return "non_public_address"
-    if isinstance(address, ipaddress.IPv6Address):
-        packed = address.packed
-        if packed[8:12] in {b"\x00\x00\x5e\xfe", b"\x02\x00\x5e\xfe"}:
-            return "isatap_address"
-        if address.is_site_local:
-            return "site_local_address"
-        if address.ipv4_mapped is not None or any(
-            address in network for network in _BLOCKED_IPV6_TRANSITION_NETWORKS
-        ):
-            return "transition_address"
     if (
         not address.is_global
         or address.is_multicast
@@ -230,6 +254,8 @@ def _parse_doh_response(
     address_version: int,
     response: _DoHResponse,
 ) -> tuple[str, ...]:
+    if record_code != _DOH_RECORD_CODE or address_version != _DOH_ADDRESS_VERSION:
+        raise ProxyRequestError("resolution_failed", 502)
     if (
         isinstance(response.status, bool)
         or not isinstance(response.status, int)
@@ -301,9 +327,7 @@ def _parse_doh_response(
     if not isinstance(answers, list) or len(answers) > DOH_MAX_ANSWERS:
         raise ProxyRequestError("resolution_failed", 502)
     cname_edges: dict[str, set[str]] = {}
-    address_records: list[
-        tuple[str, ipaddress.IPv4Address | ipaddress.IPv6Address]
-    ] = []
+    address_records: list[tuple[str, ipaddress.IPv4Address]] = []
     for answer in answers:
         if not isinstance(answer, dict):
             raise ProxyRequestError("resolution_failed", 502)
@@ -340,7 +364,7 @@ def _parse_doh_response(
             address = ipaddress.ip_address(data)
         except ValueError as error:
             raise ProxyRequestError("resolution_failed", 502) from error
-        if address.version != address_version:
+        if not isinstance(address, ipaddress.IPv4Address):
             raise ProxyRequestError("resolution_failed", 502)
         rejection_reason = _address_rejection_reason(address)
         if rejection_reason is not None:
@@ -363,38 +387,6 @@ def _parse_doh_response(
             seen.add(canonical_ip)
             result.append(canonical_ip)
     return tuple(result)
-
-
-def _default_resolver(host: str, port: int) -> Iterable[Any]:
-    del port
-    for endpoint_ip in DOH_ENDPOINT_IPS:
-        try:
-            addresses: list[str] = []
-            seen: set[str] = set()
-            for record_name, record_code, address_version in _DOH_RECORD_TYPES:
-                response = _doh_https_request(endpoint_ip, host, record_name)
-                for address in _parse_doh_response(
-                    host,
-                    record_code,
-                    address_version,
-                    response,
-                ):
-                    if address not in seen:
-                        seen.add(address)
-                        addresses.append(address)
-            if len(addresses) > DOH_MAX_ANSWERS:
-                raise ProxyRequestError("resolution_failed", 502)
-            if not addresses:
-                raise ProxyRequestError("resolution_failed", 502)
-            return tuple(addresses)
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            http.client.HTTPException,
-        ):
-            continue
-    raise ProxyRequestError("resolution_failed", 502)
 
 
 def _safe_close(connection: socket.socket) -> None:
@@ -468,7 +460,7 @@ def _bounded_wall_time(value: float | None) -> float | None:
 
 
 class _PublicEgressServer(ThreadingHTTPServer):
-    daemon_threads = True
+    daemon_threads = False
     request_queue_size = 64
 
     def __init__(
@@ -492,30 +484,18 @@ class _PublicEgressServer(ThreadingHTTPServer):
     ) -> None:
         if not isinstance(request, socket.socket):
             raise TypeError("public egress server requires a stream socket")
+        rejection_reason = self.proxy._accept_request()
+        if rejection_reason is not None:
+            self._reject_before_thread(request, rejection_reason)
+            return
         if not self.proxy._connection_slots.acquire(blocking=False):
-            try:
-                request.sendall(
-                    b"HTTP/1.1 503 Service Unavailable\r\n"
-                    b"Connection: close\r\n"
-                    b"Content-Length: 0\r\n\r\n"
-                )
-            except OSError:
-                pass
-            finally:
-                self.shutdown_request(request)
-            self.proxy._record_decision(
-                host="",
-                port=0,
-                decision="deny",
-                reason="connection_limit",
-                byte_count=0,
-            )
+            self._reject_before_thread(request, "connection_limit")
             return
         try:
             self.proxy._register_socket(request)
-        except ProxyRequestError:
+        except ProxyRequestError as error:
             self.proxy._connection_slots.release()
-            self.shutdown_request(request)
+            self._reject_before_thread(request, error.reason)
             return
         try:
             super().process_request(request, client_address)
@@ -536,6 +516,39 @@ class _PublicEgressServer(ThreadingHTTPServer):
         finally:
             self.proxy._unregister_socket(request)
             self.proxy._connection_slots.release()
+
+    def _reject_before_thread(self, request: socket.socket, reason: str) -> None:
+        try:
+            request.sendall(
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Connection: close\r\n"
+                b"Content-Length: 0\r\n\r\n"
+            )
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
+        self.proxy._record_decision(
+            host="",
+            port=0,
+            decision="deny",
+            reason=reason,
+            byte_count=0,
+        )
+
+    def handle_error(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: Any,
+    ) -> None:
+        del request, client_address
+        self.proxy._record_decision(
+            host="",
+            port=0,
+            decision="deny",
+            reason="server_error",
+            byte_count=0,
+        )
 
 
 class _PublicEgressHandler(BaseHTTPRequestHandler):
@@ -593,15 +606,17 @@ class _PublicEgressHandler(BaseHTTPRequestHandler):
 
     def _require_content_length(self) -> int:
         if self.headers.get_all("Transfer-Encoding", failobj=[]):
-            raise ProxyRequestError("transfer_encoding")
+            raise ProxyRequestError("transfer_encoding", 400)
         values = self.headers.get_all("Content-Length", failobj=[])
         if len(values) > 1:
-            raise ProxyRequestError("content_length")
+            raise ProxyRequestError("content_length", 400)
         if not values:
             return 0
         encoded_length = values[0].strip()
+        if len(encoded_length) > MAX_CONTENT_LENGTH_DIGITS:
+            raise ProxyRequestError("content_length", 413)
         if not encoded_length.isascii() or not encoded_length.isdecimal():
-            raise ProxyRequestError("content_length")
+            raise ProxyRequestError("content_length", 400)
         return int(encoded_length, 10)
 
     def _absolute_target(self) -> tuple[SplitResult, str, int]:
@@ -692,8 +707,7 @@ class _PublicEgressHandler(BaseHTTPRequestHandler):
             target, host, port = self._absolute_target()
             if not self._authenticate(host, port):
                 return
-            if self.proxy._expired():
-                raise ProxyRequestError("ttl")
+            self.proxy._require_available()
             if self.headers.get("Expect") is not None:
                 raise ProxyRequestError("expectation")
             content_length = self._require_content_length()
@@ -781,8 +795,7 @@ class _PublicEgressHandler(BaseHTTPRequestHandler):
             host, port = self._connect_target()
             if not self._authenticate(host, port):
                 return
-            if self.proxy._expired():
-                raise ProxyRequestError("ttl")
+            self.proxy._require_available()
             addresses = self.proxy._resolve_public(host, port)
             deadline = self.proxy._connection_deadline()
             upstream = self.proxy._connect(addresses, port, deadline)
@@ -883,6 +896,7 @@ class PublicEgressProxy:
         ttl_sec: float,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+        max_requests: int = DEFAULT_MAX_REQUESTS,
     ):
         if (
             not isinstance(token, str)
@@ -916,13 +930,24 @@ class PublicEgressProxy:
             or max_total_bytes > 4 * DEFAULT_MAX_TOTAL_BYTES
         ):
             raise ValueError("public egress byte limit is invalid")
+        if (
+            isinstance(max_requests, bool)
+            or not isinstance(max_requests, int)
+            or max_requests <= 0
+            or max_requests > MAX_CONFIGURED_REQUESTS
+        ):
+            raise ValueError("public egress request limit is invalid")
 
         self._token = token
         self._ttl_sec = float(ttl_sec)
         self._max_total_bytes = max_total_bytes
+        self._max_requests = max_requests
         self._connection_slots = threading.BoundedSemaphore(max_connections)
-        self._resolver: Resolver = _default_resolver
+        self._resolver: Resolver = self._resolve_via_doh
         self._connector: Connector = _default_connector
+        self._doh_requester: DoHRequester = self._doh_https_request
+        self._doh_socket_factory: DoHSocketFactory = _new_ipv4_stream_socket
+        self._doh_socket_connect: DoHSocketConnect = _connect_ipv4_socket
         self._monotonic = time.monotonic
         self._wall_time = time.time
 
@@ -933,14 +958,21 @@ class PublicEgressProxy:
         self._server_thread: threading.Thread | None = None
         self._expiry_thread: threading.Thread | None = None
         self._expiry_cancel = threading.Event()
+        self._expiry_fired = threading.Event()
+        self._stop_complete = threading.Event()
         self._started_monotonic: float | None = None
         self._expires_monotonic: float | None = None
         self._started_wall: float | None = None
         self._stopped_wall: float | None = None
         self._stopping = False
+        self._revoked = False
+        self._expired_by_timer = False
+        self._receipt_finalized = False
+        self._final_receipt: dict[str, Any] | None = None
 
         self._allowed = 0
         self._denied = 0
+        self._requests_accepted = 0
         self._bytes = {
             "clientToUpstream": 0,
             "upstreamToClient": 0,
@@ -974,7 +1006,7 @@ class PublicEgressProxy:
             self._server_thread = server_thread
             server_thread.start()
             expiry_thread = threading.Thread(
-                target=self._expire_server,
+                target=self._expire_proxy,
                 name="pico-public-egress-expiry",
                 daemon=True,
             )
@@ -982,47 +1014,75 @@ class PublicEgressProxy:
             expiry_thread.start()
             return int(server.server_address[1])
 
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+        self._close_active_sockets()
+
     def stop(self) -> dict[str, Any]:
         with self._lifecycle_lock:
-            if not self._stopping:
-                self._stopping = True
-                self._stopped_wall = self._wall_time()
+            if self._final_receipt is not None:
+                return self._copy_receipt(self._final_receipt)
+            if self._stopping:
+                wait_for_stop = True
+            else:
+                wait_for_stop = False
+                with self._lock:
+                    self._stopping = True
+                self._expiry_cancel.set()
             server = self._server
             server_thread = self._server_thread
             expiry_thread = self._expiry_thread
-            self._expiry_cancel.set()
 
-        if server is not None:
-            server.shutdown()
-            server.server_close()
-        self._close_active_sockets()
-        current = threading.current_thread()
-        if server_thread is not None and server_thread is not current:
-            server_thread.join(timeout=2)
-        if expiry_thread is not None and expiry_thread is not current:
-            expiry_thread.join(timeout=2)
-        self._token = ""
-        if (
-            server_thread is not None
-            and server_thread is not current
-            and server_thread.is_alive()
-        ) or (
-            expiry_thread is not None
-            and expiry_thread is not current
-            and expiry_thread.is_alive()
-        ):
+        if wait_for_stop:
+            self._stop_complete.wait()
+            with self._lifecycle_lock:
+                if self._final_receipt is None:
+                    raise RuntimeError("public egress proxy stop failed")
+                return self._copy_receipt(self._final_receipt)
+
+        try:
+            if server is not None:
+                server.shutdown()
             self._close_active_sockets()
-            raise RuntimeError("public egress proxy did not stop cleanly")
-        return self._receipt()
+            if server is not None:
+                server.server_close()
+            current = threading.current_thread()
+            if server_thread is not None and server_thread is not current:
+                server_thread.join()
+            if expiry_thread is not None and expiry_thread is not current:
+                expiry_thread.join()
+            self._close_active_sockets()
+            with self._lock:
+                if self._active_sockets:
+                    raise RuntimeError(
+                        "public egress proxy retained active sockets after stop"
+                    )
+                self._token = ""
+                self._stopped_wall = self._wall_time()
+                self._receipt_finalized = True
+            receipt = self._receipt()
+            with self._lifecycle_lock:
+                self._final_receipt = receipt
+            return self._copy_receipt(receipt)
+        finally:
+            self._stop_complete.set()
 
-    def _expire_server(self) -> None:
+    def _expire_proxy(self) -> None:
         if self._expiry_cancel.wait(self._ttl_sec):
             return
-        with self._lifecycle_lock:
-            server = self._server
-        if server is not None:
-            server.shutdown()
+        with self._lock:
+            self._expired_by_timer = True
+        self._expiry_fired.set()
         self._close_active_sockets()
+
+    @staticmethod
+    def _copy_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **receipt,
+            "bytes": dict(receipt["bytes"]),
+            "decisions": [dict(decision) for decision in receipt["decisions"]],
+        }
 
     def _close_active_sockets(self) -> None:
         with self._lock:
@@ -1034,11 +1094,48 @@ class PublicEgressProxy:
                 pass
             _safe_close(connection)
 
+    def _inactive_reason_locked(self) -> str | None:
+        if self._stopping:
+            return "stopped"
+        if self._revoked:
+            return "revoked"
+        expires = self._expires_monotonic
+        if self._expired_by_timer or expires is None or self._monotonic() >= expires:
+            return "ttl"
+        return None
+
+    def _inactive_reason(self) -> str | None:
+        with self._lock:
+            return self._inactive_reason_locked()
+
+    def _accept_request(self) -> str | None:
+        with self._lock:
+            inactive_reason = self._inactive_reason_locked()
+            if inactive_reason is not None:
+                return inactive_reason
+            if self._requests_accepted >= self._max_requests:
+                return "request_limit"
+            self._requests_accepted += 1
+            return None
+
     def _register_socket(self, connection: socket.socket) -> None:
         with self._lock:
-            if self._stopping:
-                raise ProxyRequestError("stopped")
+            inactive_reason = self._inactive_reason_locked()
+            if inactive_reason is not None:
+                raise ProxyRequestError(inactive_reason)
             self._active_sockets.add(connection)
+
+    def _replace_registered_socket(
+        self,
+        previous: socket.socket,
+        replacement: socket.socket,
+    ) -> None:
+        with self._lock:
+            self._active_sockets.discard(previous)
+            inactive_reason = self._inactive_reason_locked()
+            if inactive_reason is not None:
+                raise ProxyRequestError(inactive_reason)
+            self._active_sockets.add(replacement)
 
     def _unregister_socket(self, connection: socket.socket) -> None:
         with self._lock:
@@ -1058,12 +1155,20 @@ class PublicEgressProxy:
         return hmac.compare_digest(password, self._token)
 
     def _expired(self) -> bool:
-        expires = self._expires_monotonic
-        return expires is None or self._stopping or self._monotonic() >= expires
+        return self._inactive_reason() is not None
+
+    def _require_available(self) -> None:
+        inactive_reason = self._inactive_reason()
+        if inactive_reason is not None:
+            raise ProxyRequestError(inactive_reason)
 
     def _connection_deadline(self) -> float:
-        expires = self._expires_monotonic
-        if expires is None or self._stopping:
+        with self._lock:
+            inactive_reason = self._inactive_reason_locked()
+            expires = self._expires_monotonic
+        if inactive_reason is not None:
+            raise ProxyRequestError(inactive_reason)
+        if expires is None:
             raise ProxyRequestError("ttl")
         return min(
             expires,
@@ -1077,14 +1182,118 @@ class PublicEgressProxy:
         return remaining
 
     def _require_live(self, deadline: float) -> None:
-        if self._stopping:
-            raise ProxyRequestError("stopped")
-        expires = self._expires_monotonic
+        inactive_reason = self._inactive_reason()
+        if inactive_reason is not None:
+            raise ProxyRequestError(inactive_reason)
         now = self._monotonic()
-        if expires is None or now >= expires:
-            raise ProxyRequestError("ttl")
         if now >= deadline:
             raise ProxyRequestError("connection_timeout")
+
+    def _open_doh_socket(
+        self,
+        endpoint_ip: str,
+        deadline: float,
+    ) -> socket.socket:
+        self._require_live(deadline)
+        connection = self._doh_socket_factory()
+        self._register_socket(connection)
+        try:
+            connection.settimeout(
+                min(
+                    DOH_TIMEOUT_SEC,
+                    self._remaining_connection_time(deadline),
+                )
+            )
+            self._doh_socket_connect(connection, (endpoint_ip, 443))
+            self._require_live(deadline)
+            return connection
+        except BaseException:
+            self._unregister_socket(connection)
+            _safe_close(connection)
+            raise
+
+    def _doh_https_request(
+        self,
+        endpoint_ip: str,
+        host: str,
+        record_name: str,
+        deadline: float,
+    ) -> _DoHResponse:
+        connection = _PinnedDoHConnection(
+            endpoint_ip,
+            self,
+            deadline,
+        )
+        try:
+            connection.request(
+                "GET",
+                f"/dns-query?name={host}&type={record_name}",
+                headers={
+                    "Accept": "application/dns-json",
+                    "Connection": "keep-alive",
+                    "Host": DOH_HOST,
+                    "User-Agent": "pico-public-egress/1",
+                },
+            )
+            connection.apply_deadline()
+            response = connection.getresponse()
+            body = bytearray()
+            while len(body) <= DOH_MAX_RESPONSE_BYTES:
+                connection.apply_deadline()
+                chunk = response.read1(
+                    min(
+                        8 * 1024,
+                        DOH_MAX_RESPONSE_BYTES + 1 - len(body),
+                    )
+                )
+                if not chunk:
+                    break
+                body.extend(chunk)
+            return _DoHResponse(
+                status=response.status,
+                headers=tuple(response.getheaders()),
+                body=bytes(body),
+            )
+        finally:
+            connection.close()
+
+    def _resolve_via_doh(self, host: str, port: int) -> Iterable[Any]:
+        del port
+        for endpoint_ip in DOH_ENDPOINT_IPS:
+            try:
+                deadline = min(
+                    self._connection_deadline(),
+                    self._monotonic() + DOH_TIMEOUT_SEC,
+                )
+                response = self._doh_requester(
+                    endpoint_ip,
+                    host,
+                    _DOH_RECORD_NAME,
+                    deadline,
+                )
+                addresses = _parse_doh_response(
+                    host,
+                    _DOH_RECORD_CODE,
+                    _DOH_ADDRESS_VERSION,
+                    response,
+                )
+                if not addresses or len(addresses) > DOH_MAX_ANSWERS:
+                    raise ProxyRequestError("resolution_failed", 502)
+                return addresses
+            except ProxyRequestError as error:
+                if error.reason in {"revoked", "stopped", "ttl"}:
+                    raise
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                http.client.HTTPException,
+            ):
+                inactive_reason = self._inactive_reason()
+                if inactive_reason is not None:
+                    raise ProxyRequestError(inactive_reason) from None
+                continue
+        raise ProxyRequestError("resolution_failed", 502)
 
     def _resolve_public(self, host: str, port: int) -> tuple[str, ...]:
         blocked_reason = _blocked_host_reason(host)
@@ -1092,6 +1301,10 @@ class PublicEgressProxy:
             raise ProxyRequestError(blocked_reason)
         try:
             resolved = tuple(self._resolver(host, port))
+        except ProxyRequestError as error:
+            if error.reason in {"revoked", "stopped", "ttl"}:
+                raise
+            raise ProxyRequestError("resolution_failed", 502) from error
         except (OSError, ValueError) as error:
             raise ProxyRequestError("resolution_failed", 502) from error
         if not resolved:
@@ -1163,6 +1376,8 @@ class PublicEgressProxy:
             "bytes": max(0, int(byte_count)),
         }
         with self._lock:
+            if self._receipt_finalized:
+                return
             if decision == "allow":
                 self._allowed += 1
             else:
@@ -1180,6 +1395,7 @@ class PublicEgressProxy:
                 "stopped": _bounded_wall_time(self._stopped_wall),
                 "allowed": self._allowed,
                 "denied": self._denied,
+                "requestsAccepted": self._requests_accepted,
                 "bytes": dict(self._bytes),
                 "decisions": [dict(decision) for decision in self._decisions],
                 "decisionsTruncated": self._decisions_truncated,
@@ -1190,7 +1406,11 @@ __all__ = [
     "ALLOWED_CONNECT_PORTS",
     "ALLOWED_HTTP_PORTS",
     "DEFAULT_MAX_CONNECTIONS",
+    "DEFAULT_MAX_REQUESTS",
     "DEFAULT_MAX_TOTAL_BYTES",
+    "DOH_ENDPOINT_IPS",
+    "DOH_HOST",
+    "MAX_AUDIT_DECISIONS",
     "PROXY_POLICY_VERSION",
     "PUBLIC_EGRESS_CONNECTION_TIMEOUT_SEC",
     "PublicEgressProxy",
