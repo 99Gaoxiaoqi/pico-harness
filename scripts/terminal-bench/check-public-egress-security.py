@@ -8,15 +8,14 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 def load_public_egress() -> Any:
     project_root = Path(__file__).resolve().parents[2]
-    module_path = (
-        project_root / "benchmarks/terminal_bench_2_1/public_egress.py"
-    )
+    module_path = project_root / "benchmarks/terminal_bench_2_1/public_egress.py"
     spec = importlib.util.spec_from_file_location(
         "pico_public_egress_security_test", module_path
     )
@@ -184,6 +183,50 @@ class FakeClock:
         self.value += seconds
 
 
+def encoded_doh_response(
+    module: Any,
+    payload: Any,
+    *,
+    status: int = 200,
+    content_type: str = "application/dns-json",
+) -> Any:
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    return module._DoHResponse(
+        status,
+        (
+            ("Content-Type", content_type),
+            ("Content-Length", str(len(body))),
+        ),
+        body,
+    )
+
+
+def fake_doh_response(
+    module: Any,
+    host: str,
+    record_name: str,
+    addresses: list[str],
+) -> Any:
+    record_code = 1 if record_name == "A" else 28
+    return encoded_doh_response(
+        module,
+        {
+            "Status": 0,
+            "TC": False,
+            "Question": [{"name": f"{host}.", "type": record_code}],
+            "Answer": [
+                {
+                    "name": f"{host}.",
+                    "type": record_code,
+                    "TTL": 60,
+                    "data": address,
+                }
+                for address in addresses
+            ],
+        },
+    )
+
+
 def read_http_request(peer: socket.socket) -> bytes:
     received = bytearray()
     while b"\r\n\r\n" not in received:
@@ -306,9 +349,7 @@ def assert_connect(module: Any) -> None:
     port = proxy.start()
     client: socket.socket | None = None
     try:
-        status, client = connect_request(
-            port, "tunnel.test:443", basic_auth(token)
-        )
+        status, client = connect_request(port, "tunnel.test:443", basic_auth(token))
         assert status == 200
         client.sendall(b"tunnel-payload")
         assert client.recv(len(b"tunnel-payload")) == b"tunnel-payload"
@@ -335,12 +376,13 @@ def assert_policy_denials(module: Any) -> None:
             "nat64-local.test": ["64:ff9b:1::5db8:d822"],
             "six-to-four.test": ["2002:5db8:d822::"],
             "teredo.test": ["2001:0:4136:e378:8000:63bf:3fff:fdd2"],
+            "site-local.test": ["fec0::1"],
+            "isatap-public.test": ["2001:4860:4860:0:200:5efe:808:808"],
+            "isatap-private.test": ["2001:4860:4860:0:0:5efe:a00:1"],
         }
     )
 
-    def unexpected_connector(
-        _ip: str, _port: int, _timeout: float
-    ) -> socket.socket:
+    def unexpected_connector(_ip: str, _port: int, _timeout: float) -> socket.socket:
         raise AssertionError("a denied target reached the connector")
 
     proxy = module.PublicEgressProxy(token, 60)
@@ -356,6 +398,9 @@ def assert_policy_denials(module: Any) -> None:
             "http://nat64-local.test/",
             "http://six-to-four.test/",
             "http://teredo.test/",
+            "http://site-local.test/",
+            "http://isatap-public.test/",
+            "http://isatap-private.test/",
             "http://localhost/",
             "http://service.local/",
             "http://service.internal/",
@@ -367,13 +412,9 @@ def assert_policy_denials(module: Any) -> None:
             "ftp://public.test/",
         )
         for target in targets:
-            status, _body, _headers = http_request(
-                port, target, auth=basic_auth(token)
-            )
+            status, _body, _headers = http_request(port, target, auth=basic_auth(token))
             assert status == 403, (target, status)
-        status, client = connect_request(
-            port, "public.test:80", basic_auth(token)
-        )
+        status, client = connect_request(port, "public.test:80", basic_auth(token))
         client.close()
         assert status == 403
     finally:
@@ -387,11 +428,16 @@ def assert_policy_denials(module: Any) -> None:
         ("nat64-local.test", 80),
         ("six-to-four.test", 80),
         ("teredo.test", 80),
+        ("site-local.test", 80),
+        ("isatap-public.test", 80),
+        ("isatap-private.test", 80),
     ]
     reasons = {decision["reason"] for decision in receipt["decisions"]}
     assert {
         "non_public_address",
         "transition_address",
+        "site_local_address",
+        "isatap_address",
         "localhost",
         "local_name",
         "internal_name",
@@ -447,9 +493,7 @@ def assert_header_smuggling_rejected(module: Any) -> None:
     token = "header-validation-token"
     resolver = MappingResolver({"public.test": ["93.184.216.34"]})
 
-    def unexpected_connector(
-        _ip: str, _port: int, _timeout: float
-    ) -> socket.socket:
+    def unexpected_connector(_ip: str, _port: int, _timeout: float) -> socket.socket:
         raise AssertionError("an invalid header reached the connector")
 
     proxy = module.PublicEgressProxy(token, 60)
@@ -488,6 +532,208 @@ def assert_header_smuggling_rejected(module: Any) -> None:
         "headers",
         "expectation",
     ]
+
+
+def assert_doh_parser(module: Any) -> None:
+    host = "example.com"
+    a_response = fake_doh_response(
+        module,
+        host,
+        "A",
+        ["93.184.216.34"],
+    )
+    assert module._parse_doh_response(host, 1, 4, a_response) == ("93.184.216.34",)
+    aaaa_response = fake_doh_response(
+        module,
+        host,
+        "AAAA",
+        ["2606:2800:220:1:248:1893:25c8:1946"],
+    )
+    assert module._parse_doh_response(host, 28, 6, aaaa_response) == (
+        "2606:2800:220:1:248:1893:25c8:1946",
+    )
+
+    cname_response = encoded_doh_response(
+        module,
+        {
+            "Status": 0,
+            "TC": False,
+            "Question": [{"name": "example.com.", "type": 1}],
+            "Answer": [
+                {
+                    "name": "example.com.",
+                    "type": 5,
+                    "TTL": 60,
+                    "data": "edge.example.net.",
+                },
+                {
+                    "name": "edge.example.net.",
+                    "type": 1,
+                    "TTL": 30,
+                    "data": "93.184.216.34",
+                },
+            ],
+        },
+    )
+    assert module._parse_doh_response(host, 1, 4, cname_response) == ("93.184.216.34",)
+
+    invalid_payloads = (
+        module._DoHResponse(
+            503,
+            (("Content-Type", "application/dns-json"),),
+            b"{}",
+        ),
+        module._DoHResponse(
+            200,
+            (("Content-Type", "text/plain"),),
+            b"{}",
+        ),
+        module._DoHResponse(
+            200,
+            (("Content-Type", "application/dns-json"),),
+            b"x" * (module.DOH_MAX_RESPONSE_BYTES + 1),
+        ),
+        module._DoHResponse(
+            200,
+            (("Content-Type", "application/dns-json"),),
+            b"{invalid-json",
+        ),
+        module._DoHResponse(
+            200,
+            (("Content-Type", "application/dns-json"),),
+            (
+                b'{"Status":0,"Status":0,"TC":false,'
+                b'"Question":[{"name":"example.com.","type":1}]}'
+            ),
+        ),
+        encoded_doh_response(
+            module,
+            {
+                "Status": 2,
+                "TC": False,
+                "Question": [{"name": "example.com.", "type": 1}],
+            },
+        ),
+        encoded_doh_response(
+            module,
+            {
+                "Status": 0,
+                "TC": True,
+                "Question": [{"name": "example.com.", "type": 1}],
+            },
+        ),
+        encoded_doh_response(
+            module,
+            {
+                "Status": 0,
+                "TC": False,
+                "Question": [{"name": "other.example.", "type": 1}],
+            },
+        ),
+        fake_doh_response(module, host, "A", ["198.18.0.14"]),
+        fake_doh_response(module, host, "A", ["10.0.0.1"]),
+    )
+    for response in invalid_payloads:
+        try:
+            module._parse_doh_response(host, 1, 4, response)
+        except module.ProxyRequestError:
+            pass
+        else:
+            raise AssertionError("invalid DoH response was accepted")
+
+
+def assert_doh_fallback_and_fail_closed(module: Any) -> None:
+    original_request = module._doh_https_request
+    original_getaddrinfo = module.socket.getaddrinfo
+    calls: list[tuple[str, str, str]] = []
+
+    def forbidden_system_dns(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("default resolver used system DNS")
+
+    def fallback_request(endpoint_ip: str, host: str, record_name: str) -> Any:
+        calls.append((endpoint_ip, host, record_name))
+        if endpoint_ip == "1.1.1.1":
+            raise OSError("synthetic primary DoH failure")
+        addresses = (
+            ["93.184.216.34"]
+            if record_name == "A"
+            else ["2606:2800:220:1:248:1893:25c8:1946"]
+        )
+        return fake_doh_response(module, host, record_name, addresses)
+
+    try:
+        module.socket.getaddrinfo = forbidden_system_dns
+        module._doh_https_request = fallback_request
+        addresses = tuple(module._default_resolver("example.com", 443))
+        assert addresses == (
+            "93.184.216.34",
+            "2606:2800:220:1:248:1893:25c8:1946",
+        )
+        assert calls == [
+            ("1.1.1.1", "example.com", "A"),
+            ("1.0.0.1", "example.com", "A"),
+            ("1.0.0.1", "example.com", "AAAA"),
+        ]
+
+        calls.clear()
+
+        def failed_request(endpoint_ip: str, host: str, record_name: str) -> Any:
+            calls.append((endpoint_ip, host, record_name))
+            raise OSError("synthetic pinned DoH outage")
+
+        module._doh_https_request = failed_request
+        try:
+            tuple(module._default_resolver("example.com", 443))
+        except module.ProxyRequestError as error:
+            assert error.reason == "resolution_failed"
+        else:
+            raise AssertionError("DoH outage fell back or failed open")
+        assert calls == [
+            ("1.1.1.1", "example.com", "A"),
+            ("1.0.0.1", "example.com", "A"),
+        ]
+
+        calls.clear()
+
+        def empty_request(endpoint_ip: str, host: str, record_name: str) -> Any:
+            calls.append((endpoint_ip, host, record_name))
+            return fake_doh_response(module, host, record_name, [])
+
+        module._doh_https_request = empty_request
+        try:
+            tuple(module._default_resolver("example.com", 443))
+        except module.ProxyRequestError as error:
+            assert error.reason == "resolution_failed"
+        else:
+            raise AssertionError("empty A and AAAA answers were accepted")
+        assert calls == [
+            ("1.1.1.1", "example.com", "A"),
+            ("1.1.1.1", "example.com", "AAAA"),
+            ("1.0.0.1", "example.com", "A"),
+            ("1.0.0.1", "example.com", "AAAA"),
+        ]
+
+        calls.clear()
+
+        def fake_ip_request(endpoint_ip: str, host: str, record_name: str) -> Any:
+            calls.append((endpoint_ip, host, record_name))
+            addresses = ["198.18.0.14"] if record_name == "A" else []
+            return fake_doh_response(module, host, record_name, addresses)
+
+        module._doh_https_request = fake_ip_request
+        try:
+            tuple(module._default_resolver("example.com", 443))
+        except module.ProxyRequestError:
+            pass
+        else:
+            raise AssertionError("Fake-IP DoH answer was accepted")
+        assert calls == [
+            ("1.1.1.1", "example.com", "A"),
+            ("1.0.0.1", "example.com", "A"),
+        ]
+    finally:
+        module._doh_https_request = original_request
+        module.socket.getaddrinfo = original_getaddrinfo
 
 
 def assert_ttl(module: Any) -> None:
@@ -549,9 +795,7 @@ def assert_byte_limit(module: Any) -> None:
     assert receipt["bytes"]["total"] <= 512
     assert receipt["decisions"][0]["reason"] == "byte_limit"
 
-    preflight_proxy = module.PublicEgressProxy(
-        token, 60, max_total_bytes=512
-    )
+    preflight_proxy = module.PublicEgressProxy(token, 60, max_total_bytes=512)
     preflight_proxy._resolver = resolver
     preflight_proxy._connector = connector
     preflight_port = preflight_proxy.start()
@@ -582,9 +826,7 @@ def assert_connection_timeout(module: Any) -> None:
     port = proxy.start()
     client: socket.socket | None = None
     try:
-        status, client = connect_request(
-            port, "tunnel.test:443", basic_auth(token)
-        )
+        status, client = connect_request(port, "tunnel.test:443", basic_auth(token))
         assert status == 200
         clock.advance(module.PUBLIC_EGRESS_CONNECTION_TIMEOUT_SEC + 1)
         wait_until(lambda: client.recv(1) == b"", timeout_sec=2)
@@ -622,6 +864,8 @@ def assert_constructor_contract(module: Any) -> None:
     assert module.DEFAULT_MAX_TOTAL_BYTES == 1_073_741_824
     assert module.ALLOWED_HTTP_PORTS == (80,)
     assert module.ALLOWED_CONNECT_PORTS == (443,)
+    assert module.DOH_HOST == "cloudflare-dns.com"
+    assert module.DOH_ENDPOINT_IPS == ("1.1.1.1", "1.0.0.1")
     for args in (
         ("", 60),
         ("token with space", 60),
@@ -647,6 +891,8 @@ def main() -> None:
     assert_policy_denials(module)
     assert_authentication(module)
     assert_header_smuggling_rejected(module)
+    assert_doh_parser(module)
+    assert_doh_fallback_and_fail_closed(module)
     assert_ttl(module)
     assert_connection_limit(module)
     assert_byte_limit(module)
@@ -657,7 +903,14 @@ def main() -> None:
             {
                 "ok": True,
                 "proxyPolicyVersion": module.PROXY_POLICY_VERSION,
-                "checks": 11,
+                "checks": 13,
+                "maxConnections": module.DEFAULT_MAX_CONNECTIONS,
+                "maxTotalBytes": module.DEFAULT_MAX_TOTAL_BYTES,
+                "allowedHttpPorts": list(module.ALLOWED_HTTP_PORTS),
+                "allowedConnectPorts": list(module.ALLOWED_CONNECT_PORTS),
+                "connectionTimeoutSec": (module.PUBLIC_EGRESS_CONNECTION_TIMEOUT_SEC),
+                "dnsMode": "pinned-doh",
+                "dohHost": module.DOH_HOST,
             },
             separators=(",", ":"),
             sort_keys=True,
