@@ -890,6 +890,7 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
 
 async def assert_container_proxy_env_injection(adapter: Any) -> None:
     commands: list[tuple[str, ...]] = []
+    host_environments: list[dict[str, str]] = []
 
     class FakeProcess:
         returncode = 0
@@ -900,15 +901,16 @@ async def assert_container_proxy_env_injection(adapter: Any) -> None:
 
     async def create_subprocess_exec(
         *command: str,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> FakeProcess:
         commands.append(command)
+        host_environments.append(dict(kwargs["env"]))
         return FakeProcess()
 
     adapter.assert_secure_docker_environment = lambda _environment: None
     adapter.asyncio.create_subprocess_exec = create_subprocess_exec
     environment = FakeEnvironment()
-    proxy_url = "http://pico:token-value@pico-egress:8081"
+    proxy_url = f"http://pico:{'ab' * 32}@pico-egress:8081"
     proxy_env = {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -925,6 +927,13 @@ async def assert_container_proxy_env_injection(adapter: Any) -> None:
         container_env=proxy_env,
     )
     command = list(commands[-1])
+    assert [
+        "-e",
+        (
+            f"{adapter._AGENT_CONTROLLED_PROXY_GATE_ENV}="
+            f"{adapter._AGENT_CONTROLLED_PROXY_GATE_ENABLED}"
+        ),
+    ] in [command[index : index + 2] for index in range(len(command) - 1)]
     for name, value in proxy_env.items():
         assert ["-e", f"{name}={value}"] in [
             command[index : index + 2] for index in range(len(command) - 1)
@@ -932,6 +941,36 @@ async def assert_container_proxy_env_injection(adapter: Any) -> None:
     assert command.index("main") > max(
         index for index, item in enumerate(command) if item == "-e"
     )
+    assert not set(host_environments[-1]) & (
+        set(proxy_env) | {adapter._AGENT_CONTROLLED_PROXY_GATE_ENV}
+    )
+
+    for invalid_proxy_env in (
+        {name: value for name, value in proxy_env.items() if name != "no_proxy"},
+        {
+            **proxy_env,
+            "HTTP_PROXY": f"http://pico:{'ab' * 32}@untrusted-proxy:8081",
+        },
+        {**proxy_env, "NO_PROXY": "*", "no_proxy": "*"},
+        {**proxy_env, adapter._AGENT_CONTROLLED_PROXY_GATE_ENV: "attacker-value"},
+    ):
+        command_count = len(commands)
+        try:
+            await adapter.docker_exec_secret_stdin(
+                environment,
+                b"secret",
+                timeout_sec=5,
+                secret_env_names={"PICO_TB_GATEWAY_TOKEN"},
+                container_env=invalid_proxy_env,
+            )
+        except RuntimeError as error:
+            assert str(error) in {
+                "Container public proxy environment is incomplete",
+                "Container public proxy environment is invalid",
+            }
+        else:
+            raise AssertionError("invalid agent controlled proxy environment was accepted")
+        assert len(commands) == command_count
 
     await adapter.docker_exec_secret_stdin(
         environment,
@@ -940,7 +979,22 @@ async def assert_container_proxy_env_injection(adapter: Any) -> None:
         secret_env_names={"PICO_TB_GATEWAY_TOKEN"},
         container_env={},
     )
-    assert "-e" not in commands[-1]
+    disabled_command = list(commands[-1])
+    assert [
+        "-e",
+        (
+            f"{adapter._AGENT_CONTROLLED_PROXY_GATE_ENV}="
+            f"{adapter._AGENT_CONTROLLED_PROXY_GATE_DISABLED}"
+        ),
+    ] in [
+        disabled_command[index : index + 2]
+        for index in range(len(disabled_command) - 1)
+    ]
+    for name in proxy_env:
+        assert not any(
+            item.startswith(f"{name}=")
+            for item in disabled_command
+        )
 
 
 async def assert_verifier_lifecycle_contract(adapter: Any) -> None:

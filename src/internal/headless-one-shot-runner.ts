@@ -47,6 +47,18 @@ const MAX_BASH_TIMEOUT_MS = 300_000;
 const MAX_POLICY_DENIAL_COUNT = Number.MAX_SAFE_INTEGER;
 const MAX_POLICY_TOOL_NAME_LENGTH = 128;
 const LOCK_DIRECTORY_MODE = 0o700;
+const TERMINAL_BENCH_CONTROLLED_PROXY_GATE = "terminal-bench-agent-v1";
+const TERMINAL_BENCH_CONTROLLED_PROXY_CAPABILITY = Symbol("terminal-bench-agent-controlled-proxy");
+const CONTROLLED_PROXY_ENV_NAMES = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "NO_PROXY",
+  "no_proxy",
+] as const;
+const CONTROLLED_PROXY_URL_PATTERN = /^http:\/\/pico:([0-9a-f]{64})@pico-egress:8081$/u;
+const CONTROLLED_PROXY_NO_PROXY = "pico-gateway,main,localhost,127.0.0.1,::1";
 const HEADLESS_TOOL_NAMES = new Set([
   "bash",
   "edit_file",
@@ -184,6 +196,11 @@ export interface HeadlessOneShotOutcome {
 
 export interface HeadlessOneShotDependencies {
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Internal, process-local authority minted only from the Terminal-Bench adapter's
+   * per-exec gate. It is deliberately absent from the JSON request schema.
+   */
+  readonly controlledProxyCapability?: TerminalBenchControlledProxyCapability;
   readonly signal?: AbortSignal;
   readonly signalKind?: "SIGINT" | "SIGTERM";
   readonly credentialVault?: CredentialVault;
@@ -196,6 +213,8 @@ export interface HeadlessOneShotDependencies {
   /** Test seam that opens a deterministic crash window after Runtime trace export. */
   readonly beforeTraceSanitize?: () => Promise<void>;
 }
+
+type TerminalBenchControlledProxyCapability = typeof TERMINAL_BENCH_CONTROLLED_PROXY_CAPABILITY;
 
 type CancelCause = "timeout" | "SIGINT" | "SIGTERM" | "canceled";
 
@@ -336,6 +355,14 @@ export async function runHeadlessOneShotJson(
   return runValidatedRequest(request, startedAt, dependencies);
 }
 
+export function terminalBenchAgentControlledProxyCapability(
+  gate: string | undefined,
+): TerminalBenchControlledProxyCapability | undefined {
+  return gate === TERMINAL_BENCH_CONTROLLED_PROXY_GATE
+    ? TERMINAL_BENCH_CONTROLLED_PROXY_CAPABILITY
+    : undefined;
+}
+
 async function runValidatedRequest(
   request: HeadlessOneShotRequestV1,
   startedAt: number,
@@ -447,7 +474,11 @@ async function runValidatedRequest(
       : new Map<string, string>();
 
     const reporter = new SilentReporter();
-    const runtimeEnv = isolatedRuntimeEnvironment(picoHome, dependencies.env ?? process.env);
+    const runtimeEnv = isolatedRuntimeEnvironment(
+      picoHome,
+      dependencies.env ?? process.env,
+      dependencies.controlledProxyCapability,
+    );
     const runtimeDependencies: RunAgentCliDependencies = {
       signal: cancellation.signal,
       reporter,
@@ -485,7 +516,10 @@ async function runValidatedRequest(
     const settled = await settleRuntime(runtimePromise, cancellation, request.shutdownGraceMs);
     if (request.trace) await dependencies.beforeTraceSanitize?.();
     const traceWorkDir = workDir;
-    const secrets = credentialCandidates(selected.config.apiKey);
+    const secrets = credentialCandidates(
+      selected.config.apiKey,
+      ...controlledProxyCredentialCandidates(runtimeEnv),
+    );
     const safeTracePath = request.trace
       ? await sanitizeRuntimeTraces({
           workDir: traceWorkDir,
@@ -731,7 +765,8 @@ function splitModelRoute(routeId: string): { providerId: string; modelId: string
 function isolatedRuntimeEnvironment(
   picoHome: string,
   source: Readonly<Record<string, string | undefined>>,
-): RunAgentCliDependencies["env"] {
+  controlledProxyCapability: TerminalBenchControlledProxyCapability | undefined,
+): NonNullable<RunAgentCliDependencies["env"]> {
   const runtimeHome = join(picoHome, "headless-home");
   const env: Record<string, string | undefined> = {
     PICO_HOME: picoHome,
@@ -753,7 +788,49 @@ function isolatedRuntimeEnvironment(
   ]) {
     if (source[name] !== undefined) env[name] = source[name];
   }
+  if (controlledProxyCapability === TERMINAL_BENCH_CONTROLLED_PROXY_CAPABILITY) {
+    Object.assign(env, validatedControlledProxyEnvironment(source));
+  }
   return Object.freeze(env);
+}
+
+function validatedControlledProxyEnvironment(
+  source: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<(typeof CONTROLLED_PROXY_ENV_NAMES)[number], string>> {
+  const values = Object.fromEntries(
+    CONTROLLED_PROXY_ENV_NAMES.map((name) => [name, source[name]]),
+  ) as Record<(typeof CONTROLLED_PROXY_ENV_NAMES)[number], string | undefined>;
+  if (CONTROLLED_PROXY_ENV_NAMES.some((name) => typeof values[name] !== "string")) {
+    throw new HeadlessRequestError(
+      "CONTROLLED_PROXY_ENV_INVALID",
+      "The controlled proxy environment is incomplete.",
+    );
+  }
+  const proxyUrl = values["HTTP_PROXY"]!;
+  const proxyMatch = CONTROLLED_PROXY_URL_PATTERN.exec(proxyUrl);
+  if (
+    !proxyMatch ||
+    values["HTTPS_PROXY"] !== proxyUrl ||
+    values["http_proxy"] !== proxyUrl ||
+    values["https_proxy"] !== proxyUrl ||
+    values["NO_PROXY"] !== CONTROLLED_PROXY_NO_PROXY ||
+    values["no_proxy"] !== CONTROLLED_PROXY_NO_PROXY
+  ) {
+    throw new HeadlessRequestError(
+      "CONTROLLED_PROXY_ENV_INVALID",
+      "The controlled proxy environment is invalid.",
+    );
+  }
+  return Object.freeze(values as Record<(typeof CONTROLLED_PROXY_ENV_NAMES)[number], string>);
+}
+
+function controlledProxyCredentialCandidates(
+  env: Readonly<Record<string, string | undefined>>,
+): readonly string[] {
+  const proxyUrl = env["HTTP_PROXY"];
+  if (typeof proxyUrl !== "string") return [];
+  const match = CONTROLLED_PROXY_URL_PATTERN.exec(proxyUrl);
+  return match?.[1] ? [proxyUrl, match[1]] : [];
 }
 
 function emptyPluginSnapshot(): PluginRuntimeSnapshot {
@@ -1403,8 +1480,8 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function credentialCandidates(routeCredential: string): readonly string[] {
-  return [...new Set([routeCredential].filter((candidate) => candidate.length >= 6))].sort(
+function credentialCandidates(...credentials: readonly string[]): readonly string[] {
+  return [...new Set(credentials.filter((candidate) => candidate.length >= 6))].sort(
     (left, right) => right.length - left.length,
   );
 }

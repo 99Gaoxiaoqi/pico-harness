@@ -102,6 +102,30 @@ apt-get update \
   -o "Acquire::Languages=none" \
   -o "Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"
 """
+_TOKEN_FILE_SCAN_SCRIPT = r"""
+const fs = require("node:fs");
+const path = require("node:path");
+const chunks = [];
+process.stdin.on("data", chunk => chunks.push(chunk));
+process.stdin.on("end", () => {
+  const token = Buffer.concat(chunks);
+  const visit = candidate => {
+    let stat;
+    try {
+      stat = fs.lstatSync(candidate);
+    } catch {
+      return;
+    }
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(candidate)) visit(path.join(candidate, name));
+      return;
+    }
+    if (stat.isFile() && fs.readFileSync(candidate).includes(token)) process.exit(9);
+  };
+  for (const candidate of process.argv.slice(1)) visit(candidate);
+});
+"""
 
 
 class DockerEnvironmentStub:
@@ -517,6 +541,43 @@ def assert_connection_fails(
     )
 
 
+def exec_agent_bash(
+    adapter: Any,
+    main_name: str,
+    proxy_env: dict[str, str],
+    command: str,
+    *,
+    timeout_sec: float,
+) -> subprocess.CompletedProcess[bytes]:
+    args = ["exec"]
+    for name, value in proxy_env.items():
+        args.extend(["--env", f"{name}={value}"])
+    args.extend([main_name, "/bin/bash", "--noprofile", "--norc", "-c", command])
+    return run_docker(adapter, args, timeout_sec=timeout_sec)
+
+
+def assert_token_absent_from_agent_files(
+    adapter: Any,
+    main_name: str,
+    token: str,
+) -> None:
+    run_docker(
+        adapter,
+        [
+            "exec",
+            "--interactive",
+            main_name,
+            "node",
+            "-e",
+            _TOKEN_FILE_SCAN_SCRIPT,
+            "/tmp/pico-verifier-apt-lists",
+            "/tmp/pico-verifier-sources.list",
+        ],
+        input_bytes=token.encode(),
+        timeout_sec=20,
+    )
+
+
 def remove_owned_container(
     adapter: Any,
     name: str,
@@ -636,6 +697,7 @@ async def run_smoke(adapter: Any) -> None:
     def resolver(host: str, _port: int) -> list[str]:
         return {
             "public.test": [_DOCUMENTATION_GLOBAL_IP],
+            "apt.test": [_DOCUMENTATION_GLOBAL_IP],
             "private.test": ["127.0.0.1"],
             "mixed.test": [_DOCUMENTATION_GLOBAL_IP, "127.0.0.1"],
             "metadata.google.internal": ["169.254.169.254"],
@@ -738,19 +800,72 @@ async def run_smoke(adapter: Any) -> None:
         if connector_calls != [(_DOCUMENTATION_GLOBAL_IP, 80)]:
             raise AssertionError("denied proxy targets reached the connector")
 
+        proxy_url = f"http://pico:{token}@pico-egress:8081"
+        agent_proxy_env = {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "NO_PROXY": adapter._PUBLIC_EGRESS_NO_PROXY,
+            "no_proxy": adapter._PUBLIC_EGRESS_NO_PROXY,
+        }
+        curl_result = exec_agent_bash(
+            adapter,
+            main_name,
+            agent_proxy_env,
+            (
+                "curl --silent --show-error --fail --max-time 10 "
+                "http://public.test/fixture"
+            ),
+            timeout_sec=20,
+        )
+        apt_result = exec_agent_bash(
+            adapter,
+            main_name,
+            agent_proxy_env,
+            _APT_UPDATE_COMMAND,
+            timeout_sec=60,
+        )
+        token_bytes = token.encode()
+        for result in (curl_result, apt_result):
+            if token_bytes in result.stdout or token_bytes in result.stderr:
+                raise AssertionError("agent Bash leaked the public proxy token")
+        if curl_result.stdout != b"fixture-ok":
+            raise AssertionError("agent Bash curl did not use the controlled proxy")
+        if (
+            fixture.curl_request_count != 2
+            or fixture.apt_request_count < 1
+            or fixture.apt_packages_request_count < 1
+            or len(connector_calls) != fixture.request_count
+            or any(
+                address != _DOCUMENTATION_GLOBAL_IP or port != 80
+                for address, port in connector_calls
+            )
+        ):
+            raise AssertionError("agent Bash requests bypassed controlled proxy checks")
+        assert_no_persisted_proxy_or_token(
+            adapter,
+            environment=environment,
+            container_names=(main_name, sidecar_name, relay_name),
+            proxy_env_names=adapter.PUBLIC_EGRESS_PROXY_ENV_NAMES,
+            token=token,
+        )
+        assert_token_absent_from_agent_files(adapter, main_name, token)
         assert_connection_fails(
             adapter,
             main_name,
             _DOCUMENTATION_GLOBAL_IP,
             80,
         )
+        assert_connection_fails(adapter, main_name, "1.1.1.1", 53)
         assert_connection_fails(adapter, sidecar_name, "pico-egress", 8081)
 
         receipt = proxy.stop()
         proxy_started = False
         if (
             receipt.get("schemaVersion") != 1
-            or receipt.get("allowed") != 1
+            or receipt.get("allowed", 0) < 3
+            or receipt.get("allowed") != fixture.request_count
             or receipt.get("denied") != 3
         ):
             raise AssertionError("public egress proxy receipt counts are invalid")
