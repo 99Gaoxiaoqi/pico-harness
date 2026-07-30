@@ -32,6 +32,7 @@ import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
 import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
+import { snapshotToolDefinitions } from "./prompt-cache.js";
 
 /** Anthropic content block: 文本、图片或工具调用 */
 type Block =
@@ -345,7 +346,9 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
 
-    // 2. 工具 Schema 翻译:properties / required 分别填充
+    // 2. 工具 Schema 翻译:properties / required 分别填充。
+    // 再次快照化确保直接 provider 调用也不会受 schema key 插入顺序影响。
+    const tools = snapshotToolDefinitions(availableTools);
     // 统一思考强度:先算 budget,再据此保护 max_tokens(Anthropic 要求 max_tokens > budget_tokens)
     const legacyEffort =
       !this.config.capabilities && isLegacyThinkingEffort(this.thinkingEffort)
@@ -365,8 +368,8 @@ export class ClaudeProvider implements LLMProvider {
     if (systemPrompt) body.system = systemPrompt;
     if (thinkingConfig) body.thinking = thinkingConfig;
     // 无可用工具时不挂载 tools
-    if (availableTools.length > 0) {
-      body.tools = availableTools.map((t) => {
+    if (tools.length > 0) {
+      body.tools = tools.map((t) => {
         const schema = t.inputSchema as {
           properties?: Record<string, unknown>;
           required?: string[];
@@ -389,8 +392,13 @@ export class ClaudeProvider implements LLMProvider {
     // 3. Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,
     // 命中后 cache_read 输入单价降至约 1/10,长会话输入成本可降 ~75%(对标 hermes)。
     // 仅当模型 profile 声明支持 prompt cache 时启用,避免不支持该特性的兼容端点报错。
-    if (this.profile.supportsPromptCache) {
-      const breakpoints = applyAnthropicCacheControl(body, true);
+    if (this.shouldUsePromptCache()) {
+      const cachePolicy = this.config.capabilities?.promptCache;
+      const stablePrefixTtl = cachePolicy?.ttl === "1h" ? "1h" : "5m";
+      const breakpoints = applyAnthropicCacheControl(body, true, {
+        stablePrefixTtl,
+        historyTtl: "5m",
+      });
       if (breakpoints > 0) {
         logger.debug(
           { model: this.config.model, breakpoints },
@@ -404,6 +412,21 @@ export class ClaudeProvider implements LLMProvider {
       ? applyReasoningRequestPatch(body, capability, this.thinkingEffort, "claude")
       : body;
     return ensureThinkingBudgetFitsOutput(patched, this.profile.maxOutputTokens);
+  }
+
+  /**
+   * Only official Anthropic endpoints may inherit the profile default. A route
+   * on a compatible Messages gateway must explicitly opt into cache support,
+   * otherwise cache_control is omitted instead of risking a protocol error.
+   */
+  private shouldUsePromptCache(): boolean {
+    if (!this.profile.supportsPromptCache) return false;
+    const configured = this.config.capabilities?.cache;
+    if (configured === true) return true;
+    if (configured === false) return false;
+    if (this.config.capabilities) return isOfficialAnthropicEndpoint(this.config.baseURL);
+    // Keep direct, legacy provider construction backwards-compatible.
+    return true;
   }
 
   /**
@@ -578,6 +601,17 @@ export class ClaudeProvider implements LLMProvider {
         // 未知事件类型,忽略(向前兼容未来新增事件)
         break;
     }
+  }
+}
+
+function isOfficialAnthropicEndpoint(baseURL: string): boolean {
+  try {
+    const endpoint = new URL(baseURL);
+    return (
+      endpoint.protocol === "https:" && endpoint.hostname.toLowerCase() === "api.anthropic.com"
+    );
+  } catch {
+    return false;
   }
 }
 
