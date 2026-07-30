@@ -20,6 +20,7 @@ import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
 import { runCaptured } from "./captured-process.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
+import { buildEgressPolicyManifest } from "./egress-policy.mjs";
 import { verifyApprovedHarborWheelhouse } from "./harbor-wheelhouse.mjs";
 import {
   assertHarborTrialRetriesDisabled,
@@ -175,6 +176,7 @@ const localDataset = await prepareLocalDataset({
   runRoot,
   runId,
 });
+const publicEgressPolicy = buildEgressPolicyManifest(tasks, localDataset.egressPolicyByTask);
 await run(
   "python3",
   ["-m", "benchmarks.terminal_bench_2_1.task_timeout_preflight", "--dataset", localDataset.path],
@@ -341,6 +343,7 @@ const manifest = {
     secretInjection: "host-credential-gateway",
     dockerDelete: true,
     keepContainers: false,
+    publicEgress: publicEgressPolicy,
     providerBudget: {
       maxCalls: 128,
       maxInputTokenUpperBound: 1_000_000,
