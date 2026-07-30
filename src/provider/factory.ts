@@ -3,7 +3,7 @@
 import type { ProviderConfig } from "./config.js";
 import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
-import { GeminiProvider } from "./gemini.js";
+import { GeminiProvider, type GeminiProviderDependencies } from "./gemini.js";
 import type { LLMProvider } from "./interface.js";
 import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capability.js";
 import { CapabilityPreflightProvider } from "./capability-preflight.js";
@@ -11,6 +11,11 @@ import { providerProfileForRoute } from "./model-capabilities.js";
 import { withProviderErrorRedaction } from "./error-redaction.js";
 
 export type ProviderKind = "openai" | "claude" | "gemini";
+
+/** Runtime-owned dependencies that are deliberately kept outside credential-bearing ProviderConfig. */
+export interface ProviderRuntimeDependencies {
+  readonly gemini?: GeminiProviderDependencies;
+}
 
 /**
  * 把可选 thinkingEffort 合并进显式 config。凭证选择与轮换由 Runtime 宿主持有。
@@ -31,8 +36,9 @@ export function createProvider(
   kind: ProviderKind,
   config: ProviderConfig,
   thinkingEffort?: ReasoningLevel,
+  dependencies?: ProviderRuntimeDependencies,
 ): LLMProvider {
-  return createRawProvider(kind, config, thinkingEffort);
+  return createRawProvider(kind, config, thinkingEffort, dependencies);
 }
 
 /** 创建原始 Provider；运行时计费、重试与凭证轮换由装配层负责。 */
@@ -40,6 +46,7 @@ export function createRawProvider(
   kind: ProviderKind,
   config: ProviderConfig,
   thinkingEffort?: ReasoningLevel,
+  dependencies: ProviderRuntimeDependencies = {},
 ): LLMProvider {
   const cfg = resolveConfig(config, thinkingEffort);
   const profile = cfg.capabilities
@@ -54,7 +61,7 @@ export function createRawProvider(
       provider = new ClaudeProvider(cfg, profile);
       break;
     case "gemini":
-      provider = new GeminiProvider(cfg, profile);
+      provider = new GeminiProvider(cfg, profile, dependencies.gemini);
       break;
   }
   provider = withProviderErrorRedaction(provider, [cfg.apiKey]);
