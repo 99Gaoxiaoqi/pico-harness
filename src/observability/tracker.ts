@@ -26,6 +26,7 @@ import { logger } from "./logger.js";
 import { getProviderCallContext, type ProviderCallContext } from "./provider-call-context.js";
 import { currentRuntimeRun } from "../runtime/runtime-run.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
+import { normalizePromptCacheEndpoint } from "../provider/provider-endpoint.js";
 import {
   capturePreparedProviderRequest,
   diagnosePreparedProviderRequest,
@@ -140,15 +141,24 @@ export class CostTracker implements LLMProvider {
       purpose: context.purpose,
     });
     let requestDiagnostic: PreparedRequestDiagnostic | undefined;
+    const requestRoute = preparedRequestRoute(this.modelRoute);
+    const logicalCallPriors = new Map<string, PreparedRequestCapture | undefined>();
     const observeRequest = (request: PreparedProviderRequest): void => {
       try {
         const current = capturePreparedProviderRequest(request);
-        const key = preparedRequestKey(context, current);
-        const prior =
-          this.preparedRequests.get(key) ??
-          this.restorePreparedRequest(context, current.provider, current.model);
+        const key = preparedRequestKey(context, current, requestRoute);
+        let prior: PreparedRequestCapture | undefined;
+        if (logicalCallPriors.has(key)) {
+          prior = logicalCallPriors.get(key);
+        } else {
+          prior =
+            this.preparedRequests.get(key) ??
+            this.restorePreparedRequest(context, current.provider, current.model, requestRoute);
+          logicalCallPriors.set(key, prior);
+        }
         requestDiagnostic = diagnosePreparedProviderRequest(current, prior);
-        // 在网络 dispatch 前同步更新，使并发调用按真实发出顺序比较。
+        // 同一逻辑调用内的兼容降级始终对比调用开始时的 prior；全局 map 则更新为最后
+        // 实际发出的 wire body，让下一逻辑调用不会继承已被端点拒绝的字段。
         this.preparedRequests.set(key, current);
       } catch (error) {
         // 可观测性必须 fail-open，不能因诊断序列化问题阻断模型请求。
@@ -189,7 +199,7 @@ export class CostTracker implements LLMProvider {
         providerCallId: callId,
         status,
         latencyMs,
-        error: runtimeErrorMessage(error),
+        error: runtimeErrorSummary(error),
       });
       this.recordLedger(callId, context, status, undefined, latencyMs, error, requestDiagnostic);
       throw error;
@@ -200,6 +210,7 @@ export class CostTracker implements LLMProvider {
     context: ProviderCallContext,
     provider: PreparedProviderRequest["provider"],
     model: string,
+    route: string | undefined,
   ): PreparedRequestCapture | undefined {
     const records = this.options.ledger?.listProviderCalls?.({
       ...(context.sessionId ? { sessionId: context.sessionId } : {}),
@@ -216,7 +227,8 @@ export class CostTracker implements LLMProvider {
         record.goalId !== context.goalId ||
         record.jobId !== context.jobId ||
         record.attemptId !== context.attemptId ||
-        record.model !== model
+        record.model !== model ||
+        record.route !== route
       ) {
         continue;
       }
@@ -341,7 +353,7 @@ export class CostTracker implements LLMProvider {
               latencyMs,
               ...cacheSupport,
               ...(requestDiagnostic ? { requestDiagnostic } : {}),
-              ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+              ...(error ? safeErrorMetadata(error) : {}),
             },
       });
     } catch (ledgerError) {
@@ -361,9 +373,12 @@ function normalizeRoute(route: string | BillingRoute): BillingRoute {
 function safeRouteBaseUrl(value: string): string {
   try {
     const parsed = new URL(value);
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "[invalid-url]";
+    parsed.username = "";
+    parsed.password = "";
+    return normalizePromptCacheEndpoint(parsed.toString());
   } catch {
-    return value.replace(/^[^@/\s]+@/u, "").replace(/[?#].*$/u, "");
+    return "[invalid-url]";
   }
 }
 
@@ -384,6 +399,7 @@ function withRequestObserver(
 function preparedRequestKey(
   context: ProviderCallContext,
   capture: Pick<PreparedRequestCapture, "provider" | "model">,
+  route: string | undefined,
 ): string {
   return JSON.stringify([
     context.purpose,
@@ -394,10 +410,26 @@ function preparedRequestKey(
     context.attemptId,
     capture.provider,
     capture.model,
+    route,
   ]);
 }
 
-function runtimeErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  return message.slice(0, 1_000);
+function preparedRequestRoute(route: string | BillingRoute): string | undefined {
+  const normalized = normalizeRoute(route);
+  return normalized.baseUrl ? safeRouteBaseUrl(normalized.baseUrl) : undefined;
+}
+
+function runtimeErrorSummary(error: unknown): string {
+  const metadata = safeErrorMetadata(error);
+  return `${metadata.errorName}${metadata.statusCode === undefined ? "" : ` status=${metadata.statusCode}`}; detail omitted`;
+}
+
+function safeErrorMetadata(error: unknown): { errorName: string; statusCode?: number } {
+  const errorName = error instanceof Error ? error.name : typeof error;
+  if (typeof error !== "object" || error === null) return { errorName };
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  return {
+    errorName,
+    ...(typeof statusCode === "number" ? { statusCode } : {}),
+  };
 }

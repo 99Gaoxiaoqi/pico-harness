@@ -19,6 +19,8 @@ export interface LLMProviderRequestOptions {
    * Callers must never pass raw prompt text, credentials, or a random Session ID here.
    */
   promptCacheShardSeed?: string;
+  /** Route traffic threshold decision, fixed for one logical call and all of its retries. */
+  promptCacheShardActive?: boolean;
   /** 仅供显式 Claude 预热请求；Provider 不得把它传播为未知 wire 字段。 */
   promptCachePrewarm?: boolean;
   /** 请求用途，供计费、审计与可观测层区分普通 Agent、预热与 Hook 判定。 */
@@ -45,6 +47,10 @@ export interface PreparedProviderRequest {
 export interface LLMProviderRequestCapabilities {
   /** 能否在保留工具 Schema 的同时，通过 wire 参数可靠禁止工具调用。 */
   readonly toolChoiceNoneWithTools: boolean;
+  /** Secret-free route identity used for route-scoped prompt-cache traffic accounting. */
+  readonly promptCacheRouteIdentity?: string;
+  /** Record one logical route request and decide whether key sharding is active for it. */
+  readonly preparePromptCacheSharding?: () => boolean;
 }
 
 /** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */

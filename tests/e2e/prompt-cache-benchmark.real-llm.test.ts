@@ -354,7 +354,12 @@ function realBenchmarkConfig(): RealBenchmarkConfig {
     protocol === "claude"
       ? { mode: "explicit", ttl: "5m" }
       : protocol === "openai"
-        ? { mode: "explicit", ttl: "30m", keyShards: 1 }
+        ? {
+            mode: "explicit",
+            ttl: "30m",
+            explicitBreakpoints: true,
+            keyShards: 1,
+          }
         : { mode: "implicit" };
   const capabilities = resolveModelRouteCapabilities(
     protocol,

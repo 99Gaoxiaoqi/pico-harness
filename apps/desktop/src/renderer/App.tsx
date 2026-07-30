@@ -2473,7 +2473,7 @@ function UsagePage() {
         <div>
           <span className="eyebrow">{data.usage.period || "Runtime 统计"}</span>
           <h2>用量</h2>
-          <p>用同一套口径查看模型调用、缓存与费用估算。</p>
+          <p>总用量可含历史 baseline；缓存读写、命中与复用指标仅使用逐调用记录。</p>
         </div>
       </section>
       {data.notices.usage ? (

@@ -103,7 +103,6 @@ const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
 const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
 const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
 const engineSessionContext = new AsyncLocalStorage<string>();
-
 function engineSessionCapability(session: Session): string {
   return JSON.stringify([
     canonicalizeWorkspacePath(session.workDir),
@@ -679,9 +678,6 @@ export class AgentEngine implements AgentRunner {
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort;
-  /** Session-scoped shard seed survives tool turns and Full Compaction within this Engine. */
-  private readonly promptCacheShardSeeds = new WeakMap<Session, string>();
-
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
     this.registry = opts.registry;
@@ -1091,13 +1087,31 @@ export class AgentEngine implements AgentRunner {
     allowEmergencyCompaction = true,
     requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
   ): Promise<Message> {
-    const promptCacheShardSeed = this.promptCacheShardSeed(session);
+    const promptCacheCapabilities = this.provider.requestCapabilities;
+    const preparePromptCacheSharding = promptCacheCapabilities?.preparePromptCacheSharding;
+    const routeThresholdActive = preparePromptCacheSharding?.();
+    const promptCacheRequest =
+      preparePromptCacheSharding && promptCacheCapabilities.promptCacheRouteIdentity
+        ? session.preparePromptCacheSharding(
+            promptCacheCapabilities.promptCacheRouteIdentity,
+            baseContext,
+            routeThresholdActive ?? false,
+          )
+        : {
+            shardSeed: promptCacheConversationShardSeed(baseContext),
+            active: routeThresholdActive,
+          };
     const generate = (context: Message[]) =>
       generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, tools, {
         signal,
         onRetry: this.makeRetryReporter(span),
         onRateLimited: () => this.rotateProvider(reporter, signal),
-        ...(promptCacheShardSeed ? { promptCacheShardSeed } : {}),
+        ...(promptCacheRequest.shardSeed
+          ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
+          : {}),
+        ...(promptCacheRequest.active !== undefined
+          ? { promptCacheShardActive: promptCacheRequest.active }
+          : {}),
         ...requestOptions,
       });
     try {
@@ -1163,14 +1177,6 @@ export class AgentEngine implements AgentRunner {
       });
       return generate(retryContext);
     }
-  }
-
-  private promptCacheShardSeed(session: Session): string | undefined {
-    const existing = this.promptCacheShardSeeds.get(session);
-    if (existing) return existing;
-    const created = promptCacheConversationShardSeed(session.getHistory());
-    if (created) this.promptCacheShardSeeds.set(session, created);
-    return created;
   }
 
   /**
@@ -2667,9 +2673,22 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
     requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
   ): Promise<Message> {
-    const promptCacheShardSeed = runtime.usageSession
-      ? this.promptCacheShardSeed(runtime.usageSession)
-      : promptCacheConversationShardSeed(contextHistory);
+    const promptCacheCapabilities = runtime.provider.requestCapabilities;
+    const preparePromptCacheSharding = promptCacheCapabilities?.preparePromptCacheSharding;
+    const routeThresholdActive = preparePromptCacheSharding?.();
+    const promptCacheRequest =
+      runtime.usageSession &&
+      preparePromptCacheSharding &&
+      promptCacheCapabilities.promptCacheRouteIdentity
+        ? runtime.usageSession.preparePromptCacheSharding(
+            promptCacheCapabilities.promptCacheRouteIdentity,
+            contextHistory,
+            routeThresholdActive ?? false,
+          )
+        : {
+            shardSeed: promptCacheConversationShardSeed(contextHistory),
+            active: routeThresholdActive,
+          };
     if (!runtime.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(
@@ -2679,7 +2698,12 @@ export class AgentEngine implements AgentRunner {
         {
           signal,
           onRetry: this.makeRetryReporter(),
-          ...(promptCacheShardSeed ? { promptCacheShardSeed } : {}),
+          ...(promptCacheRequest.shardSeed
+            ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
+            : {}),
+          ...(promptCacheRequest.active !== undefined
+            ? { promptCacheShardActive: promptCacheRequest.active }
+            : {}),
           ...requestOptions,
           ...(runtime.onRateLimited
             ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
@@ -2700,7 +2724,12 @@ export class AgentEngine implements AgentRunner {
           {
             signal,
             onRetry: this.makeRetryReporter(),
-            ...(promptCacheShardSeed ? { promptCacheShardSeed } : {}),
+            ...(promptCacheRequest.shardSeed
+              ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
+              : {}),
+            ...(promptCacheRequest.active !== undefined
+              ? { promptCacheShardActive: promptCacheRequest.active }
+              : {}),
             ...requestOptions,
             ...(runtime.onRateLimited
               ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }

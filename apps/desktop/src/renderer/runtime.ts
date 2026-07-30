@@ -721,8 +721,10 @@ export function parseUsage(value: unknown): UsageView {
   const usage = isRecord(result.usage) ? result.usage : result;
   const total = isRecord(usage.total) ? usage.total : usage;
   const cache = isRecord(usage.cache) ? usage.cache : {};
-  const cacheReadTokens = optionalNumberValue(total.cacheReadTokens ?? total.cache_read_tokens);
-  const cacheWriteTokens = optionalNumberValue(total.cacheWriteTokens ?? total.cache_write_tokens);
+  // Cache metrics are provider_calls-only. Baselines lack per-call coverage and must not be mixed
+  // into the cache token cards or ratios.
+  const cacheReadTokens = optionalNumberValue(cache.cacheReadTokens ?? cache.cache_read_tokens);
+  const cacheWriteTokens = optionalNumberValue(cache.cacheWriteTokens ?? cache.cache_write_tokens);
   const cacheAlerts = recordArray(cache.operationalAlerts)
     .map((alert) => stringValue(alert.message))
     .filter((message) => message.length > 0);
@@ -733,7 +735,7 @@ export function parseUsage(value: unknown): UsageView {
     cacheWriteTokens,
     uncachedInputTokens: optionalNumberValue(cache.uncachedInputTokens),
     // cachedTokens is a backwards-compatible view; the canonical daemon field is cacheReadTokens.
-    cachedTokens: cacheReadTokens ?? optionalNumberValue(total.cachedTokens ?? total.cached_tokens),
+    cachedTokens: cacheReadTokens,
     cacheRequestHitRate: optionalNumberValue(cache.requestHitRate),
     cachePromptTokenReuseRate: optionalNumberValue(cache.promptTokenReuseRate),
     cacheReadToWriteRatio: optionalNumberValue(cache.cacheReadToWriteRatio),

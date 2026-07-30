@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
+import { isAbortError } from "./errors.js";
+import { normalizePromptCacheEndpoint } from "./provider-endpoint.js";
 
 export interface GeminiPromptCacheRecord {
   /** Cache identity, never includes prompt text or credentials. */
@@ -45,9 +48,29 @@ export class MemoryGeminiPromptCacheStore implements GeminiPromptCacheStore {
 
 /** Workspace-private metadata only. The remote cached content remains the prompt authority. */
 export class FileGeminiPromptCacheStore implements GeminiPromptCacheStore {
+  private static readonly MAX_SHARED_STORES = 128;
+  private static readonly sharedStores = new Map<string, FileGeminiPromptCacheStore>();
   private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly path: string) {}
+
+  /** One process-local store/lock identity per workspace metadata path. */
+  static shared(path: string): FileGeminiPromptCacheStore {
+    const canonical = resolve(path);
+    const existing = this.sharedStores.get(canonical);
+    if (existing) {
+      this.sharedStores.delete(canonical);
+      this.sharedStores.set(canonical, existing);
+      return existing;
+    }
+    const created = new FileGeminiPromptCacheStore(canonical);
+    this.sharedStores.set(canonical, created);
+    if (this.sharedStores.size > this.MAX_SHARED_STORES) {
+      const oldest = this.sharedStores.keys().next().value;
+      if (oldest !== undefined) this.sharedStores.delete(oldest);
+    }
+    return created;
+  }
 
   async list(): Promise<readonly GeminiPromptCacheRecord[]> {
     try {
@@ -102,7 +125,13 @@ export interface GeminiPromptCacheTransport {
     readonly model: string;
     readonly ttlSeconds: number;
     readonly source: Readonly<Record<string, unknown>>;
+    readonly signal?: AbortSignal;
   }): Promise<{ name: string; expireAt?: number; tokenCount?: number }>;
+  updateTtl?(
+    name: string,
+    ttlSeconds: number,
+    signal?: AbortSignal,
+  ): Promise<{ expireAt?: number }>;
   delete(name: string): Promise<void>;
 }
 
@@ -141,15 +170,17 @@ export class GeminiPromptCacheController {
       new Map<string, Promise<void>>();
     GeminiPromptCacheController.operationsByStore.set(this.store, this.operations);
     this.now = options.now ?? Date.now;
-    this.baseUrlDigest = sha256(normalizeBaseURL(options.baseURL));
+    this.baseUrlDigest = sha256(normalizePromptCacheEndpoint(options.baseURL));
   }
 
   async getOrCreate(
     source: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
   ): Promise<GeminiPromptCacheResolution | undefined> {
+    signal?.throwIfAborted();
     const digest = stableDigest(source);
     const key = ["gemini", this.baseUrlDigest, this.options.model, digest].join(":");
-    return this.withKeyLock(key, () => this.resolve(key, digest, source));
+    return this.withKeyLock(key, () => this.resolve(key, digest, source, signal), signal);
   }
 
   /** Best-effort startup maintenance; metadata failures must never surface to the provider. */
@@ -186,7 +217,9 @@ export class GeminiPromptCacheController {
     key: string,
     digest: string,
     source: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
   ): Promise<GeminiPromptCacheResolution | undefined> {
+    let fallbackName: string | undefined;
     try {
       const now = this.now();
       const records = await this.store.list();
@@ -194,32 +227,68 @@ export class GeminiPromptCacheController {
       if (record && record.expireAt > now && this.shouldRefresh(record, now) === false) {
         return { name: record.name };
       }
-      if (record) await this.invalidate(record);
+      const usableRecord = record && record.expireAt > now ? record : undefined;
+      fallbackName = usableRecord?.name;
+      if (record && !usableRecord) await this.invalidate(record);
+
+      if (usableRecord && this.options.transport.updateTtl) {
+        try {
+          const updated = await this.options.transport.updateTtl(
+            usableRecord.name,
+            this.options.ttlSeconds,
+            signal,
+          );
+          const renewed = {
+            ...usableRecord,
+            expireAt: updated.expireAt ?? now + this.options.ttlSeconds * 1_000,
+          };
+          await this.store.put(renewed);
+          return { name: renewed.name };
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (isAbortError(error)) throw error;
+          // Keep using the still-valid object. A later request may renew it or fail open.
+          return { name: usableRecord.name };
+        }
+      }
 
       const created = await this.options.transport.create({
         model: this.options.model,
         ttlSeconds: this.options.ttlSeconds,
         source,
+        ...(signal ? { signal } : {}),
       });
       if (!created.name) return undefined;
       const expireAt = created.expireAt ?? now + this.options.ttlSeconds * 1_000;
-      await this.store.put({
-        key,
-        provider: "gemini",
-        baseUrlDigest: this.baseUrlDigest,
-        model: this.options.model,
-        digest,
-        name: created.name,
-        expireAt,
-        ...(created.tokenCount === undefined ? {} : { tokenCount: created.tokenCount }),
-        ttlSeconds: this.options.ttlSeconds,
-      });
+      try {
+        await this.store.put({
+          key,
+          provider: "gemini",
+          baseUrlDigest: this.baseUrlDigest,
+          model: this.options.model,
+          digest,
+          name: created.name,
+          expireAt,
+          ...(created.tokenCount === undefined ? {} : { tokenCount: created.tokenCount }),
+          ttlSeconds: this.options.ttlSeconds,
+        });
+      } catch {
+        // The remote object may contain the stable system/tools prefix. If metadata cannot be
+        // committed, delete it best-effort so the next call neither leaks nor double-creates it.
+        void this.options.transport.delete(created.name).catch(() => undefined);
+        return usableRecord ? { name: usableRecord.name } : undefined;
+      }
+      if (usableRecord && usableRecord.name !== created.name) {
+        void this.options.transport.delete(usableRecord.name).catch(() => undefined);
+      }
       return {
         name: created.name,
         ...(created.tokenCount === undefined ? {} : { cacheWriteTokens: created.tokenCount }),
       };
-    } catch {
-      return undefined;
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (isAbortError(error)) throw error;
+      return fallbackName ? { name: fallbackName } : undefined;
     }
   }
 
@@ -250,15 +319,22 @@ export class GeminiPromptCacheController {
   private async invalidate(record: GeminiPromptCacheRecord): Promise<void> {
     // Remove local metadata even if remote deletion is denied; stale names must never be reused.
     await this.store.remove(record.key).catch(() => undefined);
-    await this.options.transport.delete(record.name).catch(() => undefined);
+    // Remote deletion is best-effort maintenance and must not hold a request-path key lock.
+    void this.options.transport.delete(record.name).catch(() => undefined);
   }
 
-  private async withKeyLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  private async withKeyLock<T>(
+    key: string,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     for (;;) {
+      signal?.throwIfAborted();
       const pending = this.operations.get(key);
       if (!pending) break;
-      await pending.catch(() => undefined);
+      await waitForPromise(pending, signal);
     }
+    signal?.throwIfAborted();
     let release: (() => void) | undefined;
     const lease = new Promise<void>((resolve) => {
       release = resolve;
@@ -273,8 +349,42 @@ export class GeminiPromptCacheController {
   }
 }
 
+async function waitForPromise(promise: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await promise.catch(() => undefined);
+    return;
+  }
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () =>
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException("The operation was aborted", "AbortError"),
+      );
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    await Promise.race([promise.catch(() => undefined), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 export function stableDigest(value: unknown): string {
   return sha256(JSON.stringify(stableValue(value)));
+}
+
+/** Operator-facing, secret-free gate bound to one endpoint/model native-cache route. */
+export function geminiPromptCacheGateId(baseURL: string, model: string): string {
+  return `gemini-cache:${sha256(
+    JSON.stringify({
+      protocol: "gemini-cachedContents-v1beta",
+      baseURL: normalizePromptCacheEndpoint(baseURL),
+      model,
+    }),
+  )}`;
 }
 
 function stableValue(value: unknown): unknown {
@@ -291,19 +401,6 @@ function stableValue(value: unknown): unknown {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function normalizeBaseURL(value: string): string {
-  try {
-    const parsed = new URL(value);
-    const path = parsed.pathname.replace(/\/+$/u, "");
-    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}`;
-  } catch {
-    return value
-      .trim()
-      .replace(/[?#].*$/u, "")
-      .replace(/\/+$/u, "");
-  }
 }
 
 function decodeStore(value: unknown): { records: GeminiPromptCacheRecord[] } {

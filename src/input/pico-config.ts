@@ -473,6 +473,14 @@ function parseModelCapabilities(
     if (ttl !== undefined && typeof ttl !== "string") {
       throw configError(configPath, `${field}.promptCache.ttl`, "must be a string");
     }
+    const explicitBreakpoints = promptCache["explicitBreakpoints"];
+    if (explicitBreakpoints !== undefined && typeof explicitBreakpoints !== "boolean") {
+      throw configError(
+        configPath,
+        `${field}.promptCache.explicitBreakpoints`,
+        "must be a boolean",
+      );
+    }
     const keyShards = promptCache["keyShards"];
     if (
       keyShards !== undefined &&
@@ -484,9 +492,29 @@ function parseModelCapabilities(
         "must be an integer between 1 and 64",
       );
     }
+    const shardThresholdRpm = promptCache["shardThresholdRpm"];
+    if (
+      shardThresholdRpm !== undefined &&
+      (!Number.isSafeInteger(shardThresholdRpm) ||
+        (shardThresholdRpm as number) < 1 ||
+        (shardThresholdRpm as number) > 1_000_000)
+    ) {
+      throw configError(
+        configPath,
+        `${field}.promptCache.shardThresholdRpm`,
+        "must be an integer between 1 and 1000000",
+      );
+    }
     const prewarm = promptCache["prewarm"];
     if (prewarm !== undefined && typeof prewarm !== "boolean") {
       throw configError(configPath, `${field}.promptCache.prewarm`, "must be a boolean");
+    }
+    if (shardThresholdRpm !== undefined && ((keyShards as number | undefined) ?? 1) <= 1) {
+      throw configError(
+        configPath,
+        `${field}.promptCache.shardThresholdRpm`,
+        "requires keyShards greater than 1",
+      );
     }
     if (protocol === "claude") {
       if (mode !== "explicit") {
@@ -498,15 +526,53 @@ function parseModelCapabilities(
       if (keyShards !== undefined && keyShards !== 1) {
         throw configError(configPath, `${field}.promptCache.keyShards`, "must be 1 for claude");
       }
+      if (shardThresholdRpm !== undefined) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.shardThresholdRpm`,
+          "is not supported for claude",
+        );
+      }
+      if (explicitBreakpoints !== undefined) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.explicitBreakpoints`,
+          "is not supported for claude",
+        );
+      }
     } else if (protocol === "openai") {
-      if (ttl !== undefined && ttl !== "30m" && ttl !== "24h") {
-        throw configError(configPath, `${field}.promptCache.ttl`, "must be 30m or 24h for openai");
+      if (
+        mode !== "explicit" &&
+        (((keyShards as number | undefined) ?? 1) > 1 || shardThresholdRpm !== undefined)
+      ) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.mode`,
+          "must be explicit when OpenAI key sharding is configured",
+        );
+      }
+      if (ttl !== undefined && ttl !== "30m") {
+        throw configError(configPath, `${field}.promptCache.ttl`, "must be 30m for openai");
       }
       if (prewarm === true) {
         throw configError(
           configPath,
           `${field}.promptCache.prewarm`,
           "is not supported for openai",
+        );
+      }
+      if (explicitBreakpoints === true && mode !== "explicit") {
+        throw configError(
+          configPath,
+          `${field}.promptCache.explicitBreakpoints`,
+          "requires promptCache.mode=explicit",
+        );
+      }
+      if (ttl !== undefined && explicitBreakpoints !== true) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.ttl`,
+          "requires explicitBreakpoints=true for openai",
         );
       }
     } else {
@@ -520,6 +586,20 @@ function parseModelCapabilities(
       if (keyShards !== undefined && keyShards !== 1) {
         throw configError(configPath, `${field}.promptCache.keyShards`, "must be 1 for gemini");
       }
+      if (shardThresholdRpm !== undefined) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.shardThresholdRpm`,
+          "is not supported for gemini",
+        );
+      }
+      if (explicitBreakpoints !== undefined) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.explicitBreakpoints`,
+          "is not supported for gemini",
+        );
+      }
       if (prewarm === true) {
         throw configError(
           configPath,
@@ -531,7 +611,11 @@ function parseModelCapabilities(
     result.promptCache = {
       mode,
       ...(ttl !== undefined ? { ttl: ttl as `${number}s` | "5m" | "1h" | "30m" | "24h" } : {}),
+      ...(explicitBreakpoints !== undefined ? { explicitBreakpoints } : {}),
       ...(keyShards !== undefined ? { keyShards: keyShards as number } : {}),
+      ...(shardThresholdRpm !== undefined
+        ? { shardThresholdRpm: shardThresholdRpm as number }
+        : {}),
       ...(prewarm !== undefined ? { prewarm } : {}),
     };
   }

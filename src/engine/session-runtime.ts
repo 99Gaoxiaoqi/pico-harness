@@ -42,6 +42,8 @@ export interface SessionUsageSnapshot {
   totalUsageReports: number;
   totalInputReports: number;
   totalCacheReadReports: number;
+  /** Calls whose provider-reported cache read token count was greater than zero. */
+  totalCacheHitCalls: number | null;
   totalCacheWriteReports: number;
   totalReasoningReports: number;
   totalEstimatedCostReports: number;
@@ -49,10 +51,19 @@ export interface SessionUsageSnapshot {
   totalUnknownCostReports: number;
 }
 
+export interface PersistedPromptCacheState {
+  stateVersion: 1;
+  /** Opaque digest of the first stable conversation anchor; prompt text is never persisted. */
+  shardSeed: string;
+  /** First per-route sharding decision, including false, so an existing Session never changes key. */
+  routeShardDecisions?: Readonly<Record<string, boolean>>;
+}
+
 /** 每条 runtime_state 只携带发生变化的完整 section。 */
 export interface SessionRuntimeStatePatch {
   settings?: PersistedSessionSettings;
   goal?: GoalManagerSnapshot;
+  promptCache?: PersistedPromptCacheState;
 }
 
 export type SessionRuntimeStateWritePatch = SessionRuntimeStatePatch;
@@ -61,6 +72,7 @@ export interface SessionRuntimeStateSnapshot {
   stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
   settings?: PersistedSessionSettings;
   goal?: GoalManagerSnapshot;
+  promptCache?: PersistedPromptCacheState;
   usage: SessionUsageSnapshot;
 }
 
@@ -113,6 +125,7 @@ export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
     totalUsageReports: 0,
     totalInputReports: 0,
     totalCacheReadReports: 0,
+    totalCacheHitCalls: 0,
     totalCacheWriteReports: 0,
     totalReasoningReports: 0,
     totalEstimatedCostReports: 0,
@@ -124,7 +137,9 @@ export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
 export function normalizeSessionRuntimeStatePatch(
   value: unknown,
 ): SessionRuntimeStatePatch | undefined {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["settings", "goal"])) return undefined;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["settings", "goal", "promptCache"])) {
+    return undefined;
+  }
 
   const patch: SessionRuntimeStatePatch = {};
   let sections = 0;
@@ -139,6 +154,12 @@ export function normalizeSessionRuntimeStatePatch(
     const goal = normalizeGoalManagerSnapshot(value["goal"]);
     if (!goal) return undefined;
     patch.goal = goal;
+    sections++;
+  }
+  if ("promptCache" in value) {
+    const promptCache = normalizePersistedPromptCacheState(value["promptCache"]);
+    if (!promptCache) return undefined;
+    patch.promptCache = promptCache;
     sections++;
   }
   return sections > 0 ? patch : undefined;
@@ -283,6 +304,8 @@ export function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnaps
   for (const key of reportKeys) {
     if (!isNonNegativeInteger(value[key])) return undefined;
   }
+  const totalCacheHitCalls = value["totalCacheHitCalls"] ?? null;
+  if (totalCacheHitCalls !== null && !isNonNegativeInteger(totalCacheHitCalls)) return undefined;
 
   return {
     totalPromptTokens: value["totalPromptTokens"] as number,
@@ -297,11 +320,75 @@ export function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnaps
     totalUsageReports: value["totalUsageReports"] as number,
     totalInputReports: value["totalInputReports"] as number,
     totalCacheReadReports: value["totalCacheReadReports"] as number,
+    totalCacheHitCalls,
     totalCacheWriteReports: value["totalCacheWriteReports"] as number,
     totalReasoningReports: value["totalReasoningReports"] as number,
     totalEstimatedCostReports: value["totalEstimatedCostReports"] as number,
     totalIncludedCostReports: value["totalIncludedCostReports"] as number,
     totalUnknownCostReports: value["totalUnknownCostReports"] as number,
+  };
+}
+
+function normalizePersistedPromptCacheState(value: unknown): PersistedPromptCacheState | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "stateVersion",
+      "shardSeed",
+      "routeShardDecisions",
+      "activeRouteDigests",
+      "routeCallCounts",
+    ]) ||
+    value["stateVersion"] !== 1 ||
+    typeof value["shardSeed"] !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value["shardSeed"])
+  ) {
+    return undefined;
+  }
+  // Early P3 builds persisted per-session route counters. Route RPM now lives in a bounded
+  // process-level window, but accepting and discarding this legacy field keeps recovery safe.
+  const legacyCounts = value["routeCallCounts"];
+  if (legacyCounts !== undefined) {
+    if (!isRecord(legacyCounts) || Object.keys(legacyCounts).length > 64) return undefined;
+    for (const [key, count] of Object.entries(legacyCounts)) {
+      if (!/^[a-f0-9]{64}$/u.test(key) || !isNonNegativeInteger(count)) return undefined;
+    }
+  }
+  const activeRouteDigests = value["activeRouteDigests"];
+  if (
+    activeRouteDigests !== undefined &&
+    (!Array.isArray(activeRouteDigests) ||
+      activeRouteDigests.length > 64 ||
+      new Set(activeRouteDigests).size !== activeRouteDigests.length ||
+      activeRouteDigests.some(
+        (digest) => typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest),
+      ))
+  ) {
+    return undefined;
+  }
+  const rawRouteShardDecisions = value["routeShardDecisions"];
+  if (
+    rawRouteShardDecisions !== undefined &&
+    (!isRecord(rawRouteShardDecisions) ||
+      Object.keys(rawRouteShardDecisions).length > 64 ||
+      Object.entries(rawRouteShardDecisions).some(
+        ([digest, active]) => !/^[a-f0-9]{64}$/u.test(digest) || typeof active !== "boolean",
+      ))
+  ) {
+    return undefined;
+  }
+  const routeShardDecisions: Record<string, boolean> = {
+    ...(isRecord(rawRouteShardDecisions)
+      ? (rawRouteShardDecisions as Record<string, boolean>)
+      : {}),
+  };
+  if (Array.isArray(activeRouteDigests)) {
+    for (const digest of activeRouteDigests as string[]) routeShardDecisions[digest] = true;
+  }
+  return {
+    stateVersion: 1,
+    shardSeed: value["shardSeed"],
+    ...(Object.keys(routeShardDecisions).length > 0 ? { routeShardDecisions } : {}),
   };
 }
 
