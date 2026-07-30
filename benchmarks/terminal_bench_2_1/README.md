@@ -1,7 +1,7 @@
 # Terminal-Bench 2.1（内部）
 
 该目录把 Pico 的内部 Headless One-shot Runner 作为 Harbor 0.20.0 custom installed
-agent 运行在 Terminal-Bench 2.1 task container 内。它只用于本地 canary，不是公开
+agent 运行在 Terminal-Bench 2.1 task container 内。它只用于本地锁定评测，不是公开
 CLI，也不宣称官方 leaderboard parity。
 
 固定版本：
@@ -42,6 +42,8 @@ npm run benchmark:terminal-bench:single -- \
   --task terminal-bench/log-summary-date-ranges
 
 npm run benchmark:terminal-bench:canary
+
+node scripts/terminal-bench/run.mjs --mode full --docker-host-gateway
 ```
 
 结果写入：
@@ -62,7 +64,10 @@ output/benchmarks/terminal-bench-2.1/runs/<run-id>/
 
 首批固定 12 题见 `canary-task-names.txt`；full 模式的固定 89 题 identity matrix
 见 `full-task-names.txt`。canary 从本机 Harbor content-addressed cache 按
-`canary-task-lock.json` 校验并离线 staging，避免运行中依赖 registry。Harbor 外层保留题目原始 timeout，
+`canary-task-lock.json` 校验；full 按 `full-task-lock.json` 从工作区
+`output/benchmarks/terminal-bench-2.1/cache/harbor-tasks/packages/` 校验。两种模式均
+完整离线 staging，不会回退到远程 dataset；锁文件、缓存或逐题 tree hash 缺失时直接
+失败。Harbor 外层保留题目原始 timeout，
 Harbor 自身及其 82 个传递依赖由 `harbor-constraints.txt` 固定，并以 `uvx --offline`
 运行；本机 cache 不完整时直接失败，不回退到网络解析。
 Headless 内层预算按 `outer - shutdownGrace(30s) - flushMargin(5s)` 收缩，避免外层
