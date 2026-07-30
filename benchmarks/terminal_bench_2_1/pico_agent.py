@@ -37,6 +37,29 @@ from benchmarks.terminal_bench_2_1.runtime_limits import (
 
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
 _RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
+_PUBLIC_EGRESS_PROXY_POLICY_VERSION = 1
+_PUBLIC_EGRESS_MAX_CONNECTIONS = 32
+_PUBLIC_EGRESS_MAX_TOTAL_BYTES = 1_073_741_824
+_PUBLIC_EGRESS_PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+_PUBLIC_EGRESS_NO_PROXY = "pico-gateway,main,localhost,127.0.0.1,::1"
+_PUBLIC_EGRESS_RELAY_SCRIPT = (
+    "const net=require('node:net');"
+    "const port=Number(process.argv[1]);"
+    "if(!Number.isInteger(port)||port<1||port>65535)process.exit(2);"
+    "net.createServer(client=>{"
+    "const upstream=net.connect(port,'host.docker.internal');"
+    "client.pipe(upstream);upstream.pipe(client);"
+    "const close=()=>{client.destroy();upstream.destroy()};"
+    "client.on('error',close);upstream.on('error',close);"
+    "}).listen(8081,'0.0.0.0');"
+)
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 _COMPLETION_TOKEN_FIELD_ROUTES = {"codex-oauth/gpt-5.4"}
 
@@ -202,45 +225,58 @@ rm -f {remote_archive}
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        loop = asyncio.get_running_loop()
-        started_at = loop.time()
         assert_secure_docker_environment(environment)
-        outer_timeout_sec = task_agent_timeout(environment)
-        outer_deadline = started_at + outer_timeout_sec
-        await assert_running_container_policy(
-            environment,
-            self.logs_dir,
-            self._supervisor_config["runId"],
-        )
-        workspace_result = await environment.exec(command="pwd -P")
-        if workspace_result.return_code != 0 or not workspace_result.stdout:
-            raise RuntimeError("Could not resolve the Harbor task workspace")
-        workspace = workspace_result.stdout.strip()
-        if self.context_id is None:
-            raise RuntimeError("Harbor did not assign the trial context_id")
         if self._trial_networks is None:
             raise RuntimeError("Trial networks were not initialized")
-        context_id = safe_trial_key(str(self.context_id))
-        trial_key = safe_trial_key(f"{self.session_id or 'session'}-{context_id}")
-        pico_home = f"/tmp/pico-tb21/{trial_key}/pico-home"
-        request_id = f"tb21.{context_id}.{trial_key}"
-        session_id = f"tb21-{context_id[:24]}-{trial_key[:24]}"
-        route_config = self._route_config
-        gateway = ProviderGateway(
-            protocol=route_config["provider"]["protocol"],
-            supervisor_socket=self._supervisor_config["socketPath"],
-            capability_seed=self._supervisor_config["capabilitySeed"],
-            run_id=self._supervisor_config["runId"],
-            network_name=self._trial_networks.gateway,
-            context_id=context_id,
-            ttl_sec=outer_timeout_sec,
-            pricing_sha256=route_config["pricingSha256"],
-            receipt_path=self.logs_dir / "gateway-accounting-receipt.json",
-        )
-        gateway.start()
+        networks = self._trial_networks
+        gateway: ProviderGateway | None = None
+        public_egress: PublicEgressAccess | None = None
         try:
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+            outer_timeout_sec = task_agent_timeout(environment)
+            outer_deadline = started_at + outer_timeout_sec
+            await assert_running_container_policy(
+                environment,
+                self.logs_dir,
+                self._supervisor_config["runId"],
+            )
+            workspace_result = await environment.exec(command="pwd -P")
+            if workspace_result.return_code != 0 or not workspace_result.stdout:
+                raise RuntimeError("Could not resolve the Harbor task workspace")
+            workspace = workspace_result.stdout.strip()
+            if self.context_id is None:
+                raise RuntimeError("Harbor did not assign the trial context_id")
+            context_id = safe_trial_key(str(self.context_id))
+            trial_key = safe_trial_key(f"{self.session_id or 'session'}-{context_id}")
+            pico_home = f"/tmp/pico-tb21/{trial_key}/pico-home"
+            request_id = f"tb21.{context_id}.{trial_key}"
+            session_id = f"tb21-{context_id[:24]}-{trial_key[:24]}"
+            route_config = self._route_config
+            public_egress = public_egress_access_for_task(
+                environment,
+                run_id=self._supervisor_config["runId"],
+                network_name=networks.gateway,
+                context_id=context_id,
+                ttl_sec=outer_timeout_sec,
+                receipt_path=self.logs_dir / "public-egress-receipt.json",
+            )
+            gateway = ProviderGateway(
+                protocol=route_config["provider"]["protocol"],
+                supervisor_socket=self._supervisor_config["socketPath"],
+                capability_seed=self._supervisor_config["capabilitySeed"],
+                run_id=self._supervisor_config["runId"],
+                network_name=networks.gateway,
+                context_id=context_id,
+                ttl_sec=outer_timeout_sec,
+                pricing_sha256=route_config["pricingSha256"],
+                receipt_path=self.logs_dir / "gateway-accounting-receipt.json",
+            )
+            gateway.start()
             await gateway.start_relay(environment)
             await gateway.enroll(environment)
+            if public_egress is not None:
+                await public_egress.start(environment)
             await self._run_with_gateway(
                 instruction=instruction,
                 environment=environment,
@@ -255,17 +291,23 @@ rm -f {remote_archive}
                 outer_timeout_sec=outer_timeout_sec,
                 outer_deadline=outer_deadline,
                 loop=loop,
+                public_proxy_env=(
+                    public_egress.container_env
+                    if public_egress is not None
+                    else {}
+                ),
             )
         finally:
             try:
-                accounting_receipt = gateway.stop()
-                apply_gateway_accounting(context, accounting_receipt)
-            finally:
-                await restore_verifier_and_remove_trial_networks(
+                await cleanup_trial_resources(
                     environment,
-                    self._trial_networks,
-                    self._supervisor_config["runId"],
+                    networks=networks,
+                    run_id=self._supervisor_config["runId"],
+                    context=context,
+                    gateway=gateway,
+                    public_egress=public_egress,
                 )
+            finally:
                 self._trial_networks = None
 
     async def _run_with_gateway(
@@ -284,6 +326,7 @@ rm -f {remote_archive}
         outer_timeout_sec: float,
         outer_deadline: float,
         loop: asyncio.AbstractEventLoop,
+        public_proxy_env: dict[str, str],
     ) -> None:
         bootstrap_request = {
             "schemaVersion": 1,
@@ -365,6 +408,7 @@ rm -f {remote_archive}
             gateway.capability.encode("utf-8"),
             timeout_sec=remaining_budget(outer_deadline, loop.time()),
             secret_env_names={self._SECRET_ENV},
+            container_env=public_proxy_env,
         )
         raw_result = await environment.exec(command=f"cat {self._PICO_RESULT.as_posix()}")
         raw_exit = await environment.exec(command=f"cat {self._EXIT_CODE.as_posix()}")
@@ -691,6 +735,332 @@ def require_nonnegative_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field} must be a nonnegative integer")
     return value
+
+
+def create_public_egress_proxy(
+    *,
+    token: str,
+    ttl_sec: float,
+) -> Any:
+    from benchmarks.terminal_bench_2_1.public_egress import PublicEgressProxy
+
+    return PublicEgressProxy(
+        token=token,
+        ttl_sec=ttl_sec,
+        max_connections=_PUBLIC_EGRESS_MAX_CONNECTIONS,
+        max_total_bytes=_PUBLIC_EGRESS_MAX_TOTAL_BYTES,
+    )
+
+
+class PublicEgressAccess:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        network_name: str,
+        context_id: str,
+        ttl_sec: float,
+        receipt_path: Path,
+    ):
+        self._run_id = run_id
+        self._network_name = network_name
+        self._context_digest = hashlib.sha256(context_id.encode()).hexdigest()[:20]
+        self._ttl_sec = ttl_sec
+        self._receipt_path = receipt_path
+        self._relay_name = f"pico-tb-egress-{self._context_digest}"
+        # This random per-trial credential is only accepted by the bounded public
+        # proxy for this trial and expires with the trial TTL.
+        self._token = secrets.token_hex(32)
+        self._proxy: Any | None = None
+        self._relay_started = False
+        self._stopped = False
+
+    @property
+    def container_env(self) -> dict[str, str]:
+        if self._proxy is None or not self._relay_started:
+            raise RuntimeError("Public egress is not ready")
+        proxy_url = f"http://pico:{self._token}@pico-egress:8081"
+        return {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "NO_PROXY": _PUBLIC_EGRESS_NO_PROXY,
+            "no_proxy": _PUBLIC_EGRESS_NO_PROXY,
+        }
+
+    async def start(self, environment: DockerEnvironment) -> None:
+        if self._proxy is not None or self._stopped:
+            raise RuntimeError("Public egress was already started")
+        self._proxy = create_public_egress_proxy(
+            token=self._token,
+            ttl_sec=self._ttl_sec,
+        )
+        try:
+            host_port = self._proxy.start()
+            if (
+                isinstance(host_port, bool)
+                or not isinstance(host_port, int)
+                or not 1 <= host_port <= 65_535
+            ):
+                raise RuntimeError("Public egress proxy returned an invalid host port")
+            await start_public_egress_relay(
+                environment,
+                relay_name=self._relay_name,
+                network_name=self._network_name,
+                run_id=self._run_id,
+                context_digest=self._context_digest,
+                host_port=host_port,
+            )
+            self._relay_started = True
+        except BaseException as startup_error:
+            try:
+                await asyncio.shield(self.stop(environment))
+            except BaseException as cleanup_error:
+                raise cleanup_error from startup_error
+            raise
+
+    async def stop(self, environment: DockerEnvironment) -> None:
+        cleanup_errors: list[BaseException] = []
+        proxy = self._proxy
+        self._proxy = None
+        if proxy is not None:
+            try:
+                receipt = proxy.stop()
+                if (
+                    not isinstance(receipt, dict)
+                    or receipt.get("schemaVersion")
+                    != _PUBLIC_EGRESS_PROXY_POLICY_VERSION
+                ):
+                    raise RuntimeError("Public egress proxy returned an invalid receipt")
+                write_private_json_once(self._receipt_path, receipt)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        try:
+            await remove_public_egress_relay(
+                environment,
+                relay_name=self._relay_name,
+                run_id=self._run_id,
+                context_digest=self._context_digest,
+            )
+        except BaseException as error:
+            cleanup_errors.append(error)
+        finally:
+            self._relay_started = False
+            self._token = ""
+            self._stopped = True
+        if cleanup_errors:
+            raise RuntimeError("Could not stop public egress cleanly") from cleanup_errors[0]
+
+
+def public_egress_access_for_task(
+    environment: BaseEnvironment,
+    *,
+    run_id: str,
+    network_name: str,
+    context_id: str,
+    ttl_sec: float,
+    receipt_path: Path,
+) -> PublicEgressAccess | None:
+    if not task_allows_internet(environment):
+        return None
+    return PublicEgressAccess(
+        run_id=run_id,
+        network_name=network_name,
+        context_id=context_id,
+        ttl_sec=ttl_sec,
+        receipt_path=receipt_path,
+    )
+
+
+async def start_public_egress_relay(
+    environment: DockerEnvironment,
+    *,
+    relay_name: str,
+    network_name: str,
+    run_id: str,
+    context_digest: str,
+    host_port: int,
+) -> None:
+    _, network_stdout, _ = await run_docker(
+        ["network", "inspect", network_name],
+        environment,
+    )
+    network_values = json.loads(network_stdout)
+    if (
+        len(network_values) != 1
+        or network_values[0].get("Name") != network_name
+        or not is_owned_trial_network(network_values[0], run_id)
+    ):
+        raise RuntimeError("Public egress relay network identity is invalid")
+    await run_docker(
+        [
+            "run",
+            "--detach",
+            "--pull",
+            "never",
+            "--name",
+            relay_name,
+            "--label",
+            f"pico.terminal-bench.run={run_id}",
+            "--label",
+            "pico.terminal-bench.role=public-egress-relay",
+            "--label",
+            f"pico.terminal-bench.trial={context_digest}",
+            "--read-only",
+            "--user",
+            "65534:65534",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--memory",
+            "64m",
+            "--network",
+            network_name,
+            "--network-alias",
+            "pico-egress",
+            _RELAY_IMAGE_ID,
+            "node",
+            "-e",
+            _PUBLIC_EGRESS_RELAY_SCRIPT,
+            str(host_port),
+        ],
+        environment,
+    )
+    await run_docker(
+        ["network", "connect", "bridge", relay_name],
+        environment,
+    )
+    _, image_stdout, _ = await run_docker(
+        ["inspect", "--format", "{{.Image}}", relay_name],
+        environment,
+    )
+    if image_stdout.decode().strip() != _RELAY_IMAGE_ID:
+        raise RuntimeError("Public egress relay image identity is invalid")
+    _, inspect_stdout, _ = await run_docker(
+        ["inspect", relay_name],
+        environment,
+    )
+    values = json.loads(inspect_stdout)
+    if len(values) != 1 or not is_valid_public_egress_relay(
+        values[0],
+        relay_name=relay_name,
+        network_name=network_name,
+        run_id=run_id,
+        context_digest=context_digest,
+        host_port=host_port,
+    ):
+        raise RuntimeError("Public egress relay isolation is invalid")
+
+
+def is_valid_public_egress_relay(
+    value: dict[str, Any],
+    *,
+    relay_name: str,
+    network_name: str,
+    run_id: str,
+    context_digest: str,
+    host_port: int,
+) -> bool:
+    config = value.get("Config") or {}
+    labels = config.get("Labels") or {}
+    host = value.get("HostConfig") or {}
+    networks = (value.get("NetworkSettings") or {}).get("Networks") or {}
+    gateway_aliases = (networks.get(network_name) or {}).get("Aliases") or []
+    return (
+        value.get("Name") == f"/{relay_name}"
+        and value.get("Image") == _RELAY_IMAGE_ID
+        and value.get("State", {}).get("Running") is True
+        and labels.get("pico.terminal-bench.run") == run_id
+        and labels.get("pico.terminal-bench.role") == "public-egress-relay"
+        and labels.get("pico.terminal-bench.trial") == context_digest
+        and set(networks) == {network_name, "bridge"}
+        and "pico-egress" in gateway_aliases
+        and config.get("User") == "65534:65534"
+        and not value.get("Mounts")
+        and not host.get("Binds")
+        and not host.get("Mounts")
+        and host.get("Privileged") is False
+        and not host.get("CapAdd")
+        and set(host.get("CapDrop") or []) == {"ALL"}
+        and host.get("ReadonlyRootfs") is True
+        and set(host.get("SecurityOpt") or []) == {"no-new-privileges"}
+        and host.get("Memory") == 67_108_864
+        and host.get("PidsLimit") == 64
+        and host.get("NetworkMode") == network_name
+        and not host.get("Devices")
+        and not host.get("PortBindings")
+        and not config.get("ExposedPorts")
+        and config.get("Cmd")
+        == ["node", "-e", _PUBLIC_EGRESS_RELAY_SCRIPT, str(host_port)]
+    )
+
+
+def is_owned_public_egress_relay(
+    value: dict[str, Any],
+    *,
+    relay_name: str,
+    run_id: str,
+    context_digest: str,
+) -> bool:
+    labels = (value.get("Config") or {}).get("Labels") or {}
+    return (
+        value.get("Name") == f"/{relay_name}"
+        and value.get("Image") == _RELAY_IMAGE_ID
+        and labels.get("pico.terminal-bench.run") == run_id
+        and labels.get("pico.terminal-bench.role") == "public-egress-relay"
+        and labels.get("pico.terminal-bench.trial") == context_digest
+    )
+
+
+async def remove_public_egress_relay(
+    environment: DockerEnvironment,
+    *,
+    relay_name: str,
+    run_id: str,
+    context_digest: str,
+) -> None:
+    inspect_code, inspect_stdout, inspect_stderr = await run_docker(
+        ["inspect", relay_name],
+        environment,
+        allowed_exit_codes={0, 1},
+    )
+    if inspect_code == 1:
+        if is_missing_docker_container_error(inspect_stderr):
+            return
+        raise RuntimeError("Could not inspect the public egress relay")
+    values = json.loads(inspect_stdout)
+    if len(values) != 1 or not is_owned_public_egress_relay(
+        values[0],
+        relay_name=relay_name,
+        run_id=run_id,
+        context_digest=context_digest,
+    ):
+        raise RuntimeError("Refusing to remove an unowned public egress relay")
+    remove_code, _, remove_stderr = await run_docker(
+        ["rm", "--force", relay_name],
+        environment,
+        allowed_exit_codes={0, 1},
+    )
+    if remove_code != 0 and not is_missing_docker_container_error(remove_stderr):
+        raise RuntimeError("Could not remove the public egress relay")
+    verify_code, _, verify_stderr = await run_docker(
+        ["inspect", relay_name],
+        environment,
+        allowed_exit_codes={0, 1},
+    )
+    if verify_code == 0 or not is_missing_docker_container_error(verify_stderr):
+        raise RuntimeError("Public egress relay removal was not confirmed")
+
+
+def is_missing_docker_container_error(stderr: bytes) -> bool:
+    message = stderr.decode(errors="replace").lower()
+    return "no such container" in message or "no such object" in message or (
+        "container " in message and " not found" in message
+    )
 
 
 class ProviderGateway:
@@ -1050,6 +1420,7 @@ async def docker_exec_secret_stdin(
     *,
     timeout_sec: float,
     secret_env_names: set[str],
+    container_env: dict[str, str] | None = None,
 ) -> asyncio.subprocess.Process:
     assert_secure_docker_environment(environment)
     full_command = [
@@ -1068,6 +1439,20 @@ async def docker_exec_secret_stdin(
             "-T",
             "-u",
             str(environment.default_user or "root"),
+        ]
+    )
+    if container_env:
+        if set(container_env) != set(_PUBLIC_EGRESS_PROXY_ENV_NAMES):
+            raise RuntimeError("Container public proxy environment is incomplete")
+        for name in _PUBLIC_EGRESS_PROXY_ENV_NAMES:
+            value = container_env[name]
+            if not isinstance(value, str) or not value or any(
+                character in value for character in ("\x00", "\r", "\n")
+            ):
+                raise RuntimeError("Container public proxy environment is invalid")
+            full_command.extend(["-e", f"{name}={value}"])
+    full_command.extend(
+        [
             "main",
             f"{PicoInstalledAgent._REMOTE_NODE.as_posix()}/bin/node",
             f"{PicoInstalledAgent._REMOTE_ROOT.as_posix()}/container-launcher.mjs",
@@ -1503,42 +1888,45 @@ def is_missing_docker_network_error(stderr: bytes) -> bool:
     )
 
 
+async def cleanup_trial_resources(
+    environment: DockerEnvironment,
+    *,
+    networks: TrialNetworks,
+    run_id: str,
+    context: AgentContext,
+    gateway: ProviderGateway | None,
+    public_egress: PublicEgressAccess | None,
+) -> None:
+    cleanup_errors: list[BaseException] = []
+    if public_egress is not None:
+        try:
+            await public_egress.stop(environment)
+        except BaseException as error:
+            cleanup_errors.append(error)
+    if gateway is not None:
+        try:
+            accounting_receipt = gateway.stop()
+            apply_gateway_accounting(context, accounting_receipt)
+        except BaseException as error:
+            cleanup_errors.append(error)
+    try:
+        await restore_verifier_and_remove_trial_networks(
+            environment,
+            networks,
+            run_id,
+        )
+    except BaseException as error:
+        cleanup_errors.append(error)
+    if cleanup_errors:
+        raise RuntimeError("Terminal-Bench trial cleanup failed") from cleanup_errors[0]
+
+
 async def restore_verifier_and_remove_trial_networks(
     environment: DockerEnvironment,
     networks: TrialNetworks,
     run_id: str,
 ) -> None:
-    await enable_verifier_network(environment)
     await remove_owned_trial_networks(environment, networks, run_id)
-
-
-async def enable_verifier_network(environment: DockerEnvironment) -> None:
-    command = [
-        "docker",
-        "compose",
-        "--project-name",
-        _sanitize_docker_compose_project_name(environment.session_id),
-        "--project-directory",
-        str(environment.environment_dir.resolve().absolute()),
-    ]
-    for path in environment._docker_compose_paths:
-        command.extend(["-f", str(path.resolve().absolute())])
-    command.extend(["ps", "-q", "main"])
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        env=compose_subprocess_env(environment),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await process.communicate()
-    main_id = stdout.decode().strip()
-    if process.returncode != 0 or not re.fullmatch(r"[0-9a-f]{12,64}", main_id):
-        raise RuntimeError("Could not identify the verifier main container")
-    await run_docker(
-        ["network", "connect", "bridge", main_id],
-        environment,
-        allowed_exit_codes={0, 1},
-    )
 
 
 def allowed_mount_destination(destination: str) -> bool:
@@ -1733,6 +2121,21 @@ def task_agent_timeout(environment: BaseEnvironment) -> float:
     ):
         raise RuntimeError("Terminal-Bench task timeout is unsupported by Pico")
     return float(timeout)
+
+
+def task_allows_internet(environment: BaseEnvironment) -> bool:
+    task_path = environment.environment_dir.parent / "task.toml"
+    with task_path.open("rb") as handle:
+        config = tomllib.load(handle)
+    task_environment = config.get("environment")
+    if not isinstance(task_environment, dict):
+        raise RuntimeError("Terminal-Bench task environment policy is missing")
+    allow_internet = task_environment.get("allow_internet")
+    if type(allow_internet) is not bool:
+        raise RuntimeError(
+            "Terminal-Bench environment.allow_internet must be a boolean"
+        )
+    return allow_internet
 
 
 def remaining_budget(deadline: float, now: float) -> float:
