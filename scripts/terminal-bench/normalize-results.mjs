@@ -560,6 +560,9 @@ function validateAccountingReceipt({
   const runtimeUsage = headless?.usage;
   if (
     !gatewayMetadata ||
+    gatewayMetadata.schemaVersion !== value.schemaVersion ||
+    gatewayMetadata.status !== value.status ||
+    gatewayMetadata.withinBudget !== value.withinBudget ||
     gatewayMetadata.receiptSha256 !== value.receiptSha256 ||
     gatewayMetadata.pricingSha256 !== value.pricingSha256 ||
     gatewayMetadata.costMicroCNY !== actual.costMicroCNY ||
@@ -572,15 +575,74 @@ function validateAccountingReceipt({
     !isNonnegativeSafeInteger(runtimeUsage?.promptTokens) ||
     !isNonnegativeSafeInteger(runtimeUsage?.completionTokens) ||
     !isNonnegativeSafeInteger(harborInputTokens) ||
-    !isNonnegativeSafeInteger(harborOutputTokens) ||
-    runtimeUsage.promptTokens !== actual.inputTokens ||
-    runtimeUsage.completionTokens !== actual.outputTokens ||
-    harborInputTokens !== actual.inputTokens ||
-    harborOutputTokens !== actual.outputTokens
+    !isNonnegativeSafeInteger(harborOutputTokens)
+  ) {
+    return { valid: false, code: "accounting_token_mismatch", receipt: null };
+  }
+  const markerKeysPresent =
+    Object.prototype.hasOwnProperty.call(gatewayMetadata, "usageFallback") ||
+    Object.prototype.hasOwnProperty.call(gatewayMetadata, "usageSource");
+  const normalUsageMarkers =
+    (!markerKeysPresent ||
+      (gatewayMetadata.usageFallback === false && gatewayMetadata.usageSource === "runtime")) &&
+    gatewayMetadata.usageFallback !== true;
+  if (value.status !== "reconciled" || value.withinBudget !== true) {
+    if (!normalUsageMarkers) {
+      return { valid: false, code: "accounting_metadata_mismatch", receipt: null };
+    }
+    return { valid: true, code: null, receipt: value };
+  }
+  const runtimeUsageMatches =
+    runtimeUsage.promptTokens === actual.inputTokens &&
+    runtimeUsage.completionTokens === actual.outputTokens;
+  const harborUsageMatches =
+    harborInputTokens === actual.inputTokens && harborOutputTokens === actual.outputTokens;
+  if (
+    !harborUsageMatches ||
+    (runtimeUsageMatches && !normalUsageMarkers) ||
+    (!runtimeUsageMatches &&
+      !isRuntimeFailedZeroUsageFallback({
+        headless,
+        picoMetadata,
+        gatewayMetadata,
+        runtimeUsage,
+        actual,
+      }))
   ) {
     return { valid: false, code: "accounting_token_mismatch", receipt: null };
   }
   return { valid: true, code: null, receipt: value };
+}
+
+function isRuntimeFailedZeroUsageFallback({
+  headless,
+  picoMetadata,
+  gatewayMetadata,
+  runtimeUsage,
+  actual,
+}) {
+  const runtimeReportedUsage = picoMetadata?.runtimeReportedUsage;
+  return (
+    headless?.status === "failed" &&
+    headless?.error?.code === "RUNTIME_FAILED" &&
+    headless?.terminationConfirmed === true &&
+    runtimeUsage.promptTokens === 0 &&
+    runtimeUsage.completionTokens === 0 &&
+    typeof runtimeUsage.costCNY === "number" &&
+    Number.isFinite(runtimeUsage.costCNY) &&
+    runtimeUsage.costCNY === 0 &&
+    actual.inputTokens + actual.outputTokens > 0 &&
+    picoMetadata?.status === "failed" &&
+    picoMetadata?.errorCode === "RUNTIME_FAILED" &&
+    picoMetadata?.terminationConfirmed === true &&
+    picoMetadata?.runtimeReportedCostCNY === 0 &&
+    isExactObject(runtimeReportedUsage, ["promptTokens", "completionTokens", "costCNY"]) &&
+    runtimeReportedUsage.promptTokens === 0 &&
+    runtimeReportedUsage.completionTokens === 0 &&
+    runtimeReportedUsage.costCNY === 0 &&
+    gatewayMetadata?.usageFallback === true &&
+    gatewayMetadata?.usageSource === "signed_gateway_actual"
+  );
 }
 
 function isExactObject(value, keys) {

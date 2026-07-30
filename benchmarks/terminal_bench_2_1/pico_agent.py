@@ -503,7 +503,31 @@ def apply_gateway_accounting(
     if not isinstance(pico, dict):
         pico = {}
     runtime_reported_cost = pico.get("costCNY")
+    runtime_usage_matches = (
+        runtime_input_tokens == actual["inputTokens"]
+        and runtime_output_tokens == actual["outputTokens"]
+    )
+    runtime_failed_zero_usage_fallback = (
+        not runtime_usage_matches
+        and receipt["status"] == "reconciled"
+        and receipt["withinBudget"] is True
+        and pico.get("status") == "failed"
+        and pico.get("errorCode") == "RUNTIME_FAILED"
+        and pico.get("terminationConfirmed") is True
+        and runtime_input_tokens == 0
+        and runtime_output_tokens == 0
+        and not isinstance(runtime_reported_cost, bool)
+        and isinstance(runtime_reported_cost, (int, float))
+        and math.isfinite(runtime_reported_cost)
+        and runtime_reported_cost == 0
+        and actual["inputTokens"] + actual["outputTokens"] > 0
+    )
     pico["runtimeReportedCostCNY"] = runtime_reported_cost
+    pico["runtimeReportedUsage"] = {
+        "promptTokens": runtime_input_tokens,
+        "completionTokens": runtime_output_tokens,
+        "costCNY": runtime_reported_cost,
+    }
     pico["costCNY"] = actual["costCNY"]
     pico["gatewayAccounting"] = {
         "schemaVersion": receipt["schemaVersion"],
@@ -513,6 +537,12 @@ def apply_gateway_accounting(
         "receiptSha256": receipt["receiptSha256"],
         "costMicroCNY": actual["costMicroCNY"],
         "costCNY": actual["costCNY"],
+        "usageFallback": runtime_failed_zero_usage_fallback,
+        "usageSource": (
+            "signed_gateway_actual"
+            if runtime_failed_zero_usage_fallback
+            else "runtime"
+        ),
     }
     metadata["pico"] = pico
     context.metadata = metadata
@@ -520,11 +550,11 @@ def apply_gateway_accounting(
         raise RuntimeError("Gateway accounting could not be reconciled")
     if receipt["withinBudget"] is not True:
         raise RuntimeError("Gateway usage exceeded the configured budget or quota")
-    if (
-        runtime_input_tokens != actual["inputTokens"]
-        or runtime_output_tokens != actual["outputTokens"]
-    ):
+    if not runtime_usage_matches and not runtime_failed_zero_usage_fallback:
         raise RuntimeError("Gateway accounting tokens do not match runtime usage")
+    if runtime_failed_zero_usage_fallback:
+        context.n_input_tokens = actual["inputTokens"]
+        context.n_output_tokens = actual["outputTokens"]
 
 
 def validate_gateway_accounting_receipt(
