@@ -1,6 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import {
-  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -10,10 +9,9 @@ import {
   readdir,
   rename,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { gunzipSync, inflateRawSync } from "node:zlib";
@@ -21,10 +19,10 @@ import { rmSync } from "node:fs";
 import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
 import { runCaptured } from "./captured-process.mjs";
-import { assertTaskComposePolicy, prestartNetworkOverlay } from "./container-policy.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
 import { verifyApprovedHarborWheelhouse } from "./harbor-wheelhouse.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
+import { localDatasetHarborArgs, prepareLocalDataset } from "./local-dataset.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
 import {
   fsyncDirectory,
@@ -127,9 +125,6 @@ const picoCommit = (await capture("git", ["rev-parse", "HEAD"], projectRoot)).tr
 const dirty = (await capture("git", ["status", "--porcelain"], projectRoot)).trim().length > 0;
 if (dirty) throw new Error("Benchmark runs require a clean Pico worktree");
 const mode = options.mode ?? "canary";
-if (mode === "full") {
-  throw new Error("Full Terminal-Bench runs are disabled until dataset preflight is materialized");
-}
 const timestamp = new Date().toISOString().replace(/[:.]/gu, "-");
 const runId = `${mode}-${timestamp}-${picoCommit.slice(0, 12)}`;
 const benchmarkRoot = join(projectRoot, "output", "benchmarks", "terminal-bench-2.1");
@@ -142,6 +137,7 @@ await mkdir(runsRoot, { recursive: true, mode: 0o700 });
 await mkdir(workRunsRoot, { recursive: true, mode: 0o700 });
 await mkdir(quarantineRoot, { recursive: true, mode: 0o700 });
 const benchmarkLock = await acquireBenchmarkLock(benchmarkRoot);
+process.once("exit", () => benchmarkLock.releaseSync());
 await recoverBenchmarkPublications({ runsRoot, workRunsRoot, quarantineRoot });
 await mkdir(runRoot, { mode: 0o700 });
 let publicationComplete = false;
@@ -151,6 +147,24 @@ process.once("exit", () => {
     rmSync(publishedRunRoot, { recursive: true, force: true });
   }
 });
+const tasks = await resolveTasks(mode, options.task);
+const scheduledTasks = tasks.length;
+const expectedTrials = scheduledTasks * options.attempts;
+const localDataset = await prepareLocalDataset({
+  mode,
+  tasks,
+  projectRoot,
+  runRoot,
+  runId,
+});
+const localDatasetSourcePath = localDataset.path;
+const localDatasetTreeSha256 = await hashDirectory(localDatasetSourcePath);
+const localDatasetSnapshot = await materializeReadOnlyDatasetSnapshot(
+  localDatasetSourcePath,
+  runRoot,
+);
+const localDatasetPath = localDatasetSnapshot.mountPath;
+const taskListSha256 = createHash("sha256").update(tasks.join("\n")).digest("hex");
 const nodeCacheRoot = join(
   projectRoot,
   "output",
@@ -212,20 +226,6 @@ const gatewaySupervisor = await startGatewaySupervisor({
   env: allowlistedHostEnv(process.env),
 });
 process.once("exit", () => gatewaySupervisor.stopSync());
-const tasks = await resolveTasks(mode, options.task);
-const scheduledTasks = tasks.length;
-const expectedTrials = scheduledTasks * options.attempts;
-const localDatasetSourcePath =
-  mode === "full" ? null : await prepareLocalDataset(tasks, runRoot, runId);
-const localDatasetTreeSha256 =
-  localDatasetSourcePath === null ? null : await hashDirectory(localDatasetSourcePath);
-const localDatasetSnapshot =
-  localDatasetSourcePath === null
-    ? null
-    : await materializeReadOnlyDatasetSnapshot(localDatasetSourcePath, runRoot);
-const localDatasetPath = localDatasetSnapshot?.mountPath ?? null;
-const canaryHash = createHash("sha256").update(tasks.join("\n")).digest("hex");
-const taskLockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
 const manifest = {
   schemaVersion: 1,
   runId,
@@ -252,16 +252,12 @@ const manifest = {
     id: datasetRef,
     sourceCommit: datasetSourceCommit,
     taskCount: scheduledTasks,
-    taskListSha256: canaryHash,
-    localTaskLockSha256:
-      localDatasetSourcePath === null
-        ? null
-        : createHash("sha256")
-            .update(await readFile(taskLockPath))
-            .digest("hex"),
+    taskListSha256,
+    localTaskLockPath: relative(projectRoot, localDataset.taskLockPath),
+    localTaskLockSha256: localDataset.taskLockSha256,
     localDatasetTreeSha256,
-    localDatasetImageSha256: localDatasetSnapshot?.imageSha256 ?? null,
-    executionSnapshot: localDatasetSnapshot === null ? null : "read-only-udro",
+    localDatasetImageSha256: localDatasetSnapshot.imageSha256,
+    executionSnapshot: "read-only-udro",
   },
   nodeRuntime: {
     version: "22.14.0",
@@ -399,27 +395,23 @@ const harborArgs = [
   "--retry-include",
   "RuntimeError",
 ];
-if (localDatasetPath === null) harborArgs.push("--dataset", datasetRef);
-else harborArgs.push("--path", ".");
+harborArgs.push(...localDatasetHarborArgs(localDatasetPath));
 const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv, projectRoot);
-const datasetGuard =
-  localDatasetSnapshot === null
-    ? null
-    : await attachReadOnlyDatasetSnapshot(localDatasetSnapshot, localDatasetTreeSha256);
+const datasetGuard = await attachReadOnlyDatasetSnapshot(
+  localDatasetSnapshot,
+  localDatasetTreeSha256,
+);
 const harborExecutionEnv = {
   ...harborEnv,
   PICO_TB_RESOURCE_REGISTRY_PATH: dockerOwnershipRegistryPath,
   PICO_TB_RUN_ID: runId,
-  ...(datasetGuard === null ? {} : { PICO_TB_DATASET_FD: "4" }),
+  PICO_TB_DATASET_FD: "4",
 };
 let harborExecution;
 let harborExecutionError;
 const cleanupErrors = [];
 try {
-  if (
-    localDatasetPath !== null &&
-    (await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256
-  ) {
+  if ((await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256) {
     throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
   }
   harborExecution = await runCaptured(
@@ -433,7 +425,7 @@ try {
       runId,
     }),
     {
-      inheritedFileDescriptors: datasetGuard === null ? [] : [datasetGuard.descriptor],
+      inheritedFileDescriptors: [datasetGuard.descriptor],
     },
   );
 } catch (error) {
@@ -456,7 +448,7 @@ try {
     cleanupErrors.push(error);
   }
   try {
-    await datasetGuard?.verifyAndDetach();
+    await datasetGuard.verifyAndDetach();
   } catch (error) {
     cleanupErrors.push(error);
   }
@@ -472,10 +464,7 @@ if (harborExecutionError || cleanupErrors.length > 0) {
     "Terminal-Bench execution or cleanup failed",
   );
 }
-if (
-  localDatasetSourcePath !== null &&
-  (await hashDirectory(localDatasetSourcePath)) !== localDatasetTreeSha256
-) {
+if ((await hashDirectory(localDatasetSourcePath)) !== localDatasetTreeSha256) {
   throw new Error("Terminal-Bench staged dataset changed during Harbor execution");
 }
 const harborExitCode = harborExecution.exitCode;
@@ -487,13 +476,11 @@ await atomicWritePrivateText(
   join(runRoot, "harbor-stderr.log"),
   redactSecrets(harborExecution.stderr, [providerSecret]),
 );
-if (localDatasetSnapshot !== null) {
-  await rewriteTextPaths(
-    runRoot,
-    localDatasetSnapshot.mountPath,
-    join(publishedRunRoot, "local-dataset"),
-  );
-}
+await rewriteTextPaths(
+  runRoot,
+  localDatasetSnapshot.mountPath,
+  join(publishedRunRoot, "local-dataset"),
+);
 await rewriteTextPaths(runRoot, runRoot, publishedRunRoot);
 const summary = await normalizeHarborJob({
   jobDir: join(runRoot, "harbor-job", "job"),
@@ -691,55 +678,6 @@ async function resolveTasks(mode, singleTask) {
     throw new Error(`Terminal-Bench full task list must contain exactly 89 tasks`);
   }
   return names;
-}
-
-async function prepareLocalDataset(tasks, runRoot, runId) {
-  const lockPath = join(projectRoot, "benchmarks/terminal_bench_2_1/canary-task-lock.json");
-  const lock = JSON.parse(await readFile(lockPath, "utf8"));
-  if (lock.schemaVersion !== 1 || typeof lock.tasks !== "object") {
-    throw new Error("Terminal-Bench canary task lock is invalid");
-  }
-  const destination = join(runRoot, "local-dataset");
-  await mkdir(destination, { recursive: true, mode: 0o700 });
-  for (const taskName of tasks) {
-    const expected = lock.tasks[taskName];
-    if (
-      !expected ||
-      !/^[0-9a-f]{64}$/u.test(expected.cacheDigest) ||
-      !/^[0-9a-f]{64}$/u.test(expected.treeSha256)
-    ) {
-      throw new Error(`Terminal-Bench task is absent from the local lock: ${taskName}`);
-    }
-    const shortName = taskName.replace(/^terminal-bench\//u, "");
-    const source = join(
-      homedir(),
-      ".cache/harbor/tasks/packages/terminal-bench",
-      shortName,
-      expected.cacheDigest,
-    );
-    if ((await hashDirectory(source)) !== expected.treeSha256) {
-      throw new Error(`Terminal-Bench cached task digest mismatch: ${taskName}`);
-    }
-    const taskDestination = join(destination, shortName);
-    await cp(source, taskDestination, { recursive: true, errorOnExist: true });
-    if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
-      throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
-    }
-    await setTaskPrestartNetworkIsolation(taskDestination, runId);
-    await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(process.env));
-  }
-  return destination;
-}
-
-async function setTaskPrestartNetworkIsolation(taskRoot, runId) {
-  const path = join(taskRoot, "environment", "docker-compose.yaml");
-  try {
-    await lstat(path);
-    throw new Error("Terminal-Bench canary task defines unsupported Compose services");
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  await writeFile(path, prestartNetworkOverlay(runId), { mode: 0o600 });
 }
 
 async function materializeReadOnlyDatasetSnapshot(sourcePath, runRoot) {
