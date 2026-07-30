@@ -4,10 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 // @ts-expect-error The benchmark orchestrator is intentionally plain Node ESM.
+import * as egressPolicy from "../../scripts/terminal-bench/egress-policy.mjs";
+// @ts-expect-error The benchmark orchestrator is intentionally plain Node ESM.
 import * as localDataset from "../../scripts/terminal-bench/local-dataset.mjs";
 // @ts-expect-error The benchmark publisher is intentionally plain Node ESM.
 import * as publication from "../../scripts/terminal-bench/publication.mjs";
 
+const {
+  buildEgressPolicyManifest,
+  parseTaskAllowInternet,
+  publicEgressLimits,
+  publicEgressProxyPolicyVersion,
+} = egressPolicy;
 const {
   localDatasetHarborArgs,
   prepareLocalDataset,
@@ -218,11 +226,13 @@ test("Terminal-Bench full mode pins every staged image by digest before isolatio
   assert.equal(result.imageLockPath, imageLockPath);
   assert.match(result.imageLockSha256, /^[0-9a-f]{64}$/u);
   assert.equal(result.imageLockPlatform, imagePlatform);
+  assert.equal(Object.keys(result.egressPolicyByTask).length, fullTaskCount);
   for (const taskName of tasks) {
     const shortName = taskName.slice("terminal-bench/".length);
     const taskToml = await readFile(join(result.path, shortName, "task.toml"), "utf8");
     const expected = imageEntries[taskName];
     assert.ok(expected);
+    assert.deepEqual(result.egressPolicyByTask[taskName], { allowInternet: true });
     assert.match(taskToml, new RegExp(`docker_image = "${pinnedImage(expected)}"`, "u"));
     assert.match(
       await readFile(join(result.path, shortName, "environment", "docker-compose.yaml"), "utf8"),
@@ -279,6 +289,11 @@ test("Terminal-Bench cached-full stages a locked subset without image pulls", as
     assert.match(compose, /pull_policy: never/u);
     assert.match(compose, /internal: true/u);
   }
+  assert.deepEqual(Object.keys(result.egressPolicyByTask), selectedTasks);
+  assert.deepEqual(
+    Object.values(result.egressPolicyByTask),
+    selectedTasks.map(() => ({ allowInternet: true })),
+  );
 });
 
 test("Terminal-Bench cached-full rejects a substituted task lock before staging a subset", async (context) => {
@@ -338,7 +353,10 @@ test("Terminal-Bench single mode does not require or report an image lock", asyn
     cacheDigest,
   );
   await mkdir(join(source, "environment"), { recursive: true });
-  await writeFile(join(source, "task.toml"), 'instruction = "fixture"\n');
+  await writeFile(
+    join(source, "task.toml"),
+    'instruction = "fixture"\n\n[environment]\nallow_internet = false\n',
+  );
   const treeSha256 = await hashDirectory(source);
   const lockPath = join(root, "benchmarks", "terminal_bench_2_1", "canary-task-lock.json");
   await mkdir(join(root, "benchmarks", "terminal_bench_2_1"), { recursive: true });
@@ -363,9 +381,92 @@ test("Terminal-Bench single mode does not require or report an image lock", asyn
   assert.equal(result.imageLockPath, null);
   assert.equal(result.imageLockSha256, null);
   assert.equal(result.imageLockPlatform, null);
+  assert.deepEqual(result.egressPolicyByTask, {
+    [taskName]: { allowInternet: false },
+  });
   assert.equal(
     await readFile(join(result.path, "fixture", "task.toml"), "utf8"),
-    'instruction = "fixture"\n',
+    'instruction = "fixture"\n\n[environment]\nallow_internet = false\n',
+  );
+});
+
+test("Terminal-Bench parses one strict allow_internet boolean from [environment]", () => {
+  assert.equal(
+    parseTaskAllowInternet(
+      [
+        'instruction = """',
+        "[environment]",
+        "allow_internet = false",
+        '"""',
+        "[environment]",
+        "allow_internet = true # locked task declaration",
+      ].join("\n"),
+      "terminal-bench/true-fixture",
+    ),
+    true,
+  );
+  assert.equal(
+    parseTaskAllowInternet(
+      "[environment]\nallow_internet = false\n",
+      "terminal-bench/false-fixture",
+    ),
+    false,
+  );
+});
+
+test("Terminal-Bench egress policy fails closed for malformed task.toml declarations", () => {
+  const invalidTaskTomls = [
+    'instruction = "missing environment and policy"\n',
+    "[environment]\ncpus = 1\n",
+    "[environment]\nallow_internet = true\nallow_internet = false\n",
+    '[environment]\nallow_internet = "true"\n',
+    "[environment]\nallow_internet = 1\n",
+    "[environment]\nallow_internet = true\n[environment]\nallow_internet = true\n",
+    '[environment]\nallow_internet = true\ninstruction = "unterminated\n',
+  ];
+  for (const taskToml of invalidTaskTomls) {
+    assert.throws(
+      () => parseTaskAllowInternet(taskToml, "terminal-bench/malformed-fixture"),
+      /egress policy is invalid/u,
+    );
+  }
+});
+
+test("Terminal-Bench serializes an exact, versioned public egress manifest", () => {
+  const tasks = ["terminal-bench/online", "terminal-bench/offline"];
+  const manifest = buildEgressPolicyManifest(tasks, {
+    "terminal-bench/online": { allowInternet: true },
+    "terminal-bench/offline": { allowInternet: false },
+  });
+
+  assert.deepEqual(manifest, {
+    proxyPolicyVersion: publicEgressProxyPolicyVersion,
+    limits: {
+      maxConnections: publicEgressLimits.maxConnections,
+      maxTotalBytes: publicEgressLimits.maxTotalBytes,
+      allowedHttpPorts: [80],
+      allowedConnectPorts: [443],
+    },
+    tasks: [
+      { taskName: "terminal-bench/online", allowInternet: true },
+      { taskName: "terminal-bench/offline", allowInternet: false },
+    ],
+  });
+  assert.throws(
+    () =>
+      buildEgressPolicyManifest(tasks, {
+        "terminal-bench/online": { allowInternet: true },
+      }),
+    /does not match the exact task list/u,
+  );
+  assert.throws(
+    () =>
+      buildEgressPolicyManifest(tasks, {
+        "terminal-bench/online": { allowInternet: true },
+        "terminal-bench/offline": { allowInternet: false },
+        "terminal-bench/unknown": { allowInternet: false },
+      }),
+    /does not match the exact task list/u,
   );
 });
 
@@ -451,7 +552,10 @@ async function writeCachedTask(
     cacheDigest,
   );
   await mkdir(join(source, "environment"), { recursive: true });
-  await writeFile(join(source, "task.toml"), `[environment]\ndocker_image = "${imageSource}"\n`);
+  await writeFile(
+    join(source, "task.toml"),
+    `[environment]\ndocker_image = "${imageSource}"\nallow_internet = true\n`,
+  );
   return source;
 }
 
