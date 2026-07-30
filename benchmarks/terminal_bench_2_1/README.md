@@ -43,8 +43,13 @@ npm run benchmark:terminal-bench:single -- \
 
 npm run benchmark:terminal-bench:canary
 
-node scripts/terminal-bench/run.mjs --mode full --docker-host-gateway
+node scripts/terminal-bench/run.mjs --mode full --docker-host-gateway \
+  --concurrency 1 --max-run-cost-cny 1200
 ```
+
+每次 run 的模型费用由 Gateway Supervisor 跨 trial 原子累计，默认硬上限为 250 CNY；
+`--max-run-cost-cny` 可显式调整，但不会放宽每个 trial 的独立预算。额度耗尽时拒绝新的
+上游请求并在 receipt 中标记，避免并发 trial 超卖。
 
 结果写入：
 
