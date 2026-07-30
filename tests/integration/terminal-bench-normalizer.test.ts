@@ -147,6 +147,45 @@ test("Terminal-Bench normalizer projects recovered policy incidents", async (con
   assert.deepEqual(summary.trials[0].agent.policyDenials, policyDenials("approval"));
 });
 
+test("Terminal-Bench normalizer preserves terminal failures alongside policy incidents", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-policy-terminal-state-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const cases = [
+    { task: "failed-after-policy", status: "failed", primaryStatus: "agent_error" },
+    { task: "timeout-after-policy", status: "timed_out", primaryStatus: "agent_timeout" },
+    { task: "canceled-after-policy", status: "canceled", primaryStatus: "agent_canceled" },
+  ];
+  for (const entry of cases) {
+    await writeTrial(jobDir, entry.task, {
+      reward: 0,
+      headless: {
+        ...headless(entry.status, true, policyDenials("hardline")),
+        error: { code: "fixture_terminal_state", summary: "fixture terminal state" },
+      },
+      runId: "policy-terminal-state-run",
+    });
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "policy-terminal-state-run",
+    expectedTasks: cases.length,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.policyIncidentCount, cases.length);
+  assert.equal(summary.verifierPassWithPolicyIncidentCount, 0);
+  for (const entry of cases) {
+    const trial = summary.trials.find((candidate) => candidate.executionOutcome === entry.status);
+    assert.equal(trial?.policyIncident, true);
+    assert.equal(trial?.executionOutcome, entry.status);
+    assert.equal(trial?.primaryStatus, entry.primaryStatus);
+  }
+});
+
 test("Terminal-Bench normalizer rejects malformed policy denial evidence", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-malformed-policy-"));
   const jobDir = join(root, "job");

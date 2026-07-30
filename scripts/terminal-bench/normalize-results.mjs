@@ -790,15 +790,17 @@ function classifyPrimary({ infra, adapter, agent, verifier, reward, policyIncide
   if (agent.terminationConfirmed === false || infra.status === "error") return "infra_error";
   if (adapter.status === "error") return "adapter_error";
   if (verifier.status !== "completed") return "verifier_error";
-  if (policyIncident) return "policy_blocked";
   switch (agent.status) {
     case "timed_out":
       return "agent_timeout";
     case "canceled":
       return "agent_canceled";
+    case "policy_blocked":
+      return "policy_blocked";
     case "failed":
       return "agent_error";
     case "completed":
+      if (policyIncident) return "policy_blocked";
       return reward >= 1 ? "passed" : "task_failed";
     default:
       return "adapter_error";
