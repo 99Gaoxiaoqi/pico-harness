@@ -36,9 +36,12 @@ interface CacheableBlock {
  * 给单个 block 注入 cache_control(原地修改,返回同引用便于链式)。
  * 已存在 cache_control 时不覆盖(调用方保证一个 block 只打一处断点)。
  */
-export function markCacheBreakpoint(block: CacheableBlock): CacheableBlock {
+export function markCacheBreakpoint(
+  block: CacheableBlock,
+  ttl: CacheControl["ttl"] = "5m",
+): CacheableBlock {
   if (block.cache_control === undefined) {
-    block.cache_control = { type: "ephemeral" };
+    block.cache_control = { type: "ephemeral", ...(ttl === "5m" ? {} : { ttl }) };
   }
   return block;
 }
@@ -75,20 +78,40 @@ export function applyAnthropicCacheControl(
     messages?: { role: string; content: CacheableBlock[] | string }[];
   },
   enabled = true,
+  options: {
+    /** The durable tools/system prefix may use Anthropic's 1h cache tier. */
+    stablePrefixTtl?: CacheControl["ttl"];
+    /** Growing message history deliberately remains on rolling 5m cache. */
+    historyTtl?: CacheControl["ttl"];
+  } = {},
 ): number {
   if (!enabled) return 0;
+  const stablePrefixTtl = options.stablePrefixTtl ?? "5m";
+  const historyTtl = options.historyTtl ?? "5m";
   let used = 0;
 
   // 断点① system:字符串 → Block 数组,在(唯一的)text block 上打断点。
   // 已是数组时,在末元素打断点(system 多块场景兼容)。
   if (body.system !== undefined && used < MAX_CACHE_BREAKPOINTS) {
     if (typeof body.system === "string") {
-      body.system = [{ type: "text", text: body.system, cache_control: { type: "ephemeral" } }];
+      body.system = [
+        {
+          type: "text",
+          text: body.system,
+          cache_control: {
+            type: "ephemeral",
+            ...(stablePrefixTtl === "5m" ? {} : { ttl: stablePrefixTtl }),
+          },
+        },
+      ];
       used++;
     } else if (body.system.length > 0) {
       const last = body.system[body.system.length - 1]!;
       if (last.cache_control === undefined) {
-        last.cache_control = { type: "ephemeral" };
+        last.cache_control = {
+          type: "ephemeral",
+          ...(stablePrefixTtl === "5m" ? {} : { ttl: stablePrefixTtl }),
+        };
         used++;
       }
     }
@@ -98,7 +121,10 @@ export function applyAnthropicCacheControl(
   if (body.tools && body.tools.length > 0 && used < MAX_CACHE_BREAKPOINTS) {
     const lastTool = body.tools[body.tools.length - 1]!;
     if (lastTool.cache_control === undefined) {
-      lastTool.cache_control = { type: "ephemeral" };
+      lastTool.cache_control = {
+        type: "ephemeral",
+        ...(stablePrefixTtl === "5m" ? {} : { ttl: stablePrefixTtl }),
+      };
       used++;
     }
   }
@@ -113,7 +139,10 @@ export function applyAnthropicCacheControl(
     if (Array.isArray(content) && content.length > 0) {
       const lastBlock = content[content.length - 1]!;
       if (lastBlock.cache_control === undefined) {
-        lastBlock.cache_control = { type: "ephemeral" };
+        lastBlock.cache_control = {
+          type: "ephemeral",
+          ...(historyTtl === "5m" ? {} : { ttl: historyTtl }),
+        };
         used++;
       }
     }
