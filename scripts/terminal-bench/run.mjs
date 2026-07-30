@@ -34,6 +34,11 @@ import {
   hashDirectory,
   recoverBenchmarkPublications,
 } from "./publication.mjs";
+import {
+  harborTaskIncludeArgs,
+  selectCachedFullTasks,
+  validateTaskOptions,
+} from "./task-selection.mjs";
 import { buildBenchmarkRouteConfig } from "./route-config.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -154,7 +159,7 @@ process.once("exit", () => {
     rmSync(publishedRunRoot, { recursive: true, force: true });
   }
 });
-const taskResolution = await resolveTasks(mode, options.task);
+const taskResolution = await resolveTasks(mode, options.tasks);
 const tasks = taskResolution.tasks;
 const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
@@ -431,6 +436,9 @@ const harborArgs = [
   "--retry-include",
   "RuntimeError",
 ];
+if (mode === "cached-full") {
+  harborArgs.push(...harborTaskIncludeArgs(tasks));
+}
 harborArgs.push(...localDatasetHarborArgs(localDatasetPath));
 const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv, projectRoot);
 const datasetGuard = await attachReadOnlyDatasetSnapshot(
@@ -674,12 +682,13 @@ function parseArgs(args) {
     concurrency: 1,
     dockerHostGateway: false,
     maxRunCostCNY: defaultRunCostCNY,
+    tasks: [],
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--docker-host-gateway") parsed.dockerHostGateway = true;
     else if (arg === "--mode") parsed.mode = requiredValue(args, ++index, arg);
-    else if (arg === "--task") parsed.task = requiredValue(args, ++index, arg);
+    else if (arg === "--task") parsed.tasks.push(requiredValue(args, ++index, arg));
     else if (arg === "--config") parsed.config = requiredValue(args, ++index, arg);
     else if (arg === "--env-file") parsed.envFile = requiredValue(args, ++index, arg);
     else if (arg === "--model-route-id") parsed.modelRouteId = requiredValue(args, ++index, arg);
@@ -698,15 +707,13 @@ function parseArgs(args) {
   if (!["single", "canary", "cached-full", "full"].includes(parsed.mode)) {
     throw new Error("--mode must be single, canary, cached-full, or full");
   }
+  validateTaskOptions(parsed.mode, parsed.tasks);
   return parsed;
 }
 
-async function resolveTasks(mode, singleTask) {
+async function resolveTasks(mode, requestedTasks) {
   if (mode === "single") {
-    if (!singleTask?.startsWith("terminal-bench/")) {
-      throw new Error("--task must use terminal-bench/<name>");
-    }
-    return { tasks: [singleTask], selection: null, localImageRefs: [] };
+    return { tasks: requestedTasks, selection: null, localImageRefs: [] };
   }
   const fixedTaskListPath = join(
     projectRoot,
@@ -726,12 +733,12 @@ async function resolveTasks(mode, singleTask) {
     throw new Error(`Terminal-Bench full task list must contain exactly 89 tasks`);
   }
   if (mode === "cached-full") {
-    return resolveCachedFullTasks(names);
+    return resolveCachedFullTasks(names, requestedTasks);
   }
   return { tasks: names, selection: null, localImageRefs: [] };
 }
 
-async function resolveCachedFullTasks(fullTasks) {
+async function resolveCachedFullTasks(fullTasks, requestedTasks) {
   if (fullTasks.length !== 89) {
     throw new Error("Terminal-Bench cached-full requires the fixed 89-task list");
   }
@@ -762,25 +769,14 @@ async function resolveCachedFullTasks(fullTasks) {
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.includes("<none>")),
   );
-  const tasks = fullTasks.filter((taskName) => localRefs.has(imageRefs.get(taskName)));
-  if (tasks.length === 0) {
-    throw new Error("Terminal-Bench cached-full found no locally cached locked images");
-  }
-  const selectedRefs = tasks.map((taskName) => imageRefs.get(taskName));
-  await assertCachedImageRefs(selectedRefs);
-  return {
-    tasks,
-    localImageRefs: selectedRefs,
-    selection: {
-      schemaVersion: 1,
-      mode: "cached-full",
-      platform: "linux/amd64",
-      selectedTasks: tasks,
-      excludedTasks: fullTasks
-        .filter((taskName) => !localRefs.has(imageRefs.get(taskName)))
-        .map((taskName) => ({ taskName, reason: "locked-image-not-cached" })),
-    },
-  };
+  const resolution = selectCachedFullTasks({
+    fullTasks,
+    requestedTasks,
+    imageRefs,
+    localRefs,
+  });
+  await assertCachedImageRefs(resolution.localImageRefs);
+  return resolution;
 }
 
 function lockedImageRef(image, taskName) {

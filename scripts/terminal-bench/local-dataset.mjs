@@ -71,13 +71,14 @@ export async function prepareLocalDataset({
   homeDirectory = homedir(),
 }) {
   assertValidTasks(tasks, mode);
+  let fullTaskMatrix = null;
   if (mode === "cached-full" || mode === "full") {
-    await assertFullTaskMatrix(projectRoot, tasks, mode);
+    fullTaskMatrix = await assertFullTaskMatrix(projectRoot, tasks, mode);
   }
   const taskLockPath = resolveTaskLockPath(projectRoot, mode);
   const taskLockRaw = await readRequiredTaskLock(taskLockPath, mode);
   const taskLock = parseTaskLock(taskLockRaw, mode);
-  assertCompleteModeLock(taskLock, tasks, mode);
+  assertCompleteModeLock(taskLock, tasks, mode, fullTaskMatrix);
   const imageLock = await readImageLock(projectRoot, tasks, mode);
   const cachePackagesRoot = resolveTaskCachePackagesRoot(projectRoot, mode, homeDirectory);
   const destination = join(runRoot, "local-dataset");
@@ -156,15 +157,27 @@ function parseTaskLock(raw, mode) {
   return lock;
 }
 
-function assertCompleteModeLock(lock, tasks, mode) {
+function assertCompleteModeLock(lock, tasks, mode, fullTaskMatrix) {
   if (mode === "single") return;
   const lockedTasks = Object.keys(lock.tasks);
   if (mode === "cached-full") {
     if (
+      !Array.isArray(fullTaskMatrix) ||
+      fullTaskMatrix.length !== fullTaskCount ||
       lockedTasks.length !== fullTaskCount ||
-      tasks.some((taskName) => !Object.hasOwn(lock.tasks, taskName))
+      fullTaskMatrix.some((taskName) => !Object.hasOwn(lock.tasks, taskName))
     ) {
       throw new Error("Terminal-Bench cached-full task lock does not cover the task list");
+    }
+    for (const taskName of fullTaskMatrix) {
+      const expected = lock.tasks[taskName];
+      if (
+        !expected ||
+        !sha256Pattern.test(expected.cacheDigest) ||
+        !sha256Pattern.test(expected.treeSha256)
+      ) {
+        throw new Error(`Terminal-Bench cached-full task lock entry is invalid: ${taskName}`);
+      }
     }
     return;
   }
@@ -215,6 +228,7 @@ async function assertFullTaskMatrix(projectRoot, tasks, mode) {
   if (mode === "full" && tasks.length !== fullTaskCount) {
     throw new Error("Terminal-Bench full task set does not match the fixed 89-task list");
   }
+  return expectedTasks;
 }
 
 async function readImageLock(projectRoot, tasks, mode) {
