@@ -312,6 +312,42 @@ test("Terminal-Bench normalizer classifies malformed Headless evidence", async (
   assert.equal(summary.trials[0].primaryStatus, "adapter_error");
 });
 
+test("Terminal-Bench normalizer rejects invalid headless runtime-control requests", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-runtime-control-invalid-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const errorCodes = [
+    "INVALID_PROVIDER_REQUEST_MODE",
+    "INVALID_POLICY_DENIAL_MODE",
+    "INVALID_BASH_TIMEOUT",
+  ];
+  for (const [index, errorCode] of errorCodes.entries()) {
+    await writeTrial(jobDir, `invalid-control-${index}`, {
+      reward: 0,
+      headless: {
+        ...headless("invalid_request", true),
+        error: { code: errorCode, summary: "invalid fixture request" },
+      },
+      runId: "runtime-control-invalid-run",
+    });
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "runtime-control-invalid-run",
+    expectedTasks: errorCodes.length,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.deepEqual(
+    summary.trials.map((trial) => [trial.adapter.status, trial.adapter.code]),
+    errorCodes.map((errorCode) => ["error", errorCode]),
+  );
+  assert.ok(summary.trials.every((trial) => trial.primaryStatus === "adapter_error"));
+});
+
 test("Terminal-Bench normalizer requires verifier execution evidence", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-verifier-evidence-"));
   const jobDir = join(root, "job");
