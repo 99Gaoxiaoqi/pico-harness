@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import ipaddress
@@ -10,6 +11,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,14 +86,118 @@ client.on("connect", () => finish(9));
 client.on("error", () => finish(0));
 setTimeout(() => finish(0), 2000);
 """
+_APT_UPDATE_COMMAND = r"""
+set -eu
+lists=/tmp/pico-verifier-apt-lists
+sources=/tmp/pico-verifier-sources.list
+rm -rf "$lists"
+mkdir -p "$lists/partial"
+printf '%s\n' \
+  'deb [trusted=yes] http://apt.test/debian stable main' >"$sources"
+apt-get update \
+  -o "Dir::Etc::sourcelist=$sources" \
+  -o "Dir::Etc::sourceparts=-" \
+  -o "Dir::State::lists=$lists" \
+  -o "APT::Get::List-Cleanup=0" \
+  -o "Acquire::Languages=none" \
+  -o "Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"
+"""
 
 
 class DockerEnvironmentStub:
-    @staticmethod
-    def _compose_env_vars(*, include_os_env: bool) -> dict[str, str]:
+    def __init__(
+        self,
+        *,
+        adapter: Any | None = None,
+        main_name: str = "",
+        workload_names: tuple[str, ...] = (),
+        run_id: str = "",
+    ) -> None:
+        self._adapter = adapter
+        self._main_name = main_name
+        self._workload_names = workload_names
+        self._run_id = run_id
+        self._keep_containers = False
+        self.extra_docker_compose_paths: list[Path] = []
+        self._docker_compose_paths: list[Path] = []
+        self._persistent_env: dict[str, str] = {}
+        self._scoped_env_stack: list[dict[str, str]] = []
+        self.original_stop_calls = 0
+        self.host_compose_env_calls = 0
+
+    def _compose_env_vars(self, *, include_os_env: bool) -> dict[str, str]:
         if include_os_env:
             raise AssertionError("Docker smoke must not inherit the full host env")
-        return {}
+        self.host_compose_env_calls += 1
+        return dict(self._persistent_env)
+
+    @contextlib.contextmanager
+    def scoped_exec_env(self, values: dict[str, str]) -> Any:
+        scoped = dict(values)
+        self._scoped_env_stack.append(scoped)
+        try:
+            yield
+        finally:
+            if not self._scoped_env_stack or self._scoped_env_stack[-1] != scoped:
+                raise AssertionError("Docker smoke scoped env stack was corrupted")
+            self._scoped_env_stack.pop()
+
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if self._adapter is None or not self._main_name:
+            raise AssertionError("Docker smoke environment is not bound to main")
+        merged_env = dict(self._persistent_env)
+        if env is not None:
+            merged_env.update(env)
+        for scoped_env in self._scoped_env_stack:
+            merged_env.update(scoped_env)
+        args = ["exec"]
+        if cwd is not None:
+            args.extend(["--workdir", cwd])
+        if user is not None:
+            args.extend(["--user", str(user)])
+        for name, value in sorted(merged_env.items()):
+            args.extend(["--env", f"{name}={value}"])
+        args.extend([self._main_name, "/bin/sh", "-lc", command])
+        result = run_docker(
+            self._adapter,
+            args,
+            allowed_exit_codes=set(range(256)),
+            timeout_sec=float(timeout_sec or 30),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", "replace")
+            for value in merged_env.values():
+                if len(value) > 1:
+                    stderr = stderr.replace(value, "<redacted-env>")
+            raise RuntimeError(
+                f"Docker smoke container exec failed ({result.returncode}): "
+                f"{stderr[-2_000:]}"
+            )
+        return result
+
+    async def stop(self, *, delete: bool) -> None:
+        self.original_stop_calls += 1
+        if self.original_stop_calls != 1:
+            raise AssertionError("original Docker environment stop ran more than once")
+        if delete:
+            if self._adapter is None or not self._run_id:
+                raise AssertionError("Docker smoke environment cleanup is not configured")
+            for container_name in self._workload_names:
+                remove_owned_container(self._adapter, container_name, self._run_id)
+
+
+# harbor_runtime deliberately refuses duck-typed or subclassed backends. Make
+# this real-Docker stub present the exact identity imported by pico_agent.
+DockerEnvironmentStub.__name__ = "DockerEnvironment"
+DockerEnvironmentStub.__qualname__ = "DockerEnvironment"
+DockerEnvironmentStub.__module__ = "harbor.environments.docker.docker"
 
 
 class LocalFixture:
@@ -103,14 +209,35 @@ class LocalFixture:
 
             def do_GET(self) -> None:
                 fixture.request_count += 1
-                valid = (
-                    self.path == "/fixture"
-                    and self.headers.get("Host") == "public.test"
-                    and self.headers.get("Proxy-Authorization") is None
+                host = self.headers.get("Host")
+                authorization_removed = (
+                    self.headers.get("Proxy-Authorization") is None
                 )
+                fixture.requests.append((host or "", self.path))
+                if host == "public.test" and self.path == "/fixture":
+                    fixture.curl_request_count += 1
+                    status = 200
+                    payload = b"fixture-ok"
+                    valid = authorization_removed
+                elif host == "apt.test" and self.path.startswith("/debian/"):
+                    fixture.apt_request_count += 1
+                    valid = authorization_removed
+                    if (
+                        "/binary-" in self.path
+                        and self.path.endswith("/Packages")
+                    ):
+                        fixture.apt_packages_request_count += 1
+                        status = 200
+                        payload = b""
+                    else:
+                        status = 404
+                        payload = b"not-found"
+                else:
+                    status = 500
+                    payload = b"invalid-request"
+                    valid = False
                 fixture.valid_request = fixture.valid_request and valid
-                payload = b"fixture-ok"
-                self.send_response_only(200 if valid else 500)
+                self.send_response_only(status)
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -120,6 +247,10 @@ class LocalFixture:
                 del args
 
         self.request_count = 0
+        self.curl_request_count = 0
+        self.apt_request_count = 0
+        self.apt_packages_request_count = 0
+        self.requests: list[tuple[str, str]] = []
         self.valid_request = True
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -169,9 +300,6 @@ def install_harbor_stubs() -> None:
     class BaseEnvironment:
         pass
 
-    class DockerEnvironment:
-        pass
-
     class AgentContext:
         pass
 
@@ -183,7 +311,7 @@ def install_harbor_stubs() -> None:
     )
     sys.modules["harbor.environments.base"].BaseEnvironment = BaseEnvironment
     docker_module = sys.modules["harbor.environments.docker.docker"]
-    docker_module.DockerEnvironment = DockerEnvironment
+    docker_module.DockerEnvironment = DockerEnvironmentStub
     docker_module._sanitize_docker_compose_project_name = lambda value: value
     sys.modules["harbor.models.agent.context"].AgentContext = AgentContext
     sys.modules["harbor.models.trial.paths"].EnvironmentPaths = EnvironmentPaths
@@ -458,6 +586,36 @@ def assert_no_residual_resources(
             raise AssertionError("Docker smoke network cleanup was not confirmed")
 
 
+def assert_no_persisted_proxy_or_token(
+    adapter: Any,
+    *,
+    environment: DockerEnvironmentStub,
+    container_names: tuple[str, ...],
+    proxy_env_names: tuple[str, ...],
+    token: str,
+) -> None:
+    host_env = adapter.compose_subprocess_env(environment)
+    if set(host_env) & set(proxy_env_names):
+        raise AssertionError("verifier proxy leaked into the host compose env")
+    if any(token in value for value in host_env.values()):
+        raise AssertionError("verifier token leaked into the host compose env")
+    for container_name in container_names:
+        value = inspect_container(adapter, container_name)
+        config_env = ((value.get("Config") or {}).get("Env") or [])
+        config_names = {
+            item.split("=", 1)[0]
+            for item in config_env
+            if isinstance(item, str) and "=" in item
+        }
+        if config_names & set(proxy_env_names):
+            raise AssertionError("verifier proxy persisted in container Config.Env")
+        if any(
+            isinstance(item, str) and token in item
+            for item in config_env
+        ):
+            raise AssertionError("verifier token persisted in container Config.Env")
+
+
 async def run_smoke(adapter: Any) -> None:
     public_egress = importlib.import_module(
         "benchmarks.terminal_bench_2_1.public_egress"
@@ -649,13 +807,323 @@ async def run_smoke(adapter: Any) -> None:
         raise AssertionError("public egress proxy did not return a receipt")
 
 
+async def run_verifier_smoke(adapter: Any) -> None:
+    harbor_runtime = importlib.import_module(
+        "benchmarks.terminal_bench_2_1.harbor_runtime"
+    )
+    harbor_runtime.install_verifier_exec_env_overlay(DockerEnvironmentStub)
+
+    suffix = secrets.token_hex(6)
+    run_id = f"verifier-egress-docker-smoke-{suffix}"
+    task_network = f"pico-verifier-task-{suffix}"
+    gateway_network = f"pico-verifier-gw-{suffix}"
+    main_name = f"pico-verifier-main-{suffix}"
+    sidecar_name = f"pico-verifier-sidecar-{suffix}"
+    networks = adapter.TrialNetworks(
+        task=task_network,
+        gateway=gateway_network,
+    )
+    environment = DockerEnvironmentStub(
+        adapter=adapter,
+        main_name=main_name,
+        workload_names=(main_name, sidecar_name),
+        run_id=run_id,
+    )
+    fixture = LocalFixture()
+    connector_calls: list[tuple[str, int]] = []
+    created_proxies: list[Any] = []
+    original_create_proxy = adapter.create_public_egress_proxy
+    receipt_payload: dict[str, Any] | None = None
+    test_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    fixture_started = False
+    access: Any | None = None
+    lifecycle_installed = False
+    lifecycle_stopped = False
+
+    def resolver(host: str, _port: int) -> list[str]:
+        return {
+            "apt.test": [_DOCUMENTATION_GLOBAL_IP],
+            "public.test": [_DOCUMENTATION_GLOBAL_IP],
+        }[host]
+
+    def connector(address: str, port: int, timeout_sec: float) -> socket.socket:
+        connector_calls.append((address, port))
+        return socket.create_connection(
+            ("127.0.0.1", fixture.port),
+            timeout=timeout_sec,
+        )
+
+    def create_proxy(*, token: str, ttl_sec: float) -> Any:
+        proxy = original_create_proxy(token=token, ttl_sec=ttl_sec)
+        proxy._resolver = resolver
+        proxy._connector = connector
+        created_proxies.append(proxy)
+        return proxy
+
+    malicious_env = {
+        name: (
+            "*"
+            if name in {"NO_PROXY", "no_proxy"}
+            else "http://127.0.0.1:1"
+        )
+        for name in harbor_runtime.PUBLIC_EGRESS_PROXY_ENV_NAMES
+    }
+
+    with tempfile.TemporaryDirectory(prefix="pico-verifier-egress-") as temp_dir:
+        receipt_path = Path(temp_dir) / "verifier-egress-receipt.json"
+        try:
+            fixture.start()
+            fixture_started = True
+            adapter.create_public_egress_proxy = create_proxy
+            create_internal_network(adapter, task_network, run_id)
+            create_internal_network(adapter, gateway_network, run_id)
+            start_workload_container(
+                adapter,
+                name=main_name,
+                role="verifier-docker-smoke-main",
+                network=task_network,
+                alias="main",
+                run_id=run_id,
+            )
+            run_docker(
+                adapter,
+                [
+                    "network",
+                    "connect",
+                    "--alias",
+                    "main",
+                    gateway_network,
+                    main_name,
+                ],
+            )
+            start_workload_container(
+                adapter,
+                name=sidecar_name,
+                role="verifier-docker-smoke-sidecar",
+                network=task_network,
+                alias="sidecar",
+                run_id=run_id,
+            )
+
+            access = adapter.PublicEgressAccess(
+                run_id=run_id,
+                network_name=gateway_network,
+                context_id=f"{run_id}-verifier",
+                ttl_sec=60,
+                receipt_path=receipt_path,
+            )
+            token = access.scrub_secret
+            adapter.install_verifier_egress_lifecycle(
+                environment,
+                networks=networks,
+                run_id=run_id,
+                verifier_egress=access,
+            )
+            lifecycle_installed = True
+
+            relay_before_activation = run_docker(
+                adapter,
+                ["inspect", access.relay_name],
+                allowed_exit_codes={0, 1},
+            )
+            if relay_before_activation.returncode != 1:
+                raise AssertionError("verifier relay started before verifier phase")
+            if hasattr(
+                environment,
+                "_pico_terminal_bench_verifier_exec_env",
+            ):
+                raise AssertionError("verifier exec overlay activated too early")
+            assert_no_persisted_proxy_or_token(
+                adapter,
+                environment=environment,
+                container_names=(main_name, sidecar_name),
+                proxy_env_names=harbor_runtime.PUBLIC_EGRESS_PROXY_ENV_NAMES,
+                token=token,
+            )
+            await environment.exec(
+                (
+                    "if curl --silent --show-error --fail --max-time 3 "
+                    "http://public.test/fixture >/dev/null 2>&1; "
+                    "then exit 9; else exit 0; fi"
+                ),
+                env=malicious_env,
+                timeout_sec=10,
+            )
+            if fixture.request_count != 0:
+                raise AssertionError("pre-verifier command reached public egress")
+
+            await adapter.activate_verifier_egress(environment)
+            if len(created_proxies) != 1:
+                raise AssertionError("verifier egress proxy was not activated once")
+            await adapter.assert_verifier_egress_topology(
+                environment,
+                networks=networks,
+                run_id=run_id,
+                verifier_egress=access,
+            )
+            assert_no_persisted_proxy_or_token(
+                adapter,
+                environment=environment,
+                container_names=(
+                    main_name,
+                    sidecar_name,
+                    access.relay_name,
+                ),
+                proxy_env_names=harbor_runtime.PUBLIC_EGRESS_PROXY_ENV_NAMES,
+                token=token,
+            )
+
+            curl_result = await environment.exec(
+                (
+                    "curl --silent --show-error --fail --max-time 10 "
+                    "http://public.test/fixture"
+                ),
+                env=malicious_env,
+                timeout_sec=20,
+            )
+            if curl_result.stdout != b"fixture-ok":
+                raise AssertionError("verifier curl did not use the egress overlay")
+            apt_result = await environment.exec(
+                _APT_UPDATE_COMMAND,
+                env=malicious_env,
+                timeout_sec=60,
+            )
+            token_bytes = token.encode()
+            if token_bytes in curl_result.stdout or token_bytes in curl_result.stderr:
+                raise AssertionError("verifier curl leaked the proxy token")
+            if token_bytes in apt_result.stdout or token_bytes in apt_result.stderr:
+                raise AssertionError("verifier apt leaked the proxy token")
+            if (
+                fixture.curl_request_count != 1
+                or fixture.apt_request_count < 1
+                or fixture.apt_packages_request_count < 1
+                or not fixture.valid_request
+            ):
+                raise AssertionError(
+                    "verifier fixture requests were incomplete: "
+                    f"{fixture.requests!r}"
+                )
+            if (
+                len(connector_calls) != fixture.request_count
+                or any(
+                    address != _DOCUMENTATION_GLOBAL_IP or port != 80
+                    for address, port in connector_calls
+                )
+            ):
+                raise AssertionError("verifier requests bypassed proxy target checks")
+            assert_connection_fails(
+                adapter,
+                main_name,
+                _DOCUMENTATION_GLOBAL_IP,
+                80,
+            )
+            assert_connection_fails(adapter, sidecar_name, "pico-egress", 8081)
+            assert_connection_fails(
+                adapter,
+                sidecar_name,
+                _DOCUMENTATION_GLOBAL_IP,
+                80,
+            )
+
+            await environment.stop(delete=True)
+            lifecycle_stopped = True
+            if environment.original_stop_calls != 1:
+                raise AssertionError("original Harbor stop did not run exactly once")
+            if hasattr(
+                environment,
+                "_pico_terminal_bench_verifier_exec_env",
+            ) or hasattr(
+                environment,
+                "_pico_terminal_bench_verifier_activation",
+            ):
+                raise AssertionError("verifier lifecycle state survived Harbor stop")
+            if not receipt_path.is_file():
+                raise AssertionError("verifier egress receipt was not written")
+            receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if (
+                receipt_payload.get("schemaVersion") != 1
+                or receipt_payload.get("allowed", 0) < 2
+                or receipt_payload.get("allowed") != fixture.request_count
+            ):
+                raise AssertionError("verifier egress receipt counts are invalid")
+            assert_no_residual_resources(
+                adapter,
+                (access.relay_name, main_name, sidecar_name),
+                (task_network, gateway_network),
+            )
+        except BaseException as error:
+            test_error = error
+        finally:
+            adapter.create_public_egress_proxy = original_create_proxy
+            if lifecycle_installed and not lifecycle_stopped:
+                try:
+                    await environment.stop(delete=True)
+                    lifecycle_stopped = True
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            if access is not None:
+                try:
+                    await access.stop(environment)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            for container_name in (
+                access.relay_name if access is not None else "",
+                main_name,
+                sidecar_name,
+            ):
+                if not container_name:
+                    continue
+                try:
+                    remove_owned_container(adapter, container_name, run_id)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            for network_name in (gateway_network, task_network):
+                try:
+                    remove_owned_network(adapter, network_name, run_id)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            residual_container_names = tuple(
+                name
+                for name in (
+                    access.relay_name if access is not None else "",
+                    main_name,
+                    sidecar_name,
+                )
+                if name
+            )
+            try:
+                assert_no_residual_resources(
+                    adapter,
+                    residual_container_names,
+                    (task_network, gateway_network),
+                )
+            except BaseException as error:
+                cleanup_errors.append(error)
+            if fixture_started:
+                try:
+                    fixture.stop()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+
+    if cleanup_errors:
+        raise RuntimeError(
+            "verifier egress Docker smoke cleanup did not complete"
+        ) from (test_error or cleanup_errors[0])
+    if test_error is not None:
+        raise test_error
+    if receipt_payload is None:
+        raise AssertionError("verifier egress receipt was not captured")
+
+
 async def main() -> None:
     adapter = load_adapter()
     require_docker_and_pinned_image(adapter)
     if not ipaddress.ip_address(_DOCUMENTATION_GLOBAL_IP).is_global:
         raise AssertionError("documentation target must be a global IP")
     await run_smoke(adapter)
-    print("Public egress Docker smoke passed.")
+    await run_verifier_smoke(adapter)
+    print("Public and verifier egress Docker smoke passed.")
 
 
 if __name__ == "__main__":

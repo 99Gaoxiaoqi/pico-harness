@@ -1,3 +1,4 @@
 from __future__ import annotations
 
 MAX_TASK_AGENT_TIMEOUT_SEC = 12_000
+MAX_TASK_VERIFIER_TIMEOUT_SEC = 12_000
