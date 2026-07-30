@@ -67,7 +67,12 @@ output/benchmarks/terminal-bench-2.1/runs/<run-id>/
 `canary-task-lock.json` 校验；full 按 `full-task-lock.json` 从工作区
 `output/benchmarks/terminal-bench-2.1/cache/harbor-tasks/packages/` 校验。两种模式均
 完整离线 staging，不会回退到远程 dataset；锁文件、缓存或逐题 tree hash 缺失时直接
-失败。Harbor 外层保留题目原始 timeout，
+失败。full 还要求 `full-image-lock.json` 精确覆盖固定 89 题，并锁定
+`linux/amd64` 镜像 manifest digest；每题缓存 tree hash 与原始 `docker_image` tag
+校验通过并复制到 staging 后，运行器才把 staged `task.toml` 改写为
+`repository@sha256:digest`，随后注入隔离网络并审计 Compose。镜像锁缺失、平台、
+题集、source tag、digest 或压缩大小不合法时均 fail closed；canary/single 不读取该锁。
+Harbor 外层保留题目原始 timeout，
 Harbor 自身及其 82 个传递依赖由 `harbor-constraints.txt` 固定，并以 `uvx --offline`
 运行；本机 cache 不完整时直接失败，不回退到网络解析。
 Headless 内层预算按 `outer - shutdownGrace(30s) - flushMargin(5s)` 收缩，避免外层
