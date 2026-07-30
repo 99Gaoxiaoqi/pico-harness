@@ -29,7 +29,19 @@ route/model/path、TTL、并发、调用次数、input/output token 与最坏价
 revoke 会拒绝新请求、关闭在途上游并丢弃迟到响应。
 `npm run benchmark:terminal-bench:check-secret-boundary` 会验证恶意 Compose 插值、
 pre-start container profile、无 root seed 同 UID 调用、nonce 重放、未注册 trial、
-并发超卖、revoke-before-use 与在途 revoke。
+并发超卖、revoke-before-use、在途 revoke，以及公网旁路的确定性策略与真实 Docker
+数据面隔离。
+
+题目的 `task.toml` 必须显式声明布尔值 `environment.allow_internet`。只有值为 `true`
+的题目会获得本 trial 独占的公网旁路；task 网络和 gateway 网络仍保持 `internal`，
+只有受限 relay 同时连接 gateway 网络与 Docker `bridge`。task container 仅获得带
+trial 随机凭据的 HTTP(S) proxy 环境变量，sidecar 不连接 gateway 网络。宿主代理只允许
+HTTP absolute-form 的 80 端口和 CONNECT 的 443 端口，固定通过经 TLS 证书验证的
+Cloudflare DoH 地址查询 IPv4 A 记录，不使用系统 DNS，也不接受 IP literal、私网、
+保留地址、metadata、Docker 内部名称或混合解析结果。每个 trial 最多 32 个并发连接、
+4096 个请求、1 GiB 传输量和 120 秒单连接时长，审计只保留 256 条不含 query、header、
+body 或 token 的有界决策。TTL 或清理先撤销活动连接；只有确认 relay 已删除后才释放
+宿主 listener，避免旧 relay 命中被复用的端口。
 
 发布前后都会扫描完整结果树中真实凭据与 root seed 的 raw、JSON escaped、URL encoded、
 Base64/Base64URL、hex、UTF-16，以及有界嵌套 gzip/tar 形态；不支持的压缩归档、命中或
