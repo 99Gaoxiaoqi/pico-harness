@@ -10,6 +10,15 @@ import {
 import { basename, dirname, join } from "node:path";
 
 const secretEnv = "PICO_TB_GATEWAY_TOKEN";
+const controlledProxyGateEnv = "PICO_TB_AGENT_CONTROLLED_PROXY";
+const controlledProxyEnvNames = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "NO_PROXY",
+  "no_proxy",
+];
 const requestPath = "/logs/agent/headless-request.json";
 const resultPath = "/logs/agent/pico-result.json";
 const exitCodePath = "/logs/agent/pico-exit-code.txt";
@@ -23,8 +32,13 @@ if (!Number.isSafeInteger(size) || size < 1 || size > 64 * 1024 || frame.length 
   throw new Error("invalid secret payload");
 }
 const secret = frame.subarray(9).toString("utf8");
-const dependencyEnv = Object.freeze({ ...process.env, [secretEnv]: secret });
+const dependencyEnvValues = { ...process.env, [secretEnv]: secret };
+const controlledProxyGate = dependencyEnvValues[controlledProxyGateEnv];
+delete dependencyEnvValues[controlledProxyGateEnv];
+const dependencyEnv = Object.freeze(dependencyEnvValues);
 delete process.env[secretEnv];
+delete process.env[controlledProxyGateEnv];
+for (const name of controlledProxyEnvNames) delete process.env[name];
 process.env.LOG_LEVEL = "fatal";
 
 const abortController = new AbortController();
@@ -37,9 +51,14 @@ process.once("SIGINT", () => cancel("SIGINT"));
 process.once("SIGTERM", () => cancel("SIGTERM"));
 
 try {
-  const { runHeadlessOneShotJson } = await import(runnerPath);
+  const { runHeadlessOneShotJson, terminalBenchAgentControlledProxyCapability } = await import(
+    runnerPath
+  );
+  const controlledProxyCapability =
+    terminalBenchAgentControlledProxyCapability(controlledProxyGate);
   const outcome = await runHeadlessOneShotJson(readFileSync(requestPath, "utf8"), {
     env: dependencyEnv,
+    ...(controlledProxyCapability ? { controlledProxyCapability } : {}),
     signal: abortController.signal,
     ...(signalKind ? { signalKind } : {}),
   });
