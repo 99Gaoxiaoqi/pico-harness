@@ -22,7 +22,13 @@ import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
-import { createProvider, createRawProvider, type ProviderKind } from "../provider/factory.js";
+import {
+  createProvider,
+  createRawProvider,
+  type ProviderKind,
+  type ProviderRuntimeDependencies,
+} from "../provider/factory.js";
+import { FileGeminiPromptCacheStore } from "../provider/gemini-prompt-cache.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
@@ -588,6 +594,15 @@ export async function executeAgentRuntime(
     if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
+    const providerDependencies: ProviderRuntimeDependencies = {
+      gemini: {
+        promptCacheStore: new FileGeminiPromptCacheStore(
+          resolve(workspaceStatePaths.control, "gemini-prompt-cache.json"),
+        ),
+        // Native cachedContents must be explicitly enabled only after the dedicated spike passes.
+        enableExplicitPromptCache: runtimeEnv.PICO_ENABLE_GEMINI_NATIVE_CACHE === "1",
+      },
+    };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
       const activated = activatePluginProviderCapabilities(
@@ -650,6 +665,7 @@ export async function executeAgentRuntime(
               providerFactory,
               providerDecorator,
               trackerOptions,
+              providerDependencies,
             });
             return {
               provider: runtime.provider,
@@ -670,6 +686,7 @@ export async function executeAgentRuntime(
       ...(dependencies.provider !== undefined ? { provider: dependencies.provider } : {}),
       providerFactory,
       providerDecorator,
+      providerDependencies,
       ...(credentialPool ? { credentialPool } : {}),
     });
     const trackedProvider = providerAssembly.provider;
@@ -681,7 +698,7 @@ export async function executeAgentRuntime(
             const ledger = new RuntimeStore({ workDir, picoHome });
             const billingRoute = billingRouteForProvider(kind, currentConfig);
             const provider = new CostTracker(
-              providerFactory(kind, currentConfig),
+              providerFactory(kind, currentConfig, undefined, providerDependencies),
               billingRoute,
               undefined,
               {
