@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -29,6 +30,10 @@ from harbor.environments.docker.docker import (
 )
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
+
+from benchmarks.terminal_bench_2_1.runtime_limits import (
+    MAX_TASK_AGENT_TIMEOUT_SEC,
+)
 
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
 _RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
@@ -930,7 +935,7 @@ class ProviderGateway:
             "trialId": self._context_id,
             "nonce": secrets.token_hex(16),
             "issuedAt": now,
-            "expiresAt": now + min(int(self._ttl_sec), 7_200),
+            "expiresAt": now + min(int(self._ttl_sec), MAX_TASK_AGENT_TIMEOUT_SEC),
         }
         value["auth"] = auth
         signature = hmac.new(
@@ -1719,7 +1724,13 @@ def task_agent_timeout(environment: BaseEnvironment) -> float:
     with task_path.open("rb") as handle:
         config = tomllib.load(handle)
     timeout = config.get("agent", {}).get("timeout_sec")
-    if not isinstance(timeout, (int, float)) or timeout <= 0 or timeout > 7200:
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > MAX_TASK_AGENT_TIMEOUT_SEC
+    ):
         raise RuntimeError("Terminal-Bench task timeout is unsupported by Pico")
     return float(timeout)
 

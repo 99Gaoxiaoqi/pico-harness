@@ -56,6 +56,8 @@ def install_harbor_stubs() -> None:
 def load_adapter() -> Any:
     install_harbor_stubs()
     project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
     adapter_path = project_root / "benchmarks/terminal_bench_2_1/pico_agent.py"
     spec = importlib.util.spec_from_file_location("pico_agent_network_test", adapter_path)
     assert spec is not None and spec.loader is not None
@@ -154,6 +156,46 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
     )
 
 
+def assert_task_timeout_contract(adapter: Any) -> None:
+    assert adapter.MAX_TASK_AGENT_TIMEOUT_SEC == 12_000
+    with tempfile.TemporaryDirectory(prefix="pico-task-timeout-") as directory:
+        root = Path(directory)
+        environment = types.SimpleNamespace(environment_dir=root / "environment")
+        task_config = root / "task.toml"
+        task_config.write_text("[agent]\ntimeout_sec = 12000.0\n")
+        assert adapter.task_agent_timeout(environment) == 12_000
+
+        for invalid in ("12000.001", "nan", "true", '"12000"'):
+            task_config.write_text(f"[agent]\ntimeout_sec = {invalid}\n")
+            try:
+                adapter.task_agent_timeout(environment)
+            except RuntimeError as error:
+                assert str(error) == (
+                    "Terminal-Bench task timeout is unsupported by Pico"
+                )
+            else:
+                raise AssertionError(
+                    f"unsupported task timeout was accepted: {invalid}"
+                )
+
+    gateway = adapter.ProviderGateway(
+        protocol="openai",
+        supervisor_socket="/unused",
+        capability_seed="a" * 64,
+        run_id="timeout-contract",
+        network_name="timeout-network",
+        context_id="timeout-trial",
+        ttl_sec=12_000,
+        pricing_sha256="b" * 64,
+        receipt_path=Path("/unused"),
+    )
+    gateway._supervisor_request = lambda value: value
+    signed = gateway._signed_supervisor_request(
+        {"action": "revoke", "trialId": "timeout-trial"}
+    )
+    assert signed["auth"]["expiresAt"] - signed["auth"]["issuedAt"] == 12_000
+
+
 class FakeEnvironment:
     session_id = "trial-session"
 
@@ -225,6 +267,7 @@ async def main() -> None:
     adapter = load_adapter()
     assert_route_config_contract(adapter)
     assert_accounting_failure_messages(adapter)
+    assert_task_timeout_contract(adapter)
     assert adapter.PicoInstalledAgent._POLICY_DENIAL_MODE == "incident"
     assert adapter.require_bounded_int(180_000, "bash_timeout_ms", 1_000, 300_000) == 180_000
     for invalid in (999, 300_001, 1.5, True, "180000.0", None):

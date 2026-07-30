@@ -286,6 +286,26 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
   const missing = await runHeadlessOneShotJson(JSON.stringify(missingRoute), dependencies);
   assert.equal(missing.result.error?.code, "MISSING_FIELD");
 
+  const supportedMaximumTimeout = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "supported-maximum-timeout"),
+      modelRouteId: "missing/model",
+      timeoutMs: 12_000_000,
+    }),
+    dependencies,
+  );
+  assert.equal(supportedMaximumTimeout.result.error?.code, "MODEL_ROUTE_INVALID");
+
+  const timeoutAboveMaximum = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "timeout-above-maximum"),
+      modelRouteId: "missing/model",
+      timeoutMs: 12_000_001,
+    }),
+    dependencies,
+  );
+  assert.equal(timeoutAboveMaximum.result.error?.code, "INVALID_FIELD");
+
   const invalidPolicyDenialMode = await runHeadlessOneShotJson(
     JSON.stringify({
       ...requestFor(fixture, "policy-denial-mode"),

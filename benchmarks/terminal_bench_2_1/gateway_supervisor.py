@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import signal
@@ -22,10 +23,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+try:
+    from benchmarks.terminal_bench_2_1.runtime_limits import (
+        MAX_TASK_AGENT_TIMEOUT_SEC,
+    )
+except ModuleNotFoundError:
+    from runtime_limits import MAX_TASK_AGENT_TIMEOUT_SEC
+
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 AUTH_WINDOW_SEC = 300
-MAX_TRIAL_TTL_SEC = 7_200
+MAX_TRIAL_TTL_SEC = MAX_TASK_AGENT_TIMEOUT_SEC
 MAX_REQUESTS = 128
 MAX_INPUT_TOKENS = 1_000_000
 MAX_OUTPUT_TOKENS = 65_536
@@ -180,8 +188,15 @@ class GatewayState:
 
     def register(self, request: dict[str, Any]) -> None:
         trial_id = require_trial_id(request.get("trialId"))
-        ttl_sec = min(float(request.get("ttlSec", 0)), MAX_TRIAL_TTL_SEC)
-        if request.get("protocol") != self.provider["protocol"] or ttl_sec <= 0:
+        ttl_sec = request.get("ttlSec")
+        if (
+            request.get("protocol") != self.provider["protocol"]
+            or isinstance(ttl_sec, bool)
+            or not isinstance(ttl_sec, (int, float))
+            or not math.isfinite(ttl_sec)
+            or ttl_sec <= 0
+            or ttl_sec > MAX_TRIAL_TTL_SEC
+        ):
             raise ValueError("gateway route mismatch")
         with self.lock:
             if trial_id in self.trials:

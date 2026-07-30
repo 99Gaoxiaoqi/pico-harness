@@ -86,14 +86,20 @@ class UnixConnection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
-def sign(seed: str, run_id: str, trial_id: str, value: dict[str, Any]) -> dict[str, Any]:
+def sign(
+    seed: str,
+    run_id: str,
+    trial_id: str,
+    value: dict[str, Any],
+    auth_ttl_sec: int = 60,
+) -> dict[str, Any]:
     now = int(time.time())
     auth = {
         "runId": run_id,
         "trialId": trial_id,
         "nonce": secrets.token_hex(16),
         "issuedAt": now,
-        "expiresAt": now + 60,
+        "expiresAt": now + auth_ttl_sec,
     }
     value = {**value, "trialId": trial_id, "auth": auth}
     signature = hmac.new(
@@ -804,6 +810,8 @@ def assert_run_budget_overrun_closes_run(
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
     provider = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     run_id = "security-e2e"
@@ -916,6 +924,45 @@ def main() -> None:
             str(socket_path), {"action": "proxy", "trialId": "forged", **proxy_frame({})}
         )[0] == 502
         assert ProviderHandler.calls == 0
+
+        assert gateway.MAX_TRIAL_TTL_SEC == 12_000
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-maximum-ttl",
+                {
+                    "action": "register",
+                    "protocol": "openai",
+                    "ttlSec": gateway.MAX_TRIAL_TTL_SEC,
+                },
+                auth_ttl_sec=gateway.MAX_TRIAL_TTL_SEC,
+            ),
+        )[0] == 200
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-over-maximum-ttl",
+                {
+                    "action": "register",
+                    "protocol": "openai",
+                    "ttlSec": gateway.MAX_TRIAL_TTL_SEC + 1,
+                },
+            ),
+        )[0] == 502
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-over-maximum-auth-ttl",
+                {"action": "register", "protocol": "openai", "ttlSec": 60},
+                auth_ttl_sec=gateway.MAX_TRIAL_TTL_SEC + 30,
+            ),
+        )[0] == 502
 
         register = sign(
             seed,

@@ -165,6 +165,12 @@ const localDataset = await prepareLocalDataset({
   runRoot,
   runId,
 });
+await run(
+  "python3",
+  ["-m", "benchmarks.terminal_bench_2_1.task_timeout_preflight", "--dataset", localDataset.path],
+  projectRoot,
+  harborEnv,
+);
 const taskSelectionPath =
   taskResolution.selection === null ? null : join(runRoot, "task-selection.json");
 let taskSelectionSha256 = null;
