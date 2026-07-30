@@ -39,6 +39,7 @@ _SUPERVISOR_CONFIG: dict[str, str] | None = None
 _RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
 _PUBLIC_EGRESS_PROXY_POLICY_VERSION = 1
 _PUBLIC_EGRESS_MAX_CONNECTIONS = 32
+_PUBLIC_EGRESS_MAX_REQUESTS = 4_096
 _PUBLIC_EGRESS_MAX_TOTAL_BYTES = 1_073_741_824
 _PUBLIC_EGRESS_PROXY_ENV_NAMES = (
     "HTTP_PROXY",
@@ -748,6 +749,7 @@ def create_public_egress_proxy(
         token=token,
         ttl_sec=ttl_sec,
         max_connections=_PUBLIC_EGRESS_MAX_CONNECTIONS,
+        max_requests=_PUBLIC_EGRESS_MAX_REQUESTS,
         max_total_bytes=_PUBLIC_EGRESS_MAX_TOTAL_BYTES,
     )
 
@@ -821,21 +823,16 @@ class PublicEgressAccess:
             raise
 
     async def stop(self, environment: DockerEnvironment) -> None:
+        if self._stopped:
+            return
         cleanup_errors: list[BaseException] = []
         proxy = self._proxy
-        self._proxy = None
         if proxy is not None:
             try:
-                receipt = proxy.stop()
-                if (
-                    not isinstance(receipt, dict)
-                    or receipt.get("schemaVersion")
-                    != _PUBLIC_EGRESS_PROXY_POLICY_VERSION
-                ):
-                    raise RuntimeError("Public egress proxy returned an invalid receipt")
-                write_private_json_once(self._receipt_path, receipt)
+                proxy.revoke()
             except BaseException as error:
                 cleanup_errors.append(error)
+        relay_removed = False
         try:
             await remove_public_egress_relay(
                 environment,
@@ -845,8 +842,28 @@ class PublicEgressAccess:
             )
         except BaseException as error:
             cleanup_errors.append(error)
-        finally:
+        else:
+            relay_removed = True
             self._relay_started = False
+
+        # Never release the host listener while a relay might still be able to
+        # reach it: a reused ephemeral port could otherwise become an egress
+        # capability for the stale relay.
+        if relay_removed and proxy is not None:
+            try:
+                receipt = proxy.stop()
+                if (
+                    not isinstance(receipt, dict)
+                    or receipt.get("schemaVersion")
+                    != _PUBLIC_EGRESS_PROXY_POLICY_VERSION
+                ):
+                    raise RuntimeError("Public egress proxy returned an invalid receipt")
+                write_private_json_once(self._receipt_path, receipt)
+                self._proxy = None
+            except BaseException as error:
+                cleanup_errors.append(error)
+
+        if relay_removed and (proxy is None or self._proxy is None):
             self._token = ""
             self._stopped = True
         if cleanup_errors:

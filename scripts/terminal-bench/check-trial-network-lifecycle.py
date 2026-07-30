@@ -215,11 +215,13 @@ class FakeDocker:
         fail_gateway_create: bool = False,
         inspect_error: bytes | None = None,
         fail_relay_connect: bool = False,
+        fail_relay_remove: bool = False,
         pause_relay_connect: asyncio.Event | None = None,
     ) -> None:
         self.fail_gateway_create = fail_gateway_create
         self.inspect_error = inspect_error
         self.fail_relay_connect = fail_relay_connect
+        self.fail_relay_remove = fail_relay_remove
         self.pause_relay_connect = pause_relay_connect
         self.networks: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
@@ -359,6 +361,8 @@ class FakeDocker:
             container_name = args[2]
             if container_name not in self.containers:
                 return 1, b"", b"No such container"
+            if self.fail_relay_remove:
+                return 1, b"", b"synthetic relay remove failure"
             for network in self.networks.values():
                 network["Containers"].pop(container_name, None)
             del self.containers[container_name]
@@ -416,13 +420,16 @@ class FakePublicEgressProxy:
         token: str,
         ttl_sec: float,
         max_connections: int,
+        max_requests: int,
         max_total_bytes: int,
     ) -> None:
         self.token = token
         self.ttl_sec = ttl_sec
         self.max_connections = max_connections
+        self.max_requests = max_requests
         self.max_total_bytes = max_total_bytes
         self.started = 0
+        self.revoked = 0
         self.stopped = 0
         self.instances.append(self)
 
@@ -430,7 +437,11 @@ class FakePublicEgressProxy:
         self.started += 1
         return 45_678
 
+    def revoke(self) -> None:
+        self.revoked += 1
+
     def stop(self) -> dict[str, Any]:
+        assert self.revoked > 0
         self.stopped += 1
         if self.fail_stop:
             raise RuntimeError("synthetic public proxy stop failure")
@@ -531,6 +542,7 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
         assert all(character in "0123456789abcdef" for character in proxy.token)
         assert proxy.ttl_sec == 120
         assert proxy.max_connections == 32
+        assert proxy.max_requests == 4_096
         assert proxy.max_total_bytes == 1_073_741_824
         proxy_env = access.container_env
         assert set(proxy_env) == {
@@ -567,6 +579,7 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
         assert proxy.token not in json.dumps(relay)
         await access.stop(environment)
         await access.stop(environment)
+        assert proxy.revoked == 1
         assert proxy.stopped == 1
         assert access._token == ""
         assert docker.containers == {}
@@ -660,6 +673,45 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
         finally:
             FakePublicEgressProxy.fail_stop = False
         assert stop_failure.containers == {}
+        assert access._proxy is not None
+        await access.stop(environment)
+        assert FakePublicEgressProxy.instances[-1].stopped == 2
+        assert access._proxy is None
+
+    relay_remove_failure = FakeDocker(fail_relay_remove=True)
+    relay_remove_failure.networks["pico-tb-gw-remove"] = named_owned_network(
+        "pico-tb-gw-remove",
+        run_id,
+    )
+    adapter.run_docker = relay_remove_failure.run
+    with tempfile.TemporaryDirectory(prefix="pico-egress-remove-") as directory:
+        access = adapter.PublicEgressAccess(
+            run_id=run_id,
+            network_name="pico-tb-gw-remove",
+            context_id="public-egress-remove",
+            ttl_sec=120,
+            receipt_path=Path(directory) / "public-egress-receipt.json",
+        )
+        await access.start(environment)
+        proxy = FakePublicEgressProxy.instances[-1]
+        try:
+            await access.stop(environment)
+        except RuntimeError as error:
+            assert str(error) == "Could not stop public egress cleanly"
+        else:
+            raise AssertionError("relay removal failure unexpectedly succeeded")
+        assert proxy.revoked == 1
+        assert proxy.stopped == 0
+        assert access._proxy is proxy
+        assert access._token
+        assert relay_remove_failure.containers
+        relay_remove_failure.fail_relay_remove = False
+        await access.stop(environment)
+        assert proxy.revoked == 2
+        assert proxy.stopped == 1
+        assert access._proxy is None
+        assert access._token == ""
+        assert relay_remove_failure.containers == {}
 
 
 async def assert_container_proxy_env_injection(adapter: Any) -> None:

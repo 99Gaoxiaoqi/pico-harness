@@ -2,9 +2,20 @@ export const publicEgressProxyPolicyVersion = 1;
 
 export const publicEgressLimits = Object.freeze({
   maxConnections: 32,
+  maxRequests: 4_096,
   maxTotalBytes: 1_073_741_824,
+  connectionTimeoutSec: 120,
+  maxAuditDecisions: 256,
   allowedHttpPorts: Object.freeze([80]),
   allowedConnectPorts: Object.freeze([443]),
+});
+
+export const publicEgressDnsPolicy = Object.freeze({
+  mode: "pinned-doh",
+  host: "cloudflare-dns.com",
+  endpointIps: Object.freeze(["1.1.1.1", "1.0.0.1"]),
+  systemFallback: false,
+  ipv4Only: true,
 });
 
 const taskNamePattern = /^terminal-bench\/[A-Za-z0-9][A-Za-z0-9._-]*$/u;
@@ -69,9 +80,19 @@ export function buildEgressPolicyManifest(tasks, egressPolicyByTask) {
     proxyPolicyVersion: publicEgressProxyPolicyVersion,
     limits: {
       maxConnections: publicEgressLimits.maxConnections,
+      maxRequests: publicEgressLimits.maxRequests,
       maxTotalBytes: publicEgressLimits.maxTotalBytes,
+      connectionTimeoutSec: publicEgressLimits.connectionTimeoutSec,
+      maxAuditDecisions: publicEgressLimits.maxAuditDecisions,
       allowedHttpPorts: [...publicEgressLimits.allowedHttpPorts],
       allowedConnectPorts: [...publicEgressLimits.allowedConnectPorts],
+    },
+    dns: {
+      mode: publicEgressDnsPolicy.mode,
+      host: publicEgressDnsPolicy.host,
+      endpointIps: [...publicEgressDnsPolicy.endpointIps],
+      systemFallback: publicEgressDnsPolicy.systemFallback,
+      ipv4Only: publicEgressDnsPolicy.ipv4Only,
     },
     tasks: tasks.map((taskName) => {
       const policy = egressPolicyByTask[taskName];
