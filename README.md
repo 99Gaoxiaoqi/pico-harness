@@ -205,6 +205,8 @@ TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `
 | Windows | 支持；Bash 依赖 Git for Windows，并运行独立安全集成测试 | CI 类型检查、安全集成与未签名打包；暂不公开签名发布 |
 | Linux   | 支持；主 CI、构建与包内容验证在 Ubuntu 执行             | 当前没有 Desktop CI 或发布入口                      |
 
+Mobile 不属于上表的正式发布面：主 CI 只执行类型检查和 Android Expo 导出验证；当前仍限本机 iOS / Android 模拟器开发预览，没有移动端发布工作流。具体启动与安全边界见 [Mobile 开发说明](./apps/mobile/README.md)。
+
 Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin` 等系统工具；CI 会显式安装它们。
 
 ## 开发与验证
