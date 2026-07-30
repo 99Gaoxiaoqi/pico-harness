@@ -215,6 +215,9 @@ function buildUserConfig(
               modelCapabilities: {
                 [modelId]: {
                   output: request.route.output,
+                  ...(request.route.id === PINNED_BENCHMARK_ROUTE_ID
+                    ? { outputTokenField: "max_completion_tokens" }
+                    : {}),
                 },
               },
             }),
