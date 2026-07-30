@@ -65,9 +65,10 @@ RuntimeEvent 和后台 Job 的事实仍由共享 Runtime 与 daemon 所有，Des
 状态。
 
 仓库还有一个 Expo Mobile 客户端，但它目前只是本机 iOS / Android 模拟器的开发预览。
-显式运行 `npm run mobile:gateway` 后，独立 Gateway 仅在 `127.0.0.1` 上提供带临时 Token 的
-有界 HTTP / WebSocket 接口，再通过本机 IPC 连接 daemon；它只访问已注册且仍受信的工作区。
-这条桥接不是公开远程 API，也不把 Mobile 定义成第三个正式产品入口。
+显式运行 `npm run mobile:gateway` 后，独立 Gateway 仅在 `127.0.0.1` 上提供有界 HTTP /
+WebSocket 接口：HTTP 使用 Bearer Token，WebSocket 首个 JSON 帧使用同一临时 Token。
+Gateway 再通过本机 IPC 连接 daemon，并且只访问已注册且仍受信的工作区。这条桥接不是公开
+远程 API，也不把 Mobile 定义成第三个正式产品入口。
 
 历史上的 REST、WebSocket、ACP、飞书和 Docker 外壳都不属于当前产品边界。仓库内
 Headless One-shot Runner 只服务 benchmark，同样不是公开 API。

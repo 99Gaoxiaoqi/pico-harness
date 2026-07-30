@@ -19,7 +19,7 @@ Desktop
 
 Mobile 开发预览（仅本机模拟器）
   Expo client
-    └─ loopback HTTP / WebSocket + 临时 Token
+    └─ loopback HTTP Bearer / WebSocket 首帧 Token
          └─ MobileGateway
               └─ LocalRuntimeClient
 
@@ -42,9 +42,9 @@ Renderer 不直接访问 Node.js 或 Runtime，而是经类型化 Preload、Elec
 daemon 调用同一个 Runtime。daemon 只提供当前用户本机 IPC，不开放网络传输。
 
 `apps/mobile` 是本机 iOS / Android 模拟器的开发预览，不是第三个公开产品入口。显式启动的
-`src/mobile-gateway` 独立进程只监听 `127.0.0.1`，用临时 Token 暴露有界 HTTP / WebSocket
-能力，再通过 `LocalRuntimeClient` 连接 daemon；它只投影已注册且仍受信的工作区，不把
-workspace 路径或 daemon 协议直接暴露给 Mobile。
+`src/mobile-gateway` 独立进程只监听 `127.0.0.1`；HTTP 请求使用 Bearer Token，WebSocket
+连接后的首个 JSON 帧使用同一临时 Token。Gateway 再通过 `LocalRuntimeClient` 连接 daemon；
+它只投影已注册且仍受信的工作区，不把 workspace 路径或 daemon 协议直接暴露给 Mobile。
 
 `packages/protocol` 定义 daemon 方法、参数、结果、事件和 Desktop 可访问方法白名单。
 Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge` 类型。

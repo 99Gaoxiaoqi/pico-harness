@@ -55,8 +55,9 @@ Token 会失效；只有显式设置 `PICO_MOBILE_GATEWAY_TOKEN` 才会在开发
 
 ## 边界
 
-- Gateway 只绑定 `127.0.0.1`，请求使用 Bearer Token，实时事件使用同一 Token 完成
-  WebSocket 鉴权。
+- Gateway 只绑定 `127.0.0.1`。HTTP 请求使用 `Authorization: Bearer <token>`；WebSocket
+  连接后必须在 5 秒内用首个 JSON 帧 `{"type":"authenticate","token":"..."}` 提交同一
+  Token。
 - Mobile 只接收不含工作区绝对路径的投影；项目使用 Gateway 会话内的 opaque ID。
 - 当前能力面是项目与会话列表、会话记录、文本发送和实时运行投影，不代表公开移动端协议
   或跨版本兼容承诺。
