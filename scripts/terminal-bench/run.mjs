@@ -22,7 +22,11 @@ import { runCaptured } from "./captured-process.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
 import { verifyApprovedHarborWheelhouse } from "./harbor-wheelhouse.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
-import { localDatasetHarborArgs, prepareLocalDataset } from "./local-dataset.mjs";
+import {
+  localDatasetHarborArgs,
+  prepareLocalDataset,
+  resolveImageLockPath,
+} from "./local-dataset.mjs";
 import { normalizeHarborJob } from "./normalize-results.mjs";
 import {
   fsyncDirectory,
@@ -149,7 +153,8 @@ process.once("exit", () => {
     rmSync(publishedRunRoot, { recursive: true, force: true });
   }
 });
-const tasks = await resolveTasks(mode, options.task);
+const taskResolution = await resolveTasks(mode, options.task);
+const tasks = taskResolution.tasks;
 const scheduledTasks = tasks.length;
 const expectedTrials = scheduledTasks * options.attempts;
 const localDataset = await prepareLocalDataset({
@@ -159,6 +164,19 @@ const localDataset = await prepareLocalDataset({
   runRoot,
   runId,
 });
+const taskSelectionPath =
+  taskResolution.selection === null ? null : join(runRoot, "task-selection.json");
+let taskSelectionSha256 = null;
+if (taskSelectionPath !== null) {
+  await atomicWritePrivateJson(taskSelectionPath, {
+    ...taskResolution.selection,
+    taskLockSha256: localDataset.taskLockSha256,
+    imageLockSha256: localDataset.imageLockSha256,
+  });
+  taskSelectionSha256 = createHash("sha256")
+    .update(await readFile(taskSelectionPath))
+    .digest("hex");
+}
 const localDatasetSourcePath = localDataset.path;
 const localDatasetTreeSha256 = await hashDirectory(localDatasetSourcePath);
 const localDatasetSnapshot = await materializeReadOnlyDatasetSnapshot(
@@ -267,6 +285,8 @@ const manifest = {
         : relative(projectRoot, localDataset.imageLockPath),
     localImageLockSha256: localDataset.imageLockSha256,
     localImageLockPlatform: localDataset.imageLockPlatform,
+    taskSelectionPath: taskSelectionPath === null ? null : "task-selection.json",
+    taskSelectionSha256,
     localDatasetTreeSha256,
     localDatasetImageSha256: localDatasetSnapshot.imageSha256,
     executionSnapshot: "read-only-udro",
@@ -427,6 +447,9 @@ let harborExecution;
 let harborExecutionError;
 const cleanupErrors = [];
 try {
+  if (mode === "cached-full") {
+    await assertCachedImageRefs(taskResolution.localImageRefs);
+  }
   if ((await hashDirectory(localDatasetPath)) !== localDatasetTreeSha256) {
     throw new Error("Terminal-Bench staged dataset changed before Harbor startup");
   }
@@ -672,8 +695,8 @@ function parseArgs(args) {
       }
     } else throw new Error(`Unknown argument: ${arg}`);
   }
-  if (!["single", "canary", "full"].includes(parsed.mode)) {
-    throw new Error("--mode must be single, canary, or full");
+  if (!["single", "canary", "cached-full", "full"].includes(parsed.mode)) {
+    throw new Error("--mode must be single, canary, cached-full, or full");
   }
   return parsed;
 }
@@ -683,17 +706,15 @@ async function resolveTasks(mode, singleTask) {
     if (!singleTask?.startsWith("terminal-bench/")) {
       throw new Error("--task must use terminal-bench/<name>");
     }
-    return [singleTask];
+    return { tasks: [singleTask], selection: null, localImageRefs: [] };
   }
-  const raw = await readFile(
-    join(
-      projectRoot,
-      mode === "full"
-        ? "benchmarks/terminal_bench_2_1/full-task-names.txt"
-        : "benchmarks/terminal_bench_2_1/canary-task-names.txt",
-    ),
-    "utf8",
+  const fixedTaskListPath = join(
+    projectRoot,
+    mode === "full" || mode === "cached-full"
+      ? "benchmarks/terminal_bench_2_1/full-task-names.txt"
+      : "benchmarks/terminal_bench_2_1/canary-task-names.txt",
   );
+  const raw = await readFile(fixedTaskListPath, "utf8");
   const names = raw
     .split(/\r?\n/u)
     .map((line) => line.trim())
@@ -704,7 +725,110 @@ async function resolveTasks(mode, singleTask) {
   if (mode === "full" && names.length !== 89) {
     throw new Error(`Terminal-Bench full task list must contain exactly 89 tasks`);
   }
-  return names;
+  if (mode === "cached-full") {
+    return resolveCachedFullTasks(names);
+  }
+  return { tasks: names, selection: null, localImageRefs: [] };
+}
+
+async function resolveCachedFullTasks(fullTasks) {
+  if (fullTasks.length !== 89) {
+    throw new Error("Terminal-Bench cached-full requires the fixed 89-task list");
+  }
+  const imageLockPath = resolveImageLockPath(projectRoot, "cached-full");
+  const imageLock = JSON.parse(await readFile(imageLockPath, "utf8"));
+  if (
+    imageLock?.schemaVersion !== 1 ||
+    imageLock.platform !== "linux/amd64" ||
+    imageLock.images === null ||
+    typeof imageLock.images !== "object" ||
+    Array.isArray(imageLock.images) ||
+    Object.keys(imageLock.images).length !== fullTasks.length ||
+    fullTasks.some((taskName) => !Object.hasOwn(imageLock.images, taskName))
+  ) {
+    throw new Error("Terminal-Bench cached-full image lock is incomplete");
+  }
+  const imageRefs = new Map(
+    fullTasks.map((taskName) => [taskName, lockedImageRef(imageLock.images[taskName], taskName)]),
+  );
+  const listing = await capture(
+    "docker",
+    ["image", "ls", "--digests", "--no-trunc", "--format", "{{.Repository}}@{{.Digest}}"],
+    projectRoot,
+  );
+  const localRefs = new Set(
+    listing
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.includes("<none>")),
+  );
+  const tasks = fullTasks.filter((taskName) => localRefs.has(imageRefs.get(taskName)));
+  if (tasks.length === 0) {
+    throw new Error("Terminal-Bench cached-full found no locally cached locked images");
+  }
+  const selectedRefs = tasks.map((taskName) => imageRefs.get(taskName));
+  await assertCachedImageRefs(selectedRefs);
+  return {
+    tasks,
+    localImageRefs: selectedRefs,
+    selection: {
+      schemaVersion: 1,
+      mode: "cached-full",
+      platform: "linux/amd64",
+      selectedTasks: tasks,
+      excludedTasks: fullTasks
+        .filter((taskName) => !localRefs.has(imageRefs.get(taskName)))
+        .map((taskName) => ({ taskName, reason: "locked-image-not-cached" })),
+    },
+  };
+}
+
+function lockedImageRef(image, taskName) {
+  if (
+    image === null ||
+    typeof image !== "object" ||
+    Array.isArray(image) ||
+    typeof image.source !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(image.digest ?? "") ||
+    !Number.isSafeInteger(image.compressedSizeBytes) ||
+    image.compressedSizeBytes <= 0
+  ) {
+    throw new Error(`Terminal-Bench cached-full image lock entry is invalid: ${taskName}`);
+  }
+  const separator = image.source.lastIndexOf(":");
+  const lastSlash = image.source.lastIndexOf("/");
+  const repository = image.source.slice(0, separator);
+  const tag = image.source.slice(separator + 1);
+  if (
+    separator <= lastSlash ||
+    repository.length === 0 ||
+    !/^[a-z0-9._/-]+$/u.test(repository) ||
+    !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/u.test(tag)
+  ) {
+    throw new Error(`Terminal-Bench cached-full image source is invalid: ${taskName}`);
+  }
+  return `${repository}@${image.digest}`;
+}
+
+async function assertCachedImageRefs(imageRefs) {
+  if (!Array.isArray(imageRefs) || imageRefs.length === 0) {
+    throw new Error("Terminal-Bench cached-full image selection is empty");
+  }
+  const output = await capture(
+    "docker",
+    ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", ...imageRefs],
+    projectRoot,
+  );
+  const platforms = output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (
+    platforms.length !== imageRefs.length ||
+    platforms.some((platform) => platform !== "linux/amd64")
+  ) {
+    throw new Error("Terminal-Bench cached-full image platform verification failed");
+  }
 }
 
 async function materializeReadOnlyDatasetSnapshot(sourcePath, runRoot) {

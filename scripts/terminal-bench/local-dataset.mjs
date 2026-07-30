@@ -9,6 +9,7 @@ import { hashDirectory } from "./publication.mjs";
 const taskLockFiles = {
   single: "canary-task-lock.json",
   canary: "canary-task-lock.json",
+  "cached-full": "full-task-lock.json",
   full: "full-task-lock.json",
 };
 const fullImageLockFilename = "full-image-lock.json";
@@ -28,7 +29,7 @@ export function resolveTaskLockPath(projectRoot, mode) {
 }
 
 export function resolveImageLockPath(projectRoot, mode) {
-  if (mode === "full") {
+  if (mode === "cached-full" || mode === "full") {
     return join(projectRoot, "benchmarks", "terminal_bench_2_1", fullImageLockFilename);
   }
   if (mode === "single" || mode === "canary") return null;
@@ -36,7 +37,7 @@ export function resolveImageLockPath(projectRoot, mode) {
 }
 
 export function resolveTaskCachePackagesRoot(projectRoot, mode, homeDirectory = homedir()) {
-  if (mode === "full") {
+  if (mode === "cached-full" || mode === "full") {
     return join(
       projectRoot,
       "output",
@@ -70,7 +71,9 @@ export async function prepareLocalDataset({
   homeDirectory = homedir(),
 }) {
   assertValidTasks(tasks, mode);
-  if (mode === "full") await assertFullTaskMatrix(projectRoot, tasks);
+  if (mode === "cached-full" || mode === "full") {
+    await assertFullTaskMatrix(projectRoot, tasks, mode);
+  }
   const taskLockPath = resolveTaskLockPath(projectRoot, mode);
   const taskLockRaw = await readRequiredTaskLock(taskLockPath, mode);
   const taskLock = parseTaskLock(taskLockRaw, mode);
@@ -109,7 +112,7 @@ export async function prepareLocalDataset({
     if (imageLock.lock !== null) {
       await pinTaskDockerImage(taskDestination, taskName, imageLock.lock.images[taskName]);
     }
-    await setTaskPrestartNetworkIsolation(taskDestination, runId);
+    await setTaskPrestartNetworkIsolation(taskDestination, runId, mode === "cached-full");
     await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(env));
   }
   return {
@@ -156,6 +159,15 @@ function parseTaskLock(raw, mode) {
 function assertCompleteModeLock(lock, tasks, mode) {
   if (mode === "single") return;
   const lockedTasks = Object.keys(lock.tasks);
+  if (mode === "cached-full") {
+    if (
+      lockedTasks.length !== fullTaskCount ||
+      tasks.some((taskName) => !Object.hasOwn(lock.tasks, taskName))
+    ) {
+      throw new Error("Terminal-Bench cached-full task lock does not cover the task list");
+    }
+    return;
+  }
   if (
     lockedTasks.length !== tasks.length ||
     tasks.some((taskName) => !Object.hasOwn(lock.tasks, taskName))
@@ -175,7 +187,7 @@ function assertValidTasks(tasks, mode) {
   }
 }
 
-async function assertFullTaskMatrix(projectRoot, tasks) {
+async function assertFullTaskMatrix(projectRoot, tasks, mode) {
   const path = join(projectRoot, "benchmarks", "terminal_bench_2_1", fullTaskListFilename);
   let raw;
   try {
@@ -196,9 +208,11 @@ async function assertFullTaskMatrix(projectRoot, tasks) {
     expectedTasks.length !== fullTaskCount ||
     new Set(expectedTasks).size !== fullTaskCount ||
     expectedTasks.some((taskName) => !taskNamePattern.test(taskName)) ||
-    tasks.length !== fullTaskCount ||
     tasks.some((taskName) => !expectedTasks.includes(taskName))
   ) {
+    throw new Error(`Terminal-Bench ${mode} task set is outside the fixed 89-task list`);
+  }
+  if (mode === "full" && tasks.length !== fullTaskCount) {
     throw new Error("Terminal-Bench full task set does not match the fixed 89-task list");
   }
 }
@@ -235,11 +249,12 @@ async function readImageLock(projectRoot, tasks, mode) {
     throw new Error("Terminal-Bench full image lock is invalid");
   }
   const lockedTasks = Object.keys(lock.images);
-  if (
-    lockedTasks.length !== tasks.length ||
-    tasks.some((taskName) => !Object.hasOwn(lock.images, taskName))
-  ) {
+  const taskCoverageInvalid = tasks.some((taskName) => !Object.hasOwn(lock.images, taskName));
+  if (taskCoverageInvalid || (mode === "full" && lockedTasks.length !== tasks.length)) {
     throw new Error("Terminal-Bench full image lock does not match the task list");
+  }
+  if (mode === "cached-full" && lockedTasks.length !== fullTaskCount) {
+    throw new Error("Terminal-Bench cached-full image lock does not cover the fixed task set");
   }
   for (const taskName of tasks) {
     const image = lock.images[taskName];
@@ -313,7 +328,7 @@ function taggedImageRepository(source, taskName) {
   return repository;
 }
 
-async function setTaskPrestartNetworkIsolation(taskRoot, runId) {
+async function setTaskPrestartNetworkIsolation(taskRoot, runId, localImagesOnly) {
   const path = join(taskRoot, "environment", "docker-compose.yaml");
   try {
     await lstat(path);
@@ -321,5 +336,5 @@ async function setTaskPrestartNetworkIsolation(taskRoot, runId) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  await writeFile(path, prestartNetworkOverlay(runId), { mode: 0o600 });
+  await writeFile(path, prestartNetworkOverlay(runId, { localImagesOnly }), { mode: 0o600 });
 }

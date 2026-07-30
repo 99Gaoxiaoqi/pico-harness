@@ -43,9 +43,17 @@ npm run benchmark:terminal-bench:single -- \
 
 npm run benchmark:terminal-bench:canary
 
+node scripts/terminal-bench/run.mjs --mode cached-full --docker-host-gateway \
+  --concurrency 1 --max-run-cost-cny 890
+
 node scripts/terminal-bench/run.mjs --mode full --docker-host-gateway \
   --concurrency 1 --max-run-cost-cny 1200
 ```
+
+`cached-full` 仍要求完整的 89 题 task/image locks 与本地 task cache，但只选择本机已有
+精确 `linux/amd64` image digest 的题目，并在 Harbor 启动前复核。staged Compose
+强制 `pull_policy: never`，因此缺失镜像会令 run 失败，而不会在运行时下载。选择与排除
+清单写入 `task-selection.json` 并由 manifest 锁定；`full` 的固定 89 题契约不变。
 
 每次 run 的模型费用由 Gateway Supervisor 跨 trial 原子累计，默认硬上限为 250 CNY；
 `--max-run-cost-cny` 可显式调整，但不会放宽每个 trial 的独立预算。额度耗尽时拒绝新的

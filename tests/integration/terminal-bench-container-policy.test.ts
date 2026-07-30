@@ -30,6 +30,14 @@ test("Terminal-Bench accepts its exact single-main prestart overlay", async (con
   await assert.rejects(assertTaskComposePolicy(root, process.env), /only define the main service/u);
 });
 
+test("Terminal-Bench accepts its exact cached-image-only overlay", async (context) => {
+  const root = await createTaskRoot(context, "cached-only");
+  const overlay = prestartNetworkOverlay("fixture-run", { localImagesOnly: true });
+  assert.match(overlay, /pull_policy: never/u);
+  await writeFile(join(root, "environment", "docker-compose.yaml"), overlay);
+  await assertTaskComposePolicy(root, process.env);
+});
+
 test("Terminal-Bench rejects sidecars and externally connected proxies", async (context) => {
   const root = await createTaskRoot(context, "sidecar");
   await writeFile(
