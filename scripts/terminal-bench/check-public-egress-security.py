@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import importlib.util
+import io
 import json
 import socket
 import sys
@@ -37,6 +39,18 @@ def wait_until(predicate: Callable[[], bool], timeout_sec: float = 2.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError("timed out waiting for local proxy state")
         time.sleep(0.005)
+
+
+def port_is_bindable(module: Any, port: int) -> bool:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((module.PUBLIC_EGRESS_BIND_HOST, port))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
 
 
 def http_request(
@@ -341,7 +355,7 @@ def assert_http_and_audit(module: Any) -> None:
 
 def assert_connect(module: Any) -> None:
     token = "connect-token"
-    resolver = MappingResolver({"tunnel.test": ["2606:2800:220:1:248:1893:25c8:1946"]})
+    resolver = MappingResolver({"tunnel.test": ["93.184.216.34"]})
     connector = SocketPairConnector(echo_responder)
     proxy = module.PublicEgressProxy(token, 60)
     proxy._resolver = resolver
@@ -359,7 +373,7 @@ def assert_connect(module: Any) -> None:
         receipt = proxy.stop()
         connector.join()
     assert resolver.calls == [("tunnel.test", 443)]
-    assert connector.calls[0][0] == "2606:2800:220:1:248:1893:25c8:1946"
+    assert connector.calls[0][0] == "93.184.216.34"
     assert receipt["allowed"] == 1
     assert receipt["bytes"]["clientToUpstream"] == len(b"tunnel-payload")
     assert receipt["bytes"]["upstreamToClient"] == len(b"tunnel-payload")
@@ -435,9 +449,7 @@ def assert_policy_denials(module: Any) -> None:
     reasons = {decision["reason"] for decision in receipt["decisions"]}
     assert {
         "non_public_address",
-        "transition_address",
-        "site_local_address",
-        "isatap_address",
+        "ipv6_address",
         "localhost",
         "local_name",
         "internal_name",
@@ -534,6 +546,46 @@ def assert_header_smuggling_rejected(module: Any) -> None:
     ]
 
 
+def assert_content_length_bound(module: Any) -> None:
+    token = "content-length-token"
+
+    def unexpected_resolver(_host: str, _port: int) -> list[str]:
+        raise AssertionError("an invalid Content-Length reached DNS")
+
+    proxy = module.PublicEgressProxy(token, 60)
+    proxy._resolver = unexpected_resolver
+    port = proxy.start()
+    try:
+        overlong_status = raw_request_status(
+            port,
+            (
+                "POST http://public.test/ HTTP/1.1\r\n"
+                "Host: public.test\r\n"
+                f"Proxy-Authorization: {basic_auth(token)}\r\n"
+                f"Content-Length: {'9' * 5_000}\r\n"
+                "\r\n"
+            ).encode(),
+        )
+        assert overlong_status == 413
+        non_ascii_status = raw_request_status(
+            port,
+            (
+                "POST http://public.test/ HTTP/1.1\r\n"
+                "Host: public.test\r\n"
+                f"Proxy-Authorization: {basic_auth(token)}\r\n"
+                "Content-Length: "
+            ).encode()
+            + b"\xb2\r\n\r\n",
+        )
+        assert non_ascii_status == 400
+    finally:
+        receipt = proxy.stop()
+    assert [decision["reason"] for decision in receipt["decisions"]] == [
+        "content_length",
+        "content_length",
+    ]
+
+
 def assert_doh_parser(module: Any) -> None:
     host = "example.com"
     a_response = fake_doh_response(
@@ -543,15 +595,6 @@ def assert_doh_parser(module: Any) -> None:
         ["93.184.216.34"],
     )
     assert module._parse_doh_response(host, 1, 4, a_response) == ("93.184.216.34",)
-    aaaa_response = fake_doh_response(
-        module,
-        host,
-        "AAAA",
-        ["2606:2800:220:1:248:1893:25c8:1946"],
-    )
-    assert module._parse_doh_response(host, 28, 6, aaaa_response) == (
-        "2606:2800:220:1:248:1893:25c8:1946",
-    )
 
     cname_response = encoded_doh_response(
         module,
@@ -632,6 +675,12 @@ def assert_doh_parser(module: Any) -> None:
         ),
         fake_doh_response(module, host, "A", ["198.18.0.14"]),
         fake_doh_response(module, host, "A", ["10.0.0.1"]),
+        fake_doh_response(
+            module,
+            host,
+            "AAAA",
+            ["2606:2800:220:1:248:1893:25c8:1946"],
+        ),
     )
     for response in invalid_payloads:
         try:
@@ -643,97 +692,106 @@ def assert_doh_parser(module: Any) -> None:
 
 
 def assert_doh_fallback_and_fail_closed(module: Any) -> None:
-    original_request = module._doh_https_request
     original_getaddrinfo = module.socket.getaddrinfo
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, float]] = []
+    proxy = module.PublicEgressProxy("doh-fail-closed-token", 60)
+    proxy.start()
 
     def forbidden_system_dns(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("default resolver used system DNS")
 
-    def fallback_request(endpoint_ip: str, host: str, record_name: str) -> Any:
-        calls.append((endpoint_ip, host, record_name))
+    def fallback_request(
+        endpoint_ip: str,
+        host: str,
+        record_name: str,
+        deadline: float,
+    ) -> Any:
+        calls.append((endpoint_ip, host, record_name, deadline))
         if endpoint_ip == "1.1.1.1":
             raise OSError("synthetic primary DoH failure")
-        addresses = (
-            ["93.184.216.34"]
-            if record_name == "A"
-            else ["2606:2800:220:1:248:1893:25c8:1946"]
-        )
-        return fake_doh_response(module, host, record_name, addresses)
+        return fake_doh_response(module, host, record_name, ["93.184.216.34"])
 
     try:
         module.socket.getaddrinfo = forbidden_system_dns
-        module._doh_https_request = fallback_request
-        addresses = tuple(module._default_resolver("example.com", 443))
-        assert addresses == (
-            "93.184.216.34",
-            "2606:2800:220:1:248:1893:25c8:1946",
-        )
-        assert calls == [
+        proxy._doh_requester = fallback_request
+        addresses = tuple(proxy._resolve_via_doh("example.com", 443))
+        assert addresses == ("93.184.216.34",)
+        assert [(endpoint, host, record) for endpoint, host, record, _ in calls] == [
             ("1.1.1.1", "example.com", "A"),
             ("1.0.0.1", "example.com", "A"),
-            ("1.0.0.1", "example.com", "AAAA"),
         ]
 
         calls.clear()
 
-        def failed_request(endpoint_ip: str, host: str, record_name: str) -> Any:
-            calls.append((endpoint_ip, host, record_name))
+        def failed_request(
+            endpoint_ip: str,
+            host: str,
+            record_name: str,
+            deadline: float,
+        ) -> Any:
+            calls.append((endpoint_ip, host, record_name, deadline))
             raise OSError("synthetic pinned DoH outage")
 
-        module._doh_https_request = failed_request
+        proxy._doh_requester = failed_request
         try:
-            tuple(module._default_resolver("example.com", 443))
+            tuple(proxy._resolve_via_doh("example.com", 443))
         except module.ProxyRequestError as error:
             assert error.reason == "resolution_failed"
         else:
             raise AssertionError("DoH outage fell back or failed open")
-        assert calls == [
+        assert [(endpoint, host, record) for endpoint, host, record, _ in calls] == [
             ("1.1.1.1", "example.com", "A"),
             ("1.0.0.1", "example.com", "A"),
         ]
 
         calls.clear()
 
-        def empty_request(endpoint_ip: str, host: str, record_name: str) -> Any:
-            calls.append((endpoint_ip, host, record_name))
+        def empty_request(
+            endpoint_ip: str,
+            host: str,
+            record_name: str,
+            deadline: float,
+        ) -> Any:
+            calls.append((endpoint_ip, host, record_name, deadline))
             return fake_doh_response(module, host, record_name, [])
 
-        module._doh_https_request = empty_request
+        proxy._doh_requester = empty_request
         try:
-            tuple(module._default_resolver("example.com", 443))
+            tuple(proxy._resolve_via_doh("example.com", 443))
         except module.ProxyRequestError as error:
             assert error.reason == "resolution_failed"
         else:
-            raise AssertionError("empty A and AAAA answers were accepted")
-        assert calls == [
+            raise AssertionError("empty A answer was accepted")
+        assert [(endpoint, host, record) for endpoint, host, record, _ in calls] == [
             ("1.1.1.1", "example.com", "A"),
-            ("1.1.1.1", "example.com", "AAAA"),
             ("1.0.0.1", "example.com", "A"),
-            ("1.0.0.1", "example.com", "AAAA"),
         ]
 
         calls.clear()
 
-        def fake_ip_request(endpoint_ip: str, host: str, record_name: str) -> Any:
-            calls.append((endpoint_ip, host, record_name))
-            addresses = ["198.18.0.14"] if record_name == "A" else []
-            return fake_doh_response(module, host, record_name, addresses)
+        def fake_ip_request(
+            endpoint_ip: str,
+            host: str,
+            record_name: str,
+            deadline: float,
+        ) -> Any:
+            calls.append((endpoint_ip, host, record_name, deadline))
+            return fake_doh_response(module, host, record_name, ["198.18.0.14"])
 
-        module._doh_https_request = fake_ip_request
+        proxy._doh_requester = fake_ip_request
         try:
-            tuple(module._default_resolver("example.com", 443))
+            tuple(proxy._resolve_via_doh("example.com", 443))
         except module.ProxyRequestError:
             pass
         else:
             raise AssertionError("Fake-IP DoH answer was accepted")
-        assert calls == [
+        assert [(endpoint, host, record) for endpoint, host, record, _ in calls] == [
             ("1.1.1.1", "example.com", "A"),
             ("1.0.0.1", "example.com", "A"),
         ]
     finally:
-        module._doh_https_request = original_request
         module.socket.getaddrinfo = original_getaddrinfo
+        proxy.stop()
 
 
 def assert_ttl(module: Any) -> None:
@@ -749,11 +807,78 @@ def assert_ttl(module: Any) -> None:
         status, _body, _headers = http_request(
             port, "http://public.test/", auth=basic_auth(token)
         )
-        assert status == 403
+        assert status == 503
     finally:
         receipt = proxy.stop()
     assert resolver.calls == []
     assert receipt["decisions"][0]["reason"] == "ttl"
+
+
+def assert_ttl_listener_lifecycle(module: Any) -> None:
+    proxy = module.PublicEgressProxy("ttl-listener-token", 0.05)
+    port = proxy.start()
+    try:
+        assert not port_is_bindable(module, port)
+        assert proxy._expiry_fired.wait(timeout=2)
+        assert not port_is_bindable(module, port)
+        status, _body, _headers = http_request(
+            port,
+            "http://public.test/",
+            auth=basic_auth("ttl-listener-token"),
+        )
+        assert status == 503
+    finally:
+        receipt = proxy.stop()
+    assert port_is_bindable(module, port)
+    assert receipt["decisions"][0]["reason"] == "ttl"
+
+
+def assert_revoke_lifecycle(module: Any) -> None:
+    proxy = module.PublicEgressProxy("revoke-token", 60)
+    port = proxy.start()
+    try:
+        proxy.revoke()
+        proxy.revoke()
+        assert not port_is_bindable(module, port)
+        status, _body, _headers = http_request(
+            port,
+            "http://public.test/",
+            auth=basic_auth("revoke-token"),
+        )
+        assert status == 503
+    finally:
+        receipt = proxy.stop()
+    assert port_is_bindable(module, port)
+    assert receipt["requestsAccepted"] == 0
+    assert receipt["decisions"][0]["reason"] == "revoked"
+
+
+def assert_request_limit(module: Any) -> None:
+    proxy = module.PublicEgressProxy("request-limit-token", 60, 32, 1_024, 2)
+    port = proxy.start()
+    try:
+        for _attempt in range(2):
+            status, _body, _headers = http_request(
+                port,
+                "http://public.test/",
+                auth=None,
+            )
+            assert status == 407
+        status, _body, _headers = http_request(
+            port,
+            "http://public.test/",
+            auth=None,
+        )
+        assert status == 503
+    finally:
+        receipt = proxy.stop()
+    assert receipt["requestsAccepted"] == 2
+    assert receipt["denied"] == 3
+    assert [decision["reason"] for decision in receipt["decisions"]] == [
+        "authentication",
+        "authentication",
+        "request_limit",
+    ]
 
 
 def assert_connection_limit(module: Any) -> None:
@@ -773,6 +898,123 @@ def assert_connection_limit(module: Any) -> None:
         receipt = proxy.stop()
     assert receipt["denied"] == 1
     assert receipt["decisions"][0]["reason"] == "connection_limit"
+
+
+def assert_server_error_is_bounded(module: Any) -> None:
+    proxy = module.PublicEgressProxy("server-error-token", 60)
+    proxy.start()
+    client, peer = socket.socketpair()
+    try:
+        server = proxy._server
+        assert server is not None
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            server.handle_error(client, ("local", 0))
+        assert stderr.getvalue() == ""
+    finally:
+        client.close()
+        peer.close()
+        receipt = proxy.stop()
+    assert receipt["decisions"] == [
+        {
+            "host": "",
+            "port": 0,
+            "decision": "deny",
+            "reason": "server_error",
+            "bytes": 0,
+        }
+    ]
+
+
+def assert_blocked_doh_action(module: Any, action: str) -> None:
+    ttl_sec = 0.5 if action == "ttl" else 60
+    proxy = module.PublicEgressProxy(f"blocked-doh-{action}-token", ttl_sec)
+    entered = threading.Event()
+    peers: list[socket.socket] = []
+    outcome: list[str] = []
+
+    def blocked_socket_factory() -> socket.socket:
+        proxy_side, peer = socket.socketpair()
+        peers.append(peer)
+        entered.set()
+        return proxy_side
+
+    proxy._doh_socket_factory = blocked_socket_factory
+    proxy._doh_socket_connect = lambda _connection, _address: None
+    port = proxy.start()
+
+    def issue_request() -> None:
+        client: socket.socket | None = None
+        try:
+            status, client = connect_request(
+                port,
+                "blocked.test:443",
+                basic_auth(f"blocked-doh-{action}-token"),
+            )
+            outcome.append(f"status:{status}")
+        except (OSError, IndexError, ValueError, http.client.HTTPException) as error:
+            outcome.append(type(error).__name__)
+        finally:
+            if client is not None:
+                client.close()
+
+    requester = threading.Thread(
+        target=issue_request,
+        name=f"pico-public-egress-test-blocked-{action}",
+        daemon=True,
+    )
+    requester.start()
+    assert entered.wait(timeout=2)
+    wait_until(lambda: len(proxy._active_sockets) >= 2)
+
+    receipt: dict[str, Any] | None = None
+    try:
+        if action == "stop":
+            receipt = proxy.stop()
+        elif action == "revoke":
+            proxy.revoke()
+        else:
+            assert action == "ttl"
+            assert proxy._expiry_fired.wait(timeout=2)
+
+        requester.join(timeout=2)
+        assert not requester.is_alive()
+        assert outcome
+        try:
+            wait_until(lambda: not proxy._active_sockets)
+        except AssertionError as error:
+            raise AssertionError(
+                f"{action} retained {len(proxy._active_sockets)} active sockets"
+            ) from error
+        assert len(peers) == 1
+
+        if action != "stop":
+            assert not port_is_bindable(module, port)
+            receipt = proxy.stop()
+        assert port_is_bindable(module, port)
+        assert receipt is not None
+        assert receipt["requestsAccepted"] == 1
+        expected_reason = {
+            "stop": "stopped",
+            "revoke": "revoked",
+            "ttl": "ttl",
+        }[action]
+        assert any(
+            decision["reason"] == expected_reason for decision in receipt["decisions"]
+        )
+        stable_receipt = json.dumps(receipt, sort_keys=True)
+        time.sleep(0.05)
+        assert json.dumps(proxy.stop(), sort_keys=True) == stable_receipt
+    finally:
+        for peer in peers:
+            peer.close()
+        if receipt is None:
+            proxy.stop()
+
+
+def assert_blocked_doh_cancellation(module: Any) -> None:
+    for action in ("stop", "revoke", "ttl"):
+        assert_blocked_doh_action(module, action)
 
 
 def assert_byte_limit(module: Any) -> None:
@@ -862,6 +1104,7 @@ def assert_constructor_contract(module: Any) -> None:
     assert module.PROXY_POLICY_VERSION == 1
     assert module.DEFAULT_MAX_CONNECTIONS == 32
     assert module.DEFAULT_MAX_TOTAL_BYTES == 1_073_741_824
+    assert module.DEFAULT_MAX_REQUESTS == 4_096
     assert module.ALLOWED_HTTP_PORTS == (80,)
     assert module.ALLOWED_CONNECT_PORTS == (443,)
     assert module.DOH_HOST == "cloudflare-dns.com"
@@ -874,6 +1117,9 @@ def assert_constructor_contract(module: Any) -> None:
         ("token", float("inf")),
         ("token", 60, 0),
         ("token", 60, 32, 0),
+        ("token", 60, 32, 1_024, 0),
+        ("token", 60, 32, 1_024, True),
+        ("token", 60, 32, 1_024, 1_000_001),
     ):
         try:
             module.PublicEgressProxy(*args)
@@ -891,10 +1137,16 @@ def main() -> None:
     assert_policy_denials(module)
     assert_authentication(module)
     assert_header_smuggling_rejected(module)
+    assert_content_length_bound(module)
     assert_doh_parser(module)
     assert_doh_fallback_and_fail_closed(module)
     assert_ttl(module)
+    assert_ttl_listener_lifecycle(module)
+    assert_revoke_lifecycle(module)
+    assert_request_limit(module)
     assert_connection_limit(module)
+    assert_server_error_is_bounded(module)
+    assert_blocked_doh_cancellation(module)
     assert_byte_limit(module)
     assert_connection_timeout(module)
     assert_bounded_audit(module)
@@ -903,14 +1155,19 @@ def main() -> None:
             {
                 "ok": True,
                 "proxyPolicyVersion": module.PROXY_POLICY_VERSION,
-                "checks": 13,
+                "checks": 19,
                 "maxConnections": module.DEFAULT_MAX_CONNECTIONS,
+                "maxRequests": module.DEFAULT_MAX_REQUESTS,
                 "maxTotalBytes": module.DEFAULT_MAX_TOTAL_BYTES,
+                "maxAuditDecisions": module.MAX_AUDIT_DECISIONS,
                 "allowedHttpPorts": list(module.ALLOWED_HTTP_PORTS),
                 "allowedConnectPorts": list(module.ALLOWED_CONNECT_PORTS),
                 "connectionTimeoutSec": (module.PUBLIC_EGRESS_CONNECTION_TIMEOUT_SEC),
                 "dnsMode": "pinned-doh",
                 "dohHost": module.DOH_HOST,
+                "dohEndpointIps": list(module.DOH_ENDPOINT_IPS),
+                "systemDnsFallback": False,
+                "ipv4Only": True,
             },
             separators=(",", ":"),
             sort_keys=True,
