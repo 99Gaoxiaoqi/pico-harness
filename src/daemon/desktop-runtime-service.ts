@@ -54,6 +54,7 @@ import { renderSkillActivation } from "../input/skill-activation.js";
 import { initializeProjectEntrypoints } from "../input/project-initializer.js";
 import { CostTracker } from "../observability/tracker.js";
 import { logger } from "../observability/logger.js";
+import { summarizeCacheEffectiveness } from "../observability/cache-effectiveness.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import {
@@ -2927,6 +2928,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const providerCalls = sumUsage(calls);
       const baselineTotals = sumUsage(baselines);
       const total = addUsage(providerCalls, baselineTotals);
+      // Baseline only contains cumulative buckets, not per-request report coverage or prompt
+      // fingerprints. Cache-effectiveness ratios intentionally stay provider_calls-only.
+      const cache = summarizeCacheEffectiveness(calls);
       return toJsonValue({
         usage: {
           workspacePath: canonical,
@@ -2938,6 +2942,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           providerCalls,
           baselines: baselineTotals,
           total: { ...total, totalTokens: total.inputTokens + total.outputTokens },
+          cache,
           rangeAccuracy: hasRange ? "provider_calls_only" : "all_time_with_baselines",
         },
       });

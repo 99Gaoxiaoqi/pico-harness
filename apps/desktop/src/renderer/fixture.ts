@@ -423,7 +423,12 @@ export const previewData: AppData = {
   usage: {
     inputTokens: 128_400,
     outputTokens: 22_760,
-    cachedTokens: 68_120,
+    cacheReadTokens: 68_120,
+    cacheWriteTokens: 12_000,
+    uncachedInputTokens: 128_400,
+    cacheRequestHitRate: 0.74,
+    cachePromptTokenReuseRate: 0.33,
+    cacheReadToWriteRatio: 5.68,
     cost: 3.84,
     period: "本月",
   },
