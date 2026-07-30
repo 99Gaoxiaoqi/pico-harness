@@ -172,47 +172,10 @@ def assert_route_config_contract(adapter: Any) -> None:
             compatible_route_config(include_model_capability=False),
             compatible_route_config(4_096),
             compatible_route_config(4_096, model="org/compatible-model"),
+            compatible_route_config(200_000),
         ):
             path.write_text(json.dumps(compatible))
             assert adapter.load_route_config(path) == compatible
-        assert adapter.route_output_capability(compatible_route_config()) is None
-        assert (
-            adapter.route_output_capability(
-                compatible_route_config(include_model_capability=False)
-            )
-            is None
-        )
-        assert (
-            adapter.route_output_capability(compatible_route_config(4_096))
-            == 4_096
-        )
-
-        for invalid_output in (
-            None,
-            True,
-            "4096",
-            0,
-            -1,
-            1.5,
-            9_007_199_254_740_992,
-        ):
-            invalid = compatible_route_config(4_096)
-            invalid["provider"]["modelCapabilities"]["compatible-model"][
-                "output"
-            ] = invalid_output
-            path.write_text(json.dumps(invalid))
-            try:
-                adapter.load_route_config(path)
-            except ValueError as error:
-                assert (
-                    str(error)
-                    == "route config model output capability is invalid"
-                )
-            else:
-                raise AssertionError(
-                    "unsafe compatible output capability was accepted: "
-                    f"{invalid_output!r}"
-                )
 
 
 async def assert_bootstrap_output_projection(adapter: Any) -> None:
@@ -270,29 +233,22 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
             "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
             "output": 8_192,
         }
-        compatible = await project(
-            root,
-            "compatible",
-            compatible_route_config(4_096),
-        )
-        assert compatible["route"] == {
-            "id": "compatible-provider/compatible-model",
-            "protocol": "openai",
-            "baseURL": "http://pico-gateway:8080",
-            "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
-            "output": 4_096,
-        }
-        missing = await project(
-            root,
-            "missing",
-            compatible_route_config(include_model_capability=False),
-        )
-        assert missing["route"] == {
-            "id": "compatible-provider/compatible-model",
-            "protocol": "openai",
-            "baseURL": "http://pico-gateway:8080",
-            "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
-        }
+        for name, route_config in (
+            ("configured-4096", compatible_route_config(4_096)),
+            ("configured-32768", compatible_route_config(32_768)),
+            ("configured-200000", compatible_route_config(200_000)),
+            (
+                "missing",
+                compatible_route_config(include_model_capability=False),
+            ),
+        ):
+            compatible = await project(root, name, route_config)
+            assert compatible["route"] == {
+                "id": "compatible-provider/compatible-model",
+                "protocol": "openai",
+                "baseURL": "http://pico-gateway:8080",
+                "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
+            }
 
 
 def assert_accounting_failure_messages(adapter: Any) -> None:
