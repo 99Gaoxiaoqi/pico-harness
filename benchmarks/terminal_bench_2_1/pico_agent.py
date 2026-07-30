@@ -51,6 +51,12 @@ _PUBLIC_EGRESS_MAX_CONNECTIONS = 32
 _PUBLIC_EGRESS_MAX_REQUESTS = 4_096
 _PUBLIC_EGRESS_MAX_TOTAL_BYTES = 1_073_741_824
 _PUBLIC_EGRESS_NO_PROXY = "pico-gateway,main,localhost,127.0.0.1,::1"
+_AGENT_CONTROLLED_PROXY_GATE_ENV = "PICO_TB_AGENT_CONTROLLED_PROXY"
+_AGENT_CONTROLLED_PROXY_GATE_ENABLED = "terminal-bench-agent-v1"
+_AGENT_CONTROLLED_PROXY_GATE_DISABLED = "disabled"
+_AGENT_CONTROLLED_PROXY_URL = re.compile(
+    r"http://pico:[0-9a-f]{64}@pico-egress:8081"
+)
 _PUBLIC_EGRESS_RELAY_SCRIPT = (
     "const net=require('node:net');"
     "const port=Number(process.argv[1]);"
@@ -1489,15 +1495,31 @@ async def docker_exec_secret_stdin(
         ]
     )
     if container_env:
-        if set(container_env) != set(PUBLIC_EGRESS_PROXY_ENV_NAMES):
-            raise RuntimeError("Container public proxy environment is incomplete")
+        verified_proxy_env = validate_agent_controlled_proxy_env(container_env)
+        full_command.extend(
+            [
+                "-e",
+                (
+                    f"{_AGENT_CONTROLLED_PROXY_GATE_ENV}="
+                    f"{_AGENT_CONTROLLED_PROXY_GATE_ENABLED}"
+                ),
+            ]
+        )
         for name in PUBLIC_EGRESS_PROXY_ENV_NAMES:
-            value = container_env[name]
-            if not isinstance(value, str) or not value or any(
-                character in value for character in ("\x00", "\r", "\n")
-            ):
-                raise RuntimeError("Container public proxy environment is invalid")
+            value = verified_proxy_env[name]
             full_command.extend(["-e", f"{name}={value}"])
+    else:
+        # Always override any task-image value. Without an adapter-created egress
+        # capability, the launcher cannot mint the process-local Runtime authority.
+        full_command.extend(
+            [
+                "-e",
+                (
+                    f"{_AGENT_CONTROLLED_PROXY_GATE_ENV}="
+                    f"{_AGENT_CONTROLLED_PROXY_GATE_DISABLED}"
+                ),
+            ]
+        )
     full_command.extend(
         [
             "main",
@@ -1535,6 +1557,22 @@ async def docker_exec_secret_stdin(
     if secret in stdout or secret in stderr:
         raise RuntimeError("Secret launcher leaked its input")
     return process
+
+
+def validate_agent_controlled_proxy_env(values: dict[str, str]) -> dict[str, str]:
+    if set(values) != set(PUBLIC_EGRESS_PROXY_ENV_NAMES):
+        raise RuntimeError("Container public proxy environment is incomplete")
+    verified = dict(values)
+    proxy_url = verified["HTTP_PROXY"]
+    if (
+        not isinstance(proxy_url, str)
+        or _AGENT_CONTROLLED_PROXY_URL.fullmatch(proxy_url) is None
+        or any(verified[name] != proxy_url for name in PUBLIC_EGRESS_PROXY_ENV_NAMES[:4])
+        or verified["NO_PROXY"] != _PUBLIC_EGRESS_NO_PROXY
+        or verified["no_proxy"] != _PUBLIC_EGRESS_NO_PROXY
+    ):
+        raise RuntimeError("Container public proxy environment is invalid")
+    return verified
 
 
 async def terminate_host_process(process: asyncio.subprocess.Process) -> None:

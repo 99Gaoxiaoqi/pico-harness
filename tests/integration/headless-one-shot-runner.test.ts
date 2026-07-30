@@ -13,6 +13,7 @@ import { createToolResultEnvelope } from "../../src/engine/tool-result-contract.
 import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
 import {
   runHeadlessOneShotJson,
+  terminalBenchAgentControlledProxyCapability,
   type HeadlessOneShotRequestV1,
 } from "../../src/internal/headless-one-shot-runner.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
@@ -23,6 +24,9 @@ const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
 const ROUTE_ID = `${PROVIDER_ID}/${MODEL_ID}`;
 type RunAgentCliDependenciesWithBashTimeout = { readonly bashTimeoutMs?: number };
+type RunAgentCliDependenciesWithEnv = {
+  readonly env?: Readonly<Record<string, string | undefined>>;
+};
 
 test("internal headless runner succeeds through the shared Runtime and redacts route credentials", async (context) => {
   const fixture = await createFixture(context, "success");
@@ -357,6 +361,194 @@ test("headless accepts existing task tools and forwards a bounded bash timeout",
 
   assert.equal(outcome.exitCode, 0);
   assert.equal(outcome.result.status, "completed");
+});
+
+test("headless forwards only a complete adapter-gated controlled proxy environment", async (context) => {
+  const fixture = await createFixture(context, "controlled-proxy");
+  await configureFixture(fixture, "secret-canary-controlled-proxy");
+  const token = "a".repeat(64);
+  const proxyUrl = `http://pico:${token}@pico-egress:8081`;
+  const noProxy = "pico-gateway,main,localhost,127.0.0.1,::1";
+  const proxyEnv = {
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
+    https_proxy: proxyUrl,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+  } as const;
+  const proxyNames = Object.keys(proxyEnv);
+
+  const runCase = async (
+    id: string,
+    env: Readonly<Record<string, string | undefined>>,
+    gate: string | undefined,
+    finalMessage = "controlled proxy case completed",
+  ) => {
+    let observedEnv: Readonly<Record<string, string | undefined>> | undefined;
+    let runtimeCalls = 0;
+    const capability = terminalBenchAgentControlledProxyCapability(gate);
+    const outcome = await runHeadlessOneShotJson(JSON.stringify(requestFor(fixture, id)), {
+      env,
+      ...(capability ? { controlledProxyCapability: capability } : {}),
+      executeRuntime: async (options, dependencies) => {
+        runtimeCalls++;
+        observedEnv = (dependencies as RunAgentCliDependenciesWithEnv | undefined)?.env;
+        return runtimeResult(options, finalMessage);
+      },
+    });
+    return { outcome, observedEnv, runtimeCalls };
+  };
+
+  for (const [id, gate] of [
+    ["proxy-gate-missing", undefined],
+    ["proxy-gate-disabled", "disabled"],
+    ["proxy-gate-polluted", "terminal-bench-agent-v2"],
+  ] as const) {
+    const { outcome, observedEnv, runtimeCalls } = await runCase(
+      id,
+      {
+        ...proxyEnv,
+        PATH: "/controlled/bin",
+        HOME: "/must-not-be-inherited",
+        PICO_TB_AGENT_CONTROLLED_PROXY: gate,
+      },
+      gate,
+    );
+    assert.equal(outcome.result.status, "completed");
+    assert.equal(runtimeCalls, 1);
+    assert.ok(observedEnv);
+    assert.equal(observedEnv["PATH"], "/controlled/bin");
+    assert.notEqual(observedEnv["HOME"], "/must-not-be-inherited");
+    for (const name of proxyNames) assert.equal(observedEnv[name], undefined);
+    assert.equal(observedEnv["PICO_TB_AGENT_CONTROLLED_PROXY"], undefined);
+  }
+
+  const incompleteEnv = { ...proxyEnv } as Record<string, string | undefined>;
+  delete incompleteEnv["no_proxy"];
+  const incomplete = await runCase("proxy-incomplete", incompleteEnv, "terminal-bench-agent-v1");
+  assert.equal(incomplete.outcome.result.status, "invalid_request");
+  assert.equal(incomplete.outcome.result.error?.code, "CONTROLLED_PROXY_ENV_INVALID");
+  assert.equal(incomplete.runtimeCalls, 0);
+
+  const pollutedProxy = await runCase(
+    "proxy-host-polluted",
+    {
+      ...proxyEnv,
+      HTTP_PROXY: `http://pico:${token}@untrusted-proxy:8081`,
+      HTTPS_PROXY: `http://pico:${token}@untrusted-proxy:8081`,
+      http_proxy: `http://pico:${token}@untrusted-proxy:8081`,
+      https_proxy: `http://pico:${token}@untrusted-proxy:8081`,
+    },
+    "terminal-bench-agent-v1",
+  );
+  assert.equal(pollutedProxy.outcome.result.status, "invalid_request");
+  assert.equal(pollutedProxy.outcome.result.error?.code, "CONTROLLED_PROXY_ENV_INVALID");
+  assert.equal(pollutedProxy.runtimeCalls, 0);
+
+  const pollutedNoProxy = await runCase(
+    "proxy-no-proxy-polluted",
+    { ...proxyEnv, NO_PROXY: "*", no_proxy: "*" },
+    "terminal-bench-agent-v1",
+  );
+  assert.equal(pollutedNoProxy.outcome.result.status, "invalid_request");
+  assert.equal(pollutedNoProxy.outcome.result.error?.code, "CONTROLLED_PROXY_ENV_INVALID");
+  assert.equal(pollutedNoProxy.runtimeCalls, 0);
+
+  const enabled = await runCase(
+    "proxy-enabled",
+    {
+      ...proxyEnv,
+      PATH: "/controlled/bin",
+      HOME: "/must-not-be-inherited",
+      UNRELATED_ENV: "must-not-be-inherited",
+    },
+    "terminal-bench-agent-v1",
+    `proxy=${proxyUrl} token=${token}`,
+  );
+  assert.equal(enabled.outcome.result.status, "completed");
+  assert.equal(enabled.runtimeCalls, 1);
+  assert.ok(enabled.observedEnv);
+  for (const [name, value] of Object.entries(proxyEnv)) {
+    assert.equal(enabled.observedEnv[name], value);
+  }
+  assert.equal(enabled.observedEnv["PATH"], "/controlled/bin");
+  assert.notEqual(enabled.observedEnv["HOME"], "/must-not-be-inherited");
+  assert.equal(enabled.observedEnv["UNRELATED_ENV"], undefined);
+  assert.equal(enabled.observedEnv["PICO_TB_AGENT_CONTROLLED_PROXY"], undefined);
+  assert.equal(enabled.outcome.result.finalMessage, "proxy=[REDACTED] token=[REDACTED]");
+  assert.equal(JSON.stringify(enabled.outcome.result).includes(token), false);
+});
+
+test("adapter-gated controlled proxy variables reach Bash without persisting its token", async (context) => {
+  const fixture = await createFixture(context, "controlled-proxy-bash");
+  await configureFixture(fixture, "secret-canary-controlled-proxy-bash");
+  const token = "b".repeat(64);
+  const proxyUrl = `http://pico:${token}@pico-egress:8081`;
+  const noProxy = "pico-gateway,main,localhost,127.0.0.1,::1";
+  const env = {
+    PATH: process.env.PATH,
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
+    https_proxy: proxyUrl,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+  };
+  const controlledProxyCapability =
+    terminalBenchAgentControlledProxyCapability("terminal-bench-agent-v1");
+  assert.ok(controlledProxyCapability);
+  let calls = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "controlled-proxy-bash"),
+      permissionMode: "yolo",
+      allowedTools: ["bash"],
+    }),
+    {
+      env,
+      controlledProxyCapability,
+      providerFactory: () => ({
+        async generate(messages) {
+          calls++;
+          if (calls === 1) {
+            return assistant("", { promptTokens: 5, completionTokens: 2 }, [
+              {
+                id: "proxy-env",
+                name: "bash",
+                arguments: JSON.stringify({
+                  command: [
+                    `printf '%s\\n' "$HTTP_PROXY" "$HTTPS_PROXY"`,
+                    `printf '%s\\n' "$http_proxy" "$https_proxy"`,
+                    `printf '%s\\n' "$NO_PROXY" "$no_proxy"`,
+                    `printf 'gate=%s\\n' "\${PICO_TB_AGENT_CONTROLLED_PROXY-unset}"`,
+                  ].join("; "),
+                }),
+              },
+            ]);
+          }
+          const transcript = JSON.stringify(messages);
+          assert.equal(transcript.includes(proxyUrl), true);
+          assert.equal(transcript.includes(noProxy), true);
+          assert.equal(transcript.includes("gate=unset"), true);
+          assert.equal(transcript.includes("terminal-bench-agent-v1"), false);
+          return assistant(`observed ${proxyUrl} ${token}`, {
+            promptTokens: 5,
+            completionTokens: 2,
+          });
+        },
+      }),
+    },
+  );
+
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(calls, 2);
+  assert.equal(outcome.result.finalMessage, "observed [REDACTED] [REDACTED]");
+  assert.equal(JSON.stringify(outcome.result).includes(token), false);
+  assert.ok(outcome.result.tracePath);
+  const trace = await readFile(outcome.result.tracePath, "utf8");
+  assert.equal(trace.includes(token), false);
+  assert.equal(trace.includes(proxyUrl), false);
 });
 
 test("unknown tools fail before provider generation and Session IDs cannot be reused", async (context) => {
