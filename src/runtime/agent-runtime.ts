@@ -852,6 +852,7 @@ export async function executeAgentRuntime(
       const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
         goalManager,
         todoStore,
+        isolatedHeadless: dependencies.isolatedHeadless,
         skillLoader: skillLoaderFactory(workDir),
         onInstructionsLoaded: async (paths) => {
           await runtimeState.dispatchHook(
