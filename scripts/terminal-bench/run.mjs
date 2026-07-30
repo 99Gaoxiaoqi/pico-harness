@@ -21,6 +21,11 @@ import { buildPicoBundle } from "./build-bundle.mjs";
 import { runCaptured } from "./captured-process.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
 import { verifyApprovedHarborWheelhouse } from "./harbor-wheelhouse.mjs";
+import {
+  assertHarborTrialRetriesDisabled,
+  harborTrialMaxRetries,
+  harborTrialRetryArgs,
+} from "./harbor-retry-policy.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import {
   localDatasetHarborArgs,
@@ -354,6 +359,7 @@ const manifest = {
     mode,
     attempts: options.attempts,
     concurrency: options.concurrency,
+    harborTrialMaxRetries,
     os: process.platform,
     arch: process.arch,
     hostNode: process.version,
@@ -431,15 +437,13 @@ const harborArgs = [
   "--job-name",
   "job",
   "--yes",
-  "--max-retries",
-  "2",
-  "--retry-include",
-  "RuntimeError",
+  ...harborTrialRetryArgs(),
 ];
 if (mode === "cached-full") {
   harborArgs.push(...harborTaskIncludeArgs(tasks));
 }
 harborArgs.push(...localDatasetHarborArgs(localDatasetPath));
+assertHarborTrialRetriesDisabled(harborArgs);
 const dockerResourcesBefore = await captureDockerResourceSnapshot(harborEnv, projectRoot);
 const datasetGuard = await attachReadOnlyDatasetSnapshot(
   localDatasetSnapshot,
