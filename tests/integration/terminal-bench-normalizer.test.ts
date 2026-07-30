@@ -41,6 +41,14 @@ test("Terminal-Bench normalizer separates task failures from infrastructure fail
   assert.equal(summary.counts.passed, 1);
   assert.equal(summary.counts.task_failed, 1);
   assert.equal(summary.counts.infra_error, 1);
+  assert.equal(summary.verifierPassCount, 1);
+  assert.equal(summary.verifierPassRate, 1 / 3);
+  assert.equal(summary.cleanCompletionCount, 2);
+  assert.equal(summary.cleanCompletionRate, 2 / 3);
+  assert.equal(summary.cleanPassCount, 1);
+  assert.equal(summary.cleanPassRate, 1 / 3);
+  assert.equal(summary.policyIncidentCount, 0);
+  assert.equal(summary.policyIncidentRate, 0);
   const normalized = JSON.parse(
     await readFile(
       join(runDir, "cases", "unconfirmed", "unconfirmed", "normalized-result.json"),
@@ -49,6 +57,123 @@ test("Terminal-Bench normalizer separates task failures from infrastructure fail
   );
   assert.equal(normalized.reward.overall, null);
   assert.equal(normalized.infra.code, "termination_unconfirmed");
+  assert.equal(normalized.verifierPassed, false);
+  assert.equal(normalized.verifierOutcome, "error");
+  assert.equal(normalized.executionOutcome, "infra_error");
+  assert.equal(normalized.policyIncident, false);
+});
+
+test("Terminal-Bench normalizer preserves verifier passes with policy incidents", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-policy-pass-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "policy-pass", {
+    reward: 1,
+    headless: headless("policy_blocked", true),
+    runId: "policy-pass-run",
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "policy-pass-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.verifierPassCount, 1);
+  assert.equal(summary.verifierPassRate, 1);
+  assert.equal(summary.cleanCompletionCount, 0);
+  assert.equal(summary.cleanCompletionRate, 0);
+  assert.equal(summary.cleanPassCount, 0);
+  assert.equal(summary.cleanPassRate, 0);
+  assert.equal(summary.policyIncidentCount, 1);
+  assert.equal(summary.policyIncidentRate, 1);
+  assert.equal(summary.verifierPassWithPolicyIncidentCount, 1);
+  assert.equal(summary.verifierPassWithPolicyIncidentRate, 1);
+  assert.equal(summary.passed, 0);
+  assert.equal(summary.counts.policy_blocked, 1);
+  assert.deepEqual(
+    {
+      primaryStatus: summary.trials[0].primaryStatus,
+      verifierPassed: summary.trials[0].verifierPassed,
+      verifierOutcome: summary.trials[0].verifierOutcome,
+      executionOutcome: summary.trials[0].executionOutcome,
+      policyIncident: summary.trials[0].policyIncident,
+    },
+    {
+      primaryStatus: "policy_blocked",
+      verifierPassed: true,
+      verifierOutcome: "passed",
+      executionOutcome: "policy_blocked",
+      policyIncident: true,
+    },
+  );
+});
+
+test("Terminal-Bench normalizer projects recovered policy incidents", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-recovered-policy-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "recovered-policy", {
+    reward: 1,
+    headless: headless("completed", true, policyDenials("approval")),
+    runId: "recovered-policy-run",
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "recovered-policy-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.verifierPassCount, 1);
+  assert.equal(summary.cleanCompletionCount, 0);
+  assert.equal(summary.cleanPassCount, 0);
+  assert.equal(summary.policyIncidentCount, 1);
+  assert.equal(summary.verifierPassWithPolicyIncidentCount, 1);
+  assert.equal(summary.verifierPassWithPolicyIncidentRate, 1);
+  assert.equal(summary.passed, 0);
+  assert.equal(summary.counts.policy_blocked, 1);
+  assert.equal(summary.trials[0].primaryStatus, "policy_blocked");
+  assert.equal(summary.trials[0].verifierPassed, true);
+  assert.equal(summary.trials[0].verifierOutcome, "passed");
+  assert.equal(summary.trials[0].executionOutcome, "completed");
+  assert.equal(summary.trials[0].policyIncident, true);
+  assert.deepEqual(summary.trials[0].agent.policyDenials, policyDenials("approval"));
+});
+
+test("Terminal-Bench normalizer rejects malformed policy denial evidence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-malformed-policy-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "malformed-policy", {
+    reward: 1,
+    headless: headless("completed", true, policyDenials("hook")),
+    runId: "malformed-policy-run",
+  });
+  const headlessPath = join(jobDir, "malformed-policy", "agent", "pico-result.json");
+  const malformed = JSON.parse(await readFile(headlessPath, "utf8"));
+  malformed.policyDenials.untrusted = true;
+  await writeFile(headlessPath, JSON.stringify(malformed));
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "malformed-policy-run",
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(summary.trials[0].adapter.code, "policy_denials_invalid");
+  assert.equal(summary.trials[0].executionOutcome, "adapter_error");
+  assert.equal(summary.trials[0].policyIncident, false);
+  assert.equal("policyDenials" in summary.trials[0].agent, false);
 });
 
 test("Terminal-Bench normalizer records a pre-job infrastructure failure", async (context) => {
@@ -62,6 +187,11 @@ test("Terminal-Bench normalizer records a pre-job infrastructure failure", async
   });
   assert.equal(summary.observed, 0);
   assert.equal(summary.sealed, false);
+  assert.equal(summary.verifierPassRate, 0);
+  assert.equal(summary.cleanCompletionRate, 0);
+  assert.equal(summary.cleanPassRate, 0);
+  assert.equal(summary.policyIncidentRate, 0);
+  assert.equal(summary.verifierPassWithPolicyIncidentRate, 0);
 });
 
 test("Terminal-Bench normalizer refuses to overwrite sealed case evidence", async (context) => {
@@ -201,6 +331,7 @@ test("Terminal-Bench normalizer requires verifier execution evidence", async (co
   });
   assert.equal(summary.sealed, false);
   assert.equal(summary.trials[0].verifier.status, "error");
+  assert.equal(summary.trials[0].verifierOutcome, "missing");
   assert.equal(summary.trials[0].primaryStatus, "verifier_error");
 });
 
@@ -224,6 +355,7 @@ test("Terminal-Bench normalizer rejects empty or inconsistent CTRF evidence", as
   assert.equal(summary.sealed, false);
   assert.equal(summary.trials[0].verifier.status, "error");
   assert.equal(summary.trials[0].verifier.exceptionType, "VerifierEvidenceInvalid");
+  assert.equal(summary.trials[0].verifierOutcome, "error");
   assert.equal(summary.trials[0].reward.overall, null);
   assert.equal(summary.trials[0].primaryStatus, "verifier_error");
 });
@@ -471,8 +603,12 @@ test("Terminal-Bench normalizer fails closed without a valid accounting receipt"
   assert.equal(summary.trials[0].primaryStatus, "adapter_error");
 });
 
-function headless(status: string, terminationConfirmed: boolean) {
-  return {
+function headless(
+  status: string,
+  terminationConfirmed: boolean,
+  denials?: ReturnType<typeof policyDenials>,
+) {
+  const result = {
     schemaVersion: 1,
     requestId: "fixture",
     status,
@@ -481,6 +617,14 @@ function headless(status: string, terminationConfirmed: boolean) {
     terminationConfirmed,
     error: null,
   };
+  return denials ? { ...result, policyDenials: denials } : result;
+}
+
+function policyDenials(code: "plan_mode" | "hardline" | "hook" | "approval") {
+  const byCode = { plan_mode: 0, hardline: 0, hook: 0, approval: 0 };
+  byCode[code] = 1;
+  const boundary = { source: "permission" as const, code, toolName: "exec_command" };
+  return { total: 1, byCode, first: boundary, last: boundary };
 }
 
 async function writeTrial(
@@ -530,12 +674,14 @@ async function writeTrial(
         n_output_tokens: harborUsage.outputTokens,
         metadata: {
           pico: {
-            exitCode:
-              headlessResult.status === "timed_out"
-                ? 124
-                : headlessResult.status === "invalid_request"
-                  ? 2
-                  : 0,
+            exitCode: {
+              completed: 0,
+              invalid_request: 2,
+              failed: 3,
+              policy_blocked: 4,
+              timed_out: 124,
+              canceled: 130,
+            }[headlessResult.status],
             costCNY: accounting.actual.costCNY,
             gatewayAccounting: {
               schemaVersion: accounting.schemaVersion,

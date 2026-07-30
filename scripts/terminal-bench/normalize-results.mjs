@@ -32,6 +32,8 @@ const configErrors = new Set([
   "MODEL_ROUTE_INVALID",
   "THINKING_EFFORT_INVALID",
 ]);
+const policyDenialCodes = ["plan_mode", "hardline", "hook", "approval"];
+const maxPolicyDenialToolNameLength = 128;
 
 export async function normalizeHarborJob({
   jobDir,
@@ -186,6 +188,18 @@ export async function normalizeHarborJob({
         trialIdentityValid &&
         trialGateValid &&
         rawTreeSha256 !== null;
+  const verifierPassCount = trials.filter((trial) => trial.verifierPassed).length;
+  const cleanCompletionCount = trials.filter(
+    (trial) => trial.executionOutcome === "completed" && !trial.policyIncident,
+  ).length;
+  const cleanPassCount = trials.filter(
+    (trial) =>
+      trial.verifierPassed && trial.executionOutcome === "completed" && !trial.policyIncident,
+  ).length;
+  const policyIncidentCount = trials.filter((trial) => trial.policyIncident).length;
+  const verifierPassWithPolicyIncidentCount = trials.filter(
+    (trial) => trial.verifierPassed && trial.policyIncident,
+  ).length;
   const summary = {
     schemaVersion: 2,
     runId,
@@ -195,6 +209,16 @@ export async function normalizeHarborJob({
     headlessCompleted: trials.filter((trial) => trial.agent.status === "completed").length,
     verifierCompleted: trials.filter((trial) => trial.verifier.status === "completed").length,
     passed: counts.passed ?? 0,
+    verifierPassCount,
+    verifierPassRate: rate(verifierPassCount, trials.length),
+    cleanCompletionCount,
+    cleanCompletionRate: rate(cleanCompletionCount, trials.length),
+    cleanPassCount,
+    cleanPassRate: rate(cleanPassCount, trials.length),
+    policyIncidentCount,
+    policyIncidentRate: rate(policyIncidentCount, trials.length),
+    verifierPassWithPolicyIncidentCount,
+    verifierPassWithPolicyIncidentRate: rate(verifierPassWithPolicyIncidentCount, trials.length),
     counts,
     trials,
   };
@@ -227,8 +251,15 @@ export function normalizeTrial({
   const exitCode = trialResult.agent_result?.metadata?.pico?.exitCode ?? null;
   const exception = trialResult.exception_info;
   const infra = classifyInfra({ headless, exception });
-  const adapter = classifyAdapter({ headless, exitCode, headlessReadError, accounting });
-  const agent = classifyAgent(headless, exitCode, accounting);
+  const policyDenials = validatePolicyDenials(headless);
+  const adapter = classifyAdapter({
+    headless,
+    exitCode,
+    headlessReadError,
+    accounting,
+    policyDenials,
+  });
+  const agent = classifyAgent(headless, exitCode, accounting, policyDenials);
   const verifier = {
     status:
       verifierEvidence === null
@@ -243,7 +274,17 @@ export function normalizeTrial({
         ? verifierEvidenceError || "VerifierEvidenceMissing"
         : (exception?.exception_type ?? null),
   };
-  const primaryStatus = classifyPrimary({ infra, adapter, agent, verifier, reward: overall });
+  const verifierOutcome = classifyVerifierOutcome({ verifier, reward: overall });
+  const executionOutcome = classifyExecutionOutcome({ infra, adapter, agent });
+  const policyIncident = agent.status === "policy_blocked" || (agent.policyDenials?.total ?? 0) > 0;
+  const primaryStatus = classifyPrimary({
+    infra,
+    adapter,
+    agent,
+    verifier,
+    reward: overall,
+    policyIncident,
+  });
   return {
     schemaVersion: 2,
     normalizerVersion: 2,
@@ -252,6 +293,10 @@ export function normalizeTrial({
       typeof trialResult.task_name === "string" ? canonicalTaskName(trialResult.task_name) : null,
     trialId: trialResult.id ?? null,
     primaryStatus,
+    verifierPassed: verifierOutcome === "passed",
+    verifierOutcome,
+    executionOutcome,
+    policyIncident,
     infra,
     adapter,
     agent,
@@ -623,6 +668,51 @@ function validateCtrfEvidence(value, readError) {
   return { valid: true, error: null };
 }
 
+function validatePolicyDenials(headless) {
+  if (!headless || !Object.prototype.hasOwnProperty.call(headless, "policyDenials")) {
+    return { valid: true, value: null };
+  }
+  const value = headless.policyDenials;
+  if (
+    !isExactObject(value, ["total", "byCode", "first", "last"]) ||
+    !isNonnegativeSafeInteger(value.total) ||
+    value.total === 0 ||
+    !isExactObject(value.byCode, policyDenialCodes) ||
+    policyDenialCodes.some((code) => !isNonnegativeSafeInteger(value.byCode[code])) ||
+    policyDenialCodes.reduce((total, code) => total + value.byCode[code], 0) !== value.total ||
+    !isPolicyDenialBoundary(value.first) ||
+    !isPolicyDenialBoundary(value.last) ||
+    value.byCode[value.first.code] === 0 ||
+    value.byCode[value.last.code] === 0
+  ) {
+    return { valid: false, value: null };
+  }
+  return {
+    valid: true,
+    value: {
+      total: value.total,
+      byCode: Object.fromEntries(policyDenialCodes.map((code) => [code, value.byCode[code]])),
+      first: projectPolicyDenialBoundary(value.first),
+      last: projectPolicyDenialBoundary(value.last),
+    },
+  };
+}
+
+function isPolicyDenialBoundary(value) {
+  return (
+    isExactObject(value, ["source", "code", "toolName"]) &&
+    ["safety", "permission"].includes(value.source) &&
+    policyDenialCodes.includes(value.code) &&
+    typeof value.toolName === "string" &&
+    value.toolName.length > 0 &&
+    value.toolName.length <= maxPolicyDenialToolNameLength
+  );
+}
+
+function projectPolicyDenialBoundary(value) {
+  return { source: value.source, code: value.code, toolName: value.toolName };
+}
+
 function classifyInfra({ headless, exception }) {
   if (headless?.terminationConfirmed === false) {
     return { status: "error", code: "termination_unconfirmed" };
@@ -641,9 +731,10 @@ function classifyInfra({ headless, exception }) {
   return { status: "ok", code: null };
 }
 
-function classifyAdapter({ headless, exitCode, headlessReadError, accounting }) {
+function classifyAdapter({ headless, exitCode, headlessReadError, accounting, policyDenials }) {
   if (headlessReadError) return { status: "error", code: "headless_result_invalid" };
   if (!headless) return { status: "error", code: "headless_result_missing" };
+  if (!policyDenials.valid) return { status: "error", code: "policy_denials_invalid" };
   if (!accounting.valid) return { status: "error", code: accounting.code };
   if (accounting.receipt.status !== "reconciled") {
     return { status: "error", code: "accounting_unreconciled" };
@@ -668,9 +759,9 @@ function classifyAdapter({ headless, exitCode, headlessReadError, accounting }) 
   return { status: "ok", code: null };
 }
 
-function classifyAgent(headless, exitCode, accounting) {
+function classifyAgent(headless, exitCode, accounting, policyDenials) {
   const actual = accounting.valid ? accounting.receipt.actual : null;
-  return {
+  const agent = {
     status: headless?.status ?? "missing",
     exitCode,
     errorCode: headless?.error?.code ?? null,
@@ -686,19 +777,22 @@ function classifyAgent(headless, exitCode, accounting) {
           },
     runtimeReportedUsage: headless?.usage ?? null,
   };
+  if (policyDenials.valid && policyDenials.value !== null) {
+    agent.policyDenials = policyDenials.value;
+  }
+  return agent;
 }
 
-function classifyPrimary({ infra, adapter, agent, verifier, reward }) {
+function classifyPrimary({ infra, adapter, agent, verifier, reward, policyIncident }) {
   if (agent.terminationConfirmed === false || infra.status === "error") return "infra_error";
   if (adapter.status === "error") return "adapter_error";
   if (verifier.status !== "completed") return "verifier_error";
+  if (policyIncident) return "policy_blocked";
   switch (agent.status) {
     case "timed_out":
       return "agent_timeout";
     case "canceled":
       return "agent_canceled";
-    case "policy_blocked":
-      return "policy_blocked";
     case "failed":
       return "agent_error";
     case "completed":
@@ -706,6 +800,24 @@ function classifyPrimary({ infra, adapter, agent, verifier, reward }) {
     default:
       return "adapter_error";
   }
+}
+
+function classifyVerifierOutcome({ verifier, reward }) {
+  if (verifier.status === "completed") return reward >= 1 ? "passed" : "failed";
+  if (verifier.status === "missing" || verifier.exceptionType === "VerifierEvidenceMissing") {
+    return "missing";
+  }
+  return "error";
+}
+
+function classifyExecutionOutcome({ infra, adapter, agent }) {
+  if (agent.terminationConfirmed === false || infra.status === "error") return "infra_error";
+  if (adapter.status === "error") return "adapter_error";
+  return agent.status;
+}
+
+function rate(count, total) {
+  return total === 0 ? 0 : count / total;
 }
 
 async function readJson(path) {
