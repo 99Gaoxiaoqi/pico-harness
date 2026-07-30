@@ -43,6 +43,16 @@ Cloudflare DoH 地址查询 IPv4 A 记录，不使用系统 DNS，也不接受 I
 body 或 token 的有界决策。TTL 或清理先撤销活动连接；只有确认 relay 已删除后才释放
 宿主 listener，避免旧 relay 命中被复用的端口。
 
+Agent 结束后会先撤销 agent 公网 token 和 Provider Gateway，并确认模型 relay 已删除；
+shared verifier 使用另一枚随机 token、独立 relay 和
+`public-egress-verifier-receipt.json`。该出口只在 Harbor 完成 agent 日志与 artifact
+收集、进入 `_run_verifier()` 时惰性启动，因此 verifier TTL 不会被前置收集消耗，
+agent 异常、取消或禁用 verifier 时也不会创建新的公网出口。Proxy 环境只通过
+`DockerEnvironment.exec()` 的实例级 scoped overlay 进入 main container 命令，不写入
+Compose 宿主环境或 container `Config.Env`，sidecar 不继承；最终
+`DockerEnvironment.stop()` 先撤销 verifier 出口并删除 trial 网络，再调用 Harbor
+原始 stop。即使前置清理失败或外层取消，原始 stop 仍只执行一次。
+
 发布前后都会扫描完整结果树中真实凭据与 root seed 的 raw、JSON escaped、URL encoded、
 Base64/Base64URL、hex、UTF-16，以及有界嵌套 gzip/tar 形态；不支持的压缩归档、命中或
 扫描/展开超限都会 fail closed。全部结果先写 `work/` staging，重写内部路径、扫描、计算
