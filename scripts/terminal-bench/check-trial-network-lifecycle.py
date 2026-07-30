@@ -74,10 +74,13 @@ def load_adapter() -> Any:
 
 def benchmark_route_config(
     output_token_field: str | None = "max_completion_tokens",
+    output_tokens: Any = 8_192,
 ) -> dict[str, Any]:
     capability: dict[str, Any] = {"toolCall": True}
     if output_token_field is not None:
         capability["outputTokenField"] = output_token_field
+    if output_tokens is not None:
+        capability["output"] = output_tokens
     return {
         "schemaVersion": 1,
         "modelRouteId": "codex-oauth/gpt-5.4",
@@ -101,20 +104,91 @@ def assert_route_config_contract(adapter: Any) -> None:
         valid = benchmark_route_config()
         path.write_text(json.dumps(valid))
         assert adapter.load_route_config(path) == valid
+        assert (
+            valid["provider"]["modelCapabilities"]["gpt-5.4"]["output"]
+            == 8_192
+        )
 
-        for invalid_field in (None, "max_tokens"):
-            path.write_text(json.dumps(benchmark_route_config(invalid_field)))
+        for invalid_output, invalid_field in (
+            (8_192, None),
+            (8_192, "max_tokens"),
+            (None, "max_completion_tokens"),
+            (4_096, "max_completion_tokens"),
+            (8_193, "max_completion_tokens"),
+            (True, "max_completion_tokens"),
+            ("8192", "max_completion_tokens"),
+        ):
+            path.write_text(
+                json.dumps(
+                    benchmark_route_config(
+                        invalid_field,
+                        output_tokens=invalid_output,
+                    )
+                )
+            )
             try:
                 adapter.load_route_config(path)
             except ValueError as error:
                 assert str(error) == (
-                    "codex-oauth/gpt-5.4 benchmark route must use "
-                    "max_completion_tokens"
+                    "codex-oauth/gpt-5.4 benchmark route must pin output=8192 "
+                    "and use max_completion_tokens"
                 )
             else:
                 raise AssertionError(
-                    f"invalid output token field was accepted: {invalid_field!r}"
+                    "invalid output capability was accepted: "
+                    f"{invalid_output!r}, {invalid_field!r}"
                 )
+
+
+async def assert_bootstrap_output_projection(adapter: Any) -> None:
+    class BootstrapFailureEnvironment:
+        async def exec(self, **_kwargs: Any) -> Any:
+            return types.SimpleNamespace(return_code=1, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory(prefix="pico-bootstrap-output-") as directory:
+        root = Path(directory)
+        agent = object.__new__(adapter.PicoInstalledAgent)
+        agent.logs_dir = root / "logs"
+        agent._shutdown_grace_ms = 30_000
+        agent._result_flush_margin_ms = 5_000
+        agent._bash_timeout_ms = 180_000
+        route_config = benchmark_route_config()
+        loop = asyncio.get_running_loop()
+        try:
+            await agent._run_with_gateway(
+                instruction="bootstrap output projection",
+                environment=BootstrapFailureEnvironment(),
+                context=types.SimpleNamespace(),
+                gateway=types.SimpleNamespace(
+                    base_url="http://pico-gateway:8080",
+                    capability="pico-workload-identity",
+                ),
+                route_config=route_config,
+                workspace="/workspace",
+                pico_home="/tmp/pico-home",
+                request_id="bootstrap-output-request",
+                session_id="bootstrap-output-session",
+                context_id="bootstrap-output-context",
+                outer_timeout_sec=120,
+                outer_deadline=loop.time() + 120,
+                loop=loop,
+                public_proxy_env={},
+            )
+        except RuntimeError as error:
+            assert str(error) == "Pico isolated bootstrap failed"
+        else:
+            raise AssertionError("synthetic bootstrap failure unexpectedly succeeded")
+
+        request = json.loads(
+            (agent.logs_dir / "bootstrap-request.json").read_text(encoding="utf-8")
+        )
+        assert request["route"] == {
+            "id": "codex-oauth/gpt-5.4",
+            "protocol": "openai",
+            "baseURL": "http://pico-gateway:8080",
+            "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
+            "output": 8_192,
+        }
 
 
 def assert_accounting_failure_messages(adapter: Any) -> None:
@@ -1382,6 +1456,7 @@ async def main() -> None:
     await assert_public_egress_lifecycle(adapter, run_id)
     await assert_container_proxy_env_injection(adapter)
     await assert_verifier_lifecycle_contract(adapter)
+    await assert_bootstrap_output_projection(adapter)
     print("Terminal-Bench trial network lifecycle passed.")
 
 
