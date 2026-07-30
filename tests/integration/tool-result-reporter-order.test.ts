@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { EvidenceArchive } from "../../src/context/evidence-archive.js";
+import { RecoveryManager } from "../../src/context/recovery.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import type { ToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
@@ -17,6 +19,7 @@ import {
   type HookSnapshot,
   type ResolvedHookHandler,
 } from "../../src/hooks/types.js";
+import { Tracer } from "../../src/observability/trace.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import type { RuntimeToolResultRecordedEvent } from "../../src/storage/runtime-event.js";
@@ -1009,6 +1012,153 @@ test("post-commit abort still publishes the durable ToolResult hooks once", asyn
           event.refs.toolCallId === "call:post-commit-abort",
       ).length,
       1,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("host ToolResult redaction precedes streaming, recovery, Evidence, hooks, and tracing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-redaction-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const runtimePort = createEngineRuntimePort();
+  const session = new Session("tool-result-redaction-boundary", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const token = "c".repeat(64);
+  const proxyUrl = `http://pico:${token}@pico-egress:8081`;
+  const ordinaryHex = "fedcba9876543210".repeat(4);
+  const safeMarker = "TOOL_RESULT_REDACTION_SAFE_MARKER";
+  const rawError = [
+    `permission denied proxy=${proxyUrl} token=${token} ordinary=${ordinaryHex} marker=${safeMarker}`,
+    "x".repeat(40_000),
+    `tail proxy=${proxyUrl} token=${token} ordinary=${ordinaryHex} marker=${safeMarker}`,
+  ].join("\n");
+  const registry = new ToolRegistry();
+  registry.register({
+    readOnly: true,
+    fileSideEffects: NO_FILE_SIDE_EFFECTS,
+    name: () => "bash",
+    definition: () => fixtureDefinition("bash"),
+    async execute(_args: string, context?: ToolExecutionContext) {
+      context?.onOutput?.({
+        stream: "stdout",
+        chunk: `stream proxy=${proxyUrl} token=${token}`,
+      });
+      throw new Error(rawError);
+    },
+  });
+  const providerMessages: Message[][] = [];
+  const provider: LLMProvider = {
+    async generate(messages) {
+      providerMessages.push(structuredClone(messages));
+      if (providerMessages.length === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call:redaction-error", name: "bash", arguments: "{}" }],
+        };
+      }
+      return { role: "assistant", content: "redaction boundary complete" };
+    },
+  };
+  const streamed: string[] = [];
+  const reported: ToolResultEnvelope[] = [];
+  const reporter = new (class extends SilentReporter {
+    onToolOutput(
+      _toolName: string,
+      _stream: "stdout" | "stderr",
+      chunk: string,
+      _providerCallId: string,
+    ): void {
+      streamed.push(chunk);
+    }
+
+    override onToolResult(result: ToolResultEnvelope): void {
+      reported.push(structuredClone(result));
+    }
+  })();
+  const hookInputs: HookInput[] = [];
+  const hookService = recordingHookService(
+    workDir,
+    session.id,
+    ["PostToolUseFailure", "PostToolBatch"],
+    hookInputs,
+  );
+  const evidenceArchive = new EvidenceArchive({
+    baseDir: join(root, "evidence"),
+  });
+  const tracer = new Tracer({ picoHome });
+  const recoveryInputs: string[] = [];
+  const recovery = new (class extends RecoveryManager {
+    override analyzeAndInject(toolName: string, rawError: string): string {
+      recoveryInputs.push(rawError);
+      return super.analyzeAndInject(toolName, rawError);
+    }
+  })();
+
+  try {
+    await session.recover();
+    await session.commitMessages({ role: "user", content: "Run the redaction fixture." });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      runtimePort,
+      reporter,
+      hookService,
+      runtimeEvidenceArchive: evidenceArchive,
+      tracer,
+      recovery,
+      toolResultRedactionSecrets: [proxyUrl, token],
+      maxTurns: 3,
+    });
+
+    await engine.run(session);
+
+    assert.deepEqual(streamed, []);
+    assert.equal(providerMessages.length, 2);
+    const providerToolResult = providerMessages[1]?.find(
+      (message) => message.toolCallId === "call:redaction-error",
+    );
+    assert.match(providerToolResult?.content ?? "", /\[REDACTED\]/u);
+    assert.match(providerToolResult?.content ?? "", new RegExp(ordinaryHex, "u"));
+
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    const recorded = events.find(
+      (event): event is RuntimeToolResultRecordedEvent =>
+        event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:redaction-error",
+    );
+    assert.ok(recorded);
+    assert.equal(recorded.data.status, "failed");
+    assert.equal(recorded.data.body.storage, "evidence");
+    assert.ok(recorded.refs.evidence);
+    const archivedOutput = await evidenceArchive.readRuntimeToolOutput(recorded.refs.evidence);
+
+    for (const serialized of [
+      providerToolResult?.content ?? "",
+      JSON.stringify(recorded),
+      archivedOutput,
+      JSON.stringify(reported),
+      JSON.stringify(hookInputs),
+      JSON.stringify(tracer.snapshot()),
+      JSON.stringify(recoveryInputs),
+    ]) {
+      assert.equal(serialized.includes(proxyUrl), false);
+      assert.equal(serialized.includes(token), false);
+      assert.equal(serialized.includes("[REDACTED]"), true);
+      assert.equal(serialized.includes(safeMarker), true);
+      assert.equal(serialized.includes(ordinaryHex), true);
+    }
+    assert.equal(recoveryInputs.length, 1);
+    assert.equal(reported[0]?.status, "failed");
+    assert.deepEqual(
+      hookInputs.map((input) => input.hook_event_name),
+      ["PostToolUseFailure", "PostToolBatch"],
     );
   } finally {
     await session.close();
