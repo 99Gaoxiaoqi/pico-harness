@@ -19,6 +19,7 @@ import {
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { RunAgentCliOptions, RunAgentCliResult } from "../../src/runtime/runtime-contract.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
@@ -480,12 +481,14 @@ test("headless forwards only a complete adapter-gated controlled proxy environme
   assert.equal(JSON.stringify(enabled.outcome.result).includes(token), false);
 });
 
-test("adapter-gated controlled proxy variables reach Bash without persisting its token", async (context) => {
+test("controlled proxy ToolResults are redacted before Provider transcript and Runtime persistence", async (context) => {
   const fixture = await createFixture(context, "controlled-proxy-bash");
   await configureFixture(fixture, "secret-canary-controlled-proxy-bash");
   const token = "b".repeat(64);
+  const ordinaryHex = "0123456789abcdef".repeat(4);
   const proxyUrl = `http://pico:${token}@pico-egress:8081`;
   const noProxy = "pico-gateway,main,localhost,127.0.0.1,::1";
+  const safeMarker = "CONTROLLED_PROXY_SAFE_OUTPUT";
   const env = {
     PATH: process.env.PATH,
     HTTP_PROXY: proxyUrl,
@@ -499,11 +502,13 @@ test("adapter-gated controlled proxy variables reach Bash without persisting its
     terminalBenchAgentControlledProxyCapability("terminal-bench-agent-v1");
   assert.ok(controlledProxyCapability);
   let calls = 0;
+  let secondProviderTranscript = "";
+  let thirdProviderTranscript = "";
   const outcome = await runHeadlessOneShotJson(
     JSON.stringify({
       ...requestFor(fixture, "controlled-proxy-bash"),
       permissionMode: "yolo",
-      allowedTools: ["bash"],
+      allowedTools: ["bash", "task_output"],
     }),
     {
       env,
@@ -514,25 +519,72 @@ test("adapter-gated controlled proxy variables reach Bash without persisting its
           if (calls === 1) {
             return assistant("", { promptTokens: 5, completionTokens: 2 }, [
               {
-                id: "proxy-env",
+                id: "proxy-env-background",
                 name: "bash",
                 arguments: JSON.stringify({
                   command: [
-                    `printf '%s\\n' "$HTTP_PROXY" "$HTTPS_PROXY"`,
-                    `printf '%s\\n' "$http_proxy" "$https_proxy"`,
-                    `printf '%s\\n' "$NO_PROXY" "$no_proxy"`,
-                    `printf 'gate=%s\\n' "\${PICO_TB_AGENT_CONTROLLED_PROXY-unset}"`,
+                    'proxy_token="${HTTP_PROXY#http://pico:}"',
+                    'proxy_token="${proxy_token%@pico-egress:8081}"',
+                    `printf '{"stream":"background","proxy":"%s","token":"%s","marker":"${safeMarker}","ordinary":"${ordinaryHex}"}\\n' "$HTTP_PROXY" "$proxy_token"`,
+                  ].join("; "),
+                  background: true,
+                }),
+              },
+              {
+                id: "proxy-env-success",
+                name: "bash",
+                arguments: JSON.stringify({
+                  command: [
+                    "sleep 0.1",
+                    'proxy_token="${HTTP_PROXY#http://pico:}"',
+                    'proxy_token="${proxy_token%@pico-egress:8081}"',
+                    `printf '{"stream":"stdout","proxy":"%s","token":"%s","noProxy":"%s","marker":"${safeMarker}","ordinary":"${ordinaryHex}"}\\n' "$HTTP_PROXY" "$proxy_token" "$NO_PROXY"`,
                   ].join("; "),
                 }),
               },
             ]);
           }
-          const transcript = JSON.stringify(messages);
-          assert.equal(transcript.includes(proxyUrl), true);
-          assert.equal(transcript.includes(noProxy), true);
-          assert.equal(transcript.includes("gate=unset"), true);
-          assert.equal(transcript.includes("terminal-bench-agent-v1"), false);
-          return assistant(`observed ${proxyUrl} ${token}`, {
+          if (calls === 2) {
+            secondProviderTranscript = JSON.stringify(messages);
+            assert.equal(secondProviderTranscript.includes(proxyUrl), false);
+            assert.equal(secondProviderTranscript.includes(token), false);
+            assert.equal(secondProviderTranscript.includes("[REDACTED]"), true);
+            assert.equal(secondProviderTranscript.includes(noProxy), true);
+            assert.equal(secondProviderTranscript.includes(safeMarker), true);
+            assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
+            assert.equal(secondProviderTranscript.includes("terminal-bench-agent-v1"), false);
+            const foregroundResult = messages.find(
+              (message) => message.toolCallId === "proxy-env-success",
+            );
+            assert.match(foregroundResult?.content ?? "", /\[REDACTED\]/u);
+            assert.match(foregroundResult?.content ?? "", new RegExp(safeMarker, "u"));
+            assert.match(foregroundResult?.content ?? "", new RegExp(ordinaryHex, "u"));
+            const backgroundResult = messages.find(
+              (message) => message.toolCallId === "proxy-env-background",
+            );
+            const taskId = backgroundResult?.content.match(/"taskId":"([^"]+)"/u)?.[1];
+            assert.ok(taskId);
+            return assistant("", { promptTokens: 5, completionTokens: 2 }, [
+              {
+                id: "proxy-background-output",
+                name: "task_output",
+                arguments: JSON.stringify({ taskId }),
+              },
+            ]);
+          }
+          thirdProviderTranscript = JSON.stringify(messages);
+          assert.equal(thirdProviderTranscript.includes(proxyUrl), false);
+          assert.equal(thirdProviderTranscript.includes(token), false);
+          assert.equal(thirdProviderTranscript.includes("[REDACTED]"), true);
+          assert.equal(thirdProviderTranscript.includes(safeMarker), true);
+          assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
+          const taskOutputResult = messages.find(
+            (message) => message.toolCallId === "proxy-background-output",
+          );
+          assert.match(taskOutputResult?.content ?? "", /\[REDACTED\]/u);
+          assert.match(taskOutputResult?.content ?? "", new RegExp(safeMarker, "u"));
+          assert.match(taskOutputResult?.content ?? "", new RegExp(ordinaryHex, "u"));
+          return assistant("controlled proxy transcript sanitized", {
             promptTokens: 5,
             completionTokens: 2,
           });
@@ -541,14 +593,55 @@ test("adapter-gated controlled proxy variables reach Bash without persisting its
     },
   );
 
-  assert.equal(outcome.result.status, "completed");
-  assert.equal(calls, 2);
-  assert.equal(outcome.result.finalMessage, "observed [REDACTED] [REDACTED]");
+  assert.equal(outcome.result.status, "completed", JSON.stringify(outcome.result));
+  assert.equal(calls, 3);
+  assert.equal(outcome.result.finalMessage, "controlled proxy transcript sanitized");
   assert.equal(JSON.stringify(outcome.result).includes(token), false);
+  assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
+  assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
+
+  const runtimeStore = new RuntimeEventStore({
+    storageRoot: resolvePicoPaths(fixture.workspace, {
+      picoHome: fixture.picoHome,
+    }).workspace.root,
+  });
+  try {
+    const events = await runtimeStore.readSession("session-controlled-proxy-bash");
+    const serializedEvents = JSON.stringify(events);
+    assert.equal(serializedEvents.includes(proxyUrl), false);
+    assert.equal(serializedEvents.includes(token), false);
+    assert.equal(serializedEvents.includes("[REDACTED]"), true);
+    assert.equal(serializedEvents.includes(noProxy), true);
+    assert.equal(serializedEvents.includes(safeMarker), true);
+    assert.equal(serializedEvents.includes(ordinaryHex), true);
+    const toolResults = events.filter((event) => event.kind === "tool.result.recorded");
+    assert.equal(toolResults.length, 3);
+    assert.deepEqual(
+      new Set(toolResults.map((event) => event.data.status)),
+      new Set(["succeeded"]),
+    );
+    assert.deepEqual(
+      new Set(toolResults.map((event) => event.data.toolName)),
+      new Set(["bash", "task_output"]),
+    );
+    for (const toolCallId of ["proxy-env-success", "proxy-background-output"]) {
+      const toolResult = toolResults.find((event) => event.refs.toolCallId === toolCallId);
+      const serializedToolResult = JSON.stringify(toolResult);
+      assert.equal(serializedToolResult.includes(proxyUrl), false);
+      assert.equal(serializedToolResult.includes(token), false);
+      assert.equal(serializedToolResult.includes("[REDACTED]"), true);
+      assert.equal(serializedToolResult.includes(safeMarker), true);
+      assert.equal(serializedToolResult.includes(ordinaryHex), true);
+    }
+  } finally {
+    runtimeStore.close();
+  }
+
   assert.ok(outcome.result.tracePath);
   const trace = await readFile(outcome.result.tracePath, "utf8");
   assert.equal(trace.includes(token), false);
   assert.equal(trace.includes(proxyUrl), false);
+  assert.equal(trace.includes(ordinaryHex), false);
 });
 
 test("unknown tools fail before provider generation and Session IDs cannot be reused", async (context) => {

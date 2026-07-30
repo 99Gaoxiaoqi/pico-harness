@@ -479,6 +479,7 @@ async function runValidatedRequest(
       dependencies.env ?? process.env,
       dependencies.controlledProxyCapability,
     );
+    const controlledProxySecrets = controlledProxyCredentialCandidates(runtimeEnv);
     const runtimeDependencies: RunAgentCliDependencies = {
       signal: cancellation.signal,
       reporter,
@@ -488,6 +489,9 @@ async function runValidatedRequest(
       isolatedHeadless: true,
       pluginSnapshot: emptyPluginSnapshot(),
       onPolicyDenied: policyDenials.record,
+      ...(controlledProxySecrets.length > 0
+        ? { toolResultRedactionSecrets: controlledProxySecrets }
+        : {}),
       ...(request.bashTimeoutMs !== undefined ? { bashTimeoutMs: request.bashTimeoutMs } : {}),
       ...(request.providerRequestMode === "single_non_stream"
         ? { providerDecorator: singleNonStreamingProvider }
@@ -516,10 +520,7 @@ async function runValidatedRequest(
     const settled = await settleRuntime(runtimePromise, cancellation, request.shutdownGraceMs);
     if (request.trace) await dependencies.beforeTraceSanitize?.();
     const traceWorkDir = workDir;
-    const secrets = credentialCandidates(
-      selected.config.apiKey,
-      ...controlledProxyCredentialCandidates(runtimeEnv),
-    );
+    const secrets = credentialCandidates(selected.config.apiKey, ...controlledProxySecrets);
     const safeTracePath = request.trace
       ? await sanitizeRuntimeTraces({
           workDir: traceWorkDir,
