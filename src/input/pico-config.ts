@@ -320,10 +320,16 @@ export function parseModelProviderConfigs(
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv)) {
       throw configError(configPath, `${field}.apiKeyEnv`, "must be an environment variable name");
     }
-    const parsedModels = parseModels(rawProvider["models"], configPath, `${field}.models`);
+    const parsedModels = parseModels(
+      rawProvider["models"],
+      protocol,
+      configPath,
+      `${field}.models`,
+    );
     const normalizedCapabilities = parseNormalizedModelCapabilities(
       rawProvider["modelCapabilities"],
       parsedModels.models,
+      protocol,
       configPath,
       `${field}.modelCapabilities`,
     );
@@ -351,6 +357,7 @@ export function parseModelProviderConfigs(
 function parseNormalizedModelCapabilities(
   value: unknown,
   models: readonly string[],
+  protocol: ProviderKind,
   configPath: string,
   field: string,
 ): Record<string, ModelCapabilityConfig> {
@@ -366,13 +373,14 @@ function parseNormalizedModelCapabilities(
     if (!isRecord(rawCapabilities)) {
       throw configError(configPath, modelField, "must be a capability object");
     }
-    capabilities[model] = parseModelCapabilities(rawCapabilities, configPath, modelField);
+    capabilities[model] = parseModelCapabilities(rawCapabilities, protocol, configPath, modelField);
   }
   return capabilities;
 }
 
 function parseModels(
   value: unknown,
+  protocol: ProviderKind,
   configPath: string,
   field: string,
 ): { models: string[]; capabilities: Record<string, ModelCapabilityConfig> } {
@@ -400,13 +408,14 @@ function parseModels(
       throw configError(configPath, modelField, "must be a capability object");
     }
     models.push(model);
-    capabilities[model] = parseModelCapabilities(rawCapabilities, configPath, modelField);
+    capabilities[model] = parseModelCapabilities(rawCapabilities, protocol, configPath, modelField);
   }
   return { models, capabilities };
 }
 
 function parseModelCapabilities(
   value: Record<string, unknown>,
+  protocol: ProviderKind,
   configPath: string,
   field: string,
 ): ModelCapabilityConfig {
@@ -449,6 +458,82 @@ function parseModelCapabilities(
   const reasoning = value["reasoning"];
   if (reasoning !== undefined) {
     result.reasoning = parseModelReasoning(reasoning, configPath, `${field}.reasoning`);
+  }
+
+  const promptCache = value["promptCache"];
+  if (promptCache !== undefined) {
+    if (!isRecord(promptCache)) {
+      throw configError(configPath, `${field}.promptCache`, "must be an object");
+    }
+    const mode = promptCache["mode"];
+    if (mode !== "implicit" && mode !== "explicit") {
+      throw configError(configPath, `${field}.promptCache.mode`, "must be implicit or explicit");
+    }
+    const ttl = promptCache["ttl"];
+    if (ttl !== undefined && typeof ttl !== "string") {
+      throw configError(configPath, `${field}.promptCache.ttl`, "must be a string");
+    }
+    const keyShards = promptCache["keyShards"];
+    if (
+      keyShards !== undefined &&
+      (!Number.isSafeInteger(keyShards) || (keyShards as number) < 1 || (keyShards as number) > 64)
+    ) {
+      throw configError(
+        configPath,
+        `${field}.promptCache.keyShards`,
+        "must be an integer between 1 and 64",
+      );
+    }
+    const prewarm = promptCache["prewarm"];
+    if (prewarm !== undefined && typeof prewarm !== "boolean") {
+      throw configError(configPath, `${field}.promptCache.prewarm`, "must be a boolean");
+    }
+    if (protocol === "claude") {
+      if (mode !== "explicit") {
+        throw configError(configPath, `${field}.promptCache.mode`, "must be explicit for claude");
+      }
+      if (ttl !== undefined && ttl !== "5m" && ttl !== "1h") {
+        throw configError(configPath, `${field}.promptCache.ttl`, "must be 5m or 1h for claude");
+      }
+      if (keyShards !== undefined && keyShards !== 1) {
+        throw configError(configPath, `${field}.promptCache.keyShards`, "must be 1 for claude");
+      }
+    } else if (protocol === "openai") {
+      if (ttl !== undefined && ttl !== "30m" && ttl !== "24h") {
+        throw configError(configPath, `${field}.promptCache.ttl`, "must be 30m or 24h for openai");
+      }
+      if (prewarm === true) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.prewarm`,
+          "is not supported for openai",
+        );
+      }
+    } else {
+      if (ttl !== undefined && !/^[1-9]\d*s$/u.test(ttl)) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.ttl`,
+          "must be a positive integer number of seconds for gemini",
+        );
+      }
+      if (keyShards !== undefined && keyShards !== 1) {
+        throw configError(configPath, `${field}.promptCache.keyShards`, "must be 1 for gemini");
+      }
+      if (prewarm === true) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.prewarm`,
+          "is not supported for gemini",
+        );
+      }
+    }
+    result.promptCache = {
+      mode,
+      ...(ttl !== undefined ? { ttl: ttl as `${number}s` | "5m" | "1h" | "30m" | "24h" } : {}),
+      ...(keyShards !== undefined ? { keyShards: keyShards as number } : {}),
+      ...(prewarm !== undefined ? { prewarm } : {}),
+    };
   }
 
   const price = value["price"];

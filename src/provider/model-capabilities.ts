@@ -18,6 +18,22 @@ export interface ModelPrice {
 export type CapabilitySupport = boolean | "unknown";
 export type CapabilityValueSource = "config" | "profile_default";
 export type OpenAIOutputTokenField = "max_tokens" | "max_completion_tokens";
+export type PromptCacheMode = "implicit" | "explicit";
+export type PromptCacheTtl = "5m" | "1h" | "30m" | "24h" | `${number}s`;
+
+export interface PromptCachePolicyConfig {
+  mode: PromptCacheMode;
+  ttl?: PromptCacheTtl;
+  keyShards?: number;
+  prewarm?: boolean;
+}
+
+export interface PromptCachePolicy {
+  mode: PromptCacheMode;
+  ttl?: PromptCacheTtl;
+  keyShards: number;
+  prewarm: boolean;
+}
 
 /**
  * Provider route metadata used before a request is sent. Values are concrete so
@@ -36,6 +52,8 @@ export interface ModelRouteCapabilities {
   reasoningProfile: ResolvedModelReasoningCapability;
   toolCall: CapabilitySupport;
   cache: CapabilitySupport;
+  /** Route behavior for provider-side prompt caching; separate from support detection. */
+  promptCache: PromptCachePolicy;
   /** Whether tools may stay on the wire while tool_choice:none forbids their use. */
   toolChoiceNoneWithTools: CapabilitySupport;
   /** Whether this route accepts OpenAI stream_options.include_usage. */
@@ -53,6 +71,7 @@ export interface ModelCapabilityConfig {
   reasoning?: ModelReasoningCapabilityInput;
   toolCall?: boolean;
   cache?: boolean;
+  promptCache?: PromptCachePolicyConfig;
   toolChoiceNoneWithTools?: boolean;
   streamUsage?: boolean;
   price?: Omit<ModelPrice, "currency" | "source">;
@@ -86,6 +105,7 @@ export function resolveModelRouteCapabilities(
     reasoningProfile,
     toolCall: override?.toolCall ?? "unknown",
     cache: override?.cache ?? "unknown",
+    promptCache: resolvePromptCachePolicy(provider, override),
     toolChoiceNoneWithTools:
       override?.toolChoiceNoneWithTools ??
       defaultToolChoiceNoneWithTools(provider, context.baseURL),
@@ -93,6 +113,72 @@ export function resolveModelRouteCapabilities(
     price: override?.price
       ? { currency: "USD", source: "config", ...override.price }
       : unknownModelPrice(),
+  };
+}
+
+function resolvePromptCachePolicy(
+  provider: ProviderKind,
+  override: ModelCapabilityConfig | undefined,
+): PromptCachePolicy {
+  if (override?.cache === false && override.promptCache !== undefined) {
+    throw new Error("promptCache cannot be configured when cache=false");
+  }
+  const configured = override?.promptCache;
+  if (!configured) {
+    if (provider === "claude") {
+      return { mode: "explicit", ttl: "5m", keyShards: 1, prewarm: false };
+    }
+    return { mode: "implicit", keyShards: 1, prewarm: false };
+  }
+
+  const keyShards = configured.keyShards ?? 1;
+  const prewarm = configured.prewarm ?? false;
+  if (provider === "openai") {
+    if (configured.ttl !== undefined && configured.ttl !== "30m" && configured.ttl !== "24h") {
+      throw new Error("OpenAI promptCache.ttl must be 30m or 24h");
+    }
+    if (prewarm) throw new Error("OpenAI promptCache.prewarm is not supported");
+    return {
+      mode: configured.mode,
+      ...(configured.ttl ? { ttl: configured.ttl } : {}),
+      keyShards,
+      prewarm: false,
+    };
+  }
+  if (provider === "claude") {
+    if (configured.mode !== "explicit") {
+      throw new Error("Claude promptCache.mode must be explicit");
+    }
+    if (configured.ttl !== undefined && configured.ttl !== "5m" && configured.ttl !== "1h") {
+      throw new Error("Claude promptCache.ttl must be 5m or 1h");
+    }
+    if (keyShards !== 1) throw new Error("Claude promptCache.keyShards must be 1");
+    return {
+      mode: "explicit",
+      ttl: configured.ttl ?? "5m",
+      keyShards: 1,
+      prewarm,
+    };
+  }
+
+  if (
+    configured.ttl !== undefined &&
+    (!/^[1-9]\d*s$/u.test(configured.ttl) ||
+      !Number.isSafeInteger(Number(configured.ttl.slice(0, -1))))
+  ) {
+    throw new Error("Gemini promptCache.ttl must be a positive integer number of seconds");
+  }
+  if (keyShards !== 1) throw new Error("Gemini promptCache.keyShards must be 1");
+  if (prewarm) throw new Error("Gemini promptCache.prewarm is not supported");
+  return {
+    mode: configured.mode,
+    ...(configured.mode === "explicit"
+      ? { ttl: configured.ttl ?? ("3600s" as const) }
+      : configured.ttl
+        ? { ttl: configured.ttl }
+        : {}),
+    keyShards: 1,
+    prewarm: false,
   };
 }
 
