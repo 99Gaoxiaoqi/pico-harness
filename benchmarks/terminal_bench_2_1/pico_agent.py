@@ -51,6 +51,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
     _TRACE_EXPORT = PurePosixPath(EnvironmentPaths.agent_dir / "trace.json")
     _SUPERVISOR_SOCKET_FD = 3
     _SECRET_ENV = "PICO_TB_GATEWAY_TOKEN"
+    _POLICY_DENIAL_MODE = "incident"
     _NODE_VERSION = "22.14.0"
     _NODE_SHA256 = {
         "x64": "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
@@ -72,6 +73,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
         node_x64_path: str,
         node_arm64_path: str,
         pico_commit: str,
+        bash_timeout_ms: int = 180_000,
         shutdown_grace_ms: int = 30_000,
         result_flush_margin_ms: int = 5_000,
         *args: Any,
@@ -96,6 +98,9 @@ class PicoInstalledAgent(BaseInstalledAgent):
             "arm64": require_file(node_arm64_path, "node_arm64_path"),
         }
         self._pico_commit = require_hex(pico_commit, "pico_commit")
+        self._bash_timeout_ms = require_bounded_int(
+            bash_timeout_ms, "bash_timeout_ms", 1_000, 300_000
+        )
         self._shutdown_grace_ms = require_positive_int(
             shutdown_grace_ms, "shutdown_grace_ms"
         )
@@ -313,6 +318,7 @@ rm -f {remote_archive}
         )
         if inner_timeout_ms < 1_000:
             raise RuntimeError("outer_timeout_budget_violation")
+        bash_timeout_ms = min(self._bash_timeout_ms, inner_timeout_ms)
         headless_request = {
             "schemaVersion": 1,
             "requestId": request_id,
@@ -328,6 +334,7 @@ rm -f {remote_archive}
                 else {}
             ),
             "permissionMode": "yolo",
+            "policyDenialMode": self._POLICY_DENIAL_MODE,
             "allowedTools": [
                 "bash",
                 "read_file",
@@ -336,7 +343,11 @@ rm -f {remote_archive}
                 "glob",
                 "grep",
                 "read_evidence",
+                "task_list",
+                "task_output",
+                "task_stop",
             ],
+            "bashTimeoutMs": bash_timeout_ms,
             "timeoutMs": inner_timeout_ms,
             "shutdownGraceMs": self._shutdown_grace_ms,
             "trace": True,
@@ -386,6 +397,7 @@ rm -f {remote_archive}
                 "picoCommit": self._pico_commit,
                 "harborContextId": context_id,
                 "innerTimeoutMs": inner_timeout_ms,
+                "bashTimeoutMs": bash_timeout_ms,
                 "outerTimeoutSec": outer_timeout_sec,
                 "localCanaryOnly": True,
                 "leaderboardComparable": False,
@@ -1620,6 +1632,20 @@ def require_positive_int(value: Any, field: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise ValueError(f"{field} must be positive")
+    return parsed
+
+
+def require_bounded_int(value: Any, field: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer from {minimum} to {maximum}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{field} must be an integer from {minimum} to {maximum}"
+        ) from None
+    if str(parsed) != str(value) or parsed < minimum or parsed > maximum:
+        raise ValueError(f"{field} must be an integer from {minimum} to {maximum}")
     return parsed
 
 

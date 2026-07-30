@@ -807,15 +807,33 @@ export class WriteFileTool implements BaseTool {
 // 4 条驾驭底线:超时控制、工作区绑定、错误原样回传、有界执行缓冲。
 // ==========================================
 
-/** bash 命令最大执行时间,防止卡死进程 (如 top / 常驻服务) */
-const BASH_TIMEOUT_MS = 30_000;
+/** bash 命令默认执行时间与可信宿主可配置边界。 */
+export const DEFAULT_BASH_TIMEOUT_MS = 30_000;
+export const MIN_BASH_TIMEOUT_MS = 1_000;
+export const MAX_BASH_TIMEOUT_MS = 300_000;
 /** 前台命令可持久捕获的最大输出（bytes）。 */
 const BASH_EXEC_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const BASH_KILL_GRACE_MS = 750;
 
+export function resolveBashTimeoutMs(value?: unknown): number {
+  if (value === undefined) return DEFAULT_BASH_TIMEOUT_MS;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < MIN_BASH_TIMEOUT_MS ||
+    value > MAX_BASH_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `bashTimeoutMs 必须是 ${MIN_BASH_TIMEOUT_MS}..${MAX_BASH_TIMEOUT_MS} 范围内的整数`,
+    );
+  }
+  return value;
+}
+
 export class BashTool implements BaseTool {
   readonly handlesAbortSignal = true;
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
+  private readonly timeoutMs: number;
 
   constructor(
     private readonly workDir: string,
@@ -829,8 +847,12 @@ export class BashTool implements BaseTool {
       };
       /** 子代理 Bash 由宿主注入最小环境；主 Bash 未设置时仍继承当前用户环境。 */
       env?: NodeJS.ProcessEnv;
+      /** 仅由可信宿主注入；未设置时保持 30 秒默认值。 */
+      timeoutMs?: number;
     } = {},
-  ) {}
+  ) {
+    this.timeoutMs = resolveBashTimeoutMs(options.timeoutMs);
+  }
 
   name(): string {
     return "bash";
@@ -908,6 +930,7 @@ export class BashTool implements BaseTool {
       context,
       sandboxPlan,
       this.options.env,
+      this.timeoutMs,
     );
     let stdout = execution.output;
 
@@ -923,7 +946,7 @@ export class BashTool implements BaseTool {
     }
 
     if (execution.timedOut) {
-      stdout += `\n[警告: 命令执行超时(${BASH_TIMEOUT_MS / 1000}s),已终止完整子进程树。如果是启动常驻服务,请改用后台运行方式。]`;
+      stdout += `\n[警告: 命令执行超时(${this.timeoutMs / 1000}s),已终止完整子进程树。如果是启动常驻服务,请改用后台运行方式。]`;
     }
     if (execution.exceededExecutionBuffer) {
       stdout += `\n[警告: 终端输出超过执行缓冲上限 ${BASH_EXEC_MAX_BUFFER_BYTES} bytes，完整子进程树已终止；本次结果仅包含已捕获内容。请缩小命令范围或分页输出。]`;
@@ -983,6 +1006,7 @@ function runForegroundCommand(
   context?: ToolExecutionContext,
   sandboxPlan?: SandboxSpawnPlan,
   env?: NodeJS.ProcessEnv,
+  timeoutMs = DEFAULT_BASH_TIMEOUT_MS,
 ): Promise<ForegroundCommandResult> {
   const shell = resolveShell();
 
@@ -1093,7 +1117,7 @@ function runForegroundCommand(
     const timeoutTimer = setTimeout(() => {
       timedOut = true;
       terminateWithGrace();
-    }, BASH_TIMEOUT_MS);
+    }, timeoutMs);
     timeoutTimer.unref();
 
     if (context?.signal) {

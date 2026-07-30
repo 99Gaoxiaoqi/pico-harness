@@ -193,6 +193,8 @@ export interface RuntimePolicyDenial {
 
 export interface RunAgentCliDependencies extends RuntimeHost {
   env?: RunAgentEnv;
+  /** Trusted host override for foreground Bash calls; validated to 1..300 seconds. */
+  bashTimeoutMs?: number;
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   picoHome?: string;
   provider?: LLMProvider;
@@ -824,6 +826,7 @@ export async function executeAgentRuntime(
       approvalManager,
       evidenceBaseDir,
       runtimeEnv,
+      dependencies.bashTimeoutMs,
     );
     registerPluginCapabilityTools(
       registry,
@@ -1316,6 +1319,7 @@ function buildRegistry(
   approvalManager?: ApprovalManager,
   evidenceBaseDir?: string,
   env?: NodeJS.ProcessEnv,
+  bashTimeoutMs?: number,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -1333,6 +1337,7 @@ function buildRegistry(
     ...(approvalManager !== undefined ? { approvalManager } : {}),
     ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
+    ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
   });
 }
 
