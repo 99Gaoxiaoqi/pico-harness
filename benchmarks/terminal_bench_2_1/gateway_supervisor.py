@@ -37,12 +37,16 @@ MAX_TRIAL_TTL_SEC = MAX_TASK_AGENT_TIMEOUT_SEC
 MAX_REQUESTS = 128
 MAX_INPUT_TOKENS = 1_000_000
 MAX_OUTPUT_TOKENS = 65_536
+MAX_REQUEST_OUTPUT_TOKENS = 8_192
 MAX_COST_MICRO_CNY = 250_000_000
 MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
 INPUT_RESERVATION_MARGIN_TOKENS = 1_024
 UPSTREAM_TIMEOUT_SEC = 120
 REVOKE_DEADLINE_SEC = 0.75
+_PINNED_BENCHMARK_OUTPUT_CAPABILITIES = {
+    "codex-oauth/gpt-5.4": ("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
+}
 
 
 class UpstreamRequest:
@@ -125,6 +129,7 @@ class GatewayState:
         run_id: str,
         capability_seed: str,
     ):
+        require_benchmark_route_contract(route_config)
         self.provider = route_config["provider"]
         self.model = route_config["modelRouteId"].split("/", 1)[1]
         self.pricing, self.pricing_sha256 = require_pricing(route_config, self.model)
@@ -784,6 +789,46 @@ def require_run_budget(route_config: dict[str, Any]) -> int:
     return maximum
 
 
+def require_benchmark_route_contract(route_config: dict[str, Any]) -> None:
+    model_route_id = route_config.get("modelRouteId")
+    if not isinstance(model_route_id, str):
+        return
+    expected = _PINNED_BENCHMARK_OUTPUT_CAPABILITIES.get(model_route_id)
+    if expected is None:
+        return
+    expected_field, expected_output = expected
+    provider = route_config.get("provider")
+    provider_id, model = model_route_id.split("/", 1)
+    capabilities = (
+        provider.get("modelCapabilities") if isinstance(provider, dict) else None
+    )
+    model_capability = (
+        capabilities.get(model) if isinstance(capabilities, dict) else None
+    )
+    models = provider.get("models") if isinstance(provider, dict) else None
+    output = (
+        model_capability.get("output")
+        if isinstance(model_capability, dict)
+        else None
+    )
+    if (
+        route_config.get("providerId") != provider_id
+        or not isinstance(provider, dict)
+        or provider.get("protocol") != "openai"
+        or not isinstance(models, list)
+        or model not in models
+        or not isinstance(model_capability, dict)
+        or isinstance(output, bool)
+        or not isinstance(output, int)
+        or output != expected_output
+        or model_capability.get("outputTokenField") != expected_field
+    ):
+        raise ValueError(
+            f"{model_route_id} benchmark route must pin output={expected_output} "
+            f"and use {expected_field}"
+        )
+
+
 def token_cost_micro_cny(
     input_tokens: int, output_tokens: int, pricing: dict[str, int]
 ) -> int:
@@ -1022,7 +1067,11 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
         generation = value.setdefault("generationConfig", {})
         if not isinstance(generation, dict):
             raise ValueError("gateway generation config must be an object")
-        output_limit = min(int(generation.get("maxOutputTokens", 8_192)), 8_192)
+        output_limit = int(
+            generation.get("maxOutputTokens", MAX_REQUEST_OUTPUT_TOKENS)
+        )
+        if output_limit < 1 or output_limit > MAX_REQUEST_OUTPUT_TOKENS:
+            raise ValueError("gateway output token limit is invalid")
         generation["maxOutputTokens"] = output_limit
     else:
         if value.get("model") != model:
@@ -1032,10 +1081,13 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
             "max_completion_tokens",
         }.issubset(value):
             raise ValueError("gateway request has ambiguous output token limits")
-        output_limit = min(
-            int(value.get("max_tokens", value.get("max_completion_tokens", 8_192))),
-            8_192,
+        raw_output_limit: Any = value.get(
+            "max_tokens",
+            value.get("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
         )
+        output_limit = int(raw_output_limit)
+        if output_limit < 1 or output_limit > MAX_REQUEST_OUTPUT_TOKENS:
+            raise ValueError("gateway output token limit is invalid")
         if protocol == "openai":
             field = (
                 "max_completion_tokens"
@@ -1045,8 +1097,6 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
             value[field] = output_limit
         else:
             value["max_tokens"] = output_limit
-    if output_limit < 1:
-        raise ValueError("gateway output token limit is invalid")
     return json.dumps(value, separators=(",", ":")).encode(), output_limit
 
 

@@ -629,6 +629,72 @@ def assert_run_budget_contract(
     assert state.run_cost_micro_cny_remaining == 0
 
 
+def assert_benchmark_output_capability_contract(
+    gateway: Any,
+    route_config: dict[str, Any],
+) -> None:
+    pricing, pricing_sha256 = pricing_contract("codex-oauth", "gpt-5.4")
+    pinned_route = json.loads(json.dumps(route_config))
+    pinned_route["modelRouteId"] = "codex-oauth/gpt-5.4"
+    pinned_route["providerId"] = "codex-oauth"
+    pinned_route["provider"] = {
+        "protocol": "openai",
+        "baseURL": route_config["provider"]["baseURL"],
+        "models": ["gpt-5.4"],
+        "discoverModels": False,
+        "modelCapabilities": {
+            "gpt-5.4": {
+                "output": gateway.MAX_REQUEST_OUTPUT_TOKENS,
+                "outputTokenField": "max_completion_tokens",
+                "toolCall": True,
+            }
+        },
+    }
+    pinned_route["pricing"] = pricing
+    pinned_route["pricingSha256"] = pricing_sha256
+    state = gateway.GatewayState(
+        pinned_route,
+        "provider-secret-canary",
+        "valid-benchmark-output-capability",
+        "6" * 64,
+    )
+    assert (
+        state.provider["modelCapabilities"]["gpt-5.4"]["output"]
+        == gateway.MAX_REQUEST_OUTPUT_TOKENS
+        == 8_192
+    )
+
+    invalid_capabilities: tuple[dict[str, Any] | None, ...] = (
+        None,
+        {"outputTokenField": "max_completion_tokens"},
+        {"output": 4_096, "outputTokenField": "max_completion_tokens"},
+        {"output": 8_193, "outputTokenField": "max_completion_tokens"},
+        {"output": 8_192, "outputTokenField": "max_tokens"},
+    )
+    for index, capability in enumerate(invalid_capabilities):
+        candidate = json.loads(json.dumps(pinned_route))
+        if capability is None:
+            candidate["provider"].pop("modelCapabilities")
+        else:
+            candidate["provider"]["modelCapabilities"]["gpt-5.4"] = capability
+        try:
+            gateway.GatewayState(
+                candidate,
+                "provider-secret-canary",
+                f"invalid-benchmark-output-capability-{index}",
+                "6" * 64,
+            )
+        except ValueError as error:
+            assert str(error) == (
+                "codex-oauth/gpt-5.4 benchmark route must pin output=8192 "
+                "and use max_completion_tokens"
+            )
+        else:
+            raise AssertionError(
+                f"invalid benchmark output capability was accepted: {capability!r}"
+            )
+
+
 def assert_atomic_run_budget_and_refund(
     gateway: Any,
     route_config: dict[str, Any],
@@ -851,6 +917,7 @@ def main() -> None:
         assert_stubborn_worker_revoke_fails_closed(gateway, route_config)
         assert_exact_reconciliation(gateway, route_config)
         assert_run_budget_contract(gateway, route_config)
+        assert_benchmark_output_capability_contract(gateway, route_config)
         assert_atomic_run_budget_and_refund(gateway, route_config)
         assert_run_budget_overrun_closes_run(gateway, route_config)
         assert_synthetic_stage_cancel(gateway, route_config, root, "dns")
@@ -1031,6 +1098,45 @@ def main() -> None:
             sign(seed, run_id, "trial-large", proxy_frame({"padding": "x" * 1_100_000})),
         )[0] == 502
         assert ProviderHandler.calls == 2
+
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-output-hard-limit",
+                {"action": "register", "protocol": "openai", "ttlSec": 60},
+            ),
+        )[0] == 200
+        calls_before_output_limit = ProviderHandler.calls
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-output-hard-limit",
+                proxy_frame(
+                    {"max_completion_tokens": 8_192},
+                    output_token_field="max_completion_tokens",
+                ),
+            ),
+        )[0] == 200
+        assert ProviderHandler.calls == calls_before_output_limit + 1
+        assert ProviderHandler.last_request_body is not None
+        assert ProviderHandler.last_request_body["max_completion_tokens"] == 8_192
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-output-hard-limit",
+                proxy_frame(
+                    {"max_completion_tokens": 8_193},
+                    output_token_field="max_completion_tokens",
+                ),
+            ),
+        )[0] == 502
+        assert ProviderHandler.calls == calls_before_output_limit + 1
 
         assert request(
             str(socket_path),
