@@ -67,6 +67,10 @@ node scripts/terminal-bench/run.mjs --mode full --docker-host-gateway \
 `--max-run-cost-cny` 可显式调整，但不会放宽每个 trial 的独立预算。额度耗尽时拒绝新的
 上游请求并在 receipt 中标记，避免并发 trial 超卖。
 
+Runner 显式向 Harbor 固定传 `--max-retries 0`，不配置 exception include/exclude。
+每个 trial 只执行一次；accounting/adapter 异常不会触发 Harbor 删除原 trial 目录后
+整题重试，因此失败 receipt 和费用证据会保留在最终 quarantine run 中。
+
 结果写入：
 
 ```text
