@@ -554,6 +554,7 @@ def request_reservation_cost(
         frame["path"],
         frame["protocol"],
         state.model,
+        strict_output_limit=state.strict_request_output_limit,
     )
     return gateway.token_cost_micro_cny(
         len(bounded_body) + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
@@ -663,6 +664,80 @@ def assert_benchmark_output_capability_contract(
         == gateway.MAX_REQUEST_OUTPUT_TOKENS
         == 8_192
     )
+    assert state.strict_request_output_limit is True
+    bounded_body, output_limit = gateway.bound_request(
+        json.dumps(
+            {
+                "model": "gpt-5.4",
+                "max_completion_tokens": 8_192,
+            }
+        ).encode(),
+        "/chat/completions",
+        "openai",
+        state.model,
+        strict_output_limit=state.strict_request_output_limit,
+    )
+    assert output_limit == 8_192
+    assert json.loads(bounded_body)["max_completion_tokens"] == 8_192
+    try:
+        gateway.bound_request(
+            json.dumps(
+                {
+                    "model": "gpt-5.4",
+                    "max_completion_tokens": 8_193,
+                }
+            ).encode(),
+            "/chat/completions",
+            "openai",
+            state.model,
+            strict_output_limit=state.strict_request_output_limit,
+        )
+    except ValueError as error:
+        assert str(error) == "gateway output token limit is invalid"
+    else:
+        raise AssertionError("pinned route accepted output above its hard limit")
+
+    compatible = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "compatible-output-capability",
+        "6" * 64,
+    )
+    assert compatible.strict_request_output_limit is False
+    bounded_body, output_limit = gateway.bound_request(
+        json.dumps(
+            {
+                "model": compatible.model,
+                "max_tokens": 32_768,
+            }
+        ).encode(),
+        "/chat/completions",
+        "openai",
+        compatible.model,
+        strict_output_limit=compatible.strict_request_output_limit,
+    )
+    assert output_limit == 8_192
+    assert json.loads(bounded_body)["max_tokens"] == 8_192
+    for invalid_output in (0, -1, True, "8192", 8_192.0, None):
+        try:
+            gateway.bound_request(
+                json.dumps(
+                    {
+                        "model": compatible.model,
+                        "max_tokens": invalid_output,
+                    }
+                ).encode(),
+                "/chat/completions",
+                "openai",
+                compatible.model,
+                strict_output_limit=compatible.strict_request_output_limit,
+            )
+        except ValueError as error:
+            assert str(error) == "gateway output token limit is invalid"
+        else:
+            raise AssertionError(
+                f"compatible route accepted invalid output limit: {invalid_output!r}"
+            )
 
     invalid_capabilities: tuple[dict[str, Any] | None, ...] = (
         None,
@@ -1131,12 +1206,28 @@ def main() -> None:
                 run_id,
                 "trial-output-hard-limit",
                 proxy_frame(
-                    {"max_completion_tokens": 8_193},
+                    {"max_completion_tokens": 32_768},
                     output_token_field="max_completion_tokens",
                 ),
             ),
-        )[0] == 502
-        assert ProviderHandler.calls == calls_before_output_limit + 1
+        )[0] == 200
+        assert ProviderHandler.calls == calls_before_output_limit + 2
+        assert ProviderHandler.last_request_body is not None
+        assert ProviderHandler.last_request_body["max_completion_tokens"] == 8_192
+        for invalid_output in (0, "8192"):
+            assert request(
+                str(socket_path),
+                sign(
+                    seed,
+                    run_id,
+                    "trial-output-hard-limit",
+                    proxy_frame(
+                        {"max_completion_tokens": invalid_output},
+                        output_token_field="max_completion_tokens",
+                    ),
+                ),
+            )[0] == 502
+        assert ProviderHandler.calls == calls_before_output_limit + 2
 
         assert request(
             str(socket_path),

@@ -138,6 +138,9 @@ class GatewayState:
         self.run_cost_micro_cny_remaining = self.run_budget_max_cost_micro_cny
         self.run_budget_closed = False
         self.model_route_id = route_config["modelRouteId"]
+        self.strict_request_output_limit = (
+            self.model_route_id in _PINNED_BENCHMARK_OUTPUT_CAPABILITIES
+        )
         self.provider_secret = provider_secret
         self.run_id = run_id
         self.capability_seed = capability_seed
@@ -227,7 +230,13 @@ class GatewayState:
             raise ValueError("gateway route mismatch")
         body = base64.b64decode(request.get("body", ""), validate=True)
         path = require_path(request.get("path"), protocol, self.model)
-        bounded_body, output_limit = bound_request(body, path, protocol, self.model)
+        bounded_body, output_limit = bound_request(
+            body,
+            path,
+            protocol,
+            self.model,
+            strict_output_limit=self.strict_request_output_limit,
+        )
         if len(bounded_body) > MAX_INPUT_TOKENS:
             raise ValueError("gateway request exceeds input limit")
         active = self.upstream_request_factory()
@@ -1057,7 +1066,14 @@ def require_path(value: Any, protocol: str, model: str) -> str:
     return value
 
 
-def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[bytes, int]:
+def bound_request(
+    body: bytes,
+    path: str,
+    protocol: str,
+    model: str,
+    *,
+    strict_output_limit: bool,
+) -> tuple[bytes, int]:
     value = json.loads(body)
     if not isinstance(value, dict):
         raise ValueError("gateway request must be an object")
@@ -1067,11 +1083,15 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
         generation = value.setdefault("generationConfig", {})
         if not isinstance(generation, dict):
             raise ValueError("gateway generation config must be an object")
-        output_limit = int(
+        requested_output_limit = require_request_output_limit(
             generation.get("maxOutputTokens", MAX_REQUEST_OUTPUT_TOKENS)
         )
-        if output_limit < 1 or output_limit > MAX_REQUEST_OUTPUT_TOKENS:
+        if (
+            strict_output_limit
+            and requested_output_limit > MAX_REQUEST_OUTPUT_TOKENS
+        ):
             raise ValueError("gateway output token limit is invalid")
+        output_limit = min(requested_output_limit, MAX_REQUEST_OUTPUT_TOKENS)
         generation["maxOutputTokens"] = output_limit
     else:
         if value.get("model") != model:
@@ -1081,13 +1101,18 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
             "max_completion_tokens",
         }.issubset(value):
             raise ValueError("gateway request has ambiguous output token limits")
-        raw_output_limit: Any = value.get(
-            "max_tokens",
-            value.get("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
+        requested_output_limit = require_request_output_limit(
+            value.get(
+                "max_tokens",
+                value.get("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
+            )
         )
-        output_limit = int(raw_output_limit)
-        if output_limit < 1 or output_limit > MAX_REQUEST_OUTPUT_TOKENS:
+        if (
+            strict_output_limit
+            and requested_output_limit > MAX_REQUEST_OUTPUT_TOKENS
+        ):
             raise ValueError("gateway output token limit is invalid")
+        output_limit = min(requested_output_limit, MAX_REQUEST_OUTPUT_TOKENS)
         if protocol == "openai":
             field = (
                 "max_completion_tokens"
@@ -1098,6 +1123,12 @@ def bound_request(body: bytes, path: str, protocol: str, model: str) -> tuple[by
         else:
             value["max_tokens"] = output_limit
     return json.dumps(value, separators=(",", ":")).encode(), output_limit
+
+
+def require_request_output_limit(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("gateway output token limit is invalid")
+    return value
 
 
 def upstream_headers(
