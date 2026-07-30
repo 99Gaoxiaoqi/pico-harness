@@ -31,6 +31,7 @@ import {
   executeAgentRuntime,
   type RunAgentCliDependencies,
   type RunAgentProviderFactory,
+  type RuntimePolicyDenial,
 } from "../runtime/agent-runtime.js";
 import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
@@ -42,6 +43,9 @@ const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_LENGTH = 1024 * 1024;
 const MAX_SHUTDOWN_GRACE_MS = 60_000;
 const MAX_TIMEOUT_MS = 7_200_000;
+const MAX_BASH_TIMEOUT_MS = 300_000;
+const MAX_POLICY_DENIAL_COUNT = Number.MAX_SAFE_INTEGER;
+const MAX_POLICY_TOOL_NAME_LENGTH = 128;
 const LOCK_DIRECTORY_MODE = 0o700;
 const HEADLESS_TOOL_NAMES = new Set([
   "bash",
@@ -51,6 +55,9 @@ const HEADLESS_TOOL_NAMES = new Set([
   "grep",
   "read_evidence",
   "read_file",
+  "task_list",
+  "task_output",
+  "task_stop",
   "todo",
   "web_search",
   "write_file",
@@ -70,7 +77,9 @@ const REQUEST_FIELDS = new Set([
   "providerRequestMode",
   "thinkingEffort",
   "permissionMode",
+  "policyDenialMode",
   "allowedTools",
+  "bashTimeoutMs",
   "timeoutMs",
   "shutdownGraceMs",
   "trace",
@@ -115,7 +124,9 @@ export interface HeadlessOneShotRequestV1 {
   readonly providerRequestMode?: "single_non_stream";
   readonly thinkingEffort?: string;
   readonly permissionMode: SessionSettings["mode"];
+  readonly policyDenialMode?: "terminal" | "incident";
   readonly allowedTools: readonly string[];
+  readonly bashTimeoutMs?: number;
   readonly timeoutMs: number;
   readonly shutdownGraceMs: number;
   readonly trace: boolean;
@@ -133,6 +144,19 @@ export interface HeadlessOneShotError {
   readonly summary: string;
 }
 
+export interface HeadlessOneShotPolicyDenial {
+  readonly source: RuntimePolicyDenial["source"];
+  readonly code: RuntimePolicyDenial["code"];
+  readonly toolName: string;
+}
+
+export interface HeadlessOneShotPolicyDenialSummary {
+  readonly total: number;
+  readonly byCode: Readonly<Record<RuntimePolicyDenial["code"], number>>;
+  readonly first: HeadlessOneShotPolicyDenial;
+  readonly last: HeadlessOneShotPolicyDenial;
+}
+
 export interface HeadlessOneShotResultV1 {
   readonly schemaVersion: typeof SCHEMA_VERSION;
   readonly requestId: string | null;
@@ -145,6 +169,8 @@ export interface HeadlessOneShotResultV1 {
   readonly tracePath: string | null;
   readonly effective: HeadlessOneShotEffectivePolicy;
   readonly error: HeadlessOneShotError | null;
+  /** Present only when Runtime observed one or more metadata-only policy denial incidents. */
+  readonly policyDenials?: HeadlessOneShotPolicyDenialSummary;
   /** True only when all Runtime execution has settled before this payload is emitted. */
   readonly terminationConfirmed: boolean;
 }
@@ -328,6 +354,7 @@ async function runValidatedRequest(
     dependencies.signal,
     dependencies.signalKind,
   );
+  const policyDenials = createPolicyDenialAccumulator();
   try {
     const casePaths = await racePreflight(canonicalizeCasePaths(request), cancellation);
     workDir = casePaths.workDir;
@@ -419,7 +446,6 @@ async function runValidatedRequest(
         )
       : new Map<string, string>();
 
-    let policyBlocked = false;
     const reporter = new SilentReporter();
     const runtimeEnv = isolatedRuntimeEnvironment(picoHome, dependencies.env ?? process.env);
     const runtimeDependencies: RunAgentCliDependencies = {
@@ -430,9 +456,8 @@ async function runValidatedRequest(
       env: runtimeEnv,
       isolatedHeadless: true,
       pluginSnapshot: emptyPluginSnapshot(),
-      onPolicyDenied: () => {
-        policyBlocked = true;
-      },
+      onPolicyDenied: policyDenials.record,
+      ...(request.bashTimeoutMs !== undefined ? { bashTimeoutMs: request.bashTimeoutMs } : {}),
       ...(request.providerRequestMode === "single_non_stream"
         ? { providerDecorator: singleNonStreamingProvider }
         : {}),
@@ -506,6 +531,7 @@ async function runValidatedRequest(
         settled.cancelCause,
         settled.shutdownConfirmed,
         elapsed(startedAt, dependencies.now),
+        policyDenials.snapshot(),
       );
       return mapped;
     }
@@ -517,6 +543,7 @@ async function runValidatedRequest(
         "RUNTIME_FAILED",
         "The Agent Runtime failed.",
         elapsed(startedAt, dependencies.now),
+        policyDenials.snapshot(),
       );
     }
     if (!settled.result) {
@@ -527,6 +554,7 @@ async function runValidatedRequest(
         "RUNTIME_FAILED",
         "The Agent Runtime did not produce a result.",
         elapsed(startedAt, dependencies.now),
+        policyDenials.snapshot(),
       );
     }
     if (
@@ -541,9 +569,11 @@ async function runValidatedRequest(
         "RUNTIME_EMPTY_RESPONSE",
         "The Agent Runtime returned an empty model response.",
         elapsed(startedAt, dependencies.now),
+        policyDenials.snapshot(),
       );
     }
-    if (policyBlocked) {
+    const policyDenialSummary = policyDenials.snapshot();
+    if (policyDenialSummary && request.policyDenialMode !== "incident") {
       return {
         result: resultPayload({
           request,
@@ -557,6 +587,7 @@ async function runValidatedRequest(
             code: "POLICY_BLOCKED",
             summary: "The requested tool action was blocked by the effective policy.",
           },
+          policyDenials: policyDenialSummary,
         }),
         exitCode: 4,
         shutdownConfirmed: true,
@@ -572,6 +603,7 @@ async function runValidatedRequest(
         finalMessage: redactSecrets(settled.result.finalMessage, secrets),
         usage: settled.result.usage,
         tracePath: safeTracePath ?? null,
+        policyDenials: policyDenialSummary,
       }),
       exitCode: 0,
       shutdownConfirmed: true,
@@ -585,6 +617,7 @@ async function runValidatedRequest(
         error.cancelCause,
         true,
         elapsed(startedAt, dependencies.now),
+        policyDenials.snapshot(),
       );
     }
     if (error instanceof HeadlessRequestError) {
@@ -594,6 +627,7 @@ async function runValidatedRequest(
         elapsed(startedAt, dependencies.now),
         workDir,
         effective,
+        policyDenials.snapshot(),
       );
     }
     return failedOutcome(
@@ -603,6 +637,7 @@ async function runValidatedRequest(
       "INTERNAL_FAILURE",
       "The headless runner failed.",
       elapsed(startedAt, dependencies.now),
+      policyDenials.snapshot(),
     );
   } finally {
     cancellation.dispose();
@@ -819,6 +854,16 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     );
   }
   const timeoutMs = requiredInteger(value["timeoutMs"], "timeoutMs", 1, MAX_TIMEOUT_MS);
+  const bashTimeoutMs =
+    value["bashTimeoutMs"] === undefined
+      ? undefined
+      : requiredInteger(value["bashTimeoutMs"], "bashTimeoutMs", 1_000, MAX_BASH_TIMEOUT_MS);
+  if (bashTimeoutMs !== undefined && bashTimeoutMs > timeoutMs) {
+    throw new HeadlessRequestError(
+      "INVALID_BASH_TIMEOUT",
+      "bashTimeoutMs must not exceed timeoutMs.",
+    );
+  }
   const shutdownGraceMs = requiredInteger(
     value["shutdownGraceMs"],
     "shutdownGraceMs",
@@ -837,6 +882,17 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     throw new HeadlessRequestError(
       "INVALID_PROVIDER_REQUEST_MODE",
       "providerRequestMode must be single_non_stream when provided.",
+    );
+  }
+  const policyDenialMode = value["policyDenialMode"];
+  if (
+    policyDenialMode !== undefined &&
+    policyDenialMode !== "terminal" &&
+    policyDenialMode !== "incident"
+  ) {
+    throw new HeadlessRequestError(
+      "INVALID_POLICY_DENIAL_MODE",
+      "policyDenialMode must be terminal or incident when provided.",
     );
   }
 
@@ -863,7 +919,9 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     ...(providerRequestMode !== undefined ? { providerRequestMode } : {}),
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
     permissionMode: permissionMode as SessionSettings["mode"],
+    ...(policyDenialMode !== undefined ? { policyDenialMode } : {}),
     allowedTools: Object.freeze(allowedTools),
+    ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
     timeoutMs,
     shutdownGraceMs,
     trace: value["trace"],
@@ -1047,6 +1105,7 @@ function cancellationOutcome(
   cause: CancelCause,
   shutdownConfirmed: boolean,
   durationMs: number,
+  policyDenials?: HeadlessOneShotPolicyDenialSummary,
 ): HeadlessOneShotOutcome {
   const status = cause === "timeout" ? "timed_out" : "canceled";
   const exitCode = cause === "timeout" ? 124 : cause === "SIGTERM" ? 143 : 130;
@@ -1070,6 +1129,7 @@ function cancellationOutcome(
           : "The cancellation grace period elapsed before Runtime shutdown could be confirmed.",
       },
       terminationConfirmed: shutdownConfirmed,
+      policyDenials,
     }),
     exitCode,
     shutdownConfirmed,
@@ -1082,6 +1142,7 @@ function invalidOutcome(
   durationMs: number,
   workDir: string | null = null,
   effective?: HeadlessOneShotEffectivePolicy,
+  policyDenials?: HeadlessOneShotPolicyDenialSummary,
 ): HeadlessOneShotOutcome {
   return {
     result: resultPayload({
@@ -1091,6 +1152,7 @@ function invalidOutcome(
       effective: effective ?? emptyEffective(request),
       durationMs,
       error: { code: error.code, summary: error.summary },
+      policyDenials,
     }),
     exitCode: 2,
     shutdownConfirmed: true,
@@ -1104,6 +1166,7 @@ function failedOutcome(
   code: string,
   summary: string,
   durationMs: number,
+  policyDenials?: HeadlessOneShotPolicyDenialSummary,
 ): HeadlessOneShotOutcome {
   return {
     result: resultPayload({
@@ -1113,6 +1176,7 @@ function failedOutcome(
       effective,
       durationMs,
       error: { code, summary },
+      policyDenials,
     }),
     exitCode: 3,
     shutdownConfirmed: true,
@@ -1130,6 +1194,7 @@ function resultPayload(input: {
   tracePath?: string | null;
   error?: HeadlessOneShotError;
   terminationConfirmed?: boolean;
+  policyDenials?: HeadlessOneShotPolicyDenialSummary;
 }): HeadlessOneShotResultV1 {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -1143,7 +1208,45 @@ function resultPayload(input: {
     tracePath: input.tracePath ?? null,
     effective: input.effective,
     error: input.error ?? null,
+    ...(input.policyDenials ? { policyDenials: input.policyDenials } : {}),
     terminationConfirmed: input.terminationConfirmed ?? true,
+  };
+}
+
+function createPolicyDenialAccumulator(): {
+  readonly record: (event: RuntimePolicyDenial) => void;
+  readonly snapshot: () => HeadlessOneShotPolicyDenialSummary | undefined;
+} {
+  let total = 0;
+  const byCode: Record<RuntimePolicyDenial["code"], number> = {
+    plan_mode: 0,
+    hardline: 0,
+    hook: 0,
+    approval: 0,
+  };
+  let first: HeadlessOneShotPolicyDenial | undefined;
+  let last: HeadlessOneShotPolicyDenial | undefined;
+  return {
+    record(event) {
+      const denial = Object.freeze({
+        source: event.source,
+        code: event.code,
+        toolName: event.toolName.slice(0, MAX_POLICY_TOOL_NAME_LENGTH),
+      });
+      total = Math.min(total + 1, MAX_POLICY_DENIAL_COUNT);
+      byCode[event.code] = Math.min(byCode[event.code] + 1, MAX_POLICY_DENIAL_COUNT);
+      first ??= denial;
+      last = denial;
+    },
+    snapshot() {
+      if (!first || !last) return undefined;
+      return Object.freeze({
+        total,
+        byCode: Object.freeze({ ...byCode }),
+        first,
+        last,
+      });
+    },
   };
 }
 

@@ -22,6 +22,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
 const ROUTE_ID = `${PROVIDER_ID}/${MODEL_ID}`;
+type RunAgentCliDependenciesWithBashTimeout = { readonly bashTimeoutMs?: number };
 
 test("internal headless runner succeeds through the shared Runtime and redacts route credentials", async (context) => {
   const fixture = await createFixture(context, "success");
@@ -52,6 +53,7 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
   });
   assert.equal(outcome.result.effective.modelRouteId, ROUTE_ID);
   assert.equal(outcome.result.effective.permissionMode, "plan");
+  assert.equal(Object.hasOwn(outcome.result, "policyDenials"), false);
   assert.equal(providerCalls, 1);
   assert.ok(outcome.result.tracePath);
   assert.equal((await readFile(outcome.result.tracePath, "utf8")).includes(secret), false);
@@ -283,7 +285,58 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
   delete missingRoute["modelRouteId"];
   const missing = await runHeadlessOneShotJson(JSON.stringify(missingRoute), dependencies);
   assert.equal(missing.result.error?.code, "MISSING_FIELD");
+
+  const invalidPolicyDenialMode = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "policy-denial-mode"),
+      policyDenialMode: "recoverable",
+    }),
+    dependencies,
+  );
+  assert.equal(invalidPolicyDenialMode.result.error?.code, "INVALID_POLICY_DENIAL_MODE");
+
+  for (const [id, bashTimeoutMs, timeoutMs, errorCode] of [
+    ["bash-timeout-low", 999, 30_000, "INVALID_FIELD"],
+    ["bash-timeout-high", 300_001, 400_000, "INVALID_FIELD"],
+    ["bash-timeout-overall", 1_001, 1_000, "INVALID_BASH_TIMEOUT"],
+  ] as const) {
+    const invalidBashTimeout = await runHeadlessOneShotJson(
+      JSON.stringify({
+        ...requestFor(fixture, id),
+        bashTimeoutMs,
+        timeoutMs,
+      }),
+      dependencies,
+    );
+    assert.equal(invalidBashTimeout.result.error?.code, errorCode);
+  }
   assert.equal(providerCalls, 0);
+});
+
+test("headless accepts existing task tools and forwards a bounded bash timeout", async (context) => {
+  const fixture = await createFixture(context, "task-tools");
+  await configureFixture(fixture, "secret-canary-task-tools");
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "task-tools"),
+      allowedTools: ["task_list", "task_output", "task_stop"],
+      bashTimeoutMs: 30_000,
+    }),
+    {
+      env: {},
+      executeRuntime: async (options, dependencies) => {
+        assert.deepEqual(options.allowedTools, ["task_list", "task_output", "task_stop"]);
+        assert.equal(
+          (dependencies as RunAgentCliDependenciesWithBashTimeout | undefined)?.bashTimeoutMs,
+          30_000,
+        );
+        return runtimeResult(options, "task tools accepted");
+      },
+    },
+  );
+
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.result.status, "completed");
 });
 
 test("unknown tools fail before provider generation and Session IDs cannot be reused", async (context) => {
@@ -329,15 +382,56 @@ test("unknown tools fail before provider generation and Session IDs cannot be re
   assert.equal(providerCalls, 2);
 });
 
-test("a headless policy denial returns policy_blocked without waiting for UI", async (context) => {
+test("headless policy denial defaults to the compatible terminal outcome", async (context) => {
+  const fixture = await createFixture(context, "policy-terminal");
+  await configureFixture(fixture, "secret-canary-policy-terminal");
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(fixture, "policy-terminal")),
+    {
+      env: {},
+      executeRuntime: async (options, dependencies) => {
+        dependencies?.onPolicyDenied?.({
+          source: "safety",
+          code: "plan_mode",
+          toolName: "write_file",
+        });
+        return runtimeResult(options, "must remain hidden", {
+          promptTokens: 7,
+          completionTokens: 3,
+          costCNY: 0,
+        });
+      },
+    },
+  );
+
+  assert.equal(outcome.exitCode, 4);
+  assert.equal(outcome.result.status, "policy_blocked");
+  assert.equal(outcome.result.finalMessage, null);
+  assert.equal(outcome.result.error?.code, "POLICY_BLOCKED");
+  assert.deepEqual(outcome.result.policyDenials, {
+    total: 1,
+    byCode: {
+      plan_mode: 1,
+      hardline: 0,
+      hook: 0,
+      approval: 0,
+    },
+    first: { source: "safety", code: "plan_mode", toolName: "write_file" },
+    last: { source: "safety", code: "plan_mode", toolName: "write_file" },
+  });
+});
+
+test("incident-mode policy denial remains recoverable after normal completion", async (context) => {
   const fixture = await createFixture(context, "policy");
-  await configureFixture(fixture, "secret-canary-policy");
+  const secret = "secret-canary-policy";
+  await configureFixture(fixture, secret);
   let calls = 0;
   const outcome = await runHeadlessOneShotJson(
     JSON.stringify({
       ...requestFor(fixture, "policy-block"),
       allowedTools: ["write_file"],
       permissionMode: "plan",
+      policyDenialMode: "incident",
     }),
     {
       env: {},
@@ -353,21 +447,118 @@ test("a headless policy denial returns policy_blocked without waiting for UI", a
               },
             ]);
           }
-          return assistant("policy explained", { promptTokens: 5, completionTokens: 2 });
+          return assistant(`policy explained ${secret}`, {
+            promptTokens: 5,
+            completionTokens: 2,
+          });
         },
       }),
     },
   );
 
-  assert.equal(outcome.exitCode, 4);
-  assert.equal(outcome.result.status, "policy_blocked");
-  assert.equal(outcome.result.error?.code, "POLICY_BLOCKED");
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(outcome.result.finalMessage, "policy explained [REDACTED]");
+  assert.equal(outcome.result.error, null);
+  assert.deepEqual(outcome.result.policyDenials, {
+    total: 1,
+    byCode: {
+      plan_mode: 1,
+      hardline: 0,
+      hook: 0,
+      approval: 0,
+    },
+    first: { source: "safety", code: "plan_mode", toolName: "write_file" },
+    last: { source: "safety", code: "plan_mode", toolName: "write_file" },
+  });
   assert.deepEqual(outcome.result.usage, {
     promptTokens: 12,
     completionTokens: 5,
     costCNY: 0,
   });
   assert.equal(calls, 2);
+});
+
+test("policy denial incidents preserve Runtime failure and timeout terminal states", async (context) => {
+  const failedFixture = await createFixture(context, "policy-runtime-failure");
+  await configureFixture(failedFixture, "secret-canary-policy-runtime-failure");
+  const sensitiveError = "rm -rf /private/tmp/sensitive-command-output";
+  const failed = await runHeadlessOneShotJson(
+    JSON.stringify(requestFor(failedFixture, "policy-runtime-failure")),
+    {
+      env: {},
+      executeRuntime: async (_options, dependencies) => {
+        dependencies?.onPolicyDenied?.({
+          source: "safety",
+          code: "plan_mode",
+          toolName: "write_file",
+        });
+        dependencies?.onPolicyDenied?.({
+          source: "safety",
+          code: "hardline",
+          toolName: "bash",
+        });
+        dependencies?.onPolicyDenied?.({
+          source: "permission",
+          code: "hook",
+          toolName: "edit_file",
+        });
+        throw new Error(sensitiveError);
+      },
+    },
+  );
+
+  assert.equal(failed.exitCode, 3);
+  assert.equal(failed.result.status, "failed");
+  assert.equal(failed.result.error?.code, "RUNTIME_FAILED");
+  assert.deepEqual(failed.result.policyDenials, {
+    total: 3,
+    byCode: {
+      plan_mode: 1,
+      hardline: 1,
+      hook: 1,
+      approval: 0,
+    },
+    first: { source: "safety", code: "plan_mode", toolName: "write_file" },
+    last: { source: "permission", code: "hook", toolName: "edit_file" },
+  });
+  assert.equal(JSON.stringify(failed.result).includes(sensitiveError), false);
+
+  const timeoutFixture = await createFixture(context, "policy-timeout");
+  await configureFixture(timeoutFixture, "secret-canary-policy-timeout");
+  const timedOut = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(timeoutFixture, "policy-timeout"),
+      timeoutMs: 500,
+    }),
+    {
+      env: {},
+      executeRuntime: async (_options, dependencies) => {
+        dependencies?.onPolicyDenied?.({
+          source: "permission",
+          code: "approval",
+          toolName: "bash",
+        });
+        await rejectOnAbort({ signal: dependencies?.signal });
+        throw new Error("unreachable");
+      },
+    },
+  );
+
+  assert.equal(timedOut.exitCode, 124);
+  assert.equal(timedOut.result.status, "timed_out");
+  assert.equal(timedOut.result.error?.code, "TIMEOUT");
+  assert.deepEqual(timedOut.result.policyDenials, {
+    total: 1,
+    byCode: {
+      plan_mode: 0,
+      hardline: 0,
+      hook: 0,
+      approval: 1,
+    },
+    first: { source: "permission", code: "approval", toolName: "bash" },
+    last: { source: "permission", code: "approval", toolName: "bash" },
+  });
 });
 
 test("a non-policy rejected envelope does not become policy_blocked", async (context) => {
