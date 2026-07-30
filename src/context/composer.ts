@@ -25,11 +25,19 @@ export interface PromptLayers {
   readonly turnTail: string;
 }
 
+export const ISOLATED_HEADLESS_COMPLETION_CONTRACT = `# 无人值守完成契约 (Isolated Headless: CRITICAL)
+1. 你必须在当前工作区或容器内把用户要求的最终状态真正完成。若任务要求执行或配置，仅创建脚本、给出说明或让用户稍后运行命令都不算完成。
+2. 在修改前先检查现状并复现关键问题。工具失败时读取错误信息，改用安全、等价的工具或命令继续推进，不要直接宣称完成。
+3. 为最终验证保留约 20%–30% 的时间或轮次预算。结束前运行 1–3 个直接覆盖用户主路径和最高风险边界的验收；服务类任务还要从独立命令检查健康状态。
+4. 只有验收证据与结论一致时才能报告成功。无法完成时，明确报告已验证的阻塞点、尝试过的方案和当前实际状态。
+5. 使用工作区内静态、显式的路径与最小权限操作。遇到策略拒绝后不要重复原调用，应改用更窄、更安全的内置工具或命令。`;
+
 /** 负责根据工作区环境动态生成 System Prompt */
 export class PromptComposer {
   private readonly workDir: string;
   private readonly skillLoader: SkillLoader;
   private readonly planMode: boolean;
+  private readonly isolatedHeadless: boolean;
   private readonly planStore: PlanStore;
   private readonly todoStore: TodoStore;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
@@ -42,6 +50,7 @@ export class PromptComposer {
    * @param options 可选配置
    *   - goalManager: GoalManager 单例（注入后把 active goal 注入 prompt）
    *   - todoStore: TodoStore 单例（注入后与 TodoTool 共享,根治跨实例不可见 bug）
+   *   - isolatedHeadless: 注入无人值守完成与验收契约
    */
   constructor(
     workDir: string,
@@ -51,11 +60,13 @@ export class PromptComposer {
       todoStore?: TodoStore;
       skillLoader?: SkillLoader;
       onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
+      isolatedHeadless?: boolean;
     },
   ) {
     this.workDir = workDir;
     this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
+    this.isolatedHeadless = options?.isolatedHeadless ?? false;
     this.planStore = new PlanStore(workDir);
     // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
     // 未注入则内部 new,保持向后兼容;单实例场景不受跨实例 bug 影响。
@@ -90,6 +101,10 @@ export class PromptComposer {
 3. 编辑文件前务必先读取现有文件,以理解上下文。
 4. 遇到工具执行报错时,仔细阅读 stderr,尝试自己修正命令并重试。
 5. 始终用中文回复,以便传达你的进展和想法。`);
+
+    if (this.isolatedHeadless) {
+      stableParts.push(ISOLATED_HEADLESS_COMPLETION_CONTRACT);
+    }
 
     // 2. (可选)长程任务与状态外部化强制规范:Plan Mode 开关
     // 借鉴 Claude Code:重型记忆管理是可选的计划模式,只对复杂长程任务开启,

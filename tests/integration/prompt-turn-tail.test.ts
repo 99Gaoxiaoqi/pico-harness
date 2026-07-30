@@ -302,6 +302,51 @@ test("AgentRuntime puts schedule intent in the current turn tail, not durable ev
   assert.doesNotMatch(JSON.stringify(runtimeEvents), /schedule-task-intent|current-turn-context/u);
 });
 
+test("isolated headless runtime adds the autonomous completion contract only to its system prompt", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-isolated-headless-contract-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workDir, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const systemPrompts: string[] = [];
+  const userPrompts: string[] = [];
+  const provider: LLMProvider = {
+    async generate(messages) {
+      systemPrompts.push(messages[0]?.content ?? "");
+      userPrompts.push(visibleUsers(messages).at(-1)?.content ?? "");
+      return { role: "assistant", content: "done" };
+    },
+  };
+  const run = async (sessionId: string, isolatedHeadless: boolean) =>
+    executeAgentRuntime(
+      {
+        prompt: "完成当前任务",
+        dir: workDir,
+        sessionSelection: { mode: "new", sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        interactionMode: "auto",
+      },
+      {
+        provider,
+        picoHome,
+        reporter: new SilentReporter(),
+        isolatedHeadless,
+      },
+    );
+
+  await run("ordinary-runtime", false);
+  await run("isolated-runtime", true);
+
+  assert.equal(systemPrompts.length, 2);
+  assert.doesNotMatch(systemPrompts[0] ?? "", /无人值守完成契约/u);
+  assert.match(systemPrompts[1] ?? "", /无人值守完成契约/u);
+  assert.match(systemPrompts[1] ?? "", /仅创建脚本、给出说明或让用户稍后运行命令都不算完成/u);
+  assert.match(systemPrompts[1] ?? "", /结束前运行 1–3 个/u);
+  assert.deepEqual(userPrompts, ["完成当前任务", "完成当前任务"]);
+});
+
 function visibleUsers(messages: readonly Message[]): Message[] {
   return messages.filter(
     (message) =>
