@@ -37,7 +37,7 @@ export function snapshotToolDefinitions(tools: readonly ToolDefinition[]): ToolD
       ...tool,
       inputSchema: stableJsonValue(tool.inputSchema) as Record<string, unknown>,
     }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
 }
 
 export interface PromptCacheRevisions {
@@ -45,6 +45,19 @@ export interface PromptCacheRevisions {
   tools: string;
   /** Stable system + tool prefix, intentionally excluding conversation/user content. */
   prefix: string;
+}
+
+export interface OpenAIPromptCacheKeyOptions {
+  /**
+   * Opaque route digest. It includes provider/model/base URL/cache policy but never credentials,
+   * so switching route domains cannot accidentally reuse the same cache identity.
+   */
+  routeIdentity?: string;
+  /**
+   * Opaque digest of the stable conversation seed. It only chooses a numeric shard and is never
+   * embedded directly into the wire key.
+   */
+  conversationShardSeed?: string;
 }
 
 /**
@@ -76,17 +89,55 @@ export function openAIPromptCacheKey(
   model: string,
   revisions: PromptCacheRevisions,
   keyShards = 1,
+  options: OpenAIPromptCacheKeyOptions = {},
 ): string {
-  const shards = Math.max(1, keyShards);
-  // There is intentionally no user/session text in the seed.  Until the
-  // provider interface carries a stable session identity, every route with an
-  // identical stable prefix resolves to one deterministic shard.
-  const shard = Number.parseInt(hash(`${model}\0${revisions.prefix}`).slice(0, 8), 16) % shards;
-  return `pico:${hash(model).slice(0, 12)}:${revisions.prefix.slice(0, 40)}:${shard}`;
+  const shards = Number.isSafeInteger(keyShards) && keyShards > 0 ? keyShards : 1;
+  const routeIdentity = options.routeIdentity ?? hash(model);
+  const shardSeed = options.conversationShardSeed ?? revisions.prefix;
+  const shard = Number.parseInt(hash(shardSeed).slice(0, 12), 16) % shards;
+  // Keep the key below OpenAI's 64-character limit even for large safe-integer shard counts.
+  return `pico:${routeIdentity.slice(0, 12)}:${revisions.prefix.slice(0, 32)}:${shard.toString(36)}`;
+}
+
+/** Build a secret-free route cache identity; query strings and credentials are discarded. */
+export function promptCacheRouteIdentity(input: {
+  provider: string;
+  model: string;
+  baseURL: string;
+  policy: unknown;
+}): string {
+  return hash(
+    stableJson({
+      provider: input.provider,
+      model: input.model,
+      baseURL: normalizeBaseURL(input.baseURL),
+      policy: input.policy,
+    }),
+  );
+}
+
+/**
+ * Choose one stable conversation seed without exposing user text. The provider receives only this
+ * digest and reduces it to a numeric shard; the base cache key remains model/system/tools based.
+ */
+export function promptCacheConversationShardSeed(messages: readonly Message[]): string | undefined {
+  const anchor = messages.find((message) => message.role !== "system");
+  if (!anchor) return undefined;
+  return hash(stableJson({ role: anchor.role, content: anchor.content }));
 }
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeBaseURL(value: string): string {
+  try {
+    const parsed = new URL(value);
+    const path = parsed.pathname.replace(/\/+$/u, "");
+    return `${parsed.protocol}//${parsed.host}${path}`;
+  } catch {
+    return value.replace(/[?#].*$/u, "").replace(/\/+$/u, "");
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
