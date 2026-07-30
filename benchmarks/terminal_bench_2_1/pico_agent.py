@@ -32,6 +32,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
 _RELAY_IMAGE_ID = "sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37"
+_MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 
 
 class TrialNetworks(NamedTuple):
@@ -1660,6 +1661,7 @@ def load_route_config(path: Path) -> dict[str, Any]:
         "provider",
         "pricing",
         "pricingSha256",
+        "runBudget",
         "thinkingEffort",
     }
     if set(value) - allowed or value.get("schemaVersion") != 1:
@@ -1670,6 +1672,19 @@ def load_route_config(path: Path) -> dict[str, Any]:
     required_provider = {"protocol", "baseURL", "models", "discoverModels"}
     if not required_provider.issubset(provider):
         raise ValueError("route config provider is incomplete")
+    run_budget = value.get("runBudget")
+    if (
+        not isinstance(run_budget, dict)
+        or set(run_budget) != {"currency", "maxCostMicroCNY"}
+        or run_budget.get("currency") != "CNY"
+    ):
+        raise ValueError("route config run budget is invalid")
+    require_bounded_int(
+        run_budget.get("maxCostMicroCNY"),
+        "runBudget.maxCostMicroCNY",
+        0,
+        _MAX_RUN_COST_MICRO_CNY,
+    )
     return value
 
 
