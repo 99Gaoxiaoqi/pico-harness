@@ -531,6 +531,271 @@ def assert_exact_reconciliation(
     ).hexdigest()
 
 
+def request_reservation_cost(
+    gateway: Any,
+    state: Any,
+    frame: dict[str, Any],
+) -> int:
+    body = base64.b64decode(frame["body"], validate=True)
+    bounded_body, output_limit = gateway.bound_request(
+        body,
+        frame["path"],
+        frame["protocol"],
+        state.model,
+    )
+    return gateway.token_cost_micro_cny(
+        len(bounded_body) + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
+        output_limit,
+        state.pricing,
+    )
+
+
+def upstream_result(input_tokens: int, output_tokens: int) -> dict[str, Any]:
+    response_body = json.dumps(
+        {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    return {
+        "status": 200,
+        "headers": [["content-type", "application/json"]],
+        "body": base64.b64encode(response_body).decode(),
+    }
+
+
+def assert_run_budget_contract(
+    gateway: Any,
+    route_config: dict[str, Any],
+) -> None:
+    invalid_budgets: tuple[Any, ...] = (
+        None,
+        {},
+        {"currency": "USD", "maxCostMicroCNY": 1},
+        {"currency": "CNY", "maxCostMicroCNY": 1, "extra": True},
+        {"currency": "CNY", "maxCostMicroCNY": True},
+        {"currency": "CNY", "maxCostMicroCNY": -1},
+        {"currency": "CNY", "maxCostMicroCNY": 1.5},
+        {"currency": "CNY", "maxCostMicroCNY": "1"},
+        {
+            "currency": "CNY",
+            "maxCostMicroCNY": gateway.MAX_RUN_COST_MICRO_CNY + 1,
+        },
+    )
+    for index, run_budget in enumerate(invalid_budgets):
+        candidate = json.loads(json.dumps(route_config))
+        if run_budget is None:
+            candidate.pop("runBudget")
+        else:
+            candidate["runBudget"] = run_budget
+        try:
+            gateway.GatewayState(
+                candidate,
+                "provider-secret-canary",
+                f"invalid-run-budget-{index}",
+                "5" * 64,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid run budget was accepted: {run_budget!r}")
+
+    zero_budget = json.loads(json.dumps(route_config))
+    zero_budget["runBudget"]["maxCostMicroCNY"] = 0
+    state = gateway.GatewayState(
+        zero_budget,
+        "provider-secret-canary",
+        "zero-run-budget",
+        "6" * 64,
+    )
+    assert state.run_budget_max_cost_micro_cny == 0
+    assert state.run_cost_micro_cny_remaining == 0
+
+
+def assert_atomic_run_budget_and_refund(
+    gateway: Any,
+    route_config: dict[str, Any],
+) -> None:
+    frame = proxy_frame({})
+    probe = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "run-budget-probe",
+        "7" * 64,
+    )
+    reservation_cost = request_reservation_cost(gateway, probe, frame)
+    actual_cost = gateway.token_cost_micro_cny(2, 1, probe.pricing)
+    assert reservation_cost > actual_cost
+
+    budgeted_route = json.loads(json.dumps(route_config))
+    budgeted_route["runBudget"]["maxCostMicroCNY"] = (
+        reservation_cost + actual_cost
+    )
+    state = gateway.GatewayState(
+        budgeted_route,
+        "provider-secret-canary",
+        "atomic-run-budget",
+        "8" * 64,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    execute_lock = threading.Lock()
+    execute_calls: list[dict[str, Any]] = []
+
+    class ControlledUpstream:
+        def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
+            with execute_lock:
+                sequence = len(execute_calls)
+                execute_calls.append(payload)
+            if sequence == 0:
+                entered.set()
+                assert release.wait(timeout=2)
+            return upstream_result(2, 1)
+
+        def cancel(self, _deadline: float | None = None) -> None:
+            release.set()
+
+    state.upstream_request_factory = ControlledUpstream
+    for trial_id in ("trial-atomic-a", "trial-atomic-b"):
+        state.register(
+            {
+                "trialId": trial_id,
+                "action": "register",
+                "protocol": "openai",
+                "ttlSec": 60,
+            }
+        )
+
+    first_outcome: list[str] = []
+
+    def execute_first() -> None:
+        try:
+            state.proxy({"trialId": "trial-atomic-a", **frame})
+            first_outcome.append("success")
+        except Exception:
+            first_outcome.append("rejected")
+
+    first_thread = threading.Thread(target=execute_first)
+    first_thread.start()
+    assert entered.wait(timeout=1)
+    try:
+        state.proxy({"trialId": "trial-atomic-b", **frame})
+    except ValueError as error:
+        assert str(error) == "gateway run budget exhausted"
+    else:
+        raise AssertionError("overlapping trials oversold the aggregate run budget")
+    assert len(execute_calls) == 1
+    denied_receipt = state.revoke("trial-atomic-b")
+    assert denied_receipt["withinBudget"] is False
+    assert denied_receipt["requests"]["attempted"] == 0
+
+    release.set()
+    first_thread.join(1)
+    assert first_outcome == ["success"]
+    state.register(
+        {
+            "trialId": "trial-after-refund",
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    assert state.proxy({"trialId": "trial-after-refund", **frame})["status"] == 200
+    assert len(execute_calls) == 2
+    with state.lock:
+        assert state.run_cost_micro_cny_remaining == (
+            reservation_cost - actual_cost
+        )
+        assert state.run_budget_closed is False
+    assert state.revoke("trial-atomic-a")["withinBudget"] is True
+    assert state.revoke("trial-after-refund")["withinBudget"] is True
+
+
+def assert_run_budget_overrun_closes_run(
+    gateway: Any,
+    route_config: dict[str, Any],
+) -> None:
+    frame = proxy_frame({})
+    probe = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "run-budget-overrun-probe",
+        "9" * 64,
+    )
+    reservation_cost = request_reservation_cost(gateway, probe, frame)
+    actual_cost = gateway.token_cost_micro_cny(5_000, 1, probe.pricing)
+    assert actual_cost > reservation_cost
+
+    budgeted_route = json.loads(json.dumps(route_config))
+    budgeted_route["runBudget"]["maxCostMicroCNY"] = reservation_cost
+    state = gateway.GatewayState(
+        budgeted_route,
+        "provider-secret-canary",
+        "run-budget-overrun",
+        "a" * 64,
+    )
+    execute_calls = 0
+
+    class SupplementingUpstream:
+        def execute(self, _payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal execute_calls
+            execute_calls += 1
+            return upstream_result(5_000, 1)
+
+        def cancel(self, _deadline: float | None = None) -> None:
+            pass
+
+    state.upstream_request_factory = SupplementingUpstream
+    state.register(
+        {
+            "trialId": "trial-run-overrun",
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    try:
+        state.proxy({"trialId": "trial-run-overrun", **frame})
+    except ValueError as error:
+        assert str(error) == "gateway response usage exceeds quota"
+    else:
+        raise AssertionError("aggregate run budget supplement was accepted")
+    with state.lock:
+        assert state.run_budget_closed is True
+        assert state.run_cost_micro_cny_remaining == (
+            reservation_cost - actual_cost
+        )
+
+    state.register(
+        {
+            "trialId": "trial-after-overrun",
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    try:
+        state.proxy({"trialId": "trial-after-overrun", **frame})
+    except ValueError as error:
+        assert str(error) == "gateway run budget exhausted"
+    else:
+        raise AssertionError("closed aggregate run budget sent another request")
+    assert execute_calls == 1
+
+    overrun_receipt = state.revoke("trial-run-overrun")
+    assert overrun_receipt["status"] == "reconciled"
+    assert overrun_receipt["withinBudget"] is False
+    assert overrun_receipt["actual"]["costMicroCNY"] == actual_cost
+    denied_receipt = state.revoke("trial-after-overrun")
+    assert denied_receipt["withinBudget"] is False
+    assert denied_receipt["requests"]["attempted"] == 0
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     provider = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
@@ -552,6 +817,10 @@ def main() -> None:
             },
             "pricing": pricing,
             "pricingSha256": pricing_sha256,
+            "runBudget": {
+                "currency": "CNY",
+                "maxCostMicroCNY": 10_000_000_000,
+            },
         }
         route_path.write_text(json.dumps(route_config))
         supervisor_path = (
@@ -567,6 +836,9 @@ def main() -> None:
         assert_spawn_revoke_race(gateway, route_config)
         assert_stubborn_worker_revoke_fails_closed(gateway, route_config)
         assert_exact_reconciliation(gateway, route_config)
+        assert_run_budget_contract(gateway, route_config)
+        assert_atomic_run_budget_and_refund(gateway, route_config)
+        assert_run_budget_overrun_closes_run(gateway, route_config)
         assert_synthetic_stage_cancel(gateway, route_config, root, "dns")
         assert_synthetic_stage_cancel(gateway, route_config, root, "connect")
         bad_route_path = root / "bad-route.json"
@@ -857,6 +1129,10 @@ def main() -> None:
                     },
                     "pricing": pricing,
                     "pricingSha256": pricing_sha256,
+                    "runBudget": {
+                        "currency": "CNY",
+                        "maxCostMicroCNY": 10_000_000_000,
+                    },
                 }
             )
         )

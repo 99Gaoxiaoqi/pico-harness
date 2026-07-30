@@ -30,6 +30,7 @@ MAX_REQUESTS = 128
 MAX_INPUT_TOKENS = 1_000_000
 MAX_OUTPUT_TOKENS = 65_536
 MAX_COST_MICRO_CNY = 250_000_000
+MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
 INPUT_RESERVATION_MARGIN_TOKENS = 1_024
 UPSTREAM_TIMEOUT_SEC = 120
@@ -120,6 +121,9 @@ class GatewayState:
         self.model = route_config["modelRouteId"].split("/", 1)[1]
         self.pricing, self.pricing_sha256 = require_pricing(route_config, self.model)
         self.pricing_descriptor = dict(route_config["pricing"])
+        self.run_budget_max_cost_micro_cny = require_run_budget(route_config)
+        self.run_cost_micro_cny_remaining = self.run_budget_max_cost_micro_cny
+        self.run_budget_closed = False
         self.model_route_id = route_config["modelRouteId"]
         self.provider_secret = provider_secret
         self.run_id = run_id
@@ -228,10 +232,18 @@ class GatewayState:
                 or trial["active"]
             ):
                 raise ValueError("gateway trial quota exhausted")
+            if (
+                self.run_budget_closed
+                or self.run_cost_micro_cny_remaining < cost_reservation
+            ):
+                trial["revoked"] = True
+                trial["withinBudget"] = False
+                raise ValueError("gateway run budget exhausted")
             trial["requestsRemaining"] -= 1
             trial["inputTokensRemaining"] -= input_reservation
             trial["outputTokensRemaining"] -= output_limit
             trial["costMicroCNYRemaining"] -= cost_reservation
+            self.run_cost_micro_cny_remaining -= cost_reservation
             trial["active"].add(active)
             accounting = trial["accounting"]
             accounting["requests"]["attempted"] += 1
@@ -291,6 +303,9 @@ class GatewayState:
                 trial["inputTokensRemaining"] += input_reservation - actual_input
                 trial["outputTokensRemaining"] += output_limit - actual_output
                 trial["costMicroCNYRemaining"] += cost_reservation - actual_cost
+                self.run_cost_micro_cny_remaining += (
+                    cost_reservation - actual_cost
+                )
                 accounting = trial["accounting"]
                 accounting["requests"]["reconciled"] += 1
                 request_accounting["status"] = "reconciled"
@@ -325,12 +340,16 @@ class GatewayState:
                     max(actual_output - output_limit, 0),
                     max(actual_cost - cost_reservation, 0),
                 )
+                run_budget_overrun = self.run_cost_micro_cny_remaining < 0
+                if run_budget_overrun:
+                    self.run_budget_closed = True
                 over_quota = (
                     actual_input > MAX_INPUT_TOKENS
                     or actual_output > output_limit
                     or trial["inputTokensRemaining"] < 0
                     or trial["outputTokensRemaining"] < 0
                     or trial["costMicroCNYRemaining"] < 0
+                    or run_budget_overrun
                 )
                 if over_quota:
                     trial["revoked"] = True
@@ -360,6 +379,7 @@ class GatewayState:
                         cost_reservation,
                     )
                     trial["revoked"] = True
+                    trial["withinBudget"] = False
                     trial["active"].discard(active)
                     self.condition.notify_all()
             raise
@@ -728,6 +748,25 @@ def require_pricing(
     ):
         raise ValueError("gateway pricing digest mismatch")
     return {"input": pricing["input"], "output": pricing["output"]}, digest
+
+
+def require_run_budget(route_config: dict[str, Any]) -> int:
+    run_budget = route_config.get("runBudget")
+    if (
+        not isinstance(run_budget, dict)
+        or set(run_budget) != {"currency", "maxCostMicroCNY"}
+        or run_budget["currency"] != "CNY"
+    ):
+        raise ValueError("gateway run budget contract is invalid")
+    maximum = run_budget["maxCostMicroCNY"]
+    if (
+        isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+        or maximum < 0
+        or maximum > MAX_RUN_COST_MICRO_CNY
+    ):
+        raise ValueError("gateway run budget limit is invalid")
+    return maximum
 
 
 def token_cost_micro_cny(
