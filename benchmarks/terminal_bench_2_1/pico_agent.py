@@ -69,7 +69,6 @@ _PUBLIC_EGRESS_RELAY_SCRIPT = (
     "}).listen(8081,'0.0.0.0');"
 )
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
-_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = {"codex-oauth/gpt-5.4": 8_192}
 
 
@@ -352,7 +351,9 @@ rm -f {remote_archive}
         loop: asyncio.AbstractEventLoop,
         public_proxy_env: dict[str, str],
     ) -> None:
-        route_output = route_output_capability(route_config)
+        route_output = _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(
+            route_config["modelRouteId"]
+        )
         bootstrap_route = {
             "id": route_config["modelRouteId"],
             "protocol": route_config["provider"]["protocol"],
@@ -2458,7 +2459,6 @@ def validate_benchmark_route_contract(
     model_route_id = value.get("modelRouteId")
     expected_output = _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(model_route_id)
     if expected_output is None:
-        route_output_capability(value)
         return
     provider_id, model = model_route_id.split("/", 1)
     capabilities = provider.get("modelCapabilities")
@@ -2486,41 +2486,6 @@ def validate_benchmark_route_contract(
             f"{model_route_id} benchmark route must pin output={expected_output} "
             "and use max_completion_tokens"
         )
-
-
-def route_output_capability(value: dict[str, Any]) -> int | None:
-    model_route_id = value.get("modelRouteId")
-    provider = value.get("provider")
-    if (
-        not isinstance(model_route_id, str)
-        or "/" not in model_route_id
-        or not isinstance(provider, dict)
-    ):
-        raise ValueError("route config model output capability is invalid")
-    provider_id, model = model_route_id.split("/", 1)
-    if not provider_id or not model:
-        raise ValueError("route config model output capability is invalid")
-    if "modelCapabilities" not in provider:
-        return None
-    capabilities = provider["modelCapabilities"]
-    if not isinstance(capabilities, dict):
-        raise ValueError("route config model output capability is invalid")
-    if model not in capabilities:
-        return None
-    model_capability = capabilities[model]
-    if not isinstance(model_capability, dict):
-        raise ValueError("route config model output capability is invalid")
-    if "output" not in model_capability:
-        return None
-    output = model_capability["output"]
-    if (
-        isinstance(output, bool)
-        or not isinstance(output, int)
-        or output <= 0
-        or output > _MAX_SAFE_INTEGER
-    ):
-        raise ValueError("route config model output capability is invalid")
-    return output
 
 
 def task_agent_timeout(environment: BaseEnvironment) -> float:
