@@ -11,9 +11,10 @@ import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 
 const SCHEMA_VERSION = 1 as const;
+const BENCHMARK_OUTPUT_TOKENS = 8_192 as const;
 const MAX_INPUT_BYTES = 64 * 1024;
 const REQUEST_FIELDS = new Set(["schemaVersion", "workspacePath", "picoHome", "route"]);
-const ROUTE_FIELDS = new Set(["id", "protocol", "baseURL", "apiKeyEnv"]);
+const ROUTE_FIELDS = new Set(["id", "protocol", "baseURL", "apiKeyEnv", "output"]);
 const FORBIDDEN_SECRET_FIELDS =
   /^(?:apiKey|token|accessToken|refreshToken|secret|password|authorization|credentials?)$/iu;
 const BENCHMARK_API_KEY_ENV = "PICO_TB_GATEWAY_TOKEN";
@@ -27,6 +28,7 @@ export interface HeadlessBootstrapRequestV1 {
     readonly protocol: "openai" | "claude" | "gemini";
     readonly baseURL: string;
     readonly apiKeyEnv: string;
+    readonly output: typeof BENCHMARK_OUTPUT_TOKENS;
   };
 }
 
@@ -178,11 +180,17 @@ function parseRequest(value: unknown): HeadlessBootstrapRequestV1 {
       `route.apiKeyEnv must equal ${BENCHMARK_API_KEY_ENV}.`,
     );
   }
+  if (route["output"] !== BENCHMARK_OUTPUT_TOKENS) {
+    throw new BootstrapRequestError(
+      "INVALID_ROUTE_OUTPUT",
+      `route.output must equal ${BENCHMARK_OUTPUT_TOKENS}.`,
+    );
+  }
   return {
     schemaVersion: SCHEMA_VERSION,
     workspacePath: requiredString(value["workspacePath"], "workspacePath", 4096),
     picoHome: requiredString(value["picoHome"], "picoHome", 4096),
-    route: { id: routeId, protocol, baseURL, apiKeyEnv },
+    route: { id: routeId, protocol, baseURL, apiKeyEnv, output: BENCHMARK_OUTPUT_TOKENS },
   };
 }
 
@@ -199,6 +207,11 @@ function buildUserConfig(
         apiKeyEnv: request.route.apiKeyEnv,
         models: [modelId],
         discoverModels: false,
+        modelCapabilities: {
+          [modelId]: {
+            output: request.route.output,
+          },
+        },
       },
     },
     "bootstrap request",
