@@ -18,6 +18,11 @@ import { applyReasoningRequestPatch } from "./reasoning-capability.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
+import {
+  openAIPromptCacheKey,
+  promptCacheRevisions,
+  snapshotToolDefinitions,
+} from "./prompt-cache.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -37,7 +42,7 @@ interface OpenAIChatResponse {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     completion_tokens_details?: { reasoning_tokens?: number };
   };
 }
@@ -216,14 +221,15 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
-    // 2. 翻译工具定义
+    // 2. 翻译工具定义。Schema 在 provider 边界再规范化一次，保护直接调用者。
+    const tools = snapshotToolDefinitions(availableTools);
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
     };
     // 无可用工具时不挂载 tools,模型只能纯文本输出
-    if (availableTools.length > 0) {
-      body.tools = availableTools.map((t) => ({
+    if (tools.length > 0) {
+      body.tools = tools.map((t) => ({
         type: "function",
         function: {
           name: t.name,
@@ -232,7 +238,7 @@ export class OpenAIProvider implements LLMProvider {
         },
       }));
     }
-    const requestBody = this.finalizeRequestBody(body);
+    const requestBody = this.finalizeRequestBody(body, messages, tools);
     options?.onRequestPrepared?.({
       provider: "openai",
       model: this.config.model,
@@ -242,7 +248,7 @@ export class OpenAIProvider implements LLMProvider {
     // 3. 构建请求并发送
     const bodyJson = JSON.stringify(requestBody);
     logger.debug(
-      { model: this.config.model, messages: openaiMsgs.length, tools: availableTools.length },
+      { model: this.config.model, messages: openaiMsgs.length, tools: tools.length },
       "[OpenAI] POST /chat/completions",
     );
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
@@ -263,7 +269,7 @@ export class OpenAIProvider implements LLMProvider {
           status: resp.status,
           requestBytes: Buffer.byteLength(bodyJson, "utf8"),
           messages: openaiMsgs.length,
-          tools: availableTools.length,
+          tools: tools.length,
         },
         "[OpenAI] 请求失败，已省略可能包含源码或密钥的请求体",
       );
@@ -300,6 +306,9 @@ export class OpenAIProvider implements LLMProvider {
             promptTokens: data.usage.prompt_tokens ?? 0,
             completionTokens: data.usage.completion_tokens ?? 0,
             cacheReadTokens: data.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            ...(typeof data.usage.prompt_tokens_details?.cache_write_tokens === "number"
+              ? { cacheWriteTokens: data.usage.prompt_tokens_details.cache_write_tokens }
+              : {}),
             reasoningTokens: data.usage.completion_tokens_details?.reasoning_tokens ?? 0,
             reportedFields: [
               ...(typeof data.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
@@ -308,6 +317,9 @@ export class OpenAIProvider implements LLMProvider {
                 : []),
               ...(typeof data.usage.prompt_tokens_details?.cached_tokens === "number"
                 ? (["cacheRead"] as const)
+                : []),
+              ...(typeof data.usage.prompt_tokens_details?.cache_write_tokens === "number"
+                ? (["cacheWrite"] as const)
                 : []),
               ...(typeof data.usage.completion_tokens_details?.reasoning_tokens === "number"
                 ? (["reasoning"] as const)
@@ -369,6 +381,7 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
+    const tools = snapshotToolDefinitions(availableTools);
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
@@ -377,13 +390,13 @@ export class OpenAIProvider implements LLMProvider {
     if (this.config.capabilities?.streamUsage === true) {
       body.stream_options = { include_usage: true };
     }
-    if (availableTools.length > 0) {
-      body.tools = availableTools.map((t) => ({
+    if (tools.length > 0) {
+      body.tools = tools.map((t) => ({
         type: "function",
         function: { name: t.name, description: t.description, parameters: t.inputSchema },
       }));
     }
-    const requestBody = this.finalizeRequestBody(body);
+    const requestBody = this.finalizeRequestBody(body, messages, tools);
     options?.onRequestPrepared?.({
       provider: "openai",
       model: this.config.model,
@@ -447,7 +460,7 @@ export class OpenAIProvider implements LLMProvider {
           usage?: {
             prompt_tokens?: number;
             completion_tokens?: number;
-            prompt_tokens_details?: { cached_tokens?: number };
+            prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
             completion_tokens_details?: { reasoning_tokens?: number };
           };
         };
@@ -459,6 +472,9 @@ export class OpenAIProvider implements LLMProvider {
             promptTokens: chunk.usage.prompt_tokens ?? 0,
             completionTokens: chunk.usage.completion_tokens ?? 0,
             cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            ...(typeof chunk.usage.prompt_tokens_details?.cache_write_tokens === "number"
+              ? { cacheWriteTokens: chunk.usage.prompt_tokens_details.cache_write_tokens }
+              : {}),
             reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
             reportedFields: [
               ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
@@ -467,6 +483,9 @@ export class OpenAIProvider implements LLMProvider {
                 : []),
               ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
                 ? (["cacheRead"] as const)
+                : []),
+              ...(typeof chunk.usage.prompt_tokens_details?.cache_write_tokens === "number"
+                ? (["cacheWrite"] as const)
                 : []),
               ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
                 ? (["reasoning"] as const)
@@ -541,10 +560,36 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   /** Canonical routes restore the output budget last; legacy direct calls cannot safely guess the field. */
-  private finalizeRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  private finalizeRequestBody(
+    body: Record<string, unknown>,
+    messages: readonly Message[],
+    tools: readonly ToolDefinition[],
+  ): Record<string, unknown> {
     const requestBody = { ...this.applyThinkingLevel(body) };
     const capabilities = this.config.capabilities;
     if (!capabilities) return requestBody;
+
+    // Gate active cache controls strictly: compatible OpenAI endpoints routinely
+    // accept cached_tokens in responses yet reject request-only cache fields.
+    // cache=true is an explicit route declaration; api.openai.com is the only
+    // endpoint whose Chat Completions wire shape we infer without a probe.
+    if (
+      capabilities.cache === true &&
+      capabilities.promptCache.mode === "explicit" &&
+      isOfficialOpenAIEndpoint(this.config.baseURL)
+    ) {
+      const revisions = promptCacheRevisions(messages, tools);
+      requestBody.prompt_cache_key = openAIPromptCacheKey(
+        this.config.model,
+        revisions,
+        capabilities.promptCache.keyShards,
+      );
+      // Chat Completions has no portable explicit-breakpoint field. Retention is
+      // sent only on this explicitly capability-gated official route.
+      if (capabilities.promptCache.ttl !== undefined) {
+        requestBody.prompt_cache_retention = capabilities.promptCache.ttl;
+      }
+    }
 
     const outputTokenField = capabilities.outputTokenField;
     const alternateField =
@@ -552,5 +597,14 @@ export class OpenAIProvider implements LLMProvider {
     delete requestBody[alternateField];
     requestBody[outputTokenField] = capabilities.maxOutputTokens;
     return requestBody;
+  }
+}
+
+function isOfficialOpenAIEndpoint(baseURL: string): boolean {
+  try {
+    const endpoint = new URL(baseURL);
+    return endpoint.protocol === "https:" && endpoint.hostname.toLowerCase() === "api.openai.com";
+  } catch {
+    return false;
   }
 }
