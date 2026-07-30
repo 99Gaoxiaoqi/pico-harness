@@ -1,9 +1,9 @@
 // Google (Gemini) 原生协议适配器 (同声传译员)。
 //
 // 与 OpenAI / Claude 协议的关键差异:
-// 1. API key 在 query param,不在 header
-// 2. 端点形如 {baseURL}/v1beta/models/{model}:generateContent?key=...
-//    流式端点 :streamGenerateContent?key=...&alt=sse
+// 1. API key 在 x-goog-api-key header,不进入 URL/query
+// 2. 端点形如 {baseURL}/v1beta/models/{model}:generateContent
+//    流式端点 :streamGenerateContent?alt=sse
 // 3. system 是顶层 system_instruction.parts[{text}],不在 contents 里
 // 4. 消息用 contents: [{role: "user"/"model", parts: [...]}]
 //    (Gemini 用 "model" 不用 "assistant")
@@ -24,6 +24,11 @@ import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { applyReasoningRequestPatch } from "./reasoning-capability.js";
+import {
+  GeminiPromptCacheController,
+  type GeminiPromptCacheStore,
+  type GeminiPromptCacheTransport,
+} from "./gemini-prompt-cache.js";
 
 /** Gemini content part:文本 / 工具调用 / 工具响应 */
 interface GeminiPart {
@@ -53,31 +58,58 @@ interface GeminiResponse {
   };
 }
 
+export interface GeminiProviderDependencies {
+  /** Workspace-owned metadata store. It never receives prompts or credentials. */
+  readonly promptCacheStore?: GeminiPromptCacheStore;
+  /** Injectable only for integration tests; production uses the native REST transport. */
+  readonly promptCacheTransport?: GeminiPromptCacheTransport;
+  readonly now?: () => number;
+  /** Set only after the native cachedContents spike has passed for this route. Defaults false. */
+  readonly enableExplicitPromptCache?: boolean;
+}
+
 /** Google (Gemini) 原生协议适配器 */
 export class GeminiProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
+  private readonly promptCache?: GeminiPromptCacheController;
 
   constructor(
     private readonly config: ProviderConfig,
     profile?: ProviderProfile,
+    dependencies: GeminiProviderDependencies = {},
   ) {
     this.profile = profile ?? resolveProviderProfile("gemini", config.model);
+    if (
+      dependencies.enableExplicitPromptCache === true &&
+      config.capabilities?.cache !== false &&
+      config.capabilities?.promptCache.mode === "explicit"
+    ) {
+      this.promptCache = new GeminiPromptCacheController({
+        store: dependencies.promptCacheStore,
+        transport: dependencies.promptCacheTransport ?? this.createPromptCacheTransport(),
+        baseURL: config.baseURL,
+        model: config.model,
+        ttlSeconds: ttlSeconds(config.capabilities.promptCache.ttl),
+        ...(dependencies.now ? { now: dependencies.now } : {}),
+      });
+      void this.promptCache.cleanupExpiredEntries();
+    }
   }
 
   get modelName(): string {
     return this.config.model;
   }
 
-  /** 拼装非流式 generateContent 端点(key 在 query) */
+  /** 拼装非流式 generateContent 端点；凭证仅放 x-goog-api-key header。 */
   private generateUrl(): string {
     const base = this.config.baseURL.replace(/\/+$/, "");
-    return `${base}/v1beta/models/${this.config.model}:generateContent?key=${this.config.apiKey}`;
+    return `${base}/v1beta/models/${this.config.model}:generateContent`;
   }
 
-  /** 拼装流式 streamGenerateContent 端点(key 在 query,alt=sse) */
+  /** 拼装流式 streamGenerateContent 端点(alt=sse,凭证仅在 header)。 */
   private streamUrl(): string {
     const base = this.config.baseURL.replace(/\/+$/, "");
-    return `${base}/v1beta/models/${this.config.model}:streamGenerateContent?key=${this.config.apiKey}&alt=sse`;
+    return `${base}/v1beta/models/${this.config.model}:streamGenerateContent?alt=sse`;
   }
 
   async generate(
@@ -85,19 +117,30 @@ export class GeminiProvider implements LLMProvider {
     availableTools: ToolDefinition[],
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const body = this.buildRequestBody(messages, availableTools);
+    const body = await this.buildRequestBody(messages, availableTools);
     options?.onRequestPrepared?.({
       provider: "gemini",
       model: this.config.model,
       body,
     });
 
-    const resp = await fetch(this.generateUrl(), {
+    let resp = await fetch(this.generateUrl(), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify(body),
       signal: providerRequestSignal(options?.signal),
     });
+
+    if (!resp.ok && body["cachedContent"] !== undefined) {
+      const fallback = await this.buildRequestBody(messages, availableTools, false);
+      options?.onRequestPrepared?.({ provider: "gemini", model: this.config.model, body: fallback });
+      resp = await fetch(this.generateUrl(), {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(fallback),
+        signal: providerRequestSignal(options?.signal),
+      });
+    }
 
     if (!resp.ok) {
       const text = await resp.text();
@@ -133,19 +176,30 @@ export class GeminiProvider implements LLMProvider {
     onDelta: (delta: string) => void,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const body = this.buildRequestBody(messages, availableTools);
+    const body = await this.buildRequestBody(messages, availableTools);
     options?.onRequestPrepared?.({
       provider: "gemini",
       model: this.config.model,
       body,
     });
 
-    const resp = await fetch(this.streamUrl(), {
+    let resp = await fetch(this.streamUrl(), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify(body),
       signal: providerRequestSignal(options?.signal),
     });
+
+    if (!resp.ok && body["cachedContent"] !== undefined) {
+      const fallback = await this.buildRequestBody(messages, availableTools, false);
+      options?.onRequestPrepared?.({ provider: "gemini", model: this.config.model, body: fallback });
+      resp = await fetch(this.streamUrl(), {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(fallback),
+        signal: providerRequestSignal(options?.signal),
+      });
+    }
 
     if (!resp.ok) {
       const text = await resp.text();
@@ -236,10 +290,11 @@ export class GeminiProvider implements LLMProvider {
    * 构建 Gemini 请求体(contents 翻译 + tools + system_instruction + generationConfig)。
    * generate 与 generateStream 共用。
    */
-  private buildRequestBody(
+  private async buildRequestBody(
     messages: Message[],
     availableTools: ToolDefinition[],
-  ): Record<string, unknown> {
+    useExplicitCache = true,
+  ): Promise<Record<string, unknown>> {
     let systemPrompt = "";
     const contents: GeminiContent[] = [];
     const toolCallNames = new Map<string, string>();
@@ -319,9 +374,77 @@ export class GeminiProvider implements LLMProvider {
     }
     body.generationConfig = { maxOutputTokens: this.profile.maxOutputTokens };
     const capability = this.config.capabilities?.reasoningProfile;
-    return capability
+    const translated = capability
       ? applyReasoningRequestPatch(body, capability, this.config.thinkingEffort ?? "off", "gemini")
       : body;
+    return useExplicitCache ? this.attachExplicitPromptCache(translated) : translated;
+  }
+
+  /**
+   * Gemini cachedContents own only the stable system/tools prefix. Message history stays on the
+   * request so each turn remains semantically identical when cache creation is unavailable.
+   */
+  private async attachExplicitPromptCache(
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.promptCache) return body;
+    const source: Record<string, unknown> = {};
+    if (body["system_instruction"] !== undefined) {
+      source["systemInstruction"] = body["system_instruction"];
+    }
+    if (body["tools"] !== undefined) source["tools"] = body["tools"];
+    if (Object.keys(source).length === 0) return body;
+    const cachedContent = await this.promptCache.getOrCreate(source);
+    if (!cachedContent) return body;
+    const { system_instruction: _systemInstruction, tools: _tools, ...remaining } = body;
+    return { ...remaining, cachedContent };
+  }
+
+  private createPromptCacheTransport(): GeminiPromptCacheTransport {
+    const base = this.config.baseURL.replace(/\/+$/, "");
+    const endpoint = `${base}/v1beta/cachedContents`;
+    return {
+      create: async ({ model, ttlSeconds, source }) => {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: this.headers(),
+          body: JSON.stringify({
+            model: `models/${model}`,
+            ...source,
+            ttl: `${ttlSeconds}s`,
+          }),
+        });
+        if (!response.ok) throw new LLMStatusError(response.status, "Gemini cachedContents create failed");
+        const data = (await response.json()) as {
+          name?: unknown;
+          expireTime?: unknown;
+          usageMetadata?: { totalTokenCount?: unknown };
+        };
+        if (typeof data.name !== "string" || !data.name) throw new Error("Gemini cachedContents missing name");
+        const parsedExpiry = typeof data.expireTime === "string" ? Date.parse(data.expireTime) : NaN;
+        const tokens = data.usageMetadata?.totalTokenCount;
+        return {
+          name: data.name,
+          ...(Number.isFinite(parsedExpiry) ? { expireAt: parsedExpiry } : {}),
+          ...(typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0
+            ? { tokenCount: tokens }
+            : {}),
+        };
+      },
+      delete: async (name) => {
+        const response = await fetch(
+          `${base}/v1beta/${encodeURI(name)}`,
+          { method: "DELETE", headers: { "x-goog-api-key": this.config.apiKey } },
+        );
+        if (!response.ok && response.status !== 404) {
+          throw new LLMStatusError(response.status, "Gemini cachedContents delete failed");
+        }
+      },
+    };
+  }
+
+  private headers(): Record<string, string> {
+    return { "Content-Type": "application/json", "x-goog-api-key": this.config.apiKey };
   }
 
   /** 反向翻译:candidate.parts → 内部 schema.Message(非流式用) */
@@ -374,4 +497,9 @@ export class GeminiProvider implements LLMProvider {
       ],
     };
   }
+}
+
+function ttlSeconds(value: string | undefined): number {
+  const matched = /^(\d+)s$/u.exec(value ?? "3600s");
+  return matched ? Number(matched[1]) : 3_600;
 }
