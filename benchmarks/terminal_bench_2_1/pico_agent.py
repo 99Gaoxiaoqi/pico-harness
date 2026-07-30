@@ -31,8 +31,17 @@ from harbor.environments.docker.docker import (
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
 
+from benchmarks.terminal_bench_2_1.harbor_runtime import (
+    PUBLIC_EGRESS_PROXY_ENV_NAMES,
+    activate_verifier_egress,
+    clear_verifier_egress_activation,
+    clear_verifier_exec_env,
+    register_verifier_egress_activation,
+    set_verifier_exec_env,
+)
 from benchmarks.terminal_bench_2_1.runtime_limits import (
     MAX_TASK_AGENT_TIMEOUT_SEC,
+    MAX_TASK_VERIFIER_TIMEOUT_SEC,
 )
 
 _SUPERVISOR_CONFIG: dict[str, str] | None = None
@@ -41,14 +50,6 @@ _PUBLIC_EGRESS_PROXY_POLICY_VERSION = 1
 _PUBLIC_EGRESS_MAX_CONNECTIONS = 32
 _PUBLIC_EGRESS_MAX_REQUESTS = 4_096
 _PUBLIC_EGRESS_MAX_TOTAL_BYTES = 1_073_741_824
-_PUBLIC_EGRESS_PROXY_ENV_NAMES = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "NO_PROXY",
-    "no_proxy",
-)
 _PUBLIC_EGRESS_NO_PROXY = "pico-gateway,main,localhost,127.0.0.1,::1"
 _PUBLIC_EGRESS_RELAY_SCRIPT = (
     "const net=require('node:net');"
@@ -232,10 +233,13 @@ rm -f {remote_archive}
         networks = self._trial_networks
         gateway: ProviderGateway | None = None
         public_egress: PublicEgressAccess | None = None
+        context_id: str | None = None
+        verifier_timeout_sec: float | None = None
         try:
             loop = asyncio.get_running_loop()
             started_at = loop.time()
             outer_timeout_sec = task_agent_timeout(environment)
+            verifier_timeout_sec = task_verifier_timeout(environment)
             outer_deadline = started_at + outer_timeout_sec
             await assert_running_container_policy(
                 environment,
@@ -260,7 +264,7 @@ rm -f {remote_archive}
                 network_name=networks.gateway,
                 context_id=context_id,
                 ttl_sec=outer_timeout_sec,
-                receipt_path=self.logs_dir / "public-egress-receipt.json",
+                receipt_path=self.logs_dir / "public-egress-agent-receipt.json",
             )
             gateway = ProviderGateway(
                 protocol=route_config["provider"]["protocol"],
@@ -278,6 +282,9 @@ rm -f {remote_archive}
             await gateway.enroll(environment)
             if public_egress is not None:
                 await public_egress.start(environment)
+                self._extra_env["PICO_TB_AGENT_EGRESS_TOKEN"] = (
+                    public_egress.scrub_secret
+                )
             await self._run_with_gateway(
                 instruction=instruction,
                 environment=environment,
@@ -300,14 +307,23 @@ rm -f {remote_archive}
             )
         finally:
             try:
-                await cleanup_trial_resources(
+                verifier_scrub_secret = await cleanup_trial_resources(
                     environment,
                     networks=networks,
                     run_id=self._supervisor_config["runId"],
                     context=context,
                     gateway=gateway,
                     public_egress=public_egress,
+                    context_id=context_id,
+                    verifier_timeout_sec=verifier_timeout_sec,
+                    verifier_receipt_path=(
+                        self.logs_dir / "public-egress-verifier-receipt.json"
+                    ),
                 )
+                if verifier_scrub_secret is not None:
+                    self._extra_env["PICO_TB_VERIFIER_EGRESS_TOKEN"] = (
+                        verifier_scrub_secret
+                    )
             finally:
                 self._trial_networks = None
 
@@ -778,6 +794,16 @@ class PublicEgressAccess:
         self._stopped = False
 
     @property
+    def relay_name(self) -> str:
+        return self._relay_name
+
+    @property
+    def scrub_secret(self) -> str:
+        if not self._token:
+            raise RuntimeError("Public egress scrub secret is unavailable")
+        return self._token
+
+    @property
     def container_env(self) -> dict[str, str]:
         if self._proxy is None or not self._relay_started:
             raise RuntimeError("Public egress is not ready")
@@ -1117,6 +1143,10 @@ class ProviderGateway:
         )
         self._host_port = 0
         self.base_url = ""
+
+    @property
+    def relay_name(self) -> str:
+        return self._relay_name
 
     def start(self) -> None:
         self._signed_supervisor_request(
@@ -1459,9 +1489,9 @@ async def docker_exec_secret_stdin(
         ]
     )
     if container_env:
-        if set(container_env) != set(_PUBLIC_EGRESS_PROXY_ENV_NAMES):
+        if set(container_env) != set(PUBLIC_EGRESS_PROXY_ENV_NAMES):
             raise RuntimeError("Container public proxy environment is incomplete")
-        for name in _PUBLIC_EGRESS_PROXY_ENV_NAMES:
+        for name in PUBLIC_EGRESS_PROXY_ENV_NAMES:
             value = container_env[name]
             if not isinstance(value, str) or not value or any(
                 character in value for character in ("\x00", "\r", "\n")
@@ -1913,7 +1943,10 @@ async def cleanup_trial_resources(
     context: AgentContext,
     gateway: ProviderGateway | None,
     public_egress: PublicEgressAccess | None,
-) -> None:
+    context_id: str | None,
+    verifier_timeout_sec: float | None,
+    verifier_receipt_path: Path,
+) -> str | None:
     cleanup_errors: list[BaseException] = []
     if public_egress is not None:
         try:
@@ -1926,16 +1959,264 @@ async def cleanup_trial_resources(
             apply_gateway_accounting(context, accounting_receipt)
         except BaseException as error:
             cleanup_errors.append(error)
-    try:
+        try:
+            await assert_container_absent(environment, gateway.relay_name)
+        except BaseException as error:
+            cleanup_errors.append(error)
+
+    if cleanup_errors:
+        try:
+            await restore_verifier_and_remove_trial_networks(
+                environment,
+                networks,
+                run_id,
+            )
+        except BaseException as error:
+            cleanup_errors.append(error)
+        raise RuntimeError("Terminal-Bench trial cleanup failed") from cleanup_errors[0]
+
+    if public_egress is None:
         await restore_verifier_and_remove_trial_networks(
             environment,
             networks,
             run_id,
         )
-    except BaseException as error:
-        cleanup_errors.append(error)
-    if cleanup_errors:
-        raise RuntimeError("Terminal-Bench trial cleanup failed") from cleanup_errors[0]
+        return None
+    if context_id is None or verifier_timeout_sec is None:
+        await restore_verifier_and_remove_trial_networks(
+            environment,
+            networks,
+            run_id,
+        )
+        raise RuntimeError("Terminal-Bench verifier egress identity is unavailable")
+
+    verifier_egress = PublicEgressAccess(
+        run_id=run_id,
+        network_name=networks.gateway,
+        context_id=f"{context_id}-verifier",
+        ttl_sec=verifier_timeout_sec,
+        receipt_path=verifier_receipt_path,
+    )
+    try:
+        install_verifier_egress_lifecycle(
+            environment,
+            networks=networks,
+            run_id=run_id,
+            verifier_egress=verifier_egress,
+        )
+        return verifier_egress.scrub_secret
+    except BaseException as startup_error:
+        cleanup_errors = []
+        try:
+            await verifier_egress.stop(environment)
+        except BaseException as error:
+            cleanup_errors.append(error)
+        try:
+            await restore_verifier_and_remove_trial_networks(
+                environment,
+                networks,
+                run_id,
+            )
+        except BaseException as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            raise RuntimeError(
+                "Terminal-Bench verifier egress startup cleanup failed"
+            ) from startup_error
+        raise
+
+
+async def assert_container_absent(
+    environment: DockerEnvironment,
+    container_name: str,
+) -> None:
+    inspect_code, _, inspect_stderr = await run_docker(
+        ["inspect", container_name],
+        environment,
+        allowed_exit_codes={0, 1},
+    )
+    if inspect_code == 0 or not is_missing_docker_container_error(inspect_stderr):
+        raise RuntimeError("Provider gateway relay removal was not confirmed")
+
+
+async def assert_verifier_egress_topology(
+    environment: DockerEnvironment,
+    *,
+    networks: TrialNetworks,
+    run_id: str,
+    verifier_egress: PublicEgressAccess,
+) -> None:
+    _, network_stdout, _ = await run_docker(
+        ["network", "inspect", networks.task, networks.gateway],
+        environment,
+    )
+    network_values = json.loads(network_stdout)
+    by_name = {
+        value.get("Name"): value
+        for value in network_values
+        if isinstance(value, dict)
+    }
+    if (
+        set(by_name) != set(networks)
+        or any(not is_owned_trial_network(by_name[name], run_id) for name in networks)
+    ):
+        raise RuntimeError("Verifier trial network identity is invalid")
+
+    _, relay_stdout, _ = await run_docker(
+        ["inspect", verifier_egress.relay_name],
+        environment,
+    )
+    relay_values = json.loads(relay_stdout)
+    if (
+        len(relay_values) != 1
+        or not isinstance(relay_values[0].get("Id"), str)
+        or not relay_values[0]["Id"]
+    ):
+        raise RuntimeError("Verifier public egress relay identity is invalid")
+    relay_id = relay_values[0]["Id"]
+    task_ids = set((by_name[networks.task].get("Containers") or {}).keys())
+    gateway_ids = set((by_name[networks.gateway].get("Containers") or {}).keys())
+    main_ids = task_ids & gateway_ids
+    if (
+        len(main_ids) != 1
+        or relay_id in task_ids
+        or gateway_ids != main_ids | {relay_id}
+    ):
+        raise RuntimeError("Verifier public egress network topology is invalid")
+
+    workload_ids = sorted(task_ids)
+    if not workload_ids:
+        raise RuntimeError("Verifier workload network topology is empty")
+    _, workload_stdout, _ = await run_docker(
+        ["inspect", *workload_ids],
+        environment,
+    )
+    workload_values = json.loads(workload_stdout)
+    if len(workload_values) != len(workload_ids):
+        raise RuntimeError("Verifier workload network inspection is invalid")
+    main_id = next(iter(main_ids))
+    for value in workload_values:
+        container_id = value.get("Id")
+        connected_networks = set(
+            ((value.get("NetworkSettings") or {}).get("Networks") or {}).keys()
+        )
+        expected = (
+            {networks.task, networks.gateway}
+            if container_id == main_id
+            else {networks.task}
+        )
+        if connected_networks != expected:
+            raise RuntimeError("Verifier workload retained direct public egress")
+
+
+def install_verifier_egress_lifecycle(
+    environment: DockerEnvironment,
+    *,
+    networks: TrialNetworks,
+    run_id: str,
+    verifier_egress: PublicEgressAccess,
+) -> None:
+    assert_secure_docker_environment(environment)
+    original_stop = environment.stop
+    activation_lock = asyncio.Lock()
+    activation_state = "pending"
+    stop_task: asyncio.Task[None] | None = None
+    stop_delete: bool | None = None
+
+    async def activate() -> None:
+        nonlocal activation_state
+        async with activation_lock:
+            if activation_state == "active":
+                return
+            if activation_state != "pending":
+                raise RuntimeError("Terminal-Bench verifier egress cannot be activated")
+            activation_state = "starting"
+            try:
+                await verifier_egress.start(environment)
+                await assert_verifier_egress_topology(
+                    environment,
+                    networks=networks,
+                    run_id=run_id,
+                    verifier_egress=verifier_egress,
+                )
+                set_verifier_exec_env(environment, verifier_egress.container_env)
+            except BaseException as startup_error:
+                activation_state = "failed"
+                cleanup_errors: list[BaseException] = []
+                try:
+                    clear_verifier_exec_env(environment)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+                try:
+                    await asyncio.shield(verifier_egress.stop(environment))
+                except BaseException as error:
+                    cleanup_errors.append(error)
+                if cleanup_errors:
+                    raise RuntimeError(
+                        "Terminal-Bench verifier egress activation cleanup failed"
+                    ) from startup_error
+                raise
+            activation_state = "active"
+
+    async def stop_once(*, delete: bool) -> None:
+        nonlocal activation_state
+        cleanup_errors: list[BaseException] = []
+        try:
+            clear_verifier_egress_activation(environment)
+        except BaseException as error:
+            cleanup_errors.append(error)
+        try:
+            async with activation_lock:
+                activation_state = "stopping"
+                try:
+                    clear_verifier_exec_env(environment)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+                try:
+                    await verifier_egress.stop(environment)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        except BaseException as error:
+            cleanup_errors.append(error)
+        try:
+            await restore_verifier_and_remove_trial_networks(
+                environment,
+                networks,
+                run_id,
+            )
+        except BaseException as error:
+            cleanup_errors.append(error)
+        try:
+            await original_stop(delete=delete)
+        except BaseException as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            raise RuntimeError(
+                "Terminal-Bench verifier egress cleanup failed"
+            ) from cleanup_errors[0]
+
+    async def stop_with_verifier_egress(*, delete: bool) -> None:
+        nonlocal stop_delete, stop_task
+        if stop_task is None:
+            stop_delete = delete
+            stop_task = asyncio.create_task(stop_once(delete=delete))
+        elif delete != stop_delete:
+            raise RuntimeError("Harbor verifier cleanup delete policy changed")
+        try:
+            await asyncio.shield(stop_task)
+        except asyncio.CancelledError as cancellation:
+            try:
+                await stop_task
+            except BaseException as cleanup_error:
+                raise cleanup_error from cancellation
+            raise
+
+    register_verifier_egress_activation(environment, activate)
+    try:
+        environment.stop = stop_with_verifier_egress
+    except BaseException:
+        clear_verifier_egress_activation(environment)
+        raise
 
 
 async def restore_verifier_and_remove_trial_networks(
@@ -2137,6 +2418,22 @@ def task_agent_timeout(environment: BaseEnvironment) -> float:
         or timeout > MAX_TASK_AGENT_TIMEOUT_SEC
     ):
         raise RuntimeError("Terminal-Bench task timeout is unsupported by Pico")
+    return float(timeout)
+
+
+def task_verifier_timeout(environment: BaseEnvironment) -> float:
+    task_path = environment.environment_dir.parent / "task.toml"
+    with task_path.open("rb") as handle:
+        config = tomllib.load(handle)
+    timeout = config.get("verifier", {}).get("timeout_sec")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > MAX_TASK_VERIFIER_TIMEOUT_SEC
+    ):
+        raise RuntimeError("Terminal-Bench verifier timeout is unsupported by Pico")
     return float(timeout)
 
 

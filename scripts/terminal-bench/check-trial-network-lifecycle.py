@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import sys
@@ -23,8 +24,12 @@ def install_harbor_stubs() -> None:
         "harbor.models",
         "harbor.models.agent",
         "harbor.models.agent.context",
+        "harbor.models.task",
+        "harbor.models.task.verifier_mode",
         "harbor.models.trial",
         "harbor.models.trial.paths",
+        "harbor.trial",
+        "harbor.trial.single_step",
     ]
     for name in modules:
         sys.modules[name] = types.ModuleType(name)
@@ -158,15 +163,23 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
 
 def assert_task_timeout_contract(adapter: Any) -> None:
     assert adapter.MAX_TASK_AGENT_TIMEOUT_SEC == 12_000
+    assert adapter.MAX_TASK_VERIFIER_TIMEOUT_SEC == 12_000
     with tempfile.TemporaryDirectory(prefix="pico-task-timeout-") as directory:
         root = Path(directory)
         environment = types.SimpleNamespace(environment_dir=root / "environment")
         task_config = root / "task.toml"
-        task_config.write_text("[agent]\ntimeout_sec = 12000.0\n")
+        task_config.write_text(
+            "[agent]\ntimeout_sec = 12000.0\n"
+            "[verifier]\ntimeout_sec = 12000.0\n"
+        )
         assert adapter.task_agent_timeout(environment) == 12_000
+        assert adapter.task_verifier_timeout(environment) == 12_000
 
         for invalid in ("12000.001", "nan", "true", '"12000"'):
-            task_config.write_text(f"[agent]\ntimeout_sec = {invalid}\n")
+            task_config.write_text(
+                f"[agent]\ntimeout_sec = {invalid}\n"
+                "[verifier]\ntimeout_sec = 60\n"
+            )
             try:
                 adapter.task_agent_timeout(environment)
             except RuntimeError as error:
@@ -176,6 +189,20 @@ def assert_task_timeout_contract(adapter: Any) -> None:
             else:
                 raise AssertionError(
                     f"unsupported task timeout was accepted: {invalid}"
+                )
+            task_config.write_text(
+                "[agent]\ntimeout_sec = 60\n"
+                f"[verifier]\ntimeout_sec = {invalid}\n"
+            )
+            try:
+                adapter.task_verifier_timeout(environment)
+            except RuntimeError as error:
+                assert str(error) == (
+                    "Terminal-Bench verifier timeout is unsupported by Pico"
+                )
+            else:
+                raise AssertionError(
+                    f"unsupported verifier timeout was accepted: {invalid}"
                 )
 
     gateway = adapter.ProviderGateway(
@@ -194,6 +221,152 @@ def assert_task_timeout_contract(adapter: Any) -> None:
         {"action": "revoke", "trialId": "timeout-trial"}
     )
     assert signed["auth"]["expiresAt"] - signed["auth"]["issuedAt"] == 12_000
+
+
+async def assert_verifier_runtime_contract() -> None:
+    runtime = importlib.import_module(
+        "benchmarks.terminal_bench_2_1.harbor_runtime"
+    )
+
+    class DockerEnvironment:
+        def __init__(self) -> None:
+            self._persistent_env = {"PERSISTENT": "present"}
+            self._overlays: list[dict[str, str]] = []
+            self.exec_envs: list[dict[str, str]] = []
+
+        @contextlib.contextmanager
+        def scoped_exec_env(self, env: dict[str, str]) -> Any:
+            self._overlays.append(dict(env))
+            try:
+                yield
+            finally:
+                self._overlays.pop()
+
+        async def exec(
+            self,
+            command: str,
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            timeout_sec: int | None = None,
+            user: str | int | None = None,
+        ) -> dict[str, Any]:
+            del command, cwd, timeout_sec, user
+            merged = {**self._persistent_env, **(env or {})}
+            for overlay in self._overlays:
+                merged.update(overlay)
+            self.exec_envs.append(merged)
+            return {"env": merged}
+
+        def _compose_env_vars(self) -> dict[str, str]:
+            return dict(self._persistent_env)
+
+    DockerEnvironment.__module__ = "harbor.environments.docker.docker"
+    runtime.install_verifier_exec_env_overlay(DockerEnvironment)
+    runtime.install_verifier_exec_env_overlay(DockerEnvironment)
+    environment = DockerEnvironment()
+    token = "verifier-token-value"
+    proxy_url = f"http://pico:{token}@pico-egress:8081"
+    proxy_env = {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "NO_PROXY": "pico-gateway,main,localhost,127.0.0.1,::1",
+        "no_proxy": "pico-gateway,main,localhost,127.0.0.1,::1",
+    }
+    runtime.set_verifier_exec_env(environment, proxy_env)
+    result = await environment.exec(
+        "true",
+        env={"HTTP_PROXY": "http://attacker.invalid", "CUSTOM": "value"},
+    )
+    assert result["env"]["HTTP_PROXY"] == proxy_url
+    assert result["env"]["CUSTOM"] == "value"
+    assert environment._compose_env_vars() == {"PERSISTENT": "present"}
+    assert token not in json.dumps(environment._compose_env_vars())
+    runtime.clear_verifier_exec_env(environment)
+    result = await environment.exec(
+        "true",
+        env={"HTTP_PROXY": "http://ordinary.invalid"},
+    )
+    assert result["env"]["HTTP_PROXY"] == "http://ordinary.invalid"
+
+    async def incompatible_exec(self: Any, command: str, *, extra: str) -> None:
+        del self, command, extra
+
+    IncompatibleDocker = type(
+        "DockerEnvironment",
+        (),
+        {"exec": incompatible_exec},
+    )
+    IncompatibleDocker.__module__ = "harbor.environments.docker.docker"
+    try:
+        runtime.install_verifier_exec_env_overlay(IncompatibleDocker)
+    except RuntimeError as error:
+        assert str(error) == "Harbor Docker exec signature is unsupported"
+    else:
+        raise AssertionError("unsupported Harbor Docker exec signature was patched")
+
+    class SingleStepTrial:
+        async def _run_verifier(self) -> str:
+            self.events.append("verifier")
+            return "verified"
+
+    SingleStepTrial.__module__ = "harbor.trial.single_step"
+
+    class VerifierEnvironmentMode:
+        SHARED = "shared"
+        SEPARATE = "separate"
+
+    verifier_mode_module = sys.modules["harbor.models.task.verifier_mode"]
+    verifier_mode_module.VerifierEnvironmentMode = VerifierEnvironmentMode
+    verifier_mode_module.resolve_task_verifier_mode = lambda config: config.mode
+    runtime.install_verifier_phase_activation(SingleStepTrial)
+    runtime.install_verifier_phase_activation(SingleStepTrial)
+
+    for disabled, mode, expected in (
+        (False, VerifierEnvironmentMode.SHARED, ["activate", "verifier"]),
+        (True, VerifierEnvironmentMode.SHARED, ["verifier"]),
+        (False, VerifierEnvironmentMode.SEPARATE, ["verifier"]),
+    ):
+        trial_environment = types.SimpleNamespace()
+        events: list[str] = []
+
+        async def activate(events: list[str] = events) -> None:
+            events.append("activate")
+
+        runtime.register_verifier_egress_activation(
+            trial_environment,
+            activate,
+        )
+        trial = SingleStepTrial()
+        trial.config = types.SimpleNamespace(
+            verifier=types.SimpleNamespace(disable=disabled)
+        )
+        trial.task = types.SimpleNamespace(config=types.SimpleNamespace(mode=mode))
+        trial.agent_environment = trial_environment
+        trial.events = events
+        assert await trial._run_verifier() == "verified"
+        assert events == expected
+        runtime.clear_verifier_egress_activation(trial_environment)
+
+    async def incompatible_run_verifier(
+        self: Any,
+        unexpected: str,
+    ) -> None:
+        del self, unexpected
+
+    IncompatibleTrial = type(
+        "SingleStepTrial",
+        (),
+        {"_run_verifier": incompatible_run_verifier},
+    )
+    IncompatibleTrial.__module__ = "harbor.trial.single_step"
+    try:
+        runtime.install_verifier_phase_activation(IncompatibleTrial)
+    except RuntimeError as error:
+        assert str(error) == "Harbor verifier lifecycle signature is unsupported"
+    else:
+        raise AssertionError("unsupported Harbor verifier signature was patched")
 
 
 class FakeEnvironment:
@@ -466,6 +639,7 @@ def task_environment(allow_internet: str) -> Any:
     root = Path(directory.name)
     (root / "task.toml").write_text(
         "[agent]\ntimeout_sec = 60\n"
+        "[verifier]\ntimeout_sec = 60\n"
         f"[environment]\nallow_internet = {allow_internet}\n"
     )
     environment = types.SimpleNamespace(environment_dir=root / "environment")
@@ -769,8 +943,209 @@ async def assert_container_proxy_env_injection(adapter: Any) -> None:
     assert "-e" not in commands[-1]
 
 
+async def assert_verifier_lifecycle_contract(adapter: Any) -> None:
+    adapter.assert_secure_docker_environment = lambda _environment: None
+    events: list[str] = []
+
+    async def topology(
+        _environment: Any,
+        *,
+        networks: Any,
+        run_id: str,
+        verifier_egress: Any,
+    ) -> None:
+        del networks, run_id, verifier_egress
+        events.append("topology")
+
+    async def remove(
+        _environment: Any,
+        _networks: Any,
+        _run_id: str,
+    ) -> None:
+        events.append("networks")
+
+    adapter.assert_verifier_egress_topology = topology
+    adapter.restore_verifier_and_remove_trial_networks = remove
+    proxy_url = "http://pico:verifier-token@pico-egress:8081"
+
+    class LifecycleAccess:
+        def __init__(
+            self,
+            *,
+            fail_start: bool = False,
+            fail_stop: bool = False,
+            stop_started: asyncio.Event | None = None,
+            stop_release: asyncio.Event | None = None,
+        ) -> None:
+            self.fail_start = fail_start
+            self.fail_stop = fail_stop
+            self.stop_started = stop_started
+            self.stop_release = stop_release
+            self.start_calls = 0
+            self.stop_calls = 0
+
+        @property
+        def container_env(self) -> dict[str, str]:
+            return {
+                "HTTP_PROXY": proxy_url,
+                "HTTPS_PROXY": proxy_url,
+                "http_proxy": proxy_url,
+                "https_proxy": proxy_url,
+                "NO_PROXY": "pico-gateway,main,localhost,127.0.0.1,::1",
+                "no_proxy": "pico-gateway,main,localhost,127.0.0.1,::1",
+            }
+
+        async def start(self, _environment: Any) -> None:
+            self.start_calls += 1
+            events.append("start")
+            if self.fail_start:
+                raise RuntimeError("synthetic verifier activation failure")
+
+        async def stop(self, _environment: Any) -> None:
+            self.stop_calls += 1
+            events.append("egress")
+            if self.stop_started is not None:
+                self.stop_started.set()
+            if self.stop_release is not None:
+                await self.stop_release.wait()
+            if self.fail_stop:
+                raise RuntimeError("synthetic verifier stop failure")
+
+    class LifecycleEnvironment:
+        def __init__(self, *, fail_original_stop: bool = False) -> None:
+            self.original_stop_calls = 0
+            self.fail_original_stop = fail_original_stop
+
+        async def stop(self, *, delete: bool) -> None:
+            assert delete is True
+            self.original_stop_calls += 1
+            events.append("original")
+            if self.fail_original_stop:
+                raise RuntimeError("synthetic original stop failure")
+
+    networks = adapter.TrialNetworks("task-network", "gateway-network")
+    environment = LifecycleEnvironment()
+    access = LifecycleAccess()
+    adapter.install_verifier_egress_lifecycle(
+        environment,
+        networks=networks,
+        run_id="verifier-lifecycle",
+        verifier_egress=access,
+    )
+    assert access.start_calls == 0
+    assert not hasattr(
+        environment,
+        "_pico_terminal_bench_verifier_exec_env",
+    )
+    await adapter.activate_verifier_egress(environment)
+    await adapter.activate_verifier_egress(environment)
+    assert access.start_calls == 1
+    assert events[:2] == ["start", "topology"]
+    first_stop = asyncio.create_task(environment.stop(delete=True))
+    second_stop = asyncio.create_task(environment.stop(delete=True))
+    await asyncio.gather(first_stop, second_stop)
+    await environment.stop(delete=True)
+    assert access.stop_calls == 1
+    assert environment.original_stop_calls == 1
+    assert events == ["start", "topology", "egress", "networks", "original"]
+    assert not hasattr(
+        environment,
+        "_pico_terminal_bench_verifier_activation",
+    )
+    assert not hasattr(
+        environment,
+        "_pico_terminal_bench_verifier_exec_env",
+    )
+
+    events.clear()
+    failing_environment = LifecycleEnvironment(fail_original_stop=True)
+    failing_access = LifecycleAccess(fail_stop=True)
+
+    async def failing_remove(
+        _environment: Any,
+        _networks: Any,
+        _run_id: str,
+    ) -> None:
+        events.append("networks")
+        raise RuntimeError("synthetic network cleanup failure")
+
+    adapter.restore_verifier_and_remove_trial_networks = failing_remove
+    adapter.install_verifier_egress_lifecycle(
+        failing_environment,
+        networks=networks,
+        run_id="verifier-lifecycle-failure",
+        verifier_egress=failing_access,
+    )
+    try:
+        await failing_environment.stop(delete=True)
+    except RuntimeError as error:
+        assert str(error) == "Terminal-Bench verifier egress cleanup failed"
+    else:
+        raise AssertionError("verifier cleanup failures unexpectedly succeeded")
+    assert failing_access.start_calls == 0
+    assert failing_access.stop_calls == 1
+    assert failing_environment.original_stop_calls == 1
+    assert events == ["egress", "networks", "original"]
+
+    events.clear()
+    stop_started = asyncio.Event()
+    stop_release = asyncio.Event()
+    cancelled_environment = LifecycleEnvironment()
+    cancelled_access = LifecycleAccess(
+        stop_started=stop_started,
+        stop_release=stop_release,
+    )
+    adapter.restore_verifier_and_remove_trial_networks = remove
+    adapter.install_verifier_egress_lifecycle(
+        cancelled_environment,
+        networks=networks,
+        run_id="verifier-lifecycle-cancel",
+        verifier_egress=cancelled_access,
+    )
+    cancelled_stop = asyncio.create_task(
+        cancelled_environment.stop(delete=True)
+    )
+    await stop_started.wait()
+    cancelled_stop.cancel()
+    stop_release.set()
+    try:
+        await cancelled_stop
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("cancelled verifier cleanup did not propagate")
+    assert cancelled_access.stop_calls == 1
+    assert cancelled_environment.original_stop_calls == 1
+    assert events == ["egress", "networks", "original"]
+    await cancelled_environment.stop(delete=True)
+    assert cancelled_environment.original_stop_calls == 1
+
+    events.clear()
+    activation_failure_environment = LifecycleEnvironment()
+    activation_failure_access = LifecycleAccess(fail_start=True)
+    adapter.install_verifier_egress_lifecycle(
+        activation_failure_environment,
+        networks=networks,
+        run_id="verifier-activation-failure",
+        verifier_egress=activation_failure_access,
+    )
+    try:
+        await adapter.activate_verifier_egress(
+            activation_failure_environment
+        )
+    except RuntimeError as error:
+        assert str(error) == "synthetic verifier activation failure"
+    else:
+        raise AssertionError("verifier activation failure unexpectedly succeeded")
+    assert activation_failure_access.stop_calls == 1
+    await activation_failure_environment.stop(delete=True)
+    assert activation_failure_access.stop_calls == 2
+    assert activation_failure_environment.original_stop_calls == 1
+
+
 async def main() -> None:
     adapter = load_adapter()
+    await assert_verifier_runtime_contract()
     assert_route_config_contract(adapter)
     assert_accounting_failure_messages(adapter)
     assert_task_timeout_contract(adapter)
@@ -940,6 +1315,9 @@ async def main() -> None:
             context=types.SimpleNamespace(),
             gateway=FailingGateway(),
             public_egress=FailingPublicEgress(),
+            context_id="cleanup-failure",
+            verifier_timeout_sec=60,
+            verifier_receipt_path=Path("/unused"),
         )
     except RuntimeError as error:
         assert str(error) == "Terminal-Bench trial cleanup failed"
@@ -949,6 +1327,7 @@ async def main() -> None:
 
     await assert_public_egress_lifecycle(adapter, run_id)
     await assert_container_proxy_env_injection(adapter)
+    await assert_verifier_lifecycle_contract(adapter)
     print("Terminal-Bench trial network lifecycle passed.")
 
 

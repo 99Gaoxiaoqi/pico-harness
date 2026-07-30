@@ -17,25 +17,39 @@ test("Terminal-Bench timeout preflight accepts 12000 seconds and rejects larger 
   const accepted = await runPreflight(dataset);
   assert.deepEqual(JSON.parse(accepted.stdout), {
     maximumObservedAgentTimeoutSec: 12_000,
+    maximumObservedVerifierTimeoutSec: 12_000,
     schemaVersion: 1,
     supportedMaximumAgentTimeoutSec: 12_000,
+    supportedMaximumVerifierTimeoutSec: 12_000,
     taskCount: 2,
   });
 
-  await writeTask(dataset, "unsupported-task", "12000.001");
+  await writeTask(dataset, "unsupported-task", "12000.001", "900.0");
   await assert.rejects(runPreflight(dataset), (error: unknown) => {
     assert.ok(error instanceof Error);
     assert.match(error.message, /unsupported-task.+at most 12000 seconds/u);
     return true;
   });
+
+  await writeTask(dataset, "unsupported-task", "900.0", "12000.001");
+  await assert.rejects(runPreflight(dataset), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /unsupported-task.+verifier.+at most 12000 seconds/u);
+    return true;
+  });
 });
 
-async function writeTask(dataset: string, name: string, timeout: string): Promise<void> {
+async function writeTask(
+  dataset: string,
+  name: string,
+  timeout: string,
+  verifierTimeout = timeout,
+): Promise<void> {
   const taskDirectory = join(dataset, name);
   await mkdir(taskDirectory, { recursive: true });
   await writeFile(
     join(taskDirectory, "task.toml"),
-    `[agent]\ntimeout_sec = ${timeout}\n\n[verifier]\ntimeout_sec = 900.0\n`,
+    `[agent]\ntimeout_sec = ${timeout}\n\n[verifier]\ntimeout_sec = ${verifierTimeout}\n`,
   );
 }
 
