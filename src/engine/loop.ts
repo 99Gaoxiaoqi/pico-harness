@@ -81,6 +81,7 @@ import { buildRuntimeToolResultProjection } from "../tools/tool-result-observati
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
+import { snapshotToolDefinitions } from "../provider/prompt-cache.js";
 import {
   delegationTaskCountFromArguments,
   isExploreOnlyRequiredDelegationArguments,
@@ -1276,6 +1277,7 @@ export class AgentEngine implements AgentRunner {
     let requiredDelegationRecoveryExploreOnly = false;
     let consecutiveHookStopBlocks = 0;
     let graceCandidateTools: ToolDefinition[] = [];
+    let runToolSnapshot: ToolDefinition[] | undefined;
     const userRewindPointId = session.fileHistory.snapshots.findLast(
       (snapshot) => snapshot.messageId === session.fileHistory.currentMessageId,
     )?.messageId;
@@ -1344,7 +1346,9 @@ export class AgentEngine implements AgentRunner {
 
         try {
           // 获取当前挂载的所有工具定义
-          const allTools = this.registry.getAvailableTools();
+          const allTools =
+            runToolSnapshot ??
+            (runToolSnapshot = snapshotToolDefinitions(this.registry.getAvailableTools()));
           // 渐进披露(ROADMAP 5.4):启用时只把核心组+已披露扩展组喂给 LLM,
           // 模型用 search_tools 元工具按需激活扩展工具。registry.execute 仍按全集路由(安全网)。
           // 未启用 disclosure 时 availableTools = allTools,行为不变。
@@ -2646,6 +2650,7 @@ export class AgentEngine implements AgentRunner {
     reporter: Reporter,
     runtime: SubagentExecutionRuntime,
     signal?: AbortSignal,
+    requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
   ): Promise<Message> {
     if (!runtime.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
@@ -2656,6 +2661,7 @@ export class AgentEngine implements AgentRunner {
         {
           signal,
           onRetry: this.makeRetryReporter(),
+          ...requestOptions,
           ...(runtime.onRateLimited
             ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
             : {}),
@@ -2675,6 +2681,7 @@ export class AgentEngine implements AgentRunner {
           {
             signal,
             onRetry: this.makeRetryReporter(),
+            ...requestOptions,
             ...(runtime.onRateLimited
               ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
               : {}),
@@ -2917,7 +2924,7 @@ export class AgentEngine implements AgentRunner {
       `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${runtime.thinkingEffort})`,
     );
 
-    const initialTools = readOnlyRegistry.getAvailableTools();
+    const initialTools = snapshotToolDefinitions(readOnlyRegistry.getAvailableTools());
     const initialToolNames = new Set(initialTools.map((tool) => tool.name));
     // 委派层会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
     const runtimeWorkspaceRoot = opts.workDir ?? this.workDir;
@@ -2981,9 +2988,16 @@ export class AgentEngine implements AgentRunner {
         });
       }
 
-      // 【驾驭底线】普通探索轮仅能获取传入的受限 Registry；
-      // 预留收口轮从能力边界上禁用工具。
-      const availableTools = finalizing ? [] : readOnlyRegistry.getAvailableTools();
+      // 【驾驭底线】普通探索轮仅能获取传入的受限 Registry。明确支持
+      // tool_choice:none + tools 的 Provider 在收口轮保留同一 Schema，
+      // 避免为了纯文本总结丢失稳定 tools 缓存前缀。
+      const retainFinalizeToolPrefix =
+        finalizing && runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true;
+      const availableTools = finalizing
+        ? retainFinalizeToolPrefix
+          ? initialTools
+          : []
+        : initialTools;
 
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
@@ -2997,6 +3011,7 @@ export class AgentEngine implements AgentRunner {
           rep,
           runtime,
           signal,
+          retainFinalizeToolPrefix ? { toolChoice: "none" } : undefined,
         );
       } catch (error) {
         signal?.throwIfAborted();
@@ -3072,10 +3087,13 @@ export class AgentEngine implements AgentRunner {
             const continuationCostBefore = usageSession?.totalCostCNY ?? 0;
             const continuationResp = await this.generateSubWithOverflowRetry(
               contextHistory,
-              [],
+              runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true ? initialTools : [],
               rep,
               runtime,
               signal,
+              runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true
+                ? { toolChoice: "none" }
+                : undefined,
             );
             const continuationDecision = this.consumeSubagentResponseBudget(
               runtime,
