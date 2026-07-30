@@ -1,0 +1,662 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import importlib.util
+import ipaddress
+import json
+import secrets
+import socket
+import subprocess
+import sys
+import threading
+import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+
+_DOCUMENTATION_GLOBAL_IP = "93.184.216.34"
+_CONTAINER_HOLD_SCRIPT = "setInterval(()=>{},2147483647)"
+_PROXY_REQUEST_SCRIPT = r"""
+const net = require("node:net");
+const targets = process.argv.slice(1);
+const chunks = [];
+process.stdin.on("data", chunk => chunks.push(chunk));
+process.stdin.on("end", async () => {
+  const authorization = Buffer.concat(chunks).toString("ascii").trim();
+  const request = host => new Promise((resolve, reject) => {
+    const response = [];
+    let responseBytes = 0;
+    const client = net.connect(8081, "pico-egress");
+    client.setTimeout(5000);
+    client.on("connect", () => {
+      client.write(
+        `GET http://${host}/fixture HTTP/1.1\r\n` +
+        `Host: ${host}\r\n` +
+        `Proxy-Authorization: Basic ${authorization}\r\n` +
+        "Connection: close\r\n\r\n"
+      );
+    });
+    client.on("data", chunk => {
+      responseBytes += chunk.length;
+      if (responseBytes > 65536) {
+        client.destroy(new Error("response limit"));
+        return;
+      }
+      response.push(chunk);
+    });
+    client.on("timeout", () => client.destroy(new Error("timeout")));
+    client.on("error", reject);
+    client.on("end", () => {
+      const head = Buffer.concat(response).toString("latin1");
+      const match = /^HTTP\/1\.[01] ([0-9]{3}) /.exec(head);
+      if (!match) {
+        reject(new Error("invalid response"));
+        return;
+      }
+      resolve(Number(match[1]));
+    });
+  });
+  try {
+    const statuses = [];
+    for (const target of targets) statuses.push(await request(target));
+    process.stdout.write(JSON.stringify(statuses));
+  } catch {
+    process.exitCode = 1;
+  }
+});
+"""
+_EXPECT_CONNECTION_FAILURE_SCRIPT = r"""
+const net = require("node:net");
+const host = process.argv[1];
+const port = Number(process.argv[2]);
+const client = net.connect(port, host);
+let finished = false;
+const finish = code => {
+  if (finished) return;
+  finished = true;
+  client.destroy();
+  process.exit(code);
+};
+client.on("connect", () => finish(9));
+client.on("error", () => finish(0));
+setTimeout(() => finish(0), 2000);
+"""
+
+
+class DockerEnvironmentStub:
+    @staticmethod
+    def _compose_env_vars(*, include_os_env: bool) -> dict[str, str]:
+        if include_os_env:
+            raise AssertionError("Docker smoke must not inherit the full host env")
+        return {}
+
+
+class LocalFixture:
+    def __init__(self) -> None:
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                fixture.request_count += 1
+                valid = (
+                    self.path == "/fixture"
+                    and self.headers.get("Host") == "public.test"
+                    and self.headers.get("Proxy-Authorization") is None
+                )
+                fixture.valid_request = fixture.valid_request and valid
+                payload = b"fixture-ok"
+                self.send_response_only(200 if valid else 500)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format: str, *args: Any) -> None:
+                del args
+
+        self.request_count = 0
+        self.valid_request = True
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="pico-egress-docker-fixture",
+            daemon=True,
+        )
+
+    @property
+    def port(self) -> int:
+        return int(self.server.server_address[1])
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise RuntimeError("local HTTP fixture did not stop")
+
+
+def install_harbor_stubs() -> None:
+    module_names = [
+        "harbor",
+        "harbor.agents",
+        "harbor.agents.installed",
+        "harbor.agents.installed.base",
+        "harbor.environments",
+        "harbor.environments.base",
+        "harbor.environments.docker",
+        "harbor.environments.docker.docker",
+        "harbor.models",
+        "harbor.models.agent",
+        "harbor.models.agent.context",
+        "harbor.models.trial",
+        "harbor.models.trial.paths",
+    ]
+    for name in module_names:
+        sys.modules[name] = types.ModuleType(name)
+
+    class BaseInstalledAgent:
+        pass
+
+    class BaseEnvironment:
+        pass
+
+    class DockerEnvironment:
+        pass
+
+    class AgentContext:
+        pass
+
+    class EnvironmentPaths:
+        agent_dir = Path("/logs/agent")
+
+    sys.modules["harbor.agents.installed.base"].BaseInstalledAgent = (
+        BaseInstalledAgent
+    )
+    sys.modules["harbor.environments.base"].BaseEnvironment = BaseEnvironment
+    docker_module = sys.modules["harbor.environments.docker.docker"]
+    docker_module.DockerEnvironment = DockerEnvironment
+    docker_module._sanitize_docker_compose_project_name = lambda value: value
+    sys.modules["harbor.models.agent.context"].AgentContext = AgentContext
+    sys.modules["harbor.models.trial.paths"].EnvironmentPaths = EnvironmentPaths
+
+
+def load_adapter() -> Any:
+    install_harbor_stubs()
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    adapter_path = project_root / "benchmarks/terminal_bench_2_1/pico_agent.py"
+    spec = importlib.util.spec_from_file_location(
+        "pico_agent_public_egress_docker_smoke",
+        adapter_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def docker_env(adapter: Any) -> dict[str, str]:
+    return adapter.compose_subprocess_env_from_host()
+
+
+def run_docker(
+    adapter: Any,
+    args: list[str],
+    *,
+    input_bytes: bytes | None = None,
+    allowed_exit_codes: set[int] = {0},
+    timeout_sec: float = 20,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        result = subprocess.run(
+            ["docker", *args],
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=docker_env(adapter),
+            timeout=timeout_sec,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("Docker is unavailable for public egress smoke") from error
+    if result.returncode not in allowed_exit_codes:
+        operation = " ".join(args[:2])
+        raise RuntimeError(
+            f"Docker command failed during public egress smoke: {operation}"
+        )
+    return result
+
+
+def require_docker_and_pinned_image(adapter: Any) -> None:
+    run_docker(adapter, ["info"], timeout_sec=10)
+    result = run_docker(
+        adapter,
+        [
+            "image",
+            "inspect",
+            adapter._RELAY_IMAGE_ID,
+            "--format",
+            "{{.Id}}",
+        ],
+    )
+    if result.stdout.decode().strip() != adapter._RELAY_IMAGE_ID:
+        raise RuntimeError("pinned public egress relay image is unavailable")
+
+
+def create_internal_network(adapter: Any, name: str, run_id: str) -> None:
+    run_docker(
+        adapter,
+        [
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            f"pico.terminal-bench.run={run_id}",
+            name,
+        ],
+    )
+
+
+def start_workload_container(
+    adapter: Any,
+    *,
+    name: str,
+    role: str,
+    network: str,
+    alias: str,
+    run_id: str,
+) -> None:
+    run_docker(
+        adapter,
+        [
+            "run",
+            "--detach",
+            "--pull",
+            "never",
+            "--name",
+            name,
+            "--label",
+            f"pico.terminal-bench.run={run_id}",
+            "--label",
+            f"pico.terminal-bench.role={role}",
+            "--network",
+            network,
+            "--network-alias",
+            alias,
+            adapter._RELAY_IMAGE_ID,
+            "node",
+            "-e",
+            _CONTAINER_HOLD_SCRIPT,
+        ],
+    )
+
+
+def inspect_container(adapter: Any, name: str) -> dict[str, Any]:
+    result = run_docker(adapter, ["inspect", name])
+    values = json.loads(result.stdout)
+    if len(values) != 1:
+        raise AssertionError("Docker returned an invalid container inspection")
+    return values[0]
+
+
+def inspect_network(adapter: Any, name: str) -> dict[str, Any]:
+    result = run_docker(adapter, ["network", "inspect", name])
+    values = json.loads(result.stdout)
+    if len(values) != 1:
+        raise AssertionError("Docker returned an invalid network inspection")
+    return values[0]
+
+
+def assert_container_networks(
+    adapter: Any,
+    name: str,
+    expected: set[str],
+) -> dict[str, Any]:
+    value = inspect_container(adapter, name)
+    networks = set((value.get("NetworkSettings") or {}).get("Networks") or {})
+    if networks != expected:
+        raise AssertionError("container retained an unexpected network")
+    if value.get("Image") != adapter._RELAY_IMAGE_ID:
+        raise AssertionError("container did not use the pinned image")
+    return value
+
+
+def exec_proxy_requests(
+    adapter: Any,
+    main_name: str,
+    token: str,
+) -> list[int]:
+    authorization = base64.b64encode(f"pico:{token}".encode("ascii"))
+    result = run_docker(
+        adapter,
+        [
+            "exec",
+            "--interactive",
+            main_name,
+            "node",
+            "-e",
+            _PROXY_REQUEST_SCRIPT,
+            "public.test",
+            "private.test",
+            "mixed.test",
+            "metadata.google.internal",
+        ],
+        input_bytes=authorization,
+        timeout_sec=30,
+    )
+    try:
+        statuses = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AssertionError(
+            "container returned invalid proxy status evidence"
+        ) from error
+    if not isinstance(statuses, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) for value in statuses
+    ):
+        raise AssertionError("container returned invalid proxy statuses")
+    return statuses
+
+
+def assert_connection_fails(
+    adapter: Any,
+    container_name: str,
+    host: str,
+    port: int,
+) -> None:
+    run_docker(
+        adapter,
+        [
+            "exec",
+            container_name,
+            "node",
+            "-e",
+            _EXPECT_CONNECTION_FAILURE_SCRIPT,
+            host,
+            str(port),
+        ],
+        timeout_sec=10,
+    )
+
+
+def remove_owned_container(
+    adapter: Any,
+    name: str,
+    run_id: str,
+) -> None:
+    result = run_docker(
+        adapter,
+        ["inspect", name],
+        allowed_exit_codes={0, 1},
+    )
+    if result.returncode == 1:
+        return
+    values = json.loads(result.stdout)
+    labels = ((values[0].get("Config") or {}).get("Labels") or {}) if values else {}
+    if len(values) != 1 or labels.get("pico.terminal-bench.run") != run_id:
+        raise RuntimeError("refusing to remove an unowned Docker smoke container")
+    run_docker(
+        adapter,
+        ["rm", "--force", name],
+        allowed_exit_codes={0, 1},
+    )
+
+
+def remove_owned_network(
+    adapter: Any,
+    name: str,
+    run_id: str,
+) -> None:
+    result = run_docker(
+        adapter,
+        ["network", "inspect", name],
+        allowed_exit_codes={0, 1},
+    )
+    if result.returncode == 1:
+        return
+    values = json.loads(result.stdout)
+    labels = (values[0].get("Labels") or {}) if values else {}
+    if len(values) != 1 or labels.get("pico.terminal-bench.run") != run_id:
+        raise RuntimeError("refusing to remove an unowned Docker smoke network")
+    run_docker(
+        adapter,
+        ["network", "rm", name],
+        allowed_exit_codes={0, 1},
+    )
+
+
+def assert_no_residual_resources(
+    adapter: Any,
+    container_names: tuple[str, ...],
+    network_names: tuple[str, ...],
+) -> None:
+    for name in container_names:
+        result = run_docker(
+            adapter,
+            ["inspect", name],
+            allowed_exit_codes={0, 1},
+        )
+        if result.returncode == 0:
+            raise AssertionError("Docker smoke container cleanup was not confirmed")
+    for name in network_names:
+        result = run_docker(
+            adapter,
+            ["network", "inspect", name],
+            allowed_exit_codes={0, 1},
+        )
+        if result.returncode == 0:
+            raise AssertionError("Docker smoke network cleanup was not confirmed")
+
+
+async def run_smoke(adapter: Any) -> None:
+    public_egress = importlib.import_module(
+        "benchmarks.terminal_bench_2_1.public_egress"
+    )
+    suffix = secrets.token_hex(6)
+    run_id = f"egress-docker-smoke-{suffix}"
+    task_network = f"pico-smoke-task-{suffix}"
+    gateway_network = f"pico-smoke-gw-{suffix}"
+    main_name = f"pico-smoke-main-{suffix}"
+    sidecar_name = f"pico-smoke-sidecar-{suffix}"
+    relay_name = f"pico-smoke-egress-{suffix}"
+    context_digest = hashlib.sha256(run_id.encode()).hexdigest()[:20]
+    environment = DockerEnvironmentStub()
+    fixture = LocalFixture()
+    connector_calls: list[tuple[str, int]] = []
+    token = secrets.token_hex(32)
+
+    def resolver(host: str, _port: int) -> list[str]:
+        return {
+            "public.test": [_DOCUMENTATION_GLOBAL_IP],
+            "private.test": ["127.0.0.1"],
+            "mixed.test": [_DOCUMENTATION_GLOBAL_IP, "127.0.0.1"],
+            "metadata.google.internal": ["169.254.169.254"],
+        }[host]
+
+    def connector(address: str, port: int, timeout_sec: float) -> socket.socket:
+        connector_calls.append((address, port))
+        return socket.create_connection(
+            ("127.0.0.1", fixture.port),
+            timeout=timeout_sec,
+        )
+
+    proxy = public_egress.PublicEgressProxy(token=token, ttl_sec=60)
+    proxy._resolver = resolver
+    proxy._connector = connector
+    proxy_started = False
+    relay_started = False
+    fixture_started = False
+    test_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    receipt: dict[str, Any] | None = None
+
+    try:
+        fixture.start()
+        fixture_started = True
+        host_port = proxy.start()
+        proxy_started = True
+
+        create_internal_network(adapter, task_network, run_id)
+        create_internal_network(adapter, gateway_network, run_id)
+        start_workload_container(
+            adapter,
+            name=main_name,
+            role="docker-smoke-main",
+            network=task_network,
+            alias="main",
+            run_id=run_id,
+        )
+        run_docker(
+            adapter,
+            [
+                "network",
+                "connect",
+                "--alias",
+                "main",
+                gateway_network,
+                main_name,
+            ],
+        )
+        start_workload_container(
+            adapter,
+            name=sidecar_name,
+            role="docker-smoke-sidecar",
+            network=task_network,
+            alias="sidecar",
+            run_id=run_id,
+        )
+        await adapter.start_public_egress_relay(
+            environment,
+            relay_name=relay_name,
+            network_name=gateway_network,
+            run_id=run_id,
+            context_digest=context_digest,
+            host_port=host_port,
+        )
+        relay_started = True
+
+        task_value = inspect_network(adapter, task_network)
+        gateway_value = inspect_network(adapter, gateway_network)
+        if not adapter.is_owned_trial_network(task_value, run_id):
+            raise AssertionError("task network is not an owned internal network")
+        if not adapter.is_owned_trial_network(gateway_value, run_id):
+            raise AssertionError("gateway network is not an owned internal network")
+        assert_container_networks(
+            adapter,
+            main_name,
+            {task_network, gateway_network},
+        )
+        assert_container_networks(adapter, sidecar_name, {task_network})
+        relay_value = assert_container_networks(
+            adapter,
+            relay_name,
+            {gateway_network, "bridge"},
+        )
+        if not adapter.is_valid_public_egress_relay(
+            relay_value,
+            relay_name=relay_name,
+            network_name=gateway_network,
+            run_id=run_id,
+            context_digest=context_digest,
+            host_port=host_port,
+        ):
+            raise AssertionError("relay does not match the production hardening policy")
+
+        statuses = exec_proxy_requests(adapter, main_name, token)
+        if statuses != [200, 403, 403, 403]:
+            raise AssertionError("unexpected public egress allow/deny statuses")
+        if fixture.request_count != 1 or not fixture.valid_request:
+            raise AssertionError("local HTTP fixture received an invalid request")
+        if connector_calls != [(_DOCUMENTATION_GLOBAL_IP, 80)]:
+            raise AssertionError("denied proxy targets reached the connector")
+
+        assert_connection_fails(
+            adapter,
+            main_name,
+            _DOCUMENTATION_GLOBAL_IP,
+            80,
+        )
+        assert_connection_fails(adapter, sidecar_name, "pico-egress", 8081)
+
+        receipt = proxy.stop()
+        proxy_started = False
+        if (
+            receipt.get("schemaVersion") != 1
+            or receipt.get("allowed") != 1
+            or receipt.get("denied") != 3
+        ):
+            raise AssertionError("public egress proxy receipt counts are invalid")
+    except BaseException as error:
+        test_error = error
+    finally:
+        if proxy_started:
+            try:
+                receipt = proxy.stop()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if relay_started:
+            try:
+                await adapter.remove_public_egress_relay(
+                    environment,
+                    relay_name=relay_name,
+                    run_id=run_id,
+                    context_digest=context_digest,
+                )
+            except BaseException as error:
+                cleanup_errors.append(error)
+        for container_name in (relay_name, main_name, sidecar_name):
+            try:
+                remove_owned_container(adapter, container_name, run_id)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        for network_name in (gateway_network, task_network):
+            try:
+                remove_owned_network(adapter, network_name, run_id)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        try:
+            assert_no_residual_resources(
+                adapter,
+                (relay_name, main_name, sidecar_name),
+                (task_network, gateway_network),
+            )
+        except BaseException as error:
+            cleanup_errors.append(error)
+        if fixture_started:
+            try:
+                fixture.stop()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        token = ""
+
+    if cleanup_errors:
+        raise RuntimeError(
+            "public egress Docker smoke cleanup did not complete"
+        ) from (test_error or cleanup_errors[0])
+    if test_error is not None:
+        raise test_error
+    if receipt is None:
+        raise AssertionError("public egress proxy did not return a receipt")
+
+
+async def main() -> None:
+    adapter = load_adapter()
+    require_docker_and_pinned_image(adapter)
+    if not ipaddress.ip_address(_DOCUMENTATION_GLOBAL_IP).is_global:
+        raise AssertionError("documentation target must be a global IP")
+    await run_smoke(adapter)
+    print("Public egress Docker smoke passed.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
