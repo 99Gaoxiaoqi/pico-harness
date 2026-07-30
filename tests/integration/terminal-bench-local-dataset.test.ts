@@ -281,6 +281,46 @@ test("Terminal-Bench cached-full stages a locked subset without image pulls", as
   }
 });
 
+test("Terminal-Bench cached-full rejects a substituted task lock before staging a subset", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-cached-full-lock-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const fullTasks = fullFixtureTasks();
+  const selectedTask = fullTasks[0];
+  assert.ok(selectedTask);
+  await writeFullTaskList(root, fullTasks);
+  const taskEntries = Object.fromEntries(
+    fullTasks.map((taskName, index) => [
+      taskName,
+      {
+        cacheDigest: fixtureHash(index + 1),
+        treeSha256: fixtureHash(index + 500),
+      },
+    ]),
+  );
+  const replacedTask = fullTasks.at(-1);
+  assert.ok(replacedTask);
+  delete taskEntries[replacedTask];
+  taskEntries["terminal-bench/outside-fixed-matrix"] = {
+    cacheDigest: fixtureHash(1_000),
+    treeSha256: fixtureHash(1_001),
+  };
+  assert.equal(Object.keys(taskEntries).length, fullTaskCount);
+  await writeTaskLock(root, taskEntries);
+
+  await assert.rejects(
+    prepareLocalDataset({
+      mode: "cached-full",
+      tasks: [selectedTask],
+      projectRoot: root,
+      runRoot: join(root, "run"),
+      runId: "fixture-run",
+      homeDirectory: join(root, "home"),
+      env: {},
+    }),
+    /cached-full task lock does not cover the task list/u,
+  );
+});
+
 test("Terminal-Bench single mode does not require or report an image lock", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-single-stage-"));
   context.after(() => rm(root, { recursive: true, force: true }));

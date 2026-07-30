@@ -302,6 +302,37 @@ test("Terminal-Bench normalizer requires the expected task attempt matrix", asyn
   assert.equal(summary.sealed, false);
 });
 
+test("Terminal-Bench normalizer rejects trials outside an explicit task selection", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-explicit-selection-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, "selected", {
+    reward: 1,
+    headless: headless("completed", true),
+    taskName: "terminal-bench/selected",
+    runId: "explicit-selection-run",
+  });
+  await writeTrial(jobDir, "unexpected", {
+    reward: 1,
+    headless: headless("completed", true),
+    taskName: "terminal-bench/unexpected",
+    runId: "explicit-selection-run",
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId: "explicit-selection-run",
+    expectedTasks: 2,
+    expectedTaskNames: ["terminal-bench/selected", "terminal-bench/requested-but-missing"],
+    expectedAttempts: 1,
+  });
+
+  assert.equal(summary.observed, 2);
+  assert.equal(summary.sealed, false);
+});
+
 test("Terminal-Bench normalizer rejects duplicate trial identities", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-trial-id-"));
   const jobDir = join(root, "job");
