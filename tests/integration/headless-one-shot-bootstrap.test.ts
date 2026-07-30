@@ -39,9 +39,14 @@ test("headless bootstrap writes a secret-free route and trusts the isolated work
     snapshot.config.providers["codex-oauth"]?.modelCapabilities?.["gpt-5.4"]?.output,
     8_192,
   );
+  assert.equal(
+    snapshot.config.providers["codex-oauth"]?.modelCapabilities?.["gpt-5.4"]?.outputTokenField,
+    "max_completion_tokens",
+  );
   const configJson = await readFile(join(picoHome, "config.json"), "utf8");
   assert.doesNotMatch(configJson, /apiKey":/u);
   assert.match(configJson, /"output": 8192/u);
+  assert.match(configJson, /"outputTokenField": "max_completion_tokens"/u);
   const router = await loadModelRouter({
     config: {
       model: snapshot.config.defaults?.modelRouteId,
@@ -54,6 +59,7 @@ test("headless bootstrap writes a secret-free route and trusts the isolated work
   const route = router.require("codex-oauth/gpt-5.4");
   assert.equal(route.capabilities.maxOutputTokens, 8_192);
   assert.equal(route.capabilities.outputSource, "config");
+  assert.equal(route.capabilities.outputTokenField, "max_completion_tokens");
   assert.equal(
     await new WorkspaceTrustStore({ userStateDirectory: picoHome }).isTrusted(canonicalWorkspace),
     true,
@@ -125,6 +131,7 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
     const route = router.require(candidate.routeId);
     assert.equal(route.capabilities.maxOutputTokens, 4_096, candidate.name);
     assert.equal(route.capabilities.outputSource, candidate.expectedSource, candidate.name);
+    assert.equal(route.capabilities.outputTokenField, "max_tokens", candidate.name);
   }
 });
 
