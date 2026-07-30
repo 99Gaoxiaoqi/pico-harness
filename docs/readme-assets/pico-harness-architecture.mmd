@@ -5,12 +5,12 @@ flowchart TB
   MOBILE["Mobile / Expo 模拟器<br/>仓库内开发预览"]
 
   BRIDGE["Preload / Main IPC<br/>allowlist<br/>LocalRuntimeClient&nbsp;"]
-  GATEWAY["认证回环 Gateway<br/>HTTP / WebSocket<br/>Bearer Token"]
+  GATEWAY["认证回环 Gateway<br/>HTTP Bearer<br/>Token<br/>WS 首帧 JSON<br/>同一 Token"]
   MOBILE_CLIENT["LocalRuntimeClient&nbsp;<br/>认证本机 IPC"]
   DAEMON["本机 daemon<br/>内部 Runtime 宿主"]
-  DRS["DesktopRuntimeService&nbsp;<br/>daemon Runtime 控制服务"]
+  DRS["DesktopRuntime<br/>Service<br/>daemon 控制服务"]
   TRUST["工作区信任 / 配置"]
-  WRS["WorkspaceRuntimeService&nbsp;<br/>工作区 Runtime 服务"]
+  WRS["WorkspaceRuntime<br/>Service<br/>工作区 Runtime 服务"]
 
   RUNTIME["Agent Runtime 核心"]
   ENGINE["Agent Engine / 工具调度器"]
@@ -23,9 +23,9 @@ flowchart TB
   COMMANDS["TUI Markdown 命令"]
   TASKS["任务控制<br/>TUI：TaskHost<br/>Daemon：周期任务"]
   PROJECT["项目工作区"]
-  STATE[("Workspace JSON / JSONL<br/>状态账本<br/>sessions/ · task-runs/<br/>control/")]
+  STATE[("&nbsp;Workspace 状态账本&nbsp;<br/>&nbsp;JSON / JSONL&nbsp;<br/>&nbsp;sessions/&nbsp;<br/>&nbsp;task-runs/&nbsp;<br/>&nbsp;control/&nbsp;")]
   COORD[(".storage 共享事务协调<br/>layout.json · commit.json&nbsp;<br/>lock/")]
-  SIDECAR[("文件历史 / Evidence CAS<br/>产物")]
+  SIDECAR[("文件历史 / 产物<br/>Evidence CAS")]
 
   TUI --> TRUST
   DESKTOP --> BRIDGE --> DAEMON --> DRS --> TRUST

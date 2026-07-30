@@ -21,7 +21,7 @@
 | Mobile / Gateway | 仓库内开发预览    | Expo 客户端通过带认证的回环 Gateway 访问本机 daemon；仅供本机 iOS / Android 模拟器，不支持远程 |
 | 本机 daemon      | 内部 Runtime 宿主 | 承载 Desktop、Mobile 开发预览和持久 Cron；通过本机 IPC 通信，自身不监听网络端口                |
 
-当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。Mobile Gateway 虽提供带 Bearer Token 认证的 HTTP/WebSocket，但固定绑定 `127.0.0.1`，只服务本机模拟器开发预览，不构成公开 API 或兼容性承诺。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它同样不是产品入口。
+当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。Mobile Gateway 的 HTTP 请求使用 Bearer Token；WebSocket 则在连接后用首个 JSON 帧提交同一 Token。Gateway 固定绑定 `127.0.0.1`，只服务本机模拟器开发预览，不构成公开 API 或兼容性承诺。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它同样不是产品入口。
 
 ## 架构概览
 
@@ -33,7 +33,7 @@
 
 - TUI：`CLI → TUI → 工作区信任/配置 → AgentRuntime`，前台执行不需要绕行 daemon。
 - Desktop：`Renderer → sandbox preload bridge → Electron IPC allowlist → LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
-- Mobile 开发预览：`Expo 模拟器客户端 → Bearer Token 认证的回环 HTTP/WebSocket Gateway → LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
+- Mobile 开发预览：`Expo 模拟器客户端 → 回环 Gateway（HTTP Bearer Token；WebSocket 首个 JSON 帧使用同一 Token 鉴权）→ LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
 
 Desktop 与 Mobile Gateway 进入 daemon 后都使用版本化本机 IPC 协议、4 字节长度前缀 JSON 帧和 1 MiB 帧上限；端点是 POSIX socket 或 Windows named pipe，并带本机认证。它是同一用户边界内的内部协议，不是网络服务。
 
