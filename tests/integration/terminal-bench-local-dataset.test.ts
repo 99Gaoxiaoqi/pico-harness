@@ -13,6 +13,7 @@ import * as publication from "../../scripts/terminal-bench/publication.mjs";
 const {
   buildEgressPolicyManifest,
   parseTaskAllowInternet,
+  publicEgressDnsPolicy,
   publicEgressLimits,
   publicEgressProxyPolicyVersion,
 } = egressPolicy;
@@ -443,9 +444,19 @@ test("Terminal-Bench serializes an exact, versioned public egress manifest", () 
     proxyPolicyVersion: publicEgressProxyPolicyVersion,
     limits: {
       maxConnections: publicEgressLimits.maxConnections,
+      maxRequests: publicEgressLimits.maxRequests,
       maxTotalBytes: publicEgressLimits.maxTotalBytes,
+      connectionTimeoutSec: publicEgressLimits.connectionTimeoutSec,
+      maxAuditDecisions: publicEgressLimits.maxAuditDecisions,
       allowedHttpPorts: [80],
       allowedConnectPorts: [443],
+    },
+    dns: {
+      mode: publicEgressDnsPolicy.mode,
+      host: publicEgressDnsPolicy.host,
+      endpointIps: [...publicEgressDnsPolicy.endpointIps],
+      systemFallback: publicEgressDnsPolicy.systemFallback,
+      ipv4Only: publicEgressDnsPolicy.ipv4Only,
     },
     tasks: [
       { taskName: "terminal-bench/online", allowInternet: true },
