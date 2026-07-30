@@ -21,7 +21,7 @@ test("headless bootstrap writes a secret-free route and trusts the isolated work
       workspacePath,
       picoHome,
       route: {
-        id: "fixture/model",
+        id: "codex-oauth/gpt-5.4",
         protocol: "openai",
         baseURL: "https://provider.invalid/v1",
         apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
@@ -34,8 +34,11 @@ test("headless bootstrap writes a secret-free route and trusts the isolated work
   assert.equal(outcome.exitCode, 0);
   assert.equal(outcome.result.workspacePath, canonicalWorkspace);
   const snapshot = await new UserConfigStore({ picoHome }).read();
-  assert.equal(snapshot.config.defaults?.modelRouteId, "fixture/model");
-  assert.equal(snapshot.config.providers["fixture"]?.modelCapabilities?.["model"]?.output, 8_192);
+  assert.equal(snapshot.config.defaults?.modelRouteId, "codex-oauth/gpt-5.4");
+  assert.equal(
+    snapshot.config.providers["codex-oauth"]?.modelCapabilities?.["gpt-5.4"]?.output,
+    8_192,
+  );
   const configJson = await readFile(join(picoHome, "config.json"), "utf8");
   assert.doesNotMatch(configJson, /apiKey":/u);
   assert.match(configJson, /"output": 8192/u);
@@ -48,13 +51,81 @@ test("headless bootstrap writes a secret-free route and trusts the isolated work
     legacyProvider: "openai",
     legacyModel: "unused-legacy-model",
   });
-  const route = router.require("fixture/model");
+  const route = router.require("codex-oauth/gpt-5.4");
   assert.equal(route.capabilities.maxOutputTokens, 8_192);
   assert.equal(route.capabilities.outputSource, "config");
   assert.equal(
     await new WorkspaceTrustStore({ userStateDirectory: picoHome }).isTrusted(canonicalWorkspace),
     true,
   );
+});
+
+test("headless bootstrap keeps non-pinned routes compatible with optional output", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-headless-bootstrap-compatible-output-"));
+  const workspacePath = join(root, "workspace");
+  await mkdir(workspacePath);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  for (const candidate of [
+    {
+      name: "missing",
+      routeId: "fixture/model",
+      modelId: "model",
+      output: undefined,
+      expectedSource: "profile_default",
+    },
+    {
+      name: "configured",
+      routeId: "fixture/model",
+      modelId: "model",
+      output: 4_096,
+      expectedSource: "config",
+    },
+    {
+      name: "slash-model",
+      routeId: "fixture/org/model",
+      modelId: "org/model",
+      output: 4_096,
+      expectedSource: "config",
+    },
+  ] as const) {
+    const picoHome = join(root, `pico-home-${candidate.name}`);
+    await mkdir(picoHome);
+    const outcome = await bootstrapHeadlessCaseJson(
+      JSON.stringify({
+        schemaVersion: 1,
+        workspacePath,
+        picoHome,
+        route: {
+          id: candidate.routeId,
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
+          ...(candidate.output === undefined ? {} : { output: candidate.output }),
+        },
+      }),
+    );
+
+    assert.equal(outcome.exitCode, 0, candidate.name);
+    const snapshot = await new UserConfigStore({ picoHome }).read();
+    assert.equal(
+      snapshot.config.providers["fixture"]?.modelCapabilities?.[candidate.modelId]?.output,
+      candidate.output,
+      candidate.name,
+    );
+    const router = await loadModelRouter({
+      config: {
+        model: snapshot.config.defaults?.modelRouteId,
+        providers: snapshot.config.providers,
+      },
+      env: { PICO_TB_GATEWAY_TOKEN: "process-local-fixture-token" },
+      legacyProvider: "openai",
+      legacyModel: "unused-legacy-model",
+    });
+    const route = router.require(candidate.routeId);
+    assert.equal(route.capabilities.maxOutputTokens, 4_096, candidate.name);
+    assert.equal(route.capabilities.outputSource, candidate.expectedSource, candidate.name);
+  }
 });
 
 test("headless bootstrap rejects plaintext provider credentials", async (context) => {
@@ -93,7 +164,7 @@ test("headless bootstrap requires an exact unpolluted 8192-token route output", 
     picoHome: join(root, "pico-home"),
     workspacePath,
     route: {
-      id: "fixture/model",
+      id: "codex-oauth/gpt-5.4",
       protocol: "openai",
       baseURL: "https://provider.invalid/v1",
       apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
@@ -142,5 +213,41 @@ test("headless bootstrap requires an exact unpolluted 8192-token route output", 
     const outcome = await bootstrapHeadlessCaseJson(JSON.stringify(request));
     assert.equal(outcome.exitCode, 2, candidate.name);
     assert.equal(outcome.result.error?.code, candidate.errorCode, candidate.name);
+  }
+});
+
+test("headless bootstrap rejects unsafe output values on non-pinned routes", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-headless-bootstrap-unsafe-output-"));
+  const workspacePath = join(root, "workspace");
+  await mkdir(workspacePath);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  for (const [name, output] of [
+    ["null", null],
+    ["boolean", true],
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+    ["string", "4096"],
+    ["object", {}],
+    ["array", []],
+  ] as const) {
+    const outcome = await bootstrapHeadlessCaseJson(
+      JSON.stringify({
+        schemaVersion: 1,
+        picoHome: join(root, `pico-home-${name}`),
+        workspacePath,
+        route: {
+          id: "fixture/model",
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
+          output,
+        },
+      }),
+    );
+    assert.equal(outcome.exitCode, 2, name);
+    assert.equal(outcome.result.error?.code, "INVALID_ROUTE_OUTPUT", name);
   }
 });

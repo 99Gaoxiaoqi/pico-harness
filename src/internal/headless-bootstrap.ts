@@ -11,6 +11,7 @@ import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 
 const SCHEMA_VERSION = 1 as const;
+const PINNED_BENCHMARK_ROUTE_ID = "codex-oauth/gpt-5.4";
 const BENCHMARK_OUTPUT_TOKENS = 8_192 as const;
 const MAX_INPUT_BYTES = 64 * 1024;
 const REQUEST_FIELDS = new Set(["schemaVersion", "workspacePath", "picoHome", "route"]);
@@ -28,7 +29,7 @@ export interface HeadlessBootstrapRequestV1 {
     readonly protocol: "openai" | "claude" | "gemini";
     readonly baseURL: string;
     readonly apiKeyEnv: string;
-    readonly output: typeof BENCHMARK_OUTPUT_TOKENS;
+    readonly output?: number;
   };
 }
 
@@ -180,17 +181,18 @@ function parseRequest(value: unknown): HeadlessBootstrapRequestV1 {
       `route.apiKeyEnv must equal ${BENCHMARK_API_KEY_ENV}.`,
     );
   }
-  if (route["output"] !== BENCHMARK_OUTPUT_TOKENS) {
-    throw new BootstrapRequestError(
-      "INVALID_ROUTE_OUTPUT",
-      `route.output must equal ${BENCHMARK_OUTPUT_TOKENS}.`,
-    );
-  }
+  const output = parseRouteOutput(routeId, route["output"]);
   return {
     schemaVersion: SCHEMA_VERSION,
     workspacePath: requiredString(value["workspacePath"], "workspacePath", 4096),
     picoHome: requiredString(value["picoHome"], "picoHome", 4096),
-    route: { id: routeId, protocol, baseURL, apiKeyEnv, output: BENCHMARK_OUTPUT_TOKENS },
+    route: {
+      id: routeId,
+      protocol,
+      baseURL,
+      apiKeyEnv,
+      ...(output === undefined ? {} : { output }),
+    },
   };
 }
 
@@ -207,11 +209,15 @@ function buildUserConfig(
         apiKeyEnv: request.route.apiKeyEnv,
         models: [modelId],
         discoverModels: false,
-        modelCapabilities: {
-          [modelId]: {
-            output: request.route.output,
-          },
-        },
+        ...(request.route.output === undefined
+          ? {}
+          : {
+              modelCapabilities: {
+                [modelId]: {
+                  output: request.route.output,
+                },
+              },
+            }),
       },
     },
     "bootstrap request",
@@ -221,6 +227,26 @@ function buildUserConfig(
     defaults: { modelRouteId: request.route.id, mode: "yolo" },
     providers,
   };
+}
+
+function parseRouteOutput(routeId: string, value: unknown): number | undefined {
+  if (routeId === PINNED_BENCHMARK_ROUTE_ID) {
+    if (value !== BENCHMARK_OUTPUT_TOKENS) {
+      throw new BootstrapRequestError(
+        "INVALID_ROUTE_OUTPUT",
+        `route.output must equal ${BENCHMARK_OUTPUT_TOKENS} for ${PINNED_BENCHMARK_ROUTE_ID}.`,
+      );
+    }
+    return BENCHMARK_OUTPUT_TOKENS;
+  }
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new BootstrapRequestError(
+      "INVALID_ROUTE_OUTPUT",
+      "route.output must be a positive safe integer when provided.",
+    );
+  }
+  return value;
 }
 
 async function canonicalizeCasePaths(

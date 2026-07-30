@@ -98,6 +98,34 @@ def benchmark_route_config(
     }
 
 
+def compatible_route_config(
+    output_tokens: Any = None,
+    *,
+    include_model_capability: bool = True,
+    model: str = "compatible-model",
+) -> dict[str, Any]:
+    capability: dict[str, Any] = {"toolCall": True}
+    if output_tokens is not None:
+        capability["output"] = output_tokens
+    provider: dict[str, Any] = {
+        "protocol": "openai",
+        "baseURL": "http://pico-gateway:8080",
+        "models": [model],
+        "discoverModels": False,
+    }
+    if include_model_capability:
+        provider["modelCapabilities"] = {model: capability}
+    return {
+        "schemaVersion": 1,
+        "modelRouteId": f"compatible-provider/{model}",
+        "providerId": "compatible-provider",
+        "provider": provider,
+        "pricing": {},
+        "pricingSha256": "0" * 64,
+        "runBudget": {"currency": "CNY", "maxCostMicroCNY": 1_000_000},
+    }
+
+
 def assert_route_config_contract(adapter: Any) -> None:
     with tempfile.TemporaryDirectory(prefix="pico-route-contract-") as directory:
         path = Path(directory) / "route.json"
@@ -139,20 +167,69 @@ def assert_route_config_contract(adapter: Any) -> None:
                     f"{invalid_output!r}, {invalid_field!r}"
                 )
 
+        for compatible in (
+            compatible_route_config(),
+            compatible_route_config(include_model_capability=False),
+            compatible_route_config(4_096),
+            compatible_route_config(4_096, model="org/compatible-model"),
+        ):
+            path.write_text(json.dumps(compatible))
+            assert adapter.load_route_config(path) == compatible
+        assert adapter.route_output_capability(compatible_route_config()) is None
+        assert (
+            adapter.route_output_capability(
+                compatible_route_config(include_model_capability=False)
+            )
+            is None
+        )
+        assert (
+            adapter.route_output_capability(compatible_route_config(4_096))
+            == 4_096
+        )
+
+        for invalid_output in (
+            None,
+            True,
+            "4096",
+            0,
+            -1,
+            1.5,
+            9_007_199_254_740_992,
+        ):
+            invalid = compatible_route_config(4_096)
+            invalid["provider"]["modelCapabilities"]["compatible-model"][
+                "output"
+            ] = invalid_output
+            path.write_text(json.dumps(invalid))
+            try:
+                adapter.load_route_config(path)
+            except ValueError as error:
+                assert (
+                    str(error)
+                    == "route config model output capability is invalid"
+                )
+            else:
+                raise AssertionError(
+                    "unsafe compatible output capability was accepted: "
+                    f"{invalid_output!r}"
+                )
+
 
 async def assert_bootstrap_output_projection(adapter: Any) -> None:
     class BootstrapFailureEnvironment:
         async def exec(self, **_kwargs: Any) -> Any:
             return types.SimpleNamespace(return_code=1, stdout="", stderr="")
 
-    with tempfile.TemporaryDirectory(prefix="pico-bootstrap-output-") as directory:
-        root = Path(directory)
+    async def project(
+        root: Path,
+        name: str,
+        route_config: dict[str, Any],
+    ) -> dict[str, Any]:
         agent = object.__new__(adapter.PicoInstalledAgent)
-        agent.logs_dir = root / "logs"
+        agent.logs_dir = root / name
         agent._shutdown_grace_ms = 30_000
         agent._result_flush_margin_ms = 5_000
         agent._bash_timeout_ms = 180_000
-        route_config = benchmark_route_config()
         loop = asyncio.get_running_loop()
         try:
             await agent._run_with_gateway(
@@ -179,15 +256,42 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
         else:
             raise AssertionError("synthetic bootstrap failure unexpectedly succeeded")
 
-        request = json.loads(
+        return json.loads(
             (agent.logs_dir / "bootstrap-request.json").read_text(encoding="utf-8")
         )
-        assert request["route"] == {
+
+    with tempfile.TemporaryDirectory(prefix="pico-bootstrap-output-") as directory:
+        root = Path(directory)
+        exact = await project(root, "exact", benchmark_route_config())
+        assert exact["route"] == {
             "id": "codex-oauth/gpt-5.4",
             "protocol": "openai",
             "baseURL": "http://pico-gateway:8080",
             "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
             "output": 8_192,
+        }
+        compatible = await project(
+            root,
+            "compatible",
+            compatible_route_config(4_096),
+        )
+        assert compatible["route"] == {
+            "id": "compatible-provider/compatible-model",
+            "protocol": "openai",
+            "baseURL": "http://pico-gateway:8080",
+            "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
+            "output": 4_096,
+        }
+        missing = await project(
+            root,
+            "missing",
+            compatible_route_config(include_model_capability=False),
+        )
+        assert missing["route"] == {
+            "id": "compatible-provider/compatible-model",
+            "protocol": "openai",
+            "baseURL": "http://pico-gateway:8080",
+            "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
         }
 
 
