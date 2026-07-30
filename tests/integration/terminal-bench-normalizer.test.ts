@@ -179,7 +179,9 @@ test("Terminal-Bench normalizer preserves terminal failures alongside policy inc
   assert.equal(summary.policyIncidentCount, cases.length);
   assert.equal(summary.verifierPassWithPolicyIncidentCount, 0);
   for (const entry of cases) {
-    const trial = summary.trials.find((candidate) => candidate.executionOutcome === entry.status);
+    const trial = summary.trials.find(
+      (candidate: { executionOutcome: string }) => candidate.executionOutcome === entry.status,
+    );
     assert.equal(trial?.policyIncident, true);
     assert.equal(trial?.executionOutcome, entry.status);
     assert.equal(trial?.primaryStatus, entry.primaryStatus);
@@ -412,10 +414,17 @@ test("Terminal-Bench normalizer rejects invalid headless runtime-control request
 
   assert.equal(summary.sealed, false);
   assert.deepEqual(
-    summary.trials.map((trial) => [trial.adapter.status, trial.adapter.code]),
+    summary.trials.map((trial: { adapter: { status: string; code: string } }) => [
+      trial.adapter.status,
+      trial.adapter.code,
+    ]),
     errorCodes.map((errorCode) => ["error", errorCode]),
   );
-  assert.ok(summary.trials.every((trial) => trial.primaryStatus === "adapter_error"));
+  assert.ok(
+    summary.trials.every(
+      (trial: { primaryStatus: string }) => trial.primaryStatus === "adapter_error",
+    ),
+  );
 });
 
 test("Terminal-Bench normalizer requires verifier execution evidence", async (context) => {
@@ -709,12 +718,23 @@ test("Terminal-Bench normalizer fails closed without a valid accounting receipt"
   assert.equal(summary.trials[0].primaryStatus, "adapter_error");
 });
 
+type HeadlessFixture = {
+  schemaVersion: number;
+  requestId: string;
+  status: string;
+  usage: { promptTokens: number; completionTokens: number; costCNY: number };
+  durationMs: number;
+  terminationConfirmed: boolean;
+  error: { code: string; summary: string } | null;
+  policyDenials?: ReturnType<typeof policyDenials>;
+};
+
 function headless(
   status: string,
   terminationConfirmed: boolean,
   denials?: ReturnType<typeof policyDenials>,
-) {
-  const result = {
+): HeadlessFixture {
+  const result: HeadlessFixture = {
     schemaVersion: 1,
     requestId: "fixture",
     status,
