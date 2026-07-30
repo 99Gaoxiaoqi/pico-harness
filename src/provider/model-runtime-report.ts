@@ -36,6 +36,13 @@ export interface ModelUsageReport {
     cacheWriteTokens: UsageFieldReport;
     reasoningTokens: UsageFieldReport;
   };
+  /** 会话快照没有逐调用账本，因此请求命中率只能明确标为 unavailable。 */
+  cache: {
+    requestHitRate: null;
+    promptTokenReuseRate: number | null;
+    cacheReadToWriteRatio: number | null;
+    uncachedInputTokens: UsageFieldReport;
+  };
   cost: {
     cny: number | null;
     status: "estimated" | "included" | "partial" | "unknown";
@@ -98,29 +105,59 @@ export function createModelUsageReport(
 ): ModelUsageReport {
   const totalCalls = usage.totalProviderCalls;
   const usageReports = usage.totalUsageReports;
+  const inputTokens = usageField(usage.totalInputTokens, usage.totalInputReports, totalCalls);
+  const cacheReadTokens = usageField(
+    usage.totalCacheReadTokens,
+    usage.totalCacheReadReports,
+    totalCalls,
+  );
+  const cacheWriteTokens = usageField(
+    usage.totalCacheWriteTokens,
+    usage.totalCacheWriteReports,
+    totalCalls,
+  );
+  const promptTokens = usageField(usage.totalPromptTokens, usageReports, totalCalls);
+  const reuseDenominator =
+    inputTokens.value === null || cacheReadTokens.value === null || cacheWriteTokens.value === null
+      ? null
+      : inputTokens.value + cacheReadTokens.value + cacheWriteTokens.value;
+  const cacheRatiosFullyReported =
+    inputTokens.status === "reported" &&
+    cacheReadTokens.status === "reported" &&
+    cacheWriteTokens.status === "reported";
   return {
     routeId: route.id,
     providerCalls: totalCalls,
     usageReports,
     fields: {
-      promptTokens: usageField(usage.totalPromptTokens, usageReports, totalCalls),
+      promptTokens,
       completionTokens: usageField(usage.totalCompletionTokens, usageReports, totalCalls),
-      inputTokens: usageField(usage.totalInputTokens, usage.totalInputReports, totalCalls),
-      cacheReadTokens: usageField(
-        usage.totalCacheReadTokens,
-        usage.totalCacheReadReports,
-        totalCalls,
-      ),
-      cacheWriteTokens: usageField(
-        usage.totalCacheWriteTokens,
-        usage.totalCacheWriteReports,
-        totalCalls,
-      ),
+      inputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
       reasoningTokens: usageField(
         usage.totalReasoningTokens,
         usage.totalReasoningReports,
         totalCalls,
       ),
+    },
+    cache: {
+      requestHitRate: null,
+      promptTokenReuseRate:
+        !cacheRatiosFullyReported ||
+        cacheReadTokens.value === null ||
+        reuseDenominator === null ||
+        reuseDenominator === 0
+          ? null
+          : cacheReadTokens.value / reuseDenominator,
+      cacheReadToWriteRatio:
+        !cacheRatiosFullyReported ||
+        cacheReadTokens.value === null ||
+        cacheWriteTokens.value === null ||
+        cacheWriteTokens.value === 0
+          ? null
+          : cacheReadTokens.value / cacheWriteTokens.value,
+      uncachedInputTokens: inputTokens,
     },
     cost: costReport(route, usage),
   };
@@ -173,6 +210,10 @@ export function formatModelUsageReport(report: ModelUsageReport): string {
     report.cost.cny === null
       ? `Cost: unknown (price ${report.cost.priceSource})`
       : `Cost: ¥${report.cost.cny.toFixed(4)} (${report.cost.status}, price ${report.cost.priceSource})`;
+  const ratio = (value: number | null): string =>
+    value === null ? "unknown" : `${(value * 100).toFixed(1)}%`;
+  const multiple = (value: number | null): string =>
+    value === null ? "unknown" : `${value.toFixed(2)}x`;
   return [
     `Route: ${report.routeId}`,
     `Provider calls: ${report.providerCalls}; usage reports: ${report.usageReports}`,
@@ -181,6 +222,10 @@ export function formatModelUsageReport(report: ModelUsageReport): string {
     field("Input tokens", report.fields.inputTokens),
     field("Cache read tokens", report.fields.cacheReadTokens),
     field("Cache write tokens", report.fields.cacheWriteTokens),
+    "Cache request hit rate: unavailable (requires provider_calls ledger)",
+    `Cache prompt-token reuse: ${ratio(report.cache.promptTokenReuseRate)}`,
+    `Cache read/write ratio: ${multiple(report.cache.cacheReadToWriteRatio)}`,
+    field("Uncached input tokens", report.cache.uncachedInputTokens),
     field("Reasoning tokens", report.fields.reasoningTokens),
     cost,
   ].join("\n");

@@ -2437,7 +2437,30 @@ function UsagePage() {
   const metrics = [
     ["输入 tokens", data.usage.inputTokens, TerminalSquare],
     ["输出 tokens", data.usage.outputTokens, Bot],
-    ["缓存 tokens", data.usage.cachedTokens, Layers3],
+    ["缓存读取 tokens", data.usage.cacheReadTokens ?? data.usage.cachedTokens, Layers3],
+    ["缓存写入 tokens", data.usage.cacheWriteTokens, Layers3],
+    ["未缓存输入 tokens", data.usage.uncachedInputTokens, TerminalSquare],
+    [
+      "缓存命中率",
+      data.usage.cacheRequestHitRate === undefined
+        ? undefined
+        : `${(data.usage.cacheRequestHitRate * 100).toFixed(1)}%`,
+      Layers3,
+    ],
+    [
+      "缓存复用率",
+      data.usage.cachePromptTokenReuseRate === undefined
+        ? undefined
+        : `${(data.usage.cachePromptTokenReuseRate * 100).toFixed(1)}%`,
+      Layers3,
+    ],
+    [
+      "缓存读写比",
+      data.usage.cacheReadToWriteRatio === undefined
+        ? undefined
+        : `${data.usage.cacheReadToWriteRatio.toFixed(2)}x`,
+      Layers3,
+    ],
     [
       "估算费用",
       data.usage.cost === undefined ? undefined : `$${data.usage.cost.toFixed(2)}`,
