@@ -98,7 +98,28 @@ import {
 const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
 const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
 const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
+const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
 const engineSessionContext = new AsyncLocalStorage<string>();
+
+function normalizeToolResultRedactionSecrets(
+  secrets: readonly string[] | undefined,
+): readonly string[] {
+  if (!secrets) return [];
+  return Object.freeze(
+    [...new Set(secrets.filter((secret) => secret.length > 0))].sort(
+      (left, right) => right.length - left.length,
+    ),
+  );
+}
+
+function redactToolResult(result: ToolResult, secrets: readonly string[]): ToolResult {
+  if (secrets.length === 0) return result;
+  let output = result.output;
+  for (const secret of secrets) {
+    output = output.replaceAll(secret, TOOL_RESULT_REDACTION_MARKER);
+  }
+  return output === result.output ? result : { ...result, output };
+}
 
 function engineSessionCapability(session: Session): string {
   return JSON.stringify([
@@ -548,6 +569,11 @@ export interface AgentEngineOptions {
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /**
+   * 可信宿主登记的精确敏感值。所有工具结果在进入 recovery、Provider transcript、
+   * Runtime 持久化、Hook 与 trace 前按完整字符串替换；工具参数不能扩充此列表。
+   */
+  toolResultRedactionSecrets?: readonly string[];
+  /**
    * Plan Mode 退出回调(ROADMAP 3.6)。
    * ExitPlanModeTool 审批通过、engine.exitPlanMode() 触发后调用,供 host 监听。
    */
@@ -655,6 +681,7 @@ export class AgentEngine implements AgentRunner {
   /** 工具渐进披露(可选);注入后每轮只把核心+已披露工具喂给 LLM */
   private readonly toolDisclosure?: ToolDisclosure;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
+  private readonly toolResultRedactionSecrets: readonly string[];
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
@@ -708,6 +735,9 @@ export class AgentEngine implements AgentRunner {
     this.todoStore = opts.todoStore;
     this.toolDisclosure = opts.toolDisclosure;
     this.onTurn = opts.onTurn;
+    this.toolResultRedactionSecrets = normalizeToolResultRedactionSecrets(
+      opts.toolResultRedactionSecrets,
+    );
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.runtimeEvidenceArchive = opts.runtimeEvidenceArchive;
@@ -2302,13 +2332,16 @@ export class AgentEngine implements AgentRunner {
         result = await this.registry.execute(toolCall, {
           signal,
           onOutput: ({ stream, chunk }) => {
-            if (!signal?.aborted) {
+            // 精确值可能横跨多个 chunk，不能安全地逐块替换。启用宿主清理边界时
+            // 禁止转发原始流；完成后的 ToolResult 仍会以已清理形式正常发布。
+            if (!signal?.aborted && this.toolResultRedactionSecrets.length === 0) {
               reporter.onToolOutput?.(toolCall.name, stream, chunk, toolCall.id);
             }
           },
         });
         runtimeStatus = result.isError ? "failed" : "succeeded";
       }
+      result = redactToolResult(result, this.toolResultRedactionSecrets);
 
       // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
       // 化被动为主动:不再冷冰冰陈述报错,而是给出带强烈倾向性的行动指南,
@@ -3139,11 +3172,12 @@ export class AgentEngine implements AgentRunner {
             signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
             await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
-            const result = await (this.runtimePort
+            const rawResult = await (this.runtimePort
               ? this.runtimePort.runWithToolCall(tc.id, () =>
                   readOnlyRegistry.execute(tc, { signal }),
                 )
               : readOnlyRegistry.execute(tc, { signal }));
+            const result = redactToolResult(rawResult, this.toolResultRedactionSecrets);
             let finalOutput = result.output;
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
