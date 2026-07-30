@@ -3,6 +3,7 @@ import { cp, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { assertTaskComposePolicy, prestartNetworkOverlay } from "./container-policy.mjs";
+import { parseTaskAllowInternet } from "./egress-policy.mjs";
 import { allowlistedHostEnv } from "./host-secret-boundary.mjs";
 import { hashDirectory } from "./publication.mjs";
 
@@ -82,6 +83,7 @@ export async function prepareLocalDataset({
   const imageLock = await readImageLock(projectRoot, tasks, mode);
   const cachePackagesRoot = resolveTaskCachePackagesRoot(projectRoot, mode, homeDirectory);
   const destination = join(runRoot, "local-dataset");
+  const egressPolicyByTask = {};
   await mkdir(destination, { recursive: true, mode: 0o700 });
   for (const taskName of tasks) {
     const expected = taskLock.tasks[taskName];
@@ -110,9 +112,14 @@ export async function prepareLocalDataset({
     if ((await hashDirectory(taskDestination)) !== expected.treeSha256) {
       throw new Error(`Terminal-Bench staged task digest mismatch: ${taskName}`);
     }
+    const allowInternet = await readTaskAllowInternet(taskDestination, taskName);
     if (imageLock.lock !== null) {
       await pinTaskDockerImage(taskDestination, taskName, imageLock.lock.images[taskName]);
+      if ((await readTaskAllowInternet(taskDestination, taskName)) !== allowInternet) {
+        throw new Error(`Terminal-Bench staged task egress policy changed: ${taskName}`);
+      }
     }
+    egressPolicyByTask[taskName] = { allowInternet };
     await setTaskPrestartNetworkIsolation(taskDestination, runId, mode === "cached-full");
     await assertTaskComposePolicy(taskDestination, allowlistedHostEnv(env));
   }
@@ -123,6 +130,7 @@ export async function prepareLocalDataset({
     imageLockPath: imageLock.path,
     imageLockSha256: imageLock.sha256,
     imageLockPlatform: imageLock.platform,
+    egressPolicyByTask,
   };
 }
 
@@ -322,6 +330,19 @@ async function pinTaskDockerImage(taskRoot, taskName, image) {
     start + assignment[0].length,
   )}`;
   await writeFile(path, updated);
+}
+
+async function readTaskAllowInternet(taskRoot, taskName) {
+  const path = join(taskRoot, "task.toml");
+  let taskToml;
+  try {
+    taskToml = await readFile(path, "utf8");
+  } catch (error) {
+    throw new Error(`Terminal-Bench task.toml is unavailable: ${taskName}`, {
+      cause: error,
+    });
+  }
+  return parseTaskAllowInternet(taskToml, taskName);
 }
 
 function taggedImageRepository(source, taskName) {
