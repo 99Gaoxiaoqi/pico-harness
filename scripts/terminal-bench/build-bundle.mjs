@@ -49,20 +49,25 @@ export async function buildPicoBundle(outputPath) {
       2,
     )}\n`,
   );
-  await run(
-    "npm",
-    ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=true"],
-    stage,
+  const approvedLockfilePath = join(
+    projectRoot,
+    "benchmarks/terminal_bench_2_1/bundle-package-lock.json",
   );
-  const lockfileSha256 = createHash("sha256")
-    .update(await readFile(join(stage, "package-lock.json")))
-    .digest("hex");
+  const approvedLockfile = await readFile(approvedLockfilePath);
   const approvedLockfileSha256 = (
     await readFile(
       join(projectRoot, "benchmarks/terminal_bench_2_1/bundle-lock-sha256.txt"),
       "utf8",
     )
   ).trim();
+  if (createHash("sha256").update(approvedLockfile).digest("hex") !== approvedLockfileSha256) {
+    throw new Error("Terminal-Bench approved bundle lock digest is invalid");
+  }
+  await writeFile(join(stage, "package-lock.json"), approvedLockfile);
+  await run("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], stage);
+  const lockfileSha256 = createHash("sha256")
+    .update(await readFile(join(stage, "package-lock.json")))
+    .digest("hex");
   if (lockfileSha256 !== approvedLockfileSha256) {
     throw new Error("Terminal-Bench bundle dependency lock is not pre-approved");
   }
