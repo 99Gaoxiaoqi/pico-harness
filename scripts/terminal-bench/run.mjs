@@ -255,6 +255,12 @@ const manifest = {
     taskListSha256,
     localTaskLockPath: relative(projectRoot, localDataset.taskLockPath),
     localTaskLockSha256: localDataset.taskLockSha256,
+    localImageLockPath:
+      localDataset.imageLockPath === null
+        ? null
+        : relative(projectRoot, localDataset.imageLockPath),
+    localImageLockSha256: localDataset.imageLockSha256,
+    localImageLockPlatform: localDataset.imageLockPlatform,
     localDatasetTreeSha256,
     localDatasetImageSha256: localDatasetSnapshot.imageSha256,
     executionSnapshot: "read-only-udro",
