@@ -20,6 +20,7 @@ import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
 import {
   openAIPromptCacheKey,
+  promptCacheRouteIdentity,
   promptCacheRevisions,
   snapshotToolDefinitions,
 } from "./prompt-cache.js";
@@ -143,6 +144,8 @@ async function consumeSseDataStream(
 export class OpenAIProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
   private readonly thinkingEffort: string;
+  /** A compatible endpoint that rejects active fields is downgraded for this provider instance. */
+  private promptCacheRequestFieldsEnabled = true;
 
   constructor(
     private readonly config: ProviderConfig,
@@ -178,6 +181,53 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
     return content;
+  }
+
+  private async dispatchChatCompletion(
+    requestBody: Record<string, unknown>,
+    options?: LLMProviderRequestOptions,
+  ): Promise<{ response: Response; bodyJson: string; errorText?: string }> {
+    const dispatch = async (body: Record<string, unknown>): Promise<Response> => {
+      options?.onRequestPrepared?.({
+        provider: "openai",
+        model: this.config.model,
+        body,
+      });
+      return fetch(`${this.config.baseURL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: providerRequestSignal(options?.signal),
+      });
+    };
+
+    let actualBody = requestBody;
+    let response = await dispatch(actualBody);
+    let errorText = response.ok ? undefined : await response.text();
+    if (
+      !response.ok &&
+      hasActivePromptCacheFields(actualBody) &&
+      isPromptCacheFieldRejection(response.status, errorText ?? "")
+    ) {
+      this.promptCacheRequestFieldsEnabled = false;
+      actualBody = { ...actualBody };
+      delete actualBody["prompt_cache_key"];
+      delete actualBody["prompt_cache_retention"];
+      logger.warn(
+        { model: this.config.model, status: response.status, promptCacheFields: "unsupported" },
+        "[OpenAI] 兼容端点拒绝主动缓存字段，已降级为隐式缓存",
+      );
+      response = await dispatch(actualBody);
+      errorText = response.ok ? undefined : await response.text();
+    }
+    return {
+      response,
+      bodyJson: JSON.stringify(actualBody),
+      ...(errorText !== undefined ? { errorText } : {}),
+    };
   }
 
   async generate(
@@ -238,36 +288,23 @@ export class OpenAIProvider implements LLMProvider {
         },
       }));
     }
-    const requestBody = this.finalizeRequestBody(body, messages, tools);
-    options?.onRequestPrepared?.({
-      provider: "openai",
-      model: this.config.model,
-      body: requestBody,
-    });
+    const requestBody = this.finalizeRequestBody(body, messages, tools, options);
 
     // 3. 构建请求并发送
-    const bodyJson = JSON.stringify(requestBody);
     logger.debug(
       { model: this.config.model, messages: openaiMsgs.length, tools: tools.length },
       "[OpenAI] POST /chat/completions",
     );
-    const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: bodyJson,
-      signal: providerRequestSignal(options?.signal),
-    });
+    const dispatched = await this.dispatchChatCompletion(requestBody, options);
+    const resp = dispatched.response;
 
     if (!resp.ok) {
-      const text = await resp.text();
+      const text = dispatched.errorText ?? "";
       logger.debug(
         {
           model: this.config.model,
           status: resp.status,
-          requestBytes: Buffer.byteLength(bodyJson, "utf8"),
+          requestBytes: Buffer.byteLength(dispatched.bodyJson, "utf8"),
           messages: openaiMsgs.length,
           tools: tools.length,
         },
@@ -396,25 +433,12 @@ export class OpenAIProvider implements LLMProvider {
         function: { name: t.name, description: t.description, parameters: t.inputSchema },
       }));
     }
-    const requestBody = this.finalizeRequestBody(body, messages, tools);
-    options?.onRequestPrepared?.({
-      provider: "openai",
-      model: this.config.model,
-      body: requestBody,
-    });
-
-    const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-      signal: providerRequestSignal(options?.signal),
-    });
+    const requestBody = this.finalizeRequestBody(body, messages, tools, options);
+    const dispatched = await this.dispatchChatCompletion(requestBody, options);
+    const resp = dispatched.response;
 
     if (!resp.ok) {
-      const text = await resp.text();
+      const text = dispatched.errorText ?? "";
       if (isContextOverflowStatus(resp.status, text)) {
         throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
       }
@@ -564,28 +588,39 @@ export class OpenAIProvider implements LLMProvider {
     body: Record<string, unknown>,
     messages: readonly Message[],
     tools: readonly ToolDefinition[],
+    options?: LLMProviderRequestOptions,
   ): Record<string, unknown> {
     const requestBody = { ...this.applyThinkingLevel(body) };
     const capabilities = this.config.capabilities;
     if (!capabilities) return requestBody;
 
-    // Gate active cache controls strictly: compatible OpenAI endpoints routinely
-    // accept cached_tokens in responses yet reject request-only cache fields.
-    // cache=true is an explicit route declaration; api.openai.com is the only
-    // endpoint whose Chat Completions wire shape we infer without a probe.
+    // `cache:true + mode:explicit` is the route's explicit capability declaration.
+    // Compatible endpoints that reject these fields are remembered and fail open.
     if (
       capabilities.cache === true &&
       capabilities.promptCache.mode === "explicit" &&
-      isOfficialOpenAIEndpoint(this.config.baseURL)
+      this.promptCacheRequestFieldsEnabled
     ) {
       const revisions = promptCacheRevisions(messages, tools);
+      const routeIdentity = promptCacheRouteIdentity({
+        provider: "openai",
+        model: this.config.model,
+        baseURL: this.config.baseURL,
+        policy: capabilities.promptCache,
+      });
       requestBody.prompt_cache_key = openAIPromptCacheKey(
         this.config.model,
         revisions,
         capabilities.promptCache.keyShards,
+        {
+          routeIdentity,
+          ...(options?.promptCacheShardSeed
+            ? { conversationShardSeed: options.promptCacheShardSeed }
+            : {}),
+        },
       );
       // Chat Completions has no portable explicit-breakpoint field. Retention is
-      // sent only on this explicitly capability-gated official route.
+      // sent only when this route explicitly declares active cache support.
       if (capabilities.promptCache.ttl !== undefined) {
         requestBody.prompt_cache_retention = capabilities.promptCache.ttl;
       }
@@ -600,11 +635,12 @@ export class OpenAIProvider implements LLMProvider {
   }
 }
 
-function isOfficialOpenAIEndpoint(baseURL: string): boolean {
-  try {
-    const endpoint = new URL(baseURL);
-    return endpoint.protocol === "https:" && endpoint.hostname.toLowerCase() === "api.openai.com";
-  } catch {
-    return false;
-  }
+function hasActivePromptCacheFields(body: Readonly<Record<string, unknown>>): boolean {
+  return Object.hasOwn(body, "prompt_cache_key") || Object.hasOwn(body, "prompt_cache_retention");
+}
+
+function isPromptCacheFieldRejection(status: number, body: string): boolean {
+  return (
+    (status === 400 || status === 422) && /prompt[_ -]?cache[_ -]?(?:key|retention)/iu.test(body)
+  );
 }

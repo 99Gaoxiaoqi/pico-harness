@@ -32,6 +32,8 @@ export interface RetryOptions {
   signal?: AbortSignal;
   /** 透传给每次实际 Provider 请求；重试和凭证轮换期间保持不变。 */
   toolChoice?: LLMProviderRequestOptions["toolChoice"];
+  /** 缓存分片身份在普通重试与凭证轮换期间保持不变。 */
+  promptCacheShardSeed?: LLMProviderRequestOptions["promptCacheShardSeed"];
   /** 重试事件回调:每次决定重试时触发,供上层打点 / Tracing */
   onRetry?: (info: RetryInfo) => void;
   /**
@@ -133,6 +135,9 @@ export async function generateWithRetry(
   const requestOptions: LLMProviderRequestOptions = {
     signal,
     ...(options?.toolChoice ? { toolChoice: options.toolChoice } : {}),
+    ...(options?.promptCacheShardSeed
+      ? { promptCacheShardSeed: options.promptCacheShardSeed }
+      : {}),
   };
   let timeoutRetries = 0;
 

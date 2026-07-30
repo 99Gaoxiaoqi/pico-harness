@@ -81,7 +81,10 @@ import { buildRuntimeToolResultProjection } from "../tools/tool-result-observati
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
-import { snapshotToolDefinitions } from "../provider/prompt-cache.js";
+import {
+  promptCacheConversationShardSeed,
+  snapshotToolDefinitions,
+} from "../provider/prompt-cache.js";
 import {
   delegationTaskCountFromArguments,
   isExploreOnlyRequiredDelegationArguments,
@@ -676,6 +679,8 @@ export class AgentEngine implements AgentRunner {
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort;
+  /** Session-scoped shard seed survives tool turns and Full Compaction within this Engine. */
+  private readonly promptCacheShardSeeds = new WeakMap<Session, string>();
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -1086,11 +1091,13 @@ export class AgentEngine implements AgentRunner {
     allowEmergencyCompaction = true,
     requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
   ): Promise<Message> {
+    const promptCacheShardSeed = this.promptCacheShardSeed(session);
     const generate = (context: Message[]) =>
       generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, tools, {
         signal,
         onRetry: this.makeRetryReporter(span),
         onRateLimited: () => this.rotateProvider(reporter, signal),
+        ...(promptCacheShardSeed ? { promptCacheShardSeed } : {}),
         ...requestOptions,
       });
     try {
@@ -1156,6 +1163,14 @@ export class AgentEngine implements AgentRunner {
       });
       return generate(retryContext);
     }
+  }
+
+  private promptCacheShardSeed(session: Session): string | undefined {
+    const existing = this.promptCacheShardSeeds.get(session);
+    if (existing) return existing;
+    const created = promptCacheConversationShardSeed(session.getHistory());
+    if (created) this.promptCacheShardSeeds.set(session, created);
+    return created;
   }
 
   /**
@@ -2652,6 +2667,9 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
     requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
   ): Promise<Message> {
+    const promptCacheShardSeed = runtime.usageSession
+      ? this.promptCacheShardSeed(runtime.usageSession)
+      : promptCacheConversationShardSeed(contextHistory);
     if (!runtime.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(
@@ -2661,6 +2679,7 @@ export class AgentEngine implements AgentRunner {
         {
           signal,
           onRetry: this.makeRetryReporter(),
+          ...(promptCacheShardSeed ? { promptCacheShardSeed } : {}),
           ...requestOptions,
           ...(runtime.onRateLimited
             ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
@@ -2681,6 +2700,7 @@ export class AgentEngine implements AgentRunner {
           {
             signal,
             onRetry: this.makeRetryReporter(),
+            ...(promptCacheShardSeed ? { promptCacheShardSeed } : {}),
             ...requestOptions,
             ...(runtime.onRateLimited
               ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
@@ -3087,7 +3107,9 @@ export class AgentEngine implements AgentRunner {
             const continuationCostBefore = usageSession?.totalCostCNY ?? 0;
             const continuationResp = await this.generateSubWithOverflowRetry(
               contextHistory,
-              runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true ? initialTools : [],
+              runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true
+                ? initialTools
+                : [],
               rep,
               runtime,
               signal,

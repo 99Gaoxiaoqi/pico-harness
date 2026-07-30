@@ -14,6 +14,11 @@ export interface LLMProviderRequestOptions {
    * 不支持的 Provider 必须由调用方通过 requestCapabilities 能力门控后传空工具集。
    */
   toolChoice?: "none";
+  /**
+   * Stable, opaque conversation digest used only to choose a configured prompt-cache key shard.
+   * Callers must never pass raw prompt text, credentials, or a random Session ID here.
+   */
+  promptCacheShardSeed?: string;
   /** 请求用途，供计费、审计与可观测层区分普通 Agent 与 Hook 判定。 */
   purpose?: "hook";
   /** Provider 返回可展示的 reasoning/thinking 增量时调用；不得混入最终回答正文。 */
