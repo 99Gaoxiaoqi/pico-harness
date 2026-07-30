@@ -12,6 +12,25 @@ export type CacheDiagnosticClassification =
   | "ttl_or_route_suspected"
   | "protocol_unsupported";
 
+export type CacheColdStartReason =
+  | "initial_cold_request"
+  | "tool_disclosure_or_schema_revision"
+  | "prompt_revision"
+  | "full_compaction_or_history_rewrite"
+  | "model_switch"
+  | "ttl_or_route_expiry_suspected";
+
+export type CacheOperationalAlertKind =
+  | "cache_write_dominates"
+  | "prefix_stability_declining"
+  | "route_zero_hits";
+
+export interface CacheOperationalAlert {
+  kind: CacheOperationalAlertKind;
+  message: string;
+  evidence: Readonly<Record<string, number | string>>;
+}
+
 export interface CacheEffectivenessLayer {
   observedComparisons: number;
   stable: number;
@@ -39,6 +58,12 @@ export interface CacheEffectiveness {
   prefixStability: Record<PreparedRequestCacheBreakpointLayer, CacheEffectivenessLayer>;
   firstChangedLayer: Record<PreparedRequestCacheBreakpointLayer, number>;
   diagnostics: Record<CacheDiagnosticClassification, number>;
+  coldStarts: {
+    total: number;
+    byReason: Record<CacheColdStartReason, number>;
+  };
+  /** Advisory only. No alert mutates routing or cache policy. */
+  operationalAlerts: CacheOperationalAlert[];
 }
 
 const LAYERS: readonly PreparedRequestCacheBreakpointLayer[] = ["tools", "tools+system", "history"];
@@ -74,6 +99,19 @@ export function summarizeCacheEffectiveness(
       ] as const
     ).map((classification) => [classification, 0]),
   ) as Record<CacheDiagnosticClassification, number>;
+  const coldStartByReason = Object.fromEntries(
+    (
+      [
+        "initial_cold_request",
+        "tool_disclosure_or_schema_revision",
+        "prompt_revision",
+        "full_compaction_or_history_rewrite",
+        "model_switch",
+        "ttl_or_route_expiry_suspected",
+      ] as const
+    ).map((reason) => [reason, 0]),
+  ) as Record<CacheColdStartReason, number>;
+  countModelSwitches(records, coldStartByReason);
 
   let usageReportedCallCount = 0;
   let cacheReadReportedCallCount = 0;
@@ -102,11 +140,23 @@ export function summarizeCacheEffectiveness(
 
     const cacheClassification = cacheDiagnosticClassification(record, reported);
     if (cacheClassification) diagnostics[cacheClassification]++;
-    if (!parsePreparedRequestCapture(record.reported?.["requestDiagnostic"])) continue;
-    const rawComparisons = isRecord(record.reported?.["requestDiagnostic"])
-      ? record.reported["requestDiagnostic"]["cacheBreakpointComparisons"]
+    const requestDiagnostic = record.reported?.["requestDiagnostic"];
+    if (
+      cacheClassification === "ttl_or_route_suspected" &&
+      (!isRecord(requestDiagnostic) || requestDiagnostic["changeReason"] !== "first_request")
+    ) {
+      coldStartByReason.ttl_or_route_expiry_suspected++;
+    }
+    if (!parsePreparedRequestCapture(requestDiagnostic)) continue;
+    if (isRecord(requestDiagnostic) && requestDiagnostic["changeReason"] === "first_request") {
+      coldStartByReason.initial_cold_request++;
+    }
+    const rawComparisons = isRecord(requestDiagnostic)
+      ? requestDiagnostic["cacheBreakpointComparisons"]
       : undefined;
     if (!Array.isArray(rawComparisons)) continue;
+    const structuralReason = structuralColdStartReason(rawComparisons);
+    if (structuralReason) coldStartByReason[structuralReason]++;
 
     let firstChangeRecorded = false;
     for (const rawComparison of rawComparisons) {
@@ -137,6 +187,10 @@ export function summarizeCacheEffectiveness(
   const cacheWriteKnown =
     usageReportedCallCount > 0 && cacheWriteReportedCallCount === usageReportedCallCount;
   const promptTokens = uncachedInputTokens + cacheReadTokens + cacheWriteTokens;
+  const coldStartTotal = Object.values(coldStartByReason).reduce(
+    (total, count) => total + count,
+    0,
+  );
   return {
     source: "provider_calls_only",
     providerCallCount: records.length,
@@ -157,7 +211,129 @@ export function summarizeCacheEffectiveness(
     prefixStability,
     firstChangedLayer,
     diagnostics,
+    coldStarts: { total: coldStartTotal, byReason: coldStartByReason },
+    operationalAlerts: operationalAlerts(records, prefixStability),
   };
+}
+
+function countModelSwitches(
+  records: readonly ProviderCallRecord[],
+  reasons: Record<CacheColdStartReason, number>,
+): void {
+  const ordered = [...records].sort(
+    (left, right) =>
+      left.createdAt - right.createdAt ||
+      (left.callId < right.callId ? -1 : left.callId > right.callId ? 1 : 0),
+  );
+  let previous: string | undefined;
+  for (const record of ordered) {
+    const current = `${record.provider}\0${record.model}\0${record.route ?? ""}`;
+    if (previous !== undefined && current !== previous) reasons.model_switch++;
+    previous = current;
+  }
+}
+
+function structuralColdStartReason(
+  comparisons: readonly unknown[],
+):
+  | Exclude<
+      CacheColdStartReason,
+      "initial_cold_request" | "model_switch" | "ttl_or_route_expiry_suspected"
+    >
+  | undefined {
+  for (const layer of LAYERS) {
+    const comparison = comparisons.find(
+      (candidate) => isRecord(candidate) && candidate["layer"] === layer,
+    );
+    if (!isRecord(comparison)) continue;
+    const reason = comparison["changeReason"];
+    if (reason !== "changed" && reason !== "added" && reason !== "removed") continue;
+    if (layer === "tools") return "tool_disclosure_or_schema_revision";
+    if (layer === "tools+system") return "prompt_revision";
+    const prior = isRecord(comparison["prior"]) ? comparison["prior"] : undefined;
+    const current = isRecord(comparison["current"]) ? comparison["current"] : undefined;
+    const priorBytes = prior?.["bytes"];
+    const currentBytes = current?.["bytes"];
+    if (
+      reason === "removed" ||
+      (reason === "changed" &&
+        typeof priorBytes === "number" &&
+        typeof currentBytes === "number" &&
+        currentBytes < priorBytes * 0.8)
+    ) {
+      return "full_compaction_or_history_rewrite";
+    }
+  }
+  return undefined;
+}
+
+function operationalAlerts(
+  records: readonly ProviderCallRecord[],
+  prefixStability: CacheEffectiveness["prefixStability"],
+): CacheOperationalAlert[] {
+  const alerts: CacheOperationalAlert[] = [];
+  const routes = new Map<string, ProviderCallRecord[]>();
+  for (const record of records) {
+    const key = `${record.provider}\0${record.model}\0${record.route ?? ""}`;
+    const group = routes.get(key) ?? [];
+    group.push(record);
+    routes.set(key, group);
+  }
+  for (const group of routes.values()) {
+    const reported = group.filter((record) => record.reported?.["usageMetadata"] === "reported");
+    if (reported.length < 3) continue;
+    const readKnown = reported.every((record) => reportedFields(record).has("cacheRead"));
+    const writeKnown = reported.every((record) => reportedFields(record).has("cacheWrite"));
+    const cacheReadTokens = reported.reduce((total, record) => total + record.cacheReadTokens, 0);
+    const cacheWriteTokens = reported.reduce((total, record) => total + record.cacheWriteTokens, 0);
+    const promptTokens = reported.reduce(
+      (total, record) =>
+        total + record.inputTokens + record.cacheReadTokens + record.cacheWriteTokens,
+      0,
+    );
+    const first = reported[0];
+    if (!first) continue;
+    const routeLabel = `${first.provider}/${first.model}`;
+    if (
+      readKnown &&
+      writeKnown &&
+      cacheWriteTokens >= (MINIMUM_CACHE_TOKENS[first.provider] ?? 1024) &&
+      cacheWriteTokens > cacheReadTokens
+    ) {
+      alerts.push({
+        kind: "cache_write_dominates",
+        message: `路由 ${routeLabel} 的缓存写入持续高于读取，请检查前缀稳定性、TTL 与路由黏性。`,
+        evidence: { route: routeLabel, calls: reported.length, cacheReadTokens, cacheWriteTokens },
+      });
+    }
+    const unsupported = reported.every(
+      (record) => record.reported?.["cacheSupport"] === "unsupported",
+    );
+    if (
+      readKnown &&
+      !unsupported &&
+      cacheReadTokens === 0 &&
+      promptTokens >= (MINIMUM_CACHE_TOKENS[first.provider] ?? 1024) * reported.length
+    ) {
+      alerts.push({
+        kind: "route_zero_hits",
+        message: `路由 ${routeLabel} 已连续产生足量请求但仍无缓存读取，请核查协议支持与路由身份。`,
+        evidence: { route: routeLabel, calls: reported.length, promptTokens },
+      });
+    }
+  }
+  for (const layer of LAYERS) {
+    const value = prefixStability[layer];
+    const comparable = value.stable + value.changed + value.added + value.removed;
+    if (comparable >= 3 && value.stabilityRate !== null && value.stabilityRate < 0.8) {
+      alerts.push({
+        kind: "prefix_stability_declining",
+        message: `缓存前缀层 ${layer} 的稳定率下降，请检查工具披露、Prompt revision 或压缩边界。`,
+        evidence: { layer, comparisons: comparable, stabilityRate: value.stabilityRate },
+      });
+    }
+  }
+  return alerts;
 }
 
 function emptyLayer(): CacheEffectivenessLayer {

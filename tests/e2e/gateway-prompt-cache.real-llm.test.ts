@@ -20,49 +20,23 @@ gatewayTest(
     const matrix = await protocolMatrix(baseURL, apiKey);
     // This suite intentionally uses only the OpenAI-compatible column. Native protocol probes are
     // reported safely but never treated as Claude/Gemini prompt-cache verification.
-    assert.equal(matrix.openaiChat, true, "gateway OpenAI-compatible chat endpoint is unavailable");
+    assert.equal(
+      matrix.openaiChat.available,
+      true,
+      "gateway OpenAI-compatible chat endpoint is unavailable",
+    );
 
     for (const model of models) {
-      const marker = `gateway-cache-${model}-${randomUUID()}`;
-      const stable = isolatedCorpus(marker);
-      const cold = await chat(baseURL, apiKey, model, stable, "Reply with exactly COLD_READY.");
-      const warm = await chat(baseURL, apiKey, model, stable, "Reply with exactly WARM_READY.");
-      const changed = await chat(
-        baseURL,
-        apiKey,
-        model,
-        `${marker}-changed\n${stable}`,
-        "Reply with exactly CONTROL_READY.",
-      );
-      assertUsage(cold, `${model} cold`);
-      assertUsage(warm, `${model} warm`);
-      assertUsage(changed, `${model} control`);
-      assert.ok(warm.cachedTokens > 0, `${model} warm request must report cached_tokens > 0`);
-      assert.ok(
-        changed.cachedTokens < warm.cachedTokens,
-        `${model} changed-prefix control must read fewer cached tokens than warm request`,
-      );
-
-      const sameTools = toolSchema("stable cache probe");
-      const toolCold = await chat(baseURL, apiKey, model, stable, "Reply TOOL_COLD.", sameTools);
-      const toolWarm = await chat(baseURL, apiKey, model, stable, "Reply TOOL_WARM.", sameTools);
-      const toolChanged = await chat(
-        baseURL,
-        apiKey,
-        model,
-        stable,
-        "Reply TOOL_CHANGED.",
-        toolSchema("changed cache probe"),
-      );
-      assertUsage(toolCold, `${model} tool cold`);
-      assertUsage(toolWarm, `${model} tool warm`);
-      assertUsage(toolChanged, `${model} tool changed`);
-      assert.ok(toolWarm.cachedTokens > 0, `${model} repeated identical tool schema must cache`);
-      assert.ok(
-        toolChanged.cachedTokens < toolWarm.cachedTokens,
-        `${model} changed tool schema must reduce cached tokens`,
-      );
-      safeReport({ model, protocol: "openai", matrix, cold, warm, changed, toolCold, toolWarm, toolChanged });
+      let scenario: GatewayScenario;
+      try {
+        scenario = await runModelScenario(baseURL, apiKey, model);
+      } catch (error) {
+        if (!(error instanceof GatewayTransportError)) throw error;
+        // A transport failure may leave an ambiguous partial sequence. Restart the complete
+        // scenario once with a fresh marker; never retry an individual warm/control request.
+        scenario = await runModelScenario(baseURL, apiKey, model);
+      }
+      safeReport({ model, protocol: "openai", matrix, ...scenario });
     }
 
     // A gateway may reject provider-specific experimental fields. This is a capability probe only.
@@ -79,26 +53,136 @@ interface GatewayResult {
   readonly cachedTokens: number;
 }
 
+interface GatewayScenario {
+  readonly cold: GatewayResult;
+  readonly warm: GatewayResult;
+  readonly changed: GatewayResult;
+  readonly toolCold: GatewayResult;
+  readonly toolWarm: GatewayResult;
+  readonly toolChanged: GatewayResult;
+}
+
+interface ProtocolProbe {
+  readonly available: boolean;
+  readonly status: number | null;
+}
+
+interface ProtocolMatrix {
+  readonly openaiChat: ProtocolProbe;
+  readonly anthropicMessages: ProtocolProbe;
+  readonly geminiGenerateContent: ProtocolProbe;
+}
+
+class GatewayTransportError extends Error {}
+
 async function listModels(baseURL: string, apiKey: string): Promise<Set<string>> {
   const response = await fetch(`${normalizeBaseURL(baseURL)}/models`, { headers: auth(apiKey) });
   assert.equal(response.ok, true, `gateway /models failed with status ${response.status}`);
   const body = (await response.json()) as { data?: Array<{ id?: unknown }> };
-  return new Set(body.data?.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])) ?? []);
+  return new Set(
+    body.data?.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])) ?? [],
+  );
 }
 
-async function protocolMatrix(baseURL: string, apiKey: string): Promise<Record<string, boolean>> {
+async function protocolMatrix(baseURL: string, apiKey: string): Promise<ProtocolMatrix> {
   const root = normalizeBaseURL(baseURL);
-  const requests: Array<[string, RequestInit]> = [
-    [`${root}/chat/completions`, { method: "OPTIONS", headers: auth(apiKey) }],
-    [`${root}/messages`, { method: "OPTIONS", headers: auth(apiKey) }],
-    [`${root}/v1beta/models`, { method: "OPTIONS", headers: auth(apiKey) }],
-  ];
-  const responses = await Promise.all(requests.map(async ([url, init]) => fetch(url, init).catch(() => undefined)));
+  const nativeRoot = root.endsWith("/v1") ? root.slice(0, -3) : root;
+  // Execute sequentially so one opt-in test never creates concurrent paid requests.
+  const openaiChat = await protocolProbe(`${root}/chat/completions`, {
+    method: "POST",
+    headers: { ...auth(apiKey), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-terra",
+      messages: [{ role: "user", content: "Reply PROBE." }],
+      max_tokens: 1,
+    }),
+  });
+  const anthropicMessages = await protocolProbe(`${root}/messages`, {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "Reply PROBE." }],
+      max_tokens: 1,
+    }),
+  });
+  const geminiGenerateContent = await protocolProbe(
+    `${nativeRoot}/v1beta/models/gemini-2.5-flash:generateContent`,
+    {
+      method: "POST",
+      headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Reply PROBE." }] }],
+        generationConfig: { maxOutputTokens: 1 },
+      }),
+    },
+  );
   return {
-    openaiChat: responses[0]?.status !== 404 && responses[0]?.status !== 405,
-    anthropicMessages: responses[1]?.status !== 404 && responses[1]?.status !== 405,
-    geminiGenerateContent: responses[2]?.status !== 404 && responses[2]?.status !== 405,
+    openaiChat,
+    anthropicMessages,
+    geminiGenerateContent,
   };
+}
+
+async function protocolProbe(url: string, init: RequestInit): Promise<ProtocolProbe> {
+  try {
+    const response = await fetch(url, init);
+    await response.body?.cancel().catch(() => undefined);
+    return { available: response.ok, status: response.status };
+  } catch {
+    return { available: false, status: null };
+  }
+}
+
+async function runModelScenario(
+  baseURL: string,
+  apiKey: string,
+  model: (typeof models)[number],
+): Promise<GatewayScenario> {
+  const marker = `gateway-cache-${model}-${randomUUID()}`;
+  const stable = isolatedCorpus(marker);
+  const cold = await chat(baseURL, apiKey, model, stable, "Reply with exactly COLD_READY.");
+  const warm = await chat(baseURL, apiKey, model, stable, "Reply with exactly WARM_READY.");
+  const changed = await chat(
+    baseURL,
+    apiKey,
+    model,
+    `${marker}-changed\n${stable}`,
+    "Reply with exactly CONTROL_READY.",
+  );
+  assertUsage(cold, `${model} cold`);
+  assertUsage(warm, `${model} warm`);
+  assertUsage(changed, `${model} control`);
+  assert.ok(warm.cachedTokens > 0, `${model} warm request must report cached_tokens > 0`);
+  assert.ok(
+    changed.cachedTokens < warm.cachedTokens,
+    `${model} changed-prefix control must read fewer cached tokens than warm request`,
+  );
+
+  const sameTools = toolSchema("stable cache probe");
+  const toolCold = await chat(baseURL, apiKey, model, stable, "Reply TOOL_COLD.", sameTools);
+  const toolWarm = await chat(baseURL, apiKey, model, stable, "Reply TOOL_WARM.", sameTools);
+  const toolChanged = await chat(
+    baseURL,
+    apiKey,
+    model,
+    stable,
+    "Reply TOOL_CHANGED.",
+    toolSchema("changed cache probe"),
+  );
+  assertUsage(toolCold, `${model} tool cold`);
+  assertUsage(toolWarm, `${model} tool warm`);
+  assertUsage(toolChanged, `${model} tool changed`);
+  assert.ok(toolWarm.cachedTokens > 0, `${model} repeated identical tool schema must cache`);
+  assert.ok(
+    toolChanged.cachedTokens < toolWarm.cachedTokens,
+    `${model} changed tool schema must reduce cached tokens`,
+  );
+  return { cold, warm, changed, toolCold, toolWarm, toolChanged };
 }
 
 async function chat(
@@ -129,11 +213,15 @@ async function chat(
       body: JSON.stringify(body),
     });
   } catch {
-    throw new Error(`gateway transport failed for model ${model}; request content and credentials omitted`);
+    throw new GatewayTransportError(
+      `gateway transport failed for model ${model}; request content and credentials omitted`,
+    );
   }
   const latencyMs = Math.round(performance.now() - started);
   if (!response.ok) {
-    throw new Error(`gateway chat failed for model ${model}; status=${response.status}; response omitted`);
+    throw new Error(
+      `gateway chat failed for model ${model}; status=${response.status}; response omitted`,
+    );
   }
   const parsed = (await response.json()) as {
     usage?: { prompt_tokens?: unknown; prompt_tokens_details?: { cached_tokens?: unknown } };
@@ -142,7 +230,8 @@ async function chat(
     status: response.status,
     latencyMs,
     promptHash: sha256(JSON.stringify({ model, stable, question, tools, extra })),
-    promptTokens: typeof parsed.usage?.prompt_tokens === "number" ? parsed.usage.prompt_tokens : null,
+    promptTokens:
+      typeof parsed.usage?.prompt_tokens === "number" ? parsed.usage.prompt_tokens : null,
     cachedTokens:
       typeof parsed.usage?.prompt_tokens_details?.cached_tokens === "number"
         ? parsed.usage.prompt_tokens_details.cached_tokens
@@ -153,7 +242,30 @@ async function chat(
 async function probeExplicitFields(
   baseURL: string,
   apiKey: string,
-): Promise<{ readonly supported: boolean; readonly status?: number; readonly result?: GatewayResult }> {
+): Promise<{
+  readonly promptCacheKey: ExplicitFieldProbe;
+  readonly promptCacheBreakpoint: ExplicitFieldProbe;
+}> {
+  const promptCacheKey = await probeExplicitField(baseURL, apiKey, {
+    prompt_cache_key: `pico-cache-probe-${randomUUID()}`,
+  });
+  const promptCacheBreakpoint = await probeExplicitField(baseURL, apiKey, {
+    prompt_cache_breakpoint: true,
+  });
+  return { promptCacheKey, promptCacheBreakpoint };
+}
+
+interface ExplicitFieldProbe {
+  readonly supported: boolean;
+  readonly status?: number;
+  readonly result?: GatewayResult;
+}
+
+async function probeExplicitField(
+  baseURL: string,
+  apiKey: string,
+  field: Readonly<Record<string, unknown>>,
+): Promise<ExplicitFieldProbe> {
   try {
     const result = await chat(
       baseURL,
@@ -162,10 +274,7 @@ async function probeExplicitFields(
       isolatedCorpus(randomUUID()),
       "Reply KEY_READY.",
       undefined,
-      {
-        prompt_cache_key: `pico-cache-probe-${randomUUID()}`,
-        prompt_cache_breakpoint: true,
-      },
+      field,
     );
     return { supported: true, result };
   } catch (error) {
@@ -176,7 +285,10 @@ async function probeExplicitFields(
 
 function isolatedCorpus(marker: string): string {
   // About 3,072 whitespace tokens; marker makes cross-run cache hits impossible.
-  return Array.from({ length: 384 }, (_, index) => `${marker} cache-token-${index} alpha beta gamma delta epsilon zeta eta`).join(" ");
+  return Array.from(
+    { length: 384 },
+    (_, index) => `${marker} cache-token-${index} alpha beta gamma delta epsilon zeta eta`,
+  ).join(" ");
 }
 
 function toolSchema(description: string): readonly Record<string, unknown>[] {
@@ -186,7 +298,11 @@ function toolSchema(description: string): readonly Record<string, unknown>[] {
       function: {
         name: "cache_probe",
         description,
-        parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+        parameters: {
+          type: "object",
+          properties: { value: { type: "string" } },
+          required: ["value"],
+        },
       },
     },
   ];

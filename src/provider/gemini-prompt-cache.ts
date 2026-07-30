@@ -14,6 +14,12 @@ export interface GeminiPromptCacheRecord {
   readonly ttlSeconds: number;
 }
 
+export interface GeminiPromptCacheResolution {
+  readonly name: string;
+  /** Present only when this call created a new remote cache object. */
+  readonly cacheWriteTokens?: number;
+}
+
 export interface GeminiPromptCacheStore {
   list(): Promise<readonly GeminiPromptCacheRecord[]>;
   put(record: GeminiPromptCacheRecord): Promise<void>;
@@ -39,6 +45,8 @@ export class MemoryGeminiPromptCacheStore implements GeminiPromptCacheStore {
 
 /** Workspace-private metadata only. The remote cached content remains the prompt authority. */
 export class FileGeminiPromptCacheStore implements GeminiPromptCacheStore {
+  private mutationTail: Promise<void> = Promise.resolve();
+
   constructor(private readonly path: string) {}
 
   async list(): Promise<readonly GeminiPromptCacheRecord[]> {
@@ -53,24 +61,40 @@ export class FileGeminiPromptCacheStore implements GeminiPromptCacheStore {
   }
 
   async put(record: GeminiPromptCacheRecord): Promise<void> {
-    const current = await this.list();
-    const records = [...current.filter((candidate) => candidate.key !== record.key), record];
-    await writeJsonAtomic(this.path, { schemaVersion: 1, records }, {
-      directoryMode: 0o700,
-      fileMode: 0o600,
-    });
+    await this.mutate((current) => [
+      ...current.filter((candidate) => candidate.key !== record.key),
+      record,
+    ]);
   }
 
   async remove(key: string): Promise<void> {
-    const current = await this.list();
-    const records = current.filter((candidate) => candidate.key !== key);
-    if (records.length === current.length) return;
-    await writeJsonAtomic(this.path, { schemaVersion: 1, records }, {
-      directoryMode: 0o700,
-      fileMode: 0o600,
-    });
+    await this.mutate((current) => current.filter((candidate) => candidate.key !== key));
   }
 
+  private async mutate(
+    transform: (records: readonly GeminiPromptCacheRecord[]) => GeminiPromptCacheRecord[],
+  ): Promise<void> {
+    const operation = this.mutationTail.then(async () => {
+      const current = await this.list();
+      const records = transform(current);
+      if (
+        records.length === current.length &&
+        records.every((record, index) => record === current[index])
+      ) {
+        return;
+      }
+      await writeJsonAtomic(
+        this.path,
+        { schemaVersion: 1, records },
+        {
+          directoryMode: 0o700,
+          fileMode: 0o600,
+        },
+      );
+    });
+    this.mutationTail = operation.catch(() => undefined);
+    await operation;
+  }
 }
 
 export interface GeminiPromptCacheTransport {
@@ -96,28 +120,36 @@ export interface GeminiPromptCacheControllerOptions {
  * callers receive no name and send their normal full Gemini request.
  */
 export class GeminiPromptCacheController {
-  /** Process-wide key lease covers concurrently created providers/subagents sharing one workspace. */
-  private static readonly creating = new Map<string, Promise<string | undefined>>();
+  /**
+   * Process-wide key locks are scoped by the runtime-owned store object. They deduplicate sibling
+   * providers and serialize startup cleanup against creation without sharing names across
+   * workspaces.
+   */
+  private static readonly operationsByStore = new WeakMap<
+    GeminiPromptCacheStore,
+    Map<string, Promise<void>>
+  >();
   private readonly store: GeminiPromptCacheStore;
+  private readonly operations: Map<string, Promise<void>>;
   private readonly now: () => number;
   private readonly baseUrlDigest: string;
 
   constructor(private readonly options: GeminiPromptCacheControllerOptions) {
     this.store = options.store ?? new MemoryGeminiPromptCacheStore();
+    this.operations =
+      GeminiPromptCacheController.operationsByStore.get(this.store) ??
+      new Map<string, Promise<void>>();
+    GeminiPromptCacheController.operationsByStore.set(this.store, this.operations);
     this.now = options.now ?? Date.now;
     this.baseUrlDigest = sha256(normalizeBaseURL(options.baseURL));
   }
 
-  async getOrCreate(source: Readonly<Record<string, unknown>>): Promise<string | undefined> {
+  async getOrCreate(
+    source: Readonly<Record<string, unknown>>,
+  ): Promise<GeminiPromptCacheResolution | undefined> {
     const digest = stableDigest(source);
     const key = ["gemini", this.baseUrlDigest, this.options.model, digest].join(":");
-    const existing = GeminiPromptCacheController.creating.get(key);
-    if (existing) return existing;
-    const task = this.resolve(key, digest, source).finally(() =>
-      GeminiPromptCacheController.creating.delete(key),
-    );
-    GeminiPromptCacheController.creating.set(key, task);
-    return task;
+    return this.withKeyLock(key, () => this.resolve(key, digest, source));
   }
 
   /** Best-effort startup maintenance; metadata failures must never surface to the provider. */
@@ -129,29 +161,38 @@ export class GeminiPromptCacheController {
     }
   }
 
+  /** Forget a server-rejected name so later requests do not repeat the same failed cache read. */
+  async invalidateName(name: string): Promise<void> {
+    try {
+      const records = await this.store.list();
+      await Promise.all(
+        records
+          .filter((record) => record.name === name)
+          .map((record) =>
+            this.withKeyLock(record.key, async () => {
+              const current = (await this.store.list()).find(
+                (candidate) => candidate.key === record.key,
+              );
+              if (current?.name === name) await this.invalidate(current);
+            }),
+          ),
+      );
+    } catch {
+      // Prompt cache is optional.
+    }
+  }
+
   private async resolve(
     key: string,
     digest: string,
     source: Readonly<Record<string, unknown>>,
-  ): Promise<string | undefined> {
+  ): Promise<GeminiPromptCacheResolution | undefined> {
     try {
       const now = this.now();
       const records = await this.store.list();
-      await this.cleanupExpired(records, now);
-      await Promise.all(
-        records
-          .filter(
-            (candidate) =>
-              candidate.baseUrlDigest === this.baseUrlDigest &&
-              candidate.model === this.options.model &&
-              candidate.key !== key &&
-              candidate.expireAt > now,
-          )
-          .map(async (candidate) => this.invalidate(candidate)),
-      );
       const record = records.find((candidate) => candidate.key === key);
       if (record && record.expireAt > now && this.shouldRefresh(record, now) === false) {
-        return record.name;
+        return { name: record.name };
       }
       if (record) await this.invalidate(record);
 
@@ -173,7 +214,10 @@ export class GeminiPromptCacheController {
         ...(created.tokenCount === undefined ? {} : { tokenCount: created.tokenCount }),
         ttlSeconds: this.options.ttlSeconds,
       });
-      return created.name;
+      return {
+        name: created.name,
+        ...(created.tokenCount === undefined ? {} : { cacheWriteTokens: created.tokenCount }),
+      };
     } catch {
       return undefined;
     }
@@ -183,11 +227,23 @@ export class GeminiPromptCacheController {
     return record.expireAt - now <= record.ttlSeconds * 1_000 * 0.2;
   }
 
-  private async cleanupExpired(records: readonly GeminiPromptCacheRecord[], now: number): Promise<void> {
+  private async cleanupExpired(
+    records: readonly GeminiPromptCacheRecord[],
+    now: number,
+  ): Promise<void> {
     await Promise.all(
       records
         .filter((record) => record.expireAt <= now)
-        .map(async (record) => this.invalidate(record)),
+        .map((record) =>
+          this.withKeyLock(record.key, async () => {
+            const current = (await this.store.list()).find(
+              (candidate) => candidate.key === record.key,
+            );
+            if (current?.name === record.name && current.expireAt <= now) {
+              await this.invalidate(current);
+            }
+          }),
+        ),
     );
   }
 
@@ -195,6 +251,25 @@ export class GeminiPromptCacheController {
     // Remove local metadata even if remote deletion is denied; stale names must never be reused.
     await this.store.remove(record.key).catch(() => undefined);
     await this.options.transport.delete(record.name).catch(() => undefined);
+  }
+
+  private async withKeyLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    for (;;) {
+      const pending = this.operations.get(key);
+      if (!pending) break;
+      await pending.catch(() => undefined);
+    }
+    let release: (() => void) | undefined;
+    const lease = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.operations.set(key, lease);
+    try {
+      return await operation();
+    } finally {
+      if (this.operations.get(key) === lease) this.operations.delete(key);
+      release?.();
+    }
   }
 }
 
@@ -207,7 +282,7 @@ function stableValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
         .map(([key, child]) => [key, stableValue(child)]),
     );
   }
@@ -219,7 +294,16 @@ function sha256(value: string): string {
 }
 
 function normalizeBaseURL(value: string): string {
-  return value.trim().replace(/\/+$/u, "").toLowerCase();
+  try {
+    const parsed = new URL(value);
+    const path = parsed.pathname.replace(/\/+$/u, "");
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}`;
+  } catch {
+    return value
+      .trim()
+      .replace(/[?#].*$/u, "")
+      .replace(/\/+$/u, "");
+  }
 }
 
 function decodeStore(value: unknown): { records: GeminiPromptCacheRecord[] } {
@@ -242,7 +326,7 @@ function decodeRecord(value: unknown): GeminiPromptCacheRecord {
     !isNonEmptyString(value["name"]) ||
     !isPositiveFiniteNumber(value["expireAt"]) ||
     !isPositiveFiniteNumber(value["ttlSeconds"]) ||
-    (value["tokenCount"] !== undefined && !isPositiveFiniteNumber(value["tokenCount"]))
+    (value["tokenCount"] !== undefined && !isNonNegativeFiniteNumber(value["tokenCount"]))
   ) {
     throw new Error("Invalid Gemini prompt cache record");
   }
@@ -269,6 +353,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isPositiveFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function isMissing(error: unknown): boolean {

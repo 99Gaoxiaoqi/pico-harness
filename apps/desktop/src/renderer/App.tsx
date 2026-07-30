@@ -2479,15 +2479,22 @@ function UsagePage() {
       {data.notices.usage ? (
         <CapabilityUnavailable title="用量暂不可用" detail={data.notices.usage} />
       ) : (
-        <div className="usage-grid">
-          {metrics.map(([label, value, Icon]) => (
-            <article className="usage-card" key={label}>
-              <Icon aria-hidden="true" />
-              <span>{label}</span>
-              <strong>{typeof value === "number" ? formatCompact(value) : (value ?? "—")}</strong>
-            </article>
+        <>
+          <div className="usage-grid">
+            {metrics.map(([label, value, Icon]) => (
+              <article className="usage-card" key={label}>
+                <Icon aria-hidden="true" />
+                <span>{label}</span>
+                <strong>{typeof value === "number" ? formatCompact(value) : (value ?? "—")}</strong>
+              </article>
+            ))}
+          </div>
+          {data.usage.cacheAlerts?.map((alert) => (
+            <InlineNotice key={alert} tone="warning">
+              {alert}
+            </InlineNotice>
           ))}
-        </div>
+        </>
       )}
       <section className="panel">
         <PanelHeader title="数据边界" detail="费用仅为 Runtime 按 Provider 返回值计算的估算" />

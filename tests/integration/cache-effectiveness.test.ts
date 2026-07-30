@@ -53,6 +53,9 @@ test("cache effectiveness only uses detailed calls for ratios and classifies cac
   assert.equal(summary.prefixStability.tools.stabilityRate, 1);
   assert.equal(summary.prefixStability["tools+system"].changed, 1);
   assert.equal(summary.firstChangedLayer["tools+system"], 1);
+  assert.equal(summary.coldStarts.byReason.initial_cold_request, 1);
+  assert.equal(summary.coldStarts.byReason.prompt_revision, 1);
+  assert.equal(summary.coldStarts.byReason.ttl_or_route_expiry_suspected, 1);
 
   const missingField = summarizeCacheEffectiveness([
     {
@@ -63,6 +66,23 @@ test("cache effectiveness only uses detailed calls for ratios and classifies cac
   assert.equal(missingField.requestHitRate, null);
   assert.equal(missingField.cacheReadTokens, null);
   assert.equal(missingField.diagnostics.provider_not_reported, 1);
+});
+
+test("cache operations emit advisory alerts without changing policy", () => {
+  const first = preparedCapture("first");
+  const changed = diagnosePreparedProviderRequest(preparedCapture("changed"), first);
+  const calls = Array.from({ length: 4 }, (_, index) =>
+    providerCall(`cold-${index}`, 2_000, 0, 600, changed),
+  );
+
+  const summary = summarizeCacheEffectiveness(calls);
+  assert.deepEqual(
+    new Set(summary.operationalAlerts.map((alert) => alert.kind)),
+    new Set(["cache_write_dominates", "route_zero_hits", "prefix_stability_declining"]),
+  );
+  assert.ok(
+    summary.operationalAlerts.every((alert) => !("action" in alert) && !("newPolicy" in alert)),
+  );
 });
 
 test("usage.get excludes baselines from cache ratios and honors the call time range", async (context) => {
@@ -129,6 +149,9 @@ test("Desktop usage parser reads canonical cache fields and preserves zero value
           requestHitRate: 0,
           promptTokenReuseRate: 0,
           cacheReadToWriteRatio: 0,
+          operationalAlerts: [
+            { kind: "route_zero_hits", message: "缓存路由连续零命中", evidence: {} },
+          ],
         },
       },
     }),
@@ -142,6 +165,7 @@ test("Desktop usage parser reads canonical cache fields and preserves zero value
       cacheRequestHitRate: 0,
       cachePromptTokenReuseRate: 0,
       cacheReadToWriteRatio: 0,
+      cacheAlerts: ["缓存路由连续零命中"],
       cost: undefined,
       period: "",
     },

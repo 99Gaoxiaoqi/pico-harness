@@ -29,6 +29,7 @@ import {
   type ProviderRuntimeDependencies,
 } from "../provider/factory.js";
 import { FileGeminiPromptCacheStore } from "../provider/gemini-prompt-cache.js";
+import { PromptCachePrewarmCoordinator } from "../provider/prompt-cache-prewarm.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
@@ -595,6 +596,7 @@ export async function executeAgentRuntime(
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
     const providerDependencies: ProviderRuntimeDependencies = {
+      promptCachePrewarm: new PromptCachePrewarmCoordinator(),
       gemini: {
         promptCacheStore: new FileGeminiPromptCacheStore(
           resolve(workspaceStatePaths.control, "gemini-prompt-cache.json"),

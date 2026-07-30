@@ -44,9 +44,12 @@ test("Gemini explicit cache persists metadata across controller restart without 
   };
   const source = { systemInstruction: { parts: [{ text: "stable confidential prompt" }] } };
   const first = controller({ store: new FileGeminiPromptCacheStore(path), transport });
-  assert.equal(await first.getOrCreate(source), "cachedContents/1");
+  assert.deepEqual(await first.getOrCreate(source), {
+    name: "cachedContents/1",
+    cacheWriteTokens: 99,
+  });
   const restarted = controller({ store: new FileGeminiPromptCacheStore(path), transport });
-  assert.equal(await restarted.getOrCreate(source), "cachedContents/1");
+  assert.deepEqual(await restarted.getOrCreate(source), { name: "cachedContents/1" });
   assert.equal(created.length, 1);
   const saved = await readFile(path, "utf8");
   assert.equal(saved.includes("stable confidential prompt"), false);
@@ -76,18 +79,93 @@ test("Gemini explicit cache deduplicates concurrent create and renews below rema
       (index % 2 === 0 ? cache : sibling).getOrCreate(source),
     ),
   );
-  assert.deepEqual(new Set(concurrent), new Set(["cachedContents/1"]));
+  assert.deepEqual(
+    new Set(concurrent.map((result) => result?.name)),
+    new Set(["cachedContents/1"]),
+  );
   assert.equal(creates, 1);
   now = 82_000;
-  assert.equal(await cache.getOrCreate(source), "cachedContents/2");
+  assert.equal((await cache.getOrCreate(source))?.name, "cachedContents/2");
   assert.equal(creates, 2);
   assert.deepEqual(deleted, ["cachedContents/1"]);
   assert.equal(
-    await cache.getOrCreate({ tools: [{ functionDeclarations: [{ name: "lookup_changed" }] }] }),
+    (
+      await cache.getOrCreate({
+        tools: [{ functionDeclarations: [{ name: "lookup_changed" }] }],
+      })
+    )?.name,
     "cachedContents/3",
   );
   assert.equal(creates, 3);
-  assert.deepEqual(deleted, ["cachedContents/1", "cachedContents/2"]);
+  assert.deepEqual(deleted, ["cachedContents/1"], "a new revision must preserve the old revision");
+  assert.equal((await store.list()).length, 2);
+  assert.equal((await cache.getOrCreate(source))?.name, "cachedContents/2");
+});
+
+test("Gemini create dedupe never shares a remote name across workspace stores", async () => {
+  let creates = 0;
+  const transport: GeminiPromptCacheTransport = {
+    async create() {
+      creates++;
+      return { name: `cachedContents/${creates}`, expireAt: Date.now() + 100_000 };
+    },
+    async delete() {},
+  };
+  const source = { systemInstruction: { parts: [{ text: "same stable prefix" }] } };
+  const firstWorkspace = controller({
+    store: new MemoryGeminiPromptCacheStore(),
+    transport,
+  });
+  const secondWorkspace = controller({
+    store: new MemoryGeminiPromptCacheStore(),
+    transport,
+  });
+  const results = await Promise.all([
+    firstWorkspace.getOrCreate(source),
+    secondWorkspace.getOrCreate(source),
+  ]);
+
+  assert.equal(creates, 2);
+  assert.notEqual(results[0]?.name, results[1]?.name);
+});
+
+test("Gemini startup cleanup serializes with first create for the same cache identity", async () => {
+  let now = 1_000;
+  let creates = 0;
+  let releaseDelete: (() => void) | undefined;
+  let markDeleteStarted: (() => void) | undefined;
+  const deleteStarted = new Promise<void>((resolve) => {
+    markDeleteStarted = resolve;
+  });
+  const deleteBlocked = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const transport: GeminiPromptCacheTransport = {
+    async create() {
+      creates++;
+      return { name: `cachedContents/${creates}`, expireAt: now + 1_000 };
+    },
+    async delete() {
+      markDeleteStarted?.();
+      await deleteBlocked;
+    },
+  };
+  const store = new MemoryGeminiPromptCacheStore();
+  const source = { systemInstruction: { parts: [{ text: "stable" }] } };
+  const initial = controller({ store, transport, now: () => now });
+  assert.equal((await initial.getOrCreate(source))?.name, "cachedContents/1");
+
+  now = 3_000;
+  const startupCleanup = controller({ store, transport, now: () => now }).cleanupExpiredEntries();
+  await deleteStarted;
+  const firstRequest = controller({ store, transport, now: () => now }).getOrCreate(source);
+  await Promise.resolve();
+  assert.equal(creates, 1, "first request must wait for same-key startup cleanup");
+  releaseDelete?.();
+
+  await startupCleanup;
+  assert.equal((await firstRequest)?.name, "cachedContents/2");
+  assert.equal((await store.list())[0]?.name, "cachedContents/2");
 });
 
 test("Gemini explicit cache separates models, removes expired metadata, and fails open on permission/delete errors", async () => {
@@ -114,8 +192,16 @@ test("Gemini explicit cache separates models, removes expired metadata, and fail
   assert.equal((await store.list()).length, 2, "model switch must not reuse a remote object");
   now = 2_100;
   createMode = "forbidden";
-  assert.equal(await flash.getOrCreate(source), undefined, "permission failure must use normal request");
-  assert.equal((await store.list()).length, 1, "expired local record is removed despite remote delete failure");
+  assert.equal(
+    await flash.getOrCreate(source),
+    undefined,
+    "permission failure must use normal request",
+  );
+  assert.equal(
+    (await store.list()).length,
+    1,
+    "expired local record is removed despite remote delete failure",
+  );
   assert.ok(deleted.length >= 1);
 });
 
@@ -138,25 +224,37 @@ test("Gemini provider sends cachedContent only for explicit routes and falls bac
     }
     return Response.json({ candidates: [{ content: { parts: [{ text: "OK" }] } }] });
   };
-  const explicit = new GeminiProvider({
-    baseURL: "https://gemini.example.test",
-    apiKey: "test-key",
-    model: "gemini-2.5-flash",
-    capabilities: resolveModelRouteCapabilities("gemini", "gemini-2.5-flash", {
-      cache: true,
-      promptCache: { mode: "explicit", ttl: "3600s" },
-    }),
-  }, undefined, { enableExplicitPromptCache: true });
-  await explicit.generate(
-    [{ role: "system", content: "stable system" }, { role: "user", content: "question" }],
+  const explicit = new GeminiProvider(
+    {
+      baseURL: "https://gemini.example.test",
+      apiKey: "test-key",
+      model: "gemini-2.5-flash",
+      capabilities: resolveModelRouteCapabilities("gemini", "gemini-2.5-flash", {
+        cache: true,
+        promptCache: { mode: "explicit", ttl: "3600s" },
+      }),
+    },
+    undefined,
+    { enableExplicitPromptCache: true },
+  );
+  const explicitResponse = await explicit.generate(
+    [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "question" },
+    ],
     [{ name: "lookup", description: "stable tool", inputSchema: { type: "object" } }],
   );
+  assert.equal(explicitResponse.usage?.cacheWriteTokens, 42);
+  assert.equal(explicitResponse.usage?.promptTokens, 42);
+  assert.deepEqual(explicitResponse.usage?.reportedFields, ["prompt", "cacheWrite"]);
   const generated = requests.at(-1)?.["body"] as Record<string, unknown>;
   assert.equal(generated["cachedContent"], "cachedContents/unit-test");
   assert.equal("system_instruction" in generated, false);
   assert.equal("tools" in generated, false);
 
-  const cacheRequest = requests.find((request) => String(request["url"]).includes("cachedContents"));
+  const cacheRequest = requests.find((request) =>
+    String(request["url"]).includes("cachedContents"),
+  );
   assert.ok(cacheRequest);
   assert.equal(String(cacheRequest["url"]).includes("test-key"), false);
 
@@ -175,7 +273,13 @@ test("Gemini provider sends cachedContent only for explicit routes and falls bac
       promptCache: { mode: "implicit" },
     }),
   });
-  await implicit.generate([{ role: "system", content: "stable system" }, { role: "user", content: "q" }], []);
+  await implicit.generate(
+    [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "q" },
+    ],
+    [],
+  );
   const full = requests.at(-1)?.["body"] as Record<string, unknown>;
   assert.equal("cachedContent" in full, false);
   assert.ok(full["system_instruction"]);
@@ -187,27 +291,39 @@ test("Gemini cachedContent rejection retries once with the complete non-cached r
     globalThis.fetch = originalFetch;
   });
   const generated: Array<Record<string, unknown>> = [];
+  const store = new MemoryGeminiPromptCacheStore();
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     if (url.includes("cachedContents")) {
-      return Response.json({ name: "cachedContents/rejected", expireTime: new Date(Date.now() + 3_600_000).toISOString() });
+      return Response.json({
+        name: "cachedContents/rejected",
+        expireTime: new Date(Date.now() + 3_600_000).toISOString(),
+      });
     }
     generated.push(body);
-    if (body["cachedContent"] !== undefined) return new Response("stale cached content", { status: 404 });
+    if (body["cachedContent"] !== undefined)
+      return new Response("stale cached content", { status: 404 });
     return Response.json({ candidates: [{ content: { parts: [{ text: "RECOVERED" }] } }] });
   };
-  const provider = new GeminiProvider({
-    baseURL: "https://gemini.example.test",
-    apiKey: "test-key",
-    model: "gemini-2.5-flash",
-    capabilities: resolveModelRouteCapabilities("gemini", "gemini-2.5-flash", {
-      cache: true,
-      promptCache: { mode: "explicit", ttl: "3600s" },
-    }),
-  }, undefined, { enableExplicitPromptCache: true });
+  const provider = new GeminiProvider(
+    {
+      baseURL: "https://gemini.example.test",
+      apiKey: "test-key",
+      model: "gemini-2.5-flash",
+      capabilities: resolveModelRouteCapabilities("gemini", "gemini-2.5-flash", {
+        cache: true,
+        promptCache: { mode: "explicit", ttl: "3600s" },
+      }),
+    },
+    undefined,
+    { enableExplicitPromptCache: true, promptCacheStore: store },
+  );
   const response = await provider.generate(
-    [{ role: "system", content: "stable system" }, { role: "user", content: "question" }],
+    [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "question" },
+    ],
     [],
   );
   assert.equal(response.content, "RECOVERED");
@@ -215,6 +331,7 @@ test("Gemini cachedContent rejection retries once with the complete non-cached r
   assert.equal(generated[0]?.["cachedContent"], "cachedContents/rejected");
   assert.equal("cachedContent" in (generated[1] ?? {}), false);
   assert.ok(generated[1]?.["system_instruction"]);
+  assert.equal((await store.list()).length, 0, "a rejected cache name must not be reused");
 });
 
 test("Gemini explicit cachedContents remains disabled until the native production gate is enabled", async (context) => {
@@ -236,8 +353,17 @@ test("Gemini explicit cachedContents remains disabled until the native productio
       promptCache: { mode: "explicit", ttl: "3600s" },
     }),
   });
-  await provider.generate([{ role: "system", content: "stable system" }, { role: "user", content: "question" }], []);
-  assert.equal(urls.some((url) => url.includes("cachedContents")), false);
+  await provider.generate(
+    [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "question" },
+    ],
+    [],
+  );
+  assert.equal(
+    urls.some((url) => url.includes("cachedContents")),
+    false,
+  );
 });
 
 test("stable Gemini cache digest recursively normalizes object keys while preserving arrays", () => {
@@ -245,5 +371,8 @@ test("stable Gemini cache digest recursively normalizes object keys while preser
     stableDigest({ tools: [{ z: 1, a: { b: 2, a: 1 } }] }),
     stableDigest({ tools: [{ a: { a: 1, b: 2 }, z: 1 }] }),
   );
-  assert.notEqual(stableDigest({ values: ["first", "second"] }), stableDigest({ values: ["second", "first"] }));
+  assert.notEqual(
+    stableDigest({ values: ["first", "second"] }),
+    stableDigest({ values: ["second", "first"] }),
+  );
 });
