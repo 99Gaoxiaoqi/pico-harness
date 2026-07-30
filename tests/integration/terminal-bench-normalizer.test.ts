@@ -694,6 +694,222 @@ test("Terminal-Bench normalizer rejects runtime or Harbor token mismatches", asy
   );
 });
 
+test("Terminal-Bench normalizer accepts the signed RUNTIME_FAILED zero-usage fallback", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-runtime-fallback-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "runtime-fallback-run";
+  const trialId = "runtime-fallback";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, trialId, {
+    reward: 1,
+    headless: {
+      ...headless("failed", true),
+      error: { code: "RUNTIME_FAILED", summary: "The Agent Runtime failed." },
+    },
+    runId,
+    accounting: accountingReceipt(runId, trialId, 125, 7),
+    runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+    harborUsage: { inputTokens: 125, outputTokens: 7 },
+    gatewayUsageFallback: true,
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.trials[0].infra.status, "ok");
+  assert.equal(summary.trials[0].adapter.status, "ok");
+  assert.equal(summary.trials[0].agent.status, "failed");
+  assert.equal(summary.trials[0].agent.errorCode, "RUNTIME_FAILED");
+  assert.equal(summary.trials[0].executionOutcome, "failed");
+  assert.equal(summary.trials[0].primaryStatus, "agent_error");
+  assert.equal(summary.trials[0].verifier.status, "completed");
+  assert.deepEqual(summary.trials[0].agent.usage, {
+    promptTokens: 125,
+    completionTokens: 7,
+    costCNY: 0.0195,
+  });
+  assert.deepEqual(summary.trials[0].agent.runtimeReportedUsage, {
+    promptTokens: 0,
+    completionTokens: 0,
+    costCNY: 0,
+  });
+  const rawHeadless = JSON.parse(
+    await readFile(join(jobDir, trialId, "agent", "pico-result.json"), "utf8"),
+  );
+  assert.deepEqual(rawHeadless.usage, {
+    promptTokens: 0,
+    completionTokens: 0,
+    costCNY: 0,
+  });
+});
+
+test("Terminal-Bench normalizer limits zero-usage fallback to the exact runtime failure", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-runtime-fallback-denied-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "runtime-fallback-denied-run";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const failed = () => ({
+    ...headless("failed", true),
+    error: { code: "RUNTIME_FAILED", summary: "The Agent Runtime failed." },
+  });
+  const cases = [
+    {
+      name: "completed",
+      headless: headless("completed", true),
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+    },
+    {
+      name: "other-error",
+      headless: {
+        ...headless("failed", true),
+        error: { code: "OTHER_RUNTIME_ERROR", summary: "Different runtime error." },
+      },
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+    },
+    {
+      name: "termination-unconfirmed",
+      headless: {
+        ...headless("failed", false),
+        error: { code: "RUNTIME_FAILED", summary: "Termination was not confirmed." },
+      },
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+    },
+    {
+      name: "partial-runtime-usage",
+      headless: failed(),
+      runtimeUsage: { promptTokens: 0, completionTokens: 1 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+    },
+    {
+      name: "runtime-cost",
+      headless: {
+        ...failed(),
+        usage: { promptTokens: 0, completionTokens: 0, costCNY: 0.000001 },
+      },
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+    },
+    {
+      name: "missing-markers",
+      headless: failed(),
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      omitGatewayUsageMarkers: true,
+    },
+    {
+      name: "wrong-source",
+      headless: failed(),
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+      gatewayUsageSource: "runtime",
+    },
+    {
+      name: "harbor-mismatch",
+      headless: failed(),
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 0 },
+      gatewayUsageFallback: true,
+    },
+  ];
+  for (const value of cases) {
+    await writeTrial(jobDir, value.name, {
+      reward: 1,
+      runId,
+      accounting: accountingReceipt(runId, value.name, 2, 1),
+      ...value,
+    });
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: cases.length,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(
+    summary.trials.every(
+      (trial: { adapter: { status: string; code: string } }) =>
+        trial.adapter.status === "error" && trial.adapter.code === "accounting_token_mismatch",
+    ),
+    true,
+  );
+});
+
+test("Terminal-Bench normalizer keeps unreconciled and over-budget trials closed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-gates-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "accounting-gates-run";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const failed = {
+    ...headless("failed", true),
+    error: { code: "RUNTIME_FAILED", summary: "The Agent Runtime failed." },
+  };
+  await writeTrial(jobDir, "circuit", {
+    reward: 1,
+    headless: failed,
+    runId,
+    accounting: unreconciledAccountingReceipt(runId, "circuit", 2, 1),
+    runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+    harborUsage: { inputTokens: 0, outputTokens: 0 },
+  });
+  for (const trialId of ["path", "chess", "adaptive"]) {
+    await writeTrial(jobDir, trialId, {
+      reward: 1,
+      headless: failed,
+      runId,
+      accounting: accountingReceipt(runId, trialId, 2, 1, false),
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 0, outputTokens: 0 },
+    });
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: 4,
+  });
+
+  assert.equal(summary.sealed, false);
+  const codes = Object.fromEntries(
+    summary.trials.map((trial: { trialId: string; adapter: { code: string } }) => [
+      trial.trialId,
+      trial.adapter.code,
+    ]),
+  );
+  assert.deepEqual(codes, {
+    adaptive: "accounting_budget_exceeded",
+    chess: "accounting_budget_exceeded",
+    circuit: "accounting_unreconciled",
+    path: "accounting_budget_exceeded",
+  });
+  assert.equal(
+    summary.trials.every(
+      (trial: { primaryStatus: string }) => trial.primaryStatus === "adapter_error",
+    ),
+    true,
+  );
+});
+
 test("Terminal-Bench normalizer fails closed without a valid accounting receipt", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-invalid-"));
   const jobDir = join(root, "job");
@@ -765,6 +981,9 @@ async function writeTrial(
     accounting?: ReturnType<typeof accountingReceipt>;
     runtimeUsage?: { promptTokens: number; completionTokens: number };
     harborUsage?: { inputTokens: number; outputTokens: number };
+    gatewayUsageFallback?: boolean;
+    gatewayUsageSource?: string;
+    omitGatewayUsageMarkers?: boolean;
   },
 ) {
   const trialDir = join(jobDir, name);
@@ -800,6 +1019,9 @@ async function writeTrial(
         n_output_tokens: harborUsage.outputTokens,
         metadata: {
           pico: {
+            status: headlessResult.status,
+            errorCode: headlessResult.error?.code ?? null,
+            terminationConfirmed: headlessResult.terminationConfirmed,
             exitCode: {
               completed: 0,
               invalid_request: 2,
@@ -809,6 +1031,8 @@ async function writeTrial(
               canceled: 130,
             }[headlessResult.status],
             costCNY: accounting.actual.costCNY,
+            runtimeReportedCostCNY: headlessResult.usage.costCNY,
+            runtimeReportedUsage: headlessResult.usage,
             gatewayAccounting: {
               schemaVersion: accounting.schemaVersion,
               status: accounting.status,
@@ -817,6 +1041,14 @@ async function writeTrial(
               receiptSha256: accounting.receiptSha256,
               costMicroCNY: accounting.actual.costMicroCNY,
               costCNY: accounting.actual.costCNY,
+              ...(!options.omitGatewayUsageMarkers
+                ? {
+                    usageFallback: options.gatewayUsageFallback ?? false,
+                    usageSource:
+                      options.gatewayUsageSource ??
+                      (options.gatewayUsageFallback ? "signed_gateway_actual" : "runtime"),
+                  }
+                : {}),
             },
           },
         },
@@ -847,14 +1079,16 @@ function accountingReceipt(
   trialId: string,
   inputTokens: number,
   outputTokens: number,
+  withinBudget = true,
 ) {
-  return accountingReceiptForRequests(runId, trialId, [[inputTokens, outputTokens]]);
+  return accountingReceiptForRequests(runId, trialId, [[inputTokens, outputTokens]], withinBudget);
 }
 
 function accountingReceiptForRequests(
   runId: string,
   trialId: string,
   usage: ReadonlyArray<readonly [number, number]>,
+  withinBudget = true,
 ) {
   const pricing = {
     schemaVersion: 1,
@@ -901,7 +1135,7 @@ function accountingReceiptForRequests(
     pricingSha256,
     rounding: "ceil-per-request",
     status: "reconciled",
-    withinBudget: true,
+    withinBudget,
     requests: {
       attempted: requestEntries.length,
       reconciled: requestEntries.length,
@@ -917,6 +1151,58 @@ function accountingReceiptForRequests(
     supplement: zeroTotals,
     unreconciledReservation: zeroTotals,
   };
+  return authenticateAccountingReceipt(receipt);
+}
+
+function unreconciledAccountingReceipt(
+  runId: string,
+  trialId: string,
+  inputTokens: number,
+  outputTokens: number,
+) {
+  const reconciled = accountingReceipt(runId, trialId, inputTokens, outputTokens);
+  const { auth: reconciledAuth, receiptSha256: reconciledReceiptSha256, ...base } = reconciled;
+  void reconciledAuth;
+  void reconciledReceiptSha256;
+  const baseEntry = base.requestEntries[0];
+  if (!baseEntry) throw new Error("fixture accounting entry is missing");
+  const zero = { inputTokens: 0, outputTokens: 0, costMicroCNY: 0 };
+  const pending = {
+    inputTokens: 1,
+    outputTokens: 1,
+    costMicroCNY: Math.ceil((base.pricing.input + base.pricing.output) / 1_000_000),
+  };
+  const reservation = {
+    inputTokens: base.reservation.inputTokens + pending.inputTokens,
+    outputTokens: base.reservation.outputTokens + pending.outputTokens,
+    costMicroCNY: base.reservation.costMicroCNY + pending.costMicroCNY,
+  };
+  return authenticateAccountingReceipt({
+    ...base,
+    status: "unreconciled",
+    withinBudget: false,
+    requests: { attempted: 2, reconciled: 1, unreconciled: 1 },
+    requestEntries: [
+      baseEntry,
+      {
+        sequence: 2,
+        status: "unreconciled",
+        reservation: pending,
+        actual: zero,
+        refund: zero,
+        supplement: zero,
+        unreconciledReservation: pending,
+      },
+    ],
+    reservation,
+    actual: base.actual,
+    refund: zero,
+    supplement: zero,
+    unreconciledReservation: pending,
+  });
+}
+
+function authenticateAccountingReceipt<T extends { actual: Record<string, unknown> }>(receipt: T) {
   const auth = {
     algorithm: "hmac-sha256",
     keyId: "run-capability-v1",
