@@ -1,4 +1,4 @@
-const completionTokenFieldRoutes = new Set(["codex-oauth/gpt-5.4"]);
+const benchmarkOutputTokensByRoute = new Map([["codex-oauth/gpt-5.4", 8_192]]);
 
 export function buildBenchmarkRouteConfig({
   modelRouteId,
@@ -30,7 +30,8 @@ export function buildBenchmarkRouteConfig({
 
 export function applyBenchmarkRouteContract(provider, { providerId, model }) {
   const prepared = structuredClone(provider);
-  if (!completionTokenFieldRoutes.has(`${providerId}/${model}`)) {
+  const outputTokens = benchmarkOutputTokensByRoute.get(`${providerId}/${model}`);
+  if (outputTokens === undefined) {
     return prepared;
   }
   if (prepared.protocol !== "openai") {
@@ -56,6 +57,7 @@ export function applyBenchmarkRouteContract(provider, { providerId, model }) {
     ...capabilities,
     [model]: {
       ...modelCapability,
+      output: outputTokens,
       outputTokenField: "max_completion_tokens",
     },
   };
