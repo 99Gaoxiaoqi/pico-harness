@@ -193,12 +193,34 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
 
 def assert_accounting_failure_messages(adapter: Any) -> None:
     class AccountingContext:
-        def __init__(self) -> None:
-            self.n_input_tokens = 2
-            self.n_output_tokens = 1
-            self.metadata: dict[str, Any] = {}
+        def __init__(
+            self,
+            *,
+            input_tokens: int = 2,
+            output_tokens: int = 1,
+            status: str = "completed",
+            error_code: str | None = None,
+            termination_confirmed: bool = True,
+            cost_cny: int | float = 0.000003,
+        ) -> None:
+            self.n_input_tokens = input_tokens
+            self.n_output_tokens = output_tokens
+            self.metadata: dict[str, Any] = {
+                "pico": {
+                    "status": status,
+                    "errorCode": error_code,
+                    "terminationConfirmed": termination_confirmed,
+                    "costCNY": cost_cny,
+                }
+            }
 
-    def receipt(status: str, within_budget: bool) -> dict[str, Any]:
+    def receipt(
+        status: str,
+        within_budget: bool,
+        *,
+        input_tokens: int = 2,
+        output_tokens: int = 1,
+    ) -> dict[str, Any]:
         return {
             "schemaVersion": 1,
             "status": status,
@@ -206,8 +228,8 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
             "pricingSha256": "0" * 64,
             "receiptSha256": "1" * 64,
             "actual": {
-                "inputTokens": 2,
-                "outputTokens": 1,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
                 "costMicroCNY": 3,
                 "costCNY": 0.000003,
             },
@@ -230,9 +252,115 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
         else:
             raise AssertionError(f"accounting failure was accepted: {expected}")
 
-    adapter.apply_gateway_accounting(
-        AccountingContext(), receipt("reconciled", True)
+    matching = AccountingContext()
+    adapter.apply_gateway_accounting(matching, receipt("reconciled", True))
+    assert (matching.n_input_tokens, matching.n_output_tokens) == (2, 1)
+    assert matching.metadata["pico"]["runtimeReportedUsage"] == {
+        "promptTokens": 2,
+        "completionTokens": 1,
+        "costCNY": 0.000003,
+    }
+    assert matching.metadata["pico"]["gatewayAccounting"]["usageFallback"] is False
+    assert matching.metadata["pico"]["gatewayAccounting"]["usageSource"] == "runtime"
+
+    fallback = AccountingContext(
+        input_tokens=0,
+        output_tokens=0,
+        status="failed",
+        error_code="RUNTIME_FAILED",
+        cost_cny=0,
     )
+    adapter.apply_gateway_accounting(fallback, receipt("reconciled", True))
+    assert (fallback.n_input_tokens, fallback.n_output_tokens) == (2, 1)
+    assert fallback.metadata["pico"]["runtimeReportedUsage"] == {
+        "promptTokens": 0,
+        "completionTokens": 0,
+        "costCNY": 0,
+    }
+    assert fallback.metadata["pico"]["gatewayAccounting"]["usageFallback"] is True
+    assert (
+        fallback.metadata["pico"]["gatewayAccounting"]["usageSource"]
+        == "signed_gateway_actual"
+    )
+
+    rejected_contexts = (
+        AccountingContext(input_tokens=0, output_tokens=0, cost_cny=0),
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="failed",
+            error_code="RUNTIME_EMPTY_RESPONSE",
+            cost_cny=0,
+        ),
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="failed",
+            error_code="RUNTIME_FAILED",
+            termination_confirmed=False,
+            cost_cny=0,
+        ),
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=1,
+            status="failed",
+            error_code="RUNTIME_FAILED",
+            cost_cny=0,
+        ),
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="failed",
+            error_code="RUNTIME_FAILED",
+            cost_cny=0.000001,
+        ),
+    )
+    for rejected in rejected_contexts:
+        try:
+            adapter.apply_gateway_accounting(
+                rejected,
+                receipt("reconciled", True),
+            )
+        except RuntimeError as error:
+            assert str(error) == (
+                "Gateway accounting tokens do not match runtime usage"
+            )
+        else:
+            raise AssertionError(
+                "non-qualifying gateway usage fallback unexpectedly succeeded"
+            )
+
+    for value, expected in (
+        (
+            receipt("unreconciled", True),
+            "Gateway accounting could not be reconciled",
+        ),
+        (
+            receipt("reconciled", False),
+            "Gateway usage exceeded the configured budget or quota",
+        ),
+    ):
+        rejected = AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="failed",
+            error_code="RUNTIME_FAILED",
+            cost_cny=0,
+        )
+        try:
+            adapter.apply_gateway_accounting(rejected, value)
+        except RuntimeError as error:
+            assert str(error) == expected
+        else:
+            raise AssertionError(
+                "gateway usage fallback bypassed an accounting gate"
+            )
+        assert (rejected.n_input_tokens, rejected.n_output_tokens) == (0, 0)
+        gateway_metadata = rejected.metadata["pico"]["gatewayAccounting"]
+        assert gateway_metadata["status"] == value["status"]
+        assert gateway_metadata["withinBudget"] is value["withinBudget"]
+        assert gateway_metadata["usageFallback"] is False
+        assert gateway_metadata["usageSource"] == "runtime"
 
 
 def assert_task_timeout_contract(adapter: Any) -> None:
