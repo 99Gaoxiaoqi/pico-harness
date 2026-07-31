@@ -208,6 +208,8 @@ export interface TaskRunFinishedEvent extends TaskRunEventBase {
   readonly data: {
     readonly status: TaskRunTerminalStatus;
     readonly attemptId?: string;
+    /** Stable identity used to converge an optional Job completion/outbox after a crash. */
+    readonly completionId?: string;
     readonly result?: Readonly<Record<string, unknown>>;
     readonly error?: string;
   };

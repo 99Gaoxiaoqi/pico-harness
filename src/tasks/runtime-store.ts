@@ -113,6 +113,48 @@ export interface StartJobInput {
   outputPath?: string;
 }
 
+export interface StartRecoverableJobSuccessorInput {
+  jobId: string;
+  sourceAttemptId: string;
+  successorAttemptId: string;
+  ownerId: string;
+  leaseEpoch: number;
+  expectedJobVersion: number;
+  expectedSourceAttemptVersion: number;
+  outputPath?: string;
+  reason?: string;
+}
+
+export interface StartRecoverableJobSuccessorResult {
+  inserted: boolean;
+  job: JobRecord;
+  sourceAttempt: JobAttemptRecord;
+  successorAttempt: JobAttemptRecord;
+}
+
+export type RecoverableJobTerminalStatus = Extract<
+  TerminalJobStatus,
+  "succeeded" | "failed" | "cancelled"
+>;
+
+export interface SettleRecoverableJobAfterTaskTerminalInput {
+  jobId: string;
+  attemptId: string;
+  ownerId: string;
+  leaseEpoch: number;
+  completionId: string;
+  status: RecoverableJobTerminalStatus;
+  outputOffset?: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  completionPayload?: Record<string, unknown>;
+  completionAlreadyDelivered?: boolean;
+}
+
+export interface SettleRecoverableJobAfterTaskTerminalResult extends FinishJobResult {
+  inserted: boolean;
+}
+
 export interface FinishJobInput {
   jobId: string;
   attemptId: string;
@@ -467,6 +509,211 @@ export class RuntimeStore {
     });
   }
 
+  /**
+   * Atomically replaces an expired recoverable Attempt without publishing a terminal outbox.
+   *
+   * The caller must first acquire the expired Job lease. Only the eventual TaskRun terminal fact
+   * is allowed to settle the Job and create its completion record.
+   */
+  startRecoverableJobSuccessor(
+    input: StartRecoverableJobSuccessorInput,
+  ): StartRecoverableJobSuccessorResult {
+    return this.write((tx) => {
+      const currentJob = this.requireJob(input.jobId, tx);
+      const source = this.requireAttempt(input.sourceAttemptId, tx);
+      const existing = tx.state.attempts[input.successorAttemptId];
+      const reason = input.reason ?? "owner_lost_recovering";
+      if (existing) {
+        if (
+          currentJob.executionClass !== "recoverable" ||
+          currentJob.status !== "running" ||
+          currentJob.leaseEpoch !== input.leaseEpoch ||
+          source.jobId !== input.jobId ||
+          source.status !== "interrupted" ||
+          source.error !== reason ||
+          existing.jobId !== input.jobId ||
+          existing.status !== "running" ||
+          existing.attemptNumber !== source.attemptNumber + 1 ||
+          existing.ownerId !== input.ownerId ||
+          existing.leaseEpoch !== input.leaseEpoch ||
+          existing.outputPath !== (input.outputPath ?? currentJob.outputPath)
+        ) {
+          throw new RuntimeConflictError(
+            `recoverable successor ${input.successorAttemptId} 已绑定到其他执行`,
+          );
+        }
+        this.assertLease(tx, `job:${input.jobId}`, input.ownerId, input.leaseEpoch);
+        return clone({
+          inserted: false,
+          job: currentJob,
+          sourceAttempt: source,
+          successorAttempt: existing,
+        });
+      }
+      if (
+        currentJob.executionClass !== "recoverable" ||
+        currentJob.status !== "running" ||
+        currentJob.version !== input.expectedJobVersion ||
+        currentJob.attemptCount !== source.attemptNumber ||
+        currentJob.leaseEpoch !== source.leaseEpoch ||
+        source.jobId !== input.jobId ||
+        source.status !== "running" ||
+        source.version !== input.expectedSourceAttemptVersion ||
+        input.leaseEpoch <= source.leaseEpoch
+      ) {
+        throw new RuntimeConflictError(
+          `recoverable Job ${input.jobId} 的 source/version/lease 已变化`,
+        );
+      }
+      this.assertLease(tx, `job:${input.jobId}`, input.ownerId, input.leaseEpoch);
+      const now = this.now();
+      const sourceAttempt: JobAttemptRecord = {
+        ...source,
+        status: "interrupted",
+        error: reason,
+        finishedAt: now,
+        updatedAt: now,
+        version: source.version + 1,
+      };
+      const successorAttempt: JobAttemptRecord = compact({
+        attemptId: input.successorAttemptId,
+        jobId: input.jobId,
+        attemptNumber: source.attemptNumber + 1,
+        status: "running" as const,
+        ownerId: input.ownerId,
+        leaseEpoch: input.leaseEpoch,
+        outputPath: input.outputPath ?? currentJob.outputPath,
+        outputOffset: 0,
+        startedAt: now,
+        updatedAt: now,
+        version: 1,
+      });
+      const job: JobRecord = compact({
+        ...currentJob,
+        status: "running" as const,
+        leaseEpoch: input.leaseEpoch,
+        attemptCount: successorAttempt.attemptNumber,
+        outputPath: input.outputPath ?? currentJob.outputPath,
+        updatedAt: now,
+        version: currentJob.version + 1,
+      });
+      tx.state.attempts[input.sourceAttemptId] = sourceAttempt;
+      tx.state.attempts[input.successorAttemptId] = successorAttempt;
+      tx.state.jobs[input.jobId] = job;
+      return clone({
+        inserted: true,
+        job,
+        sourceAttempt,
+        successorAttempt,
+      });
+    });
+  }
+
+  /**
+   * Converges a recoverable Job/outbox from an already-durable TaskRun terminal fact.
+   *
+   * A running Job requires the current live lease. The lease may be the Attempt's existing lease
+   * or a higher epoch acquired after expiry. Exact terminal replays are read-only apart from an
+   * optional deliveredAt acknowledgement.
+   */
+  settleRecoverableJobAfterTaskTerminal(
+    input: SettleRecoverableJobAfterTaskTerminalInput,
+  ): SettleRecoverableJobAfterTaskTerminalResult {
+    return this.write((tx) => {
+      const currentJob = this.requireJob(input.jobId, tx);
+      const currentAttempt = this.requireAttempt(input.attemptId, tx);
+      const existingCompletion = tx.state.completions[input.completionId];
+      if (currentJob.executionClass !== "recoverable" || currentAttempt.jobId !== input.jobId) {
+        throw new RuntimeConflictError(
+          `TaskRun terminal cannot settle non-recoverable Job ${input.jobId}`,
+        );
+      }
+      if (isTerminalJobStatus(currentJob.status)) {
+        if (
+          currentJob.status !== input.status ||
+          currentJob.error !== input.error ||
+          currentAttempt.status !== input.status ||
+          currentAttempt.error !== input.error ||
+          currentAttempt.outputOffset !== (input.outputOffset ?? currentAttempt.outputOffset) ||
+          !sameJson(currentAttempt.result, input.result) ||
+          existingCompletion?.jobId !== input.jobId ||
+          existingCompletion.attemptId !== input.attemptId ||
+          existingCompletion.status !== input.status ||
+          !sameJson(existingCompletion.payload, input.completionPayload)
+        ) {
+          throw new RuntimeConflictError(
+            `TaskRun completion ${input.completionId} conflicts with Job ${input.jobId} terminal`,
+          );
+        }
+        if (input.completionAlreadyDelivered && existingCompletion.deliveredAt === undefined) {
+          existingCompletion.deliveredAt = this.now();
+        }
+        return clone({
+          inserted: false,
+          job: currentJob,
+          attempt: currentAttempt,
+          completion: existingCompletion,
+        });
+      }
+      const sameFence =
+        currentAttempt.ownerId === input.ownerId && currentAttempt.leaseEpoch === input.leaseEpoch;
+      const takeoverFence = input.leaseEpoch > currentAttempt.leaseEpoch;
+      if (
+        currentJob.status !== "running" ||
+        currentAttempt.status !== "running" ||
+        currentJob.attemptCount !== currentAttempt.attemptNumber ||
+        currentJob.leaseEpoch !== currentAttempt.leaseEpoch ||
+        (!sameFence && !takeoverFence)
+      ) {
+        throw new RuntimeConflictError(
+          `recoverable Job ${input.jobId} has no matching running Attempt ${input.attemptId}`,
+        );
+      }
+      this.assertLease(tx, `job:${input.jobId}`, input.ownerId, input.leaseEpoch);
+      const now = this.now();
+      const attempt = compact<JobAttemptRecord>({
+        ...currentAttempt,
+        status: input.status,
+        ownerId: input.ownerId,
+        leaseEpoch: input.leaseEpoch,
+        outputOffset: input.outputOffset ?? currentAttempt.outputOffset,
+        error: input.error,
+        result: input.result,
+        finishedAt: now,
+        updatedAt: now,
+        version: currentAttempt.version + 1,
+      });
+      const job = compact<JobRecord>({
+        ...currentJob,
+        status: input.status,
+        leaseEpoch: input.leaseEpoch,
+        terminalAt: now,
+        updatedAt: now,
+        error: input.error,
+        version: currentJob.version + 1,
+      });
+      tx.state.attempts[input.attemptId] = attempt;
+      tx.state.jobs[input.jobId] = job;
+      this.insertCompletion(tx, {
+        completionId: input.completionId,
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        policy: currentJob.completionPolicy,
+        status: input.status,
+        payload: input.completionPayload,
+        createdAt: now,
+      });
+      const completion = this.requireCompletion(input.completionId, tx);
+      if (input.completionAlreadyDelivered) completion.deliveredAt = now;
+      return clone({
+        inserted: true,
+        job,
+        attempt,
+        completion,
+      });
+    });
+  }
+
   finishJob(input: FinishJobInput): FinishJobResult {
     return this.write((tx) => {
       const currentJob = this.requireJob(input.jobId, tx);
@@ -614,7 +861,13 @@ export class RuntimeStore {
       const interrupted: JobRecord[] = [];
       for (const current of Object.values(tx.state.jobs)) {
         const lease = tx.state.leases[`job:${current.jobId}`];
-        if (current.status !== "running" || (lease && lease.expiresAt > now)) continue;
+        if (
+          current.status !== "running" ||
+          current.executionClass === "recoverable" ||
+          (lease && lease.expiresAt > now)
+        ) {
+          continue;
+        }
         const attempt = Object.values(tx.state.attempts)
           .filter((value) => value.jobId === current.jobId && value.status === "running")
           .sort((left, right) => right.attemptNumber - left.attemptNumber)[0];
