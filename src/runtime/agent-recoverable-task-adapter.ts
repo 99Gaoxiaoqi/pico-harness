@@ -20,8 +20,8 @@ import {
   prepareWorkspaceStorageLayoutSync,
   type WorkspaceStorageRootIdentity,
 } from "../storage/workspace-storage-layout.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeRunStartedEvent } from "./runtime-event.js";
-import type { RuntimeEventStore } from "./runtime-event-store.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeRunStartedEvent } from "../storage/runtime-event.js";
+import type { RuntimeEventStore } from "../storage/runtime-event-store.js";
 
 export const AGENT_RECOVERABLE_TASK_ADAPTER_ID = "pico.core-agent";
 export const AGENT_RECOVERABLE_TASK_ADAPTER_VERSION = 1 as const;
