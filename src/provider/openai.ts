@@ -18,6 +18,13 @@ import { applyReasoningRequestPatch } from "./reasoning-capability.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
+import {
+  openAIPromptCacheKey,
+  promptCacheRouteIdentity,
+  promptCacheRevisions,
+  snapshotToolDefinitions,
+} from "./prompt-cache.js";
+import { appendProviderEndpointPath } from "./provider-endpoint.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -37,7 +44,7 @@ interface OpenAIChatResponse {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     completion_tokens_details?: { reasoning_tokens?: number };
   };
 }
@@ -136,8 +143,23 @@ async function consumeSseDataStream(
 
 /** OpenAI 兼容协议适配器 */
 export class OpenAIProvider implements LLMProvider {
+  private static readonly MAX_ROUTE_TRAFFIC_WINDOWS = 1_024;
+  /** Endpoint/model capability memory survives short-lived runtime/provider reconstruction. */
+  private static readonly unsupportedPromptCacheKeyRoutes = new Set<string>();
+  private static readonly unsupportedPromptCacheBreakpointRoutes = new Set<string>();
+  private static readonly promptCacheRouteTraffic = new Map<
+    string,
+    { minute: number; count: number }
+  >();
+  /** Once a route crosses the threshold, do not make existing Sessions drift back next minute. */
+  private static readonly shardedPromptCacheRoutes = new Set<string>();
+  readonly requestCapabilities;
   private readonly profile: ProviderProfile;
   private readonly thinkingEffort: string;
+  private readonly promptCacheFieldRoute: string | undefined;
+  private readonly promptCacheRoutingIdentity: string | undefined;
+  private promptCacheKeyEnabled: boolean;
+  private promptCacheBreakpointsEnabled: boolean;
 
   constructor(
     private readonly config: ProviderConfig,
@@ -145,6 +167,66 @@ export class OpenAIProvider implements LLMProvider {
   ) {
     this.profile = profile ?? resolveProviderProfile("openai", config.model);
     this.thinkingEffort = config.thinkingEffort ?? "off";
+    this.promptCacheFieldRoute =
+      config.capabilities?.cache === true && config.capabilities.promptCache.mode === "explicit"
+        ? promptCacheRouteIdentity({
+            provider: "openai",
+            model: config.model,
+            baseURL: config.baseURL,
+            policy: { mode: "explicit" },
+          })
+        : undefined;
+    this.promptCacheRoutingIdentity =
+      config.capabilities?.cache === true && config.capabilities.promptCache.mode === "explicit"
+        ? promptCacheRouteIdentity({
+            provider: "openai",
+            model: config.model,
+            baseURL: config.baseURL,
+            policy: config.capabilities.promptCache,
+          })
+        : undefined;
+    this.promptCacheKeyEnabled =
+      this.promptCacheFieldRoute === undefined ||
+      !OpenAIProvider.unsupportedPromptCacheKeyRoutes.has(this.promptCacheFieldRoute);
+    this.promptCacheBreakpointsEnabled =
+      this.promptCacheFieldRoute === undefined ||
+      !OpenAIProvider.unsupportedPromptCacheBreakpointRoutes.has(this.promptCacheFieldRoute);
+    this.requestCapabilities = {
+      toolChoiceNoneWithTools: config.capabilities?.toolChoiceNoneWithTools === true,
+      ...(this.promptCacheRoutingIdentity && (config.capabilities?.promptCache.keyShards ?? 1) > 1
+        ? {
+            promptCacheRouteIdentity: this.promptCacheRoutingIdentity,
+            preparePromptCacheSharding: () =>
+              OpenAIProvider.recordPromptCacheRouteTraffic(
+                this.promptCacheRoutingIdentity!,
+                config.capabilities?.promptCache.shardThresholdRpm ?? 15,
+              ),
+          }
+        : {}),
+    };
+  }
+
+  /** Record one logical call, not each transport retry, in the route's current minute window. */
+  private static recordPromptCacheRouteTraffic(
+    routeIdentity: string,
+    thresholdRpm: number,
+  ): boolean {
+    if (this.shardedPromptCacheRoutes.has(routeIdentity)) return true;
+    const minute = Math.floor(Date.now() / 60_000);
+    const current = this.promptCacheRouteTraffic.get(routeIdentity);
+    const next =
+      current?.minute === minute ? { minute, count: current.count + 1 } : { minute, count: 1 };
+    this.promptCacheRouteTraffic.delete(routeIdentity);
+    this.promptCacheRouteTraffic.set(routeIdentity, next);
+    if (this.promptCacheRouteTraffic.size > this.MAX_ROUTE_TRAFFIC_WINDOWS) {
+      const oldest = this.promptCacheRouteTraffic.keys().next().value;
+      if (oldest !== undefined) this.promptCacheRouteTraffic.delete(oldest);
+    }
+    if (next.count > thresholdRpm) {
+      this.shardedPromptCacheRoutes.add(routeIdentity);
+      return true;
+    }
+    return false;
   }
 
   get modelName(): string {
@@ -173,6 +255,65 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
     return content;
+  }
+
+  private async dispatchChatCompletion(
+    requestBody: Record<string, unknown>,
+    options?: LLMProviderRequestOptions,
+  ): Promise<{ response: Response; bodyJson: string; errorText?: string }> {
+    const dispatch = async (body: Record<string, unknown>): Promise<Response> => {
+      options?.onRequestPrepared?.({
+        provider: "openai",
+        model: this.config.model,
+        body,
+      });
+      return fetch(appendProviderEndpointPath(this.config.baseURL, "chat/completions"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: providerRequestSignal(options?.signal),
+      });
+    };
+
+    let actualBody = requestBody;
+    let response = await dispatch(actualBody);
+    let errorText = response.ok ? undefined : await response.text();
+    for (let downgrade = 0; !response.ok && downgrade < 2; downgrade++) {
+      const rejected = rejectedPromptCacheFields(response.status, errorText ?? "");
+      if (!rejected) break;
+      if (rejected.key) {
+        this.promptCacheKeyEnabled = false;
+        if (this.promptCacheFieldRoute) {
+          OpenAIProvider.unsupportedPromptCacheKeyRoutes.add(this.promptCacheFieldRoute);
+        }
+      }
+      if (rejected.breakpoints) {
+        this.promptCacheBreakpointsEnabled = false;
+        if (this.promptCacheFieldRoute) {
+          OpenAIProvider.unsupportedPromptCacheBreakpointRoutes.add(this.promptCacheFieldRoute);
+        }
+      }
+      actualBody = stripPromptCacheRequestFields(actualBody, rejected);
+      logger.warn(
+        {
+          model: this.config.model,
+          status: response.status,
+          promptCacheKey: rejected.key ? "unsupported" : "retained",
+          promptCacheBreakpoints: rejected.breakpoints ? "unsupported" : "retained",
+        },
+        "[OpenAI] 兼容端点拒绝部分主动缓存字段，已按字段降级",
+      );
+      response = await dispatch(actualBody);
+      errorText = response.ok ? undefined : await response.text();
+    }
+    return {
+      response,
+      bodyJson: JSON.stringify(actualBody),
+      ...(errorText !== undefined ? { errorText } : {}),
+    };
   }
 
   async generate(
@@ -216,14 +357,15 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
-    // 2. 翻译工具定义
+    // 2. 翻译工具定义。Schema 在 provider 边界再规范化一次，保护直接调用者。
+    const tools = snapshotToolDefinitions(availableTools);
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
     };
     // 无可用工具时不挂载 tools,模型只能纯文本输出
-    if (availableTools.length > 0) {
-      body.tools = availableTools.map((t) => ({
+    if (tools.length > 0) {
+      body.tools = tools.map((t) => ({
         type: "function",
         function: {
           name: t.name,
@@ -231,46 +373,37 @@ export class OpenAIProvider implements LLMProvider {
           parameters: t.inputSchema,
         },
       }));
+      if (options?.toolChoice === "none") body.tool_choice = "none";
     }
-    const requestBody = this.finalizeRequestBody(body);
-    options?.onRequestPrepared?.({
-      provider: "openai",
-      model: this.config.model,
-      body: requestBody,
-    });
+    const requestBody = this.finalizeRequestBody(body, messages, tools, options);
 
     // 3. 构建请求并发送
-    const bodyJson = JSON.stringify(requestBody);
     logger.debug(
-      { model: this.config.model, messages: openaiMsgs.length, tools: availableTools.length },
+      { model: this.config.model, messages: openaiMsgs.length, tools: tools.length },
       "[OpenAI] POST /chat/completions",
     );
-    const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: bodyJson,
-      signal: providerRequestSignal(options?.signal),
-    });
+    const dispatched = await this.dispatchChatCompletion(requestBody, options);
+    const resp = dispatched.response;
 
     if (!resp.ok) {
-      const text = await resp.text();
+      const text = dispatched.errorText ?? "";
       logger.debug(
         {
           model: this.config.model,
           status: resp.status,
-          requestBytes: Buffer.byteLength(bodyJson, "utf8"),
+          requestBytes: Buffer.byteLength(dispatched.bodyJson, "utf8"),
           messages: openaiMsgs.length,
-          tools: availableTools.length,
+          tools: tools.length,
         },
         "[OpenAI] 请求失败，已省略可能包含源码或密钥的请求体",
       );
       if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
+        throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]; response omitted`);
       }
-      throw new LLMStatusError(resp.status, `OpenAI API 请求失败 [${resp.status}]: ${text}`);
+      throw new LLMStatusError(
+        resp.status,
+        `OpenAI API 请求失败 [${resp.status}]; response omitted`,
+      );
     }
 
     // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
@@ -300,6 +433,9 @@ export class OpenAIProvider implements LLMProvider {
             promptTokens: data.usage.prompt_tokens ?? 0,
             completionTokens: data.usage.completion_tokens ?? 0,
             cacheReadTokens: data.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            ...(typeof data.usage.prompt_tokens_details?.cache_write_tokens === "number"
+              ? { cacheWriteTokens: data.usage.prompt_tokens_details.cache_write_tokens }
+              : {}),
             reasoningTokens: data.usage.completion_tokens_details?.reasoning_tokens ?? 0,
             reportedFields: [
               ...(typeof data.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
@@ -308,6 +444,9 @@ export class OpenAIProvider implements LLMProvider {
                 : []),
               ...(typeof data.usage.prompt_tokens_details?.cached_tokens === "number"
                 ? (["cacheRead"] as const)
+                : []),
+              ...(typeof data.usage.prompt_tokens_details?.cache_write_tokens === "number"
+                ? (["cacheWrite"] as const)
                 : []),
               ...(typeof data.usage.completion_tokens_details?.reasoning_tokens === "number"
                 ? (["reasoning"] as const)
@@ -369,6 +508,7 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
+    const tools = snapshotToolDefinitions(availableTools);
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: openaiMsgs,
@@ -377,35 +517,25 @@ export class OpenAIProvider implements LLMProvider {
     if (this.config.capabilities?.streamUsage === true) {
       body.stream_options = { include_usage: true };
     }
-    if (availableTools.length > 0) {
-      body.tools = availableTools.map((t) => ({
+    if (tools.length > 0) {
+      body.tools = tools.map((t) => ({
         type: "function",
         function: { name: t.name, description: t.description, parameters: t.inputSchema },
       }));
     }
-    const requestBody = this.finalizeRequestBody(body);
-    options?.onRequestPrepared?.({
-      provider: "openai",
-      model: this.config.model,
-      body: requestBody,
-    });
-
-    const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-      signal: providerRequestSignal(options?.signal),
-    });
+    const requestBody = this.finalizeRequestBody(body, messages, tools, options);
+    const dispatched = await this.dispatchChatCompletion(requestBody, options);
+    const resp = dispatched.response;
 
     if (!resp.ok) {
-      const text = await resp.text();
+      const text = dispatched.errorText ?? "";
       if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
+        throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]; response omitted`);
       }
-      throw new LLMStatusError(resp.status, `OpenAI API 流式请求失败 [${resp.status}]: ${text}`);
+      throw new LLMStatusError(
+        resp.status,
+        `OpenAI API 流式请求失败 [${resp.status}]; response omitted`,
+      );
     }
 
     // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
@@ -447,7 +577,7 @@ export class OpenAIProvider implements LLMProvider {
           usage?: {
             prompt_tokens?: number;
             completion_tokens?: number;
-            prompt_tokens_details?: { cached_tokens?: number };
+            prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
             completion_tokens_details?: { reasoning_tokens?: number };
           };
         };
@@ -459,6 +589,9 @@ export class OpenAIProvider implements LLMProvider {
             promptTokens: chunk.usage.prompt_tokens ?? 0,
             completionTokens: chunk.usage.completion_tokens ?? 0,
             cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            ...(typeof chunk.usage.prompt_tokens_details?.cache_write_tokens === "number"
+              ? { cacheWriteTokens: chunk.usage.prompt_tokens_details.cache_write_tokens }
+              : {}),
             reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
             reportedFields: [
               ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
@@ -467,6 +600,9 @@ export class OpenAIProvider implements LLMProvider {
                 : []),
               ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
                 ? (["cacheRead"] as const)
+                : []),
+              ...(typeof chunk.usage.prompt_tokens_details?.cache_write_tokens === "number"
+                ? (["cacheWrite"] as const)
                 : []),
               ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
                 ? (["reasoning"] as const)
@@ -541,10 +677,59 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   /** Canonical routes restore the output budget last; legacy direct calls cannot safely guess the field. */
-  private finalizeRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  private finalizeRequestBody(
+    body: Record<string, unknown>,
+    messages: readonly Message[],
+    tools: readonly ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Record<string, unknown> {
     const requestBody = { ...this.applyThinkingLevel(body) };
     const capabilities = this.config.capabilities;
     if (!capabilities) return requestBody;
+    if (options?.toolChoice === "none" && Array.isArray(requestBody["tools"])) {
+      requestBody.tool_choice = "none";
+    }
+
+    // `cache:true + mode:explicit` is the route's explicit capability declaration.
+    // Compatible endpoints that reject these fields are remembered and fail open.
+    if (capabilities.cache === true && capabilities.promptCache.mode === "explicit") {
+      const revisions = promptCacheRevisions(messages, tools);
+      const routeIdentity =
+        this.promptCacheRoutingIdentity ??
+        promptCacheRouteIdentity({
+          provider: "openai",
+          model: this.config.model,
+          baseURL: this.config.baseURL,
+          policy: capabilities.promptCache,
+        });
+      if (this.promptCacheKeyEnabled) {
+        requestBody.prompt_cache_key = openAIPromptCacheKey(
+          this.config.model,
+          revisions,
+          shouldShardPromptCacheKey(capabilities.promptCache, options)
+            ? capabilities.promptCache.keyShards
+            : 1,
+          {
+            routeIdentity,
+            ...(options?.promptCacheShardSeed
+              ? { conversationShardSeed: options.promptCacheShardSeed }
+              : {}),
+          },
+        );
+      }
+      if (
+        capabilities.promptCache.explicitBreakpoints === true &&
+        this.promptCacheBreakpointsEnabled &&
+        applyOpenAIExplicitPromptCacheBreakpoint(requestBody)
+      ) {
+        requestBody.prompt_cache_options = {
+          mode: "explicit",
+          ...(capabilities.promptCache.ttl !== undefined
+            ? { ttl: capabilities.promptCache.ttl }
+            : {}),
+        };
+      }
+    }
 
     const outputTokenField = capabilities.outputTokenField;
     const alternateField =
@@ -553,4 +738,120 @@ export class OpenAIProvider implements LLMProvider {
     requestBody[outputTokenField] = capabilities.maxOutputTokens;
     return requestBody;
   }
+}
+
+function rejectedPromptCacheFields(
+  status: number,
+  body: string,
+): { readonly key: boolean; readonly breakpoints: boolean } | undefined {
+  if (status !== 400 && status !== 422) return undefined;
+  const key = /prompt[_ -]?cache[_ -]?key/iu.test(body);
+  const breakpoints = /prompt[_ -]?cache[_ -]?(?:options|breakpoint)/iu.test(body);
+  return key || breakpoints ? { key, breakpoints } : undefined;
+}
+
+function shouldShardPromptCacheKey(
+  policy: { readonly keyShards: number },
+  options?: LLMProviderRequestOptions,
+): boolean {
+  return policy.keyShards > 1 && options?.promptCacheShardActive === true;
+}
+
+/** GPT-5.6 Chat Completions breakpoints live on content blocks, not top-level request fields. */
+function applyOpenAIExplicitPromptCacheBreakpoint(body: Record<string, unknown>): boolean {
+  if (!Array.isArray(body["messages"])) return false;
+  const messages = body["messages"].map((message) =>
+    isRecord(message) ? { ...message } : message,
+  );
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (!isRecord(message) || (message["role"] !== "system" && message["role"] !== "developer")) {
+      continue;
+    }
+    const content = message["content"];
+    if (typeof content === "string") {
+      messages[index] = {
+        ...message,
+        content: [
+          {
+            type: "text",
+            text: content,
+            prompt_cache_breakpoint: { mode: "explicit" },
+          },
+        ],
+      };
+      body.messages = messages;
+      return true;
+    }
+    if (!Array.isArray(content)) continue;
+    const blocks = content.map((block) => (isRecord(block) ? { ...block } : block));
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = blocks[blockIndex];
+      if (!isRecord(block) || !isOpenAICacheableContentBlock(block["type"])) continue;
+      blocks[blockIndex] = {
+        ...block,
+        prompt_cache_breakpoint: { mode: "explicit" },
+      };
+      messages[index] = { ...message, content: blocks };
+      body.messages = messages;
+      return true;
+    }
+  }
+  return false;
+}
+
+function isOpenAICacheableContentBlock(value: unknown): boolean {
+  return (
+    value === "text" ||
+    value === "image_url" ||
+    value === "input_audio" ||
+    value === "file" ||
+    value === "refusal"
+  );
+}
+
+function stripPromptCacheRequestFields(
+  body: Readonly<Record<string, unknown>>,
+  fields: { readonly key: boolean; readonly breakpoints: boolean },
+): Record<string, unknown> {
+  const stripped = fields.breakpoints
+    ? stripInjectedPromptCacheBreakpoints(body)
+    : structuredClone(body);
+  if (!isRecord(stripped)) return {};
+  if (fields.key) delete stripped["prompt_cache_key"];
+  if (fields.breakpoints) delete stripped["prompt_cache_options"];
+  return stripped;
+}
+
+function stripInjectedPromptCacheBreakpoints(
+  body: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const stripped: Record<string, unknown> = structuredClone({ ...body });
+  const messages = stripped["messages"];
+  if (!Array.isArray(messages)) return stripped;
+  stripped.messages = messages.map((message) => {
+    if (
+      !isRecord(message) ||
+      (message["role"] !== "system" && message["role"] !== "developer") ||
+      !Array.isArray(message["content"])
+    ) {
+      return message;
+    }
+    return {
+      ...message,
+      content: message["content"].map((block) => {
+        if (!isRecord(block)) return block;
+        const breakpoint = block["prompt_cache_breakpoint"];
+        if (!isRecord(breakpoint) || breakpoint["mode"] !== "explicit") return block;
+        const cleaned = { ...block };
+        delete cleaned["prompt_cache_breakpoint"];
+        return cleaned;
+      }),
+    };
+  });
+  return stripped;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

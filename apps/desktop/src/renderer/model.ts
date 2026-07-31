@@ -195,7 +195,15 @@ export type McpServerDraft = RuntimeMcpServerInput;
 export interface UsageView {
   readonly inputTokens?: number | undefined;
   readonly outputTokens?: number | undefined;
+  /** 从 daemon 的 canonical cacheReadTokens 映射；兼容旧 cachedTokens。 */
+  readonly cacheReadTokens?: number | undefined;
+  readonly cacheWriteTokens?: number | undefined;
+  readonly uncachedInputTokens?: number | undefined;
   readonly cachedTokens?: number | undefined;
+  readonly cacheRequestHitRate?: number | undefined;
+  readonly cachePromptTokenReuseRate?: number | undefined;
+  readonly cacheReadToWriteRatio?: number | undefined;
+  readonly cacheAlerts?: readonly string[] | undefined;
   readonly cost?: number | undefined;
   readonly period?: string | undefined;
 }

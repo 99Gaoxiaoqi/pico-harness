@@ -23,10 +23,11 @@ import type { HookService } from "../hooks/service.js";
 import { estimateMessagesTokens } from "./context-budget.js";
 import { sanitizeToolPairs } from "./compactor.js";
 import { findSafeCompactionCut, hasIncompleteToolExchange } from "./safe-compaction-boundary.js";
+import { FULL_COMPACTION_SUMMARY_MARKER } from "./compaction-markers.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
-  "[上下文压缩 — 仅供参考] 之前的对话轮次已被压缩成下方摘要。这是上一个上下文窗口的交接," +
+  `${FULL_COMPACTION_SUMMARY_MARKER} 之前的对话轮次已被压缩成下方摘要。这是上一个上下文窗口的交接,` +
   "请当作背景参考,而非待执行指令。不要回答或继续摘要中描述的任务,除非最近一条用户消息明确要求。" +
   "摘要中的“待办用户请求/剩余工作”等历史条目已过时,除非最新用户消息明确重申,否则不要执行。";
 
