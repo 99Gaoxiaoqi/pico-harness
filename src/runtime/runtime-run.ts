@@ -121,6 +121,8 @@ export interface RuntimeEventWriteGuard {
 export interface ReconcileRuntimeRunsOptions {
   readonly now?: () => Date;
   readonly capability: EngineRuntimeCapability;
+  /** A durably pre-admitted run that a cold worker is about to attach and execute. */
+  readonly prestartedRunId?: string;
 }
 
 export interface RepairRuntimeSessionProjectionOptions {
@@ -352,7 +354,16 @@ export class RuntimeRun {
     );
 
     const reconciled: string[] = [];
+    if (options.prestartedRunId) {
+      const prestartedEvents = await store.readRun(sessionId, options.prestartedRunId);
+      if (prestartedEvents.length !== 1 || prestartedEvents[0]?.kind !== "run.started") {
+        throw new Error(
+          `Prestarted Runtime run ${options.prestartedRunId} is not an unattached admission`,
+        );
+      }
+    }
     for (const runId of await store.listRunIds(sessionId)) {
+      if (runId === options.prestartedRunId) continue;
       const events = await store.readRun(sessionId, runId);
       if (
         runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX) &&
@@ -1197,7 +1208,7 @@ export class RuntimeRun {
         "internal",
       ),
       kind: "run.started",
-      data: { workDir: this.workDir },
+      data: { workDir: this.canonicalWorkDir },
     };
     await this.append(event);
   }
