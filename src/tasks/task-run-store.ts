@@ -1116,6 +1116,7 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
       if (
         !isTaskRunTerminalStatus(data["status"]) ||
         (data["attemptId"] !== undefined && !isNonEmptyString(data["attemptId"])) ||
+        (data["completionId"] !== undefined && !isNonEmptyString(data["completionId"])) ||
         (data["result"] !== undefined && !isRecord(data["result"])) ||
         (data["error"] !== undefined && typeof data["error"] !== "string")
       ) {
@@ -1127,6 +1128,9 @@ function decodeTaskRunEvent(value: unknown): TaskRunEvent {
         data: {
           status: data["status"],
           ...(typeof data["attemptId"] === "string" ? { attemptId: data["attemptId"] } : {}),
+          ...(typeof data["completionId"] === "string"
+            ? { completionId: data["completionId"] }
+            : {}),
           ...(isRecord(data["result"])
             ? {
                 result: toCanonicalJson(data["result"]) as Readonly<Record<string, unknown>>,
