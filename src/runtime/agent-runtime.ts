@@ -127,7 +127,11 @@ import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
-import { emitRuntimeLifecycleEvent, RuntimeRunExecutor } from "./runtime-run-executor.js";
+import {
+  emitRuntimeLifecycleEvent,
+  RuntimeRunExecutor,
+  type PrestartedRuntimeRun,
+} from "./runtime-run-executor.js";
 import {
   invalidateMemoryReviewRecoverySuccess,
   recoverMemoryReviewJobs,
@@ -167,6 +171,7 @@ export type {
 } from "./runtime-contract.js";
 
 export { loadImage } from "../input/prepare-prompt.js";
+export * from "./agent-recoverable-task-adapter.js";
 
 export type RunAgentEnv = Record<string, string | undefined>;
 export type RunAgentProviderFactory = RuntimeProviderFactory;
@@ -230,6 +235,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   rewindPointSink?: (checkpointId: string) => void;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
   resumeExistingSession?: boolean;
+  /** @internal 恢复 adapter 已在 canonical ledger 发布的唯一 RuntimeRun admission。 */
+  prestartedRun?: PrestartedRuntimeRun;
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
   /** daemon/Cron 注入的系统凭证库读取边界；前台 BYOK 不需要。 */
@@ -281,6 +288,9 @@ export async function executeAgentRuntime(
     PICO_HOME: picoHome,
   });
   const resumeExistingSession = dependencies.resumeExistingSession === true;
+  if (dependencies.prestartedRun && !resumeExistingSession) {
+    throw new Error("prestartedRun requires resumeExistingSession");
+  }
   const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
@@ -1155,6 +1165,7 @@ export async function executeAgentRuntime(
       picoHome,
       prompt,
       resumeExistingSession,
+      ...(dependencies.prestartedRun ? { prestartedRun: dependencies.prestartedRun } : {}),
       traceEnabled,
       options: {
         ...(effectiveOptions.rewindPrompt !== undefined
