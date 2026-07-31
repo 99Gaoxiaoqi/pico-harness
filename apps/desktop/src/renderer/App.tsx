@@ -2437,7 +2437,30 @@ function UsagePage() {
   const metrics = [
     ["输入 tokens", data.usage.inputTokens, TerminalSquare],
     ["输出 tokens", data.usage.outputTokens, Bot],
-    ["缓存 tokens", data.usage.cachedTokens, Layers3],
+    ["缓存读取 tokens", data.usage.cacheReadTokens ?? data.usage.cachedTokens, Layers3],
+    ["缓存写入 tokens", data.usage.cacheWriteTokens, Layers3],
+    ["未缓存输入 tokens", data.usage.uncachedInputTokens, TerminalSquare],
+    [
+      "缓存命中率",
+      data.usage.cacheRequestHitRate === undefined
+        ? undefined
+        : `${(data.usage.cacheRequestHitRate * 100).toFixed(1)}%`,
+      Layers3,
+    ],
+    [
+      "缓存复用率",
+      data.usage.cachePromptTokenReuseRate === undefined
+        ? undefined
+        : `${(data.usage.cachePromptTokenReuseRate * 100).toFixed(1)}%`,
+      Layers3,
+    ],
+    [
+      "缓存读写比",
+      data.usage.cacheReadToWriteRatio === undefined
+        ? undefined
+        : `${data.usage.cacheReadToWriteRatio.toFixed(2)}x`,
+      Layers3,
+    ],
     [
       "估算费用",
       data.usage.cost === undefined ? undefined : `$${data.usage.cost.toFixed(2)}`,
@@ -2450,21 +2473,28 @@ function UsagePage() {
         <div>
           <span className="eyebrow">{data.usage.period || "Runtime 统计"}</span>
           <h2>用量</h2>
-          <p>用同一套口径查看模型调用、缓存与费用估算。</p>
+          <p>总用量可含历史 baseline；缓存读写、命中与复用指标仅使用逐调用记录。</p>
         </div>
       </section>
       {data.notices.usage ? (
         <CapabilityUnavailable title="用量暂不可用" detail={data.notices.usage} />
       ) : (
-        <div className="usage-grid">
-          {metrics.map(([label, value, Icon]) => (
-            <article className="usage-card" key={label}>
-              <Icon aria-hidden="true" />
-              <span>{label}</span>
-              <strong>{typeof value === "number" ? formatCompact(value) : (value ?? "—")}</strong>
-            </article>
+        <>
+          <div className="usage-grid">
+            {metrics.map(([label, value, Icon]) => (
+              <article className="usage-card" key={label}>
+                <Icon aria-hidden="true" />
+                <span>{label}</span>
+                <strong>{typeof value === "number" ? formatCompact(value) : (value ?? "—")}</strong>
+              </article>
+            ))}
+          </div>
+          {data.usage.cacheAlerts?.map((alert) => (
+            <InlineNotice key={alert} tone="warning">
+              {alert}
+            </InlineNotice>
           ))}
-        </div>
+        </>
       )}
       <section className="panel">
         <PanelHeader title="数据边界" detail="费用仅为 Runtime 按 Provider 返回值计算的估算" />

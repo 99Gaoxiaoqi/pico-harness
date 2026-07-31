@@ -104,6 +104,10 @@ function numberValue(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function optionalNumberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function booleanValue(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -712,15 +716,31 @@ function parseChanges(value: unknown): {
   };
 }
 
-function parseUsage(value: unknown): UsageView {
+export function parseUsage(value: unknown): UsageView {
   const result = isRecord(value) ? value : {};
   const usage = isRecord(result.usage) ? result.usage : result;
   const total = isRecord(usage.total) ? usage.total : usage;
+  const cache = isRecord(usage.cache) ? usage.cache : {};
+  // Cache metrics are provider_calls-only. Baselines lack per-call coverage and must not be mixed
+  // into the cache token cards or ratios.
+  const cacheReadTokens = optionalNumberValue(cache.cacheReadTokens ?? cache.cache_read_tokens);
+  const cacheWriteTokens = optionalNumberValue(cache.cacheWriteTokens ?? cache.cache_write_tokens);
+  const cacheAlerts = recordArray(cache.operationalAlerts)
+    .map((alert) => stringValue(alert.message))
+    .filter((message) => message.length > 0);
   return {
-    inputTokens: numberValue(total.inputTokens || total.input_tokens) || undefined,
-    outputTokens: numberValue(total.outputTokens || total.output_tokens) || undefined,
-    cachedTokens: numberValue(total.cachedTokens || total.cached_tokens) || undefined,
-    cost: numberValue(total.cost) || undefined,
+    inputTokens: optionalNumberValue(total.inputTokens ?? total.input_tokens),
+    outputTokens: optionalNumberValue(total.outputTokens ?? total.output_tokens),
+    cacheReadTokens,
+    cacheWriteTokens,
+    uncachedInputTokens: optionalNumberValue(cache.uncachedInputTokens),
+    // cachedTokens is a backwards-compatible view; the canonical daemon field is cacheReadTokens.
+    cachedTokens: cacheReadTokens,
+    cacheRequestHitRate: optionalNumberValue(cache.requestHitRate),
+    cachePromptTokenReuseRate: optionalNumberValue(cache.promptTokenReuseRate),
+    cacheReadToWriteRatio: optionalNumberValue(cache.cacheReadToWriteRatio),
+    ...(cacheAlerts.length > 0 ? { cacheAlerts } : {}),
+    cost: optionalNumberValue(total.cost),
     period: stringValue(usage.period || usage.rangeAccuracy),
   };
 }
@@ -922,7 +942,6 @@ function mergeLoadedData(
   const providerResult = isRecord(results.legacyProviders) ? results.legacyProviders : {};
   const usageResult = isRecord(results.usage) ? results.usage : {};
   const usage = isRecord(usageResult.usage) ? usageResult.usage : {};
-  const usageTotal = isRecord(usage.total) ? usage.total : usage;
   const configResult = isRecord(results.config) ? results.config : {};
   const changeResult = isRecord(results.changes) ? results.changes : {};
   const agentCatalogResult = isRecord(results.agentCatalog) ? results.agentCatalog : {};
@@ -976,13 +995,7 @@ function mergeLoadedData(
       patch: stringValue(item.patch) || undefined,
     })),
     changeFingerprint: stringValue(changeResult.fingerprint) || undefined,
-    usage: {
-      inputTokens: numberValue(usageTotal.inputTokens || usageTotal.input_tokens) || undefined,
-      outputTokens: numberValue(usageTotal.outputTokens || usageTotal.output_tokens) || undefined,
-      cachedTokens: numberValue(usageTotal.cachedTokens || usageTotal.cached_tokens) || undefined,
-      cost: numberValue(usageTotal.cost) || undefined,
-      period: stringValue(usage.period || usage.rangeAccuracy),
-    },
+    usage: parseUsage({ usage }),
     configVersion: numberValue(configResult.version),
   };
 }

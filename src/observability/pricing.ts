@@ -8,6 +8,8 @@ export interface BillingRoute {
   provider: string;
   model: string;
   baseUrl?: string;
+  /** Route capability only; it never changes price calculation. */
+  cacheSupported?: boolean | "unknown";
   billingMode?: BillingMode;
   /** null explicitly disables the built-in model-name price table for a routed model. */
   pricing?: PricingEntry | null;

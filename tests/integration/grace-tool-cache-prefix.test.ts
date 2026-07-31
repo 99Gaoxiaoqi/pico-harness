@@ -236,6 +236,39 @@ test("Claude-compatible routes require an explicit tool_choice:none capability o
   );
 });
 
+test("official OpenAI supports tool_choice none with tools while compatible routes opt in", () => {
+  const official = resolveModelRouteCapabilities(
+    "openai",
+    "gpt-test",
+    { toolCall: true },
+    { baseURL: "https://api.openai.com/v1" },
+  );
+  assert.equal(official.toolChoiceNoneWithTools, true);
+  assert.equal(
+    createRawProvider("openai", {
+      baseURL: "https://api.openai.com/v1",
+      apiKey: "test-key",
+      model: "gpt-test",
+      capabilities: official,
+    }).requestCapabilities?.toolChoiceNoneWithTools,
+    true,
+  );
+
+  const compatible = resolveModelRouteCapabilities("openai", "gpt-test", undefined, {
+    baseURL: "https://openai-compatible.invalid/v1",
+  });
+  assert.equal(compatible.toolChoiceNoneWithTools, "unknown");
+  assert.equal(
+    createRawProvider("openai", {
+      baseURL: "https://openai-compatible.invalid/v1",
+      apiKey: "test-key",
+      model: "gpt-test",
+      capabilities: compatible,
+    }).requestCapabilities?.toolChoiceNoneWithTools,
+    false,
+  );
+});
+
 test("grace keeps the empty-tools fallback for providers without no-tool capability", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-grace-tool-fallback-"));
   context.after(() => rm(root, { recursive: true, force: true }));

@@ -22,7 +22,17 @@ import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
-import { createProvider, createRawProvider, type ProviderKind } from "../provider/factory.js";
+import {
+  createProvider,
+  createRawProvider,
+  type ProviderKind,
+  type ProviderRuntimeDependencies,
+} from "../provider/factory.js";
+import {
+  FileGeminiPromptCacheStore,
+  geminiPromptCacheGateId,
+} from "../provider/gemini-prompt-cache.js";
+import { PromptCachePrewarmCoordinator } from "../provider/prompt-cache-prewarm.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
@@ -603,6 +613,19 @@ export async function executeAgentRuntime(
     if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
+    const providerDependencies: ProviderRuntimeDependencies = {
+      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.control),
+      gemini: {
+        promptCacheStore: FileGeminiPromptCacheStore.shared(
+          resolve(workspaceStatePaths.control, "gemini-prompt-cache.json"),
+        ),
+        // Evaluate every parent/subagent route independently against the native-spike allowlist.
+        enableExplicitPromptCache: ({ baseURL, model }) =>
+          enabledGeminiPromptCacheRoutes(runtimeEnv.PICO_GEMINI_NATIVE_CACHE_ROUTE_IDS).has(
+            geminiPromptCacheGateId(baseURL, model),
+          ),
+      },
+    };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
       const activated = activatePluginProviderCapabilities(
@@ -665,6 +688,7 @@ export async function executeAgentRuntime(
               providerFactory,
               providerDecorator,
               trackerOptions,
+              providerDependencies,
             });
             return {
               provider: runtime.provider,
@@ -685,6 +709,7 @@ export async function executeAgentRuntime(
       ...(dependencies.provider !== undefined ? { provider: dependencies.provider } : {}),
       providerFactory,
       providerDecorator,
+      providerDependencies,
       ...(credentialPool ? { credentialPool } : {}),
     });
     const trackedProvider = providerAssembly.provider;
@@ -696,7 +721,7 @@ export async function executeAgentRuntime(
             const ledger = new RuntimeStore({ workDir, picoHome });
             const billingRoute = billingRouteForProvider(kind, currentConfig);
             const provider = new CostTracker(
-              providerFactory(kind, currentConfig),
+              providerFactory(kind, currentConfig, undefined, providerDependencies),
               billingRoute,
               undefined,
               {
@@ -2040,6 +2065,15 @@ function firstApiKey(value: string | undefined): string | undefined {
     ?.split(",")
     .map((key) => key.trim())
     .find(Boolean);
+}
+
+function enabledGeminiPromptCacheRoutes(value: string | undefined): ReadonlySet<string> {
+  return new Set(
+    (value ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^gemini-cache:[a-f0-9]{64}$/u.test(item)),
+  );
 }
 
 /** @internal Pure runtime-env boundary used by executeAgentRuntime. */

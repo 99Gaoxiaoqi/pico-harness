@@ -15,6 +15,7 @@ import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
 } from "../../src/engine/session-runtime.js";
+import { Session } from "../../src/engine/session.js";
 
 test("Runtime adapters preserve the engine-owned durable Session contracts", () => {
   assert.equal(runtimeSchemaVersion, RUNTIME_EVENT_SCHEMA_VERSION);
@@ -81,4 +82,74 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
       }),
     /session state patch is invalid/u,
   );
+});
+
+test("Session runtime state restores an opaque cache shard seed and drops legacy counters", () => {
+  const shardSeed = "a".repeat(64);
+  assert.deepEqual(
+    normalizeSessionRuntimeStatePatch({
+      promptCache: {
+        stateVersion: 1,
+        shardSeed,
+        routeShardDecisions: { ["c".repeat(64)]: false },
+      },
+    }),
+    {
+      promptCache: {
+        stateVersion: 1,
+        shardSeed,
+        routeShardDecisions: { ["c".repeat(64)]: false },
+      },
+    },
+  );
+  assert.deepEqual(
+    normalizeSessionRuntimeStatePatch({
+      promptCache: {
+        stateVersion: 1,
+        shardSeed,
+        routeCallCounts: { ["b".repeat(64)]: 9 },
+        activeRouteDigests: ["d".repeat(64)],
+      },
+    }),
+    {
+      promptCache: {
+        stateVersion: 1,
+        shardSeed,
+        routeShardDecisions: { ["d".repeat(64)]: true },
+      },
+    },
+  );
+  assert.equal(
+    normalizeSessionRuntimeStatePatch({
+      promptCache: { stateVersion: 1, shardSeed: "raw-session-id" },
+    }),
+    undefined,
+  );
+});
+
+test("Session cache shard identity and first route decision never drift", async () => {
+  const session = new Session("cache-shard-stability", process.cwd(), { persistence: false });
+  const first = session.preparePromptCacheSharding(
+    "secret-free-route-a",
+    [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "first private request" },
+    ],
+    false,
+  );
+  const later = session.preparePromptCacheSharding(
+    "secret-free-route-a",
+    [
+      { role: "system", content: "compacted system" },
+      { role: "user", content: "different private request" },
+    ],
+    true,
+  );
+
+  assert.match(first.shardSeed ?? "", /^[a-f0-9]{64}$/u);
+  assert.equal(later.shardSeed, first.shardSeed);
+  assert.equal(first.active, false);
+  assert.equal(later.active, false);
+  assert.doesNotMatch(first.shardSeed ?? "", /cache-shard-stability|private/u);
+  await session.close();
 });
