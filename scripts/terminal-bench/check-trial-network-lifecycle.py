@@ -849,6 +849,28 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
         }
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
+        production_inspect = subprocess.run(
+            [
+                node,
+                "-e",
+                adapter._VERIFIER_SERVICE_HELPER,
+                adapter._VERIFIER_SERVICE_HELPER_SENTINEL,
+                "inspect",
+                str(manifest_path),
+                str(workspace),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=trusted_host_env,
+        )
+        assert production_inspect.returncode == 0, (
+            production_inspect.stdout,
+            production_inspect.stderr,
+        )
+        assert json.loads(production_inspect.stdout) == manifest
+
         def invoke(
             mode: str = "inspect",
             path: Path = manifest_path,
