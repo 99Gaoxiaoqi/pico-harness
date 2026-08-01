@@ -438,6 +438,19 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
 
 
 async def assert_runtime_retry_contract(adapter: Any) -> None:
+    required_destination_prompt = adapter.benchmark_instruction(
+        "Install the binary at /usr/local/bin/task-binary.", "/app"
+    )
+    assert required_destination_prompt.startswith(
+        "Install the binary at /usr/local/bin/task-binary.\n\n"
+    )
+    assert "Never replace a destination explicitly required" in (
+        required_destination_prompt
+    )
+    assert "do not write under /tmp or system paths" not in (
+        required_destination_prompt
+    )
+
     class AttemptEnvironment:
         def __init__(self, root: Path, outcomes: list[dict[str, Any]]) -> None:
             self.root = root
@@ -621,8 +634,11 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 )
                 assert request["maxTurns"] == 80
                 assert "inside /app/.pico-tmp or /app/.local" in request["prompt"]
-                assert "Prefer write_file or edit_file" in request["prompt"]
+                assert "prefer write_file or edit_file" in request["prompt"]
                 assert "invoke executables with literal argv" in request["prompt"]
+                assert "Never replace a destination explicitly required" in request[
+                    "prompt"
+                ]
                 assert "pytest itself" in request["prompt"]
                 assert "adapter, not your process, launches" in request["prompt"]
                 assert "stop that exact process" in request["prompt"]
@@ -726,6 +742,36 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             accounting = pico["gatewayAccounting"]
             assert accounting["usageFallback"] is True
             assert accounting["usageSource"] == "signed_gateway_actual"
+
+        with tempfile.TemporaryDirectory(
+            prefix="pico-runtime-zero-cost-timeout-"
+        ) as directory:
+            context, environment = await execute(
+                Path(directory), [zero_usage_timeout], outer_timeout_sec=120
+            )
+            assert environment.launch_count == 1
+            adapter.apply_gateway_accounting(
+                context,
+                {
+                    "schemaVersion": 1,
+                    "status": "reconciled",
+                    "withinBudget": True,
+                    "pricingSha256": "0" * 64,
+                    "receiptSha256": "1" * 64,
+                    "actual": {
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "costMicroCNY": 0,
+                        "costCNY": 0,
+                    },
+                },
+            )
+            pico = context.metadata["pico"]
+            assert (context.n_input_tokens, context.n_output_tokens) == (0, 0)
+            assert pico["signedGatewayUsageRequired"] is False
+            accounting = pico["gatewayAccounting"]
+            assert accounting["usageFallback"] is False
+            assert accounting["usageSource"] == "runtime"
     finally:
         adapter.docker_exec_secret_stdin = original_launcher
 

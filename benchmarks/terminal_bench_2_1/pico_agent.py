@@ -987,9 +987,12 @@ def apply_gateway_accounting(
         and runtime_reported_cost == 0
         and actual["inputTokens"] + actual["outputTokens"] > 0
     )
-    signed_gateway_usage_required = (
+    signed_gateway_usage_eligible = (
         pico.get("signedGatewayUsageRequired") is True
         or terminal_zero_usage_fallback
+    )
+    signed_gateway_usage_required = (
+        signed_gateway_usage_eligible and not runtime_usage_matches
     )
     use_signed_gateway_actual = (
         signed_gateway_usage_required
@@ -3287,10 +3290,12 @@ def benchmark_instruction(instruction: str, workspace: str) -> str:
     return (
         f"{instruction}\n\n"
         "[Terminal-Bench adapter note]\n"
-        "Before the first tool call, keep temporary, build, and install artifacts "
-        f"inside {workspace}/.pico-tmp or {workspace}/.local. Prefer write_file or "
-        "edit_file over shell redirection, invoke executables with literal argv, "
-        "and do not source/eval commands or write under /tmp or system paths. "
+        "When the task leaves locations and mechanisms open, keep temporary, "
+        f"build, and install artifacts inside {workspace}/.pico-tmp or "
+        f"{workspace}/.local, prefer write_file or edit_file over shell "
+        "redirection, invoke executables with literal argv, and do not source/eval "
+        "commands. Never replace a destination explicitly required by the task; "
+        "follow that requirement only through operations allowed by the tool policy. "
         "Run pytest test files with pytest itself before finishing; do not execute "
         "them as plain Python scripts. If the verifier needs a persistent service "
         f"on port 8080, write {manifest_path} as strict JSON with exactly "
