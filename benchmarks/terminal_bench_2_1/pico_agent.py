@@ -50,6 +50,7 @@ _PUBLIC_EGRESS_PROXY_POLICY_VERSION = 1
 _PUBLIC_EGRESS_MAX_CONNECTIONS = 32
 _PUBLIC_EGRESS_MAX_REQUESTS = 4_096
 _PUBLIC_EGRESS_MAX_TOTAL_BYTES = 1_073_741_824
+_PUBLIC_EGRESS_MAX_CONFIGURED_TOTAL_BYTES = 2_147_483_648
 _PUBLIC_EGRESS_NO_PROXY = "pico-gateway,main,localhost,127.0.0.1,::1"
 _AGENT_CONTROLLED_PROXY_GATE_ENV = "PICO_TB_AGENT_CONTROLLED_PROXY"
 _AGENT_CONTROLLED_PROXY_GATE_ENABLED = "terminal-bench-agent-v1"
@@ -474,6 +475,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
         bash_timeout_ms: int = 180_000,
         max_turns: int = 50,
         runtime_retry_count: int = 1,
+        public_egress_max_total_bytes: int = _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
         shutdown_grace_ms: int = 30_000,
         result_flush_margin_ms: int = 5_000,
         *args: Any,
@@ -504,6 +506,12 @@ class PicoInstalledAgent(BaseInstalledAgent):
         self._max_turns = require_bounded_int(max_turns, "max_turns", 1, 200)
         self._runtime_retry_count = require_bounded_int(
             runtime_retry_count, "runtime_retry_count", 0, 1
+        )
+        self._public_egress_max_total_bytes = require_bounded_int(
+            public_egress_max_total_bytes,
+            "public_egress_max_total_bytes",
+            _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
+            _PUBLIC_EGRESS_MAX_CONFIGURED_TOTAL_BYTES,
         )
         self._shutdown_grace_ms = require_positive_int(
             shutdown_grace_ms, "shutdown_grace_ms"
@@ -637,6 +645,7 @@ rm -f {remote_archive}
                 context_id=context_id,
                 ttl_sec=outer_timeout_sec,
                 receipt_path=self.logs_dir / "public-egress-agent-receipt.json",
+                max_total_bytes=self._public_egress_max_total_bytes,
             )
             gateway = ProviderGateway(
                 protocol=route_config["provider"]["protocol"],
@@ -1277,6 +1286,7 @@ def create_public_egress_proxy(
     *,
     token: str,
     ttl_sec: float,
+    max_total_bytes: int = _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
 ) -> Any:
     from benchmarks.terminal_bench_2_1.public_egress import PublicEgressProxy
 
@@ -1285,7 +1295,12 @@ def create_public_egress_proxy(
         ttl_sec=ttl_sec,
         max_connections=_PUBLIC_EGRESS_MAX_CONNECTIONS,
         max_requests=_PUBLIC_EGRESS_MAX_REQUESTS,
-        max_total_bytes=_PUBLIC_EGRESS_MAX_TOTAL_BYTES,
+        max_total_bytes=require_bounded_int(
+            max_total_bytes,
+            "public_egress_max_total_bytes",
+            _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
+            _PUBLIC_EGRESS_MAX_CONFIGURED_TOTAL_BYTES,
+        ),
     )
 
 
@@ -1298,12 +1313,19 @@ class PublicEgressAccess:
         context_id: str,
         ttl_sec: float,
         receipt_path: Path,
+        max_total_bytes: int = _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
     ):
         self._run_id = run_id
         self._network_name = network_name
         self._context_digest = hashlib.sha256(context_id.encode()).hexdigest()[:20]
         self._ttl_sec = ttl_sec
         self._receipt_path = receipt_path
+        self._max_total_bytes = require_bounded_int(
+            max_total_bytes,
+            "public_egress_max_total_bytes",
+            _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
+            _PUBLIC_EGRESS_MAX_CONFIGURED_TOTAL_BYTES,
+        )
         self._relay_name = f"pico-tb-egress-{self._context_digest}"
         # This random per-trial credential is only accepted by the bounded public
         # proxy for this trial and expires with the trial TTL.
@@ -1315,6 +1337,10 @@ class PublicEgressAccess:
     @property
     def relay_name(self) -> str:
         return self._relay_name
+
+    @property
+    def max_total_bytes(self) -> int:
+        return self._max_total_bytes
 
     @property
     def scrub_secret(self) -> str:
@@ -1342,6 +1368,7 @@ class PublicEgressAccess:
         self._proxy = create_public_egress_proxy(
             token=self._token,
             ttl_sec=self._ttl_sec,
+            max_total_bytes=self._max_total_bytes,
         )
         try:
             host_port = self._proxy.start()
@@ -1423,6 +1450,7 @@ def public_egress_access_for_task(
     context_id: str,
     ttl_sec: float,
     receipt_path: Path,
+    max_total_bytes: int = _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
 ) -> PublicEgressAccess | None:
     if not task_allows_internet(environment):
         return None
@@ -1432,6 +1460,7 @@ def public_egress_access_for_task(
         context_id=context_id,
         ttl_sec=ttl_sec,
         receipt_path=receipt_path,
+        max_total_bytes=max_total_bytes,
     )
 
 
@@ -2800,6 +2829,7 @@ async def cleanup_trial_resources(
         context_id=f"{context_id}-verifier",
         ttl_sec=verifier_timeout_sec,
         receipt_path=verifier_receipt_path,
+        max_total_bytes=public_egress.max_total_bytes,
     )
     try:
         install_verifier_egress_lifecycle(

@@ -11,6 +11,7 @@ import * as localDataset from "../../scripts/terminal-bench/local-dataset.mjs";
 import * as publication from "../../scripts/terminal-bench/publication.mjs";
 
 const {
+  benchmarkPublicEgressMaxTotalBytes,
   buildEgressPolicyManifest,
   parseTaskAllowInternet,
   publicEgressDnsPolicy,
@@ -463,6 +464,39 @@ test("Terminal-Bench serializes an exact, versioned public egress manifest", () 
       { taskName: "terminal-bench/offline", allowInternet: false },
     ],
   });
+  assert.equal(publicEgressLimits.maxTotalBytes, 1_073_741_824);
+  assert.equal(benchmarkPublicEgressMaxTotalBytes, 2_147_483_648);
+
+  const benchmarkManifest = buildEgressPolicyManifest(
+    tasks,
+    {
+      "terminal-bench/online": { allowInternet: true },
+      "terminal-bench/offline": { allowInternet: false },
+    },
+    { maxTotalBytes: benchmarkPublicEgressMaxTotalBytes },
+  );
+  assert.equal(benchmarkManifest.limits.maxTotalBytes, 2_147_483_648);
+  for (const invalidOverrides of [
+    null,
+    {},
+    { maxTotalBytes: 1_073_741_823 },
+    { maxTotalBytes: 2_147_483_649 },
+    { maxTotalBytes: true },
+    { maxTotalBytes: 2_147_483_648, maxRequests: 4_096 },
+  ]) {
+    assert.throws(
+      () =>
+        buildEgressPolicyManifest(
+          tasks,
+          {
+            "terminal-bench/online": { allowInternet: true },
+            "terminal-bench/offline": { allowInternet: false },
+          },
+          invalidOverrides,
+        ),
+      /egress .* override/u,
+    );
+  }
   assert.throws(
     () =>
       buildEgressPolicyManifest(tasks, {

@@ -969,8 +969,12 @@ async def run_verifier_smoke(adapter: Any) -> None:
             timeout=timeout_sec,
         )
 
-    def create_proxy(*, token: str, ttl_sec: float) -> Any:
-        proxy = original_create_proxy(token=token, ttl_sec=ttl_sec)
+    def create_proxy(*, token: str, ttl_sec: float, max_total_bytes: int) -> Any:
+        proxy = original_create_proxy(
+            token=token,
+            ttl_sec=ttl_sec,
+            max_total_bytes=max_total_bytes,
+        )
         proxy._resolver = resolver
         proxy._connector = connector
         created_proxies.append(proxy)

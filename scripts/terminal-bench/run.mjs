@@ -20,7 +20,7 @@ import { acquireBenchmarkLock } from "./benchmark-lock.mjs";
 import { buildPicoBundle } from "./build-bundle.mjs";
 import { runCaptured } from "./captured-process.mjs";
 import { captureDockerResourceSnapshot, cleanupDockerResources } from "./docker-resources.mjs";
-import { buildEgressPolicyManifest } from "./egress-policy.mjs";
+import { benchmarkPublicEgressMaxTotalBytes, buildEgressPolicyManifest } from "./egress-policy.mjs";
 import { verifyApprovedHarborWheelhouse } from "./harbor-wheelhouse.mjs";
 import {
   assertHarborTrialRetriesDisabled,
@@ -178,7 +178,9 @@ const localDataset = await prepareLocalDataset({
   runRoot,
   runId,
 });
-const publicEgressPolicy = buildEgressPolicyManifest(tasks, localDataset.egressPolicyByTask);
+const publicEgressPolicy = buildEgressPolicyManifest(tasks, localDataset.egressPolicyByTask, {
+  maxTotalBytes: benchmarkPublicEgressMaxTotalBytes,
+});
 await run(
   "python3",
   ["-m", "benchmarks.terminal_bench_2_1.task_timeout_preflight", "--dataset", localDataset.path],
@@ -439,6 +441,8 @@ const harborArgs = [
   `max_turns=${benchmarkMaxTurns}`,
   "--ak",
   `runtime_retry_count=${benchmarkRuntimeRetryCount}`,
+  "--ak",
+  `public_egress_max_total_bytes=${publicEgressPolicy.limits.maxTotalBytes}`,
   "--n-attempts",
   String(options.attempts),
   "--n-concurrent",
