@@ -21,6 +21,30 @@ const config = (): ProviderConfig => ({
   }),
 });
 
+const adaptiveConfig = (): ProviderConfig => ({
+  ...config(),
+  thinkingEffort: "adaptive",
+  capabilities: resolveModelRouteCapabilities("claude", "claude-sonnet-4-6", {
+    cache: true,
+    promptCache: { mode: "explicit", ttl: "5m", prewarm: true },
+    reasoning: {
+      enabled: true,
+      levels: ["adaptive"],
+      defaultLevel: "adaptive",
+      providerOptionsByLevel: {
+        adaptive: {
+          claude: {
+            set: [
+              { path: ["thinking", "type"], value: "adaptive" },
+              { path: ["output_config", "effort"], value: "high" },
+            ],
+          },
+        },
+      },
+    },
+  }),
+});
+
 const messages = (question: string): Message[] => [
   { role: "system", content: "stable system" },
   { role: "user", content: question },
@@ -129,7 +153,7 @@ test("Claude prewarm dedupe expires with the configured cache TTL", async () => 
   assert.equal(prewarmAttempts, 2);
 });
 
-test("Claude prewarm is skipped when thinking is enabled", async () => {
+test("Claude prewarm keeps compatible adaptive thinking and effort fields", async () => {
   const calls: Array<LLMProviderRequestOptions | undefined> = [];
   const provider: LLMProvider = {
     modelName: "claude-sonnet-4-6",
@@ -138,18 +162,18 @@ test("Claude prewarm is skipped when thinking is enabled", async () => {
       return { role: "assistant", content: "ok" };
     },
   };
-  const thinkingConfig = { ...config(), thinkingEffort: "high" };
   const wrapped = withPromptCachePrewarm(
     "claude",
     provider,
-    thinkingConfig,
+    adaptiveConfig(),
     new PromptCachePrewarmCoordinator(),
   );
 
-  assert.equal(wrapped, provider);
+  assert.notEqual(wrapped, provider);
   await wrapped.generate(messages("one"), tools());
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.promptCachePrewarm, undefined);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.promptCachePrewarm, true);
+  assert.equal(calls[1]?.promptCachePrewarm, undefined);
 });
 
 test("Claude compatible routes with unknown cache support are not prewarmed", async () => {
@@ -181,9 +205,13 @@ test("Claude compatible routes with unknown cache support are not prewarmed", as
 });
 
 test("Claude prewarm is skipped for an effective structured reasoning default", async () => {
+  let calls = 0;
   const provider: LLMProvider = {
     modelName: "claude-structured-reasoning",
-    generate: async () => ({ role: "assistant", content: "ok" }),
+    generate: async () => {
+      calls++;
+      return { role: "assistant", content: "ok" };
+    },
   };
   const structuredConfig: ProviderConfig = {
     ...config(),
@@ -210,15 +238,15 @@ test("Claude prewarm is skipped for an effective structured reasoning default", 
     }),
   };
 
-  assert.equal(
-    withPromptCachePrewarm(
-      "claude",
-      provider,
-      structuredConfig,
-      new PromptCachePrewarmCoordinator(),
-    ),
+  const wrapped = withPromptCachePrewarm(
+    "claude",
     provider,
+    structuredConfig,
+    new PromptCachePrewarmCoordinator(),
   );
+  assert.equal(wrapped, provider);
+  await wrapped.generate(messages("one"), tools());
+  assert.equal(calls, 1);
 });
 
 test("Claude prewarm coordinator keeps one dedupe scope across runtime executions", () => {
@@ -247,7 +275,7 @@ test("Claude prewarm wire body uses max_tokens zero and keeps cache breakpoints"
       },
     });
   };
-  const provider = new ClaudeProvider(config());
+  const provider = new ClaudeProvider(adaptiveConfig());
   const response = await provider.generate(
     [
       { role: "system", content: "stable system" },
@@ -258,6 +286,8 @@ test("Claude prewarm wire body uses max_tokens zero and keeps cache breakpoints"
   );
 
   assert.equal(captured["max_tokens"], 0);
+  assert.deepEqual(captured["thinking"], { type: "adaptive" });
+  assert.deepEqual(captured["output_config"], { effort: "high" });
   assert.deepEqual(captured["tool_choice"], { type: "none" });
   assert.match(JSON.stringify(captured["system"]), /cache_control/u);
   assert.match(JSON.stringify(captured["tools"]), /cache_control/u);
