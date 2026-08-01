@@ -72,6 +72,10 @@ _PUBLIC_EGRESS_RELAY_SCRIPT = (
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 _MAX_BASH_TIMEOUT_MS = 900_000
 _MIN_RUNTIME_RETRY_EXECUTION_MS = 30_000
+_MIN_ADAPTER_CLEANUP_MARGIN_MS = 60_000
+_MAX_ADAPTER_CLEANUP_MARGIN_MS = 300_000
+_HEADLESS_ADAPTER_MARGIN_MS = 5_000
+_VERIFIER_SERVICE_MARGIN_MS = 15_000
 _VERIFIER_SERVICE_MANIFEST_BASENAME = ".pico-verifier-service.json"
 _VERIFIER_SERVICE_PORT = 8_080
 _VERIFIER_SERVICE_HELPER_SENTINEL = "pico-verifier-helper"
@@ -432,6 +436,11 @@ class TrialNetworks(NamedTuple):
     gateway: str
 
 
+class AgentRunDeadlines(NamedTuple):
+    headless: float
+    cleanup: float
+
+
 class VerifierServiceManifest(NamedTuple):
     argv: tuple[str, ...]
     cwd: str
@@ -478,6 +487,7 @@ class PicoInstalledAgent(BaseInstalledAgent):
         public_egress_max_total_bytes: int = _PUBLIC_EGRESS_MAX_TOTAL_BYTES,
         shutdown_grace_ms: int = 30_000,
         result_flush_margin_ms: int = 5_000,
+        adapter_cleanup_margin_ms: int = 60_000,
         *args: Any,
         **kwargs: Any,
     ):
@@ -518,6 +528,12 @@ class PicoInstalledAgent(BaseInstalledAgent):
         )
         self._result_flush_margin_ms = require_positive_int(
             result_flush_margin_ms, "result_flush_margin_ms"
+        )
+        self._adapter_cleanup_margin_ms = require_bounded_int(
+            adapter_cleanup_margin_ms,
+            "adapter_cleanup_margin_ms",
+            _MIN_ADAPTER_CLEANUP_MARGIN_MS,
+            _MAX_ADAPTER_CLEANUP_MARGIN_MS,
         )
         self._trial_networks: TrialNetworks | None = None
         self._route_config = load_route_config(self._route_config_path)
@@ -621,6 +637,11 @@ rm -f {remote_archive}
             outer_timeout_sec = task_agent_timeout(environment)
             verifier_timeout_sec = task_verifier_timeout(environment)
             outer_deadline = started_at + outer_timeout_sec
+            run_deadlines = reserve_agent_run_deadlines(
+                outer_deadline=outer_deadline,
+                now=started_at,
+                adapter_cleanup_margin_ms=self._adapter_cleanup_margin_ms,
+            )
             await assert_running_container_policy(
                 environment,
                 self.logs_dir,
@@ -679,6 +700,7 @@ rm -f {remote_archive}
                 context_id=context_id,
                 outer_timeout_sec=outer_timeout_sec,
                 outer_deadline=outer_deadline,
+                headless_deadline=run_deadlines.headless,
                 loop=loop,
                 public_proxy_env=(
                     public_egress.container_env
@@ -689,7 +711,7 @@ rm -f {remote_archive}
             await launch_verifier_service_if_requested(
                 environment,
                 workspace=workspace,
-                outer_deadline=outer_deadline,
+                outer_deadline=run_deadlines.cleanup,
                 loop=loop,
             )
         finally:
@@ -729,6 +751,7 @@ rm -f {remote_archive}
         context_id: str,
         outer_timeout_sec: float,
         outer_deadline: float,
+        headless_deadline: float,
         loop: asyncio.AbstractEventLoop,
         public_proxy_env: dict[str, str],
     ) -> None:
@@ -750,7 +773,7 @@ rm -f {remote_archive}
         }
         write_private_json(self.logs_dir / "bootstrap-request.json", bootstrap_request)
 
-        bootstrap_budget = remaining_budget(outer_deadline, loop.time())
+        bootstrap_budget = remaining_budget(headless_deadline, loop.time())
         bootstrap = await environment.exec(
             command=(
                 "set -eu; umask 077; "
@@ -776,13 +799,12 @@ rm -f {remote_archive}
         final_bash_timeout_ms = 0
         for attempt in range(1, self._runtime_retry_count + 2):
             remaining_sec = remaining_budget(outer_deadline, loop.time())
-            inner_timeout_ms = int(
-                remaining_sec * 1000
-                - self._shutdown_grace_ms
-                - self._result_flush_margin_ms
+            inner_timeout_ms = headless_execution_timeout_ms(
+                remaining_sec=remaining_sec,
+                shutdown_grace_ms=self._shutdown_grace_ms,
+                result_flush_margin_ms=self._result_flush_margin_ms,
+                adapter_cleanup_margin_ms=self._adapter_cleanup_margin_ms,
             )
-            if inner_timeout_ms < 1_000:
-                raise RuntimeError("outer_timeout_budget_violation")
             bash_timeout_ms = min(self._bash_timeout_ms, inner_timeout_ms)
             attempt_request_id = bounded_attempt_identity(request_id, attempt)
             attempt_session_id = bounded_attempt_identity(session_id, attempt)
@@ -829,7 +851,7 @@ rm -f {remote_archive}
                 request_id=attempt_request_id,
                 attempt=attempt,
                 attempt_dir=attempt_dir,
-                outer_deadline=outer_deadline,
+                outer_deadline=headless_deadline,
                 loop=loop,
                 public_proxy_env=public_proxy_env,
             )
@@ -860,6 +882,7 @@ rm -f {remote_archive}
                 remaining_sec=max(0.0, outer_deadline - loop.time()),
                 shutdown_grace_ms=self._shutdown_grace_ms,
                 result_flush_margin_ms=self._result_flush_margin_ms,
+                adapter_cleanup_margin_ms=self._adapter_cleanup_margin_ms,
             ):
                 break
 
@@ -891,6 +914,9 @@ rm -f {remote_archive}
                 "innerTimeoutMs": final_inner_timeout_ms,
                 "bashTimeoutMs": final_bash_timeout_ms,
                 "outerTimeoutSec": outer_timeout_sec,
+                "adapterCleanupMarginMs": self._adapter_cleanup_margin_ms,
+                "headlessAdapterMarginMs": _HEADLESS_ADAPTER_MARGIN_MS,
+                "verifierServiceMarginMs": _VERIFIER_SERVICE_MARGIN_MS,
                 "attempts": attempts,
                 "retryCount": retry_count,
                 "signedGatewayUsageRequired": (
@@ -922,7 +948,8 @@ rm -f {remote_archive}
         public_proxy_env: dict[str, str],
     ) -> tuple[dict[str, Any], int]:
         cleared_trace = await environment.exec(
-            command=f"rm -f -- {shlex.quote(self._TRACE_EXPORT.as_posix())}"
+            command=f"rm -f -- {shlex.quote(self._TRACE_EXPORT.as_posix())}",
+            timeout_sec=remaining_budget(outer_deadline, loop.time()),
         )
         if cleared_trace.return_code != 0:
             raise RuntimeError("Pico trace reset failed")
@@ -933,8 +960,14 @@ rm -f {remote_archive}
             secret_env_names={self._SECRET_ENV},
             container_env=public_proxy_env,
         )
-        raw_result = await environment.exec(command=f"cat {self._PICO_RESULT.as_posix()}")
-        raw_exit = await environment.exec(command=f"cat {self._EXIT_CODE.as_posix()}")
+        raw_result = await environment.exec(
+            command=f"cat {self._PICO_RESULT.as_posix()}",
+            timeout_sec=remaining_budget(outer_deadline, loop.time()),
+        )
+        raw_exit = await environment.exec(
+            command=f"cat {self._EXIT_CODE.as_posix()}",
+            timeout_sec=remaining_budget(outer_deadline, loop.time()),
+        )
         if raw_result.return_code != 0 or not raw_result.stdout:
             raise RuntimeError("Pico headless result is missing")
         result = parse_single_json_line(raw_result.stdout)
@@ -959,7 +992,8 @@ rm -f {remote_archive}
                     f"{shlex.quote(remote_attempt_trace.as_posix())} && "
                     f"cp -- {shlex.quote(remote_attempt_trace.as_posix())} "
                     f"{self._TRACE_EXPORT.as_posix()}"
-                )
+                ),
+                timeout_sec=remaining_budget(outer_deadline, loop.time()),
             )
             if copied.return_code != 0:
                 raise RuntimeError("Pico trace export failed")
@@ -3303,6 +3337,23 @@ def remaining_budget(deadline: float, now: float) -> float:
     return remaining
 
 
+def reserve_agent_run_deadlines(
+    *,
+    outer_deadline: float,
+    now: float,
+    adapter_cleanup_margin_ms: int,
+) -> AgentRunDeadlines:
+    cleanup_deadline = outer_deadline - adapter_cleanup_margin_ms / 1_000
+    headless_deadline = cleanup_deadline - _VERIFIER_SERVICE_MARGIN_MS / 1_000
+    if (
+        not math.isfinite(headless_deadline)
+        or not math.isfinite(now)
+        or headless_deadline <= now
+    ):
+        raise RuntimeError("outer_timeout_budget_violation")
+    return AgentRunDeadlines(headless=headless_deadline, cleanup=cleanup_deadline)
+
+
 def bounded_attempt_identity(base: str, attempt: int) -> str:
     if attempt < 1:
         raise ValueError("attempt must be positive")
@@ -3371,11 +3422,15 @@ def should_retry_runtime_failure(
     remaining_sec: float,
     shutdown_grace_ms: int,
     result_flush_margin_ms: int,
+    adapter_cleanup_margin_ms: int,
 ) -> bool:
     error = result.get("error")
     required_remaining_ms = (
         shutdown_grace_ms
         + result_flush_margin_ms
+        + _HEADLESS_ADAPTER_MARGIN_MS
+        + _VERIFIER_SERVICE_MARGIN_MS
+        + adapter_cleanup_margin_ms
         + _MIN_RUNTIME_RETRY_EXECUTION_MS
     )
     return (
@@ -3388,6 +3443,28 @@ def should_retry_runtime_failure(
         and math.isfinite(remaining_sec)
         and remaining_sec * 1_000 >= required_remaining_ms
     )
+
+
+def headless_execution_timeout_ms(
+    *,
+    remaining_sec: float,
+    shutdown_grace_ms: int,
+    result_flush_margin_ms: int,
+    adapter_cleanup_margin_ms: int,
+) -> int:
+    if not math.isfinite(remaining_sec):
+        raise RuntimeError("outer_timeout_budget_violation")
+    timeout_ms = int(
+        remaining_sec * 1_000
+        - shutdown_grace_ms
+        - result_flush_margin_ms
+        - _HEADLESS_ADAPTER_MARGIN_MS
+        - _VERIFIER_SERVICE_MARGIN_MS
+        - adapter_cleanup_margin_ms
+    )
+    if timeout_ms < 1_000:
+        raise RuntimeError("outer_timeout_budget_violation")
+    return timeout_ms
 
 
 def safe_trial_key(value: str) -> str:

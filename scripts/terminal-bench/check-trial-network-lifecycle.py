@@ -201,8 +201,10 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
         agent.logs_dir = root / name
         agent._shutdown_grace_ms = 30_000
         agent._result_flush_margin_ms = 5_000
+        agent._adapter_cleanup_margin_ms = 60_000
         agent._bash_timeout_ms = 180_000
         loop = asyncio.get_running_loop()
+        outer_deadline = loop.time() + 120
         try:
             await agent._run_with_gateway(
                 instruction="bootstrap output projection",
@@ -219,7 +221,8 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
                 session_id="bootstrap-output-session",
                 context_id="bootstrap-output-context",
                 outer_timeout_sec=120,
-                outer_deadline=loop.time() + 120,
+                outer_deadline=outer_deadline,
+                headless_deadline=outer_deadline - 75,
                 loop=loop,
                 public_proxy_env={},
             )
@@ -438,6 +441,88 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
 
 
 async def assert_runtime_retry_contract(adapter: Any) -> None:
+    deadlines = adapter.reserve_agent_run_deadlines(
+        outer_deadline=2_400,
+        now=0,
+        adapter_cleanup_margin_ms=60_000,
+    )
+    assert deadlines.headless == 2_325
+    assert deadlines.cleanup == 2_340
+    try:
+        adapter.reserve_agent_run_deadlines(
+            outer_deadline=75,
+            now=0,
+            adapter_cleanup_margin_ms=60_000,
+        )
+    except RuntimeError as error:
+        assert str(error) == "outer_timeout_budget_violation"
+    else:
+        raise AssertionError("reserved phases consumed the complete outer budget")
+
+    full_budget_inner_timeout_ms = adapter.headless_execution_timeout_ms(
+        remaining_sec=2_400,
+        shutdown_grace_ms=30_000,
+        result_flush_margin_ms=5_000,
+        adapter_cleanup_margin_ms=60_000,
+    )
+    assert full_budget_inner_timeout_ms == 2_285_000
+    internal_completion = (
+        full_budget_inner_timeout_ms + 30_000 + 5_000
+    ) / 1_000
+    assert deadlines.headless - internal_completion == 5
+
+    class PhaseLoop:
+        now = deadlines.headless
+
+        def time(self) -> float:
+            return self.now
+
+    phase_loop = PhaseLoop()
+    original_read_manifest = adapter.read_verifier_service_manifest
+
+    async def consume_verifier_margin(
+        _environment: Any,
+        *,
+        workspace: str,
+        timeout_sec: float,
+    ) -> None:
+        assert workspace == "/app"
+        assert timeout_sec == 15
+        phase_loop.now += timeout_sec
+        return None
+
+    adapter.read_verifier_service_manifest = consume_verifier_margin
+    try:
+        assert not await adapter.launch_verifier_service_if_requested(
+            types.SimpleNamespace(),
+            workspace="/app",
+            outer_deadline=deadlines.cleanup,
+            loop=phase_loop,
+        )
+    finally:
+        adapter.read_verifier_service_manifest = original_read_manifest
+    assert phase_loop.now == deadlines.cleanup
+    assert 2_400 - phase_loop.now == 60
+
+    assert adapter.headless_execution_timeout_ms(
+        remaining_sec=116,
+        shutdown_grace_ms=30_000,
+        result_flush_margin_ms=5_000,
+        adapter_cleanup_margin_ms=60_000,
+    ) == 1_000
+    for insufficient_budget in (115.999, float("nan"), float("inf")):
+        try:
+            adapter.headless_execution_timeout_ms(
+                remaining_sec=insufficient_budget,
+                shutdown_grace_ms=30_000,
+                result_flush_margin_ms=5_000,
+                adapter_cleanup_margin_ms=60_000,
+            )
+        except RuntimeError as error:
+            assert str(error) == "outer_timeout_budget_violation"
+        else:
+            raise AssertionError("insufficient outer timeout budget was accepted")
+
     required_destination_prompt = adapter.benchmark_instruction(
         "Install the binary at /usr/local/bin/task-binary.", "/app"
     )
@@ -515,6 +600,24 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         "usage": {"promptTokens": 0, "completionTokens": 0, "costCNY": 0},
         "error": {"code": "RUNTIME_FAILED", "summary": "synthetic"},
     }
+    assert adapter.should_retry_runtime_failure(
+        {**runtime_failed, "terminationConfirmed": True},
+        retries_used=0,
+        retry_limit=1,
+        remaining_sec=145,
+        shutdown_grace_ms=30_000,
+        result_flush_margin_ms=5_000,
+        adapter_cleanup_margin_ms=60_000,
+    )
+    assert not adapter.should_retry_runtime_failure(
+        {**runtime_failed, "terminationConfirmed": True},
+        retries_used=0,
+        retry_limit=1,
+        remaining_sec=144.999,
+        shutdown_grace_ms=30_000,
+        result_flush_margin_ms=5_000,
+        adapter_cleanup_margin_ms=60_000,
+    )
     completed = {
         "status": "completed",
         "exitCode": 0,
@@ -539,6 +642,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             remaining_sec=120,
             shutdown_grace_ms=30_000,
             result_flush_margin_ms=5_000,
+            adapter_cleanup_margin_ms=60_000,
         )
     assert not adapter.should_retry_runtime_failure(
         {**runtime_failed, "terminationConfirmed": False},
@@ -547,6 +651,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         remaining_sec=120,
         shutdown_grace_ms=30_000,
         result_flush_margin_ms=5_000,
+        adapter_cleanup_margin_ms=60_000,
     )
     assert not adapter.should_retry_runtime_failure(
         {**runtime_failed, "policyDenials": {"total": 1}},
@@ -555,6 +660,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         remaining_sec=120,
         shutdown_grace_ms=30_000,
         result_flush_margin_ms=5_000,
+        adapter_cleanup_margin_ms=60_000,
     )
 
     async def execute(
@@ -568,12 +674,14 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         agent.logs_dir = root
         agent._shutdown_grace_ms = 30_000
         agent._result_flush_margin_ms = 5_000
+        agent._adapter_cleanup_margin_ms = 60_000
         agent._bash_timeout_ms = 900_000
         agent._max_turns = 80
         agent._runtime_retry_count = 1
         agent._pico_commit = "a" * 40
         context = types.SimpleNamespace(n_input_tokens=0, n_output_tokens=0, metadata={})
         loop = asyncio.get_running_loop()
+        outer_deadline = loop.time() + outer_timeout_sec
         await agent._run_with_gateway(
             instruction="retry contract",
             environment=environment,
@@ -589,7 +697,8 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             session_id="retry-session",
             context_id="retry-context",
             outer_timeout_sec=outer_timeout_sec,
-            outer_deadline=loop.time() + outer_timeout_sec,
+            outer_deadline=outer_deadline,
+            headless_deadline=outer_deadline - 75,
             loop=loop,
             public_proxy_env={},
         )
@@ -612,7 +721,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         with tempfile.TemporaryDirectory(prefix="pico-runtime-retry-") as directory:
             root = Path(directory)
             context, environment = await execute(
-                root, [runtime_failed, completed], outer_timeout_sec=120
+                root, [runtime_failed, completed], outer_timeout_sec=180
             )
             assert environment.launch_count == 2
             assert environment.trace_clear_count == 2
@@ -630,6 +739,9 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 "durationMs",
             }
             assert pico["status"] == "completed"
+            assert pico["adapterCleanupMarginMs"] == 60_000
+            assert pico["headlessAdapterMarginMs"] == 5_000
+            assert pico["verifierServiceMarginMs"] == 15_000
             assert context.n_input_tokens == 7 and context.n_output_tokens == 5
             for attempt in (1, 2):
                 attempt_dir = root / "attempts" / f"attempt-{attempt}"
@@ -681,18 +793,28 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             context, environment = await execute(
                 Path(directory),
                 [runtime_failed, runtime_failed],
-                outer_timeout_sec=120,
+                outer_timeout_sec=180,
             )
             assert environment.launch_count == 2
             assert context.metadata["pico"]["retryCount"] == 1
 
         with tempfile.TemporaryDirectory(prefix="pico-runtime-budget-") as directory:
             context, environment = await execute(
-                Path(directory), [runtime_failed], outer_timeout_sec=64
+                Path(directory), [runtime_failed], outer_timeout_sec=120
             )
             assert environment.launch_count == 1
             assert context.metadata["pico"]["retryCount"] == 0
             assert context.metadata["pico"]["signedGatewayUsageRequired"] is True
+
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-reject-") as directory:
+            try:
+                await execute(
+                    Path(directory), [completed], outer_timeout_sec=115
+                )
+            except RuntimeError as error:
+                assert str(error) == "outer_timeout_budget_violation"
+            else:
+                raise AssertionError("headless started without cleanup budget")
 
         with tempfile.TemporaryDirectory(prefix="pico-runtime-policy-") as directory:
             policy_failure = {
@@ -2378,6 +2500,23 @@ async def main() -> None:
             raise AssertionError(f"invalid bash timeout was accepted: {invalid!r}")
     assert adapter.require_bounded_int(200, "max_turns", 1, 200) == 200
     assert adapter.require_bounded_int(1, "runtime_retry_count", 0, 1) == 1
+    assert (
+        adapter.require_bounded_int(
+            60_000, "adapter_cleanup_margin_ms", 60_000, 300_000
+        )
+        == 60_000
+    )
+    for invalid in (59_999, 300_001, True, "60000.0"):
+        try:
+            adapter.require_bounded_int(
+                invalid, "adapter_cleanup_margin_ms", 60_000, 300_000
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"invalid adapter cleanup margin was accepted: {invalid!r}"
+            )
 
     environment = FakeEnvironment()
     run_id = "network-lifecycle-test"
