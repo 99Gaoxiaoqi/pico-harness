@@ -74,17 +74,13 @@ test("prompt-cache policies resolve provider defaults and configured behavior", 
       }),
     /requires keyShards greater than 1/u,
   );
-  assert.deepEqual(
-    resolveModelRouteCapabilities("gemini", "gemini-test", {
-      cache: true,
-      promptCache: { mode: "explicit" },
-    }).promptCache,
-    {
-      mode: "explicit",
-      ttl: "3600s",
-      keyShards: 1,
-      prewarm: false,
-    },
+  assert.throws(
+    () =>
+      resolveModelRouteCapabilities("gemini", "gemini-test", {
+        cache: true,
+        promptCache: { mode: "explicit" },
+      }),
+    /Gemini promptCache is not supported/u,
   );
 });
 
@@ -193,4 +189,26 @@ test("project config validates prompt-cache policy against its provider protocol
     loadPicoProjectConfig(root),
     /promptCache\.retention.*requires promptCache\.mode=implicit/u,
   );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: {
+        gemini: {
+          protocol: "gemini",
+          baseURL: "https://generativelanguage.googleapis.com",
+          apiKeyEnv: "GEMINI_API_KEY",
+          models: {
+            "gemini-test": {
+              cache: true,
+              promptCache: { mode: "explicit", ttl: "3600s" },
+            },
+          },
+        },
+      },
+    }),
+    "utf8",
+  );
+  await assert.rejects(loadPicoProjectConfig(root), /promptCache.*is not supported for gemini/u);
 });

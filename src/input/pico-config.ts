@@ -465,6 +465,9 @@ function parseModelCapabilities(
     if (!isRecord(promptCache)) {
       throw configError(configPath, `${field}.promptCache`, "must be an object");
     }
+    if (protocol === "gemini") {
+      throw configError(configPath, `${field}.promptCache`, "is not supported for gemini");
+    }
     const mode = promptCache["mode"];
     if (mode !== "implicit" && mode !== "explicit") {
       throw configError(configPath, `${field}.promptCache.mode`, "must be implicit or explicit");
@@ -581,45 +584,6 @@ function parseModelCapabilities(
           configPath,
           `${field}.promptCache.ttl`,
           "requires explicitBreakpoints=true for openai",
-        );
-      }
-    } else {
-      if (ttl !== undefined && !/^[1-9]\d*s$/u.test(ttl)) {
-        throw configError(
-          configPath,
-          `${field}.promptCache.ttl`,
-          "must be a positive integer number of seconds for gemini",
-        );
-      }
-      if (keyShards !== undefined && keyShards !== 1) {
-        throw configError(configPath, `${field}.promptCache.keyShards`, "must be 1 for gemini");
-      }
-      if (shardThresholdRpm !== undefined) {
-        throw configError(
-          configPath,
-          `${field}.promptCache.shardThresholdRpm`,
-          "is not supported for gemini",
-        );
-      }
-      if (explicitBreakpoints !== undefined) {
-        throw configError(
-          configPath,
-          `${field}.promptCache.explicitBreakpoints`,
-          "is not supported for gemini",
-        );
-      }
-      if (retention !== undefined) {
-        throw configError(
-          configPath,
-          `${field}.promptCache.retention`,
-          "is not supported for gemini",
-        );
-      }
-      if (prewarm === true) {
-        throw configError(
-          configPath,
-          `${field}.promptCache.prewarm`,
-          "is not supported for gemini",
         );
       }
     }

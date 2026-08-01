@@ -21,10 +21,12 @@ const expectedUsage: Usage = {
 
 test("Gemini runtime totals include tool-use prompts and thoughts", async (context) => {
   const originalFetch = globalThis.fetch;
+  const requestBodies: Record<string, unknown>[] = [];
   context.after(() => {
     globalThis.fetch = originalFetch;
   });
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     if (String(input).includes(":streamGenerateContent")) {
       return new Response(
         [
@@ -69,4 +71,9 @@ test("Gemini runtime totals include tool-use prompts and thoughts", async (conte
   );
   assert.deepEqual(deltas, ["OK"]);
   assert.deepEqual(streamResponse.usage, expectedUsage);
+  assert.equal(requestBodies.length, 2);
+  assert.equal(
+    requestBodies.some((body) => Object.hasOwn(body, "cachedContent")),
+    false,
+  );
 });

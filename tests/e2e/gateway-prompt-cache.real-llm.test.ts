@@ -15,11 +15,11 @@ const RUN_GATEWAY_CACHE_E2E = process.env.RUN_GATEWAY_CACHE_E2E === "1";
 const gatewayTest = RUN_GATEWAY_CACHE_E2E ? test : test.skip;
 const PROTOCOL_PROBE_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const models = ["gpt-5.6-terra", "claude-sonnet-4-6", "gemini-2.5-flash"] as const;
+const models = ["gpt-5.6-terra", "claude-sonnet-4-6"] as const;
 const MODEL_SCENARIO_REQUEST_COUNT = 6;
 const MAX_MODEL_SCENARIO_RUNS = 2;
 const EXPLICIT_FIELD_PROBE_COUNT = 2;
-const PROTOCOL_PROBE_COUNT = 3;
+const PROTOCOL_PROBE_COUNT = 2;
 const TIMEOUT_MS =
   REQUEST_TIMEOUT_MS *
     (1 +
@@ -40,8 +40,8 @@ gatewayTest(
       assert.ok(discovered.has(model), `gateway /models missing required model ${model}`);
     }
     const matrix = await protocolMatrix(baseURL, apiKey, suiteSignal);
-    // This suite intentionally uses only the OpenAI-compatible column. Native protocol probes are
-    // reported safely but never treated as Claude/Gemini prompt-cache verification.
+    // This suite intentionally uses only the OpenAI-compatible column. The native Anthropic probe
+    // is reported safely but never treated as Claude prompt-cache verification.
     assert.equal(
       matrix.openaiChat.available,
       true,
@@ -118,7 +118,6 @@ interface ProtocolProbe {
 interface ProtocolMatrix {
   readonly openaiChat: ProtocolProbe;
   readonly anthropicMessages: ProtocolProbe;
-  readonly geminiGenerateContent: ProtocolProbe;
 }
 
 class GatewayTransportError extends Error {
@@ -167,7 +166,6 @@ async function protocolMatrix(
   suiteSignal: AbortSignal,
 ): Promise<ProtocolMatrix> {
   const root = normalizeBaseURL(baseURL);
-  const nativeRoot = root.endsWith("/v1") ? root.slice(0, -3) : root;
   // Execute sequentially so one opt-in test never creates concurrent paid requests.
   const openaiChat = await protocolProbe(
     `${root}/chat/completions`,
@@ -199,22 +197,9 @@ async function protocolMatrix(
     },
     suiteSignal,
   );
-  const geminiGenerateContent = await protocolProbe(
-    `${nativeRoot}/v1beta/models/gemini-2.5-flash:generateContent`,
-    {
-      method: "POST",
-      headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: "Reply PROBE." }] }],
-        generationConfig: { maxOutputTokens: 16 },
-      }),
-    },
-    suiteSignal,
-  );
   return {
     openaiChat,
     anthropicMessages,
-    geminiGenerateContent,
   };
 }
 
