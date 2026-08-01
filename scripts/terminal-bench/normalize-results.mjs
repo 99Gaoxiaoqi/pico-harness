@@ -36,6 +36,27 @@ const configErrors = new Set([
   "THINKING_EFFORT_INVALID",
 ]);
 const policyDenialCodes = ["plan_mode", "hardline", "hook", "approval"];
+const policyDenialReasonKinds = [
+  "plan_mode",
+  "source_or_dot",
+  "opaque_shell",
+  "dynamic_executable",
+  "protected_destination",
+  "protected_redirect",
+  "destructive_git",
+  "destructive_system",
+  "hook_denied",
+  "approval_denied",
+  "unknown_hardline",
+];
+const headlessStatuses = [
+  "completed",
+  "invalid_request",
+  "failed",
+  "policy_blocked",
+  "timed_out",
+  "canceled",
+];
 const maxPolicyDenialToolNameLength = 128;
 
 export async function normalizeHarborJob({
@@ -203,6 +224,16 @@ export async function normalizeHarborJob({
   const verifierPassWithPolicyIncidentCount = trials.filter(
     (trial) => trial.verifierPassed && trial.policyIncident,
   ).length;
+  const policyReasonKindCounts = Object.fromEntries(
+    policyDenialReasonKinds.map((reasonKind) => [reasonKind, 0]),
+  );
+  for (const trial of trials) {
+    const byReasonKind = trial.agent.policyDenials?.byReasonKind;
+    if (byReasonKind === undefined) continue;
+    for (const reasonKind of policyDenialReasonKinds) {
+      policyReasonKindCounts[reasonKind] += byReasonKind[reasonKind];
+    }
+  }
   const summary = {
     schemaVersion: 2,
     runId,
@@ -222,6 +253,7 @@ export async function normalizeHarborJob({
     policyIncidentRate: rate(policyIncidentCount, trials.length),
     verifierPassWithPolicyIncidentCount,
     verifierPassWithPolicyIncidentRate: rate(verifierPassWithPolicyIncidentCount, trials.length),
+    policyReasonKindCounts,
     counts,
     trials,
   };
@@ -597,10 +629,17 @@ function validateAccountingReceipt({
     runtimeUsage.completionTokens === actual.outputTokens;
   const harborUsageMatches =
     harborInputTokens === actual.inputTokens && harborOutputTokens === actual.outputTokens;
+  const signedRetryUsage = isSignedRetryUsage({
+    headless,
+    picoMetadata,
+    gatewayMetadata,
+    runtimeUsage,
+  });
   if (
     !harborUsageMatches ||
-    (runtimeUsageMatches && !normalUsageMarkers) ||
+    (runtimeUsageMatches && !normalUsageMarkers && !signedRetryUsage) ||
     (!runtimeUsageMatches &&
+      !signedRetryUsage &&
       !isRuntimeFailedZeroUsageFallback({
         headless,
         picoMetadata,
@@ -612,6 +651,80 @@ function validateAccountingReceipt({
     return { valid: false, code: "accounting_token_mismatch", receipt: null };
   }
   return { valid: true, code: null, receipt: value };
+}
+
+function isSignedRetryUsage({ headless, picoMetadata, gatewayMetadata, runtimeUsage }) {
+  const attempts = picoMetadata?.attempts;
+  if (
+    picoMetadata?.retryCount !== 1 ||
+    picoMetadata?.signedGatewayUsageRequired !== true ||
+    gatewayMetadata?.usageFallback !== true ||
+    gatewayMetadata?.usageSource !== "signed_gateway_actual" ||
+    !Array.isArray(attempts) ||
+    attempts.length !== 2 ||
+    !isExactObject(picoMetadata?.runtimeReportedUsage, [
+      "promptTokens",
+      "completionTokens",
+      "costCNY",
+    ]) ||
+    picoMetadata.runtimeReportedUsage.promptTokens !== runtimeUsage.promptTokens ||
+    picoMetadata.runtimeReportedUsage.completionTokens !== runtimeUsage.completionTokens ||
+    picoMetadata.runtimeReportedUsage.costCNY !== runtimeUsage.costCNY ||
+    picoMetadata.runtimeReportedCostCNY !== runtimeUsage.costCNY ||
+    typeof runtimeUsage.costCNY !== "number" ||
+    !Number.isFinite(runtimeUsage.costCNY) ||
+    runtimeUsage.costCNY < 0
+  ) {
+    return false;
+  }
+  if (
+    attempts.some(
+      (attempt, index) =>
+        !isExactObject(attempt, [
+          "attempt",
+          "requestId",
+          "status",
+          "errorCode",
+          "terminationConfirmed",
+          "durationMs",
+        ]) ||
+        attempt.attempt !== index + 1 ||
+        typeof attempt.requestId !== "string" ||
+        attempt.requestId.length === 0 ||
+        !headlessStatuses.includes(attempt.status) ||
+        !(
+          attempt.errorCode === null ||
+          (typeof attempt.errorCode === "string" && attempt.errorCode.length > 0)
+        ) ||
+        typeof attempt.terminationConfirmed !== "boolean" ||
+        typeof attempt.durationMs !== "number" ||
+        !Number.isFinite(attempt.durationMs) ||
+        attempt.durationMs < 0,
+    )
+  ) {
+    return false;
+  }
+  const [first, last] = attempts;
+  const headlessErrorCode =
+    headless?.error !== null && typeof headless?.error === "object"
+      ? (headless.error.code ?? null)
+      : null;
+  return (
+    first.requestId !== last.requestId &&
+    first.status === "failed" &&
+    first.errorCode === "RUNTIME_FAILED" &&
+    first.terminationConfirmed === true &&
+    picoMetadata.requestId === last.requestId &&
+    picoMetadata.status === last.status &&
+    picoMetadata.errorCode === last.errorCode &&
+    picoMetadata.terminationConfirmed === last.terminationConfirmed &&
+    picoMetadata.durationMs === last.durationMs &&
+    headless?.requestId === last.requestId &&
+    headless?.status === last.status &&
+    headlessErrorCode === last.errorCode &&
+    headless?.terminationConfirmed === last.terminationConfirmed &&
+    headless?.durationMs === last.durationMs
+  );
 }
 
 function isRuntimeFailedZeroUsageFallback({
@@ -739,16 +852,26 @@ function validatePolicyDenials(headless) {
   }
   const value = headless.policyDenials;
   if (
-    !isExactObject(value, ["total", "byCode", "first", "last"]) ||
+    !isExactObject(value, ["total", "byCode", "byReasonKind", "first", "last"]) ||
     !isNonnegativeSafeInteger(value.total) ||
     value.total === 0 ||
     !isExactObject(value.byCode, policyDenialCodes) ||
     policyDenialCodes.some((code) => !isNonnegativeSafeInteger(value.byCode[code])) ||
     policyDenialCodes.reduce((total, code) => total + value.byCode[code], 0) !== value.total ||
+    !isExactObject(value.byReasonKind, policyDenialReasonKinds) ||
+    policyDenialReasonKinds.some(
+      (reasonKind) => !isNonnegativeSafeInteger(value.byReasonKind[reasonKind]),
+    ) ||
+    policyDenialReasonKinds.reduce(
+      (total, reasonKind) => total + value.byReasonKind[reasonKind],
+      0,
+    ) !== value.total ||
     !isPolicyDenialBoundary(value.first) ||
     !isPolicyDenialBoundary(value.last) ||
     value.byCode[value.first.code] === 0 ||
-    value.byCode[value.last.code] === 0
+    value.byCode[value.last.code] === 0 ||
+    value.byReasonKind[value.first.reasonKind] === 0 ||
+    value.byReasonKind[value.last.reasonKind] === 0
   ) {
     return { valid: false, value: null };
   }
@@ -757,6 +880,9 @@ function validatePolicyDenials(headless) {
     value: {
       total: value.total,
       byCode: Object.fromEntries(policyDenialCodes.map((code) => [code, value.byCode[code]])),
+      byReasonKind: Object.fromEntries(
+        policyDenialReasonKinds.map((reasonKind) => [reasonKind, value.byReasonKind[reasonKind]]),
+      ),
       first: projectPolicyDenialBoundary(value.first),
       last: projectPolicyDenialBoundary(value.last),
     },
@@ -765,9 +891,10 @@ function validatePolicyDenials(headless) {
 
 function isPolicyDenialBoundary(value) {
   return (
-    isExactObject(value, ["source", "code", "toolName"]) &&
+    isExactObject(value, ["source", "code", "reasonKind", "toolName"]) &&
     ["safety", "permission"].includes(value.source) &&
     policyDenialCodes.includes(value.code) &&
+    policyDenialReasonKinds.includes(value.reasonKind) &&
     typeof value.toolName === "string" &&
     value.toolName.length > 0 &&
     value.toolName.length <= maxPolicyDenialToolNameLength
@@ -775,7 +902,12 @@ function isPolicyDenialBoundary(value) {
 }
 
 function projectPolicyDenialBoundary(value) {
-  return { source: value.source, code: value.code, toolName: value.toolName };
+  return {
+    source: value.source,
+    code: value.code,
+    reasonKind: value.reasonKind,
+    toolName: value.toolName,
+  };
 }
 
 function classifyInfra({ headless, exception }) {
