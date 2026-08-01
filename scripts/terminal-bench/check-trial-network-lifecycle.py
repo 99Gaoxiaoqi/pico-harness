@@ -75,6 +75,8 @@ def load_adapter() -> Any:
 def benchmark_route_config(
     output_token_field: str | None = "max_completion_tokens",
     output_tokens: Any = 8_192,
+    *,
+    model: str = "gpt-5.4",
 ) -> dict[str, Any]:
     capability: dict[str, Any] = {"toolCall": True}
     if output_token_field is not None:
@@ -83,14 +85,14 @@ def benchmark_route_config(
         capability["output"] = output_tokens
     return {
         "schemaVersion": 1,
-        "modelRouteId": "codex-oauth/gpt-5.4",
+        "modelRouteId": f"codex-oauth/{model}",
         "providerId": "codex-oauth",
         "provider": {
             "protocol": "openai",
             "baseURL": "http://pico-gateway:8080",
-            "models": ["gpt-5.4"],
+            "models": [model],
             "discoverModels": False,
-            "modelCapabilities": {"gpt-5.4": capability},
+            "modelCapabilities": {model: capability},
         },
         "pricing": {},
         "pricingSha256": "0" * 64,
@@ -129,43 +131,45 @@ def compatible_route_config(
 def assert_route_config_contract(adapter: Any) -> None:
     with tempfile.TemporaryDirectory(prefix="pico-route-contract-") as directory:
         path = Path(directory) / "route.json"
-        valid = benchmark_route_config()
-        path.write_text(json.dumps(valid))
-        assert adapter.load_route_config(path) == valid
-        assert (
-            valid["provider"]["modelCapabilities"]["gpt-5.4"]["output"]
-            == 8_192
-        )
+        for model in ("gpt-5.4", "gpt-5.6-terra"):
+            valid = benchmark_route_config(model=model)
+            path.write_text(json.dumps(valid))
+            assert adapter.load_route_config(path) == valid
+            assert (
+                valid["provider"]["modelCapabilities"][model]["output"]
+                == 8_192
+            )
 
-        for invalid_output, invalid_field in (
-            (8_192, None),
-            (8_192, "max_tokens"),
-            (None, "max_completion_tokens"),
-            (4_096, "max_completion_tokens"),
-            (8_193, "max_completion_tokens"),
-            (True, "max_completion_tokens"),
-            ("8192", "max_completion_tokens"),
-        ):
-            path.write_text(
-                json.dumps(
-                    benchmark_route_config(
-                        invalid_field,
-                        output_tokens=invalid_output,
+            for invalid_output, invalid_field in (
+                (8_192, None),
+                (8_192, "max_tokens"),
+                (None, "max_completion_tokens"),
+                (4_096, "max_completion_tokens"),
+                (8_193, "max_completion_tokens"),
+                (True, "max_completion_tokens"),
+                ("8192", "max_completion_tokens"),
+            ):
+                path.write_text(
+                    json.dumps(
+                        benchmark_route_config(
+                            invalid_field,
+                            output_tokens=invalid_output,
+                            model=model,
+                        )
                     )
                 )
-            )
-            try:
-                adapter.load_route_config(path)
-            except ValueError as error:
-                assert str(error) == (
-                    "codex-oauth/gpt-5.4 benchmark route must pin output=8192 "
-                    "and use max_completion_tokens"
-                )
-            else:
-                raise AssertionError(
-                    "invalid output capability was accepted: "
-                    f"{invalid_output!r}, {invalid_field!r}"
-                )
+                try:
+                    adapter.load_route_config(path)
+                except ValueError as error:
+                    assert str(error) == (
+                        f"codex-oauth/{model} benchmark route must pin output=8192 "
+                        "and use max_completion_tokens"
+                    )
+                else:
+                    raise AssertionError(
+                        "invalid output capability was accepted: "
+                        f"{model!r}, {invalid_output!r}, {invalid_field!r}"
+                    )
 
         for compatible in (
             compatible_route_config(),
@@ -225,14 +229,19 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
 
     with tempfile.TemporaryDirectory(prefix="pico-bootstrap-output-") as directory:
         root = Path(directory)
-        exact = await project(root, "exact", benchmark_route_config())
-        assert exact["route"] == {
-            "id": "codex-oauth/gpt-5.4",
-            "protocol": "openai",
-            "baseURL": "http://pico-gateway:8080",
-            "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
-            "output": 8_192,
-        }
+        for model in ("gpt-5.4", "gpt-5.6-terra"):
+            exact = await project(
+                root,
+                f"exact-{model}",
+                benchmark_route_config(model=model),
+            )
+            assert exact["route"] == {
+                "id": f"codex-oauth/{model}",
+                "protocol": "openai",
+                "baseURL": "http://pico-gateway:8080",
+                "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
+                "output": 8_192,
+            }
         for name, route_config in (
             ("configured-4096", compatible_route_config(4_096)),
             ("configured-32768", compatible_route_config(32_768)),

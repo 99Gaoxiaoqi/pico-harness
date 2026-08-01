@@ -46,6 +46,10 @@ UPSTREAM_TIMEOUT_SEC = 120
 REVOKE_DEADLINE_SEC = 0.75
 _PINNED_BENCHMARK_OUTPUT_CAPABILITIES = {
     "codex-oauth/gpt-5.4": ("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
+    "codex-oauth/gpt-5.6-terra": (
+        "max_completion_tokens",
+        MAX_REQUEST_OUTPUT_TOKENS,
+    ),
 }
 
 
