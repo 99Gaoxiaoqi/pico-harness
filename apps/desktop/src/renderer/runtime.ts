@@ -648,16 +648,12 @@ function parseProviderConfig(
   const registryResult = isRecord(results.providerRegistry) ? results.providerRegistry : {};
   const userResult = isRecord(results.userConfig) ? results.userConfig : {};
   const userConfig = isRecord(userResult.config) ? userResult.config : {};
-  const effectiveResult = isRecord(results.effectiveConfig) ? results.effectiveConfig : {};
-  const effectiveConfig = isRecord(effectiveResult.config) ? effectiveResult.config : {};
-  const effectiveProviders = recordArray(effectiveConfig.providers);
   const registryProviders = recordArray(registryResult.providers);
   const revision = stringValue(registryResult.revision ?? userResult.revision);
   const writable =
     isRecord(results.providerRegistry) && isRecord(results.userConfig) && revision.length > 0;
   const defaultModelRouteId = stringValue(
-    effectiveConfig.defaultModelRouteId ??
-      (isRecord(userConfig.defaults) ? userConfig.defaults.modelRouteId : undefined),
+    isRecord(userConfig.defaults) ? userConfig.defaults.modelRouteId : undefined,
   );
   return {
     supported: true,
@@ -665,9 +661,7 @@ function parseProviderConfig(
     revision,
     ...(defaultModelRouteId ? { defaultModelRouteId } : {}),
     userDefaults: parseUserDefaults(userConfig.defaults),
-    providers: (effectiveProviders.length > 0 ? effectiveProviders : registryProviders).map(
-      parseProviderProfile,
-    ),
+    providers: registryProviders.map(parseProviderProfile),
   };
 }
 
@@ -976,12 +970,10 @@ function mergeLoadedData(
       updatedAt: numberValue(item.updatedAt, Date.now()),
     })),
     providers: recordArray(providerResult.providers).map(capability),
-    providerConfig: parseProviderConfig(results, base.providerConfig.supported),
-    modelRoutes: parseModelRoutes(
+    modelRoutes:
       isRecord(results.effectiveConfig) && isRecord(results.effectiveConfig.config)
-        ? results.effectiveConfig.config
-        : providerResult,
-    ),
+        ? parseModelRoutes(results.effectiveConfig.config)
+        : base.modelRoutes,
     catalogAgents: parseCatalogAgents(agentCatalogResult),
     catalogSkills: parseCatalogSkills(skillCatalogResult),
     changes: recordArray(changeResult.changes).map((item) => ({
@@ -1154,6 +1146,7 @@ export function useRuntimeStore(): RuntimeStore {
   );
   const seenEventIdsRef = useRef(new Set<string>());
   const workspaceLoadGenerationRef = useRef(0);
+  const providerConfigLoadGenerationRef = useRef(0);
   const memoryLoadGenerationRef = useRef(0);
   const conversationLoadGenerationsRef = useRef(new Map<string, number>());
   const pendingSendRef = useRef<
@@ -1277,6 +1270,45 @@ export function useRuntimeStore(): RuntimeStore {
               },
             }
           : {}),
+        notices,
+      };
+    });
+  }, []);
+
+  const loadGlobalProviderConfig = useCallback(async (bridge: DesktopBridge) => {
+    const generation = providerConfigLoadGenerationRef.current + 1;
+    providerConfigLoadGenerationRef.current = generation;
+    const sharedConfigSupported = runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY);
+    if (!sharedConfigSupported) {
+      setData((current) => ({
+        ...current,
+        providerConfig: parseProviderConfig({}, false),
+        notices: {
+          ...current.notices,
+          providers: "当前 Runtime 缺少统一配置能力。请完全退出并重新启动 Pico 后再管理 Provider。",
+        },
+      }));
+      return;
+    }
+
+    const entries = await Promise.all([
+      optionalEntry("providerRegistry", bridge, "provider.list", {}),
+      optionalEntry("userConfig", bridge, "config.user.get", {}),
+    ]);
+    if (providerConfigLoadGenerationRef.current !== generation) return;
+    const values: Record<string, unknown> = {};
+    const errors: string[] = [];
+    for (const [key, result] of entries) {
+      if (result.error) errors.push(result.error);
+      else values[key] = result.value;
+    }
+    setData((current) => {
+      const notices = { ...current.notices };
+      if (errors.length > 0) notices.providers = errors.join("；");
+      else delete notices.providers;
+      return {
+        ...current,
+        providerConfig: parseProviderConfig(values, true),
         notices,
       };
     });
@@ -1442,11 +1474,7 @@ export function useRuntimeStore(): RuntimeStore {
       optionalEntry("usage", bridge, "usage.get", params),
       optionalEntry("config", bridge, "config.get", params),
       ...(sharedConfigSupported
-        ? ([
-            optionalEntry("providerRegistry", bridge, "provider.list", {}),
-            optionalEntry("userConfig", bridge, "config.user.get", {}),
-            optionalEntry("effectiveConfig", bridge, "config.effective.get", params),
-          ] as const)
+        ? ([optionalEntry("effectiveConfig", bridge, "config.effective.get", params)] as const)
         : []),
     ];
     const entries = await Promise.all(requests);
@@ -1455,14 +1483,6 @@ export function useRuntimeStore(): RuntimeStore {
     for (const [key, result] of entries) {
       if (result.error) notices[key] = result.error;
       else values[key] = result.value;
-    }
-    if (!sharedConfigSupported) {
-      notices.providers =
-        "当前 Runtime 缺少统一配置能力。请完全退出并重新启动 Pico 后再管理 Provider。";
-    } else {
-      notices.providers =
-        notices.providerRegistry ?? notices.userConfig ?? notices.effectiveConfig ?? "";
-      if (!notices.providers) delete notices.providers;
     }
     const trustResult = await optionalInvoke(bridge, "workspace.trustStatus", params);
     let launchAtLogin: boolean | undefined;
@@ -1476,6 +1496,8 @@ export function useRuntimeStore(): RuntimeStore {
     if (!isCurrentLoad()) return;
     if (trustResult.error) notices.trust = trustResult.error;
     setData((current) => {
+      if (current.notices.providers) notices.providers = current.notices.providers;
+      else delete notices.providers;
       const trusted = booleanValue(trustResult.value?.trusted);
       const switchingWorkspace = current.workspacePath !== workspacePath;
       const workspaceMode = parseWorkspaceMode(
@@ -1514,10 +1536,6 @@ export function useRuntimeStore(): RuntimeStore {
                 changeFingerprint: undefined,
               }
             : {}),
-          providerConfig: {
-            ...current.providerConfig,
-            supported: sharedConfigSupported,
-          },
         },
         workspacePath,
         values,
@@ -1673,12 +1691,12 @@ export function useRuntimeStore(): RuntimeStore {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
       await loadWorkspaceIndex(bridge, true);
-      await loadUserCapabilities(bridge);
+      await Promise.all([loadUserCapabilities(bridge), loadGlobalProviderConfig(bridge)]);
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
     }
-  }, [loadUserCapabilities, loadWorkspaceIndex, preview]);
+  }, [loadGlobalProviderConfig, loadUserCapabilities, loadWorkspaceIndex, preview]);
 
   useEffect(() => {
     void bootstrap();
@@ -1691,7 +1709,7 @@ export function useRuntimeStore(): RuntimeStore {
     const refreshOnFocus = () => {
       const workspacePath = dataRef.current.workspacePath;
       void loadWorkspaceIndex(bridge)
-        .then(() => loadUserCapabilities(bridge))
+        .then(() => Promise.all([loadUserCapabilities(bridge), loadGlobalProviderConfig(bridge)]))
         .then(() => (workspacePath ? loadWorkspace(bridge, workspacePath) : undefined))
         .catch(reportFailure);
     };
@@ -1699,6 +1717,7 @@ export function useRuntimeStore(): RuntimeStore {
     return () => window.removeEventListener("focus", refreshOnFocus);
   }, [
     connection.kind,
+    loadGlobalProviderConfig,
     loadUserCapabilities,
     loadWorkspace,
     loadWorkspaceIndex,
@@ -1970,6 +1989,9 @@ export function useRuntimeStore(): RuntimeStore {
             })
             .catch(reportFailure);
         }
+        if (Array.isArray(payload.providerIds)) {
+          void loadGlobalProviderConfig(bridge).catch(reportFailure);
+        }
         scheduleHydration();
       } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
         scheduleHydration(stringValue(scope.sessionId) || undefined);
@@ -2006,6 +2028,7 @@ export function useRuntimeStore(): RuntimeStore {
     connection.kind,
     data.workspacePath,
     loadConversation,
+    loadGlobalProviderConfig,
     loadMemory,
     loadScopedCapabilities,
     loadUserCapabilities,
@@ -2070,10 +2093,11 @@ export function useRuntimeStore(): RuntimeStore {
           (error.code === "CONFIG_REVISION_CONFLICT" || error.code === "CONFLICT")
         ) {
           const bridge = getBridge();
-          const workspacePath = dataRef.current.workspacePath;
-          if (bridge && workspacePath) {
+          if (bridge) {
             try {
-              await loadWorkspace(bridge, workspacePath);
+              await loadGlobalProviderConfig(bridge);
+              const workspacePath = dataRef.current.workspacePath;
+              if (workspacePath) await loadWorkspace(bridge, workspacePath);
             } catch (reloadError) {
               reportFailure(reloadError);
               return false;
@@ -2090,7 +2114,14 @@ export function useRuntimeStore(): RuntimeStore {
         setBusy(undefined);
       }
     },
-    [loadMemory, loadUserCapabilities, loadWorkspace, preview, reportFailure],
+    [
+      loadGlobalProviderConfig,
+      loadMemory,
+      loadUserCapabilities,
+      loadWorkspace,
+      preview,
+      reportFailure,
+    ],
   );
 
   const actions = useMemo<RuntimeActions>(
@@ -2862,6 +2893,7 @@ export function useRuntimeStore(): RuntimeStore {
             provider: runtimeProvider,
             expectedRevision: providerConfig.revision,
           });
+          await loadGlobalProviderConfig(bridge);
           const workspacePath = dataRef.current.workspacePath;
           if (workspacePath) await loadWorkspace(bridge, workspacePath);
           setMessage(`Provider ${provider.id} 已保存。`);
@@ -2876,6 +2908,7 @@ export function useRuntimeStore(): RuntimeStore {
               providerId,
               expectedRevision: providerConfig.revision,
             });
+            await loadGlobalProviderConfig(bridge);
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
           } else {
@@ -2909,6 +2942,7 @@ export function useRuntimeStore(): RuntimeStore {
               defaults,
               expectedRevision: providerConfig.revision,
             });
+            await loadGlobalProviderConfig(bridge);
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
           } else {
@@ -2937,6 +2971,7 @@ export function useRuntimeStore(): RuntimeStore {
               secret,
               expectedRevision,
             });
+            await loadGlobalProviderConfig(bridge);
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
           } else {
@@ -2970,6 +3005,7 @@ export function useRuntimeStore(): RuntimeStore {
               providerId,
               expectedRevision,
             });
+            await loadGlobalProviderConfig(bridge);
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
           } else {
@@ -3244,6 +3280,7 @@ export function useRuntimeStore(): RuntimeStore {
     [
       bootstrap,
       loadConversation,
+      loadGlobalProviderConfig,
       loadMemory,
       loadScopedCapabilities,
       loadWorkspace,
