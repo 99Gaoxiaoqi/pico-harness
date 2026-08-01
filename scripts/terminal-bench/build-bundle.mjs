@@ -5,6 +5,10 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const xattrHelperDigests = {
+  arm64: "141664b015f756b10fd76c9f92c83052bbb721f2c88d368349ec1e5c619e72a2",
+  x64: "ee31a4ebd31823a4f29d338225dc8c12b4fb4939e200b797ab5ce2b0aa9c7056",
+};
 
 export async function buildPicoBundle(outputPath) {
   const destination = resolve(outputPath);
@@ -33,6 +37,7 @@ export async function buildPicoBundle(outputPath) {
     join(projectRoot, "scripts/terminal-bench/container-launcher.mjs"),
     join(stage, "container-launcher.mjs"),
   );
+  await copyVerifiedXattrHelpers(stage);
   await writeFile(join(stage, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
   await writeFile(
     join(stage, "packages/protocol/package.json"),
@@ -84,6 +89,21 @@ export async function buildPicoBundle(outputPath) {
     .digest("hex");
   await rm(stage, { recursive: true, force: true });
   return { path: destination, sha256: digest, lockfileSha256 };
+}
+
+async function copyVerifiedXattrHelpers(stage) {
+  const sourceRoot = join(projectRoot, "scripts/terminal-bench/xattr-helper/bin");
+  const destinationRoot = join(stage, "xattr-helper/bin");
+  await mkdir(destinationRoot, { recursive: true });
+  for (const [arch, digest] of Object.entries(xattrHelperDigests)) {
+    const name = `xattr-helper-linux-${arch}`;
+    const source = join(sourceRoot, name);
+    const bytes = await readFile(source);
+    if (createHash("sha256").update(bytes).digest("hex") !== digest) {
+      throw new Error(`Terminal-Bench xattr helper digest is invalid: ${name}`);
+    }
+    await writeFile(join(destinationRoot, name), bytes, { mode: 0o755 });
+  }
 }
 
 async function assertNoLinks(root) {

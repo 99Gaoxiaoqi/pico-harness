@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, rename, stat, statfs, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   assertPrivateWindowsTemporary,
@@ -26,6 +27,7 @@ const LINUX_POSIX_ACL_ATTRIBUTE = "system.posix_acl_access";
 const LINUX_PROC_SUPER_MAGIC = 0x9fa0n;
 const METADATA_PROBE_MAX_BYTES = 256 * 1024;
 const execFileAsync = promisify(execFile);
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 interface FileIdentity {
   readonly dev: bigint;
@@ -546,28 +548,35 @@ async function readLinuxExtendedAttributes(
   handle: FileHandle,
   displayPath: string,
 ): Promise<ReadonlyMap<string, string>> {
-  let lastError: unknown;
-  for (const command of ["/usr/bin/getfattr", "/bin/getfattr"] as const) {
-    try {
-      const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
-      const { stdout, stderr } = await execFileAsync(
-        command,
-        ["--absolute-names", "--dump", "--match=-", "--encoding=hex", "--", descriptorPath],
-        linuxMetadataProcessOptions(),
-      );
-      if (stderr.length > 0) {
-        throw new Error("getfattr reported an incomplete metadata read");
+  if (process.env.PICO_XATTR_HELPER_ONLY !== "1") {
+    for (const command of ["/usr/bin/getfattr", "/bin/getfattr"] as const) {
+      try {
+        const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
+        const { stdout, stderr } = await execFileAsync(
+          command,
+          ["--absolute-names", "--dump", "--match=-", "--encoding=hex", "--", descriptorPath],
+          linuxMetadataProcessOptions(),
+        );
+        if (stderr.length > 0) {
+          throw new Error("getfattr reported an incomplete metadata read");
+        }
+        await assertLinuxDescriptorBinding(handle, displayPath);
+        return parseLinuxAttributeDump(stdout, displayPath);
+      } catch (error) {
+        if (!hasErrnoCode(error, "ENOENT")) break;
       }
-      await assertLinuxDescriptorBinding(handle, displayPath);
-      return parseLinuxAttributeDump(stdout, displayPath);
-    } catch (error) {
-      lastError = error;
-      if (!hasErrnoCode(error, "ENOENT")) break;
     }
   }
-  throw new Error(`无法读取 Linux ACL/扩展属性，已拒绝覆盖: ${displayPath}`, {
-    cause: lastError,
-  });
+  try {
+    const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
+    const result = await runBundledLinuxXattrHelper(["dump", descriptorPath]);
+    await assertLinuxDescriptorBinding(handle, displayPath);
+    return parseLinuxAttributeDump(result.stdout, displayPath);
+  } catch (error) {
+    throw new Error(`无法读取 Linux ACL/扩展属性，已拒绝覆盖: ${displayPath}`, {
+      cause: error,
+    });
+  }
 }
 
 async function setLinuxExtendedAttribute(
@@ -592,28 +601,65 @@ async function runLinuxSetfattr(
   args: readonly string[],
   displayPath: string,
 ): Promise<void> {
-  let lastError: unknown;
-  for (const command of ["/usr/bin/setfattr", "/bin/setfattr"] as const) {
-    try {
-      const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
-      const { stderr } = await execFileAsync(
-        command,
-        [...args, "--", descriptorPath],
-        linuxMetadataProcessOptions(),
-      );
-      if (stderr.length > 0) {
-        throw new Error("setfattr reported an incomplete metadata write");
+  if (process.env.PICO_XATTR_HELPER_ONLY !== "1") {
+    for (const command of ["/usr/bin/setfattr", "/bin/setfattr"] as const) {
+      try {
+        const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
+        const { stderr } = await execFileAsync(
+          command,
+          [...args, "--", descriptorPath],
+          linuxMetadataProcessOptions(),
+        );
+        if (stderr.length > 0) {
+          throw new Error("setfattr reported an incomplete metadata write");
+        }
+        await assertLinuxDescriptorBinding(handle, displayPath);
+        return;
+      } catch (error) {
+        if (!hasErrnoCode(error, "ENOENT")) break;
       }
-      await assertLinuxDescriptorBinding(handle, displayPath);
-      return;
+    }
+  }
+  try {
+    const descriptorPath = await assertLinuxDescriptorBinding(handle, displayPath);
+    const helperArgs =
+      args[0] === "--remove"
+        ? ["remove", args[1]!, descriptorPath]
+        : ["set", args[1]!, args[3]!, descriptorPath];
+    await runBundledLinuxXattrHelper(helperArgs);
+    await assertLinuxDescriptorBinding(handle, displayPath);
+  } catch (error) {
+    throw new Error(`无法写入 Linux ACL/扩展属性，已拒绝覆盖: ${displayPath}`, {
+      cause: error,
+    });
+  }
+}
+
+async function runBundledLinuxXattrHelper(args: readonly string[]): Promise<{ stdout: string }> {
+  const arch = process.arch === "x64" || process.arch === "arm64" ? process.arch : undefined;
+  if (!arch) throw new Error(`不支持的 Linux xattr helper 架构: ${process.arch}`);
+  // dist/tools -> bundle/xattr-helper; src/tools -> repository helper for local smoke tests.
+  const candidates = [
+    join(moduleDirectory, "../xattr-helper/bin", `xattr-helper-linux-${arch}`),
+    join(
+      moduleDirectory,
+      "../../scripts/terminal-bench/xattr-helper/bin",
+      `xattr-helper-linux-${arch}`,
+    ),
+  ];
+  let lastError: unknown;
+  for (const helper of candidates) {
+    try {
+      const result = await execFileAsync(helper, [...args], linuxMetadataProcessOptions());
+      if (result.stderr.length > 0)
+        throw new Error(`bundled xattr helper returned stderr: ${result.stderr}`);
+      return result;
     } catch (error) {
       lastError = error;
       if (!hasErrnoCode(error, "ENOENT")) break;
     }
   }
-  throw new Error(`无法写入 Linux ACL/扩展属性，已拒绝覆盖: ${displayPath}`, {
-    cause: lastError,
-  });
+  throw new Error("已校验的 bundled xattr helper 不可用，拒绝覆盖", { cause: lastError });
 }
 
 async function assertLinuxDescriptorBinding(
