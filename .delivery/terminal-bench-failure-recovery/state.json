@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "TB21-FAILURE-RECOVERY-20260801",
+  "title": "Terminal-Bench 失败恢复与策略可观测性",
+  "status": "active",
+  "workflow": "standard",
+  "authorized_endpoint": "implement-and-verify",
+  "risk": {
+    "declared": "high",
+    "confirmed_by": "用户接受此前诊断中的安全边界与 task-scoped 修复建议",
+    "triggers": [
+      "security_boundary",
+      "auth_or_permissions",
+      "secrets_or_credentials",
+      "cross_module",
+      "external_side_effects"
+    ]
+  },
+  "current_stage": "solution",
+  "baseline_ref": ".delivery/terminal-bench-failure-recovery/traceability.json#evidence",
+  "verification_ref": "",
+  "stages": {
+    "contract": {"status": "passed"},
+    "solution": {"status": "active"},
+    "implementation": {"status": "pending"},
+    "validation": {"status": "pending"},
+    "release-readiness": {"status": "pending"},
+    "release": {"status": "pending"},
+    "observation": {"status": "pending"},
+    "accepted": {"status": "pending"}
+  },
+  "open_questions": [
+    "依赖预热镜像是否作为单独 non-comparable 实验"
+  ],
+  "blockers": []
+}

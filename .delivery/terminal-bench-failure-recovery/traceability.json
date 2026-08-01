@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "links": [
+    {"acceptance_id": "A1", "implementation_refs": [], "verification_refs": []},
+    {"acceptance_id": "A2", "implementation_refs": [], "verification_refs": []},
+    {"acceptance_id": "A3", "implementation_refs": [], "verification_refs": []},
+    {"acceptance_id": "A4", "implementation_refs": [], "verification_refs": []},
+    {"acceptance_id": "A5", "implementation_refs": [], "verification_refs": []}
+  ],
+  "evidence": [
+    {
+      "id": "E-BASELINE-1",
+      "result": "passed",
+      "kind": "integration",
+      "command": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/headless-one-shot-runner.test.ts tests/integration/bash-timeout-config.test.ts tests/integration/terminal-bench-runtime-controls.test.ts tests/integration/terminal-bench-normalizer.test.ts",
+      "commit": "29d5c100e8d83f72e4321d5854b6bf9b37b7abab",
+      "exit_code": 0,
+      "summary": "58 tests passed, 0 failed",
+      "recorded_at": "2026-08-01T21:55:00+08:00"
+    }
+  ]
+}

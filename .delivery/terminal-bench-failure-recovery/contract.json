@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "request": {
+    "original": "接受建议，进行修复",
+    "source": "user",
+    "context": "基于最终 sealed 26 项 Terminal-Bench 诊断，先修可直接影响 raw pass 的 Harness 缺口，并保持策略边界。"
+  },
+  "problem": {
+    "current_behavior": "最终 raw pass 为 16/26；10 个 raw fail 中存在进程跨阶段失活、假验收、RUNTIME_FAILED 不可诊断、任务级轮次/命令超时不足，以及 policy incident 缺少脱敏原因分类。",
+    "expected_behavior": "Benchmark 运行时能够安全地跨 verifier 阶段托管任务服务、对已确认终止的 RUNTIME_FAILED 做一次有界恢复、为复杂任务提供受信的任务级执行预算，并输出不含命令参数的策略原因统计。",
+    "user": "pico-harness 维护者",
+    "scenario": "本地 Terminal-Bench 2.1 的 26 个现有镜像定向复跑和全量复跑"
+  },
+  "scope": {
+    "in": [
+      "Terminal-Bench adapter 的一次性 RUNTIME_FAILED 恢复与尝试证据",
+      "隔离任务容器内、仅存活到 verifier 的受限服务 manifest/supervisor",
+      "Headless trusted host 的 maxTurns 与更长 Bash timeout",
+      "policy denial 的脱敏 reasonKind 聚合与 normalizer 校验",
+      "相关集成测试、类型检查、lint、build 和安全审查"
+    ],
+    "out": [
+      "修改第三方任务 verifier、golden SQL 或隐藏测试",
+      "预装 R、Caffe、Coq/Menhir 到官方任务镜像",
+      "自动发布或生产部署",
+      "为单个 benchmark 任务硬编码答案"
+    ],
+    "must_not_change": [
+      "不得全局放宽 /usr、/etc、source、eval、任意脚本或动态 executable",
+      "不得记录原始命令参数、凭证、代理地址或工具输出",
+      "不得让 retry 绕过 gateway 结算、终止确认、清理或外层 timeout",
+      "不得把 policy incident 当作 raw verifier failure"
+    ]
+  },
+  "risk_factors": {
+    "payments": false,
+    "auth_or_permissions": true,
+    "secrets_or_credentials": true,
+    "security_boundary": true,
+    "personal_or_sensitive_data": false,
+    "destructive_or_irreversible": false,
+    "production_infrastructure": false,
+    "public_api_or_schema": true,
+    "data_migration": false,
+    "external_side_effects": true,
+    "regulated_domain": false,
+    "severe_hard_to_detect_harm": true,
+    "cross_module": true,
+    "data_model_or_core_flow": true,
+    "new_product_or_core_journey": false,
+    "discovery_required": false,
+    "broad_real_user_impact": false
+  },
+  "acceptance": [
+    {
+      "id": "A1",
+      "criterion": "RUNTIME_FAILED 仅在 terminationConfirmed=true、仍有安全预算且非 timeout/policy/invalid 情况下最多重试一次；两次尝试均保留脱敏证据并由签名 gateway receipt 统一结算。"
+    },
+    {
+      "id": "A2",
+      "criterion": "服务托管只接受固定位置的严格 JSON manifest、静态 argv、受限 executable/cwd/端口，拒绝符号链接与 shell；服务仅在隔离 task container 内存活至 verifier。"
+    },
+    {
+      "id": "A3",
+      "criterion": "Headless request 可由可信 adapter 提供有界 maxTurns 和 Bash timeout；默认调用方行为不变，非法或超界值在 provider 调用前失败。"
+    },
+    {
+      "id": "A4",
+      "criterion": "policyDenials 增加固定枚举 reasonKind 计数，但不保存命令、路径、参数或输出；旧 raw/clean 语义保持不变，malformed evidence fail-closed。"
+    },
+    {
+      "id": "A5",
+      "criterion": "相关集成测试、lint、typecheck、build 和 npm audit high 通过；独立子代理完成最终安全审查并验证回退为单提交/单分支回退。"
+    }
+  ],
+  "assumptions": [
+    "本轮针对 localCanaryOnly=true、leaderboardComparable=false 的本地 benchmark adapter。",
+    "用户当前消息确认接受此前诊断中的修复方向；既有线程已授权由主代理合并 main 并运行 benchmark。",
+    "第三方任务镜像预置依赖会改变 benchmark 环境，因此不在本次代码修复中静默实施。"
+  ],
+  "open_questions": [
+    "完成 Harness 修复后，是否另行构建明确标注为 non-comparable 的依赖预热镜像实验。"
+  ],
+  "discovery": {
+    "target_user": "维护和运行 pico-harness Terminal-Bench 的工程师",
+    "evidence": [
+      "最终 sealed run: 16/26 raw pass, 26/26 verifier completed, 0 adapter errors",
+      "8 个失败具有至少两次有效失败证据，2 个终轮失败为结果翻转",
+      "最终失败任务成本 423.85 CNY，占总成本约 51.7%"
+    ],
+    "current_baseline": "针对 headless、Bash timeout、runtime controls 与 normalizer 的 58 条集成测试通过。",
+    "target_outcome": "修复 Harness 可恢复性、生命周期和可观测性缺口，并在本地失败任务上定向复跑。",
+    "success_metric": "A1-A5 全部具备执行证据；定向 benchmark 不出现新增 adapter/infra error。",
+    "observation_window": "定向失败任务复跑后，再运行本地 26 镜像 full benchmark。"
+  },
+  "mvp": {
+    "slices": [
+      "可信 task budget",
+      "一次性 runtime recovery",
+      "受限 verifier service lifecycle",
+      "脱敏 policy reason telemetry"
+    ]
+  },
+  "solution": {
+    "decision": "复用现有 headless request、Harbor adapter、gateway receipt 与 hardline classifier；新增最小 task-scoped 合约，不改变全局策略。",
+    "boundaries": {
+      "retry": "one-shot, termination-confirmed, budget-bounded, receipt-reconciled",
+      "service": "strict manifest, no shell, isolated container, verifier lifetime only",
+      "telemetry": "fixed enum counts only; no raw arguments"
+    },
+    "threat_analysis": [
+      "恶意 manifest 可能尝试执行任意 shell、越界 cwd、符号链接或额外端口，必须 fail-closed。",
+      "retry 可能重复副作用或成本，必须只在 Runtime 已确认终止后执行一次，并依赖 task container 隔离和最终签名结算。",
+      "reasonKind 可能成为侧信道，因此只输出固定枚举和计数，不输出目标路径或命令摘要。"
+    ],
+    "rollback": "所有行为由 benchmark adapter/request 新字段触发；回退本次提交即可恢复原有单次运行、50 turns、300 秒 Bash 与旧策略摘要。"
+  },
+  "high_risk_controls": {
+    "domain_owner": "用户（仓库维护者）",
+    "acceptance_owner": "用户（已在当前任务接受诊断建议并要求修复）",
+    "acceptance_baseline_ref": ".delivery/terminal-bench-failure-recovery/contract.json#acceptance",
+    "independent_reviewer": "待分配只读安全审查子代理",
+    "independent_review_evidence": [],
+    "threat_or_failure_analysis_ref": ".delivery/terminal-bench-failure-recovery/contract.json#solution.threat_analysis",
+    "rollback_or_recovery_ref": ".delivery/terminal-bench-failure-recovery/contract.json#solution.rollback",
+    "release_approver": "用户",
+    "release_approval_evidence": [
+      "当前线程：用户接受建议并要求进行修复；此前明确要求合并 main 后运行 benchmark。"
+    ]
+  }
+}
