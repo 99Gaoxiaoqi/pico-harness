@@ -447,6 +447,14 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
     assert "Never replace a destination explicitly required" in (
         required_destination_prompt
     )
+    assert (
+        "explicitly provides tests, metrics, or numeric acceptance thresholds"
+        in required_destination_prompt
+    )
+    assert "run an equivalent local validation before finishing" in (
+        required_destination_prompt
+    )
+    assert "while execution budget remains" in required_destination_prompt
     assert "do not write under /tmp or system paths" not in (
         required_destination_prompt
     )
@@ -639,6 +647,11 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 assert "Never replace a destination explicitly required" in request[
                     "prompt"
                 ]
+                assert (
+                    "run an equivalent local validation before finishing"
+                    in request["prompt"]
+                )
+                assert "while execution budget remains" in request["prompt"]
                 assert "pytest itself" in request["prompt"]
                 assert "adapter, not your process, launches" in request["prompt"]
                 assert "stop that exact process" in request["prompt"]
