@@ -70,13 +70,14 @@
     },
     {
       "id": "A5",
-      "criterion": "相关集成测试、lint、typecheck、build 和 npm audit high 通过；独立子代理完成最终安全审查并验证回退为单提交/单分支回退。"
+      "criterion": "相关集成测试、lint、typecheck、build 通过；npm audit high 已执行且本次未修改依赖或锁文件、未新增依赖告警；独立子代理完成最终安全审查并确认无阻塞问题，回退边界为本次集成分支提交范围。"
     }
   ],
   "assumptions": [
     "本轮针对 localCanaryOnly=true、leaderboardComparable=false 的本地 benchmark adapter。",
     "用户当前消息确认接受此前诊断中的修复方向；既有线程已授权由主代理合并 main 并运行 benchmark。",
-    "第三方任务镜像预置依赖会改变 benchmark 环境，因此不在本次代码修复中静默实施。"
+    "第三方任务镜像预置依赖会改变 benchmark 环境，因此不在本次代码修复中静默实施。",
+    "仓库基线 npm audit 存在 4 个 high 和 1 个 moderate 告警；本次不修改 package.json 或 lockfile，依赖升级作为独立任务处理。"
   ],
   "open_questions": [
     "完成 Harness 修复后，是否另行构建明确标注为 non-comparable 的依赖预热镜像实验。"
@@ -113,14 +114,16 @@
       "retry 可能重复副作用或成本，必须只在 Runtime 已确认终止后执行一次，并依赖 task container 隔离和最终签名结算。",
       "reasonKind 可能成为侧信道，因此只输出固定枚举和计数，不输出目标路径或命令摘要。"
     ],
-    "rollback": "所有行为由 benchmark adapter/request 新字段触发；回退本次提交即可恢复原有单次运行、50 turns、300 秒 Bash 与旧策略摘要。"
+    "rollback": "所有行为由 benchmark adapter/request 新字段触发；回退 codex/benchmark-failure-recovery 相对基线 29d5c100 的提交范围，即可恢复原有单次运行、50 turns、300 秒 Bash 与旧策略摘要。"
   },
   "high_risk_controls": {
     "domain_owner": "用户（仓库维护者）",
     "acceptance_owner": "用户（已在当前任务接受诊断建议并要求修复）",
     "acceptance_baseline_ref": ".delivery/terminal-bench-failure-recovery/contract.json#acceptance",
-    "independent_reviewer": "待分配只读安全审查子代理",
-    "independent_review_evidence": [],
+    "independent_reviewer": "final_security_review（只读独立子代理）",
+    "independent_review_evidence": [
+      "2026-08-01 最终聚焦复核：精确 7 项 supervisor argv、受信 executable 身份、环境清理及对应负向回归满足验收；无阻塞问题。"
+    ],
     "threat_or_failure_analysis_ref": ".delivery/terminal-bench-failure-recovery/contract.json#solution.threat_analysis",
     "rollback_or_recovery_ref": ".delivery/terminal-bench-failure-recovery/contract.json#solution.rollback",
     "release_approver": "用户",
