@@ -1534,6 +1534,7 @@ export function useRuntimeStore(): RuntimeStore {
                 prompts: [],
                 changes: [],
                 changeFingerprint: undefined,
+                modelRoutes: [],
               }
             : {}),
         },
