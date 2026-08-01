@@ -1691,7 +1691,8 @@ export function useRuntimeStore(): RuntimeStore {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
       await loadWorkspaceIndex(bridge, true);
-      await Promise.all([loadUserCapabilities(bridge), loadGlobalProviderConfig(bridge)]);
+      await loadUserCapabilities(bridge);
+      await loadGlobalProviderConfig(bridge);
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
