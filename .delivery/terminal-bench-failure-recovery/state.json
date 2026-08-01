@@ -4,7 +4,7 @@
   "title": "Terminal-Bench 失败恢复与策略可观测性",
   "status": "active",
   "workflow": "standard",
-  "authorized_endpoint": "implement-and-verify",
+  "authorized_endpoint": "observe",
   "risk": {
     "declared": "high",
     "confirmed_by": "用户接受此前诊断中的安全边界与 task-scoped 修复建议",
@@ -16,21 +16,19 @@
       "external_side_effects"
     ]
   },
-  "current_stage": "solution",
+  "current_stage": "release-readiness",
   "baseline_ref": ".delivery/terminal-bench-failure-recovery/traceability.json#evidence",
   "verification_ref": "",
   "stages": {
-    "contract": {"status": "passed"},
-    "solution": {"status": "active"},
-    "implementation": {"status": "pending"},
-    "validation": {"status": "pending"},
-    "release-readiness": {"status": "pending"},
-    "release": {"status": "pending"},
-    "observation": {"status": "pending"},
-    "accepted": {"status": "pending"}
+    "contract": { "status": "passed" },
+    "solution": { "status": "passed" },
+    "implementation": { "status": "passed" },
+    "validation": { "status": "passed" },
+    "release-readiness": { "status": "active" },
+    "release": { "status": "pending" },
+    "observation": { "status": "pending" },
+    "accepted": { "status": "pending" }
   },
-  "open_questions": [
-    "依赖预热镜像是否作为单独 non-comparable 实验"
-  ],
+  "open_questions": ["依赖预热镜像是否作为单独 non-comparable 实验"],
   "blockers": []
 }

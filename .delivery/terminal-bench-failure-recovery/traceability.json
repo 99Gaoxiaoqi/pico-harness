@@ -1,11 +1,57 @@
 {
   "schema_version": 1,
   "links": [
-    {"acceptance_id": "A1", "implementation_refs": [], "verification_refs": []},
-    {"acceptance_id": "A2", "implementation_refs": [], "verification_refs": []},
-    {"acceptance_id": "A3", "implementation_refs": [], "verification_refs": []},
-    {"acceptance_id": "A4", "implementation_refs": [], "verification_refs": []},
-    {"acceptance_id": "A5", "implementation_refs": [], "verification_refs": []}
+    {
+      "acceptance_id": "A1",
+      "implementation_refs": [
+        "b31f9f1:benchmarks/terminal_bench_2_1/pico_agent.py",
+        "b31f9f1:scripts/terminal-bench/normalize-results.mjs"
+      ],
+      "verification_refs": ["E-TARGETED", "E-FULL-INTEGRATION"]
+    },
+    {
+      "acceptance_id": "A2",
+      "implementation_refs": [
+        "b31f9f1:benchmarks/terminal_bench_2_1/pico_agent.py",
+        "b31f9f1:scripts/terminal-bench/check-trial-network-lifecycle.py"
+      ],
+      "verification_refs": ["E-LIFECYCLE", "E-REVIEW"]
+    },
+    {
+      "acceptance_id": "A3",
+      "implementation_refs": [
+        "304e9c9:src/headless/internal-one-shot.ts",
+        "304e9c9:src/tools/Bash.ts",
+        "304e9c9:scripts/terminal-bench/run.mjs"
+      ],
+      "verification_refs": ["E-TARGETED", "E-TYPECHECK"]
+    },
+    {
+      "acceptance_id": "A4",
+      "implementation_refs": [
+        "304e9c9:src/runtime/AgentRuntime.ts",
+        "b31f9f1:scripts/terminal-bench/normalize-results.mjs",
+        "b31f9f1:tests/integration/terminal-bench-normalizer.test.ts"
+      ],
+      "verification_refs": ["E-TARGETED", "E-FULL-INTEGRATION"]
+    },
+    {
+      "acceptance_id": "A5",
+      "implementation_refs": [
+        "codex/benchmark-failure-recovery@4114765",
+        ".delivery/terminal-bench-failure-recovery"
+      ],
+      "verification_refs": [
+        "E-LIFECYCLE",
+        "E-TARGETED",
+        "E-FULL-INTEGRATION",
+        "E-LINT",
+        "E-TYPECHECK",
+        "E-BUILD",
+        "E-DEPS-UNCHANGED",
+        "E-REVIEW"
+      ]
+    }
   ],
   "evidence": [
     {
@@ -17,6 +63,96 @@
       "exit_code": 0,
       "summary": "58 tests passed, 0 failed",
       "recorded_at": "2026-08-01T21:55:00+08:00"
+    },
+    {
+      "id": "E-LIFECYCLE",
+      "result": "passed",
+      "kind": "integration",
+      "command": "python3 -m py_compile benchmarks/terminal_bench_2_1/pico_agent.py scripts/terminal-bench/check-trial-network-lifecycle.py && python3 scripts/terminal-bench/check-trial-network-lifecycle.py",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "网络生命周期、CJS 主模块语义、1 MiB 快照上限、精确 supervisor 身份与额外 argv 拒绝检查通过。",
+      "recorded_at": "2026-08-01T23:25:00+08:00"
+    },
+    {
+      "id": "E-TARGETED",
+      "result": "passed",
+      "kind": "integration",
+      "command": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/headless-one-shot-runner.test.ts tests/integration/bash-timeout-config.test.ts tests/integration/yolo-safety.integration.test.ts tests/integration/terminal-bench-runtime-controls.test.ts tests/integration/terminal-bench-normalizer.test.ts",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "69 tests passed, 0 failed。",
+      "recorded_at": "2026-08-01T23:26:00+08:00"
+    },
+    {
+      "id": "E-FULL-INTEGRATION",
+      "result": "passed",
+      "kind": "integration",
+      "command": "npm run test:integration",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "850 tests passed, 8 skipped, 0 failed；最后的 supervisor argv 收紧另由 E-LIFECYCLE 和 E-TARGETED 在最终代码状态覆盖。",
+      "recorded_at": "2026-08-01T23:23:00+08:00"
+    },
+    {
+      "id": "E-LINT",
+      "result": "passed",
+      "kind": "static-analysis",
+      "command": "npm run lint",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "ESLint 与架构边界检查通过。",
+      "recorded_at": "2026-08-01T23:26:00+08:00"
+    },
+    {
+      "id": "E-TYPECHECK",
+      "result": "passed",
+      "kind": "static-analysis",
+      "command": "npm run typecheck",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "TypeScript 类型检查通过。",
+      "recorded_at": "2026-08-01T23:10:00+08:00"
+    },
+    {
+      "id": "E-BUILD",
+      "result": "passed",
+      "kind": "build",
+      "command": "npm run build",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "协议包与主项目构建通过。",
+      "recorded_at": "2026-08-01T23:10:00+08:00"
+    },
+    {
+      "id": "E-DEPS-UNCHANGED",
+      "result": "passed",
+      "kind": "dependency-baseline",
+      "command": "git diff --exit-code 29d5c100e8d83f72e4321d5854b6bf9b37b7abab -- package.json package-lock.json npm-shrinkwrap.json",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "本次提交未改变依赖清单或锁文件。",
+      "recorded_at": "2026-08-01T23:27:42+08:00"
+    },
+    {
+      "id": "E-REVIEW",
+      "result": "passed",
+      "kind": "independent-review",
+      "observation": "final_security_review 子代理对最终服务身份、精确 argv、环境和回归覆盖做只读聚焦复核。",
+      "commit": "b31f9f1",
+      "exit_code": 0,
+      "summary": "无阻塞问题。",
+      "recorded_at": "2026-08-01T23:26:00+08:00"
+    },
+    {
+      "id": "E-AUDIT-BASELINE",
+      "result": "failed",
+      "kind": "dependency-audit",
+      "command": "npm audit --audit-level=high",
+      "commit": "b31f9f1",
+      "exit_code": 1,
+      "summary": "仓库既有依赖基线仍报告 4 high、1 moderate；本次没有依赖或锁文件改动，未执行可能引入破坏性版本变化的 audit fix。",
+      "recorded_at": "2026-08-01T23:27:42+08:00"
     }
   ]
 }
