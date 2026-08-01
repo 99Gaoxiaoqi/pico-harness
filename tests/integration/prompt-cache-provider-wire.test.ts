@@ -115,6 +115,41 @@ test("OpenAI explicit cache key is stable, private, and route-scoped", async (co
   );
 });
 
+test("OpenAI implicit cache sends a stable key and legacy retention", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return Response.json({
+      choices: [{ message: { role: "assistant", content: "ok" } }],
+      usage: { prompt_tokens: 100, completion_tokens: 2 },
+    });
+  };
+
+  const provider = new OpenAIProvider({
+    baseURL: "https://api.openai.com/v1",
+    apiKey: "test-key",
+    model: "gpt-legacy-test",
+    capabilities: resolveModelRouteCapabilities("openai", "gpt-legacy-test", {
+      cache: true,
+      promptCache: { mode: "implicit", retention: "24h" },
+    }),
+  });
+  await provider.generate(messages("private first question"), tools);
+  await provider.generate(messages("private second question"), tools);
+
+  const firstKey = bodies[0]?.["prompt_cache_key"];
+  assert.equal(typeof firstKey, "string");
+  assert.equal(bodies[1]?.["prompt_cache_key"], firstKey, "user text must not perturb the key");
+  assert.equal(bodies[0]?.["prompt_cache_retention"], "24h");
+  assert.equal(bodies[1]?.["prompt_cache_retention"], "24h");
+  assert.equal(Object.hasOwn(bodies[0] ?? {}, "prompt_cache_options"), false);
+  assert.doesNotMatch(JSON.stringify(bodies[0]?.["messages"]), /prompt_cache_breakpoint/u);
+});
+
 test("prompt-cache route identity includes safe routing query parameters", () => {
   const route = (baseURL: string) =>
     promptCacheRouteIdentity({
@@ -227,6 +262,93 @@ test("OpenAI compatible route rejects cache key without disabling breakpoints", 
   assert.deepEqual(bodies[1]?.["prompt_cache_options"], { mode: "explicit", ttl: "30m" });
   assert.match(JSON.stringify(bodies[1]?.["messages"]), /prompt_cache_breakpoint/u);
   assert.match(JSON.stringify(bodies[3]?.["messages"]), /prompt_cache_breakpoint/u);
+});
+
+test("OpenAI compatible implicit route remembers a rejected cache key", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    bodies.push(body);
+    if (Object.hasOwn(body, "prompt_cache_key")) {
+      return Response.json(
+        { error: { message: "unknown parameter prompt_cache_key" } },
+        { status: 400 },
+      );
+    }
+    return Response.json({
+      choices: [{ message: { role: "assistant", content: "ok" } }],
+      usage: { prompt_tokens: 100, completion_tokens: 2 },
+    });
+  };
+
+  const capabilities = resolveModelRouteCapabilities("openai", "gpt-implicit-downgrade", {
+    cache: true,
+    promptCache: { mode: "implicit" },
+  });
+  const config = {
+    baseURL: "https://implicit-key-gateway.invalid/v1",
+    apiKey: "test-key",
+    model: "gpt-implicit-downgrade",
+    capabilities,
+  };
+  await new OpenAIProvider(config).generate(messages("first"), tools);
+  await new OpenAIProvider({ ...config, apiKey: "rotated-key" }).generate(
+    messages("second"),
+    tools,
+  );
+
+  assert.equal(bodies.length, 3);
+  assert.equal(Object.hasOwn(bodies[0] ?? {}, "prompt_cache_key"), true);
+  assert.equal(Object.hasOwn(bodies[1] ?? {}, "prompt_cache_key"), false);
+  assert.equal(Object.hasOwn(bodies[2] ?? {}, "prompt_cache_key"), false);
+});
+
+test("OpenAI compatible route rejects retention without disabling cache key", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    bodies.push(body);
+    if (Object.hasOwn(body, "prompt_cache_retention")) {
+      return Response.json(
+        { error: { message: "unknown parameter prompt_cache_retention" } },
+        { status: 422 },
+      );
+    }
+    return Response.json({
+      choices: [{ message: { role: "assistant", content: "ok" } }],
+      usage: { prompt_tokens: 100, completion_tokens: 2 },
+    });
+  };
+
+  const capabilities = resolveModelRouteCapabilities("openai", "gpt-retention-downgrade", {
+    cache: true,
+    promptCache: { mode: "implicit", retention: "in_memory" },
+  });
+  const config = {
+    baseURL: "https://retention-gateway.invalid/v1",
+    apiKey: "test-key",
+    model: "gpt-retention-downgrade",
+    capabilities,
+  };
+  await new OpenAIProvider(config).generate(messages("first"), tools);
+  await new OpenAIProvider({ ...config, apiKey: "rotated-key" }).generate(
+    messages("second"),
+    tools,
+  );
+
+  assert.equal(bodies.length, 3);
+  assert.equal(bodies[0]?.["prompt_cache_retention"], "in_memory");
+  assert.equal(Object.hasOwn(bodies[1] ?? {}, "prompt_cache_retention"), false);
+  assert.equal(Object.hasOwn(bodies[2] ?? {}, "prompt_cache_retention"), false);
+  assert.ok(bodies.every((body) => typeof body["prompt_cache_key"] === "string"));
 });
 
 test("OpenAI compatible route rejects breakpoints without disabling cache key", async (context) => {
