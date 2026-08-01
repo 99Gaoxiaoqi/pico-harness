@@ -666,14 +666,30 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
     assert "Never replace a destination explicitly required" in (
         required_destination_prompt
     )
-    assert (
-        "explicitly provides tests, metrics, or numeric acceptance thresholds"
-        in required_destination_prompt
-    )
-    assert "run an equivalent local validation before finishing" in (
-        required_destination_prompt
-    )
-    assert "while execution budget remains" in required_destination_prompt
+    for acceptance_kind in (
+        "tests",
+        "metrics",
+        "numeric thresholds",
+        "format",
+        "structure",
+        "invariants",
+        "direction conventions",
+    ):
+        assert acceptance_kind in required_destination_prompt
+    for strategy_guardrail in (
+        "map every explicit acceptance condition",
+        "inspect the exact intermediate or transformed artifact first",
+        "cheapest deterministic check",
+        "change one hypothesis at a time",
+        "candidate output or tested hypothesis materially changed",
+        "leave enough time for the final authoritative validation",
+        "inspect the existing files and runtimes",
+        "minimum missing dependencies",
+        "limit setup work",
+        "do not retry the same form",
+        "literal executable argv or write_file/edit_file",
+    ):
+        assert strategy_guardrail in required_destination_prompt
     assert "do not write under /tmp or system paths" not in (
         required_destination_prompt
     )
@@ -904,11 +920,11 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 assert "Never replace a destination explicitly required" in request[
                     "prompt"
                 ]
+                assert "map every explicit acceptance condition" in request["prompt"]
                 assert (
-                    "run an equivalent local validation before finishing"
+                    "leave enough time for the final authoritative validation"
                     in request["prompt"]
                 )
-                assert "while execution budget remains" in request["prompt"]
                 assert "pytest itself" in request["prompt"]
                 assert "adapter, not your process, launches" in request["prompt"]
                 assert "stop that exact process" in request["prompt"]
