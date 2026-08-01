@@ -68,7 +68,8 @@ export interface GeminiProviderDependencies {
   readonly now?: () => number;
   /** Set only after the native cachedContents spike has passed for this route. Defaults false. */
   readonly enableExplicitPromptCache?:
-    boolean | ((route: { readonly baseURL: string; readonly model: string }) => boolean);
+    | boolean
+    | ((route: { readonly baseURL: string; readonly model: string }) => boolean);
 }
 
 /** Google (Gemini) 原生协议适配器 */
