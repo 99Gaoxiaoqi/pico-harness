@@ -599,8 +599,8 @@ export function toolStatusFromRegistry(registry: Registry): SessionToolStatus[] 
   }));
 }
 
-function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemini" {
-  return provider === "openai" ? "openai" : provider;
+function toProfileProtocol(provider: ProviderKind): "openai" | "claude" {
+  return provider;
 }
 
 function resolveSessionModelRoute(settings: SessionSettings, router: ModelRouter) {

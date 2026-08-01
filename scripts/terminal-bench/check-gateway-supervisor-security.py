@@ -260,25 +260,10 @@ def assert_usage_parsers(gateway: Any) -> None:
         b'"cache_read_input_tokens":5,"output_tokens":7}}',
         "claude",
     ) == (10, 7)
-    assert gateway.parse_usage(
-        b'{"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,'
-        b'"thoughtsTokenCount":5,"totalTokenCount":10}}',
-        "gemini",
-    ) == (2, 8)
-    assert gateway.parse_usage(
-        b'{"usageMetadata":{"promptTokenCount":27,"candidatesTokenCount":45,'
-        b'"toolUsePromptTokenCount":31,"thoughtsTokenCount":10309,'
-        b'"totalTokenCount":10412}}',
-        "gemini",
-    ) == (58, 10_354)
     invalid = (
         (b'{"usage":{"prompt_tokens":true,"completion_tokens":1}}', "openai"),
         (b'{"usage":{"input_tokens":-1,"output_tokens":1}}', "claude"),
-        (
-            b'{"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,'
-            b'"thoughtsTokenCount":6,"totalTokenCount":10}}',
-            "gemini",
-        ),
+        (b"{}", "gemini"),
     )
     for body, protocol in invalid:
         try:
@@ -290,6 +275,24 @@ def assert_usage_parsers(gateway: Any) -> None:
     assert gateway.token_cost_micro_cny(
         1, 0, {"input": 1, "output": 0}
     ) == 1
+
+
+def assert_removed_provider_protocol_is_rejected(
+    gateway: Any, route_config: dict[str, Any]
+) -> None:
+    candidate = json.loads(json.dumps(route_config))
+    candidate["provider"]["protocol"] = "gemini"
+    try:
+        gateway.GatewayState(
+            candidate,
+            "provider-secret-canary",
+            "removed-provider-protocol",
+            "9" * 64,
+        )
+    except ValueError as error:
+        assert str(error) == "gateway provider protocol is unsupported"
+    else:
+        raise AssertionError("removed provider protocol was accepted")
 
 
 def assert_spawn_cancel_race(gateway: Any) -> None:
@@ -995,6 +998,7 @@ def main() -> None:
         gateway = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(gateway)
         assert_usage_parsers(gateway)
+        assert_removed_provider_protocol_is_rejected(gateway, route_config)
         assert_spawn_cancel_race(gateway)
         assert_spawn_revoke_race(gateway, route_config)
         assert_stubborn_worker_revoke_fails_closed(gateway, route_config)

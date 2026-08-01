@@ -309,7 +309,7 @@ export function parseModelProviderConfigs(
     }
     const protocol = rawProvider["protocol"] ?? "openai";
     if (!isProviderKind(protocol)) {
-      throw configError(configPath, `${field}.protocol`, "must be openai, claude, or gemini");
+      throw configError(configPath, `${field}.protocol`, "must be openai or claude");
     }
     const baseURL = parseRequiredString(rawProvider["baseURL"], configPath, `${field}.baseURL`);
     const apiKeyEnv = parseRequiredString(
@@ -464,9 +464,6 @@ function parseModelCapabilities(
   if (promptCache !== undefined) {
     if (!isRecord(promptCache)) {
       throw configError(configPath, `${field}.promptCache`, "must be an object");
-    }
-    if (protocol === "gemini") {
-      throw configError(configPath, `${field}.promptCache`, "is not supported for gemini");
     }
     const mode = promptCache["mode"];
     if (mode !== "implicit" && mode !== "explicit") {
@@ -678,11 +675,7 @@ function parseProviderOptionsByLevel(
     const protocols: Partial<Record<ProviderKind, ReasoningRequestPatch>> = {};
     for (const [protocol, rawPatch] of Object.entries(rawProtocols)) {
       if (!isProviderKind(protocol)) {
-        throw configError(
-          configPath,
-          `${field}.${level}.${protocol}`,
-          "must be openai, claude, or gemini",
-        );
+        throw configError(configPath, `${field}.${level}.${protocol}`, "must be openai or claude");
       }
       protocols[protocol] = parseReasoningRequestPatch(
         rawPatch,
@@ -806,7 +799,7 @@ function parseRequiredString(value: unknown, configPath: string, field: string):
 }
 
 function isProviderKind(value: unknown): value is ProviderKind {
-  return value === "openai" || value === "claude" || value === "gemini";
+  return value === "openai" || value === "claude";
 }
 
 function parseVersion(value: unknown, configPath: string): typeof CONFIG_VERSION {

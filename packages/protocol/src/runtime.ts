@@ -128,7 +128,7 @@ export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
-export type RuntimeProviderKind = "openai" | "claude" | "gemini";
+export type RuntimeProviderKind = "openai" | "claude";
 export type RuntimeConfigSource =
   | "user"
   | "project"
@@ -2044,7 +2044,7 @@ function assertNestedShape(
 }
 
 const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as const);
-const providerProtocolParam = oneOfParam(["openai", "claude", "gemini"] as const);
+const providerProtocolParam = oneOfParam(["openai", "claude"] as const);
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
 
 const runtimeUserInputParam: RuntimeParamRule = (value, path) => {

@@ -163,7 +163,7 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
   const rawCacheBreakpoints = value["cacheBreakpoints"];
   const fullCompactionSummaryHash = value["fullCompactionSummaryHash"];
   if (
-    (provider !== "claude" && provider !== "openai" && provider !== "gemini") ||
+    (provider !== "claude" && provider !== "openai") ||
     typeof model !== "string" ||
     typeof requestHash !== "string" ||
     !isNonNegativeInteger(requestBytes) ||
@@ -206,8 +206,7 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
 function fullCompactionSummaryCapture(
   request: PreparedProviderRequest,
 ): Partial<Pick<PreparedRequestCapture, "fullCompactionSummaryHash">> {
-  const messagesKey = request.provider === "gemini" ? "contents" : "messages";
-  const messages = request.body[messagesKey];
+  const messages = request.body["messages"];
   if (!Array.isArray(messages)) return {};
   const summaries: string[] = [];
   for (const message of messages) {
@@ -239,24 +238,22 @@ function cacheSegments(request: PreparedProviderRequest): PreparedRequestCacheSe
   appendArraySegments(candidates, body["tools"], "tool_schema");
   claimed.add("tools");
 
-  const systemKey = request.provider === "gemini" ? "system_instruction" : "system";
-  appendValueSegments(candidates, body[systemKey], "system_prompt");
-  claimed.add(systemKey);
+  appendValueSegments(candidates, body["system"], "system_prompt");
+  claimed.add("system");
 
-  const messagesKey = request.provider === "gemini" ? "contents" : "messages";
   if (request.provider === "openai") {
-    appendOpenAIMessages(candidates, body[messagesKey]);
+    appendOpenAIMessages(candidates, body["messages"]);
   } else {
-    appendArraySegments(candidates, body[messagesKey], "message", true);
+    appendArraySegments(candidates, body["messages"], "message", true);
   }
-  claimed.add(messagesKey);
+  claimed.add("messages");
 
   const explicitOpenAI =
     request.provider === "openai" &&
     isRecord(body["prompt_cache_options"]) &&
     body["prompt_cache_options"]["mode"] === "explicit";
-  // Claude and GPT-5.6 explicit mode use real content breakpoints. Implicit protocols treat the
-  // newest message as the changing tail and synthesize stable prefix boundaries before it.
+  // Claude and GPT-5.6 explicit mode use real content breakpoints. OpenAI implicit mode treats
+  // the newest message as the changing tail and synthesizes stable prefix boundaries before it.
   const cacheBoundary =
     request.provider === "claude" || explicitOpenAI
       ? candidates.findLastIndex((candidate) => candidate.cacheBreakpoint)

@@ -3716,10 +3716,10 @@ function normalizeRuntimeProvider(value: unknown): {
   );
   const id = requireProviderId(record["id"]);
   const protocol = record["protocol"];
-  if (!isOneOf(protocol, ["openai", "claude", "gemini"] as const)) {
+  if (!isOneOf(protocol, ["openai", "claude"] as const)) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "provider.protocol 必须是 openai、claude 或 gemini",
+      "provider.protocol 必须是 openai 或 claude",
     );
   }
   const baseURL = requireText(record["baseURL"], "provider.baseURL");

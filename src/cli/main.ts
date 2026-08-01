@@ -45,7 +45,7 @@ const HELP_TEXT = `Usage: pico [options]
 Start the interactive Pico TUI in the current directory.
 
 Options:
-  --provider <openai|claude|gemini>  Provider protocol (default: openai)
+  --provider <openai|claude>         Provider protocol (default: openai)
   --thinking <off|low|medium|high>   Override the model's default reasoning level
   --dir <path>                       Workspace directory (default: current directory)
   --model <provider/model|name>      Model route or legacy model name
@@ -178,9 +178,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
 
   const provider = values.provider;
   if (!isProviderKind(provider)) {
-    throw new CliUsageError(
-      `不支持的 provider: ${String(provider)}。可选值: openai / claude / gemini。`,
-    );
+    throw new CliUsageError(`不支持的 provider: ${String(provider)}。可选值: openai / claude。`);
   }
 
   const thinkingEffort =
@@ -229,7 +227,7 @@ function formatCliError(error: unknown): string {
 }
 
 function isProviderKind(value: unknown): value is ProviderKind {
-  return value === "openai" || value === "claude" || value === "gemini";
+  return value === "openai" || value === "claude";
 }
 
 function defaultModelForKind(kind: ProviderKind): string {
@@ -238,8 +236,6 @@ function defaultModelForKind(kind: ProviderKind): string {
       return "glm-5.2";
     case "claude":
       return "claude-3-5-sonnet";
-    case "gemini":
-      return "gemini-2.0-flash";
   }
 }
 

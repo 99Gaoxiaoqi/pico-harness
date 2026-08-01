@@ -59,7 +59,7 @@ agent = initialize_agent(
 
 ### 1. 大模型每周都在变
 
-GPT-4 Turbo、Claude 3.5 Sonnet、Gemini 2.0、DeepSeek-V3……每个模型的 API 协议、能力边界、最佳实践都在快速变化。
+GPT-4 Turbo、Claude 3.5 Sonnet、DeepSeek-V3……每个模型的 API 协议、能力边界、最佳实践都在快速变化。
 
 举个例子：Anthropic 的 Claude API 里，`system` 是独立的顶层字段，工具调用是 `content` 数组里的 `tool_use` block。而 OpenAI 的 API 里，`system` 是 `messages` 数组里的一条消息，工具调用是 `tool_calls` 字段。更麻烦的是，Anthropic 还搞了个 Prompt Cache，能在 system prompt 和 tools 定义上设置 `cache_control` 断点，把重复输入的成本降低 75%。
 

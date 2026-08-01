@@ -159,18 +159,17 @@ Language Server；LSP 不可用时快速降级为渐进式 Repo Map。定义、�
 
 `AgentEngine` 不直接依赖某一家模型 API。它只依赖统一的 `LLMProvider` 接口：输入消息和工具定义，输出一条模型消息。
 
-当前适配了三类协议：
+当前适配了两类协议：
 
 - OpenAI Compatible。
-- Claude 原生协议。
-- Gemini 原生协议。
+- Anthropic Claude 原生协议。
 
 前台入口使用 `providerID/modelID` 选择稳定的模型路由。路由层不仅负责端点、模型发现和
 凭证映射，还记录 Context Window、最大输出、Vision、Reasoning、Tool Call、Cache、Price
 和 Fallback 等能力元数据。没有显式证据的能力保持 `unknown`，不会因为“协议兼容”就擅自
 推断模型一定支持。
 
-思考强度也已经变成模型级能力，而不是全局固定开关。`/thinking` 会读取当前 route 的真实档位；切换模型时，如果原档位不兼容，会自动回落到目标模型默认档位。OpenAI、Anthropic 和 Gemini 请求体各自应用对应协议补丁，避免把某一家模型的参数强塞给所有 Provider。
+思考强度也已经变成模型级能力，而不是全局固定开关。`/thinking` 会读取当前 route 的真实档位；切换模型时，如果原档位不兼容，会自动回落到目标模型默认档位。OpenAI 和 Anthropic 请求体各自应用对应协议补丁，避免把某一家模型的参数强塞给所有 Provider。
 
 真正发出请求前，`CapabilityPreflightProvider` 会检查图片、工具调用、Reasoning 和上下文预算。如果路由明确不支持某项能力，或者估算输入加预留输出已经超过窗口，请求会在本地失败，不浪费一次远端调用。Provider 外面还包着 Streaming、Retry、Rate Limit、Credential Pool、Fallback 和 CostTracker。
 

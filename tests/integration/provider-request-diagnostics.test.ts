@@ -501,57 +501,55 @@ test("逐断点诊断安全处理缺失层、旧记录以及新增和移除的�
   );
 });
 
-test("OpenAI 与 Gemini 隐式缓存合成三层稳定前缀且排除最新消息 tail", () => {
-  for (const provider of ["openai", "gemini"] as const) {
-    const first = implicitCapture(provider, {
-      history: "PRIVATE_STABLE_HISTORY",
-      tail: "PRIVATE_FIRST_TAIL",
-      toolDescription: "PRIVATE_STABLE_TOOL",
-    });
-    const changedTail = implicitCapture(provider, {
-      history: "PRIVATE_STABLE_HISTORY",
-      tail: "PRIVATE_CHANGED_TAIL",
-      toolDescription: "PRIVATE_STABLE_TOOL",
-    });
-    const changedHistory = implicitCapture(provider, {
-      history: "PRIVATE_CHANGED_HISTORY",
-      tail: "PRIVATE_CHANGED_TAIL",
-      toolDescription: "PRIVATE_STABLE_TOOL",
-    });
+test("OpenAI 隐式缓存合成三层稳定前缀且排除最新消息 tail", () => {
+  const first = implicitCapture({
+    history: "PRIVATE_STABLE_HISTORY",
+    tail: "PRIVATE_FIRST_TAIL",
+    toolDescription: "PRIVATE_STABLE_TOOL",
+  });
+  const changedTail = implicitCapture({
+    history: "PRIVATE_STABLE_HISTORY",
+    tail: "PRIVATE_CHANGED_TAIL",
+    toolDescription: "PRIVATE_STABLE_TOOL",
+  });
+  const changedHistory = implicitCapture({
+    history: "PRIVATE_CHANGED_HISTORY",
+    tail: "PRIVATE_CHANGED_TAIL",
+    toolDescription: "PRIVATE_STABLE_TOOL",
+  });
 
-    assert.deepEqual(
-      first.cacheBreakpoints?.map(({ layer }) => layer),
-      ["tools", "tools+system", "history"],
-    );
-    assert.equal(first.cachePrefixHash, first.cacheBreakpoints?.at(-1)?.hash);
-    assert.equal(JSON.stringify(first).includes("PRIVATE_"), false);
+  assert.deepEqual(
+    first.cacheBreakpoints?.map(({ layer }) => layer),
+    ["tools", "tools+system", "history"],
+  );
+  assert.equal(first.cachePrefixHash, first.cacheBreakpoints?.at(-1)?.hash);
+  assert.equal(JSON.stringify(first).includes("PRIVATE_"), false);
 
-    const tailDiagnostic = diagnosePreparedProviderRequest(changedTail, first);
-    assert.equal(tailDiagnostic.changeReason, "request_changed");
-    assert.equal(tailDiagnostic.firstChangedCacheableSegment, undefined);
-    assert.deepEqual(summarizeComparisons(tailDiagnostic.cacheBreakpointComparisons), [
-      ["tools", "stable"],
-      ["tools+system", "stable"],
-      ["history", "stable"],
-    ]);
-    const latest = tailDiagnostic.segments.find(
-      (segment) => segment.kind === "message" && segment.index === 2,
-    );
-    assert.equal(latest?.cacheable, false);
+  const tailDiagnostic = diagnosePreparedProviderRequest(changedTail, first);
+  assert.equal(tailDiagnostic.changeReason, "request_changed");
+  assert.equal(tailDiagnostic.firstChangedCacheableSegment, undefined);
+  assert.deepEqual(summarizeComparisons(tailDiagnostic.cacheBreakpointComparisons), [
+    ["tools", "stable"],
+    ["tools+system", "stable"],
+    ["history", "stable"],
+  ]);
+  const latest = tailDiagnostic.segments.find(
+    (segment) => segment.kind === "message" && segment.index === 2,
+  );
+  assert.equal(latest?.cacheable, false);
 
-    const historyDiagnostic = diagnosePreparedProviderRequest(changedHistory, changedTail);
-    assert.equal(historyDiagnostic.changeReason, "cacheable_prefix_changed");
-    assert.deepEqual(historyDiagnostic.firstChangedCacheableSegment, {
-      kind: "message",
-      index: 0,
-      role: "user",
-    });
-    assert.deepEqual(summarizeComparisons(historyDiagnostic.cacheBreakpointComparisons), [
-      ["tools", "stable"],
-      ["tools+system", "stable"],
-      ["history", "changed"],
-    ]);
-  }
+  const historyDiagnostic = diagnosePreparedProviderRequest(changedHistory, changedTail);
+  assert.equal(historyDiagnostic.changeReason, "cacheable_prefix_changed");
+  assert.deepEqual(historyDiagnostic.firstChangedCacheableSegment, {
+    kind: "message",
+    index: 0,
+    role: "user",
+  });
+  assert.deepEqual(summarizeComparisons(historyDiagnostic.cacheBreakpointComparisons), [
+    ["tools", "stable"],
+    ["tools+system", "stable"],
+    ["history", "changed"],
+  ]);
 });
 
 test("OpenAI explicit mode follows the real content breakpoint and excludes history", () => {
@@ -656,38 +654,25 @@ test("full compaction is marked explicitly without persisting summary text", () 
   assert.doesNotMatch(JSON.stringify(changed), /PRIVATE_COMPACTION_SUMMARY/u);
 });
 
-function implicitCapture(
-  provider: "openai" | "gemini",
-  input: { history: string; tail: string; toolDescription: string },
-) {
+function implicitCapture(input: { history: string; tail: string; toolDescription: string }) {
   const messages = [
     { role: "user", content: input.history },
-    { role: provider === "gemini" ? "model" : "assistant", content: "stable answer" },
+    { role: "assistant", content: "stable answer" },
     { role: "user", content: input.tail },
   ];
   return capturePreparedProviderRequest({
-    provider,
-    model: `${provider}-cache-test`,
-    body:
-      provider === "gemini"
-        ? {
-            model: `${provider}-cache-test`,
-            tools: [
-              { functionDeclarations: [{ name: "lookup", description: input.toolDescription }] },
-            ],
-            system_instruction: { parts: [{ text: "PRIVATE_STABLE_SYSTEM" }] },
-            contents: messages,
-          }
-        : {
-            model: `${provider}-cache-test`,
-            tools: [
-              {
-                type: "function",
-                function: { name: "lookup", description: input.toolDescription },
-              },
-            ],
-            messages: [{ role: "system", content: "PRIVATE_STABLE_SYSTEM" }, ...messages],
-          },
+    provider: "openai",
+    model: "openai-cache-test",
+    body: {
+      model: "openai-cache-test",
+      tools: [
+        {
+          type: "function",
+          function: { name: "lookup", description: input.toolDescription },
+        },
+      ],
+      messages: [{ role: "system", content: "PRIVATE_STABLE_SYSTEM" }, ...messages],
+    },
   });
 }
 

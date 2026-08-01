@@ -2083,8 +2083,6 @@ function defaultModel(kind: ProviderKind): string {
       return "glm-5.2";
     case "claude":
       return "claude-3-5-sonnet";
-    case "gemini":
-      return "gemini-2.0-flash";
   }
 }
 

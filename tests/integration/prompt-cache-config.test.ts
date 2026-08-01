@@ -74,14 +74,6 @@ test("prompt-cache policies resolve provider defaults and configured behavior", 
       }),
     /requires keyShards greater than 1/u,
   );
-  assert.throws(
-    () =>
-      resolveModelRouteCapabilities("gemini", "gemini-test", {
-        cache: true,
-        promptCache: { mode: "explicit" },
-      }),
-    /Gemini promptCache is not supported/u,
-  );
 });
 
 test("project config validates prompt-cache policy against its provider protocol", async (context) => {
@@ -195,20 +187,17 @@ test("project config validates prompt-cache policy against its provider protocol
     JSON.stringify({
       version: 1,
       providers: {
-        gemini: {
+        removed: {
           protocol: "gemini",
-          baseURL: "https://generativelanguage.googleapis.com",
-          apiKeyEnv: "GEMINI_API_KEY",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "REMOVED_PROVIDER_API_KEY",
           models: {
-            "gemini-test": {
-              cache: true,
-              promptCache: { mode: "explicit", ttl: "3600s" },
-            },
+            "removed-model": {},
           },
         },
       },
     }),
     "utf8",
   );
-  await assert.rejects(loadPicoProjectConfig(root), /promptCache.*is not supported for gemini/u);
+  await assert.rejects(loadPicoProjectConfig(root), /protocol.*must be openai or claude/u);
 });
