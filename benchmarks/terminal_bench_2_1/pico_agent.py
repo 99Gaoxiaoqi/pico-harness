@@ -69,6 +69,136 @@ _PUBLIC_EGRESS_RELAY_SCRIPT = (
     "}).listen(8081,'0.0.0.0');"
 )
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
+_MAX_BASH_TIMEOUT_MS = 900_000
+_MIN_RUNTIME_RETRY_EXECUTION_MS = 30_000
+_VERIFIER_SERVICE_MANIFEST_BASENAME = ".pico-verifier-service.json"
+_VERIFIER_SERVICE_PORT = 8_080
+_TRUSTED_NODE_EXEC_ENV = {
+    "LD_LIBRARY_PATH": "",
+    "LD_PRELOAD": "",
+    "NODE_OPTIONS": "",
+    "NODE_PATH": "",
+}
+_VERIFIER_SERVICE_EXECUTABLES = {
+    "/usr/bin/python3": ".py",
+    "/usr/local/bin/python3": ".py",
+    "/usr/bin/node": (".js", ".mjs", ".cjs"),
+}
+_VERIFIER_SERVICE_HELPER = r"""
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+const path = require('node:path').posix;
+const argumentOffset = ['inspect', 'launch'].includes(process.argv[1]) ? 1 : 2;
+const [mode, manifestPath, workspace] = process.argv.slice(argumentOffset);
+const basename = '.pico-verifier-service.json';
+const allowed = new Map([
+  ['/usr/bin/python3', ['.py']],
+  ['/usr/local/bin/python3', ['.py']],
+  ['/usr/bin/node', ['.js', '.mjs', '.cjs']],
+]);
+function reject(code = 2) { process.exit(code); }
+function physicalRegularFile(candidate) {
+  const info = fs.lstatSync(candidate);
+  return info.isFile() && !info.isSymbolicLink() && fs.realpathSync(candidate) === candidate;
+}
+function bounded(candidate, root) {
+  return path.isAbsolute(candidate) && path.normalize(candidate) === candidate &&
+    (candidate === root || candidate.startsWith(`${root}/`));
+}
+function parse() {
+  if (!['inspect', 'launch'].includes(mode) || !path.isAbsolute(workspace) ||
+      path.normalize(workspace) !== workspace ||
+      manifestPath !== path.join(workspace, basename)) reject();
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      manifestPath,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC,
+    );
+  } catch (error) {
+    if (error && error.code === 'ENOENT') reject(44);
+    reject();
+  }
+  let raw;
+  try {
+    const info = fs.fstatSync(descriptor);
+    if (!info.isFile() || info.size < 2 || info.size > 16 * 1024) reject();
+    raw = fs.readFileSync(descriptor, 'utf8');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  let value;
+  try { value = JSON.parse(raw); } catch { reject(); }
+  if (!value || Array.isArray(value) || typeof value !== 'object' ||
+      Object.keys(value).sort().join(',') !== 'argv,cwd,port,schemaVersion' ||
+      value.schemaVersion !== 1 || value.port !== 8080 ||
+      typeof value.cwd !== 'string' || !bounded(value.cwd, workspace) ||
+      fs.realpathSync(value.cwd) !== value.cwd || !fs.statSync(value.cwd).isDirectory() ||
+      !Array.isArray(value.argv) || value.argv.length < 2 || value.argv.length > 32 ||
+      value.argv.some((entry) => typeof entry !== 'string' || entry.length < 1 ||
+        entry.length > 4096 || /[\0\r\n]/u.test(entry))) reject();
+  const suffixes = allowed.get(value.argv[0]);
+  const script = value.argv[1];
+  if (!suffixes || !bounded(script, value.cwd) ||
+      !suffixes.some((suffix) => script.endsWith(suffix)) ||
+      !physicalRegularFile(script)) reject();
+  return Object.freeze({
+    schemaVersion: 1,
+    argv: Object.freeze([...value.argv]),
+    cwd: value.cwd,
+    port: 8080,
+  });
+}
+let manifest;
+try { manifest = parse(); } catch { reject(); }
+if (mode === 'inspect') {
+  process.stdout.write(`${JSON.stringify(manifest)}\n`);
+  process.exit(0);
+}
+const child = spawn(manifest.argv[0], manifest.argv.slice(1), {
+  cwd: manifest.cwd,
+  env: process.env,
+  stdio: 'ignore',
+});
+let stopping = false;
+function stop(signal) {
+  if (stopping) return;
+  stopping = true;
+  try { child.kill(signal); } catch {}
+  setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000).unref();
+}
+process.on('SIGTERM', () => stop('SIGTERM'));
+process.on('SIGINT', () => stop('SIGINT'));
+child.once('error', () => process.exit(2));
+child.once('exit', (code, signal) => process.exit(signal ? 128 : (code ?? 2)));
+""".strip()
+_VERIFIER_SERVICE_PROBE = r"""
+const net = require('node:net');
+let attempt = 0;
+function probe() {
+  const socket = net.connect({host: '127.0.0.1', port: 8080});
+  let settled = false;
+  const done = (ok) => {
+    if (settled) return;
+    settled = true;
+    socket.destroy();
+    if (ok) process.exit(0);
+    if (++attempt >= 50) process.exit(2);
+    setTimeout(probe, 100);
+  };
+  socket.setTimeout(250, () => done(false));
+  socket.once('connect', () => done(true));
+  socket.once('error', () => done(false));
+}
+probe();
+""".strip()
+_VERIFIER_SERVICE_ASSERT_CLOSED = r"""
+const net = require('node:net');
+const socket = net.connect({host: '127.0.0.1', port: 8080});
+socket.setTimeout(300, () => { socket.destroy(); process.exit(0); });
+socket.once('connect', () => { socket.destroy(); process.exit(2); });
+socket.once('error', () => process.exit(0));
+""".strip()
 _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = {
     "codex-oauth/gpt-5.4": 8_192,
     "codex-oauth/gpt-5.6-terra": 8_192,
@@ -78,6 +208,12 @@ _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = {
 class TrialNetworks(NamedTuple):
     task: str
     gateway: str
+
+
+class VerifierServiceManifest(NamedTuple):
+    argv: tuple[str, ...]
+    cwd: str
+    port: int
 
 
 class PicoInstalledAgent(BaseInstalledAgent):
@@ -115,6 +251,8 @@ class PicoInstalledAgent(BaseInstalledAgent):
         node_arm64_path: str,
         pico_commit: str,
         bash_timeout_ms: int = 180_000,
+        max_turns: int = 50,
+        runtime_retry_count: int = 1,
         shutdown_grace_ms: int = 30_000,
         result_flush_margin_ms: int = 5_000,
         *args: Any,
@@ -140,7 +278,11 @@ class PicoInstalledAgent(BaseInstalledAgent):
         }
         self._pico_commit = require_hex(pico_commit, "pico_commit")
         self._bash_timeout_ms = require_bounded_int(
-            bash_timeout_ms, "bash_timeout_ms", 1_000, 300_000
+            bash_timeout_ms, "bash_timeout_ms", 1_000, _MAX_BASH_TIMEOUT_MS
+        )
+        self._max_turns = require_bounded_int(max_turns, "max_turns", 1, 200)
+        self._runtime_retry_count = require_bounded_int(
+            runtime_retry_count, "runtime_retry_count", 0, 1
         )
         self._shutdown_grace_ms = require_positive_int(
             shutdown_grace_ms, "shutdown_grace_ms"
@@ -314,6 +456,12 @@ rm -f {remote_archive}
                     else {}
                 ),
             )
+            await launch_verifier_service_if_requested(
+                environment,
+                workspace=workspace,
+                outer_deadline=outer_deadline,
+                loop=loop,
+            )
         finally:
             try:
                 verifier_scrub_secret = await cleanup_trial_resources(
@@ -391,73 +539,105 @@ rm -f {remote_archive}
         if bootstrap.return_code != 0:
             raise RuntimeError("Pico isolated bootstrap failed")
 
-        remaining_sec = remaining_budget(outer_deadline, loop.time())
-        inner_timeout_ms = int(
-            remaining_sec * 1000
-            - self._shutdown_grace_ms
-            - self._result_flush_margin_ms
-        )
-        if inner_timeout_ms < 1_000:
-            raise RuntimeError("outer_timeout_budget_violation")
-        bash_timeout_ms = min(self._bash_timeout_ms, inner_timeout_ms)
-        headless_request = {
-            "schemaVersion": 1,
-            "requestId": request_id,
-            "workspacePath": workspace,
-            "picoHome": pico_home,
-            "sessionId": session_id,
-            "prompt": instruction,
-            "modelRouteId": route_config["modelRouteId"],
-            "providerRequestMode": "single_non_stream",
-            **(
-                {"thinkingEffort": route_config["thinkingEffort"]}
-                if route_config.get("thinkingEffort")
-                else {}
-            ),
-            "permissionMode": "yolo",
-            "policyDenialMode": self._POLICY_DENIAL_MODE,
-            "allowedTools": [
-                "bash",
-                "read_file",
-                "write_file",
-                "edit_file",
-                "glob",
-                "grep",
-                "read_evidence",
-                "task_list",
-                "task_output",
-                "task_stop",
-            ],
-            "bashTimeoutMs": bash_timeout_ms,
-            "timeoutMs": inner_timeout_ms,
-            "shutdownGraceMs": self._shutdown_grace_ms,
-            "trace": True,
-        }
-        write_private_json(self.logs_dir / "headless-request.json", headless_request)
-        await docker_exec_secret_stdin(
-            environment,
-            gateway.capability.encode("utf-8"),
-            timeout_sec=remaining_budget(outer_deadline, loop.time()),
-            secret_env_names={self._SECRET_ENV},
-            container_env=public_proxy_env,
-        )
-        raw_result = await environment.exec(command=f"cat {self._PICO_RESULT.as_posix()}")
-        raw_exit = await environment.exec(command=f"cat {self._EXIT_CODE.as_posix()}")
-        if raw_result.return_code != 0 or not raw_result.stdout:
-            raise RuntimeError("Pico headless result is missing")
-        result = parse_single_json_line(raw_result.stdout)
-        exit_code = parse_exit_code(raw_exit.stdout)
-        validate_headless_result(result, exit_code, request_id)
-        trace_path = result.get("tracePath")
-        if isinstance(trace_path, str) and trace_path:
-            copied = await environment.exec(
-                command=(
-                    f"test -f {shlex.quote(trace_path)} && "
-                    f"cp -- {shlex.quote(trace_path)} {self._TRACE_EXPORT.as_posix()}"
-                )
+        attempts: list[dict[str, Any]] = []
+        final_result: dict[str, Any] | None = None
+        final_exit_code: int | None = None
+        final_inner_timeout_ms = 0
+        final_bash_timeout_ms = 0
+        for attempt in range(1, self._runtime_retry_count + 2):
+            remaining_sec = remaining_budget(outer_deadline, loop.time())
+            inner_timeout_ms = int(
+                remaining_sec * 1000
+                - self._shutdown_grace_ms
+                - self._result_flush_margin_ms
             )
-            if copied.return_code != 0:
-                raise RuntimeError("Pico trace export failed")
+            if inner_timeout_ms < 1_000:
+                raise RuntimeError("outer_timeout_budget_violation")
+            bash_timeout_ms = min(self._bash_timeout_ms, inner_timeout_ms)
+            attempt_request_id = bounded_attempt_identity(request_id, attempt)
+            attempt_session_id = bounded_attempt_identity(session_id, attempt)
+            headless_request = {
+                "schemaVersion": 1,
+                "requestId": attempt_request_id,
+                "workspacePath": workspace,
+                "picoHome": pico_home,
+                "sessionId": attempt_session_id,
+                "prompt": benchmark_instruction(instruction, workspace),
+                "modelRouteId": route_config["modelRouteId"],
+                "providerRequestMode": "single_non_stream",
+                **(
+                    {"thinkingEffort": route_config["thinkingEffort"]}
+                    if route_config.get("thinkingEffort")
+                    else {}
+                ),
+                "permissionMode": "yolo",
+                "policyDenialMode": self._POLICY_DENIAL_MODE,
+                "allowedTools": [
+                    "bash",
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "glob",
+                    "grep",
+                    "read_evidence",
+                    "task_list",
+                    "task_output",
+                    "task_stop",
+                ],
+                "bashTimeoutMs": bash_timeout_ms,
+                "timeoutMs": inner_timeout_ms,
+                "shutdownGraceMs": self._shutdown_grace_ms,
+                "maxTurns": self._max_turns,
+                "trace": True,
+            }
+            attempt_dir = self.logs_dir / "attempts" / f"attempt-{attempt}"
+            write_private_json(self.logs_dir / "headless-request.json", headless_request)
+            write_private_json(attempt_dir / "headless-request.json", headless_request)
+            result, exit_code = await self._run_headless_attempt(
+                environment=environment,
+                gateway=gateway,
+                request_id=attempt_request_id,
+                attempt=attempt,
+                attempt_dir=attempt_dir,
+                outer_deadline=outer_deadline,
+                loop=loop,
+                public_proxy_env=public_proxy_env,
+            )
+            result_error = result.get("error")
+            error_code = (
+                result_error.get("code")
+                if isinstance(result_error, dict)
+                else None
+            )
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "requestId": attempt_request_id,
+                    "status": result["status"],
+                    "errorCode": error_code,
+                    "terminationConfirmed": result["terminationConfirmed"],
+                    "durationMs": result["durationMs"],
+                }
+            )
+            final_result = result
+            final_exit_code = exit_code
+            final_inner_timeout_ms = inner_timeout_ms
+            final_bash_timeout_ms = bash_timeout_ms
+            if not should_retry_runtime_failure(
+                result,
+                retries_used=attempt - 1,
+                retry_limit=self._runtime_retry_count,
+                remaining_sec=max(0.0, outer_deadline - loop.time()),
+                shutdown_grace_ms=self._shutdown_grace_ms,
+                result_flush_margin_ms=self._result_flush_margin_ms,
+            ):
+                break
+
+        if final_result is None or final_exit_code is None:
+            raise RuntimeError("Pico headless result is missing")
+        result = final_result
+        exit_code = final_exit_code
+        retry_count = len(attempts) - 1
         usage = result["usage"]
         context.n_input_tokens = int(usage["promptTokens"])
         context.n_output_tokens = int(usage["completionTokens"])
@@ -478,9 +658,14 @@ rm -f {remote_archive}
                 "modelRouteId": route_config["modelRouteId"],
                 "picoCommit": self._pico_commit,
                 "harborContextId": context_id,
-                "innerTimeoutMs": inner_timeout_ms,
-                "bashTimeoutMs": bash_timeout_ms,
+                "innerTimeoutMs": final_inner_timeout_ms,
+                "bashTimeoutMs": final_bash_timeout_ms,
                 "outerTimeoutSec": outer_timeout_sec,
+                "attempts": attempts,
+                "retryCount": retry_count,
+                "signedGatewayUsageRequired": (
+                    retry_count > 0 or is_zero_usage_runtime_failure(result)
+                ),
                 "localCanaryOnly": True,
                 "leaderboardComparable": False,
             }
@@ -493,6 +678,57 @@ rm -f {remote_archive}
             and result_error.get("code") == "RUNTIME_EMPTY_RESPONSE"
         ):
             raise RuntimeError("Pico provider returned an empty model response")
+
+    async def _run_headless_attempt(
+        self,
+        *,
+        environment: BaseEnvironment,
+        gateway: ProviderGateway,
+        request_id: str,
+        attempt: int,
+        attempt_dir: Path,
+        outer_deadline: float,
+        loop: asyncio.AbstractEventLoop,
+        public_proxy_env: dict[str, str],
+    ) -> tuple[dict[str, Any], int]:
+        await docker_exec_secret_stdin(
+            environment,
+            gateway.capability.encode("utf-8"),
+            timeout_sec=remaining_budget(outer_deadline, loop.time()),
+            secret_env_names={self._SECRET_ENV},
+            container_env=public_proxy_env,
+        )
+        raw_result = await environment.exec(command=f"cat {self._PICO_RESULT.as_posix()}")
+        raw_exit = await environment.exec(command=f"cat {self._EXIT_CODE.as_posix()}")
+        if raw_result.return_code != 0 or not raw_result.stdout:
+            raise RuntimeError("Pico headless result is missing")
+        result = parse_single_json_line(raw_result.stdout)
+        exit_code = parse_exit_code(raw_exit.stdout)
+        validate_headless_result(result, exit_code, request_id)
+        write_private_json(attempt_dir / "pico-result.json", result)
+        write_private_text(attempt_dir / "pico-exit-code.txt", f"{exit_code}\n")
+        trace_path = result.get("tracePath")
+        if isinstance(trace_path, str) and trace_path:
+            remote_attempt_trace = PurePosixPath(
+                EnvironmentPaths.agent_dir
+                / "attempts"
+                / f"attempt-{attempt}"
+                / "trace.json"
+            )
+            copied = await environment.exec(
+                command=(
+                    f"test -f {shlex.quote(trace_path)} && "
+                    f"test ! -L {shlex.quote(trace_path)} && "
+                    f"mkdir -p {shlex.quote(remote_attempt_trace.parent.as_posix())} && "
+                    f"cp -- {shlex.quote(trace_path)} "
+                    f"{shlex.quote(remote_attempt_trace.as_posix())} && "
+                    f"cp -- {shlex.quote(remote_attempt_trace.as_posix())} "
+                    f"{self._TRACE_EXPORT.as_posix()}"
+                )
+            )
+            if copied.return_code != 0:
+                raise RuntimeError("Pico trace export failed")
+        return result, exit_code
 
 
 def apply_gateway_accounting(
@@ -525,6 +761,15 @@ def apply_gateway_accounting(
         and runtime_reported_cost == 0
         and actual["inputTokens"] + actual["outputTokens"] > 0
     )
+    signed_gateway_usage_required = (
+        pico.get("signedGatewayUsageRequired") is True
+        or runtime_failed_zero_usage_fallback
+    )
+    use_signed_gateway_actual = (
+        signed_gateway_usage_required
+        and receipt["status"] == "reconciled"
+        and receipt["withinBudget"] is True
+    )
     pico["runtimeReportedCostCNY"] = runtime_reported_cost
     pico["runtimeReportedUsage"] = {
         "promptTokens": runtime_input_tokens,
@@ -532,6 +777,7 @@ def apply_gateway_accounting(
         "costCNY": runtime_reported_cost,
     }
     pico["costCNY"] = actual["costCNY"]
+    pico["signedGatewayUsageRequired"] = signed_gateway_usage_required
     pico["gatewayAccounting"] = {
         "schemaVersion": receipt["schemaVersion"],
         "status": receipt["status"],
@@ -540,10 +786,10 @@ def apply_gateway_accounting(
         "receiptSha256": receipt["receiptSha256"],
         "costMicroCNY": actual["costMicroCNY"],
         "costCNY": actual["costCNY"],
-        "usageFallback": runtime_failed_zero_usage_fallback,
+        "usageFallback": use_signed_gateway_actual,
         "usageSource": (
             "signed_gateway_actual"
-            if runtime_failed_zero_usage_fallback
+            if use_signed_gateway_actual
             else "runtime"
         ),
     }
@@ -553,9 +799,9 @@ def apply_gateway_accounting(
         raise RuntimeError("Gateway accounting could not be reconciled")
     if receipt["withinBudget"] is not True:
         raise RuntimeError("Gateway usage exceeded the configured budget or quota")
-    if not runtime_usage_matches and not runtime_failed_zero_usage_fallback:
+    if not runtime_usage_matches and not use_signed_gateway_actual:
         raise RuntimeError("Gateway accounting tokens do not match runtime usage")
-    if runtime_failed_zero_usage_fallback:
+    if use_signed_gateway_actual:
         context.n_input_tokens = actual["inputTokens"]
         context.n_output_tokens = actual["outputTokens"]
 
@@ -1503,6 +1749,239 @@ async def docker_enroll_gateway(
     )
     if process.returncode != 0 or enrollment_token in stdout or enrollment_token in stderr:
         raise RuntimeError("Pico gateway workload enrollment failed")
+
+
+def verifier_service_manifest_path(workspace: str) -> str:
+    path = PurePosixPath(workspace)
+    if (
+        not workspace.startswith("/")
+        or "\0" in workspace
+        or ".." in path.parts
+        or path.as_posix() != workspace
+    ):
+        raise RuntimeError("Terminal-Bench workspace path is invalid")
+    return (PurePosixPath(workspace) / _VERIFIER_SERVICE_MANIFEST_BASENAME).as_posix()
+
+
+def is_bounded_posix_path(candidate: str, root: str) -> bool:
+    if not candidate.startswith("/") or "\0" in candidate:
+        return False
+    path = PurePosixPath(candidate)
+    if ".." in path.parts:
+        return False
+    normalized = path.as_posix()
+    return normalized == candidate and (
+        candidate == root or candidate.startswith(f"{root}/")
+    )
+
+
+def parse_verifier_service_manifest(
+    value: Any,
+    *,
+    workspace: str,
+) -> VerifierServiceManifest:
+    verifier_service_manifest_path(workspace)
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion",
+        "argv",
+        "cwd",
+        "port",
+    }:
+        raise ValueError("Verifier service manifest schema is invalid")
+    if (
+        type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != 1
+        or type(value["port"]) is not int
+        or value["port"] != _VERIFIER_SERVICE_PORT
+    ):
+        raise ValueError("Verifier service manifest identity is invalid")
+    cwd = value["cwd"]
+    argv = value["argv"]
+    if (
+        not isinstance(cwd, str)
+        or not is_bounded_posix_path(cwd, workspace)
+        or not isinstance(argv, list)
+        or not 2 <= len(argv) <= 32
+        or any(
+            not isinstance(entry, str)
+            or not 1 <= len(entry) <= 4_096
+            or any(character in entry for character in ("\0", "\r", "\n"))
+            for entry in argv
+        )
+    ):
+        raise ValueError("Verifier service manifest launch contract is invalid")
+    executable = argv[0]
+    suffixes = _VERIFIER_SERVICE_EXECUTABLES.get(executable)
+    script = argv[1]
+    accepted_suffixes = (suffixes,) if isinstance(suffixes, str) else suffixes
+    if (
+        accepted_suffixes is None
+        or not is_bounded_posix_path(script, cwd)
+        or not script.endswith(accepted_suffixes)
+    ):
+        raise ValueError("Verifier service manifest executable is invalid")
+    return VerifierServiceManifest(tuple(argv), cwd, _VERIFIER_SERVICE_PORT)
+
+
+async def docker_compose_exec_argv(
+    environment: DockerEnvironment,
+    argv: list[str],
+    *,
+    detached: bool = False,
+    working_dir: str | None = None,
+    container_env: dict[str, str] | None = None,
+    timeout_sec: float = 15.0,
+    allowed_exit_codes: set[int] = {0},
+) -> tuple[int, bytes, bytes]:
+    assert_secure_docker_environment(environment)
+    command = docker_compose_exec_command(
+        environment,
+        argv,
+        detached=detached,
+        working_dir=working_dir,
+        container_env=container_env,
+    )
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        env=compose_subprocess_env(environment),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_sec
+        )
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise RuntimeError("Verifier service Docker exec timed out") from None
+    if process.returncode not in allowed_exit_codes:
+        raise RuntimeError("Verifier service Docker exec failed")
+    return process.returncode, stdout, stderr
+
+
+def docker_compose_exec_command(
+    environment: DockerEnvironment,
+    argv: list[str],
+    *,
+    detached: bool = False,
+    working_dir: str | None = None,
+    container_env: dict[str, str] | None = None,
+) -> list[str]:
+    if not argv or any(not isinstance(entry, str) or "\0" in entry for entry in argv):
+        raise RuntimeError("Docker exec argv is invalid")
+    command = [
+        "docker",
+        "compose",
+        "--project-name",
+        _sanitize_docker_compose_project_name(environment.session_id),
+        "--project-directory",
+        str(environment.environment_dir.resolve().absolute()),
+    ]
+    for path in environment._docker_compose_paths:
+        command.extend(["-f", str(path.resolve().absolute())])
+    command.extend(["exec", "-T"])
+    if detached:
+        command.append("--detach")
+    command.extend(["-u", str(environment.default_user or "root")])
+    if working_dir is not None:
+        command.extend(["--workdir", working_dir])
+    if container_env is not None:
+        if any(
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name)
+            or not isinstance(value, str)
+            or "\0" in value
+            for name, value in container_env.items()
+        ):
+            raise RuntimeError("Docker exec environment is invalid")
+        for name in sorted(container_env):
+            command.extend(["--env", f"{name}={container_env[name]}"])
+    command.extend(["main", *argv])
+    return command
+
+
+async def read_verifier_service_manifest(
+    environment: DockerEnvironment,
+    *,
+    workspace: str,
+    timeout_sec: float,
+) -> VerifierServiceManifest | None:
+    manifest_path = verifier_service_manifest_path(workspace)
+    return_code, stdout, _ = await docker_compose_exec_argv(
+        environment,
+        [
+            PicoInstalledAgent._REMOTE_NODE.as_posix() + "/bin/node",
+            "-e",
+            _VERIFIER_SERVICE_HELPER,
+            "inspect",
+            manifest_path,
+            workspace,
+        ],
+        working_dir=workspace,
+        container_env=_TRUSTED_NODE_EXEC_ENV,
+        timeout_sec=timeout_sec,
+        allowed_exit_codes={0, 44},
+    )
+    if return_code == 44:
+        return None
+    try:
+        value = parse_single_json_line(stdout.decode("utf-8"))
+        return parse_verifier_service_manifest(value, workspace=workspace)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RuntimeError) as error:
+        raise RuntimeError("Verifier service manifest is invalid") from error
+
+
+async def launch_verifier_service_if_requested(
+    environment: DockerEnvironment,
+    *,
+    workspace: str,
+    outer_deadline: float,
+    loop: asyncio.AbstractEventLoop,
+) -> bool:
+    manifest = await read_verifier_service_manifest(
+        environment,
+        workspace=workspace,
+        timeout_sec=verifier_service_step_timeout(outer_deadline, loop),
+    )
+    if manifest is None:
+        return False
+    node = PicoInstalledAgent._REMOTE_NODE.as_posix() + "/bin/node"
+    await docker_compose_exec_argv(
+        environment,
+        [node, "-e", _VERIFIER_SERVICE_ASSERT_CLOSED],
+        container_env=_TRUSTED_NODE_EXEC_ENV,
+        timeout_sec=verifier_service_step_timeout(outer_deadline, loop),
+    )
+    await docker_compose_exec_argv(
+        environment,
+        [
+            node,
+            "-e",
+            _VERIFIER_SERVICE_HELPER,
+            "launch",
+            verifier_service_manifest_path(workspace),
+            workspace,
+        ],
+        detached=True,
+        working_dir=manifest.cwd,
+        container_env=_TRUSTED_NODE_EXEC_ENV,
+        timeout_sec=verifier_service_step_timeout(outer_deadline, loop),
+    )
+    await docker_compose_exec_argv(
+        environment,
+        [node, "-e", _VERIFIER_SERVICE_PROBE],
+        container_env=_TRUSTED_NODE_EXEC_ENV,
+        timeout_sec=verifier_service_step_timeout(outer_deadline, loop),
+    )
+    return True
+
+
+def verifier_service_step_timeout(
+    outer_deadline: float,
+    loop: asyncio.AbstractEventLoop,
+) -> float:
+    return min(15.0, remaining_budget(outer_deadline, loop.time()))
 
 
 async def docker_exec_secret_stdin(
@@ -2545,6 +3024,73 @@ def remaining_budget(deadline: float, now: float) -> float:
     return remaining
 
 
+def bounded_attempt_identity(base: str, attempt: int) -> str:
+    if attempt < 1:
+        raise ValueError("attempt must be positive")
+    suffix = "" if attempt == 1 else f".retry-{attempt - 1}"
+    candidate = f"{base}{suffix}"
+    if len(candidate) <= 128:
+        return candidate
+    digest = hashlib.sha256(base.encode()).hexdigest()[:16]
+    prefix_limit = 128 - len(suffix) - len(digest) - 1
+    return f"{base[:prefix_limit]}.{digest}{suffix}"
+
+
+def benchmark_instruction(instruction: str, workspace: str) -> str:
+    manifest_path = verifier_service_manifest_path(workspace)
+    return (
+        f"{instruction}\n\n"
+        "[Terminal-Bench adapter note]\n"
+        "Run pytest test files with pytest itself before finishing; do not execute "
+        "them as plain Python scripts. If the verifier needs a persistent service "
+        f"on port 8080, write {manifest_path} as strict JSON with exactly "
+        'schemaVersion=1, argv, cwd, and port=8080. Use a direct Python or Node '
+        "script under cwd; argv[0] must be /usr/bin/python3, "
+        "/usr/local/bin/python3, or /usr/bin/node, and argv[1] must be the "
+        "absolute non-symlink script path. Do not rely on shell background jobs."
+    )
+
+
+def is_zero_usage_runtime_failure(result: dict[str, Any]) -> bool:
+    error = result.get("error")
+    usage = result.get("usage")
+    return (
+        result.get("status") == "failed"
+        and isinstance(error, dict)
+        and error.get("code") == "RUNTIME_FAILED"
+        and result.get("terminationConfirmed") is True
+        and isinstance(usage, dict)
+        and usage.get("promptTokens") == 0
+        and usage.get("completionTokens") == 0
+    )
+
+
+def should_retry_runtime_failure(
+    result: dict[str, Any],
+    *,
+    retries_used: int,
+    retry_limit: int,
+    remaining_sec: float,
+    shutdown_grace_ms: int,
+    result_flush_margin_ms: int,
+) -> bool:
+    error = result.get("error")
+    required_remaining_ms = (
+        shutdown_grace_ms
+        + result_flush_margin_ms
+        + _MIN_RUNTIME_RETRY_EXECUTION_MS
+    )
+    return (
+        retries_used < retry_limit
+        and result.get("status") == "failed"
+        and isinstance(error, dict)
+        and error.get("code") == "RUNTIME_FAILED"
+        and result.get("terminationConfirmed") is True
+        and math.isfinite(remaining_sec)
+        and remaining_sec * 1_000 >= required_remaining_ms
+    )
+
+
 def safe_trial_key(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]", "-", value).strip(".-")
     return normalized[:64] or "trial"
@@ -2558,6 +3104,25 @@ def write_private_json(path: Path, value: Any) -> None:
     try:
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
             handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_private_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
