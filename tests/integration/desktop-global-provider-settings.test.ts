@@ -52,6 +52,11 @@ test("全局 Provider 加载与工作区 effective config 保持独立", async (
   assert.doesNotMatch(workspaceLoader, /provider\.list|config\.user\.get/u);
   assert.doesNotMatch(workspaceLoader, /providerConfig:/u);
   assert.match(workspaceLoader, /config\.effective\.get/u);
+  assert.match(
+    workspaceLoader,
+    /switchingWorkspace[\s\S]+modelRoutes: \[\]/u,
+    "切换工作区时必须先清空上一工作区的模型路由",
+  );
   assert.doesNotMatch(workspaceMerge, /providerConfig:/u);
   assert.match(
     workspaceMerge,
