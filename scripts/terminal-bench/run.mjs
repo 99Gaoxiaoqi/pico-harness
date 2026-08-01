@@ -60,6 +60,9 @@ const harborWheelUrl =
   "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
 const benchmarkBashTimeoutMs = 900_000;
+const benchmarkAdapterCleanupMarginMs = 60_000;
+const benchmarkHeadlessAdapterMarginMs = 5_000;
+const benchmarkVerifierServiceMarginMs = 15_000;
 const benchmarkMaxTurns = 80;
 const benchmarkRuntimeRetryCount = 1;
 const defaultRunCostCNY = 250;
@@ -342,6 +345,9 @@ const manifest = {
       "task_stop",
     ],
     bashTimeoutMs: benchmarkBashTimeoutMs,
+    adapterCleanupMarginMs: benchmarkAdapterCleanupMarginMs,
+    headlessAdapterMarginMs: benchmarkHeadlessAdapterMarginMs,
+    verifierServiceMarginMs: benchmarkVerifierServiceMarginMs,
     localCanaryOnly: true,
     leaderboardComparable: false,
     secretInjection: "host-credential-gateway",
@@ -437,6 +443,8 @@ const harborArgs = [
   `pico_commit=${picoCommit}`,
   "--ak",
   `bash_timeout_ms=${benchmarkBashTimeoutMs}`,
+  "--ak",
+  `adapter_cleanup_margin_ms=${benchmarkAdapterCleanupMarginMs}`,
   "--ak",
   `max_turns=${benchmarkMaxTurns}`,
   "--ak",
