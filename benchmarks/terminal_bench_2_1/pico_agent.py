@@ -2178,12 +2178,17 @@ async def launch_verifier_service_if_requested(
     manifest_path = verifier_service_manifest_path(workspace)
     supervisor_nonce = secrets.token_hex(32)
     helper_sha256 = hashlib.sha256(_VERIFIER_SERVICE_HELPER.encode()).hexdigest()
-    await docker_compose_exec_argv(
+    listener_status, _, _ = await docker_compose_exec_argv(
         environment,
         [node, "-e", _VERIFIER_SERVICE_ASSERT_CLOSED],
         container_env=_TRUSTED_NODE_EXEC_ENV,
         timeout_sec=verifier_service_step_timeout(outer_deadline, loop),
+        allowed_exit_codes={0, 2},
     )
+    if listener_status == 2:
+        # Preserve the existing unmanaged task-service path. Never adopt or
+        # terminate an already-listening process as the trusted supervisor.
+        return False
     await docker_compose_exec_argv(
         environment,
         [
@@ -3291,7 +3296,11 @@ def benchmark_instruction(instruction: str, workspace: str) -> str:
         "confirming the executable exists may argv[0] instead be /usr/bin/python3, "
         "/usr/local/bin/python3, or /usr/bin/node. argv[1] must be the absolute "
         "non-symlink .py or .cjs script path matching the executable. Do not rely "
-        "on shell background jobs."
+        "on shell background jobs. The adapter, not your process, launches the "
+        "persistent service from this manifest after your run. You may temporarily "
+        "start it for testing, but before finishing you must stop that exact process "
+        "and confirm port 8080 is closed. Never stop or take over a listener you did "
+        "not start."
     )
 
 
