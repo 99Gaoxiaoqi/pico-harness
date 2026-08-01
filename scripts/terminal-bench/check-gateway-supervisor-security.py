@@ -618,6 +618,10 @@ def assert_request_bytes_do_not_consume_token_quota(
         strict_output_limit=state.strict_request_output_limit,
     )
     estimated_input_tokens = gateway.estimate_request_input_tokens(bounded_body)
+    assert gateway.INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN == 4
+    assert estimated_input_tokens == (
+        len(bounded_body) + gateway.INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN - 1
+    ) // gateway.INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN
     required_reservation = (
         estimated_input_tokens + gateway.INPUT_RESERVATION_MARGIN_TOKENS
     )
@@ -1321,6 +1325,17 @@ def main() -> None:
                 proxy_frame({"usage_case": "near-quota"}),
             ),
         )[0] == 200
+        calls_before_admission = ProviderHandler.calls
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-near-input-quota",
+                proxy_frame({"padding": "x" * 120_000}),
+            ),
+        )[0] == 200
+        assert ProviderHandler.calls == calls_before_admission + 1
         calls_before_input_quota = ProviderHandler.calls
         quota_status, quota_error = request(
             str(socket_path),
@@ -1328,7 +1343,7 @@ def main() -> None:
                 seed,
                 run_id,
                 "trial-near-input-quota",
-                proxy_frame({"padding": "x" * 120_000}),
+                proxy_frame({"padding": "x" * 220_000}),
             ),
         )
         assert quota_status == 502
