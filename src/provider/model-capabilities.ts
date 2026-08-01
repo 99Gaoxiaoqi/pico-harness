@@ -20,12 +20,15 @@ export type CapabilityValueSource = "config" | "profile_default";
 export type OpenAIOutputTokenField = "max_tokens" | "max_completion_tokens";
 export type PromptCacheMode = "implicit" | "explicit";
 export type PromptCacheTtl = "5m" | "1h" | "30m" | "24h" | `${number}s`;
+export type OpenAIPromptCacheRetention = "in_memory" | "24h";
 
 export interface PromptCachePolicyConfig {
   mode: PromptCacheMode;
   ttl?: PromptCacheTtl;
   /** OpenAI GPT-5.6 content-block breakpoints; enable only after route capability probing. */
   explicitBreakpoints?: boolean;
+  /** Legacy OpenAI maximum-retention policy; mutually exclusive with GPT-5.6 options. */
+  retention?: OpenAIPromptCacheRetention;
   keyShards?: number;
   /** Activate configured key sharding after this route exceeds the calls-per-minute threshold. */
   shardThresholdRpm?: number;
@@ -36,6 +39,7 @@ export interface PromptCachePolicy {
   mode: PromptCacheMode;
   ttl?: PromptCacheTtl;
   explicitBreakpoints?: boolean;
+  retention?: OpenAIPromptCacheRetention;
   keyShards: number;
   shardThresholdRpm?: number;
   prewarm: boolean;
@@ -155,14 +159,18 @@ function resolvePromptCachePolicy(
   }
   const prewarm = configured.prewarm ?? false;
   if (provider === "openai") {
-    if (
-      configured.mode !== "explicit" &&
-      (keyShards > 1 || configured.shardThresholdRpm !== undefined)
-    ) {
-      throw new Error("OpenAI prompt-cache key sharding requires promptCache.mode=explicit");
-    }
     if (configured.ttl !== undefined && configured.ttl !== "30m") {
       throw new Error("OpenAI promptCache.ttl must be 30m");
+    }
+    if (
+      configured.retention !== undefined &&
+      configured.retention !== "in_memory" &&
+      configured.retention !== "24h"
+    ) {
+      throw new Error("OpenAI promptCache.retention must be in_memory or 24h");
+    }
+    if (configured.retention !== undefined && configured.mode !== "implicit") {
+      throw new Error("OpenAI promptCache.retention requires promptCache.mode=implicit");
     }
     if (configured.explicitBreakpoints === true && configured.mode !== "explicit") {
       throw new Error("OpenAI explicitBreakpoints requires promptCache.mode=explicit");
@@ -177,6 +185,7 @@ function resolvePromptCachePolicy(
       ...(configured.explicitBreakpoints !== undefined
         ? { explicitBreakpoints: configured.explicitBreakpoints }
         : {}),
+      ...(configured.retention !== undefined ? { retention: configured.retention } : {}),
       keyShards,
       ...(shardThresholdRpm !== undefined ? { shardThresholdRpm } : {}),
       prewarm: false,
@@ -195,6 +204,9 @@ function resolvePromptCachePolicy(
     }
     if (configured.explicitBreakpoints !== undefined) {
       throw new Error("Claude promptCache.explicitBreakpoints is not supported");
+    }
+    if (configured.retention !== undefined) {
+      throw new Error("Claude promptCache.retention is not supported");
     }
     return {
       mode: "explicit",
@@ -217,6 +229,9 @@ function resolvePromptCachePolicy(
   }
   if (configured.explicitBreakpoints !== undefined) {
     throw new Error("Gemini promptCache.explicitBreakpoints is not supported");
+  }
+  if (configured.retention !== undefined) {
+    throw new Error("Gemini promptCache.retention is not supported");
   }
   if (prewarm) throw new Error("Gemini promptCache.prewarm is not supported");
   return {

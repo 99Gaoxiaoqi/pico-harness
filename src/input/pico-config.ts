@@ -481,6 +481,10 @@ function parseModelCapabilities(
         "must be a boolean",
       );
     }
+    const retention = promptCache["retention"];
+    if (retention !== undefined && retention !== "in_memory" && retention !== "24h") {
+      throw configError(configPath, `${field}.promptCache.retention`, "must be in_memory or 24h");
+    }
     const keyShards = promptCache["keyShards"];
     if (
       keyShards !== undefined &&
@@ -540,19 +544,23 @@ function parseModelCapabilities(
           "is not supported for claude",
         );
       }
-    } else if (protocol === "openai") {
-      if (
-        mode !== "explicit" &&
-        (((keyShards as number | undefined) ?? 1) > 1 || shardThresholdRpm !== undefined)
-      ) {
+      if (retention !== undefined) {
         throw configError(
           configPath,
-          `${field}.promptCache.mode`,
-          "must be explicit when OpenAI key sharding is configured",
+          `${field}.promptCache.retention`,
+          "is not supported for claude",
         );
       }
+    } else if (protocol === "openai") {
       if (ttl !== undefined && ttl !== "30m") {
         throw configError(configPath, `${field}.promptCache.ttl`, "must be 30m for openai");
+      }
+      if (retention !== undefined && mode !== "implicit") {
+        throw configError(
+          configPath,
+          `${field}.promptCache.retention`,
+          "requires promptCache.mode=implicit",
+        );
       }
       if (prewarm === true) {
         throw configError(
@@ -600,6 +608,13 @@ function parseModelCapabilities(
           "is not supported for gemini",
         );
       }
+      if (retention !== undefined) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.retention`,
+          "is not supported for gemini",
+        );
+      }
       if (prewarm === true) {
         throw configError(
           configPath,
@@ -612,6 +627,7 @@ function parseModelCapabilities(
       mode,
       ...(ttl !== undefined ? { ttl: ttl as `${number}s` | "5m" | "1h" | "30m" | "24h" } : {}),
       ...(explicitBreakpoints !== undefined ? { explicitBreakpoints } : {}),
+      ...(retention !== undefined ? { retention } : {}),
       ...(keyShards !== undefined ? { keyShards: keyShards as number } : {}),
       ...(shardThresholdRpm !== undefined
         ? { shardThresholdRpm: shardThresholdRpm as number }

@@ -45,13 +45,26 @@ test("prompt-cache policies resolve provider defaults and configured behavior", 
       }),
     /ttl requires explicitBreakpoints=true/u,
   );
+  assert.deepEqual(
+    resolveModelRouteCapabilities("openai", "gpt-test", {
+      cache: true,
+      promptCache: { mode: "implicit", retention: "24h", keyShards: 4 },
+    }).promptCache,
+    {
+      mode: "implicit",
+      retention: "24h",
+      keyShards: 4,
+      shardThresholdRpm: 15,
+      prewarm: false,
+    },
+  );
   assert.throws(
     () =>
       resolveModelRouteCapabilities("openai", "gpt-test", {
         cache: true,
-        promptCache: { mode: "implicit", keyShards: 4 },
+        promptCache: { mode: "explicit", retention: "in_memory" },
       }),
-    /key sharding requires promptCache\.mode=explicit/u,
+    /retention requires promptCache\.mode=implicit/u,
   );
   assert.throws(
     () =>
@@ -129,4 +142,55 @@ test("project config validates prompt-cache policy against its provider protocol
     "utf8",
   );
   await assert.rejects(loadPicoProjectConfig(root), /promptCache\.mode.*explicit for claude/u);
+
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: {
+        openai: {
+          protocol: "openai",
+          baseURL: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+          models: {
+            "gpt-legacy": {
+              cache: true,
+              promptCache: { mode: "implicit", retention: "in_memory", keyShards: 2 },
+            },
+          },
+        },
+      },
+    }),
+    "utf8",
+  );
+  const openAIParsed = await loadPicoProjectConfig(root);
+  assert.deepEqual(
+    openAIParsed.providers["openai"]?.modelCapabilities?.["gpt-legacy"]?.promptCache,
+    { mode: "implicit", retention: "in_memory", keyShards: 2 },
+  );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: {
+        openai: {
+          protocol: "openai",
+          baseURL: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+          models: {
+            "gpt-invalid": {
+              cache: true,
+              promptCache: { mode: "explicit", retention: "24h" },
+            },
+          },
+        },
+      },
+    }),
+    "utf8",
+  );
+  await assert.rejects(
+    loadPicoProjectConfig(root),
+    /promptCache\.retention.*requires promptCache\.mode=implicit/u,
+  );
 });
