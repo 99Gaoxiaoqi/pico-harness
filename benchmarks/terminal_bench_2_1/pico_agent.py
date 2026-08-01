@@ -270,19 +270,55 @@ function hasCleanSupervisorEnvironment(pid) {
   return ['LD_AUDIT', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'NODE_OPTIONS', 'NODE_PATH']
     .every((name) => entries.includes(`${name}=`));
 }
+function hasTrustedNodeMappings(raw, expectedInode) {
+  const mappings = raw.split('\n').map((line) => line.trim().split(/\s+/u))
+    .filter((fields) => fields.length === 6 && fields[5] === supervisorNode &&
+      fields[4] === String(expectedInode));
+  return mappings.some((fields) => /^0+$/u.test(fields[2]) && fields[1] === 'r--p') &&
+    mappings.some((fields) => fields[1] === 'r-xp');
+}
 function usesTrustedSupervisorExecutable(pid) {
+  let expected;
   try {
-    const expected = fs.statSync(supervisorNode);
+    expected = fs.statSync(supervisorNode);
+  } catch { return false; }
+  try {
     const actual = fs.statSync(`/proc/${pid}/exe`);
-    return expected.dev === actual.dev && expected.ino === actual.ino &&
-      fs.realpathSync(`/proc/${pid}/exe`) === fs.realpathSync(supervisorNode);
+    if (expected.dev === actual.dev && expected.ino === actual.ino &&
+        fs.realpathSync(`/proc/${pid}/exe`) === fs.realpathSync(supervisorNode)) {
+      return true;
+    }
+  } catch {}
+  try {
+    const actual = fs.statSync(`/proc/${pid}/exe`);
+    const current = fs.statSync('/proc/self/exe');
+    const reset = fs.statSync('/proc/.reset');
+    return process.execPath === supervisorNode && expected.isFile() &&
+      (expected.mode & 0o222) === 0 &&
+      fs.realpathSync('/proc/self/exe') === fs.realpathSync(supervisorNode) &&
+      fs.readlinkSync(`/proc/${pid}/exe`) === '/run/rosetta/rosetta' &&
+      actual.dev === current.dev && actual.ino === current.ino &&
+      reset.isFile() && reset.size === 0 && reset.uid === 0 && reset.gid === 0 &&
+      (reset.mode & 0o022) === 0 && reset.dev === fs.statSync('/proc').dev &&
+      hasTrustedNodeMappings(fs.readFileSync('/proc/self/maps', 'utf8'), expected.ino) &&
+      hasTrustedNodeMappings(fs.readFileSync(`/proc/${pid}/maps`, 'utf8'), expected.ino);
   } catch { return false; }
 }
 function hasTrustedSupervisorArguments(argv) {
-  return argv.length === 8 && argv[0] === supervisorNode && argv[1] === '-e' &&
-    crypto.createHash('sha256').update(argv[2] || '').digest('hex') === helperSha256 &&
-    argv[3] === helperSentinel && argv[4] === 'launch' && argv[5] === manifestPath &&
-    argv[6] === workspace && argv[7] === nonce;
+  let offset;
+  if (argv[0] === supervisorNode && argv[1] === '-e') {
+    offset = 2;
+  } else if (argv[0] === supervisorNode && argv[1] === '--no-opt' &&
+      argv[2] === '-r' && argv[3] === '/proc/.reset' && argv[4] === '-e') {
+    offset = 5;
+  } else {
+    return false;
+  }
+  const payload = argv.slice(offset);
+  return payload.length === 6 &&
+    crypto.createHash('sha256').update(payload[0] || '').digest('hex') === helperSha256 &&
+    payload[1] === helperSentinel && payload[2] === 'launch' &&
+    payload[3] === manifestPath && payload[4] === workspace && payload[5] === nonce;
 }
 function parentPid(pid) {
   try {
