@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { CostTracker, type ProviderCallLedger } from "../../src/observability/tracker.js";
 import { LLMStatusError } from "../../src/provider/errors.js";
 import { createProvider } from "../../src/provider/factory.js";
+import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { toCanonicalUsage } from "../../src/schema/message.js";
 import type { Message, ToolDefinition, Usage } from "../../src/schema/message.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
@@ -22,6 +23,10 @@ realModelTest(
       baseURL: anthropicBaseUrl(requiredEnvironment("ANTHROPIC_BASE_URL")),
       apiKey: requiredEnvironment("ANTHROPIC_AUTH_TOKEN"),
       model,
+      capabilities: resolveModelRouteCapabilities("claude", model, {
+        cache: true,
+        promptCache: { mode: "explicit", ttl: "5m" },
+      }),
     });
     const records: ProviderCallRecord[] = [];
     const ledger: ProviderCallLedger = {
