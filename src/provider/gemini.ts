@@ -68,8 +68,7 @@ export interface GeminiProviderDependencies {
   readonly now?: () => number;
   /** Set only after the native cachedContents spike has passed for this route. Defaults false. */
   readonly enableExplicitPromptCache?:
-    | boolean
-    | ((route: { readonly baseURL: string; readonly model: string }) => boolean);
+    boolean | ((route: { readonly baseURL: string; readonly model: string }) => boolean);
 }
 
 /** Google (Gemini) 原生协议适配器 */
@@ -443,8 +442,8 @@ export class GeminiProvider implements LLMProvider {
   }
 
   /**
-   * Gemini cachedContents own only the stable system/tools prefix. Message history stays on the
-   * request so each turn remains semantically identical when cache creation is unavailable.
+   * Gemini cachedContents own only the stable system/tools/toolConfig prefix. Message history stays
+   * on the request so each turn remains semantically identical when cache creation is unavailable.
    */
   private async attachExplicitPromptCache(
     body: Record<string, unknown>,
@@ -456,10 +455,16 @@ export class GeminiProvider implements LLMProvider {
       source["systemInstruction"] = body["system_instruction"];
     }
     if (body["tools"] !== undefined) source["tools"] = body["tools"];
+    if (body["toolConfig"] !== undefined) source["toolConfig"] = body["toolConfig"];
     if (Object.keys(source).length === 0) return body;
     const cachedContent = await this.promptCache.getOrCreate(source, signal);
     if (!cachedContent) return body;
-    const { system_instruction: _systemInstruction, tools: _tools, ...remaining } = body;
+    const {
+      system_instruction: _systemInstruction,
+      tools: _tools,
+      toolConfig: _toolConfig,
+      ...remaining
+    } = body;
     const cachedBody = { ...remaining, cachedContent: cachedContent.name };
     if (cachedContent.cacheWriteTokens !== undefined) {
       this.cacheWriteTokensByBody.set(cachedBody, cachedContent.cacheWriteTokens);
