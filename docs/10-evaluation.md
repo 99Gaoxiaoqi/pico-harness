@@ -181,7 +181,10 @@ Normalizer 不把所有非通过都叫做“模型失败”。`primaryStatus` �
 | `verifier_error`                                   | Verifier 未完成或证据无效                      |
 
 因此，`headlessCompleted` 不是通过数；一个 trial 可以正常完成 Runtime，最终仍是
-`task_failed`。同样，`PUBLISHED.json` 证明结果经过本地发布门禁，不证明模型质量优秀。
+`task_failed`。`policyIncident` 与 `primaryStatus` 是正交维度：已完成 trial 即使记录了策略
+拒绝，也按 Verifier 投影为 `passed` 或 `task_failed`；只有策略实际阻断运行而未完成时才是
+`policy_blocked`。策略事件计数、原因分类和 clean 指标仍会完整保留。`PUBLISHED.json` 证明
+结果经过本地发布门禁，不证明模型质量优秀。
 
 只有在 run 已 sealed、任务与 attempts 一致、模型和策略可比时，通过率
 `passed / scheduled` 才有解释价值。Token 和成本比较应优先使用 Gateway accounting
