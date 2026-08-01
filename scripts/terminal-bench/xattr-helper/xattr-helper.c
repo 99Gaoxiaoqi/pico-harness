@@ -9,6 +9,8 @@
 #include <sys/types.h>
 #include <sys/xattr.h>
 
+#define MAX_METADATA_BYTES (256 * 1024)
+
 static void fail(const char *operation, const char *detail) {
   fprintf(stderr, "{\"error\":\"xattr-helper\",\"operation\":\"%s\",\"errno\":%d,\"detail\":\"%s\"}\n", operation, errno, detail);
   exit(1);
@@ -23,6 +25,7 @@ static unsigned char unhex(char value) {
 static unsigned char *decode_hex(const char *text, size_t *size) {
   if (strncmp(text, "0x", 2) || strlen(text) % 2) { errno = EINVAL; fail("set", "invalid hex value"); }
   *size = (strlen(text) - 2) / 2;
+  if (*size > MAX_METADATA_BYTES) { errno = E2BIG; fail("set", "xattr value exceeds metadata limit"); }
   unsigned char *result = malloc(*size ? *size : 1);
   if (!result) fail("set", "allocation failed");
   for (size_t i = 0; i < *size; i++) {
@@ -36,25 +39,38 @@ static int compare_names(const void *left, const void *right) { return strcmp(*(
 static void dump(const char *path) {
   ssize_t listed = listxattr(path, NULL, 0);
   if (listed < 0) fail("dump", "listxattr failed");
+  if (listed > MAX_METADATA_BYTES) { errno = E2BIG; fail("dump", "xattr list exceeds metadata limit"); }
   char *names = malloc((size_t)listed ? (size_t)listed : 1);
   if (!names) fail("dump", "allocation failed");
   if (listed && listxattr(path, names, (size_t)listed) != listed) fail("dump", "xattr list changed");
   size_t count = 0;
-  for (ssize_t offset = 0; offset < listed; offset += (ssize_t)strlen(names + offset) + 1) count++;
+  for (ssize_t offset = 0; offset < listed;) {
+    char *end = memchr(names + offset, '\0', (size_t)(listed - offset));
+    if (!end) { errno = EIO; fail("dump", "malformed xattr list"); }
+    count++; offset = (ssize_t)(end - names) + 1;
+  }
   char **ordered = calloc(count ? count : 1, sizeof(*ordered));
   if (!ordered) fail("dump", "allocation failed");
   size_t index = 0;
-  for (ssize_t offset = 0; offset < listed; offset += (ssize_t)strlen(names + offset) + 1) ordered[index++] = names + offset;
+  for (ssize_t offset = 0; offset < listed;) {
+    ordered[index++] = names + offset;
+    offset += (ssize_t)strlen(names + offset) + 1;
+  }
   qsort(ordered, count, sizeof(*ordered), compare_names);
+  size_t output = 0;
   for (index = 0; index < count; index++) {
     ssize_t size = getxattr(path, ordered[index], NULL, 0);
     if (size < 0) fail("dump", "getxattr failed");
+    if (size > MAX_METADATA_BYTES) { errno = E2BIG; fail("dump", "xattr value exceeds metadata limit"); }
+    size_t name_size = strlen(ordered[index]);
+    if (name_size > MAX_METADATA_BYTES - 4 || (size_t)size > (MAX_METADATA_BYTES - name_size - 4) / 2 || output > MAX_METADATA_BYTES - name_size - 4 - 2 * (size_t)size) { errno = E2BIG; fail("dump", "xattr output exceeds metadata limit"); }
     unsigned char *value = malloc((size_t)size ? (size_t)size : 1);
     if (!value) fail("dump", "allocation failed");
     if (size && getxattr(path, ordered[index], value, (size_t)size) != size) fail("dump", "xattr value changed");
     printf("%s=0x", ordered[index]);
     for (ssize_t i = 0; i < size; i++) { putchar(hex(value[i] >> 4)); putchar(hex(value[i] & 15)); }
     putchar('\n'); free(value);
+    output += name_size + 4 + 2 * (size_t)size;
   }
   free(ordered); free(names);
 }

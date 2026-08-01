@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import {
+  bundledLinuxXattrHelperCandidates,
   captureAtomicFilePrecondition,
   writeAtomicWorkspaceFile,
 } from "../../src/tools/atomic-workspace-file.js";
@@ -26,6 +27,13 @@ const EDIT_FILE_MAX_BYTES = 16 * 1024 * 1024;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
 const METADATA_PROBE_PREFIX = ".pico-metadata-probe-";
 const execFileAsync = promisify(execFile);
+
+test("Terminal-Bench bundle helper path is resolved from extracted dist/tools", () => {
+  assert.deepEqual(bundledLinuxXattrHelperCandidates("/installed-agent/pico/dist/tools", "x64"), [
+    "/installed-agent/pico/xattr-helper/bin/xattr-helper-linux-x64",
+    "/installed-agent/pico/scripts/terminal-bench/xattr-helper/bin/xattr-helper-linux-x64",
+  ]);
+});
 
 test("write_file atomically creates and overwrites while preserving ordinary metadata", async (context) => {
   const fixture = await createFixture("write");
@@ -230,12 +238,19 @@ test(
     await writeFile(targetPath, "alpha\n");
     await execFileAsync("/usr/bin/setfacl", ["-m", "u:65534:r--", targetPath]);
     await execFileAsync("/usr/bin/setfattr", ["-n", "user.pico", "-v", "preserve-me", targetPath]);
+    const canSetCapability = typeof process.geteuid === "function" && process.geteuid() === 0;
+    const setCapability = async (): Promise<void> => {
+      if (!canSetCapability) return;
+      await execFileAsync("/usr/sbin/setcap", ["cap_net_bind_service=ep", targetPath]);
+    };
+    await setCapability();
     const originalHelperOnly = process.env.PICO_XATTR_HELPER_ONLY;
     process.env.PICO_XATTR_HELPER_ONLY = "1";
     try {
       await new WriteFileTool(fixture.workspace).execute(
         JSON.stringify({ path: "metadata.txt", content: "beta\n" }),
       );
+      await setCapability();
       await new EditFileTool(fixture.workspace).execute(
         JSON.stringify({ path: "metadata.txt", old_text: "beta", new_text: "gamma" }),
       );
@@ -244,14 +259,58 @@ test(
       else process.env.PICO_XATTR_HELPER_ONLY = originalHelperOnly;
     }
     assert.equal(await readFile(targetPath, "utf8"), "gamma\n");
-    const [{ stdout: acl }, { stdout: attribute }] = await Promise.all([
+    const [{ stdout: acl }, { stdout: attribute }, { stdout: capability }] = await Promise.all([
       execFileAsync("/usr/bin/getfacl", ["-cpn", targetPath], { encoding: "utf8" }),
       execFileAsync("/usr/bin/getfattr", ["--only-values", "-n", "user.pico", targetPath], {
         encoding: "utf8",
       }),
+      execFileAsync("/usr/sbin/getcap", [targetPath], { encoding: "utf8" }),
     ]);
     assert.match(acl, /^user:65534:r--$/mu);
     assert.equal(attribute.trimEnd(), "preserve-me");
+    assert.equal(capability, "", "helper-only 覆盖不能复活 security.capability");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
+  "sealed xattr helper failure keeps the original inode, content, and metadata",
+  { skip: process.platform !== "linux" },
+  async (context) => {
+    const fixture = await createFixture("sealed-xattr-helper-failure");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "metadata.txt");
+    await writeFile(targetPath, "old-content\n");
+    await execFileAsync("/usr/bin/setfattr", ["-n", "user.pico", "-v", "must-survive", targetPath]);
+    const originalInode = (await stat(targetPath)).ino;
+    const helperPath = join(
+      process.cwd(),
+      "scripts/terminal-bench/xattr-helper/bin",
+      `xattr-helper-linux-${process.arch}`,
+    );
+    const originalHelperOnly = process.env.PICO_XATTR_HELPER_ONLY;
+    process.env.PICO_XATTR_HELPER_ONLY = "1";
+    await chmod(helperPath, 0);
+    try {
+      await assert.rejects(
+        new WriteFileTool(fixture.workspace).execute(
+          JSON.stringify({ path: "metadata.txt", content: "replacement\n" }),
+        ),
+        /已校验的 bundled xattr helper 不可用|Linux.*扩展属性/u,
+      );
+    } finally {
+      await chmod(helperPath, 0o755);
+      if (originalHelperOnly === undefined) delete process.env.PICO_XATTR_HELPER_ONLY;
+      else process.env.PICO_XATTR_HELPER_ONLY = originalHelperOnly;
+    }
+    assert.equal((await stat(targetPath)).ino, originalInode);
+    assert.equal(await readFile(targetPath, "utf8"), "old-content\n");
+    const { stdout } = await execFileAsync(
+      "/usr/bin/getfattr",
+      ["--only-values", "-n", "user.pico", targetPath],
+      { encoding: "utf8" },
+    );
+    assert.equal(stdout.trimEnd(), "must-survive");
     await assertNoTemporaryFiles(fixture.workspace);
   },
 );
