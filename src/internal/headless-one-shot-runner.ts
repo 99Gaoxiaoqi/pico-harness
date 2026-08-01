@@ -1,16 +1,19 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
+  type FileHandle,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { SilentReporter } from "../engine/reporter.js";
 import type { EffectiveConfigSnapshot } from "../input/effective-config.js";
 import type { SessionSettings } from "../input/session-settings.js";
@@ -37,6 +40,7 @@ import {
   type RuntimePolicyDenialReasonKind,
 } from "../runtime/agent-runtime.js";
 import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
+import type { ImagePart } from "../schema/message.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "../security/workspace-trust.js";
@@ -49,6 +53,8 @@ const MAX_TIMEOUT_MS = 12_000_000;
 const MAX_BASH_TIMEOUT_MS = 900_000;
 // Internal benchmark-only ceiling; parsing rejects it outside single_non_stream mode.
 const TERMINAL_BENCH_PROVIDER_TIMEOUT_MS = 330_000;
+const MAX_IMAGE_ATTACHMENTS = 4;
+const MAX_IMAGE_ATTACHMENTS_TOTAL_BYTES = 256 * 1024;
 const MAX_POLICY_DENIAL_COUNT = Number.MAX_SAFE_INTEGER;
 const MAX_POLICY_TOOL_NAME_LENGTH = 128;
 const LOCK_DIRECTORY_MODE = 0o700;
@@ -90,6 +96,7 @@ const REQUEST_FIELDS = new Set([
   "picoHome",
   "sessionId",
   "prompt",
+  "imagePaths",
   "modelRouteId",
   "providerRequestMode",
   "providerTimeoutMs",
@@ -149,6 +156,7 @@ export interface HeadlessOneShotRequestV1 {
   readonly picoHome: string;
   readonly sessionId: string;
   readonly prompt: string;
+  readonly imagePaths?: readonly string[];
   readonly modelRouteId: string;
   readonly providerRequestMode?: "single_non_stream";
   readonly providerTimeoutMs?: number;
@@ -231,6 +239,8 @@ export interface HeadlessOneShotDependencies {
   readonly lockRoot?: string;
   /** Test seam for machine-local owner-lease deletion fault injection. */
   readonly lockRemoveLeaseDirectory?: (leaseDirectory: string) => Promise<void>;
+  /** Test seam for a deterministic image-path replacement race after canonicalization. */
+  readonly beforeImageOpen?: () => Promise<void>;
   /** Test seam that opens a deterministic crash window after Runtime trace export. */
   readonly beforeTraceSanitize?: () => Promise<void>;
 }
@@ -445,6 +455,12 @@ async function runValidatedRequest(
         "The requested model route is unavailable.",
       );
     }
+    if ((request.imagePaths?.length ?? 0) > 0 && route.capabilities.vision === false) {
+      throw new HeadlessRequestError(
+        "IMAGE_CAPABILITY_UNSUPPORTED",
+        "The requested model route does not support image attachments.",
+      );
+    }
     const requestedThinking = request.thinkingEffort ?? modelRuntime.config.defaults.thinkingEffort;
     const reasoning = coordinateReasoningLevel(
       route.capabilities.reasoningProfile,
@@ -486,6 +502,13 @@ async function runValidatedRequest(
         await releaseCaseLocks(lateLocks);
       },
     );
+    const images =
+      (request.imagePaths?.length ?? 0) > 0
+        ? await racePreflight(
+            loadWorkspaceImages(workDir, request.imagePaths ?? [], dependencies.beforeImageOpen),
+            cancellation,
+          )
+        : undefined;
     await racePreflight(assertNewSession(request.sessionId, workDir, picoHome), cancellation);
     const traceBaseline = request.trace
       ? await racePreflight(
@@ -527,6 +550,7 @@ async function runValidatedRequest(
     const runtimePromise = executeRuntime(
       {
         prompt: request.prompt,
+        ...(images === undefined ? {} : { images }),
         dir: workDir,
         sessionSelection: { mode: "new", sessionId: request.sessionId },
         provider: selected.provider,
@@ -927,6 +951,7 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
   const picoHome = requiredString(value["picoHome"], "picoHome", 4096);
   const sessionId = requiredString(value["sessionId"], "sessionId", 128);
   const prompt = requiredString(value["prompt"], "prompt", MAX_PROMPT_LENGTH, false);
+  const imagePaths = parseImagePaths(value["imagePaths"]);
   const modelRouteId = requiredString(value["modelRouteId"], "modelRouteId", 512);
   const permissionMode = value["permissionMode"];
   if (typeof permissionMode !== "string" || !INTERACTION_MODES.has(permissionMode as never)) {
@@ -1048,6 +1073,7 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     picoHome,
     sessionId,
     prompt,
+    ...(imagePaths === undefined ? {} : { imagePaths }),
     modelRouteId,
     ...(providerRequestMode !== undefined ? { providerRequestMode } : {}),
     ...(providerTimeoutMs !== undefined ? { providerTimeoutMs } : {}),
@@ -1061,6 +1087,24 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     shutdownGraceMs,
     trace: value["trace"],
   };
+}
+
+function parseImagePaths(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_IMAGE_ATTACHMENTS) {
+    throw new HeadlessRequestError(
+      "INVALID_IMAGE_PATHS",
+      `imagePaths must contain at most ${MAX_IMAGE_ATTACHMENTS} workspace image paths.`,
+    );
+  }
+  const imagePaths = value.map((path) => requiredString(path, "imagePaths", 4_096));
+  if (new Set(imagePaths).size !== imagePaths.length) {
+    throw new HeadlessRequestError(
+      "INVALID_IMAGE_PATHS",
+      "imagePaths must not contain duplicate paths.",
+    );
+  }
+  return Object.freeze(imagePaths);
 }
 
 function singleNonStreamingProvider(
@@ -1136,6 +1180,161 @@ function pathsOverlap(left: string, right: string): boolean {
 
 function isWithin(relativePath: string): boolean {
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+async function loadWorkspaceImages(
+  workDir: string,
+  imagePaths: readonly string[],
+  beforeImageOpen?: () => Promise<void>,
+): Promise<ImagePart[]> {
+  const images: ImagePart[] = [];
+  const openedFiles = new Set<string>();
+  let totalBytes = 0;
+  for (const imagePath of imagePaths) {
+    const lexicalPath = resolve(workDir, imagePath);
+    if (!isWithin(relative(workDir, lexicalPath))) {
+      throw invalidImageAttachment();
+    }
+    const expectedMimeType = imageMimeTypeForExtension(lexicalPath);
+    if (expectedMimeType === undefined) throw invalidImageAttachment();
+
+    try {
+      const trustedBeforeResolve = await assertPathHasNoSymlinkComponents(workDir, lexicalPath);
+      if (!trustedBeforeResolve.isFile()) throw invalidImageAttachment();
+      const canonicalPath = await realpath(lexicalPath);
+      if (!isWithin(relative(workDir, canonicalPath))) throw invalidImageAttachment();
+      await beforeImageOpen?.();
+
+      const handle = await open(canonicalPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const opened = await handle.stat({ bigint: true });
+        const afterOpen = await lstat(canonicalPath, { bigint: true });
+        if (
+          !opened.isFile() ||
+          !afterOpen.isFile() ||
+          afterOpen.isSymbolicLink() ||
+          !sameFile(trustedBeforeResolve, opened) ||
+          !sameFile(opened, afterOpen)
+        ) {
+          throw invalidImageAttachment();
+        }
+        const identity = `${opened.dev}:${opened.ino}`;
+        if (openedFiles.has(identity)) continue;
+        openedFiles.add(identity);
+
+        const remainingBytes = MAX_IMAGE_ATTACHMENTS_TOTAL_BYTES - totalBytes;
+        if (opened.size > BigInt(remainingBytes)) throw imageAttachmentsTooLarge();
+        const bytes = await readFileBounded(handle, remainingBytes);
+        const actualMimeType = detectImageMimeType(bytes);
+        if (actualMimeType === undefined || actualMimeType !== expectedMimeType) {
+          throw invalidImageAttachment();
+        }
+        totalBytes += bytes.length;
+        images.push({
+          type: "image_base64",
+          mimeType: actualMimeType,
+          data: bytes.toString("base64"),
+        });
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if (error instanceof HeadlessRequestError) throw error;
+      throw invalidImageAttachment();
+    }
+  }
+  return images;
+}
+
+async function assertPathHasNoSymlinkComponents(
+  workDir: string,
+  lexicalPath: string,
+): Promise<BigIntStats> {
+  const nestedPath = relative(workDir, lexicalPath);
+  if (!isWithin(nestedPath) || nestedPath === "") throw invalidImageAttachment();
+  let current = workDir;
+  let targetInfo: BigIntStats | undefined;
+  for (const component of nestedPath.split(sep)) {
+    current = join(current, component);
+    targetInfo = await lstat(current, { bigint: true });
+    if (targetInfo.isSymbolicLink()) throw invalidImageAttachment();
+  }
+  if (targetInfo === undefined) throw invalidImageAttachment();
+  return targetInfo;
+}
+
+async function readFileBounded(handle: FileHandle, maximumBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for (;;) {
+    const capacity = Math.min(64 * 1024, maximumBytes - totalBytes + 1);
+    const chunk = Buffer.allocUnsafe(capacity);
+    const { bytesRead } = await handle.read(chunk, 0, capacity, null);
+    if (bytesRead === 0) break;
+    totalBytes += bytesRead;
+    if (totalBytes > maximumBytes) throw imageAttachmentsTooLarge();
+    chunks.push(chunk.subarray(0, bytesRead));
+  }
+  return Buffer.concat(chunks, totalBytes);
+}
+
+function sameFile(
+  left: { readonly dev: number | bigint; readonly ino: number | bigint },
+  right: { readonly dev: number | bigint; readonly ino: number | bigint },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function imageMimeTypeForExtension(path: string): string | undefined {
+  switch (extname(path).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    default:
+      return undefined;
+  }
+}
+
+function detectImageMimeType(bytes: Buffer): string | undefined {
+  if (
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return "image/png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  const header = bytes.subarray(0, 6).toString("ascii");
+  if (header === "GIF87a" || header === "GIF89a") return "image/gif";
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+    bytes.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return undefined;
+}
+
+function invalidImageAttachment(): HeadlessRequestError {
+  return new HeadlessRequestError(
+    "IMAGE_ATTACHMENT_INVALID",
+    "An image attachment is not a safe supported workspace image file.",
+  );
+}
+
+function imageAttachmentsTooLarge(): HeadlessRequestError {
+  return new HeadlessRequestError(
+    "IMAGE_ATTACHMENTS_TOO_LARGE",
+    `Image attachments exceed the ${MAX_IMAGE_ATTACHMENTS_TOTAL_BYTES}-byte aggregate limit.`,
+  );
 }
 
 async function assertNewSession(

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -186,6 +187,27 @@ def assert_route_config_contract(adapter: Any) -> None:
             path.write_text(json.dumps(compatible))
             assert adapter.load_route_config(path) == compatible
 
+        with_vision = benchmark_route_config()
+        with_vision["provider"]["modelCapabilities"]["gpt-5.4"]["vision"] = True
+        path.write_text(json.dumps(with_vision))
+        assert adapter.load_route_config(path) == with_vision
+        for invalid_vision in (None, 1, "true", {}):
+            invalid = benchmark_route_config()
+            invalid["provider"]["modelCapabilities"]["gpt-5.4"][
+                "vision"
+            ] = invalid_vision
+            path.write_text(json.dumps(invalid))
+            try:
+                adapter.load_route_config(path)
+            except ValueError as error:
+                assert str(error) == (
+                    "route config model vision capability must be a boolean"
+                )
+            else:
+                raise AssertionError(
+                    f"invalid route vision was accepted: {invalid_vision!r}"
+                )
+
 
 async def assert_bootstrap_output_projection(adapter: Any) -> None:
     class BootstrapFailureEnvironment:
@@ -238,10 +260,14 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
     with tempfile.TemporaryDirectory(prefix="pico-bootstrap-output-") as directory:
         root = Path(directory)
         for model in ("gpt-5.4", "gpt-5.6-terra"):
+            route_config = benchmark_route_config(model=model)
+            route_config["provider"]["modelCapabilities"][model]["vision"] = (
+                model == "gpt-5.4"
+            )
             exact = await project(
                 root,
                 f"exact-{model}",
-                benchmark_route_config(model=model),
+                route_config,
             )
             assert exact["route"] == {
                 "id": f"codex-oauth/{model}",
@@ -249,6 +275,7 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
                 "baseURL": "http://pico-gateway:8080",
                 "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
                 "output": 8_192,
+                "vision": model == "gpt-5.4",
             }
         for name, route_config in (
             ("configured-4096", compatible_route_config(4_096)),
@@ -266,6 +293,113 @@ async def assert_bootstrap_output_projection(adapter: Any) -> None:
                 "baseURL": "http://pico-gateway:8080",
                 "apiKeyEnv": "PICO_TB_GATEWAY_TOKEN",
             }
+
+
+async def assert_task_image_attachment_projection(adapter: Any) -> None:
+    class LocalShellEnvironment:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        async def exec(self, *, command: str, **_kwargs: Any) -> Any:
+            self.commands.append(command)
+            completed = subprocess.run(
+                command,
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return types.SimpleNamespace(
+                return_code=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+
+    with tempfile.TemporaryDirectory(prefix="pico-task-images-") as directory:
+        root = Path(directory)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        existing = workspace / "input.png"
+        existing.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+        spaced = workspace / "spaced image.png"
+        spaced.write_bytes(b"\x89PNG\r\n\x1a\nspaced")
+        outside = root / "outside.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\noutside")
+        physical_parent = workspace / "physical-parent"
+        physical_parent.mkdir()
+        (physical_parent / "nested.png").write_bytes(b"\x89PNG\r\n\x1a\nnested")
+        parent_symlink = workspace / "parent-link"
+        parent_symlink.symlink_to(physical_parent, target_is_directory=True)
+        target_symlink = workspace / "target-link.png"
+        target_symlink.symlink_to(existing)
+        directory_image = workspace / "directory.gif"
+        directory_image.mkdir()
+        fifo_image = workspace / "pipe.webp"
+        os.mkfifo(fifo_image)
+
+        instruction = " ".join(
+            [
+                *(f"`missing-{index}.png`" for index in range(4)),
+                "`input.png`",
+                f"`{existing}`",
+                "`spaced image.png`",
+                f"`{outside}`",
+                "`../outside.png`",
+                "https://example.invalid/remote.png",
+                "`target-link.png`",
+                "`parent-link/nested.png`",
+                "`directory.gif`",
+                "`pipe.webp`",
+            ]
+        )
+        candidates = adapter.task_image_path_candidates(
+            instruction,
+            workspace=str(workspace),
+        )
+        assert candidates[:5] == tuple(
+            str(workspace / f"missing-{index}.png") for index in range(4)
+        ) + (str(existing),)
+        assert str(existing) in candidates
+        assert str(spaced) in candidates
+        assert str(workspace / "image.png") not in candidates
+        assert str(outside) not in candidates
+        assert len([path for path in candidates if path == str(existing)]) == 1
+
+        environment = LocalShellEnvironment()
+        accepted = await adapter.preflight_task_image_paths(
+            instruction,
+            workspace=str(workspace),
+            environment=environment,
+        )
+        assert accepted == (str(existing), str(spaced))
+        assert len(environment.commands) == 1
+        assert str(outside) not in environment.commands[0]
+        parent_check = f"[ ! -L {shlex.quote(str(parent_symlink))} ]"
+        target_probe = f"[ -f {shlex.quote(str(parent_symlink / 'nested.png'))} ]"
+        assert parent_check in environment.commands[0]
+        assert target_probe in environment.commands[0]
+        assert environment.commands[0].index(parent_check) < environment.commands[
+            0
+        ].index(target_probe)
+
+        no_image_environment = LocalShellEnvironment()
+        assert await adapter.preflight_task_image_paths(
+            "code-from-image is only a task name",
+            workspace=str(workspace),
+            environment=no_image_environment,
+        ) == ()
+        assert no_image_environment.commands == []
+
+        for index in range(5):
+            (workspace / f"accepted-{index}.jpg").write_bytes(b"\xff\xd8\xfffixture")
+        bounded = await adapter.preflight_task_image_paths(
+            " ".join(f"`accepted-{index}.jpg`" for index in range(5)),
+            workspace=str(workspace),
+            environment=LocalShellEnvironment(),
+        )
+        assert bounded == tuple(
+            str(workspace / f"accepted-{index}.jpg") for index in range(4)
+        )
 
 
 def assert_accounting_failure_messages(adapter: Any) -> None:
@@ -668,6 +802,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         outcomes: list[dict[str, Any]],
         *,
         outer_timeout_sec: float,
+        image_paths: tuple[str, ...] = (),
     ) -> tuple[Any, AttemptEnvironment]:
         environment = AttemptEnvironment(root, outcomes)
         agent = object.__new__(adapter.PicoInstalledAgent)
@@ -701,6 +836,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             headless_deadline=outer_deadline - 75,
             loop=loop,
             public_proxy_env={},
+            image_paths=image_paths,
         )
         return context, environment
 
@@ -721,7 +857,10 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         with tempfile.TemporaryDirectory(prefix="pico-runtime-retry-") as directory:
             root = Path(directory)
             context, environment = await execute(
-                root, [runtime_failed, completed], outer_timeout_sec=180
+                root,
+                [runtime_failed, completed],
+                outer_timeout_sec=180,
+                image_paths=("/app/code.png",),
             )
             assert environment.launch_count == 2
             assert environment.trace_clear_count == 2
@@ -757,6 +896,8 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 assert request["providerTimeoutMs"] == min(
                     330_000, request["timeoutMs"]
                 )
+                assert request["imagePaths"] == ["/app/code.png"]
+                assert "imageData" not in request and "base64" not in request
                 assert "inside /app/.pico-tmp or /app/.local" in request["prompt"]
                 assert "prefer write_file or edit_file" in request["prompt"]
                 assert "invoke executables with literal argv" in request["prompt"]
@@ -2761,6 +2902,7 @@ async def main() -> None:
     await assert_container_proxy_env_injection(adapter)
     await assert_verifier_lifecycle_contract(adapter)
     await assert_bootstrap_output_projection(adapter)
+    await assert_task_image_attachment_projection(adapter)
     print("Terminal-Bench trial network lifecycle passed.")
 
 
