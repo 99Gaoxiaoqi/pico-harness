@@ -810,7 +810,7 @@ export class WriteFileTool implements BaseTool {
 /** bash 命令默认执行时间与可信宿主可配置边界。 */
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000;
 export const MIN_BASH_TIMEOUT_MS = 1_000;
-export const MAX_BASH_TIMEOUT_MS = 300_000;
+export const MAX_BASH_TIMEOUT_MS = 900_000;
 /** 前台命令可持久捕获的最大输出（bytes）。 */
 const BASH_EXEC_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const BASH_KILL_GRACE_MS = 750;

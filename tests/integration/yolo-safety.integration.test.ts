@@ -4,8 +4,11 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { isHardlineBashCommand } from "../../src/approval/bash-hardline.js";
-import { isHardlineCommand } from "../../src/approval/manager.js";
+import {
+  classifyHardlineBashCommand,
+  isHardlineBashCommand,
+} from "../../src/approval/bash-hardline.js";
+import { classifyHardlineCommand, isHardlineCommand } from "../../src/approval/manager.js";
 import { buildForegroundSafetyMiddleware } from "../../src/runtime/agent-runtime.js";
 import { evaluateYoloToolCall } from "../../src/safety/yolo-sandbox.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
@@ -34,6 +37,31 @@ test("host shell argv 只接受受 Bash hardline 保护的解释器", () => {
       shell,
     );
   }
+});
+
+test("hardline reasonKind 使用固定脱敏分类且不改变拒绝语义", () => {
+  const cases = [
+    ["source ./setup.sh", "source_or_dot"],
+    ["powershell -Command Get-ChildItem", "opaque_shell"],
+    ["$PICO_EXECUTABLE --version", "dynamic_executable"],
+    ["cp ./generated.txt /etc/pico", "protected_destination"],
+    ["printf blocked > /etc/pico", "protected_redirect"],
+    ["git push --force origin main", "destructive_git"],
+    ["shutdown now", "destructive_system"],
+    ["python -c 'import os; os.system(\"rm -rf /\")'", "unknown_hardline"],
+  ] as const;
+
+  for (const [command, reasonKind] of cases) {
+    assert.equal(classifyHardlineBashCommand(command, process.cwd()), reasonKind, command);
+    assert.equal(isHardlineBashCommand(command, process.cwd()), true, command);
+    assert.equal(
+      classifyHardlineCommand("bash", JSON.stringify({ command }), process.cwd()),
+      reasonKind,
+      command,
+    );
+  }
+  assert.equal(classifyHardlineBashCommand("printf safe", process.cwd()), undefined);
+  assert.equal(isHardlineBashCommand("printf safe", process.cwd()), false);
 });
 
 test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
