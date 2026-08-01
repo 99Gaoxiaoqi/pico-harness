@@ -1190,8 +1190,7 @@ function policyDenials(code: "plan_mode" | "hardline" | "hook" | "approval") {
   ) as Record<PolicyReasonKind, number>;
   const boundary = {
     source: (code === "plan_mode" || code === "hardline" ? "safety" : "permission") as
-      | "safety"
-      | "permission",
+      "safety" | "permission",
     code,
     reasonKind,
     toolName: "exec_command",
