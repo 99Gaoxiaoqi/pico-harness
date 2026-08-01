@@ -73,6 +73,7 @@ _MAX_BASH_TIMEOUT_MS = 900_000
 _MIN_RUNTIME_RETRY_EXECUTION_MS = 30_000
 _VERIFIER_SERVICE_MANIFEST_BASENAME = ".pico-verifier-service.json"
 _VERIFIER_SERVICE_PORT = 8_080
+_VERIFIER_SERVICE_HELPER_SENTINEL = "pico-verifier-helper"
 _TRUSTED_NODE_EXEC_ENV = {
     "LD_AUDIT": "",
     "LD_LIBRARY_PATH": "",
@@ -249,6 +250,7 @@ const [nonce, manifestPath, workspace, helperSha256] = process.argv.slice(1);
 if (!/^[0-9a-f]{64}$/u.test(nonce || '') || !manifestPath || !workspace ||
     !/^[0-9a-f]{64}$/u.test(helperSha256 || '')) process.exit(2);
 const supervisorNode = '/installed-agent/pico-node/bin/node';
+const helperSentinel = 'pico-verifier-helper';
 let attempt = 0;
 function numericPids() {
   return fs.readdirSync('/proc').filter((entry) => /^[0-9]+$/u.test(entry));
@@ -275,10 +277,10 @@ function usesTrustedSupervisorExecutable(pid) {
   } catch { return false; }
 }
 function hasTrustedSupervisorArguments(argv) {
-  return argv.length === 7 && argv[0] === supervisorNode && argv[1] === '-e' &&
+  return argv.length === 8 && argv[0] === supervisorNode && argv[1] === '-e' &&
     crypto.createHash('sha256').update(argv[2] || '').digest('hex') === helperSha256 &&
-    argv[3] === 'launch' && argv[4] === manifestPath && argv[5] === workspace &&
-    argv[6] === nonce;
+    argv[3] === helperSentinel && argv[4] === 'launch' && argv[5] === manifestPath &&
+    argv[6] === workspace && argv[7] === nonce;
 }
 function parentPid(pid) {
   try {
@@ -2101,6 +2103,7 @@ async def read_verifier_service_manifest(
             PicoInstalledAgent._REMOTE_NODE.as_posix() + "/bin/node",
             "-e",
             _VERIFIER_SERVICE_HELPER,
+            _VERIFIER_SERVICE_HELPER_SENTINEL,
             "inspect",
             manifest_path,
             workspace,
@@ -2149,6 +2152,7 @@ async def launch_verifier_service_if_requested(
             node,
             "-e",
             _VERIFIER_SERVICE_HELPER,
+            _VERIFIER_SERVICE_HELPER_SENTINEL,
             "launch",
             manifest_path,
             workspace,

@@ -798,15 +798,16 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
                 (
                     "const crypto=require('node:crypto');"
                     "const supervisorNode='/installed-agent/pico-node/bin/node';"
+                    "const helperSentinel='pico-verifier-helper';"
                     "const helper='trusted helper';"
                     "const helperSha256=crypto.createHash('sha256').update(helper).digest('hex');"
                     "const manifestPath='/app/.pico-verifier-service.json';"
                     "const workspace='/app';"
                     "const nonce='a'.repeat(64);"
                     f"{supervisor_matcher.group(0)}"
-                    "const exact=[supervisorNode,'-e',helper,'launch',manifestPath,workspace,nonce];"
+                    "const exact=[supervisorNode,'-e',helper,helperSentinel,'launch',manifestPath,workspace,nonce];"
                     "if(!hasTrustedSupervisorArguments(exact))process.exit(42);"
-                    "exact.splice(3,0,'--input-type=commonjs');"
+                    "exact.splice(4,0,'--input-type=commonjs');"
                     "if(hasTrustedSupervisorArguments(exact))process.exit(43);"
                 ),
             ],
@@ -820,6 +821,26 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
             matcher_check.stderr,
         )
         manifest_path = workspace / ".pico-verifier-service.json"
+        missing_manifest = subprocess.run(
+            [
+                node,
+                "-e",
+                adapter._VERIFIER_SERVICE_HELPER,
+                adapter._VERIFIER_SERVICE_HELPER_SENTINEL,
+                "inspect",
+                str(manifest_path),
+                str(workspace),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=trusted_host_env,
+        )
+        assert missing_manifest.returncode == 44, (
+            missing_manifest.stdout,
+            missing_manifest.stderr,
+        )
         manifest = {
             "schemaVersion": 1,
             "argv": ["/usr/bin/node", str(script)],
@@ -906,7 +927,9 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
         )
         supervisor_nonce = calls[2]["argv"][-1]
         assert re.fullmatch(r"[0-9a-f]{64}", supervisor_nonce)
-        assert calls[2]["argv"][-4:] == [
+        assert len(calls[2]["argv"]) == 8
+        assert calls[2]["argv"][-5:] == [
+            adapter._VERIFIER_SERVICE_HELPER_SENTINEL,
             "launch",
             "/app/.pico-verifier-service.json",
             "/app",
