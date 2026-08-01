@@ -42,7 +42,7 @@ MAX_REQUEST_OUTPUT_TOKENS = 8_192
 MAX_COST_MICRO_CNY = 250_000_000
 MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
-INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN = 2
+INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN = 4
 INPUT_RESERVATION_MARGIN_TOKENS = 1_024
 UPSTREAM_TIMEOUT_SEC = 120
 REVOKE_DEADLINE_SEC = 0.75
@@ -678,11 +678,11 @@ def canonical_json(value: Any) -> bytes:
 def estimate_request_input_tokens(body: bytes) -> int:
     """Estimate token-quota admission without treating transport bytes as tokens.
 
-    ASCII uses two characters per token, tighter than the usual four-character
-    heuristic. Non-ASCII reserves its full UTF-8 width. This estimate is not a
-    monetary upper bound: cost quotas separately reserve one token per request
-    byte, while signed provider usage authoritatively reconciles both dimensions.
-    An input-token overrun revokes the trial before another call.
+    ASCII uses the usual four-character heuristic. Non-ASCII reserves its full
+    UTF-8 width. This estimate is not a monetary upper bound: cost quotas
+    separately reserve one token per request byte, while signed provider usage
+    authoritatively reconciles both dimensions. An input-token overrun revokes the
+    trial before another call.
     """
     try:
         text = body.decode("utf-8")
