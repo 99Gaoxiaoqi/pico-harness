@@ -82,6 +82,7 @@ _TRUSTED_NODE_EXEC_ENV = {
     "NODE_PATH": "",
 }
 _VERIFIER_SERVICE_EXECUTABLES = {
+    "/installed-agent/pico-node/bin/node": ".cjs",
     "/usr/bin/python3": ".py",
     "/usr/local/bin/python3": ".py",
     "/usr/bin/node": ".cjs",
@@ -95,6 +96,7 @@ const helperArguments = process.argv.slice(argumentOffset);
 const [mode, manifestPath, workspace, nonce] = helperArguments;
 const basename = '.pico-verifier-service.json';
 const allowed = new Map([
+  ['/installed-agent/pico-node/bin/node', ['.cjs']],
   ['/usr/bin/python3', ['.py']],
   ['/usr/local/bin/python3', ['.py']],
   ['/usr/bin/node', ['.cjs']],
@@ -3247,11 +3249,13 @@ def benchmark_instruction(instruction: str, workspace: str) -> str:
         "Run pytest test files with pytest itself before finishing; do not execute "
         "them as plain Python scripts. If the verifier needs a persistent service "
         f"on port 8080, write {manifest_path} as strict JSON with exactly "
-        'schemaVersion=1, argv, cwd, and port=8080. Use a direct Python or Node '
-        "script directly inside cwd; argv[0] must be /usr/bin/python3, "
-        "/usr/local/bin/python3, or /usr/bin/node, and argv[1] must be the "
-        "absolute non-symlink .py or .cjs script path. Do not rely on shell "
-        "background jobs."
+        'schemaVersion=1, argv, cwd, and port=8080. Prefer the guaranteed '
+        "read-only Node runtime /installed-agent/pico-node/bin/node with a direct "
+        ".cjs script inside cwd. System runtimes may be absent; only after "
+        "confirming the executable exists may argv[0] instead be /usr/bin/python3, "
+        "/usr/local/bin/python3, or /usr/bin/node. argv[1] must be the absolute "
+        "non-symlink .py or .cjs script path matching the executable. Do not rely "
+        "on shell background jobs."
     )
 
 
