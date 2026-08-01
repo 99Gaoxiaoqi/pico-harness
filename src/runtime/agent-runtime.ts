@@ -1761,11 +1761,25 @@ export function buildForegroundSafetyMiddleware(
       });
       return {
         allowed: false,
-        reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
+        reason: hardlineDenialReason(hardlineReasonKind),
       };
     }
     return { allowed: true };
   };
+}
+
+function hardlineDenialReason(reasonKind: HardlineReasonKind): string {
+  const prefix = "Hardline 高危命令不可审批绕过,系统直接拒绝。";
+  switch (reasonKind) {
+    case "protected_redirect":
+      return `${prefix} 请改用 write_file/edit_file 在工作区内写入，且不要通过 Bash 重定向写入受保护目标。`;
+    case "dynamic_executable":
+      return `${prefix} 请使用字面量可执行文件及字面量 argv 直接调用，且不要使用变量、eval 或间接 shell 启动。`;
+    case "protected_destination":
+      return `${prefix} 请将写入、安装或权限变更目标改为工作区内的本地前缀（例如 ./.local），且不要修改受保护目录。`;
+    default:
+      return prefix;
+  }
 }
 
 /** PreToolUse 通过后的交互权限链；只在确实需要审批时发 PermissionRequest。 */
