@@ -1,4 +1,7 @@
-const benchmarkOutputTokensByRoute = new Map([["codex-oauth/gpt-5.4", 8_192]]);
+const benchmarkOutputTokensByRoute = new Map([
+  ["codex-oauth/gpt-5.4", 8_192],
+  ["codex-oauth/gpt-5.6-terra", 8_192],
+]);
 
 export function buildBenchmarkRouteConfig({
   modelRouteId,

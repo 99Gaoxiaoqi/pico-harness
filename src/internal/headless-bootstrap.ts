@@ -11,8 +11,10 @@ import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 
 const SCHEMA_VERSION = 1 as const;
-const PINNED_BENCHMARK_ROUTE_ID = "codex-oauth/gpt-5.4";
-const BENCHMARK_OUTPUT_TOKENS = 8_192 as const;
+const BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = new Map<string, number>([
+  ["codex-oauth/gpt-5.4", 8_192],
+  ["codex-oauth/gpt-5.6-terra", 8_192],
+]);
 const MAX_INPUT_BYTES = 64 * 1024;
 const REQUEST_FIELDS = new Set(["schemaVersion", "workspacePath", "picoHome", "route"]);
 const ROUTE_FIELDS = new Set(["id", "protocol", "baseURL", "apiKeyEnv", "output"]);
@@ -201,6 +203,7 @@ function buildUserConfig(
   providerId: string,
   modelId: string,
 ): PicoUserConfig {
+  const benchmarkOutputTokens = BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(request.route.id);
   const providers = parseModelProviderConfigs(
     {
       [providerId]: {
@@ -215,7 +218,7 @@ function buildUserConfig(
               modelCapabilities: {
                 [modelId]: {
                   output: request.route.output,
-                  ...(request.route.id === PINNED_BENCHMARK_ROUTE_ID
+                  ...(benchmarkOutputTokens !== undefined
                     ? { outputTokenField: "max_completion_tokens" }
                     : {}),
                 },
@@ -233,14 +236,15 @@ function buildUserConfig(
 }
 
 function parseRouteOutput(routeId: string, value: unknown): number | undefined {
-  if (routeId === PINNED_BENCHMARK_ROUTE_ID) {
-    if (value !== BENCHMARK_OUTPUT_TOKENS) {
+  const benchmarkOutputTokens = BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(routeId);
+  if (benchmarkOutputTokens !== undefined) {
+    if (value !== benchmarkOutputTokens) {
       throw new BootstrapRequestError(
         "INVALID_ROUTE_OUTPUT",
-        `route.output must equal ${BENCHMARK_OUTPUT_TOKENS} for ${PINNED_BENCHMARK_ROUTE_ID}.`,
+        `route.output must equal ${benchmarkOutputTokens} for ${routeId}.`,
       );
     }
-    return BENCHMARK_OUTPUT_TOKENS;
+    return benchmarkOutputTokens;
   }
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {

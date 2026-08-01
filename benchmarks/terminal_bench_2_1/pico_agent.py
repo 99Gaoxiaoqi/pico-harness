@@ -69,7 +69,10 @@ _PUBLIC_EGRESS_RELAY_SCRIPT = (
     "}).listen(8081,'0.0.0.0');"
 )
 _MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
-_BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = {"codex-oauth/gpt-5.4": 8_192}
+_BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = {
+    "codex-oauth/gpt-5.4": 8_192,
+    "codex-oauth/gpt-5.6-terra": 8_192,
+}
 
 
 class TrialNetworks(NamedTuple):

@@ -634,57 +634,54 @@ def assert_benchmark_output_capability_contract(
     gateway: Any,
     route_config: dict[str, Any],
 ) -> None:
-    pricing, pricing_sha256 = pricing_contract("codex-oauth", "gpt-5.4")
-    pinned_route = json.loads(json.dumps(route_config))
-    pinned_route["modelRouteId"] = "codex-oauth/gpt-5.4"
-    pinned_route["providerId"] = "codex-oauth"
-    pinned_route["provider"] = {
-        "protocol": "openai",
-        "baseURL": route_config["provider"]["baseURL"],
-        "models": ["gpt-5.4"],
-        "discoverModels": False,
-        "modelCapabilities": {
-            "gpt-5.4": {
-                "output": gateway.MAX_REQUEST_OUTPUT_TOKENS,
-                "outputTokenField": "max_completion_tokens",
-                "toolCall": True,
-            }
-        },
-    }
-    pinned_route["pricing"] = pricing
-    pinned_route["pricingSha256"] = pricing_sha256
-    state = gateway.GatewayState(
-        pinned_route,
-        "provider-secret-canary",
-        "valid-benchmark-output-capability",
-        "6" * 64,
+    def benchmark_route(model: str) -> dict[str, Any]:
+        pricing, pricing_sha256 = pricing_contract("codex-oauth", model)
+        pinned_route = json.loads(json.dumps(route_config))
+        pinned_route["modelRouteId"] = f"codex-oauth/{model}"
+        pinned_route["providerId"] = "codex-oauth"
+        pinned_route["provider"] = {
+            "protocol": "openai",
+            "baseURL": route_config["provider"]["baseURL"],
+            "models": [model],
+            "discoverModels": False,
+            "modelCapabilities": {
+                model: {
+                    "output": gateway.MAX_REQUEST_OUTPUT_TOKENS,
+                    "outputTokenField": "max_completion_tokens",
+                    "toolCall": True,
+                }
+            },
+        }
+        pinned_route["pricing"] = pricing
+        pinned_route["pricingSha256"] = pricing_sha256
+        return pinned_route
+
+    invalid_capabilities: tuple[dict[str, Any] | None, ...] = (
+        None,
+        {"outputTokenField": "max_completion_tokens"},
+        {"output": 4_096, "outputTokenField": "max_completion_tokens"},
+        {"output": 8_193, "outputTokenField": "max_completion_tokens"},
+        {"output": 8_192, "outputTokenField": "max_tokens"},
     )
-    assert (
-        state.provider["modelCapabilities"]["gpt-5.4"]["output"]
-        == gateway.MAX_REQUEST_OUTPUT_TOKENS
-        == 8_192
-    )
-    assert state.strict_request_output_limit is True
-    bounded_body, output_limit = gateway.bound_request(
-        json.dumps(
-            {
-                "model": "gpt-5.4",
-                "max_completion_tokens": 8_192,
-            }
-        ).encode(),
-        "/chat/completions",
-        "openai",
-        state.model,
-        strict_output_limit=state.strict_request_output_limit,
-    )
-    assert output_limit == 8_192
-    assert json.loads(bounded_body)["max_completion_tokens"] == 8_192
-    try:
-        gateway.bound_request(
+    for model in ("gpt-5.4", "gpt-5.6-terra"):
+        pinned_route = benchmark_route(model)
+        state = gateway.GatewayState(
+            pinned_route,
+            "provider-secret-canary",
+            f"valid-benchmark-output-capability-{model}",
+            "6" * 64,
+        )
+        assert (
+            state.provider["modelCapabilities"][model]["output"]
+            == gateway.MAX_REQUEST_OUTPUT_TOKENS
+            == 8_192
+        )
+        assert state.strict_request_output_limit is True
+        bounded_body, output_limit = gateway.bound_request(
             json.dumps(
                 {
-                    "model": "gpt-5.4",
-                    "max_completion_tokens": 8_193,
+                    "model": model,
+                    "max_completion_tokens": 8_192,
                 }
             ).encode(),
             "/chat/completions",
@@ -692,10 +689,51 @@ def assert_benchmark_output_capability_contract(
             state.model,
             strict_output_limit=state.strict_request_output_limit,
         )
-    except ValueError as error:
-        assert str(error) == "gateway output token limit is invalid"
-    else:
-        raise AssertionError("pinned route accepted output above its hard limit")
+        assert output_limit == 8_192
+        assert json.loads(bounded_body)["max_completion_tokens"] == 8_192
+        try:
+            gateway.bound_request(
+                json.dumps(
+                    {
+                        "model": model,
+                        "max_completion_tokens": 8_193,
+                    }
+                ).encode(),
+                "/chat/completions",
+                "openai",
+                state.model,
+                strict_output_limit=state.strict_request_output_limit,
+            )
+        except ValueError as error:
+            assert str(error) == "gateway output token limit is invalid"
+        else:
+            raise AssertionError(
+                f"{model} pinned route accepted output above its hard limit"
+            )
+
+        for index, capability in enumerate(invalid_capabilities):
+            candidate = json.loads(json.dumps(pinned_route))
+            if capability is None:
+                candidate["provider"].pop("modelCapabilities")
+            else:
+                candidate["provider"]["modelCapabilities"][model] = capability
+            try:
+                gateway.GatewayState(
+                    candidate,
+                    "provider-secret-canary",
+                    f"invalid-benchmark-output-capability-{model}-{index}",
+                    "6" * 64,
+                )
+            except ValueError as error:
+                assert str(error) == (
+                    f"codex-oauth/{model} benchmark route must pin output=8192 "
+                    "and use max_completion_tokens"
+                )
+            else:
+                raise AssertionError(
+                    "invalid benchmark output capability was accepted: "
+                    f"{model!r}, {capability!r}"
+                )
 
     compatible = gateway.GatewayState(
         route_config,
@@ -737,36 +775,6 @@ def assert_benchmark_output_capability_contract(
         else:
             raise AssertionError(
                 f"compatible route accepted invalid output limit: {invalid_output!r}"
-            )
-
-    invalid_capabilities: tuple[dict[str, Any] | None, ...] = (
-        None,
-        {"outputTokenField": "max_completion_tokens"},
-        {"output": 4_096, "outputTokenField": "max_completion_tokens"},
-        {"output": 8_193, "outputTokenField": "max_completion_tokens"},
-        {"output": 8_192, "outputTokenField": "max_tokens"},
-    )
-    for index, capability in enumerate(invalid_capabilities):
-        candidate = json.loads(json.dumps(pinned_route))
-        if capability is None:
-            candidate["provider"].pop("modelCapabilities")
-        else:
-            candidate["provider"]["modelCapabilities"]["gpt-5.4"] = capability
-        try:
-            gateway.GatewayState(
-                candidate,
-                "provider-secret-canary",
-                f"invalid-benchmark-output-capability-{index}",
-                "6" * 64,
-            )
-        except ValueError as error:
-            assert str(error) == (
-                "codex-oauth/gpt-5.4 benchmark route must pin output=8192 "
-                "and use max_completion_tokens"
-            )
-        else:
-            raise AssertionError(
-                f"invalid benchmark output capability was accepted: {capability!r}"
             )
 
 
