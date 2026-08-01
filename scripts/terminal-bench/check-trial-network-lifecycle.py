@@ -686,8 +686,13 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         "inspect the existing files and runtimes",
         "minimum missing dependencies",
         "limit setup work",
-        "do not retry the same form",
-        "literal executable argv or write_file/edit_file",
+        "switch to literal executable argv or write_file/edit_file only when",
+        "command form as the sole issue",
+        "policy guidance permits that safe equivalent",
+        "do not retry the rejected form",
+        "operation itself is destructive or protected",
+        "rejection reason is unknown",
+        "stop and do not reproduce it through another tool",
     ):
         assert strategy_guardrail in required_destination_prompt
     assert "do not write under /tmp or system paths" not in (
@@ -923,6 +928,11 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 assert "map every explicit acceptance condition" in request["prompt"]
                 assert (
                     "leave enough time for the final authoritative validation"
+                    in request["prompt"]
+                )
+                assert "command form as the sole issue" in request["prompt"]
+                assert (
+                    "stop and do not reproduce it through another tool"
                     in request["prompt"]
                 )
                 assert "pytest itself" in request["prompt"]
