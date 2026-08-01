@@ -816,11 +816,15 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         result_flush_margin_ms=5_000,
         adapter_cleanup_margin_ms=60_000,
     )
-    assert not adapter.should_retry_runtime_failure(
-        {**runtime_failed, "policyDenials": {"total": 1}},
+    assert adapter.should_retry_runtime_failure(
+        {
+            **runtime_failed,
+            "terminationConfirmed": True,
+            "policyDenials": {"total": 1},
+        },
         retries_used=0,
         retry_limit=1,
-        remaining_sec=120,
+        remaining_sec=145,
         shutdown_grace_ms=30_000,
         result_flush_margin_ms=5_000,
         adapter_cleanup_margin_ms=60_000,
@@ -996,12 +1000,27 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 raise AssertionError("headless started without cleanup budget")
 
         with tempfile.TemporaryDirectory(prefix="pico-runtime-policy-") as directory:
-            policy_failure = {
+            recovered_policy_incident = {
                 **runtime_failed,
                 "policyDenials": {"total": 1},
             }
             context, environment = await execute(
-                Path(directory), [policy_failure], outer_timeout_sec=120
+                Path(directory), [recovered_policy_incident, completed], outer_timeout_sec=180
+            )
+            assert environment.launch_count == 2
+            assert environment.trace_clear_count == 2
+            assert context.metadata["pico"]["retryCount"] == 1
+
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-policy-blocked-") as directory:
+            terminal_policy_block = {
+                "status": "policy_blocked",
+                "exitCode": 4,
+                "usage": {"promptTokens": 0, "completionTokens": 0, "costCNY": 0},
+                "error": {"code": "POLICY_BLOCKED", "summary": "synthetic"},
+                "policyDenials": {"total": 1},
+            }
+            context, environment = await execute(
+                Path(directory), [terminal_policy_block], outer_timeout_sec=120
             )
             assert environment.launch_count == 1
             assert environment.trace_clear_count == 1

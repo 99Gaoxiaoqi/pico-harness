@@ -3628,9 +3628,19 @@ def should_retry_runtime_failure(
         and isinstance(error, dict)
         and error.get("code") == "RUNTIME_FAILED"
         and result.get("terminationConfirmed") is True
-        and "policyDenials" not in result
+        # policyDenials records every incident, including those the agent recovered
+        # from.  It must not consume the one permitted retry unless execution
+        # itself ended in the terminal policy-blocked state.
+        and not is_terminal_policy_block(result)
         and math.isfinite(remaining_sec)
         and remaining_sec * 1_000 >= required_remaining_ms
+    )
+
+
+def is_terminal_policy_block(result: dict[str, Any]) -> bool:
+    error = result.get("error")
+    return result.get("status") == "policy_blocked" or (
+        isinstance(error, dict) and error.get("code") == "POLICY_BLOCKED"
     )
 
 
