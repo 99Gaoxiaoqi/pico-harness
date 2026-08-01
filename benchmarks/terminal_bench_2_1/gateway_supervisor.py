@@ -32,6 +32,7 @@ except ModuleNotFoundError:
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_REQUEST_BODY_BYTES = 1_000_000
 AUTH_WINDOW_SEC = 300
 MAX_TRIAL_TTL_SEC = MAX_TASK_AGENT_TIMEOUT_SEC
 MAX_REQUESTS = 128
@@ -41,6 +42,7 @@ MAX_REQUEST_OUTPUT_TOKENS = 8_192
 MAX_COST_MICRO_CNY = 250_000_000
 MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
+INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN = 2
 INPUT_RESERVATION_MARGIN_TOKENS = 1_024
 UPSTREAM_TIMEOUT_SEC = 120
 REVOKE_DEADLINE_SEC = 0.75
@@ -51,6 +53,16 @@ _PINNED_BENCHMARK_OUTPUT_CAPABILITIES = {
         MAX_REQUEST_OUTPUT_TOKENS,
     ),
 }
+
+
+class GatewayError(ValueError):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+class GatewayQuotaError(GatewayError):
+    pass
 
 
 class UpstreamRequest:
@@ -239,6 +251,11 @@ class GatewayState:
         if protocol != self.provider["protocol"]:
             raise ValueError("gateway route mismatch")
         body = base64.b64decode(request.get("body", ""), validate=True)
+        if len(body) > MAX_REQUEST_BODY_BYTES:
+            raise GatewayError(
+                "request_body_too_large",
+                "gateway request exceeds body limit",
+            )
         path = require_path(request.get("path"), protocol)
         bounded_body, output_limit = bound_request(
             body,
@@ -247,8 +264,15 @@ class GatewayState:
             self.model,
             strict_output_limit=self.strict_request_output_limit,
         )
-        if len(bounded_body) > MAX_INPUT_TOKENS:
-            raise ValueError("gateway request exceeds input limit")
+        if len(bounded_body) > MAX_REQUEST_BODY_BYTES:
+            raise GatewayError(
+                "request_body_too_large",
+                "gateway request exceeds body limit",
+            )
+        estimated_input_tokens = estimate_request_input_tokens(bounded_body)
+        required_input_reservation = (
+            estimated_input_tokens + INPUT_RESERVATION_MARGIN_TOKENS
+        )
         active = self.upstream_request_factory()
         with self.lock:
             trial = self.trials.get(trial_id)
@@ -256,28 +280,56 @@ class GatewayState:
                 raise ValueError("gateway trial is not registered")
             input_reservation = min(
                 trial["inputTokensRemaining"],
-                len(bounded_body) + INPUT_RESERVATION_MARGIN_TOKENS,
+                required_input_reservation,
             )
             cost_reservation = token_cost_micro_cny(
                 input_reservation, output_limit, self.pricing
             )
-            if (
-                trial["revoked"]
-                or time.monotonic() >= trial["expiresAt"]
-                or trial["requestsRemaining"] <= 0
-                or input_reservation < len(bounded_body)
-                or trial["outputTokensRemaining"] < output_limit
-                or trial["costMicroCNYRemaining"] < cost_reservation
-                or trial["active"]
-            ):
-                raise ValueError("gateway trial quota exhausted")
+            if trial["revoked"]:
+                raise GatewayQuotaError(
+                    "trial_revoked",
+                    "gateway trial quota exhausted",
+                )
+            if time.monotonic() >= trial["expiresAt"]:
+                raise GatewayQuotaError(
+                    "trial_expired",
+                    "gateway trial quota exhausted",
+                )
+            if trial["requestsRemaining"] <= 0:
+                raise GatewayQuotaError(
+                    "trial_request_quota_exhausted",
+                    "gateway trial quota exhausted",
+                )
+            if input_reservation < required_input_reservation:
+                raise GatewayQuotaError(
+                    "trial_input_quota_exhausted",
+                    "gateway trial quota exhausted",
+                )
+            if trial["outputTokensRemaining"] < output_limit:
+                raise GatewayQuotaError(
+                    "trial_output_quota_exhausted",
+                    "gateway trial quota exhausted",
+                )
+            if trial["costMicroCNYRemaining"] < cost_reservation:
+                raise GatewayQuotaError(
+                    "trial_cost_quota_exhausted",
+                    "gateway trial quota exhausted",
+                )
+            if trial["active"]:
+                raise GatewayQuotaError(
+                    "trial_request_in_flight",
+                    "gateway trial quota exhausted",
+                )
             if (
                 self.run_budget_closed
                 or self.run_cost_micro_cny_remaining < cost_reservation
             ):
                 trial["revoked"] = True
                 trial["withinBudget"] = False
-                raise ValueError("gateway run budget exhausted")
+                raise GatewayQuotaError(
+                    "run_cost_quota_exhausted",
+                    "gateway run budget exhausted",
+                )
             trial["requestsRemaining"] -= 1
             trial["inputTokensRemaining"] -= input_reservation
             trial["outputTokensRemaining"] -= output_limit
@@ -397,7 +449,10 @@ class GatewayState:
                 trial["active"].discard(active)
                 self.condition.notify_all()
             if over_quota:
-                raise ValueError("gateway response usage exceeds quota")
+                raise GatewayQuotaError(
+                    "response_usage_exceeds_quota",
+                    "gateway response usage exceeds quota",
+                )
             if revoked:
                 raise ValueError("gateway trial revoked during upstream request")
             return response
@@ -498,6 +553,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("unsupported supervisor action")
             data = json.dumps(response, separators=(",", ":")).encode()
             self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+        except GatewayError as error:
+            data = canonical_json({"error": {"code": error.code}})
+            self.send_response(502)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Connection", "close")
@@ -607,6 +670,38 @@ def canonical_json(value: Any) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode()
+
+
+def estimate_request_input_tokens(body: bytes) -> int:
+    """Conservatively reserve tokens without treating transport bytes as tokens.
+
+    ASCII uses two characters per token, twice as conservative as the usual
+    four-character heuristic. Non-ASCII reserves its full UTF-8 width. The
+    provider's signed usage remains authoritative and reconciles any estimate
+    error after the response; an overrun revokes the trial before another call.
+    """
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("gateway request is not valid UTF-8") from error
+    ascii_characters = 0
+    non_ascii_utf8_bytes = 0
+    for character in text:
+        if character.isascii():
+            ascii_characters += 1
+        else:
+            code_point = ord(character)
+            non_ascii_utf8_bytes += (
+                2
+                if code_point <= 0x7FF
+                else 3
+                if code_point <= 0xFFFF
+                else 4
+            )
+    conservative_ascii_tokens = (
+        ascii_characters + INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN - 1
+    ) // INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN
+    return max(1, conservative_ascii_tokens + non_ascii_utf8_bytes)
 
 
 def remaining_cancel_time(deadline: float | None, maximum: float) -> float:
