@@ -621,6 +621,10 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 )
                 assert request["maxTurns"] == 80
                 assert "pytest itself" in request["prompt"]
+                assert "adapter, not your process, launches" in request["prompt"]
+                assert "stop that exact process" in request["prompt"]
+                assert "confirm port 8080 is closed" in request["prompt"]
+                assert "Never stop or take over" in request["prompt"]
 
             receipt = {
                 "schemaVersion": 1,
@@ -1032,6 +1036,35 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
             "/app",
             hashlib.sha256(adapter._VERIFIER_SERVICE_HELPER.encode()).hexdigest(),
         ]
+    finally:
+        adapter.docker_compose_exec_argv = original_exec
+
+    occupied_calls: list[dict[str, Any]] = []
+
+    async def occupied_service_exec(
+        _environment: Any,
+        argv: list[str],
+        **kwargs: Any,
+    ) -> tuple[int, bytes, bytes]:
+        occupied_calls.append({"argv": argv, **kwargs})
+        if adapter._VERIFIER_SERVICE_HELPER in argv and "inspect" in argv:
+            return 0, f"{json.dumps(valid)}\n".encode(), b""
+        if adapter._VERIFIER_SERVICE_ASSERT_CLOSED in argv:
+            assert kwargs["allowed_exit_codes"] == {0, 2}
+            return 2, b"", b""
+        raise AssertionError("occupied task service must not be replaced or adopted")
+
+    adapter.docker_compose_exec_argv = occupied_service_exec
+    try:
+        loop = asyncio.get_running_loop()
+        launched = await adapter.launch_verifier_service_if_requested(
+            FakeEnvironment(),
+            workspace="/app",
+            outer_deadline=loop.time() + 60,
+            loop=loop,
+        )
+        assert launched is False
+        assert len(occupied_calls) == 2
     finally:
         adapter.docker_compose_exec_argv = original_exec
 
