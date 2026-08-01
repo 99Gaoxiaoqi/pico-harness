@@ -620,6 +620,9 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                     )
                 )
                 assert request["maxTurns"] == 80
+                assert "inside /app/.pico-tmp or /app/.local" in request["prompt"]
+                assert "Prefer write_file or edit_file" in request["prompt"]
+                assert "invoke executables with literal argv" in request["prompt"]
                 assert "pytest itself" in request["prompt"]
                 assert "adapter, not your process, launches" in request["prompt"]
                 assert "stop that exact process" in request["prompt"]
@@ -687,6 +690,42 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             assert environment.launch_count == 1
             assert context.metadata["pico"]["retryCount"] == 0
             assert context.metadata["pico"]["signedGatewayUsageRequired"] is False
+
+        zero_usage_timeout = {
+            **timed_out,
+            "usage": {"promptTokens": 0, "completionTokens": 0, "costCNY": 0},
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="pico-runtime-zero-usage-timeout-"
+        ) as directory:
+            context, environment = await execute(
+                Path(directory), [zero_usage_timeout], outer_timeout_sec=120
+            )
+            assert environment.launch_count == 1
+            pico = context.metadata["pico"]
+            assert pico["status"] == "timed_out"
+            assert pico["retryCount"] == 0
+            assert pico["signedGatewayUsageRequired"] is True
+            adapter.apply_gateway_accounting(
+                context,
+                {
+                    "schemaVersion": 1,
+                    "status": "reconciled",
+                    "withinBudget": True,
+                    "pricingSha256": "0" * 64,
+                    "receiptSha256": "1" * 64,
+                    "actual": {
+                        "inputTokens": 13,
+                        "outputTokens": 2,
+                        "costMicroCNY": 15,
+                        "costCNY": 0.000015,
+                    },
+                },
+            )
+            assert (context.n_input_tokens, context.n_output_tokens) == (13, 2)
+            accounting = pico["gatewayAccounting"]
+            assert accounting["usageFallback"] is True
+            assert accounting["usageSource"] == "signed_gateway_actual"
     finally:
         adapter.docker_exec_secret_stdin = original_launcher
 
