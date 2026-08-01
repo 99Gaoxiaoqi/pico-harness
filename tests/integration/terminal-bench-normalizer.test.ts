@@ -224,7 +224,14 @@ test("Terminal-Bench normalizer rejects malformed policy reason-kind evidence", 
   const runDir = join(root, "run");
   const runId = "malformed-policy-reason-run";
   context.after(() => rm(root, { recursive: true, force: true }));
-  const cases = ["unknown-kind", "inconsistent-sum", "extra-key"];
+  const cases = [
+    "unknown-kind",
+    "inconsistent-sum",
+    "extra-key",
+    "source-mismatch",
+    "code-reason-mismatch",
+    "aggregate-mismatch",
+  ];
   for (const name of cases) {
     await writeTrial(jobDir, name, {
       reward: 1,
@@ -237,8 +244,20 @@ test("Terminal-Bench normalizer rejects malformed policy reason-kind evidence", 
       malformed.policyDenials.first.reasonKind = "untrusted_reason";
     } else if (name === "inconsistent-sum") {
       malformed.policyDenials.byReasonKind.hook_denied = 1;
-    } else {
+    } else if (name === "extra-key") {
       malformed.policyDenials.byReasonKind.command = "must-not-be-projected";
+    } else if (name === "source-mismatch") {
+      malformed.policyDenials.first.source = "permission";
+      malformed.policyDenials.last.source = "permission";
+    } else if (name === "code-reason-mismatch") {
+      malformed.policyDenials.byReasonKind.protected_destination = 0;
+      malformed.policyDenials.byReasonKind.hook_denied = 1;
+      malformed.policyDenials.first.reasonKind = "hook_denied";
+      malformed.policyDenials.last.reasonKind = "hook_denied";
+    } else {
+      malformed.policyDenials.total = 2;
+      malformed.policyDenials.byCode.approval = 1;
+      malformed.policyDenials.byReasonKind.protected_destination = 2;
     }
     await writeFile(headlessPath, JSON.stringify(malformed));
   }
@@ -1170,7 +1189,9 @@ function policyDenials(code: "plan_mode" | "hardline" | "hook" | "approval") {
     policyReasonKinds.map((candidate) => [candidate, candidate === reasonKind ? 1 : 0]),
   ) as Record<PolicyReasonKind, number>;
   const boundary = {
-    source: "permission" as const,
+    source: (code === "plan_mode" || code === "hardline" ? "safety" : "permission") as
+      | "safety"
+      | "permission",
     code,
     reasonKind,
     toolName: "exec_command",

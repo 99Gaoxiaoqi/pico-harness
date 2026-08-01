@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -441,9 +443,15 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             self.root = root
             self.outcomes = outcomes
             self.launch_count = 0
+            self.trace_clear_count = 0
 
         async def exec(self, *, command: str, **_kwargs: Any) -> Any:
             if "headless-bootstrap-main.js" in command:
+                return types.SimpleNamespace(return_code=0, stdout="", stderr="")
+            if command == (
+                f"rm -f -- {adapter.PicoInstalledAgent._TRACE_EXPORT.as_posix()}"
+            ):
+                self.trace_clear_count += 1
                 return types.SimpleNamespace(return_code=0, stdout="", stderr="")
             if command == f"cat {adapter.PicoInstalledAgent._PICO_RESULT.as_posix()}":
                 request = json.loads(
@@ -460,6 +468,11 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                         "terminationConfirmed", True
                     ),
                     "error": outcome.get("error"),
+                    **(
+                        {"policyDenials": outcome["policyDenials"]}
+                        if "policyDenials" in outcome
+                        else {}
+                    ),
                 }
                 return types.SimpleNamespace(
                     return_code=0,
@@ -508,6 +521,14 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
         )
     assert not adapter.should_retry_runtime_failure(
         {**runtime_failed, "terminationConfirmed": False},
+        retries_used=0,
+        retry_limit=1,
+        remaining_sec=120,
+        shutdown_grace_ms=30_000,
+        result_flush_margin_ms=5_000,
+    )
+    assert not adapter.should_retry_runtime_failure(
+        {**runtime_failed, "policyDenials": {"total": 1}},
         retries_used=0,
         retry_limit=1,
         remaining_sec=120,
@@ -573,6 +594,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 root, [runtime_failed, completed], outer_timeout_sec=120
             )
             assert environment.launch_count == 2
+            assert environment.trace_clear_count == 2
             pico = context.metadata["pico"]
             assert pico["retryCount"] == 1
             assert pico["signedGatewayUsageRequired"] is True
@@ -636,6 +658,18 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             assert context.metadata["pico"]["retryCount"] == 0
             assert context.metadata["pico"]["signedGatewayUsageRequired"] is True
 
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-policy-") as directory:
+            policy_failure = {
+                **runtime_failed,
+                "policyDenials": {"total": 1},
+            }
+            context, environment = await execute(
+                Path(directory), [policy_failure], outer_timeout_sec=120
+            )
+            assert environment.launch_count == 1
+            assert environment.trace_clear_count == 1
+            assert context.metadata["pico"]["retryCount"] == 0
+
         timed_out = {
             "status": "timed_out",
             "exitCode": 124,
@@ -667,6 +701,7 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
         {**valid, "cwd": "/tests"},
         {**valid, "argv": ["/bin/sh", "/app/server.py"]},
         {**valid, "argv": ["/usr/bin/python3", "/app/sub/../server.py"]},
+        {**valid, "argv": ["/usr/bin/python3", "/app/sub/server.py"]},
         {**valid, "argv": ["/usr/bin/node", "-e", "server"]},
         {**valid, "port": 8081},
     ):
@@ -684,12 +719,106 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
     ]
     node = next((str(candidate) for candidate in node_candidates if candidate.is_file()), None)
     assert node is not None
+    trusted_host_env = {
+        **os.environ,
+        "LD_AUDIT": "",
+        "LD_LIBRARY_PATH": "",
+        "LD_PRELOAD": "",
+        "NODE_OPTIONS": "",
+        "NODE_PATH": "",
+    }
     with tempfile.TemporaryDirectory(prefix="pico-verifier-manifest-") as directory:
         workspace = Path(directory).resolve()
-        script = workspace / "server.mjs"
+        script = workspace / "server.cjs"
         script.write_text("setInterval(() => {}, 1000);\n", encoding="utf-8")
         helper = workspace / "verifier-helper.cjs"
         helper.write_text(adapter._VERIFIER_SERVICE_HELPER, encoding="utf-8")
+        runner_declaration = re.search(
+            r"const nodeRunner = \[.*?\]\.join\(';'\);",
+            adapter._VERIFIER_SERVICE_HELPER,
+            re.DOTALL,
+        )
+        assert runner_declaration is not None
+        extracted_runner = subprocess.run(
+            [
+                node,
+                "-e",
+                f"{runner_declaration.group(0)}\nprocess.stdout.write(nodeRunner);",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=trusted_host_env,
+        )
+        assert extracted_runner.returncode == 0, (
+            extracted_runner.stdout,
+            extracted_runner.stderr,
+        )
+        cjs_main = subprocess.run(
+            [node, "-e", extracted_runner.stdout, str(script)],
+            input=(
+                "if (require.main !== module) process.exit(41);"
+                "const net=require('node:net');"
+                "const server=net.createServer();"
+                "server.listen(0,'127.0.0.1',()=>{"
+                "process.stdout.write('ready');server.close();});"
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=trusted_host_env,
+        )
+        assert cjs_main.returncode == 0, (cjs_main.stdout, cjs_main.stderr)
+        assert cjs_main.stdout == "ready"
+        for name, source in (
+            ("verifier-probe.cjs", adapter._VERIFIER_SERVICE_PROBE),
+            ("verifier-closed.cjs", adapter._VERIFIER_SERVICE_ASSERT_CLOSED),
+        ):
+            source_path = workspace / name
+            source_path.write_text(source, encoding="utf-8")
+            syntax = subprocess.run(
+                [node, "--check", str(source_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=trusted_host_env,
+            )
+            assert syntax.returncode == 0, (syntax.stdout, syntax.stderr)
+        supervisor_matcher = re.search(
+            r"function hasTrustedSupervisorArguments\(argv\) \{.*?\n\}",
+            adapter._VERIFIER_SERVICE_PROBE,
+            re.DOTALL,
+        )
+        assert supervisor_matcher is not None
+        matcher_check = subprocess.run(
+            [
+                node,
+                "-e",
+                (
+                    "const crypto=require('node:crypto');"
+                    "const supervisorNode='/installed-agent/pico-node/bin/node';"
+                    "const helper='trusted helper';"
+                    "const helperSha256=crypto.createHash('sha256').update(helper).digest('hex');"
+                    "const manifestPath='/app/.pico-verifier-service.json';"
+                    "const workspace='/app';"
+                    "const nonce='a'.repeat(64);"
+                    f"{supervisor_matcher.group(0)}"
+                    "const exact=[supervisorNode,'-e',helper,'launch',manifestPath,workspace,nonce];"
+                    "if(!hasTrustedSupervisorArguments(exact))process.exit(42);"
+                    "exact.splice(3,0,'--input-type=commonjs');"
+                    "if(hasTrustedSupervisorArguments(exact))process.exit(43);"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=trusted_host_env,
+        )
+        assert matcher_check.returncode == 0, (
+            matcher_check.stdout,
+            matcher_check.stderr,
+        )
         manifest_path = workspace / ".pico-verifier-service.json"
         manifest = {
             "schemaVersion": 1,
@@ -703,29 +832,30 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
             mode: str = "inspect",
             path: Path = manifest_path,
         ) -> subprocess.CompletedProcess[str]:
+            command = [
+                node,
+                str(helper),
+                mode,
+                str(path),
+                str(workspace),
+            ]
+            if mode == "launch":
+                command.append("a" * 64)
             return subprocess.run(
-                [
-                    node,
-                    str(helper),
-                    mode,
-                    str(path),
-                    str(workspace),
-                ],
+                command,
                 check=False,
                 capture_output=True,
                 text=True,
-                env={
-                    **os.environ,
-                    "LD_LIBRARY_PATH": "",
-                    "LD_PRELOAD": "",
-                    "NODE_OPTIONS": "",
-                    "NODE_PATH": "",
-                },
+                env=trusted_host_env,
             )
 
         result = invoke()
-        assert result.returncode == 0
+        assert result.returncode == 0, (result.stdout, result.stderr)
         assert json.loads(result.stdout) == manifest
+
+        script.write_bytes(b"x" * (1024 * 1024 + 1))
+        assert invoke().returncode == 2
+        script.write_text("setInterval(() => {}, 1000);\n", encoding="utf-8")
 
         real_manifest = workspace / "manifest.json"
         manifest_path.replace(real_manifest)
@@ -734,7 +864,7 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
         assert invoke("launch").returncode == 2
         manifest_path.unlink()
 
-        linked_script = workspace / "linked-server.mjs"
+        linked_script = workspace / "linked-server.cjs"
         linked_script.symlink_to(script)
         manifest["argv"] = ["/usr/bin/node", str(linked_script)]
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -774,12 +904,21 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
             call["container_env"] == adapter._TRUSTED_NODE_EXEC_ENV
             for call in calls
         )
-        assert calls[2]["argv"][-3:] == [
+        supervisor_nonce = calls[2]["argv"][-1]
+        assert re.fullmatch(r"[0-9a-f]{64}", supervisor_nonce)
+        assert calls[2]["argv"][-4:] == [
             "launch",
             "/app/.pico-verifier-service.json",
             "/app",
+            supervisor_nonce,
         ]
         assert adapter._VERIFIER_SERVICE_PROBE in calls[3]["argv"]
+        assert calls[3]["argv"][-4:] == [
+            supervisor_nonce,
+            "/app/.pico-verifier-service.json",
+            "/app",
+            hashlib.sha256(adapter._VERIFIER_SERVICE_HELPER.encode()).hexdigest(),
+        ]
     finally:
         adapter.docker_compose_exec_argv = original_exec
 
@@ -800,6 +939,8 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
         "1000:1000",
         "--workdir",
         "/app",
+        "--env",
+        "LD_AUDIT=",
         "--env",
         "LD_LIBRARY_PATH=",
         "--env",
