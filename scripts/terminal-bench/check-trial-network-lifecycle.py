@@ -4,6 +4,9 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -430,6 +433,426 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
         assert gateway_metadata["withinBudget"] is value["withinBudget"]
         assert gateway_metadata["usageFallback"] is False
         assert gateway_metadata["usageSource"] == "runtime"
+
+
+async def assert_runtime_retry_contract(adapter: Any) -> None:
+    class AttemptEnvironment:
+        def __init__(self, root: Path, outcomes: list[dict[str, Any]]) -> None:
+            self.root = root
+            self.outcomes = outcomes
+            self.launch_count = 0
+
+        async def exec(self, *, command: str, **_kwargs: Any) -> Any:
+            if "headless-bootstrap-main.js" in command:
+                return types.SimpleNamespace(return_code=0, stdout="", stderr="")
+            if command == f"cat {adapter.PicoInstalledAgent._PICO_RESULT.as_posix()}":
+                request = json.loads(
+                    (self.root / "headless-request.json").read_text(encoding="utf-8")
+                )
+                outcome = self.outcomes[self.launch_count - 1]
+                result = {
+                    "schemaVersion": 1,
+                    "requestId": request["requestId"],
+                    "status": outcome["status"],
+                    "usage": outcome["usage"],
+                    "durationMs": outcome.get("durationMs", 123),
+                    "terminationConfirmed": outcome.get(
+                        "terminationConfirmed", True
+                    ),
+                    "error": outcome.get("error"),
+                }
+                return types.SimpleNamespace(
+                    return_code=0,
+                    stdout=f"{json.dumps(result)}\n",
+                    stderr="",
+                )
+            if command == f"cat {adapter.PicoInstalledAgent._EXIT_CODE.as_posix()}":
+                outcome = self.outcomes[self.launch_count - 1]
+                return types.SimpleNamespace(
+                    return_code=0,
+                    stdout=f"{outcome['exitCode']}\n",
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected retry environment command: {command}")
+
+    runtime_failed = {
+        "status": "failed",
+        "exitCode": 3,
+        "usage": {"promptTokens": 0, "completionTokens": 0, "costCNY": 0},
+        "error": {"code": "RUNTIME_FAILED", "summary": "synthetic"},
+    }
+    completed = {
+        "status": "completed",
+        "exitCode": 0,
+        "usage": {"promptTokens": 7, "completionTokens": 5, "costCNY": 0.01},
+        "error": None,
+    }
+    for status, code in (
+        ("timed_out", "TIMEOUT"),
+        ("canceled", "CANCELED"),
+        ("policy_blocked", "POLICY_BLOCKED"),
+        ("invalid_request", "INVALID_REQUEST"),
+        ("failed", "RUNTIME_EMPTY_RESPONSE"),
+    ):
+        assert not adapter.should_retry_runtime_failure(
+            {
+                "status": status,
+                "error": {"code": code},
+                "terminationConfirmed": True,
+            },
+            retries_used=0,
+            retry_limit=1,
+            remaining_sec=120,
+            shutdown_grace_ms=30_000,
+            result_flush_margin_ms=5_000,
+        )
+    assert not adapter.should_retry_runtime_failure(
+        {**runtime_failed, "terminationConfirmed": False},
+        retries_used=0,
+        retry_limit=1,
+        remaining_sec=120,
+        shutdown_grace_ms=30_000,
+        result_flush_margin_ms=5_000,
+    )
+
+    async def execute(
+        root: Path,
+        outcomes: list[dict[str, Any]],
+        *,
+        outer_timeout_sec: float,
+    ) -> tuple[Any, AttemptEnvironment]:
+        environment = AttemptEnvironment(root, outcomes)
+        agent = object.__new__(adapter.PicoInstalledAgent)
+        agent.logs_dir = root
+        agent._shutdown_grace_ms = 30_000
+        agent._result_flush_margin_ms = 5_000
+        agent._bash_timeout_ms = 900_000
+        agent._max_turns = 80
+        agent._runtime_retry_count = 1
+        agent._pico_commit = "a" * 40
+        context = types.SimpleNamespace(n_input_tokens=0, n_output_tokens=0, metadata={})
+        loop = asyncio.get_running_loop()
+        await agent._run_with_gateway(
+            instruction="retry contract",
+            environment=environment,
+            context=context,
+            gateway=types.SimpleNamespace(
+                base_url="http://pico-gateway:8080",
+                capability="pico-workload-identity",
+            ),
+            route_config=benchmark_route_config(),
+            workspace="/app",
+            pico_home="/tmp/pico-home",
+            request_id="retry-request",
+            session_id="retry-session",
+            context_id="retry-context",
+            outer_timeout_sec=outer_timeout_sec,
+            outer_deadline=loop.time() + outer_timeout_sec,
+            loop=loop,
+            public_proxy_env={},
+        )
+        return context, environment
+
+    original_launcher = adapter.docker_exec_secret_stdin
+
+    async def synthetic_launcher(
+        environment: AttemptEnvironment,
+        _secret: bytes,
+        **_kwargs: Any,
+    ) -> Any:
+        environment.launch_count += 1
+        if environment.launch_count > len(environment.outcomes):
+            raise AssertionError("runtime retried more than expected")
+        return types.SimpleNamespace(returncode=0)
+
+    adapter.docker_exec_secret_stdin = synthetic_launcher
+    try:
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-retry-") as directory:
+            root = Path(directory)
+            context, environment = await execute(
+                root, [runtime_failed, completed], outer_timeout_sec=120
+            )
+            assert environment.launch_count == 2
+            pico = context.metadata["pico"]
+            assert pico["retryCount"] == 1
+            assert pico["signedGatewayUsageRequired"] is True
+            assert [entry["attempt"] for entry in pico["attempts"]] == [1, 2]
+            assert pico["attempts"][0]["requestId"] != pico["attempts"][1]["requestId"]
+            assert set(pico["attempts"][0]) == {
+                "attempt",
+                "requestId",
+                "status",
+                "errorCode",
+                "terminationConfirmed",
+                "durationMs",
+            }
+            assert pico["status"] == "completed"
+            assert context.n_input_tokens == 7 and context.n_output_tokens == 5
+            for attempt in (1, 2):
+                attempt_dir = root / "attempts" / f"attempt-{attempt}"
+                assert (attempt_dir / "pico-result.json").is_file()
+                assert (attempt_dir / "pico-exit-code.txt").is_file()
+                request = json.loads(
+                    (attempt_dir / "headless-request.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                assert request["maxTurns"] == 80
+                assert "pytest itself" in request["prompt"]
+
+            receipt = {
+                "schemaVersion": 1,
+                "status": "reconciled",
+                "withinBudget": True,
+                "pricingSha256": "0" * 64,
+                "receiptSha256": "1" * 64,
+                "actual": {
+                    "inputTokens": 11,
+                    "outputTokens": 8,
+                    "costMicroCNY": 19,
+                    "costCNY": 0.000019,
+                },
+            }
+            adapter.apply_gateway_accounting(context, receipt)
+            assert (context.n_input_tokens, context.n_output_tokens) == (11, 8)
+            accounting = context.metadata["pico"]["gatewayAccounting"]
+            assert accounting["usageFallback"] is True
+            assert accounting["usageSource"] == "signed_gateway_actual"
+
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-once-") as directory:
+            context, environment = await execute(
+                Path(directory),
+                [runtime_failed, runtime_failed],
+                outer_timeout_sec=120,
+            )
+            assert environment.launch_count == 2
+            assert context.metadata["pico"]["retryCount"] == 1
+
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-budget-") as directory:
+            context, environment = await execute(
+                Path(directory), [runtime_failed], outer_timeout_sec=64
+            )
+            assert environment.launch_count == 1
+            assert context.metadata["pico"]["retryCount"] == 0
+            assert context.metadata["pico"]["signedGatewayUsageRequired"] is True
+
+        timed_out = {
+            "status": "timed_out",
+            "exitCode": 124,
+            "usage": {"promptTokens": 1, "completionTokens": 1, "costCNY": 0},
+            "error": {"code": "TIMEOUT", "summary": "synthetic"},
+        }
+        with tempfile.TemporaryDirectory(prefix="pico-runtime-timeout-") as directory:
+            context, environment = await execute(
+                Path(directory), [timed_out], outer_timeout_sec=120
+            )
+            assert environment.launch_count == 1
+            assert context.metadata["pico"]["retryCount"] == 0
+            assert context.metadata["pico"]["signedGatewayUsageRequired"] is False
+    finally:
+        adapter.docker_exec_secret_stdin = original_launcher
+
+
+async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
+    valid = {
+        "schemaVersion": 1,
+        "argv": ["/usr/bin/python3", "/app/server.py"],
+        "cwd": "/app",
+        "port": 8080,
+    }
+    parsed = adapter.parse_verifier_service_manifest(valid, workspace="/app")
+    assert parsed.argv == ("/usr/bin/python3", "/app/server.py")
+    for invalid in (
+        {**valid, "extra": True},
+        {**valid, "cwd": "/tests"},
+        {**valid, "argv": ["/bin/sh", "/app/server.py"]},
+        {**valid, "argv": ["/usr/bin/python3", "/app/sub/../server.py"]},
+        {**valid, "argv": ["/usr/bin/node", "-e", "server"]},
+        {**valid, "port": 8081},
+    ):
+        try:
+            adapter.parse_verifier_service_manifest(invalid, workspace="/app")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid verifier manifest was accepted: {invalid!r}")
+
+    node_candidates = [
+        Path.home() / ".hermes/node/bin/node",
+        Path.home() / ".local/bin/node",
+        Path(shutil.which("node") or "/missing-node"),
+    ]
+    node = next((str(candidate) for candidate in node_candidates if candidate.is_file()), None)
+    assert node is not None
+    with tempfile.TemporaryDirectory(prefix="pico-verifier-manifest-") as directory:
+        workspace = Path(directory).resolve()
+        script = workspace / "server.mjs"
+        script.write_text("setInterval(() => {}, 1000);\n", encoding="utf-8")
+        helper = workspace / "verifier-helper.cjs"
+        helper.write_text(adapter._VERIFIER_SERVICE_HELPER, encoding="utf-8")
+        manifest_path = workspace / ".pico-verifier-service.json"
+        manifest = {
+            "schemaVersion": 1,
+            "argv": ["/usr/bin/node", str(script)],
+            "cwd": str(workspace),
+            "port": 8080,
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        def invoke(
+            mode: str = "inspect",
+            path: Path = manifest_path,
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    node,
+                    str(helper),
+                    mode,
+                    str(path),
+                    str(workspace),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "LD_LIBRARY_PATH": "",
+                    "LD_PRELOAD": "",
+                    "NODE_OPTIONS": "",
+                    "NODE_PATH": "",
+                },
+            )
+
+        result = invoke()
+        assert result.returncode == 0
+        assert json.loads(result.stdout) == manifest
+
+        real_manifest = workspace / "manifest.json"
+        manifest_path.replace(real_manifest)
+        manifest_path.symlink_to(real_manifest)
+        assert invoke().returncode == 2
+        assert invoke("launch").returncode == 2
+        manifest_path.unlink()
+
+        linked_script = workspace / "linked-server.mjs"
+        linked_script.symlink_to(script)
+        manifest["argv"] = ["/usr/bin/node", str(linked_script)]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        assert invoke().returncode == 2
+        assert invoke("launch").returncode == 2
+        manifest_path.unlink()
+        assert invoke().returncode == 44
+
+    calls: list[dict[str, Any]] = []
+    original_exec = adapter.docker_compose_exec_argv
+
+    async def service_exec(
+        _environment: Any,
+        argv: list[str],
+        **kwargs: Any,
+    ) -> tuple[int, bytes, bytes]:
+        calls.append({"argv": argv, **kwargs})
+        if adapter._VERIFIER_SERVICE_HELPER in argv and "inspect" in argv:
+            return 0, f"{json.dumps(valid)}\n".encode(), b""
+        return 0, b"", b""
+
+    adapter.docker_compose_exec_argv = service_exec
+    try:
+        loop = asyncio.get_running_loop()
+        launched = await adapter.launch_verifier_service_if_requested(
+            FakeEnvironment(),
+            workspace="/app",
+            outer_deadline=loop.time() + 60,
+            loop=loop,
+        )
+        assert launched is True
+        assert len(calls) == 4
+        assert adapter._VERIFIER_SERVICE_ASSERT_CLOSED in calls[1]["argv"]
+        assert calls[2]["detached"] is True
+        assert calls[2]["working_dir"] == "/app"
+        assert all(
+            call["container_env"] == adapter._TRUSTED_NODE_EXEC_ENV
+            for call in calls
+        )
+        assert calls[2]["argv"][-3:] == [
+            "launch",
+            "/app/.pico-verifier-service.json",
+            "/app",
+        ]
+        assert adapter._VERIFIER_SERVICE_PROBE in calls[3]["argv"]
+    finally:
+        adapter.docker_compose_exec_argv = original_exec
+
+    identity_environment = FakeEnvironment()
+    identity_environment.default_user = "1000:1000"
+    command = adapter.docker_compose_exec_command(
+        identity_environment,
+        ["/installed-agent/pico-node/bin/node", "-e", "fixed-helper"],
+        detached=True,
+        working_dir="/app",
+        container_env=adapter._TRUSTED_NODE_EXEC_ENV,
+    )
+    assert command[command.index("exec") :] == [
+        "exec",
+        "-T",
+        "--detach",
+        "-u",
+        "1000:1000",
+        "--workdir",
+        "/app",
+        "--env",
+        "LD_LIBRARY_PATH=",
+        "--env",
+        "LD_PRELOAD=",
+        "--env",
+        "NODE_OPTIONS=",
+        "--env",
+        "NODE_PATH=",
+        "main",
+        "/installed-agent/pico-node/bin/node",
+        "-e",
+        "fixed-helper",
+    ]
+    assert "/bin/sh" not in command and "bash" not in command
+
+    class AdvancingLoop:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def time(self) -> float:
+            return self.now
+
+    budget_calls = 0
+    advancing_loop = AdvancingLoop()
+
+    async def budget_exec(
+        _environment: Any,
+        argv: list[str],
+        **_kwargs: Any,
+    ) -> tuple[int, bytes, bytes]:
+        nonlocal budget_calls
+        budget_calls += 1
+        advancing_loop.now += 1.1
+        if adapter._VERIFIER_SERVICE_HELPER in argv and "inspect" in argv:
+            return 0, f"{json.dumps(valid)}\n".encode(), b""
+        return 0, b"", b""
+
+    adapter.docker_compose_exec_argv = budget_exec
+    try:
+        try:
+            await adapter.launch_verifier_service_if_requested(
+                FakeEnvironment(),
+                workspace="/app",
+                outer_deadline=1.0,
+                loop=advancing_loop,
+            )
+        except RuntimeError as error:
+            assert str(error) == "outer_timeout_budget_violation"
+        else:
+            raise AssertionError("verifier service launch exceeded the outer budget")
+        assert budget_calls == 1
+    finally:
+        adapter.docker_compose_exec_argv = original_exec
 
 
 def assert_task_timeout_contract(adapter: Any) -> None:
@@ -1473,16 +1896,20 @@ async def main() -> None:
     await assert_verifier_runtime_contract()
     assert_route_config_contract(adapter)
     assert_accounting_failure_messages(adapter)
+    await assert_runtime_retry_contract(adapter)
+    await assert_verifier_service_manifest_contract(adapter)
     assert_task_timeout_contract(adapter)
     assert adapter.PicoInstalledAgent._POLICY_DENIAL_MODE == "incident"
-    assert adapter.require_bounded_int(180_000, "bash_timeout_ms", 1_000, 300_000) == 180_000
-    for invalid in (999, 300_001, 1.5, True, "180000.0", None):
+    assert adapter.require_bounded_int(900_000, "bash_timeout_ms", 1_000, 900_000) == 900_000
+    for invalid in (999, 900_001, 1.5, True, "180000.0", None):
         try:
-            adapter.require_bounded_int(invalid, "bash_timeout_ms", 1_000, 300_000)
+            adapter.require_bounded_int(invalid, "bash_timeout_ms", 1_000, 900_000)
         except ValueError:
             pass
         else:
             raise AssertionError(f"invalid bash timeout was accepted: {invalid!r}")
+    assert adapter.require_bounded_int(200, "max_turns", 1, 200) == 200
+    assert adapter.require_bounded_int(1, "runtime_retry_count", 0, 1) == 1
 
     environment = FakeEnvironment()
     run_id = "network-lifecycle-test"
