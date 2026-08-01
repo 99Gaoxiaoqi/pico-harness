@@ -12,8 +12,13 @@ import type {
 import type { RuntimeStore } from "./runtime.js";
 
 const protocolLabels: Readonly<Record<ProviderProtocol, string>> = {
-  openai: "OpenAI compatible",
-  claude: "Anthropic Claude",
+  openai: "OpenAI-compatible",
+  claude: "Anthropic-compatible",
+};
+
+const protocolBaseURLPlaceholders: Readonly<Record<ProviderProtocol, string>> = {
+  openai: "https://api.example.com/v1",
+  claude: "https://api.example.com",
 };
 
 const originLabels: Readonly<Record<ProviderOrigin, string>> = {
@@ -76,7 +81,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
   const handleDeleteProvider = (provider: ProviderView) => {
     if (
       window.confirm(
-        `删除 Provider“${provider.id}”？已有会话不会被删除，但恢复时可能需要重新选择模型。`,
+        `删除服务商/渠道“${provider.id}”？已有会话不会被删除，但恢复时可能需要重新选择模型。`,
       )
     ) {
       void actions.deleteProvider(provider.id);
@@ -88,9 +93,10 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       <section className="page-intro">
         <div>
           <span className="eyebrow">推理能力</span>
-          <h2>模型 Providers</h2>
+          <h2>模型服务商</h2>
           <p>
-            在 App 和 TUI 之间共用模型路由。API Key 保存在 ~/.pico/config.json，文件权限为 0600。
+            Provider 代表服务商或网关渠道，API 协议决定实际请求格式；两者可以独立配置，并在 App 和
+            TUI 之间共用。
           </p>
         </div>
         <Button
@@ -99,7 +105,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
           onClick={() => setEditor(null)}
         >
           <Plus aria-hidden="true" size={16} />
-          添加 Provider
+          添加服务商
         </Button>
       </section>
 
@@ -113,7 +119,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       )}
       {config.supported && !config.writable && !data.notices.providers && (
         <InlineNotice tone="warning">
-          Provider 配置没有完整加载，已暂停编辑以避免覆盖更新的配置。请重新加载后再试。
+          模型服务商配置没有完整加载，已暂停编辑以避免覆盖更新的配置。请重新加载后再试。
         </InlineNotice>
       )}
 
@@ -143,21 +149,15 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
               ))}
             </select>
           </label>
-          {config.defaultModelRouteId &&
-            config.defaultModelRouteId !== config.userDefaults.modelRouteId && (
-              <p className="provider-effective-route">
-                当前工作区实际默认值：<code>{config.defaultModelRouteId}</code>
-              </p>
-            )}
         </section>
       )}
 
       {config.supported && (
-        <section className="panel provider-list-panel" aria-label="Provider 列表">
+        <section className="panel provider-list-panel" aria-label="模型服务商列表">
           {config.providers.length === 0 ? (
             <EmptyState
               icon={<Server aria-hidden="true" />}
-              title="还没有可用的 Provider"
+              title="还没有可用的模型服务商"
               detail="添加一个模型服务后，App 与 TUI 会在这台设备上共用它。"
               action={
                 <Button
@@ -166,7 +166,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                   onClick={() => setEditor(null)}
                 >
                   <Plus aria-hidden="true" size={16} />
-                  配置第一个 Provider
+                  配置第一个服务商
                 </Button>
               }
             />
@@ -224,7 +224,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                   </header>
                   <dl className="provider-facts">
                     <div>
-                      <dt>Endpoint</dt>
+                      <dt>{protocolLabels[provider.protocol]} Base URL</dt>
                       <dd>
                         <code title={provider.baseURL}>{provider.baseURL}</code>
                       </dd>
@@ -260,7 +260,8 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       )}
 
       <InlineNotice tone="neutral">
-        登录同步尚未开放。Provider 配置仅在当前设备上由 App 和 TUI 共用。
+        登录同步尚未开放。模型服务商配置仅在当前设备上由 App 和 TUI 共用。API Key 保存在
+        ~/.pico/config.json，文件权限为 0600。
       </InlineNotice>
 
       <ProviderEditorDialog
@@ -359,9 +360,9 @@ function ProviderEditorDialog({
           className="dialog provider-dialog"
           aria-describedby="provider-editor-detail"
         >
-          <Dialog.Title>{provider ? `编辑 ${provider.id}` : "添加 Provider"}</Dialog.Title>
+          <Dialog.Title>{provider ? `编辑 ${provider.id}` : "添加模型服务商"}</Dialog.Title>
           <Dialog.Description id="provider-editor-detail">
-            模型配置会保存到当前设备。保存 Provider 后，可直接添加 API Key。
+            配置服务商或网关渠道。保存后，在服务商卡片中点击“API Key”添加凭证。
           </Dialog.Description>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭 Provider 编辑器">
@@ -370,7 +371,7 @@ function ProviderEditorDialog({
           </Dialog.Close>
           <form className="provider-form" onSubmit={(event) => void handleSubmit(event)}>
             <label>
-              <span>Provider ID</span>
+              <span>服务商 / 渠道 ID</span>
               <input
                 required
                 value={id}
@@ -381,26 +382,28 @@ function ProviderEditorDialog({
               {provider && <small>ID 创建后不可修改。</small>}
             </label>
             <label>
-              <span>协议</span>
+              <span>API 协议</span>
               <select
                 value={protocol}
                 onChange={(event) =>
                   handleProtocolChange(event.currentTarget.value as ProviderProtocol)
                 }
               >
-                <option value="openai">OpenAI compatible</option>
-                <option value="claude">Anthropic Claude</option>
+                <option value="openai">OpenAI-compatible</option>
+                <option value="claude">Anthropic-compatible</option>
               </select>
+              <small>协议只决定请求格式，不限制模型厂商。</small>
             </label>
             <label className="provider-form__wide">
-              <span>Endpoint</span>
+              <span>{protocolLabels[protocol]} Base URL</span>
               <input
                 required
                 type="url"
                 value={baseURL}
-                placeholder="https://api.example.com/v1"
+                placeholder={protocolBaseURLPlaceholders[protocol]}
                 onChange={(event) => setBaseURL(event.currentTarget.value)}
               />
+              <small>填写与所选协议兼容的服务商、网关或团队渠道地址。</small>
             </label>
             <label className="provider-discovery-toggle">
               <input
@@ -409,7 +412,7 @@ function ProviderEditorDialog({
                 disabled={protocol !== "openai"}
                 onChange={(event) => setDiscoverModels(event.currentTarget.checked)}
               />
-              <span>允许从 Provider 动态发现模型</span>
+              <span>允许从服务商动态发现模型</span>
             </label>
             <label className="provider-form__wide">
               <span>已知模型</span>
@@ -429,7 +432,7 @@ function ProviderEditorDialog({
               </Dialog.Close>
               <Button type="submit" variant="primary" disabled={busy}>
                 <Check aria-hidden="true" size={16} />
-                {provider ? "保存更改" : "添加 Provider"}
+                {provider ? "保存更改" : "添加服务商"}
               </Button>
             </div>
           </form>
