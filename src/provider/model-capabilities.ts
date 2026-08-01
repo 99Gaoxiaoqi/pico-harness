@@ -134,6 +134,9 @@ function resolvePromptCachePolicy(
     throw new Error("promptCache cannot be configured when cache=false");
   }
   const configured = override?.promptCache;
+  if (provider === "gemini" && configured) {
+    throw new Error("Gemini promptCache is not supported");
+  }
   if (!configured) {
     if (provider === "claude") {
       return { mode: "explicit", ttl: "5m", keyShards: 1, prewarm: false };
@@ -216,34 +219,7 @@ function resolvePromptCachePolicy(
     };
   }
 
-  if (
-    configured.ttl !== undefined &&
-    (!/^[1-9]\d*s$/u.test(configured.ttl) ||
-      !Number.isSafeInteger(Number(configured.ttl.slice(0, -1))))
-  ) {
-    throw new Error("Gemini promptCache.ttl must be a positive integer number of seconds");
-  }
-  if (keyShards !== 1) throw new Error("Gemini promptCache.keyShards must be 1");
-  if (configured.shardThresholdRpm !== undefined) {
-    throw new Error("Gemini promptCache.shardThresholdRpm is not supported");
-  }
-  if (configured.explicitBreakpoints !== undefined) {
-    throw new Error("Gemini promptCache.explicitBreakpoints is not supported");
-  }
-  if (configured.retention !== undefined) {
-    throw new Error("Gemini promptCache.retention is not supported");
-  }
-  if (prewarm) throw new Error("Gemini promptCache.prewarm is not supported");
-  return {
-    mode: configured.mode,
-    ...(configured.mode === "explicit"
-      ? { ttl: configured.ttl ?? ("3600s" as const) }
-      : configured.ttl
-        ? { ttl: configured.ttl }
-        : {}),
-    keyShards: 1,
-    prewarm: false,
-  };
+  throw new Error("Gemini promptCache is not supported");
 }
 
 /**

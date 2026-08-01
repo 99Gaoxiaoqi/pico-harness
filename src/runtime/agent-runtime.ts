@@ -28,10 +28,6 @@ import {
   type ProviderKind,
   type ProviderRuntimeDependencies,
 } from "../provider/factory.js";
-import {
-  FileGeminiPromptCacheStore,
-  geminiPromptCacheGateId,
-} from "../provider/gemini-prompt-cache.js";
 import { PromptCachePrewarmCoordinator } from "../provider/prompt-cache-prewarm.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
@@ -615,16 +611,6 @@ export async function executeAgentRuntime(
     }
     const providerDependencies: ProviderRuntimeDependencies = {
       promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.control),
-      gemini: {
-        promptCacheStore: FileGeminiPromptCacheStore.shared(
-          resolve(workspaceStatePaths.control, "gemini-prompt-cache.json"),
-        ),
-        // Evaluate every parent/subagent route independently against the native-spike allowlist.
-        enableExplicitPromptCache: ({ baseURL, model }) =>
-          enabledGeminiPromptCacheRoutes(runtimeEnv.PICO_GEMINI_NATIVE_CACHE_ROUTE_IDS).has(
-            geminiPromptCacheGateId(baseURL, model),
-          ),
-      },
     };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
@@ -2065,15 +2051,6 @@ function firstApiKey(value: string | undefined): string | undefined {
     ?.split(",")
     .map((key) => key.trim())
     .find(Boolean);
-}
-
-function enabledGeminiPromptCacheRoutes(value: string | undefined): ReadonlySet<string> {
-  return new Set(
-    (value ?? "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter((item) => /^gemini-cache:[a-f0-9]{64}$/u.test(item)),
-  );
 }
 
 /** @internal Pure runtime-env boundary used by executeAgentRuntime. */

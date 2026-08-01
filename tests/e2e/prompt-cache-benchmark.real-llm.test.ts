@@ -434,8 +434,8 @@ function requiredScenario(
 
 function requiredProtocol(): ProviderKind {
   const value = requiredEnvironment("PROMPT_CACHE_BENCHMARK_PROTOCOL");
-  if (value === "claude" || value === "openai" || value === "gemini") return value;
-  throw new Error("PROMPT_CACHE_BENCHMARK_PROTOCOL must be one of claude, openai, or gemini");
+  if (value === "claude" || value === "openai") return value;
+  throw new Error("PROMPT_CACHE_BENCHMARK_PROTOCOL must be claude or openai");
 }
 
 function requiredEnvironment(name: string): string {

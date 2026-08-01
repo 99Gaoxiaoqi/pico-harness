@@ -24,11 +24,6 @@ import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { applyReasoningRequestPatch } from "./reasoning-capability.js";
-import {
-  GeminiPromptCacheController,
-  type GeminiPromptCacheStore,
-  type GeminiPromptCacheTransport,
-} from "./gemini-prompt-cache.js";
 import { appendProviderEndpointPath } from "./provider-endpoint.js";
 import { snapshotToolDefinitions } from "./prompt-cache.js";
 
@@ -60,56 +55,19 @@ interface GeminiResponse {
   };
 }
 
-export interface GeminiProviderDependencies {
-  /** Workspace-owned metadata store. It never receives prompts or credentials. */
-  readonly promptCacheStore?: GeminiPromptCacheStore;
-  /** Injectable only for integration tests; production uses the native REST transport. */
-  readonly promptCacheTransport?: GeminiPromptCacheTransport;
-  readonly now?: () => number;
-  /** Set only after the native cachedContents spike has passed for this route. Defaults false. */
-  readonly enableExplicitPromptCache?:
-    | boolean
-    | ((route: { readonly baseURL: string; readonly model: string }) => boolean);
-}
-
 /** Google (Gemini) 原生协议适配器 */
 export class GeminiProvider implements LLMProvider {
   readonly requestCapabilities;
   private readonly profile: ProviderProfile;
-  private readonly promptCache?: GeminiPromptCacheController;
-  private readonly cacheWriteTokensByBody = new WeakMap<object, number>();
 
   constructor(
     private readonly config: ProviderConfig,
     profile?: ProviderProfile,
-    dependencies: GeminiProviderDependencies = {},
   ) {
     this.profile = profile ?? resolveProviderProfile("gemini", config.model);
     this.requestCapabilities = {
       toolChoiceNoneWithTools: config.capabilities?.toolChoiceNoneWithTools === true,
     };
-    const explicitPromptCacheEnabled =
-      typeof dependencies.enableExplicitPromptCache === "function"
-        ? dependencies.enableExplicitPromptCache({
-            baseURL: config.baseURL,
-            model: config.model,
-          })
-        : dependencies.enableExplicitPromptCache === true;
-    if (
-      explicitPromptCacheEnabled &&
-      config.capabilities?.cache !== false &&
-      config.capabilities?.promptCache.mode === "explicit"
-    ) {
-      this.promptCache = new GeminiPromptCacheController({
-        store: dependencies.promptCacheStore,
-        transport: dependencies.promptCacheTransport ?? this.createPromptCacheTransport(),
-        baseURL: config.baseURL,
-        model: config.model,
-        ttlSeconds: ttlSeconds(config.capabilities.promptCache.ttl),
-        ...(dependencies.now ? { now: dependencies.now } : {}),
-      });
-      void this.promptCache.cleanupExpiredEntries();
-    }
   }
 
   get modelName(): string {
@@ -138,41 +96,19 @@ export class GeminiProvider implements LLMProvider {
     availableTools: ToolDefinition[],
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const body = await this.buildRequestBody(messages, availableTools, true, options);
-    const cacheWriteTokens = this.cacheWriteTokensByBody.get(body);
+    const body = this.buildRequestBody(messages, availableTools, options);
     options?.onRequestPrepared?.({
       provider: "gemini",
       model: this.config.model,
       body,
     });
 
-    let resp = await fetch(this.generateUrl(), {
+    const resp = await fetch(this.generateUrl(), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
       signal: providerRequestSignal(options?.signal),
     });
-
-    if (
-      !resp.ok &&
-      body["cachedContent"] !== undefined &&
-      isRejectedCachedContentStatus(resp.status)
-    ) {
-      await resp.body?.cancel().catch(() => undefined);
-      await this.promptCache?.invalidateName(String(body["cachedContent"]));
-      const fallback = await this.buildRequestBody(messages, availableTools, false, options);
-      options?.onRequestPrepared?.({
-        provider: "gemini",
-        model: this.config.model,
-        body: fallback,
-      });
-      resp = await fetch(this.generateUrl(), {
-        method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify(fallback),
-        signal: providerRequestSignal(options?.signal),
-      });
-    }
 
     if (!resp.ok) {
       const text = await resp.text();
@@ -196,10 +132,7 @@ export class GeminiProvider implements LLMProvider {
     if (!parts || parts.length === 0) {
       throw new Error("Gemini API 返回了空的 candidates/parts");
     }
-    return this.withCacheWriteUsage(
-      this.translateParts(parts, data.usageMetadata),
-      cacheWriteTokens,
-    );
+    return this.translateParts(parts, data.usageMetadata);
   }
 
   /**
@@ -214,41 +147,19 @@ export class GeminiProvider implements LLMProvider {
     onDelta: (delta: string) => void,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const body = await this.buildRequestBody(messages, availableTools, true, options);
-    const cacheWriteTokens = this.cacheWriteTokensByBody.get(body);
+    const body = this.buildRequestBody(messages, availableTools, options);
     options?.onRequestPrepared?.({
       provider: "gemini",
       model: this.config.model,
       body,
     });
 
-    let resp = await fetch(this.streamUrl(), {
+    const resp = await fetch(this.streamUrl(), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
       signal: providerRequestSignal(options?.signal),
     });
-
-    if (
-      !resp.ok &&
-      body["cachedContent"] !== undefined &&
-      isRejectedCachedContentStatus(resp.status)
-    ) {
-      await resp.body?.cancel().catch(() => undefined);
-      await this.promptCache?.invalidateName(String(body["cachedContent"]));
-      const fallback = await this.buildRequestBody(messages, availableTools, false, options);
-      options?.onRequestPrepared?.({
-        provider: "gemini",
-        model: this.config.model,
-        body: fallback,
-      });
-      resp = await fetch(this.streamUrl(), {
-        method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify(fallback),
-        signal: providerRequestSignal(options?.signal),
-      });
-    }
 
     if (!resp.ok) {
       const text = await resp.text();
@@ -330,27 +241,23 @@ export class GeminiProvider implements LLMProvider {
       }
     }
 
-    return this.withCacheWriteUsage(
-      {
-        role: "assistant",
-        content: fullContent,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage,
-      },
-      cacheWriteTokens,
-    );
+    return {
+      role: "assistant",
+      content: fullContent,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
+    };
   }
 
   /**
    * 构建 Gemini 请求体(contents 翻译 + tools + system_instruction + generationConfig)。
    * generate 与 generateStream 共用。
    */
-  private async buildRequestBody(
+  private buildRequestBody(
     messages: Message[],
     availableTools: ToolDefinition[],
-    useExplicitCache = true,
     options?: LLMProviderRequestOptions,
-  ): Promise<Record<string, unknown>> {
+  ): Record<string, unknown> {
     let systemPrompt = "";
     const contents: GeminiContent[] = [];
     const toolCallNames = new Map<string, string>();
@@ -437,110 +344,7 @@ export class GeminiProvider implements LLMProvider {
     const translated = capability
       ? applyReasoningRequestPatch(body, capability, this.config.thinkingEffort ?? "off", "gemini")
       : body;
-    return useExplicitCache
-      ? this.attachExplicitPromptCache(translated, options?.signal)
-      : translated;
-  }
-
-  /**
-   * Gemini cachedContents own only the stable system/tools/toolConfig prefix. Message history stays
-   * on the request so each turn remains semantically identical when cache creation is unavailable.
-   */
-  private async attachExplicitPromptCache(
-    body: Record<string, unknown>,
-    signal?: AbortSignal,
-  ): Promise<Record<string, unknown>> {
-    if (!this.promptCache) return body;
-    const source: Record<string, unknown> = {};
-    if (body["system_instruction"] !== undefined) {
-      source["systemInstruction"] = body["system_instruction"];
-    }
-    if (body["tools"] !== undefined) source["tools"] = body["tools"];
-    if (body["toolConfig"] !== undefined) source["toolConfig"] = body["toolConfig"];
-    if (Object.keys(source).length === 0) return body;
-    const cachedContent = await this.promptCache.getOrCreate(source, signal);
-    if (!cachedContent) return body;
-    const {
-      system_instruction: _systemInstruction,
-      tools: _tools,
-      toolConfig: _toolConfig,
-      ...remaining
-    } = body;
-    const cachedBody = { ...remaining, cachedContent: cachedContent.name };
-    if (cachedContent.cacheWriteTokens !== undefined) {
-      this.cacheWriteTokensByBody.set(cachedBody, cachedContent.cacheWriteTokens);
-    }
-    return cachedBody;
-  }
-
-  private createPromptCacheTransport(): GeminiPromptCacheTransport {
-    const endpoint = appendProviderEndpointPath(this.config.baseURL, "v1beta/cachedContents");
-    return {
-      create: async ({ model, ttlSeconds, source, signal }) => {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: this.headers(),
-          body: JSON.stringify({
-            model: `models/${model}`,
-            ...source,
-            ttl: `${ttlSeconds}s`,
-          }),
-          signal: providerRequestSignal(signal),
-        });
-        if (!response.ok)
-          throw new LLMStatusError(response.status, "Gemini cachedContents create failed");
-        const data = (await response.json()) as {
-          name?: unknown;
-          expireTime?: unknown;
-          usageMetadata?: { totalTokenCount?: unknown };
-        };
-        if (typeof data.name !== "string" || !data.name)
-          throw new Error("Gemini cachedContents missing name");
-        const parsedExpiry =
-          typeof data.expireTime === "string" ? Date.parse(data.expireTime) : NaN;
-        const tokens = data.usageMetadata?.totalTokenCount;
-        return {
-          name: data.name,
-          ...(Number.isFinite(parsedExpiry) ? { expireAt: parsedExpiry } : {}),
-          ...(typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0
-            ? { tokenCount: tokens }
-            : {}),
-        };
-      },
-      updateTtl: async (name, ttlSeconds, signal) => {
-        const response = await fetch(
-          appendProviderEndpointPath(this.config.baseURL, `v1beta/${name}`, {
-            updateMask: "ttl",
-          }),
-          {
-            method: "PATCH",
-            headers: this.headers(),
-            body: JSON.stringify({ ttl: `${ttlSeconds}s` }),
-            signal: providerRequestSignal(signal),
-          },
-        );
-        if (!response.ok) {
-          throw new LLMStatusError(response.status, "Gemini cachedContents update failed");
-        }
-        const data = (await response.json()) as { expireTime?: unknown };
-        const parsedExpiry =
-          typeof data.expireTime === "string" ? Date.parse(data.expireTime) : NaN;
-        return Number.isFinite(parsedExpiry) ? { expireAt: parsedExpiry } : {};
-      },
-      delete: async (name) => {
-        const response = await fetch(
-          appendProviderEndpointPath(this.config.baseURL, `v1beta/${name}`),
-          {
-            method: "DELETE",
-            headers: { "x-goog-api-key": this.config.apiKey },
-            signal: providerRequestSignal(),
-          },
-        );
-        if (!response.ok && response.status !== 404) {
-          throw new LLMStatusError(response.status, "Gemini cachedContents delete failed");
-        }
-      },
-    };
+    return translated;
   }
 
   private headers(): Record<string, string> {
@@ -574,25 +378,6 @@ export class GeminiProvider implements LLMProvider {
     };
   }
 
-  private withCacheWriteUsage(message: Message, cacheWriteTokens?: number): Message {
-    if (cacheWriteTokens === undefined) return message;
-    const usage = message.usage;
-    const reportedFields = new Set(usage?.reportedFields ?? []);
-    reportedFields.add("prompt");
-    reportedFields.add("cacheWrite");
-    return {
-      ...message,
-      usage: {
-        promptTokens: (usage?.promptTokens ?? 0) + cacheWriteTokens,
-        completionTokens: usage?.completionTokens ?? 0,
-        ...(usage?.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
-        cacheWriteTokens: (usage?.cacheWriteTokens ?? 0) + cacheWriteTokens,
-        ...(usage?.reasoningTokens === undefined ? {} : { reasoningTokens: usage.reasoningTokens }),
-        reportedFields: [...reportedFields],
-      },
-    };
-  }
-
   /** Gemini usageMetadata → 内部 Usage 五桶 */
   private translateUsage(meta: NonNullable<GeminiResponse["usageMetadata"]>): Usage {
     const toolUsePromptTokens = meta.toolUsePromptTokenCount ?? 0;
@@ -616,13 +401,4 @@ export class GeminiProvider implements LLMProvider {
       ],
     };
   }
-}
-
-function ttlSeconds(value: string | undefined): number {
-  const matched = /^(\d+)s$/u.exec(value ?? "3600s");
-  return matched ? Number(matched[1]) : 3_600;
-}
-
-function isRejectedCachedContentStatus(status: number): boolean {
-  return status === 400 || status === 403 || status === 404 || status === 422;
 }
