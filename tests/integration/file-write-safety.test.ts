@@ -221,6 +221,42 @@ test(
 );
 
 test(
+  "sealed xattr helper replaces absent attr utilities without weakening metadata preservation",
+  { skip: process.platform !== "linux" },
+  async (context) => {
+    const fixture = await createFixture("sealed-xattr-helper");
+    context.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const targetPath = join(fixture.workspace, "metadata.txt");
+    await writeFile(targetPath, "alpha\n");
+    await execFileAsync("/usr/bin/setfacl", ["-m", "u:65534:r--", targetPath]);
+    await execFileAsync("/usr/bin/setfattr", ["-n", "user.pico", "-v", "preserve-me", targetPath]);
+    const originalHelperOnly = process.env.PICO_XATTR_HELPER_ONLY;
+    process.env.PICO_XATTR_HELPER_ONLY = "1";
+    try {
+      await new WriteFileTool(fixture.workspace).execute(
+        JSON.stringify({ path: "metadata.txt", content: "beta\n" }),
+      );
+      await new EditFileTool(fixture.workspace).execute(
+        JSON.stringify({ path: "metadata.txt", old_text: "beta", new_text: "gamma" }),
+      );
+    } finally {
+      if (originalHelperOnly === undefined) delete process.env.PICO_XATTR_HELPER_ONLY;
+      else process.env.PICO_XATTR_HELPER_ONLY = originalHelperOnly;
+    }
+    assert.equal(await readFile(targetPath, "utf8"), "gamma\n");
+    const [{ stdout: acl }, { stdout: attribute }] = await Promise.all([
+      execFileAsync("/usr/bin/getfacl", ["-cpn", targetPath], { encoding: "utf8" }),
+      execFileAsync("/usr/bin/getfattr", ["--only-values", "-n", "user.pico", targetPath], {
+        encoding: "utf8",
+      }),
+    ]);
+    assert.match(acl, /^user:65534:r--$/mu);
+    assert.equal(attribute.trimEnd(), "preserve-me");
+    await assertNoTemporaryFiles(fixture.workspace);
+  },
+);
+
+test(
   "write_file overwrites a Linux write-only file without requiring content read access",
   { skip: process.platform !== "linux" },
   async (context) => {
