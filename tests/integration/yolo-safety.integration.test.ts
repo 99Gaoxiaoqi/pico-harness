@@ -64,6 +64,51 @@ test("hardline reasonKind 使用固定脱敏分类且不改变拒绝语义", () 
   assert.equal(isHardlineBashCommand("printf safe", process.cwd()), false);
 });
 
+test("hardline 拒绝按 reasonKind 返回固定脱敏替代提示且不放宽语义", async () => {
+  const workDir = process.cwd();
+  const roots = WorkspaceRoots.createSync(workDir);
+  const safety = buildForegroundSafetyMiddleware(workDir, { mode: "yolo" }, roots);
+  const cases = [
+    {
+      command: "printf blocked > /etc/PICO_REDIRECT_INPUT_CANARY",
+      canary: "PICO_REDIRECT_INPUT_CANARY",
+      reasonKind: "protected_redirect",
+      reason:
+        "Hardline 高危命令不可审批绕过,系统直接拒绝。 请改用 write_file/edit_file 在工作区内写入，且不要通过 Bash 重定向写入受保护目标。",
+    },
+    {
+      command: "$PICO_DYNAMIC_INPUT_CANARY --version",
+      canary: "PICO_DYNAMIC_INPUT_CANARY",
+      reasonKind: "dynamic_executable",
+      reason:
+        "Hardline 高危命令不可审批绕过,系统直接拒绝。 请使用字面量可执行文件及字面量 argv 直接调用，且不要使用变量、eval 或间接 shell 启动。",
+    },
+    {
+      command: "cp ./artifact /etc/PICO_DESTINATION_INPUT_CANARY",
+      canary: "PICO_DESTINATION_INPUT_CANARY",
+      reasonKind: "protected_destination",
+      reason:
+        "Hardline 高危命令不可审批绕过,系统直接拒绝。 请将写入、安装或权限变更目标改为工作区内的本地前缀（例如 ./.local），且不要修改受保护目录。",
+    },
+  ] as const;
+
+  for (const { command, canary, reasonKind, reason } of cases) {
+    const call = toolCall(command);
+    assert.equal(classifyHardlineCommand("bash", call.arguments, workDir), reasonKind, command);
+    assert.equal(isHardlineCommand("bash", call.arguments, workDir), true, command);
+
+    const decision = await safety(call);
+    assert.equal(decision.allowed, false, command);
+    assert.equal(decision.reason, reason, command);
+    assert.equal(decision.reason?.includes(canary), false, command);
+    assert.equal(decision.reason?.includes(command), false, command);
+  }
+
+  const safeCall = toolCall("printf safe > ./pico-safe-output");
+  assert.equal(classifyHardlineCommand("bash", safeCall.arguments, workDir), undefined);
+  assert.equal((await safety(safeCall)).allowed, true);
+});
+
 test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
   const workDir = process.cwd();
   const dangerous = [
