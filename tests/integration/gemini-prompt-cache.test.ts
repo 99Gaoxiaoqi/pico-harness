@@ -12,12 +12,14 @@ import {
   type GeminiPromptCacheTransport,
 } from "../../src/provider/gemini-prompt-cache.js";
 import { GeminiProvider } from "../../src/provider/gemini.js";
+import { LLMStatusError } from "../../src/provider/errors.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 
 function controller(options: {
   readonly store?: GeminiPromptCacheStore;
   readonly transport: GeminiPromptCacheTransport;
   readonly model?: string;
+  readonly createFailureCooldownMs?: number;
   readonly now?: () => number;
 }) {
   return new GeminiPromptCacheController({
@@ -26,6 +28,7 @@ function controller(options: {
     baseURL: "https://gemini.example.test",
     model: options.model ?? "gemini-2.5-flash",
     ttlSeconds: 100,
+    createFailureCooldownMs: options.createFailureCooldownMs,
     now: options.now,
   });
 }
@@ -342,6 +345,36 @@ test("Gemini cached-content creation propagates a host abort instead of failing 
   await assert.rejects(creating, { name: "AbortError" });
 });
 
+test("Gemini suppresses repeated deterministic create failures for a bounded cooldown", async () => {
+  let now = 1_000;
+  let creates = 0;
+  const store = new MemoryGeminiPromptCacheStore();
+  const transport: GeminiPromptCacheTransport = {
+    async create() {
+      creates++;
+      throw new LLMStatusError(400, "cache source is below the model minimum");
+    },
+    async delete() {},
+  };
+  const options = {
+    store,
+    now: () => now,
+    createFailureCooldownMs: 1_000,
+    transport,
+  };
+  const cache = controller(options);
+  const sibling = controller(options);
+  const source = { systemInstruction: { parts: [{ text: "short stable prefix" }] } };
+
+  assert.equal(await cache.getOrCreate(source), undefined);
+  assert.equal(await sibling.getOrCreate(source), undefined);
+  assert.equal(creates, 1);
+
+  now += 1_001;
+  assert.equal(await cache.getOrCreate(source), undefined);
+  assert.equal(creates, 2, "the bounded negative cache must eventually retry");
+});
+
 test("Gemini explicit cache separates models, removes expired metadata, and fails open on permission/delete errors", async () => {
   let now = 1_000;
   const store = new MemoryGeminiPromptCacheStore();
@@ -417,6 +450,7 @@ test("Gemini provider sends cachedContent only for explicit routes and falls bac
       { role: "user", content: "question" },
     ],
     [{ name: "lookup", description: "stable tool", inputSchema: { type: "object" } }],
+    { toolChoice: "none" },
   );
   assert.equal(explicitResponse.usage?.cacheWriteTokens, 42);
   assert.equal(explicitResponse.usage?.promptTokens, 42);
@@ -425,12 +459,17 @@ test("Gemini provider sends cachedContent only for explicit routes and falls bac
   assert.equal(generated["cachedContent"], "cachedContents/unit-test");
   assert.equal("system_instruction" in generated, false);
   assert.equal("tools" in generated, false);
+  assert.equal("toolConfig" in generated, false);
 
   const cacheRequest = requests.find((request) =>
     String(request["url"]).includes("cachedContents"),
   );
   assert.ok(cacheRequest);
   assert.equal(String(cacheRequest["url"]).includes("test-key"), false);
+  const cacheBody = cacheRequest["body"] as Record<string, unknown>;
+  assert.deepEqual(cacheBody["toolConfig"], {
+    functionCallingConfig: { mode: "NONE" },
+  });
 
   requests.length = 0;
   globalThis.fetch = async (input, init) => {
