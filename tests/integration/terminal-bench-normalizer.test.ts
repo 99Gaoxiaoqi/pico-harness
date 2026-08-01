@@ -137,6 +137,7 @@ test("Terminal-Bench normalizer projects recovered policy incidents", async (con
   assert.equal(summary.policyIncidentCount, 1);
   assert.equal(summary.verifierPassWithPolicyIncidentCount, 1);
   assert.equal(summary.verifierPassWithPolicyIncidentRate, 1);
+  assert.deepEqual(summary.policyReasonKindCounts, policyDenials("approval").byReasonKind);
   assert.equal(summary.passed, 0);
   assert.equal(summary.counts.policy_blocked, 1);
   assert.equal(summary.trials[0].primaryStatus, "policy_blocked");
@@ -215,6 +216,51 @@ test("Terminal-Bench normalizer rejects malformed policy denial evidence", async
   assert.equal(summary.trials[0].executionOutcome, "adapter_error");
   assert.equal(summary.trials[0].policyIncident, false);
   assert.equal("policyDenials" in summary.trials[0].agent, false);
+});
+
+test("Terminal-Bench normalizer rejects malformed policy reason-kind evidence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-malformed-policy-reason-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "malformed-policy-reason-run";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const cases = ["unknown-kind", "inconsistent-sum", "extra-key"];
+  for (const name of cases) {
+    await writeTrial(jobDir, name, {
+      reward: 1,
+      headless: headless("completed", true, policyDenials("hardline")),
+      runId,
+    });
+    const headlessPath = join(jobDir, name, "agent", "pico-result.json");
+    const malformed = JSON.parse(await readFile(headlessPath, "utf8"));
+    if (name === "unknown-kind") {
+      malformed.policyDenials.first.reasonKind = "untrusted_reason";
+    } else if (name === "inconsistent-sum") {
+      malformed.policyDenials.byReasonKind.hook_denied = 1;
+    } else {
+      malformed.policyDenials.byReasonKind.command = "must-not-be-projected";
+    }
+    await writeFile(headlessPath, JSON.stringify(malformed));
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: cases.length,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(
+    summary.trials.every(
+      (trial: { adapter: { code: string } }) => trial.adapter.code === "policy_denials_invalid",
+    ),
+    true,
+  );
+  assert.deepEqual(
+    summary.policyReasonKindCounts,
+    Object.fromEntries(policyReasonKinds.map((reasonKind) => [reasonKind, 0])),
+  );
 });
 
 test("Terminal-Bench normalizer records a pre-job infrastructure failure", async (context) => {
@@ -694,6 +740,129 @@ test("Terminal-Bench normalizer rejects runtime or Harbor token mismatches", asy
   );
 });
 
+test("Terminal-Bench normalizer accepts signed aggregate usage for one runtime retry", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-retry-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "accounting-retry-run";
+  const trialId = "retried";
+  const final = headless("completed", true);
+  const accounting = accountingReceiptForRequests(runId, trialId, [
+    [4, 2],
+    [5, 3],
+  ]);
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, trialId, {
+    reward: 1,
+    headless: final,
+    runId,
+    accounting,
+    runtimeUsage: { promptTokens: 5, completionTokens: 3 },
+    harborUsage: {
+      inputTokens: accounting.actual.inputTokens,
+      outputTokens: accounting.actual.outputTokens,
+    },
+    attempts: retriedAttempts(final),
+    retryCount: 1,
+    signedGatewayUsageRequired: true,
+    gatewayUsageFallback: true,
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.trials[0].adapter.status, "ok");
+  assert.deepEqual(summary.trials[0].agent.usage, {
+    promptTokens: accounting.actual.inputTokens,
+    completionTokens: accounting.actual.outputTokens,
+    costCNY: accounting.actual.costCNY,
+  });
+  assert.deepEqual(summary.trials[0].agent.runtimeReportedUsage, {
+    promptTokens: 5,
+    completionTokens: 3,
+    costCNY: 0,
+  });
+});
+
+test("Terminal-Bench normalizer rejects unsigned, forged, or non-retry usage mismatches", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-retry-invalid-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "accounting-retry-invalid-run";
+  const final = headless("completed", true);
+  const validAttempts = retriedAttempts(final);
+  const [firstAttempt, finalAttempt] = validAttempts;
+  if (!firstAttempt || !finalAttempt) throw new Error("retry fixture attempts are incomplete");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const cases = [
+    {
+      name: "not-a-retry",
+      attempts: [finalAttempt],
+      retryCount: 0,
+      signedGatewayUsageRequired: false,
+    },
+    {
+      name: "forged-first-attempt",
+      attempts: [{ ...firstAttempt, errorCode: "OTHER_RUNTIME_ERROR" }, finalAttempt],
+      retryCount: 1,
+      signedGatewayUsageRequired: true,
+    },
+    {
+      name: "extra-attempt-key",
+      attempts: [{ ...firstAttempt, command: "must-not-be-accepted" }, finalAttempt],
+      retryCount: 1,
+      signedGatewayUsageRequired: true,
+    },
+    {
+      name: "unsigned-retry",
+      attempts: validAttempts,
+      retryCount: 1,
+      signedGatewayUsageRequired: false,
+    },
+  ];
+  for (const value of cases) {
+    const accounting = accountingReceiptForRequests(runId, value.name, [
+      [4, 2],
+      [5, 3],
+    ]);
+    await writeTrial(jobDir, value.name, {
+      reward: 1,
+      headless: final,
+      runId,
+      accounting,
+      runtimeUsage: { promptTokens: 5, completionTokens: 3 },
+      harborUsage: {
+        inputTokens: accounting.actual.inputTokens,
+        outputTokens: accounting.actual.outputTokens,
+      },
+      attempts: value.attempts,
+      retryCount: value.retryCount,
+      signedGatewayUsageRequired: value.signedGatewayUsageRequired,
+      gatewayUsageFallback: true,
+    });
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: cases.length,
+  });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(
+    summary.trials.every(
+      (trial: { adapter: { code: string } }) => trial.adapter.code === "accounting_token_mismatch",
+    ),
+    true,
+  );
+});
+
 test("Terminal-Bench normalizer accepts the signed RUNTIME_FAILED zero-usage fallback", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-runtime-fallback-"));
   const jobDir = join(root, "job");
@@ -945,6 +1114,16 @@ type HeadlessFixture = {
   policyDenials?: ReturnType<typeof policyDenials>;
 };
 
+type AdapterAttemptFixture = {
+  attempt: number;
+  requestId: string;
+  status: string;
+  errorCode: string | null;
+  terminationConfirmed: boolean;
+  durationMs: number;
+  [key: string]: unknown;
+};
+
 function headless(
   status: string,
   terminationConfirmed: boolean,
@@ -962,11 +1141,62 @@ function headless(
   return denials ? { ...result, policyDenials: denials } : result;
 }
 
+const policyReasonKinds = [
+  "plan_mode",
+  "source_or_dot",
+  "opaque_shell",
+  "dynamic_executable",
+  "protected_destination",
+  "protected_redirect",
+  "destructive_git",
+  "destructive_system",
+  "hook_denied",
+  "approval_denied",
+  "unknown_hardline",
+] as const;
+
+type PolicyReasonKind = (typeof policyReasonKinds)[number];
+
 function policyDenials(code: "plan_mode" | "hardline" | "hook" | "approval") {
   const byCode = { plan_mode: 0, hardline: 0, hook: 0, approval: 0 };
   byCode[code] = 1;
-  const boundary = { source: "permission" as const, code, toolName: "exec_command" };
-  return { total: 1, byCode, first: boundary, last: boundary };
+  const reasonKind: PolicyReasonKind = {
+    plan_mode: "plan_mode",
+    hardline: "protected_destination",
+    hook: "hook_denied",
+    approval: "approval_denied",
+  }[code] as PolicyReasonKind;
+  const byReasonKind = Object.fromEntries(
+    policyReasonKinds.map((candidate) => [candidate, candidate === reasonKind ? 1 : 0]),
+  ) as Record<PolicyReasonKind, number>;
+  const boundary = {
+    source: "permission" as const,
+    code,
+    reasonKind,
+    toolName: "exec_command",
+  };
+  return { total: 1, byCode, byReasonKind, first: boundary, last: boundary };
+}
+
+function retriedAttempts(final: HeadlessFixture): AdapterAttemptFixture[] {
+  return [
+    {
+      attempt: 1,
+      requestId: `${final.requestId}.attempt-1`,
+      status: "failed",
+      errorCode: "RUNTIME_FAILED",
+      terminationConfirmed: true,
+      durationMs: 2,
+    },
+    {
+      attempt: 2,
+      requestId: final.requestId,
+      status: final.status,
+      errorCode: final.error?.code ?? null,
+      terminationConfirmed: final.terminationConfirmed,
+      durationMs: final.durationMs,
+    },
+  ];
 }
 
 async function writeTrial(
@@ -984,6 +1214,9 @@ async function writeTrial(
     gatewayUsageFallback?: boolean;
     gatewayUsageSource?: string;
     omitGatewayUsageMarkers?: boolean;
+    attempts?: AdapterAttemptFixture[];
+    retryCount?: number;
+    signedGatewayUsageRequired?: boolean;
   },
 ) {
   const trialDir = join(jobDir, name);
@@ -1019,9 +1252,11 @@ async function writeTrial(
         n_output_tokens: harborUsage.outputTokens,
         metadata: {
           pico: {
+            requestId: headlessResult.requestId,
             status: headlessResult.status,
             errorCode: headlessResult.error?.code ?? null,
             terminationConfirmed: headlessResult.terminationConfirmed,
+            durationMs: headlessResult.durationMs,
             exitCode: {
               completed: 0,
               invalid_request: 2,
@@ -1033,6 +1268,19 @@ async function writeTrial(
             costCNY: accounting.actual.costCNY,
             runtimeReportedCostCNY: headlessResult.usage.costCNY,
             runtimeReportedUsage: headlessResult.usage,
+            attempts: options.attempts ?? [
+              {
+                attempt: 1,
+                requestId: headlessResult.requestId,
+                status: headlessResult.status,
+                errorCode: headlessResult.error?.code ?? null,
+                terminationConfirmed: headlessResult.terminationConfirmed,
+                durationMs: headlessResult.durationMs,
+              },
+            ],
+            retryCount: options.retryCount ?? 0,
+            signedGatewayUsageRequired:
+              options.signedGatewayUsageRequired ?? options.gatewayUsageFallback ?? false,
             gatewayAccounting: {
               schemaVersion: accounting.schemaVersion,
               status: accounting.status,
