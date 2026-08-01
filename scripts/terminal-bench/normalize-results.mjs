@@ -662,7 +662,7 @@ function validateAccountingReceipt({
     (runtimeUsageMatches && !normalUsageMarkers && !signedRetryUsage) ||
     (!runtimeUsageMatches &&
       !signedRetryUsage &&
-      !isRuntimeFailedZeroUsageFallback({
+      !isTerminalZeroUsageFallback({
         headless,
         picoMetadata,
         gatewayMetadata,
@@ -749,7 +749,7 @@ function isSignedRetryUsage({ headless, picoMetadata, gatewayMetadata, runtimeUs
   );
 }
 
-function isRuntimeFailedZeroUsageFallback({
+function isTerminalZeroUsageFallback({
   headless,
   picoMetadata,
   gatewayMetadata,
@@ -757,9 +757,11 @@ function isRuntimeFailedZeroUsageFallback({
   actual,
 }) {
   const runtimeReportedUsage = picoMetadata?.runtimeReportedUsage;
+  const terminalFailure =
+    (headless?.status === "failed" && headless?.error?.code === "RUNTIME_FAILED") ||
+    (headless?.status === "timed_out" && headless?.error?.code === "TIMEOUT");
   return (
-    headless?.status === "failed" &&
-    headless?.error?.code === "RUNTIME_FAILED" &&
+    terminalFailure &&
     headless?.terminationConfirmed === true &&
     runtimeUsage.promptTokens === 0 &&
     runtimeUsage.completionTokens === 0 &&
@@ -767,9 +769,10 @@ function isRuntimeFailedZeroUsageFallback({
     Number.isFinite(runtimeUsage.costCNY) &&
     runtimeUsage.costCNY === 0 &&
     actual.inputTokens + actual.outputTokens > 0 &&
-    picoMetadata?.status === "failed" &&
-    picoMetadata?.errorCode === "RUNTIME_FAILED" &&
+    picoMetadata?.status === headless.status &&
+    picoMetadata?.errorCode === headless.error.code &&
     picoMetadata?.terminationConfirmed === true &&
+    picoMetadata?.signedGatewayUsageRequired === true &&
     picoMetadata?.runtimeReportedCostCNY === 0 &&
     isExactObject(runtimeReportedUsage, ["promptTokens", "completionTokens", "costCNY"]) &&
     runtimeReportedUsage.promptTokens === 0 &&

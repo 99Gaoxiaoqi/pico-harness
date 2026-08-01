@@ -937,7 +937,54 @@ test("Terminal-Bench normalizer accepts the signed RUNTIME_FAILED zero-usage fal
   });
 });
 
-test("Terminal-Bench normalizer limits zero-usage fallback to the exact runtime failure", async (context) => {
+test("Terminal-Bench normalizer accepts signed zero-usage accounting after a confirmed timeout", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-timeout-fallback-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "timeout-fallback-run";
+  const trialId = "timeout-fallback";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, trialId, {
+    reward: 0,
+    headless: {
+      ...headless("timed_out", true),
+      error: { code: "TIMEOUT", summary: "The Agent Runtime timed out." },
+    },
+    runId,
+    accounting: accountingReceipt(runId, trialId, 125, 7),
+    runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+    harborUsage: { inputTokens: 125, outputTokens: 7 },
+    gatewayUsageFallback: true,
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: 1,
+  });
+
+  assert.equal(summary.sealed, true);
+  assert.equal(summary.trials[0].infra.status, "ok");
+  assert.equal(summary.trials[0].adapter.status, "ok");
+  assert.equal(summary.trials[0].agent.status, "timed_out");
+  assert.equal(summary.trials[0].agent.errorCode, "TIMEOUT");
+  assert.equal(summary.trials[0].executionOutcome, "timed_out");
+  assert.equal(summary.trials[0].primaryStatus, "agent_timeout");
+  assert.equal(summary.trials[0].verifier.status, "completed");
+  assert.deepEqual(summary.trials[0].agent.usage, {
+    promptTokens: 125,
+    completionTokens: 7,
+    costCNY: 0.0195,
+  });
+  assert.deepEqual(summary.trials[0].agent.runtimeReportedUsage, {
+    promptTokens: 0,
+    completionTokens: 0,
+    costCNY: 0,
+  });
+});
+
+test("Terminal-Bench normalizer limits zero-usage fallback to exact terminal failures", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-runtime-fallback-denied-"));
   const jobDir = join(root, "job");
   const runDir = join(root, "run");
@@ -960,6 +1007,16 @@ test("Terminal-Bench normalizer limits zero-usage fallback to the exact runtime 
       headless: {
         ...headless("failed", true),
         error: { code: "OTHER_RUNTIME_ERROR", summary: "Different runtime error." },
+      },
+      runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+      harborUsage: { inputTokens: 2, outputTokens: 1 },
+      gatewayUsageFallback: true,
+    },
+    {
+      name: "other-timeout-error",
+      headless: {
+        ...headless("timed_out", true),
+        error: { code: "OTHER_TIMEOUT", summary: "Different timeout error." },
       },
       runtimeUsage: { promptTokens: 0, completionTokens: 0 },
       harborUsage: { inputTokens: 2, outputTokens: 1 },

@@ -885,7 +885,7 @@ rm -f {remote_archive}
                 "attempts": attempts,
                 "retryCount": retry_count,
                 "signedGatewayUsageRequired": (
-                    retry_count > 0 or is_zero_usage_runtime_failure(result)
+                    retry_count > 0 or is_zero_usage_terminal_failure(result)
                 ),
                 "localCanaryOnly": True,
                 "leaderboardComparable": False,
@@ -972,12 +972,12 @@ def apply_gateway_accounting(
         runtime_input_tokens == actual["inputTokens"]
         and runtime_output_tokens == actual["outputTokens"]
     )
-    runtime_failed_zero_usage_fallback = (
+    terminal_zero_usage_fallback = (
         not runtime_usage_matches
         and receipt["status"] == "reconciled"
         and receipt["withinBudget"] is True
-        and pico.get("status") == "failed"
-        and pico.get("errorCode") == "RUNTIME_FAILED"
+        and (pico.get("status"), pico.get("errorCode"))
+        in {("failed", "RUNTIME_FAILED"), ("timed_out", "TIMEOUT")}
         and pico.get("terminationConfirmed") is True
         and runtime_input_tokens == 0
         and runtime_output_tokens == 0
@@ -989,7 +989,7 @@ def apply_gateway_accounting(
     )
     signed_gateway_usage_required = (
         pico.get("signedGatewayUsageRequired") is True
-        or runtime_failed_zero_usage_fallback
+        or terminal_zero_usage_fallback
     )
     use_signed_gateway_actual = (
         signed_gateway_usage_required
@@ -3287,6 +3287,10 @@ def benchmark_instruction(instruction: str, workspace: str) -> str:
     return (
         f"{instruction}\n\n"
         "[Terminal-Bench adapter note]\n"
+        "Before the first tool call, keep temporary, build, and install artifacts "
+        f"inside {workspace}/.pico-tmp or {workspace}/.local. Prefer write_file or "
+        "edit_file over shell redirection, invoke executables with literal argv, "
+        "and do not source/eval commands or write under /tmp or system paths. "
         "Run pytest test files with pytest itself before finishing; do not execute "
         "them as plain Python scripts. If the verifier needs a persistent service "
         f"on port 8080, write {manifest_path} as strict JSON with exactly "
@@ -3304,17 +3308,18 @@ def benchmark_instruction(instruction: str, workspace: str) -> str:
     )
 
 
-def is_zero_usage_runtime_failure(result: dict[str, Any]) -> bool:
+def is_zero_usage_terminal_failure(result: dict[str, Any]) -> bool:
     error = result.get("error")
     usage = result.get("usage")
     return (
-        result.get("status") == "failed"
-        and isinstance(error, dict)
-        and error.get("code") == "RUNTIME_FAILED"
+        isinstance(error, dict)
+        and (result.get("status"), error.get("code"))
+        in {("failed", "RUNTIME_FAILED"), ("timed_out", "TIMEOUT")}
         and result.get("terminationConfirmed") is True
         and isinstance(usage, dict)
         and usage.get("promptTokens") == 0
         and usage.get("completionTokens") == 0
+        and usage.get("costCNY") == 0
     )
 
 
