@@ -147,6 +147,7 @@ export class OpenAIProvider implements LLMProvider {
   /** Endpoint/model capability memory survives short-lived runtime/provider reconstruction. */
   private static readonly unsupportedPromptCacheKeyRoutes = new Set<string>();
   private static readonly unsupportedPromptCacheBreakpointRoutes = new Set<string>();
+  private static readonly unsupportedPromptCacheRetentionRoutes = new Set<string>();
   private static readonly promptCacheRouteTraffic = new Map<
     string,
     { minute: number; count: number }
@@ -160,6 +161,7 @@ export class OpenAIProvider implements LLMProvider {
   private readonly promptCacheRoutingIdentity: string | undefined;
   private promptCacheKeyEnabled: boolean;
   private promptCacheBreakpointsEnabled: boolean;
+  private promptCacheRetentionEnabled: boolean;
 
   constructor(
     private readonly config: ProviderConfig,
@@ -168,16 +170,16 @@ export class OpenAIProvider implements LLMProvider {
     this.profile = profile ?? resolveProviderProfile("openai", config.model);
     this.thinkingEffort = config.thinkingEffort ?? "off";
     this.promptCacheFieldRoute =
-      config.capabilities?.cache === true && config.capabilities.promptCache.mode === "explicit"
+      config.capabilities?.cache === true
         ? promptCacheRouteIdentity({
             provider: "openai",
             model: config.model,
             baseURL: config.baseURL,
-            policy: { mode: "explicit" },
+            policy: { activeCacheFields: true },
           })
         : undefined;
     this.promptCacheRoutingIdentity =
-      config.capabilities?.cache === true && config.capabilities.promptCache.mode === "explicit"
+      config.capabilities?.cache === true
         ? promptCacheRouteIdentity({
             provider: "openai",
             model: config.model,
@@ -191,6 +193,9 @@ export class OpenAIProvider implements LLMProvider {
     this.promptCacheBreakpointsEnabled =
       this.promptCacheFieldRoute === undefined ||
       !OpenAIProvider.unsupportedPromptCacheBreakpointRoutes.has(this.promptCacheFieldRoute);
+    this.promptCacheRetentionEnabled =
+      this.promptCacheFieldRoute === undefined ||
+      !OpenAIProvider.unsupportedPromptCacheRetentionRoutes.has(this.promptCacheFieldRoute);
     this.requestCapabilities = {
       toolChoiceNoneWithTools: config.capabilities?.toolChoiceNoneWithTools === true,
       ...(this.promptCacheRoutingIdentity && (config.capabilities?.promptCache.keyShards ?? 1) > 1
@@ -296,6 +301,12 @@ export class OpenAIProvider implements LLMProvider {
           OpenAIProvider.unsupportedPromptCacheBreakpointRoutes.add(this.promptCacheFieldRoute);
         }
       }
+      if (rejected.retention) {
+        this.promptCacheRetentionEnabled = false;
+        if (this.promptCacheFieldRoute) {
+          OpenAIProvider.unsupportedPromptCacheRetentionRoutes.add(this.promptCacheFieldRoute);
+        }
+      }
       actualBody = stripPromptCacheRequestFields(actualBody, rejected);
       logger.warn(
         {
@@ -303,6 +314,7 @@ export class OpenAIProvider implements LLMProvider {
           status: response.status,
           promptCacheKey: rejected.key ? "unsupported" : "retained",
           promptCacheBreakpoints: rejected.breakpoints ? "unsupported" : "retained",
+          promptCacheRetention: rejected.retention ? "unsupported" : "retained",
         },
         "[OpenAI] 兼容端点拒绝部分主动缓存字段，已按字段降级",
       );
@@ -690,9 +702,9 @@ export class OpenAIProvider implements LLMProvider {
       requestBody.tool_choice = "none";
     }
 
-    // `cache:true + mode:explicit` is the route's explicit capability declaration.
-    // Compatible endpoints that reject these fields are remembered and fail open.
-    if (capabilities.cache === true && capabilities.promptCache.mode === "explicit") {
+    // `cache:true` explicitly allows the routing key for both implicit and explicit caching.
+    // Compatible endpoints that reject active cache fields are remembered and fail open.
+    if (capabilities.cache === true) {
       const revisions = promptCacheRevisions(messages, tools);
       const routeIdentity =
         this.promptCacheRoutingIdentity ??
@@ -717,7 +729,11 @@ export class OpenAIProvider implements LLMProvider {
           },
         );
       }
+      if (capabilities.promptCache.retention && this.promptCacheRetentionEnabled) {
+        requestBody.prompt_cache_retention = capabilities.promptCache.retention;
+      }
       if (
+        capabilities.promptCache.mode === "explicit" &&
         capabilities.promptCache.explicitBreakpoints === true &&
         this.promptCacheBreakpointsEnabled &&
         applyOpenAIExplicitPromptCacheBreakpoint(requestBody)
@@ -743,11 +759,14 @@ export class OpenAIProvider implements LLMProvider {
 function rejectedPromptCacheFields(
   status: number,
   body: string,
-): { readonly key: boolean; readonly breakpoints: boolean } | undefined {
+):
+  | { readonly key: boolean; readonly breakpoints: boolean; readonly retention: boolean }
+  | undefined {
   if (status !== 400 && status !== 422) return undefined;
   const key = /prompt[_ -]?cache[_ -]?key/iu.test(body);
   const breakpoints = /prompt[_ -]?cache[_ -]?(?:options|breakpoint)/iu.test(body);
-  return key || breakpoints ? { key, breakpoints } : undefined;
+  const retention = /prompt[_ -]?cache[_ -]?retention/iu.test(body);
+  return key || breakpoints || retention ? { key, breakpoints, retention } : undefined;
 }
 
 function shouldShardPromptCacheKey(
@@ -812,7 +831,7 @@ function isOpenAICacheableContentBlock(value: unknown): boolean {
 
 function stripPromptCacheRequestFields(
   body: Readonly<Record<string, unknown>>,
-  fields: { readonly key: boolean; readonly breakpoints: boolean },
+  fields: { readonly key: boolean; readonly breakpoints: boolean; readonly retention: boolean },
 ): Record<string, unknown> {
   const stripped = fields.breakpoints
     ? stripInjectedPromptCacheBreakpoints(body)
@@ -820,6 +839,7 @@ function stripPromptCacheRequestFields(
   if (!isRecord(stripped)) return {};
   if (fields.key) delete stripped["prompt_cache_key"];
   if (fields.breakpoints) delete stripped["prompt_cache_options"];
+  if (fields.retention) delete stripped["prompt_cache_retention"];
   return stripped;
 }
 
