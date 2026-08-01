@@ -177,7 +177,7 @@ async function protocolMatrix(
       body: JSON.stringify({
         model: "gpt-5.6-terra",
         messages: [{ role: "user", content: "Reply PROBE." }],
-        max_tokens: 1,
+        max_tokens: 16,
       }),
     },
     suiteSignal,
@@ -194,7 +194,7 @@ async function protocolMatrix(
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
         messages: [{ role: "user", content: "Reply PROBE." }],
-        max_tokens: 1,
+        max_tokens: 16,
       }),
     },
     suiteSignal,
@@ -206,7 +206,7 @@ async function protocolMatrix(
       headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: "Reply PROBE." }] }],
-        generationConfig: { maxOutputTokens: 1 },
+        generationConfig: { maxOutputTokens: 16 },
       }),
     },
     suiteSignal,
