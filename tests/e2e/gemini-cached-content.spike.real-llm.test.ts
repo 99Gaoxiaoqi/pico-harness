@@ -7,7 +7,7 @@ const enabled = process.env.RUN_GEMINI_CACHE_SPIKE === "1";
 const geminiSpike = enabled ? test : test.skip;
 const REQUEST_TIMEOUT_MS = 45_000;
 const CLEANUP_TIMEOUT_MS = 10_000;
-const LIFECYCLE_REQUEST_COUNT = 8;
+const LIFECYCLE_REQUEST_COUNT = 16;
 const TIMEOUT_MS = REQUEST_TIMEOUT_MS * LIFECYCLE_REQUEST_COUNT + CLEANUP_TIMEOUT_MS + 30_000;
 
 /**
@@ -22,6 +22,7 @@ geminiSpike(
     const baseURL = requiredEnv("GEMINI_CACHE_SPIKE_BASE_URL");
     const apiKey = requiredEnv("GEMINI_CACHE_SPIKE_API_KEY");
     const model = process.env.GEMINI_CACHE_SPIKE_MODEL?.trim() || "gemini-2.5-flash";
+    const minimumTokens = minimumCacheTokens(model);
     const marker = `pico-gemini-native-${randomUUID()}`;
     const source = {
       model: `models/${model}`,
@@ -32,11 +33,18 @@ geminiSpike(
             {
               name: "cache_probe",
               description: "native cached content compatibility probe",
-              parameters: { type: "object" },
+              parameters: {
+                type: "object",
+                properties: { marker: { type: "string" } },
+                required: ["marker"],
+              },
             },
           ],
         },
       ],
+      toolConfig: {
+        functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["cache_probe"] },
+      },
       ttl: "3600s",
     };
     const created = await nativeRequest(
@@ -64,6 +72,27 @@ geminiSpike(
         "string",
         "native cachedContents must report expireTime",
       );
+      const counted = await nativeRequest(
+        baseURL,
+        apiKey,
+        `/v1beta/models/${encodeURIComponent(model)}:countTokens`,
+        "POST",
+        suiteSignal,
+        {
+          generateContentRequest: {
+            model: `models/${model}`,
+            cachedContent: name,
+            contents: [{ role: "user", parts: [{ text: "Count the cached prefix." }] }],
+          },
+        },
+      );
+      const cachedTokenCount = counted.body["cachedContentTokenCount"];
+      assert.ok(
+        typeof cachedTokenCount === "number" && cachedTokenCount >= minimumTokens,
+        `native cached source must contain at least ${minimumTokens} tokens for ${model}`,
+      );
+      const listed = await findListedCache(baseURL, apiKey, name, suiteSignal);
+      assert.ok(listed, "native cachedContents list must include the newly created cache");
       const fetched = await nativeRequest(
         baseURL,
         apiKey,
@@ -84,13 +113,23 @@ geminiSpike(
         suiteSignal,
         {
           cachedContent: name,
-          contents: [{ role: "user", parts: [{ text: "Reply exactly NATIVE_CACHE_READY." }] }],
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: `Call cache_probe exactly once with marker ${marker}.` }],
+            },
+          ],
         },
       );
       const usage = asRecord(generated.body["usageMetadata"]);
       assertPositiveTokenCount(
         usage?.["cachedContentTokenCount"],
         "native Gemini generate must report cachedContentTokenCount > 0",
+      );
+      assert.equal(
+        firstFunctionCallName(generated.body),
+        "cache_probe",
+        "native Gemini must invoke the function declaration stored in cachedContents",
       );
       const updated = await nativeRequest(
         baseURL,
@@ -109,6 +148,8 @@ geminiSpike(
       );
       safeReport({
         protocol: "gemini-native",
+        countTokens: counted.safe,
+        list: listed.safe,
         create: created.safe,
         get: fetched.safe,
         generate: generated.safe,
@@ -210,6 +251,36 @@ interface SafeNativeResult {
   readonly safe: Record<string, unknown>;
 }
 
+async function findListedCache(
+  baseURL: string,
+  apiKey: string,
+  name: string,
+  suiteSignal: AbortSignal,
+): Promise<SafeNativeResult | undefined> {
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const query = new URLSearchParams({ pageSize: "100" });
+    if (pageToken) query.set("pageToken", pageToken);
+    const result = await nativeRequest(
+      baseURL,
+      apiKey,
+      `/v1beta/cachedContents?${query.toString()}`,
+      "GET",
+      suiteSignal,
+    );
+    const entries = Array.isArray(result.body["cachedContents"])
+      ? result.body["cachedContents"]
+      : [];
+    if (entries.some((entry) => asRecord(entry)?.["name"] === name)) return result;
+    pageToken =
+      typeof result.body["nextPageToken"] === "string" && result.body["nextPageToken"]
+        ? result.body["nextPageToken"]
+        : undefined;
+    if (!pageToken) return undefined;
+  }
+  throw new Error("native cachedContents list exceeded 20 pages; response omitted");
+}
+
 async function nativeRequest(
   baseURL: string,
   apiKey: string,
@@ -286,10 +357,27 @@ function safeBody(body: Record<string, unknown>): Record<string, unknown> {
   return {
     ...(typeof body["name"] === "string" ? { nameHash: sha256(body["name"]) } : {}),
     ...(typeof body["expireTime"] === "string" ? { expireTime: body["expireTime"] } : {}),
+    ...(typeof body["totalTokens"] === "number" ? { totalTokens: body["totalTokens"] } : {}),
+    ...(typeof body["cachedContentTokenCount"] === "number"
+      ? { cachedContentTokenCount: body["cachedContentTokenCount"] }
+      : {}),
     ...(usage && typeof usage["cachedContentTokenCount"] === "number"
       ? { cachedContentTokenCount: usage["cachedContentTokenCount"] }
       : {}),
   };
+}
+
+function firstFunctionCallName(body: Record<string, unknown>): string | undefined {
+  const candidates = Array.isArray(body["candidates"]) ? body["candidates"] : [];
+  for (const candidate of candidates) {
+    const content = asRecord(asRecord(candidate)?.["content"]);
+    const parts = Array.isArray(content?.["parts"]) ? content.parts : [];
+    for (const part of parts) {
+      const call = asRecord(asRecord(part)?.["functionCall"]);
+      if (typeof call?.["name"] === "string") return call.name;
+    }
+  }
+  return undefined;
 }
 
 function normalizeBaseURL(value: string): string {
@@ -313,6 +401,27 @@ function isolatedCorpus(marker: string): string {
     () => "alpha beta gamma delta epsilon zeta eta theta",
   ).join(" ");
   return `${marker} ${corpus}`;
+}
+
+function minimumCacheTokens(model: string): number {
+  const configured = process.env.GEMINI_CACHE_SPIKE_MIN_TOKENS?.trim();
+  if (configured) {
+    const parsed = Number(configured);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new Error("GEMINI_CACHE_SPIKE_MIN_TOKENS must be a positive integer");
+    }
+    return parsed;
+  }
+  const normalized = model.replace(/^models\//u, "").toLowerCase();
+  if (normalized === "gemini-2.5-flash" || normalized === "gemini-2.5-pro") {
+    return 2_048;
+  }
+  if (normalized === "gemini-3.1-pro-preview" || normalized === "gemini-3.5-flash") {
+    return 4_096;
+  }
+  throw new Error(
+    `native Gemini cache spike requires GEMINI_CACHE_SPIKE_MIN_TOKENS for model ${model}`,
+  );
 }
 
 function requiredEnv(name: string): string {
