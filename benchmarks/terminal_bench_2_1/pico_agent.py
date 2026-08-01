@@ -74,6 +74,7 @@ _MIN_RUNTIME_RETRY_EXECUTION_MS = 30_000
 _VERIFIER_SERVICE_MANIFEST_BASENAME = ".pico-verifier-service.json"
 _VERIFIER_SERVICE_PORT = 8_080
 _TRUSTED_NODE_EXEC_ENV = {
+    "LD_AUDIT": "",
     "LD_LIBRARY_PATH": "",
     "LD_PRELOAD": "",
     "NODE_OPTIONS": "",
@@ -82,31 +83,60 @@ _TRUSTED_NODE_EXEC_ENV = {
 _VERIFIER_SERVICE_EXECUTABLES = {
     "/usr/bin/python3": ".py",
     "/usr/local/bin/python3": ".py",
-    "/usr/bin/node": (".js", ".mjs", ".cjs"),
+    "/usr/bin/node": ".cjs",
 }
 _VERIFIER_SERVICE_HELPER = r"""
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const path = require('node:path').posix;
 const argumentOffset = ['inspect', 'launch'].includes(process.argv[1]) ? 1 : 2;
-const [mode, manifestPath, workspace] = process.argv.slice(argumentOffset);
+const helperArguments = process.argv.slice(argumentOffset);
+const [mode, manifestPath, workspace, nonce] = helperArguments;
 const basename = '.pico-verifier-service.json';
 const allowed = new Map([
   ['/usr/bin/python3', ['.py']],
   ['/usr/local/bin/python3', ['.py']],
-  ['/usr/bin/node', ['.js', '.mjs', '.cjs']],
+  ['/usr/bin/node', ['.cjs']],
 ]);
 function reject(code = 2) { process.exit(code); }
-function physicalRegularFile(candidate) {
-  const info = fs.lstatSync(candidate);
-  return info.isFile() && !info.isSymbolicLink() && fs.realpathSync(candidate) === candidate;
-}
 function bounded(candidate, root) {
   return path.isAbsolute(candidate) && path.normalize(candidate) === candidate &&
     (candidate === root || candidate.startsWith(`${root}/`));
 }
+function readScriptSnapshot(candidate) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      candidate,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC,
+    );
+  } catch { reject(); }
+  try {
+    const info = fs.fstatSync(descriptor);
+    if (!info.isFile()) reject();
+    let physicalPath;
+    try { physicalPath = fs.realpathSync(`/proc/self/fd/${descriptor}`); } catch {}
+    if (process.platform !== 'linux') physicalPath = fs.realpathSync(candidate);
+    if (physicalPath !== candidate) reject();
+    const maximumBytes = 1024 * 1024;
+    const snapshot = Buffer.allocUnsafe(maximumBytes + 1);
+    let size = 0;
+    while (size < snapshot.length) {
+      const count = fs.readSync(descriptor, snapshot, size, snapshot.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    if (size < 1 || size > maximumBytes) reject();
+    return snapshot.subarray(0, size);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
 function parse() {
-  if (!['inspect', 'launch'].includes(mode) || !path.isAbsolute(workspace) ||
+  if (!['inspect', 'launch'].includes(mode) ||
+      helperArguments.length !== (mode === 'inspect' ? 3 : 4) ||
+      (mode === 'launch' && !/^[0-9a-f]{64}$/u.test(nonce)) ||
+      !path.isAbsolute(workspace) ||
       path.normalize(workspace) !== workspace ||
       manifestPath !== path.join(workspace, basename)) reject();
   let descriptor;
@@ -140,26 +170,65 @@ function parse() {
   const suffixes = allowed.get(value.argv[0]);
   const script = value.argv[1];
   if (!suffixes || !bounded(script, value.cwd) ||
+      path.dirname(script) !== value.cwd ||
       !suffixes.some((suffix) => script.endsWith(suffix)) ||
-      !physicalRegularFile(script)) reject();
-  return Object.freeze({
+      fs.realpathSync(value.cwd) !== value.cwd) reject();
+  const source = readScriptSnapshot(script);
+  const manifest = Object.freeze({
     schemaVersion: 1,
     argv: Object.freeze([...value.argv]),
     cwd: value.cwd,
     port: 8080,
   });
+  return {manifest, source};
 }
-let manifest;
-try { manifest = parse(); } catch { reject(); }
+let parsed;
+try { parsed = parse(); } catch { reject(); }
+const {manifest, source} = parsed;
 if (mode === 'inspect') {
   process.stdout.write(`${JSON.stringify(manifest)}\n`);
   process.exit(0);
 }
-const child = spawn(manifest.argv[0], manifest.argv.slice(1), {
+const pythonRunner = [
+  'import builtins,sys',
+  'script=sys.argv[1]',
+  'sys.argv=sys.argv[1:]',
+  'source=sys.stdin.buffer.read()',
+  "scope={'__name__':'__main__','__file__':script,'__package__':None," +
+    "'__spec__':None,'__builtins__':builtins.__dict__}",
+  "exec(compile(source,script,'exec'),scope,scope)",
+].join('\n');
+const nodeRunner = [
+  "const fs=require('node:fs')",
+  "const path=require('node:path')",
+  "const Module=require('node:module')",
+  'const script=process.argv[1]',
+  'const args=process.argv.slice(2)',
+  "const source=fs.readFileSync(0,'utf8')",
+  'process.argv=[process.execPath,script,...args]',
+  'const main=new Module(script)',
+  "main.id='.'",
+  'main.filename=script',
+  'main.paths=Module._nodeModulePaths(path.dirname(script))',
+  'Module._cache[script]=main',
+  'process.mainModule=main',
+  'main._compile(source,script)',
+  'main.loaded=true',
+].join(';');
+const executable = manifest.argv[0];
+const script = manifest.argv[1];
+const child = spawn(executable, [
+  executable.endsWith('python3') ? '-c' : '-e',
+  executable.endsWith('python3') ? pythonRunner : nodeRunner,
+  script,
+  ...manifest.argv.slice(2),
+], {
   cwd: manifest.cwd,
   env: process.env,
-  stdio: 'ignore',
+  stdio: ['pipe', 'ignore', 'ignore'],
 });
+child.stdin.on('error', () => {});
+child.stdin.end(source);
 let stopping = false;
 function stop(signal) {
   if (stopping) return;
@@ -173,18 +242,130 @@ child.once('error', () => process.exit(2));
 child.once('exit', (code, signal) => process.exit(signal ? 128 : (code ?? 2)));
 """.strip()
 _VERIFIER_SERVICE_PROBE = r"""
+const crypto = require('node:crypto');
+const fs = require('node:fs');
 const net = require('node:net');
+const [nonce, manifestPath, workspace, helperSha256] = process.argv.slice(1);
+if (!/^[0-9a-f]{64}$/u.test(nonce || '') || !manifestPath || !workspace ||
+    !/^[0-9a-f]{64}$/u.test(helperSha256 || '')) process.exit(2);
+const supervisorNode = '/installed-agent/pico-node/bin/node';
 let attempt = 0;
+function numericPids() {
+  return fs.readdirSync('/proc').filter((entry) => /^[0-9]+$/u.test(entry));
+}
+function commandLine(pid) {
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`).toString().split('\0').filter(Boolean);
+  } catch { return []; }
+}
+function hasCleanSupervisorEnvironment(pid) {
+  let entries;
+  try {
+    entries = fs.readFileSync(`/proc/${pid}/environ`).toString().split('\0');
+  } catch { return false; }
+  return ['LD_AUDIT', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'NODE_OPTIONS', 'NODE_PATH']
+    .every((name) => entries.includes(`${name}=`));
+}
+function usesTrustedSupervisorExecutable(pid) {
+  try {
+    const expected = fs.statSync(supervisorNode);
+    const actual = fs.statSync(`/proc/${pid}/exe`);
+    return expected.dev === actual.dev && expected.ino === actual.ino &&
+      fs.realpathSync(`/proc/${pid}/exe`) === fs.realpathSync(supervisorNode);
+  } catch { return false; }
+}
+function hasTrustedSupervisorArguments(argv) {
+  return argv.length === 7 && argv[0] === supervisorNode && argv[1] === '-e' &&
+    crypto.createHash('sha256').update(argv[2] || '').digest('hex') === helperSha256 &&
+    argv[3] === 'launch' && argv[4] === manifestPath && argv[5] === workspace &&
+    argv[6] === nonce;
+}
+function parentPid(pid) {
+  try {
+    const match = /^PPid:\s+([0-9]+)$/mu.exec(fs.readFileSync(`/proc/${pid}/status`, 'utf8'));
+    return match ? match[1] : null;
+  } catch { return null; }
+}
+function descendants(root, pids) {
+  const values = new Set([root]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pid of pids) {
+      if (!values.has(pid) && values.has(parentPid(pid))) {
+        values.add(pid);
+        changed = true;
+      }
+    }
+  }
+  values.delete(root);
+  return values;
+}
+function listeningSocketInodes() {
+  const inodes = new Set();
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let lines;
+    try { lines = fs.readFileSync(table, 'utf8').trim().split('\n').slice(1); }
+    catch { continue; }
+    for (const line of lines) {
+      const fields = line.trim().split(/\s+/u);
+      const local = fields[1] || '';
+      if (fields[3] === '0A' && local.endsWith(':1F90') && fields[9]) {
+        inodes.add(fields[9]);
+      }
+    }
+  }
+  return inodes;
+}
+function socketOwnership(inodes, pids) {
+  const owners = new Set();
+  const ownedInodes = new Set();
+  for (const pid of pids) {
+    let descriptors;
+    try { descriptors = fs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+    for (const descriptor of descriptors) {
+      let target;
+      try { target = fs.readlinkSync(`/proc/${pid}/fd/${descriptor}`); } catch { continue; }
+      const match = /^socket:\[([0-9]+)\]$/u.exec(target);
+      if (match && inodes.has(match[1])) {
+        owners.add(pid);
+        ownedInodes.add(match[1]);
+      }
+    }
+  }
+  return {owners, ownedInodes};
+}
+function listenerBelongsToFreshSupervisor() {
+  const pids = numericPids();
+  const supervisors = pids.filter((pid) => {
+    const argv = commandLine(pid);
+    return hasTrustedSupervisorArguments(argv) &&
+      hasCleanSupervisorEnvironment(pid) &&
+      usesTrustedSupervisorExecutable(pid);
+  });
+  if (supervisors.length !== 1) return false;
+  const ownedDescendants = descendants(supervisors[0], pids);
+  if (ownedDescendants.size === 0) return false;
+  const inodes = listeningSocketInodes();
+  if (inodes.size === 0) return false;
+  const {owners, ownedInodes} = socketOwnership(inodes, pids);
+  return ownedInodes.size === inodes.size && owners.size > 0 &&
+    [...owners].every((pid) => ownedDescendants.has(pid));
+}
+function retry() {
+  if (++attempt >= 50) process.exit(2);
+  setTimeout(probe, 100);
+}
 function probe() {
+  if (!listenerBelongsToFreshSupervisor()) return retry();
   const socket = net.connect({host: '127.0.0.1', port: 8080});
   let settled = false;
   const done = (ok) => {
     if (settled) return;
     settled = true;
     socket.destroy();
-    if (ok) process.exit(0);
-    if (++attempt >= 50) process.exit(2);
-    setTimeout(probe, 100);
+    if (ok && listenerBelongsToFreshSupervisor()) process.exit(0);
+    retry();
   };
   socket.setTimeout(250, () => done(false));
   socket.once('connect', () => done(true));
@@ -691,6 +872,11 @@ rm -f {remote_archive}
         loop: asyncio.AbstractEventLoop,
         public_proxy_env: dict[str, str],
     ) -> tuple[dict[str, Any], int]:
+        cleared_trace = await environment.exec(
+            command=f"rm -f -- {shlex.quote(self._TRACE_EXPORT.as_posix())}"
+        )
+        if cleared_trace.return_code != 0:
+            raise RuntimeError("Pico trace reset failed")
         await docker_exec_secret_stdin(
             environment,
             gateway.capability.encode("utf-8"),
@@ -1817,6 +2003,7 @@ def parse_verifier_service_manifest(
     if (
         accepted_suffixes is None
         or not is_bounded_posix_path(script, cwd)
+        or PurePosixPath(script).parent.as_posix() != cwd
         or not script.endswith(accepted_suffixes)
     ):
         raise ValueError("Verifier service manifest executable is invalid")
@@ -1947,6 +2134,9 @@ async def launch_verifier_service_if_requested(
     if manifest is None:
         return False
     node = PicoInstalledAgent._REMOTE_NODE.as_posix() + "/bin/node"
+    manifest_path = verifier_service_manifest_path(workspace)
+    supervisor_nonce = secrets.token_hex(32)
+    helper_sha256 = hashlib.sha256(_VERIFIER_SERVICE_HELPER.encode()).hexdigest()
     await docker_compose_exec_argv(
         environment,
         [node, "-e", _VERIFIER_SERVICE_ASSERT_CLOSED],
@@ -1960,8 +2150,9 @@ async def launch_verifier_service_if_requested(
             "-e",
             _VERIFIER_SERVICE_HELPER,
             "launch",
-            verifier_service_manifest_path(workspace),
+            manifest_path,
             workspace,
+            supervisor_nonce,
         ],
         detached=True,
         working_dir=manifest.cwd,
@@ -1970,7 +2161,15 @@ async def launch_verifier_service_if_requested(
     )
     await docker_compose_exec_argv(
         environment,
-        [node, "-e", _VERIFIER_SERVICE_PROBE],
+        [
+            node,
+            "-e",
+            _VERIFIER_SERVICE_PROBE,
+            supervisor_nonce,
+            manifest_path,
+            workspace,
+            helper_sha256,
+        ],
         container_env=_TRUSTED_NODE_EXEC_ENV,
         timeout_sec=verifier_service_step_timeout(outer_deadline, loop),
     )
@@ -3045,9 +3244,10 @@ def benchmark_instruction(instruction: str, workspace: str) -> str:
         "them as plain Python scripts. If the verifier needs a persistent service "
         f"on port 8080, write {manifest_path} as strict JSON with exactly "
         'schemaVersion=1, argv, cwd, and port=8080. Use a direct Python or Node '
-        "script under cwd; argv[0] must be /usr/bin/python3, "
+        "script directly inside cwd; argv[0] must be /usr/bin/python3, "
         "/usr/local/bin/python3, or /usr/bin/node, and argv[1] must be the "
-        "absolute non-symlink script path. Do not rely on shell background jobs."
+        "absolute non-symlink .py or .cjs script path. Do not rely on shell "
+        "background jobs."
     )
 
 
@@ -3086,6 +3286,7 @@ def should_retry_runtime_failure(
         and isinstance(error, dict)
         and error.get("code") == "RUNTIME_FAILED"
         and result.get("terminationConfirmed") is True
+        and "policyDenials" not in result
         and math.isfinite(remaining_sec)
         and remaining_sec * 1_000 >= required_remaining_ms
     )

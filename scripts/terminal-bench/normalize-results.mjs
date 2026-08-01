@@ -49,6 +49,28 @@ const policyDenialReasonKinds = [
   "approval_denied",
   "unknown_hardline",
 ];
+const hardlinePolicyDenialReasonKinds = [
+  "source_or_dot",
+  "opaque_shell",
+  "dynamic_executable",
+  "protected_destination",
+  "protected_redirect",
+  "destructive_git",
+  "destructive_system",
+  "unknown_hardline",
+];
+const policyDenialSourceByCode = {
+  plan_mode: "safety",
+  hardline: "safety",
+  hook: "permission",
+  approval: "permission",
+};
+const policyDenialReasonKindsByCode = {
+  plan_mode: ["plan_mode"],
+  hardline: hardlinePolicyDenialReasonKinds,
+  hook: ["hook_denied"],
+  approval: ["approval_denied"],
+};
 const headlessStatuses = [
   "completed",
   "invalid_request",
@@ -866,6 +888,7 @@ function validatePolicyDenials(headless) {
       (total, reasonKind) => total + value.byReasonKind[reasonKind],
       0,
     ) !== value.total ||
+    !hasConsistentPolicyDenialCounts(value) ||
     !isPolicyDenialBoundary(value.first) ||
     !isPolicyDenialBoundary(value.last) ||
     value.byCode[value.first.code] === 0 ||
@@ -889,12 +912,27 @@ function validatePolicyDenials(headless) {
   };
 }
 
+function hasConsistentPolicyDenialCounts(value) {
+  const hardlineTotal = hardlinePolicyDenialReasonKinds.reduce(
+    (total, reasonKind) => total + value.byReasonKind[reasonKind],
+    0,
+  );
+  return (
+    value.byCode.plan_mode === value.byReasonKind.plan_mode &&
+    value.byCode.hardline === hardlineTotal &&
+    value.byCode.hook === value.byReasonKind.hook_denied &&
+    value.byCode.approval === value.byReasonKind.approval_denied
+  );
+}
+
 function isPolicyDenialBoundary(value) {
   return (
     isExactObject(value, ["source", "code", "reasonKind", "toolName"]) &&
     ["safety", "permission"].includes(value.source) &&
     policyDenialCodes.includes(value.code) &&
     policyDenialReasonKinds.includes(value.reasonKind) &&
+    value.source === policyDenialSourceByCode[value.code] &&
+    policyDenialReasonKindsByCode[value.code].includes(value.reasonKind) &&
     typeof value.toolName === "string" &&
     value.toolName.length > 0 &&
     value.toolName.length <= maxPolicyDenialToolNameLength
