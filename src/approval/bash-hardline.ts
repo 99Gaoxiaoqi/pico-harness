@@ -29,16 +29,128 @@ interface NestedShellCommand {
   readonly commandIndex: number;
 }
 
+/** Stable, metadata-only reason code for a Bash hardline denial. */
+export type HardlineBashReasonKind =
+  | "source_or_dot"
+  | "opaque_shell"
+  | "dynamic_executable"
+  | "protected_destination"
+  | "protected_redirect"
+  | "destructive_git"
+  | "destructive_system"
+  | "unknown_hardline";
+
 /**
  * Bash hardline 纯判定。只识别不可审批绕过的系统级破坏，
  * 工作区内的普通递归删除仍交给 YOLO 正常执行。
  */
 export function isHardlineBashCommand(command: string, initialCwd?: string): boolean {
-  return isHardlineBashCommandAtDepth(
-    command,
-    0,
-    initialCwd ? normalizeSlashPath(initialCwd.replaceAll("\\", "/")) : UNKNOWN_SHELL_CWD,
-  );
+  return classifyHardlineBashCommand(command, initialCwd) !== undefined;
+}
+
+/**
+ * Classify a denied Bash command without returning command text, arguments, or paths.
+ * The existing boolean hardline decision remains authoritative; classification failure
+ * therefore falls back to unknown_hardline instead of weakening the deny floor.
+ */
+export function classifyHardlineBashCommand(
+  command: string,
+  initialCwd?: string,
+): HardlineBashReasonKind | undefined {
+  const cwd = initialCwd ? normalizeSlashPath(initialCwd.replaceAll("\\", "/")) : UNKNOWN_SHELL_CWD;
+  const denied = isHardlineBashCommandAtDepth(command, 0, cwd);
+  if (!denied) return undefined;
+  try {
+    return classifyHardlineReason(command, cwd, 0) ?? "unknown_hardline";
+  } catch {
+    return "unknown_hardline";
+  }
+}
+
+function classifyHardlineReason(
+  command: string,
+  cwd: string,
+  depth: number,
+): Exclude<HardlineBashReasonKind, "unknown_hardline"> | undefined {
+  if (depth >= MAX_NESTED_COMMAND_DEPTH) return "dynamic_executable";
+  if (OTHER_HARDLINE_PATTERNS.some((pattern) => pattern.test(command))) {
+    return "destructive_system";
+  }
+  const parsed = parseShell(command);
+  for (const nested of parsed.nestedCommands) {
+    if (depth >= MAX_NESTED_COMMAND_DEPTH) return "dynamic_executable";
+    const nestedReason = classifyHardlineReason(nested.content, cwd, depth + 1);
+    if (nestedReason !== undefined) return nestedReason;
+  }
+  for (const commandWords of parsed.commands) {
+    const words = commandWords.map((word) => ({ ...word, cwd }));
+    if (hasDestructiveOutputRedirection(words)) return "protected_redirect";
+
+    const executableIndex = findExecutableIndex(words);
+    if (executableIndex < 0) continue;
+    const executableWord = words[executableIndex]!;
+    if (executableWord.dynamic || executableWord.unquotedExpansion) {
+      return "dynamic_executable";
+    }
+    const executable = commandBasename(executableWord.value);
+    const args = words.slice(executableIndex + 1);
+    if (SHELL_SOURCE_COMMANDS.has(executable)) return "source_or_dot";
+    if (OPAQUE_SHELL_COMMANDS.has(executable) && !isShellDisplayOnlyInvocation(args)) {
+      return "opaque_shell";
+    }
+    if (
+      (executable === "git" && isDestructiveGitInvocation(args)) ||
+      (executable === "git-push" && isDestructiveGitPushInvocation(args))
+    ) {
+      return "destructive_git";
+    }
+    if (
+      POWER_COMMANDS.has(executable) ||
+      (POWER_MANAGERS.has(executable) && isPowerManagerInvocation(executable, args)) ||
+      (isMkfsExecutable(executable) && isDestructiveMkfsInvocation(args)) ||
+      (executable === "dd" && isDestructiveDdInvocation(args)) ||
+      (executable === "wipefs" && isDestructiveWipefsInvocation(args))
+    ) {
+      return "destructive_system";
+    }
+    if (
+      (executable === "rm" && isDestructiveRmInvocation(args, false)) ||
+      (executable === "find" && isDestructiveFindInvocation(args)) ||
+      (executable === "xargs" && isDestructiveXargsInvocation(args, depth)) ||
+      (PERMISSION_COMMANDS.has(executable) && isProtectedMutationInvocation(args)) ||
+      (NATIVE_MUTATION_COMMANDS.has(executable) &&
+        isDestructiveNativeMutationInvocation(executable, args))
+    ) {
+      return "protected_destination";
+    }
+    if (executable === "env" && hasEnvSplitString(args)) return "dynamic_executable";
+    if (SHELL_COMMANDS.has(executable)) {
+      const shellOptions = scanShellInvocationOptions(args);
+      if (shellOptions.ambiguous || shellOptions.startupFile) return "dynamic_executable";
+      if (shellOptions.commandIndex >= 0) {
+        const nested = args[shellOptions.commandIndex + 1];
+        if (!nested || nested.dynamic || depth >= MAX_NESTED_COMMAND_DEPTH) {
+          return "dynamic_executable";
+        }
+        const nestedReason = classifyHardlineReason(nested.value, cwd, depth + 1);
+        if (nestedReason !== undefined) return nestedReason;
+      } else if (!shellOptions.noExec && !isShellDisplayOnlyInvocation(args)) {
+        return "dynamic_executable";
+      }
+    }
+    if (executable === "eval") {
+      if (args.length === 0 || args.some((word) => word.dynamic)) {
+        return "dynamic_executable";
+      }
+      const nestedReason = classifyHardlineReason(
+        args.map((word) => word.value).join(" "),
+        cwd,
+        depth + 1,
+      );
+      if (nestedReason !== undefined) return nestedReason;
+    }
+  }
+  return undefined;
 }
 
 function isHardlineBashCommandAtDepth(

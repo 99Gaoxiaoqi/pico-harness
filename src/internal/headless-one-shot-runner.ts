@@ -29,9 +29,12 @@ import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
 import {
   executeAgentRuntime,
+  MAX_HOST_AGENT_MAX_TURNS,
+  MIN_HOST_AGENT_MAX_TURNS,
   type RunAgentCliDependencies,
   type RunAgentProviderFactory,
   type RuntimePolicyDenial,
+  type RuntimePolicyDenialReasonKind,
 } from "../runtime/agent-runtime.js";
 import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
@@ -43,7 +46,7 @@ const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_LENGTH = 1024 * 1024;
 const MAX_SHUTDOWN_GRACE_MS = 60_000;
 const MAX_TIMEOUT_MS = 12_000_000;
-const MAX_BASH_TIMEOUT_MS = 300_000;
+const MAX_BASH_TIMEOUT_MS = 900_000;
 const MAX_POLICY_DENIAL_COUNT = Number.MAX_SAFE_INTEGER;
 const MAX_POLICY_TOOL_NAME_LENGTH = 128;
 const LOCK_DIRECTORY_MODE = 0o700;
@@ -91,6 +94,7 @@ const REQUEST_FIELDS = new Set([
   "permissionMode",
   "policyDenialMode",
   "allowedTools",
+  "maxTurns",
   "bashTimeoutMs",
   "timeoutMs",
   "shutdownGraceMs",
@@ -116,6 +120,16 @@ const EMPTY_USAGE: RunAgentUsage = Object.freeze({
   completionTokens: 0,
   costCNY: 0,
 });
+const HARDLINE_POLICY_REASON_KINDS = new Set<RuntimePolicyDenialReasonKind>([
+  "source_or_dot",
+  "opaque_shell",
+  "dynamic_executable",
+  "protected_destination",
+  "protected_redirect",
+  "destructive_git",
+  "destructive_system",
+  "unknown_hardline",
+]);
 
 export type HeadlessOneShotStatus =
   | "completed"
@@ -138,6 +152,7 @@ export interface HeadlessOneShotRequestV1 {
   readonly permissionMode: SessionSettings["mode"];
   readonly policyDenialMode?: "terminal" | "incident";
   readonly allowedTools: readonly string[];
+  readonly maxTurns?: number;
   readonly bashTimeoutMs?: number;
   readonly timeoutMs: number;
   readonly shutdownGraceMs: number;
@@ -159,12 +174,14 @@ export interface HeadlessOneShotError {
 export interface HeadlessOneShotPolicyDenial {
   readonly source: RuntimePolicyDenial["source"];
   readonly code: RuntimePolicyDenial["code"];
+  readonly reasonKind: RuntimePolicyDenial["reasonKind"];
   readonly toolName: string;
 }
 
 export interface HeadlessOneShotPolicyDenialSummary {
   readonly total: number;
   readonly byCode: Readonly<Record<RuntimePolicyDenial["code"], number>>;
+  readonly byReasonKind: Readonly<Record<RuntimePolicyDenialReasonKind, number>>;
   readonly first: HeadlessOneShotPolicyDenial;
   readonly last: HeadlessOneShotPolicyDenial;
 }
@@ -493,6 +510,7 @@ async function runValidatedRequest(
         ? { toolResultRedactionSecrets: controlledProxySecrets }
         : {}),
       ...(request.bashTimeoutMs !== undefined ? { bashTimeoutMs: request.bashTimeoutMs } : {}),
+      ...(request.maxTurns !== undefined ? { maxTurns: request.maxTurns } : {}),
       ...(request.providerRequestMode === "single_non_stream"
         ? { providerDecorator: singleNonStreamingProvider }
         : {}),
@@ -932,6 +950,15 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     );
   }
   const timeoutMs = requiredInteger(value["timeoutMs"], "timeoutMs", 1, MAX_TIMEOUT_MS);
+  const maxTurns =
+    value["maxTurns"] === undefined
+      ? undefined
+      : requiredInteger(
+          value["maxTurns"],
+          "maxTurns",
+          MIN_HOST_AGENT_MAX_TURNS,
+          MAX_HOST_AGENT_MAX_TURNS,
+        );
   const bashTimeoutMs =
     value["bashTimeoutMs"] === undefined
       ? undefined
@@ -999,6 +1026,7 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     permissionMode: permissionMode as SessionSettings["mode"],
     ...(policyDenialMode !== undefined ? { policyDenialMode } : {}),
     allowedTools: Object.freeze(allowedTools),
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
     timeoutMs,
     shutdownGraceMs,
@@ -1302,17 +1330,33 @@ function createPolicyDenialAccumulator(): {
     hook: 0,
     approval: 0,
   };
+  const byReasonKind: Record<RuntimePolicyDenialReasonKind, number> = {
+    plan_mode: 0,
+    source_or_dot: 0,
+    opaque_shell: 0,
+    dynamic_executable: 0,
+    protected_destination: 0,
+    protected_redirect: 0,
+    destructive_git: 0,
+    destructive_system: 0,
+    hook_denied: 0,
+    approval_denied: 0,
+    unknown_hardline: 0,
+  };
   let first: HeadlessOneShotPolicyDenial | undefined;
   let last: HeadlessOneShotPolicyDenial | undefined;
   return {
     record(event) {
+      const reasonKind = normalizedPolicyReasonKind(event);
       const denial = Object.freeze({
         source: event.source,
         code: event.code,
+        reasonKind,
         toolName: event.toolName.slice(0, MAX_POLICY_TOOL_NAME_LENGTH),
       });
       total = Math.min(total + 1, MAX_POLICY_DENIAL_COUNT);
       byCode[event.code] = Math.min(byCode[event.code] + 1, MAX_POLICY_DENIAL_COUNT);
+      byReasonKind[reasonKind] = Math.min(byReasonKind[reasonKind] + 1, MAX_POLICY_DENIAL_COUNT);
       first ??= denial;
       last = denial;
     },
@@ -1321,11 +1365,19 @@ function createPolicyDenialAccumulator(): {
       return Object.freeze({
         total,
         byCode: Object.freeze({ ...byCode }),
+        byReasonKind: Object.freeze({ ...byReasonKind }),
         first,
         last,
       });
     },
   };
+}
+
+function normalizedPolicyReasonKind(event: RuntimePolicyDenial): RuntimePolicyDenialReasonKind {
+  if (event.code === "plan_mode") return "plan_mode";
+  if (event.code === "hook") return "hook_denied";
+  if (event.code === "approval") return "approval_denied";
+  return HARDLINE_POLICY_REASON_KINDS.has(event.reasonKind) ? event.reasonKind : "unknown_hardline";
 }
 
 function emptyEffective(
