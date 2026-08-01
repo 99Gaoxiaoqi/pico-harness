@@ -282,8 +282,11 @@ class GatewayState:
                 trial["inputTokensRemaining"],
                 required_input_reservation,
             )
+            cost_input_reservation = (
+                len(bounded_body) + INPUT_RESERVATION_MARGIN_TOKENS
+            )
             cost_reservation = token_cost_micro_cny(
-                input_reservation, output_limit, self.pricing
+                cost_input_reservation, output_limit, self.pricing
             )
             if trial["revoked"]:
                 raise GatewayQuotaError(
@@ -673,12 +676,13 @@ def canonical_json(value: Any) -> bytes:
 
 
 def estimate_request_input_tokens(body: bytes) -> int:
-    """Conservatively reserve tokens without treating transport bytes as tokens.
+    """Estimate token-quota admission without treating transport bytes as tokens.
 
-    ASCII uses two characters per token, twice as conservative as the usual
-    four-character heuristic. Non-ASCII reserves its full UTF-8 width. The
-    provider's signed usage remains authoritative and reconciles any estimate
-    error after the response; an overrun revokes the trial before another call.
+    ASCII uses two characters per token, tighter than the usual four-character
+    heuristic. Non-ASCII reserves its full UTF-8 width. This estimate is not a
+    monetary upper bound: cost quotas separately reserve one token per request
+    byte, while signed provider usage authoritatively reconciles both dimensions.
+    An input-token overrun revokes the trial before another call.
     """
     try:
         text = body.decode("utf-8")

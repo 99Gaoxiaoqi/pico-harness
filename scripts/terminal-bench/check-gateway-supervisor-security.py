@@ -564,8 +564,7 @@ def request_reservation_cost(
         strict_output_limit=state.strict_request_output_limit,
     )
     return gateway.token_cost_micro_cny(
-        gateway.estimate_request_input_tokens(bounded_body)
-        + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
+        len(bounded_body) + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
         output_limit,
         state.pricing,
     )
@@ -611,7 +610,7 @@ def assert_request_bytes_do_not_consume_token_quota(
     )
     frame = proxy_frame({"padding": "x" * 120_000})
     body = base64.b64decode(frame["body"], validate=True)
-    bounded_body, _ = gateway.bound_request(
+    bounded_body, output_limit = gateway.bound_request(
         body,
         frame["path"],
         frame["protocol"],
@@ -621,6 +620,11 @@ def assert_request_bytes_do_not_consume_token_quota(
     estimated_input_tokens = gateway.estimate_request_input_tokens(bounded_body)
     required_reservation = (
         estimated_input_tokens + gateway.INPUT_RESERVATION_MARGIN_TOKENS
+    )
+    cost_reservation = gateway.token_cost_micro_cny(
+        len(bounded_body) + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
+        output_limit,
+        state.pricing,
     )
     remaining_input_tokens = required_reservation + 10_000
     with state.lock:
@@ -649,6 +653,14 @@ def assert_request_bytes_do_not_consume_token_quota(
     assert receipt["withinBudget"] is True
     assert receipt["requestEntries"][0]["reservation"]["inputTokens"] == (
         required_reservation
+    )
+    assert receipt["requestEntries"][0]["reservation"]["costMicroCNY"] == (
+        cost_reservation
+    )
+    assert cost_reservation > gateway.token_cost_micro_cny(
+        required_reservation,
+        output_limit,
+        state.pricing,
     )
     assert receipt["actual"]["inputTokens"] == 20_000
     assert receipt["auth"]["tag"] == hmac.new(
