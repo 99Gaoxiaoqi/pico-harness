@@ -45,6 +45,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
             input_tokens = (
                 1_800_000
                 if usage_case == "huge"
+                else 950_000
+                if usage_case == "near-quota"
                 else 5_000
                 if usage_case == "supplement"
                 else 2
@@ -128,7 +130,9 @@ def request(path: str, value: dict[str, Any]) -> tuple[int, dict[str, Any] | Non
         )
         response = connection.getresponse()
         raw = response.read()
-        return response.status, json.loads(raw) if response.status == 200 else None
+        content_type = response.getheader("content-type", "")
+        parsed = json.loads(raw) if content_type.startswith("application/json") else None
+        return response.status, parsed
     finally:
         connection.close()
 
@@ -560,7 +564,8 @@ def request_reservation_cost(
         strict_output_limit=state.strict_request_output_limit,
     )
     return gateway.token_cost_micro_cny(
-        len(bounded_body) + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
+        gateway.estimate_request_input_tokens(bounded_body)
+        + gateway.INPUT_RESERVATION_MARGIN_TOKENS,
         output_limit,
         state.pricing,
     )
@@ -583,6 +588,96 @@ def upstream_result(input_tokens: int, output_tokens: int) -> dict[str, Any]:
         "headers": [["content-type", "application/json"]],
         "body": base64.b64encode(response_body).decode(),
     }
+
+
+def assert_request_bytes_do_not_consume_token_quota(
+    gateway: Any,
+    route_config: dict[str, Any],
+) -> None:
+    state = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "request-byte-token-separation",
+        "b" * 64,
+    )
+    trial_id = "trial-request-byte-token-separation"
+    state.register(
+        {
+            "trialId": trial_id,
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    frame = proxy_frame({"padding": "x" * 120_000})
+    body = base64.b64decode(frame["body"], validate=True)
+    bounded_body, _ = gateway.bound_request(
+        body,
+        frame["path"],
+        frame["protocol"],
+        state.model,
+        strict_output_limit=state.strict_request_output_limit,
+    )
+    estimated_input_tokens = gateway.estimate_request_input_tokens(bounded_body)
+    required_reservation = (
+        estimated_input_tokens + gateway.INPUT_RESERVATION_MARGIN_TOKENS
+    )
+    remaining_input_tokens = required_reservation + 10_000
+    with state.lock:
+        state.trials[trial_id]["inputTokensRemaining"] = remaining_input_tokens
+
+    execute_calls = 0
+
+    class ControlledUpstream:
+        def execute(self, _payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal execute_calls
+            execute_calls += 1
+            return upstream_result(20_000, 1)
+
+        def cancel(self, _deadline: float | None = None) -> None:
+            pass
+
+    state.upstream_request_factory = ControlledUpstream
+    assert len(bounded_body) > remaining_input_tokens
+    assert state.proxy({"trialId": trial_id, **frame})["status"] == 200
+    assert execute_calls == 1
+    with state.lock:
+        assert state.trials[trial_id]["inputTokensRemaining"] == (
+            remaining_input_tokens - 20_000
+        )
+    receipt = state.revoke(trial_id)
+    assert receipt["withinBudget"] is True
+    assert receipt["requestEntries"][0]["reservation"]["inputTokens"] == (
+        required_reservation
+    )
+    assert receipt["actual"]["inputTokens"] == 20_000
+    assert receipt["auth"]["tag"] == hmac.new(
+        ("b" * 64).encode(),
+        b"pico-gateway-accounting-receipt-v1\0"
+        + gateway.canonical_accounting_receipt(receipt, include_auth=False),
+        "sha256",
+    ).hexdigest()
+
+    denied_trial_id = "trial-token-estimate-exhausted"
+    state.register(
+        {
+            "trialId": denied_trial_id,
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    with state.lock:
+        state.trials[denied_trial_id]["inputTokensRemaining"] = (
+            required_reservation - 1
+        )
+    try:
+        state.proxy({"trialId": denied_trial_id, **frame})
+    except gateway.GatewayQuotaError as error:
+        assert error.code == "trial_input_quota_exhausted"
+    else:
+        raise AssertionError("token estimate above the remaining quota reached upstream")
+    assert execute_calls == 1
 
 
 def assert_run_budget_contract(
@@ -1003,6 +1098,7 @@ def main() -> None:
         assert_spawn_revoke_race(gateway, route_config)
         assert_stubborn_worker_revoke_fails_closed(gateway, route_config)
         assert_exact_reconciliation(gateway, route_config)
+        assert_request_bytes_do_not_consume_token_quota(gateway, route_config)
         assert_run_budget_contract(gateway, route_config)
         assert_benchmark_output_capability_contract(gateway, route_config)
         assert_atomic_run_budget_and_refund(gateway, route_config)
@@ -1180,11 +1276,52 @@ def main() -> None:
                 {"action": "register", "protocol": "openai", "ttlSec": 60},
             ),
         )[0] == 200
+        large_status, large_error = request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-large",
+                proxy_frame(
+                    {"padding": "x" * (gateway.MAX_REQUEST_BODY_BYTES + 100_000)}
+                ),
+            ),
+        )
+        assert large_status == 502
+        assert large_error == {"error": {"code": "request_body_too_large"}}
+        assert ProviderHandler.calls == 2
+
         assert request(
             str(socket_path),
-            sign(seed, run_id, "trial-large", proxy_frame({"padding": "x" * 1_100_000})),
-        )[0] == 502
-        assert ProviderHandler.calls == 2
+            sign(
+                seed,
+                run_id,
+                "trial-near-input-quota",
+                {"action": "register", "protocol": "openai", "ttlSec": 60},
+            ),
+        )[0] == 200
+        assert request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-near-input-quota",
+                proxy_frame({"usage_case": "near-quota"}),
+            ),
+        )[0] == 200
+        calls_before_input_quota = ProviderHandler.calls
+        quota_status, quota_error = request(
+            str(socket_path),
+            sign(
+                seed,
+                run_id,
+                "trial-near-input-quota",
+                proxy_frame({"padding": "x" * 120_000}),
+            ),
+        )
+        assert quota_status == 502
+        assert quota_error == {"error": {"code": "trial_input_quota_exhausted"}}
+        assert ProviderHandler.calls == calls_before_input_quota
 
         assert request(
             str(socket_path),
