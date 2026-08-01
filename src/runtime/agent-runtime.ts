@@ -60,11 +60,12 @@ import { Tracer } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import {
   globalApprovalManager,
+  classifyHardlineCommand,
   isAgentOpsDangerousCommand,
   isDangerousCommand,
-  isHardlineCommand,
   type ApprovalManager,
   type ApprovalNotifier,
+  type HardlineReasonKind,
 } from "../approval/manager.js";
 import {
   applySessionPermissionScope,
@@ -181,6 +182,23 @@ export * from "./agent-recoverable-task-adapter.js";
 
 export type RunAgentEnv = Record<string, string | undefined>;
 export type RunAgentProviderFactory = RuntimeProviderFactory;
+export const MIN_HOST_AGENT_MAX_TURNS = 1;
+export const MAX_HOST_AGENT_MAX_TURNS = 200;
+
+export function resolveHostAgentMaxTurns(value?: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < MIN_HOST_AGENT_MAX_TURNS ||
+    value > MAX_HOST_AGENT_MAX_TURNS
+  ) {
+    throw new Error(
+      `maxTurns 必须是 ${MIN_HOST_AGENT_MAX_TURNS}..${MAX_HOST_AGENT_MAX_TURNS} 范围内的整数`,
+    );
+  }
+  return value;
+}
 
 /**
  * Host-provided effects. The runtime never renders an Ink component or assumes a terminal.
@@ -196,15 +214,24 @@ export interface RuntimeHost {
   onPolicyDenied?: (event: RuntimePolicyDenial) => void;
 }
 
+export type RuntimePolicyDenialReasonKind =
+  | "plan_mode"
+  | HardlineReasonKind
+  | "hook_denied"
+  | "approval_denied";
+
 export interface RuntimePolicyDenial {
   readonly source: "safety" | "permission";
   readonly code: "plan_mode" | "hardline" | "hook" | "approval";
+  readonly reasonKind: RuntimePolicyDenialReasonKind;
   readonly toolName: string;
 }
 
 export interface RunAgentCliDependencies extends RuntimeHost {
   env?: RunAgentEnv;
-  /** Trusted host override for foreground Bash calls; validated to 1..300 seconds. */
+  /** Trusted host-owned main-loop budget; omitted callers retain AgentEngine's 50-turn default. */
+  maxTurns?: number;
+  /** Trusted host override for foreground Bash calls; validated to 1..900 seconds. */
   bashTimeoutMs?: number;
   /**
    * Trusted host-owned exact values removed from every ToolResult before transcript/persistence.
@@ -285,6 +312,7 @@ export async function executeAgentRuntime(
 ): Promise<RunAgentCliResult> {
   // 阶段 1：解析宿主请求与静态配置。
   dependencies.signal?.throwIfAborted();
+  const maxTurns = resolveHostAgentMaxTurns(dependencies.maxTurns);
   const picoHome = resolvePicoHome({
     picoHome: dependencies.picoHome,
     env: dependencies.env ?? process.env,
@@ -945,6 +973,7 @@ export async function executeAgentRuntime(
         : {}),
       ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
       planMode: effectiveOptions.planMode ?? false,
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
       promptLayersFactory,
       goalManager,
       todoStore,
@@ -1711,14 +1740,25 @@ export function buildForegroundSafetyMiddleware(
     const mode = settings?.mode ?? "default";
     const planModeDenial = await planModeDenialReason(call, mode, workDir, workspaceRoots);
     if (planModeDenial !== undefined) {
-      denialSink?.({ source: "safety", code: "plan_mode", toolName: call.name });
+      denialSink?.({
+        source: "safety",
+        code: "plan_mode",
+        reasonKind: "plan_mode",
+        toolName: call.name,
+      });
       return {
         allowed: false,
         reason: planModeDenial,
       };
     }
-    if (isHardlineCommand(call.name, call.arguments, workDir)) {
-      denialSink?.({ source: "safety", code: "hardline", toolName: call.name });
+    const hardlineReasonKind = classifyHardlineCommand(call.name, call.arguments, workDir);
+    if (hardlineReasonKind !== undefined) {
+      denialSink?.({
+        source: "safety",
+        code: "hardline",
+        reasonKind: hardlineReasonKind,
+        toolName: call.name,
+      });
       return {
         allowed: false,
         reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
@@ -1809,7 +1849,12 @@ export function buildPermissionMiddleware(
         { signal },
       );
       if (hookDecision.decision === "deny") {
-        denialSink?.({ source: "permission", code: "hook", toolName: call.name });
+        denialSink?.({
+          source: "permission",
+          code: "hook",
+          reasonKind: "hook_denied",
+          toolName: call.name,
+        });
         return {
           allowed: false,
           reason: hookDecision.reason ?? "PermissionRequest hook 拒绝了该工具调用。",
@@ -1862,7 +1907,12 @@ export function buildPermissionMiddleware(
       await runtimeRun!.recordApprovalSettled(approvalId, result.allowed ? "approved" : "rejected");
     }
     if (!result.allowed) {
-      denialSink?.({ source: "permission", code: "approval", toolName: call.name });
+      denialSink?.({
+        source: "permission",
+        code: "approval",
+        reasonKind: "approval_denied",
+        toolName: call.name,
+      });
     }
     if (!result.allowed || !workspaceRoots || !settings) {
       return result.allowed ? result : { ...result, denialSource: "human" };

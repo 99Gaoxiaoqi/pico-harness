@@ -14,6 +14,7 @@ import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/use
 import {
   runHeadlessOneShotJson,
   terminalBenchAgentControlledProxyCapability,
+  type HeadlessOneShotPolicyDenialSummary,
   type HeadlessOneShotRequestV1,
 } from "../../src/internal/headless-one-shot-runner.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
@@ -24,10 +25,32 @@ import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
 const ROUTE_ID = `${PROVIDER_ID}/${MODEL_ID}`;
-type RunAgentCliDependenciesWithBashTimeout = { readonly bashTimeoutMs?: number };
+type RunAgentCliDependenciesWithRuntimeBudget = {
+  readonly bashTimeoutMs?: number;
+  readonly maxTurns?: number;
+};
 type RunAgentCliDependenciesWithEnv = {
   readonly env?: Readonly<Record<string, string | undefined>>;
 };
+
+function policyReasonCounts(
+  overrides: Partial<HeadlessOneShotPolicyDenialSummary["byReasonKind"]> = {},
+): HeadlessOneShotPolicyDenialSummary["byReasonKind"] {
+  return {
+    plan_mode: 0,
+    source_or_dot: 0,
+    opaque_shell: 0,
+    dynamic_executable: 0,
+    protected_destination: 0,
+    protected_redirect: 0,
+    destructive_git: 0,
+    destructive_system: 0,
+    hook_denied: 0,
+    approval_denied: 0,
+    unknown_hardline: 0,
+    ...overrides,
+  };
+}
 
 test("internal headless runner succeeds through the shared Runtime and redacts route credentials", async (context) => {
   const fixture = await createFixture(context, "success");
@@ -322,7 +345,7 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
 
   for (const [id, bashTimeoutMs, timeoutMs, errorCode] of [
     ["bash-timeout-low", 999, 30_000, "INVALID_FIELD"],
-    ["bash-timeout-high", 300_001, 400_000, "INVALID_FIELD"],
+    ["bash-timeout-high", 900_001, 1_000_000, "INVALID_FIELD"],
     ["bash-timeout-overall", 1_001, 1_000, "INVALID_BASH_TIMEOUT"],
   ] as const) {
     const invalidBashTimeout = await runHeadlessOneShotJson(
@@ -335,33 +358,50 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
     );
     assert.equal(invalidBashTimeout.result.error?.code, errorCode);
   }
+  for (const [id, maxTurns] of [
+    ["max-turns-low", 0],
+    ["max-turns-high", 201],
+    ["max-turns-fraction", 1.5],
+  ] as const) {
+    const invalidMaxTurns = await runHeadlessOneShotJson(
+      JSON.stringify({ ...requestFor(fixture, id), maxTurns }),
+      dependencies,
+    );
+    assert.equal(invalidMaxTurns.result.error?.code, "INVALID_FIELD");
+  }
   assert.equal(providerCalls, 0);
 });
 
-test("headless accepts existing task tools and forwards a bounded bash timeout", async (context) => {
+test("headless forwards bounded maxTurns and Bash timeout host budgets", async (context) => {
   const fixture = await createFixture(context, "task-tools");
   await configureFixture(fixture, "secret-canary-task-tools");
-  const outcome = await runHeadlessOneShotJson(
-    JSON.stringify({
-      ...requestFor(fixture, "task-tools"),
-      allowedTools: ["task_list", "task_output", "task_stop"],
-      bashTimeoutMs: 30_000,
-    }),
-    {
-      env: {},
-      executeRuntime: async (options, dependencies) => {
-        assert.deepEqual(options.allowedTools, ["task_list", "task_output", "task_stop"]);
-        assert.equal(
-          (dependencies as RunAgentCliDependenciesWithBashTimeout | undefined)?.bashTimeoutMs,
-          30_000,
-        );
-        return runtimeResult(options, "task tools accepted");
+  for (const [id, maxTurns] of [
+    ["task-tools-min", 1],
+    ["task-tools-max", 200],
+  ] as const) {
+    const outcome = await runHeadlessOneShotJson(
+      JSON.stringify({
+        ...requestFor(fixture, id),
+        allowedTools: ["task_list", "task_output", "task_stop"],
+        maxTurns,
+        bashTimeoutMs: 900_000,
+        timeoutMs: 900_000,
+      }),
+      {
+        env: {},
+        executeRuntime: async (options, dependencies) => {
+          assert.deepEqual(options.allowedTools, ["task_list", "task_output", "task_stop"]);
+          const budget = dependencies as RunAgentCliDependenciesWithRuntimeBudget | undefined;
+          assert.equal(budget?.maxTurns, maxTurns);
+          assert.equal(budget?.bashTimeoutMs, 900_000);
+          return runtimeResult(options, "task tools accepted");
+        },
       },
-    },
-  );
+    );
 
-  assert.equal(outcome.exitCode, 0);
-  assert.equal(outcome.result.status, "completed");
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.result.status, "completed");
+  }
 });
 
 test("headless forwards only a complete adapter-gated controlled proxy environment", async (context) => {
@@ -698,6 +738,7 @@ test("headless policy denial defaults to the compatible terminal outcome", async
         dependencies?.onPolicyDenied?.({
           source: "safety",
           code: "plan_mode",
+          reasonKind: "plan_mode",
           toolName: "write_file",
         });
         return runtimeResult(options, "must remain hidden", {
@@ -721,8 +762,19 @@ test("headless policy denial defaults to the compatible terminal outcome", async
       hook: 0,
       approval: 0,
     },
-    first: { source: "safety", code: "plan_mode", toolName: "write_file" },
-    last: { source: "safety", code: "plan_mode", toolName: "write_file" },
+    byReasonKind: policyReasonCounts({ plan_mode: 1 }),
+    first: {
+      source: "safety",
+      code: "plan_mode",
+      reasonKind: "plan_mode",
+      toolName: "write_file",
+    },
+    last: {
+      source: "safety",
+      code: "plan_mode",
+      reasonKind: "plan_mode",
+      toolName: "write_file",
+    },
   });
 });
 
@@ -773,8 +825,19 @@ test("incident-mode policy denial remains recoverable after normal completion", 
       hook: 0,
       approval: 0,
     },
-    first: { source: "safety", code: "plan_mode", toolName: "write_file" },
-    last: { source: "safety", code: "plan_mode", toolName: "write_file" },
+    byReasonKind: policyReasonCounts({ plan_mode: 1 }),
+    first: {
+      source: "safety",
+      code: "plan_mode",
+      reasonKind: "plan_mode",
+      toolName: "write_file",
+    },
+    last: {
+      source: "safety",
+      code: "plan_mode",
+      reasonKind: "plan_mode",
+      toolName: "write_file",
+    },
   });
   assert.deepEqual(outcome.result.usage, {
     promptTokens: 12,
@@ -782,6 +845,66 @@ test("incident-mode policy denial remains recoverable after normal completion", 
     costCNY: 0,
   });
   assert.equal(calls, 2);
+});
+
+test("headless hardline summary emits only a fixed reasonKind and no command parameters", async (context) => {
+  const fixture = await createFixture(context, "policy-reason-kind");
+  await configureFixture(fixture, "secret-canary-policy-reason-kind");
+  const commandCanary = "COMMAND_ARGUMENT_MUST_NOT_APPEAR";
+  let calls = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "policy-reason-kind"),
+      allowedTools: ["bash"],
+      permissionMode: "yolo",
+      policyDenialMode: "incident",
+    }),
+    {
+      env: {},
+      providerFactory: () => ({
+        async generate() {
+          calls++;
+          return calls === 1
+            ? assistant("", undefined, [
+                {
+                  id: "hardline-1",
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: `printf blocked > /etc/${commandCanary}`,
+                  }),
+                },
+              ])
+            : assistant("recovered after denial");
+        },
+      }),
+    },
+  );
+
+  assert.equal(outcome.result.status, "completed");
+  assert.deepEqual(outcome.result.policyDenials, {
+    total: 1,
+    byCode: {
+      plan_mode: 0,
+      hardline: 1,
+      hook: 0,
+      approval: 0,
+    },
+    byReasonKind: policyReasonCounts({ protected_redirect: 1 }),
+    first: {
+      source: "safety",
+      code: "hardline",
+      reasonKind: "protected_redirect",
+      toolName: "bash",
+    },
+    last: {
+      source: "safety",
+      code: "hardline",
+      reasonKind: "protected_redirect",
+      toolName: "bash",
+    },
+  });
+  assert.equal(JSON.stringify(outcome.result.policyDenials).includes(commandCanary), false);
+  assert.equal(JSON.stringify(outcome.result.policyDenials).includes("printf blocked"), false);
 });
 
 test("policy denial incidents preserve Runtime failure and timeout terminal states", async (context) => {
@@ -796,16 +919,19 @@ test("policy denial incidents preserve Runtime failure and timeout terminal stat
         dependencies?.onPolicyDenied?.({
           source: "safety",
           code: "plan_mode",
+          reasonKind: "plan_mode",
           toolName: "write_file",
         });
         dependencies?.onPolicyDenied?.({
           source: "safety",
           code: "hardline",
+          reasonKind: "destructive_system",
           toolName: "bash",
         });
         dependencies?.onPolicyDenied?.({
           source: "permission",
           code: "hook",
+          reasonKind: "hook_denied",
           toolName: "edit_file",
         });
         throw new Error(sensitiveError);
@@ -824,8 +950,23 @@ test("policy denial incidents preserve Runtime failure and timeout terminal stat
       hook: 1,
       approval: 0,
     },
-    first: { source: "safety", code: "plan_mode", toolName: "write_file" },
-    last: { source: "permission", code: "hook", toolName: "edit_file" },
+    byReasonKind: policyReasonCounts({
+      plan_mode: 1,
+      destructive_system: 1,
+      hook_denied: 1,
+    }),
+    first: {
+      source: "safety",
+      code: "plan_mode",
+      reasonKind: "plan_mode",
+      toolName: "write_file",
+    },
+    last: {
+      source: "permission",
+      code: "hook",
+      reasonKind: "hook_denied",
+      toolName: "edit_file",
+    },
   });
   assert.equal(JSON.stringify(failed.result).includes(sensitiveError), false);
 
@@ -842,6 +983,7 @@ test("policy denial incidents preserve Runtime failure and timeout terminal stat
         dependencies?.onPolicyDenied?.({
           source: "permission",
           code: "approval",
+          reasonKind: "approval_denied",
           toolName: "bash",
         });
         await rejectOnAbort({ signal: dependencies?.signal });
@@ -861,8 +1003,19 @@ test("policy denial incidents preserve Runtime failure and timeout terminal stat
       hook: 0,
       approval: 1,
     },
-    first: { source: "permission", code: "approval", toolName: "bash" },
-    last: { source: "permission", code: "approval", toolName: "bash" },
+    byReasonKind: policyReasonCounts({ approval_denied: 1 }),
+    first: {
+      source: "permission",
+      code: "approval",
+      reasonKind: "approval_denied",
+      toolName: "bash",
+    },
+    last: {
+      source: "permission",
+      code: "approval",
+      reasonKind: "approval_denied",
+      toolName: "bash",
+    },
   });
 });
 
