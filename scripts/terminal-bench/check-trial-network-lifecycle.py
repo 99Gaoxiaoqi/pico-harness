@@ -688,20 +688,48 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
 
 
 async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
+    for executable, script in (
+        ("/installed-agent/pico-node/bin/node", "/app/server.cjs"),
+        ("/usr/bin/python3", "/app/server.py"),
+        ("/usr/local/bin/python3", "/app/server.py"),
+        ("/usr/bin/node", "/app/server.cjs"),
+    ):
+        parsed = adapter.parse_verifier_service_manifest(
+            {
+                "schemaVersion": 1,
+                "argv": [executable, script],
+                "cwd": "/app",
+                "port": 8080,
+            },
+            workspace="/app",
+        )
+        assert parsed.argv == (executable, script)
+
     valid = {
         "schemaVersion": 1,
-        "argv": ["/usr/bin/python3", "/app/server.py"],
+        "argv": ["/installed-agent/pico-node/bin/node", "/app/server.cjs"],
         "cwd": "/app",
         "port": 8080,
     }
-    parsed = adapter.parse_verifier_service_manifest(valid, workspace="/app")
-    assert parsed.argv == ("/usr/bin/python3", "/app/server.py")
     for invalid in (
         {**valid, "extra": True},
         {**valid, "cwd": "/tests"},
-        {**valid, "argv": ["/bin/sh", "/app/server.py"]},
-        {**valid, "argv": ["/usr/bin/python3", "/app/sub/../server.py"]},
-        {**valid, "argv": ["/usr/bin/python3", "/app/sub/server.py"]},
+        {**valid, "argv": ["/bin/sh", "/app/server.cjs"]},
+        {
+            **valid,
+            "argv": [
+                "/installed-agent/pico-node/bin/node",
+                "/app/sub/../server.cjs",
+            ],
+        },
+        {
+            **valid,
+            "argv": ["/installed-agent/pico-node/bin/node", "/app/sub/server.cjs"],
+        },
+        {
+            **valid,
+            "argv": ["/installed-agent/pico-node/bin/node", "/app/server.py"],
+        },
         {**valid, "argv": ["/usr/bin/node", "-e", "server"]},
         {**valid, "port": 8081},
     ):
@@ -843,7 +871,7 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
         )
         manifest = {
             "schemaVersion": 1,
-            "argv": ["/usr/bin/node", str(script)],
+            "argv": ["/installed-agent/pico-node/bin/node", str(script)],
             "cwd": str(workspace),
             "port": 8080,
         }
