@@ -7,7 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { test } from "node:test";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
+import {
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  providerRequestSignal,
+  type LLMProvider,
+  type LLMProviderRequestOptions,
+} from "../../src/provider/interface.js";
+import { ClaudeProvider } from "../../src/provider/claude.js";
+import { OpenAIProvider } from "../../src/provider/openai.js";
 import type { Message } from "../../src/schema/message.js";
 import { createToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
 import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
@@ -93,17 +100,21 @@ test("headless single_non_stream mode uses one non-streaming provider attempt", 
   await configureFixture(fixture, "secret-canary-single-non-stream");
   let generateCalls = 0;
   let streamCalls = 0;
+  const providerTimeouts: Array<number | undefined> = [];
   const outcome = await runHeadlessOneShotJson(
     JSON.stringify({
       ...requestFor(fixture, "single-non-stream"),
       providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 330_000,
+      timeoutMs: 400_000,
     }),
     {
       env: {},
       providerFactory: () => ({
-        async generate() {
+        async generate(_messages, _tools, options) {
           generateCalls++;
-          throw new TypeError("synthetic retryable network failure");
+          providerTimeouts.push(options?.timeoutMs);
+          throw new DOMException("synthetic provider timeout", "TimeoutError");
         },
         async generateStream() {
           streamCalls++;
@@ -114,8 +125,65 @@ test("headless single_non_stream mode uses one non-streaming provider attempt", 
   );
 
   assert.equal(outcome.result.status, "failed");
+  assert.equal(DEFAULT_PROVIDER_TIMEOUT_MS, 120_000);
   assert.equal(generateCalls, 1);
   assert.equal(streamCalls, 0);
+  assert.deepEqual(providerTimeouts, [330_000]);
+});
+
+test("provider request signal keeps the production default and accepts a trusted override", (context) => {
+  const observedTimeouts: number[] = [];
+  context.mock.method(AbortSignal, "timeout", (timeoutMs: number) => {
+    observedTimeouts.push(timeoutMs);
+    return new AbortController().signal;
+  });
+
+  providerRequestSignal();
+  const host = new AbortController();
+  const combined = providerRequestSignal(host.signal, 330_000);
+  const reason = new DOMException("host canceled", "AbortError");
+  host.abort(reason);
+
+  assert.equal(DEFAULT_PROVIDER_TIMEOUT_MS, 120_000);
+  assert.deepEqual(observedTimeouts, [120_000, 330_000]);
+  assert.equal(combined.aborted, true);
+  assert.equal(combined.reason, reason);
+  assert.throws(() => providerRequestSignal(undefined, 0), /positive integer/u);
+});
+
+test("OpenAI and Claude transports forward the trusted provider timeout", async (context) => {
+  const observedTimeouts: number[] = [];
+  context.mock.method(AbortSignal, "timeout", (timeoutMs: number) => {
+    observedTimeouts.push(timeoutMs);
+    return new AbortController().signal;
+  });
+  context.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith("/chat/completions")) {
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "openai ok" } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    }
+    if (url.endsWith("/messages")) {
+      return Response.json({
+        content: [{ type: "text", text: "claude ok" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    }
+    throw new Error(`unexpected provider URL: ${url}`);
+  });
+
+  const config = {
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "provider-timeout-test-secret",
+    model: "fixture-model",
+  };
+  const messages: Message[] = [{ role: "user", content: "timeout contract" }];
+  await new OpenAIProvider(config).generate(messages, [], { timeoutMs: 330_000 });
+  await new ClaudeProvider(config).generate(messages, [], { timeoutMs: 330_000 });
+
+  assert.deepEqual(observedTimeouts, [330_000, 330_000]);
 });
 
 test("headless traces retain metadata but remove tool arguments and workspace output", async (context) => {
@@ -342,6 +410,43 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
     dependencies,
   );
   assert.equal(invalidPolicyDenialMode.result.error?.code, "INVALID_POLICY_DENIAL_MODE");
+
+  const providerTimeoutWithoutSingleMode = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "provider-timeout-without-single-mode"),
+      providerTimeoutMs: 330_000,
+    }),
+    dependencies,
+  );
+  assert.equal(providerTimeoutWithoutSingleMode.result.error?.code, "INVALID_PROVIDER_TIMEOUT");
+  const invalidProviderTimeout = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "invalid-provider-timeout"),
+      providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 0,
+    }),
+    dependencies,
+  );
+  assert.equal(invalidProviderTimeout.result.error?.code, "INVALID_FIELD");
+  const providerTimeoutAboveCeiling = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "provider-timeout-above-ceiling"),
+      providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 330_001,
+      timeoutMs: 400_000,
+    }),
+    dependencies,
+  );
+  assert.equal(providerTimeoutAboveCeiling.result.error?.code, "INVALID_FIELD");
+  const providerTimeoutAboveRun = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "provider-timeout-above-run"),
+      providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 330_000,
+    }),
+    dependencies,
+  );
+  assert.equal(providerTimeoutAboveRun.result.error?.code, "INVALID_PROVIDER_TIMEOUT");
 
   for (const [id, bashTimeoutMs, timeoutMs, errorCode] of [
     ["bash-timeout-low", 999, 30_000, "INVALID_FIELD"],

@@ -281,6 +281,109 @@ def assert_usage_parsers(gateway: Any) -> None:
     ) == 1
 
 
+def assert_upstream_timeout_contract(
+    gateway: Any, route_config: dict[str, Any]
+) -> None:
+    assert gateway.UPSTREAM_TIMEOUT_SEC == 300
+    assert gateway.UPSTREAM_TIMEOUT_SEC > 120
+    assert gateway.UPSTREAM_WORKER_TIMEOUT_SEC == 310
+    assert gateway.UPSTREAM_WORKER_TIMEOUT_SEC > gateway.UPSTREAM_TIMEOUT_SEC
+    observed: dict[str, Any] = {}
+
+    class ImmediateProcess:
+        returncode = 0
+
+        def communicate(
+            self, *, input: bytes, timeout: float
+        ) -> tuple[bytes, bytes]:
+            observed["input"] = input
+            observed["timeout"] = timeout
+            return (
+                gateway.canonical_json(
+                    {"status": 200, "headers": [], "body": ""}
+                ),
+                b"",
+            )
+
+        def poll(self) -> int:
+            return 0
+
+    original_popen = gateway.subprocess.Popen
+    gateway.subprocess.Popen = lambda *_args, **_kwargs: ImmediateProcess()
+    try:
+        result = gateway.UpstreamRequest().execute({"probe": True})
+    finally:
+        gateway.subprocess.Popen = original_popen
+    assert result == {"status": 200, "headers": [], "body": ""}
+    assert json.loads(observed["input"]) == {"probe": True}
+    assert observed["timeout"] == 310
+
+    timed_out_processes: list[Any] = []
+
+    class TimedOutProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stopped = False
+            timed_out_processes.append(self)
+
+        def communicate(
+            self, *, input: bytes, timeout: float
+        ) -> tuple[bytes, bytes]:
+            del input
+            assert timeout == 310
+            raise subprocess.TimeoutExpired("synthetic-upstream", timeout)
+
+        def poll(self) -> int | None:
+            return 0 if self.stopped else None
+
+        def terminate(self) -> None:
+            self.stopped = True
+
+        def kill(self) -> None:
+            self.stopped = True
+
+        def wait(self, timeout: float) -> int:
+            del timeout
+            return 0
+
+    state = gateway.GatewayState(
+        route_config,
+        "provider-secret-canary",
+        "upstream-timeout-contract",
+        "e" * 64,
+    )
+    trial_id = "trial-upstream-timeout"
+    state.register(
+        {
+            "trialId": trial_id,
+            "action": "register",
+            "protocol": "openai",
+            "ttlSec": 60,
+        }
+    )
+    gateway.subprocess.Popen = lambda *_args, **_kwargs: TimedOutProcess()
+    try:
+        try:
+            state.proxy({"trialId": trial_id, **proxy_frame({})})
+        except ValueError as error:
+            assert str(error) == "gateway upstream request timed out"
+        else:
+            raise AssertionError("timed out upstream request unexpectedly succeeded")
+    finally:
+        gateway.subprocess.Popen = original_popen
+    assert len(timed_out_processes) == 1
+    assert timed_out_processes[0].stopped is True
+    receipt = state.revoke(trial_id)
+    assert receipt["status"] == "unreconciled"
+    assert receipt["withinBudget"] is False
+    assert receipt["requests"] == {
+        "attempted": 1,
+        "reconciled": 0,
+        "unreconciled": 1,
+    }
+
+
 def assert_removed_provider_protocol_is_rejected(
     gateway: Any, route_config: dict[str, Any]
 ) -> None:
@@ -1108,6 +1211,7 @@ def main() -> None:
             raise AssertionError("unable to load gateway supervisor")
         gateway = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(gateway)
+        assert_upstream_timeout_contract(gateway, route_config)
         assert_usage_parsers(gateway)
         assert_removed_provider_protocol_is_rejected(gateway, route_config)
         assert_spawn_cancel_race(gateway)

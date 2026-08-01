@@ -4,11 +4,13 @@
 
 import type { Message, ToolDefinition } from "../schema/message.js";
 
-const PROVIDER_TIMEOUT_MS = 120_000;
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 
 export interface LLMProviderRequestOptions {
   /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
   signal?: AbortSignal;
+  /** 仅供已校验的宿主覆盖单次 Provider 硬超时；普通调用保持 120 秒默认值。 */
+  timeoutMs?: number;
   /**
    * 禁止本次响应调用工具。支持该语义的 Provider 可保留工具 Schema，
    * 不支持的 Provider 必须由调用方通过 requestCapabilities 能力门控后传空工具集。
@@ -53,9 +55,15 @@ export interface LLMProviderRequestCapabilities {
   readonly preparePromptCacheSharding?: () => boolean;
 }
 
-/** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */
-export function providerRequestSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
+/** 合并宿主中止与 Provider 硬超时，任一触发即取消请求。 */
+export function providerRequestSignal(
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_PROVIDER_TIMEOUT_MS,
+): AbortSignal {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("Provider request timeout must be a positive integer");
+  }
+  const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 

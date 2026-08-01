@@ -25,10 +25,16 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
     from benchmarks.terminal_bench_2_1.runtime_limits import (
+        GATEWAY_UPSTREAM_HTTP_TIMEOUT_SEC,
+        GATEWAY_UPSTREAM_WORKER_TIMEOUT_SEC,
         MAX_TASK_AGENT_TIMEOUT_SEC,
     )
 except ModuleNotFoundError:
-    from runtime_limits import MAX_TASK_AGENT_TIMEOUT_SEC
+    from runtime_limits import (
+        GATEWAY_UPSTREAM_HTTP_TIMEOUT_SEC,
+        GATEWAY_UPSTREAM_WORKER_TIMEOUT_SEC,
+        MAX_TASK_AGENT_TIMEOUT_SEC,
+    )
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
@@ -44,7 +50,8 @@ MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
 INPUT_ESTIMATION_ASCII_CHARS_PER_TOKEN = 4
 INPUT_RESERVATION_MARGIN_TOKENS = 1_024
-UPSTREAM_TIMEOUT_SEC = 120
+UPSTREAM_TIMEOUT_SEC = GATEWAY_UPSTREAM_HTTP_TIMEOUT_SEC
+UPSTREAM_WORKER_TIMEOUT_SEC = GATEWAY_UPSTREAM_WORKER_TIMEOUT_SEC
 REVOKE_DEADLINE_SEC = 0.75
 _PINNED_BENCHMARK_OUTPUT_CAPABILITIES = {
     "codex-oauth/gpt-5.4": ("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
@@ -98,7 +105,7 @@ class UpstreamRequest:
         try:
             try:
                 stdout, _ = process.communicate(
-                    input=canonical_json(payload), timeout=UPSTREAM_TIMEOUT_SEC
+                    input=canonical_json(payload), timeout=UPSTREAM_WORKER_TIMEOUT_SEC
                 )
             except subprocess.TimeoutExpired as error:
                 self.cancel()
