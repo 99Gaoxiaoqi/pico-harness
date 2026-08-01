@@ -10,7 +10,7 @@ const PROVIDER_CREDENTIAL_REF_PREFIX = "pico-keychain://provider/";
 const PROVIDER_CREDENTIAL_REF_VERSION = "v2";
 const DEFAULT_PROVIDER_CREDENTIAL_SLOT = "api-key";
 const KEYCHAIN_SERVICE = "dev.pico.runtime.provider";
-const PROVIDER_KINDS = ["openai", "claude", "gemini"] as const satisfies readonly ProviderKind[];
+const PROVIDER_KINDS = ["openai", "claude"] as const satisfies readonly ProviderKind[];
 
 declare const credentialRefBrand: unique symbol;
 

@@ -52,7 +52,7 @@ Desktop 与 Mobile Gateway 进入 daemon 后都使用版本化本机 IPC 协议�
 | `src/runtime/`                                                     | 共用装配入口、运行策略、Agent 事件事实/投影与子代理编排     |
 | `src/engine/`                                                      | ReAct 主循环、Session、ToolScheduler、Reporter、Reminder    |
 | `src/context/`                                                     | Prompt、Skills、Compaction、Goal/Todo、恢复提示与上下文预算 |
-| `src/provider/`                                                    | OpenAI、Claude、Gemini 协议适配，模型路由、能力与凭证解析   |
+| `src/provider/`                                                    | OpenAI、Claude 协议适配，模型路由、能力与凭证解析           |
 | `src/tools/`                                                       | Registry、文件/Bash/网络工具、资源访问声明与子代理工具      |
 | `src/safety/`、`src/security/`、`src/approval/`                    | hardline、路径与文件安全、权限判定、人工审批                |
 | `src/hooks/`、`src/mcp/`、`src/plugins/`、`src/code-intelligence/` | Hooks、MCP、受信 Plugin 快照、LSP/Repo Map                  |
@@ -77,7 +77,7 @@ Desktop 与 Mobile Gateway 进入 daemon 后都使用版本化本机 IPC 协议�
 
 ## 核心能力
 
-- **三类 Provider 协议**：OpenAI（含兼容端点）、Claude、Gemini，共用 Message Schema 与模型能力描述。
+- **两类 Provider 协议**：OpenAI（含兼容端点）与 Anthropic Claude，共用 Message Schema 与模型能力描述。
 - **资源感知工具调度**：Engine 的 `ToolScheduler` 按 Registry 暴露的 `ToolAccesses` 判断并发；冲突路径自动串行，不相关资源可并行。
 - **可恢复会话**：Session 隔离运行态；`/rewind` 可恢复代码、对话或两者，旧事件仍保留在追加式账本中。
 - **渐进式上下文**：Skills 只先披露元数据，按需加载正文；Compaction、ErrorRecovery 与 SystemReminders 控制预算和重复失败。

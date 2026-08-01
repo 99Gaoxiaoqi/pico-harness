@@ -78,7 +78,7 @@ export interface ModelRouteView {
 }
 
 export type ProviderOrigin = "user" | "project-legacy" | "environment";
-export type ProviderProtocol = "openai" | "claude" | "gemini";
+export type ProviderProtocol = "openai" | "claude";
 export type ProviderCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
 export type ProviderCredentialSource = "config" | "keychain" | "environment" | "none";
 

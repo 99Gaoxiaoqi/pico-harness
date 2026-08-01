@@ -371,7 +371,7 @@ function validateAccountingReceipt({
     value.trialId !== trialResult.id ||
     typeof value.modelRouteId !== "string" ||
     value.modelRouteId.length === 0 ||
-    !["openai", "claude", "gemini"].includes(value.protocol) ||
+    !["openai", "claude"].includes(value.protocol) ||
     value.rounding !== "ceil-per-request" ||
     !["reconciled", "unreconciled"].includes(value.status) ||
     typeof value.withinBudget !== "boolean"

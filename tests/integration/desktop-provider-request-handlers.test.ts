@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRuntimeRequest, type RuntimeRequest } from "../../src/daemon/protocol.js";
+import {
+  createRuntimeRequest,
+  parseStrictRuntimeParams,
+  type RuntimeRequest,
+} from "../../src/daemon/protocol.js";
 import { createDesktopProviderRequestHandlers } from "../../src/daemon/desktop-provider-request-handlers.js";
 
 test("Desktop provider handlers keep protocol mapping and dependency locking in one boundary", async () => {
@@ -74,4 +78,22 @@ test("Desktop provider handlers keep protocol mapping and dependency locking in 
     { status: "missing" },
   );
   assert.deepEqual(calls, ["lock.start", "provider.upsert", "lock.end", "credential.status"]);
+});
+
+test("Desktop provider protocol rejects removed Gemini inputs before dispatch", () => {
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("provider.upsert", {
+        provider: {
+          id: "removed",
+          protocol: "gemini",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "REMOVED_PROVIDER_KEY",
+          models: ["removed-model"],
+          discoverModels: false,
+        },
+        expectedRevision: "revision",
+      } as never),
+    /protocol/u,
+  );
 });

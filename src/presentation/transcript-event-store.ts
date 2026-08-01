@@ -122,7 +122,7 @@ export interface TranscriptStreamProjection {
 export interface TranscriptToolCallProjection {
   /** EventStore 内部生成的全局唯一 ID，所有后续事件都用它关联。 */
   readonly id: string;
-  /** Provider 仅保证单次响应内可关联，跨轮可重复（如 Gemini）。 */
+  /** Provider 仅保证单次响应内可关联，跨轮可重复。 */
   readonly providerCallId: string;
   readonly entryId: string;
   readonly name: string;

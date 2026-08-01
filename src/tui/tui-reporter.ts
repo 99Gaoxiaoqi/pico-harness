@@ -84,7 +84,7 @@ export class TuiReporter implements Reporter {
   private currentTurnAssistantEntryId: string | null = null;
   /**
    * EventStore 内部 tool ID 的待完成索引。Provider call ID 仅作
-   * 当前 pending 队列的关联键，不作为事件全局 ID，因为 Gemini 会跨轮复用它。
+   * 当前 pending 队列的关联键，不作为事件全局 ID，因为 Provider 可能跨轮复用它。
    */
   private readonly pendingToolIdsByProviderCallId = new Map<string, string[]>();
   /** 小 chunk 先在有界 segment 内聚合，避免每次输出都生成事件和重放拷贝。 */

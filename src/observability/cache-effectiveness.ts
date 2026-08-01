@@ -457,12 +457,6 @@ function cacheMinimumTokens(
 ): number | undefined {
   const provider = record.provider.toLowerCase();
   const model = record.model.toLowerCase();
-  const geminiFamily = provider === "gemini" || model.includes("gemini-");
-  if (geminiFamily) {
-    if (/gemini-(?:3\.5-flash|3\.1-pro)/u.test(model)) return 4_096;
-    if (/gemini-2\.5/u.test(model)) return 2_048;
-    return undefined;
-  }
   const claudeFamily = provider === "claude" || model.includes("claude-");
   if (!claudeFamily) return provider === "openai" ? 1_024 : undefined;
   if (/claude-(?:opus-4[.-](?:5|6)|haiku-4[.-]5)/u.test(model)) return 4_096;

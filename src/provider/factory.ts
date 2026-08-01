@@ -3,7 +3,6 @@
 import type { ProviderConfig } from "./config.js";
 import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
-import { GeminiProvider } from "./gemini.js";
 import type { LLMProvider } from "./interface.js";
 import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capability.js";
 import { CapabilityPreflightProvider } from "./capability-preflight.js";
@@ -11,7 +10,7 @@ import { providerProfileForRoute } from "./model-capabilities.js";
 import { withProviderErrorRedaction } from "./error-redaction.js";
 import type { PromptCachePrewarmCoordinator } from "./prompt-cache-prewarm.js";
 
-export type ProviderKind = "openai" | "claude" | "gemini";
+export type ProviderKind = "openai" | "claude";
 
 /** Runtime-owned dependencies that are deliberately kept outside credential-bearing ProviderConfig. */
 export interface ProviderRuntimeDependencies {
@@ -60,9 +59,6 @@ export function createRawProvider(
       break;
     case "claude":
       provider = new ClaudeProvider(cfg, profile);
-      break;
-    case "gemini":
-      provider = new GeminiProvider(cfg, profile);
       break;
   }
   provider = withProviderErrorRedaction(provider, [cfg.apiKey]);

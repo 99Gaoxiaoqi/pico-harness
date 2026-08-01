@@ -167,6 +167,30 @@ test("headless bootstrap rejects plaintext provider credentials", async (context
   assert.equal(outcome.result.error?.code, "SECRET_FIELD_FORBIDDEN");
 });
 
+test("headless bootstrap rejects the removed Gemini protocol", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-headless-bootstrap-removed-protocol-"));
+  const workspacePath = join(root, "workspace");
+  await mkdir(workspacePath);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const outcome = await bootstrapHeadlessCaseJson(
+    JSON.stringify({
+      schemaVersion: 1,
+      picoHome: join(root, "pico-home"),
+      workspacePath,
+      route: {
+        id: "removed/model",
+        protocol: "gemini",
+        baseURL: "https://provider.invalid/v1",
+        apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
+      },
+    }),
+  );
+
+  assert.equal(outcome.exitCode, 2);
+  assert.equal(outcome.result.error?.code, "INVALID_PROTOCOL");
+});
+
 test("headless bootstrap requires exact unpolluted 8192-token pinned route outputs", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-headless-bootstrap-output-"));
   const workspacePath = join(root, "workspace");

@@ -134,7 +134,13 @@ class GatewayState:
         capability_seed: str,
     ):
         require_benchmark_route_contract(route_config)
-        self.provider = route_config["provider"]
+        provider = route_config.get("provider")
+        if (
+            not isinstance(provider, dict)
+            or provider.get("protocol") not in {"openai", "claude"}
+        ):
+            raise ValueError("gateway provider protocol is unsupported")
+        self.provider = provider
         self.model = route_config["modelRouteId"].split("/", 1)[1]
         self.pricing, self.pricing_sha256 = require_pricing(route_config, self.model)
         self.pricing_descriptor = dict(route_config["pricing"])
@@ -233,7 +239,7 @@ class GatewayState:
         if protocol != self.provider["protocol"]:
             raise ValueError("gateway route mismatch")
         body = base64.b64decode(request.get("body", ""), validate=True)
-        path = require_path(request.get("path"), protocol, self.model)
+        path = require_path(request.get("path"), protocol)
         bounded_body, output_limit = bound_request(
             body,
             path,
@@ -886,34 +892,6 @@ def parse_usage(response_body: bytes, protocol: str) -> tuple[int, int]:
         return input_tokens, require_usage_int(
             usage.get("output_tokens"), "output_tokens"
         )
-    if protocol == "gemini":
-        usage = value.get("usageMetadata")
-        if not isinstance(usage, dict):
-            raise ValueError("gateway response is missing usage")
-        input_tokens = require_usage_int(
-            usage.get("promptTokenCount"), "promptTokenCount"
-        )
-        candidates = require_usage_int(
-            usage.get("candidatesTokenCount"), "candidatesTokenCount"
-        )
-        tool_use = (
-            require_usage_int(
-                usage["toolUsePromptTokenCount"], "toolUsePromptTokenCount"
-            )
-            if "toolUsePromptTokenCount" in usage
-            else 0
-        )
-        thoughts = (
-            require_usage_int(usage["thoughtsTokenCount"], "thoughtsTokenCount")
-            if "thoughtsTokenCount" in usage
-            else 0
-        )
-        total = require_usage_int(usage.get("totalTokenCount"), "totalTokenCount")
-        input_tokens += tool_use
-        output_tokens = candidates + thoughts
-        if total != input_tokens + output_tokens:
-            raise ValueError("gateway response usage total is inconsistent")
-        return input_tokens, output_tokens
     raise ValueError("gateway usage protocol is unsupported")
 
 
@@ -992,7 +970,7 @@ def run_upstream_worker() -> None:
     try:
         connection.request(
             "POST",
-            upstream_path(upstream.path, path, protocol, secret),
+            upstream_path(upstream.path, path),
             body=body,
             headers=upstream_headers(protocol, secret, request.get("headers")),
         )
@@ -1057,7 +1035,7 @@ def peer_uid(connection: Any) -> int:
     raise RuntimeError("peer credential verification is unavailable")
 
 
-def require_path(value: Any, protocol: str, model: str) -> str:
+def require_path(value: Any, protocol: str) -> str:
     if not isinstance(value, str):
         raise ValueError("invalid gateway path")
     split = urlsplit(value)
@@ -1065,8 +1043,8 @@ def require_path(value: Any, protocol: str, model: str) -> str:
         raise ValueError("gateway path mismatch")
     if protocol == "claude" and split.path != "/messages":
         raise ValueError("gateway path mismatch")
-    if protocol == "gemini" and split.path != f"/v1beta/models/{model}:generateContent":
-        raise ValueError("gateway path mismatch")
+    if protocol not in {"openai", "claude"}:
+        raise ValueError("gateway path protocol is unsupported")
     return value
 
 
@@ -1083,49 +1061,31 @@ def bound_request(
         raise ValueError("gateway request must be an object")
     if value.get("stream") not in {None, False}:
         raise ValueError("gateway streaming requests are unsupported")
-    if protocol == "gemini":
-        generation = value.setdefault("generationConfig", {})
-        if not isinstance(generation, dict):
-            raise ValueError("gateway generation config must be an object")
-        requested_output_limit = require_request_output_limit(
-            generation.get("maxOutputTokens", MAX_REQUEST_OUTPUT_TOKENS)
-        )
-        if (
-            strict_output_limit
-            and requested_output_limit > MAX_REQUEST_OUTPUT_TOKENS
-        ):
-            raise ValueError("gateway output token limit is invalid")
-        output_limit = min(requested_output_limit, MAX_REQUEST_OUTPUT_TOKENS)
-        generation["maxOutputTokens"] = output_limit
-    else:
-        if value.get("model") != model:
-            raise ValueError("gateway model mismatch")
-        if protocol == "openai" and {
+    if value.get("model") != model:
+        raise ValueError("gateway model mismatch")
+    if protocol == "openai" and {
+        "max_tokens",
+        "max_completion_tokens",
+    }.issubset(value):
+        raise ValueError("gateway request has ambiguous output token limits")
+    requested_output_limit = require_request_output_limit(
+        value.get(
             "max_tokens",
-            "max_completion_tokens",
-        }.issubset(value):
-            raise ValueError("gateway request has ambiguous output token limits")
-        requested_output_limit = require_request_output_limit(
-            value.get(
-                "max_tokens",
-                value.get("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
-            )
+            value.get("max_completion_tokens", MAX_REQUEST_OUTPUT_TOKENS),
         )
-        if (
-            strict_output_limit
-            and requested_output_limit > MAX_REQUEST_OUTPUT_TOKENS
-        ):
-            raise ValueError("gateway output token limit is invalid")
-        output_limit = min(requested_output_limit, MAX_REQUEST_OUTPUT_TOKENS)
-        if protocol == "openai":
-            field = (
-                "max_completion_tokens"
-                if "max_completion_tokens" in value
-                else "max_tokens"
-            )
-            value[field] = output_limit
-        else:
-            value["max_tokens"] = output_limit
+    )
+    if strict_output_limit and requested_output_limit > MAX_REQUEST_OUTPUT_TOKENS:
+        raise ValueError("gateway output token limit is invalid")
+    output_limit = min(requested_output_limit, MAX_REQUEST_OUTPUT_TOKENS)
+    if protocol == "openai":
+        field = (
+            "max_completion_tokens"
+            if "max_completion_tokens" in value
+            else "max_tokens"
+        )
+        value[field] = output_limit
+    else:
+        value["max_tokens"] = output_limit
     return json.dumps(value, separators=(",", ":")).encode(), output_limit
 
 
@@ -1152,18 +1112,14 @@ def upstream_headers(
         headers["Authorization"] = f"Bearer {provider_secret}"
     elif protocol == "claude":
         headers["x-api-key"] = provider_secret
+    else:
+        raise ValueError("gateway header protocol is unsupported")
     return headers
 
 
-def upstream_path(
-    base_path: str, incoming: str, protocol: str, provider_secret: str
-) -> str:
+def upstream_path(base_path: str, incoming: str) -> str:
     split = urlsplit(incoming)
     query = parse_qsl(split.query, keep_blank_values=True)
-    if protocol == "gemini":
-        query = [
-            (name, provider_secret if name == "key" else value) for name, value in query
-        ]
     path = f"{base_path.rstrip('/')}/{split.path.lstrip('/')}"
     return urlunsplit(("", "", path, urlencode(query), ""))
 

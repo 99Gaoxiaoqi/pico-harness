@@ -134,9 +134,6 @@ function resolvePromptCachePolicy(
     throw new Error("promptCache cannot be configured when cache=false");
   }
   const configured = override?.promptCache;
-  if (provider === "gemini" && configured) {
-    throw new Error("Gemini promptCache is not supported");
-  }
   if (!configured) {
     if (provider === "claude") {
       return { mode: "explicit", ttl: "5m", keyShards: 1, prewarm: false };
@@ -219,7 +216,7 @@ function resolvePromptCachePolicy(
     };
   }
 
-  throw new Error("Gemini promptCache is not supported");
+  throw new Error("Unsupported provider protocol");
 }
 
 /**

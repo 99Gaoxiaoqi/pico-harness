@@ -580,7 +580,7 @@ function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
 }
 
 function providerProtocol(value: unknown): ProviderProtocol {
-  return value === "claude" || value === "gemini" ? value : "openai";
+  return value === "claude" ? value : "openai";
 }
 
 function providerOrigin(value: unknown): ProviderOrigin {

@@ -77,7 +77,6 @@ const GLM_5_2_REASONING = modelRule(["nothink", "high", "max"], "max", {
       [["reasoning_effort"], ["chat_template_kwargs", "reasoning_effort"]],
     ),
     claude: patch([["thinking", "type"], "disabled"]),
-    gemini: patch([["generationConfig", "thinkingConfig", "thinkingBudget"], 0]),
   },
   high: {
     openai: patch(
@@ -90,7 +89,6 @@ const GLM_5_2_REASONING = modelRule(["nothink", "high", "max"], "max", {
       [["thinking", "budget_tokens"], 16_000],
       [["output_config", "effort"], "high"],
     ),
-    gemini: patch([["generationConfig", "thinkingConfig", "thinkingBudget"], 16_000]),
   },
   max: {
     openai: patch(
@@ -103,7 +101,6 @@ const GLM_5_2_REASONING = modelRule(["nothink", "high", "max"], "max", {
       [["thinking", "budget_tokens"], 32_000],
       [["output_config", "effort"], "max"],
     ),
-    gemini: patch([["generationConfig", "thinkingConfig", "thinkingBudget"], 32_000]),
   },
 });
 
@@ -111,17 +108,14 @@ const DEEPSEEK_V4_REASONING = modelRule(["off", "high", "max"], "max", {
   off: {
     openai: patch([["thinking", "type"], "disabled"], [["reasoning_effort"]]),
     claude: patch([["thinking", "type"], "disabled"]),
-    gemini: patch([["generationConfig", "thinkingConfig", "thinkingBudget"], 0]),
   },
   high: {
     openai: patch([["thinking", "type"], "enabled"], [["reasoning_effort"], "high"]),
     claude: patch([["thinking", "type"], "enabled"], [["thinking", "budget_tokens"], 16_000]),
-    gemini: patch([["generationConfig", "thinkingConfig", "thinkingBudget"], 16_000]),
   },
   max: {
     openai: patch([["thinking", "type"], "enabled"], [["reasoning_effort"], "max"]),
     claude: patch([["thinking", "type"], "enabled"], [["thinking", "budget_tokens"], 32_000]),
-    gemini: patch([["generationConfig", "thinkingConfig", "thinkingBudget"], 32_000]),
   },
 });
 

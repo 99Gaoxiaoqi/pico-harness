@@ -28,7 +28,7 @@ export interface HeadlessBootstrapRequestV1 {
   readonly picoHome: string;
   readonly route: {
     readonly id: string;
-    readonly protocol: "openai" | "claude" | "gemini";
+    readonly protocol: "openai" | "claude";
     readonly baseURL: string;
     readonly apiKeyEnv: string;
     readonly output?: number;
@@ -172,7 +172,7 @@ function parseRequest(value: unknown): HeadlessBootstrapRequestV1 {
     );
   }
   const protocol = route["protocol"];
-  if (protocol !== "openai" && protocol !== "claude" && protocol !== "gemini") {
+  if (protocol !== "openai" && protocol !== "claude") {
     throw new BootstrapRequestError("INVALID_PROTOCOL", "route.protocol is unsupported.");
   }
   const baseURL = validateProviderEndpoint(requiredString(route["baseURL"], "route.baseURL", 4096));

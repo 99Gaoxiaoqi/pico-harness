@@ -14,7 +14,6 @@ import type { RuntimeStore } from "./runtime.js";
 const protocolLabels: Readonly<Record<ProviderProtocol, string>> = {
   openai: "OpenAI compatible",
   claude: "Anthropic Claude",
-  gemini: "Google Gemini",
 };
 
 const originLabels: Readonly<Record<ProviderOrigin, string>> = {
@@ -33,7 +32,6 @@ const credentialLabels: Readonly<Record<ProviderCredentialStatus, string>> = {
 const defaultApiKeyEnvs: Readonly<Record<ProviderProtocol, string>> = {
   openai: "OPENAI_API_KEY",
   claude: "ANTHROPIC_API_KEY",
-  gemini: "GEMINI_API_KEY",
 };
 
 function credentialTone(status: ProviderCredentialStatus): string {
@@ -392,7 +390,6 @@ function ProviderEditorDialog({
               >
                 <option value="openai">OpenAI compatible</option>
                 <option value="claude">Anthropic Claude</option>
-                <option value="gemini">Google Gemini</option>
               </select>
             </label>
             <label className="provider-form__wide">
