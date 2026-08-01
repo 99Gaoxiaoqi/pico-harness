@@ -1738,6 +1738,37 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
     sys.modules[module_name] = public_egress_module
     true_environment = task_environment("true")
     assert adapter.task_allows_internet(true_environment) is True
+    default_access = adapter.PublicEgressAccess(
+        run_id=run_id,
+        network_name="pico-tb-gw-default-limit",
+        context_id="public-egress-default-limit",
+        ttl_sec=120,
+        receipt_path=Path("/unused"),
+    )
+    assert default_access.max_total_bytes == 1_073_741_824
+    for invalid_limit in (
+        1_073_741_823,
+        2_147_483_649,
+        True,
+        1.5,
+        "2147483648.0",
+        None,
+    ):
+        try:
+            adapter.PublicEgressAccess(
+                run_id=run_id,
+                network_name="pico-tb-gw-invalid-limit",
+                context_id="public-egress-invalid-limit",
+                ttl_sec=120,
+                receipt_path=Path("/unused"),
+                max_total_bytes=invalid_limit,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"invalid public egress byte limit was accepted: {invalid_limit!r}"
+            )
     with tempfile.TemporaryDirectory(prefix="pico-egress-missing-") as directory:
         root = Path(directory)
         (root / "task.toml").write_text("[agent]\ntimeout_sec = 60\n")
@@ -1773,6 +1804,7 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
             context_id="public-egress-success",
             ttl_sec=120,
             receipt_path=Path(directory) / "public-egress-receipt.json",
+            max_total_bytes=2_147_483_648,
         )
         assert access is not None
         await access.start(environment)
@@ -1783,7 +1815,7 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
         assert proxy.ttl_sec == 120
         assert proxy.max_connections == 32
         assert proxy.max_requests == 4_096
-        assert proxy.max_total_bytes == 1_073_741_824
+        assert proxy.max_total_bytes == 2_147_483_648
         proxy_env = access.container_env
         assert set(proxy_env) == {
             "HTTP_PROXY",
@@ -1952,6 +1984,57 @@ async def assert_public_egress_lifecycle(adapter: Any, run_id: str) -> None:
         assert access._proxy is None
         assert access._token == ""
         assert relay_remove_failure.containers == {}
+
+
+async def assert_public_egress_limit_handoff(adapter: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class AgentAccess:
+        max_total_bytes = 2_147_483_648
+
+        async def stop(self, _environment: Any) -> None:
+            captured["agentStopped"] = True
+
+    class VerifierAccess:
+        scrub_secret = "verifier-scrub-token"
+
+        def __init__(self, **kwargs: Any) -> None:
+            captured["verifierArguments"] = kwargs
+
+    def install(
+        _environment: Any,
+        *,
+        networks: Any,
+        run_id: str,
+        verifier_egress: Any,
+    ) -> None:
+        captured["install"] = (networks, run_id, verifier_egress)
+
+    original_access = adapter.PublicEgressAccess
+    original_install = adapter.install_verifier_egress_lifecycle
+    adapter.PublicEgressAccess = VerifierAccess
+    adapter.install_verifier_egress_lifecycle = install
+    networks = adapter.TrialNetworks("task-network", "gateway-network")
+    try:
+        scrub_secret = await adapter.cleanup_trial_resources(
+            types.SimpleNamespace(),
+            networks=networks,
+            run_id="egress-limit-handoff",
+            context=types.SimpleNamespace(),
+            gateway=None,
+            public_egress=AgentAccess(),
+            context_id="agent-context",
+            verifier_timeout_sec=60,
+            verifier_receipt_path=Path("/verifier-receipt.json"),
+        )
+    finally:
+        adapter.PublicEgressAccess = original_access
+        adapter.install_verifier_egress_lifecycle = original_install
+
+    assert captured["agentStopped"] is True
+    assert captured["verifierArguments"]["max_total_bytes"] == 2_147_483_648
+    assert captured["install"][:2] == (networks, "egress-limit-handoff")
+    assert scrub_secret == "verifier-scrub-token"
 
 
 async def assert_container_proxy_env_injection(adapter: Any) -> None:
@@ -2450,6 +2533,7 @@ async def main() -> None:
     assert cleanup_order == ["public-egress", "gateway", "networks"]
 
     await assert_public_egress_lifecycle(adapter, run_id)
+    await assert_public_egress_limit_handoff(adapter)
     await assert_container_proxy_env_injection(adapter)
     await assert_verifier_lifecycle_contract(adapter)
     await assert_bootstrap_output_projection(adapter)

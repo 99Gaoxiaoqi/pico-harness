@@ -10,6 +10,10 @@ export const publicEgressLimits = Object.freeze({
   allowedConnectPorts: Object.freeze([443]),
 });
 
+// Terminal-Bench trials may need one additional GiB for public build/data inputs.
+// This runner-only ceiling leaves the proxy and adapter defaults unchanged.
+export const benchmarkPublicEgressMaxTotalBytes = 2_147_483_648;
+
 export const publicEgressDnsPolicy = Object.freeze({
   mode: "pinned-doh",
   host: "cloudflare-dns.com",
@@ -53,7 +57,8 @@ export function parseTaskAllowInternet(taskToml, taskName) {
   throw policyError(taskName, "task.toml allow_internet must be the boolean true or false");
 }
 
-export function buildEgressPolicyManifest(tasks, egressPolicyByTask) {
+export function buildEgressPolicyManifest(tasks, egressPolicyByTask, limitOverrides) {
+  const maxTotalBytes = resolveMaxTotalBytes(limitOverrides);
   if (
     !Array.isArray(tasks) ||
     tasks.length === 0 ||
@@ -81,7 +86,7 @@ export function buildEgressPolicyManifest(tasks, egressPolicyByTask) {
     limits: {
       maxConnections: publicEgressLimits.maxConnections,
       maxRequests: publicEgressLimits.maxRequests,
-      maxTotalBytes: publicEgressLimits.maxTotalBytes,
+      maxTotalBytes,
       connectionTimeoutSec: publicEgressLimits.connectionTimeoutSec,
       maxAuditDecisions: publicEgressLimits.maxAuditDecisions,
       allowedHttpPorts: [...publicEgressLimits.allowedHttpPorts],
@@ -109,6 +114,28 @@ export function buildEgressPolicyManifest(tasks, egressPolicyByTask) {
       return { taskName, allowInternet: policy.allowInternet };
     }),
   };
+}
+
+function resolveMaxTotalBytes(limitOverrides) {
+  if (limitOverrides === undefined) return publicEgressLimits.maxTotalBytes;
+  if (
+    limitOverrides === null ||
+    typeof limitOverrides !== "object" ||
+    Array.isArray(limitOverrides) ||
+    Object.keys(limitOverrides).length !== 1 ||
+    !Object.hasOwn(limitOverrides, "maxTotalBytes")
+  ) {
+    throw new Error("Terminal-Bench egress limit override is invalid");
+  }
+  const value = limitOverrides.maxTotalBytes;
+  if (
+    !Number.isSafeInteger(value) ||
+    value < publicEgressLimits.maxTotalBytes ||
+    value > benchmarkPublicEgressMaxTotalBytes
+  ) {
+    throw new Error("Terminal-Bench egress byte limit override is out of bounds");
+  }
+  return value;
 }
 
 function maskTomlStringsAndComments(source, taskName) {

@@ -38,10 +38,13 @@ pre-start container profile、无 root seed 同 UID 调用、nonce 重放、未�
 trial 随机凭据的 HTTP(S) proxy 环境变量，sidecar 不连接 gateway 网络。宿主代理只允许
 HTTP absolute-form 的 80 端口和 CONNECT 的 443 端口，固定通过经 TLS 证书验证的
 Cloudflare DoH 地址查询 IPv4 A 记录，不使用系统 DNS，也不接受 IP literal、私网、
-保留地址、metadata、Docker 内部名称或混合解析结果。每个 trial 最多 32 个并发连接、
-4096 个请求、1 GiB 传输量和 120 秒单连接时长，审计只保留 256 条不含 query、header、
-body 或 token 的有界决策。TTL 或清理先撤销活动连接；只有确认 relay 已删除后才释放
-宿主 listener，避免旧 relay 命中被复用的端口。
+保留地址、metadata、Docker 内部名称或混合解析结果。每个 agent/verifier 出口最多 32
+个并发连接、4096 个请求和 120 秒单连接时长，审计只保留 256 条不含 query、header、
+body 或 token 的有界决策。代理与 adapter 的默认传输上限仍为每个出口 1 GiB；本目录的 benchmark
+runner 会显式把每个 agent/verifier 出口提升到 2 GiB，并把该值同时写入 manifest 与
+agent kwargs，JS/Python 两层都拒绝更高值。agent 与 verifier 使用彼此独立的 proxy，
+因此 2 GiB 不是跨两个阶段聚合的总量。TTL 或清理先撤销活动连接；只有确认 relay 已
+删除后才释放宿主 listener，避免旧 relay 命中被复用的端口。
 
 Agent 结束后会先撤销 agent 公网 token 和 Provider Gateway，并确认模型 relay 已删除；
 shared verifier 使用另一枚随机 token、独立 relay 和

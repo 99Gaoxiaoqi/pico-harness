@@ -23,10 +23,14 @@ test("Terminal-Bench pins trusted runtime budgets in its manifest and agent argu
     "`bash_timeout_ms=${benchmarkBashTimeoutMs}`",
     "`max_turns=${benchmarkMaxTurns}`",
     "`runtime_retry_count=${benchmarkRuntimeRetryCount}`",
+    "maxTotalBytes: benchmarkPublicEgressMaxTotalBytes,",
+    "`public_egress_max_total_bytes=${publicEgressPolicy.limits.maxTotalBytes}`",
     "concurrency: 1,",
   ]) {
     assert.equal(runSource.includes(expected), true, `run.mjs is missing: ${expected}`);
   }
+  assert.equal(egressPolicy.publicEgressLimits.maxTotalBytes, 1_073_741_824);
+  assert.equal(egressPolicy.benchmarkPublicEgressMaxTotalBytes, 2_147_483_648);
 });
 
 test("Terminal-Bench validates its runtime control configuration", async () => {
