@@ -9,6 +9,7 @@ import http.client
 import json
 import math
 import os
+import posixpath
 import re
 import secrets
 import shlex
@@ -79,6 +80,20 @@ _MIN_ADAPTER_CLEANUP_MARGIN_MS = 60_000
 _MAX_ADAPTER_CLEANUP_MARGIN_MS = 300_000
 _HEADLESS_ADAPTER_MARGIN_MS = 5_000
 _VERIFIER_SERVICE_MARGIN_MS = 15_000
+_MAX_TASK_IMAGE_ATTACHMENTS = 4
+_MAX_TASK_IMAGE_REFERENCES = 32
+_TASK_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+_QUOTED_TASK_IMAGE_REFERENCE = re.compile(
+    r"(?P<quote>[`\"'])(?P<path>[^`\"'\r\n]+?\.(?:png|jpe?g|webp|gif))(?P=quote)",
+    re.IGNORECASE,
+)
+_BARE_TASK_IMAGE_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9_./~-])"
+    r"(?P<path>(?:/|\./|\.\./)?[A-Za-z0-9_@%+=,.-]+"
+    r"(?:/[A-Za-z0-9_@%+=,.-]+)*\.(?:png|jpe?g|webp|gif))"
+    r"(?=$|[\s`\"'\)\]}>.,;:!?])",
+    re.IGNORECASE,
+)
 _VERIFIER_SERVICE_MANIFEST_BASENAME = ".pico-verifier-service.json"
 _VERIFIER_SERVICE_PORT = 8_080
 _VERIFIER_SERVICE_HELPER_SENTINEL = "pico-verifier-helper"
@@ -654,6 +669,11 @@ rm -f {remote_archive}
             if workspace_result.return_code != 0 or not workspace_result.stdout:
                 raise RuntimeError("Could not resolve the Harbor task workspace")
             workspace = workspace_result.stdout.strip()
+            image_paths = await preflight_task_image_paths(
+                instruction,
+                workspace=workspace,
+                environment=environment,
+            )
             if self.context_id is None:
                 raise RuntimeError("Harbor did not assign the trial context_id")
             context_id = safe_trial_key(str(self.context_id))
@@ -705,6 +725,7 @@ rm -f {remote_archive}
                 outer_deadline=outer_deadline,
                 headless_deadline=run_deadlines.headless,
                 loop=loop,
+                image_paths=image_paths,
                 public_proxy_env=(
                     public_egress.container_env
                     if public_egress is not None
@@ -757,16 +778,19 @@ rm -f {remote_archive}
         headless_deadline: float,
         loop: asyncio.AbstractEventLoop,
         public_proxy_env: dict[str, str],
+        image_paths: tuple[str, ...] = (),
     ) -> None:
         route_output = _BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(
             route_config["modelRouteId"]
         )
+        route_vision = configured_route_vision(route_config)
         bootstrap_route = {
             "id": route_config["modelRouteId"],
             "protocol": route_config["provider"]["protocol"],
             "baseURL": gateway.base_url,
             "apiKeyEnv": self._SECRET_ENV,
             **({"output": route_output} if route_output is not None else {}),
+            **({"vision": route_vision} if route_vision is not None else {}),
         }
         bootstrap_request = {
             "schemaVersion": 1,
@@ -819,6 +843,7 @@ rm -f {remote_archive}
                 "sessionId": attempt_session_id,
                 "prompt": benchmark_instruction(instruction, workspace),
                 "modelRouteId": route_config["modelRouteId"],
+                **({"imagePaths": list(image_paths)} if image_paths else {}),
                 "providerRequestMode": "single_non_stream",
                 "providerTimeoutMs": min(
                     BENCHMARK_PROVIDER_TIMEOUT_MS, inner_timeout_ms
@@ -3259,6 +3284,7 @@ def load_route_config(path: Path) -> dict[str, Any]:
         0,
         _MAX_RUN_COST_MICRO_CNY,
     )
+    configured_route_vision(value)
     return value
 
 
@@ -3295,6 +3321,26 @@ def validate_benchmark_route_contract(
             f"{model_route_id} benchmark route must pin output={expected_output} "
             "and use max_completion_tokens"
         )
+
+
+def configured_route_vision(route_config: dict[str, Any]) -> bool | None:
+    model_route_id = route_config.get("modelRouteId")
+    provider = route_config.get("provider")
+    if not isinstance(model_route_id, str) or "/" not in model_route_id:
+        return None
+    _provider_id, model = model_route_id.split("/", 1)
+    if not isinstance(provider, dict):
+        return None
+    capabilities = provider.get("modelCapabilities")
+    model_capability = (
+        capabilities.get(model) if isinstance(capabilities, dict) else None
+    )
+    if not isinstance(model_capability, dict) or "vision" not in model_capability:
+        return None
+    vision = model_capability["vision"]
+    if type(vision) is not bool:
+        raise ValueError("route config model vision capability must be a boolean")
+    return vision
 
 
 def task_agent_timeout(environment: BaseEnvironment) -> float:
@@ -3378,6 +3424,116 @@ def bounded_attempt_identity(base: str, attempt: int) -> str:
     digest = hashlib.sha256(base.encode()).hexdigest()[:16]
     prefix_limit = 128 - len(suffix) - len(digest) - 1
     return f"{base[:prefix_limit]}.{digest}{suffix}"
+
+
+def task_image_path_candidates(
+    instruction: str,
+    *,
+    workspace: str,
+) -> tuple[str, ...]:
+    quoted_matches = list(_QUOTED_TASK_IMAGE_REFERENCE.finditer(instruction))
+    matches = [
+        (match.start("path"), match.group("path"))
+        for match in quoted_matches
+    ]
+    quoted_index = 0
+    for match in _BARE_TASK_IMAGE_REFERENCE.finditer(instruction):
+        while (
+            quoted_index < len(quoted_matches)
+            and quoted_matches[quoted_index].end() <= match.start("path")
+        ):
+            quoted_index += 1
+        if (
+            quoted_index < len(quoted_matches)
+            and quoted_matches[quoted_index].start()
+            <= match.start("path")
+            < quoted_matches[quoted_index].end()
+        ):
+            continue
+        matches.append((match.start("path"), match.group("path")))
+    matches.sort(key=lambda item: item[0])
+    normalized_workspace = posixpath.normpath(workspace)
+    if not normalized_workspace.startswith("/"):
+        raise ValueError("workspace must be an absolute container path")
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for _position, reference in matches:
+        if len(candidates) >= _MAX_TASK_IMAGE_REFERENCES:
+            break
+        if (
+            not reference
+            or len(reference) > 4_096
+            or "\0" in reference
+            or "\r" in reference
+            or "\n" in reference
+            or PurePosixPath(reference).suffix.lower() not in _TASK_IMAGE_SUFFIXES
+        ):
+            continue
+        candidate = posixpath.normpath(
+            reference
+            if reference.startswith("/")
+            else posixpath.join(normalized_workspace, reference)
+        )
+        if not (
+            candidate == normalized_workspace
+            or candidate.startswith(f"{normalized_workspace}/")
+        ):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    return tuple(candidates)
+
+
+async def preflight_task_image_paths(
+    instruction: str,
+    *,
+    workspace: str,
+    environment: BaseEnvironment,
+) -> tuple[str, ...]:
+    candidates = task_image_path_candidates(instruction, workspace=workspace)
+    if not candidates:
+        return ()
+    checks = " ".join(
+        (
+            f"if {task_image_shell_preflight_condition(path, workspace=workspace)}; "
+            f"then printf '%s\\n' {index}; fi;"
+        )
+        for index, path in enumerate(candidates)
+    )
+    result = await environment.exec(command=f"set -eu; {checks}")
+    if result.return_code != 0:
+        raise RuntimeError("Could not preflight task image attachments")
+    accepted: list[str] = []
+    for raw_index in (result.stdout or "").splitlines():
+        if not raw_index.isdecimal():
+            raise RuntimeError("Task image preflight returned invalid output")
+        index = int(raw_index)
+        if index >= len(candidates):
+            raise RuntimeError("Task image preflight returned invalid output")
+        accepted.append(candidates[index])
+        if len(accepted) >= _MAX_TASK_IMAGE_ATTACHMENTS:
+            break
+    return tuple(accepted)
+
+
+def task_image_shell_preflight_condition(path: str, *, workspace: str) -> str:
+    root = PurePosixPath(workspace)
+    candidate = PurePosixPath(path)
+    try:
+        relative_parts = candidate.relative_to(root).parts
+    except ValueError as error:
+        raise ValueError("task image path escaped the workspace") from error
+    current = root
+    non_symlink_checks: list[str] = []
+    for component in relative_parts:
+        current /= component
+        non_symlink_checks.append(f"[ ! -L {shlex.quote(str(current))} ]")
+    return " && ".join(
+        [*non_symlink_checks, f"[ -f {shlex.quote(str(candidate))} ]"]
+    )
 
 
 def benchmark_instruction(instruction: str, workspace: str) -> str:

@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { promisify } from "node:util";
 import { test } from "node:test";
 import {
   DEFAULT_PROVIDER_TIMEOUT_MS,
@@ -32,6 +43,25 @@ import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
 const ROUTE_ID = `${PROVIDER_ID}/${MODEL_ID}`;
+const execFileAsync = promisify(execFile);
+
+function imageBytes(
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp",
+  size: number,
+): Buffer {
+  const header =
+    mimeType === "image/png"
+      ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      : mimeType === "image/jpeg"
+        ? Buffer.from([0xff, 0xd8, 0xff])
+        : mimeType === "image/gif"
+          ? Buffer.from("GIF89a", "ascii")
+          : Buffer.from("RIFF\0\0\0\0WEBP", "binary");
+  assert.ok(size >= header.length);
+  const bytes = Buffer.alloc(size);
+  header.copy(bytes);
+  return bytes;
+}
 type RunAgentCliDependenciesWithRuntimeBudget = {
   readonly bashTimeoutMs?: number;
   readonly maxTurns?: number;
@@ -78,7 +108,7 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
     },
   });
 
-  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
   assert.equal(outcome.result.status, "completed");
   assert.equal(outcome.result.finalMessage, "done [REDACTED]");
   assert.deepEqual(outcome.result.usage, {
@@ -93,6 +123,289 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
   assert.ok(outcome.result.tracePath);
   assert.equal((await readFile(outcome.result.tracePath, "utf8")).includes(secret), false);
   assert.equal(JSON.stringify(outcome.result).includes(secret), false);
+});
+
+test("headless image attachments preserve mixed path order and deduplicate physical files", async (context) => {
+  const fixture = await createFixture(context, "images-order");
+  await configureFixture(fixture, "secret-canary-images-order", true, undefined, true);
+  const paths = {
+    png: join(fixture.workspace, "first.png"),
+    jpeg: join(fixture.workspace, "second.jpeg"),
+    gif: join(fixture.workspace, "third.gif"),
+    webp: join(fixture.workspace, "fourth.webp"),
+  };
+  await Promise.all([
+    writeFile(paths.png, imageBytes("image/png", 17)),
+    writeFile(paths.jpeg, imageBytes("image/jpeg", 19)),
+    writeFile(paths.gif, imageBytes("image/gif", 23)),
+    writeFile(paths.webp, imageBytes("image/webp", 29)),
+  ]);
+  const canonicalPaths = {
+    png: await realpath(paths.png),
+    jpeg: await realpath(paths.jpeg),
+    webp: await realpath(paths.webp),
+  };
+
+  let received: RunAgentCliOptions | undefined;
+  const request = {
+    ...requestFor(fixture, "images-order"),
+    prompt: "inspect the four referenced images",
+    imagePaths: ["first.png", canonicalPaths.jpeg, "third.gif", canonicalPaths.webp],
+  };
+  const outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    executeRuntime: async (options) => {
+      received = options;
+      return runtimeResult(options, "images received");
+    },
+  });
+
+  assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
+  assert.equal(received?.prompt, request.prompt);
+  assert.deepEqual(
+    received?.images?.map((image) => (image.type === "image_base64" ? image.mimeType : image.type)),
+    ["image/png", "image/jpeg", "image/gif", "image/webp"],
+  );
+  assert.deepEqual(
+    received?.images?.map((image) =>
+      image.type === "image_base64" ? Buffer.from(image.data, "base64").length : 0,
+    ),
+    [17, 19, 23, 29],
+  );
+  assert.equal(
+    JSON.stringify(request).includes(imageBytes("image/png", 17).toString("base64")),
+    false,
+  );
+
+  let deduplicatedCount = -1;
+  const deduplicated = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "images-deduplicated"),
+      imagePaths: ["first.png", canonicalPaths.png],
+    }),
+    {
+      env: {},
+      executeRuntime: async (options) => {
+        deduplicatedCount = options.images?.length ?? 0;
+        return runtimeResult(options, "deduplicated");
+      },
+    },
+  );
+  assert.equal(deduplicated.exitCode, 0);
+  assert.equal(deduplicatedCount, 1);
+});
+
+test("headless sends image bytes only through Runtime and keeps result and trace payload-free", async (context) => {
+  const fixture = await createFixture(context, "images-runtime-wire");
+  await configureFixture(fixture, "secret-canary-images-runtime-wire", true, undefined, true);
+  const bytes = imageBytes("image/png", 31);
+  const encoded = bytes.toString("base64");
+  await writeFile(join(fixture.workspace, "runtime.png"), bytes);
+  const request = {
+    ...requestFor(fixture, "images-runtime-wire"),
+    imagePaths: ["runtime.png"],
+  };
+  let receivedImages: Message["images"];
+  const outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    providerFactory: () => ({
+      async generate(messages) {
+        receivedImages = messages.find((message) => message.role === "user")?.images;
+        return assistant("runtime image received", { promptTokens: 3, completionTokens: 2 });
+      },
+    }),
+  });
+
+  assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
+  assert.deepEqual(receivedImages, [
+    { type: "image_base64", mimeType: "image/png", data: encoded },
+  ]);
+  assert.equal(JSON.stringify(request).includes(encoded), false);
+  assert.equal(JSON.stringify(outcome.result).includes(encoded), false);
+  assert.ok(outcome.result.tracePath);
+  assert.equal((await readFile(outcome.result.tracePath, "utf8")).includes(encoded), false);
+});
+
+test("headless image attachments reject unsafe files before Runtime execution", async (context) => {
+  const fixture = await createFixture(context, "images-invalid");
+  await configureFixture(fixture, "secret-canary-images-invalid");
+  const outside = join(fixture.root, "outside.png");
+  const target = join(fixture.workspace, "target.png");
+  const targetSymlink = join(fixture.workspace, "target-link.png");
+  const physicalDirectory = join(fixture.workspace, "physical-directory");
+  const parentSymlink = join(fixture.workspace, "parent-link");
+  const directory = join(fixture.workspace, "directory.png");
+  const fifo = join(fixture.workspace, "pipe.gif");
+  const badMagic = join(fixture.workspace, "bad-magic.webp");
+  await Promise.all([
+    writeFile(outside, imageBytes("image/png", 16)),
+    writeFile(target, imageBytes("image/png", 16)),
+    mkdir(physicalDirectory),
+    mkdir(directory),
+    writeFile(badMagic, Buffer.from("not-a-webp-image", "utf8")),
+  ]);
+  await writeFile(join(physicalDirectory, "nested.png"), imageBytes("image/png", 16));
+  await symlink(target, targetSymlink);
+  await symlink(physicalDirectory, parentSymlink);
+  await execFileAsync("mkfifo", [fifo]);
+
+  const cases = [
+    { name: "outside", path: outside },
+    { name: "missing", path: "missing.png" },
+    { name: "target-symlink", path: "target-link.png" },
+    { name: "parent-symlink", path: join("parent-link", "nested.png") },
+    { name: "directory", path: "directory.png" },
+    { name: "fifo", path: "pipe.gif" },
+    { name: "magic", path: "bad-magic.webp" },
+  ];
+  for (const candidate of cases) {
+    let runtimeCalls = 0;
+    const outcome = await runHeadlessOneShotJson(
+      JSON.stringify({
+        ...requestFor(fixture, `images-invalid-${candidate.name}`),
+        imagePaths: [candidate.path],
+      }),
+      {
+        env: {},
+        executeRuntime: async (options) => {
+          runtimeCalls++;
+          return runtimeResult(options, "must not run");
+        },
+      },
+    );
+    assert.equal(outcome.exitCode, 2, candidate.name);
+    assert.equal(outcome.result.error?.code, "IMAGE_ATTACHMENT_INVALID", candidate.name);
+    assert.equal(outcome.result.error?.summary.includes(candidate.path), false, candidate.name);
+    assert.equal(runtimeCalls, 0, candidate.name);
+  }
+});
+
+test("headless image attachment inode binding rejects a parent-directory replacement race", async (context) => {
+  const fixture = await createFixture(context, "images-parent-race");
+  await configureFixture(fixture, "secret-canary-images-parent-race");
+  const originalParent = join(fixture.workspace, "race-parent");
+  const movedParent = join(fixture.workspace, "race-parent-original");
+  const outsideParent = join(fixture.root, "outside-parent");
+  await Promise.all([mkdir(originalParent), mkdir(outsideParent)]);
+  await Promise.all([
+    writeFile(join(originalParent, "image.png"), imageBytes("image/png", 17)),
+    writeFile(join(outsideParent, "image.png"), imageBytes("image/png", 19)),
+  ]);
+  let runtimeCalls = 0;
+  let replacementCalls = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "images-parent-race"),
+      imagePaths: ["race-parent/image.png"],
+    }),
+    {
+      env: {},
+      beforeImageOpen: async () => {
+        replacementCalls++;
+        await rename(originalParent, movedParent);
+        await symlink(outsideParent, originalParent);
+      },
+      executeRuntime: async (options) => {
+        runtimeCalls++;
+        return runtimeResult(options, "must not run");
+      },
+    },
+  );
+
+  assert.equal(replacementCalls, 1);
+  assert.equal(outcome.exitCode, 2);
+  assert.equal(outcome.result.error?.code, "IMAGE_ATTACHMENT_INVALID");
+  assert.equal(runtimeCalls, 0);
+});
+
+test("headless image attachments enforce count, aggregate bytes, and strict vision preflight", async (context) => {
+  const fixture = await createFixture(context, "images-limits");
+  await configureFixture(fixture, "secret-canary-images-limits");
+  const exactPaths = Array.from({ length: 4 }, (_, index) =>
+    join(fixture.workspace, `exact-${index}.png`),
+  );
+  await Promise.all(exactPaths.map((path) => writeFile(path, imageBytes("image/png", 64 * 1024))));
+  const canonicalExactPaths = await Promise.all(exactPaths.map((path) => realpath(path)));
+  let exactRuntimeCalls = 0;
+  const exact = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "images-exact-limit"),
+      imagePaths: canonicalExactPaths,
+    }),
+    {
+      env: {},
+      executeRuntime: async (options) => {
+        exactRuntimeCalls++;
+        assert.equal(
+          options.images?.reduce(
+            (total, image) =>
+              total +
+              (image.type === "image_base64" ? Buffer.from(image.data, "base64").length : 0),
+            0,
+          ),
+          256 * 1024,
+        );
+        return runtimeResult(options, "exact limit accepted");
+      },
+    },
+  );
+  assert.equal(exact.exitCode, 0, JSON.stringify(exact.result));
+  assert.equal(exactRuntimeCalls, 1);
+
+  const oversizedPath = join(fixture.workspace, "oversized.png");
+  await writeFile(oversizedPath, imageBytes("image/png", 256 * 1024 + 1));
+  let invalidRuntimeCalls = 0;
+  const oversized = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "images-oversized"),
+      imagePaths: ["oversized.png"],
+    }),
+    {
+      env: {},
+      executeRuntime: async (options) => {
+        invalidRuntimeCalls++;
+        return runtimeResult(options, "must not run");
+      },
+    },
+  );
+  assert.equal(oversized.exitCode, 2);
+  assert.equal(oversized.result.error?.code, "IMAGE_ATTACHMENTS_TOO_LARGE");
+
+  const tooMany = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "images-too-many"),
+      imagePaths: [...canonicalExactPaths, oversizedPath],
+    }),
+    {
+      env: {},
+      executeRuntime: async (options) => {
+        invalidRuntimeCalls++;
+        return runtimeResult(options, "must not run");
+      },
+    },
+  );
+  assert.equal(tooMany.exitCode, 2);
+  assert.equal(tooMany.result.error?.code, "INVALID_IMAGE_PATHS");
+  assert.equal(invalidRuntimeCalls, 0);
+
+  const noVisionFixture = await createFixture(context, "images-no-vision");
+  await configureFixture(noVisionFixture, "secret-canary-images-no-vision", true, undefined, false);
+  const noVision = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(noVisionFixture, "images-no-vision"),
+      imagePaths: ["missing.png"],
+    }),
+    {
+      env: {},
+      executeRuntime: async (options) => {
+        invalidRuntimeCalls++;
+        return runtimeResult(options, "must not run");
+      },
+    },
+  );
+  assert.equal(noVision.exitCode, 2);
+  assert.equal(noVision.result.error?.code, "IMAGE_CAPABILITY_UNSUPPORTED");
+  assert.equal(invalidRuntimeCalls, 0);
 });
 
 test("headless single_non_stream mode uses one non-streaming provider attempt", async (context) => {
@@ -184,6 +497,69 @@ test("OpenAI and Claude transports forward the trusted provider timeout", async 
   await new ClaudeProvider(config).generate(messages, [], { timeoutMs: 330_000 });
 
   assert.deepEqual(observedTimeouts, [330_000, 330_000]);
+});
+
+test("OpenAI and Claude transports preserve bounded multi-image order and MIME", async (context) => {
+  const requestBodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+  context.mock.method(
+    globalThis,
+    "fetch",
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requestBodies.push({
+        url,
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      if (url.endsWith("/chat/completions")) {
+        return Response.json({
+          choices: [{ message: { role: "assistant", content: "openai images ok" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      }
+      return Response.json({
+        content: [{ type: "text", text: "claude images ok" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    },
+  );
+  const mimeTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+  const messages: Message[] = [
+    {
+      role: "user",
+      content: "inspect images",
+      images: mimeTypes.map((mimeType) => ({
+        type: "image_base64",
+        mimeType,
+        data: imageBytes(mimeType, 64 * 1024).toString("base64"),
+      })),
+    },
+  ];
+  const config = {
+    baseURL: "https://provider.invalid/v1",
+    apiKey: "provider-images-test-secret",
+    model: "fixture-model",
+  };
+  await new OpenAIProvider(config).generate(messages, []);
+  await new ClaudeProvider(config).generate(messages, []);
+
+  assert.equal(requestBodies.length, 2);
+  for (const request of requestBodies) {
+    assert.ok(Buffer.byteLength(JSON.stringify(request.body), "utf8") < 1_000_000, request.url);
+  }
+  const openAiMessages = requestBodies[0]?.body["messages"] as Array<{
+    content: Array<{ type: string; image_url?: { url: string } }>;
+  }>;
+  assert.deepEqual(
+    openAiMessages[0]?.content.slice(1).map((part) => part.image_url?.url.split(";", 1)[0]),
+    mimeTypes.map((mimeType) => `data:${mimeType}`),
+  );
+  const claudeMessages = requestBodies[1]?.body["messages"] as Array<{
+    content: Array<{ type: string; source?: { media_type: string } }>;
+  }>;
+  assert.deepEqual(
+    claudeMessages[0]?.content.slice(0, 4).map((part) => part.source?.media_type),
+    mimeTypes,
+  );
 });
 
 test("headless traces retain metadata but remove tool arguments and workspace output", async (context) => {
@@ -1588,6 +1964,7 @@ async function configureFixture(
   apiKey: string,
   trust = true,
   baseURL = "https://provider.invalid/v1",
+  vision?: boolean,
 ): Promise<void> {
   const store = new UserConfigStore({ picoHome: fixture.picoHome });
   await store.write(
@@ -1601,6 +1978,7 @@ async function configureFixture(
           apiKey,
           models: [MODEL_ID],
           discoverModels: false,
+          ...(vision === undefined ? {} : { modelCapabilities: { [MODEL_ID]: { vision } } }),
         },
       },
     },

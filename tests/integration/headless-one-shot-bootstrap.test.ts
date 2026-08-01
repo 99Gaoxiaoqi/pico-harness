@@ -30,6 +30,7 @@ test("headless bootstrap writes secret-free pinned routes and trusts the isolate
           baseURL: "https://provider.invalid/v1",
           apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
           output: 8_192,
+          vision: true,
         },
       }),
     );
@@ -48,10 +49,16 @@ test("headless bootstrap writes secret-free pinned routes and trusts the isolate
       "max_completion_tokens",
       modelId,
     );
+    assert.equal(
+      snapshot.config.providers["codex-oauth"]?.modelCapabilities?.[modelId]?.vision,
+      true,
+      modelId,
+    );
     const configJson = await readFile(join(picoHome, "config.json"), "utf8");
     assert.doesNotMatch(configJson, /apiKey":/u, modelId);
     assert.match(configJson, /"output": 8192/u, modelId);
     assert.match(configJson, /"outputTokenField": "max_completion_tokens"/u, modelId);
+    assert.match(configJson, /"vision": true/u, modelId);
     const router = await loadModelRouter({
       config: {
         model: snapshot.config.defaults?.modelRouteId,
@@ -65,6 +72,7 @@ test("headless bootstrap writes secret-free pinned routes and trusts the isolate
     assert.equal(route.capabilities.maxOutputTokens, 8_192, modelId);
     assert.equal(route.capabilities.outputSource, "config", modelId);
     assert.equal(route.capabilities.outputTokenField, "max_completion_tokens", modelId);
+    assert.equal(route.capabilities.vision, true, modelId);
     assert.equal(
       await new WorkspaceTrustStore({ userStateDirectory: picoHome }).isTrusted(canonicalWorkspace),
       true,
@@ -95,6 +103,14 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
       expectedSource: "config",
     },
     {
+      name: "vision-only",
+      routeId: "fixture/model",
+      modelId: "model",
+      output: undefined,
+      vision: false,
+      expectedSource: "profile_default",
+    },
+    {
       name: "slash-model",
       routeId: "fixture/org/model",
       modelId: "org/model",
@@ -115,6 +131,7 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
           baseURL: "https://provider.invalid/v1",
           apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
           ...(candidate.output === undefined ? {} : { output: candidate.output }),
+          ...("vision" in candidate ? { vision: candidate.vision } : {}),
         },
       }),
     );
@@ -139,6 +156,11 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
     assert.equal(route.capabilities.maxOutputTokens, 4_096, candidate.name);
     assert.equal(route.capabilities.outputSource, candidate.expectedSource, candidate.name);
     assert.equal(route.capabilities.outputTokenField, "max_tokens", candidate.name);
+    assert.equal(
+      route.capabilities.vision,
+      "vision" in candidate ? candidate.vision : "unknown",
+      candidate.name,
+    );
   }
 });
 
@@ -293,5 +315,36 @@ test("headless bootstrap rejects unsafe output values on non-pinned routes", asy
     );
     assert.equal(outcome.exitCode, 2, name);
     assert.equal(outcome.result.error?.code, "INVALID_ROUTE_OUTPUT", name);
+  }
+});
+
+test("headless bootstrap accepts only strict boolean vision capability values", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-headless-bootstrap-vision-"));
+  const workspacePath = join(root, "workspace");
+  await mkdir(workspacePath);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  for (const [name, vision] of [
+    ["null", null],
+    ["number", 1],
+    ["string", "true"],
+    ["object", {}],
+  ] as const) {
+    const outcome = await bootstrapHeadlessCaseJson(
+      JSON.stringify({
+        schemaVersion: 1,
+        picoHome: join(root, `pico-home-${name}`),
+        workspacePath,
+        route: {
+          id: "fixture/model",
+          protocol: "openai",
+          baseURL: "https://provider.invalid/v1",
+          apiKeyEnv: "PICO_TB_GATEWAY_TOKEN",
+          vision,
+        },
+      }),
+    );
+    assert.equal(outcome.exitCode, 2, name);
+    assert.equal(outcome.result.error?.code, "INVALID_ROUTE_VISION", name);
   }
 });

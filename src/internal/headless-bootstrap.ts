@@ -17,7 +17,7 @@ const BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = new Map<string, number>([
 ]);
 const MAX_INPUT_BYTES = 64 * 1024;
 const REQUEST_FIELDS = new Set(["schemaVersion", "workspacePath", "picoHome", "route"]);
-const ROUTE_FIELDS = new Set(["id", "protocol", "baseURL", "apiKeyEnv", "output"]);
+const ROUTE_FIELDS = new Set(["id", "protocol", "baseURL", "apiKeyEnv", "output", "vision"]);
 const FORBIDDEN_SECRET_FIELDS =
   /^(?:apiKey|token|accessToken|refreshToken|secret|password|authorization|credentials?)$/iu;
 const BENCHMARK_API_KEY_ENV = "PICO_TB_GATEWAY_TOKEN";
@@ -32,6 +32,7 @@ export interface HeadlessBootstrapRequestV1 {
     readonly baseURL: string;
     readonly apiKeyEnv: string;
     readonly output?: number;
+    readonly vision?: boolean;
   };
 }
 
@@ -184,6 +185,7 @@ function parseRequest(value: unknown): HeadlessBootstrapRequestV1 {
     );
   }
   const output = parseRouteOutput(routeId, route["output"]);
+  const vision = parseRouteVision(route["vision"]);
   return {
     schemaVersion: SCHEMA_VERSION,
     workspacePath: requiredString(value["workspacePath"], "workspacePath", 4096),
@@ -194,6 +196,7 @@ function parseRequest(value: unknown): HeadlessBootstrapRequestV1 {
       baseURL,
       apiKeyEnv,
       ...(output === undefined ? {} : { output }),
+      ...(vision === undefined ? {} : { vision }),
     },
   };
 }
@@ -204,6 +207,18 @@ function buildUserConfig(
   modelId: string,
 ): PicoUserConfig {
   const benchmarkOutputTokens = BENCHMARK_OUTPUT_TOKENS_BY_ROUTE.get(request.route.id);
+  const modelCapabilities =
+    request.route.output === undefined && request.route.vision === undefined
+      ? undefined
+      : {
+          [modelId]: {
+            ...(request.route.output === undefined ? {} : { output: request.route.output }),
+            ...(benchmarkOutputTokens !== undefined
+              ? { outputTokenField: "max_completion_tokens" as const }
+              : {}),
+            ...(request.route.vision === undefined ? {} : { vision: request.route.vision }),
+          },
+        };
   const providers = parseModelProviderConfigs(
     {
       [providerId]: {
@@ -212,18 +227,7 @@ function buildUserConfig(
         apiKeyEnv: request.route.apiKeyEnv,
         models: [modelId],
         discoverModels: false,
-        ...(request.route.output === undefined
-          ? {}
-          : {
-              modelCapabilities: {
-                [modelId]: {
-                  output: request.route.output,
-                  ...(benchmarkOutputTokens !== undefined
-                    ? { outputTokenField: "max_completion_tokens" }
-                    : {}),
-                },
-              },
-            }),
+        ...(modelCapabilities === undefined ? {} : { modelCapabilities }),
       },
     },
     "bootstrap request",
@@ -233,6 +237,17 @@ function buildUserConfig(
     defaults: { modelRouteId: request.route.id, mode: "yolo" },
     providers,
   };
+}
+
+function parseRouteVision(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new BootstrapRequestError(
+      "INVALID_ROUTE_VISION",
+      "route.vision must be a boolean when provided.",
+    );
+  }
+  return value;
 }
 
 function parseRouteOutput(routeId: string, value: unknown): number | undefined {
