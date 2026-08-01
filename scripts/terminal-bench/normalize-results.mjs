@@ -172,7 +172,7 @@ export async function normalizeHarborJob({
     await writeOnceJson(join(caseDir, "normalized-result.json"), normalized);
     await writeOnceJson(join(caseDir, "provenance.json"), {
       schemaVersion: 1,
-      normalizerVersion: 2,
+      normalizerVersion: 3,
       runId,
       taskName,
       harborTaskName: trialResult.task_name,
@@ -334,17 +334,10 @@ export function normalizeTrial({
   const verifierOutcome = classifyVerifierOutcome({ verifier, reward: overall });
   const executionOutcome = classifyExecutionOutcome({ infra, adapter, agent });
   const policyIncident = agent.status === "policy_blocked" || (agent.policyDenials?.total ?? 0) > 0;
-  const primaryStatus = classifyPrimary({
-    infra,
-    adapter,
-    agent,
-    verifier,
-    reward: overall,
-    policyIncident,
-  });
+  const primaryStatus = classifyPrimary({ infra, adapter, agent, verifier, reward: overall });
   return {
     schemaVersion: 2,
-    normalizerVersion: 2,
+    normalizerVersion: 3,
     runId,
     taskId:
       typeof trialResult.task_name === "string" ? canonicalTaskName(trialResult.task_name) : null,
@@ -1021,7 +1014,7 @@ function classifyAgent(headless, exitCode, accounting, policyDenials) {
   return agent;
 }
 
-function classifyPrimary({ infra, adapter, agent, verifier, reward, policyIncident }) {
+function classifyPrimary({ infra, adapter, agent, verifier, reward }) {
   if (agent.terminationConfirmed === false || infra.status === "error") return "infra_error";
   if (adapter.status === "error") return "adapter_error";
   if (verifier.status !== "completed") return "verifier_error";
@@ -1035,7 +1028,6 @@ function classifyPrimary({ infra, adapter, agent, verifier, reward, policyIncide
     case "failed":
       return "agent_error";
     case "completed":
-      if (policyIncident) return "policy_blocked";
       return reward >= 1 ? "passed" : "task_failed";
     default:
       return "adapter_error";

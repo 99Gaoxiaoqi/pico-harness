@@ -112,7 +112,7 @@ test("Terminal-Bench normalizer preserves verifier passes with policy incidents"
   );
 });
 
-test("Terminal-Bench normalizer projects recovered policy incidents", async (context) => {
+test("Terminal-Bench normalizer keeps completed outcomes orthogonal to recovered policy incidents", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-recovered-policy-"));
   const jobDir = join(root, "job");
   const runDir = join(root, "run");
@@ -122,30 +122,50 @@ test("Terminal-Bench normalizer projects recovered policy incidents", async (con
     headless: headless("completed", true, policyDenials("approval")),
     runId: "recovered-policy-run",
   });
+  await writeTrial(jobDir, "failed-after-recovered-policy", {
+    reward: 0,
+    headless: headless("completed", true, policyDenials("hardline")),
+    runId: "recovered-policy-run",
+  });
 
   const summary = await normalizeHarborJob({
     jobDir,
     runDir,
     runId: "recovered-policy-run",
-    expectedTasks: 1,
+    expectedTasks: 2,
   });
 
   assert.equal(summary.sealed, true);
   assert.equal(summary.verifierPassCount, 1);
   assert.equal(summary.cleanCompletionCount, 0);
   assert.equal(summary.cleanPassCount, 0);
-  assert.equal(summary.policyIncidentCount, 1);
+  assert.equal(summary.policyIncidentCount, 2);
   assert.equal(summary.verifierPassWithPolicyIncidentCount, 1);
-  assert.equal(summary.verifierPassWithPolicyIncidentRate, 1);
-  assert.deepEqual(summary.policyReasonKindCounts, policyDenials("approval").byReasonKind);
-  assert.equal(summary.passed, 0);
-  assert.equal(summary.counts.policy_blocked, 1);
-  assert.equal(summary.trials[0].primaryStatus, "policy_blocked");
-  assert.equal(summary.trials[0].verifierPassed, true);
-  assert.equal(summary.trials[0].verifierOutcome, "passed");
-  assert.equal(summary.trials[0].executionOutcome, "completed");
-  assert.equal(summary.trials[0].policyIncident, true);
-  assert.deepEqual(summary.trials[0].agent.policyDenials, policyDenials("approval"));
+  assert.equal(summary.verifierPassWithPolicyIncidentRate, 1 / 2);
+  assert.equal(summary.passed, 1);
+  assert.equal(summary.counts.passed, 1);
+  assert.equal(summary.counts.task_failed, 1);
+  assert.equal(summary.counts.policy_blocked ?? 0, 0);
+  assert.deepEqual(summary.policyReasonKindCounts, {
+    ...policyDenials("approval").byReasonKind,
+    protected_destination: 1,
+  });
+  const passedTrial = summary.trials.find(
+    (trial: { primaryStatus: string }) => trial.primaryStatus === "passed",
+  );
+  assert.equal(passedTrial?.verifierPassed, true);
+  assert.equal(passedTrial?.verifierOutcome, "passed");
+  assert.equal(passedTrial?.executionOutcome, "completed");
+  assert.equal(passedTrial?.policyIncident, true);
+  assert.deepEqual(passedTrial?.agent.policyDenials, policyDenials("approval"));
+  const failedTrial = summary.trials.find(
+    (trial: { primaryStatus: string }) => trial.primaryStatus === "task_failed",
+  );
+  assert.equal(failedTrial?.verifierPassed, false);
+  assert.equal(failedTrial?.verifierOutcome, "failed");
+  assert.equal(failedTrial?.executionOutcome, "completed");
+  assert.equal(failedTrial?.policyIncident, true);
+  assert.deepEqual(failedTrial?.agent.policyDenials, policyDenials("hardline"));
 });
 
 test("Terminal-Bench normalizer preserves terminal failures alongside policy incidents", async (context) => {
