@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const xattrHelperDigests = {
-  arm64: "141664b015f756b10fd76c9f92c83052bbb721f2c88d368349ec1e5c619e72a2",
-  x64: "ee31a4ebd31823a4f29d338225dc8c12b4fb4939e200b797ab5ce2b0aa9c7056",
+  arm64: "27657d44d82e89068282b38e4d625856a8511334ba75ba89c2e27bf8831f8e0b",
+  x64: "8554508c77c2fc7909516150bbc40439d926f2de003faff6d02800e428802681",
 };
 
 export async function buildPicoBundle(outputPath) {

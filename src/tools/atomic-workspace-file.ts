@@ -635,18 +635,25 @@ async function runLinuxSetfattr(
   }
 }
 
-async function runBundledLinuxXattrHelper(args: readonly string[]): Promise<{ stdout: string }> {
-  const arch = process.arch === "x64" || process.arch === "arm64" ? process.arch : undefined;
-  if (!arch) throw new Error(`不支持的 Linux xattr helper 架构: ${process.arch}`);
-  // dist/tools -> bundle/xattr-helper; src/tools -> repository helper for local smoke tests.
-  const candidates = [
-    join(moduleDirectory, "../xattr-helper/bin", `xattr-helper-linux-${arch}`),
+export function bundledLinuxXattrHelperCandidates(
+  runtimeModuleDirectory: string,
+  arch: "x64" | "arm64",
+): readonly string[] {
+  return [
+    join(runtimeModuleDirectory, "../../xattr-helper/bin", `xattr-helper-linux-${arch}`),
     join(
-      moduleDirectory,
+      runtimeModuleDirectory,
       "../../scripts/terminal-bench/xattr-helper/bin",
       `xattr-helper-linux-${arch}`,
     ),
   ];
+}
+
+async function runBundledLinuxXattrHelper(args: readonly string[]): Promise<{ stdout: string }> {
+  const arch = process.arch === "x64" || process.arch === "arm64" ? process.arch : undefined;
+  if (!arch) throw new Error(`不支持的 Linux xattr helper 架构: ${process.arch}`);
+  // dist/tools -> bundle/xattr-helper; src/tools -> repository helper for local smoke tests.
+  const candidates = bundledLinuxXattrHelperCandidates(moduleDirectory, arch);
   let lastError: unknown;
   for (const helper of candidates) {
     try {
