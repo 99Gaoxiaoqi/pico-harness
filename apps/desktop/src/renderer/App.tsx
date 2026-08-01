@@ -218,14 +218,7 @@ function AppStateRouter() {
         />
         <Route path="skills" element={<CapabilityPage kind="skills" />} />
         <Route path="mcp" element={<CapabilityPage kind="mcp" />} />
-        <Route
-          path="providers"
-          element={
-            <WorkspaceRoute>
-              <ProviderPageRoute />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="providers" element={<ProviderPageRoute />} />
         <Route
           path="usage"
           element={
@@ -485,7 +478,7 @@ const resourceNav = [
   { to: "/memory", label: "记忆", icon: BrainCircuit, scoped: true },
   { to: "/skills", label: "Skills", icon: WandSparkles },
   { to: "/mcp", label: "MCP", icon: Network },
-  { to: "/providers", label: "模型", icon: BrainCircuit, scoped: true },
+  { to: "/providers", label: "模型", icon: BrainCircuit },
   { to: "/usage", label: "用量", icon: Gauge, scoped: true },
 ] as const;
 
