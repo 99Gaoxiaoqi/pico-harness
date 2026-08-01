@@ -396,8 +396,8 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
 
-    // 3. Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,
-    // 命中后 cache_read 输入单价降至约 1/10,长会话输入成本可降 ~75%(对标 hermes)。
+    // 3. Anthropic Prompt Cache:使用显式断点缓存 system/tools/历史前缀；
+    // 实际成本与延迟收益取决于稳定前缀长度、复用频率和 TTL。
     // 仅当模型 profile 声明支持 prompt cache 时启用,避免不支持该特性的兼容端点报错。
     if (this.shouldUsePromptCache()) {
       const cachePolicy = this.config.capabilities?.promptCache;

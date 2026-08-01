@@ -2,7 +2,7 @@ import { logger } from "../observability/logger.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "./interface.js";
-import { coordinateReasoningLevel } from "./reasoning-capability.js";
+import { applyReasoningRequestPatch, coordinateReasoningLevel } from "./reasoning-capability.js";
 import {
   promptCacheRevisions,
   promptCacheRouteIdentity,
@@ -132,15 +132,11 @@ export function withPromptCachePrewarm(
   ) {
     return provider;
   }
-  const reasoningLevel =
-    config.thinkingEffort ??
-    (config.capabilities
-      ? coordinateReasoningLevel(config.capabilities.reasoningProfile).level
-      : undefined);
-  if (reasoningLevel !== undefined && reasoningLevel.trim().toLowerCase() !== "off") {
+  const incompatibility = claudePrewarmIncompatibility(config);
+  if (incompatibility) {
     logger.warn(
-      { model: config.model, reasoningLevel },
-      "[PromptCache] Claude 预热与当前 thinking/reasoning 不兼容，已禁用预热",
+      { model: config.model, ...incompatibility },
+      "[PromptCache] Claude max_tokens:0 预热与当前请求字段不兼容，已禁用预热",
     );
     return provider;
   }
@@ -176,6 +172,75 @@ function statusCode(error: unknown): number | undefined {
 
 function promptCacheTtlMs(config: ProviderConfig): number {
   return config.capabilities?.promptCache.ttl === "1h" ? 3_600_000 : 300_000;
+}
+
+type ClaudePrewarmIncompatibilityCode =
+  | "manual_extended_thinking"
+  | "structured_output"
+  | "streaming"
+  | "forced_tool_choice";
+
+interface ClaudePrewarmIncompatibility {
+  code: ClaudePrewarmIncompatibilityCode;
+  requestPath: string;
+  reasoningLevel?: string;
+}
+
+/**
+ * Anthropic permits max_tokens:0 with effort/adaptive thinking when the prewarm and real request
+ * carry the same fields. Reject only wire fields that the API explicitly declares incompatible.
+ */
+function claudePrewarmIncompatibility(
+  config: ProviderConfig,
+): ClaudePrewarmIncompatibility | undefined {
+  const capabilities = config.capabilities;
+  if (!capabilities) return undefined;
+  const reasoningLevel =
+    config.thinkingEffort ?? coordinateReasoningLevel(capabilities.reasoningProfile).level;
+  const projected = applyReasoningRequestPatch(
+    {},
+    capabilities.reasoningProfile,
+    reasoningLevel,
+    "claude",
+  ) as Record<string, unknown>;
+  const thinking = plainRecord(projected["thinking"]);
+  if (thinking?.["type"] === "enabled") {
+    return {
+      code: "manual_extended_thinking",
+      requestPath: "thinking.type",
+      ...(reasoningLevel ? { reasoningLevel } : {}),
+    };
+  }
+  const outputConfig = plainRecord(projected["output_config"]);
+  if (outputConfig?.["format"] !== undefined) {
+    return {
+      code: "structured_output",
+      requestPath: "output_config.format",
+      ...(reasoningLevel ? { reasoningLevel } : {}),
+    };
+  }
+  if (projected["stream"] === true) {
+    return {
+      code: "streaming",
+      requestPath: "stream",
+      ...(reasoningLevel ? { reasoningLevel } : {}),
+    };
+  }
+  const toolChoice = plainRecord(projected["tool_choice"]);
+  if (toolChoice?.["type"] === "any" || toolChoice?.["type"] === "tool") {
+    return {
+      code: "forced_tool_choice",
+      requestPath: "tool_choice.type",
+      ...(reasoningLevel ? { reasoningLevel } : {}),
+    };
+  }
+  return undefined;
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function isOfficialAnthropicEndpoint(baseURL: string): boolean {

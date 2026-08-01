@@ -1,8 +1,9 @@
 // Anthropic Prompt Cache 断点注入器。
 //
-// 背景:Anthropic API 支持在请求体的 content block / system / tools 上标记
-// `cache_control: { type: "ephemeral" }`,服务端据此缓存前缀(默认 5 分钟,
-// 滚动续期)。命中后 cache_read 输入单价降至约 1/10,实测长会话输入成本可降 ~75%。
+// 背景:Anthropic API 同时支持顶层 automatic caching 与 block-level explicit
+// breakpoints。本注入器使用显式 `cache_control: { type: "ephemeral" }` 标记，
+// 让服务端缓存截至指定 content block / system / tool 的完整前缀。默认 TTL 为 5m，
+// 命中会滚动续期；实际成本与延迟收益取决于前缀长度、复用频率和所选 TTL。
 //
 // 限制(Anthropic 官方约束):
 //   - 单次请求最多 4 个 ephemeral 断点,超出会 400。
@@ -22,7 +23,7 @@
 /** Anthropic cache_control 标记。当前仅支持 ephemeral(短时滚动缓存)。 */
 export interface CacheControl {
   type: "ephemeral";
-  /** 可选 TTL 秒(Anthropic 支持 300/3600,省略走默认 300)。预留扩展,当前不发。 */
+  /** Anthropic wire TTL 仅接受 `5m` / `1h`；省略时使用默认 `5m`。 */
   ttl?: "5m" | "1h";
 }
 
