@@ -16,7 +16,7 @@
 
 import { logger } from "../observability/logger.js";
 import { hasSupportedHostShell } from "../os/shell.js";
-import { isHardlineBashCommand } from "./bash-hardline.js";
+import { classifyHardlineBashCommand, type HardlineBashReasonKind } from "./bash-hardline.js";
 import type { PermissionSessionScope } from "./session-permissions.js";
 
 /** 审批结果包 */
@@ -361,14 +361,24 @@ export function isDangerousCommand(toolName: string, args: string): boolean {
   return false;
 }
 
-export function isHardlineCommand(toolName: string, args: string, workDir?: string): boolean {
-  if (toolName !== "bash") return false;
+export type HardlineReasonKind = HardlineBashReasonKind;
+
+export function classifyHardlineCommand(
+  toolName: string,
+  args: string,
+  workDir?: string,
+): HardlineReasonKind | undefined {
+  if (toolName !== "bash") return undefined;
   // hardline 的语法模型只覆盖 Bash。实际 host 无法解析为 Bash 时，必须在
   // YOLO/审批/后台策略之前 fail closed，不能让其他 shell 解释同一段文本。
-  if (!hasSupportedHostShell()) return true;
+  if (!hasSupportedHostShell()) return "unknown_hardline";
   const command = parseBashCommand(args);
   // Bash 参数无法确定解析时不得继续到 shell。
-  return command === undefined || isHardlineBashCommand(command, workDir);
+  return command === undefined ? "unknown_hardline" : classifyHardlineBashCommand(command, workDir);
+}
+
+export function isHardlineCommand(toolName: string, args: string, workDir?: string): boolean {
+  return classifyHardlineCommand(toolName, args, workDir) !== undefined;
 }
 
 function buildApprovalPreview(toolName: string, args: string, diff?: string): ApprovalPreview {

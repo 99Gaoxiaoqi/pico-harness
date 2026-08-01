@@ -19,6 +19,7 @@ test("Bash timeout keeps the 30s default and accepts bounded trusted overrides",
   assert.equal(resolveBashTimeoutMs(180_000), 180_000);
   assert.equal(resolveBashTimeoutMs(MIN_BASH_TIMEOUT_MS), MIN_BASH_TIMEOUT_MS);
   assert.equal(resolveBashTimeoutMs(MAX_BASH_TIMEOUT_MS), MAX_BASH_TIMEOUT_MS);
+  assert.equal(MAX_BASH_TIMEOUT_MS, 900_000);
   assert.doesNotThrow(() => new BashTool(process.cwd(), undefined, { timeoutMs: 180_000 }));
 });
 
@@ -34,7 +35,7 @@ test("Bash timeout rejects malformed and out-of-range trusted overrides", () => 
   ]) {
     assert.throws(
       () => resolveBashTimeoutMs(value),
-      /bashTimeoutMs 必须是 1000\.\.300000 范围内的整数/u,
+      /bashTimeoutMs 必须是 1000\.\.900000 范围内的整数/u,
     );
   }
 });
