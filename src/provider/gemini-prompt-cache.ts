@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
-import { isAbortError } from "./errors.js";
+import { isAbortError, LLMStatusError } from "./errors.js";
 import { normalizePromptCacheEndpoint } from "./provider-endpoint.js";
 
 export interface GeminiPromptCacheRecord {
@@ -141,6 +141,8 @@ export interface GeminiPromptCacheControllerOptions {
   readonly baseURL: string;
   readonly model: string;
   readonly ttlSeconds: number;
+  /** Short, bounded suppression for deterministic create failures such as unsupported inputs. */
+  readonly createFailureCooldownMs?: number;
   readonly now?: () => number;
 }
 
@@ -149,6 +151,8 @@ export interface GeminiPromptCacheControllerOptions {
  * callers receive no name and send their normal full Gemini request.
  */
 export class GeminiPromptCacheController {
+  private static readonly DEFAULT_CREATE_FAILURE_COOLDOWN_MS = 60_000;
+  private static readonly MAX_CREATE_FAILURES = 256;
   /**
    * Process-wide key locks are scoped by the runtime-owned store object. They deduplicate sibling
    * providers and serialize startup cleanup against creation without sharing names across
@@ -158,8 +162,13 @@ export class GeminiPromptCacheController {
     GeminiPromptCacheStore,
     Map<string, Promise<void>>
   >();
+  private static readonly createFailuresByStore = new WeakMap<
+    GeminiPromptCacheStore,
+    Map<string, number>
+  >();
   private readonly store: GeminiPromptCacheStore;
   private readonly operations: Map<string, Promise<void>>;
+  private readonly createFailureUntil: Map<string, number>;
   private readonly now: () => number;
   private readonly baseUrlDigest: string;
 
@@ -169,6 +178,10 @@ export class GeminiPromptCacheController {
       GeminiPromptCacheController.operationsByStore.get(this.store) ??
       new Map<string, Promise<void>>();
     GeminiPromptCacheController.operationsByStore.set(this.store, this.operations);
+    this.createFailureUntil =
+      GeminiPromptCacheController.createFailuresByStore.get(this.store) ??
+      new Map<string, number>();
+    GeminiPromptCacheController.createFailuresByStore.set(this.store, this.createFailureUntil);
     this.now = options.now ?? Date.now;
     this.baseUrlDigest = sha256(normalizePromptCacheEndpoint(options.baseURL));
   }
@@ -252,12 +265,26 @@ export class GeminiPromptCacheController {
         }
       }
 
-      const created = await this.options.transport.create({
-        model: this.options.model,
-        ttlSeconds: this.options.ttlSeconds,
-        source,
-        ...(signal ? { signal } : {}),
-      });
+      if ((this.createFailureUntil.get(key) ?? 0) > now) {
+        return fallbackName ? { name: fallbackName } : undefined;
+      }
+      this.createFailureUntil.delete(key);
+
+      let created: Awaited<ReturnType<GeminiPromptCacheTransport["create"]>>;
+      try {
+        created = await this.options.transport.create({
+          model: this.options.model,
+          ttlSeconds: this.options.ttlSeconds,
+          source,
+          ...(signal ? { signal } : {}),
+        });
+        this.createFailureUntil.delete(key);
+      } catch (error) {
+        if (isDeterministicCreateFailure(error)) {
+          this.rememberCreateFailure(key, now);
+        }
+        throw error;
+      }
       if (!created.name) return undefined;
       const expireAt = created.expireAt ?? now + this.options.ttlSeconds * 1_000;
       try {
@@ -294,6 +321,19 @@ export class GeminiPromptCacheController {
 
   private shouldRefresh(record: GeminiPromptCacheRecord, now: number): boolean {
     return record.expireAt - now <= record.ttlSeconds * 1_000 * 0.2;
+  }
+
+  private rememberCreateFailure(key: string, now: number): void {
+    if (this.createFailureUntil.size >= GeminiPromptCacheController.MAX_CREATE_FAILURES) {
+      const oldest = this.createFailureUntil.keys().next().value;
+      if (oldest !== undefined) this.createFailureUntil.delete(oldest);
+    }
+    this.createFailureUntil.set(
+      key,
+      now +
+        (this.options.createFailureCooldownMs ??
+          GeminiPromptCacheController.DEFAULT_CREATE_FAILURE_COOLDOWN_MS),
+    );
   }
 
   private async cleanupExpired(
@@ -454,6 +494,16 @@ function isPositiveFiniteNumber(value: unknown): value is number {
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isDeterministicCreateFailure(error: unknown): boolean {
+  return (
+    error instanceof LLMStatusError &&
+    (error.statusCode === 400 ||
+      error.statusCode === 403 ||
+      error.statusCode === 404 ||
+      error.statusCode === 422)
+  );
 }
 
 function isMissing(error: unknown): boolean {
