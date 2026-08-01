@@ -819,6 +819,18 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
             re.DOTALL,
         )
         assert supervisor_matcher is not None
+        node_mapping_matcher = re.search(
+            r"function hasTrustedNodeMappings\(raw, expectedInode\) \{.*?\n\}",
+            adapter._VERIFIER_SERVICE_PROBE,
+            re.DOTALL,
+        )
+        assert node_mapping_matcher is not None
+        executable_matcher = re.search(
+            r"function usesTrustedSupervisorExecutable\(pid\) \{.*?\n\}",
+            adapter._VERIFIER_SERVICE_PROBE,
+            re.DOTALL,
+        )
+        assert executable_matcher is not None
         matcher_check = subprocess.run(
             [
                 node,
@@ -837,6 +849,34 @@ async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
                     "if(!hasTrustedSupervisorArguments(exact))process.exit(42);"
                     "exact.splice(4,0,'--input-type=commonjs');"
                     "if(hasTrustedSupervisorArguments(exact))process.exit(43);"
+                    "const emulated=[supervisorNode,'--no-opt','-r','/proc/.reset','-e',helper,helperSentinel,'launch',manifestPath,workspace,nonce];"
+                    "if(!hasTrustedSupervisorArguments(emulated))process.exit(44);"
+                    "emulated.splice(4,0,'--input-type=commonjs');"
+                    "if(hasTrustedSupervisorArguments(emulated))process.exit(45);"
+                    f"{node_mapping_matcher.group(0)}"
+                    "const maps='00400000-00e26000 r--p 00000000 00:40 649790 '+supervisorNode+'\\n'"
+                    "+'00e26000-00e29000 r-xp 00a26000 00:40 649790 '+supervisorNode+'\\n';"
+                    "if(!hasTrustedNodeMappings(maps,649790))process.exit(46);"
+                    "if(hasTrustedNodeMappings(maps,649791))process.exit(47);"
+                    "if(hasTrustedNodeMappings(maps.replace('r-xp','r--p'),649790))process.exit(48);"
+                    "let currentInode=2;"
+                    "const expectedStat={dev:64,ino:649790,mode:0o100555,isFile:()=>true};"
+                    "const fs={"
+                    "statSync:(candidate)=>{"
+                    "if(candidate===supervisorNode)return expectedStat;"
+                    "if(candidate==='/proc/123/exe')return {dev:58,ino:2};"
+                    "if(candidate==='/proc/self/exe')return {dev:58,ino:currentInode};"
+                    "if(candidate==='/proc/.reset')return {dev:71,mode:0o100644,size:0,uid:0,gid:0,isFile:()=>true};"
+                    "if(candidate==='/proc')return {dev:71};throw new Error('unexpected stat');},"
+                    "realpathSync:(candidate)=>candidate==='/proc/self/exe'?supervisorNode:candidate,"
+                    "readlinkSync:(candidate)=>candidate==='/proc/123/exe'?'/run/rosetta/rosetta':supervisorNode,"
+                    "readFileSync:(candidate)=>candidate.endsWith('/maps')?maps:'',"
+                    "};"
+                    "process.execPath=supervisorNode;"
+                    f"{executable_matcher.group(0)}"
+                    "if(!usesTrustedSupervisorExecutable('123'))process.exit(49);"
+                    "currentInode=3;"
+                    "if(usesTrustedSupervisorExecutable('123'))process.exit(50);"
                 ),
             ],
             check=False,
