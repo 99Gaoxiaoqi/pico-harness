@@ -59,7 +59,9 @@ const harborArtifactManifestSha256 =
 const harborWheelUrl =
   "https://files.pythonhosted.org/packages/76/03/b6617f32385295729f3af0ae0d512cf87ba4793b9ce462ea020d776a9025/harbor-0.20.0-py3-none-any.whl";
 const benchmarkApiKeyEnv = "PICO_TB_PROVIDER_API_KEY";
-const benchmarkBashTimeoutMs = 180_000;
+const benchmarkBashTimeoutMs = 900_000;
+const benchmarkMaxTurns = 80;
+const benchmarkRuntimeRetryCount = 1;
 const defaultRunCostCNY = 250;
 const maximumRunCostCNY = 1_000_000;
 const nodeArchives = {
@@ -362,6 +364,8 @@ const manifest = {
     mode,
     attempts: options.attempts,
     concurrency: options.concurrency,
+    maxTurns: benchmarkMaxTurns,
+    runtimeRetryCount: benchmarkRuntimeRetryCount,
     harborTrialMaxRetries,
     os: process.platform,
     arch: process.arch,
@@ -431,6 +435,10 @@ const harborArgs = [
   `pico_commit=${picoCommit}`,
   "--ak",
   `bash_timeout_ms=${benchmarkBashTimeoutMs}`,
+  "--ak",
+  `max_turns=${benchmarkMaxTurns}`,
+  "--ak",
+  `runtime_retry_count=${benchmarkRuntimeRetryCount}`,
   "--n-attempts",
   String(options.attempts),
   "--n-concurrent",
