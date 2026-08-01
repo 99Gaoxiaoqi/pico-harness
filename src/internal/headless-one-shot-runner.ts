@@ -47,6 +47,8 @@ const MAX_PROMPT_LENGTH = 1024 * 1024;
 const MAX_SHUTDOWN_GRACE_MS = 60_000;
 const MAX_TIMEOUT_MS = 12_000_000;
 const MAX_BASH_TIMEOUT_MS = 900_000;
+// Internal benchmark-only ceiling; parsing rejects it outside single_non_stream mode.
+const TERMINAL_BENCH_PROVIDER_TIMEOUT_MS = 330_000;
 const MAX_POLICY_DENIAL_COUNT = Number.MAX_SAFE_INTEGER;
 const MAX_POLICY_TOOL_NAME_LENGTH = 128;
 const LOCK_DIRECTORY_MODE = 0o700;
@@ -90,6 +92,7 @@ const REQUEST_FIELDS = new Set([
   "prompt",
   "modelRouteId",
   "providerRequestMode",
+  "providerTimeoutMs",
   "thinkingEffort",
   "permissionMode",
   "policyDenialMode",
@@ -148,6 +151,7 @@ export interface HeadlessOneShotRequestV1 {
   readonly prompt: string;
   readonly modelRouteId: string;
   readonly providerRequestMode?: "single_non_stream";
+  readonly providerTimeoutMs?: number;
   readonly thinkingEffort?: string;
   readonly permissionMode: SessionSettings["mode"];
   readonly policyDenialMode?: "terminal" | "incident";
@@ -512,7 +516,10 @@ async function runValidatedRequest(
       ...(request.bashTimeoutMs !== undefined ? { bashTimeoutMs: request.bashTimeoutMs } : {}),
       ...(request.maxTurns !== undefined ? { maxTurns: request.maxTurns } : {}),
       ...(request.providerRequestMode === "single_non_stream"
-        ? { providerDecorator: singleNonStreamingProvider }
+        ? {
+            providerDecorator: (provider: LLMProvider) =>
+              singleNonStreamingProvider(provider, request.providerTimeoutMs),
+          }
         : {}),
       ...(dependencies.providerFactory ? { providerFactory: dependencies.providerFactory } : {}),
     };
@@ -989,6 +996,27 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
       "providerRequestMode must be single_non_stream when provided.",
     );
   }
+  const providerTimeoutMs =
+    value["providerTimeoutMs"] === undefined
+      ? undefined
+      : requiredInteger(
+          value["providerTimeoutMs"],
+          "providerTimeoutMs",
+          1,
+          TERMINAL_BENCH_PROVIDER_TIMEOUT_MS,
+        );
+  if (providerTimeoutMs !== undefined && providerRequestMode !== "single_non_stream") {
+    throw new HeadlessRequestError(
+      "INVALID_PROVIDER_TIMEOUT",
+      "providerTimeoutMs requires providerRequestMode=single_non_stream.",
+    );
+  }
+  if (providerTimeoutMs !== undefined && providerTimeoutMs > timeoutMs) {
+    throw new HeadlessRequestError(
+      "INVALID_PROVIDER_TIMEOUT",
+      "providerTimeoutMs must not exceed timeoutMs.",
+    );
+  }
   const policyDenialMode = value["policyDenialMode"];
   if (
     policyDenialMode !== undefined &&
@@ -1022,6 +1050,7 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     prompt,
     modelRouteId,
     ...(providerRequestMode !== undefined ? { providerRequestMode } : {}),
+    ...(providerTimeoutMs !== undefined ? { providerTimeoutMs } : {}),
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
     permissionMode: permissionMode as SessionSettings["mode"],
     ...(policyDenialMode !== undefined ? { policyDenialMode } : {}),
@@ -1034,11 +1063,17 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
   };
 }
 
-function singleNonStreamingProvider(provider: LLMProvider): LLMProvider {
+function singleNonStreamingProvider(
+  provider: LLMProvider,
+  providerTimeoutMs?: number,
+): LLMProvider {
   return {
     async generate(messages, tools, options) {
       try {
-        return await provider.generate(messages, tools, options);
+        return await provider.generate(messages, tools, {
+          ...options,
+          ...(providerTimeoutMs !== undefined ? { timeoutMs: providerTimeoutMs } : {}),
+        });
       } catch (error) {
         options?.signal?.throwIfAborted();
         throw new Error("Single-call headless provider request failed", { cause: error });

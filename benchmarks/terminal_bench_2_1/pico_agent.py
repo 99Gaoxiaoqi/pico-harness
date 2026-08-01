@@ -40,6 +40,9 @@ from benchmarks.terminal_bench_2_1.harbor_runtime import (
     set_verifier_exec_env,
 )
 from benchmarks.terminal_bench_2_1.runtime_limits import (
+    BENCHMARK_PROVIDER_TIMEOUT_MS,
+    GATEWAY_CONTROL_SUPERVISOR_TIMEOUT_SEC,
+    GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC,
     MAX_TASK_AGENT_TIMEOUT_SEC,
     MAX_TASK_VERIFIER_TIMEOUT_SEC,
 )
@@ -817,6 +820,9 @@ rm -f {remote_archive}
                 "prompt": benchmark_instruction(instruction, workspace),
                 "modelRouteId": route_config["modelRouteId"],
                 "providerRequestMode": "single_non_stream",
+                "providerTimeoutMs": min(
+                    BENCHMARK_PROVIDER_TIMEOUT_MS, inner_timeout_ms
+                ),
                 **(
                     {"thinkingEffort": route_config["thinkingEffort"]}
                     if route_config.get("thinkingEffort")
@@ -1952,7 +1958,15 @@ class ProviderGateway:
 
     def _supervisor_request(self, value: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(value, separators=(",", ":")).encode()
-        connection = UnixHTTPConnection(self._supervisor_socket, timeout=130)
+        timeout = (
+            GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC
+            if value.get("action") == "proxy"
+            else GATEWAY_CONTROL_SUPERVISOR_TIMEOUT_SEC
+        )
+        connection = UnixHTTPConnection(
+            self._supervisor_socket,
+            timeout=timeout,
+        )
         try:
             connection.request(
                 "POST",

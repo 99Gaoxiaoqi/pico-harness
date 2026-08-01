@@ -98,7 +98,7 @@ export class ClaudeProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: providerRequestSignal(options?.signal),
+      signal: providerRequestSignal(options?.signal, options?.timeoutMs),
     });
 
     if (!resp.ok) {
@@ -165,7 +165,7 @@ export class ClaudeProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: providerRequestSignal(options?.signal),
+      signal: providerRequestSignal(options?.signal, options?.timeoutMs),
     });
 
     if (!resp.ok) {

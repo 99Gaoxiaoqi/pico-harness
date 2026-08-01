@@ -753,6 +753,10 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                     )
                 )
                 assert request["maxTurns"] == 80
+                assert request["providerRequestMode"] == "single_non_stream"
+                assert request["providerTimeoutMs"] == min(
+                    330_000, request["timeoutMs"]
+                )
                 assert "inside /app/.pico-tmp or /app/.local" in request["prompt"]
                 assert "prefer write_file or edit_file" in request["prompt"]
                 assert "invoke executables with literal argv" in request["prompt"]
@@ -1422,6 +1426,73 @@ def assert_task_timeout_contract(adapter: Any) -> None:
         {"action": "revoke", "trialId": "timeout-trial"}
     )
     assert signed["auth"]["expiresAt"] - signed["auth"]["issuedAt"] == 12_000
+
+
+def assert_supervisor_request_timeout_contract(adapter: Any) -> None:
+    runtime_limits = importlib.import_module(
+        "benchmarks.terminal_bench_2_1.runtime_limits"
+    )
+    assert runtime_limits.GATEWAY_UPSTREAM_HTTP_TIMEOUT_SEC == 300
+    assert runtime_limits.GATEWAY_UPSTREAM_WORKER_TIMEOUT_SEC == 310
+    assert runtime_limits.GATEWAY_UPSTREAM_WORKER_TIMEOUT_SEC == (
+        runtime_limits.GATEWAY_UPSTREAM_HTTP_TIMEOUT_SEC
+        + runtime_limits.GATEWAY_UPSTREAM_WORKER_MARGIN_SEC
+    )
+    assert runtime_limits.GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC == 320
+    assert runtime_limits.GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC == (
+        runtime_limits.GATEWAY_UPSTREAM_WORKER_TIMEOUT_SEC
+        + runtime_limits.GATEWAY_PROXY_SUPERVISOR_MARGIN_SEC
+    )
+    assert runtime_limits.GATEWAY_CONTROL_SUPERVISOR_TIMEOUT_SEC == 5
+    assert runtime_limits.BENCHMARK_PROVIDER_TIMEOUT_MS == 330_000
+    assert runtime_limits.BENCHMARK_PROVIDER_TIMEOUT_MS == (
+        runtime_limits.GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC * 1_000
+        + runtime_limits.BENCHMARK_PROVIDER_RESPONSE_MARGIN_MS
+    )
+
+    observed: list[dict[str, Any]] = []
+
+    class ImmediateResponse:
+        status = 200
+
+        def read(self, _limit: int) -> bytes:
+            return b"{}"
+
+    class ImmediateConnection:
+        def __init__(self, path: str, timeout: float):
+            observed.append({"path": path, "timeout": timeout})
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> ImmediateResponse:
+            return ImmediateResponse()
+
+        def close(self) -> None:
+            pass
+
+    gateway = adapter.ProviderGateway(
+        protocol="openai",
+        supervisor_socket="/unused",
+        capability_seed="a" * 64,
+        run_id="supervisor-timeout-contract",
+        network_name="timeout-network",
+        context_id="timeout-trial",
+        ttl_sec=12_000,
+        pricing_sha256="b" * 64,
+        receipt_path=Path("/unused"),
+    )
+    original_connection = adapter.UnixHTTPConnection
+    adapter.UnixHTTPConnection = ImmediateConnection
+    try:
+        assert gateway._supervisor_request({"action": "proxy"}) == {}
+        assert gateway._supervisor_request({"action": "revoke"}) == {}
+    finally:
+        adapter.UnixHTTPConnection = original_connection
+    assert observed == [
+        {"path": "/unused", "timeout": 320},
+        {"path": "/unused", "timeout": 5},
+    ]
 
 
 async def assert_verifier_runtime_contract() -> None:
@@ -2489,6 +2560,7 @@ async def main() -> None:
     await assert_runtime_retry_contract(adapter)
     await assert_verifier_service_manifest_contract(adapter)
     assert_task_timeout_contract(adapter)
+    assert_supervisor_request_timeout_contract(adapter)
     assert adapter.PicoInstalledAgent._POLICY_DENIAL_MODE == "incident"
     assert adapter.require_bounded_int(900_000, "bash_timeout_ms", 1_000, 900_000) == 900_000
     for invalid in (999, 900_001, 1.5, True, "180000.0", None):
