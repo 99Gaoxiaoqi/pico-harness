@@ -419,11 +419,12 @@ test("headless single_non_stream mode uses one non-streaming provider attempt", 
       ...requestFor(fixture, "single-non-stream"),
       providerRequestMode: "single_non_stream",
       providerTimeoutMs: 330_000,
-      providerAdmissionDeadlineMs: Date.now() + 400_000,
+      providerAdmissionDeadlineMs: 1_001,
       timeoutMs: 400_000,
     }),
     {
       env: {},
+      now: () => 0,
       providerFactory: () => ({
         async generate(_messages, _tools, options) {
           generateCalls++;

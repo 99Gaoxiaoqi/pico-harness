@@ -1325,16 +1325,22 @@ async def assert_run_failure_cleanup_contract(adapter: Any) -> None:
     events: list[str] = []
     prepare_verifier_egress: list[bool] = []
     cleanup_failure: list[BaseException] = [RuntimeError("synthetic cleanup failure")]
+    gateway_factory_calls = 0
+    gateway_start_calls = 0
 
     class Gateway:
         relay_name = "synthetic-gateway-relay"
 
         def __init__(self, **_kwargs: Any) -> None:
+            nonlocal gateway_factory_calls
+            gateway_factory_calls += 1
             events.append("gateway-started")
             self.base_url = "http://pico-gateway:8080"
             self.capability = "synthetic-capability"
 
         def start(self) -> None:
+            nonlocal gateway_start_calls
+            gateway_start_calls += 1
             events.append("gateway-registered")
 
         async def start_relay(self, _environment: Any) -> None:
@@ -1403,6 +1409,47 @@ async def assert_run_failure_cleanup_contract(adapter: Any) -> None:
         agent.session_id = "synthetic-session"
         agent._run_with_gateway = run_with_unconfirmed_shutdown
         environment = types.SimpleNamespace(exec=workspace_exec)
+
+        public_egress_factory_calls = 0
+        public_egress_start_calls = 0
+
+        class UnexpectedPublicEgress:
+            container_env: dict[str, str] = {}
+
+            async def start(self, _environment: Any) -> None:
+                nonlocal public_egress_start_calls
+                public_egress_start_calls += 1
+
+        def unexpected_public_egress_factory(
+            *_args: Any, **_kwargs: Any
+        ) -> UnexpectedPublicEgress:
+            nonlocal public_egress_factory_calls
+            public_egress_factory_calls += 1
+            return UnexpectedPublicEgress()
+
+        adapter.task_agent_timeout = lambda _environment: 400.0
+        adapter.public_egress_access_for_task = unexpected_public_egress_factory
+        try:
+            await agent.run("short-budget", environment, types.SimpleNamespace())
+        except RuntimeError as error:
+            assert str(error) == "provider_request_admission_budget_violation"
+        else:
+            raise AssertionError("short provider admission budget unexpectedly started")
+        assert events == ["cleanup"]
+        assert gateway_factory_calls == 0
+        assert gateway_start_calls == 0
+        assert public_egress_factory_calls == 0
+        assert public_egress_start_calls == 0
+        assert prepare_verifier_egress == [False]
+        assert agent._trial_networks is None
+
+        events.clear()
+        prepare_verifier_egress.clear()
+        adapter.task_agent_timeout = lambda _environment: 900.0
+        adapter.public_egress_access_for_task = lambda *_args, **_kwargs: None
+        agent._trial_networks = adapter.TrialNetworks(
+            "task-network", "gateway-network"
+        )
         try:
             await agent.run("synthetic", environment, types.SimpleNamespace())
         except RuntimeError as error:
@@ -1959,17 +2006,27 @@ def assert_task_timeout_contract(adapter: Any) -> None:
                 )
 
     admission = adapter.provider_request_admission_deadlines(
-        headless_deadline=1_000,
-        monotonic_now=600,
+        headless_deadline=10_000,
+        loop_now=9_600,
+        gateway_monotonic_now=100,
         wall_now=1_900_000_000,
     )
-    assert admission.gateway_monotonic == 668
+    assert admission.gateway_monotonic == 168
     assert admission.headless_wall_ms == 1_900_000_068_000
-    for headless_deadline in (932, 931.999, float("nan"), float("inf")):
+    delayed = adapter.provider_request_admission_deadlines(
+        headless_deadline=10_000,
+        loop_now=9_601,
+        gateway_monotonic_now=100,
+        wall_now=1_900_000_000,
+    )
+    assert delayed.gateway_monotonic == 167
+    assert delayed.headless_wall_ms == 1_900_000_067_000
+    for headless_deadline in (9_932, 9_931.999, float("nan"), float("inf")):
         try:
             adapter.provider_request_admission_deadlines(
                 headless_deadline=headless_deadline,
-                monotonic_now=600,
+                loop_now=9_600,
+                gateway_monotonic_now=100,
                 wall_now=1_900_000_000,
             )
         except RuntimeError as error:
