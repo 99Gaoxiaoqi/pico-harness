@@ -419,6 +419,7 @@ test("headless single_non_stream mode uses one non-streaming provider attempt", 
       ...requestFor(fixture, "single-non-stream"),
       providerRequestMode: "single_non_stream",
       providerTimeoutMs: 330_000,
+      providerAdmissionDeadlineMs: Date.now() + 400_000,
       timeoutMs: 400_000,
     }),
     {
@@ -442,6 +443,80 @@ test("headless single_non_stream mode uses one non-streaming provider attempt", 
   assert.equal(generateCalls, 1);
   assert.equal(streamCalls, 0);
   assert.deepEqual(providerTimeouts, [330_000]);
+});
+
+test("headless single_non_stream refuses aborted or expired provider admission before generate", async (context) => {
+  const fixture = await createFixture(context, "single-non-stream-admission");
+  await configureFixture(fixture, "secret-canary-single-non-stream-admission");
+  let generateCalls = 0;
+  const aborted = new AbortController();
+  aborted.abort(new DOMException("synthetic abort", "AbortError"));
+  const outcomes: string[] = [];
+  for (const [id, signal, providerAdmissionDeadlineMs] of [
+    ["aborted", aborted.signal, Date.now() + 60_000],
+    ["expired", undefined, Date.now() - 1],
+  ] as const) {
+    const outcome = await runHeadlessOneShotJson(
+      JSON.stringify({
+        ...requestFor(fixture, `single-non-stream-admission-${id}`),
+        providerRequestMode: "single_non_stream",
+        providerTimeoutMs: 60_000,
+        providerAdmissionDeadlineMs,
+        timeoutMs: 60_000,
+      }),
+      {
+        env: {},
+        executeRuntime: async (_options, dependencies) => {
+          const provider = dependencies?.providerDecorator?.({
+            async generate() {
+              generateCalls++;
+              return assistant("must not generate");
+            },
+          });
+          if (!provider) throw new Error("single-call provider decorator is unavailable");
+          await assert.rejects(() => provider.generate([], [], { signal }));
+          outcomes.push(id);
+          return runtimeResult(_options, "admission rejected");
+        },
+      },
+    );
+    assert.equal(outcome.result.status, "completed");
+  }
+  assert.deepEqual(outcomes, ["aborted", "expired"]);
+  assert.equal(generateCalls, 0);
+});
+
+test("headless single_non_stream clamps each provider timeout to its admission window", async (context) => {
+  const fixture = await createFixture(context, "single-non-stream-clamped-timeout");
+  await configureFixture(fixture, "secret-canary-single-non-stream-clamped-timeout");
+  let observedTimeout = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "single-non-stream-clamped-timeout"),
+      providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 60_000,
+      providerAdmissionDeadlineMs: Date.now() + 30_000,
+      timeoutMs: 60_000,
+    }),
+    {
+      env: {},
+      executeRuntime: async (options, dependencies) => {
+        const provider = dependencies?.providerDecorator?.({
+          async generate(_messages, _tools, providerOptions) {
+            observedTimeout = providerOptions?.timeoutMs ?? 0;
+            return assistant("clamped");
+          },
+        });
+        if (!provider) throw new Error("single-call provider decorator is unavailable");
+        await provider.generate([], []);
+        return runtimeResult(options, "clamped");
+      },
+    },
+  );
+  assert.equal(outcome.result.status, "completed");
+  assert.ok(observedTimeout >= 1_000);
+  assert.ok(observedTimeout < 30_000);
+  assert.ok(observedTimeout < 60_000);
 });
 
 test("provider request signal keeps the production default and accepts a trusted override", (context) => {
@@ -804,6 +879,18 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
     dependencies,
   );
   assert.equal(invalidProviderTimeout.result.error?.code, "INVALID_FIELD");
+  const missingProviderAdmissionDeadline = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "missing-provider-admission-deadline"),
+      providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 30_000,
+    }),
+    dependencies,
+  );
+  assert.equal(
+    missingProviderAdmissionDeadline.result.error?.code,
+    "INVALID_PROVIDER_ADMISSION_DEADLINE",
+  );
   const providerTimeoutAboveCeiling = await runHeadlessOneShotJson(
     JSON.stringify({
       ...requestFor(fixture, "provider-timeout-above-ceiling"),

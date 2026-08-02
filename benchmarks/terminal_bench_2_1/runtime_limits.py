@@ -20,3 +20,11 @@ BENCHMARK_PROVIDER_TIMEOUT_MS = (
     GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC * 1_000
     + BENCHMARK_PROVIDER_RESPONSE_MARGIN_MS
 )
+# A request admitted at the cutoff still needs time for the HTTP call, worker,
+# supervisor relay, and the headless provider boundary to settle before the
+# headless deadline. Keep a small extra allowance for scheduling jitter.
+GATEWAY_PROVIDER_ADMISSION_JITTER_SEC = 2
+GATEWAY_PROVIDER_ADMISSION_LEAD_SEC = (
+    BENCHMARK_PROVIDER_TIMEOUT_MS / 1_000
+    + GATEWAY_PROVIDER_ADMISSION_JITTER_SEC
+)

@@ -43,6 +43,7 @@ from benchmarks.terminal_bench_2_1.harbor_runtime import (
 from benchmarks.terminal_bench_2_1.runtime_limits import (
     BENCHMARK_PROVIDER_TIMEOUT_MS,
     GATEWAY_CONTROL_SUPERVISOR_TIMEOUT_SEC,
+    GATEWAY_PROVIDER_ADMISSION_LEAD_SEC,
     GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC,
     MAX_TASK_AGENT_TIMEOUT_SEC,
     MAX_TASK_VERIFIER_TIMEOUT_SEC,
@@ -700,6 +701,12 @@ rm -f {remote_archive}
                 network_name=networks.gateway,
                 context_id=context_id,
                 ttl_sec=outer_timeout_sec,
+                provider_request_admission_deadline_ms=(
+                    provider_request_admission_deadline_ms(
+                        headless_deadline=run_deadlines.headless,
+                        monotonic_now=loop.time(),
+                    )
+                ),
                 pricing_sha256=route_config["pricingSha256"],
                 receipt_path=self.logs_dir / "gateway-accounting-receipt.json",
             )
@@ -862,6 +869,9 @@ rm -f {remote_archive}
                 "providerRequestMode": "single_non_stream",
                 "providerTimeoutMs": min(
                     BENCHMARK_PROVIDER_TIMEOUT_MS, inner_timeout_ms
+                ),
+                "providerAdmissionDeadlineMs": (
+                    gateway.provider_request_admission_deadline_ms
                 ),
                 **(
                     {"thinkingEffort": route_config["thinkingEffort"]}
@@ -1793,6 +1803,7 @@ class ProviderGateway:
         network_name: str,
         context_id: str,
         ttl_sec: float,
+        provider_request_admission_deadline_ms: int,
         pricing_sha256: str,
         receipt_path: Path,
     ):
@@ -1802,6 +1813,15 @@ class ProviderGateway:
         self._network_name = network_name
         self._context_id = context_id
         self._ttl_sec = ttl_sec
+        if (
+            isinstance(provider_request_admission_deadline_ms, bool)
+            or not isinstance(provider_request_admission_deadline_ms, int)
+            or provider_request_admission_deadline_ms < 1
+        ):
+            raise ValueError("gateway provider admission deadline is invalid")
+        self.provider_request_admission_deadline_ms = (
+            provider_request_admission_deadline_ms
+        )
         self._pricing_sha256 = pricing_sha256
         self._receipt_path = receipt_path
         self._capability_seed = capability_seed
@@ -1830,6 +1850,9 @@ class ProviderGateway:
                 "action": "register",
                 "trialId": self._context_id,
                 "ttlSec": self._ttl_sec,
+                "providerRequestAdmissionDeadlineMs": (
+                    self.provider_request_admission_deadline_ms
+                ),
                 "protocol": self._protocol,
             }
         )
@@ -3482,6 +3505,25 @@ def remaining_budget(deadline: float, now: float) -> float:
     if remaining <= 0:
         raise RuntimeError("outer_timeout_budget_violation")
     return remaining
+
+
+def provider_request_admission_deadline_ms(
+    *, headless_deadline: float, monotonic_now: float, wall_now: float | None = None
+) -> int:
+    """Return the adapter-owned cutoff for starting a gateway provider request.
+
+    The gateway trial remains live through outer cleanup, but a provider call may
+    only start while the complete bounded settlement chain still fits before the
+    headless deadline. Wall-clock milliseconds let the separately supervised
+    gateway enforce the same signed cutoff without trusting workload input.
+    """
+    remaining = headless_deadline - monotonic_now
+    if not math.isfinite(remaining):
+        raise RuntimeError("outer_timeout_budget_violation")
+    now = time.time() if wall_now is None else wall_now
+    if not math.isfinite(now):
+        raise RuntimeError("outer_timeout_budget_violation")
+    return int((now + remaining - GATEWAY_PROVIDER_ADMISSION_LEAD_SEC) * 1_000)
 
 
 def reserve_agent_run_deadlines(

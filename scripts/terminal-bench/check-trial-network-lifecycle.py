@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -1045,6 +1047,9 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             gateway=types.SimpleNamespace(
                 base_url="http://pico-gateway:8080",
                 capability="pico-workload-identity",
+                provider_request_admission_deadline_ms=int(
+                    (time.time() + outer_timeout_sec) * 1_000
+                ),
             ),
             route_config=benchmark_route_config(),
             workspace="/app",
@@ -1961,6 +1966,7 @@ def assert_task_timeout_contract(adapter: Any) -> None:
         network_name="timeout-network",
         context_id="timeout-trial",
         ttl_sec=12_000,
+        provider_request_admission_deadline_ms=1_900_000_000_000,
         pricing_sha256="b" * 64,
         receipt_path=Path("/unused"),
     )
@@ -1969,6 +1975,19 @@ def assert_task_timeout_contract(adapter: Any) -> None:
         {"action": "revoke", "trialId": "timeout-trial"}
     )
     assert signed["auth"]["expiresAt"] - signed["auth"]["issuedAt"] == 12_000
+    signed_register = gateway._signed_supervisor_request(
+        {
+            "action": "register",
+            "trialId": "timeout-trial",
+            "ttlSec": 12_000,
+            "protocol": "openai",
+            "providerRequestAdmissionDeadlineMs": 1_900_000_000_000,
+        }
+    )
+    assert (
+        signed_register["providerRequestAdmissionDeadlineMs"]
+        == 1_900_000_000_000
+    )
 
 
 def assert_supervisor_request_timeout_contract(adapter: Any) -> None:
@@ -2022,6 +2041,7 @@ def assert_supervisor_request_timeout_contract(adapter: Any) -> None:
         network_name="timeout-network",
         context_id="timeout-trial",
         ttl_sec=12_000,
+        provider_request_admission_deadline_ms=1_900_000_000_000,
         pricing_sha256="b" * 64,
         receipt_path=Path("/unused"),
     )
@@ -2036,6 +2056,148 @@ def assert_supervisor_request_timeout_contract(adapter: Any) -> None:
         {"path": "/unused", "timeout": 320},
         {"path": "/unused", "timeout": 5},
     ]
+
+
+def assert_gateway_provider_admission_contract(adapter: Any) -> None:
+    supervisor = importlib.import_module(
+        "benchmarks.terminal_bench_2_1.gateway_supervisor"
+    )
+    pricing = {
+        "schemaVersion": 1,
+        "providerId": "admission-provider",
+        "model": "admission-model",
+        "currency": "CNY",
+        "unit": "microCNYPerMillionTokens",
+        "input": 1,
+        "output": 1,
+    }
+    route_config = {
+        "modelRouteId": "admission-provider/admission-model",
+        "providerId": "admission-provider",
+        "provider": {
+            "protocol": "openai",
+            "baseURL": "http://example.invalid",
+            "models": ["admission-model"],
+            "discoverModels": False,
+        },
+        "pricing": pricing,
+        "pricingSha256": hashlib.sha256(
+            supervisor.canonical_json(pricing)
+        ).hexdigest(),
+        "runBudget": {"currency": "CNY", "maxCostMicroCNY": 1_000_000},
+    }
+    request = {
+        "trialId": "admission-trial",
+        "protocol": "openai",
+        "path": "/chat/completions",
+        "headers": {},
+        "body": base64.b64encode(
+            json.dumps(
+                {
+                    "model": "admission-model",
+                    "messages": [],
+                    "max_tokens": 8,
+                }
+            ).encode()
+        ).decode(),
+    }
+    now_ms = [1_000_000]
+    original_time = supervisor.time.time
+    supervisor.time.time = lambda: now_ms[0] / 1_000
+    try:
+        def state_with_deadline(deadline_ms: int) -> Any:
+            state = supervisor.GatewayState(
+                route_config,
+                "secret",
+                "admission-run",
+                "a" * 64,
+            )
+            state.register(
+                {
+                    "trialId": "admission-trial",
+                    "protocol": "openai",
+                    "ttlSec": 60,
+                    "providerRequestAdmissionDeadlineMs": deadline_ms,
+                }
+            )
+            return state
+
+        expired = state_with_deadline(now_ms[0])
+        factory_calls = 0
+
+        def expired_factory() -> Any:
+            nonlocal factory_calls
+            factory_calls += 1
+            raise AssertionError("expired admission reached the upstream factory")
+
+        expired.upstream_request_factory = expired_factory
+        try:
+            expired.proxy(request)
+        except supervisor.GatewayQuotaError as error:
+            assert error.code == "provider_request_admission_closed"
+        else:
+            raise AssertionError("expired provider admission was accepted")
+        assert factory_calls == 0
+        expired_receipt = expired.revoke("admission-trial")
+        assert expired_receipt["status"] == "reconciled"
+        assert expired_receipt["withinBudget"] is True
+        assert expired_receipt["requests"] == {
+            "attempted": 0,
+            "reconciled": 0,
+            "unreconciled": 0,
+        }
+
+        class ReconciledUpstream:
+            def execute(self, _payload: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "status": 200,
+                    "headers": [],
+                    "body": base64.b64encode(
+                        b'{"usage":{"prompt_tokens":2,"completion_tokens":1}}'
+                    ).decode(),
+                }
+
+            def cancel(self, _deadline: float | None = None) -> None:
+                return None
+
+        reconciled = state_with_deadline(now_ms[0] + 1)
+        reconciled.upstream_request_factory = ReconciledUpstream
+        reconciled.proxy(request)
+        reconciled_receipt = reconciled.revoke("admission-trial")
+        assert reconciled_receipt["status"] == "reconciled"
+        assert reconciled_receipt["withinBudget"] is True
+        assert reconciled_receipt["requests"] == {
+            "attempted": 1,
+            "reconciled": 1,
+            "unreconciled": 0,
+        }
+
+        class UnknownUpstream:
+            def execute(self, _payload: dict[str, Any]) -> dict[str, Any]:
+                now_ms[0] += 2
+                raise ValueError("synthetic unknown upstream completion")
+
+            def cancel(self, _deadline: float | None = None) -> None:
+                return None
+
+        unknown = state_with_deadline(now_ms[0] + 1)
+        unknown.upstream_request_factory = UnknownUpstream
+        try:
+            unknown.proxy(request)
+        except ValueError as error:
+            assert str(error) == "synthetic unknown upstream completion"
+        else:
+            raise AssertionError("unknown upstream completion unexpectedly succeeded")
+        unknown_receipt = unknown.revoke("admission-trial")
+        assert unknown_receipt["status"] == "unreconciled"
+        assert unknown_receipt["withinBudget"] is False
+        assert unknown_receipt["requests"] == {
+            "attempted": 1,
+            "reconciled": 0,
+            "unreconciled": 1,
+        }
+    finally:
+        supervisor.time.time = original_time
 
 
 async def assert_verifier_runtime_contract() -> None:
@@ -3105,6 +3267,7 @@ async def main() -> None:
     await assert_verifier_service_manifest_contract(adapter)
     assert_task_timeout_contract(adapter)
     assert_supervisor_request_timeout_contract(adapter)
+    assert_gateway_provider_admission_contract(adapter)
     assert adapter.PicoInstalledAgent._POLICY_DENIAL_MODE == "incident"
     assert adapter.require_bounded_int(900_000, "bash_timeout_ms", 1_000, 900_000) == 900_000
     for invalid in (999, 900_001, 1.5, True, "180000.0", None):
