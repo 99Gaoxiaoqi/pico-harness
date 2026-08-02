@@ -1150,19 +1150,16 @@ function singleNonStreamingProvider(
     async generate(messages, tools, options) {
       options?.signal?.throwIfAborted();
       const nowMs = now();
-      const remainingMs = Math.min(
-        providerAdmissionDeadlineMs - nowMs,
-        runtimeDeadlineMs - nowMs,
-      );
-      if (!Number.isFinite(remainingMs) || remainingMs <= TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS) {
+      if (providerAdmissionDeadlineMs - nowMs <= TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS) {
         throw new Error("Single-call headless provider admission window expired.");
       }
-      const timeoutMs = Math.floor(
-        Math.min(
-          providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS,
-          remainingMs - TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS,
-        ),
+      const runtimeTimeoutMs = Math.floor(
+        runtimeDeadlineMs - nowMs - TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS,
       );
+      const timeoutMs = Math.min(providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS, runtimeTimeoutMs);
+      if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
+        throw new Error("Single-call headless runtime window expired.");
+      }
       try {
         return await provider.generate(messages, tools, {
           ...options,
