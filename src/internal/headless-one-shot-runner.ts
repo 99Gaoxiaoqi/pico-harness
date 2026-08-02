@@ -26,7 +26,7 @@ import {
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CredentialVault } from "../provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
-import type { LLMProvider } from "../provider/interface.js";
+import { DEFAULT_PROVIDER_TIMEOUT_MS, type LLMProvider } from "../provider/interface.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
@@ -53,6 +53,7 @@ const MAX_TIMEOUT_MS = 12_000_000;
 const MAX_BASH_TIMEOUT_MS = 900_000;
 // Internal benchmark-only ceiling; parsing rejects it outside single_non_stream mode.
 const TERMINAL_BENCH_PROVIDER_TIMEOUT_MS = 330_000;
+const TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS = 1_000;
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_IMAGE_ATTACHMENTS_TOTAL_BYTES = 256 * 1024;
 const MAX_POLICY_DENIAL_COUNT = Number.MAX_SAFE_INTEGER;
@@ -100,6 +101,7 @@ const REQUEST_FIELDS = new Set([
   "modelRouteId",
   "providerRequestMode",
   "providerTimeoutMs",
+  "providerAdmissionDeadlineMs",
   "thinkingEffort",
   "permissionMode",
   "policyDenialMode",
@@ -160,6 +162,8 @@ export interface HeadlessOneShotRequestV1 {
   readonly modelRouteId: string;
   readonly providerRequestMode?: "single_non_stream";
   readonly providerTimeoutMs?: number;
+  /** Adapter-signed wall-clock cutoff for beginning a provider HTTP request. */
+  readonly providerAdmissionDeadlineMs?: number;
   readonly thinkingEffort?: string;
   readonly permissionMode: SessionSettings["mode"];
   readonly policyDenialMode?: "terminal" | "incident";
@@ -541,7 +545,13 @@ async function runValidatedRequest(
       ...(request.providerRequestMode === "single_non_stream"
         ? {
             providerDecorator: (provider: LLMProvider) =>
-              singleNonStreamingProvider(provider, request.providerTimeoutMs),
+              singleNonStreamingProvider(
+                provider,
+                request.providerAdmissionDeadlineMs!,
+                startedAt + request.timeoutMs,
+                request.providerTimeoutMs,
+                dependencies.now ?? Date.now,
+              ),
           }
         : {}),
       ...(dependencies.providerFactory ? { providerFactory: dependencies.providerFactory } : {}),
@@ -1042,6 +1052,27 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
       "providerTimeoutMs must not exceed timeoutMs.",
     );
   }
+  const providerAdmissionDeadlineMs =
+    value["providerAdmissionDeadlineMs"] === undefined
+      ? undefined
+      : requiredInteger(
+          value["providerAdmissionDeadlineMs"],
+          "providerAdmissionDeadlineMs",
+          1,
+          Number.MAX_SAFE_INTEGER,
+        );
+  if (providerAdmissionDeadlineMs !== undefined && providerRequestMode !== "single_non_stream") {
+    throw new HeadlessRequestError(
+      "INVALID_PROVIDER_ADMISSION_DEADLINE",
+      "providerAdmissionDeadlineMs requires providerRequestMode=single_non_stream.",
+    );
+  }
+  if (providerRequestMode === "single_non_stream" && providerAdmissionDeadlineMs === undefined) {
+    throw new HeadlessRequestError(
+      "INVALID_PROVIDER_ADMISSION_DEADLINE",
+      "providerAdmissionDeadlineMs is required for single_non_stream mode.",
+    );
+  }
   const policyDenialMode = value["policyDenialMode"];
   if (
     policyDenialMode !== undefined &&
@@ -1077,6 +1108,7 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     modelRouteId,
     ...(providerRequestMode !== undefined ? { providerRequestMode } : {}),
     ...(providerTimeoutMs !== undefined ? { providerTimeoutMs } : {}),
+    ...(providerAdmissionDeadlineMs !== undefined ? { providerAdmissionDeadlineMs } : {}),
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
     permissionMode: permissionMode as SessionSettings["mode"],
     ...(policyDenialMode !== undefined ? { policyDenialMode } : {}),
@@ -1109,14 +1141,32 @@ function parseImagePaths(value: unknown): readonly string[] | undefined {
 
 function singleNonStreamingProvider(
   provider: LLMProvider,
+  providerAdmissionDeadlineMs: number,
+  runtimeDeadlineMs: number,
   providerTimeoutMs?: number,
+  now: () => number = Date.now,
 ): LLMProvider {
   return {
     async generate(messages, tools, options) {
+      options?.signal?.throwIfAborted();
+      const nowMs = now();
+      const remainingMs = Math.min(
+        providerAdmissionDeadlineMs - nowMs,
+        runtimeDeadlineMs - nowMs,
+      );
+      if (!Number.isFinite(remainingMs) || remainingMs <= TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS) {
+        throw new Error("Single-call headless provider admission window expired.");
+      }
+      const timeoutMs = Math.floor(
+        Math.min(
+          providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS,
+          remainingMs - TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS,
+        ),
+      );
       try {
         return await provider.generate(messages, tools, {
           ...options,
-          ...(providerTimeoutMs !== undefined ? { timeoutMs: providerTimeoutMs } : {}),
+          timeoutMs,
         });
       } catch (error) {
         options?.signal?.throwIfAborted();

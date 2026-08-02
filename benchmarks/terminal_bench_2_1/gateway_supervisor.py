@@ -45,6 +45,7 @@ MAX_REQUESTS = 128
 MAX_INPUT_TOKENS = 1_000_000
 MAX_OUTPUT_TOKENS = 65_536
 MAX_REQUEST_OUTPUT_TOKENS = 8_192
+MAX_ADMISSION_DEADLINE_UNIX_MS = 4_102_444_800_000
 MAX_COST_MICRO_CNY = 250_000_000
 MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
@@ -226,6 +227,7 @@ class GatewayState:
     def register(self, request: dict[str, Any]) -> None:
         trial_id = require_trial_id(request.get("trialId"))
         ttl_sec = request.get("ttlSec")
+        admission_deadline_ms = request.get("providerRequestAdmissionDeadlineMs")
         if (
             request.get("protocol") != self.provider["protocol"]
             or isinstance(ttl_sec, bool)
@@ -233,6 +235,9 @@ class GatewayState:
             or not math.isfinite(ttl_sec)
             or ttl_sec <= 0
             or ttl_sec > MAX_TRIAL_TTL_SEC
+            or isinstance(admission_deadline_ms, bool)
+            or not isinstance(admission_deadline_ms, int)
+            or not 1 <= admission_deadline_ms <= MAX_ADMISSION_DEADLINE_UNIX_MS
         ):
             raise ValueError("gateway route mismatch")
         with self.lock:
@@ -240,6 +245,7 @@ class GatewayState:
                 raise ValueError("gateway trial is already registered")
             self.trials[trial_id] = {
                 "expiresAt": time.monotonic() + ttl_sec,
+                "providerRequestAdmissionDeadlineMs": admission_deadline_ms,
                 "requestsRemaining": MAX_REQUESTS,
                 "inputTokensRemaining": MAX_INPUT_TOKENS,
                 "outputTokensRemaining": MAX_OUTPUT_TOKENS,
@@ -280,11 +286,15 @@ class GatewayState:
         required_input_reservation = (
             estimated_input_tokens + INPUT_RESERVATION_MARGIN_TOKENS
         )
-        active = self.upstream_request_factory()
         with self.lock:
             trial = self.trials.get(trial_id)
             if trial is None:
                 raise ValueError("gateway trial is not registered")
+            if time.time() * 1_000 >= trial["providerRequestAdmissionDeadlineMs"]:
+                raise GatewayQuotaError(
+                    "provider_request_admission_closed",
+                    "gateway provider request admission closed",
+                )
             input_reservation = min(
                 trial["inputTokensRemaining"],
                 required_input_reservation,
@@ -340,6 +350,10 @@ class GatewayState:
                     "run_cost_quota_exhausted",
                     "gateway run budget exhausted",
                 )
+            # Constructing the upstream request is deliberately after all
+            # admission checks: a late request must not create a request entry,
+            # consume quota, or touch the upstream factory.
+            active = self.upstream_request_factory()
             trial["requestsRemaining"] -= 1
             trial["inputTokensRemaining"] -= input_reservation
             trial["outputTokensRemaining"] -= output_limit
@@ -496,6 +510,7 @@ class GatewayState:
             if trial is None:
                 self.trials[key] = {
                     "expiresAt": 0.0,
+                    "providerRequestAdmissionDeadlineMs": 0,
                     "requestsRemaining": 0,
                     "inputTokensRemaining": 0,
                     "outputTokensRemaining": 0,
