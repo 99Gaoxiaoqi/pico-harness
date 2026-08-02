@@ -1004,6 +1004,136 @@ test("Terminal-Bench normalizer accepts signed zero-usage accounting after a con
   });
 });
 
+test("Terminal-Bench normalizer accepts only the signed unconfirmed-termination usage contract", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-unconfirmed-gateway-usage-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "unconfirmed-gateway-usage-run";
+  const trialId = "unconfirmed-gateway-usage";
+  const accounting = accountingReceipt(runId, trialId, 125, 7);
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, trialId, {
+    reward: null,
+    headless: {
+      ...headless("timed_out", false),
+      error: { code: "SHUTDOWN_UNCONFIRMED", summary: "Shutdown was not confirmed." },
+    },
+    runId,
+    accounting,
+    runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+    harborUsage: {
+      inputTokens: accounting.actual.inputTokens,
+      outputTokens: accounting.actual.outputTokens,
+    },
+    signedGatewayUsageRequired: true,
+    gatewayUsageFallback: true,
+    gatewayUsageSource: "signed_gateway_actual_unconfirmed",
+  });
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: 1,
+  });
+
+  const [trial] = summary.trials;
+  assert.equal(summary.sealed, false);
+  assert.equal(trial?.adapter.status, "ok");
+  assert.equal(trial?.primaryStatus, "infra_error");
+  assert.equal(trial?.infra.code, "termination_unconfirmed");
+  assert.equal(trial?.verifier.status, "missing");
+  assert.equal(trial?.verifierOutcome, "missing");
+  assert.equal(trial?.verifierPassed, false);
+  assert.deepEqual(trial?.agent.usage, {
+    promptTokens: accounting.actual.inputTokens,
+    completionTokens: accounting.actual.outputTokens,
+    costCNY: accounting.actual.costCNY,
+  });
+  assert.deepEqual(trial?.agent.runtimeReportedUsage, {
+    promptTokens: 0,
+    completionTokens: 0,
+    costCNY: 0,
+  });
+});
+
+test("Terminal-Bench normalizer fails closed when the unconfirmed-termination usage contract changes", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-unconfirmed-gateway-usage-denied-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "unconfirmed-gateway-usage-denied-run";
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const baseHeadless = {
+    ...headless("timed_out", false),
+    error: { code: "SHUTDOWN_UNCONFIRMED", summary: "Shutdown was not confirmed." },
+  };
+  const cases = [
+    {
+      name: "usage-marker",
+      gatewayUsageFallback: false,
+      gatewayUsageSource: "signed_gateway_actual_unconfirmed",
+    },
+    {
+      name: "usage-source",
+      gatewayUsageFallback: true,
+      gatewayUsageSource: "signed_gateway_actual",
+    },
+    {
+      name: "confirmed-termination",
+      headless: { ...baseHeadless, terminationConfirmed: true },
+    },
+    {
+      name: "wrong-status",
+      headless: { ...baseHeadless, status: "failed" },
+    },
+    {
+      name: "wrong-error",
+      headless: {
+        ...baseHeadless,
+        error: { code: "TIMEOUT", summary: "The Agent Runtime timed out." },
+      },
+    },
+    {
+      name: "runtime-usage-not-zero",
+      runtimeUsage: { promptTokens: 1, completionTokens: 0 },
+    },
+    {
+      name: "receipt-unreconciled",
+      accounting: unreconciledAccountingReceipt(runId, "receipt-unreconciled", 125, 7),
+    },
+  ];
+  for (const value of cases) {
+    const accounting = value.accounting ?? accountingReceipt(runId, value.name, 125, 7);
+    await writeTrial(jobDir, value.name, {
+      reward: null,
+      headless: value.headless ?? baseHeadless,
+      runId,
+      accounting,
+      runtimeUsage: value.runtimeUsage ?? { promptTokens: 0, completionTokens: 0 },
+      harborUsage: {
+        inputTokens: accounting.actual.inputTokens,
+        outputTokens: accounting.actual.outputTokens,
+      },
+      signedGatewayUsageRequired: true,
+      gatewayUsageFallback: value.gatewayUsageFallback ?? true,
+      gatewayUsageSource: value.gatewayUsageSource ?? "signed_gateway_actual_unconfirmed",
+    });
+  }
+
+  const summary = await normalizeHarborJob({
+    jobDir,
+    runDir,
+    runId,
+    expectedTasks: cases.length,
+  });
+
+  assert.equal(summary.sealed, false);
+  for (const trial of summary.trials) {
+    assert.equal(trial.adapter.status, "error");
+    assert.notEqual(trial.primaryStatus, "passed");
+  }
+});
+
 test("Terminal-Bench normalizer keeps matching zero usage on the runtime accounting path", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-accounting-zero-timeout-"));
   const jobDir = join(root, "job");

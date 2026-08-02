@@ -650,11 +650,20 @@ function validateAccountingReceipt({
     gatewayMetadata,
     runtimeUsage,
   });
+  const signedUnconfirmedTerminationUsage = isSignedUnconfirmedTerminationUsage({
+    headless,
+    picoMetadata,
+    gatewayMetadata,
+    runtimeUsage,
+    actual,
+    receipt: value,
+  });
   if (
     !harborUsageMatches ||
     (runtimeUsageMatches && !normalUsageMarkers && !signedRetryUsage) ||
     (!runtimeUsageMatches &&
       !signedRetryUsage &&
+      !signedUnconfirmedTerminationUsage &&
       !isTerminalZeroUsageFallback({
         headless,
         picoMetadata,
@@ -739,6 +748,44 @@ function isSignedRetryUsage({ headless, picoMetadata, gatewayMetadata, runtimeUs
     headlessErrorCode === last.errorCode &&
     headless?.terminationConfirmed === last.terminationConfirmed &&
     headless?.durationMs === last.durationMs
+  );
+}
+
+function isSignedUnconfirmedTerminationUsage({
+  headless,
+  picoMetadata,
+  gatewayMetadata,
+  runtimeUsage,
+  actual,
+  receipt,
+}) {
+  const runtimeReportedUsage = picoMetadata?.runtimeReportedUsage;
+  return (
+    headless?.status === "timed_out" &&
+    headless?.error?.code === "SHUTDOWN_UNCONFIRMED" &&
+    headless?.terminationConfirmed === false &&
+    runtimeUsage.promptTokens === 0 &&
+    runtimeUsage.completionTokens === 0 &&
+    runtimeUsage.costCNY === 0 &&
+    picoMetadata?.status === "timed_out" &&
+    picoMetadata?.errorCode === "SHUTDOWN_UNCONFIRMED" &&
+    picoMetadata?.terminationConfirmed === false &&
+    picoMetadata?.signedGatewayUsageRequired === true &&
+    picoMetadata?.runtimeReportedCostCNY === 0 &&
+    isExactObject(runtimeReportedUsage, ["promptTokens", "completionTokens", "costCNY"]) &&
+    runtimeReportedUsage.promptTokens === 0 &&
+    runtimeReportedUsage.completionTokens === 0 &&
+    runtimeReportedUsage.costCNY === 0 &&
+    gatewayMetadata?.usageFallback === true &&
+    gatewayMetadata?.usageSource === "signed_gateway_actual_unconfirmed" &&
+    receipt.status === "reconciled" &&
+    receipt.withinBudget === true &&
+    receipt.requests.attempted === receipt.requests.reconciled &&
+    receipt.requests.unreconciled === 0 &&
+    actual.inputTokens > 0 &&
+    actual.outputTokens > 0 &&
+    actual.costMicroCNY > 0 &&
+    actual.costCNY > 0
   );
 }
 
