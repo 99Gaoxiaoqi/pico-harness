@@ -1240,6 +1240,8 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             )
             assert environment.launch_count == 1
             pico = context.metadata["pico"]
+            assert pico["status"] == "timed_out"
+            assert pico["retryCount"] == 0
             assert pico["signedGatewayUsageRequired"] is True
             adapter.apply_gateway_accounting(
                 context,
@@ -1258,7 +1260,39 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 },
             )
             assert (context.n_input_tokens, context.n_output_tokens) == (13, 2)
-            assert pico["gatewayAccounting"]["usageSource"] == "signed_gateway_actual"
+            accounting = pico["gatewayAccounting"]
+            assert accounting["usageFallback"] is True
+            assert accounting["usageSource"] == "signed_gateway_actual"
+
+        with tempfile.TemporaryDirectory(
+            prefix="pico-runtime-zero-cost-timeout-"
+        ) as directory:
+            context, environment = await execute(
+                Path(directory), [zero_usage_timeout], outer_timeout_sec=120
+            )
+            assert environment.launch_count == 1
+            adapter.apply_gateway_accounting(
+                context,
+                {
+                    "schemaVersion": 1,
+                    "status": "reconciled",
+                    "withinBudget": True,
+                    "pricingSha256": "0" * 64,
+                    "receiptSha256": "1" * 64,
+                    "actual": {
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "costMicroCNY": 0,
+                        "costCNY": 0,
+                    },
+                },
+            )
+            pico = context.metadata["pico"]
+            assert (context.n_input_tokens, context.n_output_tokens) == (0, 0)
+            assert pico["signedGatewayUsageRequired"] is False
+            accounting = pico["gatewayAccounting"]
+            assert accounting["usageFallback"] is False
+            assert accounting["usageSource"] == "runtime"
 
         unconfirmed_shutdown = {
             "status": "timed_out",
