@@ -45,7 +45,6 @@ MAX_REQUESTS = 128
 MAX_INPUT_TOKENS = 1_000_000
 MAX_OUTPUT_TOKENS = 65_536
 MAX_REQUEST_OUTPUT_TOKENS = 8_192
-MAX_ADMISSION_DEADLINE_UNIX_MS = 4_102_444_800_000
 MAX_COST_MICRO_CNY = 250_000_000
 MAX_RUN_COST_MICRO_CNY = 1_000_000_000_000
 MAX_PRICE_MICRO_CNY_PER_MILLION = 1_000_000_000_000
@@ -227,7 +226,8 @@ class GatewayState:
     def register(self, request: dict[str, Any]) -> None:
         trial_id = require_trial_id(request.get("trialId"))
         ttl_sec = request.get("ttlSec")
-        admission_deadline_ms = request.get("providerRequestAdmissionDeadlineMs")
+        admission_deadline = request.get("providerRequestAdmissionDeadlineMonotonicSec")
+        monotonic_now = time.monotonic()
         if (
             request.get("protocol") != self.provider["protocol"]
             or isinstance(ttl_sec, bool)
@@ -235,9 +235,11 @@ class GatewayState:
             or not math.isfinite(ttl_sec)
             or ttl_sec <= 0
             or ttl_sec > MAX_TRIAL_TTL_SEC
-            or isinstance(admission_deadline_ms, bool)
-            or not isinstance(admission_deadline_ms, int)
-            or not 1 <= admission_deadline_ms <= MAX_ADMISSION_DEADLINE_UNIX_MS
+            or isinstance(admission_deadline, bool)
+            or not isinstance(admission_deadline, (int, float))
+            or not math.isfinite(admission_deadline)
+            or admission_deadline <= monotonic_now
+            or admission_deadline > monotonic_now + ttl_sec
         ):
             raise ValueError("gateway route mismatch")
         with self.lock:
@@ -245,7 +247,9 @@ class GatewayState:
                 raise ValueError("gateway trial is already registered")
             self.trials[trial_id] = {
                 "expiresAt": time.monotonic() + ttl_sec,
-                "providerRequestAdmissionDeadlineMs": admission_deadline_ms,
+                "providerRequestAdmissionDeadlineMonotonicSec": float(
+                    admission_deadline
+                ),
                 "requestsRemaining": MAX_REQUESTS,
                 "inputTokensRemaining": MAX_INPUT_TOKENS,
                 "outputTokensRemaining": MAX_OUTPUT_TOKENS,
@@ -290,7 +294,10 @@ class GatewayState:
             trial = self.trials.get(trial_id)
             if trial is None:
                 raise ValueError("gateway trial is not registered")
-            if time.time() * 1_000 >= trial["providerRequestAdmissionDeadlineMs"]:
+            if (
+                time.monotonic()
+                >= trial["providerRequestAdmissionDeadlineMonotonicSec"]
+            ):
                 raise GatewayQuotaError(
                     "provider_request_admission_closed",
                     "gateway provider request admission closed",
@@ -510,7 +517,7 @@ class GatewayState:
             if trial is None:
                 self.trials[key] = {
                     "expiresAt": 0.0,
-                    "providerRequestAdmissionDeadlineMs": 0,
+                    "providerRequestAdmissionDeadlineMonotonicSec": 0.0,
                     "requestsRemaining": 0,
                     "inputTokensRemaining": 0,
                     "outputTokensRemaining": 0,

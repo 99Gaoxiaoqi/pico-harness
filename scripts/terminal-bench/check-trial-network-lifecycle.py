@@ -1047,7 +1047,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             gateway=types.SimpleNamespace(
                 base_url="http://pico-gateway:8080",
                 capability="pico-workload-identity",
-                provider_request_admission_deadline_ms=int(
+                headless_provider_admission_deadline_ms=int(
                     (time.time() + outer_timeout_sec) * 1_000
                 ),
             ),
@@ -1380,7 +1380,7 @@ async def assert_run_failure_cleanup_contract(adapter: Any) -> None:
     adapter.ProviderGateway = Gateway
     adapter.assert_secure_docker_environment = lambda _environment: None
     adapter.assert_running_container_policy = no_op
-    adapter.task_agent_timeout = lambda _environment: 120.0
+    adapter.task_agent_timeout = lambda _environment: 900.0
     adapter.task_verifier_timeout = lambda _environment: 60.0
     adapter.preflight_task_image_paths = no_op
     adapter.public_egress_access_for_task = lambda *_args, **_kwargs: None
@@ -1958,6 +1958,25 @@ def assert_task_timeout_contract(adapter: Any) -> None:
                     f"unsupported verifier timeout was accepted: {invalid}"
                 )
 
+    admission = adapter.provider_request_admission_deadlines(
+        headless_deadline=1_000,
+        monotonic_now=600,
+        wall_now=1_900_000_000,
+    )
+    assert admission.gateway_monotonic == 668
+    assert admission.headless_wall_ms == 1_900_000_068_000
+    for headless_deadline in (932, 931.999, float("nan"), float("inf")):
+        try:
+            adapter.provider_request_admission_deadlines(
+                headless_deadline=headless_deadline,
+                monotonic_now=600,
+                wall_now=1_900_000_000,
+            )
+        except RuntimeError as error:
+            assert str(error) == "provider_request_admission_budget_violation"
+        else:
+            raise AssertionError("insufficient provider admission budget was accepted")
+
     gateway = adapter.ProviderGateway(
         protocol="openai",
         supervisor_socket="/unused",
@@ -1966,7 +1985,8 @@ def assert_task_timeout_contract(adapter: Any) -> None:
         network_name="timeout-network",
         context_id="timeout-trial",
         ttl_sec=12_000,
-        provider_request_admission_deadline_ms=1_900_000_000_000,
+        provider_request_admission_deadline_monotonic=10_000,
+        headless_provider_admission_deadline_ms=1_900_000_000_000,
         pricing_sha256="b" * 64,
         receipt_path=Path("/unused"),
     )
@@ -1981,12 +2001,12 @@ def assert_task_timeout_contract(adapter: Any) -> None:
             "trialId": "timeout-trial",
             "ttlSec": 12_000,
             "protocol": "openai",
-            "providerRequestAdmissionDeadlineMs": 1_900_000_000_000,
+            "providerRequestAdmissionDeadlineMonotonicSec": 10_000,
         }
     )
     assert (
-        signed_register["providerRequestAdmissionDeadlineMs"]
-        == 1_900_000_000_000
+        signed_register["providerRequestAdmissionDeadlineMonotonicSec"]
+        == 10_000
     )
 
 
@@ -2011,6 +2031,7 @@ def assert_supervisor_request_timeout_contract(adapter: Any) -> None:
         runtime_limits.GATEWAY_PROXY_SUPERVISOR_TIMEOUT_SEC * 1_000
         + runtime_limits.BENCHMARK_PROVIDER_RESPONSE_MARGIN_MS
     )
+    assert runtime_limits.GATEWAY_PROVIDER_ADMISSION_LEAD_SEC == 332
 
     observed: list[dict[str, Any]] = []
 
@@ -2041,7 +2062,8 @@ def assert_supervisor_request_timeout_contract(adapter: Any) -> None:
         network_name="timeout-network",
         context_id="timeout-trial",
         ttl_sec=12_000,
-        provider_request_admission_deadline_ms=1_900_000_000_000,
+        provider_request_admission_deadline_monotonic=10_000,
+        headless_provider_admission_deadline_ms=1_900_000_000_000,
         pricing_sha256="b" * 64,
         receipt_path=Path("/unused"),
     )
@@ -2101,11 +2123,14 @@ def assert_gateway_provider_admission_contract(adapter: Any) -> None:
             ).encode()
         ).decode(),
     }
-    now_ms = [1_000_000]
+    monotonic_now = [1_000.0]
+    wall_now = [1_900_000_000.0]
+    original_monotonic = supervisor.time.monotonic
     original_time = supervisor.time.time
-    supervisor.time.time = lambda: now_ms[0] / 1_000
+    supervisor.time.monotonic = lambda: monotonic_now[0]
+    supervisor.time.time = lambda: wall_now[0]
     try:
-        def state_with_deadline(deadline_ms: int) -> Any:
+        def state_with_deadline(deadline: float) -> Any:
             state = supervisor.GatewayState(
                 route_config,
                 "secret",
@@ -2117,12 +2142,20 @@ def assert_gateway_provider_admission_contract(adapter: Any) -> None:
                     "trialId": "admission-trial",
                     "protocol": "openai",
                     "ttlSec": 60,
-                    "providerRequestAdmissionDeadlineMs": deadline_ms,
+                    "providerRequestAdmissionDeadlineMonotonicSec": deadline,
                 }
             )
             return state
 
-        expired = state_with_deadline(now_ms[0])
+        for invalid_deadline in (monotonic_now[0], monotonic_now[0] + 61):
+            try:
+                state_with_deadline(invalid_deadline)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid monotonic admission deadline was accepted")
+
+        expired = state_with_deadline(monotonic_now[0] + 1)
         factory_calls = 0
 
         def expired_factory() -> Any:
@@ -2131,6 +2164,8 @@ def assert_gateway_provider_admission_contract(adapter: Any) -> None:
             raise AssertionError("expired admission reached the upstream factory")
 
         expired.upstream_request_factory = expired_factory
+        monotonic_now[0] += 1
+        wall_now[0] -= 86_400
         try:
             expired.proxy(request)
         except supervisor.GatewayQuotaError as error:
@@ -2160,7 +2195,8 @@ def assert_gateway_provider_admission_contract(adapter: Any) -> None:
             def cancel(self, _deadline: float | None = None) -> None:
                 return None
 
-        reconciled = state_with_deadline(now_ms[0] + 1)
+        monotonic_now[0] = 1_000.0
+        reconciled = state_with_deadline(monotonic_now[0] + 1)
         reconciled.upstream_request_factory = ReconciledUpstream
         reconciled.proxy(request)
         reconciled_receipt = reconciled.revoke("admission-trial")
@@ -2174,13 +2210,14 @@ def assert_gateway_provider_admission_contract(adapter: Any) -> None:
 
         class UnknownUpstream:
             def execute(self, _payload: dict[str, Any]) -> dict[str, Any]:
-                now_ms[0] += 2
+                monotonic_now[0] += 2
                 raise ValueError("synthetic unknown upstream completion")
 
             def cancel(self, _deadline: float | None = None) -> None:
                 return None
 
-        unknown = state_with_deadline(now_ms[0] + 1)
+        monotonic_now[0] = 1_000.0
+        unknown = state_with_deadline(monotonic_now[0] + 1)
         unknown.upstream_request_factory = UnknownUpstream
         try:
             unknown.proxy(request)
@@ -2197,6 +2234,7 @@ def assert_gateway_provider_admission_contract(adapter: Any) -> None:
             "unreconciled": 1,
         }
     finally:
+        supervisor.time.monotonic = original_monotonic
         supervisor.time.time = original_time
 
 

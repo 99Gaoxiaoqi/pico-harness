@@ -460,6 +460,11 @@ class AgentRunDeadlines(NamedTuple):
     cleanup: float
 
 
+class ProviderRequestAdmissionDeadlines(NamedTuple):
+    gateway_monotonic: float
+    headless_wall_ms: int
+
+
 class VerifierServiceManifest(NamedTuple):
     argv: tuple[str, ...]
     cwd: str
@@ -684,6 +689,10 @@ rm -f {remote_archive}
             request_id = f"tb21.{context_id}.{trial_key}"
             session_id = f"tb21-{context_id[:24]}-{trial_key[:24]}"
             route_config = self._route_config
+            provider_admission_deadlines = provider_request_admission_deadlines(
+                headless_deadline=run_deadlines.headless,
+                monotonic_now=loop.time(),
+            )
             public_egress = public_egress_access_for_task(
                 environment,
                 run_id=self._supervisor_config["runId"],
@@ -701,11 +710,11 @@ rm -f {remote_archive}
                 network_name=networks.gateway,
                 context_id=context_id,
                 ttl_sec=outer_timeout_sec,
-                provider_request_admission_deadline_ms=(
-                    provider_request_admission_deadline_ms(
-                        headless_deadline=run_deadlines.headless,
-                        monotonic_now=loop.time(),
-                    )
+                provider_request_admission_deadline_monotonic=(
+                    provider_admission_deadlines.gateway_monotonic
+                ),
+                headless_provider_admission_deadline_ms=(
+                    provider_admission_deadlines.headless_wall_ms
                 ),
                 pricing_sha256=route_config["pricingSha256"],
                 receipt_path=self.logs_dir / "gateway-accounting-receipt.json",
@@ -871,7 +880,7 @@ rm -f {remote_archive}
                     BENCHMARK_PROVIDER_TIMEOUT_MS, inner_timeout_ms
                 ),
                 "providerAdmissionDeadlineMs": (
-                    gateway.provider_request_admission_deadline_ms
+                    gateway.headless_provider_admission_deadline_ms
                 ),
                 **(
                     {"thinkingEffort": route_config["thinkingEffort"]}
@@ -1803,7 +1812,8 @@ class ProviderGateway:
         network_name: str,
         context_id: str,
         ttl_sec: float,
-        provider_request_admission_deadline_ms: int,
+        provider_request_admission_deadline_monotonic: float,
+        headless_provider_admission_deadline_ms: int,
         pricing_sha256: str,
         receipt_path: Path,
     ):
@@ -1814,13 +1824,23 @@ class ProviderGateway:
         self._context_id = context_id
         self._ttl_sec = ttl_sec
         if (
-            isinstance(provider_request_admission_deadline_ms, bool)
-            or not isinstance(provider_request_admission_deadline_ms, int)
-            or provider_request_admission_deadline_ms < 1
+            isinstance(provider_request_admission_deadline_monotonic, bool)
+            or not isinstance(provider_request_admission_deadline_monotonic, (int, float))
         ):
             raise ValueError("gateway provider admission deadline is invalid")
-        self.provider_request_admission_deadline_ms = (
-            provider_request_admission_deadline_ms
+        if not math.isfinite(provider_request_admission_deadline_monotonic):
+            raise ValueError("gateway provider admission deadline is invalid")
+        if (
+            isinstance(headless_provider_admission_deadline_ms, bool)
+            or not isinstance(headless_provider_admission_deadline_ms, int)
+            or headless_provider_admission_deadline_ms < 1
+        ):
+            raise ValueError("headless provider admission deadline is invalid")
+        self.provider_request_admission_deadline_monotonic = float(
+            provider_request_admission_deadline_monotonic
+        )
+        self.headless_provider_admission_deadline_ms = (
+            headless_provider_admission_deadline_ms
         )
         self._pricing_sha256 = pricing_sha256
         self._receipt_path = receipt_path
@@ -1850,8 +1870,8 @@ class ProviderGateway:
                 "action": "register",
                 "trialId": self._context_id,
                 "ttlSec": self._ttl_sec,
-                "providerRequestAdmissionDeadlineMs": (
-                    self.provider_request_admission_deadline_ms
+                "providerRequestAdmissionDeadlineMonotonicSec": (
+                    self.provider_request_admission_deadline_monotonic
                 ),
                 "protocol": self._protocol,
             }
@@ -3507,23 +3527,36 @@ def remaining_budget(deadline: float, now: float) -> float:
     return remaining
 
 
-def provider_request_admission_deadline_ms(
+def provider_request_admission_deadlines(
     *, headless_deadline: float, monotonic_now: float, wall_now: float | None = None
-) -> int:
-    """Return the adapter-owned cutoff for starting a gateway provider request.
+) -> ProviderRequestAdmissionDeadlines:
+    """Return gateway-authoritative and headless-conservative admission cutoffs.
 
     The gateway trial remains live through outer cleanup, but a provider call may
-    only start while the complete bounded settlement chain still fits before the
-    headless deadline. Wall-clock milliseconds let the separately supervised
-    gateway enforce the same signed cutoff without trusting workload input.
+    only start while the complete bounded settlement chain fits before the
+    headless deadline. The same-host supervisor receives the signed monotonic
+    cutoff; the wall-clock projection is only a conservative headless precheck.
     """
-    remaining = headless_deadline - monotonic_now
-    if not math.isfinite(remaining):
-        raise RuntimeError("outer_timeout_budget_violation")
+    gateway_deadline = headless_deadline - GATEWAY_PROVIDER_ADMISSION_LEAD_SEC
+    if (
+        not math.isfinite(headless_deadline)
+        or not math.isfinite(monotonic_now)
+        or not math.isfinite(gateway_deadline)
+        or gateway_deadline <= monotonic_now
+    ):
+        raise RuntimeError("provider_request_admission_budget_violation")
     now = time.time() if wall_now is None else wall_now
     if not math.isfinite(now):
-        raise RuntimeError("outer_timeout_budget_violation")
-    return int((now + remaining - GATEWAY_PROVIDER_ADMISSION_LEAD_SEC) * 1_000)
+        raise RuntimeError("provider_request_admission_budget_violation")
+    wall_deadline_ms = int(
+        (now + gateway_deadline - monotonic_now) * 1_000
+    )
+    if wall_deadline_ms < 1:
+        raise RuntimeError("provider_request_admission_budget_violation")
+    return ProviderRequestAdmissionDeadlines(
+        gateway_monotonic=gateway_deadline,
+        headless_wall_ms=wall_deadline_ms,
+    )
 
 
 def reserve_agent_run_deadlines(

@@ -486,7 +486,7 @@ test("headless single_non_stream refuses aborted or expired provider admission b
   assert.equal(generateCalls, 0);
 });
 
-test("headless single_non_stream clamps each provider timeout to its admission window", async (context) => {
+test("headless single_non_stream clamps each provider timeout to its runtime window", async (context) => {
   const fixture = await createFixture(context, "single-non-stream-clamped-timeout");
   await configureFixture(fixture, "secret-canary-single-non-stream-clamped-timeout");
   let observedTimeout = 0;
@@ -494,9 +494,9 @@ test("headless single_non_stream clamps each provider timeout to its admission w
     JSON.stringify({
       ...requestFor(fixture, "single-non-stream-clamped-timeout"),
       providerRequestMode: "single_non_stream",
-      providerTimeoutMs: 60_000,
-      providerAdmissionDeadlineMs: Date.now() + 30_000,
-      timeoutMs: 60_000,
+      providerTimeoutMs: 30_000,
+      providerAdmissionDeadlineMs: Date.now() + 120_000,
+      timeoutMs: 30_000,
     }),
     {
       env: {},
@@ -516,7 +516,39 @@ test("headless single_non_stream clamps each provider timeout to its admission w
   assert.equal(outcome.result.status, "completed");
   assert.ok(observedTimeout >= 1_000);
   assert.ok(observedTimeout < 30_000);
-  assert.ok(observedTimeout < 60_000);
+});
+
+test("headless single_non_stream rejects an exhausted runtime window before generate", async (context) => {
+  const fixture = await createFixture(context, "single-non-stream-runtime-expired");
+  await configureFixture(fixture, "secret-canary-single-non-stream-runtime-expired");
+  let generateCalls = 0;
+  let clockReads = 0;
+  const outcome = await runHeadlessOneShotJson(
+    JSON.stringify({
+      ...requestFor(fixture, "single-non-stream-runtime-expired"),
+      providerRequestMode: "single_non_stream",
+      providerTimeoutMs: 1_000,
+      providerAdmissionDeadlineMs: 60_000,
+      timeoutMs: 1_000,
+    }),
+    {
+      env: {},
+      now: () => (clockReads++ === 0 ? 0 : 1_000),
+      executeRuntime: async (options, dependencies) => {
+        const provider = dependencies?.providerDecorator?.({
+          async generate() {
+            generateCalls++;
+            return assistant("must not generate");
+          },
+        });
+        if (!provider) throw new Error("single-call provider decorator is unavailable");
+        await assert.rejects(() => provider.generate([], []));
+        return runtimeResult(options, "runtime admission rejected");
+      },
+    },
+  );
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(generateCalls, 0);
 });
 
 test("provider request signal keeps the production default and accepts a trusted override", (context) => {
