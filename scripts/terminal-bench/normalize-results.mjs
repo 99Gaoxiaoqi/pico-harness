@@ -782,8 +782,7 @@ function isSignedUnconfirmedTerminationUsage({
     receipt.withinBudget === true &&
     receipt.requests.attempted === receipt.requests.reconciled &&
     receipt.requests.unreconciled === 0 &&
-    actual.inputTokens > 0 &&
-    actual.outputTokens > 0 &&
+    actual.inputTokens + actual.outputTokens > 0 &&
     actual.costMicroCNY > 0 &&
     actual.costCNY > 0
   );
