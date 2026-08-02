@@ -1057,6 +1057,44 @@ test("Terminal-Bench normalizer accepts only the signed unconfirmed-termination 
   });
 });
 
+test("Terminal-Bench normalizer accepts signed unconfirmed-termination usage without output tokens", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tb21-unconfirmed-gateway-input-only-"));
+  const jobDir = join(root, "job");
+  const runDir = join(root, "run");
+  const runId = "unconfirmed-gateway-input-only-run";
+  const trialId = "unconfirmed-gateway-input-only";
+  const accounting = accountingReceipt(runId, trialId, 125, 0);
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeTrial(jobDir, trialId, {
+    reward: null,
+    headless: {
+      ...headless("timed_out", false),
+      error: { code: "SHUTDOWN_UNCONFIRMED", summary: "Shutdown was not confirmed." },
+    },
+    runId,
+    accounting,
+    runtimeUsage: { promptTokens: 0, completionTokens: 0 },
+    harborUsage: {
+      inputTokens: accounting.actual.inputTokens,
+      outputTokens: accounting.actual.outputTokens,
+    },
+    signedGatewayUsageRequired: true,
+    gatewayUsageFallback: true,
+    gatewayUsageSource: "signed_gateway_actual_unconfirmed",
+  });
+
+  const summary = await normalizeHarborJob({ jobDir, runDir, runId, expectedTasks: 1 });
+
+  assert.equal(summary.sealed, false);
+  assert.equal(summary.trials[0]?.adapter.status, "ok");
+  assert.equal(summary.trials[0]?.primaryStatus, "infra_error");
+  assert.deepEqual(summary.trials[0]?.agent.usage, {
+    promptTokens: 125,
+    completionTokens: 0,
+    costCNY: accounting.actual.costCNY,
+  });
+});
+
 test("Terminal-Bench normalizer fails closed when the unconfirmed-termination usage contract changes", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tb21-unconfirmed-gateway-usage-denied-"));
   const jobDir = join(root, "job");
@@ -1096,6 +1134,10 @@ test("Terminal-Bench normalizer fails closed when the unconfirmed-termination us
     {
       name: "runtime-usage-not-zero",
       runtimeUsage: { promptTokens: 1, completionTokens: 0 },
+    },
+    {
+      name: "receipt-all-zero",
+      accounting: accountingReceipt(runId, "receipt-all-zero", 0, 0),
     },
     {
       name: "receipt-unreconciled",
