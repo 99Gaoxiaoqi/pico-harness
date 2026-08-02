@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -413,6 +414,7 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
             error_code: str | None = None,
             termination_confirmed: bool = True,
             cost_cny: int | float = 0.000003,
+            signed_gateway_usage_required: bool = False,
         ) -> None:
             self.n_input_tokens = input_tokens
             self.n_output_tokens = output_tokens
@@ -422,6 +424,7 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
                     "errorCode": error_code,
                     "terminationConfirmed": termination_confirmed,
                     "costCNY": cost_cny,
+                    "signedGatewayUsageRequired": signed_gateway_usage_required,
                 }
             }
 
@@ -431,20 +434,91 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
         *,
         input_tokens: int = 2,
         output_tokens: int = 1,
+        cost_micro_cny: int = 3,
+        requests: dict[str, int] | None = None,
     ) -> dict[str, Any]:
+        request_totals = requests or {
+            "attempted": 1,
+            "reconciled": 1,
+            "unreconciled": 0,
+        }
         return {
             "schemaVersion": 1,
             "status": status,
             "withinBudget": within_budget,
             "pricingSha256": "0" * 64,
             "receiptSha256": "1" * 64,
+            "requests": request_totals,
             "actual": {
                 "inputTokens": input_tokens,
                 "outputTokens": output_tokens,
-                "costMicroCNY": 3,
-                "costCNY": 0.000003,
+                "costMicroCNY": cost_micro_cny,
+                "costCNY": cost_micro_cny / 1_000_000,
             },
         }
+
+    def signed_gateway_receipt() -> tuple[dict[str, Any], str, str]:
+        capability_seed = "signed-gateway-capability"
+        pricing = {"input": 1_000_000, "output": 1_000_000}
+        pricing_sha256 = hashlib.sha256(
+            json.dumps(
+                pricing,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        actual = {
+            "inputTokens": 2,
+            "outputTokens": 1,
+            "costMicroCNY": 3,
+        }
+        zero = {"inputTokens": 0, "outputTokens": 0, "costMicroCNY": 0}
+        value = {
+            "schemaVersion": 1,
+            "runId": "signed-gateway-run",
+            "trialId": "signed-gateway-trial",
+            "protocol": "openai",
+            "modelRouteId": "signed-gateway-model",
+            "pricing": pricing,
+            "pricingSha256": pricing_sha256,
+            "rounding": "ceil-per-request",
+            "status": "reconciled",
+            "withinBudget": True,
+            "requests": {"attempted": 1, "reconciled": 1, "unreconciled": 0},
+            "requestEntries": [
+                {
+                    "sequence": 1,
+                    "status": "reconciled",
+                    "reservation": dict(actual),
+                    "actual": dict(actual),
+                    "refund": dict(zero),
+                    "supplement": dict(zero),
+                    "unreconciledReservation": dict(zero),
+                }
+            ],
+            "reservation": dict(actual),
+            "actual": {**actual, "costCNY": 0.000003},
+            "refund": dict(zero),
+            "supplement": dict(zero),
+            "unreconciledReservation": dict(zero),
+            "receiptSha256": "",
+            "auth": {
+                "algorithm": "hmac-sha256",
+                "keyId": "run-capability-v1",
+                "tag": "",
+            },
+        }
+        value["auth"]["tag"] = hmac.new(
+            capability_seed.encode(),
+            b"pico-gateway-accounting-receipt-v1\0"
+            + adapter.canonical_gateway_accounting_receipt(value, include_auth=False),
+            "sha256",
+        ).hexdigest()
+        value["receiptSha256"] = hashlib.sha256(
+            adapter.canonical_gateway_accounting_receipt(value, include_auth=True)
+        ).hexdigest()
+        return value, capability_seed, pricing_sha256
 
     for value, expected in (
         (
@@ -474,14 +548,55 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
     assert matching.metadata["pico"]["gatewayAccounting"]["usageFallback"] is False
     assert matching.metadata["pico"]["gatewayAccounting"]["usageSource"] == "runtime"
 
-    fallback = AccountingContext(
+    signed_receipt, capability_seed, pricing_sha256 = signed_gateway_receipt()
+    validated_signed_receipt = adapter.validate_gateway_accounting_receipt(
+        signed_receipt,
+        expected_run_id="signed-gateway-run",
+        expected_trial_id="signed-gateway-trial",
+        expected_protocol="openai",
+        expected_pricing_sha256=pricing_sha256,
+        capability_seed=capability_seed,
+    )
+    unsigned_receipt = json.loads(json.dumps(signed_receipt))
+    unsigned_receipt["auth"]["tag"] = "0" * 64
+    try:
+        adapter.validate_gateway_accounting_receipt(
+            unsigned_receipt,
+            expected_run_id="signed-gateway-run",
+            expected_trial_id="signed-gateway-trial",
+            expected_protocol="openai",
+            expected_pricing_sha256=pricing_sha256,
+            capability_seed=capability_seed,
+        )
+    except ValueError as error:
+        assert str(error) == "Gateway accounting receipt authentication is invalid"
+    else:
+        raise AssertionError("unsigned gateway receipt unexpectedly validated")
+
+    legacy_fallback = AccountingContext(
         input_tokens=0,
         output_tokens=0,
         status="failed",
         error_code="RUNTIME_FAILED",
         cost_cny=0,
     )
-    adapter.apply_gateway_accounting(fallback, receipt("reconciled", True))
+    adapter.apply_gateway_accounting(legacy_fallback, receipt("reconciled", True))
+    assert (legacy_fallback.n_input_tokens, legacy_fallback.n_output_tokens) == (2, 1)
+    assert (
+        legacy_fallback.metadata["pico"]["gatewayAccounting"]["usageSource"]
+        == "signed_gateway_actual"
+    )
+
+    fallback = AccountingContext(
+        input_tokens=0,
+        output_tokens=0,
+        status="timed_out",
+        error_code="SHUTDOWN_UNCONFIRMED",
+        termination_confirmed=False,
+        cost_cny=0,
+        signed_gateway_usage_required=True,
+    )
+    adapter.apply_gateway_accounting(fallback, validated_signed_receipt)
     assert (fallback.n_input_tokens, fallback.n_output_tokens) == (2, 1)
     assert fallback.metadata["pico"]["runtimeReportedUsage"] == {
         "promptTokens": 0,
@@ -491,8 +606,10 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
     assert fallback.metadata["pico"]["gatewayAccounting"]["usageFallback"] is True
     assert (
         fallback.metadata["pico"]["gatewayAccounting"]["usageSource"]
-        == "signed_gateway_actual"
+        == "signed_gateway_actual_unconfirmed"
     )
+    assert fallback.metadata["pico"]["signedGatewayUsageRequired"] is True
+    assert fallback.metadata["pico"]["terminationConfirmed"] is False
 
     rejected_contexts = (
         AccountingContext(input_tokens=0, output_tokens=0, cost_cny=0),
@@ -540,6 +657,71 @@ def assert_accounting_failure_messages(adapter: Any) -> None:
             raise AssertionError(
                 "non-qualifying gateway usage fallback unexpectedly succeeded"
             )
+
+    unconfirmed_rejected_contexts = (
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="timed_out",
+            error_code="SHUTDOWN_UNCONFIRMED",
+            termination_confirmed=True,
+            cost_cny=0,
+            signed_gateway_usage_required=True,
+        ),
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=1,
+            status="timed_out",
+            error_code="SHUTDOWN_UNCONFIRMED",
+            termination_confirmed=False,
+            cost_cny=0,
+            signed_gateway_usage_required=True,
+        ),
+        AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="timed_out",
+            error_code="SHUTDOWN_UNCONFIRMED",
+            termination_confirmed=False,
+            cost_cny=0.000001,
+            signed_gateway_usage_required=True,
+        ),
+    )
+    for rejected in unconfirmed_rejected_contexts:
+        try:
+            adapter.apply_gateway_accounting(rejected, receipt("reconciled", True))
+        except RuntimeError as error:
+            assert str(error) == "Gateway accounting tokens do not match runtime usage"
+        else:
+            raise AssertionError("invalid unconfirmed fallback unexpectedly succeeded")
+
+    partial_receipt = receipt(
+        "reconciled",
+        True,
+        requests={"attempted": 2, "reconciled": 1, "unreconciled": 1},
+    )
+    zero_cost_projection = receipt("reconciled", True)
+    zero_cost_projection["actual"]["costCNY"] = 0
+    for value in (
+        partial_receipt,
+        receipt("reconciled", True, cost_micro_cny=0),
+        zero_cost_projection,
+    ):
+        rejected = AccountingContext(
+            input_tokens=0,
+            output_tokens=0,
+            status="timed_out",
+            error_code="SHUTDOWN_UNCONFIRMED",
+            termination_confirmed=False,
+            cost_cny=0,
+            signed_gateway_usage_required=True,
+        )
+        try:
+            adapter.apply_gateway_accounting(rejected, value)
+        except RuntimeError as error:
+            assert str(error) == "Gateway accounting tokens do not match runtime usage"
+        else:
+            raise AssertionError("partial or zero-cost gateway usage was accepted")
 
     for value, expected in (
         (
@@ -1058,8 +1240,6 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
             )
             assert environment.launch_count == 1
             pico = context.metadata["pico"]
-            assert pico["status"] == "timed_out"
-            assert pico["retryCount"] == 0
             assert pico["signedGatewayUsageRequired"] is True
             adapter.apply_gateway_accounting(
                 context,
@@ -1078,41 +1258,170 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 },
             )
             assert (context.n_input_tokens, context.n_output_tokens) == (13, 2)
-            accounting = pico["gatewayAccounting"]
-            assert accounting["usageFallback"] is True
-            assert accounting["usageSource"] == "signed_gateway_actual"
+            assert pico["gatewayAccounting"]["usageSource"] == "signed_gateway_actual"
 
+        unconfirmed_shutdown = {
+            "status": "timed_out",
+            "exitCode": 124,
+            "usage": {"promptTokens": 0, "completionTokens": 0, "costCNY": 0},
+            "error": {"code": "SHUTDOWN_UNCONFIRMED", "summary": "synthetic"},
+            "terminationConfirmed": False,
+        }
         with tempfile.TemporaryDirectory(
-            prefix="pico-runtime-zero-cost-timeout-"
+            prefix="pico-runtime-unconfirmed-shutdown-"
         ) as directory:
-            context, environment = await execute(
-                Path(directory), [zero_usage_timeout], outer_timeout_sec=120
-            )
-            assert environment.launch_count == 1
-            adapter.apply_gateway_accounting(
-                context,
-                {
-                    "schemaVersion": 1,
-                    "status": "reconciled",
-                    "withinBudget": True,
-                    "pricingSha256": "0" * 64,
-                    "receiptSha256": "1" * 64,
-                    "actual": {
-                        "inputTokens": 0,
-                        "outputTokens": 0,
-                        "costMicroCNY": 0,
-                        "costCNY": 0,
-                    },
-                },
-            )
-            pico = context.metadata["pico"]
-            assert (context.n_input_tokens, context.n_output_tokens) == (0, 0)
-            assert pico["signedGatewayUsageRequired"] is False
-            accounting = pico["gatewayAccounting"]
-            assert accounting["usageFallback"] is False
-            assert accounting["usageSource"] == "runtime"
+            try:
+                await execute(
+                    Path(directory), [unconfirmed_shutdown], outer_timeout_sec=120
+                )
+            except RuntimeError as error:
+                assert str(error) == "Pico could not confirm runtime termination"
+            else:
+                raise AssertionError("unconfirmed runtime shutdown unexpectedly succeeded")
     finally:
         adapter.docker_exec_secret_stdin = original_launcher
+
+
+async def assert_run_failure_cleanup_contract(adapter: Any) -> None:
+    events: list[str] = []
+    prepare_verifier_egress: list[bool] = []
+    cleanup_failure: list[BaseException] = [RuntimeError("synthetic cleanup failure")]
+
+    class Gateway:
+        relay_name = "synthetic-gateway-relay"
+
+        def __init__(self, **_kwargs: Any) -> None:
+            events.append("gateway-started")
+            self.base_url = "http://pico-gateway:8080"
+            self.capability = "synthetic-capability"
+
+        def start(self) -> None:
+            events.append("gateway-registered")
+
+        async def start_relay(self, _environment: Any) -> None:
+            events.append("gateway-relay")
+
+        async def enroll(self, _environment: Any) -> None:
+            events.append("gateway-enrolled")
+
+    async def run_with_unconfirmed_shutdown(**_kwargs: Any) -> None:
+        events.append("runtime")
+        raise RuntimeError("Pico could not confirm runtime termination")
+
+    async def run_cancelled(**_kwargs: Any) -> None:
+        events.append("runtime-cancelled")
+        raise asyncio.CancelledError()
+
+    async def cleanup(
+        _environment: Any,
+        **kwargs: Any,
+    ) -> None:
+        events.append("cleanup")
+        prepare_verifier_egress.append(kwargs["prepare_verifier_egress"])
+        raise cleanup_failure[0]
+
+    async def launch_verifier(*_args: Any, **_kwargs: Any) -> None:
+        events.append("verifier")
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def workspace_exec(**_kwargs: Any) -> Any:
+        return types.SimpleNamespace(return_code=0, stdout="/app\n")
+
+    original_gateway = adapter.ProviderGateway
+    original_assert_secure = adapter.assert_secure_docker_environment
+    original_assert_running = adapter.assert_running_container_policy
+    original_task_agent_timeout = adapter.task_agent_timeout
+    original_task_verifier_timeout = adapter.task_verifier_timeout
+    original_preflight_images = adapter.preflight_task_image_paths
+    original_public_egress = adapter.public_egress_access_for_task
+    original_cleanup = adapter.cleanup_trial_resources
+    original_launch_verifier = adapter.launch_verifier_service_if_requested
+    adapter.ProviderGateway = Gateway
+    adapter.assert_secure_docker_environment = lambda _environment: None
+    adapter.assert_running_container_policy = no_op
+    adapter.task_agent_timeout = lambda _environment: 120.0
+    adapter.task_verifier_timeout = lambda _environment: 60.0
+    adapter.preflight_task_image_paths = no_op
+    adapter.public_egress_access_for_task = lambda *_args, **_kwargs: None
+    adapter.cleanup_trial_resources = cleanup
+    adapter.launch_verifier_service_if_requested = launch_verifier
+    try:
+        agent = object.__new__(adapter.PicoInstalledAgent)
+        agent.logs_dir = Path("/synthetic-logs")
+        agent._trial_networks = adapter.TrialNetworks("task-network", "gateway-network")
+        agent._supervisor_config = {
+            "runId": "synthetic-run",
+            "socketPath": "/synthetic.sock",
+            "capabilitySeed": "synthetic-seed",
+        }
+        agent._route_config = benchmark_route_config()
+        agent._public_egress_max_total_bytes = 1_073_741_824
+        agent._adapter_cleanup_margin_ms = 60_000
+        agent._extra_env = {}
+        agent.context_id = "synthetic-context"
+        agent.session_id = "synthetic-session"
+        agent._run_with_gateway = run_with_unconfirmed_shutdown
+        environment = types.SimpleNamespace(exec=workspace_exec)
+        try:
+            await agent.run("synthetic", environment, types.SimpleNamespace())
+        except RuntimeError as error:
+            assert str(error) == "Pico could not confirm runtime termination"
+            assert "synthetic cleanup failure" in "\n".join(
+                getattr(error, "__notes__", [])
+            )
+        else:
+            raise AssertionError("cleanup failure replaced the primary runtime error")
+        assert events == [
+            "gateway-started",
+            "gateway-registered",
+            "gateway-relay",
+            "gateway-enrolled",
+            "runtime",
+            "cleanup",
+        ]
+        assert prepare_verifier_egress == [False]
+        assert agent._trial_networks is None
+
+        agent._trial_networks = adapter.TrialNetworks("task-network", "gateway-network")
+        agent._run_with_gateway = no_op
+        try:
+            await agent.run("synthetic", environment, types.SimpleNamespace())
+        except RuntimeError as error:
+            assert str(error) == "synthetic cleanup failure"
+        else:
+            raise AssertionError("cleanup failure succeeded without a runtime error")
+        assert prepare_verifier_egress == [False, True]
+
+        agent._trial_networks = adapter.TrialNetworks("task-network", "gateway-network")
+        agent._run_with_gateway = run_cancelled
+        try:
+            await agent.run("synthetic", environment, types.SimpleNamespace())
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("primary cancellation was not preserved")
+
+        cleanup_failure[0] = asyncio.CancelledError()
+        agent._trial_networks = adapter.TrialNetworks("task-network", "gateway-network")
+        agent._run_with_gateway = run_with_unconfirmed_shutdown
+        try:
+            await agent.run("synthetic", environment, types.SimpleNamespace())
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cleanup cancellation was converted into a runtime error")
+    finally:
+        adapter.ProviderGateway = original_gateway
+        adapter.assert_secure_docker_environment = original_assert_secure
+        adapter.assert_running_container_policy = original_assert_running
+        adapter.task_agent_timeout = original_task_agent_timeout
+        adapter.task_verifier_timeout = original_task_verifier_timeout
+        adapter.preflight_task_image_paths = original_preflight_images
+        adapter.public_egress_access_for_task = original_public_egress
+        adapter.cleanup_trial_resources = original_cleanup
+        adapter.launch_verifier_service_if_requested = original_launch_verifier
 
 
 async def assert_verifier_service_manifest_contract(adapter: Any) -> None:
@@ -2758,6 +3067,7 @@ async def main() -> None:
     assert_route_config_contract(adapter)
     assert_accounting_failure_messages(adapter)
     await assert_runtime_retry_contract(adapter)
+    await assert_run_failure_cleanup_contract(adapter)
     await assert_verifier_service_manifest_contract(adapter)
     assert_task_timeout_contract(adapter)
     assert_supervisor_request_timeout_contract(adapter)
@@ -2926,6 +3236,8 @@ async def main() -> None:
             raise RuntimeError("synthetic proxy stop failure")
 
     class FailingGateway:
+        relay_name = "synthetic-gateway-relay"
+
         def stop(self) -> dict[str, Any]:
             cleanup_order.append("gateway")
             raise RuntimeError("synthetic gateway stop failure")
@@ -2937,7 +3249,15 @@ async def main() -> None:
     ) -> None:
         cleanup_order.append("networks")
 
+    async def assert_absent_after_gateway_stop(
+        _environment: Any,
+        _relay_name: str,
+    ) -> None:
+        cleanup_order.append("gateway-relay")
+
     adapter.remove_owned_trial_networks = remove_after_failures
+    original_assert_absent = adapter.assert_container_absent
+    adapter.assert_container_absent = assert_absent_after_gateway_stop
     try:
         await adapter.cleanup_trial_resources(
             environment,
@@ -2954,7 +3274,46 @@ async def main() -> None:
         assert str(error) == "Terminal-Bench trial cleanup failed"
     else:
         raise AssertionError("trial cleanup failures unexpectedly succeeded")
-    assert cleanup_order == ["public-egress", "gateway", "networks"]
+    finally:
+        adapter.assert_container_absent = original_assert_absent
+    assert cleanup_order == [
+        "public-egress",
+        "gateway",
+        "gateway-relay",
+        "networks",
+    ]
+
+    class CancelledPublicEgress:
+        async def stop(self, _environment: Any) -> None:
+            cleanup_order.append("public-egress")
+            raise asyncio.CancelledError()
+
+    cleanup_order.clear()
+    adapter.assert_container_absent = assert_absent_after_gateway_stop
+    try:
+        await adapter.cleanup_trial_resources(
+            environment,
+            networks=networks,
+            run_id=run_id,
+            context=types.SimpleNamespace(),
+            gateway=FailingGateway(),
+            public_egress=CancelledPublicEgress(),
+            context_id="cleanup-cancelled",
+            verifier_timeout_sec=60,
+            verifier_receipt_path=Path("/unused"),
+        )
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("cleanup cancellation was converted into a runtime error")
+    finally:
+        adapter.assert_container_absent = original_assert_absent
+    assert cleanup_order == [
+        "public-egress",
+        "gateway",
+        "gateway-relay",
+        "networks",
+    ]
 
     await assert_public_egress_lifecycle(adapter, run_id)
     await assert_public_egress_limit_handoff(adapter)

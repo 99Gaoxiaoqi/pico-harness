@@ -649,6 +649,7 @@ rm -f {remote_archive}
         public_egress: PublicEgressAccess | None = None
         context_id: str | None = None
         verifier_timeout_sec: float | None = None
+        run_error: BaseException | None = None
         try:
             loop = asyncio.get_running_loop()
             started_at = loop.time()
@@ -738,6 +739,9 @@ rm -f {remote_archive}
                 outer_deadline=run_deadlines.cleanup,
                 loop=loop,
             )
+        except BaseException as error:
+            run_error = error
+            raise
         finally:
             try:
                 verifier_scrub_secret = await cleanup_trial_resources(
@@ -752,11 +756,22 @@ rm -f {remote_archive}
                     verifier_receipt_path=(
                         self.logs_dir / "public-egress-verifier-receipt.json"
                     ),
+                    prepare_verifier_egress=run_error is None,
                 )
                 if verifier_scrub_secret is not None:
                     self._extra_env["PICO_TB_VERIFIER_EGRESS_TOKEN"] = (
                         verifier_scrub_secret
                     )
+            except BaseException as cleanup_error:
+                control_flow_error = cleanup_control_flow_error(cleanup_error)
+                if control_flow_error is not None:
+                    raise control_flow_error from run_error
+                if run_error is None:
+                    raise
+                run_error.add_note(
+                    "Terminal-Bench cleanup failed after run failure: "
+                    f"{cleanup_error!r}"
+                )
             finally:
                 self._trial_networks = None
 
@@ -951,7 +966,9 @@ rm -f {remote_archive}
                 "attempts": attempts,
                 "retryCount": retry_count,
                 "signedGatewayUsageRequired": (
-                    retry_count > 0 or is_zero_usage_terminal_failure(result)
+                    retry_count > 0
+                    or is_zero_usage_terminal_failure(result)
+                    or is_unconfirmed_shutdown_zero_usage(result)
                 ),
                 "localCanaryOnly": True,
                 "leaderboardComparable": False,
@@ -1046,8 +1063,16 @@ def apply_gateway_accounting(
         runtime_input_tokens == actual["inputTokens"]
         and runtime_output_tokens == actual["outputTokens"]
     )
+    unconfirmed_shutdown_error = (
+        pico.get("status"), pico.get("errorCode")
+    ) == ("timed_out", "SHUTDOWN_UNCONFIRMED")
+    unconfirmed_shutdown_runtime = (
+        unconfirmed_shutdown_error
+        and pico.get("terminationConfirmed") is False
+    )
     terminal_zero_usage_fallback = (
-        not runtime_usage_matches
+        not unconfirmed_shutdown_runtime
+        and not runtime_usage_matches
         and receipt["status"] == "reconciled"
         and receipt["withinBudget"] is True
         and (pico.get("status"), pico.get("errorCode"))
@@ -1061,17 +1086,39 @@ def apply_gateway_accounting(
         and runtime_reported_cost == 0
         and actual["inputTokens"] + actual["outputTokens"] > 0
     )
+    unconfirmed_shutdown_usage_fallback = (
+        not runtime_usage_matches
+        and receipt["status"] == "reconciled"
+        and receipt["withinBudget"] is True
+        and unconfirmed_shutdown_runtime
+        and pico.get("signedGatewayUsageRequired") is True
+        and runtime_input_tokens == 0
+        and runtime_output_tokens == 0
+        and not isinstance(runtime_reported_cost, bool)
+        and isinstance(runtime_reported_cost, (int, float))
+        and math.isfinite(runtime_reported_cost)
+        and runtime_reported_cost == 0
+        and actual["inputTokens"] + actual["outputTokens"] > 0
+        and actual["costMicroCNY"] > 0
+        and not isinstance(actual["costCNY"], bool)
+        and isinstance(actual["costCNY"], (int, float))
+        and math.isfinite(actual["costCNY"])
+        and actual["costCNY"] > 0
+        and gateway_receipt_requests_are_fully_reconciled(receipt)
+    )
     signed_gateway_usage_eligible = (
-        pico.get("signedGatewayUsageRequired") is True
+        (
+            pico.get("signedGatewayUsageRequired") is True
+            and not unconfirmed_shutdown_error
+        )
         or terminal_zero_usage_fallback
     )
     signed_gateway_usage_required = (
-        signed_gateway_usage_eligible and not runtime_usage_matches
+        (signed_gateway_usage_eligible and not runtime_usage_matches)
+        or unconfirmed_shutdown_usage_fallback
     )
-    use_signed_gateway_actual = (
-        signed_gateway_usage_required
-        and receipt["status"] == "reconciled"
-        and receipt["withinBudget"] is True
+    use_signed_gateway_actual = signed_gateway_usage_required and (
+        receipt["status"] == "reconciled" and receipt["withinBudget"] is True
     )
     pico["runtimeReportedCostCNY"] = runtime_reported_cost
     pico["runtimeReportedUsage"] = {
@@ -1091,7 +1138,9 @@ def apply_gateway_accounting(
         "costCNY": actual["costCNY"],
         "usageFallback": use_signed_gateway_actual,
         "usageSource": (
-            "signed_gateway_actual"
+            "signed_gateway_actual_unconfirmed"
+            if unconfirmed_shutdown_usage_fallback
+            else "signed_gateway_actual"
             if use_signed_gateway_actual
             else "runtime"
         ),
@@ -1107,6 +1156,20 @@ def apply_gateway_accounting(
     if use_signed_gateway_actual:
         context.n_input_tokens = actual["inputTokens"]
         context.n_output_tokens = actual["outputTokens"]
+
+
+def gateway_receipt_requests_are_fully_reconciled(receipt: dict[str, Any]) -> bool:
+    requests = receipt.get("requests")
+    return (
+        isinstance(requests, dict)
+        and set(requests) == {"attempted", "reconciled", "unreconciled"}
+        and all(
+            not isinstance(value, bool) and isinstance(value, int) and value >= 0
+            for value in requests.values()
+        )
+        and requests["attempted"] == requests["reconciled"]
+        and requests["unreconciled"] == 0
+    )
 
 
 def validate_gateway_accounting_receipt(
@@ -2852,6 +2915,7 @@ async def cleanup_trial_resources(
     context_id: str | None,
     verifier_timeout_sec: float | None,
     verifier_receipt_path: Path,
+    prepare_verifier_egress: bool = True,
 ) -> str | None:
     cleanup_errors: list[BaseException] = []
     if public_egress is not None:
@@ -2879,9 +2943,12 @@ async def cleanup_trial_resources(
             )
         except BaseException as error:
             cleanup_errors.append(error)
+        control_flow_error = cleanup_control_flow_error(*cleanup_errors)
+        if control_flow_error is not None:
+            raise control_flow_error
         raise RuntimeError("Terminal-Bench trial cleanup failed") from cleanup_errors[0]
 
-    if public_egress is None:
+    if public_egress is None or not prepare_verifier_egress:
         await restore_verifier_and_remove_trial_networks(
             environment,
             networks,
@@ -2926,11 +2993,31 @@ async def cleanup_trial_resources(
             )
         except BaseException as error:
             cleanup_errors.append(error)
+        startup_control_flow_error = cleanup_control_flow_error(startup_error)
+        if startup_control_flow_error is not None:
+            for cleanup_error in cleanup_errors:
+                startup_error.add_note(
+                    "Terminal-Bench verifier egress startup cleanup failed: "
+                    f"{cleanup_error!r}"
+                )
+            raise
+        control_flow_error = cleanup_control_flow_error(*cleanup_errors)
+        if control_flow_error is not None:
+            raise control_flow_error from startup_error
         if cleanup_errors:
             raise RuntimeError(
                 "Terminal-Bench verifier egress startup cleanup failed"
             ) from startup_error
         raise
+
+
+def cleanup_control_flow_error(
+    *errors: BaseException,
+) -> BaseException | None:
+    for error in errors:
+        if not isinstance(error, Exception):
+            return error
+    return None
 
 
 async def assert_container_absent(
@@ -3602,6 +3689,21 @@ def is_zero_usage_terminal_failure(result: dict[str, Any]) -> bool:
         and (result.get("status"), error.get("code"))
         in {("failed", "RUNTIME_FAILED"), ("timed_out", "TIMEOUT")}
         and result.get("terminationConfirmed") is True
+        and isinstance(usage, dict)
+        and usage.get("promptTokens") == 0
+        and usage.get("completionTokens") == 0
+        and usage.get("costCNY") == 0
+    )
+
+
+def is_unconfirmed_shutdown_zero_usage(result: dict[str, Any]) -> bool:
+    error = result.get("error")
+    usage = result.get("usage")
+    return (
+        isinstance(error, dict)
+        and (result.get("status"), error.get("code"))
+        == ("timed_out", "SHUTDOWN_UNCONFIRMED")
+        and result.get("terminationConfirmed") is False
         and isinstance(usage, dict)
         and usage.get("promptTokens") == 0
         and usage.get("completionTokens") == 0
