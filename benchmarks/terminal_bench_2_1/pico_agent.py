@@ -689,9 +689,12 @@ rm -f {remote_archive}
             request_id = f"tb21.{context_id}.{trial_key}"
             session_id = f"tb21-{context_id[:24]}-{trial_key[:24]}"
             route_config = self._route_config
+            gateway_monotonic_now = time.monotonic()
+            loop_now = loop.time()
             provider_admission_deadlines = provider_request_admission_deadlines(
                 headless_deadline=run_deadlines.headless,
-                monotonic_now=loop.time(),
+                loop_now=loop_now,
+                gateway_monotonic_now=gateway_monotonic_now,
             )
             public_egress = public_egress_access_for_task(
                 environment,
@@ -3528,7 +3531,11 @@ def remaining_budget(deadline: float, now: float) -> float:
 
 
 def provider_request_admission_deadlines(
-    *, headless_deadline: float, monotonic_now: float, wall_now: float | None = None
+    *,
+    headless_deadline: float,
+    loop_now: float,
+    gateway_monotonic_now: float,
+    wall_now: float | None = None,
 ) -> ProviderRequestAdmissionDeadlines:
     """Return gateway-authoritative and headless-conservative admission cutoffs.
 
@@ -3537,20 +3544,24 @@ def provider_request_admission_deadlines(
     headless deadline. The same-host supervisor receives the signed monotonic
     cutoff; the wall-clock projection is only a conservative headless precheck.
     """
-    gateway_deadline = headless_deadline - GATEWAY_PROVIDER_ADMISSION_LEAD_SEC
+    remaining = (
+        headless_deadline
+        - loop_now
+        - GATEWAY_PROVIDER_ADMISSION_LEAD_SEC
+    )
     if (
         not math.isfinite(headless_deadline)
-        or not math.isfinite(monotonic_now)
-        or not math.isfinite(gateway_deadline)
-        or gateway_deadline <= monotonic_now
+        or not math.isfinite(loop_now)
+        or not math.isfinite(gateway_monotonic_now)
+        or not math.isfinite(remaining)
+        or remaining <= 0
     ):
         raise RuntimeError("provider_request_admission_budget_violation")
     now = time.time() if wall_now is None else wall_now
     if not math.isfinite(now):
         raise RuntimeError("provider_request_admission_budget_violation")
-    wall_deadline_ms = int(
-        (now + gateway_deadline - monotonic_now) * 1_000
-    )
+    gateway_deadline = gateway_monotonic_now + remaining
+    wall_deadline_ms = int((now + remaining) * 1_000)
     if wall_deadline_ms < 1:
         raise RuntimeError("provider_request_admission_budget_violation")
     return ProviderRequestAdmissionDeadlines(
