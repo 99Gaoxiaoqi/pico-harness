@@ -4,6 +4,7 @@ import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import { PlanCoordinator } from "../plan/coordinator.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { formatRewindSelector, formatRewindUsage } from "./rewind-presentation.js";
@@ -262,7 +263,7 @@ export async function createPicoCommandRegistry(
     createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
     createModeCommand(settings),
-    createPlanCommand(settings),
+    createPlanCommand(settings, options.session),
     createPermissionsCommand(settings),
     createCompactCommand(options, settings),
     createInitCommand(options),
@@ -1396,16 +1397,43 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
   };
 }
 
-function createPlanCommand(settings: SessionSettings): SlashCommand {
+function createPlanCommand(settings: SessionSettings, session?: Session): SlashCommand {
   return {
     name: "plan",
-    description: "Enter Plan collaboration mode",
-    usage: "/plan",
+    description: "Show or change Plan collaboration mode",
+    usage: "/plan [on|off]",
+    argumentHint: "[on|off]",
+    argumentCompleter: completeFromCandidates(["on", "off"]),
     category: "session",
     kind: "local",
     availability: "idle",
-    execute: (): LocalCommandResult => {
-      const result = setSessionCollaborationMode(settings, "plan");
+    execute: async (input): Promise<LocalCommandResult> => {
+      const requested = input.args.trim().toLowerCase();
+      if (requested && requested !== "on" && requested !== "off") {
+        return {
+          type: "local",
+          action: "message",
+          message: "用法: /plan [on|off]",
+          data: { ok: false },
+        };
+      }
+      if (requested === "off" && session?.runtimeEventStore) {
+        const projection = await new PlanCoordinator(session.runtimeEventStore, {
+          sessionId: settings.sessionId,
+          invocationId: "command:plan-off",
+          runId: "command:plan-off",
+          turnId: "command:plan-off",
+        }).project();
+        if (projection.pendingProposal) {
+          return {
+            type: "local",
+            action: "message",
+            message: "当前计划仍待审批，请先在计划审批卡中选择“拒绝并退出”。",
+            data: { ok: false, pendingPlanId: projection.pendingProposal.planId },
+          };
+        }
+      }
+      const result = setSessionCollaborationMode(settings, requested === "off" ? "agent" : "plan");
       return {
         type: "local",
         action: "message",

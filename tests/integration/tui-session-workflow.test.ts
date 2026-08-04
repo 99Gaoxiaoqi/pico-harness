@@ -96,6 +96,12 @@ test("/plan and legacy mode commands keep collaboration and permission independe
     "plan",
   );
   assert.equal((compatibility.result.data as { permissionMode: string }).permissionMode, "auto");
+
+  const off = await processUserInput("/plan off", { registry });
+  assert.equal(off.type, "local-command");
+  if (off.type !== "local-command") return;
+  assert.equal((off.result.data as { collaborationMode: string }).collaborationMode, "agent");
+  assert.equal((off.result.data as { permissionMode: string }).permissionMode, "auto");
 });
 
 test("/resume and /fork reject an unpublished fork target", async (context) => {
