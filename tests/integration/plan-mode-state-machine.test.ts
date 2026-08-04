@@ -8,7 +8,7 @@ import { Session, SessionManager } from "../../src/engine/session.js";
 import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { normalizeSessionRuntimeStatePatch, type PersistedSessionSettings } from "../../src/engine/session-runtime.js";
 import { PlanCoordinator, PlanConflictError } from "../../src/plan/index.js";
-import { createDefaultSessionSettings, setSessionMode, snapshotSessionSettings } from "../../src/input/session-settings.js";
+import { createDefaultSessionSettings, exitSessionPlanMode, setSessionMode, snapshotSessionSettings } from "../../src/input/session-settings.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeEvent } from "../../src/storage/runtime-event.js";
 import { RuntimeEventStore, RuntimeEventStoreHighWaterConflictError, RuntimeEventStorePlanOperationConflictError } from "../../src/storage/runtime-event-store.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
@@ -108,6 +108,17 @@ test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", as
   assert.equal(snapshot.permissionMode, "default");
   assert.equal(Object.hasOwn(snapshot, "mode"), false);
   assert.equal(Object.hasOwn(snapshot, "prePlanMode"), false);
+
+  const independent = createDefaultSessionSettings({ sessionId: "independent", cwd: process.cwd(), provider: "openai", model: "m", modelRouteId: "openai/m", mode: "yolo" });
+  setSessionMode(independent, "plan");
+  assert.equal(independent.collaborationMode, "plan");
+  assert.equal(independent.permissionMode, "yolo");
+  setSessionMode(independent, "auto");
+  assert.equal(independent.mode, "plan");
+  assert.equal(independent.permissionMode, "auto");
+  exitSessionPlanMode(independent);
+  assert.equal(independent.collaborationMode, "agent");
+  assert.equal(independent.permissionMode, "auto");
 });
 
 test("Session fork inherits pending plans and interrupts active execution", async (t) => {

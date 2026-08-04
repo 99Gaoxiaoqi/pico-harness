@@ -33,7 +33,7 @@ export interface SessionSettings {
   provider: ProviderKind;
   mode: InteractionMode;
   collaborationMode?: "agent" | "plan";
-  /** 进入 plan 前的模式；退出 plan 时恢复。 */
+  /** @deprecated Legacy v2 read compatibility only; new SessionSettings never sets it. */
   prePlanMode?: Exclude<InteractionMode, "plan">;
   model: string;
   /** Stable providerID/modelID identity. Endpoint and credentials stay in ModelRouter. */
@@ -110,9 +110,6 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     provider: defaults.provider,
     collaborationMode: mode === "plan" ? "plan" : "agent",
     permissionMode: mode === "plan" ? (compatibilityPreviousMode === "plan" || !compatibilityPreviousMode ? "yolo" : compatibilityPreviousMode) : mode,
-    ...(mode === "plan" && compatibilityPreviousMode && compatibilityPreviousMode !== "plan"
-      ? { prePlanMode: compatibilityPreviousMode }
-      : {}),
     model: defaults.model,
     ...(defaults.modelRouteId !== undefined ? { modelRouteId: defaults.modelRouteId } : {}),
     thinkingEffort: defaults.thinkingEffort ?? "off",
@@ -420,7 +417,7 @@ export function restoreSessionInteractionMode(
     normalizedPrePlanMode !== undefined &&
     normalizedPrePlanMode !== "plan"
   ) {
-    settings.prePlanMode = normalizedPrePlanMode;
+    settings.permissionMode = normalizedPrePlanMode;
   }
   persistSessionSettings(settings);
   return { ok: true, message: `Mode set to ${settings.mode}` };
@@ -430,10 +427,7 @@ export function exitSessionPlanMode(settings: SessionSettings): SessionSettingRe
   if (settings.mode !== "plan") {
     return { ok: true, message: `Mode remains ${settings.mode}` };
   }
-  const restored = settings.prePlanMode ?? "yolo";
-  delete settings.prePlanMode;
   settings.collaborationMode = "agent";
-  settings.permissionMode = restored;
   persistSessionSettings(settings);
   return { ok: true, message: `Mode restored to ${settings.mode}` };
 }
@@ -443,11 +437,9 @@ export function setSessionCollaborationMode(
   mode: "agent" | "plan",
 ): SessionSettingResult {
   if (mode === "plan") {
-    settings.prePlanMode = settings.permissionMode;
     settings.collaborationMode = "plan";
   } else {
     settings.collaborationMode = "agent";
-    delete settings.prePlanMode;
   }
   persistSessionSettings(settings);
   return { ok: true, message: `Collaboration mode set to ${mode}` };
@@ -760,8 +752,6 @@ function applyPersistedSessionSettings(
   settings.modelRouteId = persisted.modelRouteId;
   settings.collaborationMode = persisted.collaborationMode ?? (persisted.mode === "plan" ? "plan" : "agent");
   settings.permissionMode = persisted.permissionMode ?? (persisted.mode === "plan" ? (persisted.prePlanMode ?? "yolo") : persisted.mode);
-  if (settings.collaborationMode === "plan") settings.prePlanMode = settings.permissionMode;
-  else delete settings.prePlanMode;
   settings.thinkingEffort = persisted.thinkingEffort;
   settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;
   settings.additionalDirectories = createAdditionalDirectorySnapshot(
@@ -777,11 +767,9 @@ function normalizeSessionTitle(value: string | undefined): string | undefined {
 
 function applySessionMode(settings: SessionSettings, mode: InteractionMode): void {
   if (mode === "plan" && settings.mode !== "plan") {
-    settings.prePlanMode = settings.permissionMode;
     settings.collaborationMode = "plan";
   } else if (mode !== "plan") {
     settings.permissionMode = mode;
-    if (settings.collaborationMode !== "plan") delete settings.prePlanMode;
   }
 }
 
