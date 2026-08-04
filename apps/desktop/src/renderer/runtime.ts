@@ -109,7 +109,36 @@ export function approvalFromPlanProjection(
   const pending =
     projection && isRecord(projection.pendingProposal) ? projection.pendingProposal : undefined;
   const execution = projection && isRecord(projection.execution) ? projection.execution : undefined;
-  if (!projection || (!pending && execution?.status !== "interrupted")) return undefined;
+  const revisionRequest =
+    projection && isRecord(projection.revisionRequest) ? projection.revisionRequest : undefined;
+  if (!projection || (!pending && execution?.status !== "interrupted" && !revisionRequest)) {
+    return undefined;
+  }
+  if (!pending && revisionRequest) {
+    const planId = stringValue(revisionRequest.planId);
+    const revision = numberValue(revisionRequest.expectedRevision, -1);
+    const sessionSequence = numberValue(projection.sessionSequence, -1);
+    const operationId = stringValue(revisionRequest.operationId);
+    const feedback = stringValue(revisionRequest.feedback);
+    if (!planId || revision < 0 || sessionSequence < 0 || !operationId || !feedback) {
+      return undefined;
+    }
+    return {
+      id: `revision:${planId}`,
+      runId: `plan-revision:${planId}`,
+      sessionId,
+      title: "计划修改等待恢复",
+      detail: feedback,
+      risk: "medium",
+      kind: "plan",
+      planControlMode: "revision",
+      planId,
+      expectedRevision: revision,
+      expectedSessionSequence: sessionSequence,
+      planOperationId: operationId,
+      planFeedback: feedback,
+    };
+  }
   if (!pending && execution) {
     const planId = stringValue(execution.planId);
     const revision = numberValue(execution.revision, -1);
@@ -1147,6 +1176,7 @@ export interface RuntimeActions {
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
     readonly feedback?: string;
+    readonly operationId?: string;
   }): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
   reviewChanges(
@@ -2702,7 +2732,7 @@ export function useRuntimeStore(): RuntimeStore {
                 action: input.action,
                 expectedRevision: input.expectedRevision,
                 expectedSessionSequence: input.expectedSessionSequence,
-                operationId: planResponseOperationId(input),
+                operationId: input.operationId ?? planResponseOperationId(input),
                 ...(input.feedback?.trim() ? { feedback: input.feedback.trim() } : {}),
               });
             } catch (error) {
