@@ -128,6 +128,7 @@ import type {
 import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import type { PlanControlPort } from "./plan-control-port.js";
+import { PlanCoordinator } from "../plan/coordinator.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
 import {
   projectRuntimeTranscriptEntries,
@@ -995,6 +996,24 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const settings = await this.withSession(canonical, params.sessionId, async (session) => {
       const current = await this.getSessionSettings(canonical, session);
+      if (
+        requestedCollaborationMode === "agent" &&
+        current.collaborationMode === "plan" &&
+        session.runtimeEventStore
+      ) {
+        const projection = await new PlanCoordinator(session.runtimeEventStore, {
+          sessionId: params.sessionId,
+          invocationId: "desktop:settings",
+          runId: "desktop:settings",
+          turnId: "desktop:settings",
+        }).project();
+        if (projection.pendingProposal) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "当前计划仍待审批，请先确认“拒绝并退出”以记录放弃事实",
+          );
+        }
+      }
       const router = await this.getSessionModelRouter(canonical, current);
       const selectedRoute = resolveRequestedModelRoute(router, params.modelRouteId);
       if (params.thinkingEffort !== undefined) {

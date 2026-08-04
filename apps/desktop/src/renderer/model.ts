@@ -136,6 +136,7 @@ export interface CatalogSkillView {
 export interface ApprovalView {
   readonly id: string;
   readonly runId: string;
+  readonly sessionId?: string | undefined;
   readonly title: string;
   readonly detail: string;
   readonly command?: string | undefined;
