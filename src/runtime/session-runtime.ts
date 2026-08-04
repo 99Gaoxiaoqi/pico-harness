@@ -51,6 +51,7 @@ export interface SessionRuntimeOptions {
   /** Host-owned environment inherited by the session Hook executor. */
   env?: Readonly<NodeJS.ProcessEnv>;
   toolDisclosure?: ToolDisclosure;
+  lspEnabled?: boolean;
   lspServers?: readonly LspServerConfig[];
   taskHostRuntime?: TaskHostRuntime;
   /** Durable completion outbox 的活态发现间隔。 */
@@ -82,6 +83,8 @@ export interface SessionRuntime {
   readonly steerQueue: SteerQueue;
   readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
+  /** Keep code-intelligence processes aligned with persisted collaboration mode. */
+  setCodeIntelligenceEnabled(enabled: boolean): Promise<void>;
   readonly hookService?: HookService;
   readonly hookCommands: readonly SlashCommand[];
   readonly hookManagement?: HookManagementService;
@@ -422,8 +425,12 @@ async function createPinnedSessionRuntime(
   const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
   const goalManager = new GoalManager();
   const unbindGoalManager = session.bindGoalManager(goalManager);
+  const persistedPlanMode =
+    session.getRuntimeStateSnapshot().settings?.collaborationMode === "plan";
+  const codeIntelligenceEnabled = options.lspEnabled ?? !persistedPlanMode;
   const codeIntelligenceManager = new CodeIntelligenceManager({
     rootDir: workDir,
+    lspEnabled: codeIntelligenceEnabled,
     ...(options.lspServers ? { lspServers: options.lspServers } : {}),
   });
   await codeIntelligenceManager.start();
@@ -544,8 +551,8 @@ async function createPinnedSessionRuntime(
     hookRewakeQueue,
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue,
-    codeIntelligence,
     codeIntelligenceManager,
+    codeIntelligenceEnabled,
     unbindGoalManager,
     releaseSessionPin,
     stopDelegationCompletionPolling: () => {
@@ -694,8 +701,8 @@ interface DefaultSessionRuntimeOptions {
   hookRewakeQueue: HookRewakeQueue;
   fileIndex: FileIndex;
   steerQueue: SteerQueue;
-  codeIntelligence: CodeIntelligenceService;
   codeIntelligenceManager: CodeIntelligenceManager;
+  codeIntelligenceEnabled: boolean;
   unbindGoalManager: () => void;
   releaseSessionPin: () => void;
   stopDelegationCompletionPolling: () => void;
@@ -719,7 +726,6 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly hookRewakeQueue: HookRewakeQueue;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
-  readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
@@ -736,6 +742,9 @@ class DefaultSessionRuntime implements SessionRuntime {
   private readonly stopDelegationCompletionPolling: () => void;
   private readonly session: Session;
   private disposePromise?: Promise<void>;
+  private codeIntelligenceTransition: Promise<void> = Promise.resolve();
+  private codeIntelligenceDisposing = false;
+  private codeIntelligenceEnabled: boolean;
 
   constructor(options: DefaultSessionRuntimeOptions) {
     this.session = options.session;
@@ -753,8 +762,8 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.hookRewakeQueue = options.hookRewakeQueue;
     this.fileIndex = options.fileIndex;
     this.steerQueue = options.steerQueue;
-    this.codeIntelligence = options.codeIntelligence;
     this.codeIntelligenceManager = options.codeIntelligenceManager;
+    this.codeIntelligenceEnabled = options.codeIntelligenceEnabled;
     this.unbindGoalManager = options.unbindGoalManager;
     this.releaseSessionPin = options.releaseSessionPin;
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
@@ -785,6 +794,21 @@ class DefaultSessionRuntime implements SessionRuntime {
 
   get hookService(): HookService | undefined {
     return this._hookService;
+  }
+
+  get codeIntelligence(): CodeIntelligenceService {
+    const service = this.codeIntelligenceManager.service();
+    if (!service) throw new Error("代码智能当前已隔离");
+    return service;
+  }
+
+  async setCodeIntelligenceEnabled(enabled: boolean): Promise<void> {
+    await this.withCodeIntelligenceTransition(async () => {
+      if (this.codeIntelligenceDisposing) throw new Error("SessionRuntime is disposing");
+      if (enabled === this.codeIntelligenceEnabled) return;
+      await this.codeIntelligenceManager.setLspEnabled(enabled);
+      this.codeIntelligenceEnabled = enabled;
+    });
   }
 
   get hookCommands(): readonly SlashCommand[] {
@@ -876,6 +900,7 @@ class DefaultSessionRuntime implements SessionRuntime {
   }
 
   private async disposeOnce(): Promise<void> {
+    this.codeIntelligenceDisposing = true;
     const failures: unknown[] = [];
     const attempt = async (cleanup: () => unknown | Promise<unknown>): Promise<void> => {
       try {
@@ -899,7 +924,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     });
     const ownedCleanup = await Promise.allSettled([
       this.delegationManager.dispose(),
-      this.codeIntelligenceManager.close(),
+      this.withCodeIntelligenceTransition(() => this.codeIntelligenceManager.close()),
       ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
     ]);
     for (const result of ownedCleanup) {
@@ -920,6 +945,20 @@ class DefaultSessionRuntime implements SessionRuntime {
     await attempt(() => this.releaseSessionPin());
     if (failures.length > 0) {
       throw new AggregateError(failures, `SessionRuntime ${this.sessionId} cleanup failed`);
+    }
+  }
+
+  private async withCodeIntelligenceTransition<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.codeIntelligenceTransition;
+    let release!: () => void;
+    this.codeIntelligenceTransition = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
     }
   }
 
