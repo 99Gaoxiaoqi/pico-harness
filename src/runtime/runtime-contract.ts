@@ -77,6 +77,7 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
     readonly revision: number;
     readonly expectedSessionSequence: number;
     readonly operationId?: string;
+    readonly transition?: "start" | "resume";
   };
 }
 
@@ -96,6 +97,8 @@ export interface RunAgentCliResult {
   tracePath?: string;
   /** Pending plan review emitted by a normally completed planning run. */
   handoff?: PlanHandoff;
+  /** Present when an idempotent control operation was replayed without starting another Run. */
+  replayedOperationId?: string;
 }
 
 /** A UI-neutral lifecycle event for a runtime host. */

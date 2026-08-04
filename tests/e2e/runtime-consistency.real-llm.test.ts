@@ -100,6 +100,8 @@ realModelTest(
       model: model.route.model,
       modelRouteId: "removed-provider/removed-model",
       mode: "yolo",
+      collaborationMode: "agent",
+      permissionMode: "yolo",
       thinkingEffort: "off",
       thinkingEffortExplicit: false,
       additionalDirectories: [],

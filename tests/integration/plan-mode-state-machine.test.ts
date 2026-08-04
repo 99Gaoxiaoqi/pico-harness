@@ -36,6 +36,8 @@ const SETTINGS: PersistedSessionSettings = {
   modelRouteId: "openai/test",
   mode: "plan",
   prePlanMode: "auto",
+  collaborationMode: "plan",
+  permissionMode: "auto",
   thinkingEffort: "medium",
   thinkingEffortExplicit: false,
   additionalDirectories: [],
@@ -163,6 +165,156 @@ test("Plan operation retries are idempotent and conflicting reuse is rejected", 
     }),
     RuntimeEventStorePlanOperationConflictError,
   );
+});
+
+test("revision requests and interrupted controls are durable CAS operations", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-recovery-"));
+  const workDir = join(root, "work");
+  const storageRoot = join(root, "state");
+  await mkdir(workDir);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new RuntimeEventStore({ storageRoot });
+  await store.initializeSession({ sessionId: "session-1", workDir });
+  const coordinator = new PlanCoordinator(
+    store,
+    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn" },
+    () => AT,
+  );
+  const proposal = {
+    planId: "plan-1",
+    title: "Plan",
+    steps: [{ id: "step-1", title: "One", description: "Do one" }],
+  };
+  await coordinator.propose({ operationId: "propose", expectedSessionSequence: 0, proposal });
+  const requested = await coordinator.requestRevision({
+    operationId: "request-revision",
+    expectedSessionSequence: 1,
+    planId: "plan-1",
+    expectedRevision: 1,
+    feedback: "补充失败回滚步骤",
+  });
+  assert.equal(requested.revisionRequest?.feedback, "补充失败回滚步骤");
+  await coordinator.requestRevision({
+    operationId: "request-revision",
+    expectedSessionSequence: 1,
+    planId: "plan-1",
+    expectedRevision: 1,
+    feedback: "补充失败回滚步骤",
+  });
+  assert.equal((await store.readSession("session-1")).length, 2);
+  await assert.rejects(
+    coordinator.requestRevision({
+      operationId: "request-revision",
+      expectedSessionSequence: 2,
+      planId: "plan-1",
+      expectedRevision: 1,
+      feedback: "不同反馈",
+    }),
+    RuntimeEventStorePlanOperationConflictError,
+  );
+  const reopened = new PlanCoordinator(
+    new RuntimeEventStore({ storageRoot }),
+    { sessionId: "session-1", invocationId: "reopen", runId: "run", turnId: "turn" },
+    () => AT,
+  );
+  assert.equal((await reopened.project()).revisionRequest?.operationId, "request-revision");
+  await reopened.revise({
+    operationId: "revise",
+    expectedSessionSequence: 2,
+    planId: "plan-1",
+    expectedRevision: 1,
+    proposal: { ...proposal, title: "Revised" },
+  });
+  assert.equal((await reopened.project()).revisionRequest, undefined);
+  await reopened.approve({
+    operationId: "approve",
+    expectedSessionSequence: 3,
+    planId: "plan-1",
+    expectedRevision: 2,
+    reviewedBy: "user",
+    settings: SETTINGS,
+  });
+  await reopened.startExecution({
+    operationId: "start",
+    expectedSessionSequence: 5,
+    planId: "plan-1",
+    revision: 2,
+  });
+  await reopened.interrupt({
+    operationId: "interrupt-1",
+    expectedSessionSequence: 6,
+    planId: "plan-1",
+    reason: "runtime stopped",
+  });
+  const resumed = await reopened.resume({
+    operationId: "resume",
+    expectedSessionSequence: 7,
+    planId: "plan-1",
+  });
+  assert.equal(resumed.execution?.status, "active");
+  assert.equal(resumed.execution?.reason, undefined);
+  await reopened.resume({
+    operationId: "resume",
+    expectedSessionSequence: 7,
+    planId: "plan-1",
+  });
+  assert.equal((await store.readSession("session-1")).length, 8);
+  await reopened.interrupt({
+    operationId: "interrupt-2",
+    expectedSessionSequence: 8,
+    planId: "plan-1",
+  });
+  const replanned = await reopened.replan({
+    operationId: "replan",
+    expectedSessionSequence: 9,
+    planId: "plan-1",
+    settings: { ...SETTINGS, collaborationMode: "agent" },
+    reason: "requirements changed",
+  });
+  assert.equal(replanned.execution?.status, "cancelled");
+  const runtime = projectRuntimeSessionState(await store.readSession("session-1"));
+  assert.equal(runtime.settings?.collaborationMode, "plan");
+
+  await store.initializeSession({ sessionId: "session-cancel", workDir });
+  const cancelCoordinator = new PlanCoordinator(
+    store,
+    { sessionId: "session-cancel", invocationId: "inv", runId: "run", turnId: "turn" },
+    () => AT,
+  );
+  await cancelCoordinator.propose({ operationId: "propose", expectedSessionSequence: 0, proposal });
+  await cancelCoordinator.approve({
+    operationId: "approve",
+    expectedSessionSequence: 1,
+    planId: "plan-1",
+    expectedRevision: 1,
+    reviewedBy: "user",
+    settings: SETTINGS,
+  });
+  await cancelCoordinator.startExecution({
+    operationId: "start",
+    expectedSessionSequence: 3,
+    planId: "plan-1",
+    revision: 1,
+  });
+  await cancelCoordinator.interrupt({
+    operationId: "interrupt",
+    expectedSessionSequence: 4,
+    planId: "plan-1",
+  });
+  const cancelled = await cancelCoordinator.cancel({
+    operationId: "cancel",
+    expectedSessionSequence: 5,
+    planId: "plan-1",
+    reason: "user cancelled",
+  });
+  assert.equal(cancelled.execution?.status, "cancelled");
+  await cancelCoordinator.cancel({
+    operationId: "cancel",
+    expectedSessionSequence: 5,
+    planId: "plan-1",
+    reason: "user cancelled",
+  });
+  assert.equal((await store.readSession("session-cancel")).length, 6);
 });
 
 test("reject and exit atomically preserves permission mode", async (t) => {
@@ -305,6 +457,23 @@ test("Plan reducer enforces review, step and rewind invariants", async (t) => {
   const projected = await coordinator.project();
   assert.equal(projected.pendingProposal?.revision, 1);
   assert.equal(projected.execution, undefined);
+  assert.equal(
+    await coordinator.operationStatus("approve", "plan.approved", {
+      planId: "p",
+      expectedRevision: 1,
+      reviewedBy: "user",
+    }),
+    "missing",
+    "rewound operations do not suppress a new operation on the active branch",
+  );
+  await coordinator.approve({
+    operationId: "approve",
+    expectedSessionSequence: projected.sessionSequence,
+    planId: "p",
+    expectedRevision: 1,
+    reviewedBy: "user",
+    settings: SETTINGS,
+  });
 });
 
 test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", async () => {

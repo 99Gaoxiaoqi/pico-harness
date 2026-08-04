@@ -37,6 +37,7 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
   const proposals = [...state.proposals];
   let pendingProposal = state.pendingProposal;
   let execution = state.execution;
+  let revisionRequest = state.revisionRequest;
   switch (event.kind) {
     case "plan.proposed": {
       if (pendingProposal) conflict("A pending plan proposal already exists");
@@ -53,6 +54,18 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
       proposals[proposals.length - 1] = { ...pendingProposal!, status: "stale" };
       pendingProposal = clone(event.data.proposal);
       proposals.push(pendingProposal);
+      revisionRequest = undefined;
+      break;
+    }
+    case "plan.revision.requested": {
+      requirePending(pendingProposal, event.data.planId, event.data.expectedRevision);
+      revisionRequest = {
+        planId: event.data.planId,
+        expectedRevision: event.data.expectedRevision,
+        feedback: event.data.feedback,
+        operationId: event.data.operationId,
+        requestedAt: event.at,
+      };
       break;
     }
     case "plan.approved":
@@ -69,6 +82,7 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
       } as PlanProposal;
       proposals[proposals.length - 1] = reviewed;
       pendingProposal = undefined;
+      revisionRequest = undefined;
       break;
     }
     case "plan.execution.started": {
@@ -135,6 +149,36 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
         ...(event.data.reason ? { reason: event.data.reason } : {}),
       };
       break;
+    case "plan.execution.resumed":
+      if (
+        !execution ||
+        execution.planId !== event.data.planId ||
+        execution.status !== "interrupted"
+      )
+        conflict("Plan execution is not interrupted");
+      {
+        const { reason: _reason, ...resumed } = execution;
+        execution = {
+          ...resumed,
+          status: "active",
+          updatedAt: event.at,
+        };
+      }
+      break;
+    case "plan.execution.replanned":
+      if (
+        !execution ||
+        execution.planId !== event.data.planId ||
+        execution.status !== "interrupted"
+      )
+        conflict("Plan execution is not interrupted");
+      execution = {
+        ...execution,
+        status: "cancelled",
+        updatedAt: event.at,
+        ...(event.data.reason ? { reason: event.data.reason } : {}),
+      };
+      break;
     case "plan.execution.cancelled":
       if (
         !execution ||
@@ -166,6 +210,7 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
     ...(proposals.at(-1) ? { latestProposal: proposals.at(-1) } : {}),
     ...(pendingProposal ? { pendingProposal } : {}),
     ...(execution ? { execution } : {}),
+    ...(revisionRequest ? { revisionRequest } : {}),
   };
 }
 
