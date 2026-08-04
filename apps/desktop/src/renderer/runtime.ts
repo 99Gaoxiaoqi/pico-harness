@@ -22,6 +22,7 @@ import {
   emptyData,
   folderWorkspaceCapabilities,
   type AppData,
+  type ApprovalView,
   type CatalogAgentView,
   type CatalogSkillView,
   type CapabilitySourceView,
@@ -98,6 +99,84 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function stringValue(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
+}
+
+export function approvalFromPlanProjection(
+  value: unknown,
+  sessionId: string,
+): ApprovalView | undefined {
+  const projection = isRecord(value) ? value : undefined;
+  const pending =
+    projection && isRecord(projection.pendingProposal) ? projection.pendingProposal : undefined;
+  const execution = projection && isRecord(projection.execution) ? projection.execution : undefined;
+  if (!projection || (!pending && execution?.status !== "interrupted")) return undefined;
+  if (!pending && execution) {
+    const planId = stringValue(execution.planId);
+    const revision = numberValue(execution.revision, -1);
+    const sessionSequence = numberValue(projection.sessionSequence, -1);
+    if (!planId || revision < 0 || sessionSequence < 0) return undefined;
+    return {
+      id: `interrupted:${planId}`,
+      runId: `plan-interrupted:${planId}`,
+      sessionId,
+      title: "计划执行已中断",
+      detail: stringValue(execution.reason, "请选择继续执行、取消执行或重新规划。"),
+      risk: "medium",
+      kind: "plan",
+      planControlMode: "interrupted",
+      planId,
+      expectedRevision: revision,
+      expectedSessionSequence: sessionSequence,
+      planSteps: recordArray(execution.steps)
+        .map((step) => stringValue(step.title))
+        .filter(Boolean),
+    };
+  }
+  if (!pending) return undefined;
+  const planId = stringValue(pending.planId);
+  const revision = numberValue(pending.revision, -1);
+  const sessionSequence = numberValue(projection.sessionSequence, -1);
+  if (!planId || revision < 0 || sessionSequence < 0) return undefined;
+  const steps = recordArray(pending.steps)
+    .map((step) => stringValue(step.title ?? step.description))
+    .filter(Boolean);
+  return {
+    id: planId,
+    runId: `plan-hydrate:${planId}`,
+    sessionId,
+    title: stringValue(pending.title, "计划等待审批"),
+    detail: stringValue(pending.overview, "请审阅计划后选择下一步。"),
+    risk: "high",
+    kind: "plan",
+    planControlMode: "review",
+    planId,
+    expectedRevision: revision,
+    expectedSessionSequence: sessionSequence,
+    planTitle: stringValue(pending.title) || undefined,
+    planOverview: stringValue(pending.overview) || undefined,
+    planSteps: steps.length ? steps : undefined,
+  };
+}
+
+function planResponseOperationId(input: {
+  readonly sessionId: string;
+  readonly planId: string;
+  readonly action: string;
+  readonly expectedRevision: number;
+  readonly expectedSessionSequence: number;
+  readonly feedback?: string;
+}): string {
+  const canonical = JSON.stringify(input);
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < canonical.length; index += 1) {
+    const code = canonical.charCodeAt(index);
+    left = Math.imul(left ^ code, 0x01000193);
+    right = Math.imul(right ^ code, 0x85ebca6b);
+  }
+  return `desktop-plan:${(left >>> 0).toString(16).padStart(8, "0")}${(right >>> 0)
+    .toString(16)
+    .padStart(8, "0")}`;
 }
 
 function numberValue(value: unknown, fallback = 0): number {
@@ -1058,7 +1137,13 @@ export interface RuntimeActions {
   respondPlan(input: {
     readonly planId: string;
     readonly sessionId: string;
-    readonly action: "execute" | "continue_editing" | "reject_exit";
+    readonly action:
+      | "execute"
+      | "continue_editing"
+      | "reject_exit"
+      | "resume_execution"
+      | "cancel_execution"
+      | "replan_execution";
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
     readonly feedback?: string;
@@ -1603,6 +1688,7 @@ export function useRuntimeStore(): RuntimeStore {
       }
       if (!isCurrentLoad()) return;
       const record = isRecord(value) ? value : {};
+      const hydratedPlanApproval = approvalFromPlanProjection(record.planProjection, sessionId);
       const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
       const activeRunId = stringValue(activeRun?.runId) || undefined;
       const changeRunId =
@@ -1658,6 +1744,12 @@ export function useRuntimeStore(): RuntimeStore {
       if (!isCurrentLoad()) return;
       setData((current) => ({
         ...current,
+        approvals: [
+          ...current.approvals.filter(
+            (approval) => approval.kind !== "plan" || approval.sessionId !== sessionId,
+          ),
+          ...(hydratedPlanApproval ? [hydratedPlanApproval] : []),
+        ],
         conversations: {
           ...current.conversations,
           [conversationKey]: {
@@ -1828,6 +1920,7 @@ export function useRuntimeStore(): RuntimeStore {
               command: stringValue(request.command) || undefined,
               risk: request.risk === "high" || request.risk === "medium" ? request.risk : "low",
               kind: request.kind === "plan" ? "plan" : "tool",
+              planControlMode: request.kind === "plan" ? "review" : undefined,
               planId: stringValue(request.planId ?? plan.planId) || undefined,
               expectedRevision:
                 typeof request.expectedRevision === "number"
@@ -2039,7 +2132,11 @@ export function useRuntimeStore(): RuntimeStore {
           void loadGlobalProviderConfig(bridge).catch(reportFailure);
         }
         scheduleHydration();
-      } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
+      } else if (
+        topic === "plan.updated" ||
+        topic.startsWith("run.") ||
+        topic.startsWith("session.")
+      ) {
         scheduleHydration(stringValue(scope.sessionId) || undefined);
       }
     };
@@ -2597,16 +2694,21 @@ export function useRuntimeStore(): RuntimeStore {
         }
         await perform("plan-response", async (bridge) => {
           if (!preview) {
-            await invoke(bridge, "plan.respond", {
-              workspacePath,
-              sessionId: input.sessionId,
-              planId: input.planId,
-              action: input.action,
-              expectedRevision: input.expectedRevision,
-              expectedSessionSequence: input.expectedSessionSequence,
-              operationId: crypto.randomUUID(),
-              ...(input.feedback?.trim() ? { feedback: input.feedback.trim() } : {}),
-            });
+            try {
+              await invoke(bridge, "plan.respond", {
+                workspacePath,
+                sessionId: input.sessionId,
+                planId: input.planId,
+                action: input.action,
+                expectedRevision: input.expectedRevision,
+                expectedSessionSequence: input.expectedSessionSequence,
+                operationId: planResponseOperationId(input),
+                ...(input.feedback?.trim() ? { feedback: input.feedback.trim() } : {}),
+              });
+            } catch (error) {
+              await loadConversation(bridge, workspacePath, input.sessionId);
+              throw error;
+            }
             await loadConversation(bridge, workspacePath, input.sessionId);
           }
           setData((current) => ({

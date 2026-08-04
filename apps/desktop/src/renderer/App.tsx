@@ -1739,7 +1739,10 @@ function ConversationPage() {
             selectedApproval?.kind === "plan" &&
             (decision === "execute" ||
               decision === "continue_editing" ||
-              decision === "reject_exit")
+              decision === "reject_exit" ||
+              decision === "resume_execution" ||
+              decision === "cancel_execution" ||
+              decision === "replan_execution")
               ? actions.respondPlan({
                   planId: selectedApproval.planId ?? "",
                   sessionId: sessionId ?? "",

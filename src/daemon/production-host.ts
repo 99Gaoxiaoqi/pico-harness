@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
-import { AgentRuntime } from "../runtime/agent-runtime.js";
+import { AgentRuntime, type RunAgentCliResult } from "../runtime/agent-runtime.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { PlanProjection } from "../plan/contract.js";
@@ -158,7 +158,7 @@ export function createProductionLocalDaemonHost(
   const resolvedPrompts = new Map<string, InteractionScope>();
   let desktopResourceVersion = Date.now();
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
-  const service = new WorkspaceRuntimeService({
+  const service: WorkspaceRuntimeService = new WorkspaceRuntimeService({
     registrationStore,
     env,
     execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, execution, context }) => {
@@ -217,7 +217,7 @@ export function createProductionLocalDaemonHost(
           ...(workspaceRuntime.taskHostRuntime
             ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
             : {}),
-          ...(pluginSnapshot.hookSources.length
+          ...(persistedSettings?.collaborationMode !== "plan" && pluginSnapshot.hookSources.length
             ? { hookExtensionSources: pluginSnapshot.hookSources }
             : {}),
         });
@@ -266,53 +266,103 @@ export function createProductionLocalDaemonHost(
               ...(trustAuthority ? { trustAuthority } : {}),
             });
           }
-          const result = await agentRuntime.execute(
-            {
-              prompt,
-              dir: workspacePath,
-              session: targetSessionId,
-              provider: route.provider,
-              baseURL: route.baseURL,
-              apiKey: route.apiKey,
-              model: route.model,
-              modelRouteId: route.modelRouteId,
-              modelCapabilities: route.capabilities,
-              ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-              ...(persistedSettings?.collaborationMode === "plan" ||
-              persistedSettings?.mode === "plan"
-                ? { planMode: true }
-                : {}),
-              ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
-              ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
-                ? { rewindPrePlanMode: persistedSettings.prePlanMode }
-                : {}),
-              ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
-            },
-            {
-              signal: context.signal,
-              runtimeState,
-              reporter,
-              modelRouter: route.modelRouter,
-              approvalNotifier: broker.notifyApproval,
-              approvalManager: broker.approvalManager,
-              askUserHandler: broker.askUserHandler,
-              ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
-              waitAtSafeBoundary: context.waitAtSafeBoundary,
-              rewindPointSink: context.bindCheckpoint,
-              pluginSnapshot,
-              pluginCapabilityRegistry,
-              mcpConfigSources: effectiveMcp.sources,
-              picoHome,
-              env,
-              memoryProposalSink: (notice) =>
-                publishDesktopMemoryProposal(
-                  service,
-                  workspacePath,
-                  notice,
-                  nextDesktopResourceVersion,
-                ),
-            },
-          );
+          const runtimeOptions = {
+            prompt,
+            dir: workspacePath,
+            session: targetSessionId,
+            provider: route.provider,
+            baseURL: route.baseURL,
+            apiKey: route.apiKey,
+            model: route.model,
+            modelRouteId: route.modelRouteId,
+            modelCapabilities: route.capabilities,
+            ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
+            ...(persistedSettings?.collaborationMode === "plan" ||
+            persistedSettings?.mode === "plan"
+              ? { planMode: true }
+              : {}),
+            ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
+            ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
+              ? { rewindPrePlanMode: persistedSettings.prePlanMode }
+              : {}),
+            ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
+          };
+          const runtimeHost = {
+            signal: context.signal,
+            runtimeState,
+            reporter,
+            modelRouter: route.modelRouter,
+            approvalNotifier: broker.notifyApproval,
+            approvalManager: broker.approvalManager,
+            askUserHandler: broker.askUserHandler,
+            ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
+            waitAtSafeBoundary: context.waitAtSafeBoundary,
+            rewindPointSink: context.bindCheckpoint,
+            pluginSnapshot,
+            pluginCapabilityRegistry,
+            mcpConfigSources: effectiveMcp.sources,
+            picoHome,
+            env,
+            memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
+              publishDesktopMemoryProposal(
+                service,
+                workspacePath,
+                notice,
+                nextDesktopResourceVersion,
+              ),
+          };
+          const planReview = execution?.planReview;
+          const result: RunAgentCliResult =
+            planReview?.action === "execute"
+              ? await agentRuntime.approvePlanAndExecute(
+                  {
+                    approval: {
+                      sessionId: targetSessionId,
+                      dir: workspacePath,
+                      planId: planReview.planId,
+                      expectedRevision: planReview.expectedRevision,
+                      expectedSessionSequence: planReview.expectedSessionSequence,
+                      operationId: planReview.operationId,
+                    },
+                    execution: { ...runtimeOptions, planMode: false },
+                  },
+                  runtimeHost,
+                )
+              : planReview?.action === "resume_execution"
+                ? await agentRuntime.resumePlanExecution(
+                    {
+                      sessionId: targetSessionId,
+                      dir: workspacePath,
+                      planId: planReview.planId,
+                      expectedSessionSequence: planReview.expectedSessionSequence,
+                      operationId: planReview.operationId,
+                      execution: { ...runtimeOptions, planMode: false },
+                    },
+                    runtimeHost,
+                  )
+                : planReview?.action === "replan_execution"
+                  ? await agentRuntime.replanInterruptedExecution(
+                      {
+                        sessionId: targetSessionId,
+                        dir: workspacePath,
+                        planId: planReview.planId,
+                        expectedSessionSequence: planReview.expectedSessionSequence,
+                        operationId: planReview.operationId,
+                        prompt: planReview.feedback ?? "请根据中断原因重新规划后续步骤。",
+                        execution: { ...runtimeOptions, planMode: true },
+                      },
+                      runtimeHost,
+                    )
+                  : await agentRuntime.execute(
+                      planReview?.action === "continue_editing"
+                        ? {
+                            ...runtimeOptions,
+                            prompt: `[PLAN REVISION FEEDBACK]\n${planReview.feedback ?? "请继续修改计划。"}`,
+                            planMode: true,
+                          }
+                        : runtimeOptions,
+                      runtimeHost,
+                    );
           if (result.handoff) {
             publishDesktopPlanHandoff(
               service,
@@ -434,98 +484,134 @@ export function createProductionLocalDaemonHost(
     planControl: {
       respond: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
-        if (input.action === "execute") {
-          const route = await resolveDesktopPlanRoute(
+        if (input.action === "execute" || input.action === "continue_editing") {
+          const projection =
+            input.action === "continue_editing"
+              ? (
+                  await agentRuntime.requestPlanRevision({
+                    sessionId: input.sessionId,
+                    dir: workspacePath,
+                    picoHome,
+                    env,
+                    planId: input.planId,
+                    expectedRevision: input.expectedRevision,
+                    expectedSessionSequence: input.expectedSessionSequence,
+                    operationId: input.operationId,
+                    feedback: input.feedback ?? "请继续修改计划。",
+                  })
+                ).projection
+              : await readDesktopPlanProjection(
+                  workspacePath,
+                  input.sessionId,
+                  picoHome,
+                  input.operationId,
+                );
+          if (input.action === "execute") {
+            await service.executeIdempotentDaemonCommand(
+              workspacePath,
+              {
+                commandType: "plan.review.claim",
+                idempotencyKey: input.operationId,
+                request: {
+                  planId: input.planId,
+                  expectedRevision: input.expectedRevision,
+                  expectedSessionSequence: input.expectedSessionSequence,
+                  operationId: input.operationId,
+                  action: input.action,
+                },
+              },
+              () => {
+                assertPendingPlanReview(projection, input);
+                return { result: { accepted: true, operationId: input.operationId } };
+              },
+            );
+          }
+          const run = await service.startForegroundRun({
             workspacePath,
-            input.sessionId,
-            credentialVault,
-            userConfigStore,
-            effectiveConfigResolver,
-            env,
-            picoHome,
-          );
-          const result = await agentRuntime.approvePlanAndExecute(
-            {
-              approval: {
-                sessionId: input.sessionId,
-                dir: workspacePath,
+            sessionId: input.sessionId,
+            prompt:
+              input.action === "execute"
+                ? "执行已批准计划"
+                : `[PLAN REVISION FEEDBACK]\n${input.feedback ?? "请继续修改计划。"}`,
+            execution: {
+              resumeExistingSession: true,
+              planReview: {
+                action: input.action,
                 planId: input.planId,
                 expectedRevision: input.expectedRevision,
                 expectedSessionSequence: input.expectedSessionSequence,
                 operationId: input.operationId,
+                ...(input.feedback ? { feedback: input.feedback } : {}),
               },
-              execution: desktopPlanExecutionOptions(route),
             },
-            { picoHome, env },
-          );
-          if (result.handoff) {
-            publishDesktopPlanHandoff(
-              service,
-              workspacePath,
-              result.handoff,
-              nextDesktopResourceVersion,
-            );
-          }
+            idempotencyKey: `plan-review-run:${input.operationId}`,
+          });
+          return { accepted: true, projection, run: jsonObject(run) };
+        }
+        if (input.action === "resume_execution" || input.action === "replan_execution") {
           const projection = await readDesktopPlanProjection(
             workspacePath,
             input.sessionId,
             picoHome,
             input.operationId,
           );
-          publishDesktopPlanProjection(
-            service,
+          await service.executeIdempotentDaemonCommand(
             workspacePath,
-            projection,
-            "executing",
-            nextDesktopResourceVersion,
-          );
-          return { accepted: true, projection, run: { sessionId: result.sessionId } };
-        }
-        if (input.action === "continue_editing") {
-          const route = await resolveDesktopPlanRoute(
-            workspacePath,
-            input.sessionId,
-            credentialVault,
-            userConfigStore,
-            effectiveConfigResolver,
-            env,
-            picoHome,
-          );
-          const result = await agentRuntime.execute(
             {
-              ...desktopPlanExecutionOptions(route),
-              prompt: `[PLAN REVISION FEEDBACK]\n${input.feedback ?? "请继续修改计划。"}`,
-              dir: workspacePath,
-              session: input.sessionId,
-              sessionSelection: { mode: "resume", sessionId: input.sessionId },
-              planMode: true,
+              commandType: "plan.interrupted.claim",
+              idempotencyKey: input.operationId,
+              request: {
+                planId: input.planId,
+                expectedRevision: input.expectedRevision,
+                expectedSessionSequence: input.expectedSessionSequence,
+                action: input.action,
+                ...(input.feedback ? { feedback: input.feedback } : {}),
+              },
             },
-            { picoHome, env, resumeExistingSession: true },
+            () => {
+              assertInterruptedPlanControl(projection, input);
+              return { result: { accepted: true, operationId: input.operationId } };
+            },
           );
-          if (result.handoff) {
-            publishDesktopPlanHandoff(
-              service,
-              workspacePath,
-              result.handoff,
-              nextDesktopResourceVersion,
-            );
-          }
-          const projection =
-            result.handoff?.projection ??
-            (await readDesktopPlanProjection(
-              workspacePath,
-              input.sessionId,
-              picoHome,
-              input.operationId,
-            ));
+          const run = await service.startForegroundRun({
+            workspacePath,
+            sessionId: input.sessionId,
+            prompt:
+              input.action === "resume_execution" ? "继续执行已中断计划" : "重新规划已中断计划",
+            execution: {
+              resumeExistingSession: true,
+              planReview: {
+                action: input.action,
+                planId: input.planId,
+                expectedRevision: input.expectedRevision,
+                expectedSessionSequence: input.expectedSessionSequence,
+                operationId: input.operationId,
+                ...(input.feedback ? { feedback: input.feedback } : {}),
+              },
+            },
+            idempotencyKey: `plan-interrupted-run:${input.operationId}`,
+          });
+          return { accepted: true, projection, run: jsonObject(run) };
+        }
+        if (input.action === "cancel_execution") {
+          const projection = await agentRuntime.cancelInterruptedPlan({
+            sessionId: input.sessionId,
+            dir: workspacePath,
+            picoHome,
+            env,
+            planId: input.planId,
+            expectedSessionSequence: input.expectedSessionSequence,
+            operationId: input.operationId,
+            ...(input.feedback ? { reason: input.feedback } : {}),
+          });
           publishDesktopPlanProjection(
             service,
             workspacePath,
             projection,
-            "continue_editing",
+            "updated",
             nextDesktopResourceVersion,
           );
-          return { accepted: true, projection, run: { sessionId: result.sessionId } };
+          return { accepted: true, projection };
         }
         const lease = await globalSessionManager.getOrCreatePinned(input.sessionId, workspacePath, {
           persistence: true,
@@ -866,47 +952,6 @@ async function resolveDesktopModelRoute(
   }
 }
 
-async function resolveDesktopPlanRoute(
-  workspacePath: string,
-  sessionId: string,
-  credentialVault: CredentialVault,
-  userConfigStore: UserConfigStore,
-  effectiveConfigResolver: EffectiveConfigResolver,
-  env: Readonly<Record<string, string | undefined>>,
-  picoHome: string,
-) {
-  const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
-    persistence: true,
-    picoHome,
-    runtimePort: createEngineRuntimePort(),
-  });
-  try {
-    const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
-    return await resolveDesktopModelRoute(
-      workspacePath,
-      credentialVault,
-      userConfigStore,
-      effectiveConfigResolver,
-      settings?.modelRouteId,
-      settings?.provider,
-      env,
-    );
-  } finally {
-    lease.release();
-  }
-}
-
-function desktopPlanExecutionOptions(route: Awaited<ReturnType<typeof resolveDesktopModelRoute>>) {
-  return {
-    provider: route.provider,
-    baseURL: route.baseURL,
-    apiKey: route.apiKey,
-    model: route.model,
-    modelRouteId: route.modelRouteId,
-    modelCapabilities: route.capabilities,
-  };
-}
-
 async function readDesktopPlanProjection(
   workspacePath: string,
   sessionId: string,
@@ -930,6 +975,48 @@ async function readDesktopPlanProjection(
     }).project();
   } finally {
     lease.release();
+  }
+}
+
+function assertPendingPlanReview(
+  projection: PlanProjection,
+  input: {
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly expectedSessionSequence: number;
+  },
+): void {
+  const pending = projection.pendingProposal;
+  if (
+    !pending ||
+    pending.planId !== input.planId ||
+    pending.revision !== input.expectedRevision ||
+    projection.sessionSequence !== input.expectedSessionSequence
+  ) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "计划已更新，请刷新审批卡后重试");
+  }
+}
+
+function assertInterruptedPlanControl(
+  projection: PlanProjection,
+  input: {
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly expectedSessionSequence: number;
+  },
+): void {
+  const execution = projection.execution;
+  if (
+    !execution ||
+    execution.status !== "interrupted" ||
+    execution.planId !== input.planId ||
+    execution.revision !== input.expectedRevision ||
+    projection.sessionSequence !== input.expectedSessionSequence
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      "计划执行状态已更新，请刷新后重试",
+    );
   }
 }
 

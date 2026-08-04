@@ -93,6 +93,7 @@ import {
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
+import { projectPlanEntries } from "../plan/reducer.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -1483,6 +1484,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const result = {
       session,
       items: page.items,
+      planProjection: toJsonValue(projectPlanEntries(params.sessionId, projection.entries)),
       ...(activeRun ? { activeRun } : {}),
       queuedInputs,
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
