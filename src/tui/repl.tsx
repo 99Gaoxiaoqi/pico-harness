@@ -2961,7 +2961,17 @@ function createTuiRuntimePlanControl(input: {
   return {
     respond: async (response) => {
       if (response.action === "execute") {
-        const { prompt: _prompt, session: _session, dir: _dir, ...execution } = input.cliOpts;
+        const {
+          prompt: _prompt,
+          session: _session,
+          dir: _dir,
+          planMode: _planMode,
+          ...execution
+        } = input.cliOpts;
+        void _prompt;
+        void _session;
+        void _dir;
+        void _planMode;
         const result = await new AgentRuntime().approvePlanAndExecute(
           {
             approval: {
@@ -2972,7 +2982,7 @@ function createTuiRuntimePlanControl(input: {
               expectedSessionSequence: response.expectedSessionSequence,
               operationId: response.operationId,
             },
-            execution,
+            execution: { ...execution, planMode: false },
           },
           input.runDependencies,
         );
