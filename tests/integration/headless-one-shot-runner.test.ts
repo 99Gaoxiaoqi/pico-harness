@@ -117,7 +117,7 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
     costCNY: 0,
   });
   assert.equal(outcome.result.effective.modelRouteId, ROUTE_ID);
-  assert.equal(outcome.result.effective.permissionMode, "plan");
+  assert.equal(outcome.result.effective.permissionMode, "auto");
   assert.equal(Object.hasOwn(outcome.result, "policyDenials"), false);
   assert.equal(providerCalls, 1);
   assert.ok(outcome.result.tracePath);
@@ -133,6 +133,7 @@ test("headless Plan persists a pending handoff without approval or workspace mut
   const request = {
     ...requestFor(fixture, "plan-pending"),
     prompt: "调查后提交计划，但不要执行或修改任何文件",
+    permissionMode: "plan" as const,
     trace: false,
   };
   let providerCalls = 0;
@@ -197,6 +198,7 @@ test("headless Plan continues when the model stops before submit_plan", async (c
   const request = {
     ...requestFor(fixture, "plan-continuation"),
     prompt: "必须调用 submit_plan 提交计划",
+    permissionMode: "plan" as const,
     trace: false,
   };
   let providerCalls = 0;
@@ -1482,8 +1484,7 @@ test("headless policy denial defaults to the compatible terminal outcome", async
 
 test("incident-mode policy denial remains recoverable after normal completion", async (context) => {
   const fixture = await createFixture(context, "policy");
-  const secret = "secret-canary-policy";
-  await configureFixture(fixture, secret);
+  await configureFixture(fixture, "secret-canary-policy");
   let calls = 0;
   const outcome = await runHeadlessOneShotJson(
     JSON.stringify({
@@ -1506,10 +1507,17 @@ test("incident-mode policy denial remains recoverable after normal completion", 
               },
             ]);
           }
-          return assistant(`policy explained ${secret}`, {
-            promptTokens: 5,
-            completionTokens: 2,
-          });
+          return assistant("", { promptTokens: 5, completionTokens: 2 }, [
+            {
+              id: "submit-after-policy-denial",
+              name: "submit_plan",
+              arguments: JSON.stringify({
+                title: "记录受阻后的安全计划",
+                steps: [{ title: "等待审批", description: "保持工作区不变" }],
+                operationId: "policy-denial-submit-plan",
+              }),
+            },
+          ]);
         },
       }),
     },
@@ -1517,7 +1525,7 @@ test("incident-mode policy denial remains recoverable after normal completion", 
 
   assert.equal(outcome.exitCode, 0);
   assert.equal(outcome.result.status, "completed");
-  assert.equal(outcome.result.finalMessage, "policy explained [REDACTED]");
+  assert.equal(outcome.result.handoff?.kind, "plan_handoff");
   assert.equal(outcome.result.error, null);
   assert.deepEqual(outcome.result.policyDenials, {
     total: 1,
@@ -2242,7 +2250,7 @@ function requestFor(fixture: Fixture, id: string): HeadlessOneShotRequestV1 {
     sessionId: `session-${id}`,
     prompt: `respond to ${id}`,
     modelRouteId: ROUTE_ID,
-    permissionMode: "plan",
+    permissionMode: "auto",
     allowedTools: [],
     timeoutMs: 30_000,
     shutdownGraceMs: 2_000,

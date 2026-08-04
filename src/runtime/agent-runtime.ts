@@ -1319,7 +1319,14 @@ export async function executeAgentRuntime(
       }
     }
     if (effectiveOptions.allowedTools !== undefined) {
-      pruneRegistryToCommandAllowlist(registry, effectiveOptions.allowedTools);
+      const requiredControlTools = [
+        ...(collaborationMode() === "plan" ? ["submit_plan"] : []),
+        ...(options.approvedPlan ? ["update_plan", "cancel_plan"] : []),
+      ];
+      pruneRegistryToCommandAllowlist(registry, [
+        ...effectiveOptions.allowedTools,
+        ...requiredControlTools,
+      ]);
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
 
