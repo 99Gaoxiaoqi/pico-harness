@@ -3011,17 +3011,20 @@ function createTuiRuntimePlanControl(input: {
         if (!lease.session.runtimeEventStore) {
           throw new Error("Plan rejection requires durable Session storage");
         }
+        const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
+        if (!settings) throw new Error("Plan rejection requires persisted Session settings");
         return await new PlanCoordinator(lease.session.runtimeEventStore, {
           sessionId: response.sessionId,
           invocationId: `plan-review:${response.operationId}`,
           runId: `plan-review:${response.operationId}`,
           turnId: `plan-review:${response.operationId}`,
-        }).reject({
+        }).rejectAndExit({
           operationId: response.operationId,
           expectedSessionSequence: response.expectedSessionSequence,
           planId: response.planId,
           expectedRevision: response.expectedRevision,
           reviewedBy: "user",
+          settings,
           ...(response.feedback ? { reason: response.feedback } : {}),
         });
       } finally {
