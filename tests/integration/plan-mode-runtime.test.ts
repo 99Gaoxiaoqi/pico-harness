@@ -179,6 +179,111 @@ test("Plan provider projection always exposes submit_plan through tool disclosur
   assert.equal(result.handoff?.kind, "plan_handoff");
 });
 
+test("resumeExistingSession injects durable revision feedback into the provider turn tail", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-revision-tail-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-revision-tail";
+  await mkdir(workDir);
+  const runtime = new AgentRuntime();
+  const planned = await runtime.execute(
+    {
+      prompt: "旧用户消息，不包含新的修订要求",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+    },
+    {
+      provider: submitPlanProvider("submit-revision-tail-v1"),
+      picoHome,
+      reporter: new SilentReporter(),
+    },
+  );
+  const handoff = planned.handoff;
+  assert.ok(handoff);
+  const feedbackPrefix = "必须补充冷启动恢复和 operation replay 的验证步骤";
+  const feedback = `${feedbackPrefix}${"甲".repeat(4_100)}TAIL_MUST_BE_TRUNCATED`;
+  const operationId = "revision-feedback-operation";
+  await runtime.requestPlanRevision({
+    sessionId,
+    dir: workDir,
+    picoHome,
+    planId: handoff.planId,
+    expectedRevision: handoff.revision,
+    expectedSessionSequence: handoff.expectedSessionSequence,
+    operationId,
+    feedback,
+  });
+  const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const runtimeState = await createSessionRuntime({
+    session: sessionLease.session,
+    sessionLease,
+    hooks: false,
+    lspEnabled: false,
+  });
+  t.after(async () => {
+    await runtimeState.dispose();
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let providerCalls = 0;
+  const revisionProvider: LLMProvider = {
+    async generate(messages) {
+      providerCalls++;
+      const currentUser =
+        messages.findLast((message) => message.role === "user" && message.toolCallId === undefined)
+          ?.content ?? "";
+      assert.match(currentUser, /<plan-revision-request>/u);
+      assert.match(currentUser, new RegExp(feedbackPrefix, "u"));
+      assert.match(currentUser, new RegExp(operationId, "u"));
+      assert.match(currentUser, /\[truncated \d+ chars\]/u);
+      assert.doesNotMatch(currentUser, /TAIL_MUST_BE_TRUNCATED/u);
+      assert.doesNotMatch(currentUser, /这个 prompt 不会被提交/u);
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "submit-revision-tail-v2",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "Revision with recovery",
+              steps: [{ title: "Recover", description: "Verify cold recovery and replay" }],
+              operationId: "submit-revision-tail-v2",
+            }),
+          },
+        ],
+      };
+    },
+  };
+  const revised = await executeAgentRuntime(
+    {
+      prompt: "这个 prompt 不会被提交",
+      dir: workDir,
+      sessionSelection: { mode: "resume", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+    },
+    {
+      provider: revisionProvider,
+      picoHome,
+      runtimeState,
+      resumeExistingSession: true,
+      reporter: new SilentReporter(),
+    },
+  );
+  assert.equal(providerCalls, 1);
+  assert.equal(revised.handoff?.revision, 2);
+});
+
 test("Plan Run isolates and restores code intelligence owned by an injected SessionRuntime", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-injected-lsp-"));
   const workDir = join(root, "work");

@@ -150,6 +150,8 @@ import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 
 const livePlanAdmissions = new Set<string>();
+const PLAN_REVISION_FEEDBACK_MAX_CHARS = 4_000;
+const PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS = 256;
 import {
   assembleRuntimeProvider,
   billingRouteForProvider,
@@ -690,6 +692,30 @@ async function reconcileOrphanedPlanExecution(
 
 function planAdmissionKey(sessionId: string, operationId: string): string {
   return `${sessionId}\u0000${operationId}`;
+}
+
+function planRevisionRequestTurnTail(projection: PlanProjection): string | undefined {
+  const request = projection.revisionRequest;
+  if (!request) return undefined;
+  const context = {
+    planId: request.planId.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
+    expectedRevision: request.expectedRevision,
+    operationId: request.operationId.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
+    requestedAt: request.requestedAt.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
+    feedback: boundedPlanRevisionFeedback(request.feedback),
+  };
+  return [
+    "<plan-revision-request>",
+    "这是从持久化事件恢复的用户修订要求。请按该反馈调查并调用 submit_plan 提交同一 planId 的下一修订版；不要批准或执行旧修订。",
+    JSON.stringify(context),
+    "</plan-revision-request>",
+  ].join("\n");
+}
+
+function boundedPlanRevisionFeedback(feedback: string): string {
+  if (feedback.length <= PLAN_REVISION_FEEDBACK_MAX_CHARS) return feedback;
+  const omitted = feedback.length - PLAN_REVISION_FEEDBACK_MAX_CHARS;
+  return `${feedback.slice(0, PLAN_REVISION_FEEDBACK_MAX_CHARS)}\n...[truncated ${omitted} chars]`;
 }
 
 async function acquirePlanControlSession(
@@ -1445,6 +1471,14 @@ export async function executeAgentRuntime(
           : {}),
       }).buildLayers();
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
+      if (collaborationMode() === "plan" && session.runtimeEventStore) {
+        const projection = await new PlanCoordinator(
+          session.runtimeEventStore,
+          planControlContext(session.id, "revision-turn-tail"),
+        ).project();
+        const revisionTail = planRevisionRequestTurnTail(projection);
+        if (revisionTail) turnTailParts.push(revisionTail);
+      }
       if (memoryContextBuilder) {
         try {
           const canonical = await memoryTrustStore.canonicalize(workDir);
