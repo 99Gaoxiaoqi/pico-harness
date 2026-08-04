@@ -1749,7 +1749,12 @@ function ConversationPage() {
                   action: decision,
                   expectedRevision: selectedApproval.expectedRevision ?? 0,
                   expectedSessionSequence: selectedApproval.expectedSessionSequence ?? 0,
-                  ...(feedback ? { feedback } : {}),
+                  ...(selectedApproval.planOperationId
+                    ? { operationId: selectedApproval.planOperationId }
+                    : {}),
+                  ...(feedback || selectedApproval.planFeedback
+                    ? { feedback: feedback ?? selectedApproval.planFeedback }
+                    : {}),
                 })
               : actions.respondApproval(
                   selectedApproval?.id ?? "",
