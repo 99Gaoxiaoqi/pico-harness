@@ -434,16 +434,16 @@ export function createProductionLocalDaemonHost(
     planControl: {
       respond: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
-        const route = await resolveDesktopPlanRoute(
-          workspacePath,
-          input.sessionId,
-          credentialVault,
-          userConfigStore,
-          effectiveConfigResolver,
-          env,
-          picoHome,
-        );
         if (input.action === "execute") {
+          const route = await resolveDesktopPlanRoute(
+            workspacePath,
+            input.sessionId,
+            credentialVault,
+            userConfigStore,
+            effectiveConfigResolver,
+            env,
+            picoHome,
+          );
           const result = await agentRuntime.approvePlanAndExecute(
             {
               approval: {
@@ -482,6 +482,15 @@ export function createProductionLocalDaemonHost(
           return { accepted: true, projection, run: { sessionId: result.sessionId } };
         }
         if (input.action === "continue_editing") {
+          const route = await resolveDesktopPlanRoute(
+            workspacePath,
+            input.sessionId,
+            credentialVault,
+            userConfigStore,
+            effectiveConfigResolver,
+            env,
+            picoHome,
+          );
           const result = await agentRuntime.execute(
             {
               ...desktopPlanExecutionOptions(route),
@@ -527,17 +536,20 @@ export function createProductionLocalDaemonHost(
           if (!lease.session.runtimeEventStore) {
             throw new Error("Plan rejection requires durable Session storage");
           }
+          const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
+          if (!settings) throw new Error("Plan rejection requires persisted Session settings");
           const projection = await new PlanCoordinator(lease.session.runtimeEventStore, {
             sessionId: input.sessionId,
             invocationId: `plan-review:${input.operationId}`,
             runId: `plan-review:${input.operationId}`,
             turnId: `plan-review:${input.operationId}`,
-          }).reject({
+          }).rejectAndExit({
             operationId: input.operationId,
             expectedSessionSequence: input.expectedSessionSequence,
             planId: input.planId,
             expectedRevision: input.expectedRevision,
             reviewedBy: "user",
+            settings,
             ...(input.feedback ? { reason: input.feedback } : {}),
           });
           publishDesktopPlanProjection(
