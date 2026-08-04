@@ -77,6 +77,7 @@ interface RuntimeRunContext {
 
 const runtimeRunContext = new AsyncLocalStorage<RuntimeRunContext>();
 const runtimeToolCallContext = new AsyncLocalStorage<string>();
+const liveRuntimeRuns = new Set<string>();
 const externalMessageCommitTails = new Map<string, Promise<void>>();
 const forkBootstrapTails = new Map<string, Promise<void>>();
 
@@ -228,6 +229,11 @@ export function currentRuntimeRun(): RuntimeRun | undefined {
   return context?.active ? context.run : undefined;
 }
 
+/** Process-local guard used only to avoid reconciling a Run that is demonstrably executing now. */
+export function isRuntimeRunLive(sessionId: string, runId: string): boolean {
+  return liveRuntimeRuns.has(runtimeRunLiveKey(sessionId, runId));
+}
+
 /** The tool that caused the current nested Agent work, including a delegated child run. */
 export function currentRuntimeToolCallId(): string | undefined {
   return runtimeToolCallContext.getStore();
@@ -337,6 +343,7 @@ export class RuntimeRun {
       }),
     );
     await run.recordRunStarted();
+    liveRuntimeRuns.add(runtimeRunLiveKey(run.sessionId, run.runId));
     return run;
   }
 
@@ -364,6 +371,7 @@ export class RuntimeRun {
     }
     for (const runId of await store.listRunIds(sessionId)) {
       if (runId === options.prestartedRunId) continue;
+      if (isRuntimeRunLive(sessionId, runId)) continue;
       const events = await store.readRun(sessionId, runId);
       if (
         runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX) &&
@@ -832,6 +840,7 @@ export class RuntimeRun {
         throw error;
       } finally {
         context.active = false;
+        liveRuntimeRuns.delete(runtimeRunLiveKey(this.sessionId, this.runId));
       }
     });
   }
@@ -1196,6 +1205,7 @@ export class RuntimeRun {
         await this.append(terminal);
         this.terminal = terminal;
       }
+      liveRuntimeRuns.delete(runtimeRunLiveKey(this.sessionId, this.runId));
     })();
     return this.finishPromise;
   }
@@ -1281,6 +1291,10 @@ export class RuntimeRun {
       throw new Error(`Runtime run ${this.runId} is already terminal`);
     }
   }
+}
+
+function runtimeRunLiveKey(sessionId: string, runId: string): string {
+  return `${sessionId}\u0000${runId}`;
 }
 
 async function writeWithRuntimeEventGuard<Result>(
