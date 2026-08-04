@@ -66,7 +66,8 @@ realModelTest(
     assert.ok(
       events.some(
         (event) =>
-          event.kind === "tool.started" &&
+          event.kind === "tool.result.recorded" &&
+          event.data.status === "succeeded" &&
           ["read_file", "grep", "glob", "repo_map"].includes(event.data.toolName),
       ),
       "planning must contain a successful read/search tool fact",
@@ -212,6 +213,16 @@ realModelTest(
     assert.equal(projection?.proposals[0]?.status, "stale");
     assert.equal(projection?.pendingProposal?.revision, 2);
     assert.match(JSON.stringify(projection?.pendingProposal), /YAML/iu);
+    assert.ok((projection?.pendingProposal?.steps.length ?? 0) >= 2);
+    assert.ok(
+      projection?.pendingProposal?.steps.some((step) => {
+        const text = `${step.title}\n${step.description}`;
+        return (
+          /YAML/iu.test(text) && /(parse|parsable|validate|validation|解析|校验|验证)/iu.test(text)
+        );
+      }),
+      "revision 2 must include an independent step that validates YAML parsing",
+    );
     const events = await readRuntimeEvents(sandbox);
     assert.equal(events.filter((event) => event.kind === "plan.revised").length, 1);
     assert.equal(toolCalls(events, "ask_user").length, 1);
