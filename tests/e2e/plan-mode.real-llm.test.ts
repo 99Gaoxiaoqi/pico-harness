@@ -195,12 +195,28 @@ realModelTest(
     const firstEvents = await readRuntimeEvents(sandbox);
     assert.equal(first.handoff?.revision, 1, planEventSummary(firstEvents));
 
+    const revisionOperationId = `revise:${randomUUID()}`;
+    const revisionRequest = await runtime.requestPlanRevision({
+      sessionId: sandbox.sessionId,
+      dir: sandbox.workDir,
+      picoHome: sandbox.picoHome,
+      planId: first.handoff!.planId,
+      expectedRevision: first.handoff!.revision,
+      expectedSessionSequence: first.handoff!.expectedSessionSequence,
+      operationId: revisionOperationId,
+      feedback: "改用 YAML，并新增一个验证 YAML 可解析的独立步骤。",
+    });
+    assert.equal(revisionRequest.replayed, false);
+    assert.equal(revisionRequest.projection.pendingProposal, undefined);
+    assert.equal(revisionRequest.projection.proposals[0]?.status, "stale");
+    assert.equal(revisionRequest.projection.revisionRequest?.operationId, revisionOperationId);
+
     const second = await runtime.execute(
       planningRequest(
         sandbox,
         model,
         [
-          "继续修改上一版计划。用户反馈：改用 YAML，并新增一个验证 YAML 可解析的独立步骤。",
+          "继续完成已持久化的计划修订请求。",
           "先查看现有上下文，再调用 submit_plan 提交修订版；不要修改工作区文件。",
         ].join("\n"),
         "resume",
@@ -224,6 +240,7 @@ realModelTest(
       "revision 2 must include an independent step that validates YAML parsing",
     );
     const events = await readRuntimeEvents(sandbox);
+    assert.equal(events.filter((event) => event.kind === "plan.revision.requested").length, 1);
     assert.equal(events.filter((event) => event.kind === "plan.revised").length, 1);
     assert.equal(toolCalls(events, "ask_user").length, 1);
     assert.equal(toolCalls(events, "submit_plan").length, 2);
