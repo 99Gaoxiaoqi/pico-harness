@@ -1,5 +1,6 @@
 import {
   SESSION_RUNTIME_STATE_VERSION,
+  normalizeSessionRuntimeStatePatch,
   createEmptyUsageSnapshot,
   type SessionRuntimeStateSnapshot,
   type SessionUsageSnapshot,
@@ -180,10 +181,12 @@ export function projectRuntimeSessionState(
   let promptCache: SessionRuntimeStateSnapshot["promptCache"];
   for (const event of events) {
     if (event.kind !== "session.state.committed") continue;
-    if (event.data.patch.settings) settings = structuredClone(event.data.patch.settings);
-    if (event.data.patch.goal) goal = structuredClone(event.data.patch.goal);
-    if (event.data.patch.promptCache) {
-      promptCache = structuredClone(event.data.patch.promptCache);
+    const patch = normalizeSessionRuntimeStatePatch(event.data.patch);
+    if (!patch) continue;
+    if (patch.settings) settings = structuredClone(patch.settings);
+    if (patch.goal) goal = structuredClone(patch.goal);
+    if (patch.promptCache) {
+      promptCache = structuredClone(patch.promptCache);
     }
   }
   return {

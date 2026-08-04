@@ -7,7 +7,11 @@ import type { DurableTranscriptEvent } from "../presentation/transcript-event-st
 import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 /** Session runtime-state event schema version. */
-export const SESSION_RUNTIME_STATE_VERSION = 2 as const;
+export const SESSION_RUNTIME_STATE_VERSION = 3 as const;
+export const LEGACY_SESSION_RUNTIME_STATE_VERSION = 2 as const;
+export type SessionRuntimeStateVersion =
+  | typeof LEGACY_SESSION_RUNTIME_STATE_VERSION
+  | typeof SESSION_RUNTIME_STATE_VERSION;
 
 export type PersistedInteractionMode = "default" | "plan" | "auto" | "yolo";
 
@@ -22,6 +26,10 @@ export interface PersistedSessionSettings {
   modelRouteId: string;
   mode: PersistedInteractionMode;
   prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
+  /** Canonical v3 interaction axis. Legacy readers may continue using mode. */
+  collaborationMode?: "agent" | "plan";
+  /** Canonical v3 permission axis. */
+  permissionMode?: Exclude<PersistedInteractionMode, "plan">;
   /** Current model reasoning level. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
@@ -69,7 +77,7 @@ export interface SessionRuntimeStatePatch {
 export type SessionRuntimeStateWritePatch = SessionRuntimeStatePatch;
 
 export interface SessionRuntimeStateSnapshot {
-  stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
+  stateVersion: SessionRuntimeStateVersion;
   settings?: PersistedSessionSettings;
   goal?: GoalManagerSnapshot;
   promptCache?: PersistedPromptCacheState;
@@ -168,7 +176,11 @@ export function normalizeSessionRuntimeStatePatch(
 export function normalizeSessionRuntimeStateWritePatch(
   value: unknown,
 ): SessionRuntimeStateWritePatch | undefined {
-  return normalizeSessionRuntimeStatePatch(value);
+  const normalized = normalizeSessionRuntimeStatePatch(value);
+  if (!normalized) return undefined;
+  if (!normalized.settings) return normalized;
+  const { mode: _mode, prePlanMode: _prePlanMode, ...settings } = normalized.settings;
+  return { ...normalized, settings } as SessionRuntimeStateWritePatch;
 }
 
 /** runtime_state 中 Goal section 的唯一入口校验。 */
@@ -208,6 +220,8 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
       "modelRouteId",
       "mode",
       "prePlanMode",
+      "collaborationMode",
+      "permissionMode",
       "thinkingEffort",
       "thinkingEffortExplicit",
       "additionalDirectories",
@@ -219,6 +233,8 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   const model = value["model"];
   const mode = value["mode"];
   const prePlanMode = value["prePlanMode"];
+  const collaborationMode = value["collaborationMode"];
+  const permissionMode = value["permissionMode"];
   const thinkingEffort = value["thinkingEffort"];
   const thinkingEffortExplicit = value["thinkingEffortExplicit"];
   const additionalDirectories = value["additionalDirectories"];
@@ -229,7 +245,11 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
   }
-  if (!isInteractionMode(mode) || !isReasoningLevel(thinkingEffort)) return undefined;
+  const hasLegacyMode = isInteractionMode(mode);
+  const hasSplitMode =
+    (collaborationMode === "agent" || collaborationMode === "plan") &&
+    isNonPlanMode(permissionMode);
+  if ((!hasLegacyMode && !hasSplitMode) || !isReasoningLevel(thinkingEffort)) return undefined;
   if (typeof thinkingEffortExplicit !== "boolean") return undefined;
   if (
     !Array.isArray(additionalDirectories) ||
@@ -241,7 +261,17 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (title !== undefined && !isSessionTitle(title)) return undefined;
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
-  if (mode !== "plan" && prePlanMode !== undefined) return undefined;
+  if (hasLegacyMode && mode !== "plan" && prePlanMode !== undefined) return undefined;
+  const canonicalCollaborationMode: "agent" | "plan" = hasSplitMode
+    ? (collaborationMode as "agent" | "plan")
+    : mode === "plan" ? "plan" : "agent";
+  const canonicalPermissionMode = hasSplitMode
+    ? (permissionMode as Exclude<PersistedInteractionMode, "plan">)
+    : mode === "plan"
+      ? (prePlanMode ?? "default")
+      : (mode as Exclude<PersistedInteractionMode, "plan">);
+  const compatibilityMode: PersistedInteractionMode =
+    canonicalCollaborationMode === "plan" ? "plan" : canonicalPermissionMode;
 
   return {
     ...(title !== undefined ? { title } : {}),
@@ -249,8 +279,10 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     provider,
     model,
     modelRouteId,
-    mode,
-    ...(prePlanMode !== undefined ? { prePlanMode } : {}),
+    mode: compatibilityMode,
+    ...(canonicalCollaborationMode === "plan" ? { prePlanMode: canonicalPermissionMode } : {}),
+    collaborationMode: canonicalCollaborationMode,
+    permissionMode: canonicalPermissionMode,
     thinkingEffort,
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],

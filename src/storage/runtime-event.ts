@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { assertDurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
+  LEGACY_SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
 } from "../engine/session-runtime.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
@@ -25,6 +26,16 @@ export type {
   RuntimeMessageCommittedEvent,
   RuntimeModelCallSettledEvent,
   RuntimeModelCallStartedEvent,
+  RuntimePlanApprovedEvent,
+  RuntimePlanExecutionCancelledEvent,
+  RuntimePlanExecutionCompletedEvent,
+  RuntimePlanExecutionInterruptedEvent,
+  RuntimePlanExecutionStartedEvent,
+  RuntimePlanProposedEvent,
+  RuntimePlanRejectedEvent,
+  RuntimePlanRevisedEvent,
+  RuntimePlanStepUpdatedEvent,
+  RuntimePlanEvent,
   RuntimeRunStartedEvent,
   RuntimeRunTerminalEvent,
   RuntimeSessionForkedEvent,
@@ -40,6 +51,7 @@ import type {
   RuntimeTerminalStatus,
 } from "../engine/session-runtime-event.js";
 import type { Message, Usage } from "../schema/message.js";
+import { PLAN_EVENT_KINDS, assertPlanEventData, isPlanEventKind } from "../plan/events.js";
 
 export const RUNTIME_EVENT_KINDS = [
   "run.started",
@@ -56,6 +68,7 @@ export const RUNTIME_EVENT_KINDS = [
   "session.state.committed",
   "transcript.event.recorded",
   "run.terminal",
+  ...PLAN_EVENT_KINDS,
 ] as const satisfies readonly RuntimeEvent["kind"][];
 
 export const RUNTIME_EVENT_DECODE_ERROR_CODES = [
@@ -241,7 +254,10 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "session.state.committed": {
       assertOnlyKeys(value["data"], ["stateVersion", "patch"], "session.state.committed.data");
-      if (value["data"]["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION) {
+      if (
+        value["data"]["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION &&
+        value["data"]["stateVersion"] !== LEGACY_SESSION_RUNTIME_STATE_VERSION
+      ) {
         throw new RuntimeEventIntegrityError("Runtime session state version is invalid");
       }
       const patch = normalizeSessionRuntimeStatePatch(value["data"]["patch"]);
@@ -265,6 +281,13 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       return;
     default:
+      if (isPlanEventKind(value["kind"])) {
+        if (value["partial"] !== false || value["visibility"] !== "internal") {
+          throw new RuntimeEventIntegrityError("Plan events must be complete internal facts");
+        }
+        assertPlanEventData(value["kind"], value["data"]);
+        return;
+      }
       throw new RuntimeEventIntegrityError(
         `Runtime event kind is invalid: ${String(value["kind"])}`,
       );

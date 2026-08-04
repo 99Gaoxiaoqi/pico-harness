@@ -123,6 +123,8 @@ export interface RuntimeEventStoreAppendResult {
 export interface AppendRuntimeEventBatchOptions {
   /** Session sequence CAS checked under the canonical workspace lock before any append. */
   readonly expectedSessionHighWater?: Readonly<Record<string, number>>;
+  /** Optional exactly-once identity for one Plan transition. */
+  readonly planOperation?: { readonly operationId: string; readonly fingerprint: string };
 }
 
 export interface RuntimeEventStoreEntry {
@@ -207,6 +209,13 @@ export class RuntimeEventStoreHighWaterConflictError extends RuntimeEventStoreIn
       `Runtime session ${sessionId} high-water changed from ${expectedHighWater} to ${actualHighWater}`,
     );
     this.name = "RuntimeEventStoreHighWaterConflictError";
+  }
+}
+
+export class RuntimeEventStorePlanOperationConflictError extends RuntimeEventStoreIntegrityError {
+  constructor(readonly operationId: string) {
+    super(`Plan operation ${operationId} is already bound to another fingerprint`);
+    this.name = "RuntimeEventStorePlanOperationConflictError";
   }
 }
 
@@ -386,6 +395,30 @@ export class RuntimeEventStore {
           );
         }
       }
+      if (options.planOperation) {
+        const { operationId, fingerprint } = options.planOperation;
+        if (!operationId.trim() || !/^sha256:[a-f0-9]{64}$/u.test(fingerprint)) {
+          throw new Error("Plan operation identity is invalid");
+        }
+        const existingOperation = [...sessions.values()]
+          .flatMap((session) => session.entries)
+          .find(({ event }) =>
+            event.kind.startsWith("plan.") &&
+            "operationId" in event.data &&
+            event.data.operationId === operationId,
+          );
+        if (existingOperation) {
+          if (!("fingerprint" in existingOperation.event.data) || existingOperation.event.data.fingerprint !== fingerprint) {
+            throw new RuntimeEventStorePlanOperationConflictError(operationId);
+          }
+          return canonicalEvents.map((event) => {
+            const session = sessions.get(event.sessionId)!;
+            const existing = session.eventById.get(event.eventId);
+            if (!existing) throw new RuntimeEventStoreIntegrityError(`Plan operation ${operationId} replay batch is incomplete`);
+            return this.appendResult(session.entries, existing, false);
+          });
+        }
+      }
       let hasNewEvent = false;
       const requestedEventBySession = new Map<string, Map<string, RuntimeEvent>>();
       for (const event of canonicalEvents) {
@@ -522,6 +555,20 @@ export class RuntimeEventStore {
         );
       }
       return results;
+    });
+  }
+
+  async appendPlanOperation(
+    events: readonly RuntimeEvent[],
+    operation: { readonly operationId: string; readonly fingerprint: string; readonly expectedSessionSequence: number },
+  ): Promise<readonly RuntimeEventStoreAppendResult[]> {
+    const sessionId = events[0]?.sessionId;
+    if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
+      throw new Error("Plan operation events must belong to one session");
+    }
+    return this.appendBatch(events, {
+      expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
+      planOperation: operation,
     });
   }
 
