@@ -67,7 +67,8 @@ export interface ConversationView {
 export interface SessionSettingsView {
   readonly modelRouteId?: string | undefined;
   readonly model: string;
-  readonly mode: "default" | "plan" | "auto" | "yolo";
+  readonly collaborationMode: "agent" | "plan";
+  readonly permissionMode: "default" | "auto" | "yolo";
   readonly thinkingEffort: string;
   readonly reasoningLevels: readonly string[];
 }
@@ -139,6 +140,13 @@ export interface ApprovalView {
   readonly detail: string;
   readonly command?: string | undefined;
   readonly risk: "low" | "medium" | "high";
+  readonly kind?: "tool" | "plan" | undefined;
+  readonly planId?: string | undefined;
+  readonly expectedRevision?: number | undefined;
+  readonly expectedSessionSequence?: number | undefined;
+  readonly planTitle?: string | undefined;
+  readonly planOverview?: string | undefined;
+  readonly planSteps?: readonly string[] | undefined;
 }
 
 export interface PromptView {

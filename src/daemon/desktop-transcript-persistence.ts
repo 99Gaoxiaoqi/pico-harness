@@ -206,6 +206,11 @@ async function persistApprovalRequested(
         toolName: request["toolName"],
         command: request["command"],
         risk: request["risk"],
+        kind: request["kind"],
+        planId: request["planId"],
+        expectedRevision: request["expectedRevision"],
+        expectedSessionSequence: request["expectedSessionSequence"],
+        plan: request["plan"],
       }),
     },
   });
@@ -383,11 +388,18 @@ function compactInteractionData(
 }
 
 function isPlanTimelineTool(name: string): boolean {
-  return name === "todo" || name === "update_plan" || name === "exit_plan_mode";
+  return (
+    name === "todo" ||
+    name === "submit_plan" ||
+    name === "update_plan" ||
+    name === "cancel_plan" ||
+    name === "exit_plan_mode"
+  );
 }
 
 function planTimelineTitle(name: string): string {
-  if (name === "exit_plan_mode") return "Plan ready for approval";
+  if (name === "exit_plan_mode" || name === "submit_plan") return "Plan ready for approval";
+  if (name === "cancel_plan") return "Plan cancelled";
   return name === "todo" ? "Plan updated" : "Plan";
 }
 

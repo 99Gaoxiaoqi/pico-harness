@@ -7,6 +7,7 @@ export interface StatusBarProps {
   phase?: "idle" | "running" | "approval" | "queued" | string;
   sessionMode?: string;
   forkFrom?: string;
+  collaborationMode?: string;
   permissionMode?: string;
   mcpSummary?: string;
   contextSummary?: string;
@@ -21,6 +22,7 @@ export function buildStatusItems({
   phase = "idle",
   sessionMode = "new",
   forkFrom,
+  collaborationMode = "agent",
   permissionMode = "yolo",
   mcpSummary,
   contextSummary,
@@ -34,7 +36,7 @@ export function buildStatusItems({
   if (forkFrom !== undefined) {
     items.push(["forkFrom", shortSessionId(forkFrom)]);
   }
-  if (permissionMode !== sessionMode) items.push(["perm", permissionMode]);
+  items.push(["collab", collaborationMode], ["perm", permissionMode]);
   if (mcpSummary) items.push(["mcp", mcpSummary]);
   if (contextSummary) {
     items.push(["context", truncateLogoCwd(contextSummary, summaryMaxLength)]);
@@ -62,11 +64,13 @@ export function buildStatusBarText(props: StatusBarProps): string {
   const sessionMode = itemByLabel.get("mode") ?? props.sessionMode ?? "new";
   const forkFrom = itemByLabel.get("forkFrom");
   const permissionMode = itemByLabel.get("perm");
+  const collaborationMode = itemByLabel.get("collab");
   const mcpSummary = itemByLabel.get("mcp");
   const modeText = forkFrom === undefined ? sessionMode : `${sessionMode} from ${forkFrom}`;
   const candidates = [
     `phase ${phase}`,
     `mode ${modeText}`,
+    ...(collaborationMode ? [`collab ${collaborationMode}`] : []),
     ...(permissionMode ? [`perm ${permissionMode}`] : []),
     ...(mcpSummary ? [mcpSummary] : []),
     ...(itemByLabel.has("context") ? [`ctx ${itemByLabel.get("context")}`] : []),

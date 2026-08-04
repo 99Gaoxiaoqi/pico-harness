@@ -71,7 +71,9 @@ export class DesktopInteractionBroker {
   }
 
   readonly notifyApproval: ApprovalNotifier = (notice) => {
-    this.pendingApprovals.set(notice.taskId, notice);
+    // Plan proposals are durable Runtime projections. The broker may derive a live card,
+    // but must never become their owner or erase them when the proposing Run ends.
+    if (!isPlanApprovalNotice(notice)) this.pendingApprovals.set(notice.taskId, notice);
     this.emit({ kind: "approval.pending", notice });
   };
 
@@ -157,6 +159,10 @@ export class DesktopInteractionBroker {
     } as DesktopInteractionEvent;
     for (const listener of [...this.listeners]) listener(envelope);
   }
+}
+
+function isPlanApprovalNotice(notice: ApprovalNotice): boolean {
+  return notice.toolName === "exit_plan_mode" || notice.toolName === "submit_plan";
 }
 
 function desktopDecisionReason(decision: "approve" | "approve-session" | "reject"): string {
