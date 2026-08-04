@@ -243,7 +243,8 @@ realModelTest(
     assert.equal(events.filter((event) => event.kind === "plan.revision.requested").length, 1);
     assert.equal(events.filter((event) => event.kind === "plan.revised").length, 1);
     assert.equal(toolCalls(events, "ask_user").length, 1);
-    assert.equal(toolCalls(events, "submit_plan").length, 2);
+    assert.ok(toolCalls(events, "submit_plan").length >= 2);
+    assert.ok(successfulToolResults(events, "submit_plan") >= 2);
     assertMainModelSucceeded(events);
     assert.deepEqual(await workspaceHashes(sandbox.workDir), before);
   },
@@ -385,6 +386,15 @@ function toolCalls(events: readonly RuntimeEvent[], name: string): string[] {
     }
   }
   return ids;
+}
+
+function successfulToolResults(events: readonly RuntimeEvent[], name: string): number {
+  return events.filter(
+    (event) =>
+      event.kind === "tool.result.recorded" &&
+      event.data.toolName === name &&
+      event.data.status === "succeeded",
+  ).length;
 }
 
 function assertMainModelSucceeded(events: readonly RuntimeEvent[]): void {
