@@ -21,7 +21,7 @@ import { Session } from "../../src/engine/session.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 import { TodoTool } from "../../src/tools/todo.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
-import type { Message, ToolDefinition } from "../../src/schema/message.js";
+import type { Message } from "../../src/schema/message.js";
 
 test("prompt cache safety: systemPrompt frozen while turnTail rebuilds per turn", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-cache-safety-"));
@@ -44,9 +44,9 @@ test("prompt cache safety: systemPrompt frozen while turnTail rebuilds per turn"
     modelName: "test-model",
     async generate(messages) {
       const systemMsg = messages.find((m) => m.role === "system");
-      const lastUserMsg = [...messages].reverse().find(
-        (m) => m.role === "user" && m.toolCallId === undefined,
-      );
+      const lastUserMsg = [...messages]
+        .reverse()
+        .find((m) => m.role === "user" && m.toolCallId === undefined);
 
       const systemHash = systemMsg
         ? createHash("sha256").update(systemMsg.content).digest("hex")
@@ -62,7 +62,9 @@ test("prompt cache safety: systemPrompt frozen while turnTail rebuilds per turn"
         return {
           role: "assistant",
           content: "",
-          toolCalls: [{ id: "call-1", name: "todo", arguments: JSON.stringify({ action: "toggle", id: 1 }) }],
+          toolCalls: [
+            { id: "call-1", name: "todo", arguments: JSON.stringify({ action: "toggle", id: 1 }) },
+          ],
         };
       }
       // 第二轮：正常回复
@@ -75,7 +77,11 @@ test("prompt cache safety: systemPrompt frozen while turnTail rebuilds per turn"
 
   // 每轮重建的 promptLayersFactory（模拟 loop.ts 的行为）
   let turnIndex = 0;
-  const promptLayersFactory = async ({ currentUserPrompt }: { currentUserPrompt: string }) => {
+  const promptLayersFactory = async ({
+    currentUserPrompt: _currentUserPrompt,
+  }: {
+    currentUserPrompt: string;
+  }) => {
     turnIndex++;
     const composer = new PromptComposer(workDir, false, {
       todoStore,
@@ -120,9 +126,9 @@ test("prompt cache safety: systemPrompt frozen while turnTail rebuilds per turn"
   const turn1Tail = capturedRequests[0]!.messages.find(
     (m) => m.role === "user" && m.toolCallId === undefined,
   )!.content;
-  const turn2Tail = capturedRequests[1]!.messages.filter(
-    (m) => m.role === "user" && m.toolCallId === undefined,
-  ).at(-1)!.content;
+  const turn2Tail = capturedRequests[1]!.messages
+    .filter((m) => m.role === "user" && m.toolCallId === undefined)
+    .at(-1)!.content;
 
   console.log("[Turn 1 user 末尾]\n", turn1Tail.slice(-200));
   console.log("[Turn 2 user 末尾]\n", turn2Tail.slice(-200));

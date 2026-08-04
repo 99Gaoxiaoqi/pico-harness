@@ -7,7 +7,6 @@
  * 3. turnTail 每轮反映最新 Goal 状态（预算消耗 + 停滞计数）
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,9 +18,7 @@ import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
-import { CreateGoalTool, UpdateGoalTool, GetGoalTool } from "../../src/tools/goal.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
-import type { Message } from "../../src/schema/message.js";
 
 /**
  * 场景 1：模型连续不调工具 + Goal active → 延续协调器应注入续行指令。
@@ -48,7 +45,9 @@ test("real e2e: continuation coordinator injects when model stops without tools"
     modelName: "test-model",
     async generate(messages) {
       turnCount++;
-      const lastUser = [...messages].reverse().find((m) => m.role === "user" && m.toolCallId === undefined);
+      const lastUser = [...messages]
+        .reverse()
+        .find((m) => m.role === "user" && m.toolCallId === undefined);
       if (lastUser) capturedUserMessages.push(lastUser.content);
 
       // 模型始终不调工具，只输出文字（触发延续协调器）
@@ -58,7 +57,11 @@ test("real e2e: continuation coordinator injects when model stops without tools"
 
   const registry = new ToolRegistry();
 
-  const promptLayersFactory = async ({ currentUserPrompt }: { currentUserPrompt: string }) => {
+  const promptLayersFactory = async ({
+    currentUserPrompt: _currentUserPrompt,
+  }: {
+    currentUserPrompt: string;
+  }) => {
     const composer = new PromptComposer(workDir, false, { goalManager, todoStore, picoHome });
     return composer.buildLayers();
   };
@@ -84,10 +87,7 @@ test("real e2e: continuation coordinator injects when model stops without tools"
   console.log(`[场景 1] 总轮次: ${turnCount}, 续行注入次数: ${continuationMessages.length}`);
   console.log("[场景 1] 续行消息示例:", continuationMessages[0]?.slice(0, 120));
 
-  assert.ok(
-    continuationMessages.length > 0,
-    "模型不调工具时应注入 [Goal continuation] 续行指令",
-  );
+  assert.ok(continuationMessages.length > 0, "模型不调工具时应注入 [Goal continuation] 续行指令");
 });
 
 /**
