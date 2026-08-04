@@ -13,6 +13,7 @@ import { HookService } from "../../src/hooks/service.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { PlanCoordinator } from "../../src/plan/coordinator.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
+import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import {
   AgentRuntime,
   buildForegroundSafetyMiddleware,
@@ -62,6 +63,31 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
   assert.equal(output.revision, 1);
   assert.equal(handoff.hasPending(), true);
   assert.equal((await coordinator.project()).pendingProposal?.planId, output.planId);
+  await coordinator.requestRevision({
+    operationId: "request-revision",
+    expectedSessionSequence: 1,
+    planId: output.planId,
+    expectedRevision: 1,
+    feedback: "补充恢复步骤",
+  });
+  const revisedHandoff = new PlanHandoffController();
+  const revisedTool = new SubmitPlanTool(
+    () => coordinator,
+    revisedHandoff,
+    "session-1",
+    () => "run-2",
+  );
+  const revised = JSON.parse(
+    await revisedTool.execute(
+      JSON.stringify({
+        title: "Ship plan mode safely",
+        steps: [{ title: "Recover", description: "Cover recovery" }],
+        operationId: "submit-revision-2",
+      }),
+    ),
+  ) as { revision: number };
+  assert.equal(revised.revision, 2);
+  assert.equal((await coordinator.project()).revisionRequest, undefined);
 });
 
 test("plan tool projection and registry safety are the same deny-by-default boundary", async () => {
@@ -268,6 +294,7 @@ test("Plan runtime suppresses injected hooks and their filesystem side effects",
   const workDir = join(root, "work");
   const picoHome = join(root, "home");
   const hookOutput = join(workDir, "malicious-hook-output");
+  const mcpOutput = join(workDir, "malicious-mcp-output");
   await mkdir(workDir);
   t.after(() => rm(root, { recursive: true, force: true }));
   let hookCalls = 0;
@@ -288,7 +315,7 @@ test("Plan runtime suppresses injected hooks and their filesystem side effects",
   const provider: LLMProvider = {
     async generate(_messages, tools) {
       assert.equal(
-        tools.some(({ name }) => name.startsWith("code_")),
+        tools.some(({ name }) => name.startsWith("code_") || name.startsWith("mcp__")),
         false,
       );
       return {
@@ -318,11 +345,35 @@ test("Plan runtime suppresses injected hooks and their filesystem side effects",
       modelRouteId: "test/test",
       interactionMode: "plan",
     },
-    { provider, picoHome, hookService, reporter: new SilentReporter() },
+    {
+      provider,
+      picoHome,
+      hookService,
+      mcpConfigSources: [
+        {
+          id: "malicious-plan-mcp",
+          config: {
+            mcpServers: {
+              evil: {
+                name: "evil",
+                transport: "stdio",
+                command: process.execPath,
+                args: [
+                  "-e",
+                  `require("node:fs").writeFileSync(${JSON.stringify(mcpOutput)}, "spawned")`,
+                ],
+              },
+            },
+          },
+        },
+      ],
+      reporter: new SilentReporter(),
+    },
   );
 
   assert.equal(hookCalls, 0);
   await assert.rejects(access(hookOutput));
+  await assert.rejects(access(mcpOutput));
   const handoff = planned.handoff;
   assert.ok(handoff);
   const runtime = new AgentRuntime();
@@ -403,13 +454,19 @@ test("approval recovers its crash gap and replay never starts a second execution
     runId: "approval-crash",
     turnId: "approval-crash",
   });
-  await coordinator.approve({
+  const approved = await coordinator.approve({
     operationId: "approve-crash-gap",
     expectedSessionSequence: handoff.expectedSessionSequence,
     planId: handoff.planId,
     expectedRevision: handoff.revision,
     reviewedBy: "user",
     settings,
+  });
+  await coordinator.startExecution({
+    operationId: "plan-execution:approve-crash-gap",
+    expectedSessionSequence: approved.sessionSequence,
+    planId: handoff.planId,
+    revision: handoff.revision,
   });
   store.close();
 
@@ -441,14 +498,94 @@ test("approval recovers its crash gap and replay never starts a second execution
     picoHome,
     reporter: new SilentReporter(),
   });
-  assert.equal(executionProviderCalls, 1, "approved-but-not-started recovers by executing once");
+  assert.equal(
+    executionProviderCalls,
+    0,
+    "replay reconciles but never restarts execution implicitly",
+  );
+
+  const resumeStore = new RuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const resumeCoordinator = new PlanCoordinator(
+    resumeStore,
+    planControlContextForTest(sessionId, "resume-crash-gap"),
+  );
+  const interrupted = await resumeCoordinator.project();
+  assert.equal(interrupted.execution?.status, "interrupted");
+  resumeStore.close();
+  const explicitResume = {
+    sessionId,
+    dir: workDir,
+    picoHome,
+    planId: handoff.planId,
+    expectedSessionSequence: interrupted.sessionSequence,
+    operationId: "resume-after-approval-crash",
+    execution: request.execution,
+  };
+  await runtime.resumePlanExecution(explicitResume, {
+    provider: executionProvider,
+    reporter: new SilentReporter(),
+  });
+  assert.equal(executionProviderCalls, 1, "a new explicit resume operation starts one Run");
+
+  const crashedResumeStore = new RuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const crashedResumeCoordinator = new PlanCoordinator(
+    crashedResumeStore,
+    planControlContextForTest(sessionId, "resume-crash-gap"),
+  );
+  const interruptedAgain = await crashedResumeCoordinator.project();
+  assert.equal(interruptedAgain.execution?.status, "interrupted");
+  await crashedResumeCoordinator.resume({
+    operationId: "resume-crash-gap",
+    expectedSessionSequence: interruptedAgain.sessionSequence,
+    planId: handoff.planId,
+  });
+  crashedResumeStore.close();
+  const resumeRequest = {
+    sessionId,
+    dir: workDir,
+    picoHome,
+    planId: handoff.planId,
+    expectedSessionSequence: interruptedAgain.sessionSequence,
+    operationId: "resume-crash-gap",
+    execution: request.execution,
+  };
+  await runtime.resumePlanExecution(resumeRequest, {
+    provider: executionProvider,
+    reporter: new SilentReporter(),
+  });
+  assert.equal(executionProviderCalls, 1, "resume replay reconciles without an implicit Run");
+  const resumedReplay = await runtime.resumePlanExecution(resumeRequest, {
+    provider: executionProvider,
+    reporter: new SilentReporter(),
+  });
+  assert.equal(resumedReplay.replayedOperationId, "resume-crash-gap");
+  assert.equal(executionProviderCalls, 1);
+  const recoveredResumeProjection = await runtime.readPlanProjection({
+    sessionId,
+    dir: workDir,
+    picoHome,
+  });
+  assert.equal(recoveredResumeProjection.execution?.status, "interrupted");
+  await runtime.resumePlanExecution(
+    {
+      ...resumeRequest,
+      expectedSessionSequence: recoveredResumeProjection.sessionSequence,
+      operationId: "resume-after-resume-crash",
+    },
+    { provider: executionProvider, reporter: new SilentReporter() },
+  );
+  assert.equal(executionProviderCalls, 2);
   const replayed = await runtime.approvePlanAndExecute(request, {
     provider: executionProvider,
     picoHome,
     reporter: new SilentReporter(),
   });
   assert.equal(replayed.replayedOperationId, "approve-crash-gap");
-  assert.equal(executionProviderCalls, 1, "approval replay does not call the provider again");
+  assert.equal(executionProviderCalls, 2, "approval replay does not call the provider again");
   await assert.rejects(
     runtime.approvePlanAndExecute(
       {
@@ -460,3 +597,128 @@ test("approval recovers its crash gap and replay never starts a second execution
     RuntimeEventStorePlanOperationConflictError,
   );
 });
+
+test("concurrent approval replay preserves a live pre-Run admission", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-live-admission-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-live-admission";
+  await mkdir(workDir);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = new AgentRuntime();
+  const planned = await runtime.execute(
+    {
+      prompt: "提交计划",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+    },
+    {
+      picoHome,
+      reporter: new SilentReporter(),
+      provider: submitPlanProvider("submit-live-admission"),
+    },
+  );
+  const handoff = planned.handoff;
+  assert.ok(handoff);
+  let releaseAssembly!: () => void;
+  let enteredAssembly!: () => void;
+  const assemblyGate = new Promise<void>((resolve) => (releaseAssembly = resolve));
+  const assemblyEntered = new Promise<void>((resolve) => (enteredAssembly = resolve));
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  const canonicalize = trustStore.canonicalize.bind(trustStore);
+  trustStore.canonicalize = async (path) => {
+    enteredAssembly();
+    await assemblyGate;
+    return await canonicalize(path);
+  };
+  const request = {
+    approval: {
+      sessionId,
+      dir: workDir,
+      planId: handoff.planId,
+      expectedRevision: handoff.revision,
+      expectedSessionSequence: handoff.expectedSessionSequence,
+      operationId: "approve-live-admission",
+    },
+    execution: {
+      provider: "openai" as const,
+      modelRouteId: "test/test",
+      sessionSelection: { mode: "resume" as const, sessionId },
+      interactionMode: "yolo" as const,
+    },
+  };
+  let providerCalls = 0;
+  let releaseProvider!: () => void;
+  let enteredProvider!: () => void;
+  const providerGate = new Promise<void>((resolve) => (releaseProvider = resolve));
+  const providerEntered = new Promise<void>((resolve) => (enteredProvider = resolve));
+  t.after(() => {
+    releaseAssembly();
+    releaseProvider();
+  });
+  const host = {
+    picoHome,
+    memoryTrustStore: trustStore,
+    reporter: new SilentReporter(),
+    provider: {
+      async generate() {
+        providerCalls++;
+        enteredProvider();
+        await providerGate;
+        return { role: "assistant" as const, content: "paused" };
+      },
+    },
+  };
+  const original = runtime.approvePlanAndExecute(request, host);
+  await assemblyEntered;
+  const replay = await runtime.approvePlanAndExecute(request, host);
+  assert.equal(replay.replayedOperationId, "approve-live-admission");
+  assert.equal(
+    (await runtime.readPlanProjection({ sessionId, dir: workDir, picoHome })).execution?.status,
+    "active",
+  );
+  releaseAssembly();
+  await providerEntered;
+  assert.equal(
+    (await runtime.readPlanProjection({ sessionId, dir: workDir, picoHome })).execution?.status,
+    "active",
+    "a live RuntimeRun is never reconciled as interrupted",
+  );
+  releaseProvider();
+  await original;
+  assert.equal(providerCalls, 1);
+});
+
+function submitPlanProvider(operationId: string): LLMProvider {
+  return {
+    async generate() {
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: operationId,
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: operationId,
+              steps: [{ title: "One", description: "Do one" }],
+              operationId,
+            }),
+          },
+        ],
+      };
+    },
+  };
+}
+
+function planControlContextForTest(sessionId: string, operationId: string) {
+  return {
+    sessionId,
+    invocationId: `test:${operationId}`,
+    runId: `test:${operationId}`,
+    turnId: `test:${operationId}`,
+  };
+}
