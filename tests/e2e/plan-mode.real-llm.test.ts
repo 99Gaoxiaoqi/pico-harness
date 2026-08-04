@@ -250,8 +250,6 @@ function planningRequest(
       "read_evidence",
       "glob",
       "grep",
-      "repo_map",
-      "code_symbols",
       ...(includeAskUser ? ["ask_user"] : []),
       "submit_plan",
     ],
