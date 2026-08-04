@@ -25,7 +25,8 @@ import {
   migrateSessionModelRoute,
   normalizeInteractionMode,
   sessionReasoningCandidates,
-  setSessionMode,
+  setSessionCollaborationMode,
+  setSessionPermissionMode,
   setSessionThinkingEffort,
   setSessionTitle,
   type SessionSettings,
@@ -126,6 +127,7 @@ import type {
 } from "./service.js";
 import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
+import type { PlanControlPort } from "./plan-control-port.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
 import {
   projectRuntimeTranscriptEntries,
@@ -201,6 +203,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly sessionStateStore?: DesktopSessionStateStore;
   readonly conversationStateStore?: DesktopConversationStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
+  readonly planControl?: PlanControlPort;
   readonly automations?: DesktopAutomationService;
   readonly userConfigStore?: UserConfigStore;
   readonly userMcpConfigStore?: UserMcpConfigStore;
@@ -479,6 +482,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
         return this.options.interactions.respondApproval(request.params);
+      },
+      "plan.respond": async (request) => {
+        if (!this.options.planControl) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+            `${request.method} 尚未连接持久化 PlanControlPort，本次请求未执行`,
+          );
+        }
+        const result = await this.options.planControl.respond(request.params);
+        return {
+          accepted: result.accepted,
+          projection: toJsonValue(result.projection),
+          ...(result.run ? { run: toJsonValue(result.run) } : {}),
+        };
       },
       "prompt.respond": (request) => {
         if (!this.options.interactions) {
@@ -909,12 +926,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly workspacePath: string;
     readonly sessionId: string;
     readonly modelRouteId?: string;
+    readonly collaborationMode?: string;
+    readonly permissionMode?: string;
     readonly mode?: string;
     readonly permissions?: string;
     readonly thinkingEffort?: string;
   }): Promise<JsonValue> {
     if (
       params.modelRouteId === undefined &&
+      params.collaborationMode === undefined &&
+      params.permissionMode === undefined &&
       params.mode === undefined &&
       params.permissions === undefined &&
       params.thinkingEffort === undefined
@@ -924,8 +945,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "session.settings.update 至少需要一个设置字段",
       );
     }
-    const requestedMode = normalizeInteractionMode(params.mode ?? params.permissions);
-    if ((params.mode !== undefined || params.permissions !== undefined) && !requestedMode) {
+    const legacyMode = normalizeInteractionMode(params.mode ?? params.permissions);
+    const requestedCollaborationMode =
+      params.collaborationMode ?? (legacyMode === "plan" ? "plan" : undefined);
+    const requestedPermissionMode =
+      params.permissionMode ?? (legacyMode && legacyMode !== "plan" ? legacyMode : undefined);
+    if ((params.mode !== undefined || params.permissions !== undefined) && !legacyMode) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
         "mode/permissions 必须是 default、plan、auto 或 yolo",
@@ -939,6 +964,27 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
         "permissions 是 mode 的别名，二者不能指定不同值",
+      );
+    }
+    if (
+      requestedCollaborationMode !== undefined &&
+      requestedCollaborationMode !== "agent" &&
+      requestedCollaborationMode !== "plan"
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "collaborationMode 必须是 agent 或 plan",
+      );
+    }
+    if (
+      requestedPermissionMode !== undefined &&
+      requestedPermissionMode !== "default" &&
+      requestedPermissionMode !== "auto" &&
+      requestedPermissionMode !== "yolo"
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "permissionMode 必须是 default、auto 或 yolo",
       );
     }
 
@@ -959,8 +1005,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
 
       if (selectedRoute) migrateSessionModelRoute(current, selectedRoute);
-      if (requestedMode) {
-        const result = setSessionMode(current, requestedMode);
+      if (requestedCollaborationMode) {
+        const result = setSessionCollaborationMode(current, requestedCollaborationMode);
+        if (!result.ok) throw invalidSessionSetting(result.message);
+      }
+      if (requestedPermissionMode) {
+        const result = setSessionPermissionMode(current, requestedPermissionMode);
         if (!result.ok) throw invalidSessionSetting(result.message);
       }
       if (params.thinkingEffort !== undefined) {
@@ -4006,9 +4056,8 @@ function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter):
     provider: settings.provider,
     model: settings.model,
     modelRouteId: settings.modelRouteId,
-    mode: settings.mode,
-    // Deliberately derived from mode: `/permissions` does not own persisted state.
-    permissions: settings.mode,
+    collaborationMode: settings.collaborationMode ?? (settings.mode === "plan" ? "plan" : "agent"),
+    permissionMode: settings.permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
     reasoningLevels: [...sessionReasoningCandidates(settings, router)],

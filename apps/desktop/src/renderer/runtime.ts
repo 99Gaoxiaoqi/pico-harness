@@ -526,14 +526,29 @@ function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
   const result = isRecord(value) ? value : {};
   const settings = isRecord(result.settings) ? result.settings : result;
   const model = stringValue(settings.model);
-  const mode = settings.mode;
-  if (!model || (mode !== "default" && mode !== "plan" && mode !== "auto" && mode !== "yolo")) {
+  const legacyMode = settings.mode;
+  const collaborationMode =
+    settings.collaborationMode === "plan" || settings.collaborationMode === "agent"
+      ? settings.collaborationMode
+      : legacyMode === "plan"
+        ? "plan"
+        : "agent";
+  const permissionMode =
+    settings.permissionMode === "default" ||
+    settings.permissionMode === "auto" ||
+    settings.permissionMode === "yolo"
+      ? settings.permissionMode
+      : legacyMode === "default" || legacyMode === "auto" || legacyMode === "yolo"
+        ? legacyMode
+        : "default";
+  if (!model) {
     return undefined;
   }
   return {
     modelRouteId: stringValue(settings.modelRouteId) || undefined,
     model,
-    mode,
+    collaborationMode,
+    permissionMode,
     thinkingEffort: stringValue(settings.thinkingEffort, "off"),
     reasoningLevels: Array.isArray(settings.reasoningLevels)
       ? settings.reasoningLevels.map((level) => stringValue(level)).filter(Boolean)
@@ -1027,7 +1042,8 @@ export interface RuntimeActions {
     ref: WorkspaceSessionRef,
     patch: Readonly<{
       modelRouteId?: string;
-      mode?: "default" | "plan" | "auto" | "yolo";
+      collaborationMode?: "agent" | "plan";
+      permissionMode?: "default" | "auto" | "yolo";
       thinkingEffort?: string;
     }>,
   ): Promise<void>;
@@ -1039,6 +1055,14 @@ export interface RuntimeActions {
   stopRun(runId: string): Promise<void>;
   steerRun(runId: string, message: string): Promise<void>;
   respondApproval(id: string, decision: "allow_once" | "allow_session" | "deny"): Promise<void>;
+  respondPlan(input: {
+    readonly planId: string;
+    readonly sessionId: string;
+    readonly action: "execute" | "continue_editing" | "reject_exit";
+    readonly expectedRevision: number;
+    readonly expectedSessionSequence: number;
+    readonly feedback?: string;
+  }): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
   reviewChanges(
     decision: "approve" | "request_changes",
@@ -1784,6 +1808,10 @@ export function useRuntimeStore(): RuntimeStore {
         scheduleMemoryRefresh();
       } else if (topic === "approval.requested") {
         const request = isRecord(payload.request) ? payload.request : {};
+        const plan = isRecord(request.plan) ? request.plan : {};
+        const planSteps = recordArray(plan.steps).map((step) =>
+          stringValue(step.title ?? step.description),
+        );
         setData((current) => ({
           ...current,
           approvals: [
@@ -1798,6 +1826,21 @@ export function useRuntimeStore(): RuntimeStore {
               ),
               command: stringValue(request.command) || undefined,
               risk: request.risk === "high" || request.risk === "medium" ? request.risk : "low",
+              kind: request.kind === "plan" ? "plan" : "tool",
+              planId: stringValue(request.planId ?? plan.planId) || undefined,
+              expectedRevision:
+                typeof request.expectedRevision === "number"
+                  ? request.expectedRevision
+                  : typeof plan.revision === "number"
+                    ? plan.revision
+                    : undefined,
+              expectedSessionSequence:
+                typeof request.expectedSessionSequence === "number"
+                  ? request.expectedSessionSequence
+                  : undefined,
+              planTitle: stringValue(plan.title) || undefined,
+              planOverview: stringValue(plan.overview) || undefined,
+              planSteps: planSteps.length > 0 ? planSteps : undefined,
             },
           ],
         }));
@@ -2543,6 +2586,28 @@ export function useRuntimeStore(): RuntimeStore {
               runId: current.approvals.find((approval) => approval.id === id)?.runId ?? "",
             }),
           );
+        });
+      },
+      async respondPlan(input) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        if (input.action === "continue_editing" && !input.feedback?.trim()) {
+          throw new Error("继续修改计划时必须填写反馈。");
+        }
+        await perform("plan-response", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "plan.respond", {
+              workspacePath,
+              sessionId: input.sessionId,
+              planId: input.planId,
+              action: input.action,
+              expectedRevision: input.expectedRevision,
+              expectedSessionSequence: input.expectedSessionSequence,
+              operationId: crypto.randomUUID(),
+              ...(input.feedback?.trim() ? { feedback: input.feedback.trim() } : {}),
+            });
+            await loadConversation(bridge, workspacePath, input.sessionId);
+          }
         });
       },
       async respondPrompt(id, answer) {

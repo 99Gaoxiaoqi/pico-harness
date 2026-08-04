@@ -26,18 +26,25 @@ export function isApprovalDialogId(id: string): boolean {
 export interface ApprovalPanelProps extends ApprovalNotice {
   diffExpanded?: boolean;
   selectedIndex?: number;
+  feedback?: string;
 }
 export interface PermissionPanelProps {
   state: PermissionState;
 }
-export type ApprovalPanelAction = "approve" | "approve-session" | "reject";
+export type ApprovalPanelAction =
+  | "approve"
+  | "approve-session"
+  | "reject"
+  | "execute"
+  | "continue-editing"
+  | "reject-exit";
 export type ApprovalPanelKeyAction = ApprovalPanelAction | "toggle-diff" | "move-up" | "move-down";
 export interface ApprovalPanelState {
   diffExpanded: boolean;
   selectedIndex: number;
 }
 export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
-  onAction: (action: ApprovalPanelAction) => void;
+  onAction: (action: ApprovalPanelAction, feedback?: string) => void;
   onDiffExpandedChange?: (expanded: boolean) => void;
   keybindings?: UserKeybindingConfig;
 }
@@ -53,9 +60,11 @@ export function InteractiveApprovalPanel({
     diffExpanded: diffExpanded ?? Boolean(notice.diff ?? notice.preview?.diff),
     selectedIndex: 0,
   }));
+  const [feedback, setFeedback] = useState("");
   const submittedTaskId = useRef<string | null>(null);
   const expanded = diffExpanded ?? state.diffExpanded;
-  const optionCount = notice.sessionScope ? 3 : 2;
+  const planExit = isPlanExitApproval(notice);
+  const optionCount = planExit ? 3 : notice.sessionScope ? 3 : 2;
 
   useInput((input, key) => {
     const action = resolveApprovalPanelKey(
@@ -64,6 +73,7 @@ export function InteractiveApprovalPanel({
       keybindings,
       state.selectedIndex,
       notice.sessionScope !== undefined,
+      planExit,
     );
     if (!action) return;
     if (action === "move-up" || action === "move-down") {
@@ -78,17 +88,38 @@ export function InteractiveApprovalPanel({
       onDiffExpandedChange?.(nextExpanded);
       return;
     }
+    if (action === "continue-editing" && feedback.trim().length === 0) return;
     if (submittedTaskId.current === notice.taskId) return;
     submittedTaskId.current = notice.taskId;
-    onAction(action);
+    onAction(action, action === "continue-editing" ? feedback.trim() : undefined);
   });
 
-  return <ApprovalPanel {...notice} diffExpanded={expanded} selectedIndex={state.selectedIndex} />;
+  useInput((input, key) => {
+    if (!planExit || state.selectedIndex !== 1 || key.return || key.escape) return;
+    const extendedKey = key as typeof key & { backspace?: boolean; delete?: boolean };
+    if (extendedKey.backspace || extendedKey.delete) {
+      setFeedback((current) => current.slice(0, -1));
+      return;
+    }
+    if (!key.ctrl && !key.meta && input.length > 0 && !/[jkney]/iu.test(input)) {
+      setFeedback((current) => `${current}${input}`);
+    }
+  });
+
+  return (
+    <ApprovalPanel
+      {...notice}
+      diffExpanded={expanded}
+      selectedIndex={state.selectedIndex}
+      feedback={feedback}
+    />
+  );
 }
 
 export function ApprovalPanel({
   diffExpanded = false,
   selectedIndex = 0,
+  feedback,
   ...notice
 }: ApprovalPanelProps): React.ReactNode {
   return (
@@ -101,7 +132,7 @@ export function ApprovalPanel({
       borderBottom={false}
       paddingX={1}
     >
-      {formatApprovalPanel(notice, { diffExpanded, selectedIndex })
+      {formatApprovalPanel(notice, { diffExpanded, selectedIndex, feedback })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -129,6 +160,7 @@ export function formatApprovalPanel(
     includeDiff?: boolean;
     maxDiffPreviewLines?: number;
     selectedIndex?: number;
+    feedback?: string;
   } = {},
 ): string {
   const target = notice.preview?.target ?? approvalTarget(notice.toolName, notice.args);
@@ -136,18 +168,25 @@ export function formatApprovalPanel(
   const diff = notice.preview?.diff ?? notice.diff;
   const diffExpanded = options.diffExpanded ?? options.includeDiff ?? Boolean(diff);
   const hasSessionOption = notice.sessionScope !== undefined;
-  const approvalOptions: Array<{ label: string; action: ApprovalPanelAction }> = [
-    { label: "Yes", action: "approve" },
-    ...(hasSessionOption
-      ? [
-          {
-            label: formatPermissionSessionScope(notice.sessionScope!),
-            action: "approve-session" as const,
-          },
-        ]
-      : []),
-    { label: "No", action: "reject" },
-  ];
+  const planExit = isPlanExitApproval(notice);
+  const approvalOptions: Array<{ label: string; action: ApprovalPanelAction }> = planExit
+    ? [
+        { label: "执行计划", action: "execute" },
+        { label: "继续修改（需输入反馈）", action: "continue-editing" },
+        { label: "拒绝并退出", action: "reject-exit" },
+      ]
+    : [
+        { label: "Yes", action: "approve" },
+        ...(hasSessionOption
+          ? [
+              {
+                label: formatPermissionSessionScope(notice.sessionScope!),
+                action: "approve-session" as const,
+              },
+            ]
+          : []),
+        { label: "No", action: "reject" },
+      ];
   const selectedIndex = clampSelection(options.selectedIndex ?? 0, approvalOptions.length);
   const lines = [approvalQuestion(notice.toolName, target), `  ${target}`];
   if (diffExpanded && diff) {
@@ -162,6 +201,9 @@ export function formatApprovalPanel(
     ),
     "  ↑/↓ or J/K to move · Enter to select · Esc to cancel · E to toggle diff",
   );
+  if (planExit && selectedIndex === 1) {
+    lines.push(`  反馈: ${options.feedback?.trim() || "（请输入修改意见）"}`);
+  }
   return lines.join("\n");
 }
 
@@ -189,6 +231,7 @@ export function resolveApprovalPanelKey(
   keybindings?: UserKeybindingConfig,
   selectedIndex = 0,
   hasSessionOption = true,
+  planExit = false,
 ): ApprovalPanelKeyAction | null {
   const arrowKey = key as typeof key & { upArrow?: boolean; downArrow?: boolean };
   if (arrowKey.upArrow || (input.toLowerCase() === "k" && !key.ctrl && !key.meta)) return "move-up";
@@ -196,9 +239,11 @@ export function resolveApprovalPanelKey(
     return "move-down";
   const normalized = input.toLowerCase();
   if (key.return && !key.ctrl && !key.meta) {
-    return actionAtSelection(selectedIndex, hasSessionOption);
+    return planExit
+      ? ((["execute", "continue-editing", "reject-exit"] as const)[selectedIndex] ?? "execute")
+      : actionAtSelection(selectedIndex, hasSessionOption);
   }
-  if (key.escape) return "reject";
+  if (key.escape) return planExit ? "reject-exit" : "reject";
   if (normalized === "y" && !key.ctrl && !key.meta) return "approve";
   if (normalized === "a" && !key.ctrl && !key.meta) {
     return hasSessionOption ? "approve-session" : null;
@@ -214,6 +259,10 @@ export function resolveApprovalPanelKey(
 
   if (normalized === "e" && !key.ctrl && !key.meta) return "toggle-diff";
   return null;
+}
+
+export function isPlanExitApproval(notice: Pick<ApprovalNotice, "toolName">): boolean {
+  return notice.toolName === "exit_plan_mode" || notice.toolName === "submit_plan";
 }
 
 export function nextApprovalPanelState(

@@ -89,6 +89,8 @@ export interface AppProps {
   workDir: string;
   /** Session 选择模式(状态区展示) */
   sessionMode?: string;
+  /** Agent/Plan 协作模式(状态区展示) */
+  collaborationMode?: string;
   /** Permission 模式(状态区展示) */
   permissionMode?: string;
   /** 思考强度(状态区展示) */
@@ -136,6 +138,7 @@ export function App({
   provider,
   workDir,
   sessionMode = "new",
+  collaborationMode = "agent",
   permissionMode = "yolo",
   thinkingEffort,
   mcpSummary,
@@ -474,6 +477,7 @@ export function App({
     <StatusBar
       phase={phase}
       sessionMode={sessionMode}
+      collaborationMode={collaborationMode}
       permissionMode={permissionMode}
       mcpSummary={mcpSummary}
       contextSummary={undefined}
