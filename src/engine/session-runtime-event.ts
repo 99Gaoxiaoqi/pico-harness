@@ -170,6 +170,14 @@ export interface RuntimePlanRevisedEvent extends RuntimePlanEventBase {
     readonly proposal: PlanProposal;
   };
 }
+export interface RuntimePlanRevisionRequestedEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.revision.requested";
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly feedback: string;
+  };
+}
 interface RuntimePlanReviewedEvent<
   K extends "plan.approved" | "plan.rejected",
 > extends RuntimePlanEventBase {
@@ -197,13 +205,22 @@ export interface RuntimePlanStepUpdatedEvent extends RuntimePlanEventBase {
   };
 }
 interface RuntimePlanExecutionLifecycleEvent<
-  K extends "plan.execution.interrupted" | "plan.execution.completed" | "plan.execution.cancelled",
+  K extends
+    | "plan.execution.interrupted"
+    | "plan.execution.resumed"
+    | "plan.execution.replanned"
+    | "plan.execution.completed"
+    | "plan.execution.cancelled",
 > extends RuntimePlanEventBase {
   readonly kind: K;
   readonly data: PlanOperationFact & { readonly planId: string; readonly reason?: string };
 }
 export type RuntimePlanExecutionInterruptedEvent =
   RuntimePlanExecutionLifecycleEvent<"plan.execution.interrupted">;
+export type RuntimePlanExecutionResumedEvent =
+  RuntimePlanExecutionLifecycleEvent<"plan.execution.resumed">;
+export type RuntimePlanExecutionReplannedEvent =
+  RuntimePlanExecutionLifecycleEvent<"plan.execution.replanned">;
 export type RuntimePlanExecutionCompletedEvent =
   RuntimePlanExecutionLifecycleEvent<"plan.execution.completed">;
 export type RuntimePlanExecutionCancelledEvent =
@@ -211,11 +228,14 @@ export type RuntimePlanExecutionCancelledEvent =
 export type RuntimePlanEvent =
   | RuntimePlanProposedEvent
   | RuntimePlanRevisedEvent
+  | RuntimePlanRevisionRequestedEvent
   | RuntimePlanApprovedEvent
   | RuntimePlanRejectedEvent
   | RuntimePlanExecutionStartedEvent
   | RuntimePlanStepUpdatedEvent
   | RuntimePlanExecutionInterruptedEvent
+  | RuntimePlanExecutionResumedEvent
+  | RuntimePlanExecutionReplannedEvent
   | RuntimePlanExecutionCompletedEvent
   | RuntimePlanExecutionCancelledEvent;
 
