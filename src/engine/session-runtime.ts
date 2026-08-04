@@ -36,6 +36,15 @@ export interface PersistedSessionSettings {
   additionalDirectories: readonly string[];
 }
 
+/** Canonical v3 wire settings. Legacy interaction fields are deliberately absent. */
+export type PersistedSessionSettingsWrite = Omit<
+  PersistedSessionSettings,
+  "mode" | "prePlanMode" | "collaborationMode" | "permissionMode"
+> & {
+  readonly collaborationMode: "agent" | "plan";
+  readonly permissionMode: Exclude<PersistedInteractionMode, "plan">;
+};
+
 /** Session 维度的累计用量；这些值在 undo/rewind 后也不回退。 */
 export interface SessionUsageSnapshot {
   totalPromptTokens: number;
@@ -74,7 +83,11 @@ export interface SessionRuntimeStatePatch {
   promptCache?: PersistedPromptCacheState;
 }
 
-export type SessionRuntimeStateWritePatch = SessionRuntimeStatePatch;
+export interface SessionRuntimeStateWritePatch {
+  settings?: PersistedSessionSettings | PersistedSessionSettingsWrite;
+  goal?: GoalManagerSnapshot;
+  promptCache?: PersistedPromptCacheState;
+}
 
 export interface SessionRuntimeStateSnapshot {
   stateVersion: SessionRuntimeStateVersion;
@@ -268,25 +281,20 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   const canonicalPermissionMode = hasSplitMode
     ? (permissionMode as Exclude<PersistedInteractionMode, "plan">)
     : mode === "plan"
-      ? (prePlanMode ?? "default")
+      ? (prePlanMode ?? "yolo")
       : (mode as Exclude<PersistedInteractionMode, "plan">);
-  const compatibilityMode: PersistedInteractionMode =
-    canonicalCollaborationMode === "plan" ? "plan" : canonicalPermissionMode;
-
   return {
     ...(title !== undefined ? { title } : {}),
     ...(forkFrom !== undefined ? { forkFrom } : {}),
     provider,
     model,
     modelRouteId,
-    mode: compatibilityMode,
-    ...(canonicalCollaborationMode === "plan" ? { prePlanMode: canonicalPermissionMode } : {}),
     collaborationMode: canonicalCollaborationMode,
     permissionMode: canonicalPermissionMode,
     thinkingEffort,
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],
-  };
+  } as unknown as PersistedSessionSettings;
 }
 
 function isSessionTitle(value: unknown): value is string {
