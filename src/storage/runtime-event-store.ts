@@ -402,19 +402,26 @@ export class RuntimeEventStore {
         }
         const existingOperation = [...sessions.values()]
           .flatMap((session) => session.entries)
-          .find(({ event }) =>
-            event.kind.startsWith("plan.") &&
-            "operationId" in event.data &&
-            event.data.operationId === operationId,
+          .find(
+            ({ event }) =>
+              event.kind.startsWith("plan.") &&
+              "operationId" in event.data &&
+              event.data.operationId === operationId,
           );
         if (existingOperation) {
-          if (!("fingerprint" in existingOperation.event.data) || existingOperation.event.data.fingerprint !== fingerprint) {
+          if (
+            !("fingerprint" in existingOperation.event.data) ||
+            existingOperation.event.data.fingerprint !== fingerprint
+          ) {
             throw new RuntimeEventStorePlanOperationConflictError(operationId);
           }
           return canonicalEvents.map((event) => {
             const session = sessions.get(event.sessionId)!;
             const existing = session.eventById.get(event.eventId);
-            if (!existing) throw new RuntimeEventStoreIntegrityError(`Plan operation ${operationId} replay batch is incomplete`);
+            if (!existing)
+              throw new RuntimeEventStoreIntegrityError(
+                `Plan operation ${operationId} replay batch is incomplete`,
+              );
             return this.appendResult(session.entries, existing, false);
           });
         }
@@ -560,7 +567,11 @@ export class RuntimeEventStore {
 
   async appendPlanOperation(
     events: readonly RuntimeEvent[],
-    operation: { readonly operationId: string; readonly fingerprint: string; readonly expectedSessionSequence: number },
+    operation: {
+      readonly operationId: string;
+      readonly fingerprint: string;
+      readonly expectedSessionSequence: number;
+    },
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const sessionId = events[0]?.sessionId;
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {

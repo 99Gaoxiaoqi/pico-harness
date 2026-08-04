@@ -1164,7 +1164,10 @@ function singleNonStreamingProvider(
       const runtimeTimeoutMs = Math.floor(
         runtimeDeadlineMs - nowMs - TERMINAL_BENCH_PROVIDER_DISPATCH_MARGIN_MS,
       );
-      const timeoutMs = Math.min(providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS, runtimeTimeoutMs);
+      const timeoutMs = Math.min(
+        providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS,
+        runtimeTimeoutMs,
+      );
       if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
         throw new Error("Single-call headless runtime window expired.");
       }

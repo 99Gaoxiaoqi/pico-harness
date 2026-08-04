@@ -109,7 +109,12 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     cwd: defaults.cwd,
     provider: defaults.provider,
     collaborationMode: mode === "plan" ? "plan" : "agent",
-    permissionMode: mode === "plan" ? (compatibilityPreviousMode === "plan" || !compatibilityPreviousMode ? "yolo" : compatibilityPreviousMode) : mode,
+    permissionMode:
+      mode === "plan"
+        ? compatibilityPreviousMode === "plan" || !compatibilityPreviousMode
+          ? "yolo"
+          : compatibilityPreviousMode
+        : mode,
     model: defaults.model,
     ...(defaults.modelRouteId !== undefined ? { modelRouteId: defaults.modelRouteId } : {}),
     thinkingEffort: defaults.thinkingEffort ?? "off",
@@ -373,7 +378,10 @@ function applySessionModelRoute(settings: SessionSettings, route: ModelRoute) {
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
   const normalized = normalizeInteractionMode(mode);
   if (!normalized) {
-    return { ok: false, message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>` };
+    return {
+      ok: false,
+      message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
+    };
   }
   applySessionMode(settings, normalized);
   persistSessionSettings(settings);
@@ -750,8 +758,11 @@ function applyPersistedSessionSettings(
   settings.provider = persisted.provider;
   settings.model = persisted.model;
   settings.modelRouteId = persisted.modelRouteId;
-  settings.collaborationMode = persisted.collaborationMode ?? (persisted.mode === "plan" ? "plan" : "agent");
-  settings.permissionMode = persisted.permissionMode ?? (persisted.mode === "plan" ? (persisted.prePlanMode ?? "yolo") : persisted.mode);
+  settings.collaborationMode =
+    persisted.collaborationMode ?? (persisted.mode === "plan" ? "plan" : "agent");
+  settings.permissionMode =
+    persisted.permissionMode ??
+    (persisted.mode === "plan" ? (persisted.prePlanMode ?? "yolo") : persisted.mode);
   settings.thinkingEffort = persisted.thinkingEffort;
   settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;
   settings.additionalDirectories = createAdditionalDirectorySnapshot(
@@ -792,7 +803,7 @@ function withInteractionModeAlias(
   Object.defineProperty(settings, "mode", {
     enumerable: true,
     configurable: false,
-    get: () => settings.collaborationMode === "plan" ? "plan" : settings.permissionMode,
+    get: () => (settings.collaborationMode === "plan" ? "plan" : settings.permissionMode),
     set: (value: string) => {
       const mode = normalizeInteractionMode(value);
       if (mode !== undefined) {

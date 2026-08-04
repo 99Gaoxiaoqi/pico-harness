@@ -6,7 +6,10 @@ import type {
   PlanReviewedBy,
   PlanStepStatus,
 } from "../plan/contract.js";
-import type { SessionRuntimeStateWritePatch, SessionRuntimeStateVersion } from "./session-runtime.js";
+import type {
+  SessionRuntimeStateWritePatch,
+  SessionRuntimeStateVersion,
+} from "./session-runtime.js";
 import type {
   RuntimeEvidenceReference,
   RuntimeToolResultBody,
@@ -167,7 +170,9 @@ export interface RuntimePlanRevisedEvent extends RuntimePlanEventBase {
     readonly proposal: PlanProposal;
   };
 }
-interface RuntimePlanReviewedEvent<K extends "plan.approved" | "plan.rejected"> extends RuntimePlanEventBase {
+interface RuntimePlanReviewedEvent<
+  K extends "plan.approved" | "plan.rejected",
+> extends RuntimePlanEventBase {
   readonly kind: K;
   readonly data: PlanOperationFact & {
     readonly planId: string;
@@ -191,16 +196,18 @@ export interface RuntimePlanStepUpdatedEvent extends RuntimePlanEventBase {
     readonly note?: string;
   };
 }
-interface RuntimePlanExecutionLifecycleEvent<K extends
-  | "plan.execution.interrupted"
-  | "plan.execution.completed"
-  | "plan.execution.cancelled"> extends RuntimePlanEventBase {
+interface RuntimePlanExecutionLifecycleEvent<
+  K extends "plan.execution.interrupted" | "plan.execution.completed" | "plan.execution.cancelled",
+> extends RuntimePlanEventBase {
   readonly kind: K;
   readonly data: PlanOperationFact & { readonly planId: string; readonly reason?: string };
 }
-export type RuntimePlanExecutionInterruptedEvent = RuntimePlanExecutionLifecycleEvent<"plan.execution.interrupted">;
-export type RuntimePlanExecutionCompletedEvent = RuntimePlanExecutionLifecycleEvent<"plan.execution.completed">;
-export type RuntimePlanExecutionCancelledEvent = RuntimePlanExecutionLifecycleEvent<"plan.execution.cancelled">;
+export type RuntimePlanExecutionInterruptedEvent =
+  RuntimePlanExecutionLifecycleEvent<"plan.execution.interrupted">;
+export type RuntimePlanExecutionCompletedEvent =
+  RuntimePlanExecutionLifecycleEvent<"plan.execution.completed">;
+export type RuntimePlanExecutionCancelledEvent =
+  RuntimePlanExecutionLifecycleEvent<"plan.execution.cancelled">;
 export type RuntimePlanEvent =
   | RuntimePlanProposedEvent
   | RuntimePlanRevisedEvent

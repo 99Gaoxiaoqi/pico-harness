@@ -71,7 +71,11 @@ export class PlanConflictError extends Error {
 
 export function normalizePlanProposalInput(input: PlanProposalInput): PlanProposalInput {
   const title = requiredText(input.title, "Plan title");
-  if (!Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > PLAN_MAX_STEPS) {
+  if (
+    !Array.isArray(input.steps) ||
+    input.steps.length < 1 ||
+    input.steps.length > PLAN_MAX_STEPS
+  ) {
     throw new PlanConflictError(`Plan steps must contain between 1 and ${PLAN_MAX_STEPS} items`);
   }
   const ids = new Set<string>();
@@ -110,10 +114,7 @@ export function assertPlanValueSize(value: unknown, label = "Plan event"): void 
 
 export function isPlanStepStatus(value: unknown): value is PlanStepStatus {
   return (
-    value === "pending" ||
-    value === "in_progress" ||
-    value === "completed" ||
-    value === "skipped"
+    value === "pending" || value === "in_progress" || value === "completed" || value === "skipped"
   );
 }
 

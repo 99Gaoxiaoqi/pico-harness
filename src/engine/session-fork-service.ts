@@ -418,7 +418,11 @@ export class SessionForkService {
   ): Promise<void> {
     if (frozen.planEntries.length === 0) return;
     const statePublication = runtimePatch
-      ? { patch: runtimePatch, eventId: runtimeStateEventId(operation.operationId), at: operation.createdAt }
+      ? {
+          patch: runtimePatch,
+          eventId: runtimeStateEventId(operation.operationId),
+          at: operation.createdAt,
+        }
       : undefined;
     const runId = this.runtimePort.deriveBootstrapRunId({
       sourceSessionId: operation.sourceSessionId,
@@ -449,7 +453,10 @@ export class SessionForkService {
         },
       } as RuntimePlanEvent;
     });
-    const inherited = projectPlanEntries(operation.targetSessionId, rewritten.map((event, index) => ({ sequence: index + 1, event })));
+    const inherited = projectPlanEntries(
+      operation.targetSessionId,
+      rewritten.map((event, index) => ({ sequence: index + 1, event })),
+    );
     if (inherited.execution?.status === "active") {
       const operationId = `fork:${operation.operationId}:plan:interrupted`;
       rewritten.push({
@@ -458,7 +465,9 @@ export class SessionForkService {
         kind: "plan.execution.interrupted",
         data: {
           operationId,
-          fingerprint: planOperationFingerprint("fork.plan.execution.interrupted", { planId: inherited.execution.planId }),
+          fingerprint: planOperationFingerprint("fork.plan.execution.interrupted", {
+            planId: inherited.execution.planId,
+          }),
           planId: inherited.execution.planId,
           reason: "forked active execution requires explicit resume",
         },
@@ -846,7 +855,11 @@ function parseFrozenPlanEntries(
   }
   let previous = 0;
   return value.map((item, index) => {
-    if (!isRecord(item) || !isNonNegativeInteger(item["sequence"]) || item["sequence"] <= previous) {
+    if (
+      !isRecord(item) ||
+      !isNonNegativeInteger(item["sequence"]) ||
+      item["sequence"] <= previous
+    ) {
       throw new Error(`Frozen Runtime plan seed ${index} has an invalid sequence`);
     }
     previous = item["sequence"];

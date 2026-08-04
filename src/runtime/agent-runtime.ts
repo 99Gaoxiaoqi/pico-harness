@@ -382,10 +382,10 @@ function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
     `Plan: ${proposal.title} (${proposal.planId}@${proposal.revision})`,
     proposal.overview ? `Overview: ${proposal.overview}` : undefined,
     "Steps:",
-    ...proposal.steps.map(
-      (step) => `- ${step.id}: ${step.title}\n  ${step.description}`,
-    ),
-    proposal.risks?.length ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}` : undefined,
+    ...proposal.steps.map((step) => `- ${step.id}: ${step.title}\n  ${step.description}`),
+    proposal.risks?.length
+      ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
+      : undefined,
     "每完成或跳过一步，必须调用 update_plan 持久化步骤状态；需要停止执行时调用 cancel_plan。",
   ]
     .filter((part): part is string => part !== undefined)
@@ -515,7 +515,8 @@ export async function executeAgentRuntime(
       if (settings.collaborationMode !== "agent") {
         throw new Error("Approved plan execution requires collaborationMode=agent");
       }
-      if (!session.runtimeEventStore) throw new Error("Approved plan execution requires durable storage");
+      if (!session.runtimeEventStore)
+        throw new Error("Approved plan execution requires durable storage");
       executionCoordinator = new PlanCoordinator(session.runtimeEventStore, {
         sessionId: session.id,
         invocationId: `execution-start:${options.approvedPlan.planId}`,
@@ -1967,7 +1968,8 @@ export function buildPermissionMiddleware(
   permissionMode?: () => "default" | "auto" | "yolo",
 ): MiddlewareFunc {
   return async (call, context) => {
-    const mode = permissionMode?.() ?? (settings?.mode === "plan" ? "default" : settings?.mode ?? "default");
+    const mode =
+      permissionMode?.() ?? (settings?.mode === "plan" ? "default" : (settings?.mode ?? "default"));
     const sessionId = settings?.sessionId ?? "cli";
     const workspaceAccesses = workspaceAccessesFromCall(call);
 

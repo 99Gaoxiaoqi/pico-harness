@@ -243,7 +243,8 @@ export class RuntimeRunExecutor {
       if (handoff && planCoordinator) {
         const projection = await planCoordinator().project();
         const refreshed = planHandoff!.refreshProjection(projection);
-        if (!refreshed) throw new Error("Submitted plan handoff disappeared before projection refresh");
+        if (!refreshed)
+          throw new Error("Submitted plan handoff disappeared before projection refresh");
         return {
           ...runResult,
           handoff: refreshed,

@@ -2053,28 +2053,28 @@ export class AgentEngine implements AgentRunner {
                         ),
                       )
                     : requiredDelegation && index !== requiredDelegationIndex
-                    ? Promise.resolve(
-                        buildRejectedToolObservation(
-                          tc,
-                          requiredDelegation,
-                          this.runtimePort?.currentRun(),
-                        ),
-                      )
-                    : scheduler.add({
-                        accesses: getAccesses
-                          ? getAccesses.call(this.registry, tc)
-                          : ToolAccesses.all(),
-                        // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
-                        settleOnAbort: fileSideEffectKinds[index] !== "none",
-                        start: async () => {
-                          signal?.throwIfAborted();
-                          return this.runtimePort
-                            ? this.runtimePort.runWithToolCall(tc.id, () =>
-                                this.runOneTool(tc, reporter, turnSpan, signal),
-                              )
-                            : this.runOneTool(tc, reporter, turnSpan, signal);
-                        },
-                      });
+                      ? Promise.resolve(
+                          buildRejectedToolObservation(
+                            tc,
+                            requiredDelegation,
+                            this.runtimePort?.currentRun(),
+                          ),
+                        )
+                      : scheduler.add({
+                          accesses: getAccesses
+                            ? getAccesses.call(this.registry, tc)
+                            : ToolAccesses.all(),
+                          // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
+                          settleOnAbort: fileSideEffectKinds[index] !== "none",
+                          start: async () => {
+                            signal?.throwIfAborted();
+                            return this.runtimePort
+                              ? this.runtimePort.runWithToolCall(tc.id, () =>
+                                  this.runOneTool(tc, reporter, turnSpan, signal),
+                                )
+                              : this.runOneTool(tc, reporter, turnSpan, signal);
+                          },
+                        });
                 scheduled.push(
                   execution.then((result) => {
                     settledResults[index] = result;
