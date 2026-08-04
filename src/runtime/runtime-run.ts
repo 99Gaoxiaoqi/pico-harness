@@ -343,7 +343,6 @@ export class RuntimeRun {
       }),
     );
     await run.recordRunStarted();
-    liveRuntimeRuns.add(runtimeRunLiveKey(run.sessionId, run.runId));
     return run;
   }
 
@@ -820,6 +819,7 @@ export class RuntimeRun {
 
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
     const context: RuntimeRunContext = { run: this, active: true };
+    liveRuntimeRuns.add(runtimeRunLiveKey(this.sessionId, this.runId));
     return runtimeRunContext.run(context, async () => {
       try {
         const result = await execute();
