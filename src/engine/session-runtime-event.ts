@@ -6,7 +6,7 @@ import type {
   PlanReviewedBy,
   PlanStepStatus,
 } from "../plan/contract.js";
-import type { SessionRuntimeStatePatch, SessionRuntimeStateVersion } from "./session-runtime.js";
+import type { SessionRuntimeStateWritePatch, SessionRuntimeStateVersion } from "./session-runtime.js";
 import type {
   RuntimeEvidenceReference,
   RuntimeToolResultBody,
@@ -134,7 +134,7 @@ export interface RuntimeSessionStateCommittedEvent extends RuntimeEventBase {
   readonly kind: "session.state.committed";
   readonly data: {
     readonly stateVersion: SessionRuntimeStateVersion;
-    readonly patch: SessionRuntimeStatePatch;
+    readonly patch: SessionRuntimeStateWritePatch;
   };
 }
 export interface RuntimeTranscriptEventRecordedEvent extends RuntimeEventBase {

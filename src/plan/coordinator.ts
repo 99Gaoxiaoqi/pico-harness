@@ -62,7 +62,7 @@ export class PlanCoordinator {
   async approve(input: OperationInput & { readonly planId: string; readonly expectedRevision: number; readonly reviewedBy: PlanReviewedBy; readonly settings: PersistedSessionSettings }): Promise<PlanProjection> {
     const semantic = { planId: input.planId, expectedRevision: input.expectedRevision, reviewedBy: input.reviewedBy };
     return this.commit(input, "plan.approved", semantic, (fact, at) => {
-      const patch = normalizeSessionRuntimeStateWritePatch({ settings: { ...input.settings, collaborationMode: "agent", permissionMode: input.settings.permissionMode ?? input.settings.prePlanMode ?? (input.settings.mode === "plan" ? "default" : input.settings.mode) } });
+      const patch = normalizeSessionRuntimeStateWritePatch({ settings: { ...input.settings, collaborationMode: "agent", permissionMode: input.settings.permissionMode ?? input.settings.prePlanMode ?? (input.settings.mode === "plan" ? "yolo" : input.settings.mode) } });
       if (!patch) throw new PlanConflictError("Session settings are invalid");
       return [
         { ...this.baseEvent(input.operationId, "plan.approved", at), kind: "plan.approved", data: { ...fact, planId: input.planId, expectedRevision: input.expectedRevision, reviewedBy: input.reviewedBy } },
