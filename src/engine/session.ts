@@ -31,6 +31,7 @@ import type { CommitReceipt, SessionCursor } from "./session-persistence.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
 import {
+  normalizeSessionRuntimeStatePatch,
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
@@ -646,7 +647,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   /** 更新一个完整 section，内存立即生效，然后追加 session.state.committed。 */
   updateRuntimeState(patch: SessionRuntimeStateWritePatch): void {
     this.assertWritable();
-    const normalized = normalizeSessionRuntimeStateWritePatch(patch);
+    const normalized = normalizeSessionRuntimeStatePatch(patch);
     if (!normalized) {
       throw new Error("Runtime session state update is invalid");
     }
@@ -656,7 +657,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     this.updatedAt = new Date();
 
     if (this.store) {
-      const persisted = structuredClone(normalized);
+      const persisted = normalizeSessionRuntimeStateWritePatch(normalized)!;
       void this.enqueuePersistence("runtime state", async (store) => {
         await this.ensureRuntimeSession();
         return store.appendSessionState(this.id, persisted);
