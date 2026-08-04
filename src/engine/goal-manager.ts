@@ -17,7 +17,8 @@
 // 状态机:active(进行中) → paused(主动暂停) / blocked(被阻塞) → complete(完成)
 // 同一时刻最多一个 active goal(setActive 会把旧的置回 active 之外的状态)。
 
-import type { Usage } from "../schema/message.js";
+import { createHash } from "node:crypto";
+import type { ToolCall, Usage } from "../schema/message.js";
 import { toCanonicalUsage } from "../schema/message.js";
 import type { BudgetConfig, BudgetDecision } from "./budget.js";
 import { normalizeGoalManagerSnapshot } from "./session-runtime.js";
@@ -49,6 +50,10 @@ export interface Goal {
   progress?: string;
   /** blocked 状态下的阻塞原因 */
   blockedReason?: string;
+  /** 连续无进展轮次（工具调用指纹相同或无工具调用时递增） */
+  consecutiveNoProgress?: number;
+  /** 上一轮的工具调用指纹（用于判断是否停滞） */
+  lastToolCallHash?: string;
 }
 
 export interface GoalManagerSnapshot {
@@ -67,6 +72,11 @@ const VALID_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
   "blocked",
   "complete",
 ]);
+
+/** 停滞检测阈值 */
+export const STALL_EVALUATOR_THRESHOLD = 3; // 触发 LLM 评估器
+export const STALL_WARN_THRESHOLD = 5; // 强提醒
+export const STALL_BLOCK_THRESHOLD = 8; // 硬终止
 
 /** 状态对应的中文标记(供 buildGoalContext / 工具渲染) */
 function statusMark(status: GoalStatus): string {
@@ -286,7 +296,15 @@ export class GoalManager {
 
   currentBudgetDecision(now = this.now()): BudgetDecision {
     const active = this.getActive();
-    if (!active?.budgetConfig) return { allowed: true };
+    if (!active) return { allowed: true };
+    // 停滞硬终止（无预算配置时也生效）
+    if (active.consecutiveNoProgress && active.consecutiveNoProgress >= STALL_BLOCK_THRESHOLD) {
+      return {
+        allowed: false,
+        reason: `Goal 疑似停滞（连续 ${active.consecutiveNoProgress} 轮无进展）`,
+      };
+    }
+    if (!active.budgetConfig) return { allowed: true };
     const { budgetConfig: config, budgetUsage: usage } = active;
     if (config.maxWallClockMs !== undefined && now - usage.startedAt > config.maxWallClockMs) {
       return {
@@ -301,6 +319,61 @@ export class GoalManager {
       return { allowed: false, reason: `Goal 已达到成本预算 ¥${config.maxCostCNY}` };
     }
     return { allowed: true };
+  }
+
+  /**
+   * 记录本轮工具调用，与上一轮比较判断是否有进展。
+   * - 有工具调用且指纹变了 → 重置计数器
+   * - 有工具调用且指纹相同 → 递增计数器
+   * - 无工具调用 → 递增计数器（模型偷懒）
+   */
+  recordToolCallProgress(toolCalls: readonly ToolCall[]): void {
+    const active = this.getActive();
+    if (!active) return;
+    if (toolCalls.length === 0) {
+      active.consecutiveNoProgress = (active.consecutiveNoProgress ?? 0) + 1;
+      this.emitChange();
+      return;
+    }
+    const hash = createHash("md5")
+      .update(toolCalls.map((tc) => `${tc.name}:${tc.arguments}`).sort().join("|"))
+      .digest("hex");
+    if (hash === active.lastToolCallHash) {
+      active.consecutiveNoProgress = (active.consecutiveNoProgress ?? 0) + 1;
+    } else {
+      active.consecutiveNoProgress = 0;
+    }
+    active.lastToolCallHash = hash;
+    this.emitChange();
+  }
+
+  /** 停滞软提醒（连续 STALL_WARN_THRESHOLD 轮无进展） */
+  getStallWarning(): string | null {
+    const active = this.getActive();
+    if (!active?.consecutiveNoProgress || active.consecutiveNoProgress < STALL_WARN_THRESHOLD) {
+      return null;
+    }
+    return `目标 ${active.id} 已连续 ${active.consecutiveNoProgress} 轮无进展，疑似停滞。请换一种方案或缩小范围。`;
+  }
+
+  /** 格式化剩余预算，含 20% 预警标记 */
+  formatRemainingBudget(goal: Goal): string | null {
+    if (!goal.budgetConfig) return null;
+    const parts: string[] = [];
+    const { budgetConfig: c, budgetUsage: u } = goal;
+    if (c.maxTurns !== undefined) {
+      const r = c.maxTurns - u.turns;
+      parts.push(`剩余 ${r} 轮${r <= Math.ceil(c.maxTurns * 0.2) ? " ⚠" : ""}`);
+    }
+    if (c.maxTokens !== undefined) {
+      const r = c.maxTokens - u.tokens;
+      parts.push(`剩余 ${r} tokens${r <= Math.ceil(c.maxTokens * 0.2) ? " ⚠" : ""}`);
+    }
+    if (c.maxCostCNY !== undefined) {
+      const r = c.maxCostCNY - u.costCNY;
+      parts.push(`剩余 ¥${r.toFixed(4)}${r <= c.maxCostCNY * 0.2 ? " ⚠" : ""}`);
+    }
+    return parts.length > 0 ? parts.join(" + ") : null;
   }
 
   /**
@@ -382,6 +455,11 @@ export class GoalManager {
       lines.push(
         `  - 已消耗: ${active.budgetUsage.turns} 轮 + ${active.budgetUsage.tokens} tokens + ¥${active.budgetUsage.costCNY.toFixed(4)}`,
       );
+      const remaining = this.formatRemainingBudget(active);
+      if (remaining) lines.push(`  - ${remaining}`);
+    }
+    if (active.consecutiveNoProgress && active.consecutiveNoProgress >= STALL_EVALUATOR_THRESHOLD) {
+      lines.push(`  - ⚠ 连续无进展: ${active.consecutiveNoProgress} 轮`);
     }
     lines.push("  - 提示:推进任务时请对齐此目标;达成后用 update_goal 置 complete。");
     return lines.join("\n");

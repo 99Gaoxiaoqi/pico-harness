@@ -58,6 +58,12 @@ function formatGoal(goal: Goal): string {
     if (c.maxCostCNY !== undefined) parts.push(`¥${c.maxCostCNY}`);
     if (c.maxWallClockMs !== undefined) parts.push(`${c.maxWallClockMs}ms`);
     if (parts.length > 0) lines.push(`  - 预算: ${parts.join(" + ")}`);
+    lines.push(
+      `  - 已消耗: ${goal.budgetUsage.turns} 轮 + ${goal.budgetUsage.tokens} tokens + ¥${goal.budgetUsage.costCNY.toFixed(4)}`,
+    );
+  }
+  if (goal.consecutiveNoProgress && goal.consecutiveNoProgress >= 3) {
+    lines.push(`  - ⚠ 连续无进展: ${goal.consecutiveNoProgress} 轮`);
   }
   return lines.join("\n");
 }

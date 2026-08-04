@@ -60,6 +60,8 @@ import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
 import { IterationBudget, type BudgetConfig, type BudgetDecision } from "./budget.js";
 import type { GoalManager } from "./goal-manager.js";
+import { evaluateGoalCompletion } from "./goal-evaluator.js";
+import { STALL_EVALUATOR_THRESHOLD, STALL_BLOCK_THRESHOLD } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
@@ -1848,6 +1850,60 @@ export class AgentEngine implements AgentRunner {
               if (stopSteers.length > 0 || decision?.continue) {
                 continue; // 不 break,回 for(;;) 顶部继续下一轮
               }
+
+              // Goal 延续协调器：goal 还 active 时，按停滞计数决定续行 / 评估 / 终止
+              if (this.goalManager) {
+                const active = this.goalManager.getActive();
+                if (active && active.status === "active") {
+                  const noProgress = active.consecutiveNoProgress ?? 0;
+
+                  if (noProgress >= STALL_BLOCK_THRESHOLD) {
+                    // 硬终止 → 走 Grace Call
+                    exhaustedReason = `Goal 疑似停滞（连续 ${noProgress} 轮无进展）`;
+                    break;
+                  }
+
+                  if (noProgress >= STALL_EVALUATOR_THRESHOLD && this.provider) {
+                    // 触发 LLM 评估器判断是否真的完成
+                    const evaluation = await evaluateGoalCompletion(
+                      this.provider,
+                      active,
+                      await this.readModelHistory(session),
+                      signal,
+                    );
+                    if (evaluation.met || evaluation.impossible) {
+                      // 评估器说完成了/不可能 → 允许退出
+                      break;
+                    }
+                    if (!evaluation.evaluatorFailed) {
+                      // 评估器说没完成 → 续行并注入评估理由
+                      await session.commitMessages({
+                        role: "user",
+                        content: `[Goal continuation] 目标尚未完成。评估器判断：${evaluation.reason}\n请继续推进。`,
+                        providerData: {
+                          picoKind: "goal_continuation",
+                          picoHiddenFromTranscript: true,
+                        },
+                      });
+                      continue;
+                    }
+                    // 评估器失败 → fail-open，允许退出
+                    break;
+                  }
+
+                  // noProgress < 3 → 直接续行（给模型思考空间）
+                  await session.commitMessages({
+                    role: "user",
+                    content: "[Goal continuation] 目标尚未完成，请继续推进。",
+                    providerData: {
+                      picoKind: "goal_continuation",
+                      picoHiddenFromTranscript: true,
+                    },
+                  });
+                  continue;
+                }
+              }
+
               reporter.onFinish();
               break;
             }
@@ -2037,6 +2093,19 @@ export class AgentEngine implements AgentRunner {
           }
           if (reminderMessages.length > 0) {
             await session.commitMessages(...reminderMessages);
+          }
+
+          // Goal 停滞检测：每轮结束后更新停滞计数 + 软提醒（≥5 轮）
+          if (this.goalManager && responseMsg) {
+            this.goalManager.recordToolCallProgress(responseMsg.toolCalls ?? []);
+            const stallWarning = this.goalManager.getStallWarning();
+            if (stallWarning) {
+              await session.commitMessages({
+                role: "user",
+                content: `[SYSTEM REMINDER 警告]\n${stallWarning}`,
+                providerData: { picoKind: "system_reminder", picoHiddenFromTranscript: true },
+              });
+            }
           }
 
           // ====================================================================

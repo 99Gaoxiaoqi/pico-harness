@@ -411,7 +411,9 @@ function isGoal(value: unknown): value is Goal {
     isNonNegativeFiniteNumber(usage["startedAt"]) &&
     isOptionalString(value["progress"]) &&
     isOptionalString(value["blockedReason"]) &&
-    isOptionalBudgetConfig(value["budgetConfig"])
+    isOptionalBudgetConfig(value["budgetConfig"]) &&
+    isOptionalNonNegativeInteger(value["consecutiveNoProgress"]) &&
+    isOptionalString(value["lastToolCallHash"])
   );
 }
 
