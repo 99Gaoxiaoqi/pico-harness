@@ -102,6 +102,24 @@ test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () 
   );
 });
 
+test("中断计划卡片提供继续、取消与重新规划入口", () => {
+  const notice = {
+    taskId: "plan-1",
+    providerCallId: "call-1",
+    toolName: "interrupted_plan_execution",
+    args: "{}",
+    message: "Plan interrupted",
+  };
+  const rendered = formatApprovalPanel(notice, { selectedIndex: 2 });
+  assert.match(rendered, /继续执行/u);
+  assert.match(rendered, /取消执行/u);
+  assert.match(rendered, /重新规划/u);
+  assert.equal(
+    resolveApprovalPanelKey("", { return: true }, undefined, 2, false, true, true),
+    "replan-execution",
+  );
+});
+
 test("运行中为紧随消息的 spinner 预留一行 transcript 空间", () => {
   assert.equal(transcriptContentRows(20, { newMessageNotice: false, spinner: true }), 19);
   assert.equal(transcriptContentRows(20, { newMessageNotice: true, spinner: true }), 18);

@@ -190,7 +190,10 @@ export function ApprovalDialog({
       | "deny"
       | "execute"
       | "continue_editing"
-      | "reject_exit",
+      | "reject_exit"
+      | "resume_execution"
+      | "cancel_execution"
+      | "replan_execution",
     feedback?: string,
   ) => void;
   readonly busy: boolean;
@@ -198,6 +201,7 @@ export function ApprovalDialog({
   const [feedback, setFeedback] = useState("");
   if (!approval) return null;
   const planApproval = approval.kind === "plan";
+  const interruptedPlan = approval.planControlMode === "interrupted";
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -235,7 +239,27 @@ export function ApprovalDialog({
             <StatusPill status={approval.risk === "low" ? "ready" : "attention"} />
           </div>
           <div className="dialog__actions">
-            {planApproval ? (
+            {interruptedPlan ? (
+              <>
+                <Button
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() => onDecision("cancel_execution")}
+                >
+                  取消执行
+                </Button>
+                <Button disabled={busy} onClick={() => onDecision("replan_execution")}>
+                  重新规划
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={busy}
+                  onClick={() => onDecision("resume_execution")}
+                >
+                  继续执行
+                </Button>
+              </>
+            ) : planApproval ? (
               <>
                 <Button variant="danger" disabled={busy} onClick={() => onDecision("reject_exit")}>
                   拒绝并退出

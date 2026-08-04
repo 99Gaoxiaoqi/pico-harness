@@ -60,6 +60,15 @@ export interface DaemonRunExecution {
   readonly allowedTools?: readonly string[];
   /** Desktop has already committed the visible user input to the canonical RuntimeEvent ledger. */
   readonly resumeExistingSession?: boolean;
+  /** Trusted Plan review admission. Generic IPC clients cannot populate this field. */
+  readonly planReview?: {
+    readonly action: "execute" | "continue_editing" | "resume_execution" | "replan_execution";
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly expectedSessionSequence: number;
+    readonly operationId: string;
+    readonly feedback?: string;
+  };
   readonly skillActivation?: {
     readonly name: string;
     readonly sourcePath?: string;
