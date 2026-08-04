@@ -40,6 +40,7 @@ import {
   type RuntimePolicyDenialReasonKind,
 } from "../runtime/agent-runtime.js";
 import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
+import type { PlanHandoff } from "../engine/plan-handoff.js";
 import type { ImagePart } from "../schema/message.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
@@ -218,6 +219,8 @@ export interface HeadlessOneShotResultV1 {
   readonly policyDenials?: HeadlessOneShotPolicyDenialSummary;
   /** True only when all Runtime execution has settled before this payload is emitted. */
   readonly terminationConfirmed: boolean;
+  /** A completed planning run may end with a pending review instead of an answer. */
+  readonly handoff?: PlanHandoff;
 }
 
 export interface HeadlessOneShotOutcome {
@@ -571,7 +574,10 @@ async function runValidatedRequest(
         modelCapabilities: selected.route.capabilities,
         interactionMode: request.permissionMode,
         ...(effectiveThinking !== undefined ? { thinkingEffort: effectiveThinking } : {}),
-        allowedTools: request.allowedTools,
+        allowedTools:
+          request.permissionMode === "plan"
+            ? [...new Set([...request.allowedTools, "submit_plan"])]
+            : request.allowedTools,
         trace: request.trace,
       },
       runtimeDependencies,
@@ -652,6 +658,7 @@ async function runValidatedRequest(
       );
     }
     if (
+      !settled.result.handoff &&
       settled.result.finalMessage.trim().length === 0 &&
       settled.result.usage.promptTokens === 0 &&
       settled.result.usage.completionTokens === 0
@@ -698,6 +705,7 @@ async function runValidatedRequest(
         usage: settled.result.usage,
         tracePath: safeTracePath ?? null,
         policyDenials: policyDenialSummary,
+        ...(settled.result.handoff ? { handoff: settled.result.handoff } : {}),
       }),
       exitCode: 0,
       shutdownConfirmed: true,
@@ -1582,6 +1590,7 @@ function resultPayload(input: {
   error?: HeadlessOneShotError;
   terminationConfirmed?: boolean;
   policyDenials?: HeadlessOneShotPolicyDenialSummary;
+  handoff?: PlanHandoff;
 }): HeadlessOneShotResultV1 {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -1596,6 +1605,7 @@ function resultPayload(input: {
     effective: input.effective,
     error: input.error ?? null,
     ...(input.policyDenials ? { policyDenials: input.policyDenials } : {}),
+    ...(input.handoff ? { handoff: input.handoff } : {}),
     terminationConfirmed: input.terminationConfirmed ?? true,
   };
 }
