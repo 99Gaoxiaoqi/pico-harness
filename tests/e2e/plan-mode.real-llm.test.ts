@@ -186,11 +186,13 @@ realModelTest(
           "After the answer, submit a plan for implementing that format. Do not modify files.",
         ].join("\n"),
         "new",
+        true,
       ),
       runtimeHost(sandbox, model, { askUserHandler }),
     );
     assert.equal(answered, 1);
-    assert.equal(first.handoff?.revision, 1);
+    const firstEvents = await readRuntimeEvents(sandbox);
+    assert.equal(first.handoff?.revision, 1, planEventSummary(firstEvents));
 
     const second = await runtime.execute(
       planningRequest(
@@ -224,6 +226,7 @@ function planningRequest(
   model: RealModel,
   prompt: string,
   mode: "new" | "resume",
+  includeAskUser = false,
 ): RunAgentCliOptions {
   return {
     ...modelRequest(model),
@@ -238,7 +241,7 @@ function planningRequest(
       "grep",
       "repo_map",
       "code_symbols",
-      "ask_user",
+      ...(includeAskUser ? ["ask_user"] : []),
       "submit_plan",
     ],
   };
@@ -270,7 +273,10 @@ function modelRequest(
 function runtimeHost(
   sandbox: TestSandbox,
   model: RealModel,
-  options: { readonly systems?: string[]; readonly askUserHandler?: AskUserHandler } = {},
+  options: {
+    readonly systems?: string[];
+    readonly askUserHandler?: AskUserHandler;
+  } = {},
 ): RunAgentCliDependencies {
   return {
     picoHome: sandbox.picoHome,
@@ -373,6 +379,25 @@ function assertMainModelSucceeded(events: readonly RuntimeEvent[]): void {
         mainCalls.has(event.data.providerCallId),
     ),
   );
+}
+
+function planEventSummary(events: readonly RuntimeEvent[]): string {
+  const summary: Record<string, unknown>[] = [];
+  for (const event of events) {
+    if (event.kind === "tool.started") {
+      summary.push({ kind: event.kind, tool: event.data.toolName });
+    } else if (event.kind === "tool.result.recorded") {
+      summary.push({ kind: event.kind, tool: event.data.toolName, status: event.data.status });
+    } else if (event.kind === "model.call.settled") {
+      summary.push({ kind: event.kind, status: event.data.status });
+    } else if (event.kind === "run.terminal") {
+      summary.push({ kind: event.kind, status: event.data.status });
+    } else if (event.kind === "message.committed") {
+      const tools = event.data.message.toolCalls?.map((call) => call.name) ?? [];
+      if (tools.length > 0) summary.push({ kind: event.kind, tools });
+    }
+  }
+  return JSON.stringify(summary);
 }
 
 async function workspaceHashes(workDir: string): Promise<Record<string, string>> {

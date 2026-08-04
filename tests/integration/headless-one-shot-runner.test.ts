@@ -186,6 +186,41 @@ test("headless Plan persists a pending handoff without approval or workspace mut
   assert.equal(events.some((event) => event.kind === "plan.execution.started"), false);
 });
 
+test("headless Plan continues when the model stops before submit_plan", async (context) => {
+  const fixture = await createFixture(context, "plan-continuation");
+  await configureFixture(fixture, "secret-canary-plan-continuation");
+  const request = {
+    ...requestFor(fixture, "plan-continuation"),
+    prompt: "必须调用 submit_plan 提交计划",
+    trace: false,
+  };
+  let providerCalls = 0;
+  const outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    providerFactory: () => ({
+      async generate() {
+        providerCalls++;
+        if (providerCalls === 1) return assistant("计划如下，但尚未提交。");
+        return assistant("", undefined, [
+          {
+            id: "call-submit-after-continuation",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "继续后提交",
+              steps: [{ title: "实施", description: "批准后执行" }],
+              operationId: "headless-plan-continuation",
+            }),
+          },
+        ]);
+      },
+    }),
+  });
+
+  assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
+  assert.equal(providerCalls, 2);
+  assert.equal(outcome.result.handoff?.kind, "plan_handoff");
+});
+
 test("headless image attachments preserve mixed path order and deduplicate physical files", async (context) => {
   const fixture = await createFixture(context, "images-order");
   await configureFixture(fixture, "secret-canary-images-order", true, undefined, true);

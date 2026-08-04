@@ -552,6 +552,7 @@ export function createProductionLocalDaemonHost(
             settings,
             ...(input.feedback ? { reason: input.feedback } : {}),
           });
+          await lease.session.refreshRuntimeProjection();
           publishDesktopPlanProjection(
             service,
             workspacePath,

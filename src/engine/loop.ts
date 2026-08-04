@@ -176,6 +176,7 @@ const MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES = 2;
 const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
   "子代理已完成探索，但主模型连续违反纯文本总结协议，本次未能生成可靠的统一总结。";
 const MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS = 2;
+const MAX_PLAN_STOP_CONTINUATIONS = 2;
 const REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE =
   "模型未能按用户的明确要求启动 required 子代理，已停止主 Agent 自行探索。";
 const REQUIRED_DELEGATION_RECOVERY_PROMPT =
@@ -1382,6 +1383,7 @@ export class AgentEngine implements AgentRunner {
     let requiredDelegationRecoveryPending = false;
     let requiredDelegationRecoveryExploreOnly = false;
     let consecutiveHookStopBlocks = 0;
+    let planStopContinuations = 0;
     let graceCandidateTools: ToolDefinition[] = [];
     let runToolSnapshot: ToolDefinition[] | undefined;
     const userRewindPointId = session.fileHistory.snapshots.findLast(
@@ -1478,8 +1480,11 @@ export class AgentEngine implements AgentRunner {
             : requiredFirstDelegationActive || requiredDelegationRecoveryPending
               ? allTools.filter((tool) => tool.name === "delegate_task")
               : availableTools;
+          // Plan 的终态只能由 submit_plan 形成。渐进披露不得把它（或 ask_user）
+          // 隐藏，否则模型会看到 Plan Prompt，却没有完成协议所需的工具。
+          // 这里仍使用与 safety middleware 相同的严格白名单，不扩大能力面。
           const providerTools = this.isPlanning()
-            ? unrestrictedProviderTools.filter((tool) => isPlanProviderTool(tool.name))
+            ? allTools.filter((tool) => isPlanProviderTool(tool.name))
             : unrestrictedProviderTools;
 
           // 主 Agent 默认投影完整 Session 历史。只有超过 token 水位时，
@@ -1856,6 +1861,24 @@ export class AgentEngine implements AgentRunner {
 
             // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
             if (toolCalls.length === 0) {
+              if (this.isPlanning() && !this.planHandoff?.hasPending()) {
+                if (planStopContinuations >= MAX_PLAN_STOP_CONTINUATIONS) {
+                  throw new Error(
+                    "Plan Mode 模型连续停止但未调用 submit_plan，规划 Run 不能作为成功完成。",
+                  );
+                }
+                planStopContinuations++;
+                await session.commitMessages({
+                  role: "user",
+                  content:
+                    "[Plan continuation] 规划尚未提交。继续调查或整理方案，完成后必须调用 submit_plan；不要仅用文字结束。",
+                  providerData: {
+                    picoKind: "plan_continuation",
+                    picoHiddenFromTranscript: true,
+                  },
+                });
+                continue;
+              }
               const stopHookDecision = await this.hookService?.dispatch(
                 "Stop",
                 { reason: "model_stop", response: responseMsg.content },

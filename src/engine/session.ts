@@ -446,7 +446,19 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     if (!store) throw new Error("Session persistence is disabled");
     const projection = await store.readSessionProjection(this.id);
     if (!projection) throw new Error(`Runtime session ${this.id} has no canonical projection`);
+    const runtime = projectRuntimeSessionState(projection.entries.map(({ event }) => event));
+    this.persistedSettings = runtime.settings;
+    this.persistedGoal = runtime.goal;
+    this.persistedPromptCache = runtime.promptCache;
+    this.restoreUsage(runtime.usage);
     this.applyRuntimeHistoryProjection(projection);
+  }
+
+  /** Refresh disposable in-memory state after a trusted coordinator appends an atomic batch. */
+  async refreshRuntimeProjection(): Promise<void> {
+    this.assertWritable();
+    await this.ensureRuntimeSession();
+    await this.replayRuntimeHistoryProjection();
   }
 
   private applyRuntimeHistoryProjectionDelta(

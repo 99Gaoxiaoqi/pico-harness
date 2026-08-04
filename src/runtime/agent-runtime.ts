@@ -336,6 +336,7 @@ export class AgentRuntime {
         reviewedBy: "user",
         settings,
       });
+      await session.refreshRuntimeProjection();
       const proposal = approved.proposals.find(
         (candidate) =>
           candidate.planId === input.approval.planId &&
@@ -958,6 +959,9 @@ export async function executeAgentRuntime(
     });
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
+    if (options.approvedPlan) {
+      toolDisclosure.disclose(["update_plan", "cancel_plan"]);
+    }
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const planHandoff = new PlanHandoffController();
     const planRegistryOptions: DefaultToolRegistryOptions["plan"] = {
