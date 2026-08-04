@@ -5,6 +5,7 @@
 // QueryGuard prevents overlapping submissions from racing cleanup state.
 
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -32,11 +33,14 @@ import {
   type RunningInputQueueSnapshot,
 } from "./running-input-queue.js";
 import {
+  AgentRuntime,
   executeAgentRuntime,
   type RunAgentCliDependencies,
   type RunAgentCliOptions,
   type RunAgentCliResult,
 } from "../runtime/agent-runtime.js";
+import type { PlanHandoff } from "../engine/plan-handoff.js";
+import { PlanCoordinator } from "../plan/coordinator.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
@@ -356,6 +360,17 @@ export interface HandleTuiInputSubmissionDeps {
   switchSession?: (selection: ResumeSessionCommandData) => Promise<void>;
   openChanges?: (messageId: string) => Promise<void>;
   sessionId?: string;
+  planControl?: {
+    respond(input: {
+      readonly sessionId: string;
+      readonly planId: string;
+      readonly action: "execute" | "continue_editing" | "reject_exit";
+      readonly expectedRevision: number;
+      readonly expectedSessionSequence: number;
+      readonly operationId: string;
+      readonly feedback?: string;
+    }): Promise<unknown>;
+  };
   currentModelId?: string;
   modelOptions?: readonly ModelOption[];
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
@@ -2360,7 +2375,7 @@ export async function startTuiRepl(
                 ? {}
                 : { allowedTools: [...runOptions.allowedTools] }),
               ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-              planMode: settings.mode === "plan",
+              planMode: settings.collaborationMode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(rewindContext !== null ? { rewindPrompt: rewindContext.prompt } : {}),
               ...(rewindContext !== null
@@ -2452,7 +2467,8 @@ export async function startTuiRepl(
         provider={bundle.settings.provider}
         workDir={opts.workDir}
         sessionMode={bundle.selection.mode}
-        permissionMode={bundle.settings.mode}
+        collaborationMode={bundle.settings.collaborationMode}
+        permissionMode={bundle.settings.permissionMode}
         thinkingEffort={bundle.settings.thinkingEffort}
         mcpSummary={formatTuiMcpSummary(bundle.latestMcpStatus)}
         taskSummary={formatRunningInputQueue(runningInputState)}
@@ -2819,6 +2835,7 @@ export async function runTuiAgentPrompt(
     abortControllerRef?: TuiAbortControllerRef;
     /** 内部 completion 续跑：复用现有 Session，不追加或伪装用户输入。 */
     resumeExistingSession?: boolean;
+    planControl?: HandleTuiInputSubmissionDeps["planControl"];
   },
 ): Promise<void> {
   if (deps.askUserHandler && (!deps.openDialog || !deps.closeDialog)) {
@@ -2866,6 +2883,17 @@ export async function runTuiAgentPrompt(
   controller.signal.addEventListener("abort", closeApprovalOnAbort, { once: true });
   if (deps.abortControllerRef && ownsControllerSlot) deps.abortControllerRef.current = controller;
   try {
+    let activePlanControl = deps.planControl;
+    const presentPlanHandoff = (handoff: PlanHandoff) => {
+      deps.openDialog?.(
+        createPlanHandoffDialogRequest(handoff, {
+          reporter: deps.reporter,
+          closeDialog: (id) => deps.closeDialog?.(id),
+          sessionId: handoff.sessionId,
+          planControl: activePlanControl,
+        }),
+      );
+    };
     const runDependencies: RunAgentCliDependencies & { resumeExistingSession?: boolean } = {
       reporter: deps.reporter,
       signal: controller.signal,
@@ -2878,6 +2906,7 @@ export async function runTuiAgentPrompt(
             reporter: deps.reporter,
             closeDialog: closeApprovalDialog,
             sessionId: cliOpts.sessionSelection?.sessionId ?? cliOpts.session,
+            planControl: activePlanControl,
           }),
         );
       },
@@ -2895,7 +2924,14 @@ export async function runTuiAgentPrompt(
       ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
       ...(deps.resumeExistingSession ? { resumeExistingSession: true } : {}),
     };
+    activePlanControl ??= createTuiRuntimePlanControl({
+      cliOpts,
+      runDependencies,
+      runAgent: deps.runAgent,
+      presentPlanHandoff,
+    });
     const result = await (deps.runAgent ?? executeAgentRuntime)(cliOpts, runDependencies);
+    if (result.handoff) presentPlanHandoff(result.handoff);
     if (result.tracePath) {
       deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
     }
@@ -2912,6 +2948,124 @@ export async function runTuiAgentPrompt(
       deps.abortControllerRef.current = null;
     }
   }
+}
+
+function createTuiRuntimePlanControl(input: {
+  readonly cliOpts: RunAgentCliOptions;
+  readonly runDependencies: RunAgentCliDependencies;
+  readonly runAgent?: TuiRunAgent;
+  readonly presentPlanHandoff: (handoff: PlanHandoff) => void;
+}): NonNullable<HandleTuiInputSubmissionDeps["planControl"]> {
+  const workDir = input.cliOpts.dir;
+  if (!workDir) throw new Error("Plan review requires a working directory");
+  return {
+    respond: async (response) => {
+      if (response.action === "execute") {
+        const {
+          prompt: _prompt,
+          session: _session,
+          dir: _dir,
+          planMode: _planMode,
+          ...execution
+        } = input.cliOpts;
+        void _prompt;
+        void _session;
+        void _dir;
+        void _planMode;
+        const result = await new AgentRuntime().approvePlanAndExecute(
+          {
+            approval: {
+              sessionId: response.sessionId,
+              dir: workDir,
+              planId: response.planId,
+              expectedRevision: response.expectedRevision,
+              expectedSessionSequence: response.expectedSessionSequence,
+              operationId: response.operationId,
+            },
+            execution: { ...execution, planMode: false },
+          },
+          input.runDependencies,
+        );
+        if (result.handoff) input.presentPlanHandoff(result.handoff);
+        return result;
+      }
+      if (response.action === "continue_editing") {
+        const result = await (input.runAgent ?? executeAgentRuntime)(
+          {
+            ...input.cliOpts,
+            prompt: `[PLAN REVISION FEEDBACK]\n${response.feedback ?? "请继续修改计划。"}`,
+            session: response.sessionId,
+            sessionSelection: { mode: "resume", sessionId: response.sessionId },
+            planMode: true,
+          },
+          { ...input.runDependencies, resumeExistingSession: true },
+        );
+        if (result.handoff) input.presentPlanHandoff(result.handoff);
+        return result;
+      }
+      const lease = await globalSessionManager.getOrCreatePinned(response.sessionId, workDir, {
+        persistence: true,
+        runtimePort: createEngineRuntimePort(),
+      });
+      try {
+        if (!lease.session.runtimeEventStore) {
+          throw new Error("Plan rejection requires durable Session storage");
+        }
+        return await new PlanCoordinator(lease.session.runtimeEventStore, {
+          sessionId: response.sessionId,
+          invocationId: `plan-review:${response.operationId}`,
+          runId: `plan-review:${response.operationId}`,
+          turnId: `plan-review:${response.operationId}`,
+        }).reject({
+          operationId: response.operationId,
+          expectedSessionSequence: response.expectedSessionSequence,
+          planId: response.planId,
+          expectedRevision: response.expectedRevision,
+          reviewedBy: "user",
+          ...(response.feedback ? { reason: response.feedback } : {}),
+        });
+      } finally {
+        lease.release();
+      }
+    },
+  };
+}
+
+function createPlanHandoffDialogRequest(
+  handoff: PlanHandoff,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "reporter" | "closeDialog" | "sessionId" | "planControl"
+  >,
+): DialogRequest {
+  const proposal = handoff.projection.pendingProposal ?? handoff.projection.latestProposal;
+  const planPreview = proposal
+    ? [
+        proposal.overview,
+        ...proposal.steps.map(
+          (step, index) => `${index + 1}. ${step.title}\n   ${step.description}`,
+        ),
+        ...(proposal.risks?.length ? ["风险", ...proposal.risks.map((risk) => `- ${risk}`)] : []),
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join("\n")
+    : "计划已提交，请刷新后重试。";
+  const notice = {
+    taskId: handoff.planId,
+    toolName: "submit_plan",
+    args: JSON.stringify({ planId: handoff.planId, revision: handoff.revision }),
+    providerCallId: handoff.runId,
+    message: proposal?.title ?? "计划等待审批",
+    preview: {
+      target: proposal?.title ?? handoff.planId,
+      summary: proposal?.overview ?? "计划等待审批",
+      diff: planPreview,
+    },
+    planId: handoff.planId,
+    expectedRevision: handoff.revision,
+    expectedSessionSequence: handoff.expectedSessionSequence,
+  };
+  return createApprovalDialogRequest(notice, deps);
 }
 
 export function handleTuiInterrupt(
@@ -2976,7 +3130,10 @@ export function formatTuiMcpSummary(snapshot: McpStatusSnapshot | undefined): st
 
 function createApprovalDialogRequest(
   notice: ApprovalNotice,
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "reporter" | "closeDialog" | "sessionId" | "planControl"
+  >,
 ): DialogRequest {
   return {
     id: approvalDialogId(notice.taskId),
@@ -2985,10 +3142,59 @@ function createApprovalDialogRequest(
     content: (
       <InteractiveApprovalPanel
         {...notice}
-        onAction={(action) => resolveApprovalAction({ action, taskId: notice.taskId }, deps)}
+        onAction={(action, feedback) => {
+          if (action === "execute" || action === "continue-editing" || action === "reject-exit") {
+            void resolvePlanApprovalAction(notice, action, feedback, deps);
+            return;
+          }
+          resolveApprovalAction({ action, taskId: notice.taskId }, deps);
+        }}
       />
     ),
   };
+}
+
+async function resolvePlanApprovalAction(
+  notice: ApprovalNotice,
+  action: "execute" | "continue-editing" | "reject-exit",
+  feedback: string | undefined,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "reporter" | "closeDialog" | "sessionId" | "planControl"
+  >,
+): Promise<void> {
+  const metadata = notice as ApprovalNotice & {
+    readonly planId?: string;
+    readonly expectedRevision?: number;
+    readonly expectedSessionSequence?: number;
+  };
+  if (!deps.planControl || !deps.sessionId) {
+    deps.reporter.pushSystemMessage(
+      "Plan review is unavailable until the Runtime PlanControl port is connected.",
+    );
+    return;
+  }
+  try {
+    await deps.planControl.respond({
+      sessionId: deps.sessionId,
+      planId: metadata.planId ?? notice.taskId,
+      action:
+        action === "continue-editing"
+          ? "continue_editing"
+          : action === "reject-exit"
+            ? "reject_exit"
+            : "execute",
+      expectedRevision: metadata.expectedRevision ?? 0,
+      expectedSessionSequence: metadata.expectedSessionSequence ?? 0,
+      operationId: randomUUID(),
+      ...(feedback ? { feedback } : {}),
+    });
+    deps.closeDialog?.(approvalDialogId(notice.taskId));
+  } catch (error) {
+    deps.reporter.pushSystemMessage(
+      `Plan changed while reviewing; refresh the proposal and retry. ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function handleApprovalCommand(
@@ -3004,7 +3210,10 @@ function handleApprovalCommand(
 
 function resolveApprovalAction(
   parsed:
-    | { action: ApprovalPanelAction; taskId: string }
+    | {
+        action: Exclude<ApprovalPanelAction, "execute" | "continue-editing" | "reject-exit">;
+        taskId: string;
+      }
     | { action: "modify"; taskId: string; content: string },
   deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
 ): boolean {

@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 10;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v10";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 11;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v11";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
@@ -21,6 +21,7 @@ export type SessionId = Identifier<"SessionId">;
 export type RunId = Identifier<"RunId">;
 export type JobId = Identifier<"JobId">;
 export type ApprovalId = Identifier<"ApprovalId">;
+export type PlanId = Identifier<"PlanId">;
 export type PromptId = Identifier<"PromptId">;
 export type CheckpointId = Identifier<"CheckpointId">;
 
@@ -127,7 +128,10 @@ export type RuntimeSessionStatus = "active" | "archived";
 export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
-export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
+export type RuntimeCollaborationMode = "agent" | "plan";
+export type RuntimePermissionMode = "default" | "auto" | "yolo";
+/** @deprecated Compatibility input accepted by older clients. */
+export type RuntimeInteractionMode = RuntimePermissionMode | "plan";
 export type RuntimeProviderKind = "openai" | "claude";
 export type RuntimeConfigSource =
   | "user"
@@ -160,6 +164,8 @@ export type RuntimeProviderProfile = RuntimeProviderInput & {
 
 export type RuntimeUserDefaults = JsonObject & {
   readonly modelRouteId?: string;
+  readonly collaborationMode?: RuntimeCollaborationMode;
+  readonly permissionMode?: RuntimePermissionMode;
   readonly mode?: RuntimeInteractionMode;
   readonly thinkingEffort?: string;
 };
@@ -185,12 +191,38 @@ export type RuntimeSessionSettings = {
   readonly provider: RuntimeProviderKind;
   readonly model: string;
   readonly modelRouteId?: string;
-  readonly mode: RuntimeInteractionMode;
-  /** `/permissions` is a UI alias of mode, never an independently persisted value. */
-  readonly permissions: RuntimeInteractionMode;
+  readonly collaborationMode: RuntimeCollaborationMode;
+  readonly permissionMode: RuntimePermissionMode;
   readonly thinkingEffort: string;
   readonly thinkingEffortExplicit: boolean;
   readonly reasoningLevels: readonly string[];
+};
+
+export type RuntimePlanStep = JsonObject & {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly status: "pending" | "in_progress" | "completed" | "skipped";
+  readonly note?: string;
+};
+
+export type RuntimePlanProposal = JsonObject & {
+  readonly planId: PlanId;
+  readonly revision: number;
+  readonly title: string;
+  readonly overview?: string;
+  readonly steps: readonly RuntimePlanStep[];
+  readonly risks?: readonly string[];
+  readonly status: "pending" | "stale" | "approved" | "rejected";
+  readonly proposedAt: string;
+};
+
+export type RuntimePlanProjection = JsonObject & {
+  readonly sessionId: SessionId;
+  readonly sessionSequence: number;
+  readonly proposals: readonly RuntimePlanProposal[];
+  readonly latestProposal?: RuntimePlanProposal;
+  readonly pendingProposal?: RuntimePlanProposal;
 };
 
 export type RuntimeGoalStatus = "active" | "paused" | "blocked" | "complete";
@@ -626,8 +658,11 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
       readonly modelRouteId?: string;
+      readonly collaborationMode?: RuntimeCollaborationMode;
+      readonly permissionMode?: RuntimePermissionMode;
+      /** @deprecated Legacy combined mode. `plan` enters planning; all other values update permission only. */
       readonly mode?: RuntimeInteractionMode;
-      /** Compatibility UI alias. If mode is also present both values must match. */
+      /** @deprecated Legacy permission alias. `plan` enters planning. */
       readonly permissions?: RuntimeInteractionMode;
       readonly thinkingEffort?: string;
     };
@@ -723,6 +758,22 @@ export type RuntimeMethodMap = {
       readonly idempotencyKey?: string;
     };
     readonly result: { readonly accepted: boolean; readonly alreadyResolved: boolean };
+  };
+  readonly "plan.respond": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly planId: PlanId;
+      readonly action: "execute" | "continue_editing" | "reject_exit";
+      readonly expectedRevision: number;
+      readonly expectedSessionSequence: number;
+      readonly operationId: string;
+      readonly feedback?: string;
+    };
+    readonly result: {
+      readonly accepted: boolean;
+      readonly projection: RuntimePlanProjection;
+      readonly run?: RuntimeRun;
+    };
   };
   readonly "prompt.respond": {
     readonly params: WorkspaceParams & {
@@ -1200,6 +1251,7 @@ export const RUNTIME_METHODS = [
   "run.steer",
   "runs.list",
   "approval.respond",
+  "plan.respond",
   "prompt.respond",
   "changes.list",
   "changes.diff",
@@ -1301,6 +1353,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "run.steer",
   "runs.list",
   "approval.respond",
+  "plan.respond",
   "prompt.respond",
   "changes.list",
   "changes.diff",
@@ -1398,6 +1451,11 @@ export type RuntimeNotificationMap = {
   readonly "approval.resolved": {
     readonly approvalId: ApprovalId;
     readonly decision: "allow_once" | "allow_session" | "deny";
+  };
+  readonly "plan.updated": {
+    readonly sessionId: SessionId;
+    readonly projection: RuntimePlanProjection;
+    readonly operation: "proposed" | "updated" | "executing" | "continue_editing" | "rejected";
   };
   readonly "prompt.requested": {
     readonly promptId: PromptId;
@@ -2044,6 +2102,8 @@ function assertNestedShape(
 }
 
 const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as const);
+const collaborationModeParam = oneOfParam(["agent", "plan"] as const);
+const permissionModeParam = oneOfParam(["default", "auto", "yolo"] as const);
 const providerProtocolParam = oneOfParam(["openai", "claude"] as const);
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
 
@@ -2097,6 +2157,8 @@ const runtimeUserDefaultsParam: RuntimeParamRule = (value, path) => {
     {},
     {
       modelRouteId: stringParam,
+      collaborationMode: collaborationModeParam,
+      permissionMode: permissionModeParam,
       mode: interactionModeParam,
       thinkingEffort: stringParam,
     },
@@ -2263,6 +2325,8 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     { workspacePath: stringParam, sessionId: stringParam },
     {
       modelRouteId: stringParam,
+      collaborationMode: collaborationModeParam,
+      permissionMode: permissionModeParam,
       mode: interactionModeParam,
       permissions: interactionModeParam,
       thinkingEffort: stringParam,
@@ -2314,6 +2378,28 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       idempotencyKey: stringParam,
     },
   ),
+  "plan.respond": (value: Record<string, unknown>) => {
+    assertNestedShape(
+      value,
+      "params",
+      {
+        workspacePath: stringParam,
+        sessionId: stringParam,
+        planId: stringParam,
+        action: oneOfParam(["execute", "continue_editing", "reject_exit"]),
+        expectedRevision: finiteNumberParam,
+        expectedSessionSequence: finiteNumberParam,
+        operationId: stringParam,
+      },
+      { feedback: stringParam },
+    );
+    if (value["action"] === "continue_editing") {
+      const feedback = value["feedback"];
+      if (typeof feedback !== "string" || feedback.trim().length === 0) {
+        throw invalidParams("params.feedback 在 continue_editing 时为必填字段");
+      }
+    }
+  },
   "prompt.respond": exactParamShape(
     { workspacePath: stringParam, promptId: stringParam, answer: jsonValueParam },
     { runId: stringParam, sessionId: stringParam, idempotencyKey: stringParam },

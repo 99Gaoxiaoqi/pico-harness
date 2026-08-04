@@ -12,6 +12,7 @@ import { ModelRouter, type ModelRoute } from "../../src/provider/model-router.js
 import { buildSeparatorLine } from "../../src/tui/message-list.js";
 import { MarkdownText } from "../../src/tui/markdown-text.js";
 import { buildStatusBarText } from "../../src/tui/status-bar.js";
+import { formatApprovalPanel, resolveApprovalPanelKey } from "../../src/tui/approval-panel.js";
 import { createTuiTerminalGridSession } from "../../src/tui/terminal-grid.js";
 import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import { transcriptContentRows } from "../../src/tui/viewport-rows.js";
@@ -67,11 +68,37 @@ test("唯一状态栏同时呈现会话、权限和 MCP 状态", () => {
     buildStatusBarText({
       phase: "idle",
       sessionMode: "new",
+      collaborationMode: "plan",
       permissionMode: "yolo",
       mcpSummary: "MCP 0/0",
       renderWidth: 120,
     }),
-    "phase idle · mode new · perm yolo · MCP 0/0",
+    "phase idle · mode new · collab plan · perm yolo · MCP 0/0",
+  );
+});
+
+test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () => {
+  const notice = {
+    taskId: "plan-1",
+    providerCallId: "call-1",
+    toolName: "submit_plan",
+    args: "{}",
+    message: "Plan ready",
+    diff: "1. inspect\n2. implement",
+  };
+  const rendered = formatApprovalPanel(notice, { selectedIndex: 1, feedback: "补充失败路径" });
+  assert.match(rendered, /执行计划/u);
+  assert.match(rendered, /继续修改/u);
+  assert.match(rendered, /拒绝并退出/u);
+  assert.match(rendered, /补充失败路径/u);
+  assert.equal(resolveApprovalPanelKey("", { return: true }, undefined, 0, false, true), "execute");
+  assert.equal(
+    resolveApprovalPanelKey("", { return: true }, undefined, 1, false, true),
+    "continue-editing",
+  );
+  assert.equal(
+    resolveApprovalPanelKey("", { escape: true }, undefined, 0, false, true),
+    "reject-exit",
   );
 });
 
