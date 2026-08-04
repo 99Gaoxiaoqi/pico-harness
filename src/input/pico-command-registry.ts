@@ -65,6 +65,7 @@ import {
   parseThinkingEffortArg,
   sessionReasoningCandidates,
   setSessionMode,
+  setSessionCollaborationMode,
   setSessionModel,
   setSessionModelRoute,
   setSessionPermissionMode,
@@ -261,6 +262,7 @@ export async function createPicoCommandRegistry(
     createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
     createModeCommand(settings),
+    createPlanCommand(settings),
     createPermissionsCommand(settings),
     createCompactCommand(options, settings),
     createInitCommand(options),
@@ -1370,7 +1372,11 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
           type: "local",
           action: "message",
           message: `Current mode: ${settings.mode}`,
-          data: { mode: settings.mode },
+          data: {
+            mode: settings.mode,
+            collaborationMode: settings.collaborationMode,
+            permissionMode: settings.permissionMode,
+          },
         };
       }
 
@@ -1379,7 +1385,36 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
         type: "local",
         action: "message",
         message: result.message,
-        data: { ok: result.ok, mode: settings.mode },
+        data: {
+          ok: result.ok,
+          mode: settings.mode,
+          collaborationMode: settings.collaborationMode,
+          permissionMode: settings.permissionMode,
+        },
+      };
+    },
+  };
+}
+
+function createPlanCommand(settings: SessionSettings): SlashCommand {
+  return {
+    name: "plan",
+    description: "Enter Plan collaboration mode",
+    usage: "/plan",
+    category: "session",
+    kind: "local",
+    availability: "idle",
+    execute: (): LocalCommandResult => {
+      const result = setSessionCollaborationMode(settings, "plan");
+      return {
+        type: "local",
+        action: "message",
+        message: result.message,
+        data: {
+          ok: result.ok,
+          collaborationMode: settings.collaborationMode,
+          permissionMode: settings.permissionMode,
+        },
       };
     },
   };
@@ -1407,7 +1442,11 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
             `Authorized directories: ${settings.additionalDirectories.length}`,
             "Usage: /permissions <default|auto|yolo|plan>",
           ].join("\n"),
-          data: { mode: settings.mode, permissionMode: settings.mode },
+          data: {
+            mode: settings.mode,
+            collaborationMode: settings.collaborationMode,
+            permissionMode: settings.permissionMode,
+          },
         };
       }
 
@@ -1416,7 +1455,12 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
         type: "local",
         action: "message",
         message: result.message,
-        data: { ok: result.ok, mode: settings.mode, permissionMode: settings.mode },
+        data: {
+          ok: result.ok,
+          mode: settings.mode,
+          collaborationMode: settings.collaborationMode,
+          permissionMode: settings.permissionMode,
+        },
       };
     },
   };

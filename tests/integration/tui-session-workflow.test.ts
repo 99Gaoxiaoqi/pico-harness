@@ -62,6 +62,42 @@ test("/new requests an idle atomic switch without creating a session eagerly", a
   assert.deepEqual(await fixture.store.listSessionManifests(), []);
 });
 
+test("/plan and legacy mode commands keep collaboration and permission independent", async (context) => {
+  const fixture = await createFixture("plan-command-compatibility");
+  context.after(() => fixture.dispose());
+  const registry = await createPicoCommandRegistry({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+    provider: "openai",
+    model: "test-model",
+    tools: [],
+  });
+
+  const plan = await processUserInput("/plan", { registry });
+  assert.equal(plan.type, "local-command");
+  if (plan.type !== "local-command") return;
+  assert.deepEqual(plan.result.data, {
+    ok: true,
+    collaborationMode: "plan",
+    permissionMode: "yolo",
+  });
+
+  const permission = await processUserInput("/mode auto", { registry });
+  assert.equal(permission.type, "local-command");
+  if (permission.type !== "local-command") return;
+  assert.equal((permission.result.data as { collaborationMode: string }).collaborationMode, "plan");
+  assert.equal((permission.result.data as { permissionMode: string }).permissionMode, "auto");
+
+  const compatibility = await processUserInput("/permissions plan", { registry });
+  assert.equal(compatibility.type, "local-command");
+  if (compatibility.type !== "local-command") return;
+  assert.equal(
+    (compatibility.result.data as { collaborationMode: string }).collaborationMode,
+    "plan",
+  );
+  assert.equal((compatibility.result.data as { permissionMode: string }).permissionMode, "auto");
+});
+
 test("/resume and /fork reject an unpublished fork target", async (context) => {
   const fixture = await createFixture("unpublished-fork-command");
   context.after(() => fixture.dispose());

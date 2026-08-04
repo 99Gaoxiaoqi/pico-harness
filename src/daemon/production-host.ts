@@ -2,6 +2,9 @@ import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
+import type { PlanHandoff } from "../engine/plan-handoff.js";
+import { PlanCoordinator } from "../plan/coordinator.js";
+import type { PlanProjection } from "../plan/contract.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import type { MemoryProposalPublishedNotice } from "../memory/worker.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
@@ -275,7 +278,10 @@ export function createProductionLocalDaemonHost(
               modelRouteId: route.modelRouteId,
               modelCapabilities: route.capabilities,
               ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-              ...(persistedSettings?.mode === "plan" ? { planMode: true } : {}),
+              ...(persistedSettings?.collaborationMode === "plan" ||
+              persistedSettings?.mode === "plan"
+                ? { planMode: true }
+                : {}),
               ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
               ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
                 ? { rewindPrePlanMode: persistedSettings.prePlanMode }
@@ -307,6 +313,14 @@ export function createProductionLocalDaemonHost(
                 ),
             },
           );
+          if (result.handoff) {
+            publishDesktopPlanHandoff(
+              service,
+              workspacePath,
+              result.handoff,
+              nextDesktopResourceVersion,
+            );
+          }
           return {
             sessionId: result.sessionId,
             finalMessage: result.finalMessage,
@@ -417,6 +431,128 @@ export function createProductionLocalDaemonHost(
     credentialVault,
     pluginRuntimeSnapshotRegistry,
     ownsPluginRuntimeSnapshotRegistry,
+    planControl: {
+      respond: async (input) => {
+        const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
+        const route = await resolveDesktopPlanRoute(
+          workspacePath,
+          input.sessionId,
+          credentialVault,
+          userConfigStore,
+          effectiveConfigResolver,
+          env,
+          picoHome,
+        );
+        if (input.action === "execute") {
+          const result = await agentRuntime.approvePlanAndExecute(
+            {
+              approval: {
+                sessionId: input.sessionId,
+                dir: workspacePath,
+                planId: input.planId,
+                expectedRevision: input.expectedRevision,
+                expectedSessionSequence: input.expectedSessionSequence,
+                operationId: input.operationId,
+              },
+              execution: desktopPlanExecutionOptions(route),
+            },
+            { picoHome, env },
+          );
+          if (result.handoff) {
+            publishDesktopPlanHandoff(
+              service,
+              workspacePath,
+              result.handoff,
+              nextDesktopResourceVersion,
+            );
+          }
+          const projection = await readDesktopPlanProjection(
+            workspacePath,
+            input.sessionId,
+            picoHome,
+            input.operationId,
+          );
+          publishDesktopPlanProjection(
+            service,
+            workspacePath,
+            projection,
+            "executing",
+            nextDesktopResourceVersion,
+          );
+          return { accepted: true, projection, run: { sessionId: result.sessionId } };
+        }
+        if (input.action === "continue_editing") {
+          const result = await agentRuntime.execute(
+            {
+              ...desktopPlanExecutionOptions(route),
+              prompt: `[PLAN REVISION FEEDBACK]\n${input.feedback ?? "请继续修改计划。"}`,
+              dir: workspacePath,
+              session: input.sessionId,
+              sessionSelection: { mode: "resume", sessionId: input.sessionId },
+              planMode: true,
+            },
+            { picoHome, env, resumeExistingSession: true },
+          );
+          if (result.handoff) {
+            publishDesktopPlanHandoff(
+              service,
+              workspacePath,
+              result.handoff,
+              nextDesktopResourceVersion,
+            );
+          }
+          const projection =
+            result.handoff?.projection ??
+            (await readDesktopPlanProjection(
+              workspacePath,
+              input.sessionId,
+              picoHome,
+              input.operationId,
+            ));
+          publishDesktopPlanProjection(
+            service,
+            workspacePath,
+            projection,
+            "continue_editing",
+            nextDesktopResourceVersion,
+          );
+          return { accepted: true, projection, run: { sessionId: result.sessionId } };
+        }
+        const lease = await globalSessionManager.getOrCreatePinned(input.sessionId, workspacePath, {
+          persistence: true,
+          picoHome,
+          runtimePort: createEngineRuntimePort(),
+        });
+        try {
+          if (!lease.session.runtimeEventStore) {
+            throw new Error("Plan rejection requires durable Session storage");
+          }
+          const projection = await new PlanCoordinator(lease.session.runtimeEventStore, {
+            sessionId: input.sessionId,
+            invocationId: `plan-review:${input.operationId}`,
+            runId: `plan-review:${input.operationId}`,
+            turnId: `plan-review:${input.operationId}`,
+          }).reject({
+            operationId: input.operationId,
+            expectedSessionSequence: input.expectedSessionSequence,
+            planId: input.planId,
+            expectedRevision: input.expectedRevision,
+            reviewedBy: "user",
+            ...(input.feedback ? { reason: input.feedback } : {}),
+          });
+          publishDesktopPlanProjection(
+            service,
+            workspacePath,
+            projection,
+            "rejected",
+            nextDesktopResourceVersion,
+          );
+          return { accepted: true, projection };
+        } finally {
+          lease.release();
+        }
+      },
+    },
     interactions: {
       respondApproval: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
@@ -715,6 +851,135 @@ async function resolveDesktopModelRoute(
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+async function resolveDesktopPlanRoute(
+  workspacePath: string,
+  sessionId: string,
+  credentialVault: CredentialVault,
+  userConfigStore: UserConfigStore,
+  effectiveConfigResolver: EffectiveConfigResolver,
+  env: Readonly<Record<string, string | undefined>>,
+  picoHome: string,
+) {
+  const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
+    return await resolveDesktopModelRoute(
+      workspacePath,
+      credentialVault,
+      userConfigStore,
+      effectiveConfigResolver,
+      settings?.modelRouteId,
+      settings?.provider,
+      env,
+    );
+  } finally {
+    lease.release();
+  }
+}
+
+function desktopPlanExecutionOptions(route: Awaited<ReturnType<typeof resolveDesktopModelRoute>>) {
+  return {
+    provider: route.provider,
+    baseURL: route.baseURL,
+    apiKey: route.apiKey,
+    model: route.model,
+    modelRouteId: route.modelRouteId,
+    modelCapabilities: route.capabilities,
+  };
+}
+
+async function readDesktopPlanProjection(
+  workspacePath: string,
+  sessionId: string,
+  picoHome: string,
+  operationId: string,
+): Promise<PlanProjection> {
+  const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    if (!lease.session.runtimeEventStore) {
+      throw new Error("Plan projection requires durable Session storage");
+    }
+    return await new PlanCoordinator(lease.session.runtimeEventStore, {
+      sessionId,
+      invocationId: `plan-review:${operationId}`,
+      runId: `plan-review:${operationId}`,
+      turnId: `plan-review:${operationId}`,
+    }).project();
+  } finally {
+    lease.release();
+  }
+}
+
+function publishDesktopPlanHandoff(
+  service: WorkspaceRuntimeService,
+  workspacePath: string,
+  handoff: PlanHandoff,
+  nextResourceVersion: () => number,
+): void {
+  const proposal = handoff.projection.pendingProposal ?? handoff.projection.latestProposal;
+  service.publishDesktopNotification(
+    createRuntimeNotification({
+      topic: "approval.requested",
+      scope: { workspacePath, sessionId: handoff.sessionId, runId: handoff.runId },
+      resourceVersion: nextResourceVersion(),
+      at: Date.now(),
+      payload: {
+        approvalId: handoff.planId,
+        runId: handoff.runId,
+        request: jsonObject({
+          title: proposal?.title ?? "计划等待审批",
+          detail: proposal?.overview ?? "请审阅计划后选择下一步。",
+          kind: "plan",
+          toolName: "submit_plan",
+          risk: "high",
+          planId: handoff.planId,
+          expectedRevision: handoff.revision,
+          expectedSessionSequence: handoff.expectedSessionSequence,
+          ...(proposal ? { plan: proposal } : {}),
+          actions: ["execute", "continue_editing", "reject_exit"],
+        }),
+      },
+    }),
+  );
+  publishDesktopPlanProjection(
+    service,
+    workspacePath,
+    handoff.projection,
+    "proposed",
+    nextResourceVersion,
+  );
+}
+
+function publishDesktopPlanProjection(
+  service: WorkspaceRuntimeService,
+  workspacePath: string,
+  projection: PlanProjection,
+  operation: "proposed" | "updated" | "executing" | "continue_editing" | "rejected",
+  nextResourceVersion: () => number,
+): void {
+  service.publishDesktopNotification(
+    createRuntimeNotification({
+      topic: "plan.updated",
+      scope: { workspacePath, sessionId: projection.sessionId },
+      resourceVersion: nextResourceVersion(),
+      at: Date.now(),
+      payload: {
+        sessionId: projection.sessionId,
+        projection: jsonObject(projection),
+        operation,
+      },
+    }),
+  );
 }
 
 function resolveDesktopRequestedModel(
@@ -1065,10 +1330,23 @@ function publishInteractionEvent(
     runId: interaction.runId,
   };
   if (event.kind === "approval.pending") {
-    pendingApprovals.set(
-      interactionKey(interaction.workspacePath, event.notice.taskId),
-      interaction,
-    );
+    const planNotice = event.notice as typeof event.notice & {
+      readonly kind?: string;
+      readonly planId?: string;
+      readonly expectedRevision?: number;
+      readonly expectedSessionSequence?: number;
+      readonly plan?: unknown;
+    };
+    const isPlan =
+      planNotice.kind === "plan" ||
+      planNotice.toolName === "exit_plan_mode" ||
+      planNotice.toolName === "submit_plan";
+    if (!isPlan) {
+      pendingApprovals.set(
+        interactionKey(interaction.workspacePath, event.notice.taskId),
+        interaction,
+      );
+    }
     service.publishDesktopNotification(
       createRuntimeNotification({
         topic: "approval.requested",
@@ -1085,6 +1363,16 @@ function publishInteractionEvent(
             args: event.notice.args,
             ...(event.notice.preview?.target ? { command: event.notice.preview.target } : {}),
             risk: "high",
+            ...(isPlan
+              ? {
+                  kind: "plan",
+                  planId: planNotice.planId ?? event.notice.taskId,
+                  expectedRevision: planNotice.expectedRevision ?? 0,
+                  expectedSessionSequence: planNotice.expectedSessionSequence ?? 0,
+                  ...(planNotice.plan !== undefined ? { plan: planNotice.plan } : {}),
+                  actions: ["execute", "continue_editing", "reject_exit"],
+                }
+              : {}),
           }),
         },
       }),

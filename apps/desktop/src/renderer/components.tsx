@@ -13,7 +13,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { useState, type ComponentProps, type ReactNode } from "react";
 import type { ApprovalView, CapabilityView, PromptView } from "./model.js";
 
 export function IconButton({
@@ -183,10 +183,21 @@ export function ApprovalDialog({
   readonly approval?: ApprovalView | undefined;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
-  readonly onDecision: (decision: "allow_once" | "allow_session" | "deny") => void;
+  readonly onDecision: (
+    decision:
+      | "allow_once"
+      | "allow_session"
+      | "deny"
+      | "execute"
+      | "continue_editing"
+      | "reject_exit",
+    feedback?: string,
+  ) => void;
   readonly busy: boolean;
 }) {
+  const [feedback, setFeedback] = useState("");
   if (!approval) return null;
+  const planApproval = approval.kind === "plan";
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -198,20 +209,60 @@ export function ApprovalDialog({
           <Dialog.Title>{approval.title}</Dialog.Title>
           <Dialog.Description id="approval-detail">{approval.detail}</Dialog.Description>
           {approval.command && <pre className="command-preview">{approval.command}</pre>}
+          {planApproval && (
+            <div className="command-preview">
+              {approval.planTitle && <strong>{approval.planTitle}</strong>}
+              {approval.planOverview && <p>{approval.planOverview}</p>}
+              {approval.planSteps && (
+                <ol>
+                  {approval.planSteps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+              )}
+              <label>
+                继续修改反馈
+                <textarea
+                  value={feedback}
+                  onChange={(event) => setFeedback(event.target.value)}
+                  placeholder="说明需要修改的内容"
+                />
+              </label>
+            </div>
+          )}
           <div className="risk-row">
             <span>风险等级</span>
             <StatusPill status={approval.risk === "low" ? "ready" : "attention"} />
           </div>
           <div className="dialog__actions">
-            <Button variant="danger" disabled={busy} onClick={() => onDecision("deny")}>
-              拒绝
-            </Button>
-            <Button disabled={busy} onClick={() => onDecision("allow_session")}>
-              本任务内允许
-            </Button>
-            <Button variant="primary" disabled={busy} onClick={() => onDecision("allow_once")}>
-              仅允许这次
-            </Button>
+            {planApproval ? (
+              <>
+                <Button variant="danger" disabled={busy} onClick={() => onDecision("reject_exit")}>
+                  拒绝并退出
+                </Button>
+                <Button
+                  disabled={busy || feedback.trim().length === 0}
+                  onClick={() => onDecision("continue_editing", feedback.trim())}
+                >
+                  继续修改
+                </Button>
+                <Button variant="primary" disabled={busy} onClick={() => onDecision("execute")}>
+                  执行计划
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button variant="danger" disabled={busy} onClick={() => onDecision("deny")}>
+                  拒绝
+                </Button>
+                <Button disabled={busy} onClick={() => onDecision("allow_session")}>
+                  本任务内允许
+                </Button>
+                <Button variant="primary" disabled={busy} onClick={() => onDecision("allow_once")}>
+                  仅允许这次
+                </Button>
+              </>
+            )}
           </div>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭审批窗口">

@@ -987,7 +987,8 @@ interface ConversationEnvironmentPanelProps {
   readonly changes: readonly ChangeView[];
   readonly active: boolean;
   readonly model?: string | undefined;
-  readonly permissionMode?: "default" | "plan" | "auto" | "yolo" | undefined;
+  readonly collaborationMode?: "agent" | "plan" | undefined;
+  readonly permissionMode?: "default" | "auto" | "yolo" | undefined;
   readonly onReview: () => void;
 }
 
@@ -998,6 +999,7 @@ function ConversationEnvironmentPanel({
   changes,
   active,
   model,
+  collaborationMode,
   permissionMode,
   onReview,
 }: ConversationEnvironmentPanelProps) {
@@ -1007,7 +1009,6 @@ function ConversationEnvironmentPanel({
   const deletions = changes.reduce((total, change) => total + change.deletions, 0);
   const permissionLabels = {
     default: "默认权限",
-    plan: "计划模式",
     auto: "自动模式",
     yolo: "完全访问",
   } as const;
@@ -1076,6 +1077,12 @@ function ConversationEnvironmentPanel({
                   <div>
                     <dt>权限</dt>
                     <dd>{permissionLabels[permissionMode]}</dd>
+                  </div>
+                )}
+                {collaborationMode && (
+                  <div>
+                    <dt>协作</dt>
+                    <dd>{collaborationMode === "plan" ? "计划模式" : "Agent 模式"}</dd>
                   </div>
                 )}
               </dl>
@@ -1508,7 +1515,8 @@ function ConversationPage() {
             changes={conversation?.changes ?? []}
             active={Boolean(activeRun)}
             model={conversation?.settings?.model}
-            permissionMode={conversation?.settings?.mode}
+            collaborationMode={conversation?.settings?.collaborationMode}
+            permissionMode={conversation?.settings?.permissionMode}
             onReview={() => {
               const params = new URLSearchParams({ workspace: workspacePath });
               if (sessionId) params.set("sessionId", sessionId);
@@ -1595,20 +1603,36 @@ function ConversationPage() {
                     </select>
                   </label>
                   <label className="conversation-context-option">
-                    <span className="conversation-sr-only">权限模式</span>
+                    <span className="conversation-sr-only">协作模式</span>
                     <select
-                      name="interaction-mode"
-                      aria-label="权限模式"
-                      value={conversation.settings.mode}
+                      name="collaboration-mode"
+                      aria-label="协作模式"
+                      value={conversation.settings.collaborationMode}
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onChange={(event) =>
                         void actions.updateSessionSettings(sessionRef, {
-                          mode: event.target.value as "default" | "plan" | "auto" | "yolo",
+                          collaborationMode: event.target.value as "agent" | "plan",
+                        })
+                      }
+                    >
+                      <option value="agent">Agent</option>
+                      <option value="plan">计划</option>
+                    </select>
+                  </label>
+                  <label className="conversation-context-option">
+                    <span className="conversation-sr-only">执行权限</span>
+                    <select
+                      name="permission-mode"
+                      aria-label="执行权限"
+                      value={conversation.settings.permissionMode}
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onChange={(event) =>
+                        void actions.updateSessionSettings(sessionRef, {
+                          permissionMode: event.target.value as "default" | "auto" | "yolo",
                         })
                       }
                     >
                       <option value="default">默认</option>
-                      <option value="plan">计划</option>
                       <option value="auto">自动</option>
                       <option value="yolo">完全访问</option>
                     </select>
@@ -1685,11 +1709,26 @@ function ConversationPage() {
         open={approvalOpen}
         onOpenChange={setApprovalOpen}
         busy={busy === "approval"}
-        onDecision={(decision) =>
-          void actions
-            .respondApproval(selectedApproval?.id ?? "", decision)
-            .then(() => setApprovalOpen(false))
-        }
+        onDecision={(decision, feedback) => {
+          const operation =
+            selectedApproval?.kind === "plan" &&
+            (decision === "execute" ||
+              decision === "continue_editing" ||
+              decision === "reject_exit")
+              ? actions.respondPlan({
+                  planId: selectedApproval.planId ?? "",
+                  sessionId: sessionId ?? "",
+                  action: decision,
+                  expectedRevision: selectedApproval.expectedRevision ?? 0,
+                  expectedSessionSequence: selectedApproval.expectedSessionSequence ?? 0,
+                  ...(feedback ? { feedback } : {}),
+                })
+              : actions.respondApproval(
+                  selectedApproval?.id ?? "",
+                  decision as "allow_once" | "allow_session" | "deny",
+                );
+          void operation.then(() => setApprovalOpen(false));
+        }}
       />
       <PromptDialog
         prompt={selectedPrompt}
