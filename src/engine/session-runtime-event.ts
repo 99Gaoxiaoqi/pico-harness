@@ -1,6 +1,12 @@
 import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import type { Message, Usage } from "../schema/message.js";
-import { SESSION_RUNTIME_STATE_VERSION, type SessionRuntimeStatePatch } from "./session-runtime.js";
+import type {
+  PlanOperationFact,
+  PlanProposal,
+  PlanReviewedBy,
+  PlanStepStatus,
+} from "../plan/contract.js";
+import type { SessionRuntimeStatePatch, SessionRuntimeStateVersion } from "./session-runtime.js";
 import type {
   RuntimeEvidenceReference,
   RuntimeToolResultBody,
@@ -127,7 +133,7 @@ export interface RuntimeSessionForkedEvent extends RuntimeEventBase {
 export interface RuntimeSessionStateCommittedEvent extends RuntimeEventBase {
   readonly kind: "session.state.committed";
   readonly data: {
-    readonly stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
+    readonly stateVersion: SessionRuntimeStateVersion;
     readonly patch: SessionRuntimeStatePatch;
   };
 }
@@ -144,6 +150,68 @@ export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
   };
 }
 
+interface RuntimePlanEventBase extends RuntimeEventBase {
+  readonly partial: false;
+  readonly visibility: "internal";
+  readonly data: PlanOperationFact;
+}
+export interface RuntimePlanProposedEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.proposed";
+  readonly data: PlanOperationFact & { readonly proposal: PlanProposal };
+}
+export interface RuntimePlanRevisedEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.revised";
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly proposal: PlanProposal;
+  };
+}
+interface RuntimePlanReviewedEvent<K extends "plan.approved" | "plan.rejected"> extends RuntimePlanEventBase {
+  readonly kind: K;
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly reviewedBy: PlanReviewedBy;
+    readonly reason?: string;
+  };
+}
+export type RuntimePlanApprovedEvent = RuntimePlanReviewedEvent<"plan.approved">;
+export type RuntimePlanRejectedEvent = RuntimePlanReviewedEvent<"plan.rejected">;
+export interface RuntimePlanExecutionStartedEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.execution.started";
+  readonly data: PlanOperationFact & { readonly planId: string; readonly revision: number };
+}
+export interface RuntimePlanStepUpdatedEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.step.updated";
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly stepId: string;
+    readonly status: PlanStepStatus;
+    readonly note?: string;
+  };
+}
+interface RuntimePlanExecutionLifecycleEvent<K extends
+  | "plan.execution.interrupted"
+  | "plan.execution.completed"
+  | "plan.execution.cancelled"> extends RuntimePlanEventBase {
+  readonly kind: K;
+  readonly data: PlanOperationFact & { readonly planId: string; readonly reason?: string };
+}
+export type RuntimePlanExecutionInterruptedEvent = RuntimePlanExecutionLifecycleEvent<"plan.execution.interrupted">;
+export type RuntimePlanExecutionCompletedEvent = RuntimePlanExecutionLifecycleEvent<"plan.execution.completed">;
+export type RuntimePlanExecutionCancelledEvent = RuntimePlanExecutionLifecycleEvent<"plan.execution.cancelled">;
+export type RuntimePlanEvent =
+  | RuntimePlanProposedEvent
+  | RuntimePlanRevisedEvent
+  | RuntimePlanApprovedEvent
+  | RuntimePlanRejectedEvent
+  | RuntimePlanExecutionStartedEvent
+  | RuntimePlanStepUpdatedEvent
+  | RuntimePlanExecutionInterruptedEvent
+  | RuntimePlanExecutionCompletedEvent
+  | RuntimePlanExecutionCancelledEvent;
+
 export type RuntimeEvent =
   | RuntimeRunStartedEvent
   | RuntimeMessageCommittedEvent
@@ -158,6 +226,7 @@ export type RuntimeEvent =
   | RuntimeSessionForkedEvent
   | RuntimeSessionStateCommittedEvent
   | RuntimeTranscriptEventRecordedEvent
+  | RuntimePlanEvent
   | RuntimeRunTerminalEvent;
 
 export function isRuntimeTerminalEvent(event: RuntimeEvent): event is RuntimeRunTerminalEvent {
