@@ -277,7 +277,9 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (hasLegacyMode && mode !== "plan" && prePlanMode !== undefined) return undefined;
   const canonicalCollaborationMode: "agent" | "plan" = hasSplitMode
     ? (collaborationMode as "agent" | "plan")
-    : mode === "plan" ? "plan" : "agent";
+    : mode === "plan"
+      ? "plan"
+      : "agent";
   const canonicalPermissionMode = hasSplitMode
     ? (permissionMode as Exclude<PersistedInteractionMode, "plan">)
     : mode === "plan"

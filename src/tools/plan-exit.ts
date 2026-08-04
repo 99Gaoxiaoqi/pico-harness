@@ -112,8 +112,13 @@ export class SubmitPlanTool implements BaseTool {
 export class UpdatePlanTool implements BaseTool {
   readonly readOnly = false;
   readonly fileSideEffects = { kind: "none" } as const;
-  constructor(private readonly coordinator: PlanCoordinatorFactory, private readonly planId: string) {}
-  name(): string { return "update_plan"; }
+  constructor(
+    private readonly coordinator: PlanCoordinatorFactory,
+    private readonly planId: string,
+  ) {}
+  name(): string {
+    return "update_plan";
+  }
   definition(): ToolDefinition {
     return {
       name: "update_plan",
@@ -130,7 +135,9 @@ export class UpdatePlanTool implements BaseTool {
       },
     };
   }
-  accesses(): ToolAccesses { return ToolAccesses.all(); }
+  accesses(): ToolAccesses {
+    return ToolAccesses.all();
+  }
   async execute(args: string): Promise<string> {
     const value = JSON.parse(args) as Record<string, unknown>;
     if (typeof value["stepId"] !== "string" || !isPlanStepStatus(value["status"])) {
@@ -139,7 +146,10 @@ export class UpdatePlanTool implements BaseTool {
     const coordinator = this.coordinator();
     const before = await coordinator.project();
     const projection = await coordinator.updateStep({
-      operationId: typeof value["operationId"] === "string" ? value["operationId"] : `update-plan:${randomUUID()}`,
+      operationId:
+        typeof value["operationId"] === "string"
+          ? value["operationId"]
+          : `update-plan:${randomUUID()}`,
       expectedSessionSequence: before.sessionSequence,
       planId: this.planId,
       stepId: value["stepId"],
@@ -153,22 +163,35 @@ export class UpdatePlanTool implements BaseTool {
 export class CancelPlanTool implements BaseTool {
   readonly readOnly = false;
   readonly fileSideEffects = { kind: "none" } as const;
-  constructor(private readonly coordinator: PlanCoordinatorFactory, private readonly planId: string) {}
-  name(): string { return "cancel_plan"; }
+  constructor(
+    private readonly coordinator: PlanCoordinatorFactory,
+    private readonly planId: string,
+  ) {}
+  name(): string {
+    return "cancel_plan";
+  }
   definition(): ToolDefinition {
     return {
       name: "cancel_plan",
       description: "明确取消当前已批准计划的执行。",
-      inputSchema: { type: "object", properties: { reason: { type: "string" }, operationId: { type: "string" } } },
+      inputSchema: {
+        type: "object",
+        properties: { reason: { type: "string" }, operationId: { type: "string" } },
+      },
     };
   }
-  accesses(): ToolAccesses { return ToolAccesses.all(); }
+  accesses(): ToolAccesses {
+    return ToolAccesses.all();
+  }
   async execute(args: string): Promise<string> {
     const value = JSON.parse(args) as Record<string, unknown>;
     const coordinator = this.coordinator();
     const before = await coordinator.project();
     const projection = await coordinator.cancel({
-      operationId: typeof value["operationId"] === "string" ? value["operationId"] : `cancel-plan:${randomUUID()}`,
+      operationId:
+        typeof value["operationId"] === "string"
+          ? value["operationId"]
+          : `cancel-plan:${randomUUID()}`,
       expectedSessionSequence: before.sessionSequence,
       planId: this.planId,
       ...(typeof value["reason"] === "string" ? { reason: value["reason"] } : {}),
@@ -202,7 +225,10 @@ function parseSubmitPlanArgs(args: string): SubmitPlanArgs {
     };
   });
   const risks = value["risks"];
-  if (risks !== undefined && (!Array.isArray(risks) || risks.some((risk) => typeof risk !== "string"))) {
+  if (
+    risks !== undefined &&
+    (!Array.isArray(risks) || risks.some((risk) => typeof risk !== "string"))
+  ) {
     throw new Error("submit_plan risks must be an array of strings");
   }
   return {

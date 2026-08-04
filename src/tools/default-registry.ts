@@ -15,7 +15,12 @@ import {
 } from "./registry-impl.js";
 import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
-import { CancelPlanTool, SubmitPlanTool, UpdatePlanTool, type PlanCoordinatorFactory } from "./plan-exit.js";
+import {
+  CancelPlanTool,
+  SubmitPlanTool,
+  UpdatePlanTool,
+  type PlanCoordinatorFactory,
+} from "./plan-exit.js";
 import { TodoTool } from "./todo.js";
 import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
@@ -147,7 +152,9 @@ export function buildDefaultToolRegistry(
   registry.register(new TodoTool(todoStore ?? new TodoStore(workDir)));
   if (plan) {
     if (plan.mode === "planning") {
-      registry.register(new SubmitPlanTool(plan.coordinator, plan.handoff, plan.sessionId, plan.runId));
+      registry.register(
+        new SubmitPlanTool(plan.coordinator, plan.handoff, plan.sessionId, plan.runId),
+      );
     } else {
       if (!plan.planId) throw new Error("Execution plan registry requires planId");
       registry.register(new UpdatePlanTool(plan.coordinator, plan.planId));

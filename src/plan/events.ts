@@ -37,36 +37,49 @@ export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
     assertId(data.planId, "planId");
     assertPositiveInteger(data.expectedRevision, "expectedRevision");
     assertProposal(data.proposal, (data.expectedRevision as number) + 1);
-    if ((data.proposal as PlanProposal).planId !== data.planId) throw new Error("Revised plan id differs");
+    if ((data.proposal as PlanProposal).planId !== data.planId)
+      throw new Error("Revised plan id differs");
     return;
   }
   assertId(data.planId, "planId");
   if (kind === "plan.approved" || kind === "plan.rejected") {
     assertPositiveInteger(data.expectedRevision, "expectedRevision");
-    if (data.reviewedBy !== "user" && data.reviewedBy !== "system") throw new Error("reviewedBy is invalid");
+    if (data.reviewedBy !== "user" && data.reviewedBy !== "system")
+      throw new Error("reviewedBy is invalid");
   } else if (kind === "plan.execution.started") {
     assertPositiveInteger(data.revision, "revision");
   } else if (kind === "plan.step.updated") {
     assertId(data.stepId, "stepId");
     if (!isPlanStepStatus(data.status)) throw new Error("Plan step status is invalid");
   }
-  if (data.reason !== undefined && typeof data.reason !== "string") throw new Error("reason is invalid");
+  if (data.reason !== undefined && typeof data.reason !== "string")
+    throw new Error("reason is invalid");
   if (data.note !== undefined && typeof data.note !== "string") throw new Error("note is invalid");
 }
 
 function assertProposal(value: unknown, revision: number): asserts value is PlanProposal {
   if (!isRecord(value)) throw new Error("Plan proposal is invalid");
   assertId(value.planId, "planId");
-  if (value.revision !== revision || value.status !== "pending") throw new Error("Plan proposal revision/status is invalid");
-  if (typeof value.title !== "string" || !value.title.trim()) throw new Error("Plan title is invalid");
-  if (!Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > PLAN_MAX_STEPS) throw new Error("Plan steps are invalid");
+  if (value.revision !== revision || value.status !== "pending")
+    throw new Error("Plan proposal revision/status is invalid");
+  if (typeof value.title !== "string" || !value.title.trim())
+    throw new Error("Plan title is invalid");
+  if (!Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > PLAN_MAX_STEPS)
+    throw new Error("Plan steps are invalid");
   const ids = new Set<string>();
   for (const step of value.steps) {
     if (!isRecord(step)) throw new Error("Plan step is invalid");
     assertId(step.id, "stepId");
     if (ids.has(step.id as string)) throw new Error("Plan step id is duplicated");
     ids.add(step.id as string);
-    if (typeof step.title !== "string" || !step.title.trim() || typeof step.description !== "string" || !step.description.trim() || step.status !== "pending") throw new Error("Plan step is invalid");
+    if (
+      typeof step.title !== "string" ||
+      !step.title.trim() ||
+      typeof step.description !== "string" ||
+      !step.description.trim() ||
+      step.status !== "pending"
+    )
+      throw new Error("Plan step is invalid");
   }
 }
 
@@ -74,7 +87,8 @@ function assertPositiveInteger(value: unknown, name: string): void {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`${name} is invalid`);
 }
 function assertId(value: unknown, name: string): void {
-  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)) throw new Error(`${name} is invalid`);
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value))
+    throw new Error(`${name} is invalid`);
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

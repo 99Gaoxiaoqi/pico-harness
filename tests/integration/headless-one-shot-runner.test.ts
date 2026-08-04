@@ -141,29 +141,25 @@ test("headless Plan persists a pending handoff without approval or workspace mut
     providerFactory: () => ({
       async generate() {
         providerCalls++;
-        return assistant(
-          "",
-          { promptTokens: 12, completionTokens: 4 },
-          [
-            {
-              id: "call-submit-plan",
-              name: "submit_plan",
-              arguments: JSON.stringify({
-                title: "保持工作区只读",
-                overview: "审批前只持久化计划事件",
-                steps: [
-                  {
-                    id: "step-1",
-                    title: "审批后实施",
-                    description: "仅在用户批准后的新 Run 中执行变更",
-                  },
-                ],
-                risks: ["审批序列可能过期"],
-                operationId: "headless-plan-pending",
-              }),
-            },
-          ],
-        );
+        return assistant("", { promptTokens: 12, completionTokens: 4 }, [
+          {
+            id: "call-submit-plan",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "保持工作区只读",
+              overview: "审批前只持久化计划事件",
+              steps: [
+                {
+                  id: "step-1",
+                  title: "审批后实施",
+                  description: "仅在用户批准后的新 Run 中执行变更",
+                },
+              ],
+              risks: ["审批序列可能过期"],
+              operationId: "headless-plan-pending",
+            }),
+          },
+        ]);
       },
     }),
   });
@@ -181,9 +177,18 @@ test("headless Plan persists a pending handoff without approval or workspace mut
   const events = await new RuntimeEventStore({ storageRoot: paths.workspace.root }).readSession(
     request.sessionId,
   );
-  assert.equal(events.some((event) => event.kind === "plan.proposed"), true);
-  assert.equal(events.some((event) => event.kind === "plan.approved"), false);
-  assert.equal(events.some((event) => event.kind === "plan.execution.started"), false);
+  assert.equal(
+    events.some((event) => event.kind === "plan.proposed"),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.kind === "plan.approved"),
+    false,
+  );
+  assert.equal(
+    events.some((event) => event.kind === "plan.execution.started"),
+    false,
+  );
 });
 
 test("headless Plan continues when the model stops before submit_plan", async (context) => {
