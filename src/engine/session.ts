@@ -83,7 +83,9 @@ import {
   type RuntimeEventBase,
   type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
+  type RuntimePlanEvent,
 } from "./session-runtime-event.js";
+import { projectActivePlanEntries } from "../plan/reducer.js";
 import {
   createCanonicalTranscriptToolStart,
   createRuntimeTranscriptToolStartEvent,
@@ -144,6 +146,7 @@ export interface DurableRuntimeForkCheckpoint {
 export interface DurableSessionForkSnapshot {
   readonly hydration: SessionHydrationSnapshot;
   readonly runtimeSeedEntries: readonly RuntimeSessionForkSeedEntry[];
+  readonly planEntries: readonly { readonly sequence: number; readonly event: RuntimePlanEvent }[];
   readonly cursor: SessionCursor;
   readonly rootLogId: string;
   readonly modelCheckpoint?: DurableRuntimeForkCheckpoint;
@@ -789,6 +792,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     return {
       hydration: this.runtimeHydrationSnapshot(manifest, entries),
       runtimeSeedEntries: projectRuntimeSessionForkSeedEntries(entries),
+      planEntries: projectActivePlanEntries(entries) as readonly {
+        readonly sequence: number;
+        readonly event: RuntimePlanEvent;
+      }[],
       rootLogId: await resolveRuntimeRootSessionId(store, this.id),
       cursor,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),

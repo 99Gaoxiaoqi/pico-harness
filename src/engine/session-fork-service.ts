@@ -28,6 +28,7 @@ import {
 import type {
   PersistedInteractionMode,
   PersistedSessionSettings,
+  PersistedSessionSettingsWrite,
   SessionRuntimeStatePatch,
   SessionRuntimeStateWritePatch,
 } from "./session-runtime.js";
@@ -57,6 +58,9 @@ import {
   type DurableTranscriptEvent,
 } from "../presentation/transcript-event-store.js";
 import { decodeRuntimeEvent } from "../storage/runtime-event.js";
+import type { RuntimePlanEvent } from "./session-runtime-event.js";
+import { planOperationFingerprint } from "../plan/contract.js";
+import { projectActivePlanEntries, projectPlanEntries } from "../plan/reducer.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const FROZEN_FORK_BUNDLE_VERSION = 5 as const;
@@ -123,6 +127,7 @@ interface FrozenForkBundle {
   readonly targetSessionId: string;
   readonly sourceCursor: ForkSourceCursor;
   readonly seedEntries: readonly RuntimeSessionForkSeedEntry[];
+  readonly planEntries: readonly { readonly sequence: number; readonly event: RuntimePlanEvent }[];
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
@@ -384,6 +389,15 @@ export class SessionForkService {
             }
           : {}),
       });
+      await publication.assertOwned();
+      await this.publishForkPlanEntries(
+        operation,
+        frozen,
+        seedEntries,
+        modelCheckpoint,
+        sourceThroughEventId,
+        runtimePatch,
+      );
     } catch (error) {
       if (error instanceof ForkOperationConflictError) throw error;
       if (error instanceof SessionForkRuntimeConflictError) {
@@ -392,6 +406,65 @@ export class SessionForkService {
       await this.assertRuntimeTargetOwned(operation, prepared);
       throw error;
     }
+  }
+
+  private async publishForkPlanEntries(
+    operation: ForkStorageOperation,
+    frozen: FrozenForkBundle,
+    seedEntries: readonly RuntimeSessionForkSeedEntry[],
+    modelCheckpoint: SessionForkModelCheckpoint | undefined,
+    sourceThroughEventId: string | undefined,
+    runtimePatch: SessionRuntimeStateWritePatch | undefined,
+  ): Promise<void> {
+    if (frozen.planEntries.length === 0) return;
+    const statePublication = runtimePatch
+      ? { patch: runtimePatch, eventId: runtimeStateEventId(operation.operationId), at: operation.createdAt }
+      : undefined;
+    const runId = this.runtimePort.deriveBootstrapRunId({
+      sourceSessionId: operation.sourceSessionId,
+      targetSessionId: operation.targetSessionId,
+      operationId: operation.operationId,
+      operationCreatedAt: operation.createdAt,
+      seedEntries,
+      ...(modelCheckpoint ? { modelCheckpoint } : {}),
+      ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
+      ...(statePublication ? { statePublication } : {}),
+      workDir: this.workDir,
+      runtimeAuthority: this.runtimeStore,
+    });
+    const rewritten: RuntimePlanEvent[] = frozen.planEntries.map(({ event }, index) => {
+      const operationId = `fork:${operation.operationId}:plan:${index}`;
+      return {
+        ...structuredClone(event),
+        eventId: operationId,
+        sessionId: operation.targetSessionId,
+        invocationId: `fork:${operation.operationId}:invocation`,
+        runId,
+        turnId: `turn:${runId}:input`,
+        at: operation.createdAt,
+        data: {
+          ...structuredClone(event.data),
+          operationId,
+          fingerprint: planOperationFingerprint(`fork.${event.kind}`, event.data),
+        },
+      } as RuntimePlanEvent;
+    });
+    const inherited = projectPlanEntries(operation.targetSessionId, rewritten.map((event, index) => ({ sequence: index + 1, event })));
+    if (inherited.execution?.status === "active") {
+      const operationId = `fork:${operation.operationId}:plan:interrupted`;
+      rewritten.push({
+        ...rewritten.at(-1)!,
+        eventId: operationId,
+        kind: "plan.execution.interrupted",
+        data: {
+          operationId,
+          fingerprint: planOperationFingerprint("fork.plan.execution.interrupted", { planId: inherited.execution.planId }),
+          planId: inherited.execution.planId,
+          reason: "forked active execution requires explicit resume",
+        },
+      });
+    }
+    await this.runtimeStore.appendBatch(rewritten);
   }
 
   private async assertRuntimeTargetOwned(
@@ -580,6 +653,7 @@ function createFrozenForkBundle(
     targetSessionId: input.targetSessionId,
     sourceCursor: structuredClone(snapshot.cursor),
     seedEntries: snapshot.runtimeSeedEntries.map(stripForkSeedUsage),
+    planEntries: structuredClone(snapshot.planEntries),
     ...(snapshot.modelCheckpoint
       ? {
           modelCheckpoint: {
@@ -634,15 +708,15 @@ function filterForkSettings(
   sourceSessionId: string,
   targetMode: PersistedInteractionMode,
   sourceTitle: string | undefined,
-): PersistedSessionSettings {
+): PersistedSessionSettingsWrite {
   return {
     ...(sourceTitle ? { title: forkTitleFrom(sourceTitle) } : {}),
     forkFrom: sourceSessionId,
     provider: settings.provider,
     model: settings.model,
     modelRouteId: settings.modelRouteId,
-    mode: targetMode,
-    ...(targetMode === "plan" ? { prePlanMode: "yolo" as const } : {}),
+    collaborationMode: targetMode === "plan" ? "plan" : "agent",
+    permissionMode: targetMode === "plan" ? "yolo" : targetMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
     additionalDirectories: [],
@@ -697,6 +771,7 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     Object.hasOwn(value, "historyEntries") ||
     !isSessionForkModelCheckpoint(value["modelCheckpoint"]) ||
     !Array.isArray(value["seedEntries"]) ||
+    !Array.isArray(value["planEntries"]) ||
     (value["sourceTitle"] !== undefined && typeof value["sourceTitle"] !== "string")
   ) {
     throw new Error("Invalid frozen Runtime fork bundle");
@@ -708,12 +783,14 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     "targetSessionId",
     "sourceCursor",
     "seedEntries",
+    "planEntries",
     "modelCheckpoint",
     "sourceTitle",
     "settings",
     "goal",
   ]);
   const seedEntries = parseFrozenRuntimeSeedEntries(value["seedEntries"]);
+  const planEntries = parseFrozenPlanEntries(value["planEntries"], value["sourceSessionId"]);
   if (
     seedEntries.some(
       (entry) => entry.kind === "model" && entry.event.sessionId !== value["sourceSessionId"],
@@ -752,11 +829,33 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     targetSessionId: value["targetSessionId"],
     sourceCursor: structuredClone(value["sourceCursor"]),
     seedEntries,
+    planEntries,
     ...(modelCheckpoint ? { modelCheckpoint: structuredClone(modelCheckpoint) } : {}),
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
     ...(normalized?.goal ? { goal: normalized.goal } : {}),
   };
+}
+
+function parseFrozenPlanEntries(
+  value: unknown,
+  sourceSessionId: unknown,
+): { sequence: number; event: RuntimePlanEvent }[] {
+  if (!Array.isArray(value) || typeof sourceSessionId !== "string") {
+    throw new Error("Frozen Runtime plan seed must be an array");
+  }
+  let previous = 0;
+  return value.map((item, index) => {
+    if (!isRecord(item) || !isNonNegativeInteger(item["sequence"]) || item["sequence"] <= previous) {
+      throw new Error(`Frozen Runtime plan seed ${index} has an invalid sequence`);
+    }
+    previous = item["sequence"];
+    const event = decodeRuntimeEvent(structuredClone(item["event"]));
+    if (!event.kind.startsWith("plan.") || event.sessionId !== sourceSessionId) {
+      throw new Error(`Frozen Runtime plan seed ${index} is invalid`);
+    }
+    return { sequence: item["sequence"], event: event as RuntimePlanEvent };
+  });
 }
 
 function parseFrozenRuntimeSeedEntries(value: unknown): RuntimeSessionForkSeedEntry[] {
@@ -935,6 +1034,12 @@ async function resolveFrozenSourceThroughEventId(
   if (!isDeepStrictEqual(seedEntries, frozen.seedEntries)) {
     throw new ForkOperationConflictError(
       "Frozen source canonical seed does not match the RuntimeEvent cursor",
+      "source_cursor_changed",
+    );
+  }
+  if (!isDeepStrictEqual(projectActivePlanEntries(bounded), frozen.planEntries)) {
+    throw new ForkOperationConflictError(
+      "Frozen source Plan facts do not match the RuntimeEvent cursor",
       "source_cursor_changed",
     );
   }

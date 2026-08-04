@@ -21,6 +21,13 @@ export function projectPlanEntries(
   return state;
 }
 
+/** Active-branch Plan facts frozen by Session fork at one durable cursor. */
+export function projectActivePlanEntries(
+  entries: readonly RuntimeEventStoreEntry[],
+): RuntimeEventStoreEntry[] {
+  return projectActiveBranch(entries).filter(({ event }) => isPlanEventKind(event.kind));
+}
+
 export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): PlanProjection {
   if (!isPlanEventKind(event.kind)) return state;
   const proposals = [...state.proposals];
@@ -45,6 +52,9 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
     case "plan.approved":
     case "plan.rejected": {
       requirePending(pendingProposal, event.data.planId, event.data.expectedRevision);
+      if (event.kind === "plan.approved" && event.data.reviewedBy === "system") {
+        conflict("A plan must be approved by the user");
+      }
       const status = event.kind === "plan.approved" ? "approved" : "rejected";
       const reviewed = { ...pendingProposal!, status, reviewedBy: event.data.reviewedBy } as PlanProposal;
       proposals[proposals.length - 1] = reviewed;
