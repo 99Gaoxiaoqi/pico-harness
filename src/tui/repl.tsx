@@ -192,6 +192,7 @@ import {
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import type { PrestartedRuntimeRun } from "../runtime/runtime-run-executor.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 
@@ -1645,12 +1646,10 @@ export async function startTuiRepl(
       });
       reporterRef.current = reporter;
       hydrateTuiReporter(reporter, hydration);
-      const planProjection = await new PlanCoordinator(sessionRuntimeStore, {
+      const planProjection = await new AgentRuntime().readPlanProjection({
         sessionId: selection.sessionId,
-        invocationId: "tui:hydrate",
-        runId: "tui:hydrate",
-        turnId: "tui:hydrate",
-      }).project();
+        dir: opts.workDir,
+      });
       const recoveredRewind = await session.getPendingTuiRewindHandoff();
       if (recoveredRewind) {
         reporter.withoutDurableTranscript(() => {
@@ -1821,7 +1820,8 @@ export async function startTuiRepl(
         bundle.planProjection.execution?.status === "interrupted"
           ? bundle.planProjection.execution
           : undefined;
-      if (!pending && !interrupted) {
+      const revisionRequest = bundle.planProjection.revisionRequest;
+      if (!pending && !interrupted && !revisionRequest) {
         setDialogRequests((items) => items.filter((item) => !isApprovalDialogId(item.id)));
         return;
       }
@@ -1883,7 +1883,20 @@ export async function startTuiRepl(
           },
           presentPlanHandoff,
         });
-      if (pending) {
+      if (revisionRequest) {
+        bundle.reporter.pushSystemMessage("正在恢复尚未启动的计划修订 Run…");
+        void planControl
+          .respond({
+            sessionId: bundle.sessionId,
+            planId: revisionRequest.planId,
+            action: "continue_editing",
+            expectedRevision: revisionRequest.expectedRevision,
+            expectedSessionSequence: bundle.planProjection.sessionSequence,
+            operationId: revisionRequest.operationId,
+            feedback: revisionRequest.feedback,
+          })
+          .catch((error: unknown) => appendTuiRunError(bundle.reporter, error));
+      } else if (pending) {
         presentPlanHandoff({
           kind: "plan_handoff",
           sessionId: bundle.sessionId,
@@ -3127,8 +3140,18 @@ function createTuiRuntimePlanControl(input: {
             operationId: response.operationId,
             feedback: response.feedback ?? "请继续修改计划。",
           });
-          if (revision.replayed) return revision;
-          const result = await (input.runAgent ?? executeAgentRuntime)(
+          const admission = await ensureTuiPlanRevisionRunAdmission({
+            sessionId: response.sessionId,
+            workDir,
+            operationId: response.operationId,
+            ...(input.runDependencies.picoHome ? { picoHome: input.runDependencies.picoHome } : {}),
+            requestedAt:
+              revision.projection.revisionRequest?.requestedAt ?? new Date().toISOString(),
+          });
+          if (!admission) return revision;
+          const active = activeTuiPlanRevisionRuns.get(admission.runId);
+          if (active) return active;
+          const execution = (input.runAgent ?? executeAgentRuntime)(
             {
               ...input.cliOpts,
               prompt: `[PLAN REVISION FEEDBACK]\n${response.feedback ?? "请继续修改计划。"}`,
@@ -3136,8 +3159,18 @@ function createTuiRuntimePlanControl(input: {
               sessionSelection: { mode: "resume", sessionId: response.sessionId },
               planMode: true,
             },
-            { ...input.runDependencies, resumeExistingSession: true },
+            {
+              ...input.runDependencies,
+              resumeExistingSession: true,
+              prestartedRun: admission,
+            },
           );
+          activeTuiPlanRevisionRuns.set(admission.runId, execution);
+          const result = await execution.finally(() => {
+            if (activeTuiPlanRevisionRuns.get(admission.runId) === execution) {
+              activeTuiPlanRevisionRuns.delete(admission.runId);
+            }
+          });
           if (result.handoff) input.presentPlanHandoff(result.handoff);
           return result;
         }
@@ -3232,6 +3265,59 @@ function createTuiRuntimePlanControl(input: {
       }
     },
   };
+}
+
+const activeTuiPlanRevisionRuns = new Map<string, Promise<RunAgentCliResult>>();
+
+export async function ensureTuiPlanRevisionRunAdmission(input: {
+  readonly sessionId: string;
+  readonly workDir: string;
+  readonly operationId: string;
+  readonly requestedAt: string;
+  readonly picoHome?: string;
+}): Promise<PrestartedRuntimeRun | undefined> {
+  const digest = createHash("sha256").update(input.operationId).digest("hex");
+  const admission: PrestartedRuntimeRun = {
+    runId: `plan-revision-run:${digest}`,
+    invocationId: `plan-revision-invocation:${digest}`,
+    runStartedEventId: `plan-revision-started:${digest}`,
+    runStartedAt: input.requestedAt,
+    parentRunId: `plan-control:${input.operationId}`,
+  };
+  const lease = await globalSessionManager.getOrCreatePinned(input.sessionId, input.workDir, {
+    persistence: true,
+    ...(input.picoHome ? { picoHome: input.picoHome } : {}),
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    const capability = lease.session.runtimeEventCapability;
+    const store = lease.session.runtimeEventStore;
+    if (!capability || !store) {
+      throw new Error("Plan revision Run admission requires durable Session storage");
+    }
+    const existing = await store.readRun(input.sessionId, admission.runId);
+    if (existing.length === 0) {
+      await RuntimeRun.start({
+        capability,
+        runId: admission.runId,
+        invocationId: admission.invocationId,
+        runStartedEventId: admission.runStartedEventId,
+        parentRunId: admission.parentRunId,
+        now: () => new Date(admission.runStartedAt),
+      });
+      return admission;
+    }
+    if (
+      existing.length === 1 &&
+      existing[0]?.kind === "run.started" &&
+      existing[0].eventId === admission.runStartedEventId
+    ) {
+      return admission;
+    }
+    return undefined;
+  } finally {
+    lease.release();
+  }
 }
 
 function createPlanHandoffDialogRequest(

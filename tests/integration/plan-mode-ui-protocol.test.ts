@@ -49,7 +49,7 @@ test("Plan protocol accepts interrupted execution controls", () => {
   }
 });
 
-test("Desktop hydration rebuilds pending and interrupted Plan controls", () => {
+test("Desktop hydration rebuilds pending, revision, and interrupted Plan controls", () => {
   const pending = approvalFromPlanProjection(
     {
       sessionId: "session-1",
@@ -65,6 +65,25 @@ test("Desktop hydration rebuilds pending and interrupted Plan controls", () => {
   );
   assert.equal(pending?.planControlMode, "review");
   assert.equal(pending?.expectedSessionSequence, 7);
+
+  const revision = approvalFromPlanProjection(
+    {
+      sessionId: "session-1",
+      sessionSequence: 9,
+      revisionRequest: {
+        planId: "plan-1",
+        expectedRevision: 2,
+        operationId: "revision-operation-1",
+        feedback: "补充回滚验证",
+      },
+    },
+    "session-1",
+  );
+  assert.equal(revision?.planControlMode, "revision");
+  assert.equal(revision?.planOperationId, "revision-operation-1");
+  assert.equal(revision?.planFeedback, "补充回滚验证");
+  assert.equal(revision?.expectedRevision, 2);
+  assert.equal(revision?.expectedSessionSequence, 9);
 
   const interrupted = approvalFromPlanProjection(
     {

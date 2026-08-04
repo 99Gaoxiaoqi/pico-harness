@@ -91,9 +91,9 @@ import {
   RuntimeEventStoreIntegrityError,
 } from "../storage/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
-import { projectPlanEntries } from "../plan/reducer.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -1481,10 +1481,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       throw error;
     }
+    const planProjection = await new AgentRuntime().readPlanProjection({
+      sessionId: params.sessionId,
+      dir: canonical,
+      picoHome: this.picoHome,
+      env: this.env,
+    });
     const result = {
       session,
       items: page.items,
-      planProjection: toJsonValue(projectPlanEntries(params.sessionId, projection.entries)),
+      planProjection: toJsonValue(planProjection),
       ...(activeRun ? { activeRun } : {}),
       queuedInputs,
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
