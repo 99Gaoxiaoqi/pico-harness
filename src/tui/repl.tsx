@@ -3013,7 +3013,7 @@ function createTuiRuntimePlanControl(input: {
         }
         const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
         if (!settings) throw new Error("Plan rejection requires persisted Session settings");
-        return await new PlanCoordinator(lease.session.runtimeEventStore, {
+        const projection = await new PlanCoordinator(lease.session.runtimeEventStore, {
           sessionId: response.sessionId,
           invocationId: `plan-review:${response.operationId}`,
           runId: `plan-review:${response.operationId}`,
@@ -3027,6 +3027,8 @@ function createTuiRuntimePlanControl(input: {
           settings,
           ...(response.feedback ? { reason: response.feedback } : {}),
         });
+        await lease.session.refreshRuntimeProjection();
+        return projection;
       } finally {
         lease.release();
       }

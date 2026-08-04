@@ -6,8 +6,13 @@ import test from "node:test";
 import { PromptComposer } from "../../src/context/composer.js";
 import { PlanHandoffController } from "../../src/engine/plan-handoff.js";
 import { isPlanProviderTool } from "../../src/engine/loop.js";
+import { SilentReporter } from "../../src/engine/reporter.js";
 import { PlanCoordinator } from "../../src/plan/coordinator.js";
-import { buildForegroundSafetyMiddleware } from "../../src/runtime/agent-runtime.js";
+import type { LLMProvider } from "../../src/provider/interface.js";
+import {
+  buildForegroundSafetyMiddleware,
+  executeAgentRuntime,
+} from "../../src/runtime/agent-runtime.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { SubmitPlanTool } from "../../src/tools/plan-exit.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
@@ -26,7 +31,12 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
     turnId: "turn-1",
   });
   const handoff = new PlanHandoffController();
-  const tool = new SubmitPlanTool(() => coordinator, handoff, "session-1", () => "run-1");
+  const tool = new SubmitPlanTool(
+    () => coordinator,
+    handoff,
+    "session-1",
+    () => "run-1",
+  );
   const output = JSON.parse(
     await tool.execute(
       JSON.stringify({
@@ -57,7 +67,11 @@ test("plan tool projection and registry safety are the same deny-by-default boun
   );
   for (const name of denied) {
     assert.equal(isPlanProviderTool(name), false, name);
-    assert.equal((await safety({ id: `call-${name}`, name, arguments: "{}" })).allowed, false, name);
+    assert.equal(
+      (await safety({ id: `call-${name}`, name, arguments: "{}" })).allowed,
+      false,
+      name,
+    );
   }
 });
 
@@ -82,4 +96,49 @@ test("approved execution registry exposes update and cancel but not submit", () 
   assert.ok(registry.getTool("update_plan"));
   assert.ok(registry.getTool("cancel_plan"));
   assert.equal(registry.getTool("submit_plan"), undefined);
+});
+
+test("Plan provider projection always exposes submit_plan through tool disclosure", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-disclosure-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  await mkdir(workDir);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let providerCalls = 0;
+  const provider: LLMProvider = {
+    async generate(_messages, tools) {
+      providerCalls++;
+      assert.ok(tools.some((tool) => tool.name === "submit_plan"));
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "submit-after-disclosure",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "可提交计划",
+              steps: [{ title: "实施", description: "审批后执行" }],
+              operationId: "plan-disclosure-submit",
+            }),
+          },
+        ],
+      };
+    },
+  };
+  const result = await executeAgentRuntime(
+    {
+      prompt: "调查并提交计划",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId: "plan-disclosure" },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+      allowedTools: ["read_file", "submit_plan"],
+    },
+    { provider, picoHome, reporter: new SilentReporter() },
+  );
+
+  assert.equal(providerCalls, 1);
+  assert.equal(result.handoff?.kind, "plan_handoff");
 });
