@@ -194,6 +194,38 @@ test("revision requests and interrupted controls are durable CAS operations", as
     feedback: "补充失败回滚步骤",
   });
   assert.equal(requested.revisionRequest?.feedback, "补充失败回滚步骤");
+  assert.equal(requested.pendingProposal, undefined);
+  assert.equal(requested.latestProposal?.status, "stale");
+  await assert.rejects(
+    coordinator.approve({
+      operationId: "approve-stale-request",
+      expectedSessionSequence: 2,
+      planId: "plan-1",
+      expectedRevision: 1,
+      reviewedBy: "user",
+      settings: SETTINGS,
+    }),
+    PlanConflictError,
+  );
+  await assert.rejects(
+    coordinator.rejectAndExit({
+      operationId: "reject-stale-request",
+      expectedSessionSequence: 2,
+      planId: "plan-1",
+      expectedRevision: 1,
+      reviewedBy: "user",
+      settings: SETTINGS,
+    }),
+    PlanConflictError,
+  );
+  await assert.rejects(
+    coordinator.propose({
+      operationId: "bypass-request",
+      expectedSessionSequence: 2,
+      proposal: { ...proposal, planId: "plan-bypass" },
+    }),
+    PlanConflictError,
+  );
   await coordinator.requestRevision({
     operationId: "request-revision",
     expectedSessionSequence: 1,

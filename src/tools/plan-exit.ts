@@ -79,12 +79,21 @@ export class SubmitPlanTool implements BaseTool {
     const before = await coordinator.project();
     const operationId = parsed.operationId ?? `submit-plan:${randomUUID()}`;
     const proposal = proposalInput(parsed);
-    const projection = before.pendingProposal
+    const revisionBase =
+      before.pendingProposal ??
+      (before.revisionRequest
+        ? before.proposals.find(
+            (candidate) =>
+              candidate.planId === before.revisionRequest?.planId &&
+              candidate.revision === before.revisionRequest.expectedRevision,
+          )
+        : undefined);
+    const projection = revisionBase
       ? await coordinator.revise({
           operationId,
           expectedSessionSequence: before.sessionSequence,
-          planId: before.pendingProposal.planId,
-          expectedRevision: before.pendingProposal.revision,
+          planId: revisionBase.planId,
+          expectedRevision: revisionBase.revision,
           proposal,
         })
       : await coordinator.propose({

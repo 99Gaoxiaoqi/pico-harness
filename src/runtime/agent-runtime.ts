@@ -132,8 +132,9 @@ import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
-import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
+import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
+import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import {
@@ -147,6 +148,8 @@ import {
 } from "./memory-review-recovery.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
+
+const livePlanAdmissions = new Set<string>();
 import {
   assembleRuntimeProvider,
   billingRouteForProvider,
@@ -362,23 +365,30 @@ export class AgentRuntime {
           revision: proposal.revision,
         })) === "matching"
       ) {
+        await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id);
         return replayedPlanControlResult(session.id, workDir, operationId);
       }
-      return await this.execute(
-        {
-          ...input.execution,
-          dir: workDir,
-          session: session.id,
-          prompt: approvedPlanExecutionPrompt(proposal),
-          approvedPlan: {
-            planId: proposal.planId,
-            revision: proposal.revision,
-            expectedSessionSequence: approved.sessionSequence,
-            operationId: executionOperationId,
+      const admission = planAdmissionKey(session.id, executionOperationId);
+      livePlanAdmissions.add(admission);
+      try {
+        return await this.execute(
+          {
+            ...input.execution,
+            dir: workDir,
+            session: session.id,
+            prompt: approvedPlanExecutionPrompt(proposal),
+            approvedPlan: {
+              planId: proposal.planId,
+              revision: proposal.revision,
+              expectedSessionSequence: approved.sessionSequence,
+              operationId: executionOperationId,
+            },
           },
-        },
-        host,
-      );
+          host,
+        );
+      } finally {
+        livePlanAdmissions.delete(admission);
+      }
     } finally {
       lease.release();
     }
@@ -391,10 +401,7 @@ export class AgentRuntime {
       storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
     });
     try {
-      return await new PlanCoordinator(
-        store,
-        planControlContext(input.sessionId, "read"),
-      ).project();
+      return await reconcileOrphanedPlanExecution(store, input.sessionId);
     } finally {
       store.close();
     }
@@ -454,6 +461,7 @@ export class AgentRuntime {
           semantic,
         )) === "matching"
       ) {
+        await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id);
         return replayedPlanControlResult(session.id, workDir, input.operationId);
       }
       const projection = await coordinator.project();
@@ -463,22 +471,28 @@ export class AgentRuntime {
       ) {
         throw new PlanConflictError("Plan execution is not interrupted");
       }
-      return await this.execute(
-        {
-          ...input.execution,
-          dir: workDir,
-          session: session.id,
-          prompt: resumedPlanExecutionPrompt(projection),
-          approvedPlan: {
-            planId: input.planId,
-            revision: projection.execution.revision,
-            expectedSessionSequence: input.expectedSessionSequence,
-            operationId: input.operationId,
-            transition: "resume",
+      const admission = planAdmissionKey(session.id, input.operationId);
+      livePlanAdmissions.add(admission);
+      try {
+        return await this.execute(
+          {
+            ...input.execution,
+            dir: workDir,
+            session: session.id,
+            prompt: resumedPlanExecutionPrompt(projection),
+            approvedPlan: {
+              planId: input.planId,
+              revision: projection.execution.revision,
+              expectedSessionSequence: input.expectedSessionSequence,
+              operationId: input.operationId,
+              transition: "resume",
+            },
           },
-        },
-        host,
-      );
+          planControlExecutionHost(input, host),
+        );
+      } finally {
+        livePlanAdmissions.delete(admission);
+      }
     } finally {
       lease.release();
     }
@@ -546,7 +560,7 @@ export class AgentRuntime {
           prompt: input.prompt,
           planMode: true,
         },
-        host,
+        planControlExecutionHost(input, host),
       );
     } finally {
       lease.release();
@@ -635,6 +649,49 @@ function planControlContext(sessionId: string, operationId: string) {
   };
 }
 
+async function reconcileOrphanedPlanExecution(
+  store: RuntimeEventStore,
+  sessionId: string,
+): Promise<PlanProjection> {
+  const entries = await store.readSessionEntries(sessionId);
+  const coordinator = new PlanCoordinator(store, planControlContext(sessionId, "reconcile"));
+  const projection = await coordinator.project();
+  if (projection.execution?.status !== "active") return projection;
+  const transition = projectActivePlanEntries(entries)
+    .filter(
+      ({ event }) =>
+        event.kind === "plan.execution.started" || event.kind === "plan.execution.resumed",
+    )
+    .at(-1);
+  if (!transition) return projection;
+  const transitionOperationId =
+    "operationId" in transition.event.data ? transition.event.data.operationId : undefined;
+  if (
+    typeof transitionOperationId === "string" &&
+    livePlanAdmissions.has(planAdmissionKey(sessionId, transitionOperationId))
+  ) {
+    return projection;
+  }
+  const admittedRun = entries.find(
+    ({ sequence, event }) => sequence > transition.sequence && event.kind === "run.started",
+  );
+  if (admittedRun && isRuntimeRunLive(sessionId, admittedRun.event.runId)) return projection;
+  const current = await coordinator.project();
+  if (current.execution?.status !== "active") return current;
+  return await coordinator.interrupt({
+    operationId: `reconcile-plan-execution:${transition.event.eventId}`,
+    expectedSessionSequence: current.sessionSequence,
+    planId: current.execution.planId,
+    reason: admittedRun
+      ? "RuntimeRun ended without closing the active plan execution"
+      : "Plan execution transition has no durable RuntimeRun admission",
+  });
+}
+
+function planAdmissionKey(sessionId: string, operationId: string): string {
+  return `${sessionId}\u0000${operationId}`;
+}
+
 async function acquirePlanControlSession(
   input: PlanSessionRequest,
   host: RunAgentCliDependencies,
@@ -652,6 +709,17 @@ async function acquirePlanControlSession(
     planMode: false,
   });
   return { session: lease.session, lease, workDir };
+}
+
+function planControlExecutionHost(
+  input: PlanSessionRequest,
+  host: RunAgentCliDependencies,
+): RunAgentCliDependencies {
+  return {
+    ...host,
+    ...(input.picoHome ? { picoHome: input.picoHome } : {}),
+    ...(input.env ? { env: input.env } : {}),
+  };
 }
 
 function replayedPlanControlResult(
@@ -735,6 +803,7 @@ export async function executeAgentRuntime(
   let executionCoordinator: PlanCoordinator | undefined;
   let activeExecutionPlanId: string | undefined;
   let planRun = false;
+  let livePlanAdmission: string | undefined;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let sessionLeaseTransferred = false;
   let cleanupRuntimeState: SessionRuntime | undefined;
@@ -806,7 +875,15 @@ export async function executeAgentRuntime(
       const operationId =
         options.approvedPlan.operationId ??
         `${options.approvedPlan.transition === "resume" ? "resume" : "start"}-plan:${randomUUID()}`;
+      livePlanAdmission = planAdmissionKey(session.id, operationId);
+      livePlanAdmissions.add(livePlanAdmission);
       if (options.approvedPlan.transition === "resume") {
+        const beforeResume = await executionCoordinator.project();
+        if (beforeResume.execution?.status !== "interrupted") {
+          throw new PlanConflictError(
+            `Plan execution is not interrupted before resume: ${beforeResume.execution?.status ?? "missing"}`,
+          );
+        }
         await executionCoordinator.resume({
           operationId,
           expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
@@ -1196,7 +1273,7 @@ export async function executeAgentRuntime(
         )
         .finally(kickMemoryWorker);
     }
-    let activeMcpManager = dependencies.mcpManager;
+    let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
       modelRuntime: {
@@ -1546,38 +1623,43 @@ export async function executeAgentRuntime(
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
-    const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
-    const hostMcpSources = backgroundPolicy ? [] : (dependencies.mcpConfigSources ?? []);
+    const planMcpDisabled = collaborationMode() === "plan";
+    const mcpConfigPath = planMcpDisabled
+      ? undefined
+      : (backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath);
+    const hostMcpSources =
+      backgroundPolicy || planMcpDisabled ? [] : (dependencies.mcpConfigSources ?? []);
     const pluginMcpSources = filterPluginMcpSources(
-      pluginSnapshot?.mcpSources ?? [],
+      planMcpDisabled ? [] : (pluginSnapshot?.mcpSources ?? []),
       configuredMcpServerNames(hostMcpSources),
     );
-    ownsMcpManager = dependencies.mcpManager === undefined;
-    const mcpManager =
-      dependencies.mcpManager ??
-      (mcpConfigPath || hostMcpSources.length > 0 || pluginMcpSources.length > 0
-        ? new McpConnectionManager(registry, {
-            stdioCwd: workDir,
-            ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
-              ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
-              : {}),
-            ...(backgroundPolicy
-              ? {
-                  clientFactory: (config) =>
-                    createBackgroundMcpClient(
-                      config,
-                      workDir,
-                      backgroundPolicy.snapshot.toolNetworkPolicy,
-                      backgroundPolicy.allowedToolNetworkHosts,
-                    ),
-                }
-              : {}),
-            ...(pluginMcpSources.length > 0 &&
-            (hostMcpSources.length > 0 || mcpConfigPath !== undefined)
-              ? { duplicateServerPolicy: "keep-first" as const }
-              : {}),
-          })
-        : undefined);
+    ownsMcpManager = !planMcpDisabled && dependencies.mcpManager === undefined;
+    const mcpManager = planMcpDisabled
+      ? undefined
+      : (dependencies.mcpManager ??
+        (mcpConfigPath || hostMcpSources.length > 0 || pluginMcpSources.length > 0
+          ? new McpConnectionManager(registry, {
+              stdioCwd: workDir,
+              ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
+                ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
+                : {}),
+              ...(backgroundPolicy
+                ? {
+                    clientFactory: (config) =>
+                      createBackgroundMcpClient(
+                        config,
+                        workDir,
+                        backgroundPolicy.snapshot.toolNetworkPolicy,
+                        backgroundPolicy.allowedToolNetworkHosts,
+                      ),
+                  }
+                : {}),
+              ...(pluginMcpSources.length > 0 &&
+              (hostMcpSources.length > 0 || mcpConfigPath !== undefined)
+                ? { duplicateServerPolicy: "keep-first" as const }
+                : {}),
+            })
+          : undefined));
     cleanupMcpManager = mcpManager;
     activeMcpManager = mcpManager;
     unsubscribeMcpStatus =
@@ -1720,6 +1802,7 @@ export async function executeAgentRuntime(
     });
     throw error;
   } finally {
+    if (livePlanAdmission) livePlanAdmissions.delete(livePlanAdmission);
     // 阶段 5：只释放本次调用持有的资源。
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
     await cleanupScope.dispose();

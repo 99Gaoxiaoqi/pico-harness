@@ -41,6 +41,7 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
   switch (event.kind) {
     case "plan.proposed": {
       if (pendingProposal) conflict("A pending plan proposal already exists");
+      if (revisionRequest) conflict("A requested plan revision must be submitted first");
       if (execution && execution.status !== "completed" && execution.status !== "cancelled")
         conflict("A plan execution is still open");
       if (proposals.some((proposal) => proposal.planId === event.data.proposal.planId))
@@ -50,8 +51,9 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
       break;
     }
     case "plan.revised": {
-      requirePending(pendingProposal, event.data.planId, event.data.expectedRevision);
-      proposals[proposals.length - 1] = { ...pendingProposal!, status: "stale" };
+      const revisionBase = pendingProposal ?? revisionRequestedProposal(proposals, revisionRequest);
+      requirePending(revisionBase, event.data.planId, event.data.expectedRevision);
+      proposals[proposals.length - 1] = { ...revisionBase!, status: "stale" };
       pendingProposal = clone(event.data.proposal);
       proposals.push(pendingProposal);
       revisionRequest = undefined;
@@ -59,6 +61,8 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
     }
     case "plan.revision.requested": {
       requirePending(pendingProposal, event.data.planId, event.data.expectedRevision);
+      proposals[proposals.length - 1] = { ...pendingProposal!, status: "stale" };
+      pendingProposal = undefined;
       revisionRequest = {
         planId: event.data.planId,
         expectedRevision: event.data.expectedRevision,
@@ -212,6 +216,19 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
     ...(execution ? { execution } : {}),
     ...(revisionRequest ? { revisionRequest } : {}),
   };
+}
+
+function revisionRequestedProposal(
+  proposals: readonly PlanProposal[],
+  request: PlanProjection["revisionRequest"],
+): PlanProposal | undefined {
+  const latest = proposals.at(-1);
+  return request &&
+    latest?.planId === request.planId &&
+    latest.revision === request.expectedRevision &&
+    latest.status === "stale"
+    ? latest
+    : undefined;
 }
 
 function projectActiveBranch(entries: readonly RuntimeEventStoreEntry[]): RuntimeEventStoreEntry[] {
