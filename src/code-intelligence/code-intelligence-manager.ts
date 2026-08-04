@@ -18,6 +18,8 @@ export interface CodeIntelligenceStatus {
 
 export interface CodeIntelligenceManagerOptions {
   readonly rootDir: string;
+  /** Explicit process boundary for background/Plan runtimes; false skips discovery and spawn. */
+  readonly lspEnabled?: boolean;
   readonly lspServers?: readonly LspServerConfig[];
   readonly pathEnv?: string;
 }
@@ -30,12 +32,15 @@ export class CodeIntelligenceManager {
   private client: StdioLspClient | undefined;
   private currentService: CodeIntelligenceService | undefined;
   private startPromise: Promise<CodeIntelligenceStatus> | undefined;
+  private lspEnabled: boolean;
   private currentStatus: CodeIntelligenceStatus = {
     backend: "repo-map",
     reason: "代码智能尚未启动，使用 Repo Map",
   };
 
-  constructor(private readonly options: CodeIntelligenceManagerOptions) {}
+  constructor(private readonly options: CodeIntelligenceManagerOptions) {
+    this.lspEnabled = options.lspEnabled !== false;
+  }
 
   start(): Promise<CodeIntelligenceStatus> {
     this.startPromise ??= this.startOnce();
@@ -43,6 +48,9 @@ export class CodeIntelligenceManager {
   }
 
   private async startOnce(): Promise<CodeIntelligenceStatus> {
+    if (!this.lspEnabled) {
+      return this.fallback({ source: "none", reason: "LSP 已由运行时策略禁用" });
+    }
     const discovery = await discoverLspServer({
       rootDir: this.options.rootDir,
       ...(this.options.lspServers ? { configuredServers: this.options.lspServers } : {}),
@@ -81,6 +89,14 @@ export class CodeIntelligenceManager {
 
   service(): CodeIntelligenceService | undefined {
     return this.currentService;
+  }
+
+  /** Switch process policy while retaining a safe Repo Map service when LSP is disabled. */
+  async setLspEnabled(enabled: boolean): Promise<CodeIntelligenceStatus> {
+    if (enabled === this.lspEnabled && this.currentService) return this.currentStatus;
+    await this.close();
+    this.lspEnabled = enabled;
+    return await this.start();
   }
 
   async close(): Promise<void> {
