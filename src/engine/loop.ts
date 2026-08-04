@@ -807,7 +807,10 @@ export class AgentEngine implements AgentRunner {
     return this.providerForReporter(provider, reporter, signal);
   }
 
-  /** 单次 run 只组装一次提示词，冻结稳定 system 与易变 turn tail。 */
+  /**
+   * 组装提示词层。systemPrompt 在一次 run 内冻结（缓存友好）；
+   * turnTail 由调用方每轮重新获取以反映最新的 Todo/Goal 状态。
+   */
   private async buildPromptLayers(
     currentUserPrompt: string,
     signal?: AbortSignal,
@@ -1310,7 +1313,8 @@ export class AgentEngine implements AgentRunner {
 
     const runHistory = await this.readModelHistory(session);
     const currentUserPrompt = latestVisibleUserInput(runHistory);
-    const { systemPrompt, turnTail } = await this.buildPromptLayers(currentUserPrompt, signal);
+    const { systemPrompt } = await this.buildPromptLayers(currentUserPrompt, signal);
+    let turnTail = "";
     signal?.throwIfAborted();
 
     const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
@@ -1363,6 +1367,12 @@ export class AgentEngine implements AgentRunner {
           break;
         }
         await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
+        // 每轮重建 turnTail：TodoStore/GoalManager 是共享单例，返回最新状态。
+        // systemPrompt 保持冻结（缓存友好），只有 turnTail 变化。
+        if (this.promptLayersFactory) {
+          const fresh = await this.buildPromptLayers(currentUserPrompt, signal);
+          turnTail = fresh.turnTail;
+        }
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         this.registry.setPreWriteHook?.(async (toolName, args) => {
