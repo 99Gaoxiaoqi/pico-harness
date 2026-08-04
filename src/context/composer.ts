@@ -43,6 +43,8 @@ export class PromptComposer {
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
   private readonly goalManager?: GoalManager;
   private readonly onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
+  /** 用户级 Pico Home（~/.pico），注入后加载用户级 AGENTS.md */
+  private readonly picoHome?: string;
 
   /**
    * @param workDir 工作目录
@@ -51,6 +53,7 @@ export class PromptComposer {
    *   - goalManager: GoalManager 单例（注入后把 active goal 注入 prompt）
    *   - todoStore: TodoStore 单例（注入后与 TodoTool 共享,根治跨实例不可见 bug）
    *   - isolatedHeadless: 注入无人值守完成与验收契约
+   *   - picoHome: 用户级 Pico Home，注入后加载 ~/.pico/AGENTS.md（排在项目级之前）
    */
   constructor(
     workDir: string,
@@ -61,6 +64,7 @@ export class PromptComposer {
       skillLoader?: SkillLoader;
       onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
       isolatedHeadless?: boolean;
+      picoHome?: string;
     },
   ) {
     this.workDir = workDir;
@@ -75,6 +79,7 @@ export class PromptComposer {
     // GoalManager（可选注入）
     this.goalManager = options?.goalManager;
     this.onInstructionsLoaded = options?.onInstructionsLoaded;
+    this.picoHome = options?.picoHome;
   }
 
   /**
@@ -121,7 +126,24 @@ export class PromptComposer {
       }
     }
 
-    // 3. 外部化状态:加载项目专属规范 (AGENTS.md)
+    // 3a. 用户级指南 (来自 ~/.pico/AGENTS.md)
+    // 排在项目级之前：用户级是跨项目通用偏好，项目级更具体且排在后面（更靠近对话历史，LLM 优先遵守）。
+    if (this.picoHome) {
+      const userAgentsPath = join(this.picoHome, "AGENTS.md");
+      try {
+        const userAgentsContent = await readFile(userAgentsPath, "utf8");
+        loadedInstructionPaths.push(userAgentsPath);
+        stableParts.push(`# 用户级指南 (来自 ~/.pico/AGENTS.md)
+以下是你跨项目的个人工作习惯与通用规范:
+\`\`\`markdown
+${userAgentsContent}
+\`\`\``);
+      } catch {
+        // 无用户级 AGENTS.md,跳过
+      }
+    }
+
+    // 3b. 项目级指南 (来自 AGENTS.md)
     const agentsPath = join(this.workDir, "AGENTS.md");
     try {
       const agentsContent = await readFile(agentsPath, "utf8");
