@@ -114,11 +114,6 @@ const PLAN_PROVIDER_TOOL_NAMES = new Set([
   "grep",
   "skill_view",
   "repo_map",
-  "code_definition",
-  "code_references",
-  "code_symbols",
-  "code_diagnostics",
-  "code_call_hierarchy",
   "ask_user",
   "submit_plan",
 ]);

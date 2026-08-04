@@ -8,11 +8,14 @@ import {
 export const PLAN_EVENT_KINDS = [
   "plan.proposed",
   "plan.revised",
+  "plan.revision.requested",
   "plan.approved",
   "plan.rejected",
   "plan.execution.started",
   "plan.step.updated",
   "plan.execution.interrupted",
+  "plan.execution.resumed",
+  "plan.execution.replanned",
   "plan.execution.completed",
   "plan.execution.cancelled",
 ] as const;
@@ -39,6 +42,14 @@ export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
     assertProposal(data.proposal, (data.expectedRevision as number) + 1);
     if ((data.proposal as PlanProposal).planId !== data.planId)
       throw new Error("Revised plan id differs");
+    return;
+  }
+  if (kind === "plan.revision.requested") {
+    assertId(data.planId, "planId");
+    assertPositiveInteger(data.expectedRevision, "expectedRevision");
+    if (typeof data.feedback !== "string" || !data.feedback.trim()) {
+      throw new Error("Plan revision feedback is invalid");
+    }
     return;
   }
   assertId(data.planId, "planId");
