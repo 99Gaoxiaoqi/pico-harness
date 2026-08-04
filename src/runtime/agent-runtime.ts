@@ -914,6 +914,7 @@ export async function executeAgentRuntime(
         todoStore,
         isolatedHeadless: dependencies.isolatedHeadless,
         skillLoader: skillLoaderFactory(workDir),
+        ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         onInstructionsLoaded: async (paths) => {
           await runtimeState.dispatchHook(
             "InstructionsLoaded",

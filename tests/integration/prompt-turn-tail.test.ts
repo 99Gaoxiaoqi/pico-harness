@@ -359,3 +359,46 @@ function visibleUsers(messages: readonly Message[]): Message[] {
 function countOccurrences(value: string, needle: string): number {
   return value.split(needle).length - 1;
 }
+
+test("user-level AGENTS.md loads before project-level AGENTS.md", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-user-agents-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workDir, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  await writeFile(join(picoHome, "AGENTS.md"), "user-level-preference", "utf8");
+  await writeFile(join(workDir, "AGENTS.md"), "project-level-preference", "utf8");
+
+  const composer = new PromptComposer(workDir, false, { picoHome });
+  const { systemPrompt } = await composer.buildLayers();
+
+  assert.match(systemPrompt, /user-level-preference/u, "用户级 AGENTS.md 应注入 system prompt");
+  assert.match(systemPrompt, /project-level-preference/u, "项目级 AGENTS.md 应注入 system prompt");
+  const userIndex = systemPrompt.indexOf("user-level-preference");
+  const projectIndex = systemPrompt.indexOf("project-level-preference");
+  assert.ok(
+    userIndex < projectIndex,
+    "用户级应排在项目级之前（项目级更靠近对话历史，LLM 优先遵守）",
+  );
+});
+
+test("user-level AGENTS.md is skipped without picoHome", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-no-user-agents-"));
+  const workDir = join(root, "workspace");
+  await mkdir(workDir, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  await writeFile(join(workDir, "AGENTS.md"), "project-level-only", "utf8");
+
+  const composer = new PromptComposer(workDir, false);
+  const { systemPrompt } = await composer.buildLayers();
+
+  assert.match(systemPrompt, /project-level-only/u, "项目级 AGENTS.md 应正常加载");
+  assert.doesNotMatch(
+    systemPrompt,
+    /用户级指南/u,
+    "未注入 picoHome 时不应加载用户级 AGENTS.md",
+  );
+});
