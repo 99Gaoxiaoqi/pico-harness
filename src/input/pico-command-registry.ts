@@ -1403,7 +1403,10 @@ function createPlanCommand(settings: SessionSettings, session?: Session): SlashC
     description: "Show or change Plan collaboration mode",
     usage: "/plan [on|off]",
     argumentHint: "[on|off]",
-    argumentCompleter: completeFromCandidates(["on", "off"]),
+    argumentCompleter: completeFromCandidates([
+      { value: "on", description: "Enter Plan collaboration mode" },
+      { value: "off", description: "Exit Plan collaboration mode" },
+    ]),
     category: "session",
     kind: "local",
     availability: "idle",

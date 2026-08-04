@@ -1819,6 +1819,7 @@ export function useRuntimeStore(): RuntimeStore {
             {
               id: stringValue(payload.approvalId),
               runId: stringValue(payload.runId ?? scope.runId),
+              sessionId: stringValue(scope.sessionId) || undefined,
               title: stringValue(request.title, "需要你的批准"),
               detail: stringValue(
                 request.detail ?? request.description,
@@ -2608,6 +2609,14 @@ export function useRuntimeStore(): RuntimeStore {
             });
             await loadConversation(bridge, workspacePath, input.sessionId);
           }
+          setData((current) => ({
+            ...current,
+            approvals: current.approvals.filter(
+              (approval) =>
+                approval.planId !== input.planId ||
+                approval.expectedRevision !== input.expectedRevision,
+            ),
+          }));
         });
       },
       async respondPrompt(id, answer) {

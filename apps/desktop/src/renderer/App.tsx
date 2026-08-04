@@ -1609,11 +1609,36 @@ function ConversationPage() {
                       aria-label="协作模式"
                       value={conversation.settings.collaborationMode}
                       disabled={Boolean(activeRun) || Boolean(busy)}
-                      onChange={(event) =>
-                        void actions.updateSessionSettings(sessionRef, {
-                          collaborationMode: event.target.value as "agent" | "plan",
-                        })
-                      }
+                      onChange={(event) => {
+                        const collaborationMode = event.target.value as "agent" | "plan";
+                        const pendingPlan = data.approvals.find(
+                          (approval) =>
+                            approval.kind === "plan" && approval.sessionId === sessionRef.sessionId,
+                        );
+                        if (
+                          collaborationMode === "agent" &&
+                          conversation.settings?.collaborationMode === "plan" &&
+                          pendingPlan
+                        ) {
+                          if (
+                            !window.confirm(
+                              "当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？",
+                            )
+                          ) {
+                            return;
+                          }
+                          void actions.respondPlan({
+                            sessionId: sessionRef.sessionId,
+                            planId: pendingPlan.planId ?? pendingPlan.id,
+                            action: "reject_exit",
+                            expectedRevision: pendingPlan.expectedRevision ?? 0,
+                            expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
+                            feedback: "用户从协作模式开关退出 Plan。",
+                          });
+                          return;
+                        }
+                        void actions.updateSessionSettings(sessionRef, { collaborationMode });
+                      }}
                     >
                       <option value="agent">Agent</option>
                       <option value="plan">计划</option>
