@@ -83,9 +83,10 @@ export class PromptComposer {
    * 分层组装提示词。
    *
    * systemPrompt 只保留跨轮相对稳定的 core / Plan Mode 约束 / AGENTS.md /
-   * Skills，便于 Provider 复用 system/tools 缓存断点；PLAN/TODO 文件内容、
-   * 结构化 Todo 与 Goal 属于当前运行状态，由 AgentEngine 仅追加到本轮可见
-   * user 消息的请求副本。
+   * Skills，便于 Provider 复用 system/tools 缓存断点；环境、结构化 Todo 与
+   * Goal 等运行状态属于 turn tail，由 AgentEngine 仅追加到本轮可见
+   * user 消息的请求副本。Plan 的权威状态来自 RuntimeEvent JSONL，不读写
+   * PLAN.md/TODO.md。
    */
   async buildLayers(): Promise<PromptLayers> {
     const stableParts: string[] = [];
@@ -200,25 +201,7 @@ ${agentsContent}
   }
 }
 
-/**
- * Plan Mode 静态强制规范:状态外部化 (Externalized State) 的工作流指令。
- *
- * 该规范始终位于稳定 system 层；PromptComposer 同时调用
- * PlanStore.buildPlanContext()，把以下易变状态放入当前轮 tail:
- * - 文件存在:注入 PLAN.md / TODO.md 当前内容,引导断点续传
- * - 文件不存在:提示模型用 write_file 创建两份文件
- *
- * 这段静态文本保留了原始的三步强制流程(环境嗅探 → 单步打勾 → 迷失自救),
- * 动态路径异常时仍保留该 system 规范,确保 Plan Mode 有可用的行为约束。
- *
- * 摒弃内存状态机,引导大模型把宏观规划与微观待办以 PLAN.md / TODO.md 实体化到文件系统。
- * 这段提示词在人看是语言,在大模型眼中是强有力的微代码 (Micro-code):
- * - STEP 1 环境嗅探:全新任务建文件 / 断点续传读文件(绝对不覆盖)
- * - STEP 2 单步执行 + 实时打勾:做一步打勾一步,禁止一口气写完
- * - STEP 3 迷失自救:报错或迷茫时 read_file TODO.md 重新定位
- *
- * 由此实现:跨会话断电持久化 + 零成本人机协同(人类改 TODO.md 即可纠偏)。
- */
+/** Plan Mode 的稳定 system 约束；结构化计划由 RuntimeEvent JSONL 持久化。 */
 const PLAN_MODE_SPEC = `# 规划协作模式 (Plan Mode: CRITICAL)
 你当前只能调查、澄清需求并提交实施计划，绝对不能执行计划。
 

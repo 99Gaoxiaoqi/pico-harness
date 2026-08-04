@@ -527,8 +527,9 @@ export interface AgentEngineOptions {
   /** Host-owned prompt composition with session-scoped memory and runtime state. */
   systemPromptFactory?: () => Promise<string>;
   /**
-   * Host-owned layered prompt composition. Called once per run after the current
-   * visible user input is available. Takes precedence over systemPromptFactory.
+   * Host-owned layered prompt composition. The first result freezes the system
+   * prompt for the run; later turns may rebuild only the turn tail. Takes
+   * precedence over systemPromptFactory.
    */
   promptLayersFactory?: (input: { readonly currentUserPrompt: string }) => Promise<PromptLayers>;
   /**
@@ -1359,8 +1360,9 @@ export class AgentEngine implements AgentRunner {
 
     const runHistory = await this.readModelHistory(session);
     const currentUserPrompt = latestVisibleUserInput(runHistory);
-    const { systemPrompt } = await this.buildPromptLayers(currentUserPrompt, signal);
-    let turnTail = "";
+    const initialPromptLayers = await this.buildPromptLayers(currentUserPrompt, signal);
+    const systemPrompt = initialPromptLayers.systemPrompt;
+    let turnTail = initialPromptLayers.turnTail;
     signal?.throwIfAborted();
 
     const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
@@ -1414,9 +1416,9 @@ export class AgentEngine implements AgentRunner {
           break;
         }
         await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
-        // 每轮重建 turnTail：TodoStore/GoalManager 是共享单例，返回最新状态。
-        // systemPrompt 保持冻结（缓存友好），只有 turnTail 变化。
-        if (this.promptLayersFactory) {
+        // 首轮直接复用 run 开始时的分层结果，避免重复组装。后续轮次只刷新
+        // turnTail，使 TodoStore/GoalManager 等共享状态可见；systemPrompt 保持冻结。
+        if (turnCount > 1 && (this.promptLayersFactory || this.planMode)) {
           const fresh = await this.buildPromptLayers(currentUserPrompt, signal);
           turnTail = fresh.turnTail;
         }

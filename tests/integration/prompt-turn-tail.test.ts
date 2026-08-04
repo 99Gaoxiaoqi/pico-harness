@@ -26,14 +26,12 @@ test("dynamic prompt state stays in the current user request copy across runs an
   context.after(() => rm(root, { recursive: true, force: true }));
 
   await writeFile(join(workDir, "AGENTS.md"), "stable-agent-instruction", "utf8");
-  await writeFile(join(workDir, "PLAN.md"), "plan-alpha", "utf8");
-  await writeFile(join(workDir, "TODO.md"), "- [ ] file-todo-alpha", "utf8");
 
   const todoStore = new TodoStore(workDir, { picoHome });
   const todo = await todoStore.add("structured-todo-alpha", "high");
   const goalManager = new GoalManager();
   const goal = goalManager.create("goal-alpha", "finish alpha");
-  const composer = new PromptComposer(workDir, true, { todoStore, goalManager });
+  const composer = new PromptComposer(workDir, false, { todoStore, goalManager });
 
   const requests: Message[][] = [];
   const provider: LLMProvider = {
@@ -82,26 +80,26 @@ test("dynamic prompt state stays in the current user request copy across runs an
   await session.commitMessages({ role: "user", content: "user-alpha" });
   await engine.run(session);
 
-  await writeFile(join(workDir, "PLAN.md"), "plan-beta", "utf8");
-  await writeFile(join(workDir, "TODO.md"), "- [x] file-todo-beta", "utf8");
   await todoStore.update(todo.id, { content: "structured-todo-beta", status: "completed" });
   goalManager.update(goal.id, { progress: "goal-beta" });
   await session.commitMessages({ role: "user", content: "user-beta" });
   await engine.run(session);
 
-  assert.deepEqual(factoryInputs, ["user-alpha", "user-beta"], "factory must run once per run");
+  assert.deepEqual(
+    factoryInputs,
+    ["user-alpha", "user-alpha", "user-beta"],
+    "factory must run once per provider turn without a duplicate first-turn build",
+  );
   assert.equal(requests.length, 3);
   const systems = requests.map((messages) => messages[0]?.content);
   assert.equal(systems[0], systems[1]);
   assert.equal(systems[1], systems[2]);
   assert.match(systems[0] ?? "", /stable-agent-instruction/u);
-  assert.match(systems[0] ?? "", /长程任务与状态外部化强制规范/u);
-  assert.doesNotMatch(systems[0] ?? "", /plan-alpha|plan-beta|structured-todo|goal-alpha/u);
+  assert.doesNotMatch(systems[0] ?? "", /规划协作模式|structured-todo|goal-alpha/u);
 
   for (const firstRunRequest of requests.slice(0, 2)) {
     const currentUser = visibleUsers(firstRunRequest).at(-1);
     assert.match(currentUser?.content ?? "", /^user-alpha\n\n<current-turn-context>/u);
-    assert.match(currentUser?.content ?? "", /plan-alpha/u);
     assert.match(currentUser?.content ?? "", /structured-todo-alpha/u);
     assert.match(currentUser?.content ?? "", /goal-alpha/u);
     assert.equal(countOccurrences(currentUser?.content ?? "", "<current-turn-context>"), 1);
@@ -111,10 +109,9 @@ test("dynamic prompt state stays in the current user request copy across runs an
   assert.equal(secondRunUsers.length, 2);
   assert.equal(secondRunUsers[0]?.content, "user-alpha", "old user must not retain the old tail");
   assert.match(secondRunUsers[1]?.content ?? "", /^user-beta\n\n<current-turn-context>/u);
-  assert.match(secondRunUsers[1]?.content ?? "", /plan-beta/u);
   assert.match(secondRunUsers[1]?.content ?? "", /structured-todo-beta/u);
   assert.match(secondRunUsers[1]?.content ?? "", /goal-beta/u);
-  assert.doesNotMatch(secondRunUsers[1]?.content ?? "", /plan-alpha|structured-todo-alpha/u);
+  assert.doesNotMatch(secondRunUsers[1]?.content ?? "", /structured-todo-alpha/u);
 
   const persistedHistory = await session.getModelContext();
   assert.deepEqual(
@@ -123,7 +120,7 @@ test("dynamic prompt state stays in the current user request copy across runs an
   );
   assert.doesNotMatch(
     JSON.stringify(persistedHistory),
-    /current-turn-context|plan-alpha|plan-beta|structured-todo|goal-alpha|goal-beta/u,
+    /current-turn-context|structured-todo|goal-alpha|goal-beta/u,
   );
 });
 
@@ -344,7 +341,12 @@ test("isolated headless runtime adds the autonomous completion contract only to 
   assert.match(systemPrompts[1] ?? "", /无人值守完成契约/u);
   assert.match(systemPrompts[1] ?? "", /仅创建脚本、给出说明或让用户稍后运行命令都不算完成/u);
   assert.match(systemPrompts[1] ?? "", /结束前运行 1–3 个/u);
-  assert.deepEqual(userPrompts, ["完成当前任务", "完成当前任务"]);
+  for (const userPrompt of userPrompts) {
+    assert.match(userPrompt, /^完成当前任务\n\n<current-turn-context>/u);
+    assert.match(userPrompt, /# 环境信息/u);
+    assert.doesNotMatch(userPrompt, /无人值守完成契约/u);
+    assert.equal(countOccurrences(userPrompt, "<current-turn-context>"), 1);
+  }
 });
 
 function visibleUsers(messages: readonly Message[]): Message[] {
@@ -396,9 +398,5 @@ test("user-level AGENTS.md is skipped without picoHome", async (context) => {
   const { systemPrompt } = await composer.buildLayers();
 
   assert.match(systemPrompt, /project-level-only/u, "项目级 AGENTS.md 应正常加载");
-  assert.doesNotMatch(
-    systemPrompt,
-    /用户级指南/u,
-    "未注入 picoHome 时不应加载用户级 AGENTS.md",
-  );
+  assert.doesNotMatch(systemPrompt, /用户级指南/u, "未注入 picoHome 时不应加载用户级 AGENTS.md");
 });
