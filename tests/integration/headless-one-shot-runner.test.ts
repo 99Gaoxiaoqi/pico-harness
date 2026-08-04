@@ -125,6 +125,67 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
   assert.equal(JSON.stringify(outcome.result).includes(secret), false);
 });
 
+test("headless Plan persists a pending handoff without approval or workspace mutation", async (context) => {
+  const fixture = await createFixture(context, "plan-pending");
+  await configureFixture(fixture, "secret-canary-plan-pending");
+  const sentinelPath = join(fixture.workspace, "sentinel.txt");
+  await writeFile(sentinelPath, "must remain unchanged\n", "utf8");
+  const request = {
+    ...requestFor(fixture, "plan-pending"),
+    prompt: "调查后提交计划，但不要执行或修改任何文件",
+    trace: false,
+  };
+  let providerCalls = 0;
+  const outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    providerFactory: () => ({
+      async generate() {
+        providerCalls++;
+        return assistant(
+          "",
+          { promptTokens: 12, completionTokens: 4 },
+          [
+            {
+              id: "call-submit-plan",
+              name: "submit_plan",
+              arguments: JSON.stringify({
+                title: "保持工作区只读",
+                overview: "审批前只持久化计划事件",
+                steps: [
+                  {
+                    id: "step-1",
+                    title: "审批后实施",
+                    description: "仅在用户批准后的新 Run 中执行变更",
+                  },
+                ],
+                risks: ["审批序列可能过期"],
+                operationId: "headless-plan-pending",
+              }),
+            },
+          ],
+        );
+      },
+    }),
+  });
+
+  assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
+  assert.equal(outcome.result.status, "completed");
+  assert.equal(providerCalls, 1, "submit_plan must stop the loop without a second model call");
+  assert.equal(outcome.result.handoff?.kind, "plan_handoff");
+  assert.equal(outcome.result.handoff?.projection.pendingProposal?.status, "pending");
+  assert.equal(outcome.result.handoff?.projection.execution, undefined);
+  assert.equal(await readFile(sentinelPath, "utf8"), "must remain unchanged\n");
+  assert.deepEqual(await readdir(fixture.workspace), ["sentinel.txt"]);
+
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const events = await new RuntimeEventStore({ storageRoot: paths.workspace.root }).readSession(
+    request.sessionId,
+  );
+  assert.equal(events.some((event) => event.kind === "plan.proposed"), true);
+  assert.equal(events.some((event) => event.kind === "plan.approved"), false);
+  assert.equal(events.some((event) => event.kind === "plan.execution.started"), false);
+});
+
 test("headless image attachments preserve mixed path order and deduplicate physical files", async (context) => {
   const fixture = await createFixture(context, "images-order");
   await configureFixture(fixture, "secret-canary-images-order", true, undefined, true);
