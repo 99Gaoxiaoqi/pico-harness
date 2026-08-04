@@ -5,6 +5,7 @@ import type { CredentialRef } from "../provider/credential-vault.js";
 import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
 import type { SessionSettings } from "../input/session-settings.js";
 import type { BackgroundYoloPolicySnapshotData } from "../safety/background-yolo-policy-schema.js";
+import type { PlanHandoff } from "../engine/plan-handoff.js";
 
 /** Runtime execution mode selected by the host. */
 export type RuntimeExecution =
@@ -70,6 +71,13 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   addDirs?: string[];
   /** Per-run command restriction. Unknown names fail before the first provider call. */
   allowedTools?: readonly string[];
+  /** Internal/public host entry for a newly approved execution Run. */
+  approvedPlan?: {
+    readonly planId: string;
+    readonly revision: number;
+    readonly expectedSessionSequence: number;
+    readonly operationId?: string;
+  };
 }
 
 export interface RunAgentUsage {
@@ -86,6 +94,8 @@ export interface RunAgentCliResult {
   usage: RunAgentUsage;
   messages: readonly Message[];
   tracePath?: string;
+  /** Pending plan review emitted by a normally completed planning run. */
+  handoff?: PlanHandoff;
 }
 
 /** A UI-neutral lifecycle event for a runtime host. */

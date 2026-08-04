@@ -12,7 +12,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { logger } from "../observability/logger.js";
-import { PlanStore } from "./plan-store.js";
 import { SkillLoader } from "./skill.js";
 import { TodoStore } from "./todo-store.js";
 // GoalManager 用 import type:只取类型签名,避免 context → engine 的循环依赖
@@ -38,7 +37,6 @@ export class PromptComposer {
   private readonly skillLoader: SkillLoader;
   private readonly planMode: boolean;
   private readonly isolatedHeadless: boolean;
-  private readonly planStore: PlanStore;
   private readonly todoStore: TodoStore;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
   private readonly goalManager?: GoalManager;
@@ -71,7 +69,6 @@ export class PromptComposer {
     this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
     this.isolatedHeadless = options?.isolatedHeadless ?? false;
-    this.planStore = new PlanStore(workDir);
     // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
     // 未注入则内部 new,保持向后兼容;单实例场景不受跨实例 bug 影响。
     this.todoStore = options?.todoStore ?? new TodoStore(workDir);
@@ -115,7 +112,7 @@ export class PromptComposer {
 4. 遇到工具执行报错时,仔细阅读 stderr,尝试自己修正命令并重试。
 5. 始终用中文回复,以便传达你的进展和想法。`);
 
-    if (this.isolatedHeadless) {
+    if (this.isolatedHeadless && !this.planMode) {
       stableParts.push(ISOLATED_HEADLESS_COMPLETION_CONTRACT);
     }
 
@@ -153,15 +150,7 @@ ${agentsContent}
     // 2c. (可选)长程任务与状态外部化强制规范:Plan Mode 开关
     // 排在 AGENTS.md 之后，允许项目级 AGENTS.md 覆盖 Plan Mode 行为约束。
     if (this.planMode) {
-      // 行为约束属于稳定且高优先级的 system 层；文件内容属于易变的 turn tail。
       stableParts.push(PLAN_MODE_SPEC);
-      // 动态嗅探磁盘:文件存在则注入当前进度(断点续传),不存在则引导建文件。
-      // buildPlanContext 出错时保留静态规范,不让 Plan Mode 嗅探阻断主流程。
-      try {
-        turnTailParts.push(await this.planStore.buildPlanContext());
-      } catch (err) {
-        logger.warn({ err }, "buildPlanContext 失败,仅保留静态 PLAN_MODE_SPEC");
-      }
     }
 
     // 3. 动态加载技能外挂 (Skills)
@@ -172,13 +161,15 @@ ${agentsContent}
 
     // 4. 结构化 TodoList:注入当前任务清单状态(空清单不注入)
     // todo 失败不阻断 prompt 组装,降级为跳过
-    try {
-      const todoContext = await this.todoStore.buildTodoContext();
-      if (todoContext) {
-        turnTailParts.push(todoContext);
+    if (!this.planMode) {
+      try {
+        const todoContext = await this.todoStore.buildTodoContext();
+        if (todoContext) {
+          turnTailParts.push(todoContext);
+        }
+      } catch (err) {
+        logger.warn({ err }, "[composer] 构建 TodoList 上下文失败,降级跳过");
       }
-    } catch (err) {
-      logger.warn({ err }, "[composer] 构建 TodoList 上下文失败,降级跳过");
     }
 
     // 6. Goal Mode:注入当前激活目标状态(无 active goal 不注入)
@@ -228,22 +219,13 @@ ${agentsContent}
  *
  * 由此实现:跨会话断电持久化 + 零成本人机协同(人类改 TODO.md 即可纠偏)。
  */
-const PLAN_MODE_SPEC = `# 长程任务与状态外部化强制规范 (Plan Mode: ON)
-!!! 警告:本模式下,你绝对不能依赖自己的短期记忆。你必须将所有的架构思路和执行进度持久化到物理文件。
+const PLAN_MODE_SPEC = `# 规划协作模式 (Plan Mode: CRITICAL)
+你当前只能调查、澄清需求并提交实施计划，绝对不能执行计划。
 
-当你收到一条新指令被唤醒时,你必须、且只能按照以下【绝对顺序】执行你的动作:
-
-**[STEP 1: 强制环境嗅探 (Bootstrapping)]**
-- 收到指令后,你必须第一时间使用 bash (如: ls -la) 检查当前工作区根目录下是否已存在 PLAN.md 和 TODO.md。
-- **分支 A (全新任务)**:如果这两个文件不存在,说明这是一个全新的任务。你必须使用 write_file:
-  1. 先创建 PLAN.md,写下你的理解、架构设计、技术选型。
-  2. 再创建 TODO.md,拆解出具体的可执行步骤(使用标准的 Markdown Checkbox 格式: - [ ] 任务描述)。
-- **分支 B (断点续传 / 任务唤醒)**:如果这两个文件已经存在,**绝对不要覆盖它们!** 这意味着系统刚从崩溃中恢复。你必须用 read_file 读取它们,从上次中断的断点继续执行。
-
-**[STEP 2: 严格的单步执行与实时打勾]**
-- 开始执行 TODO.md 中未完成的任务。
-- **强制约束**:每当你通过 write_file 或 bash 真正完成了一个子任务后,你**必须立即停下来**,使用 edit_file 把 TODO.md 中对应条目的 \`- [ ]\` 改成 \`- [x]\`。
-- 绝对不允许"一口气写完所有代码最后再打勾"。做完一步,必须打勾一步!
-
-**[STEP 3: 迷失时的自救]**
-- 如果你在执行中遇到了报错,或者不知道下一步该干嘛了,立即使用 read_file 重新读取 TODO.md,确认当前进度后再决定下一步。`;
+规则：
+1. 仅使用系统提供的只读调查工具读取代码与证据；需要关键选择时可调用 ask_user。
+2. 禁止运行 Bash，禁止创建、编辑或删除任何工作区文件，禁止调用外部副作用、后台任务、Goal 或子代理工具。
+3. PLAN.md、TODO.md 与普通 TodoList 都不是本模式的权威状态，不得创建、读取或维护它们作为计划状态。
+4. 计划必须包含清晰标题、概述、原子步骤（每步含稳定 id、标题和说明）以及已知风险。
+5. 计划完整后必须调用 submit_plan。submit_plan 成功即结束当前规划 Run，等待用户审批；禁止再输出总结或继续调用工具。
+6. 未经用户明确批准，不得开始实施。`;

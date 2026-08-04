@@ -1,0 +1,85 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { PromptComposer } from "../../src/context/composer.js";
+import { PlanHandoffController } from "../../src/engine/plan-handoff.js";
+import { isPlanProviderTool } from "../../src/engine/loop.js";
+import { PlanCoordinator } from "../../src/plan/coordinator.js";
+import { buildForegroundSafetyMiddleware } from "../../src/runtime/agent-runtime.js";
+import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { SubmitPlanTool } from "../../src/tools/plan-exit.js";
+import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
+
+test("submit_plan persists a proposal and marks a machine-readable handoff", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-submit-plan-"));
+  const workDir = join(root, "work");
+  await mkdir(workDir);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  await store.initializeSession({ sessionId: "session-1", workDir });
+  const coordinator = new PlanCoordinator(store, {
+    sessionId: "session-1",
+    invocationId: "inv-1",
+    runId: "run-1",
+    turnId: "turn-1",
+  });
+  const handoff = new PlanHandoffController();
+  const tool = new SubmitPlanTool(() => coordinator, handoff, "session-1", () => "run-1");
+  const output = JSON.parse(
+    await tool.execute(
+      JSON.stringify({
+        title: "Ship plan mode",
+        overview: "Keep planning read-only",
+        steps: [{ id: "step-1", title: "Implement", description: "Implement the approved change" }],
+        risks: ["stale approval"],
+        operationId: "submit-1",
+      }),
+    ),
+  ) as { kind: string; planId: string; revision: number };
+  assert.equal(output.kind, "plan_handoff");
+  assert.equal(output.revision, 1);
+  assert.equal(handoff.hasPending(), true);
+  assert.equal((await coordinator.project()).pendingProposal?.planId, output.planId);
+});
+
+test("plan tool projection and registry safety are the same deny-by-default boundary", async () => {
+  const allowed = ["read_file", "grep", "skill_view", "repo_map", "ask_user", "submit_plan"];
+  for (const name of allowed) assert.equal(isPlanProviderTool(name), true, name);
+  const denied = ["bash", "write_file", "edit_file", "web_search", "delegate_task", "mcp__x__y"];
+  const safety = buildForegroundSafetyMiddleware(
+    process.cwd(),
+    { mode: "plan" },
+    undefined,
+    undefined,
+    () => "plan",
+  );
+  for (const name of denied) {
+    assert.equal(isPlanProviderTool(name), false, name);
+    assert.equal((await safety({ id: `call-${name}`, name, arguments: "{}" })).allowed, false, name);
+  }
+});
+
+test("plan prompt is investigation-only and has no PLAN/TODO authority", async () => {
+  const prompt = await new PromptComposer(process.cwd(), true).build();
+  assert.match(prompt, /只能调查、澄清需求并提交实施计划/u);
+  assert.match(prompt, /submit_plan/u);
+  assert.doesNotMatch(prompt, /使用 write_file 创建 PLAN\.md|开始执行 TODO\.md/u);
+});
+
+test("approved execution registry exposes update and cancel but not submit", () => {
+  const registry = buildDefaultToolRegistry(process.cwd(), {
+    plan: {
+      coordinator: () => null as never,
+      handoff: new PlanHandoffController(),
+      sessionId: "session-1",
+      runId: () => "run-1",
+      mode: "execution",
+      planId: "plan-1",
+    },
+  });
+  assert.ok(registry.getTool("update_plan"));
+  assert.ok(registry.getTool("cancel_plan"));
+  assert.equal(registry.getTool("submit_plan"), undefined);
+});

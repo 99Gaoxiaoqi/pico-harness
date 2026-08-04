@@ -1,6 +1,6 @@
 import { SkillLoader, SkillViewTool, type Skill } from "../context/skill.js";
-import { PlanStore } from "../context/plan-store.js";
 import { TodoStore } from "../context/todo-store.js";
+import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import { GoalManager } from "../engine/goal-manager.js";
 import { BackgroundManager } from "./background-manager.js";
 import {
@@ -15,7 +15,7 @@ import {
 } from "./registry-impl.js";
 import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
-import { ExitPlanModeTool } from "./plan-exit.js";
+import { CancelPlanTool, SubmitPlanTool, UpdatePlanTool, type PlanCoordinatorFactory } from "./plan-exit.js";
 import { TodoTool } from "./todo.js";
 import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
@@ -28,7 +28,6 @@ import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
-import type { ApprovalManager } from "../approval/manager.js";
 
 export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -70,8 +69,15 @@ export interface DefaultToolRegistryOptions {
   activateSkillHooks?: (skill: Skill) => void | Promise<void>;
   /** 宿主冻结的统一 Skill Catalog（含受信 Plugin 来源）。 */
   skillLoader?: SkillLoader;
-  /** exit_plan_mode 使用的宿主审批实例；缺失时该工具 fail-closed。 */
-  approvalManager?: ApprovalManager;
+  /** Plan 模式的 durable coordinator 与 run-scoped handoff latch。 */
+  plan?: {
+    coordinator: PlanCoordinatorFactory;
+    handoff: PlanHandoffController;
+    sessionId: string;
+    runId: () => string;
+    mode: "planning" | "execution";
+    planId?: string;
+  };
   /** Host-owned durable Evidence root shared by Runtime and read_evidence. */
   evidenceBaseDir?: string;
   /** Host-owned process environment for tools that intentionally inherit it. */
@@ -94,7 +100,7 @@ export function buildDefaultToolRegistry(
     codeIntelligence,
     activateSkillHooks,
     skillLoader,
-    approvalManager,
+    plan,
     evidenceBaseDir,
     env,
     bashTimeoutMs,
@@ -139,10 +145,15 @@ export function buildDefaultToolRegistry(
   // TodoTool 持有 host 注入的 TodoStore 单例,与 PromptComposer 共享同一实例。
   // 未注入时降级为内部 new,保持向后兼容(单实例场景不受跨实例 bug 影响)。
   registry.register(new TodoTool(todoStore ?? new TodoStore(workDir)));
-  // ExitPlanModeTool:onExit 回调在 default-registry 构造时无法注入(无 engine 引用)。
-  // Runtime host 构造 engine 后需遍历工具调 setExitCallback 注入,
-  // 否则审批通过也不会真正切换 planMode。Plan Mode 关闭时该工具不被模型调用。
-  registry.register(new ExitPlanModeTool(new PlanStore(workDir), approvalManager));
+  if (plan) {
+    if (plan.mode === "planning") {
+      registry.register(new SubmitPlanTool(plan.coordinator, plan.handoff, plan.sessionId, plan.runId));
+    } else {
+      if (!plan.planId) throw new Error("Execution plan registry requires planId");
+      registry.register(new UpdatePlanTool(plan.coordinator, plan.planId));
+      registry.register(new CancelPlanTool(plan.coordinator, plan.planId));
+    }
+  }
   // Goal Mode 工具:三工具共享同一个 goalManager 单例(由 host 注入)。
   // 单例约束:goalManager 必须与传给 AgentEngine 的是同一实例,
   // 否则工具改的状态 PromptComposer/Grace Call 看不到。
