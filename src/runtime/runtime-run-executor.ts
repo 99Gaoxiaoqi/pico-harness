@@ -11,6 +11,8 @@ import { logger } from "../observability/logger.js";
 import type { SessionRuntime } from "./session-runtime.js";
 import { RuntimeRun } from "./runtime-run.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
+import type { PlanHandoffController } from "../engine/plan-handoff.js";
+import type { PlanCoordinator } from "../plan/coordinator.js";
 import { detectStableMemorySignal } from "../memory/proposal-signal.js";
 import { findPrecommittedDesktopMemoryEvidence } from "./memory-review-recovery.js";
 import type {
@@ -47,6 +49,8 @@ export interface RuntimeRunExecutorInput {
   readonly rewindPointSink?: (checkpointId: string) => void;
   /** Eligible foreground-only durable post-terminal memory scheduler. */
   readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
+  readonly planHandoff?: PlanHandoffController;
+  readonly planCoordinator?: () => PlanCoordinator;
 }
 
 export interface PrestartedRuntimeRun {
@@ -80,6 +84,8 @@ export class RuntimeRunExecutor {
       onEvent,
       rewindPointSink,
       memoryReviewScheduler,
+      planHandoff,
+      planCoordinator,
     } = this.input;
     if (prestartedRun) {
       assertPrestartedRuntimeRun(prestartedRun);
@@ -232,6 +238,16 @@ export class RuntimeRunExecutor {
             "[Memory] post-terminal enqueue failed",
           );
         }
+      }
+      const handoff = planHandoff?.result();
+      if (handoff && planCoordinator) {
+        const projection = await planCoordinator().project();
+        const refreshed = planHandoff!.refreshProjection(projection);
+        if (!refreshed) throw new Error("Submitted plan handoff disappeared before projection refresh");
+        return {
+          ...runResult,
+          handoff: refreshed,
+        };
       }
       return runResult;
     });

@@ -78,6 +78,7 @@ import type {
 } from "./runtime-port.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
+import { PlanHandoffController } from "./plan-handoff.js";
 import type { HookService } from "../hooks/service.js";
 import { buildRuntimeToolResultProjection } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
@@ -106,6 +107,25 @@ const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
 const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
 const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
 const engineSessionContext = new AsyncLocalStorage<string>();
+const PLAN_PROVIDER_TOOL_NAMES = new Set([
+  "read_file",
+  "read_evidence",
+  "glob",
+  "grep",
+  "skill_view",
+  "repo_map",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
+  "ask_user",
+  "submit_plan",
+]);
+
+export function isPlanProviderTool(name: string): boolean {
+  return PLAN_PROVIDER_TOOL_NAMES.has(name);
+}
 
 function normalizeToolResultRedactionSecrets(
   secrets: readonly string[] | undefined,
@@ -413,6 +433,19 @@ function buildRejectedToolObservation(
   return buildRejectedToolResult(toolCall, content, "exclusive-delegation-rejection", runtimeRun);
 }
 
+function buildPlanSubmitSiblingRejection(
+  toolCall: ToolCall,
+  submitCall: ToolCall,
+  runtimeRun?: EngineRuntimeRun,
+): ToolExecutionOutcome {
+  return buildRejectedToolResult(
+    toolCall,
+    `工具执行已拒绝：submit_plan (${submitCall.id}) 必须独占本批，计划提交后当前 Run 立即结束。`,
+    "exclusive-plan-submit-rejection",
+    runtimeRun,
+  );
+}
+
 function assessRequiredDelegationResult(message: Message): RequiredDelegationAssessment {
   try {
     const parsed = JSON.parse(message.content) as {
@@ -518,6 +551,10 @@ export interface AgentEngineOptions {
    * 注入"状态外部化强制规范",引导大模型读写 PLAN.md / TODO.md 管理长程任务。
    */
   planMode?: boolean;
+  /** Runtime-owned dynamic collaboration mode; takes precedence over legacy planMode. */
+  collaborationMode?: () => "agent" | "plan";
+  /** Run-scoped latch marked by submit_plan after durable proposal creation. */
+  planHandoff?: PlanHandoffController;
   /** 当前 route 的统一上下文预算；未注入时仅保留旧 Compactor 兼容路径。 */
   contextBudget?: ContextBudget;
   /** 主动整理水位，默认为输入预算的 85%。 */
@@ -708,6 +745,8 @@ export class AgentEngine implements AgentRunner {
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort;
+  private readonly collaborationMode?: () => "agent" | "plan";
+  private readonly planHandoff?: PlanHandoffController;
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
     this.registry = opts.registry;
@@ -756,6 +795,15 @@ export class AgentEngine implements AgentRunner {
     this.postToolResultHook = opts.postToolResultHook;
     this.skillLoaderFactory = opts.skillLoaderFactory;
     this.runtimePort = opts.runtimePort;
+    this.collaborationMode = opts.collaborationMode;
+    this.planHandoff = opts.planHandoff;
+  }
+
+  private isPlanning(): boolean {
+    return (
+      this.collaborationMode?.() === "plan" ||
+      (this.collaborationMode === undefined && this.planMode)
+    );
   }
 
   /**
@@ -1320,7 +1368,7 @@ export class AgentEngine implements AgentRunner {
     signal?.throwIfAborted();
 
     const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
-      isSubagentCompletionWake(runHistory) ? "" : currentUserPrompt,
+      this.isPlanning() || isSubagentCompletionWake(runHistory) ? "" : currentUserPrompt,
     );
     let requiredFirstDelegationPending =
       firstTurnDelegationPolicy.kind === "required-first-delegation";
@@ -1425,11 +1473,14 @@ export class AgentEngine implements AgentRunner {
             allTools.some((tool) => tool.name === firstTurnDelegationPolicy.toolName);
           // explore-only required 委派收口后不再给主模型任何工具，
           // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
-          const providerTools = exploreSynthesisOnly
+          const unrestrictedProviderTools = exploreSynthesisOnly
             ? []
             : requiredFirstDelegationActive || requiredDelegationRecoveryPending
               ? allTools.filter((tool) => tool.name === "delegate_task")
               : availableTools;
+          const providerTools = this.isPlanning()
+            ? unrestrictedProviderTools.filter((tool) => isPlanProviderTool(tool.name))
+            : unrestrictedProviderTools;
 
           // 主 Agent 默认投影完整 Session 历史。只有超过 token 水位时，
           // 才先缩短旧 ToolResult，再在安全工具边界做持久化摘要。
@@ -1930,6 +1981,8 @@ export class AgentEngine implements AgentRunner {
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
           let scheduler: ToolScheduler<ToolExecutionOutcome> | undefined;
           let results: ToolExecutionOutcome[] = [];
+          const submitPlanIndex = toolCalls.findIndex((call) => call.name === "submit_plan");
+          const submitPlanCall = submitPlanIndex >= 0 ? toolCalls[submitPlanIndex] : undefined;
           try {
             try {
               const getAccesses = this.registry.getAccesses;
@@ -1968,7 +2021,15 @@ export class AgentEngine implements AgentRunner {
               });
               for (const [index, tc] of toolCalls.entries()) {
                 const execution: Promise<ToolExecutionOutcome> =
-                  requiredDelegation && index !== requiredDelegationIndex
+                  submitPlanCall && index !== submitPlanIndex
+                    ? Promise.resolve(
+                        buildPlanSubmitSiblingRejection(
+                          tc,
+                          submitPlanCall,
+                          this.runtimePort?.currentRun(),
+                        ),
+                      )
+                    : requiredDelegation && index !== requiredDelegationIndex
                     ? Promise.resolve(
                         buildRejectedToolObservation(
                           tc,
@@ -2032,6 +2093,11 @@ export class AgentEngine implements AgentRunner {
             results,
             completedToolReportIndexes,
           );
+          if (this.planHandoff?.hasPending()) {
+            this.planHandoff.consume();
+            reporter.onFinish();
+            break;
+          }
           if (requiredDelegation && requiredDelegationIndex !== undefined) {
             const assessment = assessRequiredDelegationResult(
               observations[requiredDelegationIndex]!,
