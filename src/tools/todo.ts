@@ -153,7 +153,7 @@ export class TodoTool implements BaseTool {
     }
 
     const item = await this.store.add(content, priority);
-    return `✅ 已添加任务 #${item.id} (${item.priority}): ${item.content}`;
+    return `✅ 已添加任务 #${item.id} (${item.priority}): ${item.content}\n\n${await this.renderSnapshot()}`;
   }
 
   /** update:id 必填,可选 content/priority/status */
@@ -196,7 +196,7 @@ export class TodoTool implements BaseTool {
     if (!updated) {
       throw new Error(`未找到任务 #${id}`);
     }
-    return `✅ 已更新任务 #${updated.id}: ${formatItem(updated)}`;
+    return `✅ 已更新任务 #${updated.id}: ${formatItem(updated)}\n\n${await this.renderSnapshot()}`;
   }
 
   /** toggle:id 必填,循环推进状态 */
@@ -209,7 +209,7 @@ export class TodoTool implements BaseTool {
     if (!toggled) {
       throw new Error(`未找到任务 #${id}`);
     }
-    return `✅ 已切换任务 #${toggled.id} 状态: ${formatItem(toggled)}`;
+    return `✅ 已切换任务 #${toggled.id} 状态: ${formatItem(toggled)}\n\n${await this.renderSnapshot()}`;
   }
 
   /** remove:id 必填 */
@@ -222,7 +222,7 @@ export class TodoTool implements BaseTool {
     if (!removed) {
       throw new Error(`未找到任务 #${id}`);
     }
-    return `🗑️ 已删除任务 #${id}`;
+    return `🗑️ 已删除任务 #${id}\n\n${await this.renderSnapshot()}`;
   }
 
   /** list:渲染当前清单 */
@@ -236,6 +236,12 @@ export class TodoTool implements BaseTool {
       (it) => `- ${statusMark(it.status)} #${it.id} (${it.priority}) ${it.content}`,
     );
     return `📋 当前清单(${items.length} 项):\n${lines.join("\n")}`;
+  }
+
+  /** 渲染完整列表快照，供操作后返回值追加（参考 maka-agent task 工具模式） */
+  private async renderSnapshot(): Promise<string> {
+    const context = await this.store.buildTodoContext();
+    return context || "📋 当前清单为空";
   }
 }
 

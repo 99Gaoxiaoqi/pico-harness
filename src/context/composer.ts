@@ -95,6 +95,14 @@ export class PromptComposer {
     const turnTailParts: string[] = [];
     const loadedInstructionPaths: string[] = [];
 
+    // 0. 环境信息注入 turnTail（date 每轮变化，放 system 会破坏缓存）
+    turnTailParts.push(`# 环境信息
+<env>
+  Working directory: ${this.workDir}
+  Platform: ${process.platform}
+  Today's date: ${new Date().toISOString().slice(0, 10)}
+</env>`);
+
     // 1. 极简内核:仅确立基本身份与最底线红线纪律
     stableParts.push(`# 核心身份
 你名叫 pico,一个由驾驭工程 (Harness Engineering) 驱动的骨灰级研发助手。
@@ -111,22 +119,7 @@ export class PromptComposer {
       stableParts.push(ISOLATED_HEADLESS_COMPLETION_CONTRACT);
     }
 
-    // 2. (可选)长程任务与状态外部化强制规范:Plan Mode 开关
-    // 借鉴 Claude Code:重型记忆管理是可选的计划模式,只对复杂长程任务开启,
-    // 避免简单问答也官僚地建 PLAN.md/TODO.md 浪费 Token。
-    if (this.planMode) {
-      // 行为约束属于稳定且高优先级的 system 层；文件内容属于易变的 turn tail。
-      stableParts.push(PLAN_MODE_SPEC);
-      // 动态嗅探磁盘:文件存在则注入当前进度(断点续传),不存在则引导建文件。
-      // buildPlanContext 出错时保留静态规范,不让 Plan Mode 嗅探阻断主流程。
-      try {
-        turnTailParts.push(await this.planStore.buildPlanContext());
-      } catch (err) {
-        logger.warn({ err }, "buildPlanContext 失败,仅保留静态 PLAN_MODE_SPEC");
-      }
-    }
-
-    // 3a. 用户级指南 (来自 ~/.pico/AGENTS.md)
+    // 2a. 用户级指南 (来自 ~/.pico/AGENTS.md)
     // 排在项目级之前：用户级是跨项目通用偏好，项目级更具体且排在后面（更靠近对话历史，LLM 优先遵守）。
     if (this.picoHome) {
       const userAgentsPath = join(this.picoHome, "AGENTS.md");
@@ -143,7 +136,7 @@ ${userAgentsContent}
       }
     }
 
-    // 3b. 项目级指南 (来自 AGENTS.md)
+    // 2b. 项目级指南 (来自 AGENTS.md)
     const agentsPath = join(this.workDir, "AGENTS.md");
     try {
       const agentsContent = await readFile(agentsPath, "utf8");
@@ -157,13 +150,27 @@ ${agentsContent}
       // 无 AGENTS.md,跳过
     }
 
-    // 4. 动态加载技能外挂 (Skills)
+    // 2c. (可选)长程任务与状态外部化强制规范:Plan Mode 开关
+    // 排在 AGENTS.md 之后，允许项目级 AGENTS.md 覆盖 Plan Mode 行为约束。
+    if (this.planMode) {
+      // 行为约束属于稳定且高优先级的 system 层；文件内容属于易变的 turn tail。
+      stableParts.push(PLAN_MODE_SPEC);
+      // 动态嗅探磁盘:文件存在则注入当前进度(断点续传),不存在则引导建文件。
+      // buildPlanContext 出错时保留静态规范,不让 Plan Mode 嗅探阻断主流程。
+      try {
+        turnTailParts.push(await this.planStore.buildPlanContext());
+      } catch (err) {
+        logger.warn({ err }, "buildPlanContext 失败,仅保留静态 PLAN_MODE_SPEC");
+      }
+    }
+
+    // 3. 动态加载技能外挂 (Skills)
     const skillsContent = await this.skillLoader.loadAll();
     if (skillsContent) {
       stableParts.push(skillsContent);
     }
 
-    // 5. 结构化 TodoList:注入当前任务清单状态(空清单不注入)
+    // 4. 结构化 TodoList:注入当前任务清单状态(空清单不注入)
     // todo 失败不阻断 prompt 组装,降级为跳过
     try {
       const todoContext = await this.todoStore.buildTodoContext();
