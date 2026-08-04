@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { AgentEngine } from "../engine/loop.js";
+import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
+import { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
@@ -40,7 +41,7 @@ import { ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { AskUserHandler } from "../tools/ask-user.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
-import { ExitPlanModeTool } from "../tools/plan-exit.js";
+import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
@@ -99,7 +100,6 @@ import type { HookService } from "../hooks/service.js";
 import {
   getOrCreateSessionSettings,
   DEFAULT_INTERACTION_MODE,
-  exitSessionPlanMode,
   setSessionAdditionalDirectories,
   toolStatusFromRegistry,
   type SessionToolStatus,
@@ -133,6 +133,8 @@ import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-a
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
+import { PlanCoordinator } from "../plan/coordinator.js";
+import type { PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import {
   emitRuntimeLifecycleEvent,
@@ -300,6 +302,93 @@ export class AgentRuntime {
   ): Promise<RunAgentCliResult> {
     return executeAgentRuntime(options, host);
   }
+
+  async approvePlanAndExecute(
+    input: PlanApprovalExecutionRequest,
+    host: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    const picoHome = resolvePicoHome({ picoHome: host.picoHome, env: host.env ?? process.env });
+    const workDir = await resolveWorkDir(input.approval.dir);
+    const lease = await acquireRuntimeSession({
+      sessionSelection: { mode: "resume", sessionId: input.approval.sessionId },
+      workDir,
+      picoHome,
+      resumeExistingSession: false,
+      planMode: true,
+    });
+    try {
+      const session = lease.session;
+      if (!session.runtimeEventStore) throw new Error("Plan approval requires durable storage");
+      const settings = session.getRuntimeStateSnapshot().settings;
+      if (!settings) throw new Error("Plan approval requires persisted session settings");
+      const operationId = input.approval.operationId ?? `approve-plan:${randomUUID()}`;
+      const coordinator = new PlanCoordinator(session.runtimeEventStore, {
+        sessionId: session.id,
+        invocationId: `approval:${operationId}`,
+        runId: `approval:${operationId}`,
+        turnId: `turn:approval:${operationId}`,
+      });
+      const approved = await coordinator.approve({
+        operationId,
+        expectedSessionSequence: input.approval.expectedSessionSequence,
+        planId: input.approval.planId,
+        expectedRevision: input.approval.expectedRevision,
+        reviewedBy: "user",
+        settings,
+      });
+      const proposal = approved.proposals.find(
+        (candidate) =>
+          candidate.planId === input.approval.planId &&
+          candidate.revision === input.approval.expectedRevision &&
+          candidate.status === "approved",
+      );
+      if (!proposal) throw new Error("Approved plan projection is unavailable");
+      return await this.execute(
+        {
+          ...input.execution,
+          dir: workDir,
+          session: session.id,
+          prompt: approvedPlanExecutionPrompt(proposal),
+          approvedPlan: {
+            planId: proposal.planId,
+            revision: proposal.revision,
+            expectedSessionSequence: approved.sessionSequence,
+          },
+        },
+        host,
+      );
+    } finally {
+      lease.release();
+    }
+  }
+}
+
+export interface PlanApprovalExecutionRequest {
+  readonly approval: {
+    readonly sessionId: string;
+    readonly dir: string;
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly expectedSessionSequence: number;
+    readonly operationId?: string;
+  };
+  readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
+}
+
+function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
+  return [
+    "[APPROVED PLAN EXECUTION] 用户已批准以下计划。现在按当前权限模式执行；不要重新进入 Plan Mode。",
+    `Plan: ${proposal.title} (${proposal.planId}@${proposal.revision})`,
+    proposal.overview ? `Overview: ${proposal.overview}` : undefined,
+    "Steps:",
+    ...proposal.steps.map(
+      (step) => `- ${step.id}: ${step.title}\n  ${step.description}`,
+    ),
+    proposal.risks?.length ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}` : undefined,
+    "每完成或跳过一步，必须调用 update_plan 持久化步骤状态；需要停止执行时调用 cancel_plan。",
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join("\n\n");
 }
 
 export type AgentRuntimeRequest = RunAgentCliOptions;
@@ -364,6 +453,8 @@ export async function executeAgentRuntime(
     planMode: options.planMode === true,
   });
   const session = sessionLease.session;
+  let executionCoordinator: PlanCoordinator | undefined;
+  let activeExecutionPlanId: string | undefined;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let sessionLeaseTransferred = false;
   let cleanupRuntimeState: SessionRuntime | undefined;
@@ -416,6 +507,28 @@ export async function executeAgentRuntime(
       },
       { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
     );
+    if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
+    const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
+    const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
+    if (options.approvedPlan) {
+      if (settings.collaborationMode !== "agent") {
+        throw new Error("Approved plan execution requires collaborationMode=agent");
+      }
+      if (!session.runtimeEventStore) throw new Error("Approved plan execution requires durable storage");
+      executionCoordinator = new PlanCoordinator(session.runtimeEventStore, {
+        sessionId: session.id,
+        invocationId: `execution-start:${options.approvedPlan.planId}`,
+        runId: `execution-start:${options.approvedPlan.planId}:${options.approvedPlan.revision}`,
+        turnId: `turn:execution-start:${options.approvedPlan.planId}`,
+      });
+      await executionCoordinator.startExecution({
+        operationId: options.approvedPlan.operationId ?? `start-plan:${randomUUID()}`,
+        expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
+        planId: options.approvedPlan.planId,
+        revision: options.approvedPlan.revision,
+      });
+      activeExecutionPlanId = options.approvedPlan.planId;
+    }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
     if (!backgroundPolicy && !dependencies.isolatedHeadless) {
@@ -484,7 +597,7 @@ export async function executeAgentRuntime(
       session: sessionSelection.sessionId,
       sessionSelection,
       model: options.model ?? settings.model,
-      planMode: backgroundPolicy ? false : (options.planMode ?? settings.mode === "plan"),
+      planMode: backgroundPolicy ? false : collaborationMode() === "plan",
       trace: traceEnabled,
       addDirs: backgroundPolicy ? [] : [...settings.additionalDirectories],
       ...(options.thinkingEffort !== undefined
@@ -846,6 +959,26 @@ export async function executeAgentRuntime(
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
+    const planHandoff = new PlanHandoffController();
+    const planRegistryOptions: DefaultToolRegistryOptions["plan"] = {
+      handoff: planHandoff,
+      sessionId: session.id,
+      mode: collaborationMode() === "plan" ? "planning" : "execution",
+      ...(options.approvedPlan ? { planId: options.approvedPlan.planId } : {}),
+      runId: () => currentRuntimeRun()?.runId ?? "unbound-plan-run",
+      coordinator: () => {
+        const run = currentRuntimeRun();
+        if (!run || !session.runtimeEventStore) {
+          throw new Error("submit_plan requires an active durable RuntimeRun");
+        }
+        return new PlanCoordinator(session.runtimeEventStore, {
+          sessionId: session.id,
+          invocationId: run.invocationId,
+          runId: run.runId,
+          turnId: `turn:${run.runId}:plan`,
+        });
+      },
+    };
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -880,10 +1013,10 @@ export async function executeAgentRuntime(
         });
       },
       skillLoaderFactory(workDir),
-      approvalManager,
       evidenceBaseDir,
       runtimeEnv,
       dependencies.bashTimeoutMs,
+      collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
     );
     registerPluginCapabilityTools(
       registry,
@@ -909,7 +1042,7 @@ export async function executeAgentRuntime(
     }: {
       readonly currentUserPrompt: string;
     }) => {
-      const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
+      const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         goalManager,
         todoStore,
         isolatedHeadless: dependencies.isolatedHeadless,
@@ -974,6 +1107,8 @@ export async function executeAgentRuntime(
         : {}),
       ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
       planMode: effectiveOptions.planMode ?? false,
+      collaborationMode,
+      planHandoff,
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       promptLayersFactory,
       goalManager,
@@ -1035,6 +1170,7 @@ export async function executeAgentRuntime(
           settings,
           workspaceRoots,
           dependencies.onPolicyDenied,
+          collaborationMode,
         ),
       );
       registry.usePermission?.(
@@ -1048,6 +1184,7 @@ export async function executeAgentRuntime(
           runtimeState.hookService,
           session.picoHome,
           dependencies.onPolicyDenied,
+          permissionMode,
         ),
       );
     }
@@ -1093,20 +1230,6 @@ export async function executeAgentRuntime(
     );
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-
-    // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
-    // 并把审批通知路由到 host 注入的 notifier,使审批通过后真正切换 planMode。
-    const notifier = approvalNotifier;
-    const exitTool = registry.getTool("exit_plan_mode");
-    if (exitTool instanceof ExitPlanModeTool) {
-      exitTool.setApprovalManager(approvalManager);
-      exitTool.setExitCallback(() => {
-        markSharedPlanModeExited(settings);
-        engine.exitPlanMode();
-      });
-      exitTool.setNotify(notifier);
-      exitTool.setAbortSignal(dependencies.signal);
-    }
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
@@ -1230,9 +1353,34 @@ export async function executeAgentRuntime(
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
       ...(memoryReviewScheduler ? { memoryReviewScheduler } : {}),
+      planHandoff,
+      planCoordinator: () => {
+        const submitted = planHandoff.result();
+        if (!submitted || !session.runtimeEventStore) {
+          throw new Error("Plan handoff projection refresh requires a submitted durable plan");
+        }
+        return new PlanCoordinator(session.runtimeEventStore, {
+          sessionId: session.id,
+          invocationId: `projection:${submitted.runId}`,
+          runId: submitted.runId,
+          turnId: `turn:${submitted.runId}:plan`,
+        });
+      },
     }).execute();
+    await interruptOpenPlanExecution(
+      executionCoordinator,
+      activeExecutionPlanId,
+      "Execution Run ended before every plan step reached a terminal status.",
+    );
     return result;
   } catch (error) {
+    await interruptOpenPlanExecution(
+      executionCoordinator,
+      activeExecutionPlanId,
+      dependencies.signal?.aborted
+        ? "Execution Run was cancelled."
+        : `Execution Run failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     if (cleanupRuntimeState?.hookService && !dependencies.signal?.aborted) {
       await cleanupRuntimeState
         .dispatchHook("StopFailure", {
@@ -1256,6 +1404,22 @@ export async function executeAgentRuntime(
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
     await cleanupScope.dispose();
   }
+}
+
+async function interruptOpenPlanExecution(
+  coordinator: PlanCoordinator | undefined,
+  planId: string | undefined,
+  reason: string,
+): Promise<void> {
+  if (!coordinator || !planId) return;
+  const projection = await coordinator.project();
+  if (projection.execution?.planId !== planId || projection.execution.status !== "active") return;
+  await coordinator.interrupt({
+    operationId: `interrupt-plan:${randomUUID()}`,
+    expectedSessionSequence: projection.sessionSequence,
+    planId,
+    reason,
+  });
 }
 
 async function acquireRuntimeSession({
@@ -1379,10 +1543,10 @@ function buildRegistry(
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
   skillLoader?: SkillLoader,
-  approvalManager?: ApprovalManager,
   evidenceBaseDir?: string,
   env?: NodeJS.ProcessEnv,
   bashTimeoutMs?: number,
+  plan?: DefaultToolRegistryOptions["plan"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -1397,7 +1561,7 @@ function buildRegistry(
     ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
-    ...(approvalManager !== undefined ? { approvalManager } : {}),
+    ...(plan !== undefined ? { plan } : {}),
     ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
@@ -1736,9 +1900,10 @@ export function buildForegroundSafetyMiddleware(
   settings?: Pick<SessionSettings, "mode">,
   workspaceRoots?: WorkspaceRoots,
   denialSink?: (event: RuntimePolicyDenial) => void,
+  collaborationMode?: () => "agent" | "plan",
 ): MiddlewareFunc {
   return async (call) => {
-    const mode = settings?.mode ?? "default";
+    const mode = collaborationMode?.() ?? (settings?.mode === "plan" ? "plan" : "agent");
     const planModeDenial = await planModeDenialReason(call, mode, workDir, workspaceRoots);
     if (planModeDenial !== undefined) {
       denialSink?.({
@@ -1795,9 +1960,10 @@ export function buildPermissionMiddleware(
   hookService?: HookService,
   picoHome?: string,
   denialSink?: (event: RuntimePolicyDenial) => void,
+  permissionMode?: () => "default" | "auto" | "yolo",
 ): MiddlewareFunc {
   return async (call, context) => {
-    const mode = settings?.mode ?? "default";
+    const mode = permissionMode?.() ?? (settings?.mode === "plan" ? "default" : settings?.mode ?? "default");
     const sessionId = settings?.sessionId ?? "cli";
     const workspaceAccesses = workspaceAccessesFromCall(call);
 
@@ -1982,41 +2148,21 @@ async function externalAuthorizationDirectories(
 
 async function planModeDenialReason(
   call: { name: string; arguments: string },
-  mode: SessionSettings["mode"],
+  mode: "agent" | "plan",
   workDir: string,
   workspaceRoots?: WorkspaceRoots,
 ): Promise<string | undefined> {
   if (mode !== "plan") return undefined;
+  if (!isPlanProviderTool(call.name)) {
+    return `Plan Mode 守卫：工具 ${call.name} 不在显式只读白名单中。`;
+  }
   if (
     (call.name === "read_file" || call.name === "grep") &&
     bypassImmuneSafetyPath(call, workDir, workspaceRoots) !== undefined
   ) {
     return "Plan Mode 守卫：密钥与凭据文件不属于计划阶段的可读边界。";
   }
-  if (call.name === "write_file" || call.name === "edit_file") {
-    const path = parseJsonStringField(call.arguments, "path");
-    return path !== undefined && !(await isPlanModeAllowedPath(path, workDir))
-      ? "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。"
-      : undefined;
-  }
-  if (isMcpToolName(call.name)) {
-    return "Plan Mode 守卫：MCP 工具的外部副作用无法证明为只读，已拒绝执行。";
-  }
-  if (call.name === "delegate_task") {
-    return "Plan Mode 守卫：delegate_task 可能启动可写 worker 或递归委派，已拒绝执行；只读探索请使用 spawn_subagent。";
-  }
-  if (call.name !== "bash") return undefined;
-  if (parseJsonBooleanField(call.arguments, "background") === true) {
-    return "Plan Mode 守卫：只读 Bash 必须在前台完成，已拒绝后台进程。";
-  }
-  const command = parseJsonStringField(call.arguments, "command");
-  if (command === undefined) {
-    return "Plan Mode 守卫：无法解析 Bash 命令，只允许可证明只读的命令。";
-  }
-  const classification = classifyBashCommand(command);
-  return classification.kind === "read-only"
-    ? undefined
-    : `Plan Mode 守卫：只允许可证明只读的 Bash；${classification.reason}。`;
+  return undefined;
 }
 
 function bashNeedsApproval(call: { name: string; arguments: string }): boolean {
@@ -2033,31 +2179,6 @@ function parseJsonStringField(args: string, field: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function parseJsonBooleanField(args: string, field: string): boolean | undefined {
-  try {
-    const parsed = JSON.parse(args) as Record<string, unknown>;
-    const value = parsed[field];
-    return typeof value === "boolean" ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function isPlanModeAllowedPath(path: string, workDir: string): Promise<boolean> {
-  const target = resolve(workDir, path);
-  const allowed = [resolve(workDir, "PLAN.md"), resolve(workDir, "TODO.md")];
-  if (!allowed.includes(target)) return false;
-  try {
-    return !(await lstat(target)).isSymbolicLink();
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT";
-  }
-}
-
-function markSharedPlanModeExited(settings: SessionSettings): void {
-  exitSessionPlanMode(settings);
 }
 
 /** A headless runtime settles the same manager it asked, so it never waits for absent UI. */
