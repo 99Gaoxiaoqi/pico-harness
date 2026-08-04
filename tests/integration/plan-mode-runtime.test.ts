@@ -8,6 +8,7 @@ import { PlanHandoffController } from "../../src/engine/plan-handoff.js";
 import { isPlanProviderTool } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { projectRuntimeSessionState } from "../../src/engine/session-runtime-projection.js";
+import { globalSessionManager } from "../../src/engine/session.js";
 import { HookService } from "../../src/hooks/service.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { PlanCoordinator } from "../../src/plan/coordinator.js";
@@ -17,6 +18,8 @@ import {
   buildForegroundSafetyMiddleware,
   executeAgentRuntime,
 } from "../../src/runtime/agent-runtime.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
+import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import {
   RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
@@ -148,6 +151,116 @@ test("Plan provider projection always exposes submit_plan through tool disclosur
 
   assert.equal(providerCalls, 1);
   assert.equal(result.handoff?.kind, "plan_handoff");
+});
+
+test("Plan Run isolates and restores code intelligence owned by an injected SessionRuntime", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-injected-lsp-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-injected-lsp";
+  await mkdir(workDir);
+  const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const runtimeState = await createSessionRuntime({
+    session: sessionLease.session,
+    sessionLease,
+    hooks: false,
+    lspServers: [],
+  });
+  t.after(async () => {
+    await runtimeState.dispose();
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const manager = runtimeState.codeIntelligenceManager;
+  const originalClose = manager.close.bind(manager);
+  const originalStart = manager.start.bind(manager);
+  let closes = 0;
+  let starts = 0;
+  manager.close = async () => {
+    closes++;
+    await originalClose();
+  };
+  manager.start = async () => {
+    starts++;
+    return await originalStart();
+  };
+  const provider: LLMProvider = {
+    async generate(_messages, tools) {
+      assert.match(manager.status().reason, /运行时策略禁用/u);
+      assert.equal(manager.lspClient(), undefined, "injected LSP is closed before Run");
+      assert.equal(
+        tools.some(({ name }) => name.startsWith("code_")),
+        false,
+      );
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "submit-injected-lsp",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "隔离注入 LSP",
+              steps: [{ title: "实施", description: "审批后实施" }],
+              operationId: "submit-injected-lsp",
+            }),
+          },
+        ],
+      };
+    },
+  };
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "只提交计划",
+      dir: workDir,
+      sessionSelection: { mode: "resume", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+    },
+    { provider, picoHome, runtimeState, reporter: new SilentReporter() },
+  );
+
+  assert.equal(result.handoff?.kind, "plan_handoff");
+  assert.equal(closes, 1);
+  assert.equal(starts, 1, "Plan keeps only the process-free Repo Map backend active");
+  assert.match(manager.status().reason, /运行时策略禁用/u);
+  const handoff = result.handoff;
+  assert.ok(handoff);
+  const executionProvider: LLMProvider = {
+    async generate() {
+      assert.doesNotMatch(manager.status().reason, /运行时策略禁用/u);
+      return { role: "assistant", content: "execution paused" };
+    },
+  };
+  await new AgentRuntime().approvePlanAndExecute(
+    {
+      approval: {
+        sessionId,
+        dir: workDir,
+        planId: handoff.planId,
+        expectedRevision: handoff.revision,
+        expectedSessionSequence: handoff.expectedSessionSequence,
+        operationId: "approve-injected-lsp",
+      },
+      execution: {
+        provider: "openai",
+        modelRouteId: "test/test",
+        sessionSelection: { mode: "resume", sessionId },
+        interactionMode: "yolo",
+      },
+    },
+    { provider: executionProvider, picoHome, runtimeState, reporter: new SilentReporter() },
+  );
+  assert.equal(closes, 2);
+  assert.equal(starts, 2);
+  assert.equal(runtimeState.codeIntelligence.backend, "repo-map");
 });
 
 test("Plan runtime suppresses injected hooks and their filesystem side effects", async (t) => {

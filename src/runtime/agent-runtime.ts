@@ -970,10 +970,8 @@ export async function executeAgentRuntime(
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
-        lspServers:
-          backgroundPolicy || collaborationMode() === "plan"
-            ? []
-            : [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
+        lspEnabled: !backgroundPolicy && collaborationMode() !== "plan",
+        lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         sessionStartSource:
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
@@ -990,6 +988,9 @@ export async function executeAgentRuntime(
       }));
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
+    if (!ownsRuntimeState) {
+      await runtimeState.setCodeIntelligenceEnabled(collaborationMode() !== "plan");
+    }
     if (collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
     }
@@ -1291,7 +1292,7 @@ export async function executeAgentRuntime(
       toolDisclosure,
       workspaceRoots,
       dependencies.askUserHandler,
-      runtimeState.codeIntelligence,
+      collaborationMode() === "plan" ? undefined : runtimeState.codeIntelligence,
       (path) => {
         if (settings.mode === "yolo") return false;
         if (settings.mode === "plan" || path === undefined) return true;
