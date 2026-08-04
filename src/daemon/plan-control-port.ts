@@ -1,6 +1,12 @@
 import type { PlanProjection } from "../plan/contract.js";
 
-export type PlanResponseAction = "execute" | "continue_editing" | "reject_exit";
+export type PlanResponseAction =
+  | "execute"
+  | "continue_editing"
+  | "reject_exit"
+  | "resume_execution"
+  | "cancel_execution"
+  | "replan_execution";
 
 export interface PlanControlResponse {
   readonly accepted: boolean;

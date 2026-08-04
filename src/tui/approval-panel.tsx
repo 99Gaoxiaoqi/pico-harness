@@ -37,7 +37,10 @@ export type ApprovalPanelAction =
   | "reject"
   | "execute"
   | "continue-editing"
-  | "reject-exit";
+  | "reject-exit"
+  | "resume-execution"
+  | "cancel-execution"
+  | "replan-execution";
 export type ApprovalPanelKeyAction = ApprovalPanelAction | "toggle-diff" | "move-up" | "move-down";
 export interface ApprovalPanelState {
   diffExpanded: boolean;
@@ -64,7 +67,8 @@ export function InteractiveApprovalPanel({
   const submittedTaskId = useRef<string | null>(null);
   const expanded = diffExpanded ?? state.diffExpanded;
   const planExit = isPlanExitApproval(notice);
-  const optionCount = planExit ? 3 : notice.sessionScope ? 3 : 2;
+  const interruptedPlan = notice.toolName === "interrupted_plan_execution";
+  const optionCount = interruptedPlan || planExit ? 3 : notice.sessionScope ? 3 : 2;
 
   useInput((input, key) => {
     const action = resolveApprovalPanelKey(
@@ -74,6 +78,7 @@ export function InteractiveApprovalPanel({
       state.selectedIndex,
       notice.sessionScope !== undefined,
       planExit,
+      interruptedPlan,
     );
     if (!action) return;
     if (action === "move-up" || action === "move-down") {
@@ -169,24 +174,31 @@ export function formatApprovalPanel(
   const diffExpanded = options.diffExpanded ?? options.includeDiff ?? Boolean(diff);
   const hasSessionOption = notice.sessionScope !== undefined;
   const planExit = isPlanExitApproval(notice);
-  const approvalOptions: Array<{ label: string; action: ApprovalPanelAction }> = planExit
-    ? [
-        { label: "执行计划", action: "execute" },
-        { label: "继续修改（需输入反馈）", action: "continue-editing" },
-        { label: "拒绝并退出", action: "reject-exit" },
-      ]
-    : [
-        { label: "Yes", action: "approve" },
-        ...(hasSessionOption
-          ? [
-              {
-                label: formatPermissionSessionScope(notice.sessionScope!),
-                action: "approve-session" as const,
-              },
-            ]
-          : []),
-        { label: "No", action: "reject" },
-      ];
+  const approvalOptions: Array<{ label: string; action: ApprovalPanelAction }> =
+    notice.toolName === "interrupted_plan_execution"
+      ? [
+          { label: "继续执行", action: "resume-execution" },
+          { label: "取消执行", action: "cancel-execution" },
+          { label: "重新规划", action: "replan-execution" },
+        ]
+      : planExit
+        ? [
+            { label: "执行计划", action: "execute" },
+            { label: "继续修改（需输入反馈）", action: "continue-editing" },
+            { label: "拒绝并退出", action: "reject-exit" },
+          ]
+        : [
+            { label: "Yes", action: "approve" },
+            ...(hasSessionOption
+              ? [
+                  {
+                    label: formatPermissionSessionScope(notice.sessionScope!),
+                    action: "approve-session" as const,
+                  },
+                ]
+              : []),
+            { label: "No", action: "reject" },
+          ];
   const selectedIndex = clampSelection(options.selectedIndex ?? 0, approvalOptions.length);
   const lines = [approvalQuestion(notice.toolName, target), `  ${target}`];
   if (diffExpanded && diff) {
@@ -232,6 +244,7 @@ export function resolveApprovalPanelKey(
   selectedIndex = 0,
   hasSessionOption = true,
   planExit = false,
+  interruptedPlan = false,
 ): ApprovalPanelKeyAction | null {
   const arrowKey = key as typeof key & { upArrow?: boolean; downArrow?: boolean };
   if (arrowKey.upArrow || (input.toLowerCase() === "k" && !key.ctrl && !key.meta)) return "move-up";
@@ -240,7 +253,10 @@ export function resolveApprovalPanelKey(
   const normalized = input.toLowerCase();
   if (key.return && !key.ctrl && !key.meta) {
     return planExit
-      ? ((["execute", "continue-editing", "reject-exit"] as const)[selectedIndex] ?? "execute")
+      ? interruptedPlan
+        ? ((["resume-execution", "cancel-execution", "replan-execution"] as const)[selectedIndex] ??
+          "resume-execution")
+        : ((["execute", "continue-editing", "reject-exit"] as const)[selectedIndex] ?? "execute")
       : actionAtSelection(selectedIndex, hasSessionOption);
   }
   if (key.escape) return planExit ? "reject-exit" : "reject";
@@ -262,7 +278,11 @@ export function resolveApprovalPanelKey(
 }
 
 export function isPlanExitApproval(notice: Pick<ApprovalNotice, "toolName">): boolean {
-  return notice.toolName === "exit_plan_mode" || notice.toolName === "submit_plan";
+  return (
+    notice.toolName === "exit_plan_mode" ||
+    notice.toolName === "submit_plan" ||
+    notice.toolName === "interrupted_plan_execution"
+  );
 }
 
 export function nextApprovalPanelState(
