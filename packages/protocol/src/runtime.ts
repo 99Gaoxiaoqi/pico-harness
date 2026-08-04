@@ -698,6 +698,7 @@ export type RuntimeMethodMap = {
       readonly items: readonly RuntimeConversationItem[];
       readonly activeRun?: RuntimeRun;
       readonly queuedInputs: readonly RuntimeQueuedInput[];
+      readonly planProjection?: RuntimePlanProjection;
       readonly nextBefore?: string;
       readonly revision: string;
     };
@@ -763,7 +764,13 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
       readonly planId: PlanId;
-      readonly action: "execute" | "continue_editing" | "reject_exit";
+      readonly action:
+        | "execute"
+        | "continue_editing"
+        | "reject_exit"
+        | "resume_execution"
+        | "cancel_execution"
+        | "replan_execution";
       readonly expectedRevision: number;
       readonly expectedSessionSequence: number;
       readonly operationId: string;
@@ -2386,7 +2393,14 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
         workspacePath: stringParam,
         sessionId: stringParam,
         planId: stringParam,
-        action: oneOfParam(["execute", "continue_editing", "reject_exit"]),
+        action: oneOfParam([
+          "execute",
+          "continue_editing",
+          "reject_exit",
+          "resume_execution",
+          "cancel_execution",
+          "replan_execution",
+        ]),
         expectedRevision: finiteNumberParam,
         expectedSessionSequence: finiteNumberParam,
         operationId: stringParam,
@@ -3182,7 +3196,11 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       queuedInputs: resultArray(runtimeQueuedInputResult),
       revision: resultString,
     },
-    { activeRun: runtimeRunResult, nextBefore: resultString },
+    {
+      activeRun: runtimeRunResult,
+      nextBefore: resultString,
+      planProjection: resultJsonObject,
+    },
   ),
   "session.evidence.read": resultShape(
     {

@@ -5,7 +5,7 @@
 // QueryGuard prevents overlapping submissions from racing cleanup state.
 
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -40,6 +40,7 @@ import {
   type RunAgentCliResult,
 } from "../runtime/agent-runtime.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
+import type { PlanProjection } from "../plan/contract.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
@@ -140,6 +141,7 @@ import { globalApprovalManager, type ApprovalNotice } from "../approval/manager.
 import {
   approvalDialogId,
   InteractiveApprovalPanel,
+  isApprovalDialogId,
   type ApprovalPanelAction,
 } from "./approval-panel.js";
 import {
@@ -364,7 +366,13 @@ export interface HandleTuiInputSubmissionDeps {
     respond(input: {
       readonly sessionId: string;
       readonly planId: string;
-      readonly action: "execute" | "continue_editing" | "reject_exit";
+      readonly action:
+        | "execute"
+        | "continue_editing"
+        | "reject_exit"
+        | "resume_execution"
+        | "cancel_execution"
+        | "replan_execution";
       readonly expectedRevision: number;
       readonly expectedSessionSequence: number;
       readonly operationId: string;
@@ -426,6 +434,7 @@ interface TuiSessionBundle {
   readonly askUserHandler: AskUserHandler;
   readonly scheduleDraft?: TuiScheduleDraftRuntime;
   readonly mcpElicitationHandler: McpElicitationUiHandler;
+  readonly planProjection: PlanProjection;
   readonly skillLoader: SkillLoader;
   readonly recoveredRewindInputText?: string;
   /** Immutable foreground non-MCP inventory; per-run allowlists must never overwrite it. */
@@ -1464,8 +1473,12 @@ export async function startTuiRepl(
       runtimeState = await createTuiRuntimeState({
         session,
         sessionLease,
-        lspServers: [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
-        hookExtensionSources: pluginSnapshot.hookSources,
+        lspServers:
+          restoredSettings?.collaborationMode === "plan"
+            ? []
+            : [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
+        hookExtensionSources:
+          restoredSettings?.collaborationMode === "plan" ? [] : pluginSnapshot.hookSources,
         ...(taskHostRuntime ? { taskHostRuntime } : {}),
       });
 
@@ -1632,6 +1645,12 @@ export async function startTuiRepl(
       });
       reporterRef.current = reporter;
       hydrateTuiReporter(reporter, hydration);
+      const planProjection = await new PlanCoordinator(sessionRuntimeStore, {
+        sessionId: selection.sessionId,
+        invocationId: "tui:hydrate",
+        runId: "tui:hydrate",
+        turnId: "tui:hydrate",
+      }).project();
       const recoveredRewind = await session.getPendingTuiRewindHandoff();
       if (recoveredRewind) {
         reporter.withoutDurableTranscript(() => {
@@ -1663,6 +1682,7 @@ export async function startTuiRepl(
         askUserHandler,
         ...(scheduleDraft ? { scheduleDraft } : {}),
         mcpElicitationHandler,
+        planProjection,
         skillLoader,
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
@@ -1794,6 +1814,113 @@ export async function startTuiRepl(
     );
     setProjection = setStateProjection;
     activeBundle = activeBundleRef.current;
+
+    useEffect(() => {
+      const pending = bundle.planProjection.pendingProposal;
+      const interrupted =
+        bundle.planProjection.execution?.status === "interrupted"
+          ? bundle.planProjection.execution
+          : undefined;
+      if (!pending && !interrupted) {
+        setDialogRequests((items) => items.filter((item) => !isApprovalDialogId(item.id)));
+        return;
+      }
+      const activeRoute = modelRouter.providerConfig(bundle.settings.modelRouteId);
+      const unbindHydratedAskUser = bindAskUserDialogs(bundle.askUserHandler, {
+        openDialog: (request) =>
+          setDialogRequests((items) => [
+            ...items.filter((item) => item.id !== request.id),
+            request,
+          ]),
+        closeDialog: (id) => setDialogRequests((items) => items.filter((item) => item.id !== id)),
+      });
+      const presentPlanHandoff = (handoff: PlanHandoff) => {
+        setDialogRequests((items) => [
+          ...items.filter((item) => item.id !== approvalDialogId(handoff.planId)),
+          createPlanHandoffDialogRequest(handoff, {
+            reporter: bundle.reporter,
+            closeDialog: (id) =>
+              setDialogRequests((current) => current.filter((item) => item.id !== id)),
+            sessionId: bundle.sessionId,
+            planControl,
+          }),
+        ]);
+      };
+      const planControl: NonNullable<HandleTuiInputSubmissionDeps["planControl"]> =
+        createTuiRuntimePlanControl({
+          cliOpts: {
+            prompt: "",
+            dir: opts.workDir,
+            session: bundle.sessionId,
+            sessionSelection: { mode: "resume", sessionId: bundle.sessionId },
+            provider: activeRoute.provider,
+            baseURL: activeRoute.config.baseURL,
+            ...(activeRoute.route.source === "legacy" ? {} : { apiKey: activeRoute.config.apiKey }),
+            model: activeRoute.config.model,
+            modelRouteId: activeRoute.route.id,
+            modelCapabilities: activeRoute.route.capabilities,
+            planMode: true,
+          },
+          runDependencies: {
+            reporter: bundle.reporter,
+            runtimeState: bundle.runtimeState,
+            modelRouter,
+            pluginSnapshot,
+            pluginCapabilityRegistry,
+            askUserHandler: bundle.askUserHandler,
+            approvalNotifier: (notice) => {
+              setDialogRequests((items) => [
+                ...items.filter((item) => item.id !== approvalDialogId(notice.taskId)),
+                createApprovalDialogRequest(notice, {
+                  reporter: bundle.reporter,
+                  closeDialog: (id) =>
+                    setDialogRequests((current) => current.filter((item) => item.id !== id)),
+                  sessionId: bundle.sessionId,
+                  planControl,
+                }),
+              ]);
+            },
+          },
+          presentPlanHandoff,
+        });
+      if (pending) {
+        presentPlanHandoff({
+          kind: "plan_handoff",
+          sessionId: bundle.sessionId,
+          runId: `plan-hydrate:${pending.planId}`,
+          planId: pending.planId,
+          revision: pending.revision,
+          expectedSessionSequence: bundle.planProjection.sessionSequence,
+          projection: bundle.planProjection,
+        });
+      } else if (interrupted) {
+        const notice = {
+          taskId: interrupted.planId,
+          toolName: "interrupted_plan_execution",
+          args: JSON.stringify({ planId: interrupted.planId, revision: interrupted.revision }),
+          providerCallId: `plan-interrupted:${interrupted.planId}`,
+          message: interrupted.reason ?? "计划执行已中断",
+          preview: {
+            target: bundle.planProjection.latestProposal?.title ?? interrupted.planId,
+            summary: interrupted.reason ?? "请选择继续执行、取消执行或重新规划。",
+          },
+          planId: interrupted.planId,
+          expectedRevision: interrupted.revision,
+          expectedSessionSequence: bundle.planProjection.sessionSequence,
+        };
+        setDialogRequests((items) => [
+          ...items.filter((item) => item.id !== approvalDialogId(interrupted.planId)),
+          createApprovalDialogRequest(notice, {
+            reporter: bundle.reporter,
+            closeDialog: (id) =>
+              setDialogRequests((current) => current.filter((item) => item.id !== id)),
+            sessionId: bundle.sessionId,
+            planControl,
+          }),
+        ]);
+      }
+      return () => unbindHydratedAskUser();
+    }, [bundle]);
 
     // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
     // 稳定引用,放在 useRef 里只创建一次。
@@ -2960,77 +3087,148 @@ function createTuiRuntimePlanControl(input: {
   if (!workDir) throw new Error("Plan review requires a working directory");
   return {
     respond: async (response) => {
-      if (response.action === "execute") {
-        const {
-          prompt: _prompt,
-          session: _session,
-          dir: _dir,
-          planMode: _planMode,
-          ...execution
-        } = input.cliOpts;
+      try {
+        if (response.action === "execute") {
+          const {
+            prompt: _prompt,
+            session: _session,
+            dir: _dir,
+            planMode: _planMode,
+            ...execution
+          } = input.cliOpts;
+          void _prompt;
+          void _session;
+          void _dir;
+          void _planMode;
+          const result = await new AgentRuntime().approvePlanAndExecute(
+            {
+              approval: {
+                sessionId: response.sessionId,
+                dir: workDir,
+                planId: response.planId,
+                expectedRevision: response.expectedRevision,
+                expectedSessionSequence: response.expectedSessionSequence,
+                operationId: response.operationId,
+              },
+              execution: { ...execution, planMode: false },
+            },
+            input.runDependencies,
+          );
+          if (result.handoff) input.presentPlanHandoff(result.handoff);
+          return result;
+        }
+        if (response.action === "continue_editing") {
+          const revision = await new AgentRuntime().requestPlanRevision({
+            sessionId: response.sessionId,
+            dir: workDir,
+            planId: response.planId,
+            expectedRevision: response.expectedRevision,
+            expectedSessionSequence: response.expectedSessionSequence,
+            operationId: response.operationId,
+            feedback: response.feedback ?? "请继续修改计划。",
+          });
+          if (revision.replayed) return revision;
+          const result = await (input.runAgent ?? executeAgentRuntime)(
+            {
+              ...input.cliOpts,
+              prompt: `[PLAN REVISION FEEDBACK]\n${response.feedback ?? "请继续修改计划。"}`,
+              session: response.sessionId,
+              sessionSelection: { mode: "resume", sessionId: response.sessionId },
+              planMode: true,
+            },
+            { ...input.runDependencies, resumeExistingSession: true },
+          );
+          if (result.handoff) input.presentPlanHandoff(result.handoff);
+          return result;
+        }
+        const { prompt: _prompt, session: _session, dir: _dir, ...execution } = input.cliOpts;
         void _prompt;
         void _session;
         void _dir;
-        void _planMode;
-        const result = await new AgentRuntime().approvePlanAndExecute(
-          {
-            approval: {
+        if (response.action === "resume_execution") {
+          return new AgentRuntime().resumePlanExecution(
+            {
               sessionId: response.sessionId,
               dir: workDir,
               planId: response.planId,
-              expectedRevision: response.expectedRevision,
               expectedSessionSequence: response.expectedSessionSequence,
               operationId: response.operationId,
+              execution: { ...execution, planMode: false },
             },
-            execution: { ...execution, planMode: false },
-          },
-          input.runDependencies,
-        );
-        if (result.handoff) input.presentPlanHandoff(result.handoff);
-        return result;
-      }
-      if (response.action === "continue_editing") {
-        const result = await (input.runAgent ?? executeAgentRuntime)(
-          {
-            ...input.cliOpts,
-            prompt: `[PLAN REVISION FEEDBACK]\n${response.feedback ?? "请继续修改计划。"}`,
-            session: response.sessionId,
-            sessionSelection: { mode: "resume", sessionId: response.sessionId },
-            planMode: true,
-          },
-          { ...input.runDependencies, resumeExistingSession: true },
-        );
-        if (result.handoff) input.presentPlanHandoff(result.handoff);
-        return result;
-      }
-      const lease = await globalSessionManager.getOrCreatePinned(response.sessionId, workDir, {
-        persistence: true,
-        runtimePort: createEngineRuntimePort(),
-      });
-      try {
-        if (!lease.session.runtimeEventStore) {
-          throw new Error("Plan rejection requires durable Session storage");
+            input.runDependencies,
+          );
         }
-        const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
-        if (!settings) throw new Error("Plan rejection requires persisted Session settings");
-        const projection = await new PlanCoordinator(lease.session.runtimeEventStore, {
-          sessionId: response.sessionId,
-          invocationId: `plan-review:${response.operationId}`,
-          runId: `plan-review:${response.operationId}`,
-          turnId: `plan-review:${response.operationId}`,
-        }).rejectAndExit({
-          operationId: response.operationId,
-          expectedSessionSequence: response.expectedSessionSequence,
-          planId: response.planId,
-          expectedRevision: response.expectedRevision,
-          reviewedBy: "user",
-          settings,
-          ...(response.feedback ? { reason: response.feedback } : {}),
+        if (response.action === "replan_execution") {
+          const result = await new AgentRuntime().replanInterruptedExecution(
+            {
+              sessionId: response.sessionId,
+              dir: workDir,
+              planId: response.planId,
+              expectedSessionSequence: response.expectedSessionSequence,
+              operationId: response.operationId,
+              prompt: response.feedback ?? "请根据中断原因重新规划后续步骤。",
+              execution: { ...execution, planMode: true },
+            },
+            input.runDependencies,
+          );
+          if (result.handoff) input.presentPlanHandoff(result.handoff);
+          return result;
+        }
+        if (response.action === "cancel_execution") {
+          return new AgentRuntime().cancelInterruptedPlan({
+            sessionId: response.sessionId,
+            dir: workDir,
+            planId: response.planId,
+            expectedSessionSequence: response.expectedSessionSequence,
+            operationId: response.operationId,
+          });
+        }
+        const lease = await globalSessionManager.getOrCreatePinned(response.sessionId, workDir, {
+          persistence: true,
+          runtimePort: createEngineRuntimePort(),
         });
-        await lease.session.refreshRuntimeProjection();
-        return projection;
-      } finally {
-        lease.release();
+        try {
+          if (!lease.session.runtimeEventStore) {
+            throw new Error("Plan rejection requires durable Session storage");
+          }
+          const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
+          if (!settings) throw new Error("Plan rejection requires persisted Session settings");
+          const projection = await new PlanCoordinator(lease.session.runtimeEventStore, {
+            sessionId: response.sessionId,
+            invocationId: `plan-review:${response.operationId}`,
+            runId: `plan-review:${response.operationId}`,
+            turnId: `plan-review:${response.operationId}`,
+          }).rejectAndExit({
+            operationId: response.operationId,
+            expectedSessionSequence: response.expectedSessionSequence,
+            planId: response.planId,
+            expectedRevision: response.expectedRevision,
+            reviewedBy: "user",
+            settings,
+            ...(response.feedback ? { reason: response.feedback } : {}),
+          });
+          await lease.session.refreshRuntimeProjection();
+          return projection;
+        } finally {
+          lease.release();
+        }
+      } catch (error) {
+        const refreshed = await new AgentRuntime()
+          .readPlanProjection({ sessionId: response.sessionId, dir: workDir })
+          .catch(() => undefined);
+        const pending = refreshed?.pendingProposal;
+        if (pending) {
+          input.presentPlanHandoff({
+            kind: "plan_handoff",
+            sessionId: response.sessionId,
+            runId: `plan-refresh:${pending.planId}`,
+            planId: pending.planId,
+            revision: pending.revision,
+            expectedSessionSequence: refreshed.sessionSequence,
+            projection: refreshed,
+          });
+        }
+        throw error;
       }
     },
   };
@@ -3148,7 +3346,14 @@ function createApprovalDialogRequest(
       <InteractiveApprovalPanel
         {...notice}
         onAction={(action, feedback) => {
-          if (action === "execute" || action === "continue-editing" || action === "reject-exit") {
+          if (
+            action === "execute" ||
+            action === "continue-editing" ||
+            action === "reject-exit" ||
+            action === "resume-execution" ||
+            action === "cancel-execution" ||
+            action === "replan-execution"
+          ) {
             void resolvePlanApprovalAction(notice, action, feedback, deps);
             return;
           }
@@ -3161,7 +3366,13 @@ function createApprovalDialogRequest(
 
 async function resolvePlanApprovalAction(
   notice: ApprovalNotice,
-  action: "execute" | "continue-editing" | "reject-exit",
+  action:
+    | "execute"
+    | "continue-editing"
+    | "reject-exit"
+    | "resume-execution"
+    | "cancel-execution"
+    | "replan-execution",
   feedback: string | undefined,
   deps: Pick<
     HandleTuiInputSubmissionDeps,
@@ -3186,12 +3397,18 @@ async function resolvePlanApprovalAction(
       action:
         action === "continue-editing"
           ? "continue_editing"
-          : action === "reject-exit"
-            ? "reject_exit"
-            : "execute",
+          : action === "resume-execution"
+            ? "resume_execution"
+            : action === "cancel-execution"
+              ? "cancel_execution"
+              : action === "replan-execution"
+                ? "replan_execution"
+                : action === "reject-exit"
+                  ? "reject_exit"
+                  : "execute",
       expectedRevision: metadata.expectedRevision ?? 0,
       expectedSessionSequence: metadata.expectedSessionSequence ?? 0,
-      operationId: randomUUID(),
+      operationId: planReviewOperationId(metadata, action, feedback),
       ...(feedback ? { feedback } : {}),
     });
     deps.closeDialog?.(approvalDialogId(notice.taskId));
@@ -3200,6 +3417,35 @@ async function resolvePlanApprovalAction(
       `Plan changed while reviewing; refresh the proposal and retry. ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+function planReviewOperationId(
+  metadata: {
+    readonly planId?: string;
+    readonly expectedRevision?: number;
+    readonly expectedSessionSequence?: number;
+  },
+  action:
+    | "execute"
+    | "continue-editing"
+    | "reject-exit"
+    | "resume-execution"
+    | "cancel-execution"
+    | "replan-execution",
+  feedback: string | undefined,
+): string {
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        planId: metadata.planId ?? "unknown",
+        revision: metadata.expectedRevision ?? 0,
+        sessionSequence: metadata.expectedSessionSequence ?? 0,
+        action,
+        feedback: feedback?.trim() ?? "",
+      }),
+    )
+    .digest("hex");
+  return `tui-plan:${digest}`;
 }
 
 function handleApprovalCommand(
