@@ -24,22 +24,34 @@ export interface PersistedSessionSettings {
   provider: ProviderKind;
   model: string;
   modelRouteId: string;
-  mode: PersistedInteractionMode;
+  /** @deprecated v2 read compatibility only; canonical normalized settings omit it. */
+  mode?: PersistedInteractionMode;
   prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
   /** Canonical v3 interaction axis. Legacy readers may continue using mode. */
-  collaborationMode?: "agent" | "plan";
+  collaborationMode: "agent" | "plan";
   /** Canonical v3 permission axis. */
-  permissionMode?: Exclude<PersistedInteractionMode, "plan">;
+  permissionMode: Exclude<PersistedInteractionMode, "plan">;
   /** Current model reasoning level. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
   additionalDirectories: readonly string[];
 }
 
+/** Raw v2 compatibility input accepted only at normalization/write boundaries. */
+export type LegacyPersistedSessionSettings = Omit<
+  PersistedSessionSettings,
+  "collaborationMode" | "permissionMode" | "mode" | "prePlanMode"
+> & {
+  readonly mode: PersistedInteractionMode;
+  readonly prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
+  readonly collaborationMode?: never;
+  readonly permissionMode?: never;
+};
+
 /** Canonical v3 wire settings. Legacy interaction fields are deliberately absent. */
 export type PersistedSessionSettingsWrite = Omit<
   PersistedSessionSettings,
-  "mode" | "prePlanMode" | "collaborationMode" | "permissionMode"
+  "mode" | "prePlanMode"
 > & {
   readonly collaborationMode: "agent" | "plan";
   readonly permissionMode: Exclude<PersistedInteractionMode, "plan">;
@@ -84,7 +96,10 @@ export interface SessionRuntimeStatePatch {
 }
 
 export interface SessionRuntimeStateWritePatch {
-  settings?: PersistedSessionSettings | PersistedSessionSettingsWrite;
+  settings?:
+    | PersistedSessionSettings
+    | PersistedSessionSettingsWrite
+    | LegacyPersistedSessionSettings;
   goal?: GoalManagerSnapshot;
   promptCache?: PersistedPromptCacheState;
 }

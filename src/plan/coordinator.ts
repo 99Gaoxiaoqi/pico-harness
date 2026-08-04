@@ -22,7 +22,7 @@ import {
   type PlanReviewedBy,
   type PlanStepStatus,
 } from "./contract.js";
-import { projectPlanEntries, reducePlanEvent } from "./reducer.js";
+import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from "./reducer.js";
 
 export interface PlanCoordinatorContext {
   readonly sessionId: string;
@@ -34,6 +34,8 @@ interface OperationInput {
   readonly operationId: string;
   readonly expectedSessionSequence: number;
 }
+
+export type PlanOperationStatus = "missing" | "matching";
 
 export class PlanCoordinator {
   constructor(
@@ -47,6 +49,27 @@ export class PlanCoordinator {
       this.context.sessionId,
       await this.store.readSessionEntries(this.context.sessionId),
     );
+  }
+
+  async operationStatus(
+    operationId: string,
+    kind: string,
+    semantic: unknown,
+  ): Promise<PlanOperationStatus> {
+    const fingerprint = planOperationFingerprint(kind, semantic);
+    const replay = projectActivePlanEntries(
+      await this.store.readSessionEntries(this.context.sessionId),
+    ).find(
+      ({ event }) =>
+        event.kind.startsWith("plan.") &&
+        "operationId" in event.data &&
+        event.data.operationId === operationId,
+    );
+    if (!replay) return "missing";
+    if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint) {
+      throw new RuntimeEventStorePlanOperationConflictError(operationId);
+    }
+    return "matching";
   }
 
   async propose(
@@ -105,6 +128,22 @@ export class PlanCoordinator {
         },
       },
     ]);
+  }
+
+  async requestRevision(
+    input: OperationInput & {
+      readonly planId: string;
+      readonly expectedRevision: number;
+      readonly feedback: string;
+    },
+  ): Promise<PlanProjection> {
+    const feedback = input.feedback.trim();
+    if (!feedback) throw new PlanConflictError("Plan revision feedback must not be empty");
+    return this.simple(input, "plan.revision.requested", {
+      planId: input.planId,
+      expectedRevision: input.expectedRevision,
+      feedback,
+    });
   }
 
   async approve(
@@ -224,6 +263,43 @@ export class PlanCoordinator {
       ...(input.reason ? { reason: input.reason } : {}),
     });
   }
+  async resume(input: OperationInput & { readonly planId: string }): Promise<PlanProjection> {
+    return this.simple(input, "plan.execution.resumed", { planId: input.planId });
+  }
+  async replan(
+    input: OperationInput & {
+      readonly planId: string;
+      readonly settings: PersistedSessionSettings;
+      readonly reason?: string;
+    },
+  ): Promise<PlanProjection> {
+    const semantic = {
+      planId: input.planId,
+      ...(input.reason ? { reason: input.reason } : {}),
+    };
+    return this.commit(input, "plan.execution.replanned", semantic, (fact, at) => {
+      const patch = normalizeSessionRuntimeStateWritePatch({
+        settings: {
+          ...input.settings,
+          collaborationMode: "plan",
+          permissionMode: input.settings.permissionMode,
+        },
+      });
+      if (!patch) throw new PlanConflictError("Session settings are invalid");
+      return [
+        {
+          ...this.baseEvent(input.operationId, "plan.execution.replanned", at),
+          kind: "plan.execution.replanned",
+          data: { ...fact, ...semantic },
+        },
+        {
+          ...this.baseEvent(input.operationId, "session.state.committed", at),
+          kind: "session.state.committed",
+          data: { stateVersion: SESSION_RUNTIME_STATE_VERSION, patch },
+        },
+      ];
+    });
+  }
   async cancel(
     input: OperationInput & { readonly planId: string; readonly reason?: string },
   ): Promise<PlanProjection> {
@@ -296,7 +372,7 @@ export class PlanCoordinator {
   ): Promise<PlanProjection> {
     const fingerprint = planOperationFingerprint(kind, semantic);
     const entries = await this.store.readSessionEntries(this.context.sessionId);
-    const replay = entries.find(
+    const replay = projectActivePlanEntries(entries).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
         "operationId" in event.data &&

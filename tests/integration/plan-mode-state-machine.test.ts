@@ -36,6 +36,8 @@ const SETTINGS: PersistedSessionSettings = {
   modelRouteId: "openai/test",
   mode: "plan",
   prePlanMode: "auto",
+  collaborationMode: "plan",
+  permissionMode: "auto",
   thinkingEffort: "medium",
   thinkingEffortExplicit: false,
   additionalDirectories: [],

@@ -47,6 +47,13 @@ export interface PlanProjection {
   readonly latestProposal?: PlanProposal;
   readonly pendingProposal?: PlanProposal;
   readonly execution?: PlanExecution;
+  readonly revisionRequest?: {
+    readonly planId: string;
+    readonly expectedRevision: number;
+    readonly feedback: string;
+    readonly operationId: string;
+    readonly requestedAt: string;
+  };
 }
 
 export interface PlanOperationFact {

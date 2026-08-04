@@ -134,7 +134,7 @@ import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
-import type { PlanProposal } from "../plan/contract.js";
+import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import {
   emitRuntimeLifecycleEvent,
@@ -328,14 +328,25 @@ export class AgentRuntime {
         runId: `approval:${operationId}`,
         turnId: `turn:approval:${operationId}`,
       });
-      const approved = await coordinator.approve({
-        operationId,
-        expectedSessionSequence: input.approval.expectedSessionSequence,
+      const approvalSemantic = {
         planId: input.approval.planId,
         expectedRevision: input.approval.expectedRevision,
-        reviewedBy: "user",
-        settings,
-      });
+        reviewedBy: "user" as const,
+      };
+      const approvalStatus = await coordinator.operationStatus(
+        operationId,
+        "plan.approved",
+        approvalSemantic,
+      );
+      const approved =
+        approvalStatus === "matching"
+          ? await coordinator.project()
+          : await coordinator.approve({
+              operationId,
+              expectedSessionSequence: input.approval.expectedSessionSequence,
+              ...approvalSemantic,
+              settings,
+            });
       await session.refreshRuntimeProjection();
       const proposal = approved.proposals.find(
         (candidate) =>
@@ -344,6 +355,15 @@ export class AgentRuntime {
           candidate.status === "approved",
       );
       if (!proposal) throw new Error("Approved plan projection is unavailable");
+      const executionOperationId = `plan-execution:${operationId}`;
+      if (
+        (await coordinator.operationStatus(executionOperationId, "plan.execution.started", {
+          planId: proposal.planId,
+          revision: proposal.revision,
+        })) === "matching"
+      ) {
+        return replayedPlanControlResult(session.id, workDir, operationId);
+      }
       return await this.execute(
         {
           ...input.execution,
@@ -354,7 +374,177 @@ export class AgentRuntime {
             planId: proposal.planId,
             revision: proposal.revision,
             expectedSessionSequence: approved.sessionSequence,
+            operationId: executionOperationId,
           },
+        },
+        host,
+      );
+    } finally {
+      lease.release();
+    }
+  }
+
+  async readPlanProjection(input: PlanSessionRequest): Promise<PlanProjection> {
+    const picoHome = resolvePicoHome({ picoHome: input.picoHome, env: input.env ?? process.env });
+    const workDir = await resolveWorkDir(input.dir);
+    const store = new RuntimeEventStore({
+      storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+    });
+    try {
+      return await new PlanCoordinator(
+        store,
+        planControlContext(input.sessionId, "read"),
+      ).project();
+    } finally {
+      store.close();
+    }
+  }
+
+  async requestPlanRevision(
+    input: PlanRevisionRequest,
+    host: RunAgentCliDependencies = {},
+  ): Promise<{ projection: PlanProjection; replayed: boolean }> {
+    const { session, lease } = await acquirePlanControlSession(input, host);
+    try {
+      if (!session.runtimeEventStore) throw new Error("Plan revision requires durable storage");
+      const coordinator = new PlanCoordinator(
+        session.runtimeEventStore,
+        planControlContext(session.id, input.operationId),
+      );
+      const semantic = {
+        planId: input.planId,
+        expectedRevision: input.expectedRevision,
+        feedback: input.feedback.trim(),
+      };
+      const replayed =
+        (await coordinator.operationStatus(
+          input.operationId,
+          "plan.revision.requested",
+          semantic,
+        )) === "matching";
+      const projection = replayed
+        ? await coordinator.project()
+        : await coordinator.requestRevision({
+            operationId: input.operationId,
+            expectedSessionSequence: input.expectedSessionSequence,
+            ...semantic,
+          });
+      return { projection, replayed };
+    } finally {
+      lease.release();
+    }
+  }
+
+  async resumePlanExecution(
+    input: PlanResumeExecutionRequest,
+    host: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    const { session, lease, workDir } = await acquirePlanControlSession(input, host);
+    try {
+      if (!session.runtimeEventStore) throw new Error("Plan resume requires durable storage");
+      const coordinator = new PlanCoordinator(
+        session.runtimeEventStore,
+        planControlContext(session.id, input.operationId),
+      );
+      const semantic = { planId: input.planId };
+      if (
+        (await coordinator.operationStatus(
+          input.operationId,
+          "plan.execution.resumed",
+          semantic,
+        )) === "matching"
+      ) {
+        return replayedPlanControlResult(session.id, workDir, input.operationId);
+      }
+      const projection = await coordinator.project();
+      if (
+        projection.execution?.planId !== input.planId ||
+        projection.execution.status !== "interrupted"
+      ) {
+        throw new PlanConflictError("Plan execution is not interrupted");
+      }
+      return await this.execute(
+        {
+          ...input.execution,
+          dir: workDir,
+          session: session.id,
+          prompt: resumedPlanExecutionPrompt(projection),
+          approvedPlan: {
+            planId: input.planId,
+            revision: projection.execution.revision,
+            expectedSessionSequence: input.expectedSessionSequence,
+            operationId: input.operationId,
+            transition: "resume",
+          },
+        },
+        host,
+      );
+    } finally {
+      lease.release();
+    }
+  }
+
+  async cancelInterruptedPlan(
+    input: PlanInterruptedControlRequest,
+    host: RunAgentCliDependencies = {},
+  ): Promise<PlanProjection> {
+    const { session, lease } = await acquirePlanControlSession(input, host);
+    try {
+      if (!session.runtimeEventStore) throw new Error("Plan cancel requires durable storage");
+      return await new PlanCoordinator(
+        session.runtimeEventStore,
+        planControlContext(session.id, input.operationId),
+      ).cancel({
+        operationId: input.operationId,
+        expectedSessionSequence: input.expectedSessionSequence,
+        planId: input.planId,
+        ...(input.reason ? { reason: input.reason } : {}),
+      });
+    } finally {
+      lease.release();
+    }
+  }
+
+  async replanInterruptedExecution(
+    input: PlanReplanExecutionRequest,
+    host: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    const { session, lease, workDir } = await acquirePlanControlSession(input, host);
+    try {
+      if (!session.runtimeEventStore) throw new Error("Plan replan requires durable storage");
+      const coordinator = new PlanCoordinator(
+        session.runtimeEventStore,
+        planControlContext(session.id, input.operationId),
+      );
+      const semantic = {
+        planId: input.planId,
+        ...(input.reason ? { reason: input.reason } : {}),
+      };
+      if (
+        (await coordinator.operationStatus(
+          input.operationId,
+          "plan.execution.replanned",
+          semantic,
+        )) === "matching"
+      ) {
+        return replayedPlanControlResult(session.id, workDir, input.operationId);
+      }
+      const settings = session.getRuntimeStateSnapshot().settings;
+      if (!settings) throw new Error("Plan replan requires persisted session settings");
+      await coordinator.replan({
+        operationId: input.operationId,
+        expectedSessionSequence: input.expectedSessionSequence,
+        planId: input.planId,
+        settings,
+        ...(input.reason ? { reason: input.reason } : {}),
+      });
+      return await this.execute(
+        {
+          ...input.execution,
+          dir: workDir,
+          session: session.id,
+          prompt: input.prompt,
+          planMode: true,
         },
         host,
       );
@@ -376,6 +566,37 @@ export interface PlanApprovalExecutionRequest {
   readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
 }
 
+export interface PlanSessionRequest {
+  readonly sessionId: string;
+  readonly dir: string;
+  readonly picoHome?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}
+
+export interface PlanInterruptedControlRequest extends PlanSessionRequest {
+  readonly planId: string;
+  readonly expectedSessionSequence: number;
+  readonly operationId: string;
+  readonly reason?: string;
+}
+
+export interface PlanRevisionRequest extends PlanSessionRequest {
+  readonly planId: string;
+  readonly expectedRevision: number;
+  readonly expectedSessionSequence: number;
+  readonly operationId: string;
+  readonly feedback: string;
+}
+
+export interface PlanResumeExecutionRequest extends PlanInterruptedControlRequest {
+  readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
+}
+
+export interface PlanReplanExecutionRequest extends PlanInterruptedControlRequest {
+  readonly prompt: string;
+  readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
+}
+
 function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
   return [
     "[APPROVED PLAN EXECUTION] 用户已批准以下计划。现在按当前权限模式执行；不要重新进入 Plan Mode。",
@@ -390,6 +611,63 @@ function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
   ]
     .filter((part): part is string => part !== undefined)
     .join("\n\n");
+}
+
+function resumedPlanExecutionPrompt(projection: PlanProjection): string {
+  const execution = projection.execution;
+  if (!execution) throw new PlanConflictError("Plan execution is unavailable");
+  return [
+    "[RESUMED PLAN EXECUTION] 用户明确恢复此前中断的计划。只继续尚未完成的步骤。",
+    `Plan: ${execution.planId}@${execution.revision}`,
+    ...execution.steps.map(
+      (step) => `- [${step.status}] ${step.id}: ${step.title}\n  ${step.description}`,
+    ),
+    "每完成或跳过一步，必须调用 update_plan；需要停止时调用 cancel_plan。",
+  ].join("\n\n");
+}
+
+function planControlContext(sessionId: string, operationId: string) {
+  return {
+    sessionId,
+    invocationId: `plan-control:${operationId}`,
+    runId: `plan-control:${operationId}`,
+    turnId: `turn:plan-control:${operationId}`,
+  };
+}
+
+async function acquirePlanControlSession(
+  input: PlanSessionRequest,
+  host: RunAgentCliDependencies,
+): Promise<{ session: Session; lease: SessionManagerLease; workDir: string }> {
+  const picoHome = resolvePicoHome({
+    picoHome: input.picoHome ?? host.picoHome,
+    env: input.env ?? host.env ?? process.env,
+  });
+  const workDir = await resolveWorkDir(input.dir);
+  const lease = await acquireRuntimeSession({
+    sessionSelection: { mode: "resume", sessionId: input.sessionId },
+    workDir,
+    picoHome,
+    resumeExistingSession: false,
+    planMode: false,
+  });
+  return { session: lease.session, lease, workDir };
+}
+
+function replayedPlanControlResult(
+  sessionId: string,
+  workDir: string,
+  operationId: string,
+): RunAgentCliResult {
+  return {
+    sessionId,
+    sessionSelection: { mode: "resume", sessionId },
+    workDir,
+    finalMessage: "Plan control operation was already processed; no Run was repeated.",
+    usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+    messages: [],
+    replayedOperationId: operationId,
+  };
 }
 
 export type AgentRuntimeRequest = RunAgentCliOptions;
@@ -456,6 +734,7 @@ export async function executeAgentRuntime(
   const session = sessionLease.session;
   let executionCoordinator: PlanCoordinator | undefined;
   let activeExecutionPlanId: string | undefined;
+  let planRun = false;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let sessionLeaseTransferred = false;
   let cleanupRuntimeState: SessionRuntime | undefined;
@@ -510,6 +789,7 @@ export async function executeAgentRuntime(
     );
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
+    planRun = collaborationMode() === "plan";
     const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
     if (options.approvedPlan) {
       if (settings.collaborationMode !== "agent") {
@@ -523,17 +803,28 @@ export async function executeAgentRuntime(
         runId: `execution-start:${options.approvedPlan.planId}:${options.approvedPlan.revision}`,
         turnId: `turn:execution-start:${options.approvedPlan.planId}`,
       });
-      await executionCoordinator.startExecution({
-        operationId: options.approvedPlan.operationId ?? `start-plan:${randomUUID()}`,
-        expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
-        planId: options.approvedPlan.planId,
-        revision: options.approvedPlan.revision,
-      });
+      const operationId =
+        options.approvedPlan.operationId ??
+        `${options.approvedPlan.transition === "resume" ? "resume" : "start"}-plan:${randomUUID()}`;
+      if (options.approvedPlan.transition === "resume") {
+        await executionCoordinator.resume({
+          operationId,
+          expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
+          planId: options.approvedPlan.planId,
+        });
+      } else {
+        await executionCoordinator.startExecution({
+          operationId,
+          expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
+          planId: options.approvedPlan.planId,
+          revision: options.approvedPlan.revision,
+        });
+      }
       activeExecutionPlanId = options.approvedPlan.planId;
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    if (!backgroundPolicy && !dependencies.isolatedHeadless) {
+    if (!backgroundPolicy && !dependencies.isolatedHeadless && collaborationMode() !== "plan") {
       try {
         const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
         if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
@@ -679,22 +970,30 @@ export async function executeAgentRuntime(
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
-        lspServers: backgroundPolicy
-          ? []
-          : [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
+        lspServers:
+          backgroundPolicy || collaborationMode() === "plan"
+            ? []
+            : [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         sessionStartSource:
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
             : "startup",
-        ...(backgroundPolicy || dependencies.isolatedHeadless ? { hooks: false as const } : {}),
-        ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
-        ...(pluginSnapshot?.hookSources
+        ...(backgroundPolicy || dependencies.isolatedHeadless || collaborationMode() === "plan"
+          ? { hooks: false as const }
+          : {}),
+        ...(collaborationMode() !== "plan" && dependencies.hookService
+          ? { hookService: dependencies.hookService }
+          : {}),
+        ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       }));
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
-    if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
+    if (collaborationMode() !== "plan" && dependencies.hookService) {
+      runtimeState.attachHookService(dependencies.hookService);
+    }
+    const activeHookService = collaborationMode() === "plan" ? undefined : runtimeState.hookService;
     if (
       dependencies.toolDisclosure !== undefined &&
       dependencies.toolDisclosure !== runtimeState.toolDisclosure
@@ -1005,18 +1304,20 @@ export async function executeAgentRuntime(
             },
           }
         : undefined,
-      async (skill) => {
-        if (!skill.sourcePath || skill.hooks === undefined) return;
-        await runtimeState.activateComponentHooks({
-          kind: "skill",
-          path: skill.sourcePath,
-          componentId: skill.name,
-          inlineHooks: skill.hooks,
-          ...(skill.source?.hookTrustAuthority
-            ? { trustAuthority: skill.source.hookTrustAuthority }
-            : {}),
-        });
-      },
+      activeHookService
+        ? async (skill) => {
+            if (!skill.sourcePath || skill.hooks === undefined) return;
+            await runtimeState.activateComponentHooks({
+              kind: "skill",
+              path: skill.sourcePath,
+              componentId: skill.name,
+              inlineHooks: skill.hooks,
+              ...(skill.source?.hookTrustAuthority
+                ? { trustAuthority: skill.source.hookTrustAuthority }
+                : {}),
+            });
+          }
+        : undefined,
       skillLoaderFactory(workDir),
       evidenceBaseDir,
       runtimeEnv,
@@ -1034,8 +1335,8 @@ export async function executeAgentRuntime(
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
     // 前台只使用会话级 HookService；legacy .claw source 也由它统一加载并校验信任。
-    if (runtimeState.hookService) {
-      registry.setHookService?.(runtimeState.hookService);
+    if (activeHookService) {
+      registry.setHookService?.(activeHookService);
     }
     // Inject steer text into the session-scoped queue before the next provider turn.
     const steerQueue = runtimeState.steerQueue;
@@ -1053,13 +1354,17 @@ export async function executeAgentRuntime(
         isolatedHeadless: dependencies.isolatedHeadless,
         skillLoader: skillLoaderFactory(workDir),
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
-        onInstructionsLoaded: async (paths) => {
-          await runtimeState.dispatchHook(
-            "InstructionsLoaded",
-            { paths },
-            { signal: dependencies.signal },
-          );
-        },
+        ...(activeHookService
+          ? {
+              onInstructionsLoaded: async (paths: readonly string[]) => {
+                await activeHookService.dispatch(
+                  "InstructionsLoaded",
+                  { paths },
+                  { signal: dependencies.signal },
+                );
+              },
+            }
+          : {}),
       }).buildLayers();
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
       if (memoryContextBuilder) {
@@ -1129,7 +1434,7 @@ export async function executeAgentRuntime(
       fullCompactor: new FullCompactor({
         provider: trackedProvider,
         ...(auxProvider ? { auxProvider } : {}),
-        ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+        ...(activeHookService ? { hookService: activeHookService } : {}),
       }),
       runtimeEvidenceArchive: evidenceArchive,
       subagentReportEvidenceWriter,
@@ -1144,7 +1449,7 @@ export async function executeAgentRuntime(
       ...(dependencies.waitAtSafeBoundary
         ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }
         : {}),
-      ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+      ...(activeHookService ? { hookService: activeHookService } : {}),
       ...(backgroundPolicy?.hookRunner
         ? {
             postToolResultHook: (call, result) =>
@@ -1186,7 +1491,7 @@ export async function executeAgentRuntime(
           approvalManager,
           settings,
           workspaceRoots,
-          runtimeState.hookService,
+          activeHookService,
           session.picoHome,
           dependencies.onPolicyDenied,
           permissionMode,
@@ -1218,20 +1523,22 @@ export async function executeAgentRuntime(
       runtimeState.taskHostRuntime?.supervisor,
       reporter,
       skillLoaderFactory,
-      runtimeState.hookService,
+      activeHookService,
       subagentModelCatalog,
       evidenceBaseDir,
       runtimeEnv,
-      async (profile) => {
-        if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
-        return await runtimeState.activateComponentHookLease({
-          kind: "agent",
-          path: profile.sourcePath,
-          componentId: profile.name,
-          inlineHooks: profile.hooks,
-          ...(profile.hookTrustAuthority ? { trustAuthority: profile.hookTrustAuthority } : {}),
-        });
-      },
+      activeHookService
+        ? async (profile) => {
+            if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
+            return await runtimeState.activateComponentHookLease({
+              kind: "agent",
+              path: profile.sourcePath,
+              componentId: profile.name,
+              inlineHooks: profile.hooks,
+              ...(profile.hookTrustAuthority ? { trustAuthority: profile.hookTrustAuthority } : {}),
+            });
+          }
+        : undefined,
     );
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -1393,9 +1700,9 @@ export async function executeAgentRuntime(
         ? "Execution Run was cancelled."
         : `Execution Run failed: ${error instanceof Error ? error.message : String(error)}`,
     );
-    if (cleanupRuntimeState?.hookService && !dependencies.signal?.aborted) {
-      await cleanupRuntimeState
-        .dispatchHook("StopFailure", {
+    if (!planRun && cleanupRuntimeState?.hookService && !dependencies.signal?.aborted) {
+      await cleanupRuntimeState.hookService
+        .dispatch("StopFailure", {
           category: classifyStopFailure(error),
           error: error instanceof Error ? error.message : String(error),
         })
