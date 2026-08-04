@@ -13,7 +13,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import type { ApprovalView, CapabilityView, PromptView } from "./model.js";
 
 export function IconButton({
@@ -199,9 +199,13 @@ export function ApprovalDialog({
   readonly busy: boolean;
 }) {
   const [feedback, setFeedback] = useState("");
+  useEffect(() => {
+    setFeedback(approval?.planFeedback ?? "");
+  }, [approval?.id, approval?.planFeedback]);
   if (!approval) return null;
   const planApproval = approval.kind === "plan";
   const interruptedPlan = approval.planControlMode === "interrupted";
+  const revisionPlan = approval.planControlMode === "revision";
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -224,14 +228,18 @@ export function ApprovalDialog({
                   ))}
                 </ol>
               )}
-              <label>
-                继续修改反馈
-                <textarea
-                  value={feedback}
-                  onChange={(event) => setFeedback(event.target.value)}
-                  placeholder="说明需要修改的内容"
-                />
-              </label>
+              {revisionPlan ? (
+                <p>原修改反馈：{approval.planFeedback}</p>
+              ) : (
+                <label>
+                  继续修改反馈
+                  <textarea
+                    value={feedback}
+                    onChange={(event) => setFeedback(event.target.value)}
+                    placeholder="说明需要修改的内容"
+                  />
+                </label>
+              )}
             </div>
           )}
           <div className="risk-row">
@@ -259,6 +267,14 @@ export function ApprovalDialog({
                   继续执行
                 </Button>
               </>
+            ) : revisionPlan ? (
+              <Button
+                variant="primary"
+                disabled={busy}
+                onClick={() => onDecision("continue_editing", approval.planFeedback)}
+              >
+                恢复继续修改
+              </Button>
             ) : planApproval ? (
               <>
                 <Button variant="danger" disabled={busy} onClick={() => onDecision("reject_exit")}>
