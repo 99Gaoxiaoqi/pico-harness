@@ -45,6 +45,8 @@
     "test:integration:windows": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/windows/hook-security.test.ts tests/integration/windows/file-write-dacl.test.ts tests/integration/windows/yolo-shell-hardline.test.ts",
     "pretest:llm-e2e": "npm run check:storage && npm run build:protocol",
     "test:llm-e2e": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/*.real-llm.test.ts",
+    "pretest:llm-e2e:plan": "npm run check:storage && npm run build:protocol",
+    "test:llm-e2e:plan": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/plan-mode.real-llm.test.ts",
     "check:storage": "node --import tsx scripts/check-storage-capability.mjs",
     "check:architecture": "node scripts/check-architecture-boundaries.mjs",
     "check:architecture:strict": "node scripts/check-architecture-boundaries.mjs --strict",

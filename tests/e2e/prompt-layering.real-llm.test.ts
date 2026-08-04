@@ -12,8 +12,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { TodoStore } from "../../src/context/todo-store.js";
-import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
 
 test("real llm: TodoTool returns full snapshot after operation", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-layering-snapshot-"));
@@ -91,8 +89,5 @@ test("real llm: PLAN_MODE_SPEC comes after AGENTS.md", async (context) => {
 
   assert.ok(projectIndex > 0, "项目级 AGENTS.md 应被加载");
   assert.ok(planModeIndex > 0, "PLAN_MODE_SPEC 应被加载");
-  assert.ok(
-    projectIndex < planModeIndex,
-    "项目级 AGENTS.md 应排在 PLAN_MODE_SPEC 之前",
-  );
+  assert.ok(projectIndex < planModeIndex, "项目级 AGENTS.md 应排在 PLAN_MODE_SPEC 之前");
 });
