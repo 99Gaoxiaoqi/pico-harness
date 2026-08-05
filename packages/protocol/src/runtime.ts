@@ -740,7 +740,7 @@ export type RuntimeMethodMap = {
       readonly depth: RuntimeDiscoveryDepth;
       readonly roots?: readonly string[];
       readonly operationId: string;
-      readonly expectedSessionSequence?: number;
+      readonly expectedSessionSequence: number;
     };
     readonly result: { readonly projection: RuntimeDiscoveryProjection };
   };
@@ -754,7 +754,7 @@ export type RuntimeMethodMap = {
       readonly discoveryId: string;
       readonly depth?: RuntimeDiscoveryDepth;
       readonly operationId: string;
-      readonly expectedSessionSequence?: number;
+      readonly expectedSessionSequence: number;
     };
     readonly result: { readonly projection: RuntimeDiscoveryProjection };
   };
@@ -764,7 +764,7 @@ export type RuntimeMethodMap = {
       readonly discoveryId: string;
       readonly reason?: string;
       readonly operationId: string;
-      readonly expectedSessionSequence?: number;
+      readonly expectedSessionSequence: number;
     };
     readonly result: { readonly projection: RuntimeDiscoveryProjection };
   };
@@ -2472,8 +2472,9 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       objective: boundedNonEmptyStringParam(8_000),
       depth: oneOfParam(["quick", "balanced", "deep"]),
       operationId: boundedNonEmptyStringParam(512),
+      expectedSessionSequence: finiteNumberParam,
     },
-    { roots: stringArrayParam, expectedSessionSequence: finiteNumberParam },
+    { roots: stringArrayParam },
   ),
   "discovery.get": workspaceSessionParams,
   "discovery.resume": exactParamShape(
@@ -2482,11 +2483,9 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       sessionId: stringParam,
       discoveryId: boundedNonEmptyStringParam(512),
       operationId: boundedNonEmptyStringParam(512),
-    },
-    {
-      depth: oneOfParam(["quick", "balanced", "deep"]),
       expectedSessionSequence: finiteNumberParam,
     },
+    { depth: oneOfParam(["quick", "balanced", "deep"]) },
   ),
   "discovery.cancel": exactParamShape(
     {
@@ -2494,8 +2493,9 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       sessionId: stringParam,
       discoveryId: boundedNonEmptyStringParam(512),
       operationId: boundedNonEmptyStringParam(512),
+      expectedSessionSequence: finiteNumberParam,
     },
-    { reason: boundedNonEmptyStringParam(4_000), expectedSessionSequence: finiteNumberParam },
+    { reason: boundedNonEmptyStringParam(4_000) },
   ),
   "run.start": exactParamShape(
     { workspacePath: stringParam, prompt: stringParam },
