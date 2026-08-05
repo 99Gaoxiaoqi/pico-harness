@@ -7,6 +7,15 @@ import type {
   PlanStepStatus,
 } from "../plan/contract.js";
 import type {
+  DiscoveryBranchStatus,
+  DiscoveryBudget,
+  DiscoveryCandidate,
+  DiscoveryCheckpoint,
+  DiscoveryDepth,
+  DiscoveryOperationFact,
+  DiscoveryReport,
+} from "../discovery/contract.js";
+import type {
   SessionRuntimeStateWritePatch,
   SessionRuntimeStateVersion,
 } from "./session-runtime.js";
@@ -241,6 +250,116 @@ export type RuntimePlanEvent =
   | RuntimePlanExecutionCompletedEvent
   | RuntimePlanExecutionCancelledEvent;
 
+interface RuntimeDiscoveryEventBase extends RuntimeEventBase {
+  readonly partial: false;
+  readonly visibility: "internal";
+  readonly data: DiscoveryOperationFact & { readonly discoveryId: string };
+}
+
+export interface RuntimeDiscoveryStartedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.started";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly objective: string;
+    readonly depth: DiscoveryDepth;
+    readonly roots: readonly string[];
+    readonly budget: DiscoveryBudget;
+  };
+}
+export interface RuntimeDiscoveryCheckpointedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.checkpointed";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly checkpoint: DiscoveryCheckpoint;
+  };
+}
+export interface RuntimeDiscoveryBranchStartedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.branch.started";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly branchId: string;
+    readonly ordinal: number;
+    readonly objective: string;
+    readonly roots: readonly string[];
+    readonly queries: readonly string[];
+    readonly stoppingCondition: string;
+    readonly reserveToolCalls: number;
+    readonly reserveFiles: number;
+  };
+}
+export interface RuntimeDiscoveryBranchCheckpointedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.branch.checkpointed";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly branchId: string;
+    readonly checkpoint: DiscoveryCheckpoint;
+  };
+}
+export interface RuntimeDiscoveryBranchCompletedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.branch.completed";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly branchId: string;
+    readonly status: Extract<DiscoveryBranchStatus, "completed" | "partial" | "failed">;
+    readonly consumedToolCalls: number;
+    readonly inspectedFiles: readonly string[];
+    readonly candidates: readonly DiscoveryCandidate[];
+    readonly evidenceRefs: readonly string[];
+    readonly openQuestions: readonly string[];
+    readonly report?: DiscoveryReport;
+    readonly reason?: string;
+  };
+}
+export interface RuntimeDiscoveryBranchCancelledEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.branch.cancelled";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly branchId: string;
+    readonly reason?: string;
+  };
+}
+export interface RuntimeDiscoveryCompletedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.completed";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly report: DiscoveryReport;
+  };
+}
+export interface RuntimeDiscoveryInterruptedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.interrupted";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly reason: string;
+    readonly limitReason?: "budget_exhausted" | "no_information_gain";
+  };
+}
+export interface RuntimeDiscoveryResumedEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.resumed";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly depth: DiscoveryDepth;
+    readonly budget: DiscoveryBudget;
+  };
+}
+export interface RuntimeDiscoveryCancelledEvent extends RuntimeDiscoveryEventBase {
+  readonly kind: "discovery.cancelled";
+  readonly data: DiscoveryOperationFact & {
+    readonly discoveryId: string;
+    readonly reason?: string;
+  };
+}
+export type RuntimeDiscoveryEvent =
+  | RuntimeDiscoveryStartedEvent
+  | RuntimeDiscoveryCheckpointedEvent
+  | RuntimeDiscoveryBranchStartedEvent
+  | RuntimeDiscoveryBranchCheckpointedEvent
+  | RuntimeDiscoveryBranchCompletedEvent
+  | RuntimeDiscoveryBranchCancelledEvent
+  | RuntimeDiscoveryCompletedEvent
+  | RuntimeDiscoveryInterruptedEvent
+  | RuntimeDiscoveryResumedEvent
+  | RuntimeDiscoveryCancelledEvent;
+
 export type RuntimeEvent =
   | RuntimeRunStartedEvent
   | RuntimeMessageCommittedEvent
@@ -256,6 +375,7 @@ export type RuntimeEvent =
   | RuntimeSessionStateCommittedEvent
   | RuntimeTranscriptEventRecordedEvent
   | RuntimePlanEvent
+  | RuntimeDiscoveryEvent
   | RuntimeRunTerminalEvent;
 
 export function isRuntimeTerminalEvent(event: RuntimeEvent): event is RuntimeRunTerminalEvent {

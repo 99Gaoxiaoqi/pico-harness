@@ -17,6 +17,17 @@ export type {
   RuntimeApprovalSettledEvent,
   RuntimeCheckpointRecordedEvent,
   RuntimeCheckpointRecordedEventData,
+  RuntimeDiscoveryBranchCancelledEvent,
+  RuntimeDiscoveryBranchCheckpointedEvent,
+  RuntimeDiscoveryBranchCompletedEvent,
+  RuntimeDiscoveryBranchStartedEvent,
+  RuntimeDiscoveryCancelledEvent,
+  RuntimeDiscoveryCheckpointedEvent,
+  RuntimeDiscoveryCompletedEvent,
+  RuntimeDiscoveryEvent,
+  RuntimeDiscoveryInterruptedEvent,
+  RuntimeDiscoveryResumedEvent,
+  RuntimeDiscoveryStartedEvent,
   RuntimeEvidenceReference,
   RuntimeEvent,
   RuntimeEventBase,
@@ -52,6 +63,11 @@ import type {
 } from "../engine/session-runtime-event.js";
 import type { Message, Usage } from "../schema/message.js";
 import { PLAN_EVENT_KINDS, assertPlanEventData, isPlanEventKind } from "../plan/events.js";
+import {
+  DISCOVERY_EVENT_KINDS,
+  assertDiscoveryEventData,
+  isDiscoveryEventKind,
+} from "../discovery/events.js";
 
 export const RUNTIME_EVENT_KINDS = [
   "run.started",
@@ -69,6 +85,7 @@ export const RUNTIME_EVENT_KINDS = [
   "transcript.event.recorded",
   "run.terminal",
   ...PLAN_EVENT_KINDS,
+  ...DISCOVERY_EVENT_KINDS,
 ] as const satisfies readonly RuntimeEvent["kind"][];
 
 export const RUNTIME_EVENT_DECODE_ERROR_CODES = [
@@ -286,6 +303,15 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
           throw new RuntimeEventIntegrityError("Plan events must be complete internal facts");
         }
         assertPlanEventData(value["kind"], value["data"]);
+        return;
+      }
+      if (isDiscoveryEventKind(value["kind"])) {
+        if (value["partial"] !== false || value["visibility"] !== "internal") {
+          throw new RuntimeEventIntegrityError(
+            "Discovery events must be complete internal facts",
+          );
+        }
+        assertDiscoveryEventData(value["kind"], value["data"]);
         return;
       }
       throw new RuntimeEventIntegrityError(
