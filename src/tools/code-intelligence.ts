@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { CodeIntelligenceService, PositionQuery } from "../code-intelligence/types.js";
-import { RepoMapService } from "../code-intelligence/repo-map.js";
+import { REPO_MAP_MAX_FILES, RepoMapService } from "../code-intelligence/repo-map.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses, type ToolAccesses as ToolAccessSet } from "./tool-access.js";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
@@ -188,7 +188,12 @@ export class RepoMapTool extends CodeIntelligenceTool {
         type: "object",
         properties: {
           query: { type: "string", description: "可选的文件或符号关键词" },
-          max_files: { type: "number", description: "本次最多新索引文件数，默认 200" },
+          max_files: {
+            type: "number",
+            minimum: 1,
+            maximum: REPO_MAP_MAX_FILES,
+            description: `本次最多新索引文件数，上限 ${REPO_MAP_MAX_FILES}`,
+          },
         },
       },
     };
@@ -200,19 +205,18 @@ export class RepoMapTool extends CodeIntelligenceTool {
 
   async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     const input = parseInput(args);
+    const requestedMaxFiles = optionalPositiveInteger(input, "max_files");
     const snapshot = await this.repoMap.snapshot({
       ...(optionalString(input, "query") ? { query: optionalString(input, "query") } : {}),
-      ...(optionalPositiveInteger(input, "max_files")
-        ? { maxFiles: optionalPositiveInteger(input, "max_files") }
-        : {}),
+      ...(requestedMaxFiles ? { maxFiles: Math.min(requestedMaxFiles, REPO_MAP_MAX_FILES) } : {}),
       ...(context?.signal ? { signal: context.signal } : {}),
     });
     const lines = snapshot.files.map((file) => {
       const symbols = file.symbols.map((symbol) => `${symbol.kind} ${symbol.name}`).join(", ");
-      return `${file.filePath}${symbols ? `: ${symbols}` : ""}`;
+      return `${file.filePath} score=${file.score} reasons=${file.reasons.join(",")}${symbols ? `: ${symbols}` : ""}`;
     });
     return [
-      `backend=repo-map indexed=${snapshot.indexedFiles}/${snapshot.totalFiles} complete=${snapshot.complete}`,
+      `backend=repo-map indexed=${snapshot.indexedFiles}/${snapshot.totalFiles} cursor=${snapshot.cursor} complete=${snapshot.complete} limitReason=${snapshot.limitReason ?? "none"}`,
       ...lines,
     ].join("\n");
   }

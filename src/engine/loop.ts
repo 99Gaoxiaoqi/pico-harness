@@ -43,10 +43,7 @@ import {
 } from "../context/runtime-compaction-checkpoint.js";
 import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
-import {
-  estimateModelInputTokens,
-  estimateMessagesTokens,
-} from "../context/context-budget.js";
+import { estimateModelInputTokens, estimateMessagesTokens } from "../context/context-budget.js";
 import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import { PromptComposer, type PromptLayers } from "../context/composer.js";
@@ -123,6 +120,15 @@ const PLAN_PROVIDER_TOOL_NAMES = new Set([
   "grep",
   "skill_view",
   "repo_map",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
+  "start_discovery",
+  "update_discovery",
+  "complete_discovery",
+  "cancel_discovery",
   "ask_user",
   "submit_plan",
 ]);
@@ -670,8 +676,10 @@ export interface AgentEngineOptions {
   rebuildProvider?: () => LLMProvider | undefined;
   /** 主会话 Hook 生命周期；子代 verifier/agent 不注入以防递归。 */
   hookService?: HookService;
-  /** 后台沙箱 Hook 的 committed ToolResult 边界；不得在工具执行期读取 raw 输出。 */
+  /** 宿主在 committed ToolResult 边界执行的 Hook；不得在工具执行期读取 raw 输出。 */
   postToolResultHook?: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
+  /** 主循环正常结束、仍位于 RuntimeRun capability 内时执行的宿主收口。 */
+  onRunComplete?: () => Promise<void>;
   /** 为主工作区及隔离 worktree 构建同策略 Skill Catalog。 */
   skillLoaderFactory?: (workDir: string) => SkillLoader;
   /** Runtime-owned lifecycle port; the engine never imports the durable implementation. */
@@ -755,6 +763,7 @@ export class AgentEngine implements AgentRunner {
   private readonly rebuildProvider?: () => LLMProvider | undefined;
   private readonly hookService?: HookService;
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
+  private readonly onRunComplete?: AgentEngineOptions["onRunComplete"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort;
   private readonly collaborationMode?: () => "agent" | "plan";
@@ -805,6 +814,7 @@ export class AgentEngine implements AgentRunner {
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
     this.postToolResultHook = opts.postToolResultHook;
+    this.onRunComplete = opts.onRunComplete;
     this.skillLoaderFactory = opts.skillLoaderFactory;
     this.runtimePort = opts.runtimePort;
     this.collaborationMode = opts.collaborationMode;
@@ -1071,7 +1081,10 @@ export class AgentEngine implements AgentRunner {
         signal,
       );
       if (result) {
-        span?.addAttributes({ midTurnCompacted: true, midTurnCompactedCount: result.compactedCount });
+        span?.addAttributes({
+          midTurnCompacted: true,
+          midTurnCompactedCount: result.compactedCount,
+        });
       }
     } catch (err) {
       // fail-open:压缩失败不抛错,留给下一轮 prepareModelContext 或 overflow 处理
@@ -2373,6 +2386,8 @@ export class AgentEngine implements AgentRunner {
       }
     }
 
+    await this.onRunComplete?.();
+
     // 返回本轮新增的消息序列(从用户输入起到最终答案止)
     return session.getHistory().slice(beforeLen);
   }
@@ -2595,7 +2610,7 @@ export class AgentEngine implements AgentRunner {
         firstError ??= error;
         logger.warn(
           { error: String(error), tool: envelope.toolName },
-          "[Engine] ToolResult 已持久化，但后台结果 Hook 通知失败",
+          "[Engine] ToolResult 已持久化，但宿主结果 Hook 通知失败",
         );
       }
     }
