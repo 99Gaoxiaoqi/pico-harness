@@ -80,7 +80,10 @@ export class DiscoveryCoordinator {
   }
 
   checkpoint(
-    input: OperationInput & { readonly discoveryId: string; readonly checkpoint: DiscoveryCheckpoint },
+    input: OperationInput & {
+      readonly discoveryId: string;
+      readonly checkpoint: DiscoveryCheckpoint;
+    },
   ): Promise<DiscoveryProjection> {
     const discoveryId = requiredDiscoveryId(input.discoveryId, "Discovery id");
     const checkpoint = normalizeCheckpoint(input.checkpoint);
@@ -241,7 +244,9 @@ export class DiscoveryCoordinator {
   ): Promise<DiscoveryProjection> {
     return this.serial(async () => {
       const before = await this.project();
-      const run = before.discoveries.find((candidate) => candidate.discoveryId === input.discoveryId);
+      const run = before.discoveries.find(
+        (candidate) => candidate.discoveryId === input.discoveryId,
+      );
       if (!run) throw new DiscoveryConflictError("Discovery does not exist");
       const depth = input.depth ?? run.depth;
       if (!isDiscoveryDepth(depth)) throw new DiscoveryConflictError("Discovery depth is invalid");
@@ -291,8 +296,7 @@ export class DiscoveryCoordinator {
     const fingerprint = discoveryOperationFingerprint(kind, semantic);
     const entries = await this.store.readSessionEntries(this.context.sessionId);
     const replay = projectActiveDiscoveryEntries(entries).find(
-      ({ event }) =>
-        "operationId" in event.data && event.data.operationId === operationId,
+      ({ event }) => "operationId" in event.data && event.data.operationId === operationId,
     );
     if (replay) {
       if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint) {
@@ -358,12 +362,17 @@ export class DiscoveryCoordinator {
 }
 
 function normalizeCheckpoint(input: DiscoveryCheckpoint): DiscoveryCheckpoint {
-  if (!isDiscoveryPhase(input.phase)) throw new DiscoveryConflictError("Discovery phase is invalid");
+  if (!isDiscoveryPhase(input.phase))
+    throw new DiscoveryConflictError("Discovery phase is invalid");
   return {
     phase: input.phase,
     cycle: positiveInteger(input.cycle, "Discovery cycle"),
     candidates: normalizeCandidates(input.candidates),
-    evidenceRefs: uniqueTexts(input.evidenceRefs, "evidence reference", DISCOVERY_MAX_EVIDENCE_REFS),
+    evidenceRefs: uniqueTexts(
+      input.evidenceRefs,
+      "evidence reference",
+      DISCOVERY_MAX_EVIDENCE_REFS,
+    ),
     hypotheses: normalizeHypotheses(input.hypotheses),
     openQuestions: uniqueTexts(input.openQuestions, "open question", 20),
     toolCallsUsed: nonNegativeInteger(input.toolCallsUsed, "toolCallsUsed"),

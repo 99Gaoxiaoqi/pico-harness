@@ -71,9 +71,7 @@ export function reduceDiscoveryEvent(
     return projection(state, discoveries);
   }
 
-  const index = discoveries.findIndex(
-    (run) => run.discoveryId === discoveryEvent.data.discoveryId,
-  );
+  const index = discoveries.findIndex((run) => run.discoveryId === discoveryEvent.data.discoveryId);
   if (index < 0) conflict("Discovery does not exist");
   let run = discoveries[index]!;
   switch (discoveryEvent.kind) {
@@ -134,7 +132,11 @@ export function reduceDiscoveryEvent(
       break;
     case "discovery.resumed": {
       if (run.status !== "interrupted") conflict("Discovery is not interrupted");
-      if (discoveries.some((candidate, candidateIndex) => candidateIndex !== index && candidate.status === "active")) {
+      if (
+        discoveries.some(
+          (candidate, candidateIndex) => candidateIndex !== index && candidate.status === "active",
+        )
+      ) {
         conflict("Another Discovery is active");
       }
       if (
@@ -171,7 +173,11 @@ export function reduceDiscoveryEvent(
         conflict("Discovery is not open");
       }
       run = {
-        ...cancelOpenBranches(run, discoveryEvent.data.reason ?? "Discovery cancelled", discoveryEvent.at),
+        ...cancelOpenBranches(
+          run,
+          discoveryEvent.data.reason ?? "Discovery cancelled",
+          discoveryEvent.at,
+        ),
         status: "cancelled",
         ...(discoveryEvent.data.reason ? { reason: discoveryEvent.data.reason } : {}),
         updatedAt: discoveryEvent.at,
@@ -228,7 +234,7 @@ function applyCheckpoint(
 
 function startBranch(
   run: DiscoveryRun,
-  data: Extract<RuntimeDiscoveryEvent, { kind: "discovery.branch.started" }>['data'],
+  data: Extract<RuntimeDiscoveryEvent, { kind: "discovery.branch.started" }>["data"],
   at: string,
 ): DiscoveryRun {
   if (run.branches.some((branch) => branch.branchId === data.branchId)) {
@@ -318,7 +324,7 @@ function checkpointBranch(
 
 function completeBranch(
   run: DiscoveryRun,
-  data: Extract<RuntimeDiscoveryEvent, { kind: "discovery.branch.completed" }>['data'],
+  data: Extract<RuntimeDiscoveryEvent, { kind: "discovery.branch.completed" }>["data"],
   at: string,
 ): DiscoveryRun {
   const index = branchIndex(run, data.branchId);
@@ -367,7 +373,12 @@ function completeBranch(
   };
 }
 
-function cancelBranch(run: DiscoveryRun, branchId: string, reason: string | undefined, at: string): DiscoveryRun {
+function cancelBranch(
+  run: DiscoveryRun,
+  branchId: string,
+  reason: string | undefined,
+  at: string,
+): DiscoveryRun {
   const index = branchIndex(run, branchId);
   const branch = run.branches[index]!;
   requireRunningBranch(branch);
@@ -397,18 +408,12 @@ function cancelOpenBranches(run: DiscoveryRun, reason: string, at: string): Disc
     ...run,
     budget: { ...run.budget, reservedToolCalls: 0, reservedFiles: 0 },
     branches: run.branches.map((branch) =>
-      isOpenBranch(branch)
-        ? { ...branch, status: "cancelled", reason, updatedAt: at }
-        : branch,
+      isOpenBranch(branch) ? { ...branch, status: "cancelled", reason, updatedAt: at } : branch,
     ),
   };
 }
 
-function consumeBudget(
-  run: DiscoveryRun,
-  toolCalls: number,
-  inspectedFiles: readonly string[],
-) {
+function consumeBudget(run: DiscoveryRun, toolCalls: number, inspectedFiles: readonly string[]) {
   const consumedToolCalls = run.budget.consumedToolCalls + toolCalls;
   const consumedFiles = inspectedFiles.length;
   if (consumedToolCalls > run.budget.maxToolCalls || consumedFiles > run.budget.maxFiles) {
@@ -481,7 +486,9 @@ function mergeHypotheses(
 
 function hypothesisDigest(hypotheses: readonly DiscoveryHypothesis[]): string {
   return hypotheses
-    .map((hypothesis) => `${hypothesis.id}:${hypothesis.status}:${hypothesis.evidenceRefs.join(",")}`)
+    .map(
+      (hypothesis) => `${hypothesis.id}:${hypothesis.status}:${hypothesis.evidenceRefs.join(",")}`,
+    )
     .join("|");
 }
 

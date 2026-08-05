@@ -157,17 +157,17 @@ export function discoveryBudget(depth: DiscoveryDepth): DiscoveryBudget {
   };
 }
 
-export function normalizeDiscoveryStartInput(input: DiscoveryStartInput): Required<
-  Pick<DiscoveryStartInput, "objective" | "depth" | "roots">
-> & { readonly discoveryId?: string } {
+export function normalizeDiscoveryStartInput(
+  input: DiscoveryStartInput,
+): Required<Pick<DiscoveryStartInput, "objective" | "depth" | "roots">> & {
+  readonly discoveryId?: string;
+} {
   const objective = requiredText(input.objective, "Discovery objective");
   const depth = input.depth ?? "balanced";
   if (!isDiscoveryDepth(depth)) throw new DiscoveryConflictError("Discovery depth is invalid");
   const roots = uniqueTexts(input.roots ?? ["."], "Discovery root", 8);
   const normalized = {
-    ...(input.discoveryId
-      ? { discoveryId: requiredId(input.discoveryId, "Discovery id") }
-      : {}),
+    ...(input.discoveryId ? { discoveryId: requiredId(input.discoveryId, "Discovery id") } : {}),
     objective,
     depth,
     roots,
