@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { constants, type Dirent } from "node:fs";
 import { open, readdir, type FileHandle } from "node:fs/promises";
 import path from "node:path";
@@ -51,6 +52,21 @@ export const REPO_MAP_MAX_FILES = 200;
 const DEFAULT_SCAN_BATCH = REPO_MAP_MAX_FILES;
 const DEFAULT_RESULT_LIMIT = 100;
 
+export interface RepoMapScanReport {
+  /** 本次调用真正尝试读取的工作区相对源码路径，包含读取失败的条目。 */
+  readonly scannedFiles: readonly string[];
+}
+
+const repoMapScanObserver = new AsyncLocalStorage<(report: RepoMapScanReport) => void>();
+
+/** 将一次 Repo Map 调用的实际扫描集合绑定到当前异步执行链。 */
+export function observeRepoMapScans<T>(
+  observer: (report: RepoMapScanReport) => void,
+  execute: () => Promise<T>,
+): Promise<T> {
+  return repoMapScanObserver.run(observer, execute);
+}
+
 interface IndexedSymbol extends CodeSymbol {
   readonly declarationLine: number;
   endLine: number;
@@ -62,6 +78,11 @@ interface IndexedFile {
   readonly text: string;
   readonly lines: readonly string[];
   readonly symbols: readonly IndexedSymbol[];
+}
+
+interface RepoMapScanBatch {
+  readonly indexed: readonly IndexedFile[];
+  readonly scannedFiles: readonly string[];
 }
 
 export interface RepoMapSnapshot {
@@ -182,7 +203,11 @@ export class RepoMapService implements CodeIntelligenceService {
       readonly signal?: AbortSignal;
     } = {},
   ): Promise<RepoMapSnapshot> {
-    await this.scanNext(clampMaxFiles(options.maxFiles ?? this.scanBatchSize), options.signal);
+    const scan = await this.scanNext(
+      clampMaxFiles(options.maxFiles ?? this.scanBatchSize),
+      options.signal,
+    );
+    repoMapScanObserver.getStore()?.({ scannedFiles: scan.scannedFiles });
     const query = options.query?.trim().toLowerCase();
     const files = [...this.indexedFiles.values()]
       .map((file) => scoreRepoMapFile(file, query))
@@ -217,20 +242,18 @@ export class RepoMapService implements CodeIntelligenceService {
   ): Promise<void> {
     const initialCount = this.indexedFiles.size;
     while (!this.isComplete() && this.indexedFiles.size - initialCount < this.scanBatchSize) {
-      const indexed = await this.scanNext(1, options.signal);
+      const { indexed } = await this.scanNext(1, options.signal);
       if (indexed.some(predicate)) return;
     }
   }
 
-  private async scanNext(limit: number, signal?: AbortSignal): Promise<readonly IndexedFile[]> {
+  private async scanNext(limit: number, signal?: AbortSignal): Promise<RepoMapScanBatch> {
     return this.serializeIndex(() => this.scanNextUnlocked(clampMaxFiles(limit), signal));
   }
 
-  private async scanNextUnlocked(
-    limit: number,
-    signal?: AbortSignal,
-  ): Promise<readonly IndexedFile[]> {
+  private async scanNextUnlocked(limit: number, signal?: AbortSignal): Promise<RepoMapScanBatch> {
     await this.discoverFiles();
+    const startIndex = this.nextFileIndex;
     const indexed: IndexedFile[] = [];
     while (this.nextFileIndex < (this.discoveredFiles?.length ?? 0) && indexed.length < limit) {
       throwIfAborted(signal);
@@ -239,7 +262,10 @@ export class RepoMapService implements CodeIntelligenceService {
       const file = await this.indexFileUnlocked(filePath, signal).catch(() => undefined);
       if (file) indexed.push(file);
     }
-    return indexed;
+    return {
+      indexed,
+      scannedFiles: (this.discoveredFiles ?? []).slice(startIndex, this.nextFileIndex),
+    };
   }
 
   private async discoverFiles(): Promise<void> {
