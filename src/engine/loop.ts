@@ -678,6 +678,8 @@ export interface AgentEngineOptions {
   hookService?: HookService;
   /** 宿主在 committed ToolResult 边界执行的 Hook；不得在工具执行期读取 raw 输出。 */
   postToolResultHook?: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
+  /** Explore required delegation may use only these tools for final direct verification. */
+  exploreSynthesisAllowedTools?: readonly string[];
   /** 主循环正常结束、仍位于 RuntimeRun capability 内时执行的宿主收口。 */
   onRunComplete?: () => Promise<void>;
   /** 主循环异常或取消时执行的宿主中断收口。 */
@@ -765,6 +767,7 @@ export class AgentEngine implements AgentRunner {
   private readonly rebuildProvider?: () => LLMProvider | undefined;
   private readonly hookService?: HookService;
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
+  private readonly exploreSynthesisAllowedTools: ReadonlySet<string>;
   private readonly onRunComplete?: AgentEngineOptions["onRunComplete"];
   private readonly onRunInterrupted?: AgentEngineOptions["onRunInterrupted"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
@@ -817,6 +820,7 @@ export class AgentEngine implements AgentRunner {
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
     this.postToolResultHook = opts.postToolResultHook;
+    this.exploreSynthesisAllowedTools = new Set(opts.exploreSynthesisAllowedTools ?? []);
     this.onRunComplete = opts.onRunComplete;
     this.onRunInterrupted = opts.onRunInterrupted;
     this.skillLoaderFactory = opts.skillLoaderFactory;
@@ -1603,7 +1607,7 @@ export class AgentEngine implements AgentRunner {
           // explore-only required 委派收口后不再给主模型任何工具，
           // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
           const unrestrictedProviderTools = exploreSynthesisOnly
-            ? []
+            ? availableTools.filter((tool) => this.exploreSynthesisAllowedTools.has(tool.name))
             : requiredFirstDelegationActive || requiredDelegationRecoveryPending
               ? allTools.filter((tool) => tool.name === "delegate_task")
               : availableTools;
@@ -1771,7 +1775,10 @@ export class AgentEngine implements AgentRunner {
           }
 
           const toolCalls = responseMsg.toolCalls ?? [];
-          if (exploreSynthesisOnly && toolCalls.length > 0) {
+          if (
+            exploreSynthesisOnly &&
+            toolCalls.some((toolCall) => !this.exploreSynthesisAllowedTools.has(toolCall.name))
+          ) {
             reporter.onAssistantResponseSuppressed?.("explore-synthesis-retry");
             // 某些 provider/模型可能在 tools=[] 时仍幻觉产生 tool_calls。
             // 保留 assistant tool call 与逐一 tool result 的协议配对，但绝不进入 Registry。
@@ -1820,7 +1827,7 @@ export class AgentEngine implements AgentRunner {
             });
             continue;
           }
-          if (exploreSynthesisOnly) {
+          if (exploreSynthesisOnly && toolCalls.length === 0) {
             exploreSynthesisOnly = false;
             exploreSynthesisToolRetries = 0;
           }
@@ -2297,7 +2304,9 @@ export class AgentEngine implements AgentRunner {
             await session.commitMessages({
               role: "user",
               content: exploreSynthesisOnly
-                ? EXPLORE_SYNTHESIS_PROMPT
+                ? this.exploreSynthesisAllowedTools.size > 0
+                  ? "[DISCOVERY VERIFY] 并发只读分支已收口。只允许使用当前提供的核验工具直接读取候选源码并交叉确认；完成核验后输出统一报告，不得扩大搜索或实施修改。"
+                  : EXPLORE_SYNTHESIS_PROMPT
                 : "[DELEGATION JOIN] required 子代理已全部收口（结果可能包含失败）。" +
                   "请吸收上述聚合结果并继续集成、定点验证或统一总结；" +
                   "不要重复子代理已完成范围的大规模探索。",

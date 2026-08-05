@@ -45,6 +45,11 @@ import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
+import {
+  isExploreOnlyRequiredDelegationArguments,
+  normalizeDelegateTasks,
+  requireDelegateTaskArgs,
+} from "../tools/delegation-contract.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
 import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
 import {
@@ -1563,7 +1568,8 @@ export async function executeAgentRuntime(
       ? createAutomaticDiscoveryTracker({
           coordinator: discoveryRegistryOptions.coordinator,
           objective: prompt,
-          autoStart: collaborationMode() === "plan",
+          autoStart: collaborationMode() === "plan" || isolatedDiscoveryRun,
+          allowConcurrentExplore: isolatedDiscoveryRun,
         })
       : undefined;
     if (automaticDiscovery) {
@@ -1634,6 +1640,9 @@ export async function executeAgentRuntime(
         : automaticDiscovery
           ? { postToolResultHook: automaticDiscovery.onToolResult }
           : {}),
+      ...(isolatedDiscoveryRun
+        ? { exploreSynthesisAllowedTools: [...AUTOMATIC_DISCOVERY_TOOLS] }
+        : {}),
       ...(automaticDiscovery ? { onRunComplete: automaticDiscovery.complete } : {}),
       ...(automaticDiscovery ? { onRunInterrupted: automaticDiscovery.interrupt } : {}),
       skillLoaderFactory,
@@ -2099,11 +2108,20 @@ function createAutomaticDiscoveryTracker(input: {
   readonly coordinator: () => DiscoveryCoordinator;
   readonly objective: string;
   readonly autoStart: boolean;
+  readonly allowConcurrentExplore: boolean;
 }): AutomaticDiscoveryTracker {
   const discoveryId = `auto-discovery:${randomUUID()}`;
   const completionKey = randomUUID();
   const repoMapScans = new Map<string, readonly string[]>();
   const directReadEvidence = new Map<string, Set<string>>();
+  const delegatedBranches = new Map<
+    string,
+    readonly {
+      branchId: string;
+      reserveToolCalls: number;
+      reserveFiles: number;
+    }[]
+  >();
 
   const ensureActive = async (operationKey: string) => {
     const coordinator = input.coordinator();
@@ -2154,6 +2172,70 @@ function createAutomaticDiscoveryTracker(input: {
         await prepareForCompletion();
         return next(call);
       }
+      if (call.name === "delegate_task" && input.allowConcurrentExplore) {
+        if (!isExploreOnlyRequiredDelegationArguments(call.arguments)) {
+          throw new Error("Discovery 只允许 completion_policy=required 的 mode=explore 子任务委派");
+        }
+        const projection = await ensureActive(call.id);
+        const active = projection.active;
+        if (!active) throw new Error("Discovery 并发分支需要活动的 Discovery");
+        const parsed = requireDelegateTaskArgs(call.arguments);
+        const tasks = normalizeDelegateTasks(parsed);
+        if (tasks.length !== active.budget.maxBranches) {
+          throw new Error(
+            `Discovery ${active.depth} 必须一次委派 ${active.budget.maxBranches} 个互斥只读分支`,
+          );
+        }
+        if (!Array.isArray(parsed.tasks)) {
+          throw new Error("Discovery 并发委派必须使用 tasks 数组");
+        }
+        assertMutuallyExclusiveDiscoveryRoots(tasks.map((task) => task.roots));
+        const remainingToolCalls =
+          active.budget.maxToolCalls -
+          active.budget.consumedToolCalls -
+          active.budget.reservedToolCalls;
+        const remainingFiles =
+          active.budget.maxFiles - active.budget.consumedFiles - active.budget.reservedFiles;
+        if (remainingToolCalls < tasks.length || remainingFiles < tasks.length) {
+          throw new Error("Discovery 剩余共享预算不足以启动并发分支");
+        }
+        const branches: {
+          branchId: string;
+          reserveToolCalls: number;
+          reserveFiles: number;
+        }[] = [];
+        for (const [ordinal, task] of tasks.entries()) {
+          const reserveToolCalls = splitDiscoveryBudget(remainingToolCalls, tasks.length, ordinal);
+          const reserveFiles = splitDiscoveryBudget(remainingFiles, tasks.length, ordinal);
+          const branchId = `delegate:${call.id}:${ordinal}`;
+          await input.coordinator().startBranch({
+            operationId: `auto-discovery:branch-start:${call.id}:${ordinal}`,
+            discoveryId: active.discoveryId,
+            branchId,
+            ordinal,
+            objective: task.goal,
+            roots: task.roots,
+            queries: [],
+            stoppingCondition: task.stoppingCondition,
+            reserveToolCalls,
+            reserveFiles,
+          });
+          branches.push({ branchId, reserveToolCalls, reserveFiles });
+        }
+        delegatedBranches.set(call.id, branches);
+        const raw = JSON.parse(call.arguments) as {
+          tasks: Array<Record<string, unknown>>;
+          completion_policy?: unknown;
+        };
+        raw.completion_policy = "required";
+        raw.tasks = raw.tasks.map((task, ordinal) => ({
+          ...task,
+          mode: "explore",
+          role: "leaf",
+          max_files: branches[ordinal]!.reserveFiles,
+        }));
+        return next({ ...call, arguments: JSON.stringify(raw) });
+      }
       if (!AUTOMATIC_DISCOVERY_TOOLS.has(call.name)) return next(call);
 
       const projection = await ensureActive(call.id);
@@ -2171,6 +2253,34 @@ function createAutomaticDiscoveryTracker(input: {
       }
     },
     async onToolResult(call, result) {
+      const branchReservations = delegatedBranches.get(call.id);
+      if (branchReservations) {
+        delegatedBranches.delete(call.id);
+        const evidenceRef =
+          result.evidence?.uri ??
+          `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
+        const candidates =
+          result.status === "succeeded"
+            ? discoveryCandidatesFromToolResult(call, result, evidenceRef)
+            : [];
+        for (const branch of branchReservations) {
+          await input.coordinator().completeBranch({
+            operationId: `auto-discovery:branch-complete:${call.id}:${branch.branchId}`,
+            discoveryId: (await input.coordinator().project()).active?.discoveryId ?? discoveryId,
+            branchId: branch.branchId,
+            status: result.status === "succeeded" ? "completed" : "failed",
+            consumedToolCalls: Math.min(1, branch.reserveToolCalls),
+            inspectedFiles: candidates
+              .map((candidate) => candidate.path)
+              .slice(0, branch.reserveFiles),
+            candidates,
+            evidenceRefs: result.status === "succeeded" ? [evidenceRef] : [],
+            openQuestions: [],
+            ...(result.status === "succeeded" ? {} : { reason: result.projection.text }),
+          });
+        }
+        return;
+      }
       const repoMapScannedFiles = repoMapScans.get(call.id) ?? [];
       repoMapScans.delete(call.id);
       const succeeded = result.status === "succeeded";
@@ -2266,6 +2376,31 @@ function automaticDiscoveryPhase(current: DiscoveryPhase, toolName: string): Dis
   }
   if (current === "forage") return "focus";
   return "deepen";
+}
+
+function splitDiscoveryBudget(total: number, count: number, ordinal: number): number {
+  return Math.floor(total / count) + (ordinal < total % count ? 1 : 0);
+}
+
+function assertMutuallyExclusiveDiscoveryRoots(rootSets: readonly (readonly string[])[]): void {
+  const normalized = rootSets.map((roots) =>
+    roots.map((root) => root.replaceAll("\\", "/").replace(/^\.\//u, "").replace(/\/$/u, "")),
+  );
+  for (let left = 0; left < normalized.length; left++) {
+    for (let right = left + 1; right < normalized.length; right++) {
+      for (const leftRoot of normalized[left]!) {
+        for (const rightRoot of normalized[right]!) {
+          if (
+            leftRoot === rightRoot ||
+            leftRoot.startsWith(`${rightRoot}/`) ||
+            rightRoot.startsWith(`${leftRoot}/`)
+          ) {
+            throw new Error("Discovery 并发分支 roots 必须互不重叠");
+          }
+        }
+      }
+    }
+  }
 }
 
 function clampRepoMapCallToDiscoveryBudget(
