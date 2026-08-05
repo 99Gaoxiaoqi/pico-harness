@@ -657,6 +657,76 @@ test("Plan runtime suppresses injected hooks and their filesystem side effects",
   );
 });
 
+test("explicit Discovery stays isolated when the persisted collaboration mode is Plan", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-discovery-isolation-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  await mkdir(workDir);
+  t.after(async () => {
+    globalSessionManager.delete("plan-discovery-isolation", workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let hookCalls = 0;
+  const hookService = new HookService({
+    workDir,
+    sessionId: "plan-discovery-isolation",
+    executor: { execute: async () => ({ decision: "allow" }) },
+    decisionProviders: [
+      {
+        async evaluate() {
+          hookCalls++;
+          return { decision: "allow" };
+        },
+      },
+    ],
+  });
+  const provider: LLMProvider = {
+    async generate(messages, tools) {
+      const system = messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n");
+      assert.equal(
+        tools.some(({ name }) => name === "submit_plan"),
+        false,
+      );
+      assert.equal(
+        tools.some(({ name }) => name.startsWith("mcp__")),
+        false,
+      );
+      assert.doesNotMatch(system, /只能调查、澄清需求并提交实施计划/u);
+      return { role: "assistant", content: "只读调查报告" };
+    },
+  };
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "执行隔离只读调查",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId: "plan-discovery-isolation" },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+      discoveryRun: true,
+      allowedTools: ["read_file", "repo_map"],
+    },
+    { provider, picoHome, hookService, reporter: new SilentReporter() },
+  );
+
+  assert.equal(result.handoff, undefined);
+  assert.equal(hookCalls, 0);
+  const session = await globalSessionManager.getOrCreate("plan-discovery-isolation", workDir, {
+    persistence: true,
+    picoHome,
+  });
+  assert.equal(
+    projectRuntimeSessionState(await session.runtimeEventStore!.readSession(session.id)).settings
+      ?.collaborationMode,
+    "plan",
+  );
+});
+
 test("approval recovers its crash gap and replay never starts a second execution Run", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-approval-replay-"));
   const workDir = join(root, "work");
