@@ -26,9 +26,7 @@ export const DISCOVERY_EVENT_KINDS = [
 export type DiscoveryEventKind = (typeof DISCOVERY_EVENT_KINDS)[number];
 
 export function isDiscoveryEventKind(value: unknown): value is DiscoveryEventKind {
-  return (
-    typeof value === "string" && (DISCOVERY_EVENT_KINDS as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (DISCOVERY_EVENT_KINDS as readonly string[]).includes(value);
 }
 
 export function assertDiscoveryEventData(kind: DiscoveryEventKind, data: unknown): void {
@@ -172,12 +170,7 @@ function assertBudget(value: unknown): void {
   for (const key of ["maxBranches", "maxCycles", "maxToolCalls", "maxFiles"]) {
     assertPositiveInteger(value[key], key);
   }
-  for (const key of [
-    "consumedToolCalls",
-    "consumedFiles",
-    "reservedToolCalls",
-    "reservedFiles",
-  ]) {
+  for (const key of ["consumedToolCalls", "consumedFiles", "reservedToolCalls", "reservedFiles"]) {
     assertNonNegativeInteger(value[key], key);
   }
 }
