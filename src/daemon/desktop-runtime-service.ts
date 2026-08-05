@@ -296,6 +296,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     { readonly requestFingerprint: string; readonly promise: Promise<JsonObject> }
   >();
   private readonly inFlightHandles = new Set<Promise<JsonValue>>();
+  private readonly discoveryRuns = new Map<
+    string,
+    {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly discoveryId: string;
+      readonly runId: string;
+    }
+  >();
+  private readonly discoveryRunKeysByRun = new Map<string, string>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private userConfigWatchTail: Promise<void> = Promise.resolve();
   /** Serializes operations that can create or remove live Provider dependencies. */
@@ -366,6 +376,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     this.userConfigWatchReady = this.startUserConfigWatch();
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
+      if (event.topic === "run.finished" && event.scope.runId) {
+        this.forgetDiscoveryRun(event.scope.workspacePath, event.scope.runId);
+      }
       const sessionId = event.scope.sessionId;
       if (!sessionId) return;
       if (isDesktopTranscriptNotification(event.topic)) {
@@ -1559,6 +1572,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await this.startDiscoveryRun({
         workspacePath: canonical,
         sessionId: params.sessionId,
+        discoveryId: requireText(projection.active?.discoveryId, "discovery.discoveryId"),
         objective: params.objective,
         depth: params.depth,
         operationId: params.operationId,
@@ -1618,6 +1632,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         await this.startDiscoveryRun({
           workspacePath: canonical,
           sessionId: params.sessionId,
+          discoveryId: resumed.discoveryId,
           objective: resumed.objective,
           depth: resumed.depth,
           operationId: params.operationId,
@@ -1655,15 +1670,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       true,
     );
     this.publishDiscovery(canonical, params.sessionId, projection, "cancelled");
-    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
-    if (activeRun) {
+    const linkedRun = this.discoveryRuns.get(
+      discoveryRunAssociationKey(canonical, params.sessionId, params.discoveryId),
+    );
+    const activeRun = linkedRun
+      ? await this.findSessionRun(canonical, params.sessionId, linkedRun.runId)
+      : undefined;
+    if (linkedRun && activeRun && !isTerminalRunStatus(String(activeRun["status"] ?? ""))) {
       await this.options.runtimeService.handle(
         createRuntimeRequest("run.cancel", {
           workspacePath: canonical,
-          runId: requireText(activeRun["runId"], "run.runId"),
+          runId: linkedRun.runId,
           reason: params.reason ?? "Discovery cancelled by user",
         }),
       );
+    } else if (linkedRun) {
+      this.forgetDiscoveryRun(canonical, linkedRun.runId);
     }
     return { projection: toJsonValue(projection) };
   }
@@ -1734,6 +1756,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async startDiscoveryRun(input: {
     readonly workspacePath: string;
     readonly sessionId: string;
+    readonly discoveryId: string;
     readonly objective: string;
     readonly depth: "quick" | "balanced" | "deep";
     readonly operationId: string;
@@ -1762,13 +1785,57 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       userInput,
       `discovery:${input.operationId}`,
     );
-    await this.options.runtimeService.startForegroundRun({
+    const run = requireJsonRecord(
+      await this.options.runtimeService.startForegroundRun({
+        workspacePath: input.workspacePath,
+        sessionId: input.sessionId,
+        prompt,
+        execution: { allowedTools: DISCOVERY_RUN_TOOLS, resumeExistingSession: true },
+        idempotencyKey: desktopRunStartIdempotencyKey("discovery", input.operationId),
+      }),
+      "discovery run.start result",
+    );
+    const runId = requireText(run["runId"], "discovery run.runId");
+    this.rememberDiscoveryRun({
       workspacePath: input.workspacePath,
       sessionId: input.sessionId,
-      prompt,
-      execution: { allowedTools: DISCOVERY_RUN_TOOLS, resumeExistingSession: true },
-      idempotencyKey: desktopRunStartIdempotencyKey("discovery", input.operationId),
+      discoveryId: input.discoveryId,
+      runId,
     });
+    const current = await this.findSessionRun(input.workspacePath, input.sessionId, runId);
+    if (!current || isTerminalRunStatus(String(current["status"] ?? ""))) {
+      this.forgetDiscoveryRun(input.workspacePath, runId);
+    }
+  }
+
+  private rememberDiscoveryRun(association: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly discoveryId: string;
+    readonly runId: string;
+  }): void {
+    const discoveryKey = discoveryRunAssociationKey(
+      association.workspacePath,
+      association.sessionId,
+      association.discoveryId,
+    );
+    const runKey = discoveryRunKey(association.workspacePath, association.runId);
+    const previous = this.discoveryRuns.get(discoveryKey);
+    if (previous) {
+      this.discoveryRunKeysByRun.delete(discoveryRunKey(previous.workspacePath, previous.runId));
+    }
+    const previousDiscoveryKey = this.discoveryRunKeysByRun.get(runKey);
+    if (previousDiscoveryKey) this.discoveryRuns.delete(previousDiscoveryKey);
+    this.discoveryRuns.set(discoveryKey, association);
+    this.discoveryRunKeysByRun.set(runKey, discoveryKey);
+  }
+
+  private forgetDiscoveryRun(workspacePath: string, runId: string): void {
+    const runKey = discoveryRunKey(workspacePath, runId);
+    const discoveryKey = this.discoveryRunKeysByRun.get(runKey);
+    if (!discoveryKey) return;
+    this.discoveryRunKeysByRun.delete(runKey);
+    this.discoveryRuns.delete(discoveryKey);
   }
 
   private async interruptDiscoveryAfterLaunchFailure(
@@ -1901,6 +1968,21 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return runs
       .filter(isJsonRecord)
       .find((run) => !isTerminalRunStatus(String(run["status"] ?? "")));
+  }
+
+  private async findSessionRun(
+    workspacePath: string,
+    sessionId: string,
+    runId: string,
+  ): Promise<JsonObject | undefined> {
+    const value = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath, sessionId }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(value["runs"]) ? value["runs"] : [];
+    return runs.filter(isJsonRecord).find((run) => run["runId"] === runId);
   }
 
   private async findActiveWorkspaceRun(workspacePath: string): Promise<JsonObject | undefined> {
@@ -3954,6 +4036,18 @@ function desktopRunStartIdempotencyKey(
 ): string {
   const digest = createHash("sha256").update(key).digest("hex");
   return `desktop-${source}-run:${digest}`;
+}
+
+function discoveryRunAssociationKey(
+  workspacePath: string,
+  sessionId: string,
+  discoveryId: string,
+): string {
+  return [workspacePath, sessionId, discoveryId].join("\0");
+}
+
+function discoveryRunKey(workspacePath: string, runId: string): string {
+  return [workspacePath, runId].join("\0");
 }
 
 function sessionPayload(
