@@ -12,7 +12,12 @@ import {
   type EngineRuntimeCapability,
   type EngineRuntimeToolResultInput,
   type EngineRuntimeWriteGuard,
+  type LastCompactionCheckpoint,
 } from "../engine/runtime-port.js";
+import {
+  COMPACTION_SUMMARY_OPEN_TAG,
+  COMPACTION_SUMMARY_CLOSE_TAG,
+} from "../context/compaction-markers.js";
 import {
   projectRuntimeModelMessage,
   projectRuntimeToolResultMessage,
@@ -187,6 +192,8 @@ export interface RuntimeCheckpointOptions {
   readonly sourceDigest: string;
   readonly throughEventId: string;
   readonly summary: Message;
+  /** 滚动摘要链:上一个 checkpoint 的 id(若存在)。 */
+  readonly previousCheckpointId?: string;
 }
 
 interface RuntimeForkBootstrapCompletion {
@@ -817,6 +824,31 @@ export class RuntimeRun {
     return projectRuntimeSessionMessageEntries(await this.store.readSession(this.sessionId));
   }
 
+  /**
+   * 查找最后一个正常的压缩 checkpoint，用于滚动摘要增量更新。
+   * 遇到 hard-reset checkpoint 时立即返回 undefined——硬重置物理上重置了上下文，
+   * 其之前的 checkpoint 都已失效，不能再作为增量更新的基线。
+   */
+  async findLastCompactionCheckpoint(): Promise<LastCompactionCheckpoint | undefined> {
+    const events = await this.store.readSession(this.sessionId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]!;
+      if (event.kind !== "context.checkpoint.recorded") continue;
+      const data = event.data;
+      // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
+      if (data.checkpointId.startsWith("hard-reset:")) return undefined;
+      const content = data.summary.content;
+      // 用结构化标签精确定位正文边界。
+      const startIdx = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
+      const endIdx = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
+      // 标签缺失时返回 undefined，避免把 REFERENCE-ONLY 包装当 previousSummary 喂模型。
+      if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return undefined;
+      const summaryText = content.slice(startIdx + COMPACTION_SUMMARY_OPEN_TAG.length, endIdx).trim();
+      return { checkpointId: data.checkpointId, summaryText };
+    }
+    return undefined;
+  }
+
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
     const context: RuntimeRunContext = { run: this, active: true };
     liveRuntimeRuns.add(runtimeRunLiveKey(this.sessionId, this.runId));
@@ -1165,6 +1197,9 @@ export class RuntimeRun {
         sourceDigest: options.sourceDigest,
         throughEventId: options.throughEventId,
         summary: structuredClone(options.summary),
+        ...(options.previousCheckpointId
+          ? { previousCheckpointId: options.previousCheckpointId }
+          : {}),
       },
     };
     await this.append(event);

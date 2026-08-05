@@ -114,6 +114,8 @@ export interface RuntimeCheckpointRecordedEventData {
   readonly sourceDigest: string;
   readonly throughEventId: string;
   readonly summary: Message;
+  /** 滚动摘要链:上一个 checkpoint 的 id(若存在),用于增量更新。 */
+  readonly previousCheckpointId?: string;
 }
 
 export interface RuntimeCheckpointRecordedEvent extends RuntimeEventBase {
