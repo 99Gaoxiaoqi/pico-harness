@@ -31,6 +31,12 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "todo",
   "fetch_url",
   "web_search",
+  "repo_map",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
 ]);
 
 /** 一个自定义子代理角色定义 */

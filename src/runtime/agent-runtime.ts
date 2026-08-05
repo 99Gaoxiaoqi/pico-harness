@@ -134,6 +134,15 @@ import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
+import { DiscoveryCoordinator } from "../discovery/coordinator.js";
+import {
+  DISCOVERY_MAX_CANDIDATES,
+  type DiscoveryCandidate,
+  type DiscoveryPhase,
+} from "../discovery/contract.js";
+import { DISCOVERY_TOOL_NAMES } from "../tools/discovery.js";
+import type { ToolCall } from "../schema/message.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
@@ -1336,6 +1345,7 @@ export async function executeAgentRuntime(
             ownerSessionId: session.id,
             evidenceBaseDir,
             env: runtimeEnv,
+            codeIntelligence: runtimeState.codeIntelligence,
           })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
           const task = [
             request.prompt,
@@ -1366,6 +1376,9 @@ export async function executeAgentRuntime(
     if (options.approvedPlan) {
       toolDisclosure.disclose(["update_plan", "cancel_plan"]);
     }
+    if (!backgroundPolicy) {
+      toolDisclosure.disclose([...DISCOVERY_TOOL_NAMES]);
+    }
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const planHandoff = new PlanHandoffController();
     const planRegistryOptions: DefaultToolRegistryOptions["plan"] = {
@@ -1387,6 +1400,23 @@ export async function executeAgentRuntime(
         });
       },
     };
+    const discoveryRegistryOptions: DefaultToolRegistryOptions["discovery"] | undefined =
+      backgroundPolicy
+        ? undefined
+        : {
+            coordinator: () => {
+              const run = currentRuntimeRun();
+              if (!run || !session.runtimeEventStore) {
+                throw new Error("Discovery requires an active durable RuntimeRun");
+              }
+              return new DiscoveryCoordinator(session.runtimeEventStore, {
+                sessionId: session.id,
+                invocationId: run.invocationId,
+                runId: run.runId,
+                turnId: `turn:${run.runId}:discovery`,
+              });
+            },
+          };
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -1395,7 +1425,7 @@ export async function executeAgentRuntime(
       toolDisclosure,
       workspaceRoots,
       dependencies.askUserHandler,
-      collaborationMode() === "plan" ? undefined : runtimeState.codeIntelligence,
+      runtimeState.codeIntelligence,
       (path) => {
         if (settings.mode === "yolo") return false;
         if (settings.mode === "plan" || path === undefined) return true;
@@ -1427,6 +1457,7 @@ export async function executeAgentRuntime(
       runtimeEnv,
       dependencies.bashTimeoutMs,
       collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
+      discoveryRegistryOptions,
     );
     registerPluginCapabilityTools(
       registry,
@@ -1511,6 +1542,19 @@ export async function executeAgentRuntime(
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
     const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions, providerDecorator);
     const reporter = dependencies.reporter ?? new TerminalReporter();
+    const automaticDiscovery = discoveryRegistryOptions
+      ? createAutomaticDiscoveryTracker({
+          coordinator: discoveryRegistryOptions.coordinator,
+          objective: prompt,
+          autoStart: collaborationMode() === "plan",
+        })
+      : undefined;
+    if (automaticDiscovery) {
+      registry.useExecution(async (call, next) => {
+        if (call.name === "submit_plan") await automaticDiscovery.prepareForCompletion();
+        return next(call);
+      });
+    }
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
@@ -1573,7 +1617,10 @@ export async function executeAgentRuntime(
                 session.id,
               ),
           }
-        : {}),
+        : automaticDiscovery
+          ? { postToolResultHook: automaticDiscovery.onToolResult }
+          : {}),
+      ...(automaticDiscovery ? { onRunComplete: automaticDiscovery.complete } : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
@@ -1640,6 +1687,7 @@ export async function executeAgentRuntime(
       subagentModelCatalog,
       evidenceBaseDir,
       runtimeEnv,
+      runtimeState.codeIntelligence,
       activeHookService
         ? async (profile) => {
             if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
@@ -1985,6 +2033,7 @@ function buildRegistry(
   env?: NodeJS.ProcessEnv,
   bashTimeoutMs?: number,
   plan?: DefaultToolRegistryOptions["plan"],
+  discovery?: DefaultToolRegistryOptions["discovery"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -2000,10 +2049,214 @@ function buildRegistry(
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(plan !== undefined ? { plan } : {}),
+    ...(discovery !== undefined ? { discovery } : {}),
     ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
   });
+}
+
+const AUTOMATIC_DISCOVERY_TOOLS = new Set([
+  "read_file",
+  "read_evidence",
+  "glob",
+  "grep",
+  "repo_map",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
+]);
+
+interface AutomaticDiscoveryTracker {
+  readonly onToolResult: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
+  readonly prepareForCompletion: () => Promise<void>;
+  readonly complete: () => Promise<void>;
+}
+
+function createAutomaticDiscoveryTracker(input: {
+  readonly coordinator: () => DiscoveryCoordinator;
+  readonly objective: string;
+  readonly autoStart: boolean;
+}): AutomaticDiscoveryTracker {
+  const discoveryId = `auto-discovery:${randomUUID()}`;
+  const completionKey = randomUUID();
+
+  const prepareForCompletion = async (): Promise<void> => {
+    const coordinator = input.coordinator();
+    const projection = await coordinator.project();
+    const active = projection.active;
+    if (!active || active.evidenceRefs.length === 0 || active.phase === "verify") return;
+    await coordinator.checkpoint({
+      operationId: `auto-discovery:verify:${completionKey}`,
+      expectedSessionSequence: projection.sessionSequence,
+      discoveryId: active.discoveryId,
+      checkpoint: {
+        phase: "verify",
+        cycle: active.cycle,
+        candidates: [],
+        evidenceRefs: [],
+        hypotheses: [],
+        openQuestions: [],
+        toolCallsUsed: 0,
+        inspectedFiles: [],
+      },
+    });
+  };
+
+  return {
+    async onToolResult(call, result) {
+      if (result.status !== "succeeded" || !AUTOMATIC_DISCOVERY_TOOLS.has(call.name)) return;
+      const coordinator = input.coordinator();
+      let projection = await coordinator.project();
+      if (!projection.active) {
+        if (!input.autoStart) return;
+        projection = await coordinator.start({
+          operationId: `auto-discovery:start:${call.id}`,
+          expectedSessionSequence: projection.sessionSequence,
+          discoveryId,
+          objective: boundedDiscoveryText(input.objective),
+          depth: "balanced",
+          roots: ["."],
+        });
+      }
+      const active = projection.active;
+      if (!active) return;
+
+      const evidenceRef =
+        result.evidence?.uri ??
+        `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
+      const candidates = discoveryCandidatesFromToolResult(call, result, evidenceRef);
+      const remainingFiles = Math.max(0, active.budget.maxFiles - active.budget.consumedFiles);
+      const inspectedFiles = candidates
+        .map((candidate) => candidate.path)
+        .filter((path) => !active.inspectedFiles.includes(path))
+        .slice(0, remainingFiles);
+      const phase = automaticDiscoveryPhase(active.phase, call.name);
+      await coordinator.checkpoint({
+        operationId: `auto-discovery:checkpoint:${call.id}`,
+        expectedSessionSequence: projection.sessionSequence,
+        discoveryId: active.discoveryId,
+        checkpoint: {
+          phase,
+          cycle: active.cycle,
+          candidates,
+          evidenceRefs: [evidenceRef],
+          hypotheses: [],
+          openQuestions: phase === "verify" ? [] : ["需要读取候选目标以确认实现位置"],
+          toolCallsUsed: 1,
+          inspectedFiles,
+        },
+      });
+    },
+    prepareForCompletion,
+    async complete() {
+      await prepareForCompletion();
+      const coordinator = input.coordinator();
+      const projection = await coordinator.project();
+      const active = projection.active;
+      if (!active || active.phase !== "verify" || active.evidenceRefs.length === 0) return;
+      await coordinator.complete({
+        operationId: `auto-discovery:complete:${completionKey}`,
+        expectedSessionSequence: projection.sessionSequence,
+        discoveryId: active.discoveryId,
+        report: {
+          summary: `已基于 ${active.budget.consumedToolCalls} 次成功的只读调查完成目标定位。`,
+          confirmedTargets: active.candidates,
+          evidenceRefs: active.evidenceRefs,
+          remainingRisks:
+            active.candidates.length > 0 ? [] : ["调查已形成直接证据，但未提取到明确文件候选。"],
+        },
+      });
+    },
+  };
+}
+
+function automaticDiscoveryPhase(current: DiscoveryPhase, toolName: string): DiscoveryPhase {
+  if (current === "verify" || toolName === "read_file" || toolName === "read_evidence") {
+    return "verify";
+  }
+  if (current === "forage") return "focus";
+  return "deepen";
+}
+
+function discoveryCandidatesFromToolResult(
+  call: ToolCall,
+  result: ToolResultEnvelope,
+  evidenceRef: string,
+): DiscoveryCandidate[] {
+  const paths = new Map<string, { score: number; reasons: string[] }>();
+  const toolInput = parseToolObject(call.arguments);
+  const directPath =
+    typeof toolInput["file_path"] === "string"
+      ? toolInput["file_path"]
+      : typeof toolInput["path"] === "string" && call.name === "read_file"
+        ? toolInput["path"]
+        : undefined;
+  if (directPath?.trim()) {
+    paths.set(directPath.trim(), { score: 100, reasons: [`${call.name}:direct_target`] });
+  }
+
+  for (const line of result.projection.text.split(/\r?\n/u)) {
+    const candidate = discoveryCandidateLine(call.name, line);
+    if (!candidate || paths.has(candidate.path)) continue;
+    paths.set(candidate.path, { score: candidate.score, reasons: candidate.reasons });
+    if (paths.size >= DISCOVERY_MAX_CANDIDATES) break;
+  }
+
+  return [...paths.entries()]
+    .map(([candidatePath, metadata]) => ({
+      path: candidatePath,
+      score: metadata.score,
+      reasons: metadata.reasons,
+      evidenceRefs: [evidenceRef],
+    }))
+    .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+    .slice(0, DISCOVERY_MAX_CANDIDATES);
+}
+
+function discoveryCandidateLine(
+  toolName: string,
+  line: string,
+): { readonly path: string; readonly score: number; readonly reasons: string[] } | undefined {
+  if (toolName === "repo_map") {
+    const match = /^(.+?) score=(-?\d+(?:\.\d+)?) reasons=([^:]*)/u.exec(line);
+    const candidatePath = match?.[1]?.trim();
+    if (!candidatePath) return undefined;
+    return {
+      path: candidatePath,
+      score: Number(match?.[2] ?? 0),
+      reasons: (match?.[3] ?? "repo_map")
+        .split(",")
+        .map((reason) => `repo_map:${reason.trim()}`)
+        .filter((reason) => reason !== "repo_map:"),
+    };
+  }
+  if (toolName === "grep") {
+    const match = /^(.+?):\d+:/u.exec(line);
+    return match?.[1] ? { path: match[1], score: 80, reasons: ["grep:content_match"] } : undefined;
+  }
+  if (toolName === "glob" && line && !line.startsWith("...") && !line.startsWith("未找到")) {
+    return { path: line, score: 70, reasons: ["glob:path_match"] };
+  }
+  return undefined;
+}
+
+function parseToolObject(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function boundedDiscoveryText(value: string): string {
+  const normalized = value.trim();
+  return normalized.length <= 4_000 ? normalized : `${normalized.slice(0, 3_999)}…`;
 }
 
 async function prepareBackgroundExecution(
@@ -2131,6 +2384,7 @@ function registerDelegationTools(
   modelCatalog?: SubagentModelCatalog,
   evidenceBaseDir?: string,
   env?: Readonly<Record<string, string | undefined>>,
+  codeIntelligence?: SessionRuntime["codeIntelligence"],
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
@@ -2146,6 +2400,7 @@ function registerDelegationTools(
     ...(modelCatalog ? { modelCatalog } : {}),
     ...(evidenceBaseDir ? { evidenceBaseDir } : {}),
     ...(env ? { env } : {}),
+    ...(codeIntelligence ? { codeIntelligence } : {}),
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
