@@ -6,6 +6,7 @@ import {
 } from "../engine/session-runtime.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeDiscoveryCompletedEvent,
   type RuntimeEvent,
   type RuntimePlanEvent,
 } from "../engine/session-runtime-event.js";
@@ -13,6 +14,12 @@ import {
   RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
 } from "../storage/runtime-event-store.js";
+import type { DiscoveryReport } from "../discovery/contract.js";
+import {
+  projectActiveDiscoveryEntries,
+  projectDiscoveryEntries,
+  reduceDiscoveryEvent,
+} from "../discovery/reducer.js";
 import {
   PlanConflictError,
   normalizePlanProposalInput,
@@ -33,6 +40,13 @@ export interface PlanCoordinatorContext {
 interface OperationInput {
   readonly operationId: string;
   readonly expectedSessionSequence: number;
+}
+
+interface PlanCommitOptions {
+  readonly discoveryCompletion?: {
+    readonly summary: string;
+    readonly remainingRisks: readonly string[];
+  };
 }
 
 export type PlanOperationStatus = "missing" | "matching";
@@ -77,23 +91,34 @@ export class PlanCoordinator {
   ): Promise<PlanProjection> {
     const proposalInput = normalizePlanProposalInput(input.proposal);
     const semantic = { proposal: proposalInput };
-    return this.commit(input, "plan.proposed", semantic, (fact, at) => [
-      {
-        ...this.baseEvent(input.operationId, "plan.proposed", at),
-        kind: "plan.proposed",
-        data: {
-          ...fact,
-          proposal: {
-            ...proposalInput,
-            planId: proposalInput.planId ?? randomUUID(),
-            revision: 1,
-            steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
-            status: "pending" as const,
-            proposedAt: at,
+    return this.commit(
+      input,
+      "plan.proposed",
+      semantic,
+      (fact, at) => [
+        {
+          ...this.baseEvent(input.operationId, "plan.proposed", at),
+          kind: "plan.proposed",
+          data: {
+            ...fact,
+            proposal: {
+              ...proposalInput,
+              planId: proposalInput.planId ?? randomUUID(),
+              revision: 1,
+              steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
+              status: "pending" as const,
+              proposedAt: at,
+            },
           },
         },
+      ],
+      {
+        discoveryCompletion: {
+          summary: proposalInput.overview ?? proposalInput.title,
+          remainingRisks: proposalInput.risks ?? [],
+        },
       },
-    ]);
+    );
   }
 
   async revise(
@@ -109,25 +134,36 @@ export class PlanCoordinator {
       expectedRevision: input.expectedRevision,
       proposal: proposalInput,
     };
-    return this.commit(input, "plan.revised", semantic, (fact, at) => [
-      {
-        ...this.baseEvent(input.operationId, "plan.revised", at),
-        kind: "plan.revised",
-        data: {
-          ...fact,
-          planId: input.planId,
-          expectedRevision: input.expectedRevision,
-          proposal: {
-            ...proposalInput,
+    return this.commit(
+      input,
+      "plan.revised",
+      semantic,
+      (fact, at) => [
+        {
+          ...this.baseEvent(input.operationId, "plan.revised", at),
+          kind: "plan.revised",
+          data: {
+            ...fact,
             planId: input.planId,
-            revision: input.expectedRevision + 1,
-            steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
-            status: "pending" as const,
-            proposedAt: at,
+            expectedRevision: input.expectedRevision,
+            proposal: {
+              ...proposalInput,
+              planId: input.planId,
+              revision: input.expectedRevision + 1,
+              steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
+              status: "pending" as const,
+              proposedAt: at,
+            },
           },
         },
+      ],
+      {
+        discoveryCompletion: {
+          summary: proposalInput.overview ?? proposalInput.title,
+          remainingRisks: proposalInput.risks ?? [],
+        },
       },
-    ]);
+    );
   }
 
   async requestRevision(
@@ -369,14 +405,37 @@ export class PlanCoordinator {
       at: string,
       projection: PlanProjection,
     ) => RuntimeEvent[],
+    options: PlanCommitOptions = {},
   ): Promise<PlanProjection> {
-    const fingerprint = planOperationFingerprint(kind, semantic);
     const entries = await this.store.readSessionEntries(this.context.sessionId);
     const replay = projectActivePlanEntries(entries).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
         "operationId" in event.data &&
         event.data.operationId === input.operationId,
+    );
+    const replayedDiscoveryEntry = projectActiveDiscoveryEntries(entries).find(
+      ({ event }) =>
+        event.kind === "discovery.completed" && event.data.operationId === input.operationId,
+    );
+    const replayedDiscovery =
+      replayedDiscoveryEntry?.event.kind === "discovery.completed"
+        ? replayedDiscoveryEntry.event
+        : undefined;
+    const preparedDiscovery = replayedDiscovery
+      ? {
+          discoveryId: replayedDiscovery.data.discoveryId,
+          report: replayedDiscovery.data.report,
+        }
+      : options.discoveryCompletion
+        ? prepareActiveDiscoveryCompletion(
+            projectDiscoveryEntries(this.context.sessionId, entries),
+            options.discoveryCompletion,
+          )
+        : undefined;
+    const fingerprint = planOperationFingerprint(
+      kind,
+      preparedDiscovery ? { plan: semantic, discoveryCompletion: preparedDiscovery } : semantic,
     );
     if (replay) {
       if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint)
@@ -389,14 +448,37 @@ export class PlanCoordinator {
       this.now().toISOString(),
       projection,
     );
+    const at = events[0]?.at ?? this.now().toISOString();
+    const discoveryEvent = preparedDiscovery
+      ? this.discoveryCompletionEvent(input.operationId, fingerprint, at, preparedDiscovery)
+      : undefined;
+    const atomicEvents = discoveryEvent ? [discoveryEvent, ...events] : events;
     let candidate = projection;
-    for (const event of events) candidate = reducePlanEvent(candidate, event);
-    await this.store.appendPlanOperation(events, {
+    let discoveryCandidate = projectDiscoveryEntries(this.context.sessionId, entries);
+    for (const event of atomicEvents) {
+      candidate = reducePlanEvent(candidate, event);
+      discoveryCandidate = reduceDiscoveryEvent(discoveryCandidate, event);
+    }
+    await this.store.appendPlanOperation(atomicEvents, {
       operationId: input.operationId,
       fingerprint,
       expectedSessionSequence: input.expectedSessionSequence,
     });
     return this.project();
+  }
+
+  private discoveryCompletionEvent(
+    operationId: string,
+    fingerprint: string,
+    at: string,
+    prepared: { readonly discoveryId: string; readonly report: DiscoveryReport },
+  ): RuntimeDiscoveryCompletedEvent {
+    return {
+      ...this.baseEvent(operationId, "discovery.completed", at),
+      eventId: `discovery:${operationId}:plan-completed`,
+      kind: "discovery.completed",
+      data: { operationId, fingerprint, ...prepared },
+    };
   }
 
   private baseEvent(operationId: string, suffix: string, at: string) {
@@ -412,4 +494,37 @@ export class PlanCoordinator {
       visibility: "internal" as const,
     };
   }
+}
+
+function prepareActiveDiscoveryCompletion(
+  projection: ReturnType<typeof projectDiscoveryEntries>,
+  input: { readonly summary: string; readonly remainingRisks: readonly string[] },
+): { readonly discoveryId: string; readonly report: DiscoveryReport } | undefined {
+  const active = projection.active;
+  if (!active) return undefined;
+  if (active.phase !== "verify") {
+    throw new PlanConflictError("Active Discovery must reach verify before submitting a plan");
+  }
+  if (active.evidenceRefs.length === 0) {
+    throw new PlanConflictError(
+      "Active Discovery must include Verify evidence before submitting a plan",
+    );
+  }
+  return {
+    discoveryId: active.discoveryId,
+    report: {
+      summary: input.summary,
+      confirmedTargets: active.candidates,
+      evidenceRefs: active.evidenceRefs,
+      remainingRisks: [
+        ...new Set([
+          ...input.remainingRisks,
+          ...active.openQuestions,
+          ...active.hypotheses
+            .filter((hypothesis) => hypothesis.status === "open")
+            .map((hypothesis) => hypothesis.statement),
+        ]),
+      ],
+    },
+  };
 }
