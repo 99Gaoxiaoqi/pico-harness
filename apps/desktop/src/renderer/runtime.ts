@@ -530,6 +530,16 @@ function discoveryItemFromProjection(value: unknown): ConversationItemView | und
   };
 }
 
+function discoverySessionSequence(value: unknown): number {
+  const result = isRecord(value) ? value : undefined;
+  const projection = result && isRecord(result.projection) ? result.projection : undefined;
+  const sequence = projection?.sessionSequence;
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error("Discovery projection is missing a valid session sequence");
+  }
+  return sequence;
+}
+
 function isTerminalRunStatus(status: string): boolean {
   return ["cancelled", "failed", "succeeded", "completed"].includes(status);
 }
@@ -2487,12 +2497,17 @@ export function useRuntimeStore(): RuntimeStore {
         if (!input.workspacePath || !input.sessionId || !input.objective.trim()) return;
         await perform("discovery-start", async (bridge) => {
           if (preview) return;
+          const current = await invoke(bridge, "discovery.get", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+          });
           await invoke(bridge, "discovery.start", {
             workspacePath: input.workspacePath,
             sessionId: input.sessionId,
             objective: input.objective.trim(),
             depth: input.depth,
             operationId: crypto.randomUUID(),
+            expectedSessionSequence: discoverySessionSequence(current),
           });
           await loadConversation(bridge, input.workspacePath, input.sessionId);
         });
@@ -2501,12 +2516,17 @@ export function useRuntimeStore(): RuntimeStore {
         if (!input.workspacePath || !input.sessionId || !input.discoveryId) return;
         await perform("discovery-resume", async (bridge) => {
           if (preview) return;
+          const current = await invoke(bridge, "discovery.get", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+          });
           await invoke(bridge, "discovery.resume", {
             workspacePath: input.workspacePath,
             sessionId: input.sessionId,
             discoveryId: input.discoveryId,
             ...(input.depth ? { depth: input.depth } : {}),
             operationId: crypto.randomUUID(),
+            expectedSessionSequence: discoverySessionSequence(current),
           });
           await loadConversation(bridge, input.workspacePath, input.sessionId);
         });
@@ -2515,12 +2535,17 @@ export function useRuntimeStore(): RuntimeStore {
         if (!input.workspacePath || !input.sessionId || !input.discoveryId) return;
         await perform("discovery-cancel", async (bridge) => {
           if (preview) return;
+          const current = await invoke(bridge, "discovery.get", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+          });
           await invoke(bridge, "discovery.cancel", {
             workspacePath: input.workspacePath,
             sessionId: input.sessionId,
             discoveryId: input.discoveryId,
             ...(input.reason ? { reason: input.reason } : {}),
             operationId: crypto.randomUUID(),
+            expectedSessionSequence: discoverySessionSequence(current),
           });
           await loadConversation(bridge, input.workspacePath, input.sessionId);
         });

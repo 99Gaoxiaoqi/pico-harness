@@ -1547,9 +1547,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       (coordinator) =>
         coordinator.start({
           operationId: params.operationId,
-          ...(params.expectedSessionSequence !== undefined
-            ? { expectedSessionSequence: params.expectedSessionSequence }
-            : {}),
+          expectedSessionSequence: params.expectedSessionSequence,
           objective: params.objective,
           depth: params.depth,
           ...(params.roots ? { roots: params.roots } : {}),
@@ -1607,9 +1605,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       (coordinator) =>
         coordinator.resume({
           operationId: params.operationId,
-          ...(params.expectedSessionSequence !== undefined
-            ? { expectedSessionSequence: params.expectedSessionSequence }
-            : {}),
+          expectedSessionSequence: params.expectedSessionSequence,
           discoveryId: params.discoveryId,
           ...(params.depth ? { depth: params.depth } : {}),
         }),
@@ -1652,9 +1648,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       (coordinator) =>
         coordinator.cancel({
           operationId: params.operationId,
-          ...(params.expectedSessionSequence !== undefined
-            ? { expectedSessionSequence: params.expectedSessionSequence }
-            : {}),
+          expectedSessionSequence: params.expectedSessionSequence,
           discoveryId: params.discoveryId,
           ...(params.reason ? { reason: params.reason } : {}),
         }),

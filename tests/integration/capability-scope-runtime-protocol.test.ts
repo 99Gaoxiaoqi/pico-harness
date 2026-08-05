@@ -46,6 +46,23 @@ test("session.send requires the canonical input discriminator", () => {
   );
 });
 
+test("Discovery control requests require a session-sequence CAS", () => {
+  const start = {
+    workspacePath: "/workspace",
+    sessionId: "session-1",
+    objective: "定位入口",
+    depth: "balanced",
+    operationId: "discovery-start-1",
+    expectedSessionSequence: 7,
+  } as const;
+  assert.deepEqual(parseStrictRuntimeParams("discovery.start", start), start);
+  const { expectedSessionSequence: _sequence, ...withoutCas } = start;
+  assertProtocolError(
+    () => parseStrictRuntimeParams("discovery.start", withoutCas),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
+});
+
 test("scoped capability methods are explicit Desktop capabilities with strict write contracts", () => {
   for (const method of capabilityMethods) {
     assert.equal(RUNTIME_METHODS.includes(method), true);
