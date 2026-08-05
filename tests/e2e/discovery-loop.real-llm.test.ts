@@ -228,6 +228,7 @@ realModelTest(
         branchId: "symbol-branch",
         ordinal: 1,
         objective: "独立按函数声明定位目标实现",
+        roots: ["z-target"],
         queries: [`grep:export function ${fixture.targetSymbol}`],
         stoppingCondition: "读取目标定义并形成直接证据",
         reserveToolCalls: 24,
@@ -259,8 +260,7 @@ realModelTest(
         beforeFirstModelCall: () => barrier.arrive(),
         allowedTools: ["grep", "read_file"],
         prompt: [
-          `Use grep now to search for the exact declaration export function ${fixture.targetSymbol}.`,
-          'Use path="" and include the full declaration phrase in the pattern.',
+          `Call grep exactly once with ${JSON.stringify({ pattern: `export function ${fixture.targetSymbol}`, path: "z-target" })}.`,
           "Then call read_file on the exact implementation path returned by grep.",
           "Do not answer until read_file succeeds; use no more than three tool calls and make no modifications.",
         ].join("\n"),
@@ -269,6 +269,10 @@ realModelTest(
 
     assertMainModelSucceeded(entryEvents);
     assertMainModelSucceeded(symbolEvents);
+    const symbolGrep = toolCalls(symbolEvents, "grep")[0];
+    assert.ok(symbolGrep, "symbol branch must execute its scoped declaration query");
+    assert.equal(parseArguments(symbolGrep)["path"], "z-target");
+    assert.equal(parseArguments(symbolGrep)["pattern"], `export function ${fixture.targetSymbol}`);
     const entryTargetRead = requireTargetRead(entryEvents, sandbox.workDir, fixture.targetPath);
     const symbolTargetRead = requireTargetRead(symbolEvents, sandbox.workDir, fixture.targetPath);
     const entryEvidence = evidenceRef(entryTargetRead, "entry-branch");
