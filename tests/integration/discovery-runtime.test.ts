@@ -28,21 +28,23 @@ test("Discovery Repo Map continues across the default scan batch before resolvin
   });
 
   const scans: RepoMapScanReport[] = [];
+  const firstReportIndex = scans.length;
   const first = await observeRepoMapScans(
     (report) => scans.push(report),
     () => tool.execute(JSON.stringify({ query: fixture.targetSymbol, max_files: 200 })),
   );
   assert.match(first, /backend=repo-map indexed=200\/206 cursor=200 complete=false/u);
-  assert.equal(scans[0]?.scannedFiles.length, 200);
+  assert.equal(scans.slice(firstReportIndex).flatMap((report) => report.scannedFiles).length, 200);
   assert.doesNotMatch(first, new RegExp(escapeRegExp(fixture.targetSymbol), "u"));
   assert.doesNotMatch(first, new RegExp(escapeRegExp(fixture.targetPath), "u"));
 
+  const secondReportIndex = scans.length;
   const second = await observeRepoMapScans(
     (report) => scans.push(report),
     () => tool.execute(JSON.stringify({ query: fixture.targetSymbol, max_files: 200 })),
   );
   assert.match(second, /backend=repo-map indexed=206\/206 cursor=206 complete=true/u);
-  assert.equal(scans[1]?.scannedFiles.length, 6);
+  assert.equal(scans.slice(secondReportIndex).flatMap((report) => report.scannedFiles).length, 6);
   assert.equal(new Set(scans.flatMap(({ scannedFiles }) => scannedFiles)).size, 206);
   assert.match(second, new RegExp(escapeRegExp(fixture.targetSymbol), "u"));
   assert.match(second, new RegExp(escapeRegExp(fixture.targetPath), "u"));
@@ -66,15 +68,16 @@ test("Repo Map max_files counts failed indexing attempts instead of scanning pas
     (report) => scans.push(report),
     () => tool.execute(JSON.stringify({ query: "boundedTarget", max_files: 2 })),
   );
-  assert.equal(scans[0]?.scannedFiles.length, 2);
+  assert.equal(scans.flatMap((report) => report.scannedFiles).length, 2);
   assert.match(first, /cursor=2 complete=false/u);
   assert.doesNotMatch(first, /z-target\.ts/u);
 
+  const secondReportIndex = scans.length;
   const second = await observeRepoMapScans(
     (report) => scans.push(report),
     () => tool.execute(JSON.stringify({ query: "boundedTarget", max_files: 1 })),
   );
-  assert.equal(scans[1]?.scannedFiles.length, 1);
+  assert.equal(scans.slice(secondReportIndex).flatMap((report) => report.scannedFiles).length, 1);
   assert.match(second, /z-target\.ts/u);
 });
 
@@ -234,6 +237,43 @@ test("bounded Explore branches enforce roots and account Grep files in one share
     /abort/u,
   );
   assert.deepEqual(abortedUsage, { toolCallsUsed: 1, inspectedFiles: ["src/a.ts"] });
+
+  const repoAbortController = new AbortController();
+  let repoAbortedUsage = { toolCallsUsed: 0, inspectedFiles: [] as readonly string[] };
+  const repoAbortRegistry = createSubagentRegistryFactory({
+    workDir,
+    runner: {
+      async runSub() {
+        return { status: "completed", summary: "unused", evidenceRefs: [] };
+      },
+    },
+    manager: new DelegationManager(),
+  })({
+    mode: "explore",
+    role: "leaf",
+    depth: 1,
+    maxSpawnDepth: 1,
+    roots: ["src"],
+    maxFiles: 10,
+    maxToolCalls: 2,
+    onBudgetUsage(value) {
+      repoAbortedUsage = value;
+      if (value.inspectedFiles.length === 1) repoAbortController.abort("stop repo map");
+    },
+  });
+  await assert.rejects(
+    repoAbortRegistry.execute(
+      {
+        id: "abort-repo-map",
+        name: "repo_map",
+        arguments: JSON.stringify({ query: "needle", max_files: 10 }),
+      },
+      { signal: repoAbortController.signal },
+    ),
+    /abort/u,
+  );
+  assert.equal(repoAbortedUsage.toolCallsUsed, 1);
+  assert.equal(repoAbortedUsage.inspectedFiles.length, 1);
 });
 
 test("workspace file scan observers preserve nested host and branch accounting", async () => {
