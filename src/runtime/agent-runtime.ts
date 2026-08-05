@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
 import { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { GoalManager } from "../engine/goal-manager.js";
@@ -1568,6 +1568,7 @@ export async function executeAgentRuntime(
       ? createAutomaticDiscoveryTracker({
           coordinator: discoveryRegistryOptions.coordinator,
           objective: prompt,
+          workDir,
           autoStart: collaborationMode() === "plan" || isolatedDiscoveryRun,
           allowConcurrentExplore: isolatedDiscoveryRun,
         })
@@ -2107,6 +2108,7 @@ interface AutomaticDiscoveryTracker {
 function createAutomaticDiscoveryTracker(input: {
   readonly coordinator: () => DiscoveryCoordinator;
   readonly objective: string;
+  readonly workDir: string;
   readonly autoStart: boolean;
   readonly allowConcurrentExplore: boolean;
 }): AutomaticDiscoveryTracker {
@@ -2261,7 +2263,7 @@ function createAutomaticDiscoveryTracker(input: {
           `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
         const candidates =
           result.status === "succeeded"
-            ? discoveryCandidatesFromToolResult(call, result, evidenceRef)
+            ? discoveryCandidatesFromToolResult(call, result, evidenceRef, input.workDir)
             : [];
         for (const branch of branchReservations) {
           await input.coordinator().completeBranch({
@@ -2299,7 +2301,7 @@ function createAutomaticDiscoveryTracker(input: {
         result.evidence?.uri ??
         `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
       const candidates = succeeded
-        ? discoveryCandidatesFromToolResult(call, result, evidenceRef)
+        ? discoveryCandidatesFromToolResult(call, result, evidenceRef, input.workDir)
         : [];
       const remainingFiles = Math.max(0, active.budget.maxFiles - active.budget.consumedFiles);
       const inspectedFiles = (
@@ -2449,6 +2451,7 @@ function discoveryCandidatesFromToolResult(
   call: ToolCall,
   result: ToolResultEnvelope,
   evidenceRef: string,
+  workDir: string,
 ): DiscoveryCandidate[] {
   const paths = new Map<string, { score: number; reasons: string[] }>();
   const toolInput = parseToolObject(call.arguments);
@@ -2459,13 +2462,19 @@ function discoveryCandidatesFromToolResult(
         ? toolInput["path"]
         : undefined;
   if (directPath?.trim()) {
-    paths.set(directPath.trim(), { score: 100, reasons: [`${call.name}:direct_target`] });
+    const candidatePath = workspaceRelativeDiscoveryPath(workDir, directPath.trim());
+    if (candidatePath) {
+      paths.set(candidatePath, { score: 100, reasons: [`${call.name}:direct_target`] });
+    }
   }
 
   for (const line of result.projection.text.split(/\r?\n/u)) {
     const candidate = discoveryCandidateLine(call.name, line);
-    if (!candidate || paths.has(candidate.path)) continue;
-    paths.set(candidate.path, { score: candidate.score, reasons: candidate.reasons });
+    const candidatePath = candidate
+      ? workspaceRelativeDiscoveryPath(workDir, candidate.path)
+      : undefined;
+    if (!candidate || !candidatePath || paths.has(candidatePath)) continue;
+    paths.set(candidatePath, { score: candidate.score, reasons: candidate.reasons });
     if (paths.size >= DISCOVERY_MAX_CANDIDATES) break;
   }
 
@@ -2505,6 +2514,23 @@ function discoveryCandidateLine(
     return { path: line, score: 70, reasons: ["glob:path_match"] };
   }
   return undefined;
+}
+
+function workspaceRelativeDiscoveryPath(
+  workDir: string,
+  candidatePath: string,
+): string | undefined {
+  const absolute = isAbsolute(candidatePath) ? candidatePath : resolve(workDir, candidatePath);
+  const workspaceRelative = relative(workDir, absolute).replaceAll("\\", "/");
+  if (
+    !workspaceRelative ||
+    workspaceRelative === ".." ||
+    workspaceRelative.startsWith("../") ||
+    isAbsolute(workspaceRelative)
+  ) {
+    return undefined;
+  }
+  return workspaceRelative;
 }
 
 function parseToolObject(value: string): Record<string, unknown> {
