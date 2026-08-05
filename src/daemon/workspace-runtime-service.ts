@@ -58,6 +58,8 @@ export interface DaemonRunExecutor {
 export interface DaemonRunExecution {
   readonly requestedModel?: string;
   readonly allowedTools?: readonly string[];
+  /** Run an isolated read-only Discovery without changing persisted collaboration mode. */
+  readonly discoveryRun?: boolean;
   /** Desktop has already committed the visible user input to the canonical RuntimeEvent ledger. */
   readonly resumeExistingSession?: boolean;
   /** Trusted Plan review admission. Generic IPC clients cannot populate this field. */

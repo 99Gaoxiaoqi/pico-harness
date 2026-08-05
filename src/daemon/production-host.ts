@@ -286,6 +286,7 @@ export function createProductionLocalDaemonHost(
               ? { rewindPrePlanMode: persistedSettings.prePlanMode }
               : {}),
             ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
+            ...(execution?.discoveryRun ? { discoveryRun: true } : {}),
           };
           const runtimeHost = {
             signal: context.signal,

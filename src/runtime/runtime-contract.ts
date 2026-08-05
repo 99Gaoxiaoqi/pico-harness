@@ -71,6 +71,8 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   addDirs?: string[];
   /** Per-run command restriction. Unknown names fail before the first provider call. */
   allowedTools?: readonly string[];
+  /** Trusted host marker for an isolated, side-effect-free Discovery run. */
+  discoveryRun?: boolean;
   /** Internal/public host entry for a newly approved execution Run. */
   approvedPlan?: {
     readonly planId: string;

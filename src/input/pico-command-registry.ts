@@ -1572,7 +1572,7 @@ function discoveryPrompt(
       "只收集可复核证据，不修改文件、不执行会改变工作区或外部状态的命令。结论给出精确文件、符号、调用关系、Evidence、未知点和建议落点；报告完成后停止，不实施修改。",
     ].join("\n"),
     metadata: { discoveryProjection: projection },
-    execution: { allowedTools: DISCOVERY_READ_ONLY_TOOLS },
+    execution: { allowedTools: DISCOVERY_READ_ONLY_TOOLS, discoveryRun: true },
   };
 }
 
