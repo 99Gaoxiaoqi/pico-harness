@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStateWritePatch,
@@ -553,11 +555,17 @@ function directlyReadDiscoveryCandidates(
   if (startedSequence === undefined) return [];
 
   const readPaths = new Map<string, string>();
+  const workDirs = new Map(
+    activeEntries.flatMap(({ event }) =>
+      event.kind === "run.started" ? [[event.runId, event.data.workDir] as const] : [],
+    ),
+  );
+  const sessionWorkDir = [...workDirs.values()][0];
   for (const { event } of activeEntries) {
     if (event.kind !== "message.committed") continue;
     for (const call of event.data.message.toolCalls ?? []) {
       if (call.name !== "read_file") continue;
-      const path = readFilePath(call.arguments);
+      const path = readFilePath(call.arguments, workDirs.get(event.runId) ?? sessionWorkDir);
       if (path) readPaths.set(call.id, path);
     }
   }
@@ -611,10 +619,23 @@ function projectActiveRuntimeEntries(
   return projected;
 }
 
-function readFilePath(argumentsJson: string): string | undefined {
+function readFilePath(argumentsJson: string, workDir: string | undefined): string | undefined {
   try {
     const input = JSON.parse(argumentsJson) as Record<string, unknown>;
-    return typeof input["path"] === "string" ? normalizeDiscoveryPath(input["path"]) : undefined;
+    if (typeof input["path"] !== "string") return undefined;
+    const raw = input["path"];
+    if (!isAbsolute(raw)) return normalizeDiscoveryPath(raw);
+    if (!workDir) return undefined;
+    let canonicalWorkDir = workDir;
+    let canonicalRaw = raw;
+    try {
+      canonicalWorkDir = realpathSync(workDir);
+      canonicalRaw = realpathSync(raw);
+    } catch {
+      // Fall back to lexical resolution when either path no longer exists.
+    }
+    const workspaceRelative = relative(canonicalWorkDir, canonicalRaw).replaceAll("\\", "/");
+    return normalizeDiscoveryPath(workspaceRelative);
   } catch {
     return undefined;
   }

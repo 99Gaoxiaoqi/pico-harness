@@ -15,10 +15,15 @@ import type { AgentRunner, SubagentRegistryFactory, SubagentRegistryRequest } fr
 import { DelegateTaskTool } from "./subagent.js";
 import { DelegateStatusTool, type DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
+import {
+  observeRepoMapScans,
+  REPO_MAP_MAX_FILES,
+  RepoMapService,
+} from "../code-intelligence/repo-map.js";
 import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
-import { WorkspaceRoots } from "./workspace-roots.js";
+import { buildWorkspaceBoundaryMiddleware, WorkspaceRoots } from "./workspace-roots.js";
 import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { classifyBashCommand } from "../approval/bash-safety.js";
@@ -31,6 +36,7 @@ import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
+import { observeWorkspaceFileScans } from "./file-scan-observer.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -111,13 +117,29 @@ export function createSubagentRegistryFactory(
 
   return (request: SubagentRegistryRequest) => {
     const registry = new ToolRegistry();
-    const activeConfig = request.workDir
+    let activeConfig = request.workDir
       ? {
           ...resolvedConfig,
           workDir: request.workDir,
           workspaceRoots: WorkspaceRoots.createSync(request.workDir),
         }
       : resolvedConfig;
+    if (request.roots && request.roots.length > 0) {
+      const scopedRoots = WorkspaceRoots.createScopedSync(activeConfig.workDir, request.roots);
+      activeConfig = {
+        ...activeConfig,
+        workspaceRoots: scopedRoots,
+        ...(request.maxToolCalls !== undefined
+          ? {
+              codeIntelligence: new RepoMapService(
+                activeConfig.workDir,
+                REPO_MAP_MAX_FILES,
+                scopedRoots,
+              ),
+            }
+          : {}),
+      };
+    }
 
     // 优先分支:自定义角色(agent_name 命中 profile)
     const profile = request.agentName ? findAgentProfile(profiles, request.agentName) : undefined;
@@ -155,6 +177,7 @@ function buildProfileRegistry(
   );
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
+    if (request.maxToolCalls !== undefined && toolName === "bash") continue;
     if (toolName === "skill_view" && config.skillLoaderFactory) {
       registry.register(new SkillViewTool(config.skillLoaderFactory(config.workDir)));
       continue;
@@ -174,10 +197,12 @@ function buildProfileRegistry(
   // 自定义角色不得扩大请求 mode：explore 过滤写工具并使用只读 Bash 守卫，
   // worker 才允许在独立 worktree 中普通写入。
   registry.use(buildSubagentSafetyMiddleware(request.mode, config));
+  registry.useSafety(buildWorkspaceBoundaryMiddleware(config.workspaceRoots));
   registry.register(new DelegateStatusTool(config.manager));
 
   // orchestrator 仍可递归委派(若角色允许且未超深度)
   maybeRegisterDelegateTool(config, request, registry);
+  enforceSubagentBudget(registry, request);
   return attachHookService(registry, config.hookService);
 }
 
@@ -210,7 +235,7 @@ function buildModeRegistry(
   if (request.mode === "explore") {
     (bash as BashTool & { readOnly?: boolean }).readOnly = true;
   }
-  registry.register(bash);
+  if (request.maxToolCalls === undefined) registry.register(bash);
 
   // 阶段 2 只读工具:explore/worker 都需要搜文件,worker 写代码也要先定位文件
   registry.register(new GlobTool(config.workspaceRoots));
@@ -233,10 +258,139 @@ function buildModeRegistry(
   }
 
   registry.use(buildSubagentSafetyMiddleware(request.mode, config));
+  registry.useSafety(buildWorkspaceBoundaryMiddleware(config.workspaceRoots));
   registry.register(new DelegateStatusTool(config.manager));
 
   maybeRegisterDelegateTool(config, request, registry);
+  enforceSubagentBudget(registry, request);
   return attachHookService(registry, config.hookService);
+}
+
+function enforceSubagentBudget(registry: ToolRegistry, request: SubagentRegistryRequest): void {
+  const maxFiles = request.maxFiles;
+  const maxToolCalls = request.maxToolCalls;
+  if (maxFiles === undefined && maxToolCalls === undefined) return;
+  let toolCallsUsed = 0;
+  let remaining = maxFiles ?? Number.POSITIVE_INFINITY;
+  let fileBudgetTail: Promise<void> = Promise.resolve();
+  const inspected = new Set<string>();
+  const publishUsage = (): void => {
+    request.onBudgetUsage?.({ toolCallsUsed, inspectedFiles: [...inspected] });
+  };
+  registry.useExecution(async (call, next) => {
+    if (maxToolCalls !== undefined && toolCallsUsed >= maxToolCalls) {
+      throw new Error("子代理工具调用预算已耗尽");
+    }
+    toolCallsUsed++;
+    publishUsage();
+    if (!FILE_INSPECTION_TOOLS.has(call.name)) return next(call);
+
+    const previous = fileBudgetTail;
+    let release!: () => void;
+    fileBudgetTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      if (remaining <= 0) throw new Error("子代理文件检查预算已耗尽");
+
+      const explicitPath =
+        call.name === "read_file"
+          ? jsonStringField(call.arguments, "path")
+          : call.name.startsWith("code_")
+            ? jsonStringField(call.arguments, "file_path")
+            : undefined;
+      if (explicitPath) recordInspectedFiles(inspected, [explicitPath], maxFiles);
+
+      const effectiveCall = SCANNING_TOOLS.has(call.name)
+        ? clampScanningCall(call, remaining)
+        : call;
+      const repoScans = new Set<string>();
+      const workspaceScans = new Set<string>();
+      const publishScans = (): void => {
+        recordInspectedFiles(inspected, [...repoScans, ...workspaceScans], maxFiles);
+        remaining =
+          maxFiles === undefined
+            ? Number.POSITIVE_INFINITY
+            : Math.max(0, maxFiles - inspected.size);
+        publishUsage();
+      };
+      let output: string;
+      try {
+        output = await observeRepoMapScans(
+          (report) => {
+            for (const path of report.scannedFiles) repoScans.add(path);
+            publishScans();
+          },
+          () =>
+            observeWorkspaceFileScans(
+              (report) => {
+                for (const path of report.scannedFiles) {
+                  workspaceScans.add(scanPathForCall(effectiveCall, path));
+                }
+                publishScans();
+              },
+              () => next(effectiveCall),
+            ),
+          Number.isFinite(remaining) ? remaining : undefined,
+        );
+      } finally {
+        publishScans();
+      }
+      return output;
+    } finally {
+      release();
+    }
+  });
+}
+
+const SCANNING_TOOLS = new Set(["repo_map", "grep", "glob"]);
+const FILE_INSPECTION_TOOLS = new Set([
+  "read_file",
+  "repo_map",
+  "grep",
+  "glob",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
+]);
+
+function clampScanningCall<T extends { name: string; arguments: string }>(
+  call: T,
+  remaining: number,
+): T {
+  const parsed = JSON.parse(call.arguments) as Record<string, unknown>;
+  const requested =
+    typeof parsed["max_files"] === "number" && Number.isSafeInteger(parsed["max_files"])
+      ? parsed["max_files"]
+      : REPO_MAP_MAX_FILES;
+  return {
+    ...call,
+    arguments: JSON.stringify({
+      ...parsed,
+      max_files: Math.max(1, Math.min(requested, remaining, REPO_MAP_MAX_FILES)),
+    }),
+  };
+}
+
+function recordInspectedFiles(
+  inspected: Set<string>,
+  paths: readonly string[],
+  maxFiles: number | undefined,
+): void {
+  for (const path of paths) {
+    const normalized = path.replaceAll("\\", "/").replace(/^\.\//u, "");
+    if (!normalized || inspected.has(normalized)) continue;
+    if (maxFiles !== undefined && inspected.size >= maxFiles) return;
+    inspected.add(normalized);
+  }
+}
+
+function scanPathForCall(call: { arguments: string }, path: string): string {
+  const base = jsonStringField(call.arguments, "path")?.replaceAll("\\", "/");
+  return !base || base === "." ? path : `${base.replace(/\/$/u, "")}/${path}`;
 }
 
 /** orchestrator 角色且未超深度时,注册 delegate_task(允许递归委派) */
