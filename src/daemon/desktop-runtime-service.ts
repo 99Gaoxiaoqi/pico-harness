@@ -1644,8 +1644,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async cancelDiscovery(
     params: RuntimeRequest<"discovery.cancel">["params"],
   ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     const projection = await this.withDiscoveryCoordinator(
-      params.workspacePath,
+      canonical,
       params.sessionId,
       params.operationId,
       (coordinator) =>
@@ -1659,12 +1660,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         }),
       true,
     );
-    this.publishDiscovery(
-      await canonicalizeWorkspacePath(params.workspacePath),
-      params.sessionId,
-      projection,
-      "cancelled",
-    );
+    this.publishDiscovery(canonical, params.sessionId, projection, "cancelled");
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    if (activeRun) {
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("run.cancel", {
+          workspacePath: canonical,
+          runId: requireText(activeRun["runId"], "run.runId"),
+          reason: params.reason ?? "Discovery cancelled by user",
+        }),
+      );
+    }
     return { projection: toJsonValue(projection) };
   }
 

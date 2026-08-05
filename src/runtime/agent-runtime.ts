@@ -1621,6 +1621,7 @@ export async function executeAgentRuntime(
           ? { postToolResultHook: automaticDiscovery.onToolResult }
           : {}),
       ...(automaticDiscovery ? { onRunComplete: automaticDiscovery.complete } : {}),
+      ...(automaticDiscovery ? { onRunInterrupted: automaticDiscovery.interrupt } : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
@@ -2073,6 +2074,7 @@ interface AutomaticDiscoveryTracker {
   readonly onToolResult: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
   readonly prepareForCompletion: () => Promise<void>;
   readonly complete: () => Promise<void>;
+  readonly interrupt: (reason: string) => Promise<void>;
 }
 
 function createAutomaticDiscoveryTracker(input: {
@@ -2168,6 +2170,18 @@ function createAutomaticDiscoveryTracker(input: {
           remainingRisks:
             active.candidates.length > 0 ? [] : ["调查已形成直接证据，但未提取到明确文件候选。"],
         },
+      });
+    },
+    async interrupt(reason) {
+      const coordinator = input.coordinator();
+      const projection = await coordinator.project();
+      const active = projection.active;
+      if (!active) return;
+      await coordinator.interrupt({
+        operationId: `auto-discovery:interrupt:${completionKey}`,
+        expectedSessionSequence: projection.sessionSequence,
+        discoveryId: active.discoveryId,
+        reason,
       });
     },
   };
