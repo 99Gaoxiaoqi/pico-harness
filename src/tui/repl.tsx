@@ -352,6 +352,7 @@ export interface HandleTuiInputSubmissionDeps {
       resumeExistingSession?: boolean;
       model?: string;
       allowedTools?: readonly string[];
+      discoveryRun?: boolean;
     },
   ) => Promise<void>;
   setRewindContext?: (context: { prompt: string; transcriptIndex: number }) => void;
@@ -587,7 +588,7 @@ async function runPreparedUserPrompt(
   attachments: readonly ImagePart[],
   beforeRun?: () => void | Promise<void>,
   afterRun?: () => void | Promise<void>,
-  execution?: { model?: string; allowedTools?: readonly string[] },
+  execution?: { model?: string; allowedTools?: readonly string[]; discoveryRun?: boolean },
 ): Promise<void> {
   let prepared: PreparedUserPrompt;
   try {
@@ -612,6 +613,7 @@ async function runPreparedUserPrompt(
     const runOptions = {
       ...(execution?.model === undefined ? {} : { model: execution.model }),
       ...(execution?.allowedTools === undefined ? {} : { allowedTools: execution.allowedTools }),
+      ...(execution?.discoveryRun === undefined ? {} : { discoveryRun: execution.discoveryRun }),
     };
     if (images.length > 0) {
       await deps.runAgent(prepared.prompt, { ...runOptions, images });
@@ -2536,6 +2538,9 @@ export async function startTuiRepl(
               ...(runOptions?.allowedTools === undefined
                 ? {}
                 : { allowedTools: [...runOptions.allowedTools] }),
+              ...(runOptions?.discoveryRun === undefined
+                ? {}
+                : { discoveryRun: runOptions.discoveryRun }),
               ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
               planMode: settings.collaborationMode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),

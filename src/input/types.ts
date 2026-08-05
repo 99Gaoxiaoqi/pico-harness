@@ -58,6 +58,7 @@ export interface PromptCommandResult {
   execution?: {
     model?: string;
     allowedTools?: readonly string[];
+    discoveryRun?: boolean;
   };
 }
 
