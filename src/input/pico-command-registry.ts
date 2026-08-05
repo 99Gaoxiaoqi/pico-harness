@@ -1454,7 +1454,18 @@ function createPlanCommand(settings: SessionSettings, session?: Session): SlashC
   };
 }
 
-const DISCOVERY_READ_ONLY_TOOLS = ["read_file", "read_evidence", "glob", "grep"] as const;
+const DISCOVERY_READ_ONLY_TOOLS = [
+  "read_file",
+  "read_evidence",
+  "glob",
+  "grep",
+  "repo_map",
+  "code_symbols",
+  "code_definition",
+  "code_references",
+  "code_call_hierarchy",
+  "code_diagnostics",
+] as const;
 
 function createExploreCommand(settings: SessionSettings, session?: Session): SlashCommand {
   return {
@@ -1554,9 +1565,11 @@ function discoveryPrompt(
   return {
     type: "prompt",
     prompt: [
-      `以 ${depth} 深度只读探索代码库，目标：${objective}`,
-      "只收集可复核证据，不修改文件、不执行会改变工作区或外部状态的命令。",
-      "结论请给出精确文件、符号、调用关系、未知点和建议的实现落点。",
+      `以 ${depth} 深度执行一次只读 Discovery，目标：${objective}`,
+      "按 Forage → Focus → Deepen → Verify 推进：先用 Repo Map、Glob、Grep 广泛觅食，再筛选候选，随后用符号、定义、引用、调用层级和 Read 深挖，最后必须直接读取目标源码交叉核验。",
+      "Repo Map 返回 complete=false 只代表仍有后续批次，不能据此宣告仓库中不存在目标。",
+      "可在一个工具批次中并发发起互不依赖的只读查询，但共享预算不得因并发倍增，也不要重复相同的宽泛搜索。",
+      "只收集可复核证据，不修改文件、不执行会改变工作区或外部状态的命令。结论给出精确文件、符号、调用关系、Evidence、未知点和建议落点；报告完成后停止，不实施修改。",
     ].join("\n"),
     metadata: { discoveryProjection: projection },
     execution: { allowedTools: DISCOVERY_READ_ONLY_TOOLS },
