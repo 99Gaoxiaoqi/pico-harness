@@ -253,7 +253,7 @@ test("bounded Explore branches enforce roots and account Grep files in one share
     role: "leaf",
     depth: 1,
     maxSpawnDepth: 1,
-    roots: ["src"],
+    roots: ["src/a.ts"],
     maxFiles: 10,
     maxToolCalls: 2,
     onBudgetUsage(value) {

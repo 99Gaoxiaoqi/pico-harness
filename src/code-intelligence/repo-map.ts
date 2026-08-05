@@ -313,7 +313,10 @@ export class RepoMapService implements CodeIntelligenceService {
       const filePath = this.discoveredFiles?.[this.nextFileIndex++];
       if (!filePath) continue;
       reportRepoMapScans([filePath]);
-      const file = await this.indexFileUnlocked(filePath, signal).catch(() => undefined);
+      const file = await this.indexFileUnlocked(filePath, signal).catch((error: unknown) => {
+        if (signal?.aborted) throw error;
+        return undefined;
+      });
       if (file) indexed.push(file);
     }
     return {
