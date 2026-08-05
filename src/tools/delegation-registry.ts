@@ -29,6 +29,8 @@ import type { HookService } from "../hooks/service.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
+import type { CodeIntelligenceService } from "../code-intelligence/types.js";
+import { createCodeIntelligenceTools } from "./code-intelligence.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -57,6 +59,8 @@ export interface SubagentRegistryFactoryConfig {
   env?: Readonly<Record<string, string | undefined>>;
   /** 与父会话一致的脱敏、不可变模型目录快照。 */
   modelCatalog?: SubagentModelCatalog;
+  /** 父会话持有的只读 LSP / Repo Map 服务，供 Explore 复用同一索引。 */
+  codeIntelligence?: CodeIntelligenceService;
 }
 
 /**
@@ -143,6 +147,12 @@ function buildProfileRegistry(
 ): ToolRegistry {
   const registry = new ToolRegistry();
   registry.register(new ReadEvidenceTool(config.workDir, config.evidenceBaseDir));
+  const codeTools = new Map(
+    (config.codeIntelligence
+      ? createCodeIntelligenceTools(config.workDir, config.codeIntelligence)
+      : []
+    ).map((tool) => [tool.name(), tool] as const),
+  );
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
     if (toolName === "skill_view" && config.skillLoaderFactory) {
@@ -151,6 +161,11 @@ function buildProfileRegistry(
     }
     if (toolName === "web_search") {
       registry.register(new WebSearchTool(config.env));
+      continue;
+    }
+    const codeTool = codeTools.get(toolName);
+    if (codeTool) {
+      registry.register(codeTool);
       continue;
     }
     const ctor = TOOL_CONSTRUCTORS[toolName];
@@ -205,6 +220,11 @@ function buildModeRegistry(
     // 探索语义:联网搜索是 explore 的合理扩展(全只读,无副作用)
     registry.register(new FetchURLTool());
     registry.register(new WebSearchTool(config.env));
+    if (config.codeIntelligence) {
+      for (const tool of createCodeIntelligenceTools(config.workDir, config.codeIntelligence)) {
+        registry.register(tool);
+      }
+    }
   }
 
   if (request.mode === "worker") {

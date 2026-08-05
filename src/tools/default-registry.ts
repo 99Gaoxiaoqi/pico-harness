@@ -33,6 +33,7 @@ import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
+import { createDiscoveryTools, type DiscoveryCoordinatorFactory } from "./discovery.js";
 
 export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -83,6 +84,8 @@ export interface DefaultToolRegistryOptions {
     mode: "planning" | "execution";
     planId?: string;
   };
+  /** 当前 durable Session 的 Discovery 状态机；缺失时不暴露控制工具。 */
+  discovery?: { coordinator: DiscoveryCoordinatorFactory };
   /** Host-owned durable Evidence root shared by Runtime and read_evidence. */
   evidenceBaseDir?: string;
   /** Host-owned process environment for tools that intentionally inherit it. */
@@ -106,6 +109,7 @@ export function buildDefaultToolRegistry(
     activateSkillHooks,
     skillLoader,
     plan,
+    discovery,
     evidenceBaseDir,
     env,
     bashTimeoutMs,
@@ -160,6 +164,9 @@ export function buildDefaultToolRegistry(
       registry.register(new UpdatePlanTool(plan.coordinator, plan.planId));
       registry.register(new CancelPlanTool(plan.coordinator, plan.planId));
     }
+  }
+  if (discovery) {
+    for (const tool of createDiscoveryTools(discovery.coordinator)) registry.register(tool);
   }
   // Goal Mode 工具:三工具共享同一个 goalManager 单例(由 host 注入)。
   // 单例约束:goalManager 必须与传给 AgentEngine 的是同一实例,

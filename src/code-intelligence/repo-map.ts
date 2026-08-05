@@ -47,7 +47,8 @@ const SUPPORTED_EXTENSIONS = new Set([
   ".cs",
 ]);
 const MAX_SOURCE_BYTES = 1_000_000;
-const DEFAULT_SCAN_BATCH = 200;
+export const REPO_MAP_MAX_FILES = 200;
+const DEFAULT_SCAN_BATCH = REPO_MAP_MAX_FILES;
 const DEFAULT_RESULT_LIMIT = 100;
 
 interface IndexedSymbol extends CodeSymbol {
@@ -67,10 +68,15 @@ export interface RepoMapSnapshot {
   readonly files: readonly {
     readonly filePath: string;
     readonly symbols: readonly CodeSymbol[];
+    readonly score: number;
+    readonly reasons: readonly string[];
   }[];
   readonly indexedFiles: number;
   readonly totalFiles: number;
+  /** Stable offset of the next repository file to inspect. */
+  readonly cursor: number;
   readonly complete: boolean;
+  readonly limitReason?: "max_files";
 }
 
 /** 无 LSP 时的确定性静态后端：按需分批索引，不在 TUI 启动时全仓扫描。 */
@@ -81,13 +87,13 @@ export class RepoMapService implements CodeIntelligenceService {
   private discoveredFiles: readonly string[] | undefined;
   private nextFileIndex = 0;
   private readonly indexedFiles = new Map<string, IndexedFile>();
+  private readonly scanBatchSize: number;
+  private indexTail: Promise<void> = Promise.resolve();
 
-  constructor(
-    rootDir: string,
-    private readonly scanBatchSize = DEFAULT_SCAN_BATCH,
-  ) {
+  constructor(rootDir: string, scanBatchSize = DEFAULT_SCAN_BATCH) {
     this.workspaceRoots = WorkspaceRoots.createSync(rootDir);
     this.rootDir = this.workspaceRoots.list()[0] ?? path.resolve(rootDir);
+    this.scanBatchSize = clampMaxFiles(scanBatchSize);
   }
 
   async definitions(
@@ -176,32 +182,33 @@ export class RepoMapService implements CodeIntelligenceService {
       readonly signal?: AbortSignal;
     } = {},
   ): Promise<RepoMapSnapshot> {
-    await this.scanNext(Math.max(1, options.maxFiles ?? this.scanBatchSize), options.signal);
+    await this.scanNext(clampMaxFiles(options.maxFiles ?? this.scanBatchSize), options.signal);
     const query = options.query?.trim().toLowerCase();
     const files = [...this.indexedFiles.values()]
-      .map((file) => ({
-        filePath: file.relativePath,
-        symbols: query
-          ? file.symbols.filter(
-              (symbol) =>
-                symbol.name.toLowerCase().includes(query) ||
-                file.relativePath.toLowerCase().includes(query),
-            )
-          : file.symbols,
-      }))
-      .filter((file) => !query || file.symbols.length > 0)
-      .sort((left, right) => left.filePath.localeCompare(right.filePath));
+      .map((file) => scoreRepoMapFile(file, query))
+      .filter((file) => file.matched)
+      .sort(
+        (left, right) => right.score - left.score || left.filePath.localeCompare(right.filePath),
+      )
+      .map(({ matched: _matched, ...file }) => file);
     const totalFiles = this.discoveredFiles?.length ?? 0;
+    const complete = this.nextFileIndex >= totalFiles;
     return {
       files,
       indexedFiles: this.indexedFiles.size,
       totalFiles,
-      complete: this.nextFileIndex >= totalFiles,
+      cursor: this.nextFileIndex,
+      complete,
+      ...(!complete ? { limitReason: "max_files" as const } : {}),
     };
   }
 
   async close(): Promise<void> {
-    this.indexedFiles.clear();
+    await this.serializeIndex(async () => {
+      this.indexedFiles.clear();
+      this.discoveredFiles = undefined;
+      this.nextFileIndex = 0;
+    });
   }
 
   private async scanUntil(
@@ -216,13 +223,20 @@ export class RepoMapService implements CodeIntelligenceService {
   }
 
   private async scanNext(limit: number, signal?: AbortSignal): Promise<readonly IndexedFile[]> {
+    return this.serializeIndex(() => this.scanNextUnlocked(clampMaxFiles(limit), signal));
+  }
+
+  private async scanNextUnlocked(
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<readonly IndexedFile[]> {
     await this.discoverFiles();
     const indexed: IndexedFile[] = [];
     while (this.nextFileIndex < (this.discoveredFiles?.length ?? 0) && indexed.length < limit) {
       throwIfAborted(signal);
       const filePath = this.discoveredFiles?.[this.nextFileIndex++];
       if (!filePath) continue;
-      const file = await this.indexFile(filePath, signal).catch(() => undefined);
+      const file = await this.indexFileUnlocked(filePath, signal).catch(() => undefined);
       if (file) indexed.push(file);
     }
     return indexed;
@@ -241,6 +255,10 @@ export class RepoMapService implements CodeIntelligenceService {
   }
 
   private async indexFile(filePath: string, signal?: AbortSignal): Promise<IndexedFile> {
+    return this.serializeIndex(() => this.indexFileUnlocked(filePath, signal));
+  }
+
+  private async indexFileUnlocked(filePath: string, signal?: AbortSignal): Promise<IndexedFile> {
     throwIfAborted(signal);
     const absolutePath = await this.workspaceRoots.assertAllowed(filePath);
     const cached = this.indexedFiles.get(absolutePath);
@@ -271,6 +289,15 @@ export class RepoMapService implements CodeIntelligenceService {
     } satisfies IndexedFile;
     this.indexedFiles.set(absolutePath, indexed);
     return indexed;
+  }
+
+  private serializeIndex<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.indexTail.then(operation, operation);
+    this.indexTail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   private async wordAt(
@@ -425,6 +452,81 @@ function filterSymbols(symbols: readonly IndexedSymbol[], query?: string): Index
   return needle
     ? symbols.filter((symbol) => symbol.name.toLowerCase().includes(needle))
     : [...symbols];
+}
+
+function clampMaxFiles(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SCAN_BATCH;
+  return Math.min(REPO_MAP_MAX_FILES, Math.max(1, Math.trunc(value)));
+}
+
+function scoreRepoMapFile(
+  file: IndexedFile,
+  query?: string,
+): {
+  readonly filePath: string;
+  readonly symbols: readonly CodeSymbol[];
+  readonly score: number;
+  readonly reasons: readonly string[];
+  readonly matched: boolean;
+} {
+  if (!query) {
+    return {
+      filePath: file.relativePath,
+      symbols: file.symbols,
+      score: 1,
+      reasons: ["indexed"],
+      matched: true,
+    };
+  }
+
+  const normalizedPath = file.relativePath.toLowerCase();
+  const baseName = path.basename(normalizedPath);
+  const matchingSymbols = file.symbols.filter((symbol) =>
+    symbol.name.toLowerCase().includes(query),
+  );
+  const exactSymbol = matchingSymbols.some((symbol) => symbol.name.toLowerCase() === query);
+  const prefixSymbol = matchingSymbols.some((symbol) =>
+    symbol.name.toLowerCase().startsWith(query),
+  );
+  const reasons: string[] = [];
+  let pathScore = 0;
+  let symbolScore = 0;
+
+  if (normalizedPath === query) {
+    pathScore = 100;
+    reasons.push("path_exact");
+  } else if (baseName === query) {
+    pathScore = 95;
+    reasons.push("basename_exact");
+  } else if (normalizedPath.startsWith(query)) {
+    pathScore = 80;
+    reasons.push("path_prefix");
+  } else if (baseName.startsWith(query)) {
+    pathScore = 75;
+    reasons.push("basename_prefix");
+  } else if (normalizedPath.includes(query)) {
+    pathScore = 60;
+    reasons.push("path_contains");
+  }
+
+  if (exactSymbol) {
+    symbolScore = 90;
+    reasons.push("symbol_exact");
+  } else if (prefixSymbol) {
+    symbolScore = 70;
+    reasons.push("symbol_prefix");
+  } else if (matchingSymbols.length > 0) {
+    symbolScore = 50;
+    reasons.push("symbol_contains");
+  }
+
+  return {
+    filePath: file.relativePath,
+    symbols: pathScore > 0 ? file.symbols : matchingSymbols,
+    score: pathScore + symbolScore,
+    reasons,
+    matched: pathScore > 0 || symbolScore > 0,
+  };
 }
 
 function wordAtPosition(file: IndexedFile, line: number, character: number): string | undefined {
