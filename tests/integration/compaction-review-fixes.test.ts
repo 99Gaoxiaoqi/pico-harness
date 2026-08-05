@@ -20,6 +20,7 @@ import {
 import { Session } from "../../src/engine/session.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "../../src/context/compaction-markers.js";
+import { computeCheckpointSourceDigest } from "../../src/context/runtime-compaction-checkpoint.js";
 
 const TEST_ROOT = process.env.PICO_TEST_TMPDIR ?? tmpdir();
 async function mkTestDir(prefix: string): Promise<string> {
@@ -105,22 +106,24 @@ test("findLastCompactionCheckpoint: 遇 hard-reset checkpoint 返回 undefined",
   const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history);
+    const beforeNormal = await seedRun.readModelHistoryEntries();
     await seedRun.recordCheckpoint({
       checkpointId: "checkpoint:normal-1",
       coveredEventCount: 2,
-      sourceDigest: "sha256-content:v1:fakedigest",
-      throughEventId: (await seedRun.readModelHistoryEntries())[1]!.eventId,
+      sourceDigest: computeCheckpointSourceDigest(beforeNormal.slice(0, 2)),
+      throughEventId: beforeNormal[1]!.eventId,
       summary: {
         role: "assistant",
         content: wrapFullCompactionSummary("## 任务目标\n正常摘要"),
       },
     });
     // 再写一个 hard-reset checkpoint
+    const beforeReset = await seedRun.readModelHistoryEntries();
     await seedRun.recordCheckpoint({
       checkpointId: "hard-reset:after-overflow",
-      coveredEventCount: 4,
-      sourceDigest: "sha256-content:v1:fakedigest2",
-      throughEventId: (await seedRun.readModelHistoryEntries()).at(-1)!.eventId,
+      coveredEventCount: beforeReset.length,
+      sourceDigest: computeCheckpointSourceDigest(beforeReset),
+      throughEventId: beforeReset.at(-1)!.eventId,
       summary: {
         role: "assistant",
         content: "[CONTEXT RESET] evidence snapshot...",
@@ -158,12 +161,13 @@ test("findLastCompactionCheckpoint: 标签缺失时返回 undefined", async (t) 
   const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history);
+    const entries = await seedRun.readModelHistoryEntries();
     // 写一个不带 XML 标签的 checkpoint（模拟旧格式或损坏数据）
     await seedRun.recordCheckpoint({
       checkpointId: "checkpoint:no-tags",
       coveredEventCount: 1,
-      sourceDigest: "sha256-content:v1:fakedigest",
-      throughEventId: (await seedRun.readModelHistoryEntries())[0]!.eventId,
+      sourceDigest: computeCheckpointSourceDigest(entries.slice(0, 1)),
+      throughEventId: entries[0]!.eventId,
       summary: {
         role: "assistant",
         content: "[上下文压缩 — 仅供参考] 这段没有 XML 标签 --- 历史摘要结束 ---",
@@ -187,12 +191,6 @@ test("wrapFullCompactionSummary 产生正确的 marker 前缀供 buildEvidenceSn
     wrapped.startsWith(FULL_COMPACTION_SUMMARY_MARKER),
     "wrapped summary 应以 FULL_COMPACTION_SUMMARY_MARKER 开头",
   );
-  assert.ok(
-    wrapped.includes("<pico_compaction_summary>"),
-    "应包含 XML 开标签",
-  );
-  assert.ok(
-    wrapped.includes("</pico_compaction_summary>"),
-    "应包含 XML 闭标签",
-  );
+  assert.ok(wrapped.includes("<pico_compaction_summary>"), "应包含 XML 开标签");
+  assert.ok(wrapped.includes("</pico_compaction_summary>"), "应包含 XML 闭标签");
 });
