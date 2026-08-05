@@ -21,10 +21,7 @@ import {
 import type { Message, ToolCall } from "../../src/schema/message.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
 import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
-import {
-  createDiscoveryLargeRepoFixture,
-  type DiscoveryLargeRepoFixture,
-} from "../fixtures/discovery-large-repo.js";
+import { createDiscoveryLargeRepoFixture } from "../fixtures/discovery-large-repo.js";
 import { configuredUserDefaultRealModel, type RealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;
@@ -219,8 +216,8 @@ realModelTest(
         discoveryId: "deep-discovery",
         branchId: "entry-branch",
         ordinal: 0,
-        objective: "从任务入口定位目标实现",
-        queries: [fixture.targetSymbol],
+        objective: "用精确文本检索定位目标实现",
+        queries: [`grep:${fixture.targetSymbol}`],
         stoppingCondition: "读取目标定义并形成直接证据",
         reserveToolCalls: 24,
         reserveFiles: 40,
@@ -230,8 +227,8 @@ realModelTest(
         discoveryId: "deep-discovery",
         branchId: "symbol-branch",
         ordinal: 1,
-        objective: "独立按符号地图定位目标实现",
-        queries: [fixture.targetSymbol],
+        objective: "独立按函数声明定位目标实现",
+        queries: [`grep:export function ${fixture.targetSymbol}`],
         stoppingCondition: "读取目标定义并形成直接证据",
         reserveToolCalls: 24,
         reserveFiles: 40,
@@ -246,7 +243,13 @@ realModelTest(
         sessionId: `${sandbox.sessionId}-entry-branch`,
         mode: "new",
         beforeFirstModelCall: () => barrier.arrive(),
-        prompt: branchInvestigationPrompt(fixture, "先读取任务说明，再从任务入口向目标收敛。"),
+        allowedTools: ["grep", "read_file"],
+        prompt: [
+          `Use grep now to search the workspace for the exact symbol ${fixture.targetSymbol}.`,
+          `Use arguments pattern=${JSON.stringify(fixture.targetSymbol)} and path="".`,
+          "Then call read_file on the exact implementation path returned by grep.",
+          "Do not answer until read_file succeeds; use no more than three tool calls and make no modifications.",
+        ].join("\n"),
       }),
       executeReadOnlyInvestigation({
         sandbox,
@@ -254,7 +257,13 @@ realModelTest(
         sessionId: `${sandbox.sessionId}-symbol-branch`,
         mode: "new",
         beforeFirstModelCall: () => barrier.arrive(),
-        prompt: branchInvestigationPrompt(fixture, "独立从符号地图开始搜索，再核对任务说明。"),
+        allowedTools: ["grep", "read_file"],
+        prompt: [
+          `Use grep now to search for the exact declaration export function ${fixture.targetSymbol}.`,
+          'Use path="" and include the full declaration phrase in the pattern.',
+          "Then call read_file on the exact implementation path returned by grep.",
+          "Do not answer until read_file succeeds; use no more than three tool calls and make no modifications.",
+        ].join("\n"),
       }),
     ]);
 
@@ -410,14 +419,12 @@ realModelTest(
       model,
       sessionId: agentSessionId,
       mode: "new",
-      allowedTools: ["glob", "read_file", "repo_map"],
+      allowedTools: ["glob", "grep", "read_file"],
       prompt: [
-        `Read ${fixture.taskPath}.`,
-        'Then call glob exactly once with arguments {"pattern":"**/*.mjs"} as the intentionally broad first query.',
-        `Continue with repo_map query=${JSON.stringify(fixture.targetSymbol)} and max_files=200 until the symbol is found.`,
-        "The target is after the first two Repo Map batches. You MUST repeat the identical repo_map call while complete=false and the symbol is absent.",
-        "Do not answer until repo_map returns the target path and read_file has successfully read that exact implementation; then stop with a concise checkpoint summary.",
-        "Use no more than eight tool calls and do not modify files.",
+        'Call glob exactly once with arguments {"pattern":"**/*.mjs"} as the intentionally broad first query.',
+        `After glob, call grep for the exact symbol ${fixture.targetSymbol} with path="".`,
+        "Then call read_file on the exact implementation path returned by grep.",
+        "Do not answer until read_file succeeds; use no more than four tool calls and do not modify files.",
       ].join("\n"),
     });
     assertMainModelSucceeded(firstEvents);
@@ -602,17 +609,6 @@ async function executeReadOnlyInvestigation(input: {
   return await readSessionEvents(input.sandbox, input.sessionId);
 }
 
-function branchInvestigationPrompt(fixture: DiscoveryLargeRepoFixture, strategy: string): string {
-  return [
-    strategy,
-    `The task is ${fixture.taskPath}; the requested symbol is ${fixture.targetSymbol}.`,
-    `Use repo_map with query=${JSON.stringify(fixture.targetSymbol)} and max_files=200, repeating only while complete=false and the symbol is absent.`,
-    "The target is deliberately after the first two Repo Map batches. You MUST continue the identical repo_map call after both empty incomplete batches.",
-    "Do not answer until repo_map returns the target path and read_file has successfully read that exact target implementation.",
-    "Use no more than six tool calls, make no modifications, then return a concise evidence summary.",
-  ].join("\n");
-}
-
 function runtimeEventStore(sandbox: TestSandbox): RuntimeEventStore {
   return new RuntimeEventStore({
     storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace.root,
@@ -670,7 +666,12 @@ function requireTargetRead(
   const call = toolCalls(events, "read_file").find((candidate) =>
     sameWorkspacePath(workDir, parseArguments(candidate)["path"], targetPath),
   );
-  assert.ok(call, `missing direct read of ${targetPath}`);
+  assert.ok(
+    call,
+    `missing direct read of ${targetPath}; calls=${JSON.stringify(
+      events.filter((event) => event.kind === "tool.started").map((event) => event.data.toolName),
+    )}`,
+  );
   assert.equal(successfulToolResult(events, call).data.status, "succeeded");
   return call;
 }
