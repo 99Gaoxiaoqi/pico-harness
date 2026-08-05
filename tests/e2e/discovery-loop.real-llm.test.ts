@@ -55,7 +55,7 @@ realModelTest(
     const model = await configuredUserDefaultRealModel();
     const sandbox = await createSandbox();
     context.after(() => cleanupSandbox(sandbox));
-    const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir);
+    const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir, { decoyCount: 480 });
     const beforePlanning = await workspaceHashes(sandbox.workDir);
     const providerSnapshots: ProviderSnapshot[] = [];
     const runtime = new AgentRuntime();
@@ -66,7 +66,7 @@ realModelTest(
         prompt: [
           `Read ${fixture.taskPath} first and investigate the requested behavior before planning.`,
           `Use repo_map with query=${JSON.stringify(fixture.targetSymbol)} and max_files=200.`,
-          "The target is deliberately after the first scan batch: when complete=false and the symbol is absent, call repo_map again with the same query and max_files=200.",
+          "The target is deliberately after the first two scan batches. Keep calling repo_map with the exact same query and max_files=200 while complete=false and the symbol is absent; do not stop after either empty batch.",
           "After locating the symbol, read its exact implementation file and ground the plan in that evidence.",
           "Submit exactly one implementation step that changes only the confirmed target and verifies the returned canary by rereading it.",
           "Do not modify any file before approval. Finish by calling submit_plan exactly once.",
@@ -89,7 +89,7 @@ realModelTest(
     assert.equal(toolCalls(planningEvents, "submit_plan").length, 1);
 
     const repoMapCalls = toolCalls(planningEvents, "repo_map");
-    assert.ok(repoMapCalls.length >= 2, "late target requires at least two Repo Map batches");
+    assert.ok(repoMapCalls.length >= 3, "late target requires at least three Repo Map batches");
     for (const call of repoMapCalls) {
       const input = parseArguments(call);
       assert.equal(input["query"], fixture.targetSymbol);
@@ -98,8 +98,10 @@ realModelTest(
     const repoMapOutputs = repoMapCalls.map((call) => successfulToolOutput(planningEvents, call));
     assert.match(repoMapOutputs[0] ?? "", /complete=false/u);
     assert.doesNotMatch(repoMapOutputs[0] ?? "", new RegExp(escapeRegExp(fixture.targetPath), "u"));
+    assert.match(repoMapOutputs[1] ?? "", /complete=false/u);
+    assert.doesNotMatch(repoMapOutputs[1] ?? "", new RegExp(escapeRegExp(fixture.targetPath), "u"));
     assert.ok(
-      repoMapOutputs.slice(1).some((output) => output.includes(fixture.targetPath)),
+      repoMapOutputs.slice(2).some((output) => output.includes(fixture.targetPath)),
       "a later Repo Map batch must resolve the target path",
     );
 
@@ -198,7 +200,7 @@ realModelTest(
     const model = await configuredUserDefaultRealModel();
     const sandbox = await createSandbox();
     context.after(() => cleanupSandbox(sandbox));
-    const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir);
+    const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir, { decoyCount: 480 });
     const before = await workspaceHashes(sandbox.workDir);
     const controlSessionId = `${sandbox.sessionId}-deep-control`;
     const controlStore = runtimeEventStore(sandbox);
@@ -377,7 +379,7 @@ realModelTest(
     const model = await configuredUserDefaultRealModel();
     const sandbox = await createSandbox();
     context.after(() => cleanupSandbox(sandbox));
-    const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir);
+    const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir, { decoyCount: 480 });
     const before = await workspaceHashes(sandbox.workDir);
     const controlSessionId = `${sandbox.sessionId}-resume-control`;
     const agentSessionId = `${sandbox.sessionId}-resume-agent`;
@@ -413,7 +415,8 @@ realModelTest(
         `Read ${fixture.taskPath}.`,
         'Then call glob exactly once with arguments {"pattern":"**/*.mjs"} as the intentionally broad first query.',
         `Continue with repo_map query=${JSON.stringify(fixture.targetSymbol)} and max_files=200 until the symbol is found.`,
-        "Read the exact target implementation, then stop with a concise checkpoint summary.",
+        "The target is after the first two Repo Map batches. You MUST repeat the identical repo_map call while complete=false and the symbol is absent.",
+        "Do not answer until repo_map returns the target path and read_file has successfully read that exact implementation; then stop with a concise checkpoint summary.",
         "Use no more than eight tool calls and do not modify files.",
       ].join("\n"),
     });
@@ -604,7 +607,8 @@ function branchInvestigationPrompt(fixture: DiscoveryLargeRepoFixture, strategy:
     strategy,
     `The task is ${fixture.taskPath}; the requested symbol is ${fixture.targetSymbol}.`,
     `Use repo_map with query=${JSON.stringify(fixture.targetSymbol)} and max_files=200, repeating only while complete=false and the symbol is absent.`,
-    "After locating it, call read_file on the exact target implementation.",
+    "The target is deliberately after the first two Repo Map batches. You MUST continue the identical repo_map call after both empty incomplete batches.",
+    "Do not answer until repo_map returns the target path and read_file has successfully read that exact target implementation.",
     "Use no more than six tool calls, make no modifications, then return a concise evidence summary.",
   ].join("\n");
 }
