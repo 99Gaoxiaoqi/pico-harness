@@ -30,6 +30,7 @@ export type LocalCommandAction =
   | "skills"
   | "agents"
   | "resume"
+  | "discovery"
   | "changes"
   | "message";
 

@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 11;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v11";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 12;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v12";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
@@ -223,6 +223,35 @@ export type RuntimePlanProjection = JsonObject & {
   readonly proposals: readonly RuntimePlanProposal[];
   readonly latestProposal?: RuntimePlanProposal;
   readonly pendingProposal?: RuntimePlanProposal;
+};
+
+export type RuntimeDiscoveryDepth = "quick" | "balanced" | "deep";
+export type RuntimeDiscoveryStatus = "active" | "interrupted" | "completed" | "cancelled";
+
+export type RuntimeDiscoveryRun = JsonObject & {
+  readonly discoveryId: string;
+  readonly objective: string;
+  readonly depth: RuntimeDiscoveryDepth;
+  readonly phase: "forage" | "focus" | "deepen" | "verify";
+  readonly status: RuntimeDiscoveryStatus;
+  readonly cycle: number;
+  readonly inspectedFiles: readonly string[];
+  readonly evidenceRefs: readonly string[];
+  readonly openQuestions: readonly string[];
+  readonly candidates: readonly JsonObject[];
+  readonly branches: readonly JsonObject[];
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly reason?: string;
+  readonly report?: JsonObject;
+};
+
+export type RuntimeDiscoveryProjection = JsonObject & {
+  readonly sessionId: SessionId;
+  readonly sessionSequence: number;
+  readonly discoveries: readonly RuntimeDiscoveryRun[];
+  readonly latest?: RuntimeDiscoveryRun;
+  readonly active?: RuntimeDiscoveryRun;
 };
 
 export type RuntimeGoalStatus = "active" | "paused" | "blocked" | "complete";
@@ -699,9 +728,45 @@ export type RuntimeMethodMap = {
       readonly activeRun?: RuntimeRun;
       readonly queuedInputs: readonly RuntimeQueuedInput[];
       readonly planProjection?: RuntimePlanProjection;
+      readonly discoveryProjection?: RuntimeDiscoveryProjection;
       readonly nextBefore?: string;
       readonly revision: string;
     };
+  };
+  readonly "discovery.start": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly objective: string;
+      readonly depth: RuntimeDiscoveryDepth;
+      readonly roots?: readonly string[];
+      readonly operationId: string;
+      readonly expectedSessionSequence?: number;
+    };
+    readonly result: { readonly projection: RuntimeDiscoveryProjection };
+  };
+  readonly "discovery.get": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly projection: RuntimeDiscoveryProjection };
+  };
+  readonly "discovery.resume": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly discoveryId: string;
+      readonly depth?: RuntimeDiscoveryDepth;
+      readonly operationId: string;
+      readonly expectedSessionSequence?: number;
+    };
+    readonly result: { readonly projection: RuntimeDiscoveryProjection };
+  };
+  readonly "discovery.cancel": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly discoveryId: string;
+      readonly reason?: string;
+      readonly operationId: string;
+      readonly expectedSessionSequence?: number;
+    };
+    readonly result: { readonly projection: RuntimeDiscoveryProjection };
   };
   readonly "session.evidence.read": {
     readonly params: WorkspaceParams & {
@@ -1251,6 +1316,10 @@ export const RUNTIME_METHODS = [
   "session.send",
   "session.transcript",
   "session.evidence.read",
+  "discovery.start",
+  "discovery.get",
+  "discovery.resume",
+  "discovery.cancel",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -1353,6 +1422,10 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.send",
   "session.transcript",
   "session.evidence.read",
+  "discovery.start",
+  "discovery.get",
+  "discovery.resume",
+  "discovery.cancel",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -1463,6 +1536,11 @@ export type RuntimeNotificationMap = {
     readonly sessionId: SessionId;
     readonly projection: RuntimePlanProjection;
     readonly operation: "proposed" | "updated" | "executing" | "continue_editing" | "rejected";
+  };
+  readonly "discovery.updated": {
+    readonly sessionId: SessionId;
+    readonly projection: RuntimeDiscoveryProjection;
+    readonly operation: "started" | "resumed" | "cancelled" | "updated";
   };
   readonly "prompt.requested": {
     readonly promptId: PromptId;
@@ -1873,10 +1951,41 @@ function isRuntimeNotificationEnvelope(value: Record<string, unknown>): boolean 
 function isRuntimeNotification(value: Record<string, unknown>): boolean {
   if (!isRuntimeNotificationEnvelope(value)) return false;
   if (value.topic === "run.live") return isRunLiveRuntimeNotification(value);
+  if (value.topic === "discovery.updated") return isDiscoveryRuntimeNotification(value);
   if (typeof value.topic === "string" && value.topic.startsWith("memory.")) {
     return isMemoryRuntimeNotification(value);
   }
   return true;
+}
+
+export function isDiscoveryRuntimeNotification(
+  value: unknown,
+): value is RuntimeNotification<"discovery.updated"> {
+  if (
+    !isJsonObject(value) ||
+    !isRuntimeNotificationEnvelope(value) ||
+    value.topic !== "discovery.updated"
+  ) {
+    return false;
+  }
+  const scope = value.scope;
+  const payload = value.payload;
+  if (!isJsonObject(scope) || !isJsonObject(payload)) return false;
+  if (!hasExactKeys(payload, ["sessionId", "projection", "operation"])) return false;
+  if (!nonEmptyString(payload.sessionId) || scope.sessionId !== payload.sessionId) return false;
+  if (!["started", "resumed", "cancelled", "updated"].includes(String(payload.operation))) {
+    return false;
+  }
+  const projection = payload.projection;
+  return (
+    isJsonObject(projection) &&
+    projection.sessionId === payload.sessionId &&
+    nonNegativeSafeInteger(projection.sessionSequence) &&
+    Array.isArray(projection.discoveries) &&
+    projection.discoveries.every(isJsonObject) &&
+    (projection.latest === undefined || isJsonObject(projection.latest)) &&
+    (projection.active === undefined || isJsonObject(projection.active))
+  );
 }
 
 /** Memory events are durable, so their payload is deliberately exact and body-free. */
@@ -2355,6 +2464,38 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "session.evidence.read": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam, evidenceUri: stringParam },
     { offsetBytes: finiteNumberParam, limitBytes: finiteNumberParam },
+  ),
+  "discovery.start": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      objective: boundedNonEmptyStringParam(8_000),
+      depth: oneOfParam(["quick", "balanced", "deep"]),
+      operationId: boundedNonEmptyStringParam(512),
+    },
+    { roots: stringArrayParam, expectedSessionSequence: finiteNumberParam },
+  ),
+  "discovery.get": workspaceSessionParams,
+  "discovery.resume": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      discoveryId: boundedNonEmptyStringParam(512),
+      operationId: boundedNonEmptyStringParam(512),
+    },
+    {
+      depth: oneOfParam(["quick", "balanced", "deep"]),
+      expectedSessionSequence: finiteNumberParam,
+    },
+  ),
+  "discovery.cancel": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      discoveryId: boundedNonEmptyStringParam(512),
+      operationId: boundedNonEmptyStringParam(512),
+    },
+    { reason: boundedNonEmptyStringParam(4_000), expectedSessionSequence: finiteNumberParam },
   ),
   "run.start": exactParamShape(
     { workspacePath: stringParam, prompt: stringParam },
@@ -3133,6 +3274,34 @@ const runtimeChangeResult = resultShape({
   deletions: resultFiniteNumber,
 });
 
+const runtimeDiscoveryRunResult = resultShape(
+  {
+    discoveryId: resultNonEmptyString,
+    objective: resultNonEmptyString,
+    depth: resultOneOf(["quick", "balanced", "deep"]),
+    phase: resultOneOf(["forage", "focus", "deepen", "verify"]),
+    status: resultOneOf(["active", "interrupted", "completed", "cancelled"]),
+    cycle: resultNonNegativeInteger,
+    inspectedFiles: resultStringArray,
+    evidenceRefs: resultStringArray,
+    openQuestions: resultStringArray,
+    candidates: resultArray(resultJsonObject),
+    branches: resultArray(resultJsonObject),
+    startedAt: resultNonEmptyString,
+    updatedAt: resultNonEmptyString,
+  },
+  { reason: resultString, report: resultJsonObject },
+);
+
+const runtimeDiscoveryProjectionResult = resultShape(
+  {
+    sessionId: resultString,
+    sessionSequence: resultNonNegativeInteger,
+    discoveries: resultArray(runtimeDiscoveryRunResult),
+  },
+  { latest: runtimeDiscoveryRunResult, active: runtimeDiscoveryRunResult },
+);
+
 const runtimeNotificationResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value) || !isRuntimeNotification(value)) {
     throw invalidResult(`${path} 不是有效的 Runtime event`);
@@ -3200,8 +3369,13 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       activeRun: runtimeRunResult,
       nextBefore: resultString,
       planProjection: resultJsonObject,
+      discoveryProjection: runtimeDiscoveryProjectionResult,
     },
   ),
+  "discovery.start": resultShape({ projection: runtimeDiscoveryProjectionResult }),
+  "discovery.get": resultShape({ projection: runtimeDiscoveryProjectionResult }),
+  "discovery.resume": resultShape({ projection: runtimeDiscoveryProjectionResult }),
+  "discovery.cancel": resultShape({ projection: runtimeDiscoveryProjectionResult }),
   "session.evidence.read": resultShape(
     {
       evidenceUri: resultString,
