@@ -240,7 +240,10 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "context.checkpoint.recorded":
       assertString(value["data"]["checkpointId"], "context.checkpoint.recorded.checkpointId");
-      assertSha256(value["data"]["sourceDigest"], "context.checkpoint.recorded.sourceDigest");
+      assertCheckpointSourceDigest(
+        value["data"]["sourceDigest"],
+        "context.checkpoint.recorded.sourceDigest",
+      );
       if (
         !isNonNegativeInteger(value["data"]["coveredEventCount"]) ||
         value["data"]["coveredEventCount"] === 0
@@ -307,9 +310,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       if (isDiscoveryEventKind(value["kind"])) {
         if (value["partial"] !== false || value["visibility"] !== "internal") {
-          throw new RuntimeEventIntegrityError(
-            "Discovery events must be complete internal facts",
-          );
+          throw new RuntimeEventIntegrityError("Discovery events must be complete internal facts");
         }
         assertDiscoveryEventData(value["kind"], value["data"]);
         return;
@@ -533,6 +534,17 @@ function assertOnlyKeys(
 function assertSha256(value: unknown, field: string): asserts value is string {
   if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
     throw new RuntimeEventIntegrityError(`Runtime event ${field} must be a SHA-256 digest`);
+  }
+}
+
+function assertCheckpointSourceDigest(value: unknown, field: string): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    !/^(?:[a-f0-9]{64}|sha256-content:v1:[a-f0-9]{64})$/u.test(value)
+  ) {
+    throw new RuntimeEventIntegrityError(
+      `Runtime event ${field} must be a supported SHA-256 digest`,
+    );
   }
 }
 

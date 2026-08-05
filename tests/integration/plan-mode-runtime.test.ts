@@ -179,6 +179,158 @@ test("Plan provider projection always exposes submit_plan through tool disclosur
   assert.equal(result.handoff?.kind, "plan_handoff");
 });
 
+test("Plan automatically records verified Discovery evidence before atomic handoff", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-discovery-auto-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-discovery-auto";
+  await mkdir(workDir);
+  await writeFile(join(workDir, "target.ts"), "export const canary = 'verified';\n", "utf8");
+  t.after(async () => {
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let providerCalls = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      providerCalls++;
+      if (providerCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "read-verified-target",
+              name: "read_file",
+              arguments: JSON.stringify({ path: "target.ts" }),
+            },
+          ],
+        };
+      }
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "submit-verified-plan",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "修改已核验目标",
+              overview: "target.ts 已直接读取并形成 Evidence",
+              steps: [{ title: "修改 target.ts", description: "仅修改已核验的目标文件" }],
+              operationId: "submit-verified-plan",
+            }),
+          },
+        ],
+      };
+    },
+  };
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "读取 target.ts 后提交计划",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+      allowedTools: ["read_file", "submit_plan"],
+    },
+    { provider, picoHome, reporter: new SilentReporter() },
+  );
+  assert.ok(result.handoff);
+
+  const store = new RuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const events = await store.readSession(sessionId);
+  store.close();
+  const startedIndex = events.findIndex((event) => event.kind === "discovery.started");
+  const checkpointIndex = events.findIndex((event) => event.kind === "discovery.checkpointed");
+  const completedIndex = events.findIndex((event) => event.kind === "discovery.completed");
+  const proposedIndex = events.findIndex((event) => event.kind === "plan.proposed");
+  assert.ok(startedIndex >= 0 && checkpointIndex > startedIndex);
+  assert.equal(completedIndex + 1, proposedIndex);
+  const checkpoint = events[checkpointIndex];
+  assert.ok(checkpoint?.kind === "discovery.checkpointed");
+  assert.equal(checkpoint.data.checkpoint.phase, "verify");
+  assert.deepEqual(checkpoint.data.checkpoint.inspectedFiles, ["target.ts"]);
+  assert.ok(checkpoint.data.checkpoint.evidenceRefs.length > 0);
+  const completed = events[completedIndex];
+  const proposed = events[proposedIndex];
+  assert.ok(completed?.kind === "discovery.completed");
+  assert.ok(proposed?.kind === "plan.proposed");
+  assert.equal(completed.data.operationId, proposed.data.operationId);
+});
+
+test("a failed Plan Run interrupts its active automatic Discovery", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-discovery-failure-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-discovery-failure";
+  await mkdir(workDir);
+  await writeFile(join(workDir, "target.ts"), "export const value = 1;\n", "utf8");
+  t.after(async () => {
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let providerCalls = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      providerCalls++;
+      if (providerCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "read-before-failure",
+              name: "read_file",
+              arguments: JSON.stringify({ path: "target.ts" }),
+            },
+          ],
+        };
+      }
+      throw new Error("synthetic provider failure");
+    },
+  };
+
+  await assert.rejects(
+    executeAgentRuntime(
+      {
+        prompt: "读取 target.ts 后提交计划",
+        dir: workDir,
+        sessionSelection: { mode: "new", sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        interactionMode: "plan",
+        allowedTools: ["read_file", "submit_plan"],
+      },
+      { provider, picoHome, reporter: new SilentReporter() },
+    ),
+    /synthetic provider failure/u,
+  );
+  const store = new RuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const events = await store.readSession(sessionId);
+  store.close();
+  assert.equal(
+    events.some((event) => event.kind === "discovery.started"),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.kind === "discovery.interrupted"),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.kind === "discovery.completed"),
+    false,
+  );
+});
+
 test("resumeExistingSession injects durable revision feedback into the provider turn tail", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-revision-tail-"));
   const workDir = join(root, "work");
@@ -326,7 +478,7 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
       assert.equal(manager.lspClient(), undefined, "injected LSP is closed before Run");
       assert.equal(
         tools.some(({ name }) => name.startsWith("code_")),
-        false,
+        true,
       );
       return {
         role: "assistant",
@@ -420,7 +572,11 @@ test("Plan runtime suppresses injected hooks and their filesystem side effects",
   const provider: LLMProvider = {
     async generate(_messages, tools) {
       assert.equal(
-        tools.some(({ name }) => name.startsWith("code_") || name.startsWith("mcp__")),
+        tools.some(({ name }) => name.startsWith("code_")),
+        true,
+      );
+      assert.equal(
+        tools.some(({ name }) => name.startsWith("mcp__")),
         false,
       );
       return {

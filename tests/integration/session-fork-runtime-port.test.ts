@@ -313,7 +313,7 @@ test("completed fork cannot add state after its publication marker", async () =>
   }
 });
 
-test("fork bootstrap retries a partially imported v5 seed without duplicate facts", async () => {
+test("fork bootstrap retries a partially imported v6 seed without duplicate facts", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-seed-retry-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -425,7 +425,7 @@ test("session fork rejects a Runtime store that differs from the source Session"
   }
 });
 
-test("SessionForkService explicitly rejects legacy v1/v2/v3/v4 fork bundles", async () => {
+test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-bundle-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -437,7 +437,7 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4 fork bundles", as
     runtimePort: createSessionForkRuntimePort(),
   });
   try {
-    for (const version of [1, 2, 3, 4] as const) {
+    for (const version of [1, 2, 3, 4, 5] as const) {
       const operationId = `legacy-fork-v${version}`;
       const stagingDirectory = join(root, "staging", operationId);
       const sourceCursor = {
@@ -548,7 +548,7 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
   }
 });
 
-test("SessionForkService v5 preserves transcript, structured ToolResult, and evidence ref", async () => {
+test("SessionForkService v6 preserves transcript, structured ToolResult, and evidence ref", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-tool-result-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -628,7 +628,7 @@ test("SessionForkService v5 preserves transcript, structured ToolResult, and evi
       targetMode: "default",
     });
 
-    assert.equal(frozenBundle?.["schemaVersion"], 5);
+    assert.equal(frozenBundle?.["schemaVersion"], 6);
     assert.equal(Object.hasOwn(frozenBundle ?? {}, "messages"), false);
     assert.equal(Object.hasOwn(frozenBundle ?? {}, "historyEntries"), false);
     const frozenSeed = frozenBundle?.["seedEntries"];

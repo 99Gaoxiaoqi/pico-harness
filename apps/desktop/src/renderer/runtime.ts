@@ -492,7 +492,52 @@ function parseConversation(
     revision: stringValue(result.revision) || undefined,
     nextBefore: stringValue(result.nextBefore) || undefined,
     queuedCount: recordArray(result.queuedInputs).length,
+    discoveryItem: discoveryItemFromProjection(result.discoveryProjection),
   };
+}
+
+function discoveryItemFromProjection(value: unknown): ConversationItemView | undefined {
+  const projection = isRecord(value) ? value : undefined;
+  const latest = projection && isRecord(projection.latest) ? projection.latest : undefined;
+  if (!latest) return undefined;
+  const discoveryId = stringValue(latest.discoveryId);
+  const depth = latest.depth;
+  const phase = latest.phase;
+  const status = latest.status;
+  if (
+    !discoveryId ||
+    (depth !== "quick" && depth !== "balanced" && depth !== "deep") ||
+    (phase !== "forage" && phase !== "focus" && phase !== "deepen" && phase !== "verify") ||
+    (status !== "active" &&
+      status !== "interrupted" &&
+      status !== "completed" &&
+      status !== "cancelled")
+  ) {
+    return undefined;
+  }
+  return {
+    id: `discovery:${discoveryId}`,
+    kind: "discovery",
+    discoveryId,
+    objective: stringValue(latest.objective, "代码库探索"),
+    depth,
+    phase,
+    status,
+    inspectedFiles: recordArray(latest.inspectedFiles).length,
+    evidenceCount: recordArray(latest.evidenceRefs).length,
+    openQuestions: recordArray(latest.openQuestions).length,
+    reason: stringValue(latest.reason) || undefined,
+  };
+}
+
+function discoverySessionSequence(value: unknown): number {
+  const result = isRecord(value) ? value : undefined;
+  const projection = result && isRecord(result.projection) ? result.projection : undefined;
+  const sequence = projection?.sessionSequence;
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error("Discovery projection is missing a valid session sequence");
+  }
+  return sequence;
 }
 
 function isTerminalRunStatus(status: string): boolean {
@@ -1129,6 +1174,24 @@ export interface RuntimeActions {
     readonly offsetBytes?: number;
     readonly limitBytes?: number;
   }): Promise<ToolEvidencePage | undefined>;
+  startDiscovery(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly objective: string;
+    readonly depth: "quick" | "balanced" | "deep";
+  }): Promise<void>;
+  resumeDiscovery(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly discoveryId: string;
+    readonly depth?: "quick" | "balanced" | "deep";
+  }): Promise<void>;
+  cancelDiscovery(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly discoveryId: string;
+    readonly reason?: string;
+  }): Promise<void>;
   sendMessage(input: {
     readonly workspacePath: string;
     readonly sessionId?: string;
@@ -2164,6 +2227,7 @@ export function useRuntimeStore(): RuntimeStore {
         scheduleHydration();
       } else if (
         topic === "plan.updated" ||
+        topic === "discovery.updated" ||
         topic.startsWith("run.") ||
         topic.startsWith("session.")
       ) {
@@ -2428,6 +2492,63 @@ export function useRuntimeStore(): RuntimeStore {
           page = toolEvidencePage(value, input.evidenceUri);
         });
         return page;
+      },
+      async startDiscovery(input) {
+        if (!input.workspacePath || !input.sessionId || !input.objective.trim()) return;
+        await perform("discovery-start", async (bridge) => {
+          if (preview) return;
+          const current = await invoke(bridge, "discovery.get", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+          });
+          await invoke(bridge, "discovery.start", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+            objective: input.objective.trim(),
+            depth: input.depth,
+            operationId: crypto.randomUUID(),
+            expectedSessionSequence: discoverySessionSequence(current),
+          });
+          await loadConversation(bridge, input.workspacePath, input.sessionId);
+        });
+      },
+      async resumeDiscovery(input) {
+        if (!input.workspacePath || !input.sessionId || !input.discoveryId) return;
+        await perform("discovery-resume", async (bridge) => {
+          if (preview) return;
+          const current = await invoke(bridge, "discovery.get", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+          });
+          await invoke(bridge, "discovery.resume", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+            discoveryId: input.discoveryId,
+            ...(input.depth ? { depth: input.depth } : {}),
+            operationId: crypto.randomUUID(),
+            expectedSessionSequence: discoverySessionSequence(current),
+          });
+          await loadConversation(bridge, input.workspacePath, input.sessionId);
+        });
+      },
+      async cancelDiscovery(input) {
+        if (!input.workspacePath || !input.sessionId || !input.discoveryId) return;
+        await perform("discovery-cancel", async (bridge) => {
+          if (preview) return;
+          const current = await invoke(bridge, "discovery.get", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+          });
+          await invoke(bridge, "discovery.cancel", {
+            workspacePath: input.workspacePath,
+            sessionId: input.sessionId,
+            discoveryId: input.discoveryId,
+            ...(input.reason ? { reason: input.reason } : {}),
+            operationId: crypto.randomUUID(),
+            expectedSessionSequence: discoverySessionSequence(current),
+          });
+          await loadConversation(bridge, input.workspacePath, input.sessionId);
+        });
       },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;

@@ -47,6 +47,8 @@
     "test:llm-e2e": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/*.real-llm.test.ts",
     "pretest:llm-e2e:plan": "npm run check:storage && npm run build:protocol",
     "test:llm-e2e:plan": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/plan-mode.real-llm.test.ts",
+    "pretest:llm-e2e:discovery": "npm run check:storage && npm run build:protocol",
+    "test:llm-e2e:discovery": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/discovery-loop.real-llm.test.ts",
     "pretest:compaction-e2e": "npm run check:storage && npm run build:protocol",
     "test:compaction-e2e": "node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/compaction-quality.real-llm.test.ts",
     "check:storage": "node --import tsx scripts/check-storage-capability.mjs",

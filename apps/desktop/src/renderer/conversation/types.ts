@@ -122,6 +122,19 @@ export interface GoalItemView extends ConversationItemBase {
   readonly state: ConversationProgressState;
 }
 
+export interface DiscoveryItemView extends ConversationItemBase {
+  readonly kind: "discovery";
+  readonly discoveryId: string;
+  readonly objective: string;
+  readonly depth: "quick" | "balanced" | "deep";
+  readonly phase: "forage" | "focus" | "deepen" | "verify";
+  readonly status: "active" | "interrupted" | "completed" | "cancelled";
+  readonly inspectedFiles: number;
+  readonly evidenceCount: number;
+  readonly openQuestions: number;
+  readonly reason?: string | undefined;
+}
+
 export type ConversationItemView =
   | UserMessageItemView
   | AssistantMessageItemView
@@ -135,7 +148,8 @@ export type ConversationItemView =
   | ApprovalItemView
   | PromptItemView
   | ChangesItemView
-  | GoalItemView;
+  | GoalItemView
+  | DiscoveryItemView;
 
 export type ComposerStatus = "idle" | "running" | "paused";
 export type ComposerBehavior = "auto" | "steer" | "queue" | "replace";

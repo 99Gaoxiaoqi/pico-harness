@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { resolveCliStartupSession } from "../../src/cli/session-args.js";
+import { DiscoveryCoordinator } from "../../src/discovery/coordinator.js";
+import { SessionManager } from "../../src/engine/session.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
@@ -102,6 +104,54 @@ test("/plan and legacy mode commands keep collaboration and permission independe
   if (off.type !== "local-command") return;
   assert.equal((off.result.data as { collaborationMode: string }).collaborationMode, "agent");
   assert.equal((off.result.data as { permissionMode: string }).permissionMode, "auto");
+});
+
+test("/explore starts a durable read-only Discovery prompt and supports status and cancel", async (context) => {
+  const fixture = await createFixture("explore-command");
+  const sessionId = "explore-command-session";
+  const manager = new SessionManager();
+  const session = await manager.getOrCreate(sessionId, fixture.workspace, {
+    persistence: true,
+    picoHome: fixture.picoHome,
+  });
+  context.after(async () => {
+    await manager.delete(sessionId, fixture.workspace, { picoHome: fixture.picoHome })?.close();
+    await fixture.dispose();
+  });
+  const registry = await createPicoCommandRegistry({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+    provider: "openai",
+    model: "test-model",
+    modelRouteId: "test/test-model",
+    session,
+    sessionId,
+    tools: [],
+  });
+
+  const started = await processUserInput("/explore deep 定位权限检查入口", { registry });
+  assert.equal(started.type, "prompt-command");
+  if (started.type !== "prompt-command") return;
+  assert.match(started.result.prompt, /Forage.*Focus.*Deepen.*Verify/u);
+  assert.ok(started.result.execution?.allowedTools?.includes("repo_map"));
+  assert.ok(started.result.execution?.allowedTools?.includes("code_definition"));
+  assert.equal(started.result.execution?.allowedTools?.includes("write_file"), false);
+  const coordinator = new DiscoveryCoordinator(session.runtimeEventStore!, {
+    sessionId,
+    invocationId: "test-explore-command",
+    runId: "test-explore-command",
+    turnId: "test-explore-command",
+  });
+  assert.equal((await coordinator.project()).active?.depth, "deep");
+
+  const status = await processUserInput("/explore status", { registry });
+  assert.equal(status.type, "local-command");
+  if (status.type !== "local-command") return;
+  assert.match(status.result.message ?? "", /Discovery active.*deep/u);
+
+  const cancelled = await processUserInput("/explore cancel 用户取消", { registry });
+  assert.equal(cancelled.type, "local-command");
+  assert.equal((await coordinator.project()).latest?.status, "cancelled");
 });
 
 test("/resume and /fork reject an unpublished fork target", async (context) => {

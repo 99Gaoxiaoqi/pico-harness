@@ -130,6 +130,7 @@ import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
+import { DiscoveryCoordinator, type DiscoveryProjection } from "../discovery/index.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
 import {
   projectRuntimeTranscriptEntries,
@@ -197,6 +198,19 @@ interface ResolvedRuntimeUserInput {
   readonly prompt: string;
   readonly execution?: DaemonRunExecution;
 }
+
+const DISCOVERY_RUN_TOOLS = [
+  "read_file",
+  "read_evidence",
+  "glob",
+  "grep",
+  "repo_map",
+  "code_symbols",
+  "code_definition",
+  "code_references",
+  "code_call_hierarchy",
+  "code_diagnostics",
+] as const;
 
 export interface DesktopRuntimeServiceOptions {
   readonly runtimeService: WorkspaceRuntimeService;
@@ -499,6 +513,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           ...(result.run ? { run: toJsonValue(result.run) } : {}),
         };
       },
+      "discovery.start": (request) => this.startDiscovery(request.params),
+      "discovery.get": (request) => this.getDiscovery(request.params),
+      "discovery.resume": (request) => this.resumeDiscovery(request.params),
+      "discovery.cancel": (request) => this.cancelDiscovery(request.params),
       "prompt.respond": (request) => {
         if (!this.options.interactions) {
           throw new RuntimeProtocolError(
@@ -1487,10 +1505,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       picoHome: this.picoHome,
       env: this.env,
     });
+    const discoveryProjection = await this.readDiscoveryProjection(
+      canonical,
+      params.sessionId,
+      `transcript:${params.sessionId}`,
+    );
     const result = {
       session,
       items: page.items,
       planProjection: toJsonValue(planProjection),
+      discoveryProjection: toJsonValue(discoveryProjection),
       ...(activeRun ? { activeRun } : {}),
       queuedInputs,
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
@@ -1503,6 +1527,276 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     return result;
+  }
+
+  private async startDiscovery(
+    params: RuntimeRequest<"discovery.start">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    if (activeRun) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `当前 Session 已有活动 Run ${String(activeRun["runId"] ?? "unknown")}，无法启动 Discovery`,
+      );
+    }
+    const projection = await this.withDiscoveryCoordinator(
+      canonical,
+      params.sessionId,
+      params.operationId,
+      (coordinator) =>
+        coordinator.start({
+          operationId: params.operationId,
+          expectedSessionSequence: params.expectedSessionSequence,
+          objective: params.objective,
+          depth: params.depth,
+          ...(params.roots ? { roots: params.roots } : {}),
+        }),
+      true,
+    );
+    this.publishDiscovery(canonical, params.sessionId, projection, "started");
+    try {
+      await this.startDiscoveryRun({
+        workspacePath: canonical,
+        sessionId: params.sessionId,
+        objective: params.objective,
+        depth: params.depth,
+        operationId: params.operationId,
+      });
+    } catch (error) {
+      await this.interruptDiscoveryAfterLaunchFailure(
+        canonical,
+        params.sessionId,
+        projection.active?.discoveryId,
+        params.operationId,
+        error,
+      );
+      throw error;
+    }
+    return { projection: toJsonValue(projection) };
+  }
+
+  private async getDiscovery(
+    params: RuntimeRequest<"discovery.get">["params"],
+  ): Promise<JsonValue> {
+    const projection = await this.readDiscoveryProjection(
+      params.workspacePath,
+      params.sessionId,
+      `get:${params.sessionId}`,
+    );
+    return { projection: toJsonValue(projection) };
+  }
+
+  private async resumeDiscovery(
+    params: RuntimeRequest<"discovery.resume">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    if (activeRun) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `当前 Session 已有活动 Run ${String(activeRun["runId"] ?? "unknown")}，无法恢复 Discovery`,
+      );
+    }
+    const projection = await this.withDiscoveryCoordinator(
+      canonical,
+      params.sessionId,
+      params.operationId,
+      (coordinator) =>
+        coordinator.resume({
+          operationId: params.operationId,
+          expectedSessionSequence: params.expectedSessionSequence,
+          discoveryId: params.discoveryId,
+          ...(params.depth ? { depth: params.depth } : {}),
+        }),
+      true,
+    );
+    this.publishDiscovery(canonical, params.sessionId, projection, "resumed");
+    const resumed = projection.active;
+    if (resumed) {
+      try {
+        await this.startDiscoveryRun({
+          workspacePath: canonical,
+          sessionId: params.sessionId,
+          objective: resumed.objective,
+          depth: resumed.depth,
+          operationId: params.operationId,
+          resume: true,
+        });
+      } catch (error) {
+        await this.interruptDiscoveryAfterLaunchFailure(
+          canonical,
+          params.sessionId,
+          resumed.discoveryId,
+          params.operationId,
+          error,
+        );
+        throw error;
+      }
+    }
+    return { projection: toJsonValue(projection) };
+  }
+
+  private async cancelDiscovery(
+    params: RuntimeRequest<"discovery.cancel">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const projection = await this.withDiscoveryCoordinator(
+      canonical,
+      params.sessionId,
+      params.operationId,
+      (coordinator) =>
+        coordinator.cancel({
+          operationId: params.operationId,
+          expectedSessionSequence: params.expectedSessionSequence,
+          discoveryId: params.discoveryId,
+          ...(params.reason ? { reason: params.reason } : {}),
+        }),
+      true,
+    );
+    this.publishDiscovery(canonical, params.sessionId, projection, "cancelled");
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    if (activeRun) {
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("run.cancel", {
+          workspacePath: canonical,
+          runId: requireText(activeRun["runId"], "run.runId"),
+          reason: params.reason ?? "Discovery cancelled by user",
+        }),
+      );
+    }
+    return { projection: toJsonValue(projection) };
+  }
+
+  private readDiscoveryProjection(
+    workspacePath: string,
+    sessionId: string,
+    operationId: string,
+  ): Promise<DiscoveryProjection> {
+    return this.withDiscoveryCoordinator(workspacePath, sessionId, operationId, (coordinator) =>
+      coordinator.project(),
+    );
+  }
+
+  private async withDiscoveryCoordinator<Result>(
+    workspacePath: string,
+    sessionId: string,
+    operationId: string,
+    operation: (coordinator: DiscoveryCoordinator) => Promise<Result>,
+    refreshRuntimeProjection = false,
+  ): Promise<Result> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    await this.requireSession(canonical, sessionId);
+    const lease = await globalSessionManager.getOrCreatePinned(sessionId, canonical, {
+      persistence: true,
+      picoHome: this.picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      if (!lease.session.runtimeEventStore) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "Discovery requires durable Session storage",
+        );
+      }
+      const result = await operation(
+        new DiscoveryCoordinator(lease.session.runtimeEventStore, {
+          sessionId,
+          invocationId: `discovery:${operationId}`,
+          runId: `discovery:${operationId}`,
+          turnId: `discovery:${operationId}`,
+        }),
+      );
+      if (refreshRuntimeProjection) await lease.session.refreshRuntimeProjection();
+      return result;
+    } finally {
+      lease.release();
+    }
+  }
+
+  private publishDiscovery(
+    workspacePath: string,
+    sessionId: string,
+    projection: DiscoveryProjection,
+    operation: "started" | "resumed" | "cancelled" | "updated",
+  ): void {
+    this.publish(
+      createRuntimeNotification({
+        topic: "discovery.updated",
+        scope: { workspacePath, sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId, projection: toJsonValue(projection), operation },
+      }),
+    );
+  }
+
+  private async startDiscoveryRun(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly objective: string;
+    readonly depth: "quick" | "balanced" | "deep";
+    readonly operationId: string;
+    readonly resume?: boolean;
+  }): Promise<void> {
+    const prompt = [
+      `以 ${input.depth} 深度执行一次隔离的只读 Discovery，目标：${input.objective}`,
+      "按 Forage → Focus → Deepen → Verify 推进：先用 Repo Map、Glob、Grep 广泛觅食，再筛选候选，随后用符号、定义、引用、调用层级和 Read 深挖，最后必须直接读取目标源码交叉核验。",
+      "Repo Map 返回 complete=false 只代表仍有后续批次，必须继续扫描，不能据此宣告目标不存在。互不依赖的只读查询可在同一批并发发起，但不得重复相同的宽泛搜索。",
+      ...(input.resume ? ["优先从已保存候选和 Evidence 继续，不要重复完全相同的全仓搜索。"] : []),
+      "只返回有界结构化报告：确认目标、符号、调用关系、Evidence、未知点和建议落点。禁止修改文件或启动可写任务；报告完成后停止，不实施。",
+    ].join("\n");
+    const userInput: RuntimeUserInput = {
+      kind: "text",
+      text: `/explore ${input.depth} ${input.objective}`,
+    };
+    await this.withSession(input.workspacePath, input.sessionId, async (session) => {
+      await this.getSessionSettings(input.workspacePath, session);
+      await session.flushPersistence();
+    });
+    await this.commitSessionInputOnce(
+      input.workspacePath,
+      input.sessionId,
+      prompt,
+      userInput.text,
+      userInput,
+      `discovery:${input.operationId}`,
+    );
+    await this.options.runtimeService.startForegroundRun({
+      workspacePath: input.workspacePath,
+      sessionId: input.sessionId,
+      prompt,
+      execution: { allowedTools: DISCOVERY_RUN_TOOLS, resumeExistingSession: true },
+      idempotencyKey: desktopRunStartIdempotencyKey("discovery", input.operationId),
+    });
+  }
+
+  private async interruptDiscoveryAfterLaunchFailure(
+    workspacePath: string,
+    sessionId: string,
+    discoveryId: string | undefined,
+    operationId: string,
+    error: unknown,
+  ): Promise<void> {
+    if (!discoveryId) return;
+    const reason = `Discovery Run 启动失败：${error instanceof Error ? error.message : String(error)}`;
+    const projection = await this.withDiscoveryCoordinator(
+      workspacePath,
+      sessionId,
+      `launch-failed:${operationId}`,
+      async (coordinator) => {
+        const before = await coordinator.project();
+        if (before.active?.discoveryId !== discoveryId) return before;
+        return coordinator.interrupt({
+          operationId: `launch-failed:${operationId}`,
+          expectedSessionSequence: before.sessionSequence,
+          discoveryId,
+          reason,
+        });
+      },
+      true,
+    );
+    this.publishDiscovery(workspacePath, sessionId, projection, "updated");
   }
 
   private async readSessionEvidence(
@@ -3654,7 +3948,10 @@ function firstSendRequestFingerprint(params: {
     .digest("hex");
 }
 
-function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): string {
+function desktopRunStartIdempotencyKey(
+  source: "send" | "queue" | "discovery",
+  key: string,
+): string {
   const digest = createHash("sha256").update(key).digest("hex");
   return `desktop-${source}-run:${digest}`;
 }
