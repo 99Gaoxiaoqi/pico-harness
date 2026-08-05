@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,8 +73,32 @@ test("Plan submission atomically completes a verified active Discovery", async (
   assert.equal((await store.readSessionEntries("session-1")).length, 2);
 
   await discovery.checkpoint({
-    operationId: "discover-verify",
+    operationId: "discover-empty-verify",
     expectedSessionSequence: 2,
+    discoveryId: "discovery-1",
+    checkpoint: {
+      phase: "verify",
+      cycle: 1,
+      candidates: [],
+      evidenceRefs: ["evidence://unrelated"],
+      hypotheses: [],
+      openQuestions: [],
+      toolCallsUsed: 0,
+      inspectedFiles: [],
+    },
+  });
+  await assert.rejects(
+    plan.propose({
+      operationId: "submit-empty-verify",
+      expectedSessionSequence: 3,
+      proposal,
+    }),
+    PlanConflictError,
+  );
+
+  await discovery.checkpoint({
+    operationId: "discover-arbitrary-verify",
+    expectedSessionSequence: 3,
     discoveryId: "discovery-1",
     checkpoint: {
       phase: "verify",
@@ -83,27 +108,122 @@ test("Plan submission atomically completes a verified active Discovery", async (
           path: "src/quote-resolver.ts",
           symbol: "resolveQuote",
           score: 30,
-          reasons: ["direct definition and caller evidence"],
-          evidenceRefs: ["evidence://quote-resolver"],
+          reasons: ["unrelated evidence cannot verify a candidate"],
+          evidenceRefs: ["evidence://unrelated"],
         },
       ],
-      evidenceRefs: ["evidence://quote-resolver"],
+      evidenceRefs: ["evidence://unrelated"],
+      hypotheses: [],
+      openQuestions: [],
+      toolCallsUsed: 0,
+      inspectedFiles: ["src/quote-resolver.ts"],
+    },
+  });
+  await assert.rejects(
+    plan.propose({
+      operationId: "submit-arbitrary-verify",
+      expectedSessionSequence: 4,
+      proposal,
+    }),
+    PlanConflictError,
+  );
+
+  const source = "export function resolveQuote() { return 42; }\n";
+  const sourceSha = createHash("sha256").update(source).digest("hex");
+  const directEvidence = `runtime://tool-result/read-quote?sha256=${sourceSha}`;
+  await store.appendBatch(
+    [
+      {
+        schemaVersion: 2,
+        eventId: "message:read-quote",
+        sessionId: "session-1",
+        invocationId: "inv-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        at: AT.toISOString(),
+        partial: false,
+        visibility: "model",
+        kind: "message.committed",
+        data: {
+          message: {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "read-quote",
+                name: "read_file",
+                arguments: JSON.stringify({ path: "src/quote-resolver.ts" }),
+              },
+            ],
+          },
+        },
+      },
+      {
+        schemaVersion: 2,
+        eventId: "tool-result:read-quote",
+        sessionId: "session-1",
+        invocationId: "inv-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        at: AT.toISOString(),
+        partial: false,
+        visibility: "model",
+        refs: { toolCallId: "read-quote" },
+        kind: "tool.result.recorded",
+        data: {
+          toolName: "read_file",
+          status: "succeeded",
+          body: {
+            storage: "inline",
+            content: source,
+            sha256: sourceSha,
+            sizeBytes: Buffer.byteLength(source, "utf8"),
+          },
+          projection: {
+            version: 1,
+            mode: "full",
+            text: source,
+            strategy: "full",
+            truncated: false,
+          },
+        },
+      },
+    ],
+    { expectedSessionHighWater: { "session-1": 4 } },
+  );
+  await discovery.checkpoint({
+    operationId: "discover-direct-verify",
+    expectedSessionSequence: 6,
+    discoveryId: "discovery-1",
+    checkpoint: {
+      phase: "verify",
+      cycle: 1,
+      candidates: [
+        {
+          path: "src/quote-resolver.ts",
+          symbol: "resolveQuote",
+          score: 40,
+          reasons: ["direct source read"],
+          evidenceRefs: [directEvidence],
+        },
+      ],
+      evidenceRefs: [directEvidence],
       hypotheses: [
         {
           id: "quote-owner",
           statement: "resolveQuote owns the final value",
           status: "supported",
-          evidenceRefs: ["evidence://quote-resolver"],
+          evidenceRefs: [directEvidence],
         },
       ],
       openQuestions: [],
-      toolCallsUsed: 2,
+      toolCallsUsed: 1,
       inspectedFiles: ["src/quote-resolver.ts"],
     },
   });
   const proposed = await plan.propose({
     operationId: "submit-verified-plan",
-    expectedSessionSequence: 3,
+    expectedSessionSequence: 7,
     proposal,
   });
   assert.equal(proposed.pendingProposal?.planId, "plan-1");
@@ -125,18 +245,24 @@ test("Plan submission atomically completes a verified active Discovery", async (
     "submit-verified-plan",
   );
   assert.equal((await discovery.project()).latest?.status, "completed");
+  assert.deepEqual(
+    discoveryCompletion?.kind === "discovery.completed"
+      ? discoveryCompletion.data.report.evidenceRefs
+      : [],
+    [directEvidence],
+  );
 
   const replay = await plan.propose({
     operationId: "submit-verified-plan",
-    expectedSessionSequence: 3,
+    expectedSessionSequence: 7,
     proposal,
   });
-  assert.equal(replay.sessionSequence, 5);
-  assert.equal((await store.readSessionEntries("session-1")).length, 5);
+  assert.equal(replay.sessionSequence, 9);
+  assert.equal((await store.readSessionEntries("session-1")).length, 9);
   await assert.rejects(
     plan.propose({
       operationId: "submit-verified-plan",
-      expectedSessionSequence: 5,
+      expectedSessionSequence: 9,
       proposal: { ...proposal, title: "Conflicting retry" },
     }),
     RuntimeEventStorePlanOperationConflictError,

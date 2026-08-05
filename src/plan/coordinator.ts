@@ -13,8 +13,14 @@ import {
 import {
   RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
+  type RuntimeEventStoreEntry,
 } from "../storage/runtime-event-store.js";
-import type { DiscoveryReport } from "../discovery/contract.js";
+import {
+  normalizeDiscoveryPath,
+  type DiscoveryCandidate,
+  type DiscoveryReport,
+  type DiscoveryRun,
+} from "../discovery/contract.js";
 import {
   projectActiveDiscoveryEntries,
   projectDiscoveryEntries,
@@ -431,6 +437,7 @@ export class PlanCoordinator {
         ? prepareActiveDiscoveryCompletion(
             projectDiscoveryEntries(this.context.sessionId, entries),
             options.discoveryCompletion,
+            entries,
           )
         : undefined;
     const fingerprint = planOperationFingerprint(
@@ -499,23 +506,28 @@ export class PlanCoordinator {
 function prepareActiveDiscoveryCompletion(
   projection: ReturnType<typeof projectDiscoveryEntries>,
   input: { readonly summary: string; readonly remainingRisks: readonly string[] },
+  entries: readonly RuntimeEventStoreEntry[],
 ): { readonly discoveryId: string; readonly report: DiscoveryReport } | undefined {
   const active = projection.active;
   if (!active) return undefined;
   if (active.phase !== "verify") {
     throw new PlanConflictError("Active Discovery must reach verify before submitting a plan");
   }
-  if (active.evidenceRefs.length === 0) {
+  const confirmedTargets = directlyReadDiscoveryCandidates(entries, active);
+  if (confirmedTargets.length === 0) {
     throw new PlanConflictError(
-      "Active Discovery must include Verify evidence before submitting a plan",
+      "Active Discovery Verify must directly read a selected candidate source and reference its ToolResult evidence",
     );
   }
+  const evidenceRefs = [
+    ...new Set(confirmedTargets.flatMap((candidate) => candidate.evidenceRefs)),
+  ];
   return {
     discoveryId: active.discoveryId,
     report: {
       summary: input.summary,
-      confirmedTargets: active.candidates,
-      evidenceRefs: active.evidenceRefs,
+      confirmedTargets,
+      evidenceRefs,
       remainingRisks: [
         ...new Set([
           ...input.remainingRisks,
@@ -527,4 +539,92 @@ function prepareActiveDiscoveryCompletion(
       ],
     },
   };
+}
+
+function directlyReadDiscoveryCandidates(
+  entries: readonly RuntimeEventStoreEntry[],
+  active: DiscoveryRun,
+): DiscoveryCandidate[] {
+  const activeEntries = projectActiveRuntimeEntries(entries);
+  const startedSequence = activeEntries.findLast(
+    ({ event }) =>
+      event.kind === "discovery.started" && event.data.discoveryId === active.discoveryId,
+  )?.sequence;
+  if (startedSequence === undefined) return [];
+
+  const readPaths = new Map<string, string>();
+  for (const { event } of activeEntries) {
+    if (event.kind !== "message.committed") continue;
+    for (const call of event.data.message.toolCalls ?? []) {
+      if (call.name !== "read_file") continue;
+      const path = readFilePath(call.arguments);
+      if (path) readPaths.set(call.id, path);
+    }
+  }
+
+  const evidenceByPath = new Map<string, Set<string>>();
+  for (const { sequence, event } of activeEntries) {
+    if (
+      sequence <= startedSequence ||
+      event.kind !== "tool.result.recorded" ||
+      event.data.toolName !== "read_file" ||
+      event.data.status !== "succeeded"
+    ) {
+      continue;
+    }
+    const candidatePath = readPaths.get(event.refs.toolCallId);
+    if (!candidatePath) continue;
+    const evidence = evidenceByPath.get(candidatePath) ?? new Set<string>();
+    evidence.add(toolResultEvidenceReference(event));
+    evidenceByPath.set(candidatePath, evidence);
+  }
+
+  return active.candidates.flatMap((candidate) => {
+    if (!active.inspectedFiles.includes(candidate.path)) return [];
+    const directEvidence = evidenceByPath.get(candidate.path);
+    if (!directEvidence) return [];
+    const evidenceRefs = candidate.evidenceRefs.filter(
+      (reference) => active.evidenceRefs.includes(reference) && directEvidence.has(reference),
+    );
+    return evidenceRefs.length > 0 ? [{ ...candidate, evidenceRefs }] : [];
+  });
+}
+
+function projectActiveRuntimeEntries(
+  entries: readonly RuntimeEventStoreEntry[],
+): RuntimeEventStoreEntry[] {
+  let projected: RuntimeEventStoreEntry[] = [];
+  for (const entry of entries) {
+    if (entry.event.kind === "history.rewound") {
+      const through = entry.event.data.throughEventId;
+      if (!through) projected = [];
+      else {
+        const index = projected.findIndex(({ event }) => event.eventId === through);
+        if (index < 0) {
+          throw new PlanConflictError(`Rewind boundary ${through} is not on the active branch`);
+        }
+        projected = projected.slice(0, index + 1);
+      }
+    }
+    projected.push(entry);
+  }
+  return projected;
+}
+
+function readFilePath(argumentsJson: string): string | undefined {
+  try {
+    const input = JSON.parse(argumentsJson) as Record<string, unknown>;
+    return typeof input["path"] === "string" ? normalizeDiscoveryPath(input["path"]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toolResultEvidenceReference(
+  event: Extract<RuntimeEvent, { kind: "tool.result.recorded" }>,
+): string {
+  const evidence = event.refs.evidence;
+  return evidence
+    ? `pico://evidence/${encodeURIComponent(evidence.sessionId)}/${evidence.contentHash}`
+    : `runtime://tool-result/${encodeURIComponent(event.refs.toolCallId)}?sha256=${event.data.body.sha256}`;
 }

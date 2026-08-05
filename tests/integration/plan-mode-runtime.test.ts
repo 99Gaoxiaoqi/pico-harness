@@ -264,6 +264,97 @@ test("Plan automatically records verified Discovery evidence before atomic hando
   assert.equal(completed.data.operationId, proposed.data.operationId);
 });
 
+test("Plan Repo Map clamps one scan to the remaining Discovery file budget", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-discovery-repo-budget-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-discovery-repo-budget";
+  await mkdir(workDir);
+  for (let index = 0; index < 40; index++) {
+    await writeFile(
+      join(workDir, `module-${String(index).padStart(2, "0")}.ts`),
+      `export const value${index} = ${index};\n`,
+      "utf8",
+    );
+  }
+  t.after(async () => {
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let providerCalls = 0;
+  let repoMapOutput = "";
+  const provider: LLMProvider = {
+    async generate(messages) {
+      providerCalls++;
+      if (providerCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "scan-over-budget",
+              name: "repo_map",
+              arguments: JSON.stringify({ max_files: 200 }),
+            },
+          ],
+        };
+      }
+      repoMapOutput =
+        messages.findLast((message) => message.toolCallId === "scan-over-budget")?.content ?? "";
+      return {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "submit-after-budget",
+            name: "submit_plan",
+            arguments: JSON.stringify({
+              title: "记录扫描预算",
+              steps: [{ title: "后续核验", description: "恢复 Discovery 后直接读取候选源码" }],
+              operationId: "submit-after-budget",
+            }),
+          },
+        ],
+      };
+    },
+  };
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "扫描仓库并提交计划",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+      allowedTools: ["repo_map", "submit_plan"],
+    },
+    { provider, picoHome, reporter: new SilentReporter() },
+  );
+  assert.ok(result.handoff);
+  assert.match(repoMapOutput, /backend=repo-map indexed=30\/40 cursor=30 complete=false/u);
+
+  const store = new RuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const events = await store.readSession(sessionId);
+  store.close();
+  const checkpoint = events.find(
+    (event) =>
+      event.kind === "discovery.checkpointed" && event.data.checkpoint.inspectedFiles.length === 30,
+  );
+  assert.ok(checkpoint?.kind === "discovery.checkpointed");
+  assert.equal(checkpoint.data.checkpoint.candidates.length, 20);
+  assert.equal(
+    events.some(
+      (event) =>
+        event.kind === "discovery.interrupted" && event.data.limitReason === "budget_exhausted",
+    ),
+    true,
+  );
+});
+
 test("a failed Plan Run interrupts its active automatic Discovery", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-discovery-failure-"));
   const workDir = join(root, "work");
