@@ -297,12 +297,7 @@ export class RepoMapService implements CodeIntelligenceService {
       );
       if (effectiveLimit <= 0) return { indexed: [], scannedFiles: [] };
       await this.discoverFiles();
-      const startIndex = this.nextFileIndex;
-      try {
-        return await this.scanNextUnlocked(effectiveLimit, signal);
-      } finally {
-        reportRepoMapScans((this.discoveredFiles ?? []).slice(startIndex, this.nextFileIndex));
-      }
+      return await this.scanNextUnlocked(effectiveLimit, signal);
     });
   }
 
@@ -317,6 +312,7 @@ export class RepoMapService implements CodeIntelligenceService {
       throwIfAborted(signal);
       const filePath = this.discoveredFiles?.[this.nextFileIndex++];
       if (!filePath) continue;
+      reportRepoMapScans([filePath]);
       const file = await this.indexFileUnlocked(filePath, signal).catch(() => undefined);
       if (file) indexed.push(file);
     }
@@ -352,11 +348,9 @@ export class RepoMapService implements CodeIntelligenceService {
         throw new Error("Repo Map 文件检查预算已耗尽");
       }
       const relativePath = path.relative(this.rootDir, path.resolve(this.rootDir, filePath));
-      try {
-        return await this.indexFileUnlocked(filePath, signal);
-      } finally {
-        reportRepoMapScans([relativePath]);
-      }
+      throwIfAborted(signal);
+      reportRepoMapScans([relativePath]);
+      return await this.indexFileUnlocked(filePath, signal);
     });
   }
 
@@ -375,7 +369,7 @@ export class RepoMapService implements CodeIntelligenceService {
       if (info.size > MAX_SOURCE_BYTES) {
         throw new Error(`Repo Map 跳过超过 ${MAX_SOURCE_BYTES} 字节的文件: ${filePath}`);
       }
-      text = await readBoundedUtf8(handle, MAX_SOURCE_BYTES, filePath);
+      text = await readBoundedUtf8(handle, MAX_SOURCE_BYTES, filePath, signal);
     } finally {
       await handle.close();
     }
@@ -486,11 +480,14 @@ async function readBoundedUtf8(
   handle: FileHandle,
   maxBytes: number,
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const buffer = Buffer.allocUnsafe(maxBytes + 1);
   let offset = 0;
   while (offset < buffer.length) {
+    throwIfAborted(signal);
     const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    throwIfAborted(signal);
     if (bytesRead === 0) break;
     offset += bytesRead;
   }
