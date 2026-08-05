@@ -65,6 +65,28 @@ export class WorkspaceRoots {
     return new WorkspaceRoots(normalizedPrimary, [normalizedPrimary]);
   }
 
+  /** Keep paths relative to the workspace while physically limiting access to branch roots. */
+  static createScopedSync(primaryRoot: string, allowedRoots: readonly string[]): WorkspaceRoots {
+    const workspace = WorkspaceRoots.createSync(primaryRoot);
+    const scoped = [...new Set(allowedRoots.map((root) => workspace.resolveUnchecked(root)))];
+    if (scoped.length === 0) throw new Error("子代理检索根不能为空");
+    for (const root of scoped) {
+      let info;
+      try {
+        info = statSync(root);
+      } catch (error) {
+        throw new Error(`子代理检索根不存在: ${root}`, { cause: error });
+      }
+      if ((!info.isDirectory() && !info.isFile()) || !workspace.isAllowed(root)) {
+        throw new Error(`子代理检索根不在当前工作区: ${root}`);
+      }
+    }
+    return new WorkspaceRoots(
+      workspace.primaryRoot,
+      scoped.map((root) => realpathSync.native(root)),
+    );
+  }
+
   list(): readonly string[] {
     return Object.freeze([...this.roots]);
   }

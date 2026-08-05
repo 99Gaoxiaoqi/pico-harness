@@ -13,6 +13,8 @@ export interface DelegateTaskInput {
   agent?: unknown;
   roots?: string[];
   max_files?: number;
+  /** Host-only hard budget. It is intentionally omitted from the model tool schema. */
+  max_tool_calls?: number;
   stopping_condition?: string;
   expected_output?: string;
 }
@@ -33,6 +35,7 @@ export interface NormalizedDelegateTask {
   ephemeralAgent?: EphemeralAgentSpec;
   roots: string[];
   maxFiles: number;
+  maxToolCalls?: number;
   stoppingCondition: string;
   expectedOutput: string;
   contractExplicit: boolean;
@@ -127,6 +130,7 @@ export function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDeleg
             agent: input.agent,
             roots: input.roots,
             max_files: input.max_files,
+            max_tool_calls: input.max_tool_calls,
             stopping_condition: input.stopping_condition,
             expected_output: input.expected_output,
           },
@@ -143,6 +147,9 @@ export function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDeleg
       ...normalizeEphemeralAgent(task.agent, defaultAgent),
       roots: normalizeDelegationRoots(task.roots, defaultRoots),
       maxFiles: normalizeMaxFiles(task.max_files, defaultMaxFiles),
+      ...(normalizeOptionalPositiveInteger(task.max_tool_calls) !== undefined
+        ? { maxToolCalls: normalizeOptionalPositiveInteger(task.max_tool_calls) }
+        : {}),
       stoppingCondition: normalizeContractText(task.stopping_condition, defaultStoppingCondition),
       expectedOutput: normalizeContractText(task.expected_output, defaultExpectedOutput),
       contractExplicit: topLevelContractExplicit || hasExplicitTaskContract(task),
@@ -211,6 +218,11 @@ function normalizeDelegationRoot(value: string): string | undefined {
 function normalizeMaxFiles(value: number | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.min(MAX_DELEGATION_FILES, Math.max(1, Math.floor(value)));
+}
+
+function normalizeOptionalPositiveInteger(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return undefined;
+  return value;
 }
 
 function normalizeContractText(value: string | undefined, fallback: string): string {

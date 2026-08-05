@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { constants, type Dirent } from "node:fs";
-import { open, readdir, type FileHandle } from "node:fs/promises";
+import { constants, realpathSync, type Dirent } from "node:fs";
+import { open, readdir, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type {
@@ -57,14 +57,53 @@ export interface RepoMapScanReport {
   readonly scannedFiles: readonly string[];
 }
 
-const repoMapScanObserver = new AsyncLocalStorage<(report: RepoMapScanReport) => void>();
+interface RepoMapScanObserverContext {
+  readonly observer: (report: RepoMapScanReport) => void;
+  readonly parent?: RepoMapScanObserverContext;
+  remaining?: number;
+}
+
+const repoMapScanObserver = new AsyncLocalStorage<RepoMapScanObserverContext>();
 
 /** 将一次 Repo Map 调用的实际扫描集合绑定到当前异步执行链。 */
 export function observeRepoMapScans<T>(
   observer: (report: RepoMapScanReport) => void,
   execute: () => Promise<T>,
+  maxFiles?: number,
 ): Promise<T> {
-  return repoMapScanObserver.run(observer, execute);
+  const parent = repoMapScanObserver.getStore();
+  return repoMapScanObserver.run(
+    {
+      observer,
+      ...(parent ? { parent } : {}),
+      ...(maxFiles !== undefined ? { remaining: Math.max(0, maxFiles) } : {}),
+    },
+    execute,
+  );
+}
+
+function repoMapObserverRemaining(): number | undefined {
+  let context = repoMapScanObserver.getStore();
+  let remaining: number | undefined;
+  while (context) {
+    if (context.remaining !== undefined) {
+      remaining = Math.min(remaining ?? Number.POSITIVE_INFINITY, context.remaining);
+    }
+    context = context.parent;
+  }
+  return remaining;
+}
+
+function reportRepoMapScans(scannedFiles: readonly string[]): void {
+  if (scannedFiles.length === 0) return;
+  let context = repoMapScanObserver.getStore();
+  while (context) {
+    context.observer({ scannedFiles });
+    if (context.remaining !== undefined) {
+      context.remaining = Math.max(0, context.remaining - scannedFiles.length);
+    }
+    context = context.parent;
+  }
 }
 
 interface IndexedSymbol extends CodeSymbol {
@@ -111,9 +150,13 @@ export class RepoMapService implements CodeIntelligenceService {
   private readonly scanBatchSize: number;
   private indexTail: Promise<void> = Promise.resolve();
 
-  constructor(rootDir: string, scanBatchSize = DEFAULT_SCAN_BATCH) {
-    this.workspaceRoots = WorkspaceRoots.createSync(rootDir);
-    this.rootDir = this.workspaceRoots.list()[0] ?? path.resolve(rootDir);
+  constructor(
+    rootDir: string,
+    scanBatchSize = DEFAULT_SCAN_BATCH,
+    workspaceRoots = WorkspaceRoots.createSync(rootDir),
+  ) {
+    this.workspaceRoots = workspaceRoots;
+    this.rootDir = realpathSync.native(path.resolve(rootDir));
     this.scanBatchSize = clampMaxFiles(scanBatchSize);
   }
 
@@ -203,11 +246,7 @@ export class RepoMapService implements CodeIntelligenceService {
       readonly signal?: AbortSignal;
     } = {},
   ): Promise<RepoMapSnapshot> {
-    const scan = await this.scanNext(
-      clampMaxFiles(options.maxFiles ?? this.scanBatchSize),
-      options.signal,
-    );
-    repoMapScanObserver.getStore()?.({ scannedFiles: scan.scannedFiles });
+    await this.scanNext(clampMaxFiles(options.maxFiles ?? this.scanBatchSize), options.signal);
     const query = options.query?.trim().toLowerCase();
     const files = [...this.indexedFiles.values()]
       .map((file) => scoreRepoMapFile(file, query))
@@ -240,22 +279,41 @@ export class RepoMapService implements CodeIntelligenceService {
     predicate: (file: IndexedFile) => boolean,
     options: CodeIntelligenceQueryOptions,
   ): Promise<void> {
-    const initialCount = this.indexedFiles.size;
-    while (!this.isComplete() && this.indexedFiles.size - initialCount < this.scanBatchSize) {
-      const { indexed } = await this.scanNext(1, options.signal);
+    let attempted = 0;
+    while (!this.isComplete() && attempted < this.scanBatchSize) {
+      const { indexed, scannedFiles } = await this.scanNext(1, options.signal);
+      if (scannedFiles.length === 0) return;
+      attempted += scannedFiles.length;
       if (indexed.some(predicate)) return;
     }
   }
 
   private async scanNext(limit: number, signal?: AbortSignal): Promise<RepoMapScanBatch> {
-    return this.serializeIndex(() => this.scanNextUnlocked(clampMaxFiles(limit), signal));
+    return this.serializeIndex(async () => {
+      const observerLimit = repoMapObserverRemaining();
+      const effectiveLimit = Math.min(
+        clampMaxFiles(limit),
+        observerLimit ?? Number.POSITIVE_INFINITY,
+      );
+      if (effectiveLimit <= 0) return { indexed: [], scannedFiles: [] };
+      await this.discoverFiles();
+      const startIndex = this.nextFileIndex;
+      try {
+        return await this.scanNextUnlocked(effectiveLimit, signal);
+      } finally {
+        reportRepoMapScans((this.discoveredFiles ?? []).slice(startIndex, this.nextFileIndex));
+      }
+    });
   }
 
   private async scanNextUnlocked(limit: number, signal?: AbortSignal): Promise<RepoMapScanBatch> {
     await this.discoverFiles();
     const startIndex = this.nextFileIndex;
     const indexed: IndexedFile[] = [];
-    while (this.nextFileIndex < (this.discoveredFiles?.length ?? 0) && indexed.length < limit) {
+    while (
+      this.nextFileIndex < (this.discoveredFiles?.length ?? 0) &&
+      this.nextFileIndex - startIndex < limit
+    ) {
       throwIfAborted(signal);
       const filePath = this.discoveredFiles?.[this.nextFileIndex++];
       if (!filePath) continue;
@@ -271,9 +329,17 @@ export class RepoMapService implements CodeIntelligenceService {
   private async discoverFiles(): Promise<void> {
     if (this.discoveredFiles) return;
     const output: string[] = [];
-    await collectSourceFiles(this.workspaceRoots, this.rootDir, this.rootDir, output);
-    output.sort();
-    this.discoveredFiles = output;
+    for (const root of this.workspaceRoots.list()) {
+      const info = await stat(root).catch(() => undefined);
+      if (info?.isFile()) {
+        if (SUPPORTED_EXTENSIONS.has(path.extname(root).toLowerCase())) {
+          output.push(path.relative(this.rootDir, root));
+        }
+      } else {
+        await collectSourceFiles(this.workspaceRoots, this.rootDir, root, output);
+      }
+    }
+    this.discoveredFiles = [...new Set(output)].sort();
   }
 
   private isComplete(): boolean {
@@ -281,7 +347,17 @@ export class RepoMapService implements CodeIntelligenceService {
   }
 
   private async indexFile(filePath: string, signal?: AbortSignal): Promise<IndexedFile> {
-    return this.serializeIndex(() => this.indexFileUnlocked(filePath, signal));
+    return this.serializeIndex(async () => {
+      if ((repoMapObserverRemaining() ?? 1) <= 0) {
+        throw new Error("Repo Map 文件检查预算已耗尽");
+      }
+      const relativePath = path.relative(this.rootDir, path.resolve(this.rootDir, filePath));
+      try {
+        return await this.indexFileUnlocked(filePath, signal);
+      } finally {
+        reportRepoMapScans([relativePath]);
+      }
+    });
   }
 
   private async indexFileUnlocked(filePath: string, signal?: AbortSignal): Promise<IndexedFile> {

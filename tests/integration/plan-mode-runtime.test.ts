@@ -265,6 +265,81 @@ test("Plan automatically records verified Discovery evidence before atomic hando
   assert.equal(completed.data.operationId, proposed.data.operationId);
 });
 
+test("Plan accepts a workspace-local absolute read_file path as direct Discovery evidence", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-absolute-discovery-read-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-absolute-discovery-read";
+  const targetPath = join(workDir, "src", "target.ts");
+  await mkdir(join(workDir, "src"), { recursive: true });
+  await writeFile(targetPath, "export const target = true;\n", "utf8");
+  t.after(async () => {
+    globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let calls = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      calls++;
+      if (calls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "absolute-target-read",
+              name: "read_file",
+              arguments: JSON.stringify({ path: targetPath }),
+            },
+          ],
+        };
+      }
+      if (calls === 2)
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "absolute-target-plan",
+              name: "submit_plan",
+              arguments: JSON.stringify({
+                title: "修改已核验目标",
+                steps: [{ title: "修改", description: "更新 src/target.ts" }],
+                operationId: "absolute-target-plan",
+              }),
+            },
+          ],
+        };
+      return { role: "assistant", content: "stop after rejected handoff" };
+    },
+  };
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "先调查目标再提交计划",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+      allowedTools: ["read_file", "submit_plan"],
+    },
+    { provider, picoHome, reporter: new SilentReporter() },
+  );
+  if (!result.handoff) {
+    const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+      persistence: true,
+      picoHome,
+    });
+    const failures = (await session.runtimeEventStore!.readSession(sessionId)).flatMap((event) =>
+      event.kind === "tool.result.recorded" && event.data.status !== "succeeded"
+        ? [event.data.projection.text]
+        : [],
+    );
+    assert.fail(failures.join(" | "));
+  }
+});
+
 test("Plan Repo Map clamps one scan to the remaining Discovery file budget", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-discovery-repo-budget-"));
   const workDir = join(root, "work");
@@ -844,15 +919,31 @@ test("explicit balanced Discovery runs two Explore branches concurrently and rec
         messages[0].content.includes("Explorer Subagent") &&
         (history.includes("入口调用链分支") || history.includes("符号引用分支"))
       ) {
+        if (messages.some((message) => message.toolCallId === "branch-repo-map")) {
+          return {
+            role: "assistant",
+            content:
+              "已完成只读检索并形成直接证据。候选实现位于 src/target.ts，后续应由主调查直接读取并交叉核验。".repeat(
+                6,
+              ),
+          };
+        }
         enteredBranches++;
         if (enteredBranches === 2) releaseBranches();
         await branchGate;
+        if (history.includes("符号引用分支")) {
+          throw new Error("模拟互斥检索分支失败");
+        }
         return {
           role: "assistant",
-          content:
-            "已完成只读检索并形成直接证据。候选实现位于 src/target.ts，后续应由主调查直接读取并交叉核验。".repeat(
-              6,
-            ),
+          content: "",
+          toolCalls: [
+            {
+              id: "branch-repo-map",
+              name: "repo_map",
+              arguments: JSON.stringify({ query: "target", max_files: 100 }),
+            },
+          ],
         };
       }
       mainCalls++;
@@ -934,7 +1025,15 @@ test("explicit balanced Discovery runs two Explore branches concurrently and rec
   assert.equal(projection.latest?.branches.length, 2);
   assert.deepEqual(
     projection.latest?.branches.map((branch) => branch.status),
-    ["completed", "completed"],
+    ["completed", "failed"],
+  );
+  assert.deepEqual(
+    projection.latest?.branches.map((branch) => branch.consumedToolCalls),
+    [1, 0],
+  );
+  assert.ok(
+    (projection.latest?.budget.consumedToolCalls ?? Number.POSITIVE_INFINITY) <=
+      (projection.latest?.budget.maxToolCalls ?? 0),
   );
   assert.equal(projection.latest?.status, "completed");
 });

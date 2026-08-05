@@ -13,10 +13,11 @@
 import { readdir } from "node:fs/promises";
 import { relative } from "node:path";
 import type { Dirent } from "node:fs";
-import type { BaseTool } from "./registry.js";
+import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
+import { reportWorkspaceFileScans } from "./file-scan-observer.js";
 
 // 递归遍历时跳过的目录:VCS、依赖、构建产物、引擎自有目录。
 // 与 skill.ts 的 EXCLUDED_SKILL_DIRS 对齐,避免误入 node_modules 等巨型子树。
@@ -50,6 +51,7 @@ const MAX_RESULTS = 100;
  */
 export class GlobTool implements BaseTool {
   readonly readOnly = true;
+  readonly handlesAbortSignal = true;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {
@@ -89,14 +91,22 @@ export class GlobTool implements BaseTool {
     return ToolAccesses.none();
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     // 1. 延迟解析 JSON 参数
     let pattern: string;
     let basePath: string;
+    let maxFiles = Number.POSITIVE_INFINITY;
     try {
-      const input = JSON.parse(args) as { pattern?: string; path?: string };
+      const input = JSON.parse(args) as { pattern?: string; path?: string; max_files?: number };
       pattern = input.pattern ?? "";
       basePath = input.path ?? ".";
+      if (
+        typeof input.max_files === "number" &&
+        Number.isSafeInteger(input.max_files) &&
+        input.max_files > 0
+      ) {
+        maxFiles = input.max_files;
+      }
     } catch {
       throw new Error("参数解析失败: 期望 JSON 含 pattern 字段");
     }
@@ -113,7 +123,7 @@ export class GlobTool implements BaseTool {
 
     // 4. 递归遍历收集相对路径
     const matches: string[] = [];
-    await collect(root, root, matcher, matches);
+    await collect(root, root, matcher, matches, { attempted: 0, maxFiles }, context?.signal);
 
     // 5. 无匹配提示
     if (matches.length === 0) {
@@ -136,7 +146,16 @@ export class GlobTool implements BaseTool {
  * 递归遍历目录树,收集匹配 glob 正则的文件相对路径。
  * 跳过 IGNORED_DIRS;相对路径统一用正斜杠,跨平台一致。
  */
-async function collect(dir: string, root: string, matcher: RegExp, out: string[]): Promise<void> {
+async function collect(
+  dir: string,
+  root: string,
+  matcher: RegExp,
+  out: string[],
+  budget: { attempted: number; readonly maxFiles: number },
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (budget.attempted >= budget.maxFiles) return;
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -146,14 +165,18 @@ async function collect(dir: string, root: string, matcher: RegExp, out: string[]
   }
 
   for (const entry of entries) {
+    signal?.throwIfAborted();
+    if (budget.attempted >= budget.maxFiles) return;
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue;
-      await collect(join(dir, entry.name), root, matcher, out);
+      await collect(join(dir, entry.name), root, matcher, out, budget, signal);
       continue;
     }
     if (!entry.isFile()) continue;
 
     const rel = relative(root, join(dir, entry.name)).replaceAll("\\", "/");
+    budget.attempted++;
+    reportWorkspaceFileScans([rel]);
     if (matcher.test(rel)) {
       out.push(rel);
     }

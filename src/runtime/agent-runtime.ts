@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
@@ -2235,6 +2236,7 @@ function createAutomaticDiscoveryTracker(input: {
           mode: "explore",
           role: "leaf",
           max_files: branches[ordinal]!.reserveFiles,
+          max_tool_calls: branches[ordinal]!.reserveToolCalls,
         }));
         return next({ ...call, arguments: JSON.stringify(raw) });
       }
@@ -2261,24 +2263,48 @@ function createAutomaticDiscoveryTracker(input: {
         const evidenceRef =
           result.evidence?.uri ??
           `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
-        const candidates =
-          result.status === "succeeded"
-            ? discoveryCandidatesFromToolResult(call, result, evidenceRef, input.workDir)
-            : [];
-        for (const branch of branchReservations) {
+        const childResults = parseDiscoveryDelegationResults(
+          result.projection.text,
+          branchReservations.length,
+        );
+        for (const [ordinal, branch] of branchReservations.entries()) {
+          const child = childResults[ordinal];
+          const branchStatus =
+            result.status !== "succeeded" || !child
+              ? "failed"
+              : child.status === "completed"
+                ? "completed"
+                : child.status === "partial"
+                  ? "partial"
+                  : "failed";
+          const branchEvidence = [
+            ...(child?.evidenceRefs ?? []),
+            ...(branchStatus === "failed" ? [] : [evidenceRef]),
+          ];
+          const candidates = discoveryCandidatesFromDelegationSummary(
+            child?.summary ?? "",
+            branchEvidence,
+            input.workDir,
+          );
           await input.coordinator().completeBranch({
             operationId: `auto-discovery:branch-complete:${call.id}:${branch.branchId}`,
             discoveryId: (await input.coordinator().project()).active?.discoveryId ?? discoveryId,
             branchId: branch.branchId,
-            status: result.status === "succeeded" ? "completed" : "failed",
-            consumedToolCalls: Math.min(1, branch.reserveToolCalls),
-            inspectedFiles: candidates
-              .map((candidate) => candidate.path)
-              .slice(0, branch.reserveFiles),
+            status: branchStatus,
+            consumedToolCalls: Math.min(child?.toolCallsUsed ?? 0, branch.reserveToolCalls),
+            inspectedFiles: [
+              ...new Set(
+                (child?.inspectedFiles ?? [])
+                  .map((path) => workspaceRelativeDiscoveryPath(input.workDir, path))
+                  .filter((path): path is string => path !== undefined),
+              ),
+            ].slice(0, branch.reserveFiles),
             candidates,
-            evidenceRefs: result.status === "succeeded" ? [evidenceRef] : [],
+            evidenceRefs: branchEvidence,
             openQuestions: [],
-            ...(result.status === "succeeded" ? {} : { reason: result.projection.text }),
+            ...(branchStatus === "failed"
+              ? { reason: child?.error ?? result.projection.text }
+              : {}),
           });
         }
         return;
@@ -2520,8 +2546,15 @@ function workspaceRelativeDiscoveryPath(
   workDir: string,
   candidatePath: string,
 ): string | undefined {
-  const absolute = isAbsolute(candidatePath) ? candidatePath : resolve(workDir, candidatePath);
-  const workspaceRelative = relative(workDir, absolute).replaceAll("\\", "/");
+  let canonicalWorkDir = workDir;
+  let absolute = isAbsolute(candidatePath) ? candidatePath : resolve(workDir, candidatePath);
+  try {
+    canonicalWorkDir = realpathSync(workDir);
+    absolute = realpathSync(absolute);
+  } catch {
+    // Keep lexical paths when a candidate no longer exists; boundary checks still apply below.
+  }
+  const workspaceRelative = relative(canonicalWorkDir, absolute).replaceAll("\\", "/");
   if (
     !workspaceRelative ||
     workspaceRelative === ".." ||
@@ -2531,6 +2564,88 @@ function workspaceRelativeDiscoveryPath(
     return undefined;
   }
   return workspaceRelative;
+}
+
+interface DiscoveryDelegationResult {
+  readonly status: "completed" | "partial" | "error" | "timed_out" | "cancelled";
+  readonly summary?: string;
+  readonly evidenceRefs?: readonly string[];
+  readonly error?: string;
+  readonly toolCallsUsed?: number;
+  readonly inspectedFiles?: readonly string[];
+}
+
+function parseDiscoveryDelegationResults(
+  value: string,
+  expected: number,
+): readonly DiscoveryDelegationResult[] {
+  try {
+    const parsed = JSON.parse(value) as { results?: unknown };
+    if (!Array.isArray(parsed.results) || parsed.results.length !== expected) return [];
+    const normalized: DiscoveryDelegationResult[] = [];
+    for (const candidate of parsed.results) {
+      if (!candidate || typeof candidate !== "object") return [];
+      const result = candidate as Record<string, unknown>;
+      const status = result["status"];
+      if (
+        status !== "completed" &&
+        status !== "partial" &&
+        status !== "error" &&
+        status !== "timed_out" &&
+        status !== "cancelled"
+      ) {
+        return [];
+      }
+      normalized.push({
+        status,
+        ...(typeof result["summary"] === "string" ? { summary: result["summary"] } : {}),
+        ...(Array.isArray(result["evidenceRefs"])
+          ? {
+              evidenceRefs: result["evidenceRefs"].filter(
+                (reference): reference is string => typeof reference === "string",
+              ),
+            }
+          : {}),
+        ...(typeof result["error"] === "string" ? { error: result["error"] } : {}),
+        ...(typeof result["toolCallsUsed"] === "number" &&
+        Number.isSafeInteger(result["toolCallsUsed"]) &&
+        result["toolCallsUsed"] >= 0
+          ? { toolCallsUsed: result["toolCallsUsed"] }
+          : {}),
+        ...(Array.isArray(result["inspectedFiles"])
+          ? {
+              inspectedFiles: result["inspectedFiles"].filter(
+                (path): path is string => typeof path === "string",
+              ),
+            }
+          : {}),
+      });
+    }
+    return normalized;
+  } catch {
+    return [];
+  }
+}
+
+function discoveryCandidatesFromDelegationSummary(
+  summary: string,
+  evidenceRefs: readonly string[],
+  workDir: string,
+): DiscoveryCandidate[] {
+  const candidates = new Set<string>();
+  for (const match of summary.matchAll(
+    /(?:^|[\s`'"(])((?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)(?=$|[\s`'"),:])/gu,
+  )) {
+    const candidate = match[1] ? workspaceRelativeDiscoveryPath(workDir, match[1]) : undefined;
+    if (candidate) candidates.add(candidate);
+    if (candidates.size >= DISCOVERY_MAX_CANDIDATES) break;
+  }
+  return [...candidates].map((path) => ({
+    path,
+    score: 60,
+    reasons: ["delegate_task:child_report"],
+    evidenceRefs: [...evidenceRefs],
+  }));
 }
 
 function parseToolObject(value: string): Record<string, unknown> {

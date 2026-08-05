@@ -141,6 +141,14 @@ export interface SubagentRegistryRequest {
   role: SubagentRole;
   depth: number;
   maxSpawnDepth: number;
+  /** Hard per-child file inspection budget enforced by the registry. */
+  maxFiles?: number;
+  /** Hard per-child tool-call budget enforced by the registry. */
+  maxToolCalls?: number;
+  /** Physical read boundary for this branch, relative to the trusted workDir. */
+  roots?: readonly string[];
+  /** Trusted usage sink used by the parent Discovery coordinator. */
+  onBudgetUsage?: (usage: { toolCallsUsed: number; inspectedFiles: readonly string[] }) => void;
   /** 持久 Agent Profile 名（来自宿主统一 Agent 目录）。 */
   agentName?: string;
   /** worker 模式下覆盖工具实际操作目录。 */
@@ -726,6 +734,7 @@ export class DelegateTaskTool implements BaseTool {
 
     // 自定义角色查询:agent_name 命中 profile 时,用其 prompt/maxTurns 覆盖 Tool 级默认
     const profile = task.agentName ? findAgentProfile(this.profiles, task.agentName) : undefined;
+    let budgetUsage = { toolCallsUsed: 0, inspectedFiles: [] as readonly string[] };
 
     let releaseAgentHooks: (() => void | Promise<void>) | undefined;
     try {
@@ -737,6 +746,16 @@ export class DelegateTaskTool implements BaseTool {
         role: task.role,
         depth: childDepth,
         maxSpawnDepth,
+        maxFiles: task.maxFiles,
+        roots: task.roots,
+        ...(task.maxToolCalls !== undefined
+          ? {
+              maxToolCalls: task.maxToolCalls,
+              onBudgetUsage: (usage: typeof budgetUsage) => {
+                budgetUsage = usage;
+              },
+            }
+          : {}),
         ...(task.agentName ? { agentName: task.agentName } : {}),
         ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
       });
@@ -791,10 +810,24 @@ export class DelegateTaskTool implements BaseTool {
         status: subResult.status,
         summary: subResult.summary,
         ...(subResult.evidenceRefs.length > 0 ? { evidenceRefs: subResult.evidenceRefs } : {}),
+        ...(task.maxToolCalls !== undefined
+          ? {
+              toolCallsUsed: budgetUsage.toolCallsUsed,
+              inspectedFiles: [...budgetUsage.inspectedFiles],
+            }
+          : {}),
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
-      return delegationResultFromError(taskIndex, err, Date.now() - startedAt, signal);
+      return {
+        ...delegationResultFromError(taskIndex, err, Date.now() - startedAt, signal),
+        ...(task.maxToolCalls !== undefined
+          ? {
+              toolCallsUsed: budgetUsage.toolCallsUsed,
+              inspectedFiles: [...budgetUsage.inspectedFiles],
+            }
+          : {}),
+      };
     } finally {
       if (releaseAgentHooks) {
         try {

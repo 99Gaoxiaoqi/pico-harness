@@ -11,11 +11,12 @@ import { execFile, execFileSync } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { Dirent } from "node:fs";
-import type { BaseTool } from "./registry.js";
+import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
 import { logger } from "../observability/logger.js";
+import { reportWorkspaceFileScans } from "./file-scan-observer.js";
 
 /** 搜索结果默认上限,避免海量匹配撑爆 Context。 */
 const DEFAULT_MAX_RESULTS = 50;
@@ -81,6 +82,7 @@ function parseGrepArgs(args: string): {
   caseSensitive: boolean;
   lineNumber: boolean;
   maxResults: number;
+  maxFiles: number | undefined;
 } {
   let parsed: Record<string, unknown>;
   try {
@@ -104,7 +106,12 @@ function parseGrepArgs(args: string): {
     typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax > 0
       ? Math.min(Math.floor(rawMax), MAX_RESULTS_LIMIT)
       : DEFAULT_MAX_RESULTS;
-  return { pattern, path, glob, caseSensitive, lineNumber, maxResults };
+  const rawMaxFiles = parsed["max_files"];
+  const maxFiles =
+    typeof rawMaxFiles === "number" && Number.isSafeInteger(rawMaxFiles) && rawMaxFiles > 0
+      ? rawMaxFiles
+      : undefined;
+  return { pattern, path, glob, caseSensitive, lineNumber, maxResults, maxFiles };
 }
 
 /** 一条匹配的原始数据(未经格式化)。 */
@@ -179,10 +186,13 @@ async function collectFiles(
   root: string,
   globFilter?: (relPath: string) => boolean,
   excludeSensitiveFiles = false,
+  maxFiles = Number.POSITIVE_INFINITY,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const results: string[] = [];
 
   async function walk(dir: string): Promise<void> {
+    signal?.throwIfAborted();
     let entries: Dirent[];
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -193,6 +203,8 @@ async function collectFiles(
       return;
     }
     for (const entry of entries) {
+      signal?.throwIfAborted();
+      if (results.length >= maxFiles) return;
       if (entry.isDirectory()) {
         if (EXCLUDED_DIRS.has(entry.name)) continue;
         await walk(join(dir, entry.name));
@@ -203,6 +215,7 @@ async function collectFiles(
       if (excludeSensitiveFiles && isSensitiveRelativePath(rel)) continue;
       if (globFilter && !globFilter(rel)) continue;
       results.push(rel);
+      reportWorkspaceFileScans([rel]);
     }
   }
 
@@ -235,6 +248,7 @@ function searchWithRg(opts: {
   lineNumber: boolean;
   maxResults: number;
   excludeSensitiveFiles?: boolean;
+  signal?: AbortSignal;
 }): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     const args: string[] = ["--color=never", "--no-heading"];
@@ -259,6 +273,7 @@ function searchWithRg(opts: {
         maxBuffer: 16 * 1024 * 1024,
         encoding: "utf8",
         windowsHide: true,
+        ...(opts.signal ? { signal: opts.signal } : {}),
       },
       (err, stdout, stderr) => {
         // rg 退出码:0 有匹配,1 无匹配,>1 真实错误
@@ -333,11 +348,15 @@ async function searchWithNode(opts: {
   globFilter?: (relPath: string) => boolean;
   caseSensitive: boolean;
   excludeSensitiveFiles?: boolean;
+  maxFiles?: number;
+  signal?: AbortSignal;
 }): Promise<RawMatch[]> {
   const files = await collectFiles(
     opts.searchRoot,
     opts.globFilter,
     opts.excludeSensitiveFiles === true,
+    opts.maxFiles,
+    opts.signal,
   );
 
   // 编译正则;失败则退化为字面匹配
@@ -346,11 +365,16 @@ async function searchWithNode(opts: {
 
   const matches: RawMatch[] = [];
   for (const rel of files) {
+    opts.signal?.throwIfAborted();
     const abs = join(opts.searchRoot, rel);
     let content: string;
     try {
-      content = await readFile(abs, "utf8");
+      content = await readFile(abs, {
+        encoding: "utf8",
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      });
     } catch (err) {
+      if (opts.signal?.aborted) throw err;
       // 二进制 / 权限 / 编码问题:静默跳过该文件
       if (isErrnoCode(err, "EACCES") || isErrnoCode(err, "ENOENT") || isErrnoCode(err, "EISDIR")) {
         continue;
@@ -392,6 +416,7 @@ function compileSearchPattern(pattern: string, caseSensitive: boolean): RegExp |
 
 export class GrepTool implements BaseTool {
   readonly readOnly = true;
+  readonly handlesAbortSignal = true;
   private readonly roots: WorkspaceRoots;
 
   constructor(
@@ -452,8 +477,9 @@ export class GrepTool implements BaseTool {
     };
   }
 
-  async execute(args: string): Promise<string> {
-    const { pattern, path, glob, caseSensitive, lineNumber, maxResults } = parseGrepArgs(args);
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
+    const { pattern, path, glob, caseSensitive, lineNumber, maxResults, maxFiles } =
+      parseGrepArgs(args);
     const excludeSensitiveFiles =
       typeof this.options.excludeSensitiveFiles === "function"
         ? this.options.excludeSensitiveFiles(path)
@@ -468,7 +494,7 @@ export class GrepTool implements BaseTool {
     }
 
     // 优先 rg 路径
-    if (rgAvailable) {
+    if (rgAvailable && maxFiles === undefined) {
       try {
         const raw = await searchWithRg({
           pattern,
@@ -478,10 +504,12 @@ export class GrepTool implements BaseTool {
           lineNumber,
           maxResults,
           excludeSensitiveFiles,
+          ...(context?.signal ? { signal: context.signal } : {}),
         });
         const matches = parseRgOutput(raw, lineNumber);
         return formatMatches(matches, maxResults, lineNumber);
       } catch (err) {
+        if (context?.signal?.aborted) throw err;
         // rg 路径异常 → 标记不可用,降级到 Node.js
         rgAvailable = false;
         logger.warn({ err }, "grep 的 rg 路径失败,降级到 Node.js 实现");
@@ -496,6 +524,8 @@ export class GrepTool implements BaseTool {
       globFilter,
       caseSensitive,
       excludeSensitiveFiles,
+      ...(maxFiles !== undefined ? { maxFiles } : {}),
+      ...(context?.signal ? { signal: context.signal } : {}),
     });
     return formatMatches(matches, maxResults, lineNumber);
   }
