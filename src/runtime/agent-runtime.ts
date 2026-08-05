@@ -892,7 +892,9 @@ export async function executeAgentRuntime(
       { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
     );
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
-    const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
+    const isolatedDiscoveryRun = options.discoveryRun === true;
+    const collaborationMode = (): "agent" | "plan" =>
+      isolatedDiscoveryRun ? "agent" : settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
     const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
     if (options.approvedPlan) {
@@ -936,7 +938,12 @@ export async function executeAgentRuntime(
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    if (!backgroundPolicy && !dependencies.isolatedHeadless && collaborationMode() !== "plan") {
+    if (
+      !backgroundPolicy &&
+      !dependencies.isolatedHeadless &&
+      !isolatedDiscoveryRun &&
+      collaborationMode() !== "plan"
+    ) {
       try {
         const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
         if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
@@ -1088,13 +1095,16 @@ export async function executeAgentRuntime(
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
             : "startup",
-        ...(backgroundPolicy || dependencies.isolatedHeadless || collaborationMode() === "plan"
+        ...(backgroundPolicy ||
+        dependencies.isolatedHeadless ||
+        isolatedDiscoveryRun ||
+        collaborationMode() === "plan"
           ? { hooks: false as const }
           : {}),
-        ...(collaborationMode() !== "plan" && dependencies.hookService
+        ...(!isolatedDiscoveryRun && collaborationMode() !== "plan" && dependencies.hookService
           ? { hookService: dependencies.hookService }
           : {}),
-        ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
+        ...(!isolatedDiscoveryRun && collaborationMode() !== "plan" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       }));
@@ -1103,10 +1113,11 @@ export async function executeAgentRuntime(
     if (!ownsRuntimeState) {
       await runtimeState.setCodeIntelligenceEnabled(collaborationMode() !== "plan");
     }
-    if (collaborationMode() !== "plan" && dependencies.hookService) {
+    if (!isolatedDiscoveryRun && collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
     }
-    const activeHookService = collaborationMode() === "plan" ? undefined : runtimeState.hookService;
+    const activeHookService =
+      isolatedDiscoveryRun || collaborationMode() === "plan" ? undefined : runtimeState.hookService;
     if (
       dependencies.toolDisclosure !== undefined &&
       dependencies.toolDisclosure !== runtimeState.toolDisclosure
@@ -1308,7 +1319,8 @@ export async function executeAgentRuntime(
         )
         .finally(kickMemoryWorker);
     }
-    let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
+    let activeMcpManager =
+      isolatedDiscoveryRun || collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
       modelRuntime: {
@@ -1707,7 +1719,7 @@ export async function executeAgentRuntime(
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
-    const planMcpDisabled = collaborationMode() === "plan";
+    const planMcpDisabled = isolatedDiscoveryRun || collaborationMode() === "plan";
     const mcpConfigPath = planMcpDisabled
       ? undefined
       : (backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath);

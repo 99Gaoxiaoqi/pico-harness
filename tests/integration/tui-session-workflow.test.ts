@@ -136,6 +136,7 @@ test("/explore starts a durable read-only Discovery prompt and supports status a
   assert.ok(started.result.execution?.allowedTools?.includes("repo_map"));
   assert.ok(started.result.execution?.allowedTools?.includes("code_definition"));
   assert.equal(started.result.execution?.allowedTools?.includes("write_file"), false);
+  assert.equal(started.result.execution?.discoveryRun, true);
   const coordinator = new DiscoveryCoordinator(session.runtimeEventStore!, {
     sessionId,
     invocationId: "test-explore-command",

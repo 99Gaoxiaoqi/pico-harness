@@ -1790,7 +1790,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         workspacePath: input.workspacePath,
         sessionId: input.sessionId,
         prompt,
-        execution: { allowedTools: DISCOVERY_RUN_TOOLS, resumeExistingSession: true },
+        execution: {
+          allowedTools: DISCOVERY_RUN_TOOLS,
+          resumeExistingSession: true,
+          discoveryRun: true,
+        },
         idempotencyKey: desktopRunStartIdempotencyKey("discovery", input.operationId),
       }),
       "discovery run.start result",
