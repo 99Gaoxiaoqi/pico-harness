@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { PromptComposer } from "../../src/context/composer.js";
+import { DiscoveryCoordinator } from "../../src/discovery/coordinator.js";
 import { PlanHandoffController } from "../../src/engine/plan-handoff.js";
 import { isPlanProviderTool } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
@@ -816,6 +817,126 @@ test("explicit Discovery stays isolated when the persisted collaboration mode is
       ?.collaborationMode,
     "plan",
   );
+});
+
+test("explicit balanced Discovery runs two Explore branches concurrently and records them", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-discovery-delegation-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "discovery-delegation";
+  await mkdir(join(workDir, "src"), { recursive: true });
+  await mkdir(join(workDir, "tests"), { recursive: true });
+  await writeFile(join(workDir, "src", "target.ts"), "export const target = 1;\n", "utf8");
+  t.after(async () => {
+    globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let mainCalls = 0;
+  let enteredBranches = 0;
+  let releaseBranches!: () => void;
+  const branchGate = new Promise<void>((resolve) => (releaseBranches = resolve));
+  const provider: LLMProvider = {
+    async generate(messages) {
+      const history = messages.map((message) => message.content).join("\n");
+      if (
+        messages[0]?.role === "system" &&
+        messages[0].content.includes("Explorer Subagent") &&
+        (history.includes("入口调用链分支") || history.includes("符号引用分支"))
+      ) {
+        enteredBranches++;
+        if (enteredBranches === 2) releaseBranches();
+        await branchGate;
+        return {
+          role: "assistant",
+          content:
+            "已完成只读检索并形成直接证据。候选实现位于 src/target.ts，后续应由主调查直接读取并交叉核验。".repeat(
+              6,
+            ),
+        };
+      }
+      mainCalls++;
+      if (mainCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "delegate-discovery-branches",
+              name: "delegate_task",
+              arguments: JSON.stringify({
+                completion_policy: "required",
+                tasks: [
+                  {
+                    goal: "入口调用链分支",
+                    mode: "explore",
+                    role: "leaf",
+                    roots: ["src"],
+                    max_files: 15,
+                    stopping_condition: "找到入口到实现的直接证据",
+                  },
+                  {
+                    goal: "符号引用分支",
+                    mode: "explore",
+                    role: "leaf",
+                    roots: ["tests"],
+                    max_files: 15,
+                    stopping_condition: "找到定义与引用的直接证据",
+                  },
+                ],
+              }),
+            },
+          ],
+        };
+      }
+      if (mainCalls === 2) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "verify-discovery-target",
+              name: "read_file",
+              arguments: JSON.stringify({ path: "src/target.ts" }),
+            },
+          ],
+        };
+      }
+      return { role: "assistant", content: "调查完成" };
+    },
+  };
+
+  await executeAgentRuntime(
+    {
+      prompt: "并发定位 target 的真实实现",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "default",
+      discoveryRun: true,
+      allowedTools: ["delegate_task", "read_file"],
+    },
+    { provider, picoHome, reporter: new SilentReporter() },
+  );
+
+  assert.equal(enteredBranches, 2);
+  const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+  });
+  const projection = await new DiscoveryCoordinator(session.runtimeEventStore!, {
+    sessionId,
+    invocationId: "test-discovery-delegation",
+    runId: "test-discovery-delegation",
+    turnId: "test-discovery-delegation",
+  }).project();
+  assert.equal(projection.latest?.branches.length, 2);
+  assert.deepEqual(
+    projection.latest?.branches.map((branch) => branch.status),
+    ["completed", "completed"],
+  );
+  assert.equal(projection.latest?.status, "completed");
 });
 
 test("approval recovers its crash gap and replay never starts a second execution Run", async (t) => {
