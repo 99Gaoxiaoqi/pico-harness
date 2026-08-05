@@ -1221,7 +1221,8 @@ function ConversationPage() {
       conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
         ? [conversation.goalItem]
         : [];
-    return mergeConversationItemGroups(persisted, goal, live, decisions);
+    const discovery = conversation?.discoveryItem ? [conversation.discoveryItem] : [];
+    return mergeConversationItemGroups(persisted, goal, discovery, live, decisions);
   }, [
     activeRun,
     data.approvals,
@@ -1267,6 +1268,34 @@ function ConversationPage() {
       subtitle: "来自当前 Runtime 的真实目录",
       content: (
         <div className="conversation-catalog-list">
+          <section>
+            <h3>代码探索</h3>
+            <p>{draft.trim() ? "用当前输入作为探索目标。" : "请先在输入框填写探索目标。"}</p>
+            {(["quick", "balanced", "deep"] as const).map((depth) => (
+              <button
+                type="button"
+                key={`discovery:${depth}`}
+                disabled={!sessionId || !draft.trim()}
+                onClick={() => {
+                  if (!sessionId || !draft.trim()) return;
+                  void actions
+                    .startDiscovery({ workspacePath, sessionId, objective: draft, depth })
+                    .then(() => {
+                      setDraft("");
+                      setInspector(undefined);
+                    });
+                }}
+              >
+                <WandSparkles aria-hidden="true" />
+                <span>
+                  <strong>{depth}</strong>
+                  <small>
+                    {depth === "quick" ? "快速定位" : depth === "deep" ? "深入验证" : "平衡探索"}
+                  </small>
+                </span>
+              </button>
+            ))}
+          </section>
           <section>
             <h3>Skills</h3>
             {data.catalogSkills.length === 0 ? (
@@ -1333,6 +1362,58 @@ function ConversationPage() {
       const params = new URLSearchParams({ workspace: workspacePath });
       if (sessionId) params.set("sessionId", sessionId);
       navigate(`/review?${params.toString()}`);
+      return;
+    }
+    if (item.kind === "discovery" && sessionId) {
+      setInspector({
+        title: "代码探索",
+        subtitle: `${item.depth} · ${item.phase} · ${item.status}`,
+        content: (
+          <div>
+            <p>{item.objective}</p>
+            <p>
+              {item.inspectedFiles} 个文件 · {item.evidenceCount} 条证据 · {item.openQuestions}{" "}
+              个待确认问题
+            </p>
+            {item.status === "active" && (
+              <Button
+                type="button"
+                variant="quiet"
+                onClick={() =>
+                  void actions
+                    .cancelDiscovery({
+                      workspacePath,
+                      sessionId,
+                      discoveryId: item.discoveryId,
+                      reason: "由 Desktop 用户取消",
+                    })
+                    .then(() => setInspector(undefined))
+                }
+              >
+                取消探索
+              </Button>
+            )}
+            {item.status === "interrupted" && (
+              <Button
+                type="button"
+                variant="quiet"
+                onClick={() =>
+                  void actions
+                    .resumeDiscovery({
+                      workspacePath,
+                      sessionId,
+                      discoveryId: item.discoveryId,
+                      depth: item.depth,
+                    })
+                    .then(() => setInspector(undefined))
+                }
+              >
+                恢复探索
+              </Button>
+            )}
+          </div>
+        ),
+      });
       return;
     }
     if (item.kind === "tool") {

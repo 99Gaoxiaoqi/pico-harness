@@ -130,6 +130,7 @@ import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
+import { DiscoveryCoordinator, type DiscoveryProjection } from "../discovery/index.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
 import {
   projectRuntimeTranscriptEntries,
@@ -499,6 +500,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           ...(result.run ? { run: toJsonValue(result.run) } : {}),
         };
       },
+      "discovery.start": (request) => this.startDiscovery(request.params),
+      "discovery.get": (request) => this.getDiscovery(request.params),
+      "discovery.resume": (request) => this.resumeDiscovery(request.params),
+      "discovery.cancel": (request) => this.cancelDiscovery(request.params),
       "prompt.respond": (request) => {
         if (!this.options.interactions) {
           throw new RuntimeProtocolError(
@@ -1487,10 +1492,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       picoHome: this.picoHome,
       env: this.env,
     });
+    const discoveryProjection = await this.readDiscoveryProjection(
+      canonical,
+      params.sessionId,
+      `transcript:${params.sessionId}`,
+    );
     const result = {
       session,
       items: page.items,
       planProjection: toJsonValue(planProjection),
+      discoveryProjection: toJsonValue(discoveryProjection),
       ...(activeRun ? { activeRun } : {}),
       queuedInputs,
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
@@ -1503,6 +1514,162 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     return result;
+  }
+
+  private async startDiscovery(
+    params: RuntimeRequest<"discovery.start">["params"],
+  ): Promise<JsonValue> {
+    const projection = await this.withDiscoveryCoordinator(
+      params.workspacePath,
+      params.sessionId,
+      params.operationId,
+      (coordinator) =>
+        coordinator.start({
+          operationId: params.operationId,
+          ...(params.expectedSessionSequence !== undefined
+            ? { expectedSessionSequence: params.expectedSessionSequence }
+            : {}),
+          objective: params.objective,
+          depth: params.depth,
+          ...(params.roots ? { roots: params.roots } : {}),
+        }),
+      true,
+    );
+    this.publishDiscovery(
+      await canonicalizeWorkspacePath(params.workspacePath),
+      params.sessionId,
+      projection,
+      "started",
+    );
+    return { projection: toJsonValue(projection) };
+  }
+
+  private async getDiscovery(
+    params: RuntimeRequest<"discovery.get">["params"],
+  ): Promise<JsonValue> {
+    const projection = await this.readDiscoveryProjection(
+      params.workspacePath,
+      params.sessionId,
+      `get:${params.sessionId}`,
+    );
+    return { projection: toJsonValue(projection) };
+  }
+
+  private async resumeDiscovery(
+    params: RuntimeRequest<"discovery.resume">["params"],
+  ): Promise<JsonValue> {
+    const projection = await this.withDiscoveryCoordinator(
+      params.workspacePath,
+      params.sessionId,
+      params.operationId,
+      (coordinator) =>
+        coordinator.resume({
+          operationId: params.operationId,
+          ...(params.expectedSessionSequence !== undefined
+            ? { expectedSessionSequence: params.expectedSessionSequence }
+            : {}),
+          discoveryId: params.discoveryId,
+          ...(params.depth ? { depth: params.depth } : {}),
+        }),
+      true,
+    );
+    this.publishDiscovery(
+      await canonicalizeWorkspacePath(params.workspacePath),
+      params.sessionId,
+      projection,
+      "resumed",
+    );
+    return { projection: toJsonValue(projection) };
+  }
+
+  private async cancelDiscovery(
+    params: RuntimeRequest<"discovery.cancel">["params"],
+  ): Promise<JsonValue> {
+    const projection = await this.withDiscoveryCoordinator(
+      params.workspacePath,
+      params.sessionId,
+      params.operationId,
+      (coordinator) =>
+        coordinator.cancel({
+          operationId: params.operationId,
+          ...(params.expectedSessionSequence !== undefined
+            ? { expectedSessionSequence: params.expectedSessionSequence }
+            : {}),
+          discoveryId: params.discoveryId,
+          ...(params.reason ? { reason: params.reason } : {}),
+        }),
+      true,
+    );
+    this.publishDiscovery(
+      await canonicalizeWorkspacePath(params.workspacePath),
+      params.sessionId,
+      projection,
+      "cancelled",
+    );
+    return { projection: toJsonValue(projection) };
+  }
+
+  private readDiscoveryProjection(
+    workspacePath: string,
+    sessionId: string,
+    operationId: string,
+  ): Promise<DiscoveryProjection> {
+    return this.withDiscoveryCoordinator(workspacePath, sessionId, operationId, (coordinator) =>
+      coordinator.project(),
+    );
+  }
+
+  private async withDiscoveryCoordinator<Result>(
+    workspacePath: string,
+    sessionId: string,
+    operationId: string,
+    operation: (coordinator: DiscoveryCoordinator) => Promise<Result>,
+    refreshRuntimeProjection = false,
+  ): Promise<Result> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    await this.requireSession(canonical, sessionId);
+    const lease = await globalSessionManager.getOrCreatePinned(sessionId, canonical, {
+      persistence: true,
+      picoHome: this.picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      if (!lease.session.runtimeEventStore) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "Discovery requires durable Session storage",
+        );
+      }
+      const result = await operation(
+        new DiscoveryCoordinator(lease.session.runtimeEventStore, {
+          sessionId,
+          invocationId: `discovery:${operationId}`,
+          runId: `discovery:${operationId}`,
+          turnId: `discovery:${operationId}`,
+        }),
+      );
+      if (refreshRuntimeProjection) await lease.session.refreshRuntimeProjection();
+      return result;
+    } finally {
+      lease.release();
+    }
+  }
+
+  private publishDiscovery(
+    workspacePath: string,
+    sessionId: string,
+    projection: DiscoveryProjection,
+    operation: "started" | "resumed" | "cancelled" | "updated",
+  ): void {
+    this.publish(
+      createRuntimeNotification({
+        topic: "discovery.updated",
+        scope: { workspacePath, sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId, projection: toJsonValue(projection), operation },
+      }),
+    );
   }
 
   private async readSessionEvidence(

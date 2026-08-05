@@ -5,6 +5,8 @@ import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
+import { DiscoveryCoordinator, type DiscoveryDepth } from "../discovery/index.js";
+import { randomUUID } from "node:crypto";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { formatRewindSelector, formatRewindUsage } from "./rewind-presentation.js";
@@ -264,6 +266,7 @@ export async function createPicoCommandRegistry(
     createGoalCommand(options.goalManager),
     createModeCommand(settings),
     createPlanCommand(settings, options.session),
+    createExploreCommand(settings, options.session),
     createPermissionsCommand(settings),
     createCompactCommand(options, settings),
     createInitCommand(options),
@@ -1449,6 +1452,139 @@ function createPlanCommand(settings: SessionSettings, session?: Session): SlashC
       };
     },
   };
+}
+
+const DISCOVERY_READ_ONLY_TOOLS = ["read_file", "read_evidence", "glob", "grep"] as const;
+
+function createExploreCommand(settings: SessionSettings, session?: Session): SlashCommand {
+  return {
+    name: "explore",
+    description: "Run or control a read-only codebase discovery",
+    usage: "/explore <quick|balanced|deep> <目标> | status | resume [深度] | cancel [原因]",
+    argumentHint: "<quick|balanced|deep> <目标> | status | resume | cancel",
+    category: "workspace",
+    kind: "local",
+    availability: "idle",
+    argumentCompleter: completeFromCandidates([
+      { value: "quick", description: "快速定位主要入口" },
+      { value: "balanced", description: "平衡覆盖范围与成本" },
+      { value: "deep", description: "深入验证多个候选与依赖" },
+      { value: "status", description: "查看当前探索状态" },
+      { value: "resume", description: "恢复最近中断的探索" },
+      { value: "cancel", description: "取消当前探索" },
+    ]),
+    execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
+      if (!session?.runtimeEventStore) {
+        return discoveryMessage("当前 Session 没有持久化 Runtime，无法启动 Discovery。");
+      }
+      const commandId = randomUUID();
+      const coordinator = new DiscoveryCoordinator(session.runtimeEventStore, {
+        sessionId: settings.sessionId,
+        invocationId: `command:explore:${commandId}`,
+        runId: `command:explore:${commandId}`,
+        turnId: `command:explore:${commandId}`,
+      });
+      const verb = input.argv[0]?.toLowerCase();
+      if (!verb || !["quick", "balanced", "deep", "status", "resume", "cancel"].includes(verb)) {
+        return discoveryMessage(
+          "用法: /explore <quick|balanced|deep> <目标> | status | resume [深度] | cancel [原因]",
+        );
+      }
+      if (verb === "status") {
+        const projection = await coordinator.project();
+        return discoveryMessage(formatDiscoveryStatus(projection), projection);
+      }
+      if (verb === "cancel") {
+        const before = await coordinator.project();
+        const active = before.active;
+        if (!active) return discoveryMessage("当前没有进行中的 Discovery。", before);
+        const projection = await coordinator.cancel({
+          operationId: randomUUID(),
+          expectedSessionSequence: before.sessionSequence,
+          discoveryId: active.discoveryId,
+          ...(input.argv.slice(1).join(" ").trim()
+            ? { reason: input.argv.slice(1).join(" ").trim() }
+            : {}),
+        });
+        await session.refreshRuntimeProjection();
+        return discoveryMessage("Discovery 已取消。", projection);
+      }
+      if (verb === "resume") {
+        const before = await coordinator.project();
+        const interrupted = [...before.discoveries]
+          .reverse()
+          .find((run) => run.status === "interrupted");
+        if (!interrupted) return discoveryMessage("没有可恢复的中断 Discovery。", before);
+        const requestedDepth = input.argv[1]?.toLowerCase();
+        if (requestedDepth && !isExploreDepth(requestedDepth)) {
+          return discoveryMessage("恢复深度必须是 quick、balanced 或 deep。", before);
+        }
+        const resumeDepth =
+          requestedDepth && isExploreDepth(requestedDepth) ? requestedDepth : undefined;
+        const projection = await coordinator.resume({
+          operationId: randomUUID(),
+          expectedSessionSequence: before.sessionSequence,
+          discoveryId: interrupted.discoveryId,
+          ...(resumeDepth ? { depth: resumeDepth } : {}),
+        });
+        await session.refreshRuntimeProjection();
+        return discoveryPrompt(interrupted.objective, resumeDepth ?? interrupted.depth, projection);
+      }
+      const objective = input.argv.slice(1).join(" ").trim();
+      if (!objective)
+        return discoveryMessage(`请提供探索目标，例如: /explore ${verb} 定位登录流程入口`);
+      const before = await coordinator.project();
+      const projection = await coordinator.start({
+        operationId: randomUUID(),
+        expectedSessionSequence: before.sessionSequence,
+        objective,
+        depth: verb as DiscoveryDepth,
+      });
+      await session.refreshRuntimeProjection();
+      return discoveryPrompt(objective, verb as DiscoveryDepth, projection);
+    },
+  };
+}
+
+function discoveryPrompt(
+  objective: string,
+  depth: DiscoveryDepth,
+  projection: import("../discovery/index.js").DiscoveryProjection,
+): PromptCommandResult {
+  return {
+    type: "prompt",
+    prompt: [
+      `以 ${depth} 深度只读探索代码库，目标：${objective}`,
+      "只收集可复核证据，不修改文件、不执行会改变工作区或外部状态的命令。",
+      "结论请给出精确文件、符号、调用关系、未知点和建议的实现落点。",
+    ].join("\n"),
+    metadata: { discoveryProjection: projection },
+    execution: { allowedTools: DISCOVERY_READ_ONLY_TOOLS },
+  };
+}
+
+function discoveryMessage(
+  message: string,
+  projection?: import("../discovery/index.js").DiscoveryProjection,
+): LocalCommandResult {
+  return {
+    type: "local",
+    action: "discovery",
+    message,
+    ...(projection ? { data: { projection } } : {}),
+  };
+}
+
+function formatDiscoveryStatus(
+  projection: import("../discovery/index.js").DiscoveryProjection,
+): string {
+  const run = projection.active ?? projection.latest;
+  if (!run) return "当前 Session 尚无 Discovery。";
+  return `Discovery ${run.status} · ${run.depth} · ${run.phase} · 已检查 ${run.inspectedFiles.length} 个文件 · ${run.objective}`;
+}
+
+function isExploreDepth(value: string): value is DiscoveryDepth {
+  return value === "quick" || value === "balanced" || value === "deep";
 }
 
 function createPermissionsCommand(settings: SessionSettings): SlashCommand {

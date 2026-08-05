@@ -13,6 +13,7 @@ import {
   Sparkles,
   TerminalSquare,
   WandSparkles,
+  SearchCode,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type {
@@ -157,6 +158,27 @@ function renderDefaultItem(
               </li>
             ))}
           </ol>
+        </section>
+      );
+    case "discovery":
+      return (
+        <section className="conversation-inline-card" data-state={item.status}>
+          <header className="conversation-inline-card__header">
+            <SearchCode aria-hidden="true" />
+            <div>
+              <span className="conversation-kicker">
+                Explore · {item.depth} · {item.phase}
+              </span>
+              <strong>{item.objective}</strong>
+            </div>
+            <span className="conversation-item-state">{item.status}</span>
+          </header>
+          <p>
+            {item.inspectedFiles} 个文件 · {item.evidenceCount} 条证据 · {item.openQuestions}{" "}
+            个待确认问题
+          </p>
+          {item.reason && <p>{item.reason}</p>}
+          {onOpenItem && <DetailButton label="探索控制" onClick={() => onOpenItem(item)} />}
         </section>
       );
     case "tool":
