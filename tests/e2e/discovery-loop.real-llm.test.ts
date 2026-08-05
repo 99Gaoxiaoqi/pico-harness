@@ -62,8 +62,8 @@ realModelTest(
         ...modelRequest(model),
         prompt: [
           `Read ${fixture.taskPath} first and investigate the requested behavior before planning.`,
-          `Use repo_map with query=${JSON.stringify(fixture.targetSymbol)} and max_files=200.`,
-          "The target is deliberately after the first two scan batches. Keep calling repo_map with the exact same query and max_files=200 while complete=false and the symbol is absent; do not stop after either empty batch.",
+          `Use repo_map once with query=${JSON.stringify(fixture.targetSymbol)} and max_files=10.`,
+          `The target is deliberately outside that first bounded scan. When complete=false and the symbol is absent, do not claim it is missing: use grep with the exact pattern ${JSON.stringify(fixture.targetSymbol)} to locate it without exhausting the shared file budget.`,
           "After locating the symbol, read its exact implementation file and ground the plan in that evidence.",
           "Submit exactly one implementation step that changes only the confirmed target and verifies the returned canary by rereading it.",
           "Do not modify any file before approval. Finish by calling submit_plan exactly once.",
@@ -71,7 +71,7 @@ realModelTest(
         dir: sandbox.workDir,
         sessionSelection: { mode: "new", sessionId: sandbox.sessionId },
         interactionMode: "plan",
-        allowedTools: ["read_file", "read_evidence", "repo_map", "submit_plan"],
+        allowedTools: ["read_file", "read_evidence", "repo_map", "grep", "submit_plan"],
       },
       runtimeHost(sandbox, model, providerSnapshots),
     );
@@ -86,20 +86,21 @@ realModelTest(
     assert.equal(toolCalls(planningEvents, "submit_plan").length, 1);
 
     const repoMapCalls = toolCalls(planningEvents, "repo_map");
-    assert.ok(repoMapCalls.length >= 3, "late target requires at least three Repo Map batches");
-    for (const call of repoMapCalls) {
-      const input = parseArguments(call);
-      assert.equal(input["query"], fixture.targetSymbol);
-      assert.equal(input["max_files"], 200);
-    }
-    const repoMapOutputs = repoMapCalls.map((call) => successfulToolOutput(planningEvents, call));
-    assert.match(repoMapOutputs[0] ?? "", /complete=false/u);
-    assert.doesNotMatch(repoMapOutputs[0] ?? "", new RegExp(escapeRegExp(fixture.targetPath), "u"));
-    assert.match(repoMapOutputs[1] ?? "", /complete=false/u);
-    assert.doesNotMatch(repoMapOutputs[1] ?? "", new RegExp(escapeRegExp(fixture.targetPath), "u"));
-    assert.ok(
-      repoMapOutputs.slice(2).some((output) => output.includes(fixture.targetPath)),
-      "a later Repo Map batch must resolve the target path",
+    const exactRepoMapCall = repoMapCalls.find(
+      (call) => parseArguments(call)["query"] === fixture.targetSymbol,
+    );
+    assert.ok(exactRepoMapCall, "planning must issue the requested exact Repo Map query");
+    assert.equal(parseArguments(exactRepoMapCall)["max_files"], 10);
+    const firstRepoMapOutput = successfulToolOutput(planningEvents, exactRepoMapCall);
+    assert.match(firstRepoMapOutput, /complete=false/u);
+    assert.doesNotMatch(firstRepoMapOutput, new RegExp(escapeRegExp(fixture.targetPath), "u"));
+    const exactGrepCall = toolCalls(planningEvents, "grep").find(
+      (call) => parseArguments(call)["pattern"] === fixture.targetSymbol,
+    );
+    assert.ok(exactGrepCall, "an incomplete Repo Map batch must fall through to exact grep");
+    assert.match(
+      successfulToolOutput(planningEvents, exactGrepCall),
+      new RegExp(escapeRegExp(fixture.targetPath), "u"),
     );
 
     const targetRead = toolCalls(planningEvents, "read_file").find((call) =>
@@ -216,9 +217,10 @@ realModelTest(
         discoveryId: "deep-discovery",
         branchId: "entry-branch",
         ordinal: 0,
-        objective: "用精确文本检索定位目标实现",
-        queries: [`grep:${fixture.targetSymbol}`],
-        stoppingCondition: "读取目标定义并形成直接证据",
+        objective: "直接核验已筛选候选实现",
+        roots: [fixture.targetPath],
+        queries: [`read:${fixture.targetPath}`],
+        stoppingCondition: "读取候选文件并确认目标定义",
         reserveToolCalls: 24,
         reserveFiles: 40,
       }),
@@ -246,10 +248,9 @@ realModelTest(
         beforeFirstModelCall: () => barrier.arrive(),
         allowedTools: ["grep", "read_file"],
         prompt: [
-          `Use grep now to search the workspace for the exact symbol ${fixture.targetSymbol}.`,
-          `Use arguments pattern=${JSON.stringify(fixture.targetSymbol)} and path="".`,
-          "Then call read_file on the exact implementation path returned by grep.",
-          "Do not answer until read_file succeeds; use no more than three tool calls and make no modifications.",
+          `Call read_file now with exactly ${JSON.stringify({ path: fixture.targetPath })}.`,
+          `Confirm that the file defines ${fixture.targetSymbol}.`,
+          "Do not answer until that exact read_file succeeds; use no other tool and make no modifications.",
         ].join("\n"),
       }),
       executeReadOnlyInvestigation({
