@@ -16,6 +16,7 @@ const CORE_HELP_COMMANDS = new Set([
   "goal",
   "mode",
   "plan",
+  "explore",
   "permissions",
   "compact",
   "init",

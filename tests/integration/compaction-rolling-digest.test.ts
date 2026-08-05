@@ -36,9 +36,11 @@ async function mkTestDir(prefix: string): Promise<string> {
 }
 
 function mockProvider(content: string): LLMProvider {
-  return { async generate() {
-    return { role: "assistant", content };
-  } };
+  return {
+    async generate() {
+      return { role: "assistant", content };
+    },
+  };
 }
 
 function paddedHistory(): Message[] {
@@ -102,7 +104,10 @@ test("Runtime checkpoint 使用内容哈希 digest 且重放校验通过", async
     recordRuntimeCompactionCheckpoint({
       session,
       runtimeRun: compactionRun,
-      compactor: new FullCompactor({ provider: mockProvider("digest checkpoint summary"), maxAttempts: 1 }),
+      compactor: new FullCompactor({
+        provider: mockProvider("digest checkpoint summary"),
+        maxAttempts: 1,
+      }),
       request: { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
     }),
   );
@@ -174,10 +179,11 @@ test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpoin
   });
 
   // 第二次压缩
-  const result2 = await run2.run(() =>
+  const run3 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const result2 = await run3.run(() =>
     recordRuntimeCompactionCheckpoint({
       session,
-      runtimeRun: run2,
+      runtimeRun: run3,
       compactor: new FullCompactor({ provider: capturingProvider, maxAttempts: 1 }),
       request: { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
     }),

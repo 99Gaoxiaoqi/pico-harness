@@ -680,6 +680,8 @@ export interface AgentEngineOptions {
   postToolResultHook?: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
   /** 主循环正常结束、仍位于 RuntimeRun capability 内时执行的宿主收口。 */
   onRunComplete?: () => Promise<void>;
+  /** 主循环异常或取消时执行的宿主中断收口。 */
+  onRunInterrupted?: (reason: string) => Promise<void>;
   /** 为主工作区及隔离 worktree 构建同策略 Skill Catalog。 */
   skillLoaderFactory?: (workDir: string) => SkillLoader;
   /** Runtime-owned lifecycle port; the engine never imports the durable implementation. */
@@ -764,6 +766,7 @@ export class AgentEngine implements AgentRunner {
   private readonly hookService?: HookService;
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
   private readonly onRunComplete?: AgentEngineOptions["onRunComplete"];
+  private readonly onRunInterrupted?: AgentEngineOptions["onRunInterrupted"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort;
   private readonly collaborationMode?: () => "agent" | "plan";
@@ -815,6 +818,7 @@ export class AgentEngine implements AgentRunner {
     this.hookService = opts.hookService;
     this.postToolResultHook = opts.postToolResultHook;
     this.onRunComplete = opts.onRunComplete;
+    this.onRunInterrupted = opts.onRunInterrupted;
     this.skillLoaderFactory = opts.skillLoaderFactory;
     this.runtimePort = opts.runtimePort;
     this.collaborationMode = opts.collaborationMode;
@@ -2361,6 +2365,13 @@ export class AgentEngine implements AgentRunner {
       }
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) reporter.onInterrupted?.();
+      await this.onRunInterrupted?.(
+        signal?.aborted || isAbortError(error)
+          ? "Discovery Run was cancelled."
+          : `Discovery Run failed: ${error instanceof Error ? error.message : String(error)}`,
+      ).catch((hookError) =>
+        logger.warn({ hookError: String(hookError) }, "[Engine] Discovery 中断收口失败"),
+      );
       throw error;
     } finally {
       if (runFileJournal && userRewindPointId) {
