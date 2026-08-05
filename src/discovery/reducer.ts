@@ -240,7 +240,7 @@ function startBranch(
   if (run.branches.some((branch) => branch.branchId === data.branchId)) {
     conflict("Discovery branch id already exists");
   }
-  if (run.branches.filter((branch) => isOpenBranch(branch)).length >= run.budget.maxBranches) {
+  if (run.branches.length >= run.budget.maxBranches) {
     conflict("Discovery branch limit reached");
   }
   if (run.branches.some((branch) => branch.ordinal === data.ordinal)) {
@@ -369,6 +369,9 @@ function completeBranch(
     evidenceRefs: unique([...run.evidenceRefs, ...data.evidenceRefs]),
     inspectedFiles,
     openQuestions: unique([...run.openQuestions, ...data.openQuestions]),
+    ...(budget.consumedToolCalls >= budget.maxToolCalls || budget.consumedFiles >= budget.maxFiles
+      ? { limitReason: "budget_exhausted" as const }
+      : {}),
     updatedAt: at,
   };
 }

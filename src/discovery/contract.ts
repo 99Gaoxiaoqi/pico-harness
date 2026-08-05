@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 
 export type DiscoveryDepth = "quick" | "balanced" | "deep";
 export type DiscoveryPhase = "forage" | "focus" | "deepen" | "verify";
@@ -157,9 +158,9 @@ export function discoveryBudget(depth: DiscoveryDepth): DiscoveryBudget {
   };
 }
 
-export function normalizeDiscoveryStartInput(
-  input: DiscoveryStartInput,
-): Required<Pick<DiscoveryStartInput, "objective" | "depth" | "roots">> & {
+export function normalizeDiscoveryStartInput(input: DiscoveryStartInput): Required<
+  Pick<DiscoveryStartInput, "objective" | "depth" | "roots">
+> & {
   readonly discoveryId?: string;
 } {
   const objective = requiredText(input.objective, "Discovery objective");
@@ -178,12 +179,24 @@ export function normalizeDiscoveryStartInput(
 
 export function normalizeDiscoveryCandidate(candidate: DiscoveryCandidate): DiscoveryCandidate {
   const normalized: DiscoveryCandidate = {
-    path: requiredText(candidate.path, "Discovery candidate path"),
+    path: normalizeDiscoveryPath(candidate.path),
     ...(optionalText(candidate.symbol) ? { symbol: optionalText(candidate.symbol) } : {}),
     score: finiteNumber(candidate.score, "Discovery candidate score"),
     reasons: uniqueTexts(candidate.reasons, "Discovery candidate reason", 20),
     evidenceRefs: uniqueTexts(candidate.evidenceRefs, "Discovery candidate evidence", 20),
   };
+  return normalized;
+}
+
+export function normalizeDiscoveryPath(value: string): string {
+  const raw = requiredText(value, "Discovery path").replaceAll("\\", "/");
+  if (raw.startsWith("/") || /^[A-Za-z]:\//u.test(raw)) {
+    throw new DiscoveryConflictError("Discovery path must be workspace-relative");
+  }
+  const normalized = posix.normalize(raw).replace(/^\.\//u, "");
+  if (normalized === ".." || normalized.startsWith("../")) {
+    throw new DiscoveryConflictError("Discovery path escapes the workspace");
+  }
   return normalized;
 }
 

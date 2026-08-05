@@ -13,6 +13,7 @@ import {
   isDiscoveryDepth,
   isDiscoveryPhase,
   normalizeDiscoveryCandidate,
+  normalizeDiscoveryPath,
   normalizeDiscoveryStartInput,
   requiredDiscoveryId,
   type DiscoveryBranchStartInput,
@@ -157,7 +158,7 @@ export class DiscoveryCoordinator {
       branchId: requiredDiscoveryId(input.branchId, "Discovery branch id"),
       status: input.status,
       consumedToolCalls: nonNegativeInteger(input.consumedToolCalls, "consumedToolCalls"),
-      inspectedFiles: uniqueTexts(input.inspectedFiles, "inspected file", 80),
+      inspectedFiles: uniquePaths(input.inspectedFiles, 80),
       candidates: normalizeCandidates(input.candidates ?? []),
       evidenceRefs: uniqueTexts(input.evidenceRefs ?? [], "evidence reference", 50),
       openQuestions: uniqueTexts(input.openQuestions ?? [], "open question", 20),
@@ -376,7 +377,7 @@ function normalizeCheckpoint(input: DiscoveryCheckpoint): DiscoveryCheckpoint {
     hypotheses: normalizeHypotheses(input.hypotheses),
     openQuestions: uniqueTexts(input.openQuestions, "open question", 20),
     toolCallsUsed: nonNegativeInteger(input.toolCallsUsed, "toolCallsUsed"),
-    inspectedFiles: uniqueTexts(input.inspectedFiles, "inspected file", 80),
+    inspectedFiles: uniquePaths(input.inspectedFiles, 80),
   };
 }
 
@@ -444,6 +445,13 @@ function uniqueTexts(values: readonly string[], label: string, max: number): str
     throw new DiscoveryConflictError(`${label} list exceeds ${max} items`);
   }
   return [...new Set(values.map((value) => requiredText(value, label)))];
+}
+
+function uniquePaths(values: readonly string[], max: number): string[] {
+  if (!Array.isArray(values) || values.length > max) {
+    throw new DiscoveryConflictError(`inspected file list exceeds ${max} items`);
+  }
+  return [...new Set(values.map(normalizeDiscoveryPath))];
 }
 
 function requiredText(value: string, label: string): string {
