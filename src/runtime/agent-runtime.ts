@@ -143,6 +143,11 @@ import {
 import { DISCOVERY_TOOL_NAMES } from "../tools/discovery.js";
 import type { ToolCall } from "../schema/message.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
+import {
+  observeRepoMapScans,
+  REPO_MAP_MAX_FILES,
+  type RepoMapScanReport,
+} from "../code-intelligence/repo-map.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
@@ -1562,10 +1567,7 @@ export async function executeAgentRuntime(
         })
       : undefined;
     if (automaticDiscovery) {
-      registry.useExecution(async (call, next) => {
-        if (call.name === "submit_plan") await automaticDiscovery.prepareForCompletion();
-        return next(call);
-      });
+      registry.useExecution(automaticDiscovery.executeTool);
     }
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
@@ -2083,6 +2085,10 @@ const AUTOMATIC_DISCOVERY_TOOLS = new Set([
 ]);
 
 interface AutomaticDiscoveryTracker {
+  readonly executeTool: (
+    call: ToolCall,
+    next: (call: ToolCall) => Promise<string>,
+  ) => Promise<string>;
   readonly onToolResult: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
   readonly prepareForCompletion: () => Promise<void>;
   readonly complete: () => Promise<void>;
@@ -2096,12 +2102,35 @@ function createAutomaticDiscoveryTracker(input: {
 }): AutomaticDiscoveryTracker {
   const discoveryId = `auto-discovery:${randomUUID()}`;
   const completionKey = randomUUID();
+  const repoMapScans = new Map<string, readonly string[]>();
+  const directReadEvidence = new Map<string, Set<string>>();
+
+  const ensureActive = async (operationKey: string) => {
+    const coordinator = input.coordinator();
+    let projection = await coordinator.project();
+    if (!projection.active && input.autoStart) {
+      projection = await coordinator.start({
+        operationId: `auto-discovery:start:${operationKey}`,
+        expectedSessionSequence: projection.sessionSequence,
+        discoveryId,
+        objective: boundedDiscoveryText(input.objective),
+        depth: "balanced",
+        roots: ["."],
+      });
+    }
+    return projection;
+  };
 
   const prepareForCompletion = async (): Promise<void> => {
     const coordinator = input.coordinator();
     const projection = await coordinator.project();
     const active = projection.active;
     if (!active || active.evidenceRefs.length === 0 || active.phase === "verify") return;
+    const verified = verifiedDiscoveryCandidates(active.candidates, directReadEvidence);
+    if (verified.length === 0) {
+      throw new Error("Discovery Verify 前必须直接 read_file 已选候选源码并保留对应证据");
+    }
+    const evidenceRefs = verified.flatMap((candidate) => candidate.evidenceRefs);
     await coordinator.checkpoint({
       operationId: `auto-discovery:verify:${completionKey}`,
       expectedSessionSequence: projection.sessionSequence,
@@ -2109,8 +2138,8 @@ function createAutomaticDiscoveryTracker(input: {
       checkpoint: {
         phase: "verify",
         cycle: active.cycle,
-        candidates: [],
-        evidenceRefs: [],
+        candidates: verified,
+        evidenceRefs,
         hypotheses: [],
         openQuestions: [],
         toolCallsUsed: 0,
@@ -2120,34 +2149,64 @@ function createAutomaticDiscoveryTracker(input: {
   };
 
   return {
-    async onToolResult(call, result) {
-      if (result.status !== "succeeded" || !AUTOMATIC_DISCOVERY_TOOLS.has(call.name)) return;
-      const coordinator = input.coordinator();
-      let projection = await coordinator.project();
-      if (!projection.active) {
-        if (!input.autoStart) return;
-        projection = await coordinator.start({
-          operationId: `auto-discovery:start:${call.id}`,
-          expectedSessionSequence: projection.sessionSequence,
-          discoveryId,
-          objective: boundedDiscoveryText(input.objective),
-          depth: "balanced",
-          roots: ["."],
-        });
+    async executeTool(call, next) {
+      if (call.name === "submit_plan") {
+        await prepareForCompletion();
+        return next(call);
       }
+      if (!AUTOMATIC_DISCOVERY_TOOLS.has(call.name)) return next(call);
+
+      const projection = await ensureActive(call.id);
+      if (call.name !== "repo_map") return next(call);
+      const active = projection.active;
+      const effectiveCall = active ? clampRepoMapCallToDiscoveryBudget(call, active.budget) : call;
+      const scannedFiles: string[] = [];
+      try {
+        return await observeRepoMapScans(
+          (report: RepoMapScanReport) => scannedFiles.push(...report.scannedFiles),
+          () => next(effectiveCall),
+        );
+      } finally {
+        repoMapScans.set(call.id, [...new Set(scannedFiles)]);
+      }
+    },
+    async onToolResult(call, result) {
+      const repoMapScannedFiles = repoMapScans.get(call.id) ?? [];
+      repoMapScans.delete(call.id);
+      const succeeded = result.status === "succeeded";
+      if (
+        !AUTOMATIC_DISCOVERY_TOOLS.has(call.name) ||
+        (!succeeded && repoMapScannedFiles.length === 0)
+      ) {
+        return;
+      }
+      const coordinator = input.coordinator();
+      const projection = await ensureActive(call.id);
       const active = projection.active;
       if (!active) return;
 
       const evidenceRef =
         result.evidence?.uri ??
         `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
-      const candidates = discoveryCandidatesFromToolResult(call, result, evidenceRef);
+      const candidates = succeeded
+        ? discoveryCandidatesFromToolResult(call, result, evidenceRef)
+        : [];
       const remainingFiles = Math.max(0, active.budget.maxFiles - active.budget.consumedFiles);
-      const inspectedFiles = candidates
-        .map((candidate) => candidate.path)
+      const inspectedFiles = (
+        call.name === "repo_map"
+          ? repoMapScannedFiles
+          : candidates.map((candidate) => candidate.path)
+      )
         .filter((path) => !active.inspectedFiles.includes(path))
         .slice(0, remainingFiles);
-      const phase = automaticDiscoveryPhase(active.phase, call.name);
+      if (succeeded && call.name === "read_file") {
+        for (const candidate of candidates) {
+          const evidence = directReadEvidence.get(candidate.path) ?? new Set<string>();
+          evidence.add(evidenceRef);
+          directReadEvidence.set(candidate.path, evidence);
+        }
+      }
+      const phase = succeeded ? automaticDiscoveryPhase(active.phase, call.name) : active.phase;
       await coordinator.checkpoint({
         operationId: `auto-discovery:checkpoint:${call.id}`,
         expectedSessionSequence: projection.sessionSequence,
@@ -2156,7 +2215,7 @@ function createAutomaticDiscoveryTracker(input: {
           phase,
           cycle: active.cycle,
           candidates,
-          evidenceRefs: [evidenceRef],
+          evidenceRefs: succeeded ? [evidenceRef] : [],
           hypotheses: [],
           openQuestions: phase === "verify" ? [] : ["需要读取候选目标以确认实现位置"],
           toolCallsUsed: 1,
@@ -2171,16 +2230,18 @@ function createAutomaticDiscoveryTracker(input: {
       const projection = await coordinator.project();
       const active = projection.active;
       if (!active || active.phase !== "verify" || active.evidenceRefs.length === 0) return;
+      const verified = verifiedDiscoveryCandidates(active.candidates, directReadEvidence);
+      if (verified.length === 0) return;
+      const evidenceRefs = [...new Set(verified.flatMap((candidate) => candidate.evidenceRefs))];
       await coordinator.complete({
         operationId: `auto-discovery:complete:${completionKey}`,
         expectedSessionSequence: projection.sessionSequence,
         discoveryId: active.discoveryId,
         report: {
           summary: `已基于 ${active.budget.consumedToolCalls} 次成功的只读调查完成目标定位。`,
-          confirmedTargets: active.candidates,
-          evidenceRefs: active.evidenceRefs,
-          remainingRisks:
-            active.candidates.length > 0 ? [] : ["调查已形成直接证据，但未提取到明确文件候选。"],
+          confirmedTargets: verified,
+          evidenceRefs,
+          remainingRisks: [],
         },
       });
     },
@@ -2200,11 +2261,53 @@ function createAutomaticDiscoveryTracker(input: {
 }
 
 function automaticDiscoveryPhase(current: DiscoveryPhase, toolName: string): DiscoveryPhase {
-  if (current === "verify" || toolName === "read_file" || toolName === "read_evidence") {
+  if (current === "verify" || toolName === "read_file") {
     return "verify";
   }
   if (current === "forage") return "focus";
   return "deepen";
+}
+
+function clampRepoMapCallToDiscoveryBudget(
+  call: ToolCall,
+  budget: {
+    readonly maxFiles: number;
+    readonly consumedFiles: number;
+    readonly reservedFiles: number;
+  },
+): ToolCall {
+  const remainingFiles = budget.maxFiles - budget.consumedFiles - budget.reservedFiles;
+  if (remainingFiles <= 0) {
+    throw new Error("Discovery Repo Map 文件预算已耗尽");
+  }
+  const parsed = parseToolObject(call.arguments);
+  const requested =
+    typeof parsed["max_files"] === "number" &&
+    Number.isSafeInteger(parsed["max_files"]) &&
+    parsed["max_files"] > 0
+      ? parsed["max_files"]
+      : REPO_MAP_MAX_FILES;
+  return {
+    ...call,
+    arguments: JSON.stringify({
+      ...parsed,
+      max_files: Math.min(requested, remainingFiles, REPO_MAP_MAX_FILES),
+    }),
+  };
+}
+
+function verifiedDiscoveryCandidates(
+  candidates: readonly DiscoveryCandidate[],
+  directReadEvidence: ReadonlyMap<string, ReadonlySet<string>>,
+): DiscoveryCandidate[] {
+  return candidates.flatMap((candidate) => {
+    const directEvidence = directReadEvidence.get(candidate.path);
+    if (!directEvidence) return [];
+    const evidenceRefs = candidate.evidenceRefs.filter((reference) =>
+      directEvidence.has(reference),
+    );
+    return evidenceRefs.length > 0 ? [{ ...candidate, evidenceRefs }] : [];
+  });
 }
 
 function discoveryCandidatesFromToolResult(
