@@ -18,14 +18,14 @@ test("Discovery Repo Map continues across the default scan batch before resolvin
   });
 
   const first = await tool.execute(JSON.stringify({ query: fixture.targetSymbol, max_files: 200 }));
-  assert.match(first, /backend=repo-map indexed=200\/206 complete=false/u);
+  assert.match(first, /backend=repo-map indexed=200\/206 cursor=200 complete=false/u);
   assert.doesNotMatch(first, new RegExp(escapeRegExp(fixture.targetSymbol), "u"));
   assert.doesNotMatch(first, new RegExp(escapeRegExp(fixture.targetPath), "u"));
 
   const second = await tool.execute(
     JSON.stringify({ query: fixture.targetSymbol, max_files: 200 }),
   );
-  assert.match(second, /backend=repo-map indexed=206\/206 complete=true/u);
+  assert.match(second, /backend=repo-map indexed=206\/206 cursor=206 complete=true/u);
   assert.match(second, new RegExp(escapeRegExp(fixture.targetSymbol), "u"));
   assert.match(second, new RegExp(escapeRegExp(fixture.targetPath), "u"));
 });
