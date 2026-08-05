@@ -36,13 +36,16 @@ import type {
   FullCompactionRequest,
   FullCompactor,
 } from "../context/full-compactor.js";
-import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
+import { FULL_COMPACTION_SUMMARY_MARKER } from "../context/compaction-markers.js";
+import {
+  recordRuntimeCompactionCheckpoint,
+  computeCheckpointSourceDigest,
+} from "../context/runtime-compaction-checkpoint.js";
 import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
 import {
   estimateModelInputTokens,
   estimateMessagesTokens,
-  estimateTokenBudgetAsChars,
 } from "../context/context-budget.js";
 import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
@@ -105,6 +108,12 @@ import {
 const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
 const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
 const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
+/**
+ * midTurn proactive 压缩水位(比主动压缩 85% 更激进)。
+ * 工具结果 commit 后、下一轮 prepareModelContext 前主动检查:若已超 75% 水位,
+ * 提前触发 checkpoint,避免下一轮才 reactive 发现(那时已在 provider 调用紧前)。
+ */
+const MID_TURN_COMPACT_TRIGGER_RATIO = 0.75;
 const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
 const engineSessionContext = new AsyncLocalStorage<string>();
 const PLAN_PROVIDER_TOOL_NAMES = new Set([
@@ -710,6 +719,12 @@ export class AgentEngine implements AgentRunner {
   private readonly budget: IterationBudget;
   private readonly usageSession?: Session;
   /**
+   * 上一轮 provider 返回的真实输入 token(含工具 schema + 缓存)。
+   * 用作下一轮 token 估算的锚定基线(对标 maka midTurn estimateNextRequestTokens):
+   * 厂商 usage 是 ground truth,比 BPE 估算更准;冷启动(首轮无 usage)时回退到 BPE。
+   */
+  private lastAnchoredPromptTokens?: number;
+  /**
    * Session 成本是累计值。多个子代理并发返回时，以高水位结算增量，
    * 避免每个请求都用自己的 costBefore 导致重复计费。
    */
@@ -1000,6 +1015,75 @@ export class AgentEngine implements AgentRunner {
     return result?.preview;
   }
 
+  /**
+   * midTurn proactive 压缩(对标 maka midTurn capacity compact)。
+   *
+   * 在工具结果 commit 后、下一轮 prepareModelContext 前主动检查:若上下文已超
+   * 75% 水位,提前触发 Runtime checkpoint,避免下一轮才 reactive 发现。
+   *
+   * 简化设计(相比 maka):
+   * - pico 同步 await 落盘,不需要 maka 的 seq-ack 持久化等待
+   * - pico 无 steering/pinned 事件,turnTail 每轮重建不进 history
+   * - 复用现有 recordRuntimeCheckpoint + findSafeCompactionCut 边界检测
+   * - fail-open:压缩失败不抛错,留给下一轮 prepareModelContext 或 overflow 处理
+   */
+  private async runMidTurnCompaction(
+    session: Session,
+    span: Span | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    // 仅 Runtime 会话 + 有 fullCompactor + 有 contextBudget 才执行
+    if (!this.fullCompactor || !this.contextBudget || !this.isRuntimeSession(session)) return;
+    const runtimeRun = this.runtimePort?.currentRun();
+    if (!runtimeRun?.claimsSession(session)) return;
+
+    const budget = this.contextBudget.inputBudgetTokens;
+    const triggerTokens = Math.floor(budget * MID_TURN_COMPACT_TRIGGER_RATIO);
+
+    // 优先用上一轮 usage 锚定估算(ground truth),冷启动回退到 BPE。
+    let estimatedInput: number;
+    if (this.lastAnchoredPromptTokens !== undefined) {
+      estimatedInput = this.lastAnchoredPromptTokens;
+    } else {
+      const entries = await runtimeRun.readModelHistoryEntries();
+      estimatedInput = estimateMessagesTokens(entries.map(({ message }) => message));
+    }
+
+    if (estimatedInput <= triggerTokens) return; // 未到 75% 水位,不压
+
+    signal?.throwIfAborted();
+    logger.info(
+      {
+        estimatedInput,
+        triggerTokens,
+        triggerRatio: MID_TURN_COMPACT_TRIGGER_RATIO,
+        budget,
+      },
+      "[midTurn] 工具结果落地后上下文已超 75% 水位,主动触发 Runtime checkpoint",
+    );
+    try {
+      const result = await this.recordRuntimeCheckpoint(
+        session,
+        {
+          inputBudgetTokens: budget,
+          trigger: "auto",
+        },
+        signal,
+      );
+      if (result) {
+        span?.addAttributes({ midTurnCompacted: true, midTurnCompactedCount: result.compactedCount });
+      }
+    } catch (err) {
+      // fail-open:压缩失败不抛错,留给下一轮 prepareModelContext 或 overflow 处理
+      if (isAbortError(err)) throw err;
+      logger.warn(
+        { err: String(err), sessionId: session.id },
+        "[midTurn] proactive 压缩失败,fail-open:留给下一轮处理",
+      );
+      span?.addAttributes({ midTurnCompactionFailedOpen: true });
+    }
+  }
+
   /** Replaces prior context with a minimal, auditable checkpoint while preserving this input. */
   private async hardResetRuntimeHistory(
     session: Session,
@@ -1022,6 +1106,13 @@ export class AgentEngine implements AgentRunner {
     const through = covered.at(-1);
     if (!through) return;
     const checkpointId = `hard-reset:${randomUUID()}`;
+    // 复用 evidence snapshot:从 covered 消息提取结构化证据(最近 8 条工具/助手),
+    // 让硬重置后模型至少能看到"重置前最后的工作线索",而非完全清零。
+    const evidenceSnapshot = buildEvidenceSnapshot(
+      covered.map((entry) => entry.message),
+      0,
+      "[CONTEXT RESET EVIDENCE]",
+    );
     const summary =
       currentIndex === -1 &&
       currentRequest.message.role === "user" &&
@@ -1029,14 +1120,16 @@ export class AgentEngine implements AgentRunner {
         ? structuredClone(currentRequest.message)
         : {
             role: "assistant" as const,
-            content:
-              "[CONTEXT RESET] Earlier conversation context was intentionally reset after a context-limit recovery. Treat the current user request as the only active task.",
+            content: evidenceSnapshot
+              ? "[CONTEXT RESET] Earlier conversation context was intentionally reset after a context-limit recovery. Treat the current user request as the only active task.\n\n" +
+                evidenceSnapshot
+              : "[CONTEXT RESET] Earlier conversation context was intentionally reset after a context-limit recovery. Treat the current user request as the only active task.",
             providerData: { picoKind: "runtime_hard_reset", picoCheckpointId: checkpointId },
           };
     await runtimeRun.recordCheckpoint({
       checkpointId,
       coveredEventCount: covered.length,
-      sourceDigest: runtimeHistoryDigest(covered.map(({ eventId }) => eventId)),
+      sourceDigest: computeCheckpointSourceDigest(covered),
       throughEventId: through.eventId,
       summary,
     });
@@ -1065,7 +1158,13 @@ export class AgentEngine implements AgentRunner {
 
     const budget = this.contextBudget.inputBudgetTokens;
     const triggerTokens = Math.floor(budget * this.autoCompactTriggerRatio);
-    const beforeTokens = estimateModelInputTokens(context, tools);
+    const bpeEstimate = estimateModelInputTokens(context, tools);
+    // usage 锚定:优先用上一轮 provider 返回的真实 promptTokens 作为估算基线(ground truth),
+    // 与 BPE 估算取大者(保守:确保不低估而漏触发压缩)。冷启动(无锚定值)时纯用 BPE。
+    const beforeTokens =
+      this.lastAnchoredPromptTokens !== undefined
+        ? Math.max(bpeEstimate, this.lastAnchoredPromptTokens)
+        : bpeEstimate;
     if (beforeTokens <= triggerTokens) return context;
 
     const targetRetainedTokens = Math.max(1, Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO));
@@ -1147,12 +1246,26 @@ export class AgentEngine implements AgentRunner {
           false,
         );
       }
+      // fail-open:full compaction 失败但字符级投影已完成,不立即硬重置。
+      // 返回 projected(可能略超预算),让 generateWithOverflowRetry 的 provider overflow
+      // 紧急压缩再尝试一次。硬重置只在紧急压缩也失败时才作为最后兜底。
+      logger.warn(
+        {
+          trigger: request.trigger,
+          projectedTokens,
+          budget,
+          triggerTokens,
+        },
+        "[Engine] full compaction 失败,fail-open:返回字符级投影,留给 overflow 紧急压缩重试",
+      );
+      span?.addAttributes({ contextCompactionFailedOpen: true });
     }
 
-    if (projectedTokens <= budget) return projected;
-    const beforeChars = estimateTraceLength(context);
-    const afterChars = estimateTraceLength(projected);
-    throw new ContextCompactionError(beforeChars, afterChars, estimateTokenBudgetAsChars(budget));
+    // fail-open:无论 projected 是否超预算,都返回它(而非抛 ContextCompactionError)。
+    // 超预算的情况由 generateWithOverflowRetry 的 provider overflow 紧急压缩处理;
+    // 紧急压缩也失败时,主循环捕获 ContextOverflowError 触发硬重置兜底。
+    // 这样 full compaction 失败不再立即丢上下文,给 overflow 紧急压缩多一次机会。
+    return projected;
   }
 
   /** Provider overflow 只允许一次更紧的模型摘要重试。 */
@@ -2208,6 +2321,14 @@ export class AgentEngine implements AgentRunner {
               providerData: { picoKind: "steer" },
             });
           }
+
+          // ====================================================================
+          // midTurn proactive 压缩(对标 maka midTurn capacity compact):
+          // 此时工具结果、reminder、stallWarning、steer 都已 commitMessages 落盘,
+          // 下一轮 prepareModelContext 还未执行。若上下文已超 75% 水位,提前压缩。
+          // 失败 fail-open,不阻塞主循环。
+          // ====================================================================
+          await this.runMidTurnCompaction(session, turnSpan, signal);
         } finally {
           turnSpan?.end();
         }
@@ -2804,9 +2925,15 @@ export class AgentEngine implements AgentRunner {
     session: Session,
     response: Message,
     costBefore: number,
+    isSubagent = false,
   ): BudgetDecision {
     const decisions: BudgetDecision[] = [];
     if (response.usage) {
+      // 锚定:记录上一轮真实输入 token,供下一轮 prepareModelContext/midTurn 估算。
+      // 子代理的 promptTokens 远小于主代理,不能污染主代理的锚定值。
+      if (!isSubagent) {
+        this.lastAnchoredPromptTokens = response.usage.promptTokens;
+      }
       decisions.push(this.budget.consumeUsage(response.usage));
       decisions.push(this.goalManager?.consumeUsage(response.usage) ?? { allowed: true });
     }
@@ -2836,7 +2963,7 @@ export class AgentEngine implements AgentRunner {
     costBefore: number,
   ): BudgetDecision {
     const session = runtime.usageSession ?? this.usageSession;
-    if (session) return this.consumeResponseBudget(session, response, costBefore);
+    if (session) return this.consumeResponseBudget(session, response, costBefore, true);
 
     // 非 Runtime 宿主可以直接构造 AgentEngine，此时没有可用的 Session 成本账本；
     // 仍严格结算 Provider 返回的 Token usage。
@@ -3533,10 +3660,27 @@ function persistSubagentContext(contextHistory: Message[], compacted: Message[])
 }
 
 function buildSubagentEvidenceSnapshot(contextHistory: readonly Message[]): string | undefined {
+  return buildEvidenceSnapshot(contextHistory, 2, "[SUBAGENT EVIDENCE SNAPSHOT]");
+}
+
+/**
+ * 从消息历史构造结构化证据快照。
+ * @param messages 完整消息历史
+ * @param skipPrefix 跳过前 N 条(system/task prompt),只处理其后消息
+ * @param header 快照头部标识
+ * @returns 证据快照文本,或 undefined(无证据可提取)
+ */
+function buildEvidenceSnapshot(
+  messages: readonly Message[],
+  skipPrefix: number,
+  header: string,
+): string | undefined {
   const toolNames = new Map<string, string>();
   const evidence: string[] = [];
-  for (const message of contextHistory.slice(2)) {
+  for (const message of messages.slice(skipPrefix)) {
     if (message.role === "assistant") {
+      // 跳过上一轮 checkpoint summary（压缩产物而非真实对话），避免把截断的旧摘要当工作线索。
+      if (message.content.startsWith(FULL_COMPACTION_SUMMARY_MARKER)) continue;
       for (const call of message.toolCalls ?? []) toolNames.set(call.id, call.name);
       if (message.content.trim()) {
         evidence.push(`[assistant checkpoint] ${truncate(message.content.trim(), 400)}`);
@@ -3548,11 +3692,16 @@ function buildSubagentEvidenceSnapshot(contextHistory: readonly Message[]): stri
       evidence.push(
         `[tool evidence: ${toolName}; call=${message.toolCallId}] ${truncate(message.content, 700)}`,
       );
+      continue;
+    }
+    // 纯 user 消息（用户原始请求/约束）:必须保留,否则硬重置后模型丢失任务目标和用户意图。
+    if (message.role === "user") {
+      evidence.push(`[user request] ${truncate(message.content.trim(), 300)}`);
     }
   }
   if (evidence.length === 0) return undefined;
   return [
-    "[SUBAGENT EVIDENCE SNAPSHOT] 上下文已重置；以下是压缩前已收集的结构化证据，不要重复探索同一范围。",
+    `${header} 上下文已重置；以下是压缩前已收集的结构化证据，不要重复探索同一范围。`,
     ...evidence.slice(-8),
   ].join("\n");
 }
@@ -3696,10 +3845,6 @@ function estimateTraceLength(messages: Message[]): number {
     }
   }
   return length;
-}
-
-function runtimeHistoryDigest(eventIds: readonly string[]): string {
-  return createHash("sha256").update(eventIds.join("\n")).digest("hex");
 }
 
 function recordCompaction(span: Span | undefined, beforeChars: number, afterChars: number): void {

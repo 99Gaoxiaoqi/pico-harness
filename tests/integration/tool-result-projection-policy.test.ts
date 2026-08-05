@@ -68,7 +68,7 @@ test("ToolResult projection creates a bounded deterministic preview above an inj
   assert.deepEqual(second, first);
   assert.equal(first.shouldArchive, true);
   assert.equal(first.projection.mode, "preview");
-  assert.equal(first.projection.strategy, "fallback-head-tail");
+  assert.equal(first.projection.strategy, "head-tail");
   assert.equal(first.projection.truncated, true);
   assert.ok(first.projection.text.length <= input.maxPreviewChars);
   assert.doesNotMatch(first.projection.text, new RegExp(canary, "u"));
@@ -78,7 +78,7 @@ test("ToolResult projection creates a bounded deterministic preview above an inj
     modelOutput: `${rawOutput}\n[Recovery] 请按错误提示继续。`,
   });
   assert.equal(recoveredPreview.projection.mode, "preview");
-  assert.equal(recoveredPreview.projection.strategy, "recovery:fallback-head-tail");
+  assert.equal(recoveredPreview.projection.strategy, "recovery:head-tail");
 
   const belowHighThreshold = buildRuntimeToolResultProjection({
     ...input,
@@ -155,7 +155,7 @@ test("micro compaction preserves structured Evidence ToolResult projections", ()
         version: 1,
         mode: "preview",
         text: "preview\n".repeat(80),
-        strategy: "fallback-head-tail",
+        strategy: "head-tail",
         truncated: true,
       },
     },

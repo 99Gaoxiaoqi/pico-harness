@@ -47,3 +47,4 @@ Thumbs.db
 # understand-anything 技能缓存(本地知识图谱,不提交)
 .understand-anything/
 **/.understand-anything/
+.test-tmp/

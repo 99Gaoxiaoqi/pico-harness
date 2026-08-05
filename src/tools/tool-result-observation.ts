@@ -4,7 +4,7 @@ import type { RuntimeToolResultProjection } from "../engine/tool-result-contract
 import type { ToolCall, ToolResult } from "../schema/message.js";
 import { summarizeToolResult } from "./result-summarizer.js";
 
-const DEFAULT_SUMMARY_MAX_CHARS = 1600;
+const DEFAULT_SUMMARY_MAX_CHARS = 3000;
 const DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048;
 const BOUNDED_READBACK_TOOLS = new Set(["read_evidence"]);
 

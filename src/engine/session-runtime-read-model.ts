@@ -5,6 +5,10 @@ import {
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
 } from "./runtime-model-message.js";
+import {
+  computeCheckpointSourceDigest,
+  CONTENT_DIGEST_V1_PREFIX,
+} from "../context/runtime-compaction-checkpoint.js";
 
 export interface RuntimeHistoryProjectionEntry {
   /** The immutable event that currently contributes this model-visible message. */
@@ -110,12 +114,14 @@ function replaceProjectedPrefixWithCheckpoint(
     `Runtime checkpoint ${checkpoint.eventId}`,
   );
   const covered = projected.slice(0, throughProjectedIndex + 1);
-  const sourceDigest = createHash("sha256")
-    .update(covered.map(({ eventId }) => eventId).join("\n"))
-    .digest("hex");
+  // 内容哈希校验(新格式 v1)或旧格式(eventId 序列哈希)兼容。
+  const storedDigest = checkpoint.data.sourceDigest;
+  const recomputedDigest = storedDigest.startsWith(CONTENT_DIGEST_V1_PREFIX)
+    ? computeCheckpointSourceDigest(covered)
+    : createHash("sha256").update(covered.map(({ eventId }) => eventId).join("\n")).digest("hex");
   if (
     checkpoint.data.coveredEventCount !== covered.length ||
-    checkpoint.data.sourceDigest !== sourceDigest
+    storedDigest !== recomputedDigest
   ) {
     throw new RuntimeEventReadModelIntegrityError(
       `Runtime checkpoint ${checkpoint.eventId} does not match its covered model prefix`,

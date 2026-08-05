@@ -1545,6 +1545,7 @@ export async function executeAgentRuntime(
       // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
       fullCompactor: new FullCompactor({
         provider: trackedProvider,
+        workDir,
         ...(auxProvider ? { auxProvider } : {}),
         ...(activeHookService ? { hookService: activeHookService } : {}),
       }),

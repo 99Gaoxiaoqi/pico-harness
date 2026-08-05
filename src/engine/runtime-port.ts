@@ -106,6 +106,15 @@ export interface EngineRuntimeCheckpointInput {
   readonly sourceDigest: string;
   readonly throughEventId: string;
   readonly summary: Message;
+  /** 滚动摘要链:上一个 checkpoint 的 id(若存在)。 */
+  readonly previousCheckpointId?: string;
+}
+
+/** 最后一个 compaction checkpoint 的摘要信息(滚动摘要增量更新用)。 */
+export interface LastCompactionCheckpoint {
+  readonly checkpointId: string;
+  /** 摘要正文(去掉 REFERENCE-ONLY 包装),作为下一轮增量更新的基线。 */
+  readonly summaryText: string;
 }
 
 /** A runtime run as seen by the ReAct engine. */
@@ -123,6 +132,12 @@ export interface EngineRuntimeRun {
   readModelHistory(): Promise<Message[]>;
   readModelHistoryEntries(): Promise<readonly EngineRuntimeHistoryEntry[]>;
   readSessionProjectionEntries(): Promise<readonly EngineRuntimeHistoryEntry[]>;
+  /**
+   * 查找最后一个 `context.checkpoint.recorded` 事件(滚动摘要链用)。
+   * 返回其 checkpointId 和 summary 正文(去掉 REFERENCE-ONLY 包装),
+   * 供下一轮压缩做增量更新。无 checkpoint 时返回 undefined。
+   */
+  findLastCompactionCheckpoint(): Promise<LastCompactionCheckpoint | undefined>;
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result>;
   recordTurnStarted(turn: number): Promise<void>;
   recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
