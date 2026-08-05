@@ -200,6 +200,7 @@ interface ResolvedRuntimeUserInput {
 }
 
 const DISCOVERY_RUN_TOOLS = [
+  "delegate_task",
   "read_file",
   "read_evidence",
   "glob",
@@ -1765,6 +1766,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const prompt = [
       `以 ${input.depth} 深度执行一次隔离的只读 Discovery，目标：${input.objective}`,
       "按 Forage → Focus → Deepen → Verify 推进：先用 Repo Map、Glob、Grep 广泛觅食，再筛选候选，随后用符号、定义、引用、调用层级和 Read 深挖，最后必须直接读取目标源码交叉核验。",
+      ...(input.depth === "quick"
+        ? []
+        : [
+            `首先调用一次 delegate_task，以 completion_policy=required 并行启动 ${input.depth === "deep" ? 3 : 2} 个 mode=explore、role=leaf 的互斥只读分支；分别调查入口调用链、符号定义引用${input.depth === "deep" ? "、测试与配置边界" : ""}，为每项提供互不重叠的 roots、停止条件和文件上限。禁止 mode=worker、异步或 detached 委派。`,
+          ]),
       "Repo Map 返回 complete=false 只代表仍有后续批次，必须继续扫描，不能据此宣告目标不存在。互不依赖的只读查询可在同一批并发发起，但不得重复相同的宽泛搜索。",
       ...(input.resume ? ["优先从已保存候选和 Evidence 继续，不要重复完全相同的全仓搜索。"] : []),
       "只返回有界结构化报告：确认目标、符号、调用关系、Evidence、未知点和建议落点。禁止修改文件或启动可写任务；报告完成后停止，不实施。",
