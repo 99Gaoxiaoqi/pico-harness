@@ -1455,6 +1455,7 @@ function createPlanCommand(settings: SessionSettings, session?: Session): SlashC
 }
 
 const DISCOVERY_READ_ONLY_TOOLS = [
+  "delegate_task",
   "read_file",
   "read_evidence",
   "glob",
@@ -1567,6 +1568,11 @@ function discoveryPrompt(
     prompt: [
       `以 ${depth} 深度执行一次只读 Discovery，目标：${objective}`,
       "按 Forage → Focus → Deepen → Verify 推进：先用 Repo Map、Glob、Grep 广泛觅食，再筛选候选，随后用符号、定义、引用、调用层级和 Read 深挖，最后必须直接读取目标源码交叉核验。",
+      ...(depth === "quick"
+        ? []
+        : [
+            `首先调用一次 delegate_task，以 completion_policy=required 并行启动 ${depth === "deep" ? 3 : 2} 个 mode=explore、role=leaf 的互斥只读分支；分别调查入口调用链、符号定义引用${depth === "deep" ? "、测试与配置边界" : ""}，为每项提供互不重叠的 roots、停止条件和文件上限。禁止 mode=worker、异步或 detached 委派。`,
+          ]),
       "Repo Map 返回 complete=false 只代表仍有后续批次，不能据此宣告仓库中不存在目标。",
       "可在一个工具批次中并发发起互不依赖的只读查询，但共享预算不得因并发倍增，也不要重复相同的宽泛搜索。",
       "只收集可复核证据，不修改文件、不执行会改变工作区或外部状态的命令。结论给出精确文件、符号、调用关系、Evidence、未知点和建议落点；报告完成后停止，不实施修改。",
