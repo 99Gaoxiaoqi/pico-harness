@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DiscoveryCoordinator } from "../../src/discovery/coordinator.js";
+import { SessionForkService } from "../../src/engine/session-fork-service.js";
+import { Session, SessionManager } from "../../src/engine/session.js";
 import { PlanCoordinator, PlanConflictError } from "../../src/plan/index.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
+import { createSessionForkRuntimePort } from "../../src/runtime/session-fork-runtime-port-adapter.js";
 import {
   RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
@@ -137,4 +141,73 @@ test("Plan submission atomically completes a verified active Discovery", async (
     }),
     RuntimeEventStorePlanOperationConflictError,
   );
+});
+
+test("Session fork inherits an active Discovery as interrupted without resuming workers", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-discovery-fork-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  await mkdir(workDir);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new SessionManager({
+    createSession: (id, cwd, options) => new Session(id, cwd, options),
+  });
+  const source = await manager.getOrCreate("discovery-source", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  await source.commitMessages({ role: "user", content: "Investigate the repository" });
+  const store = source.runtimeEventStore!;
+  const sourceDiscovery = new DiscoveryCoordinator(store, {
+    sessionId: source.id,
+    invocationId: "source-invocation",
+    runId: "source-run",
+    turnId: "source-turn",
+  });
+  const before = await sourceDiscovery.project();
+  await sourceDiscovery.start({
+    operationId: "source-discovery-start",
+    expectedSessionSequence: before.sessionSequence,
+    discoveryId: "source-discovery",
+    objective: "Locate the implementation",
+    depth: "balanced",
+  });
+  const afterStart = await sourceDiscovery.project();
+  await sourceDiscovery.startBranch({
+    operationId: "source-branch-start",
+    expectedSessionSequence: afterStart.sessionSequence,
+    discoveryId: "source-discovery",
+    branchId: "entry-chain",
+    ordinal: 0,
+    objective: "Trace the entry call chain",
+    roots: ["src"],
+    queries: ["entry"],
+    stoppingCondition: "Find a concrete definition",
+    reserveToolCalls: 8,
+    reserveFiles: 10,
+  });
+  const service = new SessionForkService({
+    workDir,
+    picoHome,
+    sessionManager: manager,
+    runtimeStore: store,
+    runtimePort: createSessionForkRuntimePort(),
+    createOperationId: () => "fork-active-discovery",
+  });
+  await service.fork({
+    sourceSessionId: source.id,
+    targetSessionId: "discovery-target",
+    targetMode: "default",
+  });
+  const targetDiscovery = await new DiscoveryCoordinator(store, {
+    sessionId: "discovery-target",
+    invocationId: "target-invocation",
+    runId: "target-run",
+    turnId: "target-turn",
+  }).project();
+  assert.equal(targetDiscovery.latest?.status, "interrupted");
+  assert.match(targetDiscovery.latest?.reason ?? "", /explicit resume/u);
+  assert.equal(targetDiscovery.latest?.branches[0]?.status, "cancelled");
+  assert.equal((await sourceDiscovery.project()).active?.discoveryId, "source-discovery");
 });
