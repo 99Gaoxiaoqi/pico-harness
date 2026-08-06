@@ -1466,6 +1466,32 @@ test("explicit Discovery fails closed when delegated usage results are structura
   assert.equal(resumed.active?.budget.consumedFiles, 30);
   assert.equal(resumed.active?.budget.maxToolCalls, 48);
   assert.equal(resumed.active?.budget.maxFiles, 80);
+  await writeFile(join(workDir, "src", "post-resume.ts"), "export const resumed = true;\n", "utf8");
+  const checkpointed = await coordinator.checkpoint({
+    operationId: "checkpoint-after-omitted-usage",
+    expectedSessionSequence: resumed.sessionSequence,
+    discoveryId: resumed.active!.discoveryId,
+    checkpoint: {
+      phase: "focus",
+      cycle: resumed.active!.cycle,
+      candidates: [
+        {
+          path: "src/post-resume.ts",
+          score: 80,
+          reasons: ["post_resume:direct_read"],
+          evidenceRefs: ["pico://evidence/post-resume"],
+        },
+      ],
+      evidenceRefs: ["pico://evidence/post-resume"],
+      hypotheses: [],
+      openQuestions: [],
+      toolCallsUsed: 1,
+      inspectedFiles: ["src/post-resume.ts"],
+    },
+  });
+  assert.equal(checkpointed.active?.budget.consumedToolCalls, 25);
+  assert.equal(checkpointed.active?.budget.consumedFiles, 31);
+  assert.ok(checkpointed.active!.budget.consumedFiles <= checkpointed.active!.budget.maxFiles);
 });
 
 test("approval recovers its crash gap and replay never starts a second execution Run", async (t) => {
