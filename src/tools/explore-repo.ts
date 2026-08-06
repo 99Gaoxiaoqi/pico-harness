@@ -1,19 +1,21 @@
 /**
  * explore_repo：一次性有界仓库侦察工具。
  *
- * 确定性纯算法，零 LLM 调用。复用 RepoMapService 的符号扫描能力，
- * 叠加项目结构启发式打分 + 行级内容匹配，一次调用返回：
- * - 打分排序的候选文件（含符号清单）
- * - 行级证据锚点（含行号和 snippet）
- * - 可读文本报告
+ * 确定性纯算法，零 LLM 调用。自己做 DFS 文件遍历（不依赖 repo_map 的渐进式索引），
+ * 复用 repo_map 的 parseSymbols 解析符号，叠加项目结构启发式打分 + 行级内容匹配，
+ * 一次调用返回：打分排序的候选文件（含符号清单）、行级证据锚点和可读文本报告。
  *
- * 设计参考 maka-agent ExploreAgent，但 pico 有 repo_map 的符号级能力，
- * 所以打分维度更丰富（符号匹配 + 项目结构 + 内容匹配三层）。
+ * 与 repo_map 的区别：repo_map 按字母序渐进索引（适合多次调用建全量索引），
+ * explore_repo 自己做 DFS 遍历（适合一次性侦察，不受字母序限制）。
  */
 
-import { readFile, stat } from "node:fs/promises";
-import { resolve, basename } from "node:path";
-import { RepoMapService } from "../code-intelligence/repo-map.js";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { resolve, join, relative, basename, extname } from "node:path";
+import {
+  parseSymbols,
+  SUPPORTED_EXTENSIONS,
+  IGNORED_DIRECTORIES,
+} from "../code-intelligence/repo-map.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses, type ToolAccesses as ToolAccessSet } from "./tool-access.js";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
@@ -29,6 +31,7 @@ const MAX_FILE_BYTES = 512 * 1024;
 const MATCH_CONTEXT_CHARS = 220;
 const MAX_CANDIDATES = 20;
 const MAX_EVIDENCE = 10;
+const MAX_DISCOVERED_FILES = 250;
 
 const PROJECT_MANIFEST_FILES = new Set([
   "package.json", "pnpm-workspace.yaml", "turbo.json", "tsconfig.json",
@@ -49,8 +52,15 @@ const ENTRYPOINT_NAMES = new Set([
   "application.java", "main.java", "app.java",
 ]);
 
+const TEXT_EXTENSIONS = new Set([
+  ...SUPPORTED_EXTENSIONS,
+  ".md", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash",
+  ".sql", ".html", ".css", ".scss", ".less", ".vue", ".svelte",
+  ".xml", ".ini", ".cfg", ".conf", ".env.example", ".gitignore",
+]);
+
 const SENSITIVE_FILE_PATTERNS = [
-  /\.env/i, /\.pem$/i, /\.key$/i, /\.p12$/i,
+  /\.env$/i, /\.pem$/i, /\.key$/i, /\.p12$/i,
   /id_rsa/i, /credentials/i, /\.secret/i,
 ];
 
@@ -65,11 +75,8 @@ const COMMON_WORDS = new Set([
 
 export class ExploreRepoTool implements BaseTool {
   readonly readOnly = true;
-  private readonly repoMap: RepoMapService;
 
-  constructor(private readonly rootDir: string, service: unknown) {
-    this.repoMap = service instanceof RepoMapService ? service : new RepoMapService(rootDir);
-  }
+  constructor(private readonly rootDir: string, _service: unknown) {}
 
   name(): string {
     return "explore_repo";
@@ -120,36 +127,39 @@ export class ExploreRepoTool implements BaseTool {
     );
     const maxFiles = clampInt(input.max_files, DEFAULT_MAX_FILES, 1, 80);
     const maxMatches = clampInt(input.max_matches, DEFAULT_MAX_MATCHES, 1, 120);
+    const rootDirs = Array.isArray(input.roots)
+      ? (input.roots as string[]).map(String)
+      : ["."];
     const signal = context?.signal;
 
-    // Step 1：repo_map 符号扫描
-    // 先用 query 精确匹配；如果没命中（文件名/符号名不含查询词），fallback 到全量索引扫描，
-    // 靠 Step 3 的内容匹配来找。这解决了"目标代码的文件名/符号名不含查询词"的常见场景。
-    // 全量 fallback 时索引 maxFiles×5（上限 200），确保大仓库的关键文件被覆盖。
-    const queryStr = queries.join(" ");
-    let snapshot = await this.repoMap.snapshot({ query: queryStr, maxFiles, signal });
-    signal?.throwIfAborted();
-    if (snapshot.files.length === 0) {
-      const indexBudget = Math.min(200, maxFiles * 5);
-      snapshot = await this.repoMap.snapshot({ maxFiles: indexBudget, signal });
+    // Step 1：DFS 文件遍历（自己的遍历，不受 repo_map 字母序限制）
+    const discovered: string[] = [];
+    for (const root of rootDirs.slice(0, 5)) {
       signal?.throwIfAborted();
+      const absRoot = resolve(this.rootDir, root);
+      await collectFiles(absRoot, discovered, signal);
+      if (discovered.length >= MAX_DISCOVERED_FILES) break;
     }
+    signal?.throwIfAborted();
 
-    // Step 2：项目结构启发式 + 路径级 query 匹配叠加打分
-    const candidates: Candidate[] = snapshot.files.map((f) => {
-      const structural = scoreStructure(f.filePath);
-      const pathMatch = scorePathQuery(f.filePath, queries);
-      return {
-        filePath: f.filePath,
-        symbols: f.symbols,
-        score: f.score + structural.score + pathMatch.score,
-        reasons: [...f.reasons, ...structural.reasons, ...pathMatch.reasons],
-        matches: [] as MatchEntry[],
-      };
-    });
-
-    // Step 3：行级内容匹配（只对高分候选读内容）
+    // Step 2：打分排序（项目结构 + 路径匹配 + 符号匹配）
+    const candidates: Candidate[] = [];
+    for (const absPath of discovered) {
+      const relPath = relative(this.rootDir, absPath).replace(/\\/g, "/");
+      const structural = scoreStructure(relPath);
+      const pathMatch = scorePathQuery(relPath, queries);
+      const totalScore = structural.score + pathMatch.score;
+      candidates.push({
+        filePath: relPath,
+        symbols: [],
+        score: totalScore,
+        reasons: [...structural.reasons, ...pathMatch.reasons],
+        matches: [],
+      });
+    }
     candidates.sort((a, b) => b.score - a.score || a.filePath.localeCompare(b.filePath));
+
+    // Step 3：逐文件读取 + 符号解析 + 行级匹配（只对高分候选）
     const toInspect = candidates.slice(0, maxFiles);
     let totalMatches = 0;
     let totalBytes = 0;
@@ -163,7 +173,6 @@ export class ExploreRepoTool implements BaseTool {
       const absPath = resolve(this.rootDir, candidate.filePath);
       const lowerPath = candidate.filePath.toLowerCase();
 
-      // 敏感文件跳过
       if (SENSITIVE_FILE_PATTERNS.some((p) => p.test(lowerPath))) {
         sensitiveSkipped++;
         continue;
@@ -185,6 +194,13 @@ export class ExploreRepoTool implements BaseTool {
       }
       totalBytes += content.length;
       filesInspected++;
+
+      // 符号解析（仅对代码文件）
+      if (SUPPORTED_EXTENSIONS.has(extname(candidate.filePath))) {
+        const lines = content.split(/\r?\n/);
+        const symbols = parseSymbols(candidate.filePath, lines);
+        candidate.symbols = symbols.map((s) => ({ kind: s.kind, name: s.name }));
+      }
 
       // 行级匹配
       const lines = content.split(/\r?\n/);
@@ -209,15 +225,52 @@ export class ExploreRepoTool implements BaseTool {
     const top = candidates.filter((c) => c.score > 0 || c.matches.length > 0).slice(0, MAX_CANDIDATES);
     const evidence = buildEvidence(top);
     const report = buildReport(objective, queries, top, evidence, {
-      filesInspected,
+      filesDiscovered: discovered.length,
+      filesInspected: filesInspected,
       totalMatches,
       totalBytes,
       sensitiveSkipped,
-      indexed: snapshot.indexedFiles,
-      total: snapshot.totalFiles,
     });
 
     return report;
+  }
+}
+
+// ============================================================
+// 文件遍历（DFS，跳过噪声目录和符号链接）
+// ============================================================
+
+async function collectFiles(dir: string, output: string[], signal?: AbortSignal): Promise<void> {
+  if (output.length >= MAX_DISCOVERED_FILES) return;
+  signal?.throwIfAborted();
+
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  // 按名称排序保证确定性
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const entry of entries) {
+    if (output.length >= MAX_DISCOVERED_FILES) return;
+    signal?.throwIfAborted();
+
+    // 跳过符号链接（防穿越）
+    if (entry.isSymbolicLink()) continue;
+
+    const fullPath = join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+      await collectFiles(fullPath, output, signal);
+    } else if (entry.isFile()) {
+      const ext = extname(entry.name).toLowerCase();
+      if (!TEXT_EXTENSIONS.has(ext)) continue;
+      output.push(fullPath);
+    }
   }
 }
 
@@ -287,8 +340,8 @@ function hasIgnoreCase(set: ReadonlySet<string>, value: string): boolean {
   return set.has(value) || set.has(value.toLowerCase());
 }
 
-/** 路径级 query 匹配：路径包含查询词时加分（子串匹配，大小写不敏感）。 */
-function scorePathQuery(filePath: string, queries: readonly string[]): { score: number; reasons: string[] } {
+/** 路径级 query 匹配：路径包含查询词时加分。 */
+export function scorePathQuery(filePath: string, queries: readonly string[]): { score: number; reasons: string[] } {
   const lowerPath = filePath.toLowerCase();
   let score = 0;
   const reasons: string[] = [];
@@ -345,12 +398,12 @@ function buildReport(
   queries: readonly string[],
   candidates: readonly Candidate[],
   evidence: readonly { path: string; line?: number; label: string }[],
-  stats: { filesInspected: number; totalMatches: number; totalBytes: number; sensitiveSkipped: number; indexed: number; total: number },
+  stats: { filesDiscovered: number; filesInspected: number; totalMatches: number; totalBytes: number; sensitiveSkipped: number },
 ): string {
   const lines: string[] = [
     `explore_repo: objective="${objective.slice(0, 80)}"`,
     `queries: ${queries.join(", ")}`,
-    `indexed: ${stats.indexed}/${stats.total} files | inspected: ${stats.filesInspected} | matches: ${stats.totalMatches} | bytes: ${stats.totalBytes} | sensitive skipped: ${stats.sensitiveSkipped}`,
+    `discovered: ${stats.filesDiscovered} files | inspected: ${stats.filesInspected} | matches: ${stats.totalMatches} | bytes: ${stats.totalBytes} | sensitive skipped: ${stats.sensitiveSkipped}`,
     "",
   ];
 

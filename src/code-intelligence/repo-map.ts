@@ -15,7 +15,7 @@ import type {
   SymbolQuery,
 } from "./types.js";
 
-const IGNORED_DIRECTORIES = new Set([
+export const IGNORED_DIRECTORIES = new Set([
   ".git",
   ".hg",
   ".svn",
@@ -28,7 +28,7 @@ const IGNORED_DIRECTORIES = new Set([
   "coverage",
   "vendor",
 ]);
-const SUPPORTED_EXTENSIONS = new Set([
+export const SUPPORTED_EXTENSIONS = new Set([
   ".ts",
   ".tsx",
   ".js",
@@ -500,7 +500,7 @@ async function readBoundedUtf8(
   return buffer.subarray(0, offset).toString("utf8");
 }
 
-function parseSymbols(filePath: string, lines: readonly string[]): IndexedSymbol[] {
+export function parseSymbols(filePath: string, lines: readonly string[]): IndexedSymbol[] {
   const symbols: IndexedSymbol[] = [];
   const patterns: readonly { kind: string; regex: RegExp }[] = [
     { kind: "class", regex: /\b(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)/ },
