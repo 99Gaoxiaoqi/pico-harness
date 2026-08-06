@@ -125,6 +125,11 @@ realModelTest(
     assert.ok(planProposed?.kind === "plan.proposed");
     assert.equal(discoveryCompleted.data.operationId, planProposed.data.operationId);
     assert.ok(discoveryCompleted.data.report.evidenceRefs.length > 0);
+    assert.equal(
+      planProposed.data.proposal.steps.length,
+      1,
+      "planning must submit exactly one step",
+    );
     assert.match(
       JSON.stringify(planProposed.data.proposal),
       new RegExp(escapeRegExp(fixture.targetPath), "u"),
@@ -193,6 +198,7 @@ realModelTest(
     assert.equal(
       finalState.events.some((event) => event.kind === "plan.execution.completed"),
       true,
+      `execution did not close; tools=${boundedToolDiagnostics(finalState.events)}`,
     );
     assert.equal(isPlanSystemPrompt(providerSnapshots.at(-1)?.system ?? ""), false);
   },
