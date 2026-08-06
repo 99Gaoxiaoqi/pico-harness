@@ -426,7 +426,8 @@ function cancelOpenBranches(run: DiscoveryRun, reason: string, at: string): Disc
 
 function consumeBudget(run: DiscoveryRun, toolCalls: number, inspectedFiles: readonly string[]) {
   const consumedToolCalls = run.budget.consumedToolCalls + toolCalls;
-  const consumedFiles = inspectedFiles.length;
+  const unattributedFiles = Math.max(0, run.budget.consumedFiles - run.inspectedFiles.length);
+  const consumedFiles = unattributedFiles + inspectedFiles.length;
   if (consumedToolCalls > run.budget.maxToolCalls || consumedFiles > run.budget.maxFiles) {
     conflict("Discovery usage exceeds shared budget");
   }
