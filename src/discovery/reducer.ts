@@ -548,7 +548,7 @@ function isOpenBranch(branch: DiscoveryBranch): boolean {
 }
 
 function occupiesBranchSlot(branch: DiscoveryBranch): boolean {
-  return branch.status !== "cancelled";
+  return isOpenBranch(branch);
 }
 
 function unique(values: readonly string[]): string[] {

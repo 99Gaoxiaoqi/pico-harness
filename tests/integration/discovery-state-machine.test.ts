@@ -221,7 +221,7 @@ test("Discovery Coordinator serializes concurrent branches and merges overlap wi
   );
 });
 
-test("Discovery resume replaces cancelled branch slots without reopening history", async (context) => {
+test("Discovery resume replaces terminal branch slots without reopening history", async (context) => {
   const fixture = await createFixture("resume-branches");
   context.after(() => fixture.dispose());
   const coordinator = fixture.coordinator("resume-branch-session");
@@ -229,10 +229,10 @@ test("Discovery resume replaces cancelled branch slots without reopening history
     operationId: "start-resume-branches",
     discoveryId: "resume-branch-discovery",
     objective: "恢复并发调查",
-    depth: "balanced",
+    depth: "deep",
   });
 
-  for (const [ordinal, branchId] of ["old-a", "old-b"].entries()) {
+  for (const [ordinal, branchId] of ["old-completed", "old-partial", "old-failed"].entries()) {
     await coordinator.startBranch({
       operationId: `start-${branchId}`,
       discoveryId: "resume-branch-discovery",
@@ -247,14 +247,41 @@ test("Discovery resume replaces cancelled branch slots without reopening history
     });
   }
   await coordinator.checkpointBranch({
-    operationId: "checkpoint-old-a",
+    operationId: "checkpoint-old-completed",
     discoveryId: "resume-branch-discovery",
-    branchId: "old-a",
+    branchId: "old-completed",
     checkpoint: checkpoint({
       toolCallsUsed: 3,
-      inspectedFiles: ["src/old-a/entry.ts", "src/shared/target.ts"],
-      evidenceRefs: ["evidence:old-a"],
+      inspectedFiles: ["src/old-completed/entry.ts", "src/shared/target.ts"],
+      evidenceRefs: ["evidence:old-completed"],
     }),
+  });
+  for (const [branchId, status] of [
+    ["old-completed", "completed"],
+    ["old-partial", "partial"],
+    ["old-failed", "failed"],
+  ] as const) {
+    await coordinator.completeBranch({
+      operationId: `complete-${branchId}`,
+      discoveryId: "resume-branch-discovery",
+      branchId,
+      status,
+      consumedToolCalls: branchId === "old-completed" ? 3 : 0,
+      inspectedFiles:
+        branchId === "old-completed" ? ["src/old-completed/entry.ts", "src/shared/target.ts"] : [],
+    });
+  }
+  await coordinator.startBranch({
+    operationId: "start-old-cancelled",
+    discoveryId: "resume-branch-discovery",
+    branchId: "old-cancelled",
+    ordinal: 0,
+    objective: "中断时仍在运行的历史分支",
+    roots: ["src/old-cancelled"],
+    queries: ["routeRequest"],
+    stoppingCondition: "找到直接证据",
+    reserveToolCalls: 6,
+    reserveFiles: 8,
   });
 
   const interrupted = await coordinator.interrupt({
@@ -265,8 +292,10 @@ test("Discovery resume replaces cancelled branch slots without reopening history
   assert.deepEqual(
     interrupted.latest?.branches.map(({ branchId, status }) => ({ branchId, status })),
     [
-      { branchId: "old-a", status: "cancelled" },
-      { branchId: "old-b", status: "cancelled" },
+      { branchId: "old-completed", status: "completed" },
+      { branchId: "old-cancelled", status: "cancelled" },
+      { branchId: "old-partial", status: "partial" },
+      { branchId: "old-failed", status: "failed" },
     ],
   );
 
@@ -306,10 +335,12 @@ test("Discovery resume replaces cancelled branch slots without reopening history
       status,
     })),
     [
-      { branchId: "old-a", ordinal: 0, status: "cancelled" },
+      { branchId: "old-completed", ordinal: 0, status: "completed" },
+      { branchId: "old-cancelled", ordinal: 0, status: "cancelled" },
       { branchId: "new-a", ordinal: 0, status: "running" },
-      { branchId: "old-b", ordinal: 1, status: "cancelled" },
+      { branchId: "old-partial", ordinal: 1, status: "partial" },
       { branchId: "new-b", ordinal: 1, status: "running" },
+      { branchId: "old-failed", ordinal: 2, status: "failed" },
       { branchId: "new-c", ordinal: 2, status: "running" },
     ],
   );
@@ -333,12 +364,12 @@ test("Discovery resume replaces cancelled branch slots without reopening history
   );
   await assert.rejects(
     reopened.checkpointBranch({
-      operationId: "reopen-old-a",
+      operationId: "reopen-old-completed",
       discoveryId: "resume-branch-discovery",
-      branchId: "old-a",
+      branchId: "old-completed",
       checkpoint: checkpoint({
         toolCallsUsed: 4,
-        inspectedFiles: ["src/old-a/entry.ts", "src/shared/target.ts"],
+        inspectedFiles: ["src/old-completed/entry.ts", "src/shared/target.ts"],
       }),
     }),
     /branch is not running/u,
@@ -347,7 +378,7 @@ test("Discovery resume replaces cancelled branch slots without reopening history
     reopened.startBranch({
       operationId: "reuse-old-branch-id",
       discoveryId: "resume-branch-discovery",
-      branchId: "old-a",
+      branchId: "old-completed",
       ordinal: 3,
       objective: "复用历史分支标识",
       stoppingCondition: "不应启动",
