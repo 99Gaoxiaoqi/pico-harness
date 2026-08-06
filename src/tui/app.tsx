@@ -66,7 +66,6 @@ import {
   measureAgentSwitcherRows,
 } from "./agent-switcher.js";
 import { AgentDetailView } from "./agent-detail-view.js";
-import type { DiscoveryProjection, DiscoveryRun } from "../discovery/index.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(workDir: string, msg: string): void {
@@ -105,7 +104,7 @@ export interface AppProps {
   /** 当前对话流条目(reporter 增量更新) */
   entries: TuiEntry[];
   /** Durable Discovery sidecar; intentionally not a transcript item. */
-  discovery?: DiscoveryProjection;
+  discovery?: unknown;
   /** Main 与子代理的独立导航投影。 */
   agents?: readonly AgentNavigationItem[];
   /** 是否正在运行(idle 时聚焦输入框) */
@@ -148,7 +147,6 @@ export function App({
   taskSummary,
   queuedCount = 0,
   entries,
-  discovery,
   agents = EMPTY_AGENT_ITEMS,
   running,
   slashCommandSuggestions,
@@ -297,7 +295,7 @@ export function App({
     transcriptContentRows(transcriptRows, {
       newMessageNotice: newMessageCount > 0,
       spinner: showSpinner,
-    }) - (discovery?.latest ? 4 : 0),
+    }) - 0,
   );
   const agentSwitcherLayout = buildAgentSwitcherLayout({
     items: navigationItems,
@@ -505,7 +503,6 @@ export function App({
       ) : (
         <>
           {newMessageCount > 0 && <Text color="cyan">↓ {newMessageCount} new messages</Text>}
-          {discovery?.latest ? <DiscoveryCard run={discovery.latest} /> : null}
           <ToolCardFocusProvider expanded={focusedToolExpanded}>
             <MessageList
               layout={transcriptLayout}
@@ -602,28 +599,6 @@ export function App({
       height={rows}
       hidden={redrawBlank}
     />
-  );
-}
-
-function DiscoveryCard({ run }: { run: DiscoveryRun }): React.ReactNode {
-  const color =
-    run.status === "active"
-      ? "cyan"
-      : run.status === "completed"
-        ? "green"
-        : run.status === "interrupted"
-          ? "yellow"
-          : "gray";
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
-      <Text color={color} bold>
-        Explore · {run.status} · {run.depth} · {run.phase}
-      </Text>
-      <Text wrap="truncate-end">
-        {run.objective} · {run.inspectedFiles.length} files · {run.evidenceRefs.length} evidence ·{" "}
-        {run.openQuestions.length} open
-      </Text>
-    </Box>
   );
 }
 

@@ -42,7 +42,6 @@ import {
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import type { PlanProjection } from "../plan/contract.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
-import { DiscoveryCoordinator, type DiscoveryProjection } from "../discovery/index.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
@@ -364,7 +363,7 @@ export interface HandleTuiInputSubmissionDeps {
   openLocalUiDialog?: (result: LocalCommandResult) => Promise<void> | void;
   switchSession?: (selection: ResumeSessionCommandData) => Promise<void>;
   openChanges?: (messageId: string) => Promise<void>;
-  onDiscoveryProjection?: (projection: DiscoveryProjection) => void;
+  onunknown?: (projection: unknown) => void;
   sessionId?: string;
   planControl?: {
     respond(input: {
@@ -439,7 +438,7 @@ interface TuiSessionBundle {
   readonly scheduleDraft?: TuiScheduleDraftRuntime;
   readonly mcpElicitationHandler: McpElicitationUiHandler;
   readonly planProjection: PlanProjection;
-  discoveryProjection: DiscoveryProjection;
+  discoveryProjection?: unknown;
   readonly skillLoader: SkillLoader;
   readonly recoveredRewindInputText?: string;
   /** Immutable foreground non-MCP inventory; per-run allowlists must never overwrite it. */
@@ -535,7 +534,7 @@ export async function handleTuiInputSubmission(
       const discoveryProjection = discoveryProjectionFromUnknown(
         processed.result.metadata?.["discoveryProjection"],
       );
-      if (discoveryProjection) deps.onDiscoveryProjection?.(discoveryProjection);
+      if (discoveryProjection) deps.onunknown?.(discoveryProjection);
       await runPreparedUserPrompt(
         processed.result.prompt,
         deps,
@@ -1659,15 +1658,6 @@ export async function startTuiRepl(
         sessionId: selection.sessionId,
         dir: opts.workDir,
       });
-      if (!session.runtimeEventStore) {
-        throw new Error("Discovery projection requires durable Session storage");
-      }
-      const discoveryProjection = await new DiscoveryCoordinator(session.runtimeEventStore, {
-        sessionId: selection.sessionId,
-        invocationId: `tui-hydration:${selection.sessionId}`,
-        runId: `tui-hydration:${selection.sessionId}`,
-        turnId: `tui-hydration:${selection.sessionId}`,
-      }).project();
       const recoveredRewind = await session.getPendingTuiRewindHandoff();
       if (recoveredRewind) {
         reporter.withoutDurableTranscript(() => {
@@ -1700,7 +1690,6 @@ export async function startTuiRepl(
         ...(scheduleDraft ? { scheduleDraft } : {}),
         mcpElicitationHandler,
         planProjection,
-        discoveryProjection,
         skillLoader,
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
@@ -2420,7 +2409,7 @@ export async function startTuiRepl(
           sessionId,
           switchSession,
           openChanges: openChangesDialog,
-          onDiscoveryProjection: (projection) => {
+          onunknown: (projection) => {
             if (!isCurrentGeneration()) return;
             current.discoveryProjection = projection;
             setBundle({ ...current });
@@ -2841,7 +2830,7 @@ async function handleLocalTuiCommand(
     | "commandAvailabilityState"
     | "switchSession"
     | "openChanges"
-    | "onDiscoveryProjection"
+    | "onunknown"
   >,
 ): Promise<void> {
   const uiEffect = resolveLocalTuiCommandUiEffect(result, {
@@ -2905,7 +2894,7 @@ async function handleLocalTuiCommand(
       data && typeof data === "object" && "projection" in data
         ? discoveryProjectionFromUnknown(data.projection)
         : undefined;
-    if (projection) deps.onDiscoveryProjection?.(projection);
+    if (projection) deps.onunknown?.(projection);
     deps.reporter.pushSystemMessage(result.message ?? "");
     return;
   }
@@ -2924,14 +2913,8 @@ async function handleLocalTuiCommand(
   }
 }
 
-function discoveryProjectionFromUnknown(value: unknown): DiscoveryProjection | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const candidate = value as Partial<DiscoveryProjection>;
-  return typeof candidate.sessionId === "string" &&
-    typeof candidate.sessionSequence === "number" &&
-    Array.isArray(candidate.discoveries)
-    ? (candidate as DiscoveryProjection)
-    : undefined;
+function discoveryProjectionFromUnknown(_value: unknown): unknown | undefined {
+  return undefined;
 }
 
 function changesCommandMessageId(value: unknown): string | undefined {

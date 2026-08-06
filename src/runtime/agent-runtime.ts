@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { mkdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
 import { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { GoalManager } from "../engine/goal-manager.js";
@@ -46,11 +45,6 @@ import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
-import {
-  isExploreOnlyRequiredDelegationArguments,
-  normalizeDelegateTasks,
-  requireDelegateTaskArgs,
-} from "../tools/delegation-contract.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
 import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
 import {
@@ -140,24 +134,6 @@ import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
-import { DiscoveryCoordinator } from "../discovery/coordinator.js";
-import {
-  DISCOVERY_MAX_CANDIDATES,
-  type DiscoveryCandidate,
-  type DiscoveryPhase,
-} from "../discovery/contract.js";
-import { DISCOVERY_TOOL_NAMES } from "../tools/discovery.js";
-import type { ToolCall } from "../schema/message.js";
-import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
-import {
-  observeRepoMapScans,
-  REPO_MAP_MAX_FILES,
-  type RepoMapScanReport,
-} from "../code-intelligence/repo-map.js";
-import {
-  observeWorkspaceFileScans,
-  type WorkspaceFileScanReport,
-} from "../tools/file-scan-observer.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
@@ -909,9 +885,7 @@ export async function executeAgentRuntime(
       { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
     );
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
-    const isolatedDiscoveryRun = options.discoveryRun === true;
-    const collaborationMode = (): "agent" | "plan" =>
-      isolatedDiscoveryRun ? "agent" : settings.collaborationMode!;
+    const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
     const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
     if (options.approvedPlan) {
@@ -958,7 +932,6 @@ export async function executeAgentRuntime(
     if (
       !backgroundPolicy &&
       !dependencies.isolatedHeadless &&
-      !isolatedDiscoveryRun &&
       collaborationMode() !== "plan"
     ) {
       try {
@@ -1114,14 +1087,13 @@ export async function executeAgentRuntime(
             : "startup",
         ...(backgroundPolicy ||
         dependencies.isolatedHeadless ||
-        isolatedDiscoveryRun ||
         collaborationMode() === "plan"
           ? { hooks: false as const }
           : {}),
-        ...(!isolatedDiscoveryRun && collaborationMode() !== "plan" && dependencies.hookService
+        ...(collaborationMode() !== "plan" && dependencies.hookService
           ? { hookService: dependencies.hookService }
           : {}),
-        ...(!isolatedDiscoveryRun && collaborationMode() !== "plan" && pluginSnapshot?.hookSources
+        ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       }));
@@ -1130,11 +1102,11 @@ export async function executeAgentRuntime(
     if (!ownsRuntimeState) {
       await runtimeState.setCodeIntelligenceEnabled(collaborationMode() !== "plan");
     }
-    if (!isolatedDiscoveryRun && collaborationMode() !== "plan" && dependencies.hookService) {
+    if (collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
     }
     const activeHookService =
-      isolatedDiscoveryRun || collaborationMode() === "plan" ? undefined : runtimeState.hookService;
+      collaborationMode() === "plan" ? undefined : runtimeState.hookService;
     if (
       dependencies.toolDisclosure !== undefined &&
       dependencies.toolDisclosure !== runtimeState.toolDisclosure
@@ -1337,7 +1309,7 @@ export async function executeAgentRuntime(
         .finally(kickMemoryWorker);
     }
     let activeMcpManager =
-      isolatedDiscoveryRun || collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
+      collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
       modelRuntime: {
@@ -1405,9 +1377,6 @@ export async function executeAgentRuntime(
     if (options.approvedPlan) {
       toolDisclosure.disclose(["update_plan", "cancel_plan"]);
     }
-    if (!backgroundPolicy) {
-      toolDisclosure.disclose([...DISCOVERY_TOOL_NAMES]);
-    }
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const planHandoff = new PlanHandoffController();
     const planRegistryOptions: DefaultToolRegistryOptions["plan"] = {
@@ -1429,23 +1398,6 @@ export async function executeAgentRuntime(
         });
       },
     };
-    const discoveryRegistryOptions: DefaultToolRegistryOptions["discovery"] | undefined =
-      backgroundPolicy
-        ? undefined
-        : {
-            coordinator: () => {
-              const run = currentRuntimeRun();
-              if (!run || !session.runtimeEventStore) {
-                throw new Error("Discovery requires an active durable RuntimeRun");
-              }
-              return new DiscoveryCoordinator(session.runtimeEventStore, {
-                sessionId: session.id,
-                invocationId: run.invocationId,
-                runId: run.runId,
-                turnId: `turn:${run.runId}:discovery`,
-              });
-            },
-          };
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -1486,7 +1438,6 @@ export async function executeAgentRuntime(
       runtimeEnv,
       dependencies.bashTimeoutMs,
       collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
-      discoveryRegistryOptions,
     );
     registerPluginCapabilityTools(
       registry,
@@ -1571,18 +1522,6 @@ export async function executeAgentRuntime(
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
     const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions, providerDecorator);
     const reporter = dependencies.reporter ?? new TerminalReporter();
-    const automaticDiscovery = discoveryRegistryOptions
-      ? createAutomaticDiscoveryTracker({
-          coordinator: discoveryRegistryOptions.coordinator,
-          objective: prompt,
-          workDir,
-          autoStart: collaborationMode() === "plan" || isolatedDiscoveryRun,
-          allowConcurrentExplore: isolatedDiscoveryRun,
-        })
-      : undefined;
-    if (automaticDiscovery) {
-      registry.useExecution(automaticDiscovery.executeTool);
-    }
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
@@ -1645,14 +1584,7 @@ export async function executeAgentRuntime(
                 session.id,
               ),
           }
-        : automaticDiscovery
-          ? { postToolResultHook: automaticDiscovery.onToolResult }
-          : {}),
-      ...(isolatedDiscoveryRun
-        ? { exploreSynthesisAllowedTools: [...AUTOMATIC_DISCOVERY_TOOLS] }
         : {}),
-      ...(automaticDiscovery ? { onRunComplete: automaticDiscovery.complete } : {}),
-      ...(automaticDiscovery ? { onRunInterrupted: automaticDiscovery.interrupt } : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
@@ -1738,7 +1670,7 @@ export async function executeAgentRuntime(
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
-    const planMcpDisabled = isolatedDiscoveryRun || collaborationMode() === "plan";
+    const planMcpDisabled = collaborationMode() === "plan";
     const mcpConfigPath = planMcpDisabled
       ? undefined
       : (backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath);
@@ -2065,7 +1997,6 @@ function buildRegistry(
   env?: NodeJS.ProcessEnv,
   bashTimeoutMs?: number,
   plan?: DefaultToolRegistryOptions["plan"],
-  discovery?: DefaultToolRegistryOptions["discovery"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -2081,764 +2012,10 @@ function buildRegistry(
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(plan !== undefined ? { plan } : {}),
-    ...(discovery !== undefined ? { discovery } : {}),
     ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
   });
-}
-
-const AUTOMATIC_DISCOVERY_TOOLS = new Set([
-  "read_file",
-  "read_evidence",
-  "glob",
-  "grep",
-  "repo_map",
-  "code_definition",
-  "code_references",
-  "code_symbols",
-  "code_diagnostics",
-  "code_call_hierarchy",
-]);
-
-interface AutomaticDiscoveryTracker {
-  readonly executeTool: (
-    call: ToolCall,
-    next: (call: ToolCall) => Promise<string>,
-  ) => Promise<string>;
-  readonly onToolResult: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
-  readonly prepareForCompletion: () => Promise<void>;
-  readonly complete: () => Promise<void>;
-  readonly interrupt: (reason: string) => Promise<void>;
-}
-
-function createAutomaticDiscoveryTracker(input: {
-  readonly coordinator: () => DiscoveryCoordinator;
-  readonly objective: string;
-  readonly workDir: string;
-  readonly autoStart: boolean;
-  readonly allowConcurrentExplore: boolean;
-}): AutomaticDiscoveryTracker {
-  const discoveryId = `auto-discovery:${randomUUID()}`;
-  const completionKey = randomUUID();
-  const directReadEvidence = new Map<string, Set<string>>();
-  const hostReservations = new Map<
-    string,
-    {
-      readonly reservedFiles: number;
-      readonly effectiveCall: ToolCall;
-      readonly inspectedFiles: Set<string>;
-    }
-  >();
-  let trackerTail: Promise<void> = Promise.resolve();
-  const delegatedBranches = new Map<
-    string,
-    readonly {
-      branchId: string;
-      reserveToolCalls: number;
-      reserveFiles: number;
-    }[]
-  >();
-
-  const ensureActive = async (operationKey: string) => {
-    const coordinator = input.coordinator();
-    let projection = await coordinator.project();
-    if (!projection.active && input.autoStart) {
-      if (projection.latest?.discoveryId === discoveryId) {
-        throw new Error("Discovery 已终止，当前 Run 不得重新启动同一调查");
-      }
-      projection = await coordinator.start({
-        operationId: `auto-discovery:start:${operationKey}`,
-        expectedSessionSequence: projection.sessionSequence,
-        discoveryId,
-        objective: boundedDiscoveryText(input.objective),
-        depth: "balanced",
-        roots: ["."],
-      });
-    }
-    return projection;
-  };
-
-  const withTrackerLock = async <T>(operation: () => Promise<T>): Promise<T> => {
-    const previous = trackerTail;
-    let release!: () => void;
-    trackerTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  };
-
-  const prepareForCompletion = async (): Promise<void> => {
-    const coordinator = input.coordinator();
-    const projection = await coordinator.project();
-    const active = projection.active;
-    if (!active || active.evidenceRefs.length === 0 || active.phase === "verify") return;
-    const verified = verifiedDiscoveryCandidates(active.candidates, directReadEvidence);
-    if (verified.length === 0) {
-      throw new Error("Discovery Verify 前必须直接 read_file 已选候选源码并保留对应证据");
-    }
-    const evidenceRefs = verified.flatMap((candidate) => candidate.evidenceRefs);
-    await coordinator.checkpoint({
-      operationId: `auto-discovery:verify:${completionKey}`,
-      expectedSessionSequence: projection.sessionSequence,
-      discoveryId: active.discoveryId,
-      checkpoint: {
-        phase: "verify",
-        cycle: active.cycle,
-        candidates: verified,
-        evidenceRefs,
-        hypotheses: [],
-        openQuestions: [],
-        toolCallsUsed: 0,
-        inspectedFiles: [],
-      },
-    });
-  };
-
-  return {
-    async executeTool(call, next) {
-      if (call.name === "submit_plan") {
-        await prepareForCompletion();
-        return next(call);
-      }
-      if (call.name === "delegate_task" && input.allowConcurrentExplore) {
-        if (!isExploreOnlyRequiredDelegationArguments(call.arguments)) {
-          throw new Error("Discovery 只允许 completion_policy=required 的 mode=explore 子任务委派");
-        }
-        const projection = await ensureActive(call.id);
-        const active = projection.active;
-        if (!active) throw new Error("Discovery 并发分支需要活动的 Discovery");
-        const parsed = requireDelegateTaskArgs(call.arguments);
-        const tasks = normalizeDelegateTasks(parsed);
-        if (tasks.length !== active.budget.maxBranches) {
-          throw new Error(
-            `Discovery ${active.depth} 必须一次委派 ${active.budget.maxBranches} 个互斥只读分支`,
-          );
-        }
-        if (!Array.isArray(parsed.tasks)) {
-          throw new Error("Discovery 并发委派必须使用 tasks 数组");
-        }
-        assertMutuallyExclusiveDiscoveryRoots(
-          input.workDir,
-          tasks.map((task) => task.roots),
-        );
-        const remainingToolCalls =
-          active.budget.maxToolCalls -
-          active.budget.consumedToolCalls -
-          active.budget.reservedToolCalls;
-        const remainingFiles =
-          active.budget.maxFiles - active.budget.consumedFiles - active.budget.reservedFiles;
-        if (remainingToolCalls < tasks.length || remainingFiles < tasks.length) {
-          throw new Error("Discovery 剩余共享预算不足以启动并发分支");
-        }
-        const branches: {
-          branchId: string;
-          reserveToolCalls: number;
-          reserveFiles: number;
-        }[] = [];
-        for (const [ordinal, task] of tasks.entries()) {
-          const reserveToolCalls = splitDiscoveryBudget(remainingToolCalls, tasks.length, ordinal);
-          const reserveFiles = splitDiscoveryBudget(remainingFiles, tasks.length, ordinal);
-          const branchId = `delegate:${call.id}:${ordinal}`;
-          await input.coordinator().startBranch({
-            operationId: `auto-discovery:branch-start:${call.id}:${ordinal}`,
-            discoveryId: active.discoveryId,
-            branchId,
-            ordinal,
-            objective: task.goal,
-            roots: task.roots,
-            queries: [],
-            stoppingCondition: task.stoppingCondition,
-            reserveToolCalls,
-            reserveFiles,
-          });
-          branches.push({ branchId, reserveToolCalls, reserveFiles });
-        }
-        delegatedBranches.set(call.id, branches);
-        const raw = JSON.parse(call.arguments) as {
-          tasks: Array<Record<string, unknown>>;
-          completion_policy?: unknown;
-        };
-        raw.completion_policy = "required";
-        raw.tasks = raw.tasks.map((task, ordinal) => ({
-          ...task,
-          mode: "explore",
-          role: "leaf",
-          max_files: branches[ordinal]!.reserveFiles,
-          max_tool_calls: branches[ordinal]!.reserveToolCalls,
-        }));
-        return next({ ...call, arguments: JSON.stringify(raw) });
-      }
-      if (!AUTOMATIC_DISCOVERY_TOOLS.has(call.name)) return next(call);
-
-      const reservation = await withTrackerLock(async () => {
-        const projection = await ensureActive(call.id);
-        const active = projection.active;
-        if (!active) throw new Error("Discovery 只读调查需要活动的 Discovery");
-        const inFlightToolCalls = hostReservations.size;
-        const remainingToolCalls =
-          active.budget.maxToolCalls -
-          active.budget.consumedToolCalls -
-          active.budget.reservedToolCalls -
-          inFlightToolCalls;
-        if (remainingToolCalls <= 0) throw new Error("Discovery 工具调用预算已耗尽");
-
-        const inFlightFiles = [...hostReservations.values()].reduce(
-          (sum, current) => sum + current.reservedFiles,
-          0,
-        );
-        const remainingFiles =
-          active.budget.maxFiles -
-          active.budget.consumedFiles -
-          active.budget.reservedFiles -
-          inFlightFiles;
-        const reservedFiles = discoveryFileReservation(
-          call,
-          active.inspectedFiles,
-          input.workDir,
-          remainingFiles,
-        );
-        const effectiveCall = clampDiscoveryFileCall(call, reservedFiles);
-        const inspectedFiles = new Set<string>();
-        const explicitPath = discoveryExplicitFilePath(effectiveCall, input.workDir);
-        if (reservedFiles > 0 && explicitPath) inspectedFiles.add(explicitPath);
-        const created = { reservedFiles, effectiveCall, inspectedFiles };
-        hostReservations.set(call.id, created);
-        return created;
-      });
-
-      return await observeRepoMapScans(
-        (report: RepoMapScanReport) =>
-          recordDiscoveryScans(
-            reservation,
-            report.scannedFiles,
-            input.workDir,
-            reservation.effectiveCall,
-            false,
-          ),
-        () =>
-          observeWorkspaceFileScans(
-            (report: WorkspaceFileScanReport) =>
-              recordDiscoveryScans(
-                reservation,
-                report.scannedFiles,
-                input.workDir,
-                reservation.effectiveCall,
-                true,
-              ),
-            () => next(reservation.effectiveCall),
-          ),
-        reservation.reservedFiles > 0 ? reservation.reservedFiles : undefined,
-      );
-    },
-    async onToolResult(call, result) {
-      const branchReservations = delegatedBranches.get(call.id);
-      if (branchReservations) {
-        delegatedBranches.delete(call.id);
-        const evidenceRef =
-          result.evidence?.uri ??
-          `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
-        const childResults = parseDiscoveryDelegationResults(
-          result.projection.text,
-          branchReservations.length,
-        );
-        if (childResults.length !== branchReservations.length) {
-          for (const branch of branchReservations) {
-            const projection = await input.coordinator().project();
-            if (!projection.active) break;
-            await input.coordinator().completeBranch({
-              operationId: `auto-discovery:branch-fail-closed:${call.id}:${branch.branchId}`,
-              discoveryId: projection.active.discoveryId,
-              branchId: branch.branchId,
-              status: "failed",
-              consumedToolCalls: branch.reserveToolCalls,
-              consumedFiles: branch.reserveFiles,
-              inspectedFiles: [],
-              candidates: [],
-              evidenceRefs: [],
-              openQuestions: [],
-              reason: "子代理结果被截断或结构不完整，已按全部预留额度保守结算",
-            });
-          }
-          throw new Error("Discovery 子代理结果被截断或结构不完整，已按全部预留额度保守结算并中断");
-        }
-        for (const [ordinal, branch] of branchReservations.entries()) {
-          const child = childResults[ordinal];
-          const branchStatus =
-            result.status !== "succeeded" || !child
-              ? "failed"
-              : child.status === "completed"
-                ? "completed"
-                : child.status === "partial"
-                  ? "partial"
-                  : "failed";
-          const branchEvidence = [
-            ...(child?.evidenceRefs ?? []),
-            ...(branchStatus === "failed" ? [] : [evidenceRef]),
-          ];
-          const candidates = discoveryCandidatesFromDelegationSummary(
-            child?.summary ?? "",
-            branchEvidence,
-            input.workDir,
-          );
-          await input.coordinator().completeBranch({
-            operationId: `auto-discovery:branch-complete:${call.id}:${branch.branchId}`,
-            discoveryId: (await input.coordinator().project()).active?.discoveryId ?? discoveryId,
-            branchId: branch.branchId,
-            status: branchStatus,
-            consumedToolCalls: Math.min(child?.toolCallsUsed ?? 0, branch.reserveToolCalls),
-            inspectedFiles: [
-              ...new Set(
-                (child?.inspectedFiles ?? [])
-                  .map((path) => workspaceRelativeDiscoveryPath(input.workDir, path))
-                  .filter((path): path is string => path !== undefined),
-              ),
-            ].slice(0, branch.reserveFiles),
-            candidates,
-            evidenceRefs: branchEvidence,
-            openQuestions: [],
-            ...(branchStatus === "failed"
-              ? { reason: child?.error ?? result.projection.text }
-              : {}),
-          });
-        }
-        return;
-      }
-      const reservation = hostReservations.get(call.id);
-      if (!reservation) return;
-      await withTrackerLock(async () => {
-        const currentReservation = hostReservations.get(call.id);
-        if (!currentReservation) return;
-        const succeeded = result.status === "succeeded";
-        const coordinator = input.coordinator();
-        const projection = await coordinator.project();
-        const active = projection.active;
-        if (!active) {
-          hostReservations.delete(call.id);
-          return;
-        }
-
-        const evidenceRef =
-          result.evidence?.uri ??
-          `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
-        const candidates = succeeded
-          ? discoveryCandidatesFromToolResult(call, result, evidenceRef, input.workDir)
-          : [];
-        const inspectedFiles = [...currentReservation.inspectedFiles]
-          .filter((path) => !active.inspectedFiles.includes(path))
-          .slice(0, currentReservation.reservedFiles);
-        if (succeeded && call.name === "read_file") {
-          for (const candidate of candidates) {
-            const evidence = directReadEvidence.get(candidate.path) ?? new Set<string>();
-            evidence.add(evidenceRef);
-            directReadEvidence.set(candidate.path, evidence);
-          }
-        }
-        const phase = succeeded ? automaticDiscoveryPhase(active.phase, call.name) : active.phase;
-        await coordinator.checkpoint({
-          operationId: `auto-discovery:checkpoint:${call.id}`,
-          expectedSessionSequence: projection.sessionSequence,
-          discoveryId: active.discoveryId,
-          checkpoint: {
-            phase,
-            cycle: active.cycle,
-            candidates,
-            evidenceRefs: succeeded ? [evidenceRef] : [],
-            hypotheses: [],
-            openQuestions: phase === "verify" ? [] : ["需要读取候选目标以确认实现位置"],
-            toolCallsUsed: 1,
-            inspectedFiles,
-          },
-        });
-        hostReservations.delete(call.id);
-      });
-    },
-    prepareForCompletion,
-    async complete() {
-      await prepareForCompletion();
-      const coordinator = input.coordinator();
-      const projection = await coordinator.project();
-      const active = projection.active;
-      if (!active || active.phase !== "verify" || active.evidenceRefs.length === 0) return;
-      const verified = verifiedDiscoveryCandidates(active.candidates, directReadEvidence);
-      if (verified.length === 0) return;
-      const evidenceRefs = [...new Set(verified.flatMap((candidate) => candidate.evidenceRefs))];
-      await coordinator.complete({
-        operationId: `auto-discovery:complete:${completionKey}`,
-        expectedSessionSequence: projection.sessionSequence,
-        discoveryId: active.discoveryId,
-        report: {
-          summary: `已基于 ${active.budget.consumedToolCalls} 次成功的只读调查完成目标定位。`,
-          confirmedTargets: verified,
-          evidenceRefs,
-          remainingRisks: [],
-        },
-      });
-    },
-    async interrupt(reason) {
-      const coordinator = input.coordinator();
-      const projection = await coordinator.project();
-      const active = projection.active;
-      if (!active) return;
-      await coordinator.interrupt({
-        operationId: `auto-discovery:interrupt:${completionKey}`,
-        expectedSessionSequence: projection.sessionSequence,
-        discoveryId: active.discoveryId,
-        reason,
-      });
-    },
-  };
-}
-
-function automaticDiscoveryPhase(current: DiscoveryPhase, toolName: string): DiscoveryPhase {
-  if (current === "verify" || toolName === "read_file") {
-    return "verify";
-  }
-  if (current === "forage") return "focus";
-  return "deepen";
-}
-
-function splitDiscoveryBudget(total: number, count: number, ordinal: number): number {
-  return Math.floor(total / count) + (ordinal < total % count ? 1 : 0);
-}
-
-function assertMutuallyExclusiveDiscoveryRoots(
-  workDir: string,
-  rootSets: readonly (readonly string[])[],
-): void {
-  const canonicalWorkDir = realpathSync(workDir);
-  const normalized = rootSets.map((roots) =>
-    roots.map((root) => {
-      let canonicalRoot: string;
-      try {
-        canonicalRoot = realpathSync(resolve(canonicalWorkDir, root));
-      } catch {
-        throw new Error(`Discovery 并发分支 root 无法物理规范化: ${root}`);
-      }
-      const relativeRoot = relative(canonicalWorkDir, canonicalRoot).replaceAll("\\", "/");
-      if (relativeRoot === ".." || relativeRoot.startsWith("../") || isAbsolute(relativeRoot)) {
-        throw new Error(`Discovery 并发分支 root 越出工作区: ${root}`);
-      }
-      return relativeRoot;
-    }),
-  );
-  for (let left = 0; left < normalized.length; left++) {
-    for (let right = left + 1; right < normalized.length; right++) {
-      for (const leftRoot of normalized[left]!) {
-        for (const rightRoot of normalized[right]!) {
-          if (
-            leftRoot === "" ||
-            rightRoot === "" ||
-            leftRoot === rightRoot ||
-            leftRoot.startsWith(`${rightRoot}/`) ||
-            rightRoot.startsWith(`${leftRoot}/`)
-          ) {
-            throw new Error("Discovery 并发分支 roots 必须互不重叠");
-          }
-        }
-      }
-    }
-  }
-}
-
-const DISCOVERY_FILE_INSPECTION_TOOLS = new Set([
-  "read_file",
-  "glob",
-  "grep",
-  "repo_map",
-  "code_definition",
-  "code_references",
-  "code_symbols",
-  "code_diagnostics",
-  "code_call_hierarchy",
-]);
-
-const DISCOVERY_SCANNING_TOOLS = new Set([
-  "glob",
-  "grep",
-  "repo_map",
-  "code_definition",
-  "code_references",
-  "code_symbols",
-  "code_diagnostics",
-  "code_call_hierarchy",
-]);
-
-function discoveryFileReservation(
-  call: ToolCall,
-  inspectedFiles: readonly string[],
-  workDir: string,
-  remainingFiles: number,
-): number {
-  if (!DISCOVERY_FILE_INSPECTION_TOOLS.has(call.name)) return 0;
-  if (DISCOVERY_SCANNING_TOOLS.has(call.name)) {
-    if (remainingFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
-    const parsed = parseToolObject(call.arguments);
-    const requested =
-      typeof parsed["max_files"] === "number" &&
-      Number.isSafeInteger(parsed["max_files"]) &&
-      parsed["max_files"] > 0
-        ? parsed["max_files"]
-        : REPO_MAP_MAX_FILES;
-    return Math.min(requested, remainingFiles, REPO_MAP_MAX_FILES);
-  }
-  const explicitPath = discoveryExplicitFilePath(call, workDir);
-  if (explicitPath && inspectedFiles.includes(explicitPath)) return 0;
-  if (remainingFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
-  return 1;
-}
-
-function clampDiscoveryFileCall(call: ToolCall, reservedFiles: number): ToolCall {
-  if (!DISCOVERY_SCANNING_TOOLS.has(call.name)) return call;
-  if (reservedFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
-  const parsed = parseToolObject(call.arguments);
-  return {
-    ...call,
-    arguments: JSON.stringify({
-      ...parsed,
-      max_files: reservedFiles,
-    }),
-  };
-}
-
-function discoveryExplicitFilePath(call: ToolCall, workDir?: string): string | undefined {
-  const parsed = parseToolObject(call.arguments);
-  const requested =
-    call.name === "read_file"
-      ? parsed["path"]
-      : call.name.startsWith("code_")
-        ? parsed["file_path"]
-        : undefined;
-  if (typeof requested !== "string" || !requested.trim()) return undefined;
-  return workDir ? workspaceRelativeDiscoveryPath(workDir, requested.trim()) : requested.trim();
-}
-
-function recordDiscoveryScans(
-  reservation: { readonly reservedFiles: number; readonly inspectedFiles: Set<string> },
-  paths: readonly string[],
-  workDir: string,
-  call: ToolCall,
-  relativeToSearchRoot: boolean,
-): void {
-  const parsed = parseToolObject(call.arguments);
-  const searchRoot =
-    relativeToSearchRoot && typeof parsed["path"] === "string" ? parsed["path"] : ".";
-  for (const path of paths) {
-    if (reservation.inspectedFiles.size >= reservation.reservedFiles) return;
-    const candidate = searchRoot === "." ? path : `${searchRoot.replace(/\/$/u, "")}/${path}`;
-    const relativePath = workspaceRelativeDiscoveryPath(workDir, candidate);
-    if (relativePath) reservation.inspectedFiles.add(relativePath);
-  }
-}
-
-function verifiedDiscoveryCandidates(
-  candidates: readonly DiscoveryCandidate[],
-  directReadEvidence: ReadonlyMap<string, ReadonlySet<string>>,
-): DiscoveryCandidate[] {
-  return candidates.flatMap((candidate) => {
-    const directEvidence = directReadEvidence.get(candidate.path);
-    if (!directEvidence) return [];
-    const evidenceRefs = candidate.evidenceRefs.filter((reference) =>
-      directEvidence.has(reference),
-    );
-    return evidenceRefs.length > 0 ? [{ ...candidate, evidenceRefs }] : [];
-  });
-}
-
-function discoveryCandidatesFromToolResult(
-  call: ToolCall,
-  result: ToolResultEnvelope,
-  evidenceRef: string,
-  workDir: string,
-): DiscoveryCandidate[] {
-  const paths = new Map<string, { score: number; reasons: string[] }>();
-  const toolInput = parseToolObject(call.arguments);
-  const directPath =
-    typeof toolInput["file_path"] === "string"
-      ? toolInput["file_path"]
-      : typeof toolInput["path"] === "string" && call.name === "read_file"
-        ? toolInput["path"]
-        : undefined;
-  if (directPath?.trim()) {
-    const candidatePath = workspaceRelativeDiscoveryPath(workDir, directPath.trim());
-    if (candidatePath) {
-      paths.set(candidatePath, { score: 100, reasons: [`${call.name}:direct_target`] });
-    }
-  }
-
-  for (const line of result.projection.text.split(/\r?\n/u)) {
-    const candidate = discoveryCandidateLine(call.name, line);
-    const candidatePath = candidate
-      ? workspaceRelativeDiscoveryPath(workDir, candidate.path)
-      : undefined;
-    if (!candidate || !candidatePath || paths.has(candidatePath)) continue;
-    paths.set(candidatePath, { score: candidate.score, reasons: candidate.reasons });
-    if (paths.size >= DISCOVERY_MAX_CANDIDATES) break;
-  }
-
-  return [...paths.entries()]
-    .map(([candidatePath, metadata]) => ({
-      path: candidatePath,
-      score: metadata.score,
-      reasons: metadata.reasons,
-      evidenceRefs: [evidenceRef],
-    }))
-    .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
-    .slice(0, DISCOVERY_MAX_CANDIDATES);
-}
-
-function discoveryCandidateLine(
-  toolName: string,
-  line: string,
-): { readonly path: string; readonly score: number; readonly reasons: string[] } | undefined {
-  if (toolName === "repo_map") {
-    const match = /^(.+?) score=(-?\d+(?:\.\d+)?) reasons=([^:]*)/u.exec(line);
-    const candidatePath = match?.[1]?.trim();
-    if (!candidatePath) return undefined;
-    return {
-      path: candidatePath,
-      score: Number(match?.[2] ?? 0),
-      reasons: (match?.[3] ?? "repo_map")
-        .split(",")
-        .map((reason) => `repo_map:${reason.trim()}`)
-        .filter((reason) => reason !== "repo_map:"),
-    };
-  }
-  if (toolName === "grep") {
-    const match = /^(.+?):\d+:/u.exec(line);
-    return match?.[1] ? { path: match[1], score: 80, reasons: ["grep:content_match"] } : undefined;
-  }
-  if (toolName === "glob" && line && !line.startsWith("...") && !line.startsWith("未找到")) {
-    return { path: line, score: 70, reasons: ["glob:path_match"] };
-  }
-  return undefined;
-}
-
-function workspaceRelativeDiscoveryPath(
-  workDir: string,
-  candidatePath: string,
-): string | undefined {
-  let canonicalWorkDir = workDir;
-  let absolute = isAbsolute(candidatePath) ? candidatePath : resolve(workDir, candidatePath);
-  try {
-    canonicalWorkDir = realpathSync(workDir);
-    absolute = realpathSync(absolute);
-  } catch {
-    // Keep lexical paths when a candidate no longer exists; boundary checks still apply below.
-  }
-  const workspaceRelative = relative(canonicalWorkDir, absolute).replaceAll("\\", "/");
-  if (
-    !workspaceRelative ||
-    workspaceRelative === ".." ||
-    workspaceRelative.startsWith("../") ||
-    isAbsolute(workspaceRelative)
-  ) {
-    return undefined;
-  }
-  return workspaceRelative;
-}
-
-interface DiscoveryDelegationResult {
-  readonly status: "completed" | "partial" | "error" | "timed_out" | "cancelled";
-  readonly summary?: string;
-  readonly evidenceRefs?: readonly string[];
-  readonly error?: string;
-  readonly toolCallsUsed?: number;
-  readonly inspectedFiles?: readonly string[];
-}
-
-function parseDiscoveryDelegationResults(
-  value: string,
-  expected: number,
-): readonly DiscoveryDelegationResult[] {
-  try {
-    const parsed = JSON.parse(value) as { results?: unknown };
-    if (!Array.isArray(parsed.results) || parsed.results.length !== expected) return [];
-    const normalized: DiscoveryDelegationResult[] = [];
-    for (const candidate of parsed.results) {
-      if (!candidate || typeof candidate !== "object") return [];
-      const result = candidate as Record<string, unknown>;
-      const status = result["status"];
-      if (
-        status !== "completed" &&
-        status !== "partial" &&
-        status !== "error" &&
-        status !== "timed_out" &&
-        status !== "cancelled"
-      ) {
-        return [];
-      }
-      normalized.push({
-        status,
-        ...(typeof result["summary"] === "string" ? { summary: result["summary"] } : {}),
-        ...(Array.isArray(result["evidenceRefs"])
-          ? {
-              evidenceRefs: result["evidenceRefs"].filter(
-                (reference): reference is string => typeof reference === "string",
-              ),
-            }
-          : {}),
-        ...(typeof result["error"] === "string" ? { error: result["error"] } : {}),
-        ...(typeof result["toolCallsUsed"] === "number" &&
-        Number.isSafeInteger(result["toolCallsUsed"]) &&
-        result["toolCallsUsed"] >= 0
-          ? { toolCallsUsed: result["toolCallsUsed"] }
-          : {}),
-        ...(Array.isArray(result["inspectedFiles"])
-          ? {
-              inspectedFiles: result["inspectedFiles"].filter(
-                (path): path is string => typeof path === "string",
-              ),
-            }
-          : {}),
-      });
-    }
-    return normalized;
-  } catch {
-    return [];
-  }
-}
-
-function discoveryCandidatesFromDelegationSummary(
-  summary: string,
-  evidenceRefs: readonly string[],
-  workDir: string,
-): DiscoveryCandidate[] {
-  const candidates = new Set<string>();
-  for (const match of summary.matchAll(
-    /(?:^|[\s`'"(])((?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)(?=$|[\s`'"),:])/gu,
-  )) {
-    const candidate = match[1] ? workspaceRelativeDiscoveryPath(workDir, match[1]) : undefined;
-    if (candidate) candidates.add(candidate);
-    if (candidates.size >= DISCOVERY_MAX_CANDIDATES) break;
-  }
-  return [...candidates].map((path) => ({
-    path,
-    score: 60,
-    reasons: ["delegate_task:child_report"],
-    evidenceRefs: [...evidenceRefs],
-  }));
-}
-
-function parseToolObject(value: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function boundedDiscoveryText(value: string): string {
-  const normalized = value.trim();
-  return normalized.length <= 4_000 ? normalized : `${normalized.slice(0, 3_999)}…`;
 }
 
 async function prepareBackgroundExecution(

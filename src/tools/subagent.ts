@@ -147,7 +147,7 @@ export interface SubagentRegistryRequest {
   maxToolCalls?: number;
   /** Physical read boundary for this branch, relative to the trusted workDir. */
   roots?: readonly string[];
-  /** Trusted usage sink used by the parent Discovery coordinator. */
+  /** Trusted usage sink used by the parent agent for budget tracking. */
   onBudgetUsage?: (usage: { toolCallsUsed: number; inspectedFiles: readonly string[] }) => void;
   /** 持久 Agent Profile 名（来自宿主统一 Agent 目录）。 */
   agentName?: string;

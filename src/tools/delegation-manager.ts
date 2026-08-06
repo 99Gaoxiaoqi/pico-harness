@@ -13,7 +13,7 @@ export interface DelegationResult {
   summary?: string;
   /** 完整子代理报告的受校验 pico://evidence 引用。 */
   evidenceRefs?: string[];
-  /** Trusted host-observed usage for bounded Discovery branches. */
+  /** Trusted host-observed usage for bounded delegation branches. */
   toolCallsUsed?: number;
   inspectedFiles?: string[];
   error?: string;
