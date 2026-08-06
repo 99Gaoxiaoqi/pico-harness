@@ -123,18 +123,27 @@ export class ExploreRepoTool implements BaseTool {
     const signal = context?.signal;
 
     // Step 1：repo_map 符号扫描
+    // 先用 query 精确匹配；如果没命中（文件名/符号名不含查询词），fallback 到全量索引扫描，
+    // 靠 Step 3 的内容匹配来找。这解决了"目标代码的文件名/符号名不含查询词"的常见场景。
+    // 全量 fallback 时索引 maxFiles×5（上限 200），确保大仓库的关键文件被覆盖。
     const queryStr = queries.join(" ");
-    const snapshot = await this.repoMap.snapshot({ query: queryStr, maxFiles, signal });
+    let snapshot = await this.repoMap.snapshot({ query: queryStr, maxFiles, signal });
     signal?.throwIfAborted();
+    if (snapshot.files.length === 0) {
+      const indexBudget = Math.min(200, maxFiles * 5);
+      snapshot = await this.repoMap.snapshot({ maxFiles: indexBudget, signal });
+      signal?.throwIfAborted();
+    }
 
-    // Step 2：项目结构启发式叠加打分
+    // Step 2：项目结构启发式 + 路径级 query 匹配叠加打分
     const candidates: Candidate[] = snapshot.files.map((f) => {
       const structural = scoreStructure(f.filePath);
+      const pathMatch = scorePathQuery(f.filePath, queries);
       return {
         filePath: f.filePath,
         symbols: f.symbols,
-        score: f.score + structural.score,
-        reasons: [...f.reasons, ...structural.reasons],
+        score: f.score + structural.score + pathMatch.score,
+        reasons: [...f.reasons, ...structural.reasons, ...pathMatch.reasons],
         matches: [] as MatchEntry[],
       };
     });
@@ -276,6 +285,21 @@ export function scoreStructure(filePath: string): { score: number; reasons: stri
 /** 大小写不敏感的 Set 匹配。 */
 function hasIgnoreCase(set: ReadonlySet<string>, value: string): boolean {
   return set.has(value) || set.has(value.toLowerCase());
+}
+
+/** 路径级 query 匹配：路径包含查询词时加分（子串匹配，大小写不敏感）。 */
+function scorePathQuery(filePath: string, queries: readonly string[]): { score: number; reasons: string[] } {
+  const lowerPath = filePath.toLowerCase();
+  let score = 0;
+  const reasons: string[] = [];
+  for (const q of queries) {
+    if (q.length < 2) continue;
+    if (lowerPath.includes(q.toLowerCase())) {
+      score += 5;
+      reasons.push(`path contains "${q}"`);
+    }
+  }
+  return { score, reasons };
 }
 
 /** snippet 截取：压空白 + 码点安全截断。 */
