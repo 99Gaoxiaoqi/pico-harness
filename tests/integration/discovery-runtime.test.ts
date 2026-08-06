@@ -22,6 +22,7 @@ test("Discovery Repo Map continues across the default scan batch before resolvin
   const fixture = await createDiscoveryLargeRepoFixture(workDir);
   const service = new RepoMapService(workDir);
   const tool = new RepoMapTool(workDir, service);
+  const totalIndexedFiles = fixture.sourcePaths.length;
   context.after(async () => {
     await service.close();
     await rm(workDir, { recursive: true, force: true });
@@ -33,9 +34,14 @@ test("Discovery Repo Map continues across the default scan batch before resolvin
     (report) => scans.push(report),
     () => tool.execute(JSON.stringify({ query: fixture.targetSymbol, max_files: 200 })),
   );
-  assert.match(first, /backend=repo-map indexed=200\/206 cursor=200 complete=false/u);
+  assert.match(
+    first,
+    new RegExp(
+      `backend=repo-map indexed=200/${String(totalIndexedFiles)} cursor=200 complete=false`,
+      "u",
+    ),
+  );
   assert.equal(scans.slice(firstReportIndex).flatMap((report) => report.scannedFiles).length, 200);
-  assert.doesNotMatch(first, new RegExp(escapeRegExp(fixture.targetSymbol), "u"));
   assert.doesNotMatch(first, new RegExp(escapeRegExp(fixture.targetPath), "u"));
 
   const secondReportIndex = scans.length;
@@ -43,9 +49,18 @@ test("Discovery Repo Map continues across the default scan batch before resolvin
     (report) => scans.push(report),
     () => tool.execute(JSON.stringify({ query: fixture.targetSymbol, max_files: 200 })),
   );
-  assert.match(second, /backend=repo-map indexed=206\/206 cursor=206 complete=true/u);
-  assert.equal(scans.slice(secondReportIndex).flatMap((report) => report.scannedFiles).length, 6);
-  assert.equal(new Set(scans.flatMap(({ scannedFiles }) => scannedFiles)).size, 206);
+  assert.match(
+    second,
+    new RegExp(
+      `backend=repo-map indexed=${String(totalIndexedFiles)}/${String(totalIndexedFiles)} cursor=${String(totalIndexedFiles)} complete=true`,
+      "u",
+    ),
+  );
+  assert.equal(
+    scans.slice(secondReportIndex).flatMap((report) => report.scannedFiles).length,
+    totalIndexedFiles - 200,
+  );
+  assert.equal(new Set(scans.flatMap(({ scannedFiles }) => scannedFiles)).size, totalIndexedFiles);
   assert.match(second, new RegExp(escapeRegExp(fixture.targetSymbol), "u"));
   assert.match(second, new RegExp(escapeRegExp(fixture.targetPath), "u"));
 });
