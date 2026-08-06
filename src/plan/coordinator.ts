@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStateWritePatch,
@@ -8,26 +6,13 @@ import {
 } from "../engine/session-runtime.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
-  type RuntimeDiscoveryCompletedEvent,
   type RuntimeEvent,
   type RuntimePlanEvent,
 } from "../engine/session-runtime-event.js";
 import {
   RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
-  type RuntimeEventStoreEntry,
 } from "../storage/runtime-event-store.js";
-import {
-  normalizeDiscoveryPath,
-  type DiscoveryCandidate,
-  type DiscoveryReport,
-  type DiscoveryRun,
-} from "../discovery/contract.js";
-import {
-  projectActiveDiscoveryEntries,
-  projectDiscoveryEntries,
-  reduceDiscoveryEvent,
-} from "../discovery/reducer.js";
 import {
   PlanConflictError,
   normalizePlanProposalInput,
@@ -48,13 +33,6 @@ export interface PlanCoordinatorContext {
 interface OperationInput {
   readonly operationId: string;
   readonly expectedSessionSequence: number;
-}
-
-interface PlanCommitOptions {
-  readonly discoveryCompletion?: {
-    readonly summary: string;
-    readonly remainingRisks: readonly string[];
-  };
 }
 
 export type PlanOperationStatus = "missing" | "matching";
@@ -120,12 +98,6 @@ export class PlanCoordinator {
           },
         },
       ],
-      {
-        discoveryCompletion: {
-          summary: proposalInput.overview ?? proposalInput.title,
-          remainingRisks: proposalInput.risks ?? [],
-        },
-      },
     );
   }
 
@@ -165,12 +137,6 @@ export class PlanCoordinator {
           },
         },
       ],
-      {
-        discoveryCompletion: {
-          summary: proposalInput.overview ?? proposalInput.title,
-          remainingRisks: proposalInput.risks ?? [],
-        },
-      },
     );
   }
 
@@ -413,7 +379,6 @@ export class PlanCoordinator {
       at: string,
       projection: PlanProjection,
     ) => RuntimeEvent[],
-    options: PlanCommitOptions = {},
   ): Promise<PlanProjection> {
     const entries = await this.store.readSessionEntries(this.context.sessionId);
     const replay = projectActivePlanEntries(entries).find(
@@ -422,30 +387,7 @@ export class PlanCoordinator {
         "operationId" in event.data &&
         event.data.operationId === input.operationId,
     );
-    const replayedDiscoveryEntry = projectActiveDiscoveryEntries(entries).find(
-      ({ event }) =>
-        event.kind === "discovery.completed" && event.data.operationId === input.operationId,
-    );
-    const replayedDiscovery =
-      replayedDiscoveryEntry?.event.kind === "discovery.completed"
-        ? replayedDiscoveryEntry.event
-        : undefined;
-    const preparedDiscovery = replayedDiscovery
-      ? {
-          discoveryId: replayedDiscovery.data.discoveryId,
-          report: replayedDiscovery.data.report,
-        }
-      : options.discoveryCompletion
-        ? prepareActiveDiscoveryCompletion(
-            projectDiscoveryEntries(this.context.sessionId, entries),
-            options.discoveryCompletion,
-            entries,
-          )
-        : undefined;
-    const fingerprint = planOperationFingerprint(
-      kind,
-      preparedDiscovery ? { plan: semantic, discoveryCompletion: preparedDiscovery } : semantic,
-    );
+    const fingerprint = planOperationFingerprint(kind, semantic);
     if (replay) {
       if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint)
         throw new RuntimeEventStorePlanOperationConflictError(input.operationId);
@@ -457,37 +399,16 @@ export class PlanCoordinator {
       this.now().toISOString(),
       projection,
     );
-    const at = events[0]?.at ?? this.now().toISOString();
-    const discoveryEvent = preparedDiscovery
-      ? this.discoveryCompletionEvent(input.operationId, fingerprint, at, preparedDiscovery)
-      : undefined;
-    const atomicEvents = discoveryEvent ? [discoveryEvent, ...events] : events;
     let candidate = projection;
-    let discoveryCandidate = projectDiscoveryEntries(this.context.sessionId, entries);
-    for (const event of atomicEvents) {
+    for (const event of events) {
       candidate = reducePlanEvent(candidate, event);
-      discoveryCandidate = reduceDiscoveryEvent(discoveryCandidate, event);
     }
-    await this.store.appendPlanOperation(atomicEvents, {
+    await this.store.appendPlanOperation(events, {
       operationId: input.operationId,
       fingerprint,
       expectedSessionSequence: input.expectedSessionSequence,
     });
     return this.project();
-  }
-
-  private discoveryCompletionEvent(
-    operationId: string,
-    fingerprint: string,
-    at: string,
-    prepared: { readonly discoveryId: string; readonly report: DiscoveryReport },
-  ): RuntimeDiscoveryCompletedEvent {
-    return {
-      ...this.baseEvent(operationId, "discovery.completed", at),
-      eventId: `discovery:${operationId}:plan-completed`,
-      kind: "discovery.completed",
-      data: { operationId, fingerprint, ...prepared },
-    };
   }
 
   private baseEvent(operationId: string, suffix: string, at: string) {
@@ -503,149 +424,4 @@ export class PlanCoordinator {
       visibility: "internal" as const,
     };
   }
-}
-
-function prepareActiveDiscoveryCompletion(
-  projection: ReturnType<typeof projectDiscoveryEntries>,
-  input: { readonly summary: string; readonly remainingRisks: readonly string[] },
-  entries: readonly RuntimeEventStoreEntry[],
-): { readonly discoveryId: string; readonly report: DiscoveryReport } | undefined {
-  const active = projection.active;
-  if (!active) return undefined;
-  if (active.phase !== "verify") {
-    throw new PlanConflictError("Active Discovery must reach verify before submitting a plan");
-  }
-  const confirmedTargets = directlyReadDiscoveryCandidates(entries, active);
-  if (confirmedTargets.length === 0) {
-    throw new PlanConflictError(
-      "Active Discovery Verify must directly read a selected candidate source and reference its ToolResult evidence",
-    );
-  }
-  const evidenceRefs = [
-    ...new Set(confirmedTargets.flatMap((candidate) => candidate.evidenceRefs)),
-  ];
-  return {
-    discoveryId: active.discoveryId,
-    report: {
-      summary: input.summary,
-      confirmedTargets,
-      evidenceRefs,
-      remainingRisks: [
-        ...new Set([
-          ...input.remainingRisks,
-          ...active.openQuestions,
-          ...active.hypotheses
-            .filter((hypothesis) => hypothesis.status === "open")
-            .map((hypothesis) => hypothesis.statement),
-        ]),
-      ],
-    },
-  };
-}
-
-function directlyReadDiscoveryCandidates(
-  entries: readonly RuntimeEventStoreEntry[],
-  active: DiscoveryRun,
-): DiscoveryCandidate[] {
-  const activeEntries = projectActiveRuntimeEntries(entries);
-  const startedSequence = activeEntries.findLast(
-    ({ event }) =>
-      event.kind === "discovery.started" && event.data.discoveryId === active.discoveryId,
-  )?.sequence;
-  if (startedSequence === undefined) return [];
-
-  const readPaths = new Map<string, string>();
-  const workDirs = new Map(
-    activeEntries.flatMap(({ event }) =>
-      event.kind === "run.started" ? [[event.runId, event.data.workDir] as const] : [],
-    ),
-  );
-  const sessionWorkDir = [...workDirs.values()][0];
-  for (const { event } of activeEntries) {
-    if (event.kind !== "message.committed") continue;
-    for (const call of event.data.message.toolCalls ?? []) {
-      if (call.name !== "read_file") continue;
-      const path = readFilePath(call.arguments, workDirs.get(event.runId) ?? sessionWorkDir);
-      if (path) readPaths.set(call.id, path);
-    }
-  }
-
-  const evidenceByPath = new Map<string, Set<string>>();
-  for (const { sequence, event } of activeEntries) {
-    if (
-      sequence <= startedSequence ||
-      event.kind !== "tool.result.recorded" ||
-      event.data.toolName !== "read_file" ||
-      event.data.status !== "succeeded"
-    ) {
-      continue;
-    }
-    const candidatePath = readPaths.get(event.refs.toolCallId);
-    if (!candidatePath) continue;
-    const evidence = evidenceByPath.get(candidatePath) ?? new Set<string>();
-    evidence.add(toolResultEvidenceReference(event));
-    evidenceByPath.set(candidatePath, evidence);
-  }
-
-  return active.candidates.flatMap((candidate) => {
-    if (!active.inspectedFiles.includes(candidate.path)) return [];
-    const directEvidence = evidenceByPath.get(candidate.path);
-    if (!directEvidence) return [];
-    const evidenceRefs = candidate.evidenceRefs.filter(
-      (reference) => active.evidenceRefs.includes(reference) && directEvidence.has(reference),
-    );
-    return evidenceRefs.length > 0 ? [{ ...candidate, evidenceRefs }] : [];
-  });
-}
-
-function projectActiveRuntimeEntries(
-  entries: readonly RuntimeEventStoreEntry[],
-): RuntimeEventStoreEntry[] {
-  let projected: RuntimeEventStoreEntry[] = [];
-  for (const entry of entries) {
-    if (entry.event.kind === "history.rewound") {
-      const through = entry.event.data.throughEventId;
-      if (!through) projected = [];
-      else {
-        const index = projected.findIndex(({ event }) => event.eventId === through);
-        if (index < 0) {
-          throw new PlanConflictError(`Rewind boundary ${through} is not on the active branch`);
-        }
-        projected = projected.slice(0, index + 1);
-      }
-    }
-    projected.push(entry);
-  }
-  return projected;
-}
-
-function readFilePath(argumentsJson: string, workDir: string | undefined): string | undefined {
-  try {
-    const input = JSON.parse(argumentsJson) as Record<string, unknown>;
-    if (typeof input["path"] !== "string") return undefined;
-    const raw = input["path"];
-    if (!isAbsolute(raw)) return normalizeDiscoveryPath(raw);
-    if (!workDir) return undefined;
-    let canonicalWorkDir = workDir;
-    let canonicalRaw = raw;
-    try {
-      canonicalWorkDir = realpathSync(workDir);
-      canonicalRaw = realpathSync(raw);
-    } catch {
-      // Fall back to lexical resolution when either path no longer exists.
-    }
-    const workspaceRelative = relative(canonicalWorkDir, canonicalRaw).replaceAll("\\", "/");
-    return normalizeDiscoveryPath(workspaceRelative);
-  } catch {
-    return undefined;
-  }
-}
-
-function toolResultEvidenceReference(
-  event: Extract<RuntimeEvent, { kind: "tool.result.recorded" }>,
-): string {
-  const evidence = event.refs.evidence;
-  return evidence
-    ? `pico://evidence/${encodeURIComponent(evidence.sessionId)}/${evidence.contentHash}`
-    : `runtime://tool-result/${encodeURIComponent(event.refs.toolCallId)}?sha256=${event.data.body.sha256}`;
 }

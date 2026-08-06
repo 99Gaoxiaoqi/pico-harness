@@ -125,10 +125,6 @@ const PLAN_PROVIDER_TOOL_NAMES = new Set([
   "code_symbols",
   "code_diagnostics",
   "code_call_hierarchy",
-  "start_discovery",
-  "update_discovery",
-  "complete_discovery",
-  "cancel_discovery",
   "ask_user",
   "submit_plan",
 ]);
@@ -2304,9 +2300,7 @@ export class AgentEngine implements AgentRunner {
             await session.commitMessages({
               role: "user",
               content: exploreSynthesisOnly
-                ? this.exploreSynthesisAllowedTools.size > 0
-                  ? "[DISCOVERY VERIFY] 并发只读分支已收口。只允许使用当前提供的核验工具直接读取候选源码并交叉确认；完成核验后输出统一报告，不得扩大搜索或实施修改。"
-                  : EXPLORE_SYNTHESIS_PROMPT
+                ? EXPLORE_SYNTHESIS_PROMPT
                 : "[DELEGATION JOIN] required 子代理已全部收口（结果可能包含失败）。" +
                   "请吸收上述聚合结果并继续集成、定点验证或统一总结；" +
                   "不要重复子代理已完成范围的大规模探索。",
@@ -2376,10 +2370,10 @@ export class AgentEngine implements AgentRunner {
       if (signal?.aborted || isAbortError(error)) reporter.onInterrupted?.();
       await this.onRunInterrupted?.(
         signal?.aborted || isAbortError(error)
-          ? "Discovery Run was cancelled."
-          : `Discovery Run failed: ${error instanceof Error ? error.message : String(error)}`,
+          ? "Run was cancelled."
+          : `Run failed: ${error instanceof Error ? error.message : String(error)}`,
       ).catch((hookError) =>
-        logger.warn({ hookError: String(hookError) }, "[Engine] Discovery 中断收口失败"),
+        logger.warn({ hookError: String(hookError) }, "[Engine] 运行中断收口失败"),
       );
       throw error;
     } finally {
