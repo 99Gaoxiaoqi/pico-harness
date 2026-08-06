@@ -36,12 +36,12 @@ pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始
   │
   ├─ ≤ 2048 token ──→ 原文保留（mode: "full"）
   │
-  └─ > 2048 token ──→ 生成 3000 字符预览（mode: "preview"）
+  └─ > 2048 token ──→ 生成 1600 字符预览（mode: "preview"）
                        原文按 SHA-256 写入 Evidence CAS
                        模型只拿到 pico://evidence/... URI
 ```
 
-**2048 token** 是分水岭（`DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048`）。低于这个值的工具结果原文进上下文；高于的，原文落盘到 Evidence CAS，模型只收到一份 **3000 字符**（`DEFAULT_SUMMARY_MAX_CHARS`）的 head-tail 预览。
+**2048 token** 是分水岭（`DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048`）。低于这个值的工具结果原文进上下文；高于的，原文落盘到 Evidence CAS，模型只收到一份 **1600 字符**（`DEFAULT_SUMMARY_MAX_CHARS`）的 head-tail 预览。
 
 ### 统一 head-tail 预览
 
@@ -78,7 +78,7 @@ pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始
 ```
 
 这个设计保证了三个性质：
-1. **单条大结果永远撑不爆上下文**——模型只持有 3000 字符预览
+1. **单条大结果永远撑不爆上下文**——模型只持有 1600 字符预览
 2. **原文不丢失**——SHA-256 内容寻址，完整性可校验
 3. **可翻页回读**——模型按需分页获取，不需要一次性全量加载
 
@@ -100,7 +100,7 @@ pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始
 
 ## 三、语义压缩：当历史总量逼近窗口
 
-Tool Result 投影解决的是"单条暴击"，但即使每条结果都被截断到 3000 字符，历史消息累积到一定轮数后仍然会逼近窗口。这时候就需要**语义压缩**——把旧前缀浓缩成一份结构化摘要。
+Tool Result 投影解决的是"单条暴击"，但即使每条结果都被截断到 1600 字符，历史消息累积到一定轮数后仍然会逼近窗口。这时候就需要**语义压缩**——把旧前缀浓缩成一份结构化摘要。
 
 ### 触发机制：双触发 + 三级降级
 
