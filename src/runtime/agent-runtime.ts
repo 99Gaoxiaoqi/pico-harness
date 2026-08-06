@@ -154,6 +154,10 @@ import {
   REPO_MAP_MAX_FILES,
   type RepoMapScanReport,
 } from "../code-intelligence/repo-map.js";
+import {
+  observeWorkspaceFileScans,
+  type WorkspaceFileScanReport,
+} from "../tools/file-scan-observer.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
@@ -2115,8 +2119,16 @@ function createAutomaticDiscoveryTracker(input: {
 }): AutomaticDiscoveryTracker {
   const discoveryId = `auto-discovery:${randomUUID()}`;
   const completionKey = randomUUID();
-  const repoMapScans = new Map<string, readonly string[]>();
   const directReadEvidence = new Map<string, Set<string>>();
+  const hostReservations = new Map<
+    string,
+    {
+      readonly reservedFiles: number;
+      readonly effectiveCall: ToolCall;
+      readonly inspectedFiles: Set<string>;
+    }
+  >();
+  let trackerTail: Promise<void> = Promise.resolve();
   const delegatedBranches = new Map<
     string,
     readonly {
@@ -2130,6 +2142,9 @@ function createAutomaticDiscoveryTracker(input: {
     const coordinator = input.coordinator();
     let projection = await coordinator.project();
     if (!projection.active && input.autoStart) {
+      if (projection.latest?.discoveryId === discoveryId) {
+        throw new Error("Discovery 已终止，当前 Run 不得重新启动同一调查");
+      }
       projection = await coordinator.start({
         operationId: `auto-discovery:start:${operationKey}`,
         expectedSessionSequence: projection.sessionSequence,
@@ -2140,6 +2155,20 @@ function createAutomaticDiscoveryTracker(input: {
       });
     }
     return projection;
+  };
+
+  const withTrackerLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const previous = trackerTail;
+    let release!: () => void;
+    trackerTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   };
 
   const prepareForCompletion = async (): Promise<void> => {
@@ -2192,7 +2221,10 @@ function createAutomaticDiscoveryTracker(input: {
         if (!Array.isArray(parsed.tasks)) {
           throw new Error("Discovery 并发委派必须使用 tasks 数组");
         }
-        assertMutuallyExclusiveDiscoveryRoots(tasks.map((task) => task.roots));
+        assertMutuallyExclusiveDiscoveryRoots(
+          input.workDir,
+          tasks.map((task) => task.roots),
+        );
         const remainingToolCalls =
           active.budget.maxToolCalls -
           active.budget.consumedToolCalls -
@@ -2242,19 +2274,65 @@ function createAutomaticDiscoveryTracker(input: {
       }
       if (!AUTOMATIC_DISCOVERY_TOOLS.has(call.name)) return next(call);
 
-      const projection = await ensureActive(call.id);
-      if (call.name !== "repo_map") return next(call);
-      const active = projection.active;
-      const effectiveCall = active ? clampRepoMapCallToDiscoveryBudget(call, active.budget) : call;
-      const scannedFiles: string[] = [];
-      try {
-        return await observeRepoMapScans(
-          (report: RepoMapScanReport) => scannedFiles.push(...report.scannedFiles),
-          () => next(effectiveCall),
+      const reservation = await withTrackerLock(async () => {
+        const projection = await ensureActive(call.id);
+        const active = projection.active;
+        if (!active) throw new Error("Discovery 只读调查需要活动的 Discovery");
+        const inFlightToolCalls = hostReservations.size;
+        const remainingToolCalls =
+          active.budget.maxToolCalls -
+          active.budget.consumedToolCalls -
+          active.budget.reservedToolCalls -
+          inFlightToolCalls;
+        if (remainingToolCalls <= 0) throw new Error("Discovery 工具调用预算已耗尽");
+
+        const inFlightFiles = [...hostReservations.values()].reduce(
+          (sum, current) => sum + current.reservedFiles,
+          0,
         );
-      } finally {
-        repoMapScans.set(call.id, [...new Set(scannedFiles)]);
-      }
+        const remainingFiles =
+          active.budget.maxFiles -
+          active.budget.consumedFiles -
+          active.budget.reservedFiles -
+          inFlightFiles;
+        const reservedFiles = discoveryFileReservation(
+          call,
+          active.inspectedFiles,
+          input.workDir,
+          remainingFiles,
+        );
+        const effectiveCall = clampDiscoveryFileCall(call, reservedFiles);
+        const inspectedFiles = new Set<string>();
+        const explicitPath = discoveryExplicitFilePath(effectiveCall, input.workDir);
+        if (reservedFiles > 0 && explicitPath) inspectedFiles.add(explicitPath);
+        const created = { reservedFiles, effectiveCall, inspectedFiles };
+        hostReservations.set(call.id, created);
+        return created;
+      });
+
+      return await observeRepoMapScans(
+        (report: RepoMapScanReport) =>
+          recordDiscoveryScans(
+            reservation,
+            report.scannedFiles,
+            input.workDir,
+            reservation.effectiveCall,
+            false,
+          ),
+        () =>
+          observeWorkspaceFileScans(
+            (report: WorkspaceFileScanReport) =>
+              recordDiscoveryScans(
+                reservation,
+                report.scannedFiles,
+                input.workDir,
+                reservation.effectiveCall,
+                true,
+              ),
+            () => next(reservation.effectiveCall),
+          ),
+        reservation.reservedFiles > 0 ? reservation.reservedFiles : undefined,
+      );
     },
     async onToolResult(call, result) {
       const branchReservations = delegatedBranches.get(call.id);
@@ -2267,6 +2345,11 @@ function createAutomaticDiscoveryTracker(input: {
           result.projection.text,
           branchReservations.length,
         );
+        if (childResults.length !== branchReservations.length) {
+          throw new Error(
+            "Discovery 子代理结果被截断或结构不完整，已保留分支预留预算并停止本轮调查",
+          );
+        }
         for (const [ordinal, branch] of branchReservations.entries()) {
           const child = childResults[ordinal];
           const branchStatus =
@@ -2309,56 +2392,53 @@ function createAutomaticDiscoveryTracker(input: {
         }
         return;
       }
-      const repoMapScannedFiles = repoMapScans.get(call.id) ?? [];
-      repoMapScans.delete(call.id);
-      const succeeded = result.status === "succeeded";
-      if (
-        !AUTOMATIC_DISCOVERY_TOOLS.has(call.name) ||
-        (!succeeded && repoMapScannedFiles.length === 0)
-      ) {
-        return;
-      }
-      const coordinator = input.coordinator();
-      const projection = await ensureActive(call.id);
-      const active = projection.active;
-      if (!active) return;
-
-      const evidenceRef =
-        result.evidence?.uri ??
-        `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
-      const candidates = succeeded
-        ? discoveryCandidatesFromToolResult(call, result, evidenceRef, input.workDir)
-        : [];
-      const remainingFiles = Math.max(0, active.budget.maxFiles - active.budget.consumedFiles);
-      const inspectedFiles = (
-        call.name === "repo_map"
-          ? repoMapScannedFiles
-          : candidates.map((candidate) => candidate.path)
-      )
-        .filter((path) => !active.inspectedFiles.includes(path))
-        .slice(0, remainingFiles);
-      if (succeeded && call.name === "read_file") {
-        for (const candidate of candidates) {
-          const evidence = directReadEvidence.get(candidate.path) ?? new Set<string>();
-          evidence.add(evidenceRef);
-          directReadEvidence.set(candidate.path, evidence);
+      const reservation = hostReservations.get(call.id);
+      if (!reservation) return;
+      await withTrackerLock(async () => {
+        const currentReservation = hostReservations.get(call.id);
+        if (!currentReservation) return;
+        const succeeded = result.status === "succeeded";
+        const coordinator = input.coordinator();
+        const projection = await coordinator.project();
+        const active = projection.active;
+        if (!active) {
+          hostReservations.delete(call.id);
+          return;
         }
-      }
-      const phase = succeeded ? automaticDiscoveryPhase(active.phase, call.name) : active.phase;
-      await coordinator.checkpoint({
-        operationId: `auto-discovery:checkpoint:${call.id}`,
-        expectedSessionSequence: projection.sessionSequence,
-        discoveryId: active.discoveryId,
-        checkpoint: {
-          phase,
-          cycle: active.cycle,
-          candidates,
-          evidenceRefs: succeeded ? [evidenceRef] : [],
-          hypotheses: [],
-          openQuestions: phase === "verify" ? [] : ["需要读取候选目标以确认实现位置"],
-          toolCallsUsed: 1,
-          inspectedFiles,
-        },
+
+        const evidenceRef =
+          result.evidence?.uri ??
+          `runtime://tool-result/${encodeURIComponent(call.id)}?sha256=${result.sha256}`;
+        const candidates = succeeded
+          ? discoveryCandidatesFromToolResult(call, result, evidenceRef, input.workDir)
+          : [];
+        const inspectedFiles = [...currentReservation.inspectedFiles]
+          .filter((path) => !active.inspectedFiles.includes(path))
+          .slice(0, currentReservation.reservedFiles);
+        if (succeeded && call.name === "read_file") {
+          for (const candidate of candidates) {
+            const evidence = directReadEvidence.get(candidate.path) ?? new Set<string>();
+            evidence.add(evidenceRef);
+            directReadEvidence.set(candidate.path, evidence);
+          }
+        }
+        const phase = succeeded ? automaticDiscoveryPhase(active.phase, call.name) : active.phase;
+        await coordinator.checkpoint({
+          operationId: `auto-discovery:checkpoint:${call.id}`,
+          expectedSessionSequence: projection.sessionSequence,
+          discoveryId: active.discoveryId,
+          checkpoint: {
+            phase,
+            cycle: active.cycle,
+            candidates,
+            evidenceRefs: succeeded ? [evidenceRef] : [],
+            hypotheses: [],
+            openQuestions: phase === "verify" ? [] : ["需要读取候选目标以确认实现位置"],
+            toolCallsUsed: 1,
+            inspectedFiles,
+          },
+        });
+        hostReservations.delete(call.id);
       });
     },
     prepareForCompletion,
@@ -2410,15 +2490,33 @@ function splitDiscoveryBudget(total: number, count: number, ordinal: number): nu
   return Math.floor(total / count) + (ordinal < total % count ? 1 : 0);
 }
 
-function assertMutuallyExclusiveDiscoveryRoots(rootSets: readonly (readonly string[])[]): void {
+function assertMutuallyExclusiveDiscoveryRoots(
+  workDir: string,
+  rootSets: readonly (readonly string[])[],
+): void {
+  const canonicalWorkDir = realpathSync(workDir);
   const normalized = rootSets.map((roots) =>
-    roots.map((root) => root.replaceAll("\\", "/").replace(/^\.\//u, "").replace(/\/$/u, "")),
+    roots.map((root) => {
+      let canonicalRoot: string;
+      try {
+        canonicalRoot = realpathSync(resolve(canonicalWorkDir, root));
+      } catch {
+        throw new Error(`Discovery 并发分支 root 无法物理规范化: ${root}`);
+      }
+      const relativeRoot = relative(canonicalWorkDir, canonicalRoot).replaceAll("\\", "/");
+      if (relativeRoot === ".." || relativeRoot.startsWith("../") || isAbsolute(relativeRoot)) {
+        throw new Error(`Discovery 并发分支 root 越出工作区: ${root}`);
+      }
+      return relativeRoot;
+    }),
   );
   for (let left = 0; left < normalized.length; left++) {
     for (let right = left + 1; right < normalized.length; right++) {
       for (const leftRoot of normalized[left]!) {
         for (const rightRoot of normalized[right]!) {
           if (
+            leftRoot === "" ||
+            rightRoot === "" ||
             leftRoot === rightRoot ||
             leftRoot.startsWith(`${rightRoot}/`) ||
             rightRoot.startsWith(`${leftRoot}/`)
@@ -2431,18 +2529,31 @@ function assertMutuallyExclusiveDiscoveryRoots(rootSets: readonly (readonly stri
   }
 }
 
-function clampRepoMapCallToDiscoveryBudget(
+const DISCOVERY_FILE_INSPECTION_TOOLS = new Set([
+  "read_file",
+  "glob",
+  "grep",
+  "repo_map",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
+]);
+
+const DISCOVERY_SCANNING_TOOLS = new Set(["glob", "grep", "repo_map"]);
+
+function discoveryFileReservation(
   call: ToolCall,
-  budget: {
-    readonly maxFiles: number;
-    readonly consumedFiles: number;
-    readonly reservedFiles: number;
-  },
-): ToolCall {
-  const remainingFiles = budget.maxFiles - budget.consumedFiles - budget.reservedFiles;
-  if (remainingFiles <= 0) {
-    throw new Error("Discovery Repo Map 文件预算已耗尽");
-  }
+  inspectedFiles: readonly string[],
+  workDir: string,
+  remainingFiles: number,
+): number {
+  if (!DISCOVERY_FILE_INSPECTION_TOOLS.has(call.name)) return 0;
+  const explicitPath = discoveryExplicitFilePath(call, workDir);
+  if (explicitPath && inspectedFiles.includes(explicitPath)) return 0;
+  if (remainingFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
+  if (!DISCOVERY_SCANNING_TOOLS.has(call.name)) return 1;
   const parsed = parseToolObject(call.arguments);
   const requested =
     typeof parsed["max_files"] === "number" &&
@@ -2450,13 +2561,50 @@ function clampRepoMapCallToDiscoveryBudget(
     parsed["max_files"] > 0
       ? parsed["max_files"]
       : REPO_MAP_MAX_FILES;
+  return Math.min(requested, remainingFiles, REPO_MAP_MAX_FILES);
+}
+
+function clampDiscoveryFileCall(call: ToolCall, reservedFiles: number): ToolCall {
+  if (!DISCOVERY_SCANNING_TOOLS.has(call.name)) return call;
+  if (reservedFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
+  const parsed = parseToolObject(call.arguments);
   return {
     ...call,
     arguments: JSON.stringify({
       ...parsed,
-      max_files: Math.min(requested, remainingFiles, REPO_MAP_MAX_FILES),
+      max_files: reservedFiles,
     }),
   };
+}
+
+function discoveryExplicitFilePath(call: ToolCall, workDir?: string): string | undefined {
+  const parsed = parseToolObject(call.arguments);
+  const requested =
+    call.name === "read_file"
+      ? parsed["path"]
+      : call.name.startsWith("code_")
+        ? parsed["file_path"]
+        : undefined;
+  if (typeof requested !== "string" || !requested.trim()) return undefined;
+  return workDir ? workspaceRelativeDiscoveryPath(workDir, requested.trim()) : requested.trim();
+}
+
+function recordDiscoveryScans(
+  reservation: { readonly reservedFiles: number; readonly inspectedFiles: Set<string> },
+  paths: readonly string[],
+  workDir: string,
+  call: ToolCall,
+  relativeToSearchRoot: boolean,
+): void {
+  const parsed = parseToolObject(call.arguments);
+  const searchRoot =
+    relativeToSearchRoot && typeof parsed["path"] === "string" ? parsed["path"] : ".";
+  for (const path of paths) {
+    if (reservation.inspectedFiles.size >= reservation.reservedFiles) return;
+    const candidate = searchRoot === "." ? path : `${searchRoot.replace(/\/$/u, "")}/${path}`;
+    const relativePath = workspaceRelativeDiscoveryPath(workDir, candidate);
+    if (relativePath) reservation.inspectedFiles.add(relativePath);
+  }
 }
 
 function verifiedDiscoveryCandidates(
