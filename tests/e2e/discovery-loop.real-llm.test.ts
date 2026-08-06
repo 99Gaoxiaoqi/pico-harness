@@ -7,12 +7,11 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { DiscoveryCoordinator } from "../../src/discovery/coordinator.js";
 import { projectDiscoveryEntries } from "../../src/discovery/reducer.js";
-import type { DiscoveryCheckpoint, DiscoveryProjection } from "../../src/discovery/contract.js";
+import type { DiscoveryProjection } from "../../src/discovery/contract.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
-import type { ModelRoute } from "../../src/provider/model-router.js";
 import {
   AgentRuntime,
   type RunAgentCliDependencies,
@@ -43,6 +42,14 @@ interface ProviderSnapshot {
 interface RuntimeHostOptions {
   readonly maxTurns?: number;
   readonly beforeFirstModelCall?: () => Promise<void>;
+  readonly activity?: ProviderActivity;
+  readonly failAtModelCall?: number;
+}
+
+interface ProviderActivity {
+  active: number;
+  maxActive: number;
+  calls: number;
 }
 
 realModelTest(
@@ -56,15 +63,17 @@ realModelTest(
     const beforePlanning = await workspaceHashes(sandbox.workDir);
     const providerSnapshots: ProviderSnapshot[] = [];
     const runtime = new AgentRuntime();
+    const initialQuery = "production request policy";
 
     const planned = await runtime.execute(
       {
         ...modelRequest(model),
         prompt: [
           `Read ${fixture.taskPath} first and investigate the requested behavior before planning.`,
-          `Use repo_map once with query=${JSON.stringify(fixture.targetSymbol)} and max_files=10.`,
-          `The target is deliberately outside that first bounded scan. When complete=false and the symbol is absent, do not claim it is missing: use grep with the exact pattern ${JSON.stringify(fixture.targetSymbol)} to locate it without exhausting the shared file budget.`,
-          "After locating the symbol, read its exact implementation file and ground the plan in that evidence.",
+          `Use repo_map once with query=${JSON.stringify(initialQuery)} and max_files=10.`,
+          "The production target is deliberately outside that first bounded scan. When complete=false, do not claim it is missing.",
+          "Read the deterministic acceptance script named in TASK.md, then follow and directly read every static import in the production call chain until you reach the implementation that returns the legacy value.",
+          "Ignore same-symbol archived decoys that are not reachable from that production entrypoint, and ground the plan in direct reads of the complete call chain.",
           "Submit exactly one implementation step that changes only the confirmed target and verifies the returned canary by rereading it.",
           "Do not modify any file before approval. Finish by calling submit_plan exactly once.",
         ].join("\n"),
@@ -87,27 +96,22 @@ realModelTest(
 
     const repoMapCalls = toolCalls(planningEvents, "repo_map");
     const exactRepoMapCall = repoMapCalls.find(
-      (call) => parseArguments(call)["query"] === fixture.targetSymbol,
+      (call) => parseArguments(call)["query"] === initialQuery,
     );
     assert.ok(exactRepoMapCall, "planning must issue the requested exact Repo Map query");
     assert.equal(parseArguments(exactRepoMapCall)["max_files"], 10);
     const firstRepoMapOutput = successfulToolOutput(planningEvents, exactRepoMapCall);
     assert.match(firstRepoMapOutput, /complete=false/u);
     assert.doesNotMatch(firstRepoMapOutput, new RegExp(escapeRegExp(fixture.targetPath), "u"));
-    const exactGrepCall = toolCalls(planningEvents, "grep").find(
-      (call) => parseArguments(call)["pattern"] === fixture.targetSymbol,
-    );
-    assert.ok(exactGrepCall, "an incomplete Repo Map batch must fall through to exact grep");
-    assert.match(
-      successfulToolOutput(planningEvents, exactGrepCall),
-      new RegExp(escapeRegExp(fixture.targetPath), "u"),
-    );
-
-    const targetRead = toolCalls(planningEvents, "read_file").find((call) =>
-      sameWorkspacePath(sandbox.workDir, parseArguments(call)["path"], fixture.targetPath),
-    );
-    assert.ok(targetRead, "planning must read the exact target after locating it");
-    assert.equal(successfulToolResult(planningEvents, targetRead).data.status, "succeeded");
+    for (const path of [
+      fixture.verificationPath,
+      fixture.entryPath,
+      fixture.servicePath,
+      fixture.routerPath,
+      fixture.targetPath,
+    ]) {
+      requireTargetRead(planningEvents, sandbox.workDir, path);
+    }
 
     const discoveryCompletedIndex = planningEvents.findIndex(
       (event) => event.kind === "discovery.completed",
@@ -129,7 +133,7 @@ realModelTest(
       JSON.stringify(planProposed.data.proposal),
       new RegExp(escapeRegExp(fixture.targetSymbol), "u"),
     );
-    for (const decoyPath of fixture.decoyPaths.slice(0, 10)) {
+    for (const decoyPath of fixture.sameSymbolDecoyPaths) {
       assert.doesNotMatch(
         JSON.stringify(planProposed.data.proposal),
         new RegExp(escapeRegExp(decoyPath), "u"),
@@ -192,7 +196,7 @@ realModelTest(
 );
 
 realModelTest(
-  "real deep discovery overlaps two read-only branches and settles one shared budget",
+  "real /explore deep runs production delegation concurrently under one shared budget",
   { timeout: TEST_TIMEOUT_MS },
   async (context) => {
     const model = await configuredUserDefaultRealModel();
@@ -200,188 +204,86 @@ realModelTest(
     context.after(() => cleanupSandbox(sandbox));
     const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir, { decoyCount: 480 });
     const before = await workspaceHashes(sandbox.workDir);
-    const controlSessionId = `${sandbox.sessionId}-deep-control`;
     const controlStore = runtimeEventStore(sandbox);
-    context.after(() => controlStore.close());
-    await controlStore.initializeSession({ sessionId: controlSessionId, workDir: sandbox.workDir });
-    const coordinator = discoveryCoordinator(controlStore, controlSessionId);
+    await controlStore.initializeSession({
+      sessionId: sandbox.sessionId,
+      workDir: sandbox.workDir,
+    });
+    const coordinator = discoveryCoordinator(controlStore, sandbox.sessionId);
     await coordinator.start({
       operationId: "deep-start",
       discoveryId: "deep-discovery",
-      objective: `并发定位 ${fixture.targetSymbol}`,
+      objective: "从可执行行为追踪生产策略实现，并排除未接入调用链的同名实现",
       depth: "deep",
     });
-    await Promise.all([
-      coordinator.startBranch({
-        operationId: "deep-branch-entry-start",
-        discoveryId: "deep-discovery",
-        branchId: "entry-branch",
-        ordinal: 0,
-        objective: "直接核验已筛选候选实现",
-        roots: [fixture.targetPath],
-        queries: [`read:${fixture.targetPath}`],
-        stoppingCondition: "读取候选文件并确认目标定义",
-        reserveToolCalls: 24,
-        reserveFiles: 40,
-      }),
-      coordinator.startBranch({
-        operationId: "deep-branch-symbol-start",
-        discoveryId: "deep-discovery",
-        branchId: "symbol-branch",
-        ordinal: 1,
-        objective: "独立按函数声明定位目标实现",
-        roots: ["z-target"],
-        queries: [`grep:export function ${fixture.targetSymbol}`],
-        stoppingCondition: "读取目标定义并形成直接证据",
-        reserveToolCalls: 24,
-        reserveFiles: 40,
-      }),
-    ]);
+    controlStore.close();
 
-    const barrier = new TwoPartyModelBarrier();
-    const [entryEvents, symbolEvents] = await Promise.all([
-      executeReadOnlyInvestigation({
-        sandbox,
-        model,
-        sessionId: `${sandbox.sessionId}-entry-branch`,
-        mode: "new",
-        beforeFirstModelCall: () => barrier.arrive(),
-        allowedTools: ["grep", "read_file"],
+    const activity: ProviderActivity = { active: 0, maxActive: 0, calls: 0 };
+    const snapshots: ProviderSnapshot[] = [];
+    await new AgentRuntime().execute(
+      {
+        ...modelRequest(model),
         prompt: [
-          `Call read_file now with exactly ${JSON.stringify({ path: fixture.targetPath })}.`,
-          `Confirm that the file defines ${fixture.targetSymbol}.`,
-          "Do not answer until that exact read_file succeeds; use no other tool and make no modifications.",
+          `Read ${fixture.taskPath} and run a production-style /explore deep investigation without modifying files.`,
+          "Your first tool call must be exactly one delegate_task with completion_policy=required and three mode=explore, role=leaf tasks.",
+          'Use disjoint roots: task 1 roots=["scripts","apps"] for the runnable entry; task 2 roots=["src","z-target"] for the production service/router/implementation; task 3 roots=["a-decoys"] for unreachable same-symbol alternatives.',
+          "Give every task a concrete stopping_condition. Do not use worker, optional, detached, or nested delegation.",
+          "After all branches return, personally read the acceptance script and follow the production imports through every layer to the implementation that returns the legacy value.",
+          "Return the bounded Discovery report and stop. Do not implement the requested change.",
         ].join("\n"),
-      }),
-      executeReadOnlyInvestigation({
-        sandbox,
-        model,
-        sessionId: `${sandbox.sessionId}-symbol-branch`,
-        mode: "new",
-        beforeFirstModelCall: () => barrier.arrive(),
-        allowedTools: ["grep", "read_file"],
-        prompt: [
-          `Call grep exactly once with ${JSON.stringify({ pattern: `export function ${fixture.targetSymbol}`, path: "z-target" })}.`,
-          "Then call read_file on the exact implementation path returned by grep.",
-          "Do not answer until read_file succeeds; use no more than three tool calls and make no modifications.",
-        ].join("\n"),
-      }),
-    ]);
-
-    assertMainModelSucceeded(entryEvents);
-    assertMainModelSucceeded(symbolEvents);
-    const symbolGrep = toolCalls(symbolEvents, "grep")[0];
-    assert.ok(symbolGrep, "symbol branch must execute its scoped declaration query");
-    assert.equal(parseArguments(symbolGrep)["path"], "z-target");
-    assert.equal(parseArguments(symbolGrep)["pattern"], `export function ${fixture.targetSymbol}`);
-    const entryTargetRead = requireTargetRead(entryEvents, sandbox.workDir, fixture.targetPath);
-    const symbolTargetRead = requireTargetRead(symbolEvents, sandbox.workDir, fixture.targetPath);
-    const entryEvidence = evidenceRef(entryTargetRead, "entry-branch");
-    const symbolEvidence = evidenceRef(symbolTargetRead, "symbol-branch");
-    const entryUsage = successfulResearchToolCount(entryEvents);
-    const symbolUsage = successfulResearchToolCount(symbolEvents);
-    const entryFiles = inspectedReadPaths(entryEvents, sandbox.workDir);
-    const symbolFiles = inspectedReadPaths(symbolEvents, sandbox.workDir);
-    assert.ok(entryUsage <= 24 && symbolUsage <= 24);
-    assert.ok(entryFiles.includes(fixture.targetPath));
-    assert.ok(symbolFiles.includes(fixture.targetPath));
-    assertIntervalsOverlap(modelCallInterval(entryEvents), modelCallInterval(symbolEvents));
-
-    const confirmedTarget = {
-      path: fixture.targetPath,
-      symbol: fixture.targetSymbol,
-      score: 1,
-      reasons: ["两个独立真实模型分支均直接读取目标定义"],
-      evidenceRefs: [entryEvidence, symbolEvidence],
-    } as const;
-    await Promise.all([
-      coordinator.checkpointBranch({
-        operationId: "deep-branch-entry-checkpoint",
-        discoveryId: "deep-discovery",
-        branchId: "entry-branch",
-        checkpoint: discoveryCheckpoint({
-          toolCallsUsed: entryUsage,
-          inspectedFiles: entryFiles,
-          candidates: [confirmedTarget],
-          evidenceRefs: [entryEvidence],
-        }),
-      }),
-      coordinator.checkpointBranch({
-        operationId: "deep-branch-symbol-checkpoint",
-        discoveryId: "deep-discovery",
-        branchId: "symbol-branch",
-        checkpoint: discoveryCheckpoint({
-          toolCallsUsed: symbolUsage,
-          inspectedFiles: symbolFiles,
-          candidates: [confirmedTarget],
-          evidenceRefs: [symbolEvidence],
-        }),
-      }),
-    ]);
-    await Promise.all([
-      coordinator.completeBranch({
-        operationId: "deep-branch-entry-complete",
-        discoveryId: "deep-discovery",
-        branchId: "entry-branch",
-        status: "completed",
-        consumedToolCalls: entryUsage,
-        inspectedFiles: entryFiles,
-        candidates: [confirmedTarget],
-        evidenceRefs: [entryEvidence],
-      }),
-      coordinator.completeBranch({
-        operationId: "deep-branch-symbol-complete",
-        discoveryId: "deep-discovery",
-        branchId: "symbol-branch",
-        status: "completed",
-        consumedToolCalls: symbolUsage,
-        inspectedFiles: symbolFiles,
-        candidates: [confirmedTarget],
-        evidenceRefs: [symbolEvidence],
-      }),
-    ]);
-    await coordinator.checkpoint({
-      operationId: "deep-verify",
-      discoveryId: "deep-discovery",
-      checkpoint: discoveryCheckpoint({
-        phase: "verify",
-        inspectedFiles: unique([...entryFiles, ...symbolFiles]),
-        candidates: [confirmedTarget],
-        evidenceRefs: [entryEvidence, symbolEvidence],
-      }),
-    });
-    const completed = await coordinator.complete({
-      operationId: "deep-complete",
-      discoveryId: "deep-discovery",
-      report: {
-        summary: `两个分支确认 ${fixture.targetPath}`,
-        confirmedTargets: [confirmedTarget],
-        evidenceRefs: [entryEvidence, symbolEvidence],
-        remainingRisks: [],
+        dir: sandbox.workDir,
+        sessionSelection: { mode: "new", sessionId: sandbox.sessionId },
+        interactionMode: "yolo",
+        discoveryRun: true,
+        allowedTools: [
+          "delegate_task",
+          "read_file",
+          "read_evidence",
+          "repo_map",
+          "glob",
+          "grep",
+          "code_symbols",
+          "code_definition",
+          "code_references",
+          "code_call_hierarchy",
+        ],
       },
-    });
+      runtimeHost(sandbox, model, snapshots, { maxTurns: 12, activity }),
+    );
 
-    const discovery = completed.latest;
+    const completed = await readRuntimeState(sandbox);
+    const discovery = completed.discovery.latest;
     assert.equal(discovery?.status, "completed");
     assert.equal(discovery?.depth, "deep");
-    assert.equal(discovery?.branches.length, 2);
-    assert.deepEqual(
-      discovery?.branches.map((branch) => branch.status),
-      ["completed", "completed"],
-    );
-    assert.equal(discovery?.budget.consumedToolCalls, entryUsage + symbolUsage);
-    assert.equal(discovery?.budget.consumedFiles, unique([...entryFiles, ...symbolFiles]).length);
+    assert.equal(discovery?.branches.length, 3);
+    assert.ok(discovery?.branches.every((branch) => branch.status !== "running"));
     assert.ok((discovery?.budget.consumedToolCalls ?? 49) <= 48);
     assert.ok((discovery?.budget.consumedFiles ?? 81) <= 80);
+    assert.ok(
+      activity.maxActive >= 2,
+      `expected concurrent provider calls: ${stableJson(activity)}`,
+    );
+    assert.equal(toolCalls(completed.events, "delegate_task").length, 1);
+    requireTargetRead(completed.events, sandbox.workDir, fixture.targetPath);
+    assert.ok(
+      discovery?.report?.confirmedTargets.some(
+        (candidate) => candidate.path === fixture.targetPath,
+      ),
+    );
+    for (const decoyPath of fixture.sameSymbolDecoyPaths) {
+      assert.equal(
+        discovery?.report?.confirmedTargets.some((candidate) => candidate.path === decoyPath),
+        false,
+      );
+    }
     assert.deepEqual(await workspaceHashes(sandbox.workDir), before);
-    const controlEvents = await controlStore.readSession(controlSessionId);
     assert.equal(
-      controlEvents.filter((event) => event.kind === "discovery.branch.started").length,
-      2,
+      completed.events.filter((event) => event.kind === "discovery.branch.started").length,
+      3,
     );
     assert.equal(
-      controlEvents.filter((event) => event.kind === "discovery.branch.completed").length,
-      2,
+      completed.events.filter((event) => event.kind === "discovery.branch.completed").length,
+      3,
     );
   },
 );
@@ -395,95 +297,62 @@ realModelTest(
     context.after(() => cleanupSandbox(sandbox));
     const fixture = await createDiscoveryLargeRepoFixture(sandbox.workDir, { decoyCount: 480 });
     const before = await workspaceHashes(sandbox.workDir);
-    const controlSessionId = `${sandbox.sessionId}-resume-control`;
-    const agentSessionId = `${sandbox.sessionId}-resume-agent`;
     let controlStore = runtimeEventStore(sandbox);
-    context.after(() => controlStore.close());
-    await controlStore.initializeSession({ sessionId: controlSessionId, workDir: sandbox.workDir });
-    let coordinator = discoveryCoordinator(controlStore, controlSessionId);
+    await controlStore.initializeSession({
+      sessionId: sandbox.sessionId,
+      workDir: sandbox.workDir,
+    });
+    let coordinator = discoveryCoordinator(controlStore, sandbox.sessionId);
     await coordinator.start({
       operationId: "resume-start",
       discoveryId: "resume-discovery",
-      objective: `定位并恢复 ${fixture.targetSymbol} 的调查`,
-      depth: "balanced",
+      objective: "恢复生产策略行为的只读调查",
+      depth: "quick",
     });
-    await coordinator.startBranch({
-      operationId: "resume-first-branch-start",
-      discoveryId: "resume-discovery",
-      branchId: "before-restart",
-      ordinal: 0,
-      objective: "先宽泛扫描，再定位并读取目标",
-      queries: ["**/*.mjs", fixture.targetSymbol],
-      stoppingCondition: "形成可恢复的目标候选和直接证据",
-      reserveToolCalls: 12,
-      reserveFiles: 15,
-    });
-
-    const firstEvents = await executeReadOnlyInvestigation({
-      sandbox,
-      model,
-      sessionId: agentSessionId,
-      mode: "new",
-      allowedTools: ["glob", "grep", "read_file"],
-      prompt: [
-        'Call glob exactly once with arguments {"pattern":"**/*.mjs"} as the intentionally broad first query.',
-        `After glob, call grep for the exact symbol ${fixture.targetSymbol} with path="".`,
-        "Then call read_file on the exact implementation path returned by grep.",
-        "Do not answer until read_file succeeds; use no more than four tool calls and do not modify files.",
-      ].join("\n"),
-    });
-    assertMainModelSucceeded(firstEvents);
-    const firstBroadCalls = broadGlobCalls(firstEvents);
-    assert.equal(firstBroadCalls.length, 1, "the pre-restart run must establish one broad query");
-    const previousBroadSignatures = new Set(firstBroadCalls.map(toolCallSignature));
-    const firstTargetRead = requireTargetRead(firstEvents, sandbox.workDir, fixture.targetPath);
-    const firstEvidence = evidenceRef(firstTargetRead, "before-restart");
-    const firstUsage = successfulResearchToolCount(firstEvents);
-    const firstFiles = inspectedReadPaths(firstEvents, sandbox.workDir);
-    const candidate = {
-      path: fixture.targetPath,
-      symbol: fixture.targetSymbol,
-      score: 1,
-      reasons: ["重启前真实模型已直接读取定义"],
-      evidenceRefs: [firstEvidence],
-    } as const;
-    await coordinator.checkpointBranch({
-      operationId: "resume-first-branch-checkpoint",
-      discoveryId: "resume-discovery",
-      branchId: "before-restart",
-      checkpoint: discoveryCheckpoint({
-        toolCallsUsed: firstUsage,
-        inspectedFiles: firstFiles,
-        candidates: [candidate],
-        evidenceRefs: [firstEvidence],
-      }),
-    });
-    const focused = await coordinator.checkpoint({
-      operationId: "resume-focus-checkpoint",
-      discoveryId: "resume-discovery",
-      checkpoint: discoveryCheckpoint({
-        phase: "focus",
-        inspectedFiles: firstFiles,
-        candidates: [candidate],
-        evidenceRefs: [firstEvidence],
-      }),
-    });
-    const interrupted = await coordinator.interrupt({
-      operationId: "resume-interrupt",
-      expectedSessionSequence: focused.sessionSequence,
-      discoveryId: "resume-discovery",
-      reason: "simulate process restart after durable checkpoint",
-    });
-    assert.equal(interrupted.latest?.status, "interrupted");
-    const consumedBeforeRestart = interrupted.latest?.budget;
-
     controlStore.close();
-    const released = globalSessionManager.delete(agentSessionId, sandbox.workDir, {
+    const snapshots: ProviderSnapshot[] = [];
+    const interruptionActivity: ProviderActivity = { active: 0, maxActive: 0, calls: 0 };
+    await assert.rejects(
+      new AgentRuntime().execute(
+        {
+          ...modelRequest(model),
+          prompt: [
+            "Begin a production-style quick Discovery and establish a durable forage checkpoint.",
+            'Call glob exactly once with {"pattern":"**/*.mjs"}; independently grep for handleProductionRequest in the workspace.',
+            "Do not modify files. Continue after the tool results.",
+          ].join("\n"),
+          dir: sandbox.workDir,
+          sessionSelection: { mode: "new", sessionId: sandbox.sessionId },
+          interactionMode: "yolo",
+          discoveryRun: true,
+          allowedTools: ["glob", "grep"],
+        },
+        runtimeHost(sandbox, model, snapshots, {
+          maxTurns: 6,
+          activity: interruptionActivity,
+          failAtModelCall: 2,
+        }),
+      ),
+      /forced model interruption/u,
+    );
+
+    const interrupted = await readRuntimeState(sandbox);
+    assert.equal(interrupted.discovery.latest?.status, "interrupted");
+    assert.ok((interrupted.discovery.latest?.budget.consumedToolCalls ?? 0) > 0);
+    assert.ok((interrupted.discovery.latest?.evidenceRefs.length ?? 0) > 0);
+    const firstRunEvents = latestRunEvents(interrupted.events);
+    const previousBroadSignatures = new Set(
+      toolCalls(firstRunEvents).filter(isBroadSearchCall).map(broadSearchSignature),
+    );
+    assert.ok(previousBroadSignatures.size > 0, "pre-restart run must persist a broad search");
+    const consumedBeforeRestart = interrupted.discovery.latest?.budget;
+
+    const released = globalSessionManager.delete(sandbox.sessionId, sandbox.workDir, {
       picoHome: sandbox.picoHome,
     });
     await released?.close();
     controlStore = runtimeEventStore(sandbox);
-    coordinator = discoveryCoordinator(controlStore, controlSessionId);
+    coordinator = discoveryCoordinator(controlStore, sandbox.sessionId);
     const restored = await coordinator.project();
     assert.equal(restored.latest?.status, "interrupted");
     assert.deepEqual(restored.latest?.budget, consumedBeforeRestart);
@@ -491,128 +360,50 @@ realModelTest(
       operationId: "resume-after-restart",
       expectedSessionSequence: restored.sessionSequence,
       discoveryId: "resume-discovery",
-      depth: "balanced",
+      depth: "quick",
     });
     assert.equal(
       resumed.active?.budget.consumedToolCalls,
       consumedBeforeRestart?.consumedToolCalls,
     );
     assert.equal(resumed.active?.budget.consumedFiles, consumedBeforeRestart?.consumedFiles);
-    await coordinator.startBranch({
-      operationId: "resume-second-branch-start",
-      discoveryId: "resume-discovery",
-      branchId: "after-restart",
-      ordinal: 1,
-      objective: "从持久候选直接核验目标，不重跑宽泛扫描",
-      queries: [fixture.targetPath],
-      stoppingCondition: "直接读取持久候选并核验证据",
-      reserveToolCalls: 12,
-      reserveFiles: 15,
-    });
+    controlStore.close();
 
-    const allAgentEvents = await executeReadOnlyInvestigation({
-      sandbox,
-      model,
-      sessionId: agentSessionId,
-      mode: "resume",
-      allowedTools: ["glob", "read_file", "repo_map"],
-      prompt: [
-        "Resume from the durable Discovery checkpoint instead of restarting repository exploration.",
-        `The confirmed candidate is ${fixture.targetPath} and the symbol is ${fixture.targetSymbol}.`,
-        `Call read_file on ${fixture.targetPath} directly and verify the definition.`,
-        'Do not repeat the previous broad glob query {"pattern":"**/*.mjs"}.',
-        "Use no more than three tool calls, make no modifications, then stop.",
-      ].join("\n"),
-    });
-    const secondEvents = latestRunEvents(allAgentEvents);
+    await new AgentRuntime().execute(
+      {
+        ...modelRequest(model),
+        prompt: [
+          "Resume the interrupted Discovery from its durable checkpoint and prior tool evidence.",
+          `Read ${fixture.taskPath}, then use focused reads or scoped searches to follow the acceptance script and production imports to the real implementation.`,
+          "Do not repeat any equivalent whole-repository Glob, Grep, or Repo Map search already present in the transcript.",
+          "Directly read the final production implementation, return the bounded report, make no modifications, and stop.",
+        ].join("\n"),
+        dir: sandbox.workDir,
+        sessionSelection: { mode: "resume", sessionId: sandbox.sessionId },
+        interactionMode: "yolo",
+        discoveryRun: true,
+        allowedTools: ["glob", "grep", "repo_map", "read_file", "read_evidence"],
+      },
+      runtimeHost(sandbox, model, snapshots, { maxTurns: 10 }),
+    );
+    const finalState = await readRuntimeState(sandbox);
+    const secondEvents = latestRunEvents(finalState.events);
     assertMainModelSucceeded(secondEvents);
     assert.equal(
-      broadGlobCalls(secondEvents).some((call) =>
-        previousBroadSignatures.has(toolCallSignature(call)),
-      ),
+      toolCalls(secondEvents)
+        .filter(isBroadSearchCall)
+        .some((call) => previousBroadSignatures.has(broadSearchSignature(call))),
       false,
     );
-    const secondTargetRead = requireTargetRead(secondEvents, sandbox.workDir, fixture.targetPath);
-    const secondEvidence = evidenceRef(secondTargetRead, "after-restart");
-    const secondUsage = successfulResearchToolCount(secondEvents);
-    const secondFiles = inspectedReadPaths(secondEvents, sandbox.workDir);
-    await coordinator.checkpointBranch({
-      operationId: "resume-second-branch-checkpoint",
-      discoveryId: "resume-discovery",
-      branchId: "after-restart",
-      checkpoint: discoveryCheckpoint({
-        phase: "focus",
-        toolCallsUsed: secondUsage,
-        inspectedFiles: secondFiles,
-        candidates: [candidate],
-        evidenceRefs: [secondEvidence],
-      }),
-    });
-    await coordinator.completeBranch({
-      operationId: "resume-second-branch-complete",
-      discoveryId: "resume-discovery",
-      branchId: "after-restart",
-      status: "completed",
-      consumedToolCalls: secondUsage,
-      inspectedFiles: secondFiles,
-      candidates: [candidate],
-      evidenceRefs: [secondEvidence],
-    });
-    await coordinator.checkpoint({
-      operationId: "resume-verify",
-      discoveryId: "resume-discovery",
-      checkpoint: discoveryCheckpoint({
-        phase: "verify",
-        inspectedFiles: unique([...firstFiles, ...secondFiles]),
-        candidates: [candidate],
-        evidenceRefs: [firstEvidence, secondEvidence],
-      }),
-    });
-    const completed = await coordinator.complete({
-      operationId: "resume-complete",
-      discoveryId: "resume-discovery",
-      report: {
-        summary: "重启后从持久候选直接完成核验",
-        confirmedTargets: [candidate],
-        evidenceRefs: [firstEvidence, secondEvidence],
-        remainingRisks: [],
-      },
-    });
-    assert.equal(completed.latest?.status, "completed");
+    requireTargetRead(secondEvents, sandbox.workDir, fixture.targetPath);
+    assert.equal(finalState.discovery.latest?.status, "completed");
     assert.ok(
-      (completed.latest?.budget.consumedToolCalls ?? 0) >=
+      (finalState.discovery.latest?.budget.consumedToolCalls ?? 0) >=
         (consumedBeforeRestart?.consumedToolCalls ?? 0),
     );
     assert.deepEqual(await workspaceHashes(sandbox.workDir), before);
   },
 );
-
-async function executeReadOnlyInvestigation(input: {
-  readonly sandbox: TestSandbox;
-  readonly model: RealModel;
-  readonly sessionId: string;
-  readonly mode: "new" | "resume";
-  readonly prompt: string;
-  readonly allowedTools?: readonly string[];
-  readonly beforeFirstModelCall?: () => Promise<void>;
-}): Promise<RuntimeEvent[]> {
-  const snapshots: ProviderSnapshot[] = [];
-  await new AgentRuntime().execute(
-    {
-      ...modelRequest(input.model),
-      prompt: input.prompt,
-      dir: input.sandbox.workDir,
-      sessionSelection: { mode: input.mode, sessionId: input.sessionId },
-      interactionMode: "yolo",
-      allowedTools: [...(input.allowedTools ?? ["read_file", "read_evidence", "repo_map"])],
-    },
-    runtimeHost(input.sandbox, input.model, snapshots, {
-      maxTurns: 8,
-      ...(input.beforeFirstModelCall ? { beforeFirstModelCall: input.beforeFirstModelCall } : {}),
-    }),
-  );
-  return await readSessionEvents(input.sandbox, input.sessionId);
-}
 
 function runtimeEventStore(sandbox: TestSandbox): RuntimeEventStore {
   return new RuntimeEventStore({
@@ -629,40 +420,6 @@ function discoveryCoordinator(store: RuntimeEventStore, sessionId: string): Disc
   });
 }
 
-function discoveryCheckpoint(overrides: Partial<DiscoveryCheckpoint> = {}): DiscoveryCheckpoint {
-  return {
-    phase: "forage",
-    cycle: 1,
-    candidates: [],
-    evidenceRefs: [],
-    hypotheses: [],
-    openQuestions: [],
-    toolCallsUsed: 0,
-    inspectedFiles: [],
-    ...overrides,
-  };
-}
-
-function successfulResearchToolCount(events: readonly RuntimeEvent[]): number {
-  const researchTools = new Set(["read_file", "read_evidence", "glob", "grep", "repo_map"]);
-  return events.filter(
-    (event) =>
-      event.kind === "tool.result.recorded" &&
-      event.data.status === "succeeded" &&
-      researchTools.has(event.data.toolName),
-  ).length;
-}
-
-function inspectedReadPaths(events: readonly RuntimeEvent[], workDir: string): string[] {
-  const paths: string[] = [];
-  for (const call of toolCalls(events, "read_file")) {
-    const path = parseArguments(call)["path"];
-    if (typeof path !== "string" || !path) continue;
-    paths.push(relative(workDir, resolve(workDir, path)).replaceAll("\\", "/"));
-  }
-  return unique(paths);
-}
-
 function requireTargetRead(
   events: readonly RuntimeEvent[],
   workDir: string,
@@ -671,29 +428,36 @@ function requireTargetRead(
   const call = toolCalls(events, "read_file").find((candidate) =>
     sameWorkspacePath(workDir, parseArguments(candidate)["path"], targetPath),
   );
-  assert.ok(
-    call,
-    `missing direct read of ${targetPath}; calls=${JSON.stringify(
-      events.filter((event) => event.kind === "tool.started").map((event) => event.data.toolName),
-    )}`,
-  );
+  assert.ok(call, `missing direct read of ${targetPath}; tools=${boundedToolDiagnostics(events)}`);
   assert.equal(successfulToolResult(events, call).data.status, "succeeded");
   return call;
 }
 
-function evidenceRef(call: ToolCall, scope: string): string {
-  return `runtime-tool-call:${scope}:${call.id}`;
+function isBroadSearchCall(call: ToolCall): boolean {
+  const input = parseArguments(call);
+  const path = typeof input["path"] === "string" ? input["path"].replace(/^\.\//u, "") : "";
+  if (path !== "" && path !== ".") return false;
+  if (call.name === "glob") {
+    const pattern = String(input["pattern"] ?? "").replace(/^\.\//u, "");
+    return pattern.startsWith("**/") || pattern === "**" || pattern === "*";
+  }
+  if (call.name === "repo_map") {
+    const query = String(input["query"] ?? "").trim();
+    return query.length === 0 || /repository|workspace|all files|全仓|全部/u.test(query);
+  }
+  return false;
 }
 
-function broadGlobCalls(events: readonly RuntimeEvent[]): ToolCall[] {
-  return toolCalls(events, "glob").filter((call) => {
-    const input = parseArguments(call);
-    return input["pattern"] === "**/*.mjs";
-  });
-}
-
-function toolCallSignature(call: ToolCall): string {
-  return `${call.name}:${stableJson(parseArguments(call))}`;
+function broadSearchSignature(call: ToolCall): string {
+  const input = parseArguments(call);
+  const normalized = {
+    ...input,
+    path: typeof input["path"] === "string" ? input["path"].replace(/^\.\//u, "") || "." : ".",
+    ...(call.name === "glob" && typeof input["pattern"] === "string"
+      ? { pattern: input["pattern"].replace(/^\.\//u, "") }
+      : {}),
+  };
+  return `${call.name}:${stableJson(normalized)}`;
 }
 
 function stableJson(value: unknown): string {
@@ -713,73 +477,11 @@ function latestRunEvents(events: readonly RuntimeEvent[]): RuntimeEvent[] {
   return events.filter((event) => event.runId === runId);
 }
 
-function modelCallInterval(events: readonly RuntimeEvent[]): {
-  readonly startedAt: number;
-  readonly settledAt: number;
-} {
-  const starts = events
-    .filter((event) => event.kind === "model.call.started" && event.data.purpose === "main")
-    .map((event) => Date.parse(event.at));
-  const settlements = events
-    .filter((event) => event.kind === "model.call.settled")
-    .map((event) => Date.parse(event.at));
-  assert.ok(starts.length > 0 && settlements.length > 0);
-  return { startedAt: Math.min(...starts), settledAt: Math.max(...settlements) };
-}
-
-function assertIntervalsOverlap(
-  left: { readonly startedAt: number; readonly settledAt: number },
-  right: { readonly startedAt: number; readonly settledAt: number },
-): void {
-  assert.ok(
-    Math.max(left.startedAt, right.startedAt) <= Math.min(left.settledAt, right.settledAt),
-    `expected overlapping model intervals: ${JSON.stringify({ left, right })}`,
-  );
-}
-
-class TwoPartyModelBarrier {
-  private arrivals = 0;
-  private release!: () => void;
-  private readonly gate = new Promise<void>((resolveGate) => {
-    this.release = resolveGate;
-  });
-
-  async arrive(): Promise<void> {
-    this.arrivals++;
-    if (this.arrivals === 2) this.release();
-    await withTimeout(this.gate, 30_000, "parallel model branches did not reach the barrier");
-  }
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function unique<T>(values: readonly T[]): T[] {
-  return [...new Set(values)];
-}
-
 function modelRequest(
   model: RealModel,
 ): Pick<
   RunAgentCliOptions,
-  | "provider"
-  | "baseURL"
-  | "apiKey"
-  | "model"
-  | "modelRouteId"
-  | "modelCapabilities"
-  | "thinkingEffort"
+  "provider" | "baseURL" | "apiKey" | "model" | "modelRouteId" | "modelCapabilities"
 > {
   return {
     provider: model.provider,
@@ -788,7 +490,6 @@ function modelRequest(
     model: model.config.model,
     modelRouteId: model.route.id,
     modelCapabilities: model.route.capabilities,
-    ...(supportsThinkingOff(model.route) ? { thinkingEffort: "off" } : {}),
   };
 }
 
@@ -803,7 +504,12 @@ function runtimeHost(
     env: process.env,
     modelRouter: model.runtime.router,
     reporter: new SilentReporter(),
-    providerDecorator: captureProviderSnapshots(snapshots, options.beforeFirstModelCall),
+    providerDecorator: captureProviderSnapshots(
+      snapshots,
+      options.beforeFirstModelCall,
+      options.activity,
+      options.failAtModelCall,
+    ),
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
   };
 }
@@ -811,9 +517,12 @@ function runtimeHost(
 function captureProviderSnapshots(
   sink: ProviderSnapshot[],
   beforeFirstModelCall?: () => Promise<void>,
+  activity?: ProviderActivity,
+  failAtModelCall?: number,
 ): NonNullable<RunAgentCliDependencies["providerDecorator"]> {
   return (provider) => {
     let firstModelCall = true;
+    let localCalls = 0;
     const beforeGenerate = async (): Promise<void> => {
       if (!firstModelCall) return;
       firstModelCall = false;
@@ -828,6 +537,22 @@ function captureProviderSnapshots(
         tools: tools.map((tool) => tool.name),
       });
     };
+    const beforeProviderCall = async (): Promise<void> => {
+      await beforeGenerate();
+      localCalls++;
+      if (activity) activity.calls++;
+      const callNumber = activity?.calls ?? localCalls;
+      if (failAtModelCall === callNumber) {
+        throw new Error(`forced model interruption at call ${String(callNumber)}`);
+      }
+      if (activity) {
+        activity.active++;
+        activity.maxActive = Math.max(activity.maxActive, activity.active);
+      }
+    };
+    const afterProviderCall = (): void => {
+      if (activity) activity.active--;
+    };
     const wrapped: LLMProvider = {
       ...(provider.modelName ? { modelName: provider.modelName } : {}),
       get requestCapabilities() {
@@ -835,26 +560,29 @@ function captureProviderSnapshots(
       },
       generate: async (messages, tools, options) => {
         capture(messages, tools);
-        await beforeGenerate();
-        return await provider.generate(messages, tools, options);
+        await beforeProviderCall();
+        try {
+          return await provider.generate(messages, tools, options);
+        } finally {
+          afterProviderCall();
+        }
       },
       ...(provider.generateStream
         ? {
             generateStream: async (messages, tools, onDelta, options) => {
               capture(messages, tools);
-              await beforeGenerate();
-              return await provider.generateStream!(messages, tools, onDelta, options);
+              await beforeProviderCall();
+              try {
+                return await provider.generateStream!(messages, tools, onDelta, options);
+              } finally {
+                afterProviderCall();
+              }
             },
           }
         : {}),
     };
     return wrapped;
   };
-}
-
-function supportsThinkingOff(route: ModelRoute): boolean {
-  const profile = route.capabilities.reasoningProfile;
-  return profile.enabled === true && profile.levels.includes("off");
 }
 
 function isPlanSystemPrompt(value: string): boolean {
@@ -896,24 +624,35 @@ async function readRuntimeState(
   }
 }
 
-async function readSessionEvents(sandbox: TestSandbox, sessionId: string): Promise<RuntimeEvent[]> {
-  const store = runtimeEventStore(sandbox);
-  try {
-    return await store.readSession(sessionId);
-  } finally {
-    store.close();
-  }
-}
-
-function toolCalls(events: readonly RuntimeEvent[], name: string): ToolCall[] {
+function toolCalls(events: readonly RuntimeEvent[], name?: string): ToolCall[] {
   const calls: ToolCall[] = [];
   for (const event of events) {
     if (event.kind !== "message.committed") continue;
     for (const call of event.data.message.toolCalls ?? []) {
-      if (call.name === name) calls.push(call);
+      if (name === undefined || call.name === name) calls.push(call);
     }
   }
   return calls;
+}
+
+function boundedToolDiagnostics(events: readonly RuntimeEvent[]): string {
+  const diagnostics = toolCalls(events)
+    .slice(-12)
+    .map((call) => {
+      const result = events.find(
+        (event) => event.kind === "tool.result.recorded" && event.refs.toolCallId === call.id,
+      );
+      return {
+        name: call.name,
+        arguments: parseArguments(call),
+        status: result?.kind === "tool.result.recorded" ? result.data.status : "missing",
+        projection:
+          result?.kind === "tool.result.recorded"
+            ? result.data.projection.text.slice(0, 240)
+            : undefined,
+      };
+    });
+  return JSON.stringify(diagnostics).slice(0, 4_000);
 }
 
 function successfulToolResult(events: readonly RuntimeEvent[], call: ToolCall) {

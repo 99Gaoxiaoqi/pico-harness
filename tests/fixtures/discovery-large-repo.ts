@@ -10,16 +10,22 @@ export interface DiscoveryLargeRepoFixtureOptions {
 
 export interface DiscoveryLargeRepoFixture {
   readonly taskPath: string;
+  readonly entryPath: string;
+  readonly servicePath: string;
+  readonly routerPath: string;
+  readonly verificationPath: string;
   readonly targetPath: string;
   readonly targetSymbol: string;
   readonly expectedCanary: string;
   readonly sourcePaths: readonly string[];
   readonly decoyPaths: readonly string[];
+  readonly sameSymbolDecoyPaths: readonly string[];
 }
 
 /**
- * Builds a deterministic large-repository shape with one randomized target after Repo Map's
- * default 200-file scan batch. The task names the symbol and behavior but never reveals its path.
+ * Builds a deterministic large-repository shape with one randomized production target after Repo
+ * Map's default 200-file scan batch. The task exposes only an observable behavior and verification
+ * command; locating the target requires following a four-file call chain past same-symbol decoys.
  */
 export async function createDiscoveryLargeRepoFixture(
   workDir: string,
@@ -40,14 +46,19 @@ export async function createDiscoveryLargeRepoFixture(
   const decoyPaths = Array.from({ length: decoyCount }, (_, index) =>
     join(decoyDirectory, `module-${String(index).padStart(4, "0")}.mjs`),
   );
+  const sameSymbolDecoyPaths = decoyPaths.slice(0, 3);
   for (let offset = 0; offset < decoyPaths.length; offset += 25) {
     await Promise.all(
       decoyPaths.slice(offset, offset + 25).map((path, batchIndex) => {
         const ordinal = offset + batchIndex;
+        const exportedSymbol =
+          ordinal < sameSymbolDecoyPaths.length
+            ? targetSymbol
+            : `decoyPolicy_${String(ordinal).padStart(4, "0")}`;
         return writeFile(
           path,
           [
-            `export function decoyPolicy_${String(ordinal).padStart(4, "0")}() {`,
+            `export function ${exportedSymbol}() {`,
             `  return ${JSON.stringify(`DECOY_${ordinal}`)};`,
             "}",
             "",
@@ -64,13 +75,69 @@ export async function createDiscoveryLargeRepoFixture(
     [`export function ${targetSymbol}() {`, '  return "LEGACY_POLICY";', "}", ""].join("\n"),
     "utf8",
   );
+
+  const entryAbsolutePath = join(workDir, "apps", "api", "policy-entry.mjs");
+  const serviceAbsolutePath = join(workDir, "src", "services", "policy-service.mjs");
+  const routerAbsolutePath = join(workDir, "src", "domain", "policy-router.mjs");
+  const verificationAbsolutePath = join(workDir, "scripts", "verify-production-policy.mjs");
+  await mkdir(join(workDir, "apps", "api"), { recursive: true });
+  await mkdir(join(workDir, "src", "services"), { recursive: true });
+  await mkdir(join(workDir, "src", "domain"), { recursive: true });
+  await mkdir(join(workDir, "scripts"), { recursive: true });
+  await writeFile(
+    entryAbsolutePath,
+    [
+      'import { resolveRequestPolicy } from "../../src/services/policy-service.mjs";',
+      "export function handleProductionRequest(request = {}) {",
+      "  return resolveRequestPolicy(request);",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    serviceAbsolutePath,
+    [
+      'import { selectRuntimePolicy } from "../domain/policy-router.mjs";',
+      "export function resolveRequestPolicy(request) {",
+      '  return selectRuntimePolicy({ channel: request.channel ?? "production" });',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    routerAbsolutePath,
+    [
+      `import { ${targetSymbol} } from "../../z-target/policy-${nonce}.mjs";`,
+      "export function selectRuntimePolicy(context) {",
+      `  return ${targetSymbol}(context);`,
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    verificationAbsolutePath,
+    [
+      'import { handleProductionRequest } from "../apps/api/policy-entry.mjs";',
+      'const actual = handleProductionRequest({ channel: "production" });',
+      `if (actual !== ${JSON.stringify(expectedCanary)}) {`,
+      "  throw new Error(`expected production policy canary, received ${actual}`);",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
   const taskAbsolutePath = join(workDir, "TASK.md");
   await writeFile(
     taskAbsolutePath,
     [
-      "A production request resolves to the legacy policy value.",
-      `Locate the implementation of symbol ${targetSymbol} in this repository.`,
-      `After approval, change that function to return exactly ${expectedCanary}.`,
+      "A production API request currently resolves to the legacy policy value.",
+      "Trace the production request path from its runnable entrypoint to the implementation that actually supplies that value.",
+      "The repository contains archived and test-like policy implementations that are not on the production call path.",
+      `After approval, make the production behavior return exactly ${expectedCanary}.`,
+      "The deterministic acceptance command is: node scripts/verify-production-policy.mjs",
       "Do not alter unrelated modules.",
       "",
     ].join("\n"),
@@ -79,12 +146,28 @@ export async function createDiscoveryLargeRepoFixture(
 
   const relativePath = (path: string): string => relative(workDir, path).replaceAll("\\", "/");
   const targetPath = relativePath(targetAbsolutePath);
+  const entryPath = relativePath(entryAbsolutePath);
+  const servicePath = relativePath(serviceAbsolutePath);
+  const routerPath = relativePath(routerAbsolutePath);
+  const verificationPath = relativePath(verificationAbsolutePath);
   return {
     taskPath: relativePath(taskAbsolutePath),
+    entryPath,
+    servicePath,
+    routerPath,
+    verificationPath,
     targetPath,
     targetSymbol,
     expectedCanary,
-    sourcePaths: [...decoyPaths.map(relativePath), targetPath],
+    sourcePaths: [
+      ...decoyPaths.map(relativePath),
+      entryPath,
+      servicePath,
+      routerPath,
+      targetPath,
+      verificationPath,
+    ],
     decoyPaths: decoyPaths.map(relativePath),
+    sameSymbolDecoyPaths: sameSymbolDecoyPaths.map(relativePath),
   };
 }
