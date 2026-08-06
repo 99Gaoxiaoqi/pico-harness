@@ -34,6 +34,7 @@ import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { ReadEvidenceTool } from "./evidence-read.js";
 import { createDiscoveryTools, type DiscoveryCoordinatorFactory } from "./discovery.js";
+import { ExploreRepoTool } from "./explore-repo.js";
 
 export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -184,6 +185,7 @@ export function buildDefaultToolRegistry(
     for (const tool of createCodeIntelligenceTools(workDir, codeIntelligence)) {
       registry.register(tool);
     }
+    registry.register(new ExploreRepoTool(workDir, codeIntelligence));
   }
   // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
   // search_tools 持有 registry 的实时定义数据源,execute 时才筛选扩展工具。
