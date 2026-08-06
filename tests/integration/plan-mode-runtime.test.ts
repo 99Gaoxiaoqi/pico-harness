@@ -684,8 +684,11 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
   const handoff = result.handoff;
   assert.ok(handoff);
   const executionProvider: LLMProvider = {
-    async generate() {
+    async generate(messages) {
       assert.doesNotMatch(manager.status().reason, /运行时策略禁用/u);
+      const prompt = messages.map((message) => message.content).join("\n");
+      assert.match(prompt, /先调用 update_plan 将它标记为 in_progress/u);
+      assert.match(prompt, /直到 update_plan 返回 execution 已 completed/u);
       return { role: "assistant", content: "execution paused" };
     },
   };

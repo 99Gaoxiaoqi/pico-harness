@@ -647,7 +647,8 @@ function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
     proposal.risks?.length
       ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
       : undefined,
-    "每完成或跳过一步，必须调用 update_plan 持久化步骤状态；需要停止执行时调用 cancel_plan。",
+    "开始执行某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
+    "只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
   ]
     .filter((part): part is string => part !== undefined)
     .join("\n\n");
@@ -662,7 +663,8 @@ function resumedPlanExecutionPrompt(projection: PlanProjection): string {
     ...execution.steps.map(
       (step) => `- [${step.status}] ${step.id}: ${step.title}\n  ${step.description}`,
     ),
-    "每完成或跳过一步，必须调用 update_plan；需要停止时调用 cancel_plan。",
+    "恢复某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
+    "只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
   ].join("\n\n");
 }
 
