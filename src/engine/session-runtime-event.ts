@@ -302,6 +302,8 @@ export interface RuntimeDiscoveryBranchCompletedEvent extends RuntimeDiscoveryEv
     readonly branchId: string;
     readonly status: Extract<DiscoveryBranchStatus, "completed" | "partial" | "failed">;
     readonly consumedToolCalls: number;
+    /** Conservative physical file usage; omitted by legacy writers that derive it from anchors. */
+    readonly consumedFiles?: number;
     readonly inspectedFiles: readonly string[];
     readonly candidates: readonly DiscoveryCandidate[];
     readonly evidenceRefs: readonly string[];

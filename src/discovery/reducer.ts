@@ -335,6 +335,9 @@ function completeBranch(
   if (
     data.consumedToolCalls < branch.consumedToolCalls ||
     data.consumedToolCalls > branch.reservedToolCalls ||
+    (data.consumedFiles !== undefined &&
+      (data.consumedFiles < branch.inspectedFiles.length ||
+        data.consumedFiles > branch.reservedFiles)) ||
     data.inspectedFiles.length > branch.reservedFiles ||
     branch.inspectedFiles.some((path) => !data.inspectedFiles.includes(path))
   ) {
@@ -342,7 +345,10 @@ function completeBranch(
   }
   const deltaToolCalls = data.consumedToolCalls - branch.consumedToolCalls;
   const inspectedFiles = unique([...run.inspectedFiles, ...data.inspectedFiles]);
-  const budget = consumeBudget(run, deltaToolCalls, inspectedFiles);
+  const budget =
+    data.consumedFiles === undefined
+      ? consumeBudget(run, deltaToolCalls, inspectedFiles)
+      : consumeBudgetCounts(run, deltaToolCalls, data.consumedFiles - branch.inspectedFiles.length);
   const branches = run.branches.map((candidate, candidateIndex) =>
     candidateIndex === index
       ? {
@@ -421,6 +427,15 @@ function cancelOpenBranches(run: DiscoveryRun, reason: string, at: string): Disc
 function consumeBudget(run: DiscoveryRun, toolCalls: number, inspectedFiles: readonly string[]) {
   const consumedToolCalls = run.budget.consumedToolCalls + toolCalls;
   const consumedFiles = inspectedFiles.length;
+  if (consumedToolCalls > run.budget.maxToolCalls || consumedFiles > run.budget.maxFiles) {
+    conflict("Discovery usage exceeds shared budget");
+  }
+  return { ...run.budget, consumedToolCalls, consumedFiles };
+}
+
+function consumeBudgetCounts(run: DiscoveryRun, toolCalls: number, files: number) {
+  const consumedToolCalls = run.budget.consumedToolCalls + toolCalls;
+  const consumedFiles = run.budget.consumedFiles + files;
   if (consumedToolCalls > run.budget.maxToolCalls || consumedFiles > run.budget.maxFiles) {
     conflict("Discovery usage exceeds shared budget");
   }

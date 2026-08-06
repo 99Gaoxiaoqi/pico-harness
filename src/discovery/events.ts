@@ -76,6 +76,9 @@ export function assertDiscoveryEventData(kind: DiscoveryEventKind, data: unknown
       throw new Error("Discovery branch terminal status is invalid");
     }
     assertNonNegativeInteger(data.consumedToolCalls, "consumedToolCalls");
+    if (data.consumedFiles !== undefined) {
+      assertNonNegativeInteger(data.consumedFiles, "consumedFiles");
+    }
     assertTextArray(data.inspectedFiles, "inspectedFiles", 80);
     assertCandidates(data.candidates);
     assertTextArray(data.evidenceRefs, "evidenceRefs", DISCOVERY_MAX_EVIDENCE_REFS);
