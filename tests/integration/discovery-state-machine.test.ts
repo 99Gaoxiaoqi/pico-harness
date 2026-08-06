@@ -221,6 +221,143 @@ test("Discovery Coordinator serializes concurrent branches and merges overlap wi
   );
 });
 
+test("Discovery resume replaces cancelled branch slots without reopening history", async (context) => {
+  const fixture = await createFixture("resume-branches");
+  context.after(() => fixture.dispose());
+  const coordinator = fixture.coordinator("resume-branch-session");
+  await coordinator.start({
+    operationId: "start-resume-branches",
+    discoveryId: "resume-branch-discovery",
+    objective: "恢复并发调查",
+    depth: "balanced",
+  });
+
+  for (const [ordinal, branchId] of ["old-a", "old-b"].entries()) {
+    await coordinator.startBranch({
+      operationId: `start-${branchId}`,
+      discoveryId: "resume-branch-discovery",
+      branchId,
+      ordinal,
+      objective: `旧调查分支 ${branchId}`,
+      roots: [`src/${branchId}`],
+      queries: ["routeRequest"],
+      stoppingCondition: "找到直接证据",
+      reserveToolCalls: 6,
+      reserveFiles: 8,
+    });
+  }
+  await coordinator.checkpointBranch({
+    operationId: "checkpoint-old-a",
+    discoveryId: "resume-branch-discovery",
+    branchId: "old-a",
+    checkpoint: checkpoint({
+      toolCallsUsed: 3,
+      inspectedFiles: ["src/old-a/entry.ts", "src/shared/target.ts"],
+      evidenceRefs: ["evidence:old-a"],
+    }),
+  });
+
+  const interrupted = await coordinator.interrupt({
+    operationId: "interrupt-resume-branches",
+    discoveryId: "resume-branch-discovery",
+    reason: "host restarted",
+  });
+  assert.deepEqual(
+    interrupted.latest?.branches.map(({ branchId, status }) => ({ branchId, status })),
+    [
+      { branchId: "old-a", status: "cancelled" },
+      { branchId: "old-b", status: "cancelled" },
+    ],
+  );
+
+  fixture.store.close();
+  fixture.reopenStore();
+  const reopened = fixture.coordinator("resume-branch-session");
+  const resumed = await reopened.resume({
+    operationId: "resume-with-deep-budget",
+    discoveryId: "resume-branch-discovery",
+    depth: "deep",
+  });
+  assert.equal(resumed.active?.budget.consumedToolCalls, 3);
+  assert.equal(resumed.active?.budget.consumedFiles, 2);
+  assert.equal(resumed.active?.budget.reservedToolCalls, 0);
+  assert.equal(resumed.active?.budget.reservedFiles, 0);
+
+  for (const [ordinal, branchId] of ["new-a", "new-b", "new-c"].entries()) {
+    await reopened.startBranch({
+      operationId: `start-${branchId}`,
+      discoveryId: "resume-branch-discovery",
+      branchId,
+      ordinal,
+      objective: `恢复调查分支 ${branchId}`,
+      roots: [`src/${branchId}`],
+      queries: ["routeRequest"],
+      stoppingCondition: "找到直接证据",
+      reserveToolCalls: 5,
+      reserveFiles: 8,
+    });
+  }
+
+  const restarted = await reopened.project();
+  assert.deepEqual(
+    restarted.active?.branches.map(({ branchId, ordinal, status }) => ({
+      branchId,
+      ordinal,
+      status,
+    })),
+    [
+      { branchId: "old-a", ordinal: 0, status: "cancelled" },
+      { branchId: "new-a", ordinal: 0, status: "running" },
+      { branchId: "old-b", ordinal: 1, status: "cancelled" },
+      { branchId: "new-b", ordinal: 1, status: "running" },
+      { branchId: "new-c", ordinal: 2, status: "running" },
+    ],
+  );
+  assert.equal(restarted.active?.budget.consumedToolCalls, 3);
+  assert.equal(restarted.active?.budget.consumedFiles, 2);
+  assert.equal(restarted.active?.budget.reservedToolCalls, 15);
+  assert.equal(restarted.active?.budget.reservedFiles, 24);
+
+  await assert.rejects(
+    reopened.startBranch({
+      operationId: "start-over-limit-after-resume",
+      discoveryId: "resume-branch-discovery",
+      branchId: "new-d",
+      ordinal: 3,
+      objective: "超过恢复后的并发分支上限",
+      stoppingCondition: "不应启动",
+      reserveToolCalls: 1,
+      reserveFiles: 1,
+    }),
+    /branch limit reached/u,
+  );
+  await assert.rejects(
+    reopened.checkpointBranch({
+      operationId: "reopen-old-a",
+      discoveryId: "resume-branch-discovery",
+      branchId: "old-a",
+      checkpoint: checkpoint({
+        toolCallsUsed: 4,
+        inspectedFiles: ["src/old-a/entry.ts", "src/shared/target.ts"],
+      }),
+    }),
+    /branch is not running/u,
+  );
+  await assert.rejects(
+    reopened.startBranch({
+      operationId: "reuse-old-branch-id",
+      discoveryId: "resume-branch-discovery",
+      branchId: "old-a",
+      ordinal: 3,
+      objective: "复用历史分支标识",
+      stoppingCondition: "不应启动",
+      reserveToolCalls: 1,
+      reserveFiles: 1,
+    }),
+    /branch id already exists/u,
+  );
+});
+
 test("Discovery preserves CAS, restart, rewind and resume semantics", async (context) => {
   const fixture = await createFixture("replay");
   context.after(() => fixture.dispose());
@@ -366,7 +503,13 @@ async function createFixture(label: string): Promise<Fixture> {
     }
     return originalCoordinator(sessionId);
   };
-  for (const sessionId of ["budget-session", "cycle-session", "branch-session", "replay-session"]) {
+  for (const sessionId of [
+    "budget-session",
+    "cycle-session",
+    "branch-session",
+    "resume-branch-session",
+    "replay-session",
+  ]) {
     await fixture.store.initializeSession({ sessionId, workDir });
     initialized.add(sessionId);
   }
