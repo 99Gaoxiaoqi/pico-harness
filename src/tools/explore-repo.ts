@@ -87,7 +87,8 @@ export class ExploreRepoTool implements BaseTool {
       name: this.name(),
       description:
         "一次性有界仓库侦察。扫描文件名+符号+内容，返回打分排序的候选文件、行级证据锚点和符号清单。" +
-        "适用于目标位置未知的探索；已知文件请直接 read_file。",
+        "适用于目标位置未知的探索；已知文件请直接 read_file。" +
+        "大型仓库（>500文件）建议先用 glob 查看目录结构，再用 roots 参数缩小扫描范围。",
       inputSchema: {
         type: "object",
         properties: {
