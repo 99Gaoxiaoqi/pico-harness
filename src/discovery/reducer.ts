@@ -240,10 +240,12 @@ function startBranch(
   if (run.branches.some((branch) => branch.branchId === data.branchId)) {
     conflict("Discovery branch id already exists");
   }
-  if (run.branches.length >= run.budget.maxBranches) {
+  if (run.branches.filter(occupiesBranchSlot).length >= run.budget.maxBranches) {
     conflict("Discovery branch limit reached");
   }
-  if (run.branches.some((branch) => branch.ordinal === data.ordinal)) {
+  if (
+    run.branches.some((branch) => occupiesBranchSlot(branch) && branch.ordinal === data.ordinal)
+  ) {
     conflict("Discovery branch ordinal already exists");
   }
   if (
@@ -543,6 +545,10 @@ function requireRunningBranch(branch: DiscoveryBranch): void {
 
 function isOpenBranch(branch: DiscoveryBranch): boolean {
   return branch.status === "queued" || branch.status === "running";
+}
+
+function occupiesBranchSlot(branch: DiscoveryBranch): boolean {
+  return branch.status !== "cancelled";
 }
 
 function unique(values: readonly string[]): string[] {
