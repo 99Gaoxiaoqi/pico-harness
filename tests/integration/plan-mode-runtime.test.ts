@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1036,6 +1036,288 @@ test("explicit balanced Discovery runs two Explore branches concurrently and rec
       (projection.latest?.budget.maxToolCalls ?? 0),
   );
   assert.equal(projection.latest?.status, "completed");
+});
+
+test("explicit Discovery reserves concurrent host search budgets before execution", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-discovery-host-budget-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "discovery-host-budget";
+  await mkdir(join(workDir, "src"), { recursive: true });
+  for (const prefix of ["a", "b"] as const) {
+    for (let index = 0; index < 20; index++) {
+      await writeFile(
+        join(workDir, "src", `${prefix}-${String(index).padStart(2, "0")}.ts`),
+        `export const value = ${index};\n`,
+        "utf8",
+      );
+    }
+  }
+  t.after(async () => {
+    globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      calls++;
+      if (calls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "parallel-empty-grep-a",
+              name: "grep",
+              arguments: JSON.stringify({
+                pattern: "missing-canary",
+                path: "src",
+                glob: "a-*.ts",
+                max_files: 20,
+              }),
+            },
+            {
+              id: "parallel-empty-grep-b",
+              name: "grep",
+              arguments: JSON.stringify({
+                pattern: "missing-canary",
+                path: "src",
+                glob: "b-*.ts",
+                max_files: 9,
+              }),
+            },
+          ],
+        };
+      }
+      if (calls === 2) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "verify-final-budget-file",
+              name: "read_file",
+              arguments: JSON.stringify({ path: "src/b-19.ts" }),
+            },
+          ],
+        };
+      }
+      return { role: "assistant", content: "调查完成" };
+    },
+  };
+
+  await executeAgentRuntime(
+    {
+      prompt: "并发检索一个不存在的 canary，再直接核验候选文件",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "default",
+      discoveryRun: true,
+      allowedTools: ["grep", "read_file"],
+    },
+    { provider, picoHome, reporter: new SilentReporter() },
+  );
+
+  const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+  });
+  const projection = await new DiscoveryCoordinator(session.runtimeEventStore!, {
+    sessionId,
+    invocationId: "host-budget-check",
+    runId: "host-budget-check",
+    turnId: "host-budget-check",
+  }).project();
+  assert.equal(projection.latest?.budget.consumedToolCalls, 3);
+  assert.equal(projection.latest?.budget.consumedFiles, 30);
+  assert.equal(projection.latest?.inspectedFiles.length, 30);
+  assert.equal(projection.latest?.status, "interrupted");
+  assert.equal(projection.latest?.limitReason, "budget_exhausted");
+});
+
+test("explicit Discovery rejects physically overlapping branch root aliases", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-discovery-root-alias-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  await mkdir(join(workDir, "src"), { recursive: true });
+  await symlink(join(workDir, "src"), join(workDir, "src-alias"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const cases = [
+    [".", "src"],
+    ["src", "src/../src"],
+    ["src", "src-alias"],
+  ] as const;
+  for (const [index, roots] of cases.entries()) {
+    const sessionId = `discovery-root-alias-${index}`;
+    let calls = 0;
+    let rejectionObserved = false;
+    const provider: LLMProvider = {
+      async generate(messages) {
+        calls++;
+        if (calls === 1) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: `overlap-${index}`,
+                name: "delegate_task",
+                arguments: JSON.stringify({
+                  completion_policy: "required",
+                  tasks: roots.map((branchRoot, ordinal) => ({
+                    goal: `物理根重叠分支 ${ordinal}`,
+                    mode: "explore",
+                    roots: [branchRoot],
+                    max_files: 10,
+                    stopping_condition: "找到证据",
+                  })),
+                }),
+              },
+            ],
+          };
+        }
+        rejectionObserved = messages.some((message) =>
+          message.content.includes("roots 必须互不重叠"),
+        );
+        return { role: "assistant", content: "停止" };
+      },
+    };
+
+    await executeAgentRuntime(
+      {
+        prompt: "验证分支物理根互斥",
+        dir: workDir,
+        sessionSelection: { mode: "new", sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        interactionMode: "default",
+        discoveryRun: true,
+        allowedTools: ["delegate_task"],
+      },
+      { provider, picoHome, reporter: new SilentReporter() },
+    );
+    assert.equal(rejectionObserved, true, `case ${index} should reject ${roots.join(" vs ")}`);
+    const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+      persistence: true,
+      picoHome,
+    });
+    const projection = await new DiscoveryCoordinator(session.runtimeEventStore!, {
+      sessionId,
+      invocationId: `root-alias-${index}`,
+      runId: `root-alias-${index}`,
+      turnId: `root-alias-${index}`,
+    }).project();
+    assert.equal(projection.active?.branches.length, 0);
+    globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+  }
+});
+
+test("explicit Discovery fails closed when delegated usage results are structurally omitted", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-discovery-omitted-usage-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "discovery-omitted-usage";
+  const longParent = `${"p".repeat(180)}/${"q".repeat(180)}`;
+  for (const branchRoot of ["src", "tests"] as const) {
+    const directory = join(workDir, branchRoot, longParent);
+    await mkdir(directory, { recursive: true });
+    for (let index = 0; index < 15; index++) {
+      await writeFile(
+        join(directory, `${"f".repeat(180)}-${String(index).padStart(2, "0")}.ts`),
+        `export const value = ${index};\n`,
+        "utf8",
+      );
+    }
+  }
+  t.after(async () => {
+    globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let mainCalls = 0;
+  const childCalls = new Map<string, number>();
+  const provider: LLMProvider = {
+    async generate(messages) {
+      const system = messages[0]?.content ?? "";
+      const history = messages.map((message) => message.content).join("\n");
+      if (system.includes("Explorer Subagent")) {
+        const branchRoot = history.includes("允许根: tests") ? "tests" : "src";
+        const calls = (childCalls.get(branchRoot) ?? 0) + 1;
+        childCalls.set(branchRoot, calls);
+        if (calls === 1) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: `long-glob-${branchRoot}`,
+                name: "glob",
+                arguments: JSON.stringify({ pattern: "**/*.ts", path: branchRoot }),
+              },
+            ],
+          };
+        }
+        return { role: "assistant", content: `${branchRoot} 检索完成` };
+      }
+      mainCalls++;
+      if (mainCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "delegate-long-usage",
+              name: "delegate_task",
+              arguments: JSON.stringify({
+                completion_policy: "required",
+                tasks: ["src", "tests"].map((branchRoot) => ({
+                  goal: `扫描 ${branchRoot} 的长路径文件`,
+                  mode: "explore",
+                  roots: [branchRoot],
+                  max_files: 15,
+                  stopping_condition: "检查满 15 个文件后停止",
+                })),
+              }),
+            },
+          ],
+        };
+      }
+      return { role: "assistant", content: "不应继续" };
+    },
+  };
+
+  await assert.rejects(
+    executeAgentRuntime(
+      {
+        prompt: "并发扫描两个长路径分支",
+        dir: workDir,
+        sessionSelection: { mode: "new", sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        interactionMode: "default",
+        discoveryRun: true,
+        allowedTools: ["delegate_task"],
+      },
+      { provider, picoHome, reporter: new SilentReporter() },
+    ),
+    /结果被截断或结构不完整/u,
+  );
+
+  const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+  });
+  const events = await session.runtimeEventStore!.readSession(sessionId);
+  const discoveryKinds = events
+    .map((event) => event.kind)
+    .filter((kind) => kind.startsWith("discovery."));
+  assert.equal(discoveryKinds.filter((kind) => kind === "discovery.branch.started").length, 2);
+  assert.equal(discoveryKinds.includes("discovery.branch.completed"), false);
+  assert.equal(discoveryKinds.includes("discovery.interrupted"), true);
 });
 
 test("approval recovers its crash gap and replay never starts a second execution Run", async (t) => {
