@@ -2348,9 +2348,24 @@ function createAutomaticDiscoveryTracker(input: {
           branchReservations.length,
         );
         if (childResults.length !== branchReservations.length) {
-          throw new Error(
-            "Discovery 子代理结果被截断或结构不完整，已保留分支预留预算并停止本轮调查",
-          );
+          for (const branch of branchReservations) {
+            const projection = await input.coordinator().project();
+            if (!projection.active) break;
+            await input.coordinator().completeBranch({
+              operationId: `auto-discovery:branch-fail-closed:${call.id}:${branch.branchId}`,
+              discoveryId: projection.active.discoveryId,
+              branchId: branch.branchId,
+              status: "failed",
+              consumedToolCalls: branch.reserveToolCalls,
+              consumedFiles: branch.reserveFiles,
+              inspectedFiles: [],
+              candidates: [],
+              evidenceRefs: [],
+              openQuestions: [],
+              reason: "子代理结果被截断或结构不完整，已按全部预留额度保守结算",
+            });
+          }
+          throw new Error("Discovery 子代理结果被截断或结构不完整，已按全部预留额度保守结算并中断");
         }
         for (const [ordinal, branch] of branchReservations.entries()) {
           const child = childResults[ordinal];
@@ -2543,7 +2558,16 @@ const DISCOVERY_FILE_INSPECTION_TOOLS = new Set([
   "code_call_hierarchy",
 ]);
 
-const DISCOVERY_SCANNING_TOOLS = new Set(["glob", "grep", "repo_map"]);
+const DISCOVERY_SCANNING_TOOLS = new Set([
+  "glob",
+  "grep",
+  "repo_map",
+  "code_definition",
+  "code_references",
+  "code_symbols",
+  "code_diagnostics",
+  "code_call_hierarchy",
+]);
 
 function discoveryFileReservation(
   call: ToolCall,
@@ -2552,18 +2576,21 @@ function discoveryFileReservation(
   remainingFiles: number,
 ): number {
   if (!DISCOVERY_FILE_INSPECTION_TOOLS.has(call.name)) return 0;
+  if (DISCOVERY_SCANNING_TOOLS.has(call.name)) {
+    if (remainingFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
+    const parsed = parseToolObject(call.arguments);
+    const requested =
+      typeof parsed["max_files"] === "number" &&
+      Number.isSafeInteger(parsed["max_files"]) &&
+      parsed["max_files"] > 0
+        ? parsed["max_files"]
+        : REPO_MAP_MAX_FILES;
+    return Math.min(requested, remainingFiles, REPO_MAP_MAX_FILES);
+  }
   const explicitPath = discoveryExplicitFilePath(call, workDir);
   if (explicitPath && inspectedFiles.includes(explicitPath)) return 0;
   if (remainingFiles <= 0) throw new Error("Discovery 文件检查预算已耗尽");
-  if (!DISCOVERY_SCANNING_TOOLS.has(call.name)) return 1;
-  const parsed = parseToolObject(call.arguments);
-  const requested =
-    typeof parsed["max_files"] === "number" &&
-    Number.isSafeInteger(parsed["max_files"]) &&
-    parsed["max_files"] > 0
-      ? parsed["max_files"]
-      : REPO_MAP_MAX_FILES;
-  return Math.min(requested, remainingFiles, REPO_MAP_MAX_FILES);
+  return 1;
 }
 
 function clampDiscoveryFileCall(call: ToolCall, reservedFiles: number): ToolCall {

@@ -1141,6 +1141,130 @@ test("explicit Discovery reserves concurrent host search budgets before executio
   assert.equal(projection.latest?.limitReason, "budget_exhausted");
 });
 
+test("explicit Discovery bounds Repo Map scans triggered by code intelligence tools", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-discovery-code-budget-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "discovery-code-budget";
+  await mkdir(join(workDir, "src"), { recursive: true });
+  await writeFile(join(workDir, "src", "a-target.ts"), "export const targetSymbol = 1;\n", "utf8");
+  for (let index = 0; index < 39; index++) {
+    await writeFile(
+      join(workDir, "src", `noise-${String(index).padStart(2, "0")}.ts`),
+      `export const noise${index} = ${index};\n`,
+      "utf8",
+    );
+  }
+  const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const runtimeState = await createSessionRuntime({
+    session: sessionLease.session,
+    sessionLease,
+    hooks: false,
+    lspEnabled: false,
+    lspServers: [],
+  });
+  t.after(async () => {
+    await runtimeState.dispose();
+    globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let calls = 0;
+  let finalRepoMapOutput = "";
+  const provider: LLMProvider = {
+    async generate(messages) {
+      calls++;
+      if (calls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "code-budget-repo-map",
+              name: "repo_map",
+              arguments: JSON.stringify({ query: "targetSymbol", max_files: 29 }),
+            },
+          ],
+        };
+      }
+      if (calls === 2) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "code-budget-references",
+              name: "code_references",
+              arguments: JSON.stringify({
+                file_path: "src/a-target.ts",
+                line: 1,
+                character: 14,
+              }),
+            },
+          ],
+        };
+      }
+      if (calls === 3) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "code-budget-final-repo-map",
+              name: "repo_map",
+              arguments: JSON.stringify({ query: "targetSymbol", max_files: 1 }),
+            },
+          ],
+        };
+      }
+      finalRepoMapOutput =
+        messages.findLast((message) => message.toolCallId === "code-budget-final-repo-map")
+          ?.content ?? "";
+      return { role: "assistant", content: "停止" };
+    },
+  };
+
+  await executeAgentRuntime(
+    {
+      prompt: "在剩余一个文件额度时查询 targetSymbol 的引用",
+      dir: workDir,
+      sessionSelection: { mode: "resume", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "default",
+      discoveryRun: true,
+      allowedTools: ["repo_map", "code_references"],
+    },
+    {
+      provider,
+      picoHome,
+      runtimeState,
+      resumeExistingSession: true,
+      reporter: new SilentReporter(),
+    },
+  );
+
+  const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+  });
+  const projection = await new DiscoveryCoordinator(session.runtimeEventStore!, {
+    sessionId,
+    invocationId: "code-budget-check",
+    runId: "code-budget-check",
+    turnId: "code-budget-check",
+  }).project();
+  assert.match(finalRepoMapOutput, /indexed=30\/40 cursor=30 complete=false/u);
+  assert.equal(projection.latest?.budget.consumedToolCalls, 3);
+  assert.equal(projection.latest?.budget.consumedFiles, 30);
+  assert.equal(projection.latest?.status, "interrupted");
+  assert.equal(projection.latest?.limitReason, "budget_exhausted");
+});
+
 test("explicit Discovery rejects physically overlapping branch root aliases", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-discovery-root-alias-"));
   const workDir = join(root, "work");
@@ -1307,7 +1431,7 @@ test("explicit Discovery fails closed when delegated usage results are structura
       },
       { provider, picoHome, reporter: new SilentReporter() },
     ),
-    /结果被截断或结构不完整/u,
+    /结果被截断或结构不完整.*全部预留额度.*中断/u,
   );
 
   const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
@@ -1319,8 +1443,29 @@ test("explicit Discovery fails closed when delegated usage results are structura
     .map((event) => event.kind)
     .filter((kind) => kind.startsWith("discovery."));
   assert.equal(discoveryKinds.filter((kind) => kind === "discovery.branch.started").length, 2);
-  assert.equal(discoveryKinds.includes("discovery.branch.completed"), false);
+  assert.equal(discoveryKinds.filter((kind) => kind === "discovery.branch.completed").length, 2);
   assert.equal(discoveryKinds.includes("discovery.interrupted"), true);
+  assert.equal(discoveryKinds.includes("discovery.cancelled"), false);
+  const coordinator = new DiscoveryCoordinator(session.runtimeEventStore!, {
+    sessionId,
+    invocationId: "omitted-usage-check",
+    runId: "omitted-usage-check",
+    turnId: "omitted-usage-check",
+  });
+  const projection = await coordinator.project();
+  assert.equal(projection.latest?.status, "interrupted");
+  assert.equal(projection.latest?.budget.consumedToolCalls, 24);
+  assert.equal(projection.latest?.budget.consumedFiles, 30);
+  const resumed = await coordinator.resume({
+    operationId: "resume-omitted-usage",
+    expectedSessionSequence: projection.sessionSequence,
+    discoveryId: projection.latest!.discoveryId,
+    depth: "deep",
+  });
+  assert.equal(resumed.active?.budget.consumedToolCalls, 24);
+  assert.equal(resumed.active?.budget.consumedFiles, 30);
+  assert.equal(resumed.active?.budget.maxToolCalls, 48);
+  assert.equal(resumed.active?.budget.maxFiles, 80);
 });
 
 test("approval recovers its crash gap and replay never starts a second execution Run", async (t) => {

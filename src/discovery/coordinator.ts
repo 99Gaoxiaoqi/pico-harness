@@ -142,6 +142,7 @@ export class DiscoveryCoordinator {
       readonly branchId: string;
       readonly status: Extract<DiscoveryBranchStatus, "completed" | "partial" | "failed">;
       readonly consumedToolCalls: number;
+      readonly consumedFiles?: number;
       readonly inspectedFiles: readonly string[];
       readonly candidates?: DiscoveryCheckpoint["candidates"];
       readonly evidenceRefs?: readonly string[];
@@ -158,6 +159,9 @@ export class DiscoveryCoordinator {
       branchId: requiredDiscoveryId(input.branchId, "Discovery branch id"),
       status: input.status,
       consumedToolCalls: nonNegativeInteger(input.consumedToolCalls, "consumedToolCalls"),
+      ...(input.consumedFiles !== undefined
+        ? { consumedFiles: nonNegativeInteger(input.consumedFiles, "consumedFiles") }
+        : {}),
       inspectedFiles: uniquePaths(input.inspectedFiles, 80),
       candidates: normalizeCandidates(input.candidates ?? []),
       evidenceRefs: uniqueTexts(input.evidenceRefs ?? [], "evidence reference", 50),
