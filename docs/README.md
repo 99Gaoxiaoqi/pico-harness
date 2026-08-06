@@ -49,6 +49,7 @@ pico-harness 是一个用 TypeScript 实现的 Agent Harness。课程从最小 A
 - [完整数据流](architecture/06-data-flow.md)
 - [多 Agent 共享工作区并发规范](architecture/08-multi-agent-concurrency.md)
 - [上下文压缩与 Tool Result 归档](architecture/12-compaction-and-tool-result.md)
+- [渐进式披露](architecture/13-progressive-disclosure.md)
 
 ## 怎么读
 
