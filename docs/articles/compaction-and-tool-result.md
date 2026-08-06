@@ -150,7 +150,7 @@ inputBudgetTokens = contextWindowTokens - maxOutputTokens - safetyMargin(1024)
 
 #### midTurn proactive 压缩
 
-midTurn 是"轮内主动"压缩——在一个用户 turn 内，工具批量执行产生大量结果后，**不等下一轮发现溢出，立刻检查是否需要压缩**（`src/engine/loop.ts:985`）：
+midTurn 是"轮内主动"压缩——在一个用户 turn 内，工具批量执行产生大量结果后，**不等下一轮发现溢出，立刻检查是否需要压缩**（`src/engine/loop.ts:1048`）：
 
 ```typescript
 // 主循环里，工具结果 commit 后、下一轮 prepareModelContext 前
@@ -173,7 +173,7 @@ if (estimatedInput <= triggerTokens) return;        // 未到 75%，不压
 
 ### LLM 摘要：6 段结构化模板
 
-当字符级投影压不进预算时，系统调用 LLM 把旧前缀压缩成一份结构化摘要（`src/context/full-compactor.ts:51`）：
+当字符级投影压不进预算时，系统调用 LLM 把旧前缀压缩成一份结构化摘要（`src/context/full-compactor.ts:61`）：
 
 ```
 ## 任务目标
@@ -297,7 +297,7 @@ for (const entry of entries) {
 
 压缩可能失败——LLM 调用超时、返回空、或安全切点找不到。pico 的设计是 **fail-open**：压缩失败时不崩溃，把机会留给下一道防线。
 
-`prepareModelContext`（`src/engine/loop.ts:1203`）在 full compaction 失败时：
+`prepareModelContext`（`src/engine/loop.ts:1280`）在 full compaction 失败时：
 
 ```typescript
 // fail-open: full compaction 失败但字符级投影已完成，不立即硬重置。
@@ -311,7 +311,7 @@ return projected;
 
 ### 硬重置兜底：清零但不完全失忆
 
-当所有压缩手段都失败时，`hardResetRuntimeHistory`（`src/engine/loop.ts:1042`）清空历史，但不是完全清零——它复用 `buildEvidenceSnapshot` 从被覆盖的消息中提取**最近 8 条结构化证据**：
+当所有压缩手段都失败时，`hardResetRuntimeHistory`（`src/engine/loop.ts:1109`）清空历史，但不是完全清零——它复用 `buildEvidenceSnapshot` 从被覆盖的消息中提取**最近 8 条结构化证据**：
 
 ```typescript
 const evidenceSnapshot = buildEvidenceSnapshot(
