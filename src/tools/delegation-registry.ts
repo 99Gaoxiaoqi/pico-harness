@@ -36,6 +36,7 @@ import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
+import { ExploreRepoTool } from "./explore-repo.js";
 import { observeWorkspaceFileScans } from "./file-scan-observer.js";
 
 export interface SubagentRegistryFactoryConfig {
@@ -189,6 +190,10 @@ function buildProfileRegistry(
     const codeTool = codeTools.get(toolName);
     if (codeTool) {
       registry.register(codeTool);
+      continue;
+    }
+    if (toolName === "explore_repo") {
+      registry.register(new ExploreRepoTool(config.workDir, config.codeIntelligence));
       continue;
     }
     const ctor = TOOL_CONSTRUCTORS[toolName];
