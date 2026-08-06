@@ -173,6 +173,9 @@ realModelTest(
 
     const afterExecution = await workspaceHashes(sandbox.workDir);
     assert.deepEqual(changedPaths(beforePlanning, afterExecution), [fixture.targetPath]);
+    await import(
+      `${pathToFileURL(join(sandbox.workDir, fixture.verificationPath)).href}?${randomUUID()}`
+    );
     const moduleUrl = `${pathToFileURL(join(sandbox.workDir, fixture.targetPath)).href}?${randomUUID()}`;
     const loaded = (await import(moduleUrl)) as Record<string, unknown>;
     const targetFunction = loaded[fixture.targetSymbol];
