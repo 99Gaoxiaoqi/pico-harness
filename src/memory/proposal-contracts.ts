@@ -24,6 +24,8 @@ export interface UserMemoryEvidence extends TerminalMemoryEvidenceRef {
   readonly digest: string;
   readonly sourceId: string;
   readonly cursor: MemoryJobCursor;
+  /** 源对话消息快照（含本轮 assistant 回复），追加提取 prompt 后发给模型。 */
+  readonly sourceMessages?: readonly Message[];
 }
 
 export type MemorySignalKind = "explicit" | "preference" | "correction" | "project_fact";

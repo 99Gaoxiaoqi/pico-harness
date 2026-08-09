@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { RuntimeEvent } from "../engine/session-runtime-event.js";
+import { isRuntimeMessageEvent } from "../engine/session-runtime-event.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
-import { isMessageHiddenFromTranscript } from "../schema/message.js";
+import { isMessageHiddenFromTranscript, type Message } from "../schema/message.js";
 import type {
   MemoryEvidenceReaderPort,
   TerminalMemoryEvidenceRef,
@@ -10,6 +11,7 @@ import type {
 
 export interface RuntimeEvidenceStorePort {
   readSessionEvent(sessionId: string, eventId: string): Promise<RuntimeEventStoreEntry | undefined>;
+  readSessionEntries?(sessionId: string): Promise<readonly RuntimeEventStoreEntry[]>;
 }
 
 export class MemoryEvidenceError extends Error {
@@ -46,6 +48,19 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
       content,
     });
     const digestHex = createHash("sha256").update(digestPayload).digest("hex");
+    // 读取源对话消息快照（截止 terminal sequence），让提取模型看到完整上下文。
+    let sourceMessages: readonly Message[] | undefined;
+    if (this.store.readSessionEntries) {
+      try {
+        const entries = await this.store.readSessionEntries(ref.sessionId);
+        sourceMessages = entries
+          .filter((e) => e.sequence <= terminalEntry.sequence && isRuntimeMessageEvent(e.event))
+          .map((e) => (e.event as { data: { message: Message } }).data.message)
+          .filter((m) => !isMessageHiddenFromTranscript(m));
+      } catch {
+        // 读取失败不阻断提取，回退到无 sourceMessages 的独立请求。
+      }
+    }
     return {
       ...ref,
       content,
@@ -60,6 +75,7 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
         sequence: terminalEntry.sequence,
         eventId: ref.terminalEventId,
       },
+      ...(sourceMessages ? { sourceMessages } : {}),
     };
   }
 }
