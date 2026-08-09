@@ -56,6 +56,12 @@ realModelTest(
       storageRoot: paths.workspace.memory,
       workspaceId: paths.workspace.id,
     });
+    // 此用例验证审批制下的提取质量，关掉 autoCommit 保持 pending 语义。
+    repository.updateSettings({
+      expectedVersion: repository.getSettings().version,
+      autoCommit: false,
+      idempotencyKey: "e2e-quality-autocommit-off",
+    });
     const actual: ScoredMemoryProposal[] = [];
     const model = new RealProposalModel(provider);
 
@@ -140,6 +146,16 @@ realModelTest(
     ]);
     const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
     await trustStore.trust(await trustStore.canonicalize(workspace));
+    // 此用例验证审批→接受→召回的闭环，关掉 autoCommit 保持 pending 等待语义。
+    {
+      const repo = openMemoryRepository(workspace, picoHome);
+      repo.updateSettings({
+        expectedVersion: repo.getSettings().version,
+        autoCommit: false,
+        idempotencyKey: "e2e-recall-autocommit-off",
+      });
+      repo.close();
+    }
 
     try {
       await executeAgentRuntime(

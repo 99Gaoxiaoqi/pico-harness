@@ -253,12 +253,6 @@ export class DesktopMemoryService {
     params: RuntimeParams<"memory.settings.update">,
   ): RuntimeResult<"memory.settings.update"> {
     return this.safely(() => {
-      if ((params as { readonly autoCommit?: boolean }).autoCommit === true) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.INVALID_PARAMS,
-          "首版记忆不支持自动批准",
-        );
-      }
       const repository = this.repository(workspacePath);
       const replay = hasIdempotentMutation(
         repository,
