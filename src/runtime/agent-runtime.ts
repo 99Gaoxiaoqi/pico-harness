@@ -166,6 +166,9 @@ import type {
 import { MemoryContextBuilder } from "../memory/context-builder.js";
 import { buildMemoryTriggerTools, type MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { MemoryRepository } from "../memory/memory-repository.js";
+import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "../memory/proposal-engine.js";
+import type { MemoryProposalProcessResult, TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";
+import { RuntimeMemoryEvidenceReader } from "../memory/runtime-evidence-reader.js";
 import {
   MemoryReviewScheduler,
   type MemoryReviewSchedulerPort,
@@ -1452,11 +1455,33 @@ export async function executeAgentRuntime(
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
-    // 记忆触发器工具：模型��过调 memory_remember/memory_extract "举手"决定该不该记。
-    // executor 在 turn 终结后检查 slot.trigger，有则入队提取。
+    // 记忆触发器工具：memory_remember 前台同步提取并返回具体内容；memory_extract 后台异步。
     const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
     if (memoryReviewScheduler && memoryReviewMode !== "eco") {
-      for (const tool of buildMemoryTriggerTools(memoryTriggerSlot)) {
+      const rememberHandler = memoryRepository && memoryModelFactory
+        ? async (ref: TerminalMemoryEvidenceRef): Promise<MemoryProposalProcessResult> => {
+            const repo = new MemoryRepository({
+              storageRoot: memoryRepository.storageRoot,
+              workspaceId: memoryRepository.workspaceId,
+            });
+            try {
+              const store = new MemoryRepositoryProposalStore(repo);
+              const evidenceReader = new RuntimeMemoryEvidenceReader({
+                readSessionEvent: (sid, eid) => session.runtimeEventStore!.readSessionEvent(sid, eid),
+                readSessionEntries: (sid) => session.runtimeEventStore!.readSessionEntries(sid),
+              });
+              const model = memoryModelFactory().model;
+              const engine = new MemoryProposalEngine({ store, evidenceReader, model });
+              return await engine.process(ref);
+            } finally {
+              repo.close();
+            }
+          }
+        : undefined;
+      for (const tool of buildMemoryTriggerTools(
+        { rememberHandler, slot: memoryTriggerSlot },
+        () => memoryTriggerSlot.ref,
+      )) {
         registry.register(tool);
       }
     }

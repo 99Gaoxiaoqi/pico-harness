@@ -187,6 +187,15 @@ export class RuntimeRunExecutor {
           });
           submittedUserMessage = { eventId: userReceipt.eventId, content: prompt };
           await session.bindRewindPointSource(rewindPointId, userReceipt);
+          // 设置 memory_remember 前台同步提取需要的上下文引用。
+          if (this.input.memoryTriggerSlot) {
+            this.input.memoryTriggerSlot.ref = {
+              sessionId: session.id,
+              runId: runtimeRun.runId,
+              terminalEventId: userReceipt.eventId,
+              userMessageEventId: userReceipt.eventId,
+            };
+          }
         }
 
         const messages = await engine.run(session, undefined, undefined, signal);
