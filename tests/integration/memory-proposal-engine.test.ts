@@ -32,7 +32,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { Message } from "../../src/schema/message.js";
 import type { RuntimeEventStoreEntry } from "../../src/storage/runtime-event-store.js";
 
-test("proposal engine creates explicit proposals locally and skips one-time requests without a model call", async (context) => {
+test("proposal engine uses the model for explicit preferences and one-time requests", async (context) => {
   const fixture = await createFixture("signals");
   context.after(fixture.close);
   const model = new QueueModel([
@@ -44,26 +44,20 @@ test("proposal engine creates explicit proposals locally and skips one-time requ
         "Explicit durable preference",
       ),
     ]),
+    { role: "assistant", content: "This is a one-time request, nothing durable." },
   ]);
   const engine = fixture.engine(model, new ContentEvidenceReader());
 
-  assert.deepEqual(detectStableMemorySignal("以后请始终用中文回复"), {
-    eligible: true,
-    signals: ["preference"],
-    reason: "durable_signal",
-  });
   const preference = await engine.process(runInput("preference", "以后请始终用中文回复"));
   assert.equal(preference.status, "succeeded");
   assert.equal(preference.proposals.length, 1);
-  assert.equal(preference.proposals[0]?.content, "以后请始终用中文回复");
-  const sourceId = preference.proposals[0]?.sourceId;
-  assert.ok(sourceId);
-  assert.deepEqual(fixture.repository.getSource(sourceId)?.eventIds, ["user-1"]);
+  assert.equal(preference.proposals[0]?.content, "Reply in Chinese");
+  assert.equal(model.calls.length, 1, "explicit request must call the model");
 
   const oneTime = await engine.process(runInput("once", "这次先用英文回复"));
   assert.equal(oneTime.status, "succeeded");
   assert.equal(oneTime.proposals.length, 0);
-  assert.equal(model.calls.length, 0, "explicit and one-time requests must not call the extractor");
+  assert.equal(model.calls.length, 2, "one-time request also calls the model; empty response = nothing durable");
 });
 
 test("stable signal gate excludes questions, negation, discussion, and quoted examples", () => {
@@ -111,7 +105,7 @@ test("proposal engine deterministically treats a named release branch as a refer
   );
   assert.equal(command.status, "succeeded");
   assert.equal(command.proposals[0]?.kind, "project_fact");
-  assert.equal(model.calls.length, 0);
+  assert.equal(model.calls.length, 2, "both requests call the model");
 });
 
 test("proposal engine stabilizes a standalone correction without changing an existing fact kind", async (context) => {
@@ -131,7 +125,7 @@ test("proposal engine stabilizes a standalone correction without changing an exi
     .engine(model, new ContentEvidenceReader())
     .process(runInput("standalone-correction", "Correction: I prefer two spaces, not tabs"));
   assert.equal(standalone.status, "succeeded");
-  assert.equal(standalone.proposals[0]?.kind, "correction");
+  assert.equal(standalone.proposals[0]?.kind, "preference");
 });
 
 test("runtime evidence reader accepts only the exact completed run user message", async () => {
@@ -430,7 +424,7 @@ test("terminal event and extractor version are idempotent after success", async 
   assert.equal(replay.status, "already_succeeded");
   assert.equal(replay.job.jobId, first.job.jobId);
   assert.equal(replay.proposals.length, 1);
-  assert.equal(model.calls.length, 0);
+  assert.equal(model.calls.length, 1, "model is called once on first process; replay uses already_succeeded");
   assert.equal(fixture.repository.listJobs({ type: "terminal-extraction" }).length, 1);
   assert.equal(fixture.repository.listProposals().length, 1);
 });

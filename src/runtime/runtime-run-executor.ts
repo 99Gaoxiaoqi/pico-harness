@@ -13,7 +13,7 @@ import { RuntimeRun } from "./runtime-run.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
-import { detectStableMemorySignal } from "../memory/proposal-signal.js";
+import type { MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { findPrecommittedDesktopMemoryEvidence } from "./memory-review-recovery.js";
 import type {
   RunAgentCliResult,
@@ -49,6 +49,8 @@ export interface RuntimeRunExecutorInput {
   readonly rewindPointSink?: (checkpointId: string) => void;
   /** Eligible foreground-only durable post-terminal memory scheduler. */
   readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
+  /** Per-turn memory trigger slot: set by memory_remember/memory_extract tools. */
+  readonly memoryTriggerSlot?: MemoryTriggerSlot;
   readonly planHandoff?: PlanHandoffController;
   readonly planCoordinator?: () => PlanCoordinator;
 }
@@ -203,7 +205,7 @@ export class RuntimeRunExecutor {
       if (
         memoryReviewScheduler &&
         submittedUserMessage &&
-        detectStableMemorySignal(submittedUserMessage.content).eligible
+        this.input.memoryTriggerSlot?.trigger
       ) {
         try {
           const terminalEntry = (await runtimeRun.store.readSessionEntries(session.id)).find(

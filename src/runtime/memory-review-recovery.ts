@@ -6,7 +6,6 @@ import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
   RuntimeEventStore,
 } from "../storage/runtime-event-store.js";
-import { detectStableMemorySignal } from "../memory/proposal-signal.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";
 
@@ -245,7 +244,7 @@ class CompactRecoveryProjection {
         event.data.recovered !== true
       ) {
         const evidence = run.directUser ?? run.priorDesktopEvidence;
-        if (evidence && detectStableMemorySignal(evidence.content).eligible) {
+        if (evidence) {
           const ref: TerminalMemoryEvidenceRef = {
             sessionId: this.sessionId,
             runId: event.runId,
