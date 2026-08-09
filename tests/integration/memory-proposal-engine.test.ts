@@ -10,7 +10,6 @@ import {
   MemoryRepositoryProposalStore,
 } from "../../src/memory/proposal-engine.js";
 import {
-  MEMORY_PROPOSAL_TOOL,
   MemoryProposalParseError,
   parseMemoryProposalResponse,
 } from "../../src/memory/proposal-parser.js";
@@ -232,16 +231,24 @@ test("runtime evidence reader accepts only the exact completed run user message"
   }
 });
 
-test("strict model parser fails closed on text, extra fields and invented evidence", () => {
-  assert.throws(
-    () =>
-      parseMemoryProposalResponse(
-        { role: "assistant", content: JSON.stringify({ proposals: [] }) },
-        ["user-1"],
-      ),
-    (error: unknown) =>
-      error instanceof MemoryProposalParseError && error.code === "tool_call_count",
+test("JSON-text parser accepts empty arrays and plain prose, rejects extra fields and invented evidence", () => {
+  // Empty proposals JSON is now a legitimate "nothing durable" response.
+  assert.deepEqual(
+    parseMemoryProposalResponse(
+      { role: "assistant", content: JSON.stringify({ proposals: [] }) },
+      ["user-1"],
+    ),
+    [],
   );
+  // Plain prose without JSON (model explained why nothing is durable) → empty candidates.
+  assert.deepEqual(
+    parseMemoryProposalResponse(
+      { role: "assistant", content: "This evidence is too ambiguous to remember." },
+      ["user-1"],
+    ),
+    [],
+  );
+  // Extra fields still fail closed (strict shape check).
   assert.throws(
     () =>
       parseMemoryProposalResponse(
@@ -255,6 +262,7 @@ test("strict model parser fails closed on text, extra fields and invented eviden
       ),
     /proposal_0_shape/u,
   );
+  // Invented evidence still fails closed.
   assert.throws(
     () =>
       parseMemoryProposalResponse(
@@ -268,7 +276,6 @@ test("strict model parser fails closed on text, extra fields and invented eviden
       ),
     /proposal_0_evidence/u,
   );
-  assert.equal(MEMORY_PROPOSAL_TOOL.name, "submit_memory_proposals");
 });
 
 test("proposal safety rejects secrets and injection while quarantining redacted PII", async (context) => {
@@ -353,7 +360,7 @@ test("failed extraction keeps a retryable job and exposes no cursor advance", as
   const fixture = await createFixture("retry");
   context.after(fixture.close);
   const model = new QueueModel([
-    { role: "assistant", content: "not a tool call" },
+    { role: "assistant", content: '{"proposals": broken}' },
     toolResponse([
       candidate("preference", "Language", "Reply in Chinese", "Durable user preference"),
     ]),
@@ -389,9 +396,9 @@ test("exhausted retries retain every model attempt in budget usage", async (cont
   context.after(fixture.close);
   const engine = fixture.engine(
     new QueueModel([
-      { role: "assistant", content: "invalid one" },
-      { role: "assistant", content: "invalid two" },
-      { role: "assistant", content: "invalid three" },
+      { role: "assistant", content: '{"proposals": broken one}' },
+      { role: "assistant", content: '{"proposals": broken two}' },
+      { role: "assistant", content: '{"proposals": broken three}' },
     ]),
     new ContentEvidenceReader(),
   );
@@ -484,14 +491,7 @@ function candidate(
 function toolResponse(proposals: readonly RawMemoryProposalCandidate[]): Message {
   return {
     role: "assistant",
-    content: "",
-    toolCalls: [
-      {
-        id: "proposal-call",
-        name: MEMORY_PROPOSAL_TOOL.name,
-        arguments: JSON.stringify({ proposals }),
-      },
-    ],
+    content: JSON.stringify({ proposals }),
   };
 }
 
