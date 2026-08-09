@@ -619,10 +619,34 @@ export function mkdirPrivateSync(path: string): void {
   chmodSync(path, 0o700);
 }
 
+const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set([
+  "EACCES",
+  "EINVAL",
+  "EISDIR",
+  "ENOTSUP",
+  "EPERM",
+]);
+
+/**
+ * 目录 fsync 在部分文件系统（Windows NTFS、网络盘、容器挂载）上不被支持。
+ * 与异步 syncDirectory 的既有降级模式一致：这些 errno 视为 best-effort 跳过，
+ * 其余错误照常抛出。对齐 atomic-json / blob-store / session 等 8+ 处 async 兄弟实现。
+ */
+export function isUnsupportedDirectorySync(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    UNSUPPORTED_DIRECTORY_SYNC_CODES.has(String((error as { code?: unknown }).code))
+  );
+}
+
 export function syncDirectorySync(directory: string): void {
   const descriptor = openSync(directory, "r");
   try {
     fsyncSync(descriptor);
+  } catch (error) {
+    if (!isUnsupportedDirectorySync(error)) throw error;
   } finally {
     closeSync(descriptor);
   }
