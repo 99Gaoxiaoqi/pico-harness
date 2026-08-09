@@ -312,6 +312,23 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
           ...(candidate.conflictFactId ? { conflictFactId: candidate.conflictFactId } : {}),
           idempotencyKey: `proposal-create:${identity}`,
         });
+        // autoCommit：默认生效，异常才审。
+        // 无冲突且非 quarantine（PII 脱敏）的干净提案直接 accept；
+        // conflict 或 [SAFETY_REVIEW_REQUIRED] 保持 pending 待人工裁决。
+        const autoCommitEligible =
+          settings.autoCommit &&
+          proposal.conflictStatus !== "potential" &&
+          !(proposal.reason ?? "").startsWith(QUARANTINE_PREFIX);
+        if (autoCommitEligible) {
+          const { proposal: accepted } = repository.resolveProposal({
+            proposalId: proposal.proposalId,
+            expectedVersion: proposal.version,
+            resolution: "accepted",
+            idempotencyKey: `proposal-autocommit:${proposal.proposalId}`,
+          });
+          return accepted;
+        }
+        // 仍 pending 的提案才发 proposed 通知（accepted 的已变 Fact，无需待审通知）
         repository.enqueueProposedNotification(
           proposal,
           `proposal-notification:${proposal.proposalId}:${proposal.version}`,

@@ -505,6 +505,13 @@ async function createFixture(label: string) {
     storageRoot: paths.workspace.memory,
     workspaceId: paths.workspace.id,
   });
+  // 显式保留审批制语义：这些用例断言 pending 提案行为，
+  // autoCommit 的自动接受由生产默认值和专门用例覆盖。
+  repository.updateSettings({
+    expectedVersion: repository.getSettings().version,
+    autoCommit: false,
+    idempotencyKey: "fixture-autocommit-off",
+  });
   const store = new MemoryRepositoryProposalStore(repository);
   return {
     root,
