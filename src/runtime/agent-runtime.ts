@@ -164,6 +164,7 @@ import type {
   RuntimeLifecycleEvent,
 } from "./runtime-contract.js";
 import { MemoryContextBuilder } from "../memory/context-builder.js";
+import { buildMemoryTriggerTools, type MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { MemoryRepository } from "../memory/memory-repository.js";
 import {
   MemoryReviewScheduler,
@@ -841,6 +842,7 @@ export async function executeAgentRuntime(
   let memoryRepository: MemoryRepository | undefined;
   let memoryContextBuilder: MemoryContextBuilder | undefined;
   let memoryReviewScheduler: MemoryReviewSchedulerPort | undefined;
+  let memoryReviewMode: string | undefined;
   let kickMemoryWorker = (): void => undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
   const cleanupScope = new RuntimeCleanupScope((resource, error) => {
@@ -944,6 +946,7 @@ export async function executeAgentRuntime(
           });
           memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
           const memorySettings = memoryRepository.getSettings();
+          memoryReviewMode = memorySettings.reviewMode;
           if (memorySettings.enabled && memorySettings.autoPropose) {
             memoryReviewScheduler = {
               enqueue: (input) => {
@@ -1449,6 +1452,14 @@ export async function executeAgentRuntime(
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
+    // 记忆触发器工具：模型��过调 memory_remember/memory_extract "举手"决定该不该记。
+    // executor 在 turn 终结后检查 slot.trigger，有则入队提取。
+    const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
+    if (memoryReviewScheduler && memoryReviewMode !== "eco") {
+      for (const tool of buildMemoryTriggerTools(memoryTriggerSlot)) {
+        registry.register(tool);
+      }
+    }
     // 前台只使用会话级 HookService；legacy .claw source 也由它统一加载并校验信任。
     if (activeHookService) {
       registry.setHookService?.(activeHookService);
@@ -1802,6 +1813,7 @@ export async function executeAgentRuntime(
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
       ...(memoryReviewScheduler ? { memoryReviewScheduler } : {}),
+      ...(memoryReviewScheduler ? { memoryTriggerSlot } : {}),
       planHandoff,
       planCoordinator: () => {
         const submitted = planHandoff.result();

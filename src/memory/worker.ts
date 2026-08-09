@@ -27,7 +27,6 @@ import {
 import { RuntimeMemoryEvidenceReader } from "./runtime-evidence-reader.js";
 import { MEMORY_REVIEW_DEBOUNCE_MS, MemoryReviewScheduler } from "./runtime-scheduler.js";
 import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
-import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
 export interface MemoryProposalModelLease {
   readonly model: MemoryProposalModelPort;
@@ -304,18 +303,11 @@ export class MemoryReviewWorker {
               userMessageEventId: job.cursor.eventId,
             };
             const evidence = await evidenceReader.read(evidenceRef);
-            const decision = detectStableMemorySignal(evidence.content);
-            const deterministic = decision.eligible
-              ? deriveDeterministicMemoryProposal(evidence.content, evidence.eventIds)
-              : undefined;
             const review = { index, job, evidenceRef: evidence };
-            if (decision.eligible && !deterministic) {
-              pendingModelReviews.push(review);
-              if (pendingModelReviews.length >= MEMORY_MODEL_BATCH_SIZE) {
-                await flushModelReviews();
-              }
-            } else {
-              await processReview(review);
+            // 记忆候选始终由模型批量生成（对标 maka-agent，不再用正则确定性提取）。
+            pendingModelReviews.push(review);
+            if (pendingModelReviews.length >= MEMORY_MODEL_BATCH_SIZE) {
+              await flushModelReviews();
             }
           } catch (error) {
             const latest = repository.getJob(job.jobId);

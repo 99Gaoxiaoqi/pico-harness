@@ -26,7 +26,6 @@ import {
   normalizeMemoryIdentityText,
   sanitizeMemoryProposalCandidate,
 } from "./proposal-sanitizer.js";
-import { deriveDeterministicMemoryProposal, detectStableMemorySignal } from "./proposal-signal.js";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const QUARANTINE_PREFIX = "[SAFETY_REVIEW_REQUIRED]";
@@ -87,8 +86,10 @@ export class MemoryProposalEngine {
     try {
       input.signal?.throwIfAborted();
       const evidence = input.evidence ?? (await this.options.evidenceReader.read(input));
-      const decision = detectStableMemorySignal(evidence.content);
-      if (!decision.eligible) {
+
+      const activeFacts = this.options.store.listActiveFacts();
+      // 记忆候选始终由模型生成（对标 maka-agent，不再用正则确定性提取）。
+      if (input.skipModelReview) {
         const committed = this.options.store.commitExtraction({
           job,
           evidence,
@@ -97,55 +98,26 @@ export class MemoryProposalEngine {
         });
         return successResult(committed, job.cursor, 0, 0);
       }
-
-      const activeFacts = this.options.store.listActiveFacts();
-      const deterministic = deriveDeterministicMemoryProposal(evidence.content, evidence.eventIds);
-      let parsed: readonly RawMemoryProposalCandidate[];
-      if (deterministic) {
-        parsed = [
-          stabilizeCandidateKind(
-            deterministic,
-            evidence.content,
-            decision.signals.includes("correction"),
-            activeFacts,
-          ),
-        ];
-      } else {
-        if (input.skipModelReview) {
-          const committed = this.options.store.commitExtraction({
-            job,
-            evidence,
-            candidates: [],
-            metrics,
-          });
-          return successResult(committed, job.cursor, 0, 0);
-        }
-        if (!this.options.model) throw new Error("memory_proposal_model_required");
-        const extraction = await this.options.model.extract(
-          {
-            workspaceId: this.options.store.workspaceId,
-            evidence,
-            tool: MEMORY_PROPOSAL_TOOL,
-          },
-          input.signal,
-        );
-        metrics = {
-          modelCalls: nonNegativeInteger(extraction.modelCalls ?? 1),
-          inputTokens: nonNegativeInteger(extraction.inputTokens),
-          outputTokens: nonNegativeInteger(extraction.outputTokens),
-          costUsd: nonNegativeNumber(extraction.costUsd),
-        };
-        input.signal?.throwIfAborted();
-        parsed = parseMemoryProposalResponse(extraction.response, evidence.eventIds).map(
-          (candidate) =>
-            stabilizeCandidateKind(
-              candidate,
-              evidence.content,
-              decision.signals.includes("correction"),
-              activeFacts,
-            ),
-        );
-      }
+      if (!this.options.model) throw new Error("memory_proposal_model_required");
+      const extraction = await this.options.model.extract(
+        {
+          workspaceId: this.options.store.workspaceId,
+          evidence,
+          tool: MEMORY_PROPOSAL_TOOL,
+        },
+        input.signal,
+      );
+      metrics = {
+        modelCalls: nonNegativeInteger(extraction.modelCalls ?? 1),
+        inputTokens: nonNegativeInteger(extraction.inputTokens),
+        outputTokens: nonNegativeInteger(extraction.outputTokens),
+        costUsd: nonNegativeNumber(extraction.costUsd),
+      };
+      input.signal?.throwIfAborted();
+      const parsed = parseMemoryProposalResponse(extraction.response, evidence.eventIds).map(
+        (candidate) =>
+          stabilizeCandidateKind(candidate, evidence.content, false, activeFacts),
+      );
       const prepared = prepareCandidates(
         parsed.map(sanitizeMemoryProposalCandidate),
         activeFacts,
