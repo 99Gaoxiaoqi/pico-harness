@@ -76,24 +76,18 @@ export class MemoryProposalParseError extends Error {
   }
 }
 
-/** Accepts one exact tool call only. Text/Markdown JSON fallbacks are intentionally rejected. */
+/**
+ * Parses a JSON-text model response (no tool calls).
+ * Returns empty candidates when the response contains no JSON (model chose to explain in prose
+ * that nothing is durable) — this is a legitimate "nothing to remember" signal, not a parse error.
+ */
 export function parseMemoryProposalResponse(
   response: Message,
   allowedEvidenceEventIds: readonly string[],
 ): RawMemoryProposalCandidate[] {
   if (response.role !== "assistant") throw new MemoryProposalParseError("response_role");
-  if (!response.toolCalls || response.toolCalls.length !== 1) {
-    throw new MemoryProposalParseError("tool_call_count");
-  }
-  const call = response.toolCalls[0]!;
-  if (call.name !== TOOL_NAME) throw new MemoryProposalParseError("tool_name");
-  let value: unknown;
-  try {
-    value = JSON.parse(call.arguments) as unknown;
-  } catch {
-    throw new MemoryProposalParseError("malformed_json");
-  }
-  const root = requireExactRecord(value, ["proposals"], "root_shape");
+  const root = parseProposalsJson(response.content);
+  if (!root) return [];
   const proposals = root["proposals"];
   if (!Array.isArray(proposals) || proposals.length > MAX_CANDIDATES) {
     throw new MemoryProposalParseError("proposal_count");
@@ -103,7 +97,7 @@ export function parseMemoryProposalResponse(
 }
 
 /**
- * Splits one provider tool call into strict per-evidence responses. A malformed candidate that
+ * Splits one JSON-text response into per-evidence slices. A malformed candidate that
  * names one evidence is deliberately kept only in that slice, so its normal parser failure cannot
  * prevent unrelated jobs from committing. Envelope errors remain batch-wide retryable failures.
  */
@@ -113,18 +107,14 @@ export function splitMemoryProposalBatchResponse(
 ): Message[] {
   if (evidenceGroups.length === 0) return [];
   if (response.role !== "assistant") throw new MemoryProposalParseError("response_role");
-  if (!response.toolCalls || response.toolCalls.length !== 1) {
-    throw new MemoryProposalParseError("tool_call_count");
+  const root = parseProposalsJson(response.content);
+  if (!root) {
+    // No JSON — treat as empty proposals for all evidence groups.
+    return evidenceGroups.map((_, index) => ({
+      role: "assistant" as const,
+      content: JSON.stringify({ proposals: [] }),
+    }));
   }
-  const call = response.toolCalls[0]!;
-  if (call.name !== TOOL_NAME) throw new MemoryProposalParseError("tool_name");
-  let value: unknown;
-  try {
-    value = JSON.parse(call.arguments) as unknown;
-  } catch {
-    throw new MemoryProposalParseError("malformed_json");
-  }
-  const root = requireExactRecord(value, ["proposals"], "root_shape");
   const proposals = root["proposals"];
   if (!Array.isArray(proposals) || proposals.length > MAX_CANDIDATES * evidenceGroups.length) {
     throw new MemoryProposalParseError("proposal_count");
@@ -150,17 +140,29 @@ export function splitMemoryProposalBatchResponse(
     for (const { index } of matchingGroups) slices[index]!.push(candidate);
   }
 
-  return slices.map((proposalsForEvidence, index) => ({
-    role: "assistant",
-    content: "",
-    toolCalls: [
-      {
-        id: `${call.id}:evidence-${index}`,
-        name: TOOL_NAME,
-        arguments: JSON.stringify({ proposals: proposalsForEvidence }),
-      },
-    ],
+  return slices.map((proposalsForEvidence) => ({
+    role: "assistant" as const,
+    content: JSON.stringify({ proposals: proposalsForEvidence }),
   }));
+}
+
+/**
+ * Extracts the proposals root object from a JSON-text model response.
+ * Requires the trimmed text to start with `{` and end with `}` — this blocks the common
+ * model anti-pattern of "explain first, then give JSON". Returns undefined when the response
+ * is plain prose without JSON (legitimate "nothing durable" signal).
+ */
+function parseProposalsJson(content: string | undefined): { proposals: unknown } | undefined {
+  if (typeof content !== "string") return undefined;
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed) as unknown;
+  } catch {
+    throw new MemoryProposalParseError("malformed_json");
+  }
+  return requireExactRecord(value, ["proposals"], "root_shape");
 }
 
 function parseCandidate(
