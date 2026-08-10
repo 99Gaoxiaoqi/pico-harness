@@ -44,15 +44,9 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
     now: () => new Date("2026-07-25T00:00:00.000Z"),
   });
   const started = runtimeEvent("session/with:path", "run-1", "event-1", workspace);
-  const rewind = runtimeEvent(
-    "session/with:path",
-    "run-1",
-    "event-2",
-    workspace,
-    "history.rewound",
-  );
+  const second = runtimeEvent("session/with:path", "run-1", "event-2", workspace);
 
-  const results = await store.appendBatch([started, rewind]);
+  const results = await store.appendBatch([started, second]);
   assert.deepEqual(
     results.map(({ inserted, cursor }) => ({
       inserted,
@@ -61,7 +55,7 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
     })),
     [
       { inserted: true, sequence: 1, epoch: 0 },
-      { inserted: true, sequence: 2, epoch: 1 },
+      { inserted: true, sequence: 2, epoch: 0 },
     ],
   );
 
@@ -81,7 +75,6 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   });
   const batch = JSON.parse(lines[1]!) as Record<string, unknown>;
   assert.equal(batch["type"], "event-batch");
-  assert.equal(batch["activeBranchId"], "branch-2");
   assert.equal((batch["entries"] as unknown[]).length, 2);
   assert.equal((await stat(sessionDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(logPath)).mode & 0o777, 0o600);
@@ -89,14 +82,29 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
 
   await unlink(manifestPath);
-  assert.equal((await store.readSessionManifest(manifest.sessionId))?.activeBranchId, "branch-2");
-  assert.equal(
-    JSON.parse(await readFile(manifestPath, "utf8")).manifest.activeBranchId,
-    "branch-2",
+  assert.deepEqual(await store.readSessionManifest(manifest.sessionId), {
+    schemaVersion: 2,
+    sessionId: manifest.sessionId,
+    workDir: manifest.workDir,
+    historySource: "runtime-event-v2",
+    createdAt: manifest.createdAt,
+  });
+  assert.deepEqual(
+    JSON.parse(await readFile(manifestPath, "utf8")).manifest,
+    {
+      schemaVersion: 2,
+      sessionId: manifest.sessionId,
+      workDir: manifest.workDir,
+      historySource: "runtime-event-v2",
+      createdAt: manifest.createdAt,
+    },
   );
 
-  delete batch["activeBranchId"];
-  await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batch)}\n`, { mode: 0o600 });
+  // A batch missing its required envelope fields is rejected on rebuild.
+  const { txId: _txId, committedAt: _committedAt, ...batchBody } = batch;
+  void _txId;
+  void _committedAt;
+  await writeFile(logPath, `${lines[0]}\n${JSON.stringify(batchBody)}\n`, { mode: 0o600 });
   await unlink(manifestPath);
   await assert.rejects(store.readSessionManifest(manifest.sessionId), /event batch.+invalid/u);
 });
@@ -131,7 +139,7 @@ test("RuntimeEventStore rejects a canonical-location v1 Session without rewritin
   await assert.rejects(stat(join(sessionDirectory, "manifest.json")), { code: "ENOENT" });
 });
 
-test("RuntimeEventStore rejects a forged manifest branch and rebuilds it from the ledger tail", async (context) => {
+test("RuntimeEventStore rejects a forged manifest and rebuilds it from the ledger tail", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-forged-manifest-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -146,15 +154,15 @@ test("RuntimeEventStore rejects a forged manifest branch and rebuilds it from th
   const digest = createHash("sha256").update(manifest.sessionId).digest("hex");
   const manifestPath = join(store.storageRoot, "sessions", digest, "manifest.json");
   const projection = JSON.parse(await readFile(manifestPath, "utf8")) as {
-    manifest: { activeBranchId: string };
+    manifest: { createdAt: string };
   };
-  projection.manifest.activeBranchId = "forged";
+  projection.manifest.createdAt = "1999-01-01T00:00:00.000Z";
   await writeFile(manifestPath, `${JSON.stringify(projection)}\n`, { mode: 0o600 });
 
-  assert.equal((await store.listSessionManifests())[0]?.activeBranchId, "main");
-  assert.equal(
-    (JSON.parse(await readFile(manifestPath, "utf8")) as typeof projection).manifest.activeBranchId,
-    "main",
+  assert.notEqual((await store.listSessionManifests())[0]?.createdAt, "1999-01-01T00:00:00.000Z");
+  assert.notEqual(
+    (JSON.parse(await readFile(manifestPath, "utf8")) as typeof projection).manifest.createdAt,
+    "1999-01-01T00:00:00.000Z",
   );
 });
 
@@ -405,9 +413,9 @@ test("RuntimeEventStore readOnly mode neither repairs nor accepts mutations", as
   const ledgerPath = join(root, "sessions", digest, "session.jsonl");
   const manifestPath = join(root, "sessions", digest, "manifest.json");
   const staleManifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-    manifest: { activeBranchId: string };
+    manifest: { createdAt: string };
   };
-  staleManifest.manifest.activeBranchId = "stale-read-only-projection";
+  staleManifest.manifest.createdAt = "1999-01-01T00:00:00.000Z";
   await writeFile(manifestPath, `${JSON.stringify(staleManifest)}\n`, { mode: 0o600 });
   const beforeLedger = await readFile(ledgerPath);
   const beforeManifest = await readFile(manifestPath);
@@ -422,7 +430,10 @@ test("RuntimeEventStore readOnly mode neither repairs nor accepts mutations", as
     /readOnly mode cannot enable repairs/u,
   );
   const readOnly = new RuntimeEventStore({ storageRoot: root }, { readOnly: true });
-  assert.equal((await readOnly.readSessionManifest(sessionId))?.activeBranchId, "main");
+  assert.notEqual(
+    (await readOnly.readSessionManifest(sessionId))?.createdAt,
+    "1999-01-01T00:00:00.000Z",
+  );
   assert.deepEqual(await readFile(manifestPath), beforeManifest);
 
   for (const mutation of [
@@ -505,9 +516,8 @@ function runtimeEvent(
   runId: string,
   eventId: string,
   workDir: string,
-  kind: "run.started" | "history.rewound" = "run.started",
 ): RuntimeEvent {
-  const base = {
+  return {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
     eventId,
     sessionId,
@@ -516,9 +526,8 @@ function runtimeEvent(
     turnId: `turn:${runId}`,
     at: "2026-07-25T00:00:00.000Z",
     partial: false,
-    visibility: "internal" as const,
+    visibility: "internal",
+    kind: "run.started",
+    data: { workDir },
   };
-  return kind === "run.started"
-    ? { ...base, kind, data: { workDir } }
-    : { ...base, kind, data: { branchId: "branch-2" } };
 }

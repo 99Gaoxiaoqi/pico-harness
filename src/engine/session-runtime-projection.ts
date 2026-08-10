@@ -91,7 +91,7 @@ export function projectRuntimeSessionModelHistoryEntries(
 export function projectRuntimeSessionSequencedMessageEntries(
   entries: readonly SequencedRuntimeEvent[],
 ): RuntimeSessionSequencedMessageEntry[] {
-  return projectBranchEventIndexes(
+  return selectRuntimeEvents(
     entries.map(({ event }) => event),
     runtimeEventHasModelHistoryEntry,
   ).map(({ eventIndex, event }) => ({
@@ -153,7 +153,7 @@ export function projectRuntimeSessionForkSeedEntries(
 export function projectRuntimeSessionActiveToolResultEntries(
   entries: readonly SequencedRuntimeEvent[],
 ): RuntimeSessionToolResultEntry[] {
-  return projectBranchEventIndexes(
+  return selectRuntimeEvents(
     entries.map(({ event }) => event),
     isRuntimeToolResult,
   ).map(({ eventIndex, event }) => ({
@@ -237,40 +237,29 @@ export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): Ses
 }
 
 function projectModelHistoryEvents(events: readonly RuntimeEvent[]): RuntimeModelHistoryEvent[] {
-  return projectBranchEventIndexes(events, runtimeEventHasModelHistoryEntry).map(
-    ({ event }) => event,
-  );
+  return selectRuntimeEvents(events, runtimeEventHasModelHistoryEntry).map(({ event }) => event);
 }
 
-function projectBranchEventIndexes<Event extends RuntimeEvent>(
+/**
+ * Selects events matching `select`, indexed by their original position, while
+ * detecting duplicate event IDs. The destructive rewind/branch truncation that
+ * previously lived here has been removed (rewind is now a non-destructive fork),
+ * so this is a pure filter + map.
+ */
+function selectRuntimeEvents<Event extends RuntimeEvent>(
   events: readonly RuntimeEvent[],
   select: (event: RuntimeEvent) => event is Event,
 ): Array<{ readonly eventIndex: number; readonly event: Event }> {
-  const eventIndexes = new Map<string, number>();
+  const seenEventIds = new Set<string>();
   const projected: Array<{ readonly eventIndex: number; readonly event: Event }> = [];
   for (const [eventIndex, event] of events.entries()) {
-    if (eventIndexes.has(event.eventId)) {
+    if (seenEventIds.has(event.eventId)) {
       throw new Error(`Runtime session projection contains duplicate event ID ${event.eventId}`);
     }
-    if (event.kind === "history.rewound") {
-      if (event.data.throughEventId === undefined) {
-        projected.length = 0;
-      } else {
-        const throughEventIndex = eventIndexes.get(event.data.throughEventId);
-        if (throughEventIndex === undefined) {
-          throw new Error(
-            `Runtime session projection rewind references unknown event ${event.data.throughEventId}`,
-          );
-        }
-        const firstRemoved = projected.findIndex(
-          (candidate) => candidate.eventIndex > throughEventIndex,
-        );
-        if (firstRemoved !== -1) projected.splice(firstRemoved);
-      }
-    } else if (select(event)) {
+    if (select(event)) {
       projected.push({ eventIndex, event: structuredClone(event) });
     }
-    eventIndexes.set(event.eventId, eventIndex);
+    seenEventIds.add(event.eventId);
   }
   return projected;
 }

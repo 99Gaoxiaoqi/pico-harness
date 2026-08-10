@@ -395,13 +395,12 @@ export class RuntimeRun {
       const recoveryAt = existingTerminal?.at ?? last.at;
       const pendingToolCalls = findDanglingRuntimeToolCalls(events, activeMessageEventIds);
       const syntheticToolResults = pendingToolCalls.map((pending) =>
-        buildInterruptedToolResultEvent(events, pending, recoveryAt, manifest.activeBranchId),
+        buildInterruptedToolResultEvent(events, pending, recoveryAt),
       );
       const syntheticToolStarts = buildInterruptedTranscriptToolStartEvents({
         entries: await store.readSessionEntries(sessionId),
         pendingToolCalls,
         toolResults: syntheticToolResults,
-        activeBranchId: manifest.activeBranchId,
         at: recoveryAt,
       });
       if (existingTerminal && syntheticToolResults.length === 0) continue;
@@ -1435,7 +1434,6 @@ function buildInterruptedTranscriptToolStartEvents(options: {
   readonly entries: readonly RuntimeEventStoreEntry[];
   readonly pendingToolCalls: readonly PendingRuntimeToolCall[];
   readonly toolResults: readonly RuntimeToolResultRecordedEvent[];
-  readonly activeBranchId: string;
   readonly at: string;
 }): RuntimeTranscriptEventRecordedEvent[] {
   if (options.pendingToolCalls.length === 0) return [];
@@ -1479,7 +1477,7 @@ function buildInterruptedTranscriptToolStartEvents(options: {
     }
     const start = createCanonicalTranscriptToolStart({
       ...identityInput,
-      scope: `runtime-recovery:${options.activeBranchId}`,
+      scope: "runtime-recovery",
       toolCall: pending.toolCall,
       sequence: nextSequence++,
       createdAt,
@@ -1531,7 +1529,6 @@ function buildInterruptedToolResultEvent(
   events: readonly RuntimeEvent[],
   pending: PendingRuntimeToolCall,
   at: string,
-  activeBranchId: string,
 ): RuntimeToolResultRecordedEvent {
   const source = pending.source;
   const toolContext = events.findLast(
@@ -1552,7 +1549,6 @@ function buildInterruptedToolResultEvent(
       source.eventId,
       pending.callIndex,
       pending.toolCall.id,
-      activeBranchId,
     ]),
     sessionId: source.sessionId,
     invocationId: source.invocationId,
@@ -2161,11 +2157,6 @@ function assertForkSeedPrefix(
   identity: RuntimeForkBootstrapIdentity,
   bootstrapAt: string | undefined,
 ): number {
-  if (existingEvents.some((event) => event.kind === "history.rewound")) {
-    throw runtimeForkConflict(
-      `Runtime fork target ${targetSessionId} contains a rewind inside bootstrap facts`,
-    );
-  }
   const expectedIds = new Set(expected.map((_, index) => identity.seedEventId(index)));
   const unexpected = existingEvents.find(
     (event) =>

@@ -89,33 +89,13 @@ function materializePrefix(
   eventIndexes: ReadonlyMap<string, number>,
 ): { projected: RuntimeHistoryProjectionEntry[]; prefixDiagnostics: RuntimeProjectionDiagnostic[] } {
   const prefixDiagnostics: RuntimeProjectionDiagnostic[] = [];
-  let projected: RuntimeHistoryProjectionEntry[] = [];
+  const projected: RuntimeHistoryProjectionEntry[] = [];
   for (let eventIndex = 0; eventIndex < endExclusive; eventIndex++) {
     const event = events[eventIndex]!;
-    if (event.kind === "history.rewound") {
-      const throughEventId = event.data.throughEventId;
-      if (throughEventId === undefined) {
-        projected = [];
-        prefixDiagnostics.push(
-          makeDiagnostic("unclaimed_control_fact", event.eventId, "history.rewound (full clear)"),
-        );
-        continue;
-      }
-      const throughEventIndex = eventIndexes.get(throughEventId);
-      if (throughEventIndex === undefined || throughEventIndex >= eventIndex) {
-        throw new RuntimeEventReadModelIntegrityError(
-          `Runtime history rewind ${event.eventId} references an unknown prior event ${throughEventId}`,
-        );
-      }
-      // rewound 截断：重算到 throughEventIndex 的前缀，保留其诊断 + rewound 自身的 soft 诊断
-      const sub = materializePrefix(events, throughEventIndex + 1, eventIndexes);
-      projected = sub.projected;
-      prefixDiagnostics.push(...sub.prefixDiagnostics);
-      prefixDiagnostics.push(
-        makeDiagnostic("unclaimed_control_fact", event.eventId, `history.rewound (through ${throughEventId})`),
-      );
-      continue;
-    }
+    // history.rewound handling removed: rewind is now a non-destructive fork and
+    // no new rewound events are produced. A legacy rewound fact (if any) falls
+    // through to the claim contract below and surfaces as an unclaimed control
+    // fact diagnostic, which is harmless.
     if (event.kind === "context.checkpoint.recorded") {
       replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
       continue;
