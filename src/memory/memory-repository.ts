@@ -60,8 +60,6 @@ export const MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX =
 export const MEMORY_SOURCE_NOTIFICATION_JOB_TYPE = "notification.memory.source-changed" as const;
 export const MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION =
   "memory-source-notification-v1:unavailable" as const;
-export const MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION =
-  "memory-source-notification-v1:rewound" as const;
 
 type RejectAsyncTransactionArguments<Result> = [Result] extends [never]
   ? []
@@ -1510,10 +1508,7 @@ export class MemoryRepository {
       jobId,
       type: MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
       terminalEventId: identity,
-      extractorVersion:
-        source.availability === "rewound"
-          ? MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
-          : MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
+      extractorVersion: MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
       cursor: { sessionId: "memory-service", eventId: source.sourceId, sequence: source.version },
       idempotencyKey,
       at,

@@ -3,11 +3,7 @@ import type { Stats } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
-import {
-  projectRuntimeSessionMessages,
-  projectRuntimeSessionState,
-} from "../engine/session-runtime-projection.js";
+import { RuntimeProjectionService } from "../engine/runtime-projection-service.js";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { FileHistoryBlobStore } from "./file-history-blob-store.js";
 import {
@@ -321,6 +317,7 @@ export class StorageDoctor {
         readOnly: true,
       },
     );
+    const projectionService = new RuntimeProjectionService(store);
     let manifests;
     try {
       manifests = await store.listSessionManifests();
@@ -349,14 +346,15 @@ export class StorageDoctor {
             `session ${manifest.sessionId} belongs to unexpected workspace ${manifest.workDir}`,
           );
         }
-        const events = await store.readSession(manifest.sessionId);
         const canonicalManifest = await store.readSessionManifest(manifest.sessionId);
         if (!canonicalManifest) {
           throw new Error(`session ${manifest.sessionId} disappeared during scan`);
         }
-        projectRuntimeSessionState(events);
-        projectRuntimeSessionMessages(events);
-        materializeRuntimeHistory(events);
+        // 统一投影入口验证：通过 RuntimeProjectionService 重算 state / raw messages / checkpoint
+        // 视图，任一投影抛出（fail-closed 诊断）都会被外层 try/catch 记录为 session replay 异常。
+        await projectionService.getState(manifest.sessionId);
+        await projectionService.getMessages(manifest.sessionId, { checkpoint: false });
+        await projectionService.getMessages(manifest.sessionId);
         let persistedManifest;
         try {
           persistedManifest = decodeRuntimeSessionManifestProjection(
@@ -684,7 +682,7 @@ export class StorageDoctor {
           "memory",
           statePath,
           "Memory storage exists without state.json",
-          "Preserve the directory and restore state.json from a verified backup",
+          "Rebuild derived sources from RuntimeEvent, then restore user overlay from verified backup",
           "authoritative",
         ),
       );
@@ -703,7 +701,7 @@ export class StorageDoctor {
           "memory",
           statePath,
           errorMessage(error),
-          "Preserve the file and restore it from a verified backup or transaction artifact",
+          "Rebuild derived sources from RuntimeEvent, then restore user overlay from verified backup",
           "authoritative",
         ),
       );
