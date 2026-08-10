@@ -52,6 +52,7 @@ pico-harness 是一个用 TypeScript 实现的 Agent Harness。课程从最小 A
 - [渐进式披露](architecture/13-progressive-disclosure.md)
 - [工作区记忆](architecture/14-workspace-memory.md)
 - [前缀缓存](architecture/15-prompt-cache.md)
+- [Pico 与 Maka 状态管理架构对比](architecture/16-pico-vs-maka-state-architecture.md)
 
 ## 怎么读
 
