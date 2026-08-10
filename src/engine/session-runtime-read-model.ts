@@ -2,18 +2,30 @@ import { createHash } from "node:crypto";
 import type { Message, ToolCall } from "../schema/message.js";
 import type { RuntimeCheckpointRecordedEvent, RuntimeEvent } from "./session-runtime-event.js";
 import {
+  claimKindForEvent,
   projectRuntimeModelMessage,
-  runtimeEventHasModelHistoryEntry,
 } from "./runtime-model-message.js";
 import {
   computeCheckpointSourceDigest,
   CONTENT_DIGEST_V1_PREFIX,
 } from "../context/runtime-compaction-checkpoint.js";
+import type { RuntimeProjectionDiagnostic } from "./runtime-projection-diagnostics.js";
+import { makeDiagnostic } from "./runtime-projection-diagnostics.js";
 
 export interface RuntimeHistoryProjectionEntry {
   /** The immutable event that currently contributes this model-visible message. */
   readonly eventId: string;
   readonly message: Message;
+}
+
+/**
+ * 投影结果：entries + 结构化诊断。
+ * hard 诊断在 materializeRuntimeHistoryProjection 内已 throw（fail-closed），
+ * 这里的 diagnostics 只含 soft 诊断（unclaimed_control_fact / partial_event_skipped）。
+ */
+export interface RuntimeHistoryProjection {
+  readonly entries: RuntimeHistoryProjectionEntry[];
+  readonly diagnostics: readonly RuntimeProjectionDiagnostic[];
 }
 
 export class RuntimeEventReadModelIntegrityError extends Error {
@@ -45,6 +57,15 @@ export function projectRuntimeEventsToMessageEntries(
 export function materializeRuntimeHistoryEntries(
   events: readonly RuntimeEvent[],
 ): RuntimeHistoryProjectionEntry[] {
+  return materializeRuntimeHistoryProjection(events).entries;
+}
+
+/**
+ * 带诊断的投影入口。hard 诊断仍 throw（fail-closed 不变）；soft 诊断收集到结果里。
+ * 这是新增的主投影函数，其余三个旧函数委托它、签名不变——现有消费者零改动。
+ */
+export function materializeRuntimeHistoryProjection(events: readonly RuntimeEvent[]): RuntimeHistoryProjection {
+  const diagnostics: RuntimeProjectionDiagnostic[] = [];
   const eventIndexes = new Map<string, number>();
   for (const [eventIndex, event] of events.entries()) {
     if (eventIndexes.has(event.eventId)) {
@@ -55,16 +76,19 @@ export function materializeRuntimeHistoryEntries(
     eventIndexes.set(event.eventId, eventIndex);
   }
 
-  const projected = materializePrefix(events, events.length, eventIndexes);
+  const { projected, prefixDiagnostics } = materializePrefix(events, events.length, eventIndexes);
+  diagnostics.push(...prefixDiagnostics);
+  // assertToolCallPairing 检测的都是 hard 违规（配对错位/悬空/重复），仍直接 throw
   assertToolCallPairing(projected.map(({ message }) => message));
-  return projected;
+  return { entries: projected, diagnostics };
 }
 
 function materializePrefix(
   events: readonly RuntimeEvent[],
   endExclusive: number,
   eventIndexes: ReadonlyMap<string, number>,
-): RuntimeHistoryProjectionEntry[] {
+): { projected: RuntimeHistoryProjectionEntry[]; prefixDiagnostics: RuntimeProjectionDiagnostic[] } {
+  const prefixDiagnostics: RuntimeProjectionDiagnostic[] = [];
   let projected: RuntimeHistoryProjectionEntry[] = [];
   for (let eventIndex = 0; eventIndex < endExclusive; eventIndex++) {
     const event = events[eventIndex]!;
@@ -72,6 +96,9 @@ function materializePrefix(
       const throughEventId = event.data.throughEventId;
       if (throughEventId === undefined) {
         projected = [];
+        prefixDiagnostics.push(
+          makeDiagnostic("unclaimed_control_fact", event.eventId, "history.rewound (full clear)"),
+        );
         continue;
       }
       const throughEventIndex = eventIndexes.get(throughEventId);
@@ -80,14 +107,41 @@ function materializePrefix(
           `Runtime history rewind ${event.eventId} references an unknown prior event ${throughEventId}`,
         );
       }
-      projected = materializePrefix(events, throughEventIndex + 1, eventIndexes);
+      // rewound 截断：重算到 throughEventIndex 的前缀，保留其诊断 + rewound 自身的 soft 诊断
+      const sub = materializePrefix(events, throughEventIndex + 1, eventIndexes);
+      projected = sub.projected;
+      prefixDiagnostics.push(...sub.prefixDiagnostics);
+      prefixDiagnostics.push(
+        makeDiagnostic("unclaimed_control_fact", event.eventId, `history.rewound (through ${throughEventId})`),
+      );
       continue;
     }
     if (event.kind === "context.checkpoint.recorded") {
       replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
       continue;
     }
-    if (runtimeEventHasModelHistoryEntry(event)) {
+    // claim coverage 契约：每个 kind 必须显式 claim，未知 kind 不再静默丢失
+    const claim = claimKindForEvent(event);
+    if (claim === undefined) {
+      // 纵深防御：解码层已拦截 unknown_kind，投影层再防一道
+      throw new RuntimeEventReadModelIntegrityError(
+        `Runtime event ${event.eventId} has unsupported kind ${event.kind}`,
+      );
+    }
+    if (claim === "message") {
+      if (event.partial) {
+        prefixDiagnostics.push(
+          makeDiagnostic("partial_event_skipped", event.eventId, `partial ${event.kind}`),
+        );
+        continue;
+      }
+      if (event.visibility !== "model") {
+        // transcript/internal 可见度的 message 事件不进 model 投影（control 语义）
+        prefixDiagnostics.push(
+          makeDiagnostic("unclaimed_control_fact", event.eventId, `${event.kind} visibility=${event.visibility}`),
+        );
+        continue;
+      }
       const message = projectRuntimeModelMessage(event);
       if (!message) {
         throw new RuntimeEventReadModelIntegrityError(
@@ -95,9 +149,14 @@ function materializePrefix(
         );
       }
       projected.push({ eventId: event.eventId, message: cloneMessage(message) });
+    } else {
+      // claim === "control"：控制事实无 chat 行是正常的，产 soft 诊断
+      prefixDiagnostics.push(
+        makeDiagnostic("unclaimed_control_fact", event.eventId, event.kind),
+      );
     }
   }
-  return projected;
+  return { projected, prefixDiagnostics };
 }
 
 function replaceProjectedPrefixWithCheckpoint(

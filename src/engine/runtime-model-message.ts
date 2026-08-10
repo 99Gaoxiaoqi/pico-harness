@@ -21,6 +21,51 @@ export function runtimeEventHasModelHistoryEntry(
 }
 
 /**
+ * Claim coverage 契约：每个事件 kind 必须显式标注它在投影里如何被 claim。
+ * 参考 maka 的 claim coverage 不变量——reader 可见的 kind 落空时要么是
+ * unclaimed_control_fact（soft），要么是 unsupported_event_kind（hard）。
+ *
+ * - "message"：产出行（message.committed / tool.result.recorded）
+ * - "control"：控制事实，无 chat 行，正常（产 soft 诊断）
+ * - undefined：未知 kind（纵深防御——解码层已拦截 unknown_kind，但投影层再防一道）
+ */
+export type RuntimeEventClaimKind = "message" | "control";
+
+const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
+  "run.started": "control",
+  "message.committed": "message",
+  "tool.started": "control",
+  "tool.result.recorded": "message",
+  "approval.requested": "control",
+  "approval.settled": "control",
+  "model.call.started": "control",
+  "model.call.settled": "control",
+  "context.checkpoint.recorded": "control",
+  "history.rewound": "control",
+  "session.forked": "control",
+  "session.state.committed": "control",
+  "transcript.event.recorded": "control",
+  "run.terminal": "control",
+  // Plan 生命周期事件（12 种全部覆盖）
+  "plan.proposed": "control",
+  "plan.revised": "control",
+  "plan.revision.requested": "control",
+  "plan.approved": "control",
+  "plan.rejected": "control",
+  "plan.execution.started": "control",
+  "plan.step.updated": "control",
+  "plan.execution.completed": "control",
+  "plan.execution.cancelled": "control",
+  "plan.execution.interrupted": "control",
+  "plan.execution.resumed": "control",
+  "plan.execution.replanned": "control",
+};
+
+export function claimKindForEvent(event: RuntimeEvent): RuntimeEventClaimKind | undefined {
+  return CLAIM_BY_KIND[event.kind];
+}
+
+/**
  * The single projection from durable model-visible facts to provider Messages.
  * Callers must never reconstruct a tool-result Message independently.
  */
