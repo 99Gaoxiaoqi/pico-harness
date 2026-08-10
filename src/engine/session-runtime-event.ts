@@ -122,6 +122,12 @@ export interface RuntimeCheckpointRecordedEvent extends RuntimeEventBase {
   readonly kind: "context.checkpoint.recorded";
   readonly data: RuntimeCheckpointRecordedEventData;
 }
+/**
+ * @deprecated The destructive rewind / branchId mechanism has been removed
+ * (rewind is now a non-destructive fork). This type is retained only so that
+ * decoding legacy persisted `history.rewound` events does not crash; no new
+ * code should construct or inspect this event.
+ */
 export interface RuntimeHistoryRewoundEvent extends RuntimeEventBase {
   readonly kind: "history.rewound";
   readonly data: { readonly branchId: string; readonly throughEventId?: string };

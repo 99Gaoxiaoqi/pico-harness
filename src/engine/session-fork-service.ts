@@ -93,6 +93,12 @@ export interface ForkSessionInput {
   readonly targetSessionId: string;
   /** fork 不继承 source 权限 mode，由当前产品启动默认值决定。 */
   readonly targetMode: PersistedInteractionMode;
+  /**
+   * Non-destructive rewind: 仅截取到 source 中该 RuntimeEvent 为止（含）
+   * 的条目作为 fork 边界。省略时与原行为一致——从 source 当前 head fork。
+   * 用于把 rewind checkpoint 表达为对历史切片的 fork。
+   */
+  readonly throughEventId?: string;
 }
 
 export interface ForkSessionResult {
@@ -213,7 +219,9 @@ export class SessionForkService {
         capability: runtimeCapability,
       });
       this.runtimePort.validateModelHistory(await sourceRuntimeStore.readSession(source.id));
-      const snapshot = await source.readDurableForkSnapshot();
+      const snapshot = input.throughEventId
+        ? await source.readDurableForkSnapshotAt(input.throughEventId)
+        : await source.readDurableForkSnapshot();
       const operationId = this.createOperationId();
       const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
       const frozen = createFrozenForkBundle(operationId, input, snapshot);

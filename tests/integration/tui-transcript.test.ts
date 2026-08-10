@@ -489,7 +489,7 @@ test("UI-only transcript clear is not persisted as a durable session fact", asyn
   );
 });
 
-test("rewind after a local clear rehydrates the durable transcript branch", async () => {
+test("rewind after a local clear forks a new session and returns its id", async () => {
   const durable = new TuiReporter();
   durable.pushUserMessage("durable old user");
   const hydration = {
@@ -512,12 +512,15 @@ test("rewind after a local clear rehydrates the durable transcript branch", asyn
   hydrateTuiReporter(reporter, hydration);
   reporter.clear();
   reporter.pushUserMessage("local post-clear user");
+  // Non-destructive rewind: forkFromCheckpoint 返回新 session id，
+  // 原 session 与其 reporter 不变。调用方负责切换到 forkedSessionId。
   const fakeSession = {
-    rewindConversation: async () => undefined,
+    forkFromCheckpoint: async () => ({ targetSessionId: "forked-session" }),
     readHydrationSnapshot: async () => hydration,
   } as unknown as Session;
+  const stubForkPort = {} as unknown as Parameters<typeof applyTuiRewind>[0]["forkRuntimePort"];
 
-  await applyTuiRewind({
+  const result = await applyTuiRewind({
     session: fakeSession,
     reporter,
     snapshot: {
@@ -531,23 +534,12 @@ test("rewind after a local clear rehydrates the durable transcript branch", asyn
       deletedFileCount: 0,
     },
     mode: "conversation",
+    forkRuntimePort: stubForkPort,
+    createTargetSessionId: () => "forked-session",
   });
 
-  assert.deepEqual(
-    reporter
-      .getProjection()
-      .entries.map(({ entry }) => entry)
-      .slice(0, 1),
-    [{ kind: "user", content: "durable old user" }],
-  );
-  assert.equal(
-    reporter
-      .getProjection()
-      .entries.some(
-        ({ entry }) => entry.kind === "user" && entry.content === "local post-clear user",
-      ),
-    false,
-  );
+  assert.equal(result.forkedSessionId, "forked-session");
+  assert.equal(result.inputText, "original prompt");
 });
 
 function summarizeEntry(entry: { kind: string; uiEntryId?: string; content?: string }) {

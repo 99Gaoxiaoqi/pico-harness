@@ -157,10 +157,10 @@ import {
   listDesktopUserSkills,
 } from "./desktop-resource-catalog.js";
 import {
-  applyDesktopRewind,
   assertDesktopChangesComplete,
   assertDesktopChangesFingerprint,
   projectDesktopCheckpoint,
+  projectDesktopRewindFingerprints,
   type DesktopCheckpointProjection,
 } from "./desktop-review.js";
 import {
@@ -934,6 +934,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     } finally {
       sourceLease.release();
     }
+    // Fork creates a new sessionId; the source session's Memory Sources and Facts
+    // remain valid (source RuntimeEvents unchanged). The target session starts with
+    // no Memory Sources of its own — extraction will create new Sources as the
+    // target session accumulates completed turns. No lifecycle Job is needed.
     const session = await this.requireSession(canonical, targetSessionId);
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
@@ -3194,53 +3198,50 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly checkpointId: string;
     readonly expectedFingerprint: string;
   }): Promise<JsonValue> {
-    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
-    const rewindBoundarySequence = await this.withSession(
+    const canonical = await this.requireIdleTrustedSession(
+      params.workspacePath,
+      params.sessionId,
+      "回滚",
+    );
+    // Non-destructive rewind: 从 checkpoint 创建新 Session（fork）。
+    // 原 Session 完全不变，因此不再需要 Memory Source 失效——fork 不会破坏任何账本。
+    const targetSessionId = this.createSessionId();
+    const forkedSessionId = await this.withSession(
       canonical,
       params.sessionId,
       async (session) => {
-        const checkpoint = session.fileHistory.snapshots.find(
-          (candidate) => candidate.messageId === params.checkpointId,
+        const expectedFingerprints = await projectDesktopRewindFingerprints(
+          session,
+          params.checkpointId,
+          params.expectedFingerprint,
         );
-        if (!checkpoint) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.NOT_FOUND,
-            `Session ${params.sessionId} 中不存在检查点 ${params.checkpointId}`,
-          );
-        }
-        return checkpoint.beforeSessionSeq;
+        const fork = await session.forkFromCheckpoint(
+          params.checkpointId,
+          "both",
+          createSessionForkRuntimePort(),
+          () => targetSessionId,
+          expectedFingerprints,
+        );
+        return fork.targetSessionId;
       },
     );
-    const preparedMemory = this.memoryService.prepareSessionSourceInvalidation(
-      canonical,
-      params.sessionId,
-      {
-        availability: "rewound",
-        code: `rewind_${params.checkpointId}`,
-        afterSequence: rewindBoundarySequence,
-      },
-    );
-    try {
-      await this.withSession(canonical, params.sessionId, (session) =>
-        applyDesktopRewind(session, params.checkpointId, params.expectedFingerprint),
-      );
-    } catch (error) {
-      // Rewind spans workspace and Runtime stores; after execution starts, an error can be partial.
-      // The privacy-first lifecycle job never deletes approved Facts.
-      this.memoryService.commitSessionSourceInvalidation(preparedMemory);
-      throw error;
-    }
-    this.memoryService.commitSessionSourceInvalidation(preparedMemory);
+    const session = await this.requireSession(canonical, forkedSessionId);
+    this.publishSession(session);
+    this.publishTranscriptUpdate(canonical, forkedSessionId, "reload");
     this.publish(
       createRuntimeNotification({
         topic: "rewind.completed",
-        scope: { workspacePath: canonical, sessionId: params.sessionId },
+        scope: { workspacePath: canonical, sessionId: forkedSessionId },
         resourceVersion: this.nextResourceVersion(),
         at: this.now(),
-        payload: { sessionId: params.sessionId, checkpointId: params.checkpointId },
+        payload: {
+          sessionId: forkedSessionId,
+          sourceSessionId: params.sessionId,
+          checkpointId: params.checkpointId,
+        },
       }),
     );
-    return { applied: true, sessionId: params.sessionId };
+    return { applied: true, sessionId: forkedSessionId, sourceSessionId: params.sessionId };
   }
 
   private async projectRunChanges(
