@@ -93,14 +93,15 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
 
 ## 状态真源
 
-`$PICO_HOME/workspaces/<workspace-id>/` 下的状态按事实所有权拆分：
+`$PICO_HOME/workspaces/<workspace-id>/` 下的状态按事实所有权拆分。RuntimeEventStore
+是整个系统的 canonical semantic log；其他账本通过弱外键引用 RuntimeEvent，不复制会话历史。
 
 | 组件                | 位置         | 负责的数据                                                                                  | 不负责的数据                         |
 | ------------------- | ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------ |
 | `RuntimeEventStore` | `sessions/`  | Session manifest、消息、工具、审批、压缩、rewind、run terminal 等 Agent 事实                | Job 调度、TaskRun 和长期记忆事实     |
 | `TaskRunStore`      | `task-runs/` | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态  |
 | `RuntimeStore`      | `control/`   | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实   |
-| `MemoryRepository`  | `memory/`    | 版本化的 settings、sources、facts、proposals、审计与幂等记录                                | 原始对话、ToolResult 和 Session 标题 |
+| `MemoryRepository`  | `memory/`    | 版本化的 settings、sources、facts、proposals、审计与幂等记录                                | 原始对话事实（属于 RuntimeEventStore） |
 
 `RuntimeEventStore` 是会话和 Agent 运行事实的唯一真源。Session 内存、Transcript 和
 Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，不建立第二套会话历史。
@@ -108,14 +109,19 @@ Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，
 Session 标题也属于 RuntimeEvent。Desktop session metadata 只保存 archive 等 UI 元数据；
 旧 metadata 由一次性迁移转换，正常读写只使用当前 schema，不以 metadata title 作为回退。
 
-`TaskRunStore` 和 `RuntimeStore` 分别拥有可恢复任务账本与后台任务控制面。三类 Store 共用
-`.storage/` 下的 workspace identity、文件事务锁和 commit 协调器，但通过不同 JSON/JSONL
-文件和 API 维持边界，不能把 TaskRun 或 Job 状态当作 Session 历史。
+运行态三类 Store（RuntimeEventStore / TaskRunStore / RuntimeStore）共用 `.storage/` 下的
+workspace identity、文件事务锁和 commit 协调器，但通过不同 JSON/JSONL 文件和 API 维持
+边界，不能把 TaskRun 或 Job 状态当作 Session 历史。`MemoryRepository` 使用独立的 `memory/`
+目录和 lock；跨域操作（如 deleteSession）采用两阶段提交模拟（prepare lifecycle Job →
+执行操作 → commit lifecycle Job），中途崩溃时由 `reconcileLifecycleJobs` 的 fail-closed
+恢复保证隐私安全。
 
 大体积 ToolResult 和子代理报告写入 `evidence/` 的不可变内容寻址存储，RuntimeEvent 保留
-有界投影、哈希与引用；`traces/` 保存可选的运行 Span，供观测和复盘，不替代任何事实账本。
-`memory/state.json` 是结构化长期记忆的独立 authority，原始用户证据仍来自 RuntimeEvent，
-不会复制出第二份 Transcript。
+���界投影、哈希与引用；`traces/` 保存可选的运行 Span，供观测和复盘，不替代任何事实账本。
+`memory/state.json` 是 RuntimeEvent 派生投影 + 用户编辑 overlay 的复合 authority：派生层
+（Source 的 eventIds/digest/evidenceRef）可从 RuntimeEvent 重建，overlay 层（Settings、
+manual-fact、Fact 状态变更、Proposal 裁决）是独立用户意图，需从备份恢复。原始用户证据
+始终来自 RuntimeEvent，不会复制出第二份 Transcript。
 
 ## 路径模型
 

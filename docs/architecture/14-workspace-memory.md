@@ -13,7 +13,7 @@ pico 里有两套都叫"记忆"的系统，容易混淆：
 | 管什么 | 对话历史、run 状态、usage | 跨会话的偏好/约定/纠错/参考 |
 | 生命周期 | 一个 Session | 一个工作区（跨所有 Session） |
 | 存储 | `RuntimeEventStore` JSONL | `memory/state.json` 单文件 |
-| 真源 | 不可变事件流 | 结构化 Fact/Proposal/Source |
+| 真源 | 不可变事件流 | RuntimeEvent 派生投影 + 用户编辑 overlay |
 | 是否注入 prompt | 完整历史投影 | 按 3 条/320 token 召回注入 |
 
 本文只讲第二套。它实现 `src/memory/` 下 15 个文件，是项目里最复杂的子系统之一。

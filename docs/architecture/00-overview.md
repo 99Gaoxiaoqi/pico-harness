@@ -49,14 +49,18 @@ Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `Lo
 ## 状态边界
 
 - `RuntimeEventStore` 是 Session manifest、消息、工具、审批、压缩、rewind 和 run terminal
-  的唯一事实源，落在每个 Session 的 `session.jsonl`。
+  的唯一事实源，落在每个 Session 的 `session.jsonl`。它是整个系统的 canonical semantic log。
 - `RuntimeStore` 是 Jobs、daemon/cron runs、attempts、leases、usage 和 completion outbox
   的控制面真源。
 - `TaskRunStore` 是显式 recoverable 任务跨 Attempt 的事实账本；它保存 adapter 身份、不可变输入、
   checkpoint 引用、执行租约和启动凭据，但不复制 Session RuntimeEvent。
+- `MemoryRepository` 是 RuntimeEvent 派生投影 + 用户编辑 overlay 的复合 authority。派生层
+  （Source 的 eventIds/digest/evidenceRef）从 RuntimeEvent 提取，可重建；overlay 层
+  （Settings、manual-fact、Fact 状态变更、Proposal 裁决）是独立用户意图。使用独立的
+  `memory/` 目录和 lock，跨域操作采用两阶段提交模拟 + fail-closed 失效。
 - `daemon-events.jsonl` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面状态。
-- 三者共享 `$PICO_HOME/workspaces/<workspace-id>/` 下的事务协调，但分别落在 `sessions/`、
-  `task-runs/` 和 `control/`，使用不同账本和 API。
+- 运行态三类 Store 共享 `$PICO_HOME/workspaces/<workspace-id>/.storage/` 下的事务协调，
+  但分别落在 `sessions/`、`task-runs/` 和 `control/`，使用不同账本和 API。
 - Session 内存、Transcript 和 Desktop ViewModel 都是可重建投影。
 - Session title 存在 RuntimeEvent；Desktop metadata 不保存第二份 title。
 
