@@ -1,8 +1,8 @@
 // GoalManager:长程目标的状态机 + budget 管理(ROADMAP 3.5 Goal Mode)。
 //
-// 与 PlanStore(计划文档)、TodoStore(任务清单)的层次区分:
+// 与 PlanCoordinator(事件溯源计划)、TodoStore(任务清单)的层次区分:
 //   - Goal:宏观长程目标 + budget(轮次/Token/墙钟),用状态机约束生命周期
-//   - Plan:目标的实现路径,以 PLAN.md 文本落地
+//   - Plan:目标的实现路径,由 PlanCoordinator 以事件溯源方式管理
 //   - Todo:路径上的原子任务清单
 // 三者层次不同,Goal 居于最上层,锚定"我们在追什么、还能追多久"。
 //
