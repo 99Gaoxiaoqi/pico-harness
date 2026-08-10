@@ -9,8 +9,6 @@ import {
   readFirstJsonLineSync,
   readJsonFileSync,
   readJsonLinesSync,
-  recoverFileTransactionSync,
-  withFileLockSync,
   writeJsonAtomicSync,
 } from "../storage/local-file-storage.js";
 import {
@@ -22,6 +20,10 @@ import {
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
   type WorkspaceStorageRootIdentity,
 } from "../storage/workspace-storage-layout.js";
+import {
+  createFileStorageErrorMapper,
+  withLedgerStoreLock,
+} from "../storage/ledger-store-lock.js";
 import {
   RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
   TASK_ATTEMPT_TERMINAL_STATUSES,
@@ -548,30 +550,29 @@ export class TaskRunStore {
   }
 
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
-    try {
+    const preLockAssert = () => {
       if (this.rootIdentity) {
         assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
       }
       this.assertTaskRunsBoundary();
-      if (this.readOnly) return operation();
-      return withFileLockSync(this.lockDirectory, this.ownerId, () => {
-        if (this.rootIdentity) {
-          assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
-        }
-        this.assertTaskRunsBoundary();
-        recoverFileTransactionSync(this.storageRoot, TASK_RUN_TRANSACTION_OPTIONS);
-        this.assertTaskRunsBoundary();
-        return operation();
-      });
-    } catch (error) {
-      if (error instanceof TaskRunStoreIntegrityError) throw error;
-      if (error instanceof FileStorageIntegrityError || error instanceof SyntaxError) {
-        throw new TaskRunStoreIntegrityError(`TaskRun storage is invalid: ${error.message}`, {
-          cause: error,
-        });
-      }
-      throw error;
-    }
+    };
+    return withLedgerStoreLock(
+      {
+        lockDirectory: this.lockDirectory,
+        storageRoot: this.storageRoot,
+        ownerId: this.ownerId,
+        transactionOptions: TASK_RUN_TRANSACTION_OPTIONS,
+        readOnly: this.readOnly,
+        preLockAssert,
+        postLockAssert: preLockAssert,
+        postRecoverAssert: () => this.assertTaskRunsBoundary(),
+        mapError: createFileStorageErrorMapper(
+          TaskRunStoreIntegrityError,
+          "TaskRun",
+        ),
+      },
+      operation,
+    );
   }
 
   private requireTaskRun(taskRunId: string): LoadedTaskRun {
