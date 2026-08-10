@@ -268,6 +268,9 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
               startSequence: input.evidence.startSequence,
               endSequence: input.evidence.endSequence,
               digest: input.evidence.digest,
+              ...(input.evidence.evidenceRef
+                ? { evidenceRef: input.evidence.evidenceRef }
+                : {}),
               idempotencyKey: `proposal-source:${input.job.jobId}`,
             });
       const proposals = input.candidates.map((candidate) => {
