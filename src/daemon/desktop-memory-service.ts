@@ -15,7 +15,6 @@ import {
   MEMORY_FORGOTTEN_NOTIFICATION_JOB_TYPE,
   MEMORY_FORGOTTEN_NOTIFICATION_VERSION,
   MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
-  MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION,
   MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION,
   MemoryConflictError,
   MemoryIdempotencyConflictError,
@@ -68,7 +67,6 @@ export interface PreparedMemorySourceInvalidation {
 
 const MEMORY_LIFECYCLE_JOB_TYPE = "source-lifecycle-invalidation" as const;
 const MEMORY_LIFECYCLE_UNAVAILABLE_VERSION = "memory-source-lifecycle-v1:unavailable" as const;
-const MEMORY_LIFECYCLE_REWOUND_VERSION = "memory-source-lifecycle-v1:rewound" as const;
 const MEMORY_LIFECYCLE_BATCH_SIZE = 250;
 
 /** Host-owned workspace repository boundary. Private storage paths never cross this service. */
@@ -321,12 +319,15 @@ export class DesktopMemoryService {
     });
   }
 
+  /**
+   * Marks a Session's Memory Sources as `unavailable` (used by deleteSession). Rewind is now a
+   * non-destructive fork, so the source Session is immutable and its Sources stay valid — there
+   * is no longer a `rewound` invalidation reason.
+   */
   invalidateSessionSources(
     workspacePath: string,
     sessionId: string,
-    reason:
-      | { readonly availability: "unavailable"; readonly code: string }
-      | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+    reason: { readonly availability: "unavailable"; readonly code: string },
   ): void {
     const prepared = this.prepareSessionSourceInvalidation(workspacePath, sessionId, reason);
     this.commitSessionSourceInvalidation(prepared);
@@ -335,9 +336,7 @@ export class DesktopMemoryService {
   prepareSessionSourceInvalidation(
     workspacePath: string,
     sessionId: string,
-    reason:
-      | { readonly availability: "unavailable"; readonly code: string }
-      | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+    reason: { readonly availability: "unavailable"; readonly code: string },
   ): PreparedMemorySourceInvalidation {
     return this.safely(() => {
       const repository = this.repository(workspacePath);
@@ -348,14 +347,10 @@ export class DesktopMemoryService {
           jobId: `lifecycle:${operationId}`,
           type: MEMORY_LIFECYCLE_JOB_TYPE,
           terminalEventId: operationId,
-          extractorVersion:
-            reason.availability === "rewound"
-              ? MEMORY_LIFECYCLE_REWOUND_VERSION
-              : MEMORY_LIFECYCLE_UNAVAILABLE_VERSION,
+          extractorVersion: MEMORY_LIFECYCLE_UNAVAILABLE_VERSION,
           cursor: {
             sessionId,
             eventId: reason.code,
-            ...(reason.availability === "rewound" ? { sequence: reason.afterSequence } : {}),
           },
           maxAttempts: 1,
           idempotencyKey: `lifecycle-enqueue:${operationId}`,
@@ -520,11 +515,9 @@ export class DesktopMemoryService {
         const sourceId = job.cursor.eventId;
         const sourceVersion = job.cursor.sequence;
         const change =
-          job.extractorVersion === MEMORY_SOURCE_REWOUND_NOTIFICATION_VERSION
-            ? "source_rewound"
-            : job.extractorVersion === MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION
-              ? "source_unavailable"
-              : undefined;
+          job.extractorVersion === MEMORY_SOURCE_UNAVAILABLE_NOTIFICATION_VERSION
+            ? "source_unavailable"
+            : undefined;
         const source = sourceId ? repository.getSource(sourceId) : undefined;
         if (!source || sourceVersion === undefined || !change) {
           repository.updateJob({
@@ -573,15 +566,24 @@ export class DesktopMemoryService {
     }
   }
 
+  /**
+   * Drains one queued/running lifecycle invalidation Job by marking the Session's Sources
+   * `unavailable` (used by deleteSession, which really does destroy the RuntimeEvent ledger).
+   * Pending proposals anchored on those Sources are deleted; user-approved Facts are retained.
+   */
   private applyLifecycleJob(repository: MemoryRepository, job: Job): void {
-    const availability =
-      job.extractorVersion === MEMORY_LIFECYCLE_REWOUND_VERSION
-        ? "rewound"
-        : job.extractorVersion === MEMORY_LIFECYCLE_UNAVAILABLE_VERSION
-          ? "unavailable"
-          : undefined;
+    if (job.extractorVersion !== MEMORY_LIFECYCLE_UNAVAILABLE_VERSION) {
+      repository.updateJob({
+        jobId: job.jobId,
+        expectedVersion: job.version,
+        status: "failed",
+        errorCode: "lifecycle_job_invalid",
+        idempotencyKey: `${job.jobId}:invalid:${job.version}`,
+      });
+      return;
+    }
     const invalidationCode = job.cursor.eventId;
-    if (!availability || !invalidationCode) {
+    if (!invalidationCode) {
       repository.updateJob({
         jobId: job.jobId,
         expectedVersion: job.version,
@@ -596,8 +598,7 @@ export class DesktopMemoryService {
       sessionId: job.cursor.sessionId,
       type: MEMORY_PROPOSAL_JOB_TYPE,
       extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
-      ...(availability === "rewound" ? { afterSequence: job.cursor.sequence ?? 0 } : {}),
-      errorCode: availability === "rewound" ? "memory_source_rewound" : "memory_source_unavailable",
+      errorCode: "memory_source_unavailable",
       idempotencyKeyPrefix: `${job.jobId}:extraction-cancel`,
     });
 
@@ -605,7 +606,6 @@ export class DesktopMemoryService {
     while (true) {
       const sources = repository.listSessionSources(job.cursor.sessionId, {
         availability: "available",
-        ...(availability === "rewound" ? { afterSequence: job.cursor.sequence ?? 0 } : {}),
         ...(afterSourceId ? { afterSourceId } : {}),
         limit: MEMORY_LIFECYCLE_BATCH_SIZE,
       });
@@ -625,11 +625,11 @@ export class DesktopMemoryService {
           const updated = repository.updateSourceAvailability({
             sourceId: source.sourceId,
             expectedVersion: source.version,
-            availability,
+            availability: "unavailable",
             invalidationCode,
             idempotencyKey: `${job.jobId}:source:${source.sourceId}:${source.version}`,
           });
-          if (updated.availability !== availability) {
+          if (updated.availability !== "unavailable") {
             throw new MemoryConflictError("Source lifecycle update did not persist");
           }
         }
@@ -804,24 +804,16 @@ function requireProposalBody(value: string | null): string {
 
 function lifecycleOperationId(
   sessionId: string,
-  reason:
-    | { readonly availability: "unavailable"; readonly code: string }
-    | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+  reason: { readonly availability: "unavailable"; readonly code: string },
   nonce: string,
 ): string {
   return createHash("sha256")
-    .update(
-      `${sessionId}\0${reason.availability}\0${reason.code}\0${
-        reason.availability === "rewound" ? reason.afterSequence : ""
-      }\0${nonce}`,
-    )
+    .update(`${sessionId}\0${reason.availability}\0${reason.code}\0\0${nonce}`)
     .digest("hex");
 }
 
 function assertLifecycleReason(
-  reason:
-    | { readonly availability: "unavailable"; readonly code: string }
-    | { readonly availability: "rewound"; readonly code: string; readonly afterSequence: number },
+  reason: { readonly availability: "unavailable"; readonly code: string },
 ): void {
   if (
     reason.code.length === 0 ||
@@ -829,11 +821,5 @@ function assertLifecycleReason(
     !/^[A-Za-z0-9._:-]+$/u.test(reason.code)
   ) {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "记忆生命周期失效代码无效");
-  }
-  if (
-    reason.availability === "rewound" &&
-    (!Number.isSafeInteger(reason.afterSequence) || reason.afterSequence < 0)
-  ) {
-    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "记忆回退序列边界无效");
   }
 }

@@ -59,8 +59,12 @@ export interface Proposal {
 /**
  * Durable provenance contains identities and a digest only. Raw transcript excerpts belong in
  * Runtime logs and are deliberately not duplicated into the Memory state projection.
+ *
+ * Note on availability: rewind is now non-destructive (it forks into a new Session), so the
+ * source Session's RuntimeEvents never change and a Source's ref stays valid forever. Only
+ * `available` and `unavailable` (used by deleteSession) remain.
  */
-export const SOURCE_AVAILABILITIES = ["available", "unavailable", "rewound"] as const;
+export const SOURCE_AVAILABILITIES = ["available", "unavailable"] as const;
 export type SourceAvailability = (typeof SOURCE_AVAILABILITIES)[number];
 
 export interface Source {

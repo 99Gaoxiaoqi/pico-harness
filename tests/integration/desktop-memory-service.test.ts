@@ -344,7 +344,7 @@ test("Desktop review approval replaces a conflict fact instead of creating a dup
   );
 });
 
-test("session deletion and rewind invalidate sources and pending proposals but retain facts", async (context) => {
+test("session deletion invalidates sources and pending proposals but retains facts", async (context) => {
   const fixture = await createFixture("lifecycle");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -372,36 +372,6 @@ test("session deletion and rewind invalidate sources and pending proposals but r
     reason: "Pending reason",
     sourceId: deletedSource.sourceId,
   });
-  const rewindSource = repository.createSource({
-    sourceId: "source-rewind",
-    sessionId: "session-rewind",
-    digest: "sha256:rewind",
-    startSequence: 11,
-    endSequence: 15,
-  });
-  repository.createProposal({
-    proposalId: "pending-rewind",
-    kind: "correction",
-    title: "Pending rewind",
-    content: "Pending rewind body",
-    reason: "Pending rewind reason",
-    sourceId: rewindSource.sourceId,
-  });
-  const beforeRewindSource = repository.createSource({
-    sourceId: "source-before-rewind",
-    sessionId: "session-rewind",
-    digest: "sha256:before-rewind",
-    startSequence: 1,
-    endSequence: 10,
-  });
-  repository.createProposal({
-    proposalId: "pending-before-rewind",
-    kind: "reference",
-    title: "Before rewind",
-    content: "Must remain pending",
-    reason: "Source is before the checkpoint",
-    sourceId: beforeRewindSource.sourceId,
-  });
   const deletedJob = repository.createJob({
     jobId: "pending-delete-job",
     type: MEMORY_PROPOSAL_JOB_TYPE,
@@ -415,20 +385,6 @@ test("session deletion and rewind invalidate sources and pending proposals but r
     status: "failed",
     attemptCount: 1,
   });
-  repository.createJob({
-    jobId: "pending-rewind-job",
-    type: MEMORY_PROPOSAL_JOB_TYPE,
-    terminalEventId: "pending-rewind-terminal",
-    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
-    cursor: { sessionId: "session-rewind", eventId: "rewind-user", sequence: 15 },
-  });
-  repository.createJob({
-    jobId: "pending-before-rewind-job",
-    type: MEMORY_PROPOSAL_JOB_TYPE,
-    terminalEventId: "pending-before-rewind-terminal",
-    extractorVersion: MEMORY_PROPOSAL_EXTRACTOR_VERSION,
-    cursor: { sessionId: "session-rewind", eventId: "before-user", sequence: 10 },
-  });
   repository.close();
 
   const events: Array<{ readonly topic: string; readonly payload: Record<string, unknown> }> = [];
@@ -439,11 +395,6 @@ test("session deletion and rewind invalidate sources and pending proposals but r
   service.invalidateSessionSources(fixture.workspace, "session-delete", {
     availability: "unavailable",
     code: "session_deleted",
-  });
-  service.invalidateSessionSources(fixture.workspace, "session-rewind", {
-    availability: "rewound",
-    code: "rewind_checkpoint-1",
-    afterSequence: 10,
   });
   assert.equal(
     service.get(fixture.workspace, "approved-fact").fact.source?.availability,
@@ -457,17 +408,11 @@ test("session deletion and rewind invalidate sources and pending proposals but r
   });
   context.after(() => verify.close());
   assert.equal(verify.getSource("source-delete")?.availability, "unavailable");
-  assert.equal(verify.getSource("source-rewind")?.availability, "rewound");
-  assert.equal(verify.getSource("source-before-rewind")?.availability, "available");
   assert.equal(verify.getProposal("pending-delete")?.status, "deleted");
-  assert.equal(verify.getProposal("pending-rewind")?.status, "deleted");
-  assert.equal(verify.getProposal("pending-before-rewind")?.status, "pending");
   assert.equal(verify.getFact("approved-fact")?.state, "active");
   assert.equal(verify.getFact("approved-fact")?.content, "Use npm run build");
   assert.equal(verify.getJob("pending-delete-job")?.status, "cancelled");
-  assert.equal(verify.getJob("pending-rewind-job")?.status, "cancelled");
-  assert.equal(verify.getJob("pending-before-rewind-job")?.status, "queued");
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 1);
   assert.ok(events.every((event) => !("content" in event.payload) && !("reason" in event.payload)));
 });
 
