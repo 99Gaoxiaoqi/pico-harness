@@ -440,7 +440,6 @@ interface TuiSessionBundle {
   readonly planProjection: PlanProjection;
   discoveryProjection?: unknown;
   readonly skillLoader: SkillLoader;
-  readonly recoveredRewindInputText?: string;
   /** Immutable foreground non-MCP inventory; per-run allowlists must never overwrite it. */
   readonly baselineToolSnapshot: readonly SessionToolStatus[];
   latestMcpStatus?: McpStatusSnapshot;
@@ -1658,14 +1657,6 @@ export async function startTuiRepl(
         sessionId: selection.sessionId,
         dir: opts.workDir,
       });
-      const recoveredRewind = await session.getPendingTuiRewindHandoff();
-      if (recoveredRewind) {
-        reporter.withoutDurableTranscript(() => {
-          reporter.pushSystemMessage(
-            `Recovered rewind ${recoveredRewind.operationId}. Original prompt is ready to edit.`,
-          );
-        });
-      }
       if (taskRuntimeDiagnostic) {
         reporter.pushSystemMessage(
           `Task runtime unavailable; background/worker persistence is disabled. ${taskRuntimeDiagnostic}`,
@@ -1691,7 +1682,6 @@ export async function startTuiRepl(
         mcpElicitationHandler,
         planProjection,
         skillLoader,
-        ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
         baselineToolSnapshot: toolStatusFromRegistry(toolRegistry),
         latestToolSnapshot: toolStatusFromRegistry(toolRegistry),
@@ -1814,11 +1804,7 @@ export async function startTuiRepl(
           text: string;
         }
       | undefined
-    >(() =>
-      initialBundle.recoveredRewindInputText
-        ? { sequence: 1, text: initialBundle.recoveredRewindInputText }
-        : undefined,
-    );
+    >(undefined);
     setProjection = setStateProjection;
     activeBundle = activeBundleRef.current;
 
@@ -2182,19 +2168,11 @@ export async function startTuiRepl(
           // 新 bundle 已完整构建且旧 runtime 已收口，再一次替换引用。
           activeBundleRef.current = next;
           activeBundle = next;
-          const recoveredRewindInputText = next.recoveredRewindInputText;
           runningQueue.clear();
           runningInputDepsRef.current = null;
           rewindContextRef.current = null;
           setDialogRequests([]);
-          setInputReplacement((current) =>
-            recoveredRewindInputText
-              ? {
-                  sequence: (current?.sequence ?? 0) + 1,
-                  text: recoveredRewindInputText,
-                }
-              : undefined,
-          );
+          setInputReplacement(undefined);
           setRunningInputState(runningQueue.snapshot);
           setProjection(next.reporter.getProjection());
           setBundle(next);
@@ -2329,6 +2307,8 @@ export async function startTuiRepl(
                 reporter,
                 snapshot,
                 mode,
+                forkRuntimePort: createSessionForkRuntimePort(),
+                createTargetSessionId: createCliSessionId,
                 onRestoreInteractionMode: (interactionMode, prePlanMode) => {
                   const restored = restoreSessionInteractionMode(
                     settings,
@@ -2341,6 +2321,15 @@ export async function startTuiRepl(
               if (!isCurrentGeneration()) return;
               if (rewind.inputText !== undefined) {
                 setInputReplacement((replacement) => rewindInputReplacement(replacement, rewind));
+              }
+              // Non-destructive rewind 创建了新 Session：切换 TUI 到 fork 目标，
+              // 旧 Session 保持不变。inputReplacement 已携带原 prompt 供新 session 编辑。
+              // switchSession 必须在 historyMutation 释放后调用（它要求 idle 且无 mutation）。
+              const forkedSessionId = rewind.forkedSessionId;
+              if (forkedSessionId && forkedSessionId !== sessionId) {
+                queueMicrotask(() => {
+                  void switchSession({ mode: "resume", sessionId: forkedSessionId });
+                });
               }
             }),
         });

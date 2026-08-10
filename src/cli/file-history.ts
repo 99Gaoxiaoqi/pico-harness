@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { SessionForkRuntimePort } from "../engine/session-fork-runtime-port.js";
 import type { Session } from "../engine/session.js";
 import type { FileHistorySnapshot } from "../safety/file-history.js";
 
@@ -138,6 +140,7 @@ export async function rewindFileHistoryFromCli(
   session: Session,
   messageId: string | undefined,
   mode: RewindMode = "both",
+  forkRuntimePort?: SessionForkRuntimePort,
 ): Promise<FileHistoryRewindResult> {
   if (!messageId) {
     const summaries = listFileHistorySnapshotSummaries(session);
@@ -149,17 +152,29 @@ export async function rewindFileHistoryFromCli(
 
   findSnapshot(session, messageId);
 
-  if (mode === "code") {
-    await session.rewindCode(messageId);
-  } else if (mode === "conversation") {
-    await session.rewindConversation(messageId);
-  } else {
-    await session.rewindBoth(messageId);
+  if (!forkRuntimePort) {
+    throw new Error(
+      "rewindFileHistoryFromCli 需要 forkRuntimePort 以执行 non-destructive fork；" +
+        "请在调用处注入 createSessionForkRuntimePort()。",
+    );
   }
 
+  // Non-destructive rewind：原 Session 不变，从 checkpoint 创建 fork。
+  // CLI 入口创建随机 targetSessionId（与 desktop/TUI 一致）。
+  const fork = await session.forkFromCheckpoint(
+    messageId,
+    mode,
+    forkRuntimePort,
+    () => `cli-rewind:${randomUUID()}`,
+  );
+
+  const target = fork.targetSessionId;
+  const isFork = target !== session.id;
   return {
     changed: true,
-    output: `已回滚 session ${session.id}: messageId=${messageId} mode=${mode} (${describeRewindMode(mode)})`,
+    output: isFork
+      ? `已从 checkpoint fork 新 session ${target}: messageId=${messageId} mode=${mode} (${describeRewindMode(mode)}); 原 session ${session.id} 未改动。`
+      : `已回滚 session ${session.id}: messageId=${messageId} mode=${mode} (${describeRewindMode(mode)})`,
   };
 }
 

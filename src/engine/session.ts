@@ -12,11 +12,9 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-  isMessageHiddenFromTranscript,
   type CanonicalUsage,
   type Message,
   type UsageReportedField,
@@ -45,32 +43,17 @@ import {
 } from "./session-runtime.js";
 import {
   createFileHistoryState,
-  type FileHistoryBackup,
   type FileHistoryState,
   type FileHistoryDiffStat,
   fileHistoryBeginRewindPoint,
   fileHistoryBindSourceEvent,
-  fileHistoryDiscardFrom,
   fileHistoryDiffStat,
   fileHistoryDefaultBaseDir,
   fileHistoryLoadState,
   fileHistoryMessageDiffStat,
-  fileHistoryPrepareRewind,
   fileHistoryRegisterRoot,
-  resolveBackupPath,
+  fileHistoryRewind,
 } from "../safety/file-history.js";
-import { FileHistoryBlobStore } from "../storage/file-history-blob-store.js";
-import {
-  StorageOperationJournal,
-  type RewindStorageOperation,
-  type StoredFileState,
-} from "../storage/operation-journal.js";
-import {
-  RewindOperationCoordinator,
-  RewindOperationConflictError,
-  type NewRewindStorageOperation,
-  type RewindWorkspaceTarget,
-} from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   createEngineRuntimeCapability,
@@ -79,13 +62,13 @@ import {
   type EngineRuntimeWriteGuard,
 } from "./runtime-port.js";
 import {
-  RUNTIME_EVENT_SCHEMA_VERSION,
   type RuntimeEventBase,
   type RuntimeEvent,
-  type RuntimeHistoryRewoundEvent,
   type RuntimePlanEvent,
 } from "./session-runtime-event.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
+import { SessionForkService } from "./session-fork-service.js";
+import type { SessionForkRuntimePort } from "./session-fork-runtime-port.js";
 import {
   createCanonicalTranscriptToolStart,
   createRuntimeTranscriptToolStartEvent,
@@ -150,14 +133,6 @@ export interface DurableSessionForkSnapshot {
   readonly cursor: SessionCursor;
   readonly rootLogId: string;
   readonly modelCheckpoint?: DurableRuntimeForkCheckpoint;
-}
-
-export interface DurableTuiRewindHandoff {
-  readonly operationId: string;
-  readonly inputText: string;
-  readonly transcriptIndex: number;
-  readonly interactionMode?: PersistedSessionSettings["mode"];
-  readonly prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>;
 }
 
 interface SerializedExecutionLease {
@@ -272,7 +247,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private runtimeOwnership?: OwnerLease;
   private runtimeOwnershipPromise?: Promise<OwnerLease>;
   private runtimeProjectionCursor?: SessionCursor;
-  private runtimeProjectionBranchId?: string;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
   /** Runtime lifecycle is injected by durable hosts; in-memory Sessions do not need one. */
@@ -367,7 +341,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       this.markWriteUncertain("Runtime session initialize/replay failed", error);
       throw error;
     }
-    await this.recoverStorageOperations();
   }
 
   private ensureRuntimeSession(): Promise<RuntimeSessionManifest> {
@@ -435,7 +408,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     );
     const cursor = projection.cursor;
     this.runtimeProjectionCursor = cursor ? { ...cursor } : undefined;
-    this.runtimeProjectionBranchId = projection.activeBranchId;
     this.conversationId = cursor ? `${cursor.logId}:${cursor.epoch}` : this.id;
     const lastEvent = projection.entries.at(-1)?.event;
     this.updatedAt = lastEvent ? new Date(lastEvent.at) : this.createdAt;
@@ -464,12 +436,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private applyRuntimeHistoryProjectionDelta(
     messages: readonly Message[],
     cursor: SessionCursor,
-    activeBranchId: string,
     updatedAt: string,
   ): void {
     this.messageLedger.appendProjected(messages);
     this.runtimeProjectionCursor = { ...cursor };
-    this.runtimeProjectionBranchId = activeBranchId;
     this.conversationId = `${cursor.logId}:${cursor.epoch}`;
     this.updatedAt = new Date(updatedAt);
   }
@@ -478,18 +448,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     await fileHistoryLoadState(this.fileHistory, this.id, this.fileHistoryBaseDir);
     if (!this.fileHistory.roots.has("workspace")) {
       fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(this.workDir));
-    }
-  }
-
-  private async recoverStorageOperations(): Promise<void> {
-    const results = await this.createRewindCoordinator().reconcileUnfinished(this.id);
-    for (const result of results) {
-      if (result.state === "needs_attention") {
-        logger.warn(
-          { operationId: result.operationId, sessionId: this.id },
-          "[rewind] 未完成操作检测到外部冲突，等待人工处理",
-        );
-      }
     }
   }
 
@@ -814,6 +772,45 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     };
   }
 
+  /**
+   * 在 fork 前 drain Session 写队列，再从 RuntimeEvent entries 中截取到
+   * 指定 throughEventId（含）为止的切片，生成 hydration 与 cursor。
+   * 用于 non-destructive rewind：旧 Session 完全不变，fork 在历史中间分叉。
+   *
+   * 与 {@link readDurableForkSnapshot} 的区别仅在于边界：这里把 source head
+   * 替换为指定的历史 event。调用方必须保证 throughEventId 真实存在于 source。
+   */
+  async readDurableForkSnapshotAt(throughEventId: string): Promise<DurableSessionForkSnapshot> {
+    await this.flushPersistence();
+    const store = this.store;
+    if (!store) {
+      throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
+    }
+    const manifest = await this.ensureRuntimeSession();
+    const all = await store.readSessionEntries(this.id);
+    const boundaryIndex = all.findIndex((entry) => entry.event.eventId === throughEventId);
+    if (boundaryIndex < 0) {
+      throw new Error(
+        `Session ${this.id} 中找不到 fork 边界事件 ${throughEventId}`,
+      );
+    }
+    const entries = all.slice(0, boundaryIndex + 1);
+    const cursor = runtimeCursorForEntry(this.id, all, all[boundaryIndex]!);
+    const events = entries.map(({ event }) => event);
+    const modelCheckpoint = deriveDurableRuntimeForkCheckpoint(events);
+    return {
+      hydration: this.runtimeHydrationSnapshot(manifest, entries),
+      runtimeSeedEntries: projectRuntimeSessionForkSeedEntries(entries),
+      planEntries: projectActivePlanEntries(entries) as readonly {
+        readonly sequence: number;
+        readonly event: RuntimePlanEvent;
+      }[],
+      rootLogId: await resolveRuntimeRootSessionId(store, this.id),
+      cursor,
+      ...(modelCheckpoint ? { modelCheckpoint } : {}),
+    };
+  }
+
   private runtimeHydrationSnapshot(
     manifest: RuntimeSessionManifest,
     entries: readonly RuntimeEventStoreEntry[],
@@ -945,7 +942,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     await this.ensureRuntimeSession();
 
     const previousCursor = this.runtimeProjectionCursor;
-    const previousBranchId = this.runtimeProjectionBranchId;
     const targetCursor = commits.at(-1)!.cursor;
     let precedingSequence = previousCursor?.seq ?? -1;
     const commitsAreFreshAndOrdered = commits.every((commit) => {
@@ -957,7 +953,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
 
     if (
       !previousCursor ||
-      !previousBranchId ||
       this.messageLedger.deferredCount > 0 ||
       !commitsAreFreshAndOrdered
     ) {
@@ -969,9 +964,8 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       this.id,
       previousCursor,
       targetCursor,
-      previousBranchId,
     );
-    if (!delta || delta.entries.some((entry) => entry.event.kind === "history.rewound")) {
+    if (!delta) {
       await this.replayRuntimeHistoryProjection();
       return;
     }
@@ -998,7 +992,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     this.applyRuntimeHistoryProjectionDelta(
       messages,
       delta.cursor,
-      delta.activeBranchId,
       delta.entries.at(-1)!.event.at,
     );
   }
@@ -1131,13 +1124,13 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   async undo(count: number): Promise<void> {
     this.assertWritable();
     if (count <= 0) return;
+    if (this.store) {
+      throw new Error(
+        "Durable Runtime does not support destructive Session.undo; use forkFromCheckpoint for a non-destructive rewind",
+      );
+    }
     const { cutIndex, removedCount } = findUndoCut(this.messageLedger.readHistory(), count);
     if (removedCount === 0) return;
-    const runtimeBranchId = `undo:${randomUUID()}`;
-    if (this.store) {
-      await this.commitRuntimeRewind(cutIndex, runtimeBranchId);
-      return;
-    }
     this.messageLedger.retainPrefix(cutIndex, { resetOrderingState: true });
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
@@ -1186,57 +1179,33 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 
   /** Rewind Saga 以 operationId 作事件幂等键。 */
-  async rewindOnce(operationId: string, messageIndex: number): Promise<CommitReceipt | undefined> {
-    if (!operationId.trim()) throw new Error("Rewind operationId 不能为空");
-    return this.rewindConversationOnce(`rewind:${operationId}`, messageIndex);
-  }
-
-  private async rewindConversationOnce(
-    eventId: string,
-    messageIndex: number,
+  async rewindOnce(
+    _operationId: string,
+    _messageIndex: number,
   ): Promise<CommitReceipt | undefined> {
-    this.assertWritable();
-    if (this.store) return this.commitRuntimeRewind(messageIndex, eventId);
-    this.messageLedger.retainPrefix(messageIndex, { resetOrderingState: true });
-    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
-    this.updatedAt = new Date();
-    return undefined;
+    throw new Error(
+      "Destructive Session.rewindOnce has been removed; rewind is now non-destructive via forkFromCheckpoint",
+    );
   }
 
-  private commitRuntimeRewind(messageIndex: number, eventId: string): Promise<CommitReceipt> {
-    return this.enqueuePersistence("rewind", async (store) => {
-      await this.ensureRuntimeSession();
-      const entries = await store.readSessionEntries(this.id);
-      const existing = entries.find((entry) => entry.event.eventId === eventId);
-      if (existing) {
-        if (existing.event.kind !== "history.rewound" || existing.event.data.branchId !== eventId) {
-          throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
-        }
-        await this.replayRuntimeHistoryProjection();
-        return commitReceiptFromEntry(this.id, entries, existing, false);
-      }
-
-      const messages = projectRuntimeSessionMessageEntries(entries.map(({ event }) => event));
-      const retainedCount = Math.max(0, Math.min(Math.trunc(messageIndex), messages.length));
-      const throughEventId = messages[retainedCount - 1]?.eventId;
-      const event: RuntimeHistoryRewoundEvent = {
-        ...this.runtimeEventBase(eventId, "session-rewind", "internal"),
-        kind: "history.rewound",
-        data: { branchId: eventId, ...(throughEventId ? { throughEventId } : {}) },
-      };
-      const appended = await store.append(event);
-      await this.replayRuntimeHistoryProjection();
-      return commitReceiptFromAppend(appended);
-    });
-  }
-
+  /**
+   * 非破坏性 code rewind：仅回滚工作区文件到 checkpoint 状态。
+   * 不追加 history.rewound、不丢弃后续 FileHistory 快照。
+   * 被 {@link forkFromCheckpoint} 的 code / both 模式复用。
+   */
   async rewindCode(
     messageId: string,
     expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<void> {
     this.assertWritable();
-    const snapshot = this.requireRewindSnapshot(messageId);
-    await this.executeRewindOperation("code", snapshot, randomUUID(), expectedCurrentFingerprints);
+    await this.flushPersistence();
+    await fileHistoryRewind(
+      this.fileHistory,
+      messageId,
+      this.id,
+      this.fileHistoryBaseDir,
+      expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {},
+    );
   }
 
   async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
@@ -1252,22 +1221,86 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     );
   }
 
-  async rewindConversation(messageId: string): Promise<void> {
+  /**
+   * Non-destructive rewind: 从 checkpoint 处创建新 Session（fork），
+   * 原 Session 完全不变。消除跨账本悬空引用（Memory Source、TaskRun checkpoint）。
+   *
+   * mode 语义与破坏性 rewind 对齐：
+   * - "code": 只回滚工作区文件到 checkpoint 状态。无新 Session。
+   * - "conversation": 只 fork 对话（新 Session 截断到 checkpoint 之前），不动文件。
+   * - "both": fork 对话 + 回滚工作区文件。
+   *
+   * `runtimePort` 由宿主注入（engine 不能 import runtime 适配器层）。
+   * `createTargetSessionId` 让宿主控制新 Session 的命名空间。
+   */
+  async forkFromCheckpoint(
+    checkpointId: string,
+    mode: "code" | "conversation" | "both",
+    runtimePort: SessionForkRuntimePort,
+    createTargetSessionId: () => string,
+    expectedFingerprints?: Record<string, string>,
+  ): Promise<{ targetSessionId: string }> {
     this.assertWritable();
-    await this.executeRewindOperation("conversation", this.requireRewindSnapshot(messageId));
+    const snapshot = this.requireRewindSnapshot(checkpointId);
+    const expectedCurrentFingerprints = expectedFingerprints
+      ? new Map(Object.entries(expectedFingerprints))
+      : undefined;
+
+    // code-only 模式没有破坏性副作用：旧 rewindCode 只应用工作区文件，
+    // 既不追加 history.rewound 也不丢弃后续 FileHistory 快照。
+    // 直接复用以保持与破坏性 code 模式一致的语义。
+    if (mode === "code") {
+      await this.rewindCode(checkpointId, expectedCurrentFingerprints);
+      return { targetSessionId: this.id };
+    }
+
+    await this.flushPersistence();
+    const store = this.store;
+    if (!store) {
+      throw new Error(`Session ${this.id} 需要 durable runtime 才能执行 fork rewind`);
+    }
+
+    // 解析 fork 边界：checkpoint 记录的 beforeSessionSeq 是该用户消息追加前的 head seq。
+    // fork 到这个边界即丢弃该用户消息及其后续。边界可能不存在（首条用户消息前为空对话）。
+    const targetSessionId = createTargetSessionId();
+    const throughEventId = await this.resolveForkBoundaryEventId(snapshot.beforeSessionSeq);
+
+    const forkService = new SessionForkService({
+      workDir: this.workDir,
+      picoHome: this.picoHome,
+      runtimePort,
+      fileHistoryBaseDir: this.fileHistoryBaseDir,
+    });
+    await forkService.fork({
+      sourceSessionId: this.id,
+      targetSessionId,
+      targetMode: this.persistedSettings?.mode ?? "yolo",
+      ...(throughEventId ? { throughEventId } : {}),
+    });
+
+    // both 模式额外把工作区文件回滚到 checkpoint 状态。
+    // fork 只复制 RuntimeEvent 与 FileHistory sidecar，不动磁盘文件；
+    // 因此在共享工作区上显式应用 checkpoint 的文件状态。
+    // 复用 rewindCode：它的 saga 在 code 模式下只 applyWorkspace，
+    // 既不追加 history.rewound 也不丢弃后续 FileHistory 快照，本身即非破坏性。
+    if (mode === "both") {
+      await this.rewindCode(checkpointId, expectedCurrentFingerprints);
+    }
+
+    return { targetSessionId };
   }
 
-  async rewindBoth(
-    messageId: string,
-    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
-  ): Promise<void> {
-    this.assertWritable();
-    await this.executeRewindOperation(
-      "both",
-      this.requireRewindSnapshot(messageId),
-      randomUUID(),
-      expectedCurrentFingerprints,
-    );
+  /**
+   * 解析 fork rewind 的 RuntimeEvent 边界 event id。
+   * beforeSessionSeq=0 且无 seq 0 条目表示首条用户消息之前的空对话，返回 undefined。
+   */
+  private async resolveForkBoundaryEventId(beforeSessionSeq: number): Promise<string | undefined> {
+    if (!this.store) return undefined;
+    const entries = await this.store.readSessionEntries(this.id);
+    if (beforeSessionSeq <= 0) {
+      return entries.find((entry) => entry.sequence === 0)?.event.eventId;
+    }
+    return entries.find((entry) => entry.sequence === beforeSessionSeq)?.event.eventId;
   }
 
   private requireRewindSnapshot(messageId: string): FileHistoryState["snapshots"][number] {
@@ -1276,260 +1309,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     );
     if (!snapshot) throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
     return snapshot;
-  }
-
-  private async executeRewindOperation(
-    mode: NewRewindStorageOperation["mode"],
-    snapshot: FileHistoryState["snapshots"][number],
-    operationId = randomUUID(),
-    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
-  ): Promise<void> {
-    await this.flushPersistence();
-    const coordinator = this.createRewindCoordinator();
-    const operation = await coordinator.executePrepared(async () => {
-      const files =
-        mode === "conversation"
-          ? []
-          : await this.buildRewindFileTransitions(snapshot.messageId, expectedCurrentFingerprints);
-      const head = await this.store?.getHeadCursor(this.id);
-      return {
-        operationId,
-        kind: "rewind",
-        sessionId: this.id,
-        mode,
-        precondition: {
-          sessionLastSeq: Math.max(0, head?.seq ?? 0),
-          effectiveHistoryDigest: sessionHistoryDigest(this.messageLedger.readHistory()),
-          fileHistoryRevision: this.fileHistory.revision,
-        },
-        target: {
-          messageId: snapshot.messageId,
-          sourceMessageEventId: snapshot.sourceMessageEventId,
-          messageIndex: snapshot.messageIndex,
-          userPrompt: snapshot.userPrompt,
-          ...(snapshot.transcriptIndex !== undefined
-            ? { transcriptIndex: snapshot.transcriptIndex }
-            : {}),
-          ...(isPersistedInteractionMode(snapshot.interactionMode)
-            ? { interactionMode: snapshot.interactionMode }
-            : {}),
-          ...(snapshot.interactionMode === "plan" && isPersistedPrePlanMode(snapshot.prePlanMode)
-            ? { prePlanMode: snapshot.prePlanMode }
-            : {}),
-        },
-        files,
-      };
-    });
-    if (operation.state === "needs_attention") {
-      const conflicts = operation.error?.conflictingPaths?.join(", ");
-      throw new Error(
-        conflicts
-          ? `Rewind 需要人工处理：工作区已发生外部变化 (${conflicts})`
-          : `Rewind 需要人工处理：${operation.error?.message ?? "unknown conflict"}`,
-      );
-    }
-  }
-
-  private createRewindCoordinator(): RewindOperationCoordinator {
-    const baseDir = this.fileHistoryBaseDir;
-    return new RewindOperationCoordinator({
-      journal: new StorageOperationJournal({
-        workDir: this.workDir,
-        picoHome: this.picoHome,
-      }),
-      blobStore: new FileHistoryBlobStore({ baseDir }),
-      callbacks: {
-        resolveRoot: (rootId) => this.fileHistory.roots.get(rootId),
-        validatePrecondition: async (operation) => {
-          await this.validateRewindPrecondition(operation);
-        },
-        applyWorkspace: async (operation, targets) => {
-          await applyRewindWorkspaceTargets(operation.operationId, targets);
-        },
-        commitSession: async (operation) => {
-          if (operation.sessionId !== this.id) {
-            throw new Error(`Rewind operation ${operation.operationId} 不属于当前 Session`);
-          }
-          if (operation.mode !== "code") {
-            await this.rewindOnce(operation.operationId, operation.target.messageIndex);
-            await this.commitRewindRuntimeMode(operation);
-            await this.commitRewindTranscript(operation);
-          }
-        },
-        commitSidecars: async (operation) => {
-          if (operation.mode === "code") return;
-          await fileHistoryDiscardFrom(
-            this.fileHistory,
-            operation.target.messageId,
-            this.id,
-            this.fileHistoryBaseDir,
-          );
-        },
-      },
-    });
-  }
-
-  /**
-   * completed rewind 在下一条显式用户消息提交前持续作为 TUI handoff。
-   * 因此 UI 应用后立即崩溃也不会丢失原 prompt；重启只会幂等回填。
-   */
-  async getPendingTuiRewindHandoff(): Promise<DurableTuiRewindHandoff | undefined> {
-    if (!this.store) return undefined;
-    await this.flushPersistence();
-    const operations = (
-      await new StorageOperationJournal({
-        workDir: this.workDir,
-        picoHome: this.picoHome,
-      }).list()
-    ).filter(
-      (operation): operation is RewindStorageOperation =>
-        operation.kind === "rewind" &&
-        operation.sessionId === this.id &&
-        operation.state === "completed" &&
-        operation.mode !== "code" &&
-        typeof operation.target.userPrompt === "string" &&
-        operation.target.transcriptIndex !== undefined,
-    );
-    if (operations.length === 0) return undefined;
-    const entries = await this.store.readSessionEntries(this.id);
-    for (const operation of operations.toReversed()) {
-      const rewind = entries.find(
-        (entry) => entry.event.eventId === `rewind:${operation.operationId}`,
-      );
-      if (!rewind || rewind.event.kind !== "history.rewound") continue;
-      const superseded = entries.some(
-        (entry) =>
-          entry.sequence > rewind.sequence &&
-          entry.event.kind === "message.committed" &&
-          entry.event.visibility === "model" &&
-          !entry.event.partial &&
-          entry.event.data.message.role === "user" &&
-          entry.event.data.message.toolCallId === undefined &&
-          !isMessageHiddenFromTranscript(entry.event.data.message),
-      );
-      if (superseded) return undefined;
-      return {
-        operationId: operation.operationId,
-        inputText: operation.target.userPrompt!,
-        transcriptIndex: operation.target.transcriptIndex!,
-        ...(operation.target.interactionMode
-          ? { interactionMode: operation.target.interactionMode }
-          : {}),
-        ...(operation.target.prePlanMode ? { prePlanMode: operation.target.prePlanMode } : {}),
-      };
-    }
-    return undefined;
-  }
-
-  private async commitRewindRuntimeMode(operation: RewindStorageOperation): Promise<void> {
-    const mode = operation.target.interactionMode;
-    if (!mode || !this.persistedSettings) return;
-    const settings = restorePersistedInteractionMode(
-      this.persistedSettings,
-      mode,
-      operation.target.prePlanMode,
-    );
-    const patch: SessionRuntimeStateWritePatch = { settings };
-    if (this.store) {
-      await this.commitRuntimeStateOnce(patch, `rewind:${operation.operationId}:runtime`);
-    }
-    this.persistedSettings = settings;
-    this.updatedAt = new Date();
-  }
-
-  private async commitRewindTranscript(operation: RewindStorageOperation): Promise<void> {
-    if (operation.target.transcriptIndex === undefined || !this.store) return;
-    await this.recordTranscriptEvent(
-      {
-        eventId: `rewind:${operation.operationId}:transcript`,
-        sequence: 1,
-        createdAt: Date.parse(operation.createdAt),
-        type: "transcript.truncated",
-        entryCount: operation.target.transcriptIndex,
-        operationId: operation.operationId,
-      },
-      { eventId: `transcript-rewind:${operation.operationId}` },
-    );
-  }
-
-  private commitRuntimeStateOnce(
-    patch: SessionRuntimeStateWritePatch,
-    eventId: string,
-  ): Promise<CommitReceipt> {
-    return this.enqueuePersistence("runtime state", async (store) => {
-      await this.ensureRuntimeSession();
-      const entries = await store.readSessionEntries(this.id);
-      const existing = entries.find((entry) => entry.event.eventId === eventId);
-      if (existing) {
-        if (
-          existing.event.kind !== "session.state.committed" ||
-          !isDeepStrictEqual(existing.event.data.patch, patch)
-        ) {
-          throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
-        }
-        return commitReceiptFromEntry(this.id, entries, existing, false);
-      }
-      return commitReceiptFromAppend(
-        await store.appendSessionState(this.id, structuredClone(patch), { eventId }),
-      );
-    });
-  }
-
-  private async buildRewindFileTransitions(
-    messageId: string,
-    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
-  ): Promise<NewRewindStorageOperation["files"]> {
-    const baseDir = this.fileHistoryBaseDir;
-    const prepared = await fileHistoryPrepareRewind(this.fileHistory, messageId, this.id, baseDir, {
-      ...(expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {}),
-    });
-    const blobStore = new FileHistoryBlobStore({ baseDir });
-    const files: NewRewindStorageOperation["files"] = [];
-    for (const file of prepared.files) {
-      const location = resolveFileHistoryLocation(this.fileHistory.roots, file.filePath);
-      const before = await storedPreimageState(file.backup, this.id, baseDir, blobStore);
-      const after = await storedCurrentState(file.filePath, blobStore);
-      files.push({ ...location, before, after });
-    }
-    return files;
-  }
-
-  private async validateRewindPrecondition(operation: RewindStorageOperation): Promise<void> {
-    const entries = this.store ? await this.store.readSessionEntries(this.id) : [];
-    const eventId = `rewind:${operation.operationId}`;
-    const existing = entries.find((entry) => entry.event.eventId === eventId);
-    if (existing) {
-      if (existing.event.kind === "history.rewound" && existing.event.data.branchId === eventId) {
-        return;
-      }
-      throw new RewindOperationConflictError(
-        `Rewind operationId ${operation.operationId} 已被其他 Session 事件使用`,
-        [],
-      );
-    }
-
-    const currentSeq = Math.max(0, (await this.store?.getHeadCursor(this.id))?.seq ?? 0);
-    const currentDigest = sessionHistoryDigest(this.messageLedger.readHistory());
-    const mismatches = [
-      ...(currentSeq !== operation.precondition.sessionLastSeq
-        ? [`session seq ${currentSeq} != ${operation.precondition.sessionLastSeq}`]
-        : []),
-      ...(currentDigest !== operation.precondition.effectiveHistoryDigest
-        ? ["effective history digest changed"]
-        : []),
-      ...(operation.state === "prepared" &&
-      this.fileHistory.revision !== operation.precondition.fileHistoryRevision
-        ? [
-            `file history revision ${this.fileHistory.revision} != ${operation.precondition.fileHistoryRevision}`,
-          ]
-        : []),
-    ];
-    if (mismatches.length > 0) {
-      throw new RewindOperationConflictError(
-        `Rewind precondition drifted: ${mismatches.join("; ")}`,
-        [],
-      );
-    }
   }
 
   /** Replace an explicitly in-memory Session prefix with one summary message. */
@@ -1548,24 +1327,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     };
     this.messageLedger.compact(summaryMsg, compactedCount);
     this.updatedAt = new Date();
-  }
-
-  private runtimeEventBase(
-    eventId: string,
-    runId: string,
-    visibility: RuntimeEventBase["visibility"],
-  ): RuntimeEventBase {
-    return {
-      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId,
-      sessionId: this.id,
-      invocationId: `session:${this.id}`,
-      runId,
-      turnId: runId,
-      at: new Date().toISOString(),
-      partial: false,
-      visibility,
-    };
   }
 
   /** 全量历史深拷贝，供宿主投影、诊断与压缩读取，不作为 Provider 的直接投影策略。 */
@@ -1889,144 +1650,6 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 }
 
-async function storedPreimageState(
-  backup: FileHistoryBackup,
-  sessionId: string,
-  baseDir: string,
-  blobStore: FileHistoryBlobStore,
-): Promise<StoredFileState> {
-  if (backup.backupFileName === null) return { kind: "missing" };
-  const ref =
-    backup.blobRef ??
-    (await blobStore.putFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir))).ref;
-  return {
-    kind: "file",
-    blobSha256: ref.digest,
-    sizeBytes: ref.sizeBytes,
-    mode: backup.originMode ?? 0o644,
-  };
-}
-
-async function storedCurrentState(
-  filePath: string,
-  blobStore: FileHistoryBlobStore,
-): Promise<StoredFileState> {
-  try {
-    const metadata = await lstat(filePath);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error(`FileHistory: ${filePath} 当前不是可恢复的普通文件`);
-    }
-    const { ref } = await blobStore.putFile(filePath);
-    return {
-      kind: "file",
-      blobSha256: ref.digest,
-      sizeBytes: ref.sizeBytes,
-      mode: metadata.mode & 0o777,
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
-    throw error;
-  }
-}
-
-function resolveFileHistoryLocation(
-  roots: ReadonlyMap<string, string>,
-  filePath: string,
-): { rootId: string; relativePath: string } {
-  const absolutePath = resolve(filePath);
-  const matches = [...roots.entries()]
-    .map(([rootId, root]) => ({
-      rootId,
-      root: resolve(root),
-      relativePath: relative(root, absolutePath),
-    }))
-    .filter(
-      (candidate) =>
-        candidate.relativePath.length > 0 &&
-        !candidate.relativePath.startsWith("..") &&
-        !isAbsolute(candidate.relativePath),
-    )
-    .toSorted((left, right) => right.root.length - left.root.length);
-  const selected = matches[0];
-  if (!selected) throw new Error(`FileHistory: ${filePath} 不属于已信任 workspace root`);
-  return {
-    rootId: selected.rootId,
-    relativePath: selected.relativePath.split("\\").join("/"),
-  };
-}
-
-async function applyRewindWorkspaceTargets(
-  operationId: string,
-  targets: readonly RewindWorkspaceTarget[],
-): Promise<void> {
-  for (const target of targets) {
-    if (target.state.kind === "missing") {
-      try {
-        const current = await lstat(target.absolutePath);
-        if (!current.isFile() && !current.isSymbolicLink()) {
-          throw new Error(`Rewind 拒绝删除非文件路径: ${target.absolutePath}`);
-        }
-        await unlink(target.absolutePath);
-        await syncRewindDirectory(dirname(target.absolutePath));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      continue;
-    }
-    if (!target.contents) throw new Error(`Rewind 缺少 CAS 内容: ${target.absolutePath}`);
-    const directory = dirname(target.absolutePath);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const temporary = join(
-      directory,
-      `.${basename(target.absolutePath)}.pico-rewind-${operationId}-${randomUUID()}.tmp`,
-    );
-    let handle: FileHandle | undefined;
-    let published = false;
-    try {
-      handle = await open(temporary, "wx", 0o600);
-      await writeAllRewindFile(handle, target.contents);
-      await handle.chmod(target.state.mode);
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      await rename(temporary, target.absolutePath);
-      published = true;
-      await syncRewindDirectory(directory);
-    } finally {
-      await handle?.close().catch(() => undefined);
-      if (!published) await unlink(temporary).catch(() => undefined);
-    }
-  }
-}
-
-function sessionHistoryDigest(history: readonly Message[]): string {
-  return createHash("sha256").update(JSON.stringify(history)).digest("hex");
-}
-
-async function writeAllRewindFile(handle: FileHandle, bytes: Uint8Array): Promise<void> {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset, null);
-    if (bytesWritten <= 0) throw new Error("Rewind temporary file write made no progress");
-    offset += bytesWritten;
-  }
-}
-
-async function syncRewindDirectory(directory: string): Promise<void> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(directory, "r");
-    await handle.sync();
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (!code || !new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code)) {
-      throw error;
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
 export function deriveDurableRuntimeForkCheckpoint(
   events: readonly RuntimeEvent[],
 ): DurableRuntimeForkCheckpoint | undefined {
@@ -2081,13 +1704,13 @@ function runtimeCursorForEntry(
   entries: readonly RuntimeEventStoreEntry[],
   entry: RuntimeEventStoreEntry,
 ): SessionCursor {
+  // Rewind/branch mechanism removed: epoch is always 0 (no history.rewound is produced).
+  // The field is retained in SessionCursor for persisted-schema stability.
+  void entries;
   return {
     logId: sessionId,
     seq: entry.sequence,
-    epoch: entries.filter(
-      (candidate) =>
-        candidate.sequence <= entry.sequence && candidate.event.kind === "history.rewound",
-    ).length,
+    epoch: 0,
     eventId: entry.event.eventId,
   };
 }
@@ -2099,21 +1722,6 @@ function commitReceiptFromAppend(result: RuntimeEventStoreAppendResult): CommitR
     committedAt: result.committedAt,
     durable: true,
     inserted: result.inserted,
-  };
-}
-
-function commitReceiptFromEntry(
-  sessionId: string,
-  entries: readonly RuntimeEventStoreEntry[],
-  entry: RuntimeEventStoreEntry,
-  inserted: boolean,
-): CommitReceipt {
-  return {
-    eventId: entry.event.eventId,
-    cursor: runtimeCursorForEntry(sessionId, entries, entry),
-    committedAt: entry.event.at,
-    durable: true,
-    inserted,
   };
 }
 
@@ -2167,32 +1775,6 @@ function isCompactionSummaryMessage(message: Message): boolean {
   return (
     message.role === "assistant" && message.providerData?.["picoKind"] === "compaction_summary"
   );
-}
-
-function isPersistedInteractionMode(value: unknown): value is PersistedSessionSettings["mode"] {
-  return value === "default" || value === "plan" || value === "auto" || value === "yolo";
-}
-
-function isPersistedPrePlanMode(
-  value: unknown,
-): value is NonNullable<PersistedSessionSettings["prePlanMode"]> {
-  return value === "default" || value === "auto" || value === "yolo";
-}
-
-function restorePersistedInteractionMode(
-  current: PersistedSessionSettings,
-  mode: PersistedSessionSettings["mode"],
-  prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>,
-): PersistedSessionSettings {
-  const next = structuredClone(current);
-  if (mode === "plan") {
-    next.prePlanMode =
-      prePlanMode ?? (current.mode === "plan" ? (current.prePlanMode ?? "yolo") : current.mode);
-  } else {
-    delete next.prePlanMode;
-  }
-  next.mode = mode;
-  return next;
 }
 
 /** SessionManager is kept as a public re-export for existing consumers. */

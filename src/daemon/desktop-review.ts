@@ -60,37 +60,21 @@ export function assertDesktopChangesFingerprint(
   }
 }
 
-export async function applyDesktopRewind(
+/**
+ * 计算 rewind 前的指纹前置校验，返回 checkpoint 各文件当前指纹的映射，
+ * 供 non-destructive fork 在应用工作区文件时做安全校验。
+ */
+export async function projectDesktopRewindFingerprints(
   session: Session,
   checkpointId: string,
   expectedFingerprint: string,
-): Promise<void> {
-  const checkpoint = session.fileHistory.snapshots.find(
-    (candidate) => candidate.messageId === checkpointId,
-  );
-  if (!checkpoint) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.NOT_FOUND,
-      `Session ${session.id} 中不存在可完整回滚的检查点 ${checkpointId}`,
-    );
-  }
+): Promise<Record<string, string>> {
   const projection = await projectDesktopCheckpoint(session, checkpointId);
   assertDesktopChangesComplete(projection.changes, "Rewind");
   assertDesktopChangesFingerprint(expectedFingerprint, projection.fingerprint, "Rewind");
-  const expectedCurrentFingerprints = new Map(
+  return Object.fromEntries(
     projection.changes.files.map((file) => [file.filePath, file.currentFingerprint]),
   );
-  try {
-    await session.rewindBoth(checkpointId, expectedCurrentFingerprints);
-  } catch (error) {
-    if (isRewindConflict(error)) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `Rewind 安全检查失败: ${errorMessage(error)}`,
-      );
-    }
-    throw error;
-  }
 }
 
 function changesFingerprint(
@@ -116,13 +100,4 @@ function changesFingerprint(
       .toSorted((left, right) => left.filePath.localeCompare(right.filePath)),
   };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
-}
-
-function isRewindConflict(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /(?:conflict|drift|fingerprint|revision|变化|变更|预检|人工处理)/iu.test(error.message);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
