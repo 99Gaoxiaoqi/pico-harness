@@ -13,13 +13,12 @@ export function projectPlanEntries(
   sessionId: string,
   entries: readonly RuntimeEventStoreEntry[],
 ): PlanProjection {
-  const active = projectActiveBranch(entries);
   let state: PlanProjection = {
     sessionId,
     sessionSequence: entries.at(-1)?.sequence ?? 0,
     proposals: [],
   };
-  for (const entry of active) {
+  for (const entry of entries) {
     if (isPlanEventKind(entry.event.kind)) state = reducePlanEvent(state, entry.event);
   }
   return state;
@@ -29,7 +28,7 @@ export function projectPlanEntries(
 export function projectActivePlanEntries(
   entries: readonly RuntimeEventStoreEntry[],
 ): RuntimeEventStoreEntry[] {
-  return projectActiveBranch(entries).filter(({ event }) => isPlanEventKind(event.kind));
+  return entries.filter(({ event }) => isPlanEventKind(event.kind));
 }
 
 export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): PlanProjection {
@@ -231,22 +230,6 @@ function revisionRequestedProposal(
     : undefined;
 }
 
-function projectActiveBranch(entries: readonly RuntimeEventStoreEntry[]): RuntimeEventStoreEntry[] {
-  let projected: RuntimeEventStoreEntry[] = [];
-  for (const entry of entries) {
-    if (entry.event.kind === "history.rewound") {
-      const through = entry.event.data.throughEventId;
-      if (!through) projected = [];
-      else {
-        const index = projected.findIndex(({ event }) => event.eventId === through);
-        if (index < 0) conflict(`Rewind boundary ${through} is not on the active branch`);
-        projected = projected.slice(0, index + 1);
-      }
-    }
-    projected.push(entry);
-  }
-  return projected;
-}
 function requirePending(
   proposal: PlanProposal | undefined,
   planId: string,

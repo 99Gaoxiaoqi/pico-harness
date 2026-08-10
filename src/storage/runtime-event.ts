@@ -236,7 +236,8 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertCheckpointSummary(value["data"]);
       return;
     case "history.rewound":
-      assertString(value["data"]["branchId"], "history.rewound.branchId");
+      // Deprecated: branchId/rewind mechanism removed. Kind kept in enum so
+      // decode of legacy persisted events does not crash with unknown_kind.
       return;
     case "session.forked":
       assertString(value["data"]["parentSessionId"], "session.forked.parentSessionId");

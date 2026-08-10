@@ -30,9 +30,7 @@ import {
   readLastJsonLineSync,
   readJsonFileSync,
   readJsonLinesSync,
-  recoverFileTransactionSync,
   syncDirectorySync,
-  withFileLockSync,
   writeJsonAtomicSync,
 } from "./local-file-storage.js";
 import {
@@ -45,6 +43,10 @@ import {
   WORKSPACE_STORAGE_LOCK_DIRECTORY,
   type WorkspaceStorageRootIdentity,
 } from "./workspace-storage-layout.js";
+import {
+  createFileStorageErrorMapper,
+  withLedgerStoreLock,
+} from "./ledger-store-lock.js";
 
 const RUNTIME_SESSION_MANIFEST_VERSION = 2 as const;
 const RUNTIME_SESSION_FILE_VERSION = 2 as const;
@@ -60,7 +62,6 @@ export interface RuntimeSessionManifest {
   readonly workDir: string;
   readonly historySource: "runtime-event-v2";
   readonly createdAt: string;
-  readonly activeBranchId: string;
 }
 
 export interface RuntimeSessionManifestProjection {
@@ -134,13 +135,11 @@ export interface RuntimeEventStoreEntry {
 
 export interface RuntimeSessionProjectionSnapshot {
   readonly manifest: RuntimeSessionManifest;
-  readonly activeBranchId: string;
   readonly entries: readonly RuntimeEventStoreEntry[];
   readonly cursor?: SessionCursor;
 }
 
 export interface RuntimeSessionProjectionDelta {
-  readonly activeBranchId: string;
   readonly entries: readonly RuntimeEventStoreEntry[];
   readonly cursor: SessionCursor;
 }
@@ -174,7 +173,6 @@ interface RuntimeEventBatch {
   readonly schemaVersion: typeof RUNTIME_SESSION_FILE_VERSION;
   readonly txId: string;
   readonly committedAt: string;
-  readonly activeBranchId: string;
   readonly entries: readonly RuntimeEventBatchEntry[];
 }
 
@@ -189,7 +187,6 @@ interface MutableRuntimeSession {
   readonly entries: RuntimeEventStoreEntry[];
   readonly eventById: Map<string, RuntimeEventStoreEntry>;
   readonly appended: RuntimeEventBatchEntry[];
-  activeBranchId: string;
 }
 
 export class RuntimeEventStoreIntegrityError extends Error {
@@ -300,7 +297,7 @@ export class RuntimeEventStore {
         historySource: "runtime-event-v2",
         createdAt,
       };
-      const manifest = manifestFromHeader(header, "main");
+      const manifest = manifestFromHeader(header);
       const headerLine = encodeJsonLine(header);
       commitFileTransactionSync(
         this.storageRoot,
@@ -380,7 +377,6 @@ export class RuntimeEventStore {
           entries: [...loaded.entries],
           eventById: new Map(loaded.entries.map((entry) => [entry.event.eventId, entry])),
           appended: [],
-          activeBranchId: loaded.manifest.activeBranchId,
         });
       }
       for (const [sessionId, expectedHighWater] of Object.entries(
@@ -503,7 +499,6 @@ export class RuntimeEventStore {
           committedAt: event.at,
           event,
         });
-        if (event.kind === "history.rewound") session.activeBranchId = event.data.branchId;
         results.push(this.appendResult(session.entries, entry, true));
       }
 
@@ -519,7 +514,6 @@ export class RuntimeEventStore {
           schemaVersion: RUNTIME_SESSION_FILE_VERSION,
           txId: transactionId,
           committedAt: transactionCommittedAt,
-          activeBranchId: session.activeBranchId,
           entries: session.appended,
         };
         const content = encodeJsonLine(batch);
@@ -531,10 +525,7 @@ export class RuntimeEventStore {
       });
       const replacements = appendedSessions.map(([sessionId, session]) => {
         this.assertSessionDigestBoundary(sessionDigest(sessionId));
-        const manifest = {
-          ...session.loaded.manifest,
-          activeBranchId: session.activeBranchId,
-        };
+        const manifest = session.loaded.manifest;
         const ledgerByteLength =
           statSync(this.sessionFilePath(sessionId)).size +
           Buffer.byteLength(batchLines.get(sessionId)!);
@@ -685,13 +676,11 @@ export class RuntimeEventStore {
     sessionId: string,
     after: SessionCursor,
     through: SessionCursor,
-    expectedBranchId: string,
   ): Promise<RuntimeSessionProjectionDelta | undefined> {
     if (
       after.logId !== sessionId ||
       through.logId !== sessionId ||
-      through.seq <= after.seq ||
-      !expectedBranchId
+      through.seq <= after.seq
     ) {
       return undefined;
     }
@@ -711,8 +700,7 @@ export class RuntimeEventStore {
         targetEntry.sequence !== through.seq ||
         targetEntry.event.eventId !== through.eventId ||
         headEntry.sequence !== through.seq ||
-        headEntry.event.eventId !== through.eventId ||
-        activeBranchAt(loaded.entries, after.seq) !== expectedBranchId
+        headEntry.event.eventId !== through.eventId
       ) {
         return undefined;
       }
@@ -721,17 +709,7 @@ export class RuntimeEventStore {
         (entry) => entry.sequence > after.seq && entry.sequence <= through.seq,
       );
       if (entries.at(-1)?.event.eventId !== through.eventId) return undefined;
-      let epoch = after.epoch;
-      let activeBranchId = expectedBranchId;
-      for (const entry of entries) {
-        if (entry.event.kind !== "history.rewound") continue;
-        epoch++;
-        activeBranchId = entry.event.data.branchId;
-      }
-      if (epoch !== through.epoch || activeBranchId !== loaded.manifest.activeBranchId) {
-        return undefined;
-      }
-      return { activeBranchId, entries, cursor: { ...through } };
+      return { entries, cursor: { ...through } };
     });
   }
 
@@ -794,31 +772,29 @@ export class RuntimeEventStore {
   }
 
   private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
-    try {
+    const preLockAssert = () => {
       if (this.rootIdentity) {
         assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
       }
       this.assertSessionsBoundary();
-      if (this.readOnly) return operation();
-      return withFileLockSync(this.lockDirectory, this.ownerId, () => {
-        if (this.rootIdentity) {
-          assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
-        }
-        this.assertSessionsBoundary();
-        recoverFileTransactionSync(this.storageRoot, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
-        this.assertSessionsBoundary();
-        return operation();
-      });
-    } catch (error) {
-      if (error instanceof RuntimeEventStoreIntegrityError) throw error;
-      if (error instanceof FileStorageIntegrityError || error instanceof SyntaxError) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime event storage is invalid: ${error.message}`,
-          { cause: error },
-        );
-      }
-      throw error;
-    }
+    };
+    return withLedgerStoreLock(
+      {
+        lockDirectory: this.lockDirectory,
+        storageRoot: this.storageRoot,
+        ownerId: this.ownerId,
+        transactionOptions: WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
+        readOnly: this.readOnly,
+        preLockAssert,
+        postLockAssert: preLockAssert,
+        postRecoverAssert: () => this.assertSessionsBoundary(),
+        mapError: createFileStorageErrorMapper(
+          RuntimeEventStoreIntegrityError,
+          "Runtime event",
+        ),
+      },
+      operation,
+    );
   }
 
   private appendResult(
@@ -865,7 +841,6 @@ export class RuntimeEventStore {
     const entries: RuntimeEventStoreEntry[] = [];
     const eventIds = new Set<string>();
     let lastTxId: string | undefined;
-    let activeBranchId = "main";
     for (let index = 1; index < records.length; index++) {
       const batch = decodeEventBatch(records[index], logPath, index + 1);
       lastTxId = batch.txId;
@@ -888,18 +863,10 @@ export class RuntimeEventStore {
         }
         eventIds.add(batchEntry.event.eventId);
         entries.push({ sequence: batchEntry.sequence, event: batchEntry.event });
-        if (batchEntry.event.kind === "history.rewound") {
-          activeBranchId = batchEntry.event.data.branchId;
-        }
-      }
-      if (activeBranchId !== batch.activeBranchId) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime event batch ${batch.txId} active branch does not match its entries`,
-        );
       }
     }
 
-    const derivedManifest = manifestFromHeader(header, activeBranchId);
+    const derivedManifest = manifestFromHeader(header);
     const derivedProjection = createManifestProjection(
       derivedManifest,
       statSync(logPath).size,
@@ -984,7 +951,7 @@ export class RuntimeEventStore {
       const header = readSessionHeaderSync(logPath);
       if (
         !isDeepStrictEqual(
-          manifestFromHeader(header, projection.manifest.activeBranchId),
+          manifestFromHeader(header),
           projection.manifest,
         )
       ) {
@@ -994,8 +961,7 @@ export class RuntimeEventStore {
       if (projection.ledger.lastSequence === 0) {
         if (
           !isDeepStrictEqual(lastRecord, readFirstJsonLineSync(logPath)) ||
-          projection.ledger.lastTxId !== undefined ||
-          projection.manifest.activeBranchId !== "main"
+          projection.ledger.lastTxId !== undefined
         ) {
           return undefined;
         }
@@ -1003,8 +969,7 @@ export class RuntimeEventStore {
         const lastBatch = decodeEventBatch(lastRecord, logPath, -1);
         if (
           lastBatch.txId !== projection.ledger.lastTxId ||
-          lastBatch.entries.at(-1)?.sequence !== projection.ledger.lastSequence ||
-          lastBatch.activeBranchId !== projection.manifest.activeBranchId
+          lastBatch.entries.at(-1)?.sequence !== projection.ledger.lastSequence
         ) {
           return undefined;
         }
@@ -1025,7 +990,6 @@ export class RuntimeEventStore {
     const head = loaded.entries.at(-1);
     return {
       manifest: loaded.manifest,
-      activeBranchId: loaded.manifest.activeBranchId,
       entries: loaded.entries,
       ...(head
         ? {
@@ -1155,8 +1119,6 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
     !value["txId"] ||
     typeof value["committedAt"] !== "string" ||
     !value["committedAt"] ||
-    typeof value["activeBranchId"] !== "string" ||
-    !value["activeBranchId"] ||
     !Array.isArray(value["entries"]) ||
     value["entries"].length === 0
   ) {
@@ -1199,7 +1161,6 @@ function decodeEventBatch(value: unknown, path: string, line: number): RuntimeEv
     schemaVersion: RUNTIME_SESSION_FILE_VERSION,
     txId: value["txId"],
     committedAt: value["committedAt"],
-    activeBranchId: value["activeBranchId"],
     entries,
   };
 }
@@ -1251,9 +1212,7 @@ function decodeManifestValue(value: Record<string, unknown>, path: string): Runt
     typeof value["sessionId"] !== "string" ||
     typeof value["workDir"] !== "string" ||
     value["historySource"] !== "runtime-event-v2" ||
-    typeof value["createdAt"] !== "string" ||
-    typeof value["activeBranchId"] !== "string" ||
-    !value["activeBranchId"]
+    typeof value["createdAt"] !== "string"
   ) {
     throw new RuntimeEventStoreIntegrityError(`Runtime session manifest is invalid in ${path}`);
   }
@@ -1263,7 +1222,6 @@ function decodeManifestValue(value: Record<string, unknown>, path: string): Runt
     workDir: value["workDir"],
     historySource: "runtime-event-v2",
     createdAt: value["createdAt"],
-    activeBranchId: value["activeBranchId"],
   };
 }
 
@@ -1287,7 +1245,6 @@ function createManifestProjection(
 
 function manifestFromHeader(
   header: RuntimeSessionFileHeader,
-  activeBranchId: string,
 ): RuntimeSessionManifest {
   return {
     schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
@@ -1295,35 +1252,24 @@ function manifestFromHeader(
     workDir: header.workDir,
     historySource: "runtime-event-v2",
     createdAt: header.createdAt,
-    activeBranchId,
   };
 }
 
 function cursorForEntries(
   sessionId: string,
-  entries: readonly RuntimeEventStoreEntry[],
+  _entries: readonly RuntimeEventStoreEntry[],
   sequence: number,
   eventId: string,
 ): SessionCursor {
+  // Rewind/branch mechanism removed: epoch is always 0 (no history.rewound is produced).
+  // The field is retained in SessionCursor for persisted-schema stability.
+  void _entries;
   return {
     logId: sessionId,
     seq: sequence,
-    epoch: entries.filter(
-      (entry) => entry.sequence <= sequence && entry.event.kind === "history.rewound",
-    ).length,
+    epoch: 0,
     eventId,
   };
-}
-
-function activeBranchAt(entries: readonly RuntimeEventStoreEntry[], sequence: number): string {
-  let activeBranchId = "main";
-  for (const entry of entries) {
-    if (entry.sequence > sequence) break;
-    if (entry.event.kind === "history.rewound") {
-      activeBranchId = entry.event.data.branchId;
-    }
-  }
-  return activeBranchId;
 }
 
 function sessionDigest(sessionId: string): string {

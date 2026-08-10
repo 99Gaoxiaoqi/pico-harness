@@ -32,7 +32,7 @@ export interface RuntimeEventCursor {
   readonly highSequence: number;
   /** 可选 audit/dedup 指针——禁止用于排序，仅用于身份校验。 */
   readonly eventIds?: readonly string[];
-  /** 实际行数；因 rewound/branch gap 可能小于 highSequence-lowSequence+1。 */
+  /** 实际行数（highSequence-lowSequence+1，因历史可能含不可投影事件而略少）。 */
   readonly eventCount?: number;
 }
 

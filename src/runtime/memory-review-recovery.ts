@@ -16,6 +16,9 @@ export interface RecoverMemoryReviewJobsInput {
 
 const RECOVERY_SESSION_PAGE_SIZE = 25;
 const RECOVERY_ENQUEUE_BATCH_SIZE = 25;
+
+/** Page size shared by recovery and rebuild scans when walking session manifests. */
+export const MEMORY_SCAN_SESSION_PAGE_SIZE = RECOVERY_SESSION_PAGE_SIZE;
 const successfulRecoveryDatabases = new Set<string>();
 interface RecoveryFlight {
   readonly promise: Promise<number>;
@@ -107,39 +110,19 @@ async function scanRuntimeLedger(input: RecoverMemoryReviewJobsInput): Promise<n
   return recovered;
 }
 
-async function readCanonicalRecoveryRefs(
+/**
+ * Reads the canonical completed-turn {@link TerminalMemoryEvidenceRef}s for one Session by replaying
+ * its RuntimeEvent ledger through the same compact projection used by the daemon.
+ *
+ * Shared by crash-recovery (`recoverMemoryReviewJobs`) and Memory derived-layer rebuild
+ * (`rebuildDerivedFromRuntimeEvent`) so both paths converge on the same "what is a completed turn?"
+ * definition. The result is the canonical set of terminals whose extraction Jobs are eligible.
+ */
+export async function readCanonicalRecoveryRefs(
   store: RuntimeEventStore,
   sessionId: string,
 ): Promise<TerminalMemoryEvidenceRef[]> {
-  // First pass discovers the only event IDs whose historical state a later rewind can request.
-  // The second pass therefore snapshots state only at those targets rather than indexing every
-  // event in a long Session.
-  const { targets: rewindTargets, upperSequence } = await collectRewindTargets(store, sessionId);
-  const projection = new CompactRecoveryProjection(sessionId, rewindTargets);
-  let afterSequence = 0;
-  while (afterSequence < upperSequence) {
-    const entries = await store.readSessionEntriesPage(sessionId, {
-      afterSequence,
-      limit: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-    });
-    if (entries.length === 0) break;
-    const boundedEntries = entries.filter((entry) => entry.sequence <= upperSequence);
-    for (const entry of boundedEntries) projection.append(entry);
-    if (boundedEntries.length === 0) break;
-    afterSequence = boundedEntries.at(-1)!.sequence;
-    await yieldToHost();
-    if (afterSequence >= upperSequence || entries.length < RUNTIME_EVENT_STORE_MAX_PAGE_SIZE) {
-      break;
-    }
-  }
-  return projection.refs();
-}
-
-async function collectRewindTargets(
-  store: RuntimeEventStore,
-  sessionId: string,
-): Promise<{ readonly targets: Set<string>; readonly upperSequence: number }> {
-  const targets = new Set<string>();
+  const projection = new CompactRecoveryProjection(sessionId);
   let afterSequence = 0;
   while (true) {
     const entries = await store.readSessionEntriesPage(sessionId, {
@@ -147,16 +130,12 @@ async function collectRewindTargets(
       limit: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
     });
     if (entries.length === 0) break;
-    for (const { event } of entries) {
-      if (event.kind === "history.rewound" && event.data.throughEventId !== undefined) {
-        targets.add(event.data.throughEventId);
-      }
-    }
+    for (const entry of entries) projection.append(entry);
     afterSequence = entries.at(-1)!.sequence;
     await yieldToHost();
     if (entries.length < RUNTIME_EVENT_STORE_MAX_PAGE_SIZE) break;
   }
-  return { targets, upperSequence: afterSequence };
+  return projection.refs();
 }
 
 interface CompactEvidence {
@@ -175,40 +154,21 @@ interface RecoveryRefNode {
   readonly previous?: RecoveryRefNode;
 }
 
-interface CompactProjectionState {
-  readonly latestDesktopEvidence?: CompactEvidence;
-  readonly runs: ReadonlyMap<string, CompactRunState>;
-  readonly refsTail?: RecoveryRefNode;
-}
-
-/** Canonical rewind projection retaining only active runs, refs and requested rewind snapshots. */
+/**
+ * Compact projection that retains only active runs and accumulated evidence refs as the
+ * RuntimeEvent ledger is replayed. The destructive rewind/branch snapshot-restore logic that
+ * previously lived here has been removed (rewind is now a non-destructive fork).
+ */
 class CompactRecoveryProjection {
   private latestDesktopEvidence: CompactEvidence | undefined;
   private runs = new Map<string, CompactRunState>();
   private refsTail: RecoveryRefNode | undefined;
-  private readonly snapshots = new Map<string, CompactProjectionState>();
 
-  constructor(
-    private readonly sessionId: string,
-    private readonly rewindTargets: ReadonlySet<string>,
-  ) {}
+  constructor(private readonly sessionId: string) {}
 
   append(entry: RuntimeEventStoreEntry): void {
     const { event } = entry;
-    if (event.kind === "history.rewound") {
-      const throughEventId = event.data.throughEventId;
-      if (throughEventId === undefined) {
-        this.restore();
-      } else {
-        const snapshot = this.snapshots.get(throughEventId);
-        if (!snapshot) {
-          throw new Error(
-            `Runtime recovery rewind ${event.eventId} references unknown event ${throughEventId}`,
-          );
-        }
-        this.restore(snapshot);
-      }
-    } else if (event.kind === "run.started") {
+    if (event.kind === "run.started") {
       this.runs.set(event.runId, {
         ...(this.latestDesktopEvidence ? { priorDesktopEvidence: this.latestDesktopEvidence } : {}),
         hasAssistantResponse: false,
@@ -255,16 +215,8 @@ class CompactRecoveryProjection {
           this.refsTail = { ref, ...(this.refsTail ? { previous: this.refsTail } : {}) };
         }
       }
-      // A terminal Run can no longer receive canonical messages. Rewind snapshots retain only the
-      // few pre-terminal states that are actually addressable by a future rewind.
+      // A terminal Run can no longer receive canonical messages.
       this.runs.delete(event.runId);
-    }
-
-    if (this.rewindTargets.has(event.eventId)) {
-      if (this.snapshots.has(event.eventId)) {
-        throw new Error(`Runtime recovery found duplicate event ID ${event.eventId}`);
-      }
-      this.snapshots.set(event.eventId, this.snapshot());
     }
   }
 
@@ -272,20 +224,6 @@ class CompactRecoveryProjection {
     const reversed: TerminalMemoryEvidenceRef[] = [];
     for (let node = this.refsTail; node; node = node.previous) reversed.push(node.ref);
     return reversed.reverse();
-  }
-
-  private snapshot(): CompactProjectionState {
-    return {
-      ...(this.latestDesktopEvidence ? { latestDesktopEvidence: this.latestDesktopEvidence } : {}),
-      runs: new Map(this.runs),
-      ...(this.refsTail ? { refsTail: this.refsTail } : {}),
-    };
-  }
-
-  private restore(snapshot?: CompactProjectionState): void {
-    this.latestDesktopEvidence = snapshot?.latestDesktopEvidence;
-    this.runs = new Map(snapshot?.runs);
-    this.refsTail = snapshot?.refsTail;
   }
 }
 
