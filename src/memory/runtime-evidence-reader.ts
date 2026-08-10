@@ -3,6 +3,11 @@ import type { RuntimeEvent } from "../engine/session-runtime-event.js";
 import { isRuntimeMessageEvent } from "../engine/session-runtime-event.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
 import { isMessageHiddenFromTranscript, type Message } from "../schema/message.js";
+import {
+  EVIDENCE_REF_SCHEMA_VERSION,
+  validateEvidenceRef,
+  type EvidenceRef,
+} from "../engine/evidence-ref.js";
 import type {
   MemoryEvidenceReaderPort,
   TerminalMemoryEvidenceRef,
@@ -61,6 +66,26 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
         // 读取失败不阻断提取，回退到无 sourceMessages 的独立请求。
       }
     }
+    // 构造统一溯源 overlay：把离散 eventId 升级为带流身份的区间 cursor。
+    // sequence 是 session 级全局 append 序号（runtime-event-store.ts:496），
+    // 故 streamId 绑定到 sessionId（而非 runId）以对齐序号语义。
+    const evidenceRefCandidate: EvidenceRef = {
+      schemaVersion: EVIDENCE_REF_SCHEMA_VERSION,
+      sessionId: ref.sessionId,
+      runId: ref.runId,
+      coverage: {
+        ledger: "session_runtime_event",
+        streamId: ref.sessionId,
+        lowSequence: userEntry.sequence,
+        highSequence: userEntry.sequence,
+        eventIds: [ref.userMessageEventId],
+        eventCount: 1,
+      },
+      digest: `sha256:${digestHex}`,
+    };
+    // overlay 校验失败时静默降级（不阻断提取），但正常路径下应总是有效。
+    const evidenceRefValidation = validateEvidenceRef(evidenceRefCandidate);
+    const evidenceRef = evidenceRefValidation.ok ? evidenceRefCandidate : undefined;
     return {
       ...ref,
       content,
@@ -75,6 +100,7 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
         sequence: terminalEntry.sequence,
         eventId: ref.terminalEventId,
       },
+      ...(evidenceRef ? { evidenceRef } : {}),
       ...(sourceMessages ? { sourceMessages } : {}),
     };
   }

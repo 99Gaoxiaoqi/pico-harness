@@ -53,10 +53,6 @@ import type {
 import type { Message, Usage } from "../schema/message.js";
 import { PLAN_EVENT_KINDS, assertPlanEventData, isPlanEventKind } from "../plan/events.js";
 
-// The Discovery system has been removed. Historical "discovery.*" events can no
-// longer be decoded against the type union (the RuntimeEvent kinds were dropped
-// upstream); the assertRuntimeEvent default branch still short-circuits them so
-// older ledgers do not trip the unknown-kind guard on replay.
 export const RUNTIME_EVENT_KINDS = [
   "run.started",
   "message.committed",
@@ -293,14 +289,6 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
           throw new RuntimeEventIntegrityError("Plan events must be complete internal facts");
         }
         assertPlanEventData(value["kind"], value["data"]);
-        return;
-      }
-      // Discovery events are no longer produced or validated. Historical entries
-      // pass through decodeRuntimeEvent's kind-set check but cannot be asserted.
-      if (
-        typeof value["kind"] === "string" &&
-        value["kind"].startsWith("discovery.")
-      ) {
         return;
       }
       throw new RuntimeEventIntegrityError(

@@ -76,7 +76,7 @@ test("memory JSON snapshot persists the complete structured model", async (conte
     mutations: unknown[];
     idempotency: object;
   };
-  assert.equal(state.schemaVersion, 1);
+  assert.equal(state.schemaVersion, 2);
   assert.equal(state.workspaceId, fixture.workspaceId);
   assert.ok(state.revision >= 5);
   assert.ok(state.mutations.length >= 5);
@@ -300,7 +300,7 @@ test("future schema and workspace mismatch fail closed", async (context) => {
   const statePath = join(fixture.storageRoot, "state.json");
   const original = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
 
-  await writeFile(statePath, `${JSON.stringify({ ...original, schemaVersion: 2 })}\n`);
+  await writeFile(statePath, `${JSON.stringify({ ...original, schemaVersion: 3 })}\n`);
   assert.throws(() => open(fixture), FileStorageIntegrityError);
 
   await writeFile(statePath, `${JSON.stringify({ ...original, workspaceId: "another" })}\n`);

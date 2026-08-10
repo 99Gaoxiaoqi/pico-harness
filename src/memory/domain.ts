@@ -1,4 +1,5 @@
 import type { WorkspaceId } from "../paths/pico-paths.js";
+import type { EvidenceRef } from "../engine/evidence-ref.js";
 
 export const MEMORY_KINDS = ["preference", "correction", "project_fact", "reference"] as const;
 
@@ -72,6 +73,11 @@ export interface Source {
   readonly startSequence?: number;
   readonly endSequence?: number;
   readonly digest: string;
+  /**
+   * 统一溯源 overlay：把离散 eventIds 升级为带流身份的区间 cursor。
+   * 可选字段，旧数据无此字段时平滑兼容。详见 engine/evidence-ref.ts。
+   */
+  readonly evidenceRef?: EvidenceRef;
   readonly availability: SourceAvailability;
   readonly invalidatedAt?: string;
   readonly invalidationCode?: string;

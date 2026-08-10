@@ -17,8 +17,9 @@ import {
   type Source,
 } from "./domain.js";
 import { FileStorageIntegrityError } from "../storage/local-file-storage.js";
+import { validateEvidenceRef } from "../engine/evidence-ref.js";
 
-export const MEMORY_FILE_SCHEMA_VERSION = 1 as const;
+export const MEMORY_FILE_SCHEMA_VERSION = 2 as const;
 
 export class MemoryFileSchemaVersionError extends FileStorageIntegrityError {
   constructor(message: string) {
@@ -231,6 +232,15 @@ function assertSource(value: Record<string, unknown>, field: string): void {
   requireEnum(value["availability"], SOURCE_AVAILABILITIES, `${field}.availability`);
   requireOptionalTimestamp(value["invalidatedAt"], `${field}.invalidatedAt`);
   requireOptionalString(value["invalidationCode"], `${field}.invalidationCode`);
+  // evidenceRef overlay：校验失败时 soft 降级（剥离字段），不 throw 整个 memory。
+  // overlay 是可选溯源元数据，与投影层 soft/hard 分级思想一致——
+  // 写路径（normalizeSourceInput）也是静默降级，读路径应对称。
+  if (value["evidenceRef"] !== undefined) {
+    const validation = validateEvidenceRef(value["evidenceRef"]);
+    if (!validation.ok) {
+      delete value["evidenceRef"];
+    }
+  }
   requireVersionAndDates(value, field);
 }
 

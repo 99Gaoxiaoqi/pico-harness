@@ -1,6 +1,7 @@
 import type { WorkspaceId } from "../paths/pico-paths.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { Fact, Job, MemoryJobCursor, MemoryKind, Proposal, Settings } from "./domain.js";
+import type { EvidenceRef } from "../engine/evidence-ref.js";
 
 export const MEMORY_PROPOSAL_EXTRACTOR_VERSION = "memory-proposal-v1" as const;
 export const MEMORY_PROPOSAL_JOB_TYPE = "terminal-extraction" as const;
@@ -26,6 +27,8 @@ export interface UserMemoryEvidence extends TerminalMemoryEvidenceRef {
   readonly cursor: MemoryJobCursor;
   /** 源对话消息快照（含本轮 assistant 回复），追加提取 prompt 后发给模型。 */
   readonly sourceMessages?: readonly Message[];
+  /** 统一溯源 overlay（可选）：把离散 eventIds 升级为带流身份的区间 cursor。 */
+  readonly evidenceRef?: EvidenceRef;
 }
 
 export type MemorySignalKind = "explicit" | "preference" | "correction" | "project_fact";

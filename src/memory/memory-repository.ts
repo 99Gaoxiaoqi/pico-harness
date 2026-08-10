@@ -37,6 +37,7 @@ import {
   type Source,
   type SourceAvailability,
 } from "./domain.js";
+import { validateEvidenceRef, type EvidenceRef } from "../engine/evidence-ref.js";
 import {
   createMemoryFileState,
   decodeMemoryFileState,
@@ -97,6 +98,8 @@ export interface CreateSourceInput extends IdempotentWriteOptions {
   readonly startSequence?: number;
   readonly endSequence?: number;
   readonly digest: string;
+  /** 可选统一溯源 overlay，校验失败时静默降级（不阻断 source 创建）。 */
+  readonly evidenceRef?: EvidenceRef;
 }
 
 export interface UpdateSourceAvailabilityInput extends IdempotentWriteOptions {
@@ -497,6 +500,7 @@ export class MemoryRepository {
             : { startSequence: normalized.startSequence }),
           ...(normalized.endSequence === undefined ? {} : { endSequence: normalized.endSequence }),
           digest: normalized.digest,
+          ...(normalized.evidenceRef ? { evidenceRef: normalized.evidenceRef } : {}),
           availability: "available",
           version: 1,
           createdAt: at,
@@ -1853,6 +1857,7 @@ function normalizeSourceInput(input: CreateSourceInput): {
   readonly startSequence?: number;
   readonly endSequence?: number;
   readonly digest: string;
+  readonly evidenceRef?: EvidenceRef;
   readonly request: unknown;
 } {
   const sessionId = normalizeId(input.sessionId, "sessionId");
@@ -1865,6 +1870,11 @@ function normalizeSourceInput(input: CreateSourceInput): {
     throw new Error("startSequence cannot be greater than endSequence");
   }
   const digest = requireDigest(input.digest);
+  // evidenceRef overlay：校验失败时静默降级（不阻断 source 创建）
+  const evidenceRefValidation = input.evidenceRef
+    ? validateEvidenceRef(input.evidenceRef)
+    : undefined;
+  const evidenceRef = evidenceRefValidation?.ok ? evidenceRefValidation.ref : undefined;
   return {
     sessionId,
     ...(runId ? { runId } : {}),
@@ -1873,6 +1883,7 @@ function normalizeSourceInput(input: CreateSourceInput): {
     ...(startSequence === undefined ? {} : { startSequence }),
     ...(endSequence === undefined ? {} : { endSequence }),
     digest,
+    ...(evidenceRef ? { evidenceRef } : {}),
     request: {
       sourceId: input.sourceId,
       sessionId,
@@ -1882,6 +1893,8 @@ function normalizeSourceInput(input: CreateSourceInput): {
       startSequence,
       endSequence,
       digest,
+      // evidenceRef 刻意不纳入 request——它是 overlay 元数据，参与幂等 requestHash
+      // 比对会在 content/runId 漂移时（如 recovery 路径）触发假性幂等冲突。
     },
   };
 }
