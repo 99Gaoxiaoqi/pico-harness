@@ -36,7 +36,7 @@
 
 - `messages`
 - `transcriptEvents`
-- 当前 active branch 的 `toolResults`
+- 当前 Session 的 `toolResults`
 - `runtime settings / goal / usage`
 
 TUI 只以 `transcriptEvents` 初始化 `TranscriptEventStore`，并用 canonical `toolResults`

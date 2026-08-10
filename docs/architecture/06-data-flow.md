@@ -136,7 +136,7 @@ generateWithRetry 内层捕获
 
 ---
 
-## 4. 文件历史三轴 rewind 流程
+## 4. 文件历史三轴 fork（用户侧 /rewind）流程
 
 ```
 用户在 TUI 输入: /rewind
@@ -145,21 +145,27 @@ TUI rewind command/dialog:
   ├─ 直接打开用户消息列表，不暴露 UUID 参数补全
   ├─ 用户选择提示词，再选择 code / conversation / both
   ├─ messageId / messageIndex 从所选快照读取
-  └─ 统一调用 applyTuiRewind，同步 Session、文件、transcript、输入框与 mode
+  └─ 统一调用 applyTuiRewind → session.forkFromCheckpoint
 
-session.rewindBoth(messageId, messageIndex):
-  └─ RewindOperationCoordinator
-      ├─ 固定 Session seq / 有效历史 digest / File History revision
-      ├─ 读取全部 CAS preimage，并预检当前文件仍等于记录的 after 指纹
-      ├─ journal: prepared
-      ├─ 原子恢复 workspace；外部变化则 needs_attention，不覆盖后来修改
-      ├─ 追加幂等 history.rewound(throughEventId)
-      │   └─ 旧 RuntimeEvent 不删除，只改变活动历史投影
-      ├─ 修剪与回退点对应的 File History
-      └─ journal: completed
+session.forkFromCheckpoint(checkpointId, mode):
+  ├─ 从 fileHistory.snapshots 找到 checkpoint，获取 cursor（messageIndex / throughEventId）
+  ├─ conversation / both 模式:
+  │   ├─ SessionForkService 从 cursor 处冻结源 Session 游标
+  │   ├─ 投影 fork seed（只保留 model-visible + transcript 事件）
+  │   ├─ 创建 target session，逐条 appendBatch 重发 seed entries
+  │   ├─ 写 session.forked 事件作为唯一发布点
+  │   ├─ both 模式额外在 target session 上应用 checkpoint 的文件状态
+  │   └─ 旧 Session 完全不变——Memory Source 和 TaskRun checkpoint ref 永久有效
+  └─ code 模式:
+      └─ 在当前 session 上应用 checkpoint 的文件状态（不创建新 session）
 
-进程在中间崩溃时，下次启动从 journal 当前阶段继续向前收敛。
+fork 完成后，TUI 自动切换到新 Session（forkedSessionId）。
 ```
+
+> 注意：旧版的破坏性 rewind（追加 `history.rewound` 事件 + 切换 branchId +
+> 破坏性删除后续 FileHistory 快照）已移除。`history.rewound` 事件类型仅在
+> decoder 中保留用于读取存量会话。详见架构文档
+> [16-pico-vs-maka-state-architecture.md](16-pico-vs-maka-state-architecture.md)。
 
 ---
 

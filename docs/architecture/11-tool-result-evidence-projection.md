@@ -149,7 +149,7 @@ FullCompactor 不另写 compaction Evidence。被摘要的 RuntimeEvent 与 Tool
 - Fork bundle 只接受 v5 source-sequenced `seedEntries`，联合冻结 active model facts 与完整 durable transcript；v1-v4 直接拒绝，不再重复保存 `messages` 或单独的 `historyEntries` 投影；
 - v1-v4 bundle 明确拒绝，不再回落到 Message 导入；
 - 同一 workspace 的 fork 继续引用 source-session Evidence URI，不复制或改写 CAS；
-- rewind 只投影当前 active branch；
+- rewind（用户侧 /rewind 命令）内部走 non-destructive fork：旧 Session 不变，新 Session 继承切片后的 tool.result.recorded 与 Evidence URI；
 - 未闭合 tool call 的恢复结果仍写 `tool.result.recorded`；
 - durable Runtime 禁止使用会把 ToolResult 投影重写为 `message.committed` 的
   `truncateTo/applyInMemoryCompaction` 路径；生产压缩通过 Runtime checkpoint 改变读模型。

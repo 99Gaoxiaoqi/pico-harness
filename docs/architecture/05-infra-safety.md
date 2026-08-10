@@ -49,12 +49,12 @@ CanonicalUsage = {
 每轮结束
   └─ 原子更新每 Session 的 v2 manifest（最多 100 个快照）
 
-执行 rewind
+执行 rewind（用户侧 /rewind 命令，内部走 non-destructive fork）
   ├─ 预读全部 CAS blob 并校验当前文件指纹
-  ├─ journal 发布 prepared operation
-  ├─ code/both：恢复 workspace，外部变化时 fail-closed
-  ├─ conversation/both：追加幂等 history.rewound RuntimeEvent
-  └─ 修剪与回退点对应的 File History 后将 operation 置为 completed
+  ├─ code/both：通过 session.forkFromCheckpoint 恢复 workspace，外部变化时 fail-closed
+  ├─ conversation/both：创建新 Session（fork），旧 Session 完全不变
+  │   └─ 以 session.forked 事件作为新 Session 的唯一发布点
+  └─ 旧 Session 的 Memory Source 和 TaskRun checkpoint ref 永久有效
 ```
 
 File History 只接受 v2 manifest、CAS blob 引用和完整的 canonical 用户消息边界；开发期旧 manifest、缺少边界字段的快照均不读取、不迁移，遇到时由恢复与 Storage Doctor 明确拒绝。`ContentAddressedBlobGarbageCollector` 与声明式 retention policy 目前保留但未接入生产调度，因此不能假定存在自动全局 GC。
@@ -221,6 +221,6 @@ Cron 关闭先停止新 tick 与定时器，再有界等待活动 tick；超时�
 
 1. **零外部协议依赖**：手写 JSON-RPC over stdio、手写 SSE 行解析、不用 @modelcontextprotocol/sdk
 2. **装饰器/AOP 贯穿**：CostTracker（计费）、McpToolBridge（工具适配）、ApprovalManager（Promise 挂起）
-3. **单一 Rewind 路径**：File History CAS + operation journal，三种 rewind mode 在 Session 层组合
+3. **单一 Fork 路径**：File History CAS + operation journal，三种用户侧 rewind mode（code/conversation/both）在 Session 层统一通过 forkFromCheckpoint 实现
 4. **两层审批**：`buildPermissionMiddleware` 负责安全判定与会话授权，ApprovalManager 负责挂起和唤醒人工审批
 5. **严格类型安全**：全开 strict + noUncheckedIndexedAccess，边界值必须显式校验或提供安全默认值

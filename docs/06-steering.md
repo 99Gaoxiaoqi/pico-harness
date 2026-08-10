@@ -34,7 +34,7 @@ Plan Mode 的核心机制很简单：在 System Prompt 里注入一条铁律—�
 这听起来像是一个 Prompt 技巧，但实现上是**引擎主动嗅探磁盘**：
 
 ```typescript
-// src/context/plan-store.ts
+// 原 src/context/plan-store.ts（已删除，现由 PlanCoordinator 替代）
 async buildPlanContext(): Promise<string> {
   const [plan, todo] = await Promise.all([this.readPlan(), this.readTodo()]);
 

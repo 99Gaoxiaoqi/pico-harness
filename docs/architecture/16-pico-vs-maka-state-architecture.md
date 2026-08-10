@@ -74,20 +74,22 @@ RuntimeEventStore (runtime-events.jsonl)  ← 唯一 canonical semantic log
 
 ### 3.1 rewind 语义
 
-这是两种架构差异最大的地方。
+> 下表对比的是**改进前**的 Pico rewind 机制。改进 3 已把 Pico rewind 改为
+> non-destructive fork，与下表 Maka 列的行为一致。旧 `history.rewound` /
+> branchId 机制已删除。
 
-| 维度 | Pico | Maka |
+| 维度 | Pico（旧机制，已废弃） | 对比项目 |
 |------|------|------|
 | rewind 是什么 | 追加 `history.rewound` 事件 + 切换 branchId + **文件回滚** | 创建新 Session（fork），**旧 ledger 永不修改** |
 | canonical log | 事件仍在但 active branch 切换 | 完全 immutable，从未修改 |
 | 其他账本怎么响应 | 需要显式协调（Memory lifecycle Job 标记 Source 为 rewound；TaskRunStore **不感知 rewind**） | 天然安全——旧 Session 的投影不变，新 Session 是新对象 |
 
-**Pico 的 rewind 风险**：
+**Pico 旧 rewind 的风险（已通过改进 3 消除）**：
 
 - Memory 和运行态账本用**不同的物理锁**（`memory/lock` vs `.storage/lock`），永远不可能原子提交——rewind 中途崩溃会产生部分态
-- TaskRunStore **完全不处理 `history.rewound`**（grep 在 `src/tasks/` 零命中）——checkpoint 引用的 terminal 事件在 rewind 后可能已不可达，任务被静默 park
+- TaskRunStore **完全不处理 `history.rewound`**——checkpoint 引用的 terminal 事件在 rewind 后可能已不可达，任务被静默 park
 
-**Maka 为什么没有这个问题**：rewind 是 non-destructive fork（`session-manager.ts:5032` `reviseBeforeTurn`），旧 Session 的 RuntimeEvent ledger 从未被修改。所有指向旧 Session 的 ref（Task Ledger 的 sessionId/runId、Memory 的 MemoryItemSource）仍然有效——因为旧数据还在，没动过。
+**为什么 non-destructive fork 消除了这些问题**：fork 创建新 Session，旧 Session 的 RuntimeEvent ledger 从未被修改。所有指向旧 Session 的 ref（Memory Source 的 eventIds、TaskRun checkpoint 的 terminalEventId）仍然有效——因为旧数据还在，没动过。
 
 ### 3.2 跨账本一致性
 
@@ -148,13 +150,11 @@ RuntimeEventStore (runtime-events.jsonl)  ← 唯一 canonical semantic log
 
 #### 改进 3：rewind 从"破坏性回滚"向"non-destructive fork"演进 ✅ 已落地
 
-已把 rewind 改为 non-destructive fork——旧 Session 完全不变，创建新 Session 继承切片后的状态。从根源消除跨账本悬空引用：旧 Session 的 Memory Source 和 TaskRun checkpoint ref 永久有效。旧 rewind 方法和 branchId 解码逻辑保留（向后兼容存量 `history.rewound` 事件），但新代码不再写入。
+已把 rewind 改为 non-destructive fork——旧 Session 完全不变，创建新 Session 继承切片后的状态。从根源消除跨账本悬空引用：旧 Session 的 Memory Source 和 TaskRun checkpoint ref 永久有效。旧 rewind 方法、branchId 机制和 RewindOperationCoordinator 已彻底删除（仅保留 `history.rewound` 事件类型的 decoder 兼容）。
 
-#### 改进 4：统一投影重算入口 🔄 待落地
+#### 改进 4：统一投影重算入口 ✅ 已落地
 
-Maka 有 `RuntimeReadModel.getSessionView()` 作为统一的投影入口，每次 read 即时从 RuntimeEvent ledger 重算。Pico 的投影分散在 `SessionMessageLedger`（一次性内存投影）、`Session`（运行态投影）、各 UI 投影中，没有统一的"从 RuntimeEvent 重算"入口。
-
-**Pico 的改进方向**：引入一个 `RuntimeProjectionService`，封装"从 RuntimeEventStore 重建指定状态"的逻辑，作为所有投影的 canonical 恢复路径。当投影损坏时，从 RuntimeEvent 重建而非报错。
+已引入 `RuntimeProjectionService`（`src/engine/runtime-projection-service.ts`），封装 read-model 和 projection 两套投影为统一入口，提供 `getSessionView` / `getMessages` / `getState` 等方法。StorageDoctor 已迁移到 service。streaming delta 路径保留增量语义，不在 service 范围。
 
 ### 4.3 可以做的：渐进改进
 
@@ -162,9 +162,9 @@ Maka 有 `RuntimeReadModel.getSessionView()` 作为统一的投影入口，每�
 
 `src/context/plan-store.ts`（144 行）已删除。`new PlanStore` 在生产代码中零调用，已被事件溯源版 PlanCoordinator 完全替代。
 
-#### 改进 6：抽象 withStoreLock 模板 🔄 待落地
+#### 改进 6：抽象 withStoreLock 模板 ✅ 已落地（部分）
 
-四个账本的 `withStoreLock` 骨架（root identity 断言 + boundary 断言 + recover + 包装错误）逐行克隆约 120 行。可抽象为泛型基类，但保留各自的 integrity error 类型。
+已提取 `withLedgerStoreLock` 通用工具（`src/storage/ledger-store-lock.ts`），RuntimeEventStore 和 TaskRunStore 已迁移。RuntimeStore 和 MemoryRepository 因特殊逻辑（LeaseConflict 重试 / 嵌套事务）暂保留原实现。
 
 #### 改进 7：补全 ARCHITECTURE.md 的 Memory 隔离域声明 ✅ 已落地
 
@@ -199,10 +199,10 @@ Maka 有 `RuntimeReadModel.getSessionView()` 作为统一的投影入口，每�
 |------|----------|----------|
 | 状态真源声明 | `ARCHITECTURE.md:96-118` | `runtime-core:49, 308-333` |
 | canonical log | `src/storage/runtime-event-store.ts` | `packages/core/src/runtime-event-store.ts` |
-| rewind 实现 | `desktop-runtime-service.ts:3191-3244` | `session-manager.ts:5032` (`reviseBeforeTurn`) |
-| 跨账本协调 | `desktop-memory-service.ts:335-650` (lifecycle Job) | 不存在（不需要） |
-| Memory provenance | `src/memory/domain.ts:65-81` (Source) | `long-term-memory.ts:87-92` (MemoryItemSource) |
-| 投影入口 | `src/engine/session-message-ledger.ts`（分散） | `runtime-read-model.ts:77` (`getSessionView`，统一） |
+| rewind/fork 实现 | `src/engine/session.ts` (`forkFromCheckpoint`) + `src/engine/session-fork-service.ts` | `session-manager.ts:5032` (`reviseBeforeTurn`) |
+| 跨账本协调 | `desktop-memory-service.ts` (deleteSession lifecycle Job) | 不存在（不需要） |
+| Memory provenance | `src/memory/domain.ts` (Source) | `long-term-memory.ts` (MemoryItemSource) |
+| 投影入口 | `src/engine/runtime-projection-service.ts`（统一） | `runtime-read-model.ts` (`getSessionView`，统一） |
 | 压缩语义 | `src/context/full-compactor.ts`（摘要替换前缀） | `history-compact-checkpoint.ts`（checkpoint 是投影） |
 | schema 版本 | 各账本独立 schemaVersion | RuntimeEvent 无版本（closed-domain 校验） |
 | 故障恢复 | `src/storage/storage-doctor.ts`（按账本独立 repair） | 从 RuntimeEvent 重建投影 |
