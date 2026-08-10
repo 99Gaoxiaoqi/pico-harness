@@ -134,7 +134,8 @@ generateWithRetry (内层:普通重试)
 ### RuntimeEventStore (`src/storage/runtime-event-store.ts`)
 
 Session 级追加 JSONL 是会话与运行时的唯一事实源：`message.committed`、
-`session.state.committed`、`history.rewound`、`session.forked` 与 run/tool/model 事实共享一条全序列。
+`session.state.committed`、`session.forked` 与 run/tool/model 事实共享一条全序列
+（旧 `history.rewound` 事件类型仅在 decoder 保留，新代码不写入）。
 
 - **事务提交**：事件批次先发布耐久 commit marker，再原子完成 JSONL 与 manifest 投影
 - **Exactly-once**：`(sessionId, eventId)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝

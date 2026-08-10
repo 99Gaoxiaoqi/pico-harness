@@ -106,7 +106,7 @@ await session.commitMessages(
 );
 ```
 
-`rewind` 不删除旧消息，而是追加 `history.rewound`事件改变有效历史投影。`fork` 先冻结源会话游标，再通过 forward-only Saga 克隆 File History 等必要附属状态，最后以 `session.forked` 事件作为唯一发布点。如果中途崩溃，下次 CLI/TUI 启动会自动继续未完成操作；在发布事件落盘前，目标 Session 对用户不可见。
+`rewind`（用户侧 /rewind 命令）现在内部走 non-destructive fork：旧 Session 完全不变，创建新 Session 继承切片状态，以 `session.forked` 事件作为唯一发布点。如果中途崩溃，下次 CLI/TUI 启动会自动继续未完成操作；在发布事件落盘前，目标 Session 对用户不可见。（旧的破坏性 `history.rewound` 事件类型仅保留 decoder，新代码不写入。）
 
 这次收敛不再读取、写入或迁移旧 Session JSONL，也移除了重复的 run JSONL 账本。旧数据如果已明确放弃，保留第二套恢复路径反而会让真源重新变得模糊。
 

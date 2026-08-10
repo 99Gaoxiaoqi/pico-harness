@@ -107,11 +107,13 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 - `reload()`：强制重读盘（跨进程兜底）
 - **单例注入**：host 创建唯一实例，registry(TodoTool) + Composer 共享
 
-### PlanStore (`plan-store.ts`)
+### PlanCoordinator (`src/plan/coordinator.ts`)
 
-- 路径：`<workDir>/PLAN.md` + `<workDir>/TODO.md`
-- `buildPlanContext()`：嗅探文件 —— 均不存在 → 引导建文件；存在 → 注入当前进度
-- Plan Mode 下用 ExitPlanModeTool 走审批流
+- 事件溯源版计划管理：所有 plan 操作（propose/revise/approve/reject/startExecution/
+  interrupt/resume/replan/cancel/complete/updateStep）作为 `plan.*` RuntimeEvent 追加
+- 状态通过纯函数 reducer（`src/plan/reducer.ts`）从 RuntimeEvent 投影，不嗅探 PLAN.md 文件
+- Plan Mode 下由 PlanCoordinator.project() 注入当前计划状态
+- （旧的 PlanStore 文件嗅探实现 `plan-store.ts` 已删除）
 
 ### EvidenceArchive (`evidence-archive.ts`)
 
@@ -157,7 +159,7 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 ```
 engine/loop.ts (编排者)
   ├─ PromptComposer ──┬─ SkillLoader ── .pico/skills + $PICO_HOME/skills
-  │                    ├─ PlanStore ── PLAN.md / TODO.md
+  │                    ├─ PlanCoordinator ── RuntimeEvent plan 投影
   │                    ├─ TodoStore ── $PICO_HOME/workspaces/<id>/todo.json
   │                    └─ GoalManager ── (import type 防循环依赖)
   ├─ Compactor ─────── token-counter + context-budget + Session.toolResultMeta
