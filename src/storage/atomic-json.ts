@@ -41,13 +41,13 @@ export async function writeJsonAtomic(
   let handle: FileHandle | undefined;
   let published = false;
   try {
-    handle = await open(temporaryPath, "wx", fileMode);
+    handle = await openWithTransientRetry((mode) => open(temporaryPath, "wx", mode), fileMode);
     await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
     if (durability !== "none") await handle.sync();
     await handle.close();
     handle = undefined;
 
-    await rename(temporaryPath, path);
+    await renameWithTransientRetry(temporaryPath, path);
     published = true;
     await chmod(path, fileMode);
     if (durability === "file-and-directory") await syncDirectory(directory);
@@ -99,4 +99,54 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error;
+}
+
+/**
+ * Windows NTFS 上 rename/open 偶发 EPERM/ENOENT/EACCES/EBUSY（杀毒软件、索引器
+ * 或并发 GC 短暂占用）。对齐 syncDirectory 的既有 errno 降级模式，��这些操作
+ * 比目录 fsync 更关键（失败会丢数据），故用短退避重试而非静默跳过。
+ */
+const TRANSIENT_FS_ERRORS = new Set(["EPERM", "EACCES", "EBUSY", "ENOENT"]);
+const TRANSIENT_FS_RETRY_LIMIT = 5;
+const TRANSIENT_FS_BASE_DELAY_MS = 50;
+
+function isTransientFsError(error: unknown): boolean {
+  if (!isNodeError(error)) return false;
+  return TRANSIENT_FS_ERRORS.has(error.code ?? "");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function openWithTransientRetry<T>(
+  openFn: (mode: number) => Promise<T>,
+  mode: number,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < TRANSIENT_FS_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await openFn(mode);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientFsError(error) || attempt === TRANSIENT_FS_RETRY_LIMIT - 1) break;
+      await sleep(TRANSIENT_FS_BASE_DELAY_MS * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function renameWithTransientRetry(src: string, dest: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < TRANSIENT_FS_RETRY_LIMIT; attempt += 1) {
+    try {
+      await rename(src, dest);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientFsError(error) || attempt === TRANSIENT_FS_RETRY_LIMIT - 1) break;
+      await sleep(TRANSIENT_FS_BASE_DELAY_MS * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
