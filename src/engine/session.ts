@@ -114,7 +114,7 @@ import {
   projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
 } from "./session-runtime-projection.js";
-import { OwnerLease } from "../storage/owner-lease.js";
+import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
 import { SessionMessageLedger } from "./session-message-ledger.js";
 import { configureDefaultSessionFactory, SessionManager } from "./session-manager.js";
@@ -1630,7 +1630,11 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       ownership = await this.ensureRuntimeOwnership();
       await ownership.assertOwnership();
     } catch (error) {
-      this.markWriteUncertain("Runtime Session owner lease validation failed", error);
+      // LeaseConflictError = 真正��了所有权（leaseId 不匹配）→ 标记不可写。
+      // 瞬时文件系统错误（EPERM/ENOENT/EBUSY）→ 不标记不可写，直接抛出让调用方重试。
+      if (error instanceof LeaseConflictError) {
+        this.markWriteUncertain("Runtime Session owner lease validation failed", error);
+      }
       throw this.persistenceFailure ?? error;
     }
     this.assertWritable();

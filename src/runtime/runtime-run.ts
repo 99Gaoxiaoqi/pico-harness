@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
+import { LeaseConflictError } from "../storage/owner-lease.js";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
@@ -1337,24 +1338,50 @@ async function writeWithRuntimeEventGuard<Result>(
   write: () => Promise<Result>,
   operation: string,
 ): Promise<Result> {
-  await guard.assertRuntimeEventWriteAllowed();
-  let result: Result;
-  try {
-    result = await write();
-  } catch (writeError) {
+  // Windows NTFS 上 lease 校验和原子写偶发瞬时文件系统错误（EPERM/ENOENT/EBUSY）。
+  // 只有 LeaseConflictError（leaseId 不匹配 = 真正丢锁）才不可重试；其余重试。
+  const GUARD_RETRY_LIMIT = 3;
+  for (let attempt = 0; attempt < GUARD_RETRY_LIMIT; attempt += 1) {
     try {
       await guard.assertRuntimeEventWriteAllowed();
-    } catch (guardError) {
-      throw new AggregateError(
-        [writeError, guardError],
-        `${operation} write failed after its Session lease became invalid`,
-        { cause: guardError },
-      );
+    } catch (error) {
+      if (error instanceof LeaseConflictError || attempt === GUARD_RETRY_LIMIT - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      continue;
     }
-    throw writeError;
+    let result: Result;
+    try {
+      result = await write();
+    } catch (writeError) {
+      try {
+        await guard.assertRuntimeEventWriteAllowed();
+      } catch (guardError) {
+        if (
+          !(guardError instanceof LeaseConflictError) &&
+          !(writeError instanceof LeaseConflictError) &&
+          attempt < GUARD_RETRY_LIMIT - 1
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+          continue;
+        }
+        throw new AggregateError(
+          [writeError, guardError],
+          `${operation} write failed after its Session lease became invalid`,
+          { cause: guardError },
+        );
+      }
+      throw writeError;
+    }
+    try {
+      await guard.assertRuntimeEventWriteAllowed();
+    } catch (error) {
+      if (error instanceof LeaseConflictError || attempt === GUARD_RETRY_LIMIT - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      continue;
+    }
+    return result;
   }
-  await guard.assertRuntimeEventWriteAllowed();
-  return result;
+  throw new Error(`${operation} write exhausted transient-error retries`);
 }
 
 function findDanglingRuntimeToolCalls(

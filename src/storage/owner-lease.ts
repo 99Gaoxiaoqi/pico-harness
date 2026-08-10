@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { logger } from "../observability/logger.js";
 import { writeJsonAtomic } from "./atomic-json.js";
 
 const LEASE_SCHEMA_VERSION = 1 as const;
@@ -86,12 +87,22 @@ export class OwnerLease {
     if (this.released) throw new LeaseConflictError("Lease has already been released");
     if (this.lostSignal.aborted) throw leaseLossReason(this.lostSignal);
     try {
-      const current = await readLeaseRecord(this.ownerPath);
+      // Windows 上 readLeaseRecord 偶发因 EPERM/ENOENT 返回 undefined（文件被 AV/索引器
+      // 瞬时占用），会误判为 "Lease ownership changed"。先重试确认文件确实读不到或
+      // leaseId 确实不匹配，再决定是否丢锁。
+      let current = await readLeaseRecord(this.ownerPath);
       if (current?.leaseId !== this.leaseId) {
+        for (let attempt = 0; attempt < 3 && current === undefined; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+          current = await readLeaseRecord(this.ownerPath);
+          if (current?.leaseId === this.leaseId) return;
+        }
         throw new LeaseConflictError("Lease ownership changed", current);
       }
     } catch (error) {
-      this.markLost(error);
+      // LeaseConflictError = 真正丢了所有权（leaseId 不匹配），需要 markLost。
+      // 瞬时文件系统错误（EPERM/ENOENT/EBUSY）不应永久丢锁——交给调用方处理。
+      if (error instanceof LeaseConflictError) this.markLost(error);
       throw error;
     }
   }
@@ -190,9 +201,18 @@ export class OwnerLease {
     if (this.heartbeatTimer || this.released || this.lostSignal.aborted) return;
     this.heartbeatTimer = setInterval(() => {
       void this.heartbeat().catch((error: unknown) => {
-        this.markLost(error);
-        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-        this.heartbeatTimer = undefined;
+        if (error instanceof LeaseConflictError) {
+          // 真正丢了所有权（leaseId 不匹配、lease 已释放等）→ 永久放弃
+          this.markLost(error);
+          if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+          this.heartbeatTimer = undefined;
+          return;
+        }
+        // 瞬时文件系统错误（EPERM/ENOENT/EBUSY）→ 跳过本次心跳，下个周期再试
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "[OwnerLease] heartbeat encountered transient filesystem error; skipping this cycle",
+        );
       });
     }, this.heartbeatIntervalMs);
     this.heartbeatTimer.unref();
