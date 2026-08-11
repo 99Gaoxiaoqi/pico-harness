@@ -69,7 +69,7 @@ export function preflightModelRequest(
   }
 
   const estimatedInputTokens = estimateRequestTokens(request.messages, request.availableTools);
-  const reservedOutputTokens = capabilities.maxOutputTokens;
+  const reservedOutputTokens = capabilities.maxOutputTokens ?? 4096;
   const remainingTokens =
     capabilities.contextWindowTokens -
     estimatedInputTokens -
