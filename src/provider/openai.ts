@@ -751,7 +751,10 @@ export class OpenAIProvider implements LLMProvider {
     const alternateField =
       outputTokenField === "max_tokens" ? "max_completion_tokens" : "max_tokens";
     delete requestBody[alternateField];
-    requestBody[outputTokenField] = capabilities.maxOutputTokens;
+    // 不传 maxOutputTokens 时让 provider 使用模型默认上限（reasoning 模型不会因预算不足返回空 content）
+    if (capabilities.maxOutputTokens !== undefined) {
+      requestBody[outputTokenField] = capabilities.maxOutputTokens;
+    }
     return requestBody;
   }
 }

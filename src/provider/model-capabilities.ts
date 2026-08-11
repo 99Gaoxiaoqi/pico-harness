@@ -52,7 +52,7 @@ export interface PromptCachePolicy {
 export interface ModelRouteCapabilities {
   contextWindowTokens: number;
   contextSource: CapabilityValueSource;
-  maxOutputTokens: number;
+  maxOutputTokens: number | undefined;
   outputSource: CapabilityValueSource;
   /** OpenAI-compatible request field used to enforce maxOutputTokens on the wire. */
   outputTokenField: OpenAIOutputTokenField;
@@ -105,8 +105,8 @@ export function resolveModelRouteCapabilities(
   return {
     contextWindowTokens: override?.context ?? profile.contextWindowTokens,
     contextSource: override?.context === undefined ? "profile_default" : "config",
-    maxOutputTokens: override?.output ?? profile.maxOutputTokens,
-    outputSource: override?.output === undefined ? "profile_default" : "config",
+    maxOutputTokens: override?.output,
+    outputSource: override?.output === undefined ? "provider_default" : "config",
     outputTokenField:
       override?.outputTokenField ?? defaultOpenAIOutputTokenField(provider, context.baseURL),
     // Adapter support does not prove a custom endpoint/model supports the feature.
@@ -277,7 +277,9 @@ export function providerProfileForRoute(
   return {
     ...profile,
     contextWindowTokens: capabilities.contextWindowTokens,
-    maxOutputTokens: capabilities.maxOutputTokens,
+    ...(capabilities.maxOutputTokens !== undefined
+      ? { maxOutputTokens: capabilities.maxOutputTokens }
+      : {}),
     supportsPromptCache:
       capabilities.cache === "unknown" ? profile.supportsPromptCache : capabilities.cache,
     supportsThinkingControl:
