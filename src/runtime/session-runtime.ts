@@ -851,6 +851,10 @@ export async function settleGraphWork(
               error: outputSummary || status,
             },
           };
+      // 直写 store（不经 session.serialize / enqueuePersistence / assertRuntimeEventWriteAllowed）：
+      // graph settle 依赖 CAS（expectedSessionSequence）+ 幂等短路 + 跨进程文件锁兜底并发与
+      // stale 进程。切勿改为包 session.serialize——会改变 CAS 重试的并发语义并引入死锁
+      //（参见 delegation graphWorkId 去重因扩大 settle 窗口而致 graph 死锁的教训）。
       try {
         await store.appendGraphOperation([event], {
           operationId,
