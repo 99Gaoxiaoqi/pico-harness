@@ -43,6 +43,7 @@ export default function SessionScreen() {
   const sessionId = singleParam(params.sessionId);
   const title = singleParam(params.title) ?? "会话";
   const [transcript, setTranscript] = useState<MobileTranscript>();
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>();
@@ -61,7 +62,7 @@ export default function SessionScreen() {
     { readonly text: string; readonly idempotencyKey: string } | undefined
   >(undefined);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (before?: string) => {
     if (!projectId || !sessionId) {
       setError("会话链接缺少必要参数");
       setLoading(false);
@@ -77,19 +78,32 @@ export default function SessionScreen() {
       setConnection((current) =>
         current?.origin === origin && current.token === token ? current : nextConnection,
       );
-      const nextTranscript = await new MobileGatewayClient(nextConnection).getTranscript(
+      const fetched = await new MobileGatewayClient(nextConnection).getTranscript(
         projectId,
         sessionId,
+        before,
       );
-      transcriptRef.current = nextTranscript;
-      setTranscript(nextTranscript);
-      setLiveItems((current) => reconcileMobileLiveItems(nextTranscript.items, current));
-      setError(undefined);
+      if (before) {
+        // 分页：把更早的一页 prepend 到现有 items 前
+        setTranscript((current) => {
+          const merged = current
+            ? { ...fetched, items: [...fetched.items, ...current.items] }
+            : fetched;
+          transcriptRef.current = merged;
+          return merged;
+        });
+      } else {
+        transcriptRef.current = fetched;
+        setTranscript(fetched);
+        setLiveItems((current) => reconcileMobileLiveItems(fetched.items, current));
+        setError(undefined);
+      }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "会话记录读取失败");
     } finally {
       setLoading(false);
       setRefreshing(false);
+      setLoadingEarlier(false);
     }
   }, [projectId, sessionId]);
 
@@ -266,7 +280,27 @@ export default function SessionScreen() {
               ) : null}
             </View>
           ) : conversationItems.length ? (
-            conversationItems.map((item) => <TranscriptItem key={item.id} item={item} />)
+            <>
+              {transcript?.nextBefore ? (
+                <Pressable
+                  style={styles.loadEarlierRow}
+                  disabled={loadingEarlier}
+                  onPress={() => {
+                    if (transcript.nextBefore) {
+                      setLoadingEarlier(true);
+                      void load(transcript.nextBefore);
+                    }
+                  }}
+                >
+                  <Text style={styles.loadEarlierText}>
+                    {loadingEarlier ? "正在加载更早消息…" : "加载更早消息"}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {conversationItems.map((item) => (
+                <TranscriptItem key={item.id} item={item} />
+              ))}
+            </>
           ) : (
             <View style={styles.centerState}>
               <Text style={styles.mutedText}>这个会话还没有消息</Text>
@@ -520,6 +554,8 @@ const styles = StyleSheet.create({
   errorText: { color: mobileTheme.colors.danger, fontSize: mobileTheme.type.small, lineHeight: 18 },
   errorAction: { alignSelf: "flex-start", marginTop: 6, paddingVertical: 6 },
   errorActionText: { color: mobileTheme.colors.accent, fontSize: mobileTheme.type.small, fontWeight: "600" },
+  loadEarlierRow: { alignItems: "center", paddingVertical: 10 },
+  loadEarlierText: { color: mobileTheme.colors.accent, fontSize: mobileTheme.type.small },
   messageRow: { alignItems: "flex-start" },
   userMessageRow: { alignItems: "flex-end" },
   messageBubble: {
