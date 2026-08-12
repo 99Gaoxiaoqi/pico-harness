@@ -212,6 +212,14 @@ export interface RuntimePlanStepUpdatedEvent extends RuntimePlanEventBase {
     readonly note?: string;
   };
 }
+export interface RuntimePlanStepRecoveredEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.step.recovered";
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly stepId: string;
+    readonly note?: string;
+  };
+}
 interface RuntimePlanExecutionLifecycleEvent<
   K extends
     | "plan.execution.interrupted"
@@ -241,11 +249,79 @@ export type RuntimePlanEvent =
   | RuntimePlanRejectedEvent
   | RuntimePlanExecutionStartedEvent
   | RuntimePlanStepUpdatedEvent
+  | RuntimePlanStepRecoveredEvent
   | RuntimePlanExecutionInterruptedEvent
   | RuntimePlanExecutionResumedEvent
   | RuntimePlanExecutionReplannedEvent
   | RuntimePlanExecutionCompletedEvent
   | RuntimePlanExecutionCancelledEvent;
+
+/**
+ * Graph Mode (Lesson 17). Graph events model an explicit DAG of works: each
+ * add_work declares an instruction plus optional upstream record ids; the
+ * orchestrator dispatches each work once its inputs are ready and records the
+ * output. Every graph event shares the same operationId + fingerprint CAS
+ * envelope as Plan events, so the underlying store treats them identically.
+ */
+interface RuntimeGraphEventBase extends RuntimeEventBase {
+  readonly partial: false;
+  readonly visibility: "internal";
+  readonly data: {
+    readonly operationId: string;
+    readonly fingerprint: string;
+    readonly graphId: string;
+  };
+}
+
+export interface RuntimeGraphWorkAddedEvent extends RuntimeGraphEventBase {
+  readonly kind: "graph.work.added";
+  readonly data: RuntimeGraphEventBase["data"] & {
+    readonly workId: string;
+    readonly instruction: string;
+    readonly inputIds: readonly string[];
+    readonly mode: "explore" | "worker";
+  };
+}
+
+export interface RuntimeGraphWorkDispatchedEvent extends RuntimeGraphEventBase {
+  readonly kind: "graph.work.dispatched";
+  readonly data: RuntimeGraphEventBase["data"] & {
+    readonly workId: string;
+    readonly delegationId: string;
+  };
+}
+
+export interface RuntimeGraphWorkRecordedEvent extends RuntimeGraphEventBase {
+  readonly kind: "graph.work.recorded";
+  readonly data: RuntimeGraphEventBase["data"] & {
+    readonly workId: string;
+    readonly recordId: string;
+    readonly outputSummary: string;
+    readonly evidenceRefs?: readonly string[];
+  };
+}
+
+export interface RuntimeGraphWorkFailedEvent extends RuntimeGraphEventBase {
+  readonly kind: "graph.work.failed";
+  readonly data: RuntimeGraphEventBase["data"] & {
+    readonly workId: string;
+    readonly error: string;
+  };
+}
+
+export interface RuntimeGraphClosedEvent extends RuntimeGraphEventBase {
+  readonly kind: "graph.closed";
+  readonly data: RuntimeGraphEventBase["data"] & {
+    readonly resultRecordIds?: readonly string[];
+  };
+}
+
+export type RuntimeGraphEvent =
+  | RuntimeGraphWorkAddedEvent
+  | RuntimeGraphWorkDispatchedEvent
+  | RuntimeGraphWorkRecordedEvent
+  | RuntimeGraphWorkFailedEvent
+  | RuntimeGraphClosedEvent;
 
 export type RuntimeEvent =
   | RuntimeRunStartedEvent
@@ -262,6 +338,7 @@ export type RuntimeEvent =
   | RuntimeSessionStateCommittedEvent
   | RuntimeTranscriptEventRecordedEvent
   | RuntimePlanEvent
+  | RuntimeGraphEvent
   | RuntimeRunTerminalEvent;
 
 export function isRuntimeTerminalEvent(event: RuntimeEvent): event is RuntimeRunTerminalEvent {

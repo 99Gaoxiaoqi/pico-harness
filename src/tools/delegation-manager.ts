@@ -49,6 +49,18 @@ export interface DelegationManagerOptions {
   maxOutputSummaryChars?: number;
   taskRegistry?: TaskRegistry;
   onCompletion?: (completion: DelegationCompletionEnvelope) => void;
+  /** Called when a delegation carrying planStepId settles, regardless of completionPolicy. */
+  onPlanStepSettled?: (planStepId: string, status: DelegationRecordStatus) => Promise<void> | void;
+  /**
+   * Called when a delegation carrying graphWorkId settles, regardless of
+   * completionPolicy. The outputSummary is the same bounded summary the
+   * completion envelope carries; the host uses it to mint graph.work.recorded.
+   */
+  onGraphWorkSettled?: (
+    workId: string,
+    status: DelegationRecordStatus,
+    outputSummary: string,
+  ) => Promise<void> | void;
 }
 
 export interface DelegationCompletionEnvelope {
@@ -63,6 +75,9 @@ export interface DelegationCompletionEnvelope {
   status: Exclude<DelegationRecordStatus, "running">;
   outputSummary: string;
   error?: string;
+  planStepId?: string;
+  /** Graph Mode work handle this completion fulfills (if any). */
+  graphWorkId?: string;
 }
 
 export function formatDelegationCompletions(
@@ -97,6 +112,9 @@ export interface DelegationTaskRuntimeInput {
   activityIds?: readonly string[];
   ownerSessionId?: string;
   childSessionId?: string;
+  planStepId?: string;
+  /** Graph Mode work handle this delegation is fulfilling. */
+  graphWorkId?: string;
 }
 
 export interface DelegationResumeInfo {
@@ -143,6 +161,8 @@ interface DelegationRecord {
   error?: string;
   controller: AbortController;
   promise: Promise<void>;
+  planStepId?: string;
+  graphWorkId?: string;
 }
 
 export class DelegationManager {
@@ -155,6 +175,8 @@ export class DelegationManager {
   private readonly maxAsyncChildren: number;
   private readonly maxOutputSummaryChars: number;
   private readonly onCompletion?: DelegationManagerOptions["onCompletion"];
+  private readonly onPlanStepSettled?: DelegationManagerOptions["onPlanStepSettled"];
+  private readonly onGraphWorkSettled?: DelegationManagerOptions["onGraphWorkSettled"];
   private nextCompletionSeq = 1;
   readonly taskRegistry?: TaskRegistry;
 
@@ -165,6 +187,8 @@ export class DelegationManager {
       options.maxOutputSummaryChars ?? SUBAGENT_OUTPUT_BUDGET.batch.hardMax;
     this.taskRegistry = options.taskRegistry;
     this.onCompletion = options.onCompletion;
+    this.onPlanStepSettled = options.onPlanStepSettled;
+    this.onGraphWorkSettled = options.onGraphWorkSettled;
   }
 
   dispatch(
@@ -221,11 +245,13 @@ export class DelegationManager {
       updatedAt: now,
       controller,
       promise: Promise.resolve(),
+      ...(taskInput.planStepId ? { planStepId: taskInput.planStepId } : {}),
+      ...(taskInput.graphWorkId ? { graphWorkId: taskInput.graphWorkId } : {}),
     };
 
     record.promise = Promise.resolve()
       .then(() => runner(controller.signal))
-      .then((result) => {
+      .then(async (result) => {
         const legacyResultWithoutStatus = result.status === undefined;
         const normalizedResult = normalizeDelegationBatchResult(result);
         if (
@@ -243,15 +269,31 @@ export class DelegationManager {
         record.updatedAt = record.completedAt;
         record.completionSeq ??= this.nextCompletionSeq++;
         this.settleTaskRegistry(record, legacyResultWithoutStatus ? result : normalizedResult);
+        if (record.planStepId) {
+          try { await this.onPlanStepSettled?.(record.planStepId, record.status); } catch { /* best-effort */ }
+        }
+        if (record.graphWorkId) {
+          try {
+            await this.onGraphWorkSettled?.(record.graphWorkId, record.status, this.outputSummary(record));
+          } catch { /* best-effort */ }
+        }
         this.publishCompletion(record);
       })
-      .catch((err: unknown) => {
+      .catch(async (err: unknown) => {
         record.status = delegationStatusFromError(err, controller.signal);
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
         record.completionSeq ??= this.nextCompletionSeq++;
         this.settleTaskRegistry(record);
+        if (record.planStepId) {
+          try { await this.onPlanStepSettled?.(record.planStepId, record.status); } catch { /* best-effort */ }
+        }
+        if (record.graphWorkId) {
+          try {
+            await this.onGraphWorkSettled?.(record.graphWorkId, record.status, this.outputSummary(record));
+          } catch { /* best-effort */ }
+        }
         this.publishCompletion(record);
       });
 
@@ -392,6 +434,8 @@ export class DelegationManager {
       status: record.status,
       outputSummary: this.outputSummary(record),
       ...(record.error !== undefined ? { error: record.error } : {}),
+      ...(record.planStepId ? { planStepId: record.planStepId } : {}),
+      ...(record.graphWorkId ? { graphWorkId: record.graphWorkId } : {}),
     };
   }
 

@@ -469,6 +469,27 @@ export class SessionForkService {
       rewritten.map((event, index) => ({ sequence: index + 1, event })),
     );
     if (inherited.execution?.status === "active") {
+      // Recover inherited in_progress steps — they belong to the source session's runs,
+      // not the fork. Without this, orphan detection fails (fork doesn't copy run.terminal).
+      for (const step of inherited.execution.steps) {
+        if (step.status !== "in_progress") continue;
+        const recoverOpId = `fork:${operation.operationId}:recover:${step.id}`;
+        rewritten.push({
+          ...structuredClone(rewritten.at(-1)!),
+          eventId: recoverOpId,
+          kind: "plan.step.recovered",
+          data: {
+            operationId: recoverOpId,
+            fingerprint: planOperationFingerprint(`fork.plan.step.recovered`, {
+              planId: inherited.execution.planId,
+              stepId: step.id,
+            }),
+            planId: inherited.execution.planId,
+            stepId: step.id,
+            note: "fork: inherited in_progress step reset to pending",
+          },
+        } as RuntimePlanEvent);
+      }
       const operationId = `fork:${operation.operationId}:plan:interrupted`;
       rewritten.push({
         ...rewritten.at(-1)!,
