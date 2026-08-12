@@ -92,11 +92,18 @@ export class OwnerLease {
       // leaseId 确实不匹配，再决定是否丢锁。
       let current = await readLeaseRecord(this.ownerPath);
       if (current?.leaseId !== this.leaseId) {
-        for (let attempt = 0; attempt < 3 && current === undefined; attempt += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+        for (let attempt = 0; attempt < 5 && current === undefined; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
           current = await readLeaseRecord(this.ownerPath);
           if (current?.leaseId === this.leaseId) return;
         }
+        if (current === undefined) {
+          // 文件持续不可读 = 瞬时 FS 竞争（AV/索引器），不是真正丢锁
+          throw new Error(
+            `Lease file ${this.ownerPath} unreadable after retries; transient filesystem contention`,
+          );
+        }
+        // current 是另一条记录 = 真正丢了所有权
         throw new LeaseConflictError("Lease ownership changed", current);
       }
     } catch (error) {
