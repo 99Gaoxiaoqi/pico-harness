@@ -694,6 +694,7 @@ function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
       : legacyMode === "default" || legacyMode === "auto" || legacyMode === "yolo"
         ? legacyMode
         : "default";
+  const orchestrationMode = settings.orchestrationMode === "graph" ? "graph" : "default";
   if (!model) {
     return undefined;
   }
@@ -701,6 +702,7 @@ function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
     modelRouteId: stringValue(settings.modelRouteId) || undefined,
     model,
     collaborationMode,
+    orchestrationMode,
     permissionMode,
     thinkingEffort: stringValue(settings.thinkingEffort, "off"),
     reasoningLevels: Array.isArray(settings.reasoningLevels)
@@ -1214,6 +1216,7 @@ export interface RuntimeActions {
     patch: Readonly<{
       modelRouteId?: string;
       collaborationMode?: "agent" | "plan";
+      orchestrationMode?: "default" | "graph";
       permissionMode?: "default" | "auto" | "yolo";
       thinkingEffort?: string;
     }>,
