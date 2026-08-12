@@ -13,6 +13,7 @@ export const DESKTOP_IPC_CHANNELS = {
   runtimeSubscribe: "pico:runtime:subscribe",
   runtimeUnsubscribe: "pico:runtime:unsubscribe",
   runtimeEvent: "pico:runtime:event",
+  runtimeUnavailable: "pico:runtime:unavailable",
   chooseWorkspace: "pico:platform:choose-workspace",
   showNotification: "pico:platform:show-notification",
   openDirectory: "pico:platform:open-directory",
@@ -51,6 +52,8 @@ export interface DesktopBridge {
       listener: (notification: RuntimeNotification) => void,
     ): RuntimeNotificationSubscription;
   };
+  /** 主进程探活判定 Runtime 永久不可达时通过此通道通知渲染进程。 */
+  onUnavailable(listener: () => void): () => void;
   readonly platform: {
     chooseWorkspace(): Promise<DesktopResult<string | undefined>>;
     showNotification(input: {

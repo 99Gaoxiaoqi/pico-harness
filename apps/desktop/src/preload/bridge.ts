@@ -146,6 +146,14 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         });
       },
     }),
+    onUnavailable(listener: () => void): () => void {
+      if (typeof listener !== "function") return () => undefined;
+      const handler = (): void => listener();
+      ipcRenderer.on(DESKTOP_IPC_CHANNELS.runtimeUnavailable, handler);
+      return () => {
+        ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeUnavailable, handler);
+      };
+    },
     platform: Object.freeze({
       chooseWorkspace: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.chooseWorkspace),
       showNotification: (input: { readonly title: string; readonly body: string }) => {
