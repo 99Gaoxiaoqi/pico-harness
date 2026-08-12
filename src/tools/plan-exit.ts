@@ -155,10 +155,7 @@ export class UpdatePlanTool implements BaseTool {
     const coordinator = this.coordinator();
     const before = await coordinator.project();
     const projection = await coordinator.updateStep({
-      operationId:
-        typeof value["operationId"] === "string"
-          ? value["operationId"]
-          : `update-plan:${randomUUID()}`,
+      operationId: `update-plan:${randomUUID()}`,
       expectedSessionSequence: before.sessionSequence,
       planId: this.planId,
       stepId: value["stepId"],

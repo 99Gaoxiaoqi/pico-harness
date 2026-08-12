@@ -472,40 +472,9 @@ test("Plan reducer enforces review, step and rewind invariants", async (t) => {
     }),
     PlanConflictError,
   );
-  const rewind: RuntimeEvent = {
-    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-    eventId: "rewind",
-    sessionId: "s",
-    invocationId: "i",
-    runId: "r",
-    turnId: "t",
-    at: AT.toISOString(),
-    partial: false,
-    visibility: "internal",
-    kind: "history.rewound",
-    data: { branchId: "branch-2", throughEventId: "plan:p1:plan.proposed" },
-  };
-  await store.append(rewind);
-  const projected = await coordinator.project();
-  assert.equal(projected.pendingProposal?.revision, 1);
-  assert.equal(projected.execution, undefined);
-  assert.equal(
-    await coordinator.operationStatus("approve", "plan.approved", {
-      planId: "p",
-      expectedRevision: 1,
-      reviewedBy: "user",
-    }),
-    "missing",
-    "rewound operations do not suppress a new operation on the active branch",
-  );
-  await coordinator.approve({
-    operationId: "approve",
-    expectedSessionSequence: projected.sessionSequence,
-    planId: "p",
-    expectedRevision: 1,
-    reviewedBy: "user",
-    settings: SETTINGS,
-  });
+  // Note: branchId rewind invariants were removed during log-first alignment
+  // (commit bf828a35). The history.rewound kind is kept for legacy decode
+  // compatibility but no longer drives plan projection restoration.
 });
 
 test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", async () => {

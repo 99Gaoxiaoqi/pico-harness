@@ -142,6 +142,32 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
       };
       break;
     }
+    case "plan.step.recovered": {
+      if (!execution || execution.planId !== event.data.planId)
+        conflict("Plan execution does not exist");
+      if (execution.status !== "active" && execution.status !== "interrupted")
+        conflict("Plan step can only be recovered from an active or interrupted execution");
+      const index = execution.steps.findIndex((step) => step.id === event.data.stepId);
+      if (index < 0) conflict("Plan step does not exist");
+      const current = execution.steps[index]!;
+      if (current.status !== "in_progress")
+        conflict("Only an in_progress plan step can be recovered");
+      const steps = execution.steps.map((step, candidate) =>
+        candidate === index
+          ? {
+              ...step,
+              status: "pending" as const,
+              ...(event.data.note === undefined ? {} : { note: event.data.note }),
+            }
+          : step,
+      ) as PlanStep[];
+      execution = {
+        ...execution,
+        steps,
+        updatedAt: event.at,
+      };
+      break;
+    }
     case "plan.execution.interrupted":
       if (!execution || execution.planId !== event.data.planId || execution.status !== "active")
         conflict("Plan execution is not active");
