@@ -214,6 +214,25 @@ export class DelegationManager {
         error: `后台委派数量已达上限 ${this.maxAsyncChildren}`,
       };
     }
+    // 同一 graphWork 最多一个 running 委派：settleGraphWork 链下游派发不写 dispatched CAS，
+    // 并行 graph 分支 settle 时 computeReadyWorks 会重复返回同一 requested work，导致同一
+    // 指令被多次 spawn。按 status === "running" 去重即可覆盖——delegation settle 写入
+    // recorded CAS 是原子的，写前后 work 都不会被 computeReadyWorks 返回。切勿用
+    // settleFinalized 扩大窗口���delegation 的 .then 内 settleGraphWork 执行期间会让合法
+    // 下游 re-dispatch 被误拒，实测导致 graph 死锁。
+    if (taskInput.graphWorkId) {
+      const inflight = [...this.records.values()].find(
+        (record) =>
+          record.graphWorkId === taskInput.graphWorkId && record.status === "running",
+      );
+      if (inflight) {
+        return {
+          status: "rejected",
+          delegationId: inflight.id,
+          error: `graphWork ${taskInput.graphWorkId} 已有活跃委派 ${inflight.id}`,
+        };
+      }
+    }
 
     const now = Date.now();
     const completionPolicy = taskInput.completionPolicy ?? "required";
