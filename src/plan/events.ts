@@ -13,6 +13,7 @@ export const PLAN_EVENT_KINDS = [
   "plan.rejected",
   "plan.execution.started",
   "plan.step.updated",
+  "plan.step.recovered",
   "plan.execution.interrupted",
   "plan.execution.resumed",
   "plan.execution.replanned",
@@ -62,6 +63,8 @@ export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
   } else if (kind === "plan.step.updated") {
     assertId(data.stepId, "stepId");
     if (!isPlanStepStatus(data.status)) throw new Error("Plan step status is invalid");
+  } else if (kind === "plan.step.recovered") {
+    assertId(data.stepId, "stepId");
   }
   if (data.reason !== undefined && typeof data.reason !== "string")
     throw new Error("reason is invalid");
