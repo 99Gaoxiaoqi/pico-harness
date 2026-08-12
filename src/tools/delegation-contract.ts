@@ -24,6 +24,8 @@ export interface DelegateTaskArgs extends DelegateTaskInput {
   completion_policy?: DelegationCompletionPolicy;
   /** @deprecated 兼容旧模型调用；true 等价于 completion_policy=optional。 */
   background?: boolean;
+  /** 关联到 plan step，携带时工具层自动管理 step 状态（in_progress/completed）。 */
+  plan_step_id?: string;
 }
 
 export interface NormalizedDelegateTask {

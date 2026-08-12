@@ -22,6 +22,12 @@ export type {
   RuntimeEventBase,
   RuntimeEventRefs,
   RuntimeEventVisibility,
+  RuntimeGraphClosedEvent,
+  RuntimeGraphEvent,
+  RuntimeGraphWorkAddedEvent,
+  RuntimeGraphWorkDispatchedEvent,
+  RuntimeGraphWorkFailedEvent,
+  RuntimeGraphWorkRecordedEvent,
   RuntimeHistoryRewoundEvent,
   RuntimeMessageCommittedEvent,
   RuntimeModelCallSettledEvent,
@@ -69,6 +75,11 @@ export const RUNTIME_EVENT_KINDS = [
   "transcript.event.recorded",
   "run.terminal",
   ...PLAN_EVENT_KINDS,
+  "graph.work.added",
+  "graph.work.dispatched",
+  "graph.work.recorded",
+  "graph.work.failed",
+  "graph.closed",
 ] as const satisfies readonly RuntimeEvent["kind"][];
 
 export const RUNTIME_EVENT_DECODE_ERROR_CODES = [
@@ -292,10 +303,95 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         assertPlanEventData(value["kind"], value["data"]);
         return;
       }
+      if (typeof value["kind"] === "string" && value["kind"].startsWith("graph.")) {
+        // Graph events share the Plan CAS envelope (operationId + fingerprint)
+        // plus a graphId handle; per-kind payload fields are validated by the
+        // graph reducer. We assert only the structural contract here so that
+        // store decode stays schema-stable as graph payloads evolve.
+        if (value["partial"] !== false || value["visibility"] !== "internal") {
+          throw new RuntimeEventIntegrityError("Graph events must be complete internal facts");
+        }
+        assertGraphEventData(value["kind"], value["data"]);
+        return;
+      }
       throw new RuntimeEventIntegrityError(
         `Runtime event kind is invalid: ${String(value["kind"])}`,
       );
   }
+}
+
+/**
+ * Validates the structural envelope of a graph.* event. The reducer performs
+ * deeper state-machine validation; here we only enforce the durable contract
+ * (CAS identity + graphId + per-kind required fields) so a corrupted fact is
+ * rejected at decode time before it can enter the projection.
+ */
+function assertGraphEventData(kind: string, data: unknown): void {
+  if (!isRecord(data)) throw new RuntimeEventIntegrityError("Graph event data must be an object");
+  assertId(data["operationId"], "graph operationId");
+  if (
+    typeof data["fingerprint"] !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/u.test(data["fingerprint"])
+  ) {
+    throw new RuntimeEventIntegrityError("Graph event fingerprint is invalid");
+  }
+  assertId(data["graphId"], "graph graphId");
+  switch (kind) {
+    case "graph.work.added":
+      assertId(data["workId"], "graph workId");
+      assertString(data["instruction"], "graph instruction");
+      if (!Array.isArray(data["inputIds"]) || !data["inputIds"].every(isNonEmptyString)) {
+        throw new RuntimeEventIntegrityError("Graph work inputIds must be an array of strings");
+      }
+      if (data["mode"] !== "explore" && data["mode"] !== "worker") {
+        throw new RuntimeEventIntegrityError("Graph work mode is invalid");
+      }
+      return;
+    case "graph.work.dispatched":
+      assertId(data["workId"], "graph workId");
+      assertId(data["delegationId"], "graph delegationId");
+      return;
+    case "graph.work.recorded":
+      assertId(data["workId"], "graph workId");
+      assertId(data["recordId"], "graph recordId");
+      if (typeof data["outputSummary"] !== "string") {
+        throw new RuntimeEventIntegrityError("Graph work outputSummary must be a string");
+      }
+      if (
+        data["evidenceRefs"] !== undefined &&
+        (!Array.isArray(data["evidenceRefs"]) || !data["evidenceRefs"].every(isNonEmptyString))
+      ) {
+        throw new RuntimeEventIntegrityError("Graph work evidenceRefs must be an array of strings");
+      }
+      return;
+    case "graph.work.failed":
+      assertId(data["workId"], "graph workId");
+      if (typeof data["error"] !== "string") {
+        throw new RuntimeEventIntegrityError("Graph work error must be a string");
+      }
+      return;
+    case "graph.closed":
+      if (
+        data["resultRecordIds"] !== undefined &&
+        (!Array.isArray(data["resultRecordIds"]) ||
+          !data["resultRecordIds"].every(isNonEmptyString))
+      ) {
+        throw new RuntimeEventIntegrityError("Graph closed resultRecordIds must be an array of strings");
+      }
+      return;
+    default:
+      throw new RuntimeEventIntegrityError(`Graph event kind is invalid: ${kind}`);
+  }
+}
+
+function assertId(value: unknown, field: string): void {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)) {
+    throw new RuntimeEventIntegrityError(`Runtime event ${field} is invalid`);
+  }
+}
+
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0;
 }
 
 export class RuntimeEventIntegrityError extends Error {

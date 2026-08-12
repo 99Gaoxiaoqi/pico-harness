@@ -267,6 +267,12 @@ export class SpawnSubagentTool implements BaseTool {
  * - completion_policy 控制最终答案是否必须等待结果
  * - role + depth 约束,防止无限递归委派
  */
+/** Minimal interface for delegate_task to auto-manage plan step status. */
+export interface DelegatePlanStepCoordinator {
+  markStarted(stepId: string): Promise<void>;
+  markSettled(stepId: string, completed: boolean): Promise<void>;
+}
+
 export class DelegateTaskTool implements BaseTool {
   /** 宿主统一 Agent 目录，按 agent_name 查询。 */
   private readonly profiles: AgentProfile[];
@@ -284,6 +290,7 @@ export class DelegateTaskTool implements BaseTool {
       activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
       hookService?: HookService;
       modelCatalog?: SubagentModelCatalog;
+      planStepCoordinator?: DelegatePlanStepCoordinator;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -379,6 +386,11 @@ export class DelegateTaskTool implements BaseTool {
                 ? "当前宿主仅支持 required：前台等待子代理收口。"
                 : "结果交付策略。required=前台等待(默认);optional=可先结束并在下一个模型边界自动注入结果;detached=独立运行且不进入主上下文。",
           },
+          plan_step_id: {
+            type: "string",
+            description:
+              "关联到已批准 Plan 的 step id。携带时���动管理该 step 状态（dispatch→in_progress，完成→completed），模型无需手动调 update_plan。",
+          },
         },
       },
     };
@@ -421,6 +433,8 @@ export class DelegateTaskTool implements BaseTool {
         error: `当前宿主不持有跨轮子代理运行时，已拒绝 ${completionPolicy}；请使用 required。`,
       });
     }
+    const planStepId = input.plan_step_id;
+    const stepCoordinator = this.options.planStepCoordinator;
     const activities = tasks.map((task) => this.createActivity(task, completionPolicy));
     for (const activity of activities) {
       this.emitActivity(activity, "queued", {
@@ -431,10 +445,18 @@ export class DelegateTaskTool implements BaseTool {
     // required 是前台委派：工具结果本身就是硬屏障，主 Agent 在拿到汇总前
     // 不会进入下一次推理，也就不可能提前结束整轮。
     if (completionPolicy === "required") {
-      return JSON.stringify(
-        await this.runBudgetedBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
+      if (planStepId && stepCoordinator) await stepCoordinator.markStarted(planStepId);
+      const result = await this.runBudgetedBatch(
+        tasks, activities, depth, maxSpawnDepth, context?.signal,
       );
+      if (planStepId && stepCoordinator) {
+        const completed = result.status === "completed" || result.status === "partial";
+        await stepCoordinator.markSettled(planStepId, completed);
+      }
+      return JSON.stringify(result);
     }
+
+    if (planStepId && stepCoordinator) await stepCoordinator.markStarted(planStepId);
 
     let dispatch: ReturnType<DelegationManager["dispatch"]>;
     try {
@@ -445,9 +467,11 @@ export class DelegateTaskTool implements BaseTool {
           description: summarizeDelegation(tasks),
           activityIds: activities.map((activity) => activity.activityId),
           ...(this.options.ownerSessionId ? { ownerSessionId: this.options.ownerSessionId } : {}),
+          ...(planStepId ? { planStepId } : {}),
         },
       );
     } catch (error) {
+      if (planStepId && stepCoordinator) await stepCoordinator.markSettled(planStepId, false);
       const message = errorMessage(error);
       this.finishQueuedActivities(activities, "failed", message);
       this.claimActivities(activities);
@@ -459,6 +483,7 @@ export class DelegateTaskTool implements BaseTool {
       });
     }
     if (dispatch.status === "rejected") {
+      if (planStepId && stepCoordinator) await stepCoordinator.markSettled(planStepId, false);
       this.finishQueuedActivities(activities, "cancelled", dispatch.error ?? "委派未派发");
       this.claimActivities(activities);
     }

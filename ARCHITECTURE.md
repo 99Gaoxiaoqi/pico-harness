@@ -123,6 +123,24 @@ workspace identity、文件事务锁和 commit 协调器，但通过不同 JSON/
 manual-fact、Fact 状态变更、Proposal 裁决）是独立用户意图，需从备份恢复。原始用户证据
 始终来自 RuntimeEvent，不会复制出第二份 Transcript。
 
+### Plan 执行与 DAG 调度
+
+PlanStep 支持 `dependsOn`（前置步骤 id 列表），允许计划步骤以 DAG 形式声明依赖关系。
+reducer 的依赖门控确保步骤只有在其全部 `dependsOn` 达到 terminal（completed/skipped）后
+才能进入 `in_progress`；多个无依赖关系的步骤可并行执行。
+
+DAG 调度全部从 RuntimeEventStore 派生，不建立第二个 canonical store：
+
+- `plan.step.updated(in_progress)` 事件本身就是调度 claim（appendPlanOperation 的 CAS +
+  幂等保证不重复 dispatch）。
+- `plan.step.recovered` 事件用于崩溃恢复——当 `run.terminal` 证明某个 run 已终止但该 run
+  启动的 step 仍未 settled 时，recover 将 step 回退为 pending（不自动重派）。
+- `delegate_task` 工具的 `plan_step_id` 参数让工具层自动管理 step 状态（dispatch →
+  in_progress，完成 → completed），无需模型手动调 update_plan。
+- `src/graph/reconcile.ts` 的 `computeReadySteps` 是纯函数，从 PlanProjection 计算就绪步骤。
+- `src/graph/recover.ts` 的 `recoverOrphanSteps` 通过 `run.terminal` 跨参判定 orphan step，
+  零假阳性（vs lease 定时器的假阳性风险）。
+
 ## 路径模型
 
 `PICO_HOME` 是宿主拥有的用户状态根，默认值为 `~/.pico`。同一进程可以运行多个不同

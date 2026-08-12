@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { PlanCoordinator } from "../plan/coordinator.js";
 import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session, type SessionManager } from "../engine/session.js";
@@ -15,7 +16,16 @@ import {
   DelegationManager,
   formatDelegationCompletions,
   type DelegationCompletionEnvelope,
+  type DelegationRecordStatus,
 } from "../tools/delegation-manager.js";
+import { recordIdFor } from "../graph/contract.js";
+import { computeReadyWorks } from "../graph/graph-reconcile.js";
+import { projectGraphEntries } from "../graph/graph-reducer.js";
+import { graphOperationFingerprint } from "../tools/graph-tools.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeEvent,
+} from "../engine/session-runtime-event.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   CodeIntelligenceManager,
@@ -66,6 +76,28 @@ export interface SessionRuntimeOptions {
   hookExtensionSources?: readonly HookConfigSourceSpec[];
 }
 
+/**
+ * Stable handle for the active Graph Mode instance on this session. The graphId
+ * is derived from the sessionId so one session owns at most one active graph;
+ * closing it finalizes the projection and rejects further add_work.
+ */
+export interface SessionGraphContext {
+  readonly graphId: string;
+  readonly sessionId: string;
+}
+
+/**
+ * Spawns the delegation backing a graph work. Host-implemented because the
+ * engine + registry live in agent-runtime; session-runtime never imports the
+ * engine to preserve the architectural boundary. Returns the delegationId on
+ * dispatch, or undefined when the host declined (capacity exhausted, disposed).
+ */
+export type GraphWorkDispatcher = (input: {
+  readonly workId: string;
+  readonly instruction: string;
+  readonly mode: "explore" | "worker";
+}) => Promise<string | undefined>;
+
 export interface SessionRuntime {
   readonly workDir: string;
   readonly sessionId: string;
@@ -103,6 +135,13 @@ export interface SessionRuntime {
   drainHookEvents(): Promise<void>;
   assertCompatible(session: Session): void;
   dispose(): Promise<void>;
+  /** Active Graph Mode handle (derived from sessionId); stable for the session lifetime. */
+  readonly graphContext: SessionGraphContext;
+  /**
+   * Lazily binds the host-owned graph dispatcher. Called by agent-runtime once
+   * the engine is constructed; settleGraphWork uses it to chain ready works.
+   */
+  setGraphWorkDispatcher(dispatcher: GraphWorkDispatcher | undefined): void;
 }
 
 export function createDelegationCompletionMessage(
@@ -443,6 +482,13 @@ async function createPinnedSessionRuntime(
 
   const steerQueue = new SteerQueue();
   const jobService = options.taskHostRuntime?.jobService;
+  const graphContext: SessionGraphContext = { graphId: `graph:${sessionId}`, sessionId };
+  // Late-bound by agent-runtime once the engine is constructed. settleGraphWork
+  // uses this to dispatch newly-ready works when an upstream work settles.
+  let graphWorkDispatcher: GraphWorkDispatcher | undefined;
+  const setGraphWorkDispatcher = (dispatcher: GraphWorkDispatcher | undefined): void => {
+    graphWorkDispatcher = dispatcher;
+  };
   const delegationCompletionQueue = new DelegationCompletionWakeQueue({
     deliver: async (completion) => {
       if (jobService) {
@@ -546,6 +592,17 @@ async function createPinnedSessionRuntime(
     delegationManager: new DelegationManager({
       taskRegistry,
       onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
+      onPlanStepSettled: (planStepId, status) =>
+        settlePlanStepFromDelegation(session, planStepId, status),
+      onGraphWorkSettled: (workId, status, outputSummary) =>
+        settleGraphWork(session, graphContext, workId, status, outputSummary, () =>
+          graphWorkDispatcher ? graphWorkDispatcher : undefined,
+        ).catch((error) => {
+          logger.warn(
+            { sessionId, workId, error: String(error) },
+            "[graph] settleGraphWork failed",
+          );
+        }),
     }),
     delegationCompletionQueue,
     hookRewakeQueue,
@@ -553,6 +610,8 @@ async function createPinnedSessionRuntime(
     steerQueue,
     codeIntelligenceManager,
     codeIntelligenceEnabled,
+    graphContext,
+    setGraphWorkDispatcher,
     unbindGoalManager,
     releaseSessionPin,
     stopDelegationCompletionPolling: () => {
@@ -684,6 +743,152 @@ function delegationEnvelopeFromCommittedMessage(
   };
 }
 
+async function settlePlanStepFromDelegation(
+  session: Session,
+  planStepId: string,
+  status: string,
+): Promise<void> {
+  const store = session.runtimeEventStore;
+  if (!store) return;
+  const completed = status === "completed" || status === "partial";
+  // Retry loop for CAS conflicts when multiple delegations settle concurrently
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const coordinator = new PlanCoordinator(store, {
+      sessionId: session.id,
+      invocationId: `plan-step-settle:${planStepId}`,
+      runId: `plan-step-settle:${planStepId}`,
+      turnId: `plan-step-settle:${planStepId}`,
+    });
+    const projection = await coordinator.project();
+    const execution = projection.execution;
+    if (!execution || (execution.status !== "active" && execution.status !== "interrupted")) return;
+    const step = execution.steps.find((s) => s.id === planStepId);
+    if (!step || step.status !== "in_progress") return;
+    try {
+      await coordinator.updateStep({
+        operationId: `plan-step-settle:${planStepId}:${Date.now()}:${attempt}`,
+        expectedSessionSequence: projection.sessionSequence,
+        planId: execution.planId,
+        stepId: planStepId,
+        status: completed ? "completed" : "pending",
+      });
+      return; // success
+    } catch {
+      // CAS conflict — retry with fresh projection
+    }
+  }
+}
+
+/**
+ * Settles a Graph Mode work when its backing delegation terminates. Writes
+ * graph.work.recorded (on completed/partial) or graph.work.failed (otherwise),
+ * then drains any works that became ready as a result and dispatches them via
+ * the host-owned {@link GraphWorkDispatcher}.
+ *
+ * The dispatcher is resolved lazily because agent-runtime binds it after the
+ * engine is constructed; if it is still missing (e.g. background runtime) the
+ * recorded fact still commits and downstream works will be picked up by the
+ * graph continuation arbiter on the next engine stop.
+ */
+async function settleGraphWork(
+  session: Session,
+  context: SessionGraphContext,
+  workId: string,
+  status: DelegationRecordStatus,
+  outputSummary: string,
+  resolveDispatcher: () => GraphWorkDispatcher | undefined,
+): Promise<void> {
+  const store = session.runtimeEventStore;
+  if (!store) return;
+  const completed = status === "completed" || status === "partial";
+  const recordId = recordIdFor(context.graphId, workId);
+  const at = new Date().toISOString();
+  const operationId = `settle-graph:${workId}:${Date.now()}`;
+  const semantic = completed
+    ? { kind: "graph.work.recorded", graphId: context.graphId, workId, recordId, outputSummary }
+    : { kind: "graph.work.failed", graphId: context.graphId, workId, error: outputSummary || status };
+  const kind = completed ? "graph.work.recorded" : "graph.work.failed";
+  const fingerprint = graphOperationFingerprint(kind, semantic);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const entries = await store.readSessionEntries(context.sessionId);
+    const projection = projectGraphEntries(context.graphId, entries);
+    // Idempotent: if the work is already recorded/failed for this delegation,
+    // the reducer treated the replay and we only need to chain downstream.
+    const work = projection.works.find((candidate) => candidate.workId === workId);
+    if (work && work.status !== "recorded" && work.status !== "failed") {
+      const baseEvent = {
+        schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+        eventId: `graph:${operationId}:${kind.split(".").pop()}`,
+        sessionId: context.sessionId,
+        invocationId: `graph-settle:${workId}`,
+        runId: `graph-settle:${workId}`,
+        turnId: `graph-settle:${workId}`,
+        at,
+        partial: false as const,
+        visibility: "internal" as const,
+      };
+      const event: RuntimeEvent = completed
+        ? {
+            ...baseEvent,
+            kind: "graph.work.recorded",
+            data: {
+              operationId,
+              fingerprint,
+              graphId: context.graphId,
+              workId,
+              recordId,
+              outputSummary,
+            },
+          }
+        : {
+            ...baseEvent,
+            kind: "graph.work.failed",
+            data: {
+              operationId,
+              fingerprint,
+              graphId: context.graphId,
+              workId,
+              error: outputSummary || status,
+            },
+          };
+      try {
+        await store.appendGraphOperation([event], {
+          operationId,
+          fingerprint,
+          expectedSessionSequence: projection.sessionSequence,
+        });
+      } catch {
+        // CAS conflict — re-read and retry. If the work is already settled by a
+        // concurrent settle, the next projection will short-circuit.
+        continue;
+      }
+    }
+    // Chain downstream ready works regardless of whether we wrote the fact.
+    const dispatcher = resolveDispatcher();
+    if (!dispatcher) return;
+    const refreshed = projectGraphEntries(
+      context.graphId,
+      await store.readSessionEntries(context.sessionId),
+    );
+    const ready = computeReadyWorks(refreshed);
+    for (const candidate of ready) {
+      try {
+        await dispatcher({
+          workId: candidate.workId,
+          instruction: candidate.instruction,
+          mode: candidate.mode,
+        });
+      } catch (error) {
+        logger.warn(
+          { sessionId: context.sessionId, workId: candidate.workId, error: String(error) },
+          "[graph] downstream dispatch failed",
+        );
+      }
+    }
+    return;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -703,6 +908,8 @@ interface DefaultSessionRuntimeOptions {
   steerQueue: SteerQueue;
   codeIntelligenceManager: CodeIntelligenceManager;
   codeIntelligenceEnabled: boolean;
+  graphContext: SessionGraphContext;
+  setGraphWorkDispatcher: (dispatcher: GraphWorkDispatcher | undefined) => void;
   unbindGoalManager: () => void;
   releaseSessionPin: () => void;
   stopDelegationCompletionPolling: () => void;
@@ -727,6 +934,8 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
+  readonly graphContext: SessionGraphContext;
+  private readonly setGraphWorkDispatcherBound: (dispatcher: GraphWorkDispatcher | undefined) => void;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
   private readonly pendingHookEvents = new Set<Promise<unknown>>();
@@ -764,6 +973,8 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.steerQueue = options.steerQueue;
     this.codeIntelligenceManager = options.codeIntelligenceManager;
     this.codeIntelligenceEnabled = options.codeIntelligenceEnabled;
+    this.graphContext = options.graphContext;
+    this.setGraphWorkDispatcherBound = options.setGraphWorkDispatcher;
     this.unbindGoalManager = options.unbindGoalManager;
     this.releaseSessionPin = options.releaseSessionPin;
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
@@ -892,6 +1103,10 @@ class DefaultSessionRuntime implements SessionRuntime {
       );
     }
     throw new Error(`SessionRuntime is bound to a different Session instance: ${this.sessionId}`);
+  }
+
+  setGraphWorkDispatcher(dispatcher: GraphWorkDispatcher | undefined): void {
+    this.setGraphWorkDispatcherBound(dispatcher);
   }
 
   async dispose(): Promise<void> {

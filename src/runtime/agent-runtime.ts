@@ -43,16 +43,26 @@ import type { AskUserHandler } from "../tools/ask-user.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
-import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
+import { DelegationManager, DelegateStatusTool, aggregateDelegationStatus } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
 import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
 import {
   DelegateTaskTool,
+  type DelegatePlanStepCoordinator,
   SpawnSubagentTool,
   type SubagentModelSelectionRequest,
   type SubagentReportEvidenceWriter,
 } from "../tools/subagent.js";
+import {
+  AddWorkTool,
+  CloseGraphTool,
+  ViewGraphTool,
+  type GraphToolContext,
+} from "../tools/graph-tools.js";
+import { normalizeDelegateTasks } from "../tools/delegation-contract.js";
+import { projectGraphEntries } from "../graph/graph-reducer.js";
+import { computeReadyWorks } from "../graph/graph-reconcile.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
@@ -407,7 +417,8 @@ export class AgentRuntime {
       storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
     });
     try {
-      return await reconcileOrphanedPlanExecution(store, input.sessionId);
+      const result = await reconcileOrphanedPlanExecution(store, input.sessionId);
+      return result;
     } finally {
       store.close();
     }
@@ -623,7 +634,9 @@ function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
     `Plan: ${proposal.title} (${proposal.planId}@${proposal.revision})`,
     proposal.overview ? `Overview: ${proposal.overview}` : undefined,
     "Steps:",
-    ...proposal.steps.map((step) => `- ${step.id}: ${step.title}\n  ${step.description}`),
+    ...proposal.steps.map(
+      (step) => `- ${step.id}: ${step.title}\n  ${step.description}`,
+    ),
     proposal.risks?.length
       ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
       : undefined,
@@ -1503,6 +1516,7 @@ export async function executeAgentRuntime(
         goalManager,
         todoStore,
         isolatedHeadless: dependencies.isolatedHeadless,
+        graphToolsAvailable: !!session.runtimeEventStore && !backgroundPolicy,
         skillLoader: skillLoaderFactory(workDir),
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService
@@ -1623,6 +1637,27 @@ export async function executeAgentRuntime(
         : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
+      ...(session.runtimeEventStore && !backgroundPolicy
+        ? {
+            graphReconcile: async () => {
+              try {
+                const entries = await session.runtimeEventStore!.readSessionEntries(session.id);
+                const projection = projectGraphEntries(
+                  runtimeState.graphContext.graphId,
+                  entries,
+                );
+                if (projection.status !== "active") return { pending: 0, ready: 0 };
+                const pending = projection.works.filter(
+                  (work) => work.status === "requested" || work.status === "dispatched",
+                ).length;
+                const ready = computeReadyWorks(projection).length;
+                return { pending, ready };
+              } catch {
+                return { pending: 0, ready: 0 };
+              }
+            },
+          }
+        : {}),
     });
 
     if (backgroundPolicy) {
@@ -1700,9 +1735,99 @@ export async function executeAgentRuntime(
             });
           }
         : undefined,
+      options.approvedPlan
+        ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
+        : undefined,
     );
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+
+    // Graph Mode 工具：每个会话最多持有一个活跃 graph，graphId 由 sessionId 派生。
+    // add_work 声明意图并尝试派发；view_graph 只读投影；close_graph 收尾。
+    // 派发回调封装 DelegationManager.dispatch + engine.runSub，复用与 delegate_task
+    // 相同的子代理执行边界（沙箱、worktree、profile 全部由 registryFactory 提供）。
+    if (session.runtimeEventStore && !backgroundPolicy) {
+      const graphStore = session.runtimeEventStore;
+      const resolveGraphContext = (): GraphToolContext => ({
+        store: graphStore,
+        sessionId: session.id,
+        graphId: runtimeState.graphContext.graphId,
+        invocationId: currentRuntimeRun()?.invocationId ?? "graph-mode",
+        runId: currentRuntimeRun()?.runId ?? "graph-mode",
+        turnId: "graph-mode",
+      });
+      const graphDispatcher = async (input: {
+        readonly workId: string;
+        readonly instruction: string;
+        readonly mode: "explore" | "worker";
+      }): Promise<string | undefined> => {
+        const normalized = normalizeDelegateTasks({
+          goal: input.instruction,
+          mode: input.mode,
+          role: "leaf",
+        });
+        if (normalized.length === 0) return undefined;
+        const task = normalized[0]!;
+        const childRegistry = createSubagentRegistryFactory({
+          workDir,
+          runner: engine,
+          manager: delegationManager,
+          yoloSandbox: { config: picoConfig.sandbox },
+          ownerSessionId: session.id,
+          allowAsyncCompletion: !ownsRuntimeState,
+          skillLoaderFactory,
+          ...(activeHookService ? { hookService: activeHookService } : {}),
+          ...(subagentModelCatalog ? { modelCatalog: subagentModelCatalog } : {}),
+          ...(evidenceBaseDir ? { evidenceBaseDir } : {}),
+          ...(runtimeEnv ? { env: runtimeEnv } : {}),
+          ...(runtimeState.codeIntelligence
+            ? { codeIntelligence: runtimeState.codeIntelligence }
+            : {}),
+        })({ mode: task.mode, role: task.role, depth: 0, maxSpawnDepth: 0 });
+        const dispatch = delegationManager.dispatch(
+          async (signal) => {
+            const subResult = await engine.runSub(task.goal, childRegistry, undefined, {
+              depth: 0,
+              maxSpawnDepth: 0,
+              role: task.role,
+              ...(signal ? { signal } : {}),
+            });
+            const results = [
+              {
+                taskIndex: 0,
+                status: subResult.status,
+                ...(subResult.summary ? { summary: subResult.summary } : {}),
+                ...(subResult.evidenceRefs.length > 0
+                  ? { evidenceRefs: [...subResult.evidenceRefs] }
+                  : {}),
+                durationMs: 0,
+              },
+            ];
+            return {
+              results,
+              status: aggregateDelegationStatus(results),
+              totalDurationMs: 0,
+            };
+          },
+          {
+            completionPolicy: "optional",
+            description: task.goal.slice(0, 120),
+            ownerSessionId: session.id,
+            graphWorkId: input.workId,
+          },
+        );
+        if (dispatch.status !== "dispatched" || !dispatch.delegationId) return undefined;
+        return dispatch.delegationId;
+      };
+      runtimeState.setGraphWorkDispatcher(graphDispatcher);
+      registry.register(new AddWorkTool(resolveGraphContext(), graphDispatcher));
+      registry.register(new ViewGraphTool(resolveGraphContext()));
+      registry.register(new CloseGraphTool(resolveGraphContext()));
+      toolDisclosure.disclose(["add_work", "view_graph", "close_graph"]);
+    } else {
+      runtimeState.setGraphWorkDispatcher(undefined);
+    }
+
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
@@ -2163,6 +2288,51 @@ async function loadProfiles(
   }
 }
 
+function createDelegatePlanStepCoordinator(
+  factory: () => PlanCoordinator,
+): DelegatePlanStepCoordinator {
+  return {
+    async markStarted(stepId: string) {
+      const coordinator = factory();
+      const projection = await coordinator.project();
+      const execution = projection.execution;
+      if (!execution || execution.status !== "active") return;
+      const step = execution.steps.find((s) => s.id === stepId);
+      if (!step || step.status !== "pending") return;
+      try {
+        await coordinator.updateStep({
+          operationId: `delegate-step-start:${stepId}:${Date.now()}`,
+          expectedSessionSequence: projection.sessionSequence,
+          planId: execution.planId,
+          stepId,
+          status: "in_progress",
+        });
+      } catch {
+        // Dependency gating rejected the transition — silently skip
+      }
+    },
+    async markSettled(stepId: string, completed: boolean) {
+      const coordinator = factory();
+      const projection = await coordinator.project();
+      const execution = projection.execution;
+      if (!execution || execution.status !== "active") return;
+      const step = execution.steps.find((s) => s.id === stepId);
+      if (!step || step.status !== "in_progress") return;
+      try {
+        await coordinator.updateStep({
+          operationId: `delegate-step-settle:${stepId}:${Date.now()}`,
+          expectedSessionSequence: projection.sessionSequence,
+          planId: execution.planId,
+          stepId,
+          status: completed ? "completed" : "pending",
+        });
+      } catch {
+        // CAS conflict or state changed — best-effort, don't hide delegation result
+      }
+    },
+  };
+}
+
 function registerDelegationTools(
   registry: ToolRegistry,
   engine: AgentEngine,
@@ -2182,6 +2352,7 @@ function registerDelegationTools(
   env?: Readonly<Record<string, string | undefined>>,
   codeIntelligence?: SessionRuntime["codeIntelligence"],
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
+  planStepCoordinator?: DelegatePlanStepCoordinator,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -2211,6 +2382,7 @@ function registerDelegationTools(
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(hookService ? { hookService } : {}),
     ...(modelCatalog ? { modelCatalog } : {}),
+    ...(planStepCoordinator ? { planStepCoordinator } : {}),
   };
   registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));

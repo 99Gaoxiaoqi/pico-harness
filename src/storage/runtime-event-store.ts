@@ -400,7 +400,7 @@ export class RuntimeEventStore {
           .flatMap((session) => session.entries)
           .find(
             ({ event }) =>
-              event.kind.startsWith("plan.") &&
+              (event.kind.startsWith("plan.") || event.kind.startsWith("graph.")) &&
               "operationId" in event.data &&
               event.data.operationId === operationId,
           );
@@ -567,6 +567,31 @@ export class RuntimeEventStore {
     const sessionId = events[0]?.sessionId;
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
       throw new Error("Plan operation events must belong to one session");
+    }
+    return this.appendBatch(events, {
+      expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
+      planOperation: operation,
+    });
+  }
+
+  /**
+   * Appends a Graph Mode operation under the same operationId + fingerprint CAS
+   * envelope as {@link appendPlanOperation}. The mechanism is identical: the
+   * store deduplicates by operationId and rejects conflicting fingerprints.
+   * Graph events reuse the planOperation path because the CAS contract is the
+   * same durable exactly-once identity.
+   */
+  async appendGraphOperation(
+    events: readonly RuntimeEvent[],
+    operation: {
+      readonly operationId: string;
+      readonly fingerprint: string;
+      readonly expectedSessionSequence: number;
+    },
+  ): Promise<readonly RuntimeEventStoreAppendResult[]> {
+    const sessionId = events[0]?.sessionId;
+    if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
+      throw new Error("Graph operation events must belong to one session");
     }
     return this.appendBatch(events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },

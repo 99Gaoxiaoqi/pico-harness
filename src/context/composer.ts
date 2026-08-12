@@ -36,6 +36,7 @@ export class PromptComposer {
   private readonly workDir: string;
   private readonly skillLoader: SkillLoader;
   private readonly planMode: boolean;
+  private graphToolsAvailable: boolean;
   private readonly isolatedHeadless: boolean;
   private readonly todoStore: TodoStore;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
@@ -63,12 +64,14 @@ export class PromptComposer {
       onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
       isolatedHeadless?: boolean;
       picoHome?: string;
+      graphToolsAvailable?: boolean;
     },
   ) {
     this.workDir = workDir;
     this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
     this.isolatedHeadless = options?.isolatedHeadless ?? false;
+    this.graphToolsAvailable = options?.graphToolsAvailable ?? false;
     // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
     // 未注入则内部 new,保持向后兼容;单实例场景不受跨实例 bug 影响。
     this.todoStore = options?.todoStore ?? new TodoStore(workDir);
@@ -154,6 +157,11 @@ ${agentsContent}
       stableParts.push(PLAN_MODE_SPEC);
     }
 
+    // 2d. (可选) Graph Mode 工具使用指南
+    if (this.graphToolsAvailable) {
+      stableParts.push(GRAPH_TOOLS_SPEC);
+    }
+
     // 3. 动态加载技能外挂 (Skills)
     const skillsContent = await this.skillLoader.loadAll();
     if (skillsContent) {
@@ -212,3 +220,22 @@ const PLAN_MODE_SPEC = `# 规划协作模式 (Plan Mode: CRITICAL)
 4. 计划必须包含清晰标题、概述、原子步骤（每步含稳定 id、标题和说明）以及已知风险。
 5. 计划完整后必须调用 submit_plan。submit_plan 成功即结束当前规划 Run，等待用户审批；禁止再输出总结或继续调用工具。
 6. 未经用户明确批准，不得开始实施。`;
+
+/** Graph Mode 工具使用指南；当 add_work/view_graph/close_graph 可用时注入。 */
+const GRAPH_TOOLS_SPEC = `# Graph Mode 工作调度
+你可以使用 add_work 增量提交并行工作项，让子代理执行：
+
+- **add_work(instruction, input_ids?, mode?)**：声明一个工作项。
+  - input_ids 为空 = 根任务，立即派发子代理执行。
+  - input_ids 填入上游工作产出记录的 recordId = 等上游完成后自动派发。
+  - mode="explore"（默认）= 只读分析；mode="worker" = 可写执行。
+- **view_graph()**：查看所有工作项状态和已完成工作的 recordId。
+- **close_graph(result_record_ids)**：所有工作完成后关闭 graph。
+
+使用流程：
+1. 用 add_work 提交独立任务（无 input_ids），它们会并行执行。
+2. 子代理完成后会返回 recordId。
+3. 用 add_work(input_ids=[上游recordId]) 提交依赖上游结果的任务。
+4. 所有工作完成后调用 close_graph。
+
+当任务可以并行或有明确依赖关系时，优先使用 add_work 而非手动 delegate_task。`;
