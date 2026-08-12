@@ -85,6 +85,7 @@ import {
   mergeConversationItemGroups,
 } from "./conversation/index.js";
 import type {
+  ApprovalView,
   CapabilityView,
   ChangeView,
   McpServerDraft,
@@ -621,6 +622,7 @@ function AppShell() {
             sessions={data.sessions}
             workspaces={data.workspaces}
             runs={data.runs}
+            approvals={data.approvals}
             busy={busy === "session-state" || busy === "choose-workspace"}
             onAddWorkspace={handleAddWorkspace}
             onArchiveSession={handleArchiveSession}
@@ -689,6 +691,7 @@ function SidebarTasks({
   sessions,
   workspaces,
   runs,
+  approvals,
   busy,
   onAddWorkspace,
   onArchiveSession,
@@ -698,6 +701,7 @@ function SidebarTasks({
   readonly sessions: readonly SessionView[];
   readonly workspaces: readonly WorkspaceView[];
   readonly runs: readonly RunView[];
+  readonly approvals: readonly ApprovalView[];
   readonly busy: boolean;
   readonly onAddWorkspace: () => void;
   readonly onArchiveSession: (session: SessionView) => void;
@@ -766,6 +770,9 @@ function SidebarTasks({
                   running={runs.some(
                     (run) => run.sessionId === session.id && !isTerminalRun(run.status),
                   )}
+                  hasPendingApproval={approvals.some(
+                    (approval) => approval.sessionId === session.id,
+                  )}
                   busy={busy}
                   onArchive={onArchiveSession}
                   onDelete={onDeleteSession}
@@ -783,6 +790,7 @@ function SidebarTasks({
 function SidebarSessionRow({
   session,
   running,
+  hasPendingApproval,
   busy,
   onArchive,
   onDelete,
@@ -790,6 +798,7 @@ function SidebarSessionRow({
 }: {
   readonly session: SessionView;
   readonly running: boolean;
+  readonly hasPendingApproval: boolean;
   readonly busy: boolean;
   readonly onArchive: (session: SessionView) => void;
   readonly onDelete: (session: SessionView) => void;
@@ -808,8 +817,17 @@ function SidebarSessionRow({
         data-nav-link
       >
         <span
-          className={`sidebar-task-link__status ${running ? "is-running" : ""}`}
-          aria-label={running ? "运行中" : session.pinned ? "已置顶" : "会话"}
+          className={`sidebar-task-link__status ${running && !hasPendingApproval ? "is-running" : ""}`}
+          style={hasPendingApproval ? { background: "#d97706" } : undefined}
+          aria-label={
+            hasPendingApproval
+              ? "等待审批"
+              : running
+                ? "运行中"
+                : session.pinned
+                  ? "已置顶"
+                  : "会话"
+          }
         />
         <span>{session.title}</span>
         <time dateTime={new Date(session.updatedAt).toISOString()}>
