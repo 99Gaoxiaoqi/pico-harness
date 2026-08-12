@@ -508,7 +508,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     borderRadius: mobileTheme.radius.small,
     flexDirection: "row",
-    minHeight: 38,
+    minHeight: 44,
     paddingHorizontal: 9,
     paddingVertical: 6,
   },
