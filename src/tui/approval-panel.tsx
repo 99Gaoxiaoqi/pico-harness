@@ -214,7 +214,7 @@ export function formatApprovalPanel(
     "  ↑/↓ or J/K to move · Enter to select · Esc to cancel · E to toggle diff",
   );
   if (planExit && selectedIndex === 1) {
-    lines.push(`  反馈: ${options.feedback?.trim() || "（请输入修改意见）"}`);
+    lines.push(`  反馈: ${options.feedback?.trim() || "（直接打字输入修改意见，输入后按 Enter 提交）"}`);
   }
   return lines.join("\n");
 }
