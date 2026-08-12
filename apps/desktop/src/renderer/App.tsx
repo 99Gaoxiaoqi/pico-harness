@@ -568,6 +568,27 @@ function AppShell() {
             <span className="sidebar__label">Pico</span>
             {preview && <span className="preview-dot" title="视觉预览模式" />}
           </Link>
+          {data.approvals.length + data.prompts.length > 0 ? (
+            <span
+              aria-label={`${data.approvals.length + data.prompts.length} 项待处理`}
+              title="有待处理的审批或提问，请到对应会话查看"
+              style={{
+                alignItems: "center",
+                background: "#d97706",
+                borderRadius: 999,
+                color: "#fff",
+                display: "inline-flex",
+                fontSize: 11,
+                fontWeight: 700,
+                height: 18,
+                justifyContent: "center",
+                minWidth: 18,
+                padding: "0 5px",
+              }}
+            >
+              {data.approvals.length + data.prompts.length}
+            </span>
+          ) : null}
           <button
             type="button"
             className="sidebar__collapse"
