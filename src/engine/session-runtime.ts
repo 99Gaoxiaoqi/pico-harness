@@ -31,6 +31,8 @@ export interface PersistedSessionSettings {
   collaborationMode: "agent" | "plan";
   /** Canonical v3 permission axis. */
   permissionMode: Exclude<PersistedInteractionMode, "plan">;
+  /** Canonical orchestration axis: "default" = no graph scheduling, "graph" = Graph Mode active. */
+  orchestrationMode?: "default" | "graph";
   /** Current model reasoning level. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
@@ -250,6 +252,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
       "prePlanMode",
       "collaborationMode",
       "permissionMode",
+      "orchestrationMode",
       "thinkingEffort",
       "thinkingEffortExplicit",
       "additionalDirectories",
@@ -263,6 +266,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   const prePlanMode = value["prePlanMode"];
   const collaborationMode = value["collaborationMode"];
   const permissionMode = value["permissionMode"];
+  const orchestrationMode = value["orchestrationMode"];
   const thinkingEffort = value["thinkingEffort"];
   const thinkingEffortExplicit = value["thinkingEffortExplicit"];
   const additionalDirectories = value["additionalDirectories"];
@@ -290,6 +294,13 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
   if (hasLegacyMode && mode !== "plan" && prePlanMode !== undefined) return undefined;
+  if (
+    orchestrationMode !== undefined &&
+    orchestrationMode !== "default" &&
+    orchestrationMode !== "graph"
+  ) {
+    return undefined;
+  }
   const canonicalCollaborationMode: "agent" | "plan" = hasSplitMode
     ? (collaborationMode as "agent" | "plan")
     : mode === "plan"
@@ -308,6 +319,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     modelRouteId,
     collaborationMode: canonicalCollaborationMode,
     permissionMode: canonicalPermissionMode,
+    orchestrationMode: orchestrationMode === "graph" ? "graph" : "default",
     thinkingEffort,
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],

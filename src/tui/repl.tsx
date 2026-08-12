@@ -213,6 +213,8 @@ export interface ReplOptions {
   sessionSelection?: CliSessionSelection;
   /** CLI --add-dir 提供的附加工作目录。 */
   addDirs?: string[];
+  /** CLI --graph：新会话初始启用 Graph Mode（resume 时以持久化值为准）。 */
+  orchestrationMode?: "default" | "graph";
   /** Host-owned capability factories shared by snapshot resolution and runtime activation. */
   pluginCapabilityRegistry?: PluginCapabilityRegistry;
 }
@@ -1030,6 +1032,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
             model: route.model,
             modelRouteId: route.id,
             ...startupDefaults,
+            ...(opts.orchestrationMode ? { orchestrationMode: opts.orchestrationMode } : {}),
           },
           { persistence: session },
         );
@@ -1545,6 +1548,7 @@ export async function startTuiRepl(
           model: initialRoute.model,
           modelRouteId: initialRoute.id,
           ...startupDefaults,
+          ...(opts.orchestrationMode ? { orchestrationMode: opts.orchestrationMode } : {}),
           tools: toolStatusFromRegistry(toolRegistry),
           additionalDirectories: workspaceRoots.list().slice(1),
         },
@@ -2613,6 +2617,7 @@ export async function startTuiRepl(
         workDir={opts.workDir}
         sessionMode={bundle.selection.mode}
         collaborationMode={bundle.settings.collaborationMode}
+        graphMode={bundle.settings.orchestrationMode === "graph"}
         permissionMode={bundle.settings.permissionMode}
         thinkingEffort={bundle.settings.thinkingEffort}
         mcpSummary={formatTuiMcpSummary(bundle.latestMcpStatus)}

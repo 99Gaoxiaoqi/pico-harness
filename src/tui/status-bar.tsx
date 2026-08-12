@@ -9,6 +9,7 @@ export interface StatusBarProps {
   forkFrom?: string;
   collaborationMode?: string;
   permissionMode?: string;
+  graphMode?: boolean;
   mcpSummary?: string;
   contextSummary?: string;
   taskSummary?: string;
@@ -24,6 +25,7 @@ export function buildStatusItems({
   forkFrom,
   collaborationMode = "agent",
   permissionMode = "yolo",
+  graphMode = false,
   mcpSummary,
   contextSummary,
   taskSummary,
@@ -37,6 +39,7 @@ export function buildStatusItems({
     items.push(["forkFrom", shortSessionId(forkFrom)]);
   }
   items.push(["collab", collaborationMode], ["perm", permissionMode]);
+  if (graphMode) items.push(["graph", "on"]);
   if (mcpSummary) items.push(["mcp", mcpSummary]);
   if (contextSummary) {
     items.push(["context", truncateLogoCwd(contextSummary, summaryMaxLength)]);

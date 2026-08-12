@@ -700,7 +700,17 @@ export interface AgentEngineOptions {
    * Returning undefined or { pending: 0 } lets the engine proceed to its
    * normal stop handling.
    */
-  graphReconcile?: () => Promise<{ readonly pending: number; readonly ready: number } | undefined>;
+  graphReconcile?: () => Promise<
+    | {
+        readonly pending: number;
+        readonly ready: number;
+        readonly stuck?: readonly {
+          readonly workId: string;
+          readonly missingInputIds: readonly string[];
+        }[];
+      }
+    | undefined
+  >;
 }
 
 export interface SubagentExecutionRuntime {
@@ -2057,11 +2067,28 @@ export class AgentEngine implements AgentRunner {
                       graphSnapshot.ready > 0
                         ? `其中 ${graphSnapshot.ready} 个已就绪可立即派发。`
                         : "当前没有可立即派发的工作，等待上游产出记录。";
+                    // Deadlock diagnostic: requested works whose input_ids
+                    // reference records that will never be produced (wrong id
+                    // or a failed upstream). Surfacing this at stop-decision
+                    // time is the only reliable way for the model to learn
+                    // about an unresolvable dependency — the per-work hint
+                    // inside view_graph is easily missed (lesson from real-LLM
+                    // T5 regression).
+                    const stuck = graphSnapshot.stuck ?? [];
+                    const stuckHint =
+                      stuck.length > 0
+                        ? stuck
+                            .map(
+                              (entry) =>
+                                `工作 ${entry.workId} 的 input_ids 引用了永不产出的 record（${entry.missingInputIds.join(", ")}），将死锁；请用 view_graph 核对 recordId 后重新 add_work 修正，或显式放弃。`,
+                            )
+                            .join("")
+                        : "";
                     await session.commitMessages({
                       role: "user",
                       content:
                         `[Graph continuation] Graph Mode 仍有 ${graphSnapshot.pending} 个未完成的工作。` +
-                        `${readyHint}请调用 view_graph 查看状态，或用 add_work 声明新工作；不要仅用文字结束。`,
+                        `${readyHint}${stuckHint}请调用 view_graph 查看状态，或用 add_work 声明新工作；不要仅用文字结束。`,
                       providerData: {
                         picoKind: "graph_continuation",
                         picoHiddenFromTranscript: true,

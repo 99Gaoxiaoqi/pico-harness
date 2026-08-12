@@ -33,6 +33,8 @@ export interface SessionSettings {
   provider: ProviderKind;
   mode: InteractionMode;
   collaborationMode?: "agent" | "plan";
+  /** Orchestration axis: "default" = no graph scheduling, "graph" = Graph Mode active. */
+  orchestrationMode?: "default" | "graph";
   /** @deprecated Legacy v2 read compatibility only; new SessionSettings never sets it. */
   prePlanMode?: Exclude<InteractionMode, "plan">;
   model: string;
@@ -63,6 +65,8 @@ export interface SessionSettingsDefaults {
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
   additionalDirectories?: readonly string[];
+  /** Initial orchestration mode for new sessions (CLI --graph / programmatic). Defaults to "default". */
+  orchestrationMode?: "default" | "graph";
 }
 
 export interface SessionSettingResult {
@@ -109,6 +113,7 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     cwd: defaults.cwd,
     provider: defaults.provider,
     collaborationMode: mode === "plan" ? "plan" : "agent",
+    orchestrationMode: defaults.orchestrationMode ?? "default",
     permissionMode:
       mode === "plan"
         ? compatibilityPreviousMode === "plan" || !compatibilityPreviousMode
@@ -453,6 +458,18 @@ export function setSessionCollaborationMode(
   return { ok: true, message: `Collaboration mode set to ${mode}` };
 }
 
+export function setSessionOrchestrationMode(
+  settings: SessionSettings,
+  mode: "default" | "graph",
+): SessionSettingResult {
+  settings.orchestrationMode = mode;
+  persistSessionSettings(settings);
+  return {
+    ok: true,
+    message: mode === "graph" ? "Graph Mode 已启用" : "Graph Mode 已关闭",
+  };
+}
+
 export function setSessionPermissionMode(
   settings: SessionSettings,
   mode: string,
@@ -734,6 +751,7 @@ export function snapshotSessionSettings(settings: SessionSettings): PersistedSes
     model: settings.model,
     modelRouteId,
     collaborationMode: settings.collaborationMode ?? (settings.mode === "plan" ? "plan" : "agent"),
+    orchestrationMode: settings.orchestrationMode ?? "default",
     permissionMode: settings.permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
@@ -760,6 +778,7 @@ function applyPersistedSessionSettings(
   settings.modelRouteId = persisted.modelRouteId;
   settings.collaborationMode =
     persisted.collaborationMode ?? (persisted.mode === "plan" ? "plan" : "agent");
+  settings.orchestrationMode = persisted.orchestrationMode ?? "default";
   settings.permissionMode =
     persisted.permissionMode ??
     (persisted.mode === "plan" ? (persisted.prePlanMode ?? "yolo") : persisted.mode);

@@ -790,7 +790,7 @@ async function settlePlanStepFromDelegation(
  * recorded fact still commits and downstream works will be picked up by the
  * graph continuation arbiter on the next engine stop.
  */
-async function settleGraphWork(
+export async function settleGraphWork(
   session: Session,
   context: SessionGraphContext,
   workId: string,

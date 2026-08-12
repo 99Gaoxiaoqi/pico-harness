@@ -113,6 +113,13 @@ export function reduceGraphEvent(state: GraphProjection, event: RuntimeEvent): G
   switch (graphEvent.kind) {
     case "graph.work.added": {
       const { workId, instruction, inputIds, mode } = graphEvent.data;
+      // Defense-in-depth: AddWorkTool rejects declarations on a closed graph,
+      // but the event store does no semantic validation. Ignore any added
+      // event that lands on a non-active projection (e.g. a recover/replay
+      // ordering quirk) rather than corrupting the projection — the work would
+      // never be dispatched on a closed graph anyway. Compare graph.closed,
+      // which guards the same way.
+      if (state.status !== "active") return state;
       if (findWork(state, workId)) return state; // idempotent replay
       const work: GraphWork = {
         workId,
