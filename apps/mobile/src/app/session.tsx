@@ -1,5 +1,5 @@
 import type { MobileRun, MobileTranscript } from "@pico/protocol";
-import { Stack, useLocalSearchParams } from "expo-router";
+import { router, Stack, useLocalSearchParams } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -259,6 +259,11 @@ export default function SessionScreen() {
               <Text selectable style={styles.errorText}>
                 {error}
               </Text>
+              {error.includes("Token") ? (
+                <Pressable onPress={() => router.replace("/")} style={styles.errorAction}>
+                  <Text style={styles.errorActionText}>返回更新 Token</Text>
+                </Pressable>
+              ) : null}
             </View>
           ) : conversationItems.length ? (
             conversationItems.map((item) => <TranscriptItem key={item.id} item={item} />)
@@ -513,6 +518,8 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   errorText: { color: mobileTheme.colors.danger, fontSize: mobileTheme.type.small, lineHeight: 18 },
+  errorAction: { alignSelf: "flex-start", marginTop: 6, paddingVertical: 6 },
+  errorActionText: { color: mobileTheme.colors.accent, fontSize: mobileTheme.type.small, fontWeight: "600" },
   messageRow: { alignItems: "flex-start" },
   userMessageRow: { alignItems: "flex-end" },
   messageBubble: {

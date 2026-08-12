@@ -43,21 +43,25 @@ export default function ProjectsScreen() {
       if (!mounted) return;
       if (storedOrigin) setOrigin(storedOrigin);
       if (storedToken) setToken(storedToken);
+      // 凭据已持久化则自动尝试连接；临时 token 失效时按现有错误展示，省去每次冷启动的手动点击。
+      if (storedOrigin && storedToken) void connect(storedOrigin, storedToken);
     });
     return () => {
       mounted = false;
     };
   }, []);
 
-  const connect = async () => {
+  const connect = async (overrideOrigin?: string, overrideToken?: string) => {
+    const useOrigin = overrideOrigin ?? origin;
+    const useToken = overrideToken ?? token;
     setPhase("connecting");
     setMessage("正在读取已信任项目…");
     try {
-      const client = new MobileGatewayClient({ origin, token });
+      const client = new MobileGatewayClient({ origin: useOrigin, token: useToken });
       const nextProjects = await client.listProjects();
       await Promise.all([
-        SecureStore.setItemAsync(GATEWAY_ORIGIN_KEY, origin.trim()),
-        SecureStore.setItemAsync(GATEWAY_TOKEN_KEY, token),
+        SecureStore.setItemAsync(GATEWAY_ORIGIN_KEY, useOrigin.trim()),
+        SecureStore.setItemAsync(GATEWAY_TOKEN_KEY, useToken),
       ]);
       setProjects(nextProjects);
       setSelectedProjectId(undefined);
