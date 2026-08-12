@@ -245,10 +245,10 @@ function MessageFrame({
 }
 
 export function formatErrorEntry(entry: Extract<TuiEntry, { kind: "error" }>): string {
-  const parts = [entry.message];
-  if (entry.retryable !== undefined) parts.push(entry.retryable ? "retryable" : "not retryable");
-  if (entry.action) parts.push(entry.action);
-  return parts.join(" · ");
+  // 仅呈现错误本身与可读提示，不拼入 "retryable"/"retry" 等暗示可操作但 TUI 无对应入口
+  // （命令/快捷键）的字样，避免给用户虚假可供性。
+  const suffix = entry.retryable ? "（该错误通常可重试，请重新发送你的消息）" : "";
+  return `${entry.message}${suffix}`;
 }
 
 export function buildErrorEntryRows(
