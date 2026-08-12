@@ -1183,6 +1183,15 @@ function ConversationPage() {
   );
   const conversationKey = sessionRef ? workspaceSessionKey(sessionRef) : undefined;
   const [draft, setDraft] = useState("");
+  // 按会话缓存草稿：切会话保留半截输入，切回恢复，不再"切了就丢"。
+  const draftCache = useRef<Map<string, string>>(new Map());
+  const handleDraftChange = useCallback(
+    (value: string) => {
+      setDraft(value);
+      if (conversationKey) draftCache.current.set(conversationKey, value);
+    },
+    [conversationKey],
+  );
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
@@ -1206,7 +1215,7 @@ function ConversationPage() {
   }, [actions, sessionRef]);
 
   useEffect(() => {
-    setDraft("");
+    setDraft(conversationKey ? (draftCache.current.get(conversationKey) ?? "") : "");
     setInspector(undefined);
     setApprovalOpen(false);
     setPromptOpen(false);
@@ -1301,7 +1310,7 @@ function ConversationPage() {
         ...(activation ? { activation } : {}),
       });
       if (!result.succeeded) return;
-      setDraft("");
+      handleDraftChange("");
       setActivation(undefined);
       if (!sessionId && result.sessionId) {
         navigate(
@@ -1336,7 +1345,7 @@ function ConversationPage() {
                   void actions
                     .startDiscovery({ workspacePath, sessionId, objective: draft, depth })
                     .then(() => {
-                      setDraft("");
+                      handleDraftChange("");
                       setInspector(undefined);
                     });
                 }}
@@ -1665,7 +1674,7 @@ function ConversationPage() {
       composer={
         <ConversationComposer
           value={draft}
-          onValueChange={setDraft}
+          onValueChange={handleDraftChange}
           onSubmit={(value) => void submit(value.text, value.behavior)}
           status={composerStatus}
           behavior={behavior}
