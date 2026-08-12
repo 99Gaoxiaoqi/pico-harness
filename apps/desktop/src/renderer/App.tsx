@@ -988,6 +988,7 @@ interface ConversationEnvironmentPanelProps {
   readonly active: boolean;
   readonly model?: string | undefined;
   readonly collaborationMode?: "agent" | "plan" | undefined;
+  readonly orchestrationMode?: "default" | "graph" | undefined;
   readonly permissionMode?: "default" | "auto" | "yolo" | undefined;
   readonly onReview: () => void;
 }
@@ -1000,6 +1001,7 @@ function ConversationEnvironmentPanel({
   active,
   model,
   collaborationMode,
+  orchestrationMode,
   permissionMode,
   onReview,
 }: ConversationEnvironmentPanelProps) {
@@ -1083,6 +1085,12 @@ function ConversationEnvironmentPanel({
                   <div>
                     <dt>协作</dt>
                     <dd>{collaborationMode === "plan" ? "计划模式" : "Agent 模式"}</dd>
+                  </div>
+                )}
+                {orchestrationMode && (
+                  <div>
+                    <dt>编排</dt>
+                    <dd>{orchestrationMode === "graph" ? "Graph 模式" : "线性"}</dd>
                   </div>
                 )}
               </dl>
@@ -1597,6 +1605,7 @@ function ConversationPage() {
             active={Boolean(activeRun)}
             model={conversation?.settings?.model}
             collaborationMode={conversation?.settings?.collaborationMode}
+            orchestrationMode={conversation?.settings?.orchestrationMode}
             permissionMode={conversation?.settings?.permissionMode}
             onReview={() => {
               const params = new URLSearchParams({ workspace: workspacePath });
@@ -1741,6 +1750,23 @@ function ConversationPage() {
                       <option value="default">默认</option>
                       <option value="auto">自动</option>
                       <option value="yolo">完全访问</option>
+                    </select>
+                  </label>
+                  <label className="conversation-context-option">
+                    <span className="conversation-sr-only">编排模式</span>
+                    <select
+                      name="orchestration-mode"
+                      aria-label="编排模式"
+                      value={conversation.settings.orchestrationMode}
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onChange={(event) =>
+                        void actions.updateSessionSettings(sessionRef, {
+                          orchestrationMode: event.target.value as "default" | "graph",
+                        })
+                      }
+                    >
+                      <option value="default">线性</option>
+                      <option value="graph">Graph</option>
                     </select>
                   </label>
                   {conversation.settings.reasoningLevels.length > 0 && (

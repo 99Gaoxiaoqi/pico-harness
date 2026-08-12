@@ -129,6 +129,7 @@ export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 export type RuntimeCollaborationMode = "agent" | "plan";
+export type RuntimeOrchestrationMode = "default" | "graph";
 export type RuntimePermissionMode = "default" | "auto" | "yolo";
 /** @deprecated Compatibility input accepted by older clients. */
 export type RuntimeInteractionMode = RuntimePermissionMode | "plan";
@@ -165,6 +166,7 @@ export type RuntimeProviderProfile = RuntimeProviderInput & {
 export type RuntimeUserDefaults = JsonObject & {
   readonly modelRouteId?: string;
   readonly collaborationMode?: RuntimeCollaborationMode;
+  readonly orchestrationMode?: RuntimeOrchestrationMode;
   readonly permissionMode?: RuntimePermissionMode;
   readonly mode?: RuntimeInteractionMode;
   readonly thinkingEffort?: string;
@@ -192,6 +194,7 @@ export type RuntimeSessionSettings = {
   readonly model: string;
   readonly modelRouteId?: string;
   readonly collaborationMode: RuntimeCollaborationMode;
+  readonly orchestrationMode: RuntimeOrchestrationMode;
   readonly permissionMode: RuntimePermissionMode;
   readonly thinkingEffort: string;
   readonly thinkingEffortExplicit: boolean;
@@ -688,6 +691,7 @@ export type RuntimeMethodMap = {
       readonly sessionId: SessionId;
       readonly modelRouteId?: string;
       readonly collaborationMode?: RuntimeCollaborationMode;
+      readonly orchestrationMode?: RuntimeOrchestrationMode;
       readonly permissionMode?: RuntimePermissionMode;
       /** @deprecated Legacy combined mode. `plan` enters planning; all other values update permission only. */
       readonly mode?: RuntimeInteractionMode;
@@ -2219,6 +2223,7 @@ function assertNestedShape(
 
 const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as const);
 const collaborationModeParam = oneOfParam(["agent", "plan"] as const);
+const orchestrationModeParam = oneOfParam(["default", "graph"] as const);
 const permissionModeParam = oneOfParam(["default", "auto", "yolo"] as const);
 const providerProtocolParam = oneOfParam(["openai", "claude"] as const);
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
@@ -2274,6 +2279,7 @@ const runtimeUserDefaultsParam: RuntimeParamRule = (value, path) => {
     {
       modelRouteId: stringParam,
       collaborationMode: collaborationModeParam,
+      orchestrationMode: orchestrationModeParam,
       permissionMode: permissionModeParam,
       mode: interactionModeParam,
       thinkingEffort: stringParam,
@@ -2442,6 +2448,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     {
       modelRouteId: stringParam,
       collaborationMode: collaborationModeParam,
+      orchestrationMode: orchestrationModeParam,
       permissionMode: permissionModeParam,
       mode: interactionModeParam,
       permissions: interactionModeParam,

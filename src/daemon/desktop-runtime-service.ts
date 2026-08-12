@@ -26,6 +26,7 @@ import {
   normalizeInteractionMode,
   sessionReasoningCandidates,
   setSessionCollaborationMode,
+  setSessionOrchestrationMode,
   setSessionPermissionMode,
   setSessionThinkingEffort,
   setSessionTitle,
@@ -961,6 +962,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly sessionId: string;
     readonly modelRouteId?: string;
     readonly collaborationMode?: string;
+    readonly orchestrationMode?: string;
     readonly permissionMode?: string;
     readonly mode?: string;
     readonly permissions?: string;
@@ -969,6 +971,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (
       params.modelRouteId === undefined &&
       params.collaborationMode === undefined &&
+      params.orchestrationMode === undefined &&
       params.permissionMode === undefined &&
       params.mode === undefined &&
       params.permissions === undefined &&
@@ -984,6 +987,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       params.collaborationMode ?? (legacyMode === "plan" ? "plan" : undefined);
     const requestedPermissionMode =
       params.permissionMode ?? (legacyMode && legacyMode !== "plan" ? legacyMode : undefined);
+    const requestedOrchestrationMode = params.orchestrationMode;
     if ((params.mode !== undefined || params.permissions !== undefined) && !legacyMode) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
@@ -1008,6 +1012,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
         "collaborationMode 必须是 agent 或 plan",
+      );
+    }
+    if (
+      requestedOrchestrationMode !== undefined &&
+      requestedOrchestrationMode !== "default" &&
+      requestedOrchestrationMode !== "graph"
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "orchestrationMode 必须是 default 或 graph",
       );
     }
     if (
@@ -1059,6 +1073,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (selectedRoute) migrateSessionModelRoute(current, selectedRoute);
       if (requestedCollaborationMode) {
         const result = setSessionCollaborationMode(current, requestedCollaborationMode);
+        if (!result.ok) throw invalidSessionSetting(result.message);
+      }
+      if (requestedOrchestrationMode) {
+        const result = setSessionOrchestrationMode(
+          current,
+          requestedOrchestrationMode as "default" | "graph",
+        );
         if (!result.ok) throw invalidSessionSetting(result.message);
       }
       if (requestedPermissionMode) {
@@ -4113,6 +4134,7 @@ function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter):
     model: settings.model,
     modelRouteId: settings.modelRouteId,
     collaborationMode: settings.collaborationMode ?? (settings.mode === "plan" ? "plan" : "agent"),
+    orchestrationMode: settings.orchestrationMode ?? "default",
     permissionMode: settings.permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,

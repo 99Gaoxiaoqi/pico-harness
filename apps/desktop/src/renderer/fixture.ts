@@ -193,6 +193,7 @@ export const previewData: AppData = {
         modelRouteId: "openai/gpt-5.4",
         model: "gpt-5.4",
         collaborationMode: "agent",
+        orchestrationMode: "default",
         permissionMode: "default",
         thinkingEffort: "high",
         reasoningLevels: ["off", "low", "medium", "high"],
