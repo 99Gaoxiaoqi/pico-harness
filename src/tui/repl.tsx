@@ -685,7 +685,7 @@ export async function handleTuiRunningInputSubmission(
       deps.steerQueue.push(steerText);
       deps.reporter.pushUserMessage(steerText);
       emitRunningQueueState(deps);
-      deps.reporter.pushSystemMessage("Steer accepted for the next model boundary.");
+      deps.reporter.pushSystemMessage("已记下你的补充，将在模型下一轮处理。");
     } else {
       enqueueRunningInput(text, processed, availabilityState, deps);
     }
@@ -830,7 +830,7 @@ function applyRunningInputIntent(
     deps.steerQueue.push(intent.text);
     deps.reporter.pushUserMessage(intent.text);
     emitRunningQueueState(deps);
-    deps.reporter.pushSystemMessage("Steer accepted for the next model boundary.");
+    deps.reporter.pushSystemMessage("已记下你的补充，将在模型下一轮处理。");
     return;
   }
 
@@ -865,7 +865,7 @@ function enqueueRunningInput(
     return;
   }
   emitRunningQueueState(deps);
-  deps.reporter.pushSystemMessage("Input queued for the next user turn.");
+  deps.reporter.pushSystemMessage("已排队，将在下一轮提交。");
 }
 
 function emitRunningQueueState(deps: HandleTuiRunningInputSubmissionDeps): void {
@@ -3464,8 +3464,8 @@ export function handleTuiInterrupt(
   onQueueStateChange?.(queue.snapshot);
   reporter.pushSystemMessage(
     dropped > 0
-      ? `Interrupted current run and dropped ${dropped} queued input(s).`
-      : "Interrupted current run.",
+      ? `已中断当前运行，并丢弃 ${dropped} 条排队输入。`
+      : "已中断当前运行。",
   );
 }
 
