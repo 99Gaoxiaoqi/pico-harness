@@ -528,12 +528,21 @@ function AppShell() {
   }, [actions]);
   const handleArchiveSession = useCallback(
     (session: SessionView) => {
+      const isRunning = data.runs.some(
+        (run) => run.sessionId === session.id && !isTerminalRun(run.status),
+      );
+      if (
+        isRunning &&
+        !window.confirm("该会话正在运行，归档可能导致运行结果丢失。确认归档？")
+      ) {
+        return;
+      }
       void actions.setSessionArchived(
         { workspacePath: session.workspacePath, sessionId: session.id },
         true,
       );
     },
-    [actions],
+    [actions, data.runs],
   );
   const handlePinSession = useCallback(
     (session: SessionView) => {
