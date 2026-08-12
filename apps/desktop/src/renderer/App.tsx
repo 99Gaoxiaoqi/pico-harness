@@ -420,6 +420,14 @@ function Onboarding() {
                 继续并检查工作区
               </Button>
             )}
+            {selected && (
+              <Link
+                style={{ display: "inline-block", fontSize: 13, marginTop: 8 }}
+                to="/providers"
+              >
+                连接模型（配置 Provider 与 API Key）→
+              </Link>
+            )}
           </div>
           <footer>
             <ShieldCheck aria-hidden="true" size={15} /> Pico 不会扫描其他目录
