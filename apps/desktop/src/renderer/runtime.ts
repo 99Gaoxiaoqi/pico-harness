@@ -2298,7 +2298,8 @@ export function useRuntimeStore(): RuntimeStore {
       operation: (bridge: DesktopBridge) => Promise<void>,
     ): Promise<boolean> => {
       setBusy(label);
-      setMessage(undefined);
+      // 不在此处清空上一条 message：错误反馈若被新动作开始即抹去，用户来不及看清。
+      // 新动作完成（成功或失败）会自行设置 message 覆盖；进行中的 busy 态另有指示。
       try {
         if (preview) {
           await operation(createPreviewBridge());
