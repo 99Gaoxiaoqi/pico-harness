@@ -2838,7 +2838,7 @@ async function planModeDenialReason(
     return `Plan Mode 守卫：工具 ${call.name} 不在显式只读白名单中。`;
   }
   if (
-    (call.name === "read_file" || call.name === "grep") &&
+    (call.name === "read_file" || call.name === "grep" || call.name === "glob") &&
     bypassImmuneSafetyPath(call, workDir, workspaceRoots) !== undefined
   ) {
     return "Plan Mode 守卫：密钥与凭据文件不属于计划阶段的可读边界。";
