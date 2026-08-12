@@ -970,7 +970,35 @@ function scopedMcpServer(server: RuntimeScopedMcpServer, index: number): Capabil
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Runtime 返回了未知错误。";
+  const raw = error instanceof Error ? error.message : "Runtime 返回了未知错误。";
+  const code = typeof (error as { code?: unknown })?.code === "string"
+    ? (error as { code: string }).code
+    : undefined;
+  return friendlyRuntimeMessage(raw, code);
+}
+
+/**
+ * 把常见的技术性运行时错误归一化为可理解的中文提示 + 可操作建议，让普通用户知道
+ * "出错了"和"该怎么做"，而非面对 socket/auth 英文报错。未匹配的原始错误原样返回。
+ */
+function friendlyRuntimeMessage(raw: string, code?: string): string {
+  if (code === "RUNTIME_UNAVAILABLE" || code === "RUNTIME_DISCONNECTED") {
+    return "无法连接本地 Runtime，请确认 Pico 桌面应用正在运行（必要时重启）。";
+  }
+  if (code === "RUNTIME_AUTH_FAILED") {
+    return "本地 Runtime 认证失败，请重启 Pico 桌面应用。";
+  }
+  const lower = raw.toLowerCase();
+  if (/api key|unauthorized|\b401\b|invalid.*credential|authentication failed/.test(lower)) {
+    return "模型凭证无效或未配置，请到“模型”页检查 Provider 的 API Key。";
+  }
+  if (/econnrefused|etimedout|fetch failed|socket hang up|network error/.test(lower)) {
+    return "无法连接本地 Runtime 或模型服务，请检查网络或重启 Pico。";
+  }
+  if (/rate limit|\b429\b|too many requests/.test(lower)) {
+    return "请求过于频繁或触发限流，请稍后重试。";
+  }
+  return raw;
 }
 
 export class RuntimeInvocationError extends Error {
