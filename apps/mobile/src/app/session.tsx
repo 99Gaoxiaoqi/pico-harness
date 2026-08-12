@@ -242,7 +242,7 @@ export default function SessionScreen() {
           {connection && realtimeState === "disconnected" ? (
             <View style={styles.realtimeWarning}>
               <Text style={styles.realtimeWarningText}>
-                实时更新已断开{realtimeError ? ` · ${realtimeError}` : ""}，下拉可重新同步
+                实时更新已断开{realtimeError ? ` · ${realtimeError}` : ""}，返回再进入会话可恢复
               </Text>
             </View>
           ) : null}

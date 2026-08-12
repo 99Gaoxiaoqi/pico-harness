@@ -1827,11 +1827,17 @@ function ConversationPage() {
             items={items}
             onOpenItem={openItem}
             emptyState={
-              <div className="conversation-empty-state">
-                <Sparkles aria-hidden="true" />
-                <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
-                <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
-              </div>
+              busy === "load-session" ? (
+                <div className="conversation-empty-state">
+                  <h3>正在载入对话记录…</h3>
+                </div>
+              ) : (
+                <div className="conversation-empty-state">
+                  <Sparkles aria-hidden="true" />
+                  <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
+                  <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+                </div>
+              )
             }
           />
         </>
