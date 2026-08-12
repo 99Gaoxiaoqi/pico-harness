@@ -43,10 +43,17 @@ export function Spinner({
 }): React.ReactNode {
   // useAnimation:frame 状态自包含,不冒泡到父组件。isActive=false 时停止(省 CPU)。
   const { frame } = useAnimation({ interval, isActive: true });
+  // 已用时长：让用户区分"正常慢"与"卡死"，超 30s 提示可中断。
+  const [elapsed, setElapsed] = React.useState(0);
+  React.useEffect(() => {
+    const elapsedTimer = setInterval(() => setElapsed((value) => value + 1), 1000);
+    return () => clearInterval(elapsedTimer);
+  }, []);
   const glyph = FRAMES[frame % FRAMES.length]!;
   return (
     <Text color={MODE_COLOR[mode]}>
-      {glyph} {MODE_LABEL[mode]}…
+      {glyph} {MODE_LABEL[mode]}…{elapsed > 0 ? ` ${elapsed}s` : ""}
+      {elapsed >= 30 ? "（可按 Ctrl+C 中断）" : ""}
     </Text>
   );
 }
