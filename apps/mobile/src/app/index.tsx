@@ -91,7 +91,8 @@ export default function ProjectsScreen() {
       setSessions(nextSessions);
     } catch (error) {
       setSessions([]);
-      setPhase("error");
+      // 错误局部化：单次会话列表拉取失败不应清空整个项目列表或退回连接错误页；
+      // 保留 connected 态与项目列表，仅在消息条提示，用户可重试展开该项目。
       setMessage(error instanceof Error ? error.message : "会话列表读取失败");
     } finally {
       setSessionsLoading(false);
