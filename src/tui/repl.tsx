@@ -2126,7 +2126,7 @@ export async function startTuiRepl(
           historyPreparationRef.current ||
           historyMutationRef.current
         ) {
-          current.reporter.pushSystemMessage("Session switching is only available while idle.");
+          current.reporter.pushSystemMessage("当前任务运行中，请先按 Ctrl+C 中断再切换会话。");
           return;
         }
         if (request.mode === "resume" && request.sessionId === current.sessionId) {
@@ -2186,11 +2186,11 @@ export async function startTuiRepl(
             terminalRuntimeFailure = nextCleanupError
               ? new AggregateError(
                   [oldCleanupError, nextCleanupError],
-                  `Session ${current.sessionId} did not stop cleanly; switch aborted and restart is required`,
+                  `会话 ${current.sessionId} 未正常停止；切换已中止，需要重启 Pico`,
                 )
               : new AggregateError(
                   [oldCleanupError],
-                  `Session ${current.sessionId} did not stop cleanly; switch aborted and restart is required`,
+                  `会话 ${current.sessionId} 未正常停止；切换已中止，需要重启 Pico`,
                 );
             appendTuiRunError(current.reporter, terminalRuntimeFailure);
             next = undefined;
@@ -2929,7 +2929,7 @@ async function handleLocalTuiCommand(
       return;
     }
     if (!deps.switchSession) {
-      deps.reporter.pushSystemMessage("Session switching is unavailable in this host.");
+      deps.reporter.pushSystemMessage("当前宿主不支持切换会话。");
       return;
     }
     await deps.switchSession(request);
