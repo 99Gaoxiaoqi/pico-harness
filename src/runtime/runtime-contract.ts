@@ -61,6 +61,8 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;
   planMode?: boolean;
+  /** Turn-level orchestration override: "graph" enables Graph Mode tools for this run. */
+  orchestrationMode?: "default" | "graph";
   /** Enable per-request JSON trace export. Also enabled by PICO_TRACE=1. */
   trace?: boolean;
   /** MCP 配置文件路径(--mcp-config)。提供则启动时连接所有 MCP server 并注册工具 */

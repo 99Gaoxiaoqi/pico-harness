@@ -53,7 +53,7 @@ async function readRuntimeEvents(sandbox: TestSandbox): Promise<RuntimeEvent[]> 
 
 function modelRequest(
   model: RealModel,
-): Pick<RunAgentCliOptions, "provider" | "baseURL" | "apiKey" | "model" | "modelRouteId" | "modelCapabilities" | "thinkingEffort"> {
+): Pick<RunAgentCliOptions, "provider" | "baseURL" | "apiKey" | "model" | "modelRouteId" | "modelCapabilities" | "thinkingEffort" | "orchestrationMode"> {
   return {
     provider: model.provider,
     baseURL: model.config.baseURL,
@@ -61,6 +61,7 @@ function modelRequest(
     model: model.config.model,
     modelRouteId: model.route.id,
     modelCapabilities: model.route.capabilities,
+    orchestrationMode: "graph",
     ...(supportsThinkingOff(model.route) ? { thinkingEffort: "off" } : {}),
   };
 }

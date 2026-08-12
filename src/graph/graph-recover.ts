@@ -1,23 +1,30 @@
-import type { RuntimeEvent } from "../engine/session-runtime-event.js";
-import type { RuntimeEventStore, RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import type { RuntimeEventStore } from "../storage/runtime-event-store.js";
 import { projectGraphEntries } from "./graph-reducer.js";
-import type { GraphProjection, GraphWork } from "./contract.js";
+import type { GraphProjection } from "./contract.js";
 
 /**
  * Context for orphan-work recovery. Only durable sessions participate: in-memory
  * sessions cannot lose work to a crash because nothing was persisted.
+ *
+ * `liveDelegationIds` is the set of delegation ids the current process's
+ * DelegationManager still considers in-flight. A dispatched work whose
+ * delegationId is absent from this set has lost its backing delegation — either
+ * the process restarted (DelegationManager is a fresh empty instance) or the
+ * delegation was otherwise reaped. The caller supplies this from the live
+ * DelegationManager; the scanner itself stays pure and store-backed.
  */
 export interface RecoverOrphanGraphWorksContext {
   readonly runtimeStore: RuntimeEventStore;
   readonly sessionId: string;
   readonly graphId: string;
+  readonly liveDelegationIds: readonly string[];
 }
 
 /**
- * Result of an orphan scan: the workIds that were dispatched to a run which has
- * since terminated without producing a record. The caller is responsible for
- * emitting recovery events (graph.work.failed or a fresh graph.work.dispatched);
- * this function never writes to the store.
+ * Result of an orphan scan: the workIds that were dispatched to a delegation
+ * which is no longer live in this process. The caller is responsible for
+ * emitting recovery events (graph.work.failed); this function never writes to
+ * the store.
  */
 export interface RecoverOrphanGraphWorksResult {
   readonly orphanWorkIds: readonly string[];
@@ -25,14 +32,17 @@ export interface RecoverOrphanGraphWorksResult {
 }
 
 /**
- * Detects orphan graph works: works marked `dispatched` whose backing delegation
- * run has terminated (a `run.terminal` event with matching runId exists) without
- * a corresponding `graph.work.recorded` or `graph.work.failed` fact.
+ * Detects orphan graph works: works marked `dispatched` whose backing
+ * delegation is no longer tracked by the current process's DelegationManager.
  *
- * The mapping delegationId -> runId is by value equality: the delegation runtime
- * mints the RuntimeRun runId from the same delegation id, so we treat the stored
- * delegationId as the runId for terminal lookup. This simplified scanner only
- * returns the orphan workIds; durable recovery is the caller's responsibility.
+ * A previous implementation matched `work.delegationId` against `run.terminal`
+ * event runIds, assuming delegationId === runId. That assumption does not hold:
+ * delegationId is minted by DelegationManager.dispatch, while the backing
+ * RuntimeRun's runId is minted independently by runtimePort.startRun inside
+ * runSub. The two id spaces never intersect, so the old scan always returned
+ * empty. The live-delegation check is both correct (a dispatched work must have
+ * had a delegation; if it is gone, the work can never settle on its own) and
+ * simpler (no terminal-event collection).
  */
 export async function findOrphanGraphWorks(
   context: RecoverOrphanGraphWorksContext,
@@ -42,32 +52,14 @@ export async function findOrphanGraphWorks(
   if (projection.status !== "active") {
     return { orphanWorkIds: [], projection };
   }
-  const terminalRunIds = collectTerminalRunIds(entries);
-  if (terminalRunIds.size === 0) {
-    return { orphanWorkIds: [], projection };
-  }
+  const liveDelegationIds = new Set(context.liveDelegationIds);
   const orphanWorkIds = projection.works
-    .filter((work) => isOrphan(work, terminalRunIds))
+    .filter(
+      (work) =>
+        work.status === "dispatched" &&
+        typeof work.delegationId === "string" &&
+        !liveDelegationIds.has(work.delegationId),
+    )
     .map((work) => work.workId);
   return { orphanWorkIds, projection };
-}
-
-function isOrphan(work: GraphWork, terminalRunIds: Set<string>): boolean {
-  if (work.status !== "dispatched") return false;
-  if (!work.delegationId) return false;
-  return terminalRunIds.has(work.delegationId);
-}
-
-function collectTerminalRunIds(entries: readonly RuntimeEventStoreEntry[]): Set<string> {
-  const terminalRunIds = new Set<string>();
-  for (const { event } of entries) {
-    if (isRunTerminalEvent(event)) terminalRunIds.add(event.runId);
-  }
-  return terminalRunIds;
-}
-
-function isRunTerminalEvent(
-  event: RuntimeEvent,
-): event is Extract<RuntimeEvent, { kind: "run.terminal" }> {
-  return event.kind === "run.terminal";
 }

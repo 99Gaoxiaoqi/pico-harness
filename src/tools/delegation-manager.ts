@@ -319,6 +319,22 @@ export class DelegationManager {
     await this.records.get(id)?.promise;
   }
 
+  /**
+   * Delegation ids this process still considers in-flight (status "running").
+   * Used by graph orphan recovery to distinguish works whose backing
+   * delegation is genuinely lost (process restart) from those still executing
+   * in the current process. After a restart the DelegationManager is freshly
+   * constructed, so this returns [] and every previously-dispatched work is
+   * flagged as an orphan.
+   */
+  liveDelegationIds(): readonly string[] {
+    const live: string[] = [];
+    for (const record of this.records.values()) {
+      if (record.status === "running") live.push(record.id);
+    }
+    return live;
+  }
+
   /** 禁止新委派，取消并等待所有已派发子任务真正收口。 */
   dispose(reason = "delegation runtime disposed"): Promise<void> {
     if (this.disposePromise) return this.disposePromise;

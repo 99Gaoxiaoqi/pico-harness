@@ -7,7 +7,7 @@ import {
   type GraphProjection,
   type GraphWork,
 } from "../graph/contract.js";
-import { computeReadyWorks, hasPendingWorks } from "../graph/graph-reconcile.js";
+import { computeReadyWorks, hasPendingWorks, missingInputIdsFor } from "../graph/graph-reconcile.js";
 import { projectGraphEntries } from "../graph/graph-reducer.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeEvent } from "../engine/session-runtime-event.js";
 import type { RuntimeEventStore } from "../storage/runtime-event-store.js";
@@ -150,9 +150,18 @@ export class AddWorkTool implements BaseTool {
 
     // CAS envelope: the operationId binds added + (optional) dispatched into
     // one exactly-once transition. Replay is safe: the reducer is idempotent.
-    const operationId =
-      parsed.operationId ?? `add-work:${workId}:${randomUUID()}`;
+    const operationId = parsed.operationId ?? `add-work:${workId}:${randomUUID()}`;
     const before = await readGraphProjection(this.context);
+    // Reject declaration on a closed graph. Maka enforces the same invariant at
+    // the schedule-store layer (AgentGraphScheduleUpdateConflictError once the
+    // graph is finished). Pico enforces it at the tool layer because its event
+    // store does no semantic validation; the reducer additionally ignores
+    // added events on a non-active projection as defense-in-depth.
+    if (before.status === "closed") {
+      throw new GraphConflictError(
+        "Graph 已关闭，close_graph 之后不允许再 add_work。如需继续工作请新建会话或 fork。",
+      );
+    }
     const existing = before.works.find((work) => work.workId === workId);
     const alreadyDispatched = existing?.status === "dispatched" || existing?.status === "recorded";
 
@@ -191,9 +200,37 @@ export class AddWorkTool implements BaseTool {
     const after = await readGraphProjection(this.context);
     const ready = computeReadyWorks(after).find((work) => work.workId === workId);
     if (!ready || alreadyDispatched) {
+      const waitingWork = after.works.find((work) => work.workId === workId);
+      // If the work already progressed past "requested" (dispatched/recorded/
+      // failed), report its real status. A bare "waiting" here misleads a model
+      // that re-declares an in-flight or settled work into thinking nothing was
+      // scheduled — it may re-declare under a different wording (new workId) and
+      // duplicate the labour, or burn turns on view_graph to disambiguate.
+      if (
+        waitingWork &&
+        (waitingWork.status === "dispatched" ||
+          waitingWork.status === "recorded" ||
+          waitingWork.status === "failed")
+      ) {
+        return JSON.stringify({
+          workId,
+          status: waitingWork.status,
+          ...(waitingWork.delegationId ? { delegationId: waitingWork.delegationId } : {}),
+          ...(waitingWork.recordId ? { recordId: waitingWork.recordId } : {}),
+          graphId: this.context.graphId,
+        });
+      }
+      const missingInputIds = waitingWork ? missingInputIdsFor(after, waitingWork) : [];
       return JSON.stringify({
         workId,
         status: ready ? "ready" : "waiting",
+        ...(missingInputIds.length > 0
+          ? {
+              missingInputIds,
+              hint:
+                "input_ids 引用了尚未产出的 recordId。若引用的是 workId 或已失败的上游，该工作将永远不会就绪；用 view_graph 核对 recordId 后再声明。",
+            }
+          : {}),
         graphId: this.context.graphId,
       });
     }
@@ -370,7 +407,41 @@ export class CloseGraphTool implements BaseTool {
       fingerprint,
       expectedSessionSequence: projection.sessionSequence,
     });
-    return JSON.stringify({ graphId: this.context.graphId, status: "closed" });
+    // Report un-converged works so a close with dangling pending work is never
+    // silent (maka's `closing` vs `completed` distinction). The close itself is
+    // not rejected — mirroring maka's finish, which only asserts committed
+    // result ids — but the model sees exactly what it left behind, with status
+    // semantics distinguished: a dispatched work's backing delegation is still
+    // running and WILL still commit its record (settleGraphWork does not gate on
+    // graph status), whereas a requested work will never be scheduled again.
+    const pendingWorks = projection.works
+      .filter((work) => work.status === "requested" || work.status === "dispatched")
+      .map((work) => ({
+        workId: work.workId,
+        status: work.status,
+        instruction: work.instruction,
+        ...(work.inputIds.length > 0 ? { inputIds: [...work.inputIds] } : {}),
+      }));
+    const hasDispatched = pendingWorks.some((work) => work.status === "dispatched");
+    const hasRequested = pendingWorks.some((work) => work.status === "requested");
+    return JSON.stringify({
+      graphId: this.context.graphId,
+      status: "closed",
+      ...(pendingWorks.length > 0
+        ? {
+            pendingWorks,
+            warning: [
+              "图已关闭，但以下工作未完成：",
+              hasRequested ? "requested 的工作不会再被调度、也不会产出记录；" : "",
+              hasDispatched
+                ? "dispatched 的工作其子代理仍在执行，完成后仍会写入 record（但不再触发新的下游调度）。"
+                : "",
+            ]
+              .filter((segment) => segment.length > 0)
+              .join(""),
+          }
+        : {}),
+    });
   }
 }
 
@@ -448,7 +519,7 @@ function renderGraphProjection(
   projection: GraphProjection,
   includeRecords: boolean,
 ): Record<string, unknown> {
-  const works = projection.works.map((work) => renderGraphWork(work));
+  const works = projection.works.map((work) => renderGraphWork(projection, work));
   const result: Record<string, unknown> = {
     graphId: projection.graphId,
     status: projection.status,
@@ -468,7 +539,11 @@ function renderGraphProjection(
   return result;
 }
 
-function renderGraphWork(work: GraphWork): Record<string, unknown> {
+function renderGraphWork(
+  projection: GraphProjection,
+  work: GraphWork,
+): Record<string, unknown> {
+  const missingInputIds = missingInputIdsFor(projection, work);
   return {
     workId: work.workId,
     instruction: work.instruction,
@@ -477,6 +552,13 @@ function renderGraphWork(work: GraphWork): Record<string, unknown> {
     status: work.status,
     ...(work.delegationId ? { delegationId: work.delegationId } : {}),
     ...(work.recordId ? { recordId: work.recordId } : {}),
+    ...(missingInputIds.length > 0
+      ? {
+          missingInputIds,
+          hint:
+            "引用的 input record 尚未产出。若上游已 failed 或引用的是 workId，该工作永远不会就绪。",
+        }
+      : {}),
   };
 }
 

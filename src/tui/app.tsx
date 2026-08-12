@@ -91,6 +91,8 @@ export interface AppProps {
   sessionMode?: string;
   /** Agent/Plan 协作模式(状态区展示) */
   collaborationMode?: string;
+  /** Graph Mode 启用状态(状态区展示) */
+  graphMode?: boolean;
   /** Permission 模式(状态区展示) */
   permissionMode?: string;
   /** 思考强度(状态区展示) */
@@ -141,6 +143,7 @@ export function App({
   workDir,
   sessionMode = "new",
   collaborationMode = "agent",
+  graphMode = false,
   permissionMode = "yolo",
   thinkingEffort,
   mcpSummary,
@@ -483,6 +486,7 @@ export function App({
       phase={phase}
       sessionMode={sessionMode}
       collaborationMode={collaborationMode}
+      graphMode={graphMode}
       permissionMode={permissionMode}
       mcpSummary={mcpSummary}
       contextSummary={undefined}

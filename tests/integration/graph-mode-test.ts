@@ -154,12 +154,208 @@ test("AddWorkTool with unmet input_ids stays waiting", async (t) => {
     await tool.execute(
       JSON.stringify({ instruction: "Aggregate findings", input_ids: ["record_missing"] }),
     ),
-  ) as { workId: string; status: string };
+  ) as { workId: string; status: string; missingInputIds?: string[]; hint?: string };
   assert.equal(result.status, "waiting");
   assert.equal(dispatched, false);
+  // maka-style input_not_committed diagnostic: the model must see WHICH inputs
+  // are missing so it can distinguish a stale id from an in-flight upstream.
+  assert.deepEqual(result.missingInputIds, ["record_missing"]);
+  assert.ok(result.hint, "waiting result should carry a hint");
 
   const projection = await projectionSnapshot(store);
   assert.equal(projection.works[0]!.status, "requested");
+});
+
+test("AddWorkTool rejects new work on a closed graph", async (t) => {
+  const { root, store, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const closeTool = new CloseGraphTool(context, () => AT);
+  await closeTool.execute("{}");
+
+  const addTool = new AddWorkTool(context, async () => "delegation-late", () => AT);
+  await assert.rejects(
+    addTool.execute(JSON.stringify({ instruction: "Late work" })),
+    GraphConflictError,
+  );
+
+  // No graph.work.added may be committed on a closed graph.
+  const projection = await projectionSnapshot(store);
+  assert.equal(projection.works.length, 0);
+  assert.equal(projection.status, "closed");
+});
+
+test("AddWorkTool dispatch result stays consistent after upstream commit", async (t) => {
+  const { root, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const tool = new AddWorkTool(context, async () => "delegation-ok", () => AT);
+  const result = JSON.parse(await tool.execute(JSON.stringify({ instruction: "Plain work" }))) as {
+    status: string;
+    missingInputIds?: string[];
+  };
+  assert.equal(result.status, "dispatched");
+  assert.equal(result.missingInputIds, undefined);
+});
+
+test("ViewGraphTool exposes missingInputIds for waiting works", async (t) => {
+  const { root, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  await addTool.execute(
+    JSON.stringify({ instruction: "Consume A", input_ids: ["record_unknown", "record_pending"] }),
+  );
+
+  const viewTool = new ViewGraphTool(context);
+  const projection = JSON.parse(await viewTool.execute("{}")) as {
+    works: Array<{ workId: string; status: string; missingInputIds?: string[] }>;
+  };
+  assert.equal(projection.works[0]!.status, "requested");
+  assert.deepEqual(projection.works[0]!.missingInputIds, ["record_unknown", "record_pending"]);
+});
+
+test("CloseGraphTool reports pending works when closing un-converged graph", async (t) => {
+  const { root, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  // A requested work with an unresolvable input (deadlock case from real-LLM run).
+  const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  await addTool.execute(
+    JSON.stringify({ instruction: "Consume A", input_ids: ["record_never_committed"] }),
+  );
+
+  const closeTool = new CloseGraphTool(context, () => AT);
+  const result = JSON.parse(await closeTool.execute("{}")) as {
+    status: string;
+    pendingWorks?: Array<{ workId: string; status: string }>;
+    warning?: string;
+  };
+  assert.equal(result.status, "closed");
+  assert.ok(result.pendingWorks, "close result must report pending works");
+  assert.equal(result.pendingWorks!.length, 1);
+  assert.equal(result.pendingWorks![0]!.status, "requested");
+  assert.ok(result.warning, "close result must carry a warning when pending works exist");
+});
+
+test("CloseGraphTool warning distinguishes dispatched from requested pending", async (t) => {
+  const { root, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  // A dispatched work (backing delegation still running) and a requested one.
+  const dispatchedTool = new AddWorkTool(context, async () => "delegation-running", () => AT);
+  await dispatchedTool.execute(JSON.stringify({ instruction: "Running work" }));
+  const requestedTool = new AddWorkTool(context, async () => "delegation-other", () => AT);
+  await requestedTool.execute(
+    JSON.stringify({ instruction: "Waiting work", input_ids: ["record_missing"] }),
+  );
+
+  const closeTool = new CloseGraphTool(context, () => AT);
+  const result = JSON.parse(await closeTool.execute("{}")) as {
+    pendingWorks?: Array<{ status: string }>;
+    warning?: string;
+  };
+  const statuses = result.pendingWorks!.map((work) => work.status).sort();
+  assert.deepEqual(statuses, ["dispatched", "requested"]);
+  // H-1 contract: the warning must NOT claim dispatched works produce no record
+  // (their delegation is still running and settleGraphWork will commit it).
+  assert.ok(
+    !result.warning!.includes("不会再产出记录") || !result.warning!.includes("dispatched"),
+    "warning must not blanket-claim 'no record' for dispatched works",
+  );
+  assert.ok(result.warning!.includes("dispatched"), "warning should mention dispatched semantics");
+});
+
+test("dispatched work settles after close_graph still commits its record", async (t) => {
+  const { root, store, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  // add_work with no inputs → dispatched (delegation in flight).
+  const instruction = "In-flight work";
+  const workId = workIdFor(GRAPH_ID, instruction, []);
+  const recordId = recordIdFor(GRAPH_ID, workId);
+  const addTool = new AddWorkTool(context, async () => "delegation-inflight", () => AT);
+  await addTool.execute(JSON.stringify({ instruction }));
+
+  // Close while the work is dispatched — pendingWorks must report it.
+  const closeTool = new CloseGraphTool(context, () => AT);
+  const closeResult = JSON.parse(await closeTool.execute("{}")) as {
+    pendingWorks?: Array<{ status: string }>;
+  };
+  assert.equal(closeResult.pendingWorks![0]!.status, "dispatched");
+
+  // The backing delegation settles AFTER close (settleGraphWork does not gate on
+  // graph status). The record must still commit and the graph must stay closed.
+  await commitRecord(store, context, workId, recordId, "settled after close");
+
+  const projection = await projectionSnapshot(store);
+  assert.equal(projection.status, "closed");
+  assert.equal(projection.works[0]!.status, "recorded");
+  assert.equal(projection.records.length, 1);
+  assert.equal(projection.records[0]!.recordId, recordId);
+});
+
+test("hasPendingWorks reports pending on a closed graph (view_graph honesty)", () => {
+  // H1: hasPendingWorks must not short-circuit on graph status — a closed graph
+  // with in-flight / never-started works is NOT converged, and view_graph's top
+  // flag must say so rather than contradicting close_graph's pendingWorks report.
+  const closed = {
+    graphId: GRAPH_ID,
+    sessionSequence: 5,
+    status: "closed" as const,
+    works: [
+      {
+        workId: "w",
+        instruction: "x",
+        inputIds: [],
+        mode: "explore" as const,
+        status: "dispatched" as const,
+      },
+    ],
+    records: [],
+  };
+  assert.equal(hasPendingWorks(closed), true);
+  const closedConverged = { ...closed, works: [{ ...closed.works[0]!, status: "recorded" as const }] };
+  assert.equal(hasPendingWorks(closedConverged), false);
+});
+
+test("reduceGraphEvent ignores added events on a closed projection (defense-in-depth)", () => {
+  // M2: even if an added event lands on a closed projection (recover/replay
+  // quirk, or a future writer bypassing AddWorkTool), the reducer must not fold
+  // it in — closed graphs must never gain new pending works.
+  let state = projectGraphEntries(GRAPH_ID, []);
+  const baseEvent: RuntimeEvent = {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: "graph:op:closed",
+    sessionId: SESSION_ID,
+    invocationId: "inv-1",
+    runId: "run-1",
+    turnId: "turn-1",
+    at: AT.toISOString(),
+    partial: false,
+    visibility: "internal",
+    kind: "graph.closed",
+    data: { operationId: "op-close", fingerprint: "sha256:close", graphId: GRAPH_ID },
+  };
+  state = reduceGraphEvent(state, baseEvent);
+  assert.equal(state.status, "closed");
+
+  const addedAfterClose: RuntimeEvent = {
+    ...baseEvent,
+    eventId: "graph:op-late:added",
+    kind: "graph.work.added",
+    data: {
+      operationId: "op-late",
+      fingerprint: "sha256:late",
+      graphId: GRAPH_ID,
+      workId: "work_late",
+      instruction: "Should be ignored",
+      inputIds: [],
+      mode: "explore",
+    },
+  };
+  state = reduceGraphEvent(state, addedAfterClose);
+  assert.equal(state.works.length, 0, "no work may be added to a closed projection");
 });
 
 test("AddWorkTool deduplicates identical work on replay (idempotent)", async (t) => {
@@ -173,11 +369,21 @@ test("AddWorkTool deduplicates identical work on replay (idempotent)", async (t)
   );
   const first = JSON.parse(await tool.execute(JSON.stringify({ instruction: "Same work" }))) as {
     workId: string;
+    status: string;
+    delegationId: string;
   };
   const second = JSON.parse(await tool.execute(JSON.stringify({ instruction: "Same work" }))) as {
     workId: string;
+    status: string;
+    delegationId: string;
   };
   assert.equal(first.workId, second.workId);
+  // L-3: re-declaring an already-dispatched work must report its real status,
+  // not a bare "waiting" — otherwise the model thinks nothing was scheduled and
+  // may re-declare under different wording (new workId) duplicating the labour.
+  assert.equal(first.status, "dispatched");
+  assert.equal(second.status, "dispatched");
+  assert.equal(second.delegationId, "delegation-replay");
 });
 
 test("AddWorkTool dispatches after upstream record is committed (DAG dependency)", async (t) => {
@@ -398,55 +604,85 @@ test("reduceGraphEvent replays idempotently for duplicate graph.work.added", () 
   assert.equal(state.works.length, 1);
 });
 
-test("findOrphanGraphWorks detects dispatched works whose run terminated", async (t) => {
+test("findOrphanGraphWorks flags dispatched works whose delegation is not live", async (t) => {
   const { root, store, context } = await setupFixture();
   t.after(() => rm(root, { recursive: true, force: true }));
 
-  // Add a work and dispatch it.
   const addTool = new AddWorkTool(context, async () => "delegation-orphan", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "orphaned work" }));
 
-  // Emit a run.terminal for the delegation id (orphan scan uses delegationId as runId).
-  await store.append({
-    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-    eventId: "term-1",
-    sessionId: SESSION_ID,
-    invocationId: "inv",
-    runId: "delegation-orphan",
-    turnId: "turn",
-    at: AT.toISOString(),
-    partial: false,
-    visibility: "internal",
-    kind: "run.terminal",
-    data: { status: "interrupted" },
-  });
-
+  // Simulate a process restart: the fresh DelegationManager holds no live
+  // delegations, so the previously-dispatched work is an orphan.
   const result = await findOrphanGraphWorks({
     runtimeStore: store,
     sessionId: SESSION_ID,
     graphId: GRAPH_ID,
+    liveDelegationIds: [],
   });
-  assert.ok(result.orphanWorkIds.length >= 1);
-  const projection = result.projection;
-  const orphan = projection.works.find(
-    (w) => w.status === "dispatched" && w.delegationId === "delegation-orphan",
-  );
+  assert.equal(result.orphanWorkIds.length, 1);
+  const orphan = result.projection.works.find((w) => w.delegationId === "delegation-orphan");
   assert.ok(orphan, "dispatched work still present in projection");
+  assert.equal(orphan!.status, "dispatched");
 });
 
-test("findOrphanGraphWorks returns empty when no runs terminated", async (t) => {
+test("findOrphanGraphWorks excludes works whose delegation is still live", async (t) => {
   const { root, store, context } = await setupFixture();
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const addTool = new AddWorkTool(context, async () => "delegation-live", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "live work" }));
 
+  // Same process: the delegation is still running, so the work is NOT an orphan.
   const result = await findOrphanGraphWorks({
     runtimeStore: store,
     sessionId: SESSION_ID,
     graphId: GRAPH_ID,
+    liveDelegationIds: ["delegation-live"],
   });
   assert.deepEqual([...result.orphanWorkIds], []);
+});
+
+test("orphan recovery marks a lost delegation's dispatched work as failed", async (t) => {
+  const { root, store, context } = await setupFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const instruction = "crashed work";
+  const workId = workIdFor(GRAPH_ID, instruction, []);
+  const addTool = new AddWorkTool(context, async () => "delegation-crashed", () => AT);
+  await addTool.execute(JSON.stringify({ instruction }));
+
+  // Restart: DelegationManager is empty → work flagged as orphan.
+  const scan = await findOrphanGraphWorks({
+    runtimeStore: store,
+    sessionId: SESSION_ID,
+    graphId: GRAPH_ID,
+    liveDelegationIds: [],
+  });
+  assert.deepEqual([...scan.orphanWorkIds], [workId]);
+
+  // settleGraphWork (production recovery path) writes graph.work.failed. This
+  // test commits the same event shape to verify the projection transition; the
+  // settleGraphWork function itself is exercised end-to-end via the
+  // onGraphWorkSettled callback in real runs.
+  await commitFailed(
+    store,
+    context,
+    workId,
+    "orphan: backing delegation lost on process restart (recovered)",
+  );
+
+  const after = await projectionSnapshot(store);
+  const work = after.works.find((w) => w.workId === workId);
+  assert.equal(work!.status, "failed");
+
+  // A failed work is no longer an orphan (it is no longer dispatched).
+  const rescan = await findOrphanGraphWorks({
+    runtimeStore: store,
+    sessionId: SESSION_ID,
+    graphId: GRAPH_ID,
+    liveDelegationIds: [],
+  });
+  assert.deepEqual([...rescan.orphanWorkIds], []);
 });
 
 test("appendGraphOperation CAS rejects conflicting fingerprint for same operationId", async (t) => {
@@ -496,6 +732,39 @@ async function commitRecord(
       recordId,
       outputSummary,
     },
+  };
+  await store.appendGraphOperation([event], {
+    operationId,
+    fingerprint,
+    expectedSessionSequence: projection.sessionSequence,
+  });
+}
+
+async function commitFailed(
+  store: RuntimeEventStore,
+  context: GraphToolContext,
+  workId: string,
+  error: string,
+): Promise<void> {
+  const operationId = `manual-fail:${workId}`;
+  const fingerprint = graphOperationFingerprint("graph.work.failed", {
+    graphId: context.graphId,
+    workId,
+    error,
+  });
+  const projection = await projectionSnapshot(store);
+  const event: RuntimeEvent = {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: `graph:${operationId}:failed`,
+    sessionId: context.sessionId,
+    invocationId: context.invocationId,
+    runId: context.runId,
+    turnId: context.turnId,
+    at: AT.toISOString(),
+    partial: false,
+    visibility: "internal",
+    kind: "graph.work.failed",
+    data: { operationId, fingerprint, graphId: context.graphId, workId, error },
   };
   await store.appendGraphOperation([event], {
     operationId,

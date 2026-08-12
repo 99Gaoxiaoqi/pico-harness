@@ -53,6 +53,7 @@ Options:
   --add-dir <path>                   Add an authorized workspace directory (repeatable)
   -S, --session <id>                 Resume a session by id
   -c, --continue                     Continue the latest session in this project
+      --graph                        Start with Graph Mode enabled (add_work scheduling)
   --resume <id>                      Resume a session by id
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
@@ -82,6 +83,7 @@ interface ParsedCliOptions {
   model?: string;
   mcpConfigPath?: string;
   addDirs?: string[];
+  graph: boolean;
   help: boolean;
   version: boolean;
 }
@@ -95,6 +97,7 @@ interface ParsedCliValues {
   "add-dir"?: string[];
   session?: string;
   continue?: boolean;
+  graph?: boolean;
   resume?: string;
   fork?: string;
   "fork-session"?: string;
@@ -135,6 +138,7 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       sessionSelection,
       ...(options.mcpConfigPath ? { mcpConfigPath: options.mcpConfigPath } : {}),
       ...(options.addDirs ? { addDirs: options.addDirs } : {}),
+      ...(options.graph ? { orchestrationMode: "graph" as const } : {}),
     });
     return 0;
   } catch (error) {
@@ -164,6 +168,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         "add-dir": { type: "string", multiple: true },
         session: { type: "string", short: "S" },
         continue: { type: "boolean", short: "c" },
+        graph: { type: "boolean" },
         resume: { type: "string" },
         fork: { type: "string" },
         "fork-session": { type: "string" },
@@ -191,6 +196,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(typeof values["mcp-config"] === "string" ? { mcpConfigPath: values["mcp-config"] } : {}),
     ...(Array.isArray(values["add-dir"]) ? { addDirs: values["add-dir"] } : {}),
+    graph: values.graph === true,
     help: values.help === true,
     version: values.version === true,
   };

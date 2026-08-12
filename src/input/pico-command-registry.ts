@@ -69,6 +69,7 @@ import {
   setSessionCollaborationMode,
   setSessionModel,
   setSessionModelRoute,
+  setSessionOrchestrationMode,
   setSessionPermissionMode,
   setSessionTitle,
   setSessionThinkingEffort,
@@ -264,6 +265,7 @@ export async function createPicoCommandRegistry(
     createGoalCommand(options.goalManager),
     createModeCommand(settings),
     createPlanCommand(settings, options.session),
+    createGraphCommand(settings),
     createExploreCommand(),
     createPermissionsCommand(settings),
     createCompactCommand(options, settings),
@@ -1447,6 +1449,55 @@ function createPlanCommand(settings: SessionSettings, session?: Session): SlashC
           collaborationMode: settings.collaborationMode,
           permissionMode: settings.permissionMode,
         },
+      };
+    },
+  };
+}
+
+function createGraphCommand(settings: SessionSettings): SlashCommand {
+  return {
+    name: "graph",
+    description: "Show or change Graph orchestration mode",
+    usage: "/graph [on|off]",
+    argumentHint: "[on|off]",
+    argumentCompleter: completeFromCandidates([
+      { value: "on", description: "Enable Graph Mode (add_work scheduling)" },
+      { value: "off", description: "Disable Graph Mode" },
+    ]),
+    category: "session",
+    kind: "local",
+    availability: "idle",
+    execute: async (input): Promise<LocalCommandResult> => {
+      const requested = input.args.trim().toLowerCase();
+      if (requested && requested !== "on" && requested !== "off") {
+        return {
+          type: "local",
+          action: "message",
+          message: "用法: /graph [on|off]",
+          data: { ok: false },
+        };
+      }
+      if (!requested) {
+        const current = settings.orchestrationMode ?? "default";
+        return {
+          type: "local",
+          action: "message",
+          message:
+            current === "graph"
+              ? "Graph Mode 已启用（/graph off 关闭）"
+              : "Graph Mode 未启用（/graph on 开启）",
+          data: { ok: true, orchestrationMode: current },
+        };
+      }
+      const result = setSessionOrchestrationMode(
+        settings,
+        requested === "off" ? "default" : "graph",
+      );
+      return {
+        type: "local",
+        action: "message",
+        message: result.message,
+        data: { ok: result.ok, orchestrationMode: settings.orchestrationMode },
       };
     },
   };

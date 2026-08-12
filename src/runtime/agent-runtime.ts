@@ -62,7 +62,7 @@ import {
 } from "../tools/graph-tools.js";
 import { normalizeDelegateTasks } from "../tools/delegation-contract.js";
 import { projectGraphEntries } from "../graph/graph-reducer.js";
-import { computeReadyWorks } from "../graph/graph-reconcile.js";
+import { computeReadyWorks, missingInputIdsFor } from "../graph/graph-reconcile.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
@@ -905,6 +905,8 @@ export async function executeAgentRuntime(
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
+    const orchestrationMode = (): "default" | "graph" =>
+      options.orchestrationMode ?? settings.orchestrationMode ?? "default";
     const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
     if (options.approvedPlan) {
       if (settings.collaborationMode !== "agent") {
@@ -1019,6 +1021,7 @@ export async function executeAgentRuntime(
       sessionSelection,
       model: options.model ?? settings.model,
       planMode: backgroundPolicy ? false : collaborationMode() === "plan",
+      orchestrationMode: backgroundPolicy ? "default" : orchestrationMode(),
       trace: traceEnabled,
       addDirs: backgroundPolicy ? [] : [...settings.additionalDirectories],
       ...(options.thinkingEffort !== undefined
@@ -1516,7 +1519,8 @@ export async function executeAgentRuntime(
         goalManager,
         todoStore,
         isolatedHeadless: dependencies.isolatedHeadless,
-        graphToolsAvailable: !!session.runtimeEventStore && !backgroundPolicy,
+        graphToolsAvailable:
+          !!session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph",
         skillLoader: skillLoaderFactory(workDir),
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService
@@ -1637,7 +1641,7 @@ export async function executeAgentRuntime(
         : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
-      ...(session.runtimeEventStore && !backgroundPolicy
+      ...(session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph"
         ? {
             graphReconcile: async () => {
               try {
@@ -1647,11 +1651,26 @@ export async function executeAgentRuntime(
                   entries,
                 );
                 if (projection.status !== "active") return { pending: 0, ready: 0 };
-                const pending = projection.works.filter(
+                const pendingWorks = projection.works.filter(
                   (work) => work.status === "requested" || work.status === "dispatched",
-                ).length;
+                );
                 const ready = computeReadyWorks(projection).length;
-                return { pending, ready };
+                // Surface deadlocked requested works whose input_ids reference
+                // records that will never be produced (wrong id, or a failed
+                // upstream). The continuation arbiter injects this into the
+                // [Graph continuation] message so the model sees the deadlock
+                // at stop-decision time, not only inside a view_graph call.
+                const stuck = pendingWorks
+                  .filter(
+                    (work) =>
+                      work.status === "requested" &&
+                      missingInputIdsFor(projection, work).length > 0,
+                  )
+                  .map((work) => ({
+                    workId: work.workId,
+                    missingInputIds: [...missingInputIdsFor(projection, work)],
+                  }));
+                return { pending: pendingWorks.length, ready, stuck };
               } catch {
                 return { pending: 0, ready: 0 };
               }
@@ -1746,7 +1765,7 @@ export async function executeAgentRuntime(
     // add_work 声明意图并尝试派发；view_graph 只读投影；close_graph 收尾。
     // 派发回调封装 DelegationManager.dispatch + engine.runSub，复用与 delegate_task
     // 相同的子代理执行边界（沙箱、worktree、profile 全部由 registryFactory 提供）。
-    if (session.runtimeEventStore && !backgroundPolicy) {
+    if (session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph") {
       const graphStore = session.runtimeEventStore;
       const resolveGraphContext = (): GraphToolContext => ({
         store: graphStore,

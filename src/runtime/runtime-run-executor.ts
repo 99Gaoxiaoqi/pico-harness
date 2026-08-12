@@ -8,13 +8,14 @@ import type { ImagePart, Message } from "../schema/message.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CliSessionSelection } from "../cli/session-resolver.js";
 import { logger } from "../observability/logger.js";
-import type { SessionRuntime } from "./session-runtime.js";
 import { RuntimeRun } from "./runtime-run.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
 import type { MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { findPrecommittedDesktopMemoryEvidence } from "./memory-review-recovery.js";
+import { findOrphanGraphWorks } from "../graph/graph-recover.js";
+import { settleGraphWork, type SessionRuntime } from "./session-runtime.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -109,6 +110,7 @@ export class RuntimeRunExecutor {
       await RuntimeRun.repairSessionProjection(session, {
         capability: runtimeCapability,
       });
+      await this.recoverOrphanGraphWorks(session, runtimeState);
       const runtimeRun = await RuntimeRun.start({
         capability: runtimeCapability,
         ...(prestartedRun
@@ -271,6 +273,41 @@ export class RuntimeRunExecutor {
       at: Date.now(),
     });
     return result;
+  }
+
+  /**
+   * Settles graph works left dispatched by a previous process: after a restart
+   * the DelegationManager is freshly constructed and holds none of the prior
+   * delegations, so any still-dispatched work can never settle on its own. Each
+   * is marked failed (recovered); downstream works then surface as deadlocked
+   * via the existing missingInputIds continuation diagnostics.
+   */
+  private async recoverOrphanGraphWorks(
+    session: Session,
+    runtimeState: SessionRuntime,
+  ): Promise<void> {
+    if (!session.runtimeEventStore || !runtimeState.graphContext) return;
+    const { orphanWorkIds } = await findOrphanGraphWorks({
+      runtimeStore: session.runtimeEventStore,
+      sessionId: session.id,
+      graphId: runtimeState.graphContext.graphId,
+      liveDelegationIds: runtimeState.delegationManager.liveDelegationIds(),
+    });
+    for (const workId of orphanWorkIds) {
+      await settleGraphWork(
+        session,
+        runtimeState.graphContext,
+        workId,
+        "error",
+        "orphan: backing delegation lost on process restart (recovered)",
+        () => undefined,
+      ).catch((error) =>
+        logger.warn(
+          { sessionId: session.id, workId, error: String(error) },
+          "[graph] orphan recovery settle failed",
+        ),
+      );
+    }
   }
 }
 

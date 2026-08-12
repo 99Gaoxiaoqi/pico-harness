@@ -757,6 +757,7 @@ function filterForkSettings(
     model: settings.model,
     modelRouteId: settings.modelRouteId,
     collaborationMode: targetMode === "plan" ? "plan" : "agent",
+    orchestrationMode: settings.orchestrationMode ?? "default",
     permissionMode: targetMode === "plan" ? "yolo" : targetMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
