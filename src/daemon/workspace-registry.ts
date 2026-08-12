@@ -42,6 +42,11 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
     try {
       const resolved = await runtime;
       this.assertOpen();
+      // await 期间该 runtime 可能被并发 release 删除并开始 close；若注册项已不是
+      // 当初读到的 runtime，绝不把正在 close 的实例交出去，重走 get 取最新实例。
+      if (this.runtimes.get(canonicalPath) !== runtime) {
+        return this.get(workspacePath);
+      }
       return resolved;
     } catch (error) {
       if (this.runtimes.get(canonicalPath) === runtime) this.runtimes.delete(canonicalPath);
