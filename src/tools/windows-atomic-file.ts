@@ -68,10 +68,10 @@ function Convert-PicoExtendedPath([string] $Path) {
   if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
     throw [ArgumentException]::new('PICO_PATH_NOT_ABSOLUTE')
   }
-  if ($Path.StartsWith('\\?\')) { return $Path }
-  $full = [IO.Path]::GetFullPath($Path)
-  if ($full.StartsWith('\\')) { return '\\?\UNC\' + $full.Substring(2) }
-  return '\\?\' + $full
+  # Strip \\?\ prefix — PowerShell 5.1 (.NET Framework) rejects ? as illegal path char
+  if ($Path.StartsWith('\\?\UNC\')) { $Path = '\\' + $Path.Substring(6) }
+  elseif ($Path.StartsWith('\\?\')) { $Path = $Path.Substring(4) }
+  return [IO.Path]::GetFullPath($Path)
 }
 
 function New-PicoPrivateSecurity {
