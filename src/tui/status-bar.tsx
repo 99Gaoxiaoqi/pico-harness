@@ -19,6 +19,14 @@ export interface StatusBarProps {
 
 export type StatusItem = readonly [label: string, value: string];
 
+/** 状态栏 phase 值的中文映射，让普通用户看懂"空闲/运行/审批"。 */
+const PHASE_LABEL: Record<string, string> = {
+  idle: "空闲",
+  running: "运行",
+  approval: "审批",
+  queued: "排队",
+};
+
 export function buildStatusItems({
   phase = "idle",
   sessionMode = "new",
@@ -71,13 +79,13 @@ export function buildStatusBarText(props: StatusBarProps): string {
   const mcpSummary = itemByLabel.get("mcp");
   const modeText = forkFrom === undefined ? sessionMode : `${sessionMode} from ${forkFrom}`;
   const candidates = [
-    `phase ${phase}`,
-    `mode ${modeText}`,
-    ...(collaborationMode ? [`collab ${collaborationMode}`] : []),
-    ...(permissionMode ? [`perm ${permissionMode}`] : []),
+    `状态 ${PHASE_LABEL[phase] ?? phase}`,
+    `模式 ${modeText}`,
+    ...(collaborationMode ? [`协作 ${collaborationMode}`] : []),
+    ...(permissionMode ? [`权限 ${permissionMode}`] : []),
     ...(mcpSummary ? [mcpSummary] : []),
-    ...(itemByLabel.has("context") ? [`ctx ${itemByLabel.get("context")}`] : []),
-    ...(itemByLabel.has("task") ? [`task ${itemByLabel.get("task")}`] : []),
+    ...(itemByLabel.has("context") ? [`上下文 ${itemByLabel.get("context")}`] : []),
+    ...(itemByLabel.has("task") ? [`任务 ${itemByLabel.get("task")}`] : []),
   ];
   return fitStatusParts(candidates, props.renderWidth ?? 80);
 }
