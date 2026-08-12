@@ -95,9 +95,9 @@ export function buildLogoPanelRows({
   const parts = [
     detail,
     ...(cwd ? [truncateLogoCwd(cwd, cwdMaxLength)] : []),
-    ...(!compact && sessionMode ? [`mode ${sessionMode}`] : []),
+    ...(!compact && sessionMode ? [`模式 ${sessionMode}`] : []),
     ...(!compact && permissionMode && permissionMode !== sessionMode
-      ? [`perm ${permissionMode}`]
+      ? [`权限 ${permissionMode}`]
       : []),
     ...(!compact && mcpSummary ? [mcpSummary] : []),
     ...(!compact && taskSummary ? [taskSummary] : []),

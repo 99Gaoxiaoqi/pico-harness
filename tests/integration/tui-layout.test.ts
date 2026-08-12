@@ -73,7 +73,7 @@ test("唯一状态栏同时呈现会话、权限和 MCP 状态", () => {
       mcpSummary: "MCP 0/0",
       renderWidth: 120,
     }),
-    "phase idle · mode new · collab plan · perm yolo · MCP 0/0",
+    "状态 空闲 · 模式 new · 协作 plan · 权限 yolo · MCP 0/0",
   );
 });
 
