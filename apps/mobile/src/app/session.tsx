@@ -239,10 +239,12 @@ export default function SessionScreen() {
               <Text style={styles.runText}>正在运行·{transcript.activeRun.description}</Text>
             </View>
           )}
-          {connection && realtimeState === "disconnected" ? (
+          {connection && realtimeState !== "connected" ? (
             <View style={styles.realtimeWarning}>
               <Text style={styles.realtimeWarningText}>
-                实时更新已断开{realtimeError ? ` · ${realtimeError}` : ""}，返回再进入会话可恢复
+                {realtimeState === "connecting"
+                  ? `正在重连实时更新${realtimeError ? `（${realtimeError}）` : ""}…`
+                  : `实时更新重连失败${realtimeError ? ` · ${realtimeError}` : ""}，请返回会话列表重进`}
               </Text>
             </View>
           ) : null}
