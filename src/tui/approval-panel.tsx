@@ -188,7 +188,7 @@ export function formatApprovalPanel(
             { label: "拒绝并退出", action: "reject-exit" },
           ]
         : [
-            { label: "Yes", action: "approve" },
+            { label: "允许", action: "approve" },
             ...(hasSessionOption
               ? [
                   {
@@ -197,7 +197,7 @@ export function formatApprovalPanel(
                   },
                 ]
               : []),
-            { label: "No", action: "reject" },
+            { label: "拒绝", action: "reject" },
           ];
   const selectedIndex = clampSelection(options.selectedIndex ?? 0, approvalOptions.length);
   const lines = [approvalQuestion(notice.toolName, target), `  ${target}`];
@@ -407,9 +407,9 @@ function clampSelection(index: number, optionCount: number): number {
 
 function approvalQuestion(toolName: string, target: string): string {
   const name = target.split(/[\\/]/u).at(-1) ?? target;
-  if (toolName === "edit_file") return `Do you want to make this edit to ${name}?`;
-  if (toolName === "write_file") return `Do you want to write to ${name}?`;
-  if (toolName === "read_file") return `Do you want to read ${name}?`;
-  if (toolName === "bash") return "Do you want to execute this command?";
-  return `Do you want to allow ${toolName}?`;
+  if (toolName === "edit_file") return `是否允许对 ${name} 执行此修改？`;
+  if (toolName === "write_file") return `是否允许写入 ${name}？`;
+  if (toolName === "read_file") return `是否允许读取 ${name}？`;
+  if (toolName === "bash") return "是否允许执行此命令？";
+  return `是否允许执行 ${toolName}？`;
 }

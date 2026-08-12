@@ -1768,7 +1768,7 @@ export async function startTuiRepl(
       };
       // 排空给硬超时兜底：若某条后台链路不响应 abort 信号而永不 settle，
       // 不能让进程永久挂起。超时后吞下诊断并继续执行后续持久化。
-      let drainTimer: NodeJS.Timeout | undefined;
+      let drainTimer: ReturnType<typeof setTimeout> | undefined;
       let drainTimedOut = false;
       const drainTimeout = new Promise<void>((resolve) => {
         drainTimer = setTimeout(() => {
@@ -2840,7 +2840,7 @@ export function createTuiUpdateScheduler<T>(
   minIntervalMs: number,
 ): (value: T) => void {
   let latest: T | null = null;
-  let timer: NodeJS.Timeout | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let lastAppliedAt = 0;
 
   return (value) => {
@@ -3660,13 +3660,13 @@ function resolveApprovalAction(
   deps.reporter.pushSystemMessage(
     ok
       ? parsed.action === "approve-session"
-        ? "Allowed for this session."
+        ? "本会话内允许。"
         : parsed.action === "approve"
-          ? "Allowed once."
+          ? "已允许一次。"
           : parsed.action === "reject"
-            ? "Rejected."
-            : "Approved with changes."
-      : "Approval request is no longer active.",
+            ? "已拒绝。"
+            : "已带修改批准。"
+      : "审批请求已失效。",
   );
   return ok;
 }
