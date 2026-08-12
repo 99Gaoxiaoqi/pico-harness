@@ -472,7 +472,7 @@ function renderInputContent(
   }
 
   if (!text) {
-    return <Text dimColor>Try &quot;fix this&quot; or / for commands</Text>;
+    return <Text dimColor>输入你的需求，或输入 / 查看命令（Ctrl+C 中断 · Ctrl+D 退出）</Text>;
   }
 
   if (text.includes("\n")) {

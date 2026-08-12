@@ -348,7 +348,7 @@ function ConnectionScreen() {
         </InlineNotice>
         <Button variant="primary" onClick={() => void actions.reload()}>
           <RefreshCw aria-hidden="true" size={16} />
-          重新连接
+          重新检测连接
         </Button>
       </div>
     </main>
