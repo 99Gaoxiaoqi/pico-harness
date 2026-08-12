@@ -54,6 +54,46 @@ test("workspace replacement waits until the previous Runtime releases ownership"
   assert.equal(registry.hasPendingOwnership(), false);
 });
 
+test("get re-fetches a runtime released while its create was still pending", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-registry-race-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace, { recursive: true });
+  const firstCreateReleased = deferred();
+  let creates = 0;
+  const registry = new WorkspaceRuntimeRegistry<{ workspacePath: string; close(): Promise<void> }>({
+    create: async (workspacePath) => {
+      creates++;
+      if (creates === 1) await firstCreateReleased.promise;
+      return { workspacePath, close: async () => undefined };
+    },
+  });
+  context.after(async () => {
+    firstCreateReleased.resolve();
+    await registry.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // get#1 启动慢 create（pending）；get#2 复用同一个 pending runtime 并 await 它。
+  const firstGet = registry.get(workspace);
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondGet = registry.get(workspace);
+
+  // release 在 runtime 仍 pending 时删除并关闭它。先让 release 跑过 canonicalize
+  // 与 runtimes.delete（之后卡在 closeRuntimes await pendingR1），再 resolve 让 get
+  // 的 await 完成——此时 get 必须发现注册项已被删除并重新创建。
+  const releasing = registry.release(workspace);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  firstCreateReleased.resolve();
+  await releasing;
+
+  // 修复后两个 get 都发现注册项已不再是当初 await 的 runtime（被 release 删除），
+  // 重新 get 触发第二次 create，绝不把正在 close 的第一个 runtime 交出去。
+  const [first, second] = await Promise.all([firstGet, secondGet]);
+  assert.equal(creates, 2, "应重新创建而非复用被 release 的 runtime");
+  assert.equal(first, second);
+  assert.ok(first.workspacePath, "重新创建的 runtime 应携带 workspacePath");
+});
+
 function deferred(): {
   readonly promise: Promise<void>;
   readonly settled: boolean;
