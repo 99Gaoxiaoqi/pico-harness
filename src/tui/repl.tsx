@@ -332,6 +332,17 @@ export const TUI_RENDER_OPTIONS = {
 } as const satisfies RenderOptions;
 
 /**
+ * cleanup 排空等待的硬超时（毫秒），仅覆盖 pending 集合（pendingTuiSubmissions
+ * 等）的 drainPending 循环。runtime/MCP 不响应 abort 信号时，排空不能永久挂起；
+ * 超时后继续执行后续持久化（flushDurableTranscript / flushPersistence），未排空的
+ * 后台 promise 在 shuttingDown 守卫下成为无害孤儿。
+ *
+ * 注意：本超时不覆盖后续 disposeHostResources（MCP closeAll 等）；若其阻塞仍可能
+ * 挂起 cleanup，此时由第二次进程信号（onTuiSignal → process.exit）强制退出兜底。
+ */
+const TUI_CLEANUP_DRAIN_MS = 5_000;
+
+/**
  * TERM=dumb 没有 Ink 多帧重绘所需的光标控制保证。此环境必须走
  * line-mode，而不是尝试通过 interactive:true 或关闭增量渲染来补救；
  * 标准 Ink renderer 同样依赖 cursor-up / erase。
@@ -1738,20 +1749,42 @@ export async function startTuiRepl(
         await terminalGrid?.dispose();
       });
       activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
-      while (pendingTuiSubmissions.size > 0) {
-        await Promise.allSettled([...pendingTuiSubmissions]);
+      const drainPending = async (): Promise<void> => {
+        while (pendingTuiSubmissions.size > 0) {
+          await Promise.allSettled([...pendingTuiSubmissions]);
+        }
+        while (pendingDelegationWakes.size > 0) {
+          await Promise.allSettled([...pendingDelegationWakes]);
+        }
+        while (pendingHookWakes.size > 0) {
+          await Promise.allSettled([...pendingHookWakes]);
+        }
+        while (pendingSessionSwitches.size > 0) {
+          await Promise.allSettled([...pendingSessionSwitches]);
+        }
+        while (pendingTuiDialogActions.size > 0) {
+          await Promise.allSettled([...pendingTuiDialogActions]);
+        }
+      };
+      // 排空给硬超时兜底：若某条后台链路不响应 abort 信号而永不 settle，
+      // 不能让进程永久挂起。超时后吞下诊断并继续执行后续持久化。
+      let drainTimer: NodeJS.Timeout | undefined;
+      let drainTimedOut = false;
+      const drainTimeout = new Promise<void>((resolve) => {
+        drainTimer = setTimeout(() => {
+          drainTimedOut = true;
+          resolve();
+        }, TUI_CLEANUP_DRAIN_MS);
+      });
+      try {
+        await Promise.race([drainPending(), drainTimeout]);
+      } finally {
+        if (drainTimer) clearTimeout(drainTimer);
       }
-      while (pendingDelegationWakes.size > 0) {
-        await Promise.allSettled([...pendingDelegationWakes]);
-      }
-      while (pendingHookWakes.size > 0) {
-        await Promise.allSettled([...pendingHookWakes]);
-      }
-      while (pendingSessionSwitches.size > 0) {
-        await Promise.allSettled([...pendingSessionSwitches]);
-      }
-      while (pendingTuiDialogActions.size > 0) {
-        await Promise.allSettled([...pendingTuiDialogActions]);
+      if (drainTimedOut) {
+        // 排空超时是已兜底情形（runtime/MCP 未响应 abort），不作为 cleanup 失败上报，
+        // 仅写一条诊断；未排空的后台任务在 shuttingDown 守卫下成为无害孤儿。
+        process.stderr.write("TUI 排空等待超时，未响应的后台任务已被放弃\n");
       }
       const finalBundle = activeBundle;
       if (finalBundle) {
@@ -2696,6 +2729,23 @@ export async function startTuiRepl(
   // ChatGPT.app 可能先改变 xterm 网格、后端 PTY 却仍上报旧宽度。
   // Ink 接管 alt-screen 前先查询前端光标边界，避免隐式换行让擦行记账失步。
   let terminalGrid: TerminalGridSession | undefined;
+  // 交互式 TUI（exitOnCtrlC:false）默认不注册进程级信号：外部 kill / IDE
+  // 停止 / 终端关闭（SIGTERM/SIGHUP）原本走 Node 默认硬退，绕过 cleanup，
+  // 导致终端状态损坏、MCP 子进程孤儿、尾部 transcript 丢失。注册后：
+  // 首次信号解除 waitUntilExit 走 finally 的 cleanupTuiResources，第二次强退。
+  // raw mode 下日常 Ctrl+C 由 Ink useInput 捕获（app:interrupt），不触发此处 SIGINT。
+  let tuiSignalCount = 0;
+  const onTuiSignal = (): void => {
+    tuiSignalCount += 1;
+    if (tuiSignalCount === 1) {
+      // 不直接调 cleanup：IIFE 首次调用会捕获 terminalGrid 参数，handler 不传参会
+      // 导致网格资源泄漏。只 unmount 让 finally 接管真正的清理；退出码由 finally
+      // 的 process.exit(130) 决定（runCli 的返回值会覆盖 process.exitCode）。
+      instanceRef.current?.unmount();
+    } else {
+      process.exit(130);
+    }
+  };
   try {
     terminalGrid = await createTuiTerminalGridSession(process.stdin, process.stdout);
     const renderStdout = terminalGrid.stdout;
@@ -2712,9 +2762,23 @@ export async function startTuiRepl(
     // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
     const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
     instanceRef.current = instance;
+    process.on("SIGTERM", onTuiSignal);
+    process.on("SIGHUP", onTuiSignal);
+    process.on("SIGINT", onTuiSignal);
     await instance.waitUntilExit();
   } finally {
-    await cleanupTuiResources(terminalGrid);
+    // cleanup 期间保留信号 handler，使第二次信号能命中 onTuiSignal 强制退出；
+    // off 在 cleanup 之后执行。内层 finally 确保即使 cleanup 抛错也能摘除 handler。
+    try {
+      await cleanupTuiResources(terminalGrid);
+    } finally {
+      process.off("SIGTERM", onTuiSignal);
+      process.off("SIGHUP", onTuiSignal);
+      process.off("SIGINT", onTuiSignal);
+      // 信号触发的退出：runCli 会用返回值覆盖 process.exitCode，故 cleanup 完成后
+      // 显式以 130 退出，保证 shell 看到正确的中断退出码。
+      if (tuiSignalCount > 0) process.exit(130);
+    }
   }
 }
 

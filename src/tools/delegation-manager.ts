@@ -163,6 +163,8 @@ interface DelegationRecord {
   promise: Promise<void>;
   planStepId?: string;
   graphWorkId?: string;
+  /** True once the full settle chain (including onGraphWorkSettled → settleGraphWork) has finished. */
+  settleFinalized: boolean;
 }
 
 export class DelegationManager {
@@ -247,6 +249,7 @@ export class DelegationManager {
       promise: Promise.resolve(),
       ...(taskInput.planStepId ? { planStepId: taskInput.planStepId } : {}),
       ...(taskInput.graphWorkId ? { graphWorkId: taskInput.graphWorkId } : {}),
+      settleFinalized: false,
     };
 
     record.promise = Promise.resolve()
@@ -295,6 +298,9 @@ export class DelegationManager {
           } catch { /* best-effort */ }
         }
         this.publishCompletion(record);
+      })
+      .finally(() => {
+        record.settleFinalized = true;
       });
 
     this.records.set(id, record);
@@ -330,7 +336,12 @@ export class DelegationManager {
   liveDelegationIds(): readonly string[] {
     const live: string[] = [];
     for (const record of this.records.values()) {
-      if (record.status === "running") live.push(record.id);
+      // A delegation stays "live" until its entire settle chain — including
+      // onGraphWorkSettled → settleGraphWork — has finished. Checking only
+      // status === "running" misses the window between the status mutation
+      // and settleGraphWork completing, which orphan recovery could otherwise
+      // misclassify as a lost delegation and wrongly mark the work failed.
+      if (record.status === "running" || !record.settleFinalized) live.push(record.id);
     }
     return live;
   }

@@ -27,6 +27,7 @@ import {
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
 import type { ProviderKind } from "../provider/factory.js";
+import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import {
@@ -796,6 +797,8 @@ export function createProductionLocalDaemonHost(
     cronRuntimeFactory,
     registrationStore,
     endpoint: options.endpoint ?? resolveLocalDaemonEndpoint({ env }),
+    onWorkspaceError: (workspacePath, error) =>
+      logger.error({ workspacePath, err: error }, "Cron workspace 启动失败"),
   });
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
   return host;

@@ -1916,6 +1916,21 @@ export function useRuntimeStore(): RuntimeStore {
     void bootstrap();
   }, [bootstrap]);
 
+  // 主进程探活判定 Runtime 永久不可达（连续 ping 失败）时经 IPC 通知渲染进程，
+  // 把连接降级到错误页，避免停在"看似就绪但所有操作都失败"的界面。
+  useEffect(() => {
+    if (preview || connection.kind !== "ready") return;
+    const bridge = getBridge();
+    if (!bridge) return;
+    return bridge.onUnavailable(() => {
+      setConnection({
+        kind: "error",
+        detail: "本地 Runtime 已断开，请重启 Pico 应用后重试",
+        retryable: true,
+      });
+    });
+  }, [connection.kind, preview]);
+
   useEffect(() => {
     if (preview || connection.kind !== "ready") return;
     const bridge = getBridge();
@@ -3672,6 +3687,7 @@ function createPreviewBridge(): DesktopBridge {
         dispose: () => undefined,
       }),
     },
+    onUnavailable: () => () => undefined,
     platform: {
       chooseWorkspace: () => success(previewData.workspacePath),
       showNotification: () => success(undefined),

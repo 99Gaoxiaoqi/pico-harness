@@ -803,11 +803,27 @@ test("Daemon signal handlers consume a rejecting stop promise", async (context) 
   assert.ok(installed);
 
   installed("SIGTERM");
-  installed("SIGTERM");
+  // 第二次信号在新设计下强制 process.exit(130)：优雅关闭仍未结束则允许中断。
+  // stub process.exit 验证调用而不让测试进程真退出。
+  const originalExit = process.exit;
+  let forcedExitCode: number | undefined;
+  Object.defineProperty(process, "exit", {
+    value: (code?: number) => {
+      forcedExitCode = code ?? 0;
+      throw new Error("__forced_exit__");
+    },
+    configurable: true,
+  });
+  try {
+    assert.throws(() => installed("SIGTERM"), /__forced_exit__/u);
+  } finally {
+    Object.defineProperty(process, "exit", { value: originalExit, configurable: true });
+  }
   await waitForImmediate();
   await waitForImmediate();
 
   assert.equal(stopCount, 1);
+  assert.equal(forcedExitCode, 130);
   assert.deepEqual(unhandledRejections, []);
   assert.equal(process.listeners("SIGTERM").includes(installed), false);
 });

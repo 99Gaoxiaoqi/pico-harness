@@ -388,7 +388,10 @@ function readCronOwnershipFence(runtime: ManagedCronWorkspaceRuntime): {
 export function installLocalDaemonShutdownHandlers(host: LocalDaemonHost): () => void {
   let stopping = false;
   const shutdown = () => {
-    if (stopping) return;
+    if (stopping) {
+      // 第二次信号：优雅关闭仍未结束则强制退出，避免 cleanup 卡住时无法中断。
+      process.exit(130);
+    }
     stopping = true;
     void host.stop().then(
       () => dispose(),
