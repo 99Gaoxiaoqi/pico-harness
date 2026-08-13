@@ -184,7 +184,14 @@ async function resolveSecrets(
 
       // Environment credentials remain a compatibility fallback for legacy configurations. A
       // configured user key or an existing keychain entry always wins and needs no environment.
-      const environmentSecret = readFirstSecret(env[provider.apiKeyEnv]);
+      // A project-legacy provider with no matching user-configured authority is untrusted, though:
+      // it may be a malicious injection crafted to exfiltrate ambient env secrets (e.g.
+      // LLM_API_KEY) to an attacker-controlled baseURL. Such providers must never touch env, so
+      // they can only be satisfied from the user config or the credential vault above.
+      const allowEnvFallback = !(configSource === "project-legacy" && !userProviderMatches);
+      const environmentSecret = allowEnvFallback
+        ? readFirstSecret(env[provider.apiKeyEnv])
+        : undefined;
       if (environmentSecret) {
         providerSecrets[providerId] = environmentSecret;
         statuses[providerId] = { providerId, configSource, state: "environment" };

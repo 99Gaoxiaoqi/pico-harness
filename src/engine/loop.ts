@@ -43,7 +43,11 @@ import {
 } from "../context/runtime-compaction-checkpoint.js";
 import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
-import { estimateModelInputTokens, estimateMessagesTokens } from "../context/context-budget.js";
+import {
+  CHARS_PER_TOKEN,
+  estimateModelInputTokens,
+  estimateMessagesTokens,
+} from "../context/context-budget.js";
 import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import { PromptComposer, type PromptLayers } from "../context/composer.js";
@@ -993,8 +997,17 @@ export class AgentEngine implements AgentRunner {
    * 构造普通重试(429/5xx/网络错误)的 onRetry 回调:每次重试时打 warn 日志,
    * 并把最近一次重试的 attempt / delayMs 写入对应 Span,供 Tracing 复盘。
    * 多次重试时后值覆盖前值(span 记录最后一次重试的快照)。
+   *
+   * 流式投影修复(A-P1.2):流式 Provider 已通过 onDelta 把上一轮部分 token 投影到
+   * UI(经 providerForReporter 闭包);中途失败重试时若不撤销,第二次尝试会把完整
+   * 内容再流一遍,UI 得到"半截 + 完整"拼接。这里在 onRetry 触发时调用
+   * reporter.onAssistantResponseSuppressed("network-retry") 撤销上一轮已投影的临时流。
+   * reporter 未传入(如 compactSubContext 子代理路径)时只打日志,保持原行为。
    */
-  private makeRetryReporter(span?: Span): (info: RetryInfo) => void {
+  private makeRetryReporter(
+    span?: Span,
+    reporter?: Reporter,
+  ): (info: RetryInfo) => void {
     return (info: RetryInfo) => {
       logger.warn(
         {
@@ -1010,6 +1023,11 @@ export class AgentEngine implements AgentRunner {
         retryAttempt: info.nextAttempt,
         retryDelayMs: info.delayMs,
       });
+      // attempt>1 表示之前已有一次失败尝试;流式路径下其部分 token 可能已投影到 UI。
+      // 通知 reporter 撤销该临时投影,避免重试成功后 UI 出现"半截 + 完整"重复。
+      if (info.nextAttempt > 1) {
+        reporter?.onAssistantResponseSuppressed?.("network-retry");
+      }
     };
   }
 
@@ -1344,7 +1362,7 @@ export class AgentEngine implements AgentRunner {
     const generate = (context: Message[]) =>
       generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, tools, {
         signal,
-        onRetry: this.makeRetryReporter(span),
+        onRetry: this.makeRetryReporter(span, reporter),
         onRateLimited: () => this.rotateProvider(reporter, signal),
         ...(promptCacheRequest.shardSeed
           ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
@@ -1980,7 +1998,13 @@ export class AgentEngine implements AgentRunner {
             toolProtocolClosed = true;
           };
           const failToolProtocol = async (error: unknown): Promise<never> => {
-            await Promise.allSettled(scheduled);
+            // loop-1 兜底:仅依赖工具协作收口存在死锁风险(未来工具/卡 IO 不响应
+            // signal 时 Promise.allSettled 永远挂起,主循环卡死)。10s 超时强制继续,
+            // 放弃等待 settleOnAbort 任务的真实收口,优先保证 run 终止。
+            await Promise.race([
+              Promise.allSettled(scheduled).then(() => undefined),
+              new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+            ]);
             // The assistant tool-call batch is durable, but no ToolResult may
             // become canonical until its structured starts are known durable.
             // Reconciliation will later close this still-pending model batch.
@@ -2284,7 +2308,12 @@ export class AgentEngine implements AgentRunner {
                             ? getAccesses.call(this.registry, tc)
                             : ToolAccesses.all(),
                           // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
-                          settleOnAbort: fileSideEffectKinds[index] !== "none",
+                          // 但只有声明了 handlesAbortSignal 的工具才会在 abort 后协作 settle,
+                          // 否则等待是无限期的(loop-1):不响应 signal 的工具立即 reject,
+                          // 由 failToolProtocol / finally 的超时兜底强制收口。
+                          settleOnAbort:
+                            fileSideEffectKinds[index] !== "none" &&
+                            (this.registry.handlesAbortSignal?.(tc.name) ?? false),
                           start: async () => {
                             signal?.throwIfAborted();
                             return this.runtimePort
@@ -2306,7 +2335,12 @@ export class AgentEngine implements AgentRunner {
               signal?.throwIfAborted();
             } finally {
               // 异常时也要先等已启动任务收口，再提交文件 journal 和协议闭合结果。
-              await Promise.allSettled(scheduled);
+              // loop-1 兜底:与 failToolProtocol 一致,10s 超时强制继续,避免 settleOnAbort
+              // 任务(文件类工具)不协作 signal 时永久挂起主循环。
+              await Promise.race([
+                Promise.allSettled(scheduled).then(() => undefined),
+                new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+              ]);
               scheduler?.dispose();
             }
           } catch (error) {
@@ -3155,8 +3189,8 @@ export class AgentEngine implements AgentRunner {
         },
       );
     }
-    // 首轮:用默认预算压缩(attempt 0,系数 1.0)
-    let context = this.compactSubContext(contextHistory, runtime.compactor);
+    // 首轮:用默认预算压缩(attempt 0,系数 1.0);传入 tools 以启用 token 维度自适应校正(ctx-2)
+    let context = this.compactSubContext(contextHistory, runtime.compactor, undefined, tools);
     for (let attempt = 0; ; attempt++) {
       try {
         // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
@@ -3195,7 +3229,7 @@ export class AgentEngine implements AgentRunner {
         const newBudget = Math.max(1, Math.floor(runtime.compactor.maxChars * budgetFactor));
         // contextHistory 已持久化上一档压缩结果；继续缩紧预算时从该结构化历史降级，
         // 避免下一轮又从未压缩原文开始并重复探索。
-        context = this.compactSubContext(contextHistory, runtime.compactor, newBudget);
+        context = this.compactSubContext(contextHistory, runtime.compactor, newBudget, tools);
         logger.warn(
           { attempt: attempt + 1, budget: newBudget },
           `[Subagent] ⚠ 上下文溢出,响应式降级重试(attempt ${attempt + 1}):预算 ${newBudget} 字符`,
@@ -3216,7 +3250,35 @@ export class AgentEngine implements AgentRunner {
     contextHistory: Message[],
     compactor: Compactor,
     budget?: number,
+    tools: readonly ToolDefinition[] = [],
   ): Message[] {
+    // ctx-2: 子代理预算闭环原本纯字符(maxChars = inputBudgetTokens * CHARS_PER_TOKEN,
+    // 而 CHARS_PER_TOKEN 是英文经验值,对中文失真 4-8 倍)。首轮(budget 未指定)先用
+    // BPE token 估算判断是否真的超预算(token 维度),而不是仅靠字符水位线。
+    //   - token 维度未超预算:无内存压力,不主动收紧字符预算,沿用默认 maxChars 路径;
+    //   - token 维度已超预算:按实际内容密度(chars/token)反推与 token 预算匹配的
+    //     自适应字符预算,而非沿用英文经验值。英文内容(chars/token≈4)自适应后与
+    //     旧 maxChars(tokens*4)量级一致、行为不变;中文内容(chars/token≈0.5-1)
+    //     自适应后会显著收紧,杜绝 4-8 倍超出窗口。
+    if (budget === undefined && contextHistory.length > 0) {
+      const currentTokens = estimateModelInputTokens(contextHistory, tools);
+      // maxChars 由 inputBudgetTokens * CHARS_PER_TOKEN 换算而来,反推 token 预算。
+      const tokenBudget = Math.max(1, Math.floor(compactor.maxChars / CHARS_PER_TOKEN));
+      if (currentTokens > tokenBudget) {
+        const currentChars = compactor.estimateLength(contextHistory);
+        const adaptiveCharBudget =
+          currentTokens > 0
+            ? Math.max(1, Math.floor((tokenBudget * currentChars) / currentTokens))
+            : undefined;
+        if (adaptiveCharBudget !== undefined) {
+          budget = adaptiveCharBudget;
+          logger.warn(
+            { currentTokens, tokenBudget, currentChars, adaptiveCharBudget },
+            `[Subagent] ⚠ token 维度已超预算,按内容密度自适应收紧字符预算(英文经验值 CHARS_PER_TOKEN 对中文过度宽松)`,
+          );
+        }
+      }
+    }
     // system prompt 不允许被 Compactor 裁剪。动态 workspace/tool 纪律可能使它大于
     // 最低降级系数算出的预算；若不钳制可行下限，会在真正的 provider
     // overflow 重试之前误抛 ContextCompactionError。
