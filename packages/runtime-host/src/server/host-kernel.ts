@@ -235,20 +235,26 @@ export class RuntimeHostKernel {
           // 不能让 kernel.start() 无限挂起（此时 shutdown deadline 尚未 arm）。
           // requestDrain() 触发 #commitShutdown，其 arm 的 shutdown deadline 会在
           // recover 仍不返回时升级为 process_termination_required。
-          await Promise.race([
-            this.#composition.recover(),
-            new Promise<never>((_, reject) => {
-              const timer = setTimeout(() => {
-                this.#requestDrain();
-                reject(
-                  new Error(
-                    "Runtime Host composition recover exceeded the startup deadline",
-                  ),
-                );
-              }, RECOVER_STARTUP_DEADLINE_MS);
-              timer.unref?.();
-            }),
-          ]);
+          // recover 成功 settle 后必须 clearTimeout——否则 timer 到期会把已就绪的
+          // 健康 host 强制 requestDrain（自我 drain）。
+          let recoverDeadlineTimer: NodeJS.Timeout | undefined;
+          try {
+            await Promise.race([
+              this.#composition.recover(),
+              new Promise<never>((_, reject) => {
+                recoverDeadlineTimer = setTimeout(() => {
+                  this.#requestDrain();
+                  reject(
+                    new Error(
+                      "Runtime Host composition recover exceeded the startup deadline",
+                    ),
+                  );
+                }, RECOVER_STARTUP_DEADLINE_MS);
+              }),
+            ]);
+          } finally {
+            if (recoverDeadlineTimer) clearTimeout(recoverDeadlineTimer);
+          }
         } finally {
           settleCompositionStartup();
         }
@@ -533,6 +539,9 @@ export class RuntimeHostKernel {
   #isTrueIdle(): boolean {
     return (
       this.#state === "ready" &&
+      // 握手中的 transport 也算活动：idle 到期瞬间若有 client 正在握手，不应把
+      // candidate 整个拆掉（handshaking 本身已被 handshakeTimeoutMs 限界，不会永久 pin）。
+      this.#handshakingTransports.size === 0 &&
       this.#acceptedTransports.size === 0 &&
       this.#activeOperations === 0 &&
       this.#activeResidencies === 0
