@@ -1474,11 +1474,15 @@ export async function executeAgentRuntime(
     // 记忆触发器工具：memory_remember 前台同步提取并返回具体内容；memory_extract 后台异步。
     const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
     if (memoryReviewScheduler && memoryReviewMode !== "eco") {
-      const rememberHandler = memoryRepository && memoryModelFactory
+      // Capture the narrowed values: memoryRepository is a reassignable `let`, so
+      // its guard narrowing would be lost inside the async closure.
+      const memoryRepo = memoryRepository;
+      const memoryModel = memoryModelFactory;
+      const rememberHandler = memoryRepo && memoryModel
         ? async (ref: TerminalMemoryEvidenceRef): Promise<MemoryProposalProcessResult> => {
             const repo = new MemoryRepository({
-              storageRoot: memoryRepository.storageRoot,
-              workspaceId: memoryRepository.workspaceId,
+              storageRoot: memoryRepo.storageRoot,
+              workspaceId: memoryRepo.workspaceId,
             });
             try {
               const store = new MemoryRepositoryProposalStore(repo);
@@ -1486,7 +1490,7 @@ export async function executeAgentRuntime(
                 readSessionEvent: (sid, eid) => session.runtimeEventStore!.readSessionEvent(sid, eid),
                 readSessionEntries: (sid) => session.runtimeEventStore!.readSessionEntries(sid),
               });
-              const model = memoryModelFactory().model;
+              const model = (await memoryModel()).model;
               const engine = new MemoryProposalEngine({ store, evidenceReader, model });
               return await engine.process(ref);
             } finally {
