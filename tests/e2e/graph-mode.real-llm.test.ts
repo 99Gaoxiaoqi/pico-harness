@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -112,7 +112,7 @@ realModelTest(
     const canary = `GRAPH_${randomUUID().replaceAll("-", "").toUpperCase()}`;
 
     const runtime = new AgentRuntime();
-    const result = await runtime.execute(
+    await runtime.execute(
       {
         ...modelRequest(model),
         prompt: [

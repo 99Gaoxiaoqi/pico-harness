@@ -19,7 +19,6 @@ import {
 } from "../../src/input/session-settings.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
-  type RuntimeEvent,
 } from "../../src/storage/runtime-event.js";
 import {
   RuntimeEventStore,

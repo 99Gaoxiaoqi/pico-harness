@@ -18,7 +18,6 @@ import {
   type RuntimeEventStoreEntry,
 } from "../../src/storage/runtime-event-store.js";
 import { projectGraphEntries } from "../../src/graph/graph-reducer.js";
-import type { GraphProjection } from "../../src/graph/contract.js";
 import { configuredUserDefaultRealModel, type RealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 10 * 60_000;
@@ -148,7 +147,7 @@ function dumpGraph(label: string, entries: readonly RuntimeEventStoreEntry[], sa
   );
 }
 
-function dumpEventStream(events: readonly RuntimeEvent[], sandbox: TestSandbox): void {
+function dumpEventStream(events: readonly RuntimeEvent[]): void {
   const graphEvents = events.filter((e) => e.kind.startsWith("graph."));
   console.log("\n===== graph event stream =====");
   for (const event of graphEvents) {
@@ -227,7 +226,7 @@ realModelTest(
     const entries = await readRuntimeEventEntries(sandbox);
     const projection = projectGraphEntries(sandbox.graphId, entries);
     dumpGraph("T1 incremental", entries, sandbox);
-    dumpEventStream(events, sandbox);
+    dumpEventStream(events);
 
     // Both works were added and settled.
     const works = projection.works;
@@ -291,7 +290,7 @@ realModelTest(
     const entries = await readRuntimeEventEntries(sandbox);
     const projection = projectGraphEntries(sandbox.graphId, entries);
     dumpGraph("T2 failure", entries, sandbox);
-    dumpEventStream(events, sandbox);
+    dumpEventStream(events);
 
     // Key observation: subagents report "cannot complete" as a *successful*
     // completion (recorded), not as an error. So the failure-propagation path
@@ -356,7 +355,7 @@ realModelTest(
     const entries = await readRuntimeEventEntries(sandbox);
     const projection = projectGraphEntries(sandbox.graphId, entries);
     dumpGraph("T5 deadlock", entries, sandbox);
-    dumpEventStream(events, sandbox);
+    dumpEventStream(events);
 
     const works = projection.works;
     for (const work of works) {
@@ -430,7 +429,7 @@ realModelTest(
     const entries = await readRuntimeEventEntries(sandbox);
     const projection = projectGraphEntries(sandbox.graphId, entries);
     dumpGraph("T6 forced-after-close", entries, sandbox);
-    dumpEventStream(events, sandbox);
+    dumpEventStream(events);
 
     const works = projection.works;
     const closeIndex = events.findIndex((e) => e.kind === "graph.closed");
@@ -513,7 +512,7 @@ realModelTest(
     const entries = await readRuntimeEventEntries(sandbox);
     const projection = projectGraphEntries(sandbox.graphId, entries);
     dumpGraph("T3 after-close", entries, sandbox);
-    dumpEventStream(events, sandbox);
+    dumpEventStream(events);
 
     const works = projection.works;
     const postCloseAdded = works.filter((w) => w.status === "requested" || w.status === "dispatched");
@@ -580,7 +579,7 @@ realModelTest(
     const entries = await readRuntimeEventEntries(sandbox);
     const projection = projectGraphEntries(sandbox.graphId, entries);
     dumpGraph("T4 load", entries, sandbox);
-    dumpEventStream(events, sandbox);
+    dumpEventStream(events);
 
     const works = projection.works;
     assert.ok(works.length >= 4, `expected >=4 works, got ${works.length}`);
