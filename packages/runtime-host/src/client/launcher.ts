@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export interface DetachedCandidateInput {
   rootPath: string;
@@ -30,32 +31,54 @@ export type CandidateLauncher = (input: DetachedCandidateInput) => DetachedCandi
  * - Compiled (dist): `candidate-main.js` sits next to the compiled client and is
  *   run directly by node.
  * - Source (tsx): only `candidate-main.ts` exists. The candidate is a detached
- *   `node` process, so it needs the tsx ESM loader registered via `--import tsx`
- *   (resolved from the process cwd's node_modules). Without this the spawned
- *   child dies with ERR_MODULE_NOT_FOUND and the election loop only ever sees a
- *   bare `startup_timeout`.
+ *   `node` process, so it needs the tsx ESM loader registered via `--import`.
+ *   The loader is resolved to an absolute path from this module's own location
+ *   (createRequire) so the spawn does not depend on the child's cwd being able
+ *   to resolve the bare `tsx` specifier. Without the loader the spawned child
+ *   dies with ERR_MODULE_NOT_FOUND and the election loop only ever sees a bare
+ *   `startup_timeout`.
  */
-function resolveDefaultEntrypoint(): { path: string; needsTsLoader: boolean } {
+function resolveDefaultEntrypoint(): { path: string; tsxLoaderPath?: string } {
   const compiledPath = fileURLToPath(new URL('../candidate-main.js', import.meta.url));
-  if (existsSync(compiledPath)) return { path: compiledPath, needsTsLoader: false };
+  if (existsSync(compiledPath)) return { path: compiledPath };
   const sourcePath = fileURLToPath(new URL('../candidate-main.ts', import.meta.url));
-  if (existsSync(sourcePath)) return { path: sourcePath, needsTsLoader: true };
+  if (existsSync(sourcePath)) return { path: sourcePath, tsxLoaderPath: resolveTsxLoaderPath() };
   // Let node surface a clear module-not-found rather than the election loop
   // timing out with no information.
-  return { path: compiledPath, needsTsLoader: false };
+  return { path: compiledPath };
+}
+
+function resolveTsxLoaderPath(): string {
+  try {
+    const resolved = createRequire(import.meta.url).resolve('tsx');
+    // node --import 需要 file:// URL（Windows 裸绝对路径会被当作 URL scheme 报
+    // ERR_UNSUPPORTED_ESM_URL_SCHEME），故转为 file URL。
+    return pathToFileURL(resolved).href;
+  } catch {
+    // Fall back to the bare specifier; the child then resolves tsx from its own
+    // cwd's node_modules (works when spawned from within the workspace).
+    return 'tsx';
+  }
 }
 
 export function launchDetachedRuntimeHostCandidate(
   input: DetachedCandidateInput,
 ): DetachedCandidateLaunch {
   const executable = input.executable ?? process.execPath;
-  const entrypoint = input.entrypoint ?? resolveDefaultEntrypoint().path;
-  const entrypointPath = typeof entrypoint === 'string' ? entrypoint : fileURLToPath(entrypoint);
-  const needsTsLoader =
-    input.entrypoint === undefined && resolveDefaultEntrypoint().needsTsLoader;
+  // Resolve the default entrypoint once; path and loader must come from the same
+  // resolution to avoid a TOCTOU between the two existsSync checks.
+  const resolvedDefault = resolveDefaultEntrypoint();
+  const usesDefaultEntrypoint = input.entrypoint === undefined;
+  const entrypointPath =
+    input.entrypoint === undefined
+      ? resolvedDefault.path
+      : typeof input.entrypoint === 'string'
+        ? input.entrypoint
+        : fileURLToPath(input.entrypoint);
+  const tsxLoaderPath = usesDefaultEntrypoint ? resolvedDefault.tsxLoaderPath : undefined;
   const args = [
-    // 源码模式下为 detached node 子进程注册 tsx ESM loader（cwd 需能解析 tsx）。
-    ...(needsTsLoader ? ['--import', 'tsx'] : []),
+    // 源码模式下为 detached node 子进程注册 tsx ESM loader（绝对路径，不依赖子进程 cwd）。
+    ...(tsxLoaderPath ? ['--import', tsxLoaderPath] : []),
     entrypointPath,
     '--root',
     input.rootPath,
@@ -68,7 +91,9 @@ export function launchDetachedRuntimeHostCandidate(
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.
   const child = spawn(executable, args, {
-    cwd: needsTsLoader ? process.cwd() : dirname(isAbsolute(executable) ? executable : process.execPath),
+    cwd: tsxLoaderPath
+      ? process.cwd()
+      : dirname(isAbsolute(executable) ? executable : process.execPath),
     detached: true,
     stdio: 'ignore',
     windowsHide: true,

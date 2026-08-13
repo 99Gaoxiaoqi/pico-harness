@@ -154,6 +154,8 @@ interface RetiredRequest {
   slotReleased?: boolean;
   /** TTL timer bounding how long a retired entry may pin state; cleared on match/fail. */
   slotTimer?: NodeJS.Timeout;
+  /** Absolute TTL after which the entry itself is removed (bounds liveness churn). */
+  entryTimer?: NodeJS.Timeout;
 }
 
 interface QueuedDomainFrame {
@@ -170,6 +172,11 @@ type RequestTimeoutScope = "request" | "connection";
 // stays until a matching response arrives, so a genuinely late response is still
 // reconciled instead of failing the connection as unmatched.
 const RETIRED_SLOT_TTL_MS = 30_000;
+// The retired entry itself is removed after this longer absolute TTL. Until then a
+// late response is still reconciled; after removal a very-late response is treated
+// as unmatched. This bounds the retired map and stops the perpetual liveness probes
+// a half-dead host (alive but never answering some request) would otherwise cause.
+const RETIRED_ENTRY_TTL_MS = 5 * 60_000;
 
 class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   readonly hostEpoch: string;
@@ -342,6 +349,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       if (retired?.operation === frame.operation) {
         this.#retiredRequests.delete(frame.requestId);
         if (retired.slotTimer) clearTimeout(retired.slotTimer);
+        if (retired.entryTimer) clearTimeout(retired.entryTimer);
         // 槽位 TTL 可能已强制释放过 in-flight 槽位；仅在未释放时才释放，否则计数下溢。
         if (!retired.slotReleased) this.#releaseDomainSlot(retired);
         this.#scheduleLivenessCheck();
@@ -394,8 +402,21 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       retired.slotTimer = setTimeout(() => this.#expireRetiredSlot(requestId), RETIRED_SLOT_TTL_MS);
       retired.slotTimer.unref?.();
     }
+    retired.entryTimer = setTimeout(() => this.#removeRetiredEntry(requestId), RETIRED_ENTRY_TTL_MS);
+    retired.entryTimer.unref?.();
     this.#retiredRequests.set(requestId, retired);
     pending.reject(error);
+    this.#scheduleLivenessCheck();
+  }
+
+  #removeRetiredEntry(requestId: string): void {
+    const retired = this.#retiredRequests.get(requestId);
+    if (!retired) return;
+    if (retired.slotTimer) clearTimeout(retired.slotTimer);
+    // 条目绝对 TTL 到期删除；此后迟到响应按 unmatched 处理。5min 迟到的响应
+    // 对账价值已低于连接健康信号，且删除条目能终止 #hasOutstandingDomainRequest
+    // 因 retiredRequests 非空而产生的永久 liveness 探测。
+    this.#retiredRequests.delete(requestId);
     this.#scheduleLivenessCheck();
   }
 
@@ -492,6 +513,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     this.#pendingRequests.clear();
     for (const retired of this.#retiredRequests.values()) {
       if (retired.slotTimer) clearTimeout(retired.slotTimer);
+      if (retired.entryTimer) clearTimeout(retired.entryTimer);
     }
     this.#retiredRequests.clear();
     this.#transport.destroy();
