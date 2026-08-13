@@ -48,7 +48,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 - 事件账本无事件级 GC
 - `appendBatch` 是 RuntimeEventStore 内唯一写原语
 - 投影入口（`RuntimeProjectionService`）/压缩器（`Compactor`）不直接写账本（无第二事实源）
-- **known-debt 活体追踪**：`DelegationManager.records` 不可重建 → 标 `test.todo`，阶段 2 修复后转正向断言
+- **known-debt 活体追踪**：`DelegationManager.records` 不可重建等 P0/P1 债（D7/D9/D11/D12）是**普通测试**，断言"债务表征当前存在"——债务在 → 测试绿；债务被修复 → 表征消失 → 测试红，提醒开发者删除/反转断言。`test.todo` 的 body 永不执行、追踪全靠人记，已被弃用；修复落地时由红测试强制显式处理
 
 ### 3.2 架构门禁（`scripts/check-architecture-boundaries.mjs`）
 复用现有范式（导出 scan 函数 + fixture 注入 + baseline + `lint` 串联 + CI 双跑）。本轮新增：
@@ -111,7 +111,18 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 1. 把 `src/mobile-gateway/` 升级为通用网关（支持本地 socket + WS 双传输），定义 `RuntimeHostConnection` 契约 + `ClientSurface`。
 2. 统一连接状态机、重连策略、transcript 分页（吸收 `loadGeneration`/`conversationLoadGenerationsRef` 到网关客户端）。
 3. Desktop 改为经网关客户端接入（取代直连 daemon IPC + 自维护 ConnectionState）。
-4. TUI 从进程内装配改为 socket 客户端（最大改动，最后做）。
+4. TUI 从进程内装配改为 socket 客户端（最大改动，最后做——部署模型变更，见下）。
+
+**部署模型变更（TUI 迁移风险评估）**：TUI 改客户端不是纯重构，而是**部署模型变更**——CLI 从"单进程"变成"CLI 客户端 + 宿主进程"。现状：`src/cli/main.ts` 直接 `startTuiRepl`（`src/tui/repl.tsx:1203`）进程内装配，`src/cli/` 无任何 daemon 依赖、无 spawn/headless 逻辑。改客户端后需重设计：
+- **进程生命周期**：宿主进程（网关/daemon）由 CLI 常驻派生还是按需 spawn？CLI 退出时宿主如何回收（孤儿进程）？repl 退出/崩溃后连接如何恢复？
+- **headless/离线兼容**：现有 CLI 无头可用（纯进程内、无 daemon 依赖）；改客户端后无宿主时如何降级——`pico run`/CI/脚本类调用不能依赖交互式宿主常驻。
+- **降级路径**：保留一条不经网关的进程内/直连路径（如 headless 标志走进程内装配），避免 TUI 迁移阻塞其它外壳先拿到网关收益。
+- 排序仍放最后，但**工作量不是"改一个组件"而是"重设计部署模型"**，需单独立项评估，不宜与 1-3 混在同一轮。
+
+**与 LocalDaemonHost 的关系（叠加，非替换）**：统一网关层**叠加于 `LocalDaemonHost` 之上**，不是另起炉灶：
+- 网关 = `src/mobile-gateway/` 升级（本地 socket + WS 双传输）+ 统一契约层（`RuntimeHostConnection`/`ClientSurface`/transcript 分页/连续性），复用 mobile 网关已有的实时通道与服务端。
+- `LocalDaemonHost`（`src/daemon/runtime-host.ts`，生产装配 `src/daemon/production-host.ts:90`，入口 `src/daemon/main.ts`）保留为 **RuntimeHostKernel 等价物**——外壳/传输层的对端，不随网关升级而消失；daemon IPC 作为网关的服务端后端之一，`connectWithTimeout` 的 socket 事件式语义由网关收口。
+- 即 maka 的 `RuntimeHostKernel` ↔ pico 的 `LocalDaemonHost`；maka 的 `RuntimeHostConnection` ↔ pico 新建的网关契约。外壳只与契约层对话，daemon 不感知外壳差异；Desktop 直连 daemon 的旧路径降级保留（`ConnectionState` 由网关客户端接管后仅作降级回退）。
 
 ## 6. 架构债清单（本轮新增，对接 09）
 

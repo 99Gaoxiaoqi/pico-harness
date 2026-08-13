@@ -69,20 +69,86 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
 });
 
 // --- 已知架构债（活体追踪器）-----------------------------------------------
-// 以下测试追踪 docs/architecture/20 的 P0/P1 债。标记为 todo：当前债存在（预期），
-// 对应修复落地后转为正向断言。todo 测试不阻塞 CI，但让债务在测试套件里可见、可检索。
+// 以下测试追踪 docs/architecture/20 的 P0/P1 债。与 test.todo 不同，这些是**普通测试**：
+// 断言"债务表征当前存在"。债务在 → 测试绿；债务被修复 → 表征消失 → 测试红，
+// 提醒开发者删除/反转本测试。这是活体追踪——修复落地时由红测试强制显式处理，
+// 而不是靠人记。修复对应债务后：删除该测试，或按注释转为正向断言。
 
-test(
-  "DelegationManager.records 应可重建或标为非权威缓存",
-  {
-    todo: "P0 调度态债（阶段 2 claim 推广）：records 当前是不可持久化的事实权威（孤儿检测依赖重启清空）。" +
-      "修复方向——用 RuntimeStore.acquireLease 给 graph work 套 durable lease，records 降为非权威缓存，" +
-      "orphan 恢复按 lease 活性判定。修复后本测试转为断言 records 有 rebuild/lease 回源路径。",
-  },
-  () => {
-    const manager = readSource("src/tools/delegation-manager.ts");
-    // 当前预期：records 既无 rebuild 路径、也无 delete（只增不删的事实权威）。
-    // 修复后这两个断言应反转。
-    assert.doesNotMatch(manager, /\brestore\b|\bhydrate\b|replaceFromAuthority/);
-  },
-);
+test("D7 债务追踪：DelegationManager.records 仍是不可重建的事实权威", () => {
+  // P0 调度态债（阶段 2 claim 推广）：records 当前是不可持久化的事实权威
+  // （孤儿检测依赖重启清空返回空集）。
+  // 修复方向——用 RuntimeStore.acquireLease 给 graph work 套 durable lease，
+  // records 降为非权威缓存，orphan 恢复按 lease 活性判定。
+  const manager = readSource("src/tools/delegation-manager.ts");
+  // 债务表征：
+  // 1) records 无 rebuild 路径（restore/hydrate/replaceFromAuthority 均不存在）——债务在时 pass；
+  // 2) records 核心结构还在（\brecords\b）——records 被移除/重构时此断言红。
+  assert.doesNotMatch(
+    manager,
+    /\brestore\b|\bhydrate\b|replaceFromAuthority/,
+    "records 仍无 rebuild 路径（债务表征 1：不可重建的事实权威）",
+  );
+  assert.match(manager, /\brecords\b/, "records 结构仍在（债务表征 2）");
+  // 阶段 2 claim 推广修复后：删除本测试，或反转为正向断言——
+  // records 有 rebuild/lease 回源路径（如 assert.match(manager, /acquireLease/)）。
+});
+
+test("D9 债务追踪：多外壳连接状态/重连三套仍并存（无统一网关层）", () => {
+  // P0 机械态债（阶段 3 网关层）：Desktop / Mobile / daemon-client 各维护一套
+  // 连接状态机与重连策略，互不互通——daemon 重启后传输层自愈，renderer 却卡
+  // "请重启 Pico 应用"。网关层统一后三套收敛为一套 RuntimeHostConnection。
+  const desktopModel = readSource("apps/desktop/src/renderer/model.ts");
+  const mobileRealtime = readSource("apps/mobile/src/lib/mobile-gateway-realtime.ts");
+  const daemonClient = readSource("src/daemon/client.ts");
+  // 债务表征：三套状态机定义都还在。任一外壳收敛到网关后对应断言红。
+  assert.match(
+    desktopModel,
+    /\bConnectionState\b/,
+    "Desktop ConnectionState 状态机仍在（未收敛到网关）",
+  );
+  assert.match(
+    mobileRealtime,
+    /\bMobileRealtimeState\b/,
+    "Mobile 实时状态机仍在（未收敛到网关）",
+  );
+  assert.match(
+    daemonClient,
+    /\breconnectAttempt\b/,
+    "daemon client 自维护无限重连（reconnectAttempt 无重试上限）仍在",
+  );
+  // 阶段 3 网关层统一后：删除本测试（外壳只保留展示层，无自有状态机）。
+});
+
+test("D11 债务追踪：Memory rebuild 不重放 overlay mutation（复活链仍在）", () => {
+  // P1 叙事态债：forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition
+  // ——overlay 意图（Settings/manual-fact/Fact 裁决/审计）无法从账本重建。
+  const rebuild = readSource("src/memory/memory-rebuild.ts");
+  // 债务表征：rebuild 只重建派生层（Source + Jobs），不触碰 overlay——不重放
+  // overlay mutation。overlay 可重建化（或账本镜像 forget 意图）落地后，rebuild
+  // 必然开始引用 forgetFact/重放逻辑 → 本断言红。
+  assert.doesNotMatch(
+    rebuild,
+    /\bforgetFact\b/,
+    "memory-rebuild 不得重放 overlay mutation（forgetFact 等）；overlay 可重建化后删除本测试",
+  );
+});
+
+test("D12 债务追踪：transcript 同步双实现仍并存（desktop/mobile 各一套）", () => {
+  // P1 机械态债（阶段 3 网关层）：transcript 分页/连续性两套实现——Desktop 的
+  // conversationLoadGenerationsRef 与 Mobile 的 loadGenerationRef，应统一吸收进
+  // 网关客户端（maka 式 RuntimeHostConnection.loadTranscript）。
+  const desktopRuntime = readSource("apps/desktop/src/renderer/runtime.ts");
+  const mobileSession = readSource("apps/mobile/src/app/session.tsx");
+  // 债务表征：两套 generation 追踪 ref 都还在。任一实现被网关吸收后对应断言红。
+  assert.match(
+    desktopRuntime,
+    /\bconversationLoadGenerationsRef\b/,
+    "Desktop transcript generation 追踪仍在（未收敛到网关）",
+  );
+  assert.match(
+    mobileSession,
+    /\bloadGenerationRef\b/,
+    "Mobile transcript generation 追踪仍在（未收敛到网关）",
+  );
+  // 阶段 3 网关层统一 transcript 同步后：删除本测试。
+});
