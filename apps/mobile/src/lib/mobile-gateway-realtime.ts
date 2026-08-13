@@ -8,8 +8,10 @@ const CONNECT_TIMEOUT_MS = 8_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000] as const;
 /** 重连次数封顶（约 78s 后放弃，避免 gateway 真死时无限耗电/流量）。 */
 const RECONNECT_MAX_ATTEMPTS = 10;
-/** 客户端主动 close 的码：这些不视为服务端认证拒绝，应进入重连而非停止。 */
-const CLIENT_CLOSE_CODES = new Set([1000, 1001, 1003, 4000]);
+/** gateway 用 1008 (Policy Violation) 表示认证拒绝（Unauthorized / 认证超时）。
+ *  仅此码停止重连；其余码（1006 网络中断、1011 服务端临时错误等）一律退避重连，
+ *  避免把网络抖动/gateway 慢启动误判为 Token 过期而永久断连。 */
+const AUTH_FAILURE_CODES = new Set([1008]);
 
 const RUN_STATUSES = new Set<MobileRun["status"]>([
   "queued",
@@ -103,12 +105,15 @@ export class MobileGatewayRealtimeClient {
         if (!disposed) handlers.onError?.(new Error("Gateway 实时连接失败"));
       };
       socket.onclose = (closeEvent) => {
-        if (disposed) return;
+        // 旧 socket 的 onclose 必须忽略：openSocket() 重开会主动 close 旧 socket，
+        // 若不校验身份，旧 close 会触发 scheduleReconnect 形成自激重连风暴，且会
+        // 误清新 socket 的 connectTimeoutTimer。
+        if (disposed || currentSocket !== socket) return;
         clearTimeout(connectTimeoutTimer);
         connectTimeoutTimer = undefined;
-        // 认证/握手失败（连上却没收到 ready 即被服务端关闭）→ 停止重连，避免 token
-        // 过期时反复重连形成请求风暴。客户端主动 close 的码不在此列，走重连。
-        const isAuthFailure = !receivedReady && !CLIENT_CLOSE_CODES.has(closeEvent.code);
+        // 仅 gateway 的认证拒绝码（1008）在握手期才停止重连，避免 token 过期时
+        // 反复重连形成请求风暴；其它码（1006 网络中断、1011 服务端错误等）退避重连。
+        const isAuthFailure = !receivedReady && AUTH_FAILURE_CODES.has(closeEvent.code);
         if (isAuthFailure) {
           handlers.onError?.(new Error("Gateway Token 无效或已过期，请返回重新连接"));
           handlers.onStateChange?.("disconnected");

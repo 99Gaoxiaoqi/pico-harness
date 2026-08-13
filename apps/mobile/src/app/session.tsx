@@ -55,6 +55,9 @@ export default function SessionScreen() {
   const [realtimeState, setRealtimeState] = useState<MobileRealtimeState>();
   const [realtimeError, setRealtimeError] = useState<string>();
   const transcriptRef = useRef<MobileTranscript | undefined>(undefined);
+  // load 防过期：每次 load 取号，异步返回后只有"最新一次"才允许写状态，
+  // 避免分页与 hydration 交错时旧结果覆盖新结果（参考 desktop conversationLoadGenerationsRef）。
+  const loadGenerationRef = useRef(0);
   const hydrationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const scrollViewRef = useRef<ScrollView | null>(null);
   const shouldFollowOutput = useRef(true);
@@ -68,6 +71,9 @@ export default function SessionScreen() {
       setLoading(false);
       return;
     }
+    // 取号标记本次加载，await 回来后据此判断是否已被更新的 load 接管。
+    const generation = ++loadGenerationRef.current;
+    const isCurrentLoad = () => loadGenerationRef.current === generation;
     try {
       const [origin, token] = await Promise.all([
         SecureStore.getItemAsync(GATEWAY_ORIGIN_KEY),
@@ -83,6 +89,7 @@ export default function SessionScreen() {
         sessionId,
         before,
       );
+      if (!isCurrentLoad()) return; // 已有更新的 load 接管，丢弃本次过期结果，避免覆盖新状态
       if (before) {
         // 分页：把更早的一页 prepend 到现有 items 前
         setTranscript((current) => {
@@ -93,17 +100,27 @@ export default function SessionScreen() {
           return merged;
         });
       } else {
-        transcriptRef.current = fetched;
-        setTranscript(fetched);
+        // hydration（全量刷新）：增量合并而非整体替换，保留用户已分页加载的更早消息，
+        // 否则任何 realtime 事件触发 load() 都会用最新一页覆盖掉已翻出来的历史。
+        setTranscript((current) => {
+          const merged = current ? hydrateTranscript(current, fetched) : fetched;
+          transcriptRef.current = merged;
+          return merged;
+        });
         setLiveItems((current) => reconcileMobileLiveItems(fetched.items, current));
         setError(undefined);
       }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "会话记录读取失败");
+      if (isCurrentLoad()) {
+        setError(loadError instanceof Error ? loadError.message : "会话记录读取失败");
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
-      setLoadingEarlier(false);
+      // 仅让最新一次 load 负责清理加载态，防止过期 load 提前清掉正在进行的加载指示。
+      if (isCurrentLoad()) {
+        setLoading(false);
+        setRefreshing(false);
+        setLoadingEarlier(false);
+      }
     }
   }, [projectId, sessionId]);
 
@@ -446,6 +463,27 @@ function isActiveRun(run: MobileRun): boolean {
     run.status === "paused" ||
     run.status === "cancelling"
   );
+}
+
+function hydrateTranscript(
+  current: MobileTranscript,
+  fetched: MobileTranscript,
+): MobileTranscript {
+  // hydration 增量合并：transcript 条目按 id 去重，保留当前已分页加载的更早消息，
+  // 再追加 fetched 带来的新条目，避免无参 load() 整体替换导致已翻出的历史消失。
+  const fetchedIds = new Set(fetched.items.map((item) => item.id));
+  const earlier = current.items.filter((item) => !fetchedIds.has(item.id));
+  if (earlier.length === 0) {
+    // 当前条目已全部包含在最新页中（未分页或 fetched 为超集）：直接采用 fetched 的最新页与游标。
+    return fetched;
+  }
+  // 保留更早消息；分页游标沿用 current 的更深层游标（指向比已加载更早的位置），
+  // 以便继续向更早翻页；其余元数据（session / activeRun / revision）取 fetched 的最新值。
+  return {
+    ...fetched,
+    items: [...earlier, ...fetched.items],
+    nextBefore: current.nextBefore ?? fetched.nextBefore,
+  };
 }
 
 function applyRealtimeRun(transcript: MobileTranscript, run: MobileRun): MobileTranscript {
