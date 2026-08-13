@@ -16,6 +16,7 @@ import {
 } from "./protocol.js";
 import { resolveLocalDaemonEndpoint, type LocalDaemonEndpoint } from "./endpoint.js";
 import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
+import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 100;
@@ -531,13 +532,13 @@ class RuntimeConnection {
       ),
     );
     try {
-      await withTimeout(
+      await raceWithDeadlineReject(
         new Promise<void>((resolve, reject) => {
           this.authentication = { resolve, reject };
           socket.write(encodeRuntimeFrame(createRuntimeAuthRequest(token)));
         }),
         CONNECT_TIMEOUT_MS,
-        "本机 Runtime IPC 认证超时",
+        () => new RuntimeClientError("RUNTIME_TIMEOUT", "本机 Runtime IPC 认证超时", true),
       );
     } catch (error) {
       socket.destroy();
@@ -611,23 +612,6 @@ async function connectWithTimeout(address: string): Promise<Socket> {
     });
   } catch (error) {
     throw toUnavailableError(error);
-  }
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(
-          () => reject(new RuntimeClientError("RUNTIME_TIMEOUT", message, true)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
   }
 }
 

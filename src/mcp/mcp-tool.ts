@@ -34,11 +34,6 @@ export class McpToolBridge implements BaseTool {
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   readonly toolset = "mcp";
 
-  /** 只有声明 process_tree 的 client（当前为 POSIX stdio）可做物理收口强承诺。 */
-  get handlesAbortSignal(): boolean {
-    return this.client.toolCancellationScope === "process_tree";
-  }
-
   private readonly qualifiedName: string;
   private readonly toolDefinition: ToolDefinition;
 

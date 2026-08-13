@@ -51,7 +51,6 @@ const MAX_RESULTS = 100;
  */
 export class GlobTool implements BaseTool {
   readonly readOnly = true;
-  readonly handlesAbortSignal = true;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {

@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 import { LeaseConflictError, OwnerLease, type OwnerLeaseRecord } from "./owner-lease.js";
 
 const FILE_TRANSACTION_SCHEMA_VERSION = 1 as const;
@@ -1403,27 +1404,19 @@ async function waitForLocalLockTurn(
   deadline: number,
   lockPath: string,
 ): Promise<void> {
+  // 动态剩余超时:deadline 与当前时间的差值,保留此计算(每轮重算,非固定值)。
   const remainingMs = Math.max(0, deadline - Date.now());
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      previous.catch(() => undefined),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new FileLockTimeoutError(
-                `Timed out waiting for in-process file lock ${lockPath}`,
-                lockPath,
-              ),
-            ),
-          remainingMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  // previous reject 时 .catch 吞掉(轮次传递,锁竞争失败由后续轮处理);仅超时 reject。
+  // 定时器句柄清理收敛进 raceWithDeadlineReject。
+  await raceWithDeadlineReject(
+    previous.catch(() => undefined),
+    remainingMs,
+    () =>
+      new FileLockTimeoutError(
+        `Timed out waiting for in-process file lock ${lockPath}`,
+        lockPath,
+      ),
+  );
 }
 
 function isNodeCode(error: unknown, code: string): boolean {

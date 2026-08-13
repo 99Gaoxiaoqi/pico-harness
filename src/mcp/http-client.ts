@@ -12,6 +12,7 @@
 // 接口与 StdioMcpClient 一致(McpClient),让 McpConnectionManager 无感切换。
 
 import { logger } from "../observability/logger.js";
+import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
 import {
   JsonRpcErrorCode,
@@ -673,19 +674,18 @@ export class HttpMcpClient implements McpClient {
 
     // 等 endpoint 事件到达(带超时)
     const timeoutMs = this.config.startupTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    let timer: NodeJS.Timeout | undefined;
+    // errorFactory 仅在截止时间到达时被调用一次,兼作"超时"信号:超时时 abort SSE 流
+    // (与原实现一致,避免悬挂连接);ready 自身 reject 时 sseAbort 不触发(由流自身错误处理收口)。
+    // 定时器句柄清理收敛进 raceWithDeadline。
+    let sseTimedOut = false;
     try {
-      await Promise.race([
-        ready,
-        new Promise<void>((_, reject) => {
-          timer = setTimeout(() => {
-            this.sseAbort?.abort();
-            reject(new Error(`等待 SSE endpoint 事件超时`));
-          }, timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
+      await raceWithDeadlineReject(ready, timeoutMs, () => {
+        sseTimedOut = true;
+        return new Error("等待 SSE endpoint 事件超时");
+      });
+    } catch (error) {
+      if (sseTimedOut) this.sseAbort?.abort();
+      throw error;
     }
   }
 

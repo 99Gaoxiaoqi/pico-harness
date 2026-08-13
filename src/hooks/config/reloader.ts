@@ -10,6 +10,7 @@ import {
 } from "../config.js";
 import { resolveReferencedScripts } from "./referenced-scripts.js";
 import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
+import { raceWithDeadline } from "../../util/race-with-deadline.js";
 
 const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 1_000;
 
@@ -352,7 +353,7 @@ export class HookConfigReloader {
   }
 
   private async finishStop(draining: Promise<void>): Promise<void> {
-    await settleWithinDeadline(draining, this.stopDrainTimeoutMs);
+    await raceWithDeadline(draining, this.stopDrainTimeoutMs);
     this.clearScheduledReload();
     this.closeWatchers();
   }
@@ -364,20 +365,6 @@ function boundedDrainTimeout(value: number | undefined): number {
     throw new RangeError("Hook reloader stopDrainTimeoutMs 必须是非负有限数");
   }
   return timeoutMs;
-}
-
-async function settleWithinDeadline(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise.then(() => true),
-      new Promise<boolean>((resolveTimeout) => {
-        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function closeWatcherMap(watchers: ReadonlyMap<string, FSWatcher>): void {

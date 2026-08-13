@@ -416,7 +416,6 @@ function compileSearchPattern(pattern: string, caseSensitive: boolean): RegExp |
 
 export class GrepTool implements BaseTool {
   readonly readOnly = true;
-  readonly handlesAbortSignal = true;
   private readonly roots: WorkspaceRoots;
 
   constructor(
