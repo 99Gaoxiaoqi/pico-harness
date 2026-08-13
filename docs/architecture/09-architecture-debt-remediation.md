@@ -255,6 +255,22 @@ Desktop 的 MCP 目录查询与执行现在都复用同一个 `PluginRuntimeSnap
 
 `run.live` 的 scope/payload Run 身份现在必须一致，terminal event 不得携带 delta/truncated；daemon、Main/Preload buffer 和 Renderer 都保持 stream terminal 单调性，迟到 append 不会重启已完成的 thinking。有界 buffer 在 durable event 入队前优先驱逐 append delta，terminal tombstone 优先于 append，且 live coalesce 不跨越 durable/其他 stream 屏障；驱逐前缀或收到上游 `truncated:true` 后，截断状态会跨 `drain()` 保留到 complete/clear，不会把 suffix 伪装成完整内容。工具轮在 `tool.started` 持久时间线前先完成对应 live stream；message RuntimeEvent 的 `runId + turnId` 会贯通到 durable thinking 和 live item，`session.transcript` 结果边界也会拒绝非字符串身份。hydration 只按显式轮次身份替换 active live，不再用文本相等或前缀猜测轮次。只有无身份的截断旧流保留保守前缀收口，截断提示本身不参与匹配。工具条目按 `providerCallId` 和 durable sequence 选择最近前驱调用，ToolResult 队列在去重前同步消耗，避免跨轮复用 ID 时错配。`LocalRuntimeClient` 在回放失败或 overlap buffer 溢出后保持 recovery fence，成功重放前不交付新 durable event、不推进 cursor；Unix Socket 集成回归覆盖了溢出与重试间隙。
 
+## 2026-08-13 全局三态审计新增债务
+
+本轮架构审计（叙事/调度/机械三态）发现 D1-D6 之外的新结构性债务，完整诊断与治理机制见 [`20-architecture-audit-and-governance.md`](./20-architecture-audit-and-governance.md)：
+
+| 编号 | 债务 | 态 | 级别 | 修复阶段 |
+|---|---|---|---|---|
+| D7 | `DelegationManager.records` 内存事实权威 + 双去重倒挂 | 调度 | P0 | 阶段 2 claim 推广 |
+| D8 | 超时原语全栈散落（3+2+多处） | 机械 | P0 | 阶段 1（已收敛为 raceWithDeadline；`connectWithTimeout`（`src/daemon/client.ts:594`，socket 事件式）除外，属阶段 3 网关层收口） |
+| D9 | 多外壳连接状态/重连三套不互通（缺统一网关层） | 机械 | P0 | 阶段 3 网关层 |
+| D10 | Graph 无真 DAG / 无内容级熔断 / DelegationManager 职责错位 | 调度 | P1 | 阶段 2/3 |
+| D11 | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事 | P1 | 后续 |
+| D12 | `DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现 | 机械 | P1 | 阶段 3 |
+| D13 | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移 | 叙事/调度 | P2 | 清理 |
+
+核心结论：4 条设计原则在叙事态执行扎实（健康度 4/5），但调度态（2/5）和机械态（2.5/5）退化为"内存权威 + 补丁驱动"。治理机制（不变量测试 [`architecture-invariants.test.ts`](../../tests/integration/architecture-invariants.test.ts) + 架构门禁横切唯一性规则）已建立；阶段 1（超时收敛）已落地；阶段 2（claim 推广）与阶段 3（统一网关层）待启动。
+
 ## 修整原则
 
 1. 先用回归测试固定用户可见缺陷，再改抽象。

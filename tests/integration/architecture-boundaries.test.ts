@@ -5,7 +5,10 @@ import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { join, resolve } from "node:path";
-import { scanArchitectureBoundaries } from "../../scripts/check-architecture-boundaries.mjs";
+import {
+  scanArchitectureBoundaries,
+  scanCrossCuttingDefinitions,
+} from "../../scripts/check-architecture-boundaries.mjs";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, "../..");
@@ -64,4 +67,125 @@ test("architecture boundary gate rejects Engine type-only imports from Runtime",
       },
     ],
   );
+});
+
+test("architecture gate flags locally-defined cross-cutting primitives", async (context) => {
+  // 横切超时原语必须统一用 src/util/race-with-deadline.ts，不得本地重定义。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-cross-cutting-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/runtime", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  await writeFile(
+    join(fixtureRoot, "src/runtime/custom.ts"),
+    "async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> { return p; }\n" +
+      "function settleWithinDeadline(p: Promise<unknown>, ms: number): Promise<boolean> { return Promise.resolve(true); }\n",
+    "utf8",
+  );
+
+  const violations = scanCrossCuttingDefinitions({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(
+    violations.map(({ rule, target }) => ({ rule, target })).sort((a, b) =>
+      a.target.localeCompare(b.target),
+    ),
+    [
+      { rule: "cross-cutting-duplicate-definition", target: "settleWithinDeadline" },
+      { rule: "cross-cutting-duplicate-definition", target: "withTimeout" },
+    ],
+  );
+});
+
+test("architecture gate flags dynamic import() of Runtime from Engine", async (context) => {
+  // 动态 import() 与静态 import 同权：engine 不得在运行时加载 runtime 实现。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-architecture-dynamic-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/engine", "src/runtime", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  await writeFile(
+    join(fixtureRoot, "src/runtime/private.ts"),
+    "export const secret = 42;\n",
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/engine/consumer.ts"),
+    'async function go() { await import("../runtime/private.js"); }\n',
+    "utf8",
+  );
+
+  const violations = scanArchitectureBoundaries({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(
+    violations.map(({ rule, specifier }) => ({ rule, specifier })),
+    [
+      {
+        rule: "engine-to-runtime-implementation",
+        specifier: "../runtime/private.js",
+      },
+    ],
+  );
+});
+
+test("architecture gate sees through neutral-zone re-export bridges", async (context) => {
+  // src/util/bridge.ts re-export runtime 内容后，engine import bridge 等价于直连 runtime。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-architecture-bridge-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/engine", "src/runtime", "src/util", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  await writeFile(
+    join(fixtureRoot, "src/runtime/private.ts"),
+    "export const secret = 42;\n",
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/util/bridge.ts"),
+    'export * from "../runtime/private.js";\n',
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/engine/consumer.ts"),
+    'import { secret } from "../util/bridge.js";\n',
+    "utf8",
+  );
+
+  const violations = scanArchitectureBoundaries({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(
+    violations.map(({ rule, specifier }) => ({ rule, specifier })),
+    [
+      {
+        rule: "engine-to-runtime-implementation",
+        specifier: "../util/bridge.js",
+      },
+    ],
+  );
+});
+
+test("architecture gate does not mistake string literals for imports", async (context) => {
+  // `export const notes = "../runtime/private.js"` 是字符串字面量，不是 import。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-architecture-literal-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/engine", "src/runtime", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  await writeFile(
+    join(fixtureRoot, "src/runtime/private.ts"),
+    "export const secret = 42;\n",
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/engine/consumer.ts"),
+    'export const notes = "../runtime/private.js";\n',
+    "utf8",
+  );
+
+  const violations = scanArchitectureBoundaries({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(violations, []);
 });
