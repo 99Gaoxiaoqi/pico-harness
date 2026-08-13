@@ -123,10 +123,10 @@ export interface RuntimeCheckpointRecordedEvent extends RuntimeEventBase {
   readonly data: RuntimeCheckpointRecordedEventData;
 }
 /**
- * @deprecated The destructive rewind / branchId mechanism has been removed
- * (rewind is now a non-destructive fork). This type is retained only so that
- * decoding legacy persisted `history.rewound` events does not crash; no new
- * code should construct or inspect this event.
+ * @legacy-only 不可生产，仅旧账本解码。rewind / branchId 破坏性机制已移除
+ * （rewind 现为非破坏性 fork）：本类型不在 RUNTIME_EVENT_KINDS 中，append
+ * 校验会拒绝；保留在判别联合中仅为了让历史持久化的 `history.rewound`
+ * 事件解码不崩溃。新代码不得构造或检查此事件。
  */
 export interface RuntimeHistoryRewoundEvent extends RuntimeEventBase {
   readonly kind: "history.rewound";

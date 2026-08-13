@@ -10,9 +10,9 @@ import {
 } from "./contract.js";
 
 /**
- * Kinds emitted by the Graph Mode event stream. These belong on
- * {@link RuntimeEvent} once graph.* events are formally registered in
- * session-runtime-event.ts; until then the reducer treats them opaquely.
+ * Graph Mode 事件流的 kind 注册表（单源）。graph.* 事件已正式注册进
+ * {@link RuntimeEvent} 判别联合与 RUNTIME_EVENT_KINDS（storage 通过
+ * `...GRAPH_EVENT_KINDS` spread 引用本表，勿在两处手写同步）。
  */
 export const GRAPH_EVENT_KINDS = [
   "graph.work.added",
@@ -90,8 +90,24 @@ export function isGraphEventKind(kind: string): kind is GraphEventKind {
   return (GRAPH_EVENT_KINDS as readonly string[]).includes(kind);
 }
 
+/**
+ * 将 kind 已确认为 graph.* 的 RuntimeEvent 窄化为 GraphEvent 视图。
+ * RuntimeEvent 的 graph 分支（RuntimeGraphEvent）与 GraphEvent 结构兼容
+ * （data 字段一致，仅多出事件基类字段），按判别联合 kind 窄化后可直接
+ * 返回，无需强转。调用方必须先通过 isGraphEventKind 过滤。
+ */
 function asGraphEvent(event: RuntimeEvent): GraphEvent {
-  return event as unknown as GraphEvent;
+  switch (event.kind) {
+    case "graph.work.added":
+    case "graph.work.dispatched":
+    case "graph.work.recorded":
+    case "graph.work.failed":
+    case "graph.closed":
+      return event;
+    default:
+      // 不可达：isGraphEventKind 已过滤；此分支仅为满足 TS 穷尽性。
+      throw new Error(`Unexpected graph event kind: ${String(event.kind)}`);
+  }
 }
 
 function findWork(state: GraphProjection, workId: string): GraphWork | undefined {

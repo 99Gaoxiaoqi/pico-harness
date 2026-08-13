@@ -59,8 +59,8 @@ import {
 } from "../presentation/transcript-event-store.js";
 import { decodeRuntimeEvent } from "../storage/runtime-event.js";
 import type { RuntimePlanEvent } from "./session-runtime-event.js";
-import { planOperationFingerprint } from "../plan/contract.js";
-import { projectActivePlanEntries, projectPlanEntries } from "../plan/reducer.js";
+import { planOperationFingerprint, PlanConflictError } from "../plan/contract.js";
+import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from "../plan/reducer.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const FROZEN_FORK_BUNDLE_VERSION = 7 as const;
@@ -504,6 +504,25 @@ export class SessionForkService {
           reason: "forked active execution requires explicit resume",
         },
       } as RuntimePlanEvent);
+    }
+    // 落账前用 reducer 预校验（与 PlanCoordinator.commit 一致）。fork 语料
+    // 自守：上方守卫（execution active + step in_progress）与 reducePlanEvent
+    // 对 recovered/interrupted 的前置条件一一对应，正常路径必然通过；此校验
+    // 是防御性兜底——若源语料出现未预期的异常态，宁可在此失败转
+    // needs_attention，也不向目标账本写入不变量被破坏的 plan 事实。
+    try {
+      let candidate = projectPlanEntries(operation.targetSessionId, []);
+      for (const event of rewritten) candidate = reducePlanEvent(candidate, event);
+    } catch (error) {
+      if (error instanceof PlanConflictError) {
+        throw new ForkOperationConflictError(
+          `Fork plan workflow violates reducer invariants: ${error.message}`,
+          "staging_corrupt",
+          [],
+          { cause: error },
+        );
+      }
+      throw error;
     }
     await this.runtimeStore.appendBatch(rewritten);
   }
