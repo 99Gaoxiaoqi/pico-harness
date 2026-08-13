@@ -31,6 +31,8 @@ export interface ConnectOrSpawnRuntimeHostInput {
   electionDeadlineMs?: number;
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
+  /** Forwarded to a spawned candidate (its idle self-exit grace). */
+  idleGraceMs?: number;
   candidateEntrypoint?: string | URL;
   legacyConfigurationRoot?: string;
 }
@@ -108,6 +110,10 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
         const launch = dependencies.launchCandidate({
           rootPath: capability.canonicalPath,
           expectedRootId: capability.rootId,
+          ...(input.idleGraceMs === undefined ? {} : { idleGraceMs: input.idleGraceMs }),
+          ...(input.handshakeTimeoutMs === undefined
+            ? {}
+            : { handshakeTimeoutMs: input.handshakeTimeoutMs }),
           ...(input.candidateEntrypoint === undefined
             ? {}
             : { entrypoint: input.candidateEntrypoint }),

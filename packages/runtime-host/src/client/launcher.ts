@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,13 +24,39 @@ export interface DetachedCandidateLaunch {
 
 export type CandidateLauncher = (input: DetachedCandidateInput) => DetachedCandidateLaunch;
 
+/**
+ * Resolve the default candidate entrypoint for the current runtime form.
+ *
+ * - Compiled (dist): `candidate-main.js` sits next to the compiled client and is
+ *   run directly by node.
+ * - Source (tsx): only `candidate-main.ts` exists. The candidate is a detached
+ *   `node` process, so it needs the tsx ESM loader registered via `--import tsx`
+ *   (resolved from the process cwd's node_modules). Without this the spawned
+ *   child dies with ERR_MODULE_NOT_FOUND and the election loop only ever sees a
+ *   bare `startup_timeout`.
+ */
+function resolveDefaultEntrypoint(): { path: string; needsTsLoader: boolean } {
+  const compiledPath = fileURLToPath(new URL('../candidate-main.js', import.meta.url));
+  if (existsSync(compiledPath)) return { path: compiledPath, needsTsLoader: false };
+  const sourcePath = fileURLToPath(new URL('../candidate-main.ts', import.meta.url));
+  if (existsSync(sourcePath)) return { path: sourcePath, needsTsLoader: true };
+  // Let node surface a clear module-not-found rather than the election loop
+  // timing out with no information.
+  return { path: compiledPath, needsTsLoader: false };
+}
+
 export function launchDetachedRuntimeHostCandidate(
   input: DetachedCandidateInput,
 ): DetachedCandidateLaunch {
   const executable = input.executable ?? process.execPath;
-  const entrypoint = input.entrypoint ?? new URL('../candidate-main.js', import.meta.url);
+  const entrypoint = input.entrypoint ?? resolveDefaultEntrypoint().path;
+  const entrypointPath = typeof entrypoint === 'string' ? entrypoint : fileURLToPath(entrypoint);
+  const needsTsLoader =
+    input.entrypoint === undefined && resolveDefaultEntrypoint().needsTsLoader;
   const args = [
-    typeof entrypoint === 'string' ? entrypoint : fileURLToPath(entrypoint),
+    // 源码模式下为 detached node 子进程注册 tsx ESM loader（cwd 需能解析 tsx）。
+    ...(needsTsLoader ? ['--import', 'tsx'] : []),
+    entrypointPath,
     '--root',
     input.rootPath,
     '--expected-root-id',
@@ -41,7 +68,7 @@ export function launchDetachedRuntimeHostCandidate(
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.
   const child = spawn(executable, args, {
-    cwd: dirname(isAbsolute(executable) ? executable : process.execPath),
+    cwd: needsTsLoader ? process.cwd() : dirname(isAbsolute(executable) ? executable : process.execPath),
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
