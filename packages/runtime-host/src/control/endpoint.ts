@@ -104,7 +104,7 @@ function resolveEndpointRoot(prefix: string): string {
 }
 
 function endpointRootPrefix(rootId: string): string {
-  return `m-${currentUid()}-${endpointRootTag(rootId).slice(0, 16)}-`;
+  return `pico-${currentUid()}-${endpointRootTag(rootId).slice(0, 16)}-`;
 }
 
 // Put the owner in the name passed to mkdtemp. A complete, parseable owner

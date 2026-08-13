@@ -1,27 +1,68 @@
-import { open } from "node:fs/promises";
-import { tryLock, unlock } from "fs-native-extensions";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
+import { unlock, waitForLock } from "fs-native-extensions";
+
+const lockGates = new Map<string, Promise<void>>();
 
 /**
- * 3-A 骨架版 marker 独占写入锁。maka 原版用于 storage root marker 的原子替换
- * （repair/import 路径）；pico 骨架阶段不触发这些路径，这里提供一个简单的
- * flock 自旋实现以保证 root-authority 可编译、语义正确。
+ * Marker 独占写入锁（移植自原版实现）。进程内 lockGates 串行门 + flock 阻塞等待
+ * （waitForLock），加锁前后两次校验句柄与路径的 dev/ino 一致（防锁文件被
+ * unlink+重建的 TOCTOU）。用于 storage root marker 的原子替换（repair/import 路径）。
  */
 export async function withArtifactWriterBootstrapLock<T>(
   lockPath: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const handle = await open(lockPath, "a+", 0o600);
+  const previous = lockGates.get(lockPath);
+  let releaseGate!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  lockGates.set(lockPath, current);
+  await previous?.catch(() => {});
   try {
-    while (!tryLock(handle.fd, { shared: false })) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    return await operation();
-  } finally {
+    const handle = await open(
+      lockPath,
+      fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    let locked = false;
     try {
-      unlock(handle.fd);
-    } catch {
-      // 关闭句柄即权威释放。
+      await assertStableRegularFile(handle, lockPath);
+      if (process.platform !== "win32") await handle.chmod(0o600);
+      await waitForLock(handle.fd);
+      locked = true;
+      await assertStableRegularFile(handle, lockPath);
+      return await operation();
+    } finally {
+      if (locked) releaseLock(handle);
+      await handle.close();
     }
-    await handle.close();
+  } finally {
+    releaseGate();
+    if (lockGates.get(lockPath) === current) lockGates.delete(lockPath);
+  }
+}
+
+async function assertStableRegularFile(handle: FileHandle, lockPath: string): Promise<void> {
+  const [handleStat, pathStat] = await Promise.all([
+    handle.stat({ bigint: true }),
+    lstat(lockPath, { bigint: true }),
+  ]);
+  if (
+    !handleStat.isFile() ||
+    !pathStat.isFile() ||
+    handleStat.dev !== pathStat.dev ||
+    handleStat.ino !== pathStat.ino
+  ) {
+    throw new Error(`Artifact writer bootstrap lock is not one stable file: ${lockPath}`);
+  }
+}
+
+function releaseLock(handle: FileHandle): void {
+  try {
+    unlock(handle.fd);
+  } catch {
+    // 关闭 OS 句柄是权威释放路径。
   }
 }
