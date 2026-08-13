@@ -611,13 +611,13 @@ test("findOrphanGraphWorks flags dispatched works whose delegation is not live",
   const addTool = new AddWorkTool(context, async () => "delegation-orphan", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "orphaned work" }));
 
-  // Simulate a process restart: the fresh DelegationManager holds no live
-  // delegations, so the previously-dispatched work is an orphan.
+  // Simulate a process restart: heartbeats stopped, so the graph-work lease has
+  // elapsed — the previously-dispatched work is an orphan.
   const result = await findOrphanGraphWorks({
     runtimeStore: store,
     sessionId: SESSION_ID,
     graphId: GRAPH_ID,
-    liveDelegationIds: [],
+    isWorkLeaseLive: () => false,
   });
   assert.equal(result.orphanWorkIds.length, 1);
   const orphan = result.projection.works.find((w) => w.delegationId === "delegation-orphan");
@@ -632,12 +632,12 @@ test("findOrphanGraphWorks excludes works whose delegation is still live", async
   const addTool = new AddWorkTool(context, async () => "delegation-live", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "live work" }));
 
-  // Same process: the delegation is still running, so the work is NOT an orphan.
+  // Same process: the lease is still alive (heartbeat renewing), so NOT an orphan.
   const result = await findOrphanGraphWorks({
     runtimeStore: store,
     sessionId: SESSION_ID,
     graphId: GRAPH_ID,
-    liveDelegationIds: ["delegation-live"],
+    isWorkLeaseLive: () => true,
   });
   assert.deepEqual([...result.orphanWorkIds], []);
 });
@@ -651,12 +651,12 @@ test("orphan recovery marks a lost delegation's dispatched work as failed", asyn
   const addTool = new AddWorkTool(context, async () => "delegation-crashed", () => AT);
   await addTool.execute(JSON.stringify({ instruction }));
 
-  // Restart: DelegationManager is empty → work flagged as orphan.
+  // Restart: lease elapsed → work flagged as orphan.
   const scan = await findOrphanGraphWorks({
     runtimeStore: store,
     sessionId: SESSION_ID,
     graphId: GRAPH_ID,
-    liveDelegationIds: [],
+    isWorkLeaseLive: () => false,
   });
   assert.deepEqual([...scan.orphanWorkIds], [workId]);
 
@@ -680,7 +680,7 @@ test("orphan recovery marks a lost delegation's dispatched work as failed", asyn
     runtimeStore: store,
     sessionId: SESSION_ID,
     graphId: GRAPH_ID,
-    liveDelegationIds: [],
+    isWorkLeaseLive: () => false,
   });
   assert.deepEqual([...rescan.orphanWorkIds], []);
 });

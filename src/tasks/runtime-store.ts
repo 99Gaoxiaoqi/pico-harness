@@ -446,6 +446,15 @@ export class RuntimeStore {
     });
   }
 
+  /**
+   * 只读查询某个 resourceKey 的当前 lease（含 TTL 未过期的活租约与已过期但未清理的残影）。
+   * 调用方自行按 expiresAt > now 判定活性；不校验 owner/epoch。供 graph orphan 恢复与
+   * dispatch 冲突时取持有者 ownerId 使用。
+   */
+  getLease(resourceKey: string): RuntimeLeaseRecord | undefined {
+    return this.read((tx) => optionalClone(tx.state.leases[resourceKey]));
+  }
+
   createJob(input: CreateJobInput): JobRecord {
     return this.write((tx) => {
       if (tx.state.jobs[input.jobId]) throw new RuntimeConflictError(`任务 ${input.jobId} 已存在`);

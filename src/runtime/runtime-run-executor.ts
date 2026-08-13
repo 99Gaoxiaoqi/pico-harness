@@ -277,10 +277,11 @@ export class RuntimeRunExecutor {
 
   /**
    * Settles graph works left dispatched by a previous process: after a restart
-   * the DelegationManager is freshly constructed and holds none of the prior
-   * delegations, so any still-dispatched work can never settle on its own. Each
-   * is marked failed (recovered); downstream works then surface as deadlocked
-   * via the existing missingInputIds continuation diagnostics.
+   * the prior delegations' heartbeats stop, so their `graph-work:${workId}`
+   * leases elapse (≤ TTL). Any still-dispatched work whose lease is now dead
+   * can never settle on its own. Each is marked failed (recovered); downstream
+   * works then surface as deadlocked via the existing missingInputIds
+   * continuation diagnostics.
    */
   private async recoverOrphanGraphWorks(
     session: Session,
@@ -291,7 +292,7 @@ export class RuntimeRunExecutor {
       runtimeStore: session.runtimeEventStore,
       sessionId: session.id,
       graphId: runtimeState.graphContext.graphId,
-      liveDelegationIds: runtimeState.delegationManager.liveDelegationIds(),
+      isWorkLeaseLive: (workId) => runtimeState.delegationManager.isWorkLeaseLive(workId),
     });
     for (const workId of orphanWorkIds) {
       await settleGraphWork(

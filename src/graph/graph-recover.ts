@@ -6,18 +6,18 @@ import type { GraphProjection } from "./contract.js";
  * Context for orphan-work recovery. Only durable sessions participate: in-memory
  * sessions cannot lose work to a crash because nothing was persisted.
  *
- * `liveDelegationIds` is the set of delegation ids the current process's
- * DelegationManager still considers in-flight. A dispatched work whose
- * delegationId is absent from this set has lost its backing delegation — either
- * the process restarted (DelegationManager is a fresh empty instance) or the
- * delegation was otherwise reaped. The caller supplies this from the live
- * DelegationManager; the scanner itself stays pure and store-backed.
+ * `isWorkLeaseLive` queries the durable `graph-work:${workId}` lease: a
+ * dispatched work whose lease is dead (TTL expired / never acquired / released)
+ * has lost its backing delegation — the process restarted and heartbeat stopped,
+ * so the TTL elapsed. The caller supplies this from the live DelegationManager
+ * (which owns the RuntimeStore lease source); the scanner itself stays pure and
+ * store-backed.
  */
 export interface RecoverOrphanGraphWorksContext {
   readonly runtimeStore: RuntimeEventStore;
   readonly sessionId: string;
   readonly graphId: string;
-  readonly liveDelegationIds: readonly string[];
+  readonly isWorkLeaseLive: (workId: string) => boolean;
 }
 
 /**
@@ -33,16 +33,15 @@ export interface RecoverOrphanGraphWorksResult {
 
 /**
  * Detects orphan graph works: works marked `dispatched` whose backing
- * delegation is no longer tracked by the current process's DelegationManager.
+ * delegation's durable lease is dead (TTL elapsed after the host stopped
+ * heartbeating, e.g. on process restart).
  *
- * A previous implementation matched `work.delegationId` against `run.terminal`
- * event runIds, assuming delegationId === runId. That assumption does not hold:
- * delegationId is minted by DelegationManager.dispatch, while the backing
- * RuntimeRun's runId is minted independently by runtimePort.startRun inside
- * runSub. The two id spaces never intersect, so the old scan always returned
- * empty. The live-delegation check is both correct (a dispatched work must have
- * had a delegation; if it is gone, the work can never settle on its own) and
- * simpler (no terminal-event collection).
+ * Earlier implementations matched `work.delegationId` against in-process live
+ * delegation ids; that relied on the "empty after restart" negative signal of a
+ * freshly-constructed DelegationManager, which is fragile (any future
+ * persistence/hydration of records would silently break it). The lease-liveness
+ * check is a positive, durable signal: a dispatched work whose lease TTL has
+ * elapsed can never settle on its own, so it is safe to mark failed+recovered.
  */
 export async function findOrphanGraphWorks(
   context: RecoverOrphanGraphWorksContext,
@@ -52,13 +51,9 @@ export async function findOrphanGraphWorks(
   if (projection.status !== "active") {
     return { orphanWorkIds: [], projection };
   }
-  const liveDelegationIds = new Set(context.liveDelegationIds);
   const orphanWorkIds = projection.works
     .filter(
-      (work) =>
-        work.status === "dispatched" &&
-        typeof work.delegationId === "string" &&
-        !liveDelegationIds.has(work.delegationId),
+      (work) => work.status === "dispatched" && !context.isWorkLeaseLive(work.workId),
     )
     .map((work) => work.workId);
   return { orphanWorkIds, projection };
