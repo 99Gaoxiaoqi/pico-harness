@@ -1,0 +1,781 @@
+import { randomUUID } from "node:crypto";
+import { connect } from "node:net";
+import { performance } from "node:perf_hooks";
+import {
+  discoverMarkedStorageRoot,
+  prepareStorageRootControlDirectory,
+  resolveExistingStorageRootControlDirectory,
+  resolveStorageRoot,
+  type StorageRootCapability,
+} from "../control/root-authority.js";
+import { readHostRegistration, RuntimeHostRegistrationError } from "../control/registration.js";
+import {
+  decodeHostFrame,
+  HOST_OPERATION_SPECS,
+  RUNTIME_HOST_COMPATIBILITY_EPOCH,
+  RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS,
+  requireClientInstanceId,
+  validateProtocolRange,
+  type ClientSurface,
+  type HostDiagnosticsResult,
+  type HostIncompatible,
+  type HostOperationErrorCode,
+  type HostRegistration,
+  type HostStatusResult,
+  type OperationInput,
+  type OperationKey,
+  type OperationOutput,
+  type ProtocolRange,
+  type RequestFrame,
+  type ResponseFrame,
+} from "../protocol/index.js";
+import { FramedTransport, RuntimeHostTransportError } from "../transport/framed-transport.js";
+import type { OperationSpec } from "../protocol/operation-spec.js";
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 500;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 2_000;
+const DEFAULT_LIVENESS_INTERVAL_MS = 2_000;
+const DEFAULT_LIVENESS_TIMEOUT_MS = 2_000;
+
+export interface ConnectRuntimeHostInput {
+  rootPath: string;
+  surface: ClientSurface;
+  protocol: ProtocolRange;
+  clientInstanceId?: string;
+  connectTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
+  /**
+   * Interval between liveness probes while a domain request is outstanding.
+   * Injectable so tests exercise requests that outlive a probe cycle without
+   * waiting the real cadence; defaults to DEFAULT_LIVENESS_INTERVAL_MS (2s).
+   */
+  livenessIntervalMs?: number;
+  /**
+   * Invoked after each liveness probe round-trips and validates its Host
+   * Epoch. Test observability: lets a probe-crossing test prove probes
+   * actually fired inside its window instead of assuming the cadence took.
+   * Diagnostics only — exceptions it throws are swallowed and never affect
+   * connection health.
+   */
+  onLivenessProbe?: () => void;
+}
+
+export type RuntimeHostUnavailableReason =
+  | "not_registered"
+  | "invalid_registration"
+  | "root_mismatch"
+  | "connect_failed"
+  | "handshake_failed"
+  | "epoch_mismatch";
+
+export type ConnectRuntimeHostResult =
+  | {
+      kind: "connected";
+      connection: RuntimeHostConnection;
+      registration: HostRegistration;
+    }
+  | {
+      kind: "incompatible";
+      handshake: HostIncompatible;
+      registration: HostRegistration;
+    }
+  | { kind: "draining"; registration: HostRegistration }
+  | {
+      kind: "unavailable";
+      reason: RuntimeHostUnavailableReason;
+      registration?: HostRegistration;
+    };
+
+type ConnectResolvedRuntimeHostResult =
+  | ConnectRuntimeHostResult
+  | {
+      kind: "election_deadline_elapsed";
+      endpointConnected: boolean;
+    };
+
+class ElectionDeadlineElapsedError extends Error {
+  constructor() {
+    super("Runtime Host election deadline elapsed");
+    this.name = "ElectionDeadlineElapsedError";
+  }
+}
+
+interface ConnectResolvedRuntimeHostInput
+  extends Omit<ConnectRuntimeHostInput, "rootPath" | "clientInstanceId"> {
+  capability: StorageRootCapability<"interactive">;
+  clientInstanceId: string;
+  controlDirectory: string;
+  electionDeadline?: number;
+}
+
+export interface RuntimeHostConnection {
+  readonly hostEpoch: string;
+  readonly connectionId: string;
+  readonly selectedProtocol: number;
+  readonly closed: Promise<void>;
+  request<K extends DirectRequestOperationKey>(
+    operation: K,
+    input: OperationInput<K>,
+    timeoutMs?: number,
+  ): Promise<OperationOutput<K>>;
+  status(timeoutMs?: number): Promise<HostStatusResult>;
+  queryHostDiagnostics(timeoutMs?: number): Promise<HostDiagnosticsResult>;
+  close(): Promise<void>;
+}
+
+// The 3-A skeleton registers only bootstrap operations, so every operation key
+// is a direct request; subscriptions and capability mutations arrive in 3-B.
+export type DirectRequestOperationKey = OperationKey;
+
+export class RuntimeHostOperationError extends Error {
+  constructor(
+    readonly operation: OperationKey,
+    readonly code: HostOperationErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RuntimeHostOperationError";
+  }
+}
+
+interface PendingRequest {
+  operation: OperationKey;
+  accept(value: unknown): unknown;
+  resolve(value: unknown): void;
+  reject(error: Error): void;
+  domainState?: "queued" | "in_flight";
+  timer?: NodeJS.Timeout;
+}
+
+interface RetiredRequest {
+  operation: OperationKey;
+  domainState?: "in_flight";
+}
+
+interface QueuedDomainFrame {
+  requestId: string;
+  frame: RequestFrame;
+}
+
+type RequestTimeoutScope = "request" | "connection";
+
+class RuntimeHostConnectionImpl implements RuntimeHostConnection {
+  readonly hostEpoch: string;
+  readonly connectionId: string;
+  readonly selectedProtocol: number;
+  readonly closed: Promise<void>;
+  readonly #transport: FramedTransport;
+  readonly #pendingRequests = new Map<string, PendingRequest>();
+  readonly #retiredRequests = new Map<string, RetiredRequest>();
+  readonly #queuedDomainFrames: QueuedDomainFrame[] = [];
+  #livenessTimer: NodeJS.Timeout | undefined;
+  #livenessProbePending = false;
+  #inFlightDomainRequests = 0;
+  #terminalError: Error | undefined;
+  readonly #livenessIntervalMs: number;
+  readonly #onLivenessProbe: (() => void) | undefined;
+
+  constructor(
+    transport: FramedTransport,
+    accepted: {
+      hostEpoch: string;
+      connectionId: string;
+      selectedProtocol: number;
+    },
+    // livenessIntervalMs is validated by connectResolvedRuntimeHost alongside
+    // the other connect timeouts, before any transport work happens.
+    options?: { livenessIntervalMs?: number; onLivenessProbe?: () => void },
+  ) {
+    this.#livenessIntervalMs = options?.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS;
+    this.#onLivenessProbe = options?.onLivenessProbe;
+    this.#transport = transport;
+    this.hostEpoch = accepted.hostEpoch;
+    this.connectionId = accepted.connectionId;
+    this.selectedProtocol = accepted.selectedProtocol;
+    this.closed = this.#transport.closed;
+    void this.#readResponses();
+  }
+
+  request<K extends DirectRequestOperationKey>(
+    operation: K,
+    input: OperationInput<K>,
+    timeoutMs?: number,
+  ): Promise<OperationOutput<K>> {
+    return this.#requestOperation(
+      operation,
+      input,
+      timeoutMs ?? (operation === "host.status" ? DEFAULT_LIVENESS_TIMEOUT_MS : undefined),
+      (result) => result,
+      operation === "host.status" ? "connection" : "request",
+    );
+  }
+
+  #requestOperation<K extends OperationKey, Result>(
+    operation: K,
+    input: OperationInput<K>,
+    timeoutMs: number | undefined,
+    accept: (result: OperationOutput<K>) => Result,
+    timeoutScope: RequestTimeoutScope,
+  ): Promise<Result> {
+    const boundedTimeoutMs =
+      timeoutMs === undefined ? undefined : requireTimeout(timeoutMs, "timeoutMs");
+    if (this.#terminalError) return Promise.reject(this.#terminalError);
+    const spec = HOST_OPERATION_SPECS[operation] as OperationSpec<
+      OperationInput<K>,
+      OperationOutput<K>,
+      HostOperationErrorCode
+    >;
+    let canonicalInput: OperationInput<K>;
+    try {
+      canonicalInput = spec.decodeInput(input);
+    } catch (error) {
+      return Promise.reject(asError(error));
+    }
+    const requestId = randomUUID();
+    const isDomainRequest = operation !== "host.status";
+    const result = new Promise<Result>((resolve, reject) => {
+      const timer =
+        boundedTimeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              const error = requestTimeoutError(operation);
+              if (timeoutScope === "connection") this.#fail(error);
+              else this.#retireRequest(requestId, error);
+            }, boundedTimeoutMs);
+      this.#pendingRequests.set(requestId, {
+        operation,
+        accept: (value) => {
+          const output = value as OperationOutput<K>;
+          spec.assertOutputForInput?.(canonicalInput, output);
+          return accept(output);
+        },
+        resolve: (value) => resolve(value as Result),
+        reject,
+        ...(isDomainRequest ? { domainState: "queued" as const } : {}),
+        timer,
+      });
+      this.#scheduleLivenessCheck();
+    });
+    const frame = {
+      requestId,
+      operation,
+      input: canonicalInput,
+    } as RequestFrame;
+    if (isDomainRequest) {
+      this.#queuedDomainFrames.push({ requestId, frame });
+      this.#drainDomainRequests();
+    } else {
+      void this.#transport.write(frame).catch((error: unknown) => this.#fail(asError(error)));
+    }
+    return result;
+  }
+
+  #drainDomainRequests(): void {
+    while (
+      !this.#terminalError &&
+      this.#inFlightDomainRequests < RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS
+    ) {
+      const queued = this.#queuedDomainFrames.shift();
+      if (!queued) return;
+      const pending = this.#pendingRequests.get(queued.requestId);
+      if (!pending || pending.domainState !== "queued") continue;
+      pending.domainState = "in_flight";
+      this.#inFlightDomainRequests += 1;
+      void this.#transport
+        .write(queued.frame)
+        .catch((error: unknown) => this.#fail(asError(error)));
+    }
+  }
+
+  async status(timeoutMs?: number): Promise<HostStatusResult> {
+    const status = await this.request("host.status", {}, timeoutMs);
+    if (status.hostEpoch !== this.hostEpoch) {
+      const error = new Error("Runtime Host returned status for a different Host Epoch");
+      this.#fail(error);
+      throw error;
+    }
+    return status;
+  }
+
+  queryHostDiagnostics(timeoutMs?: number): Promise<HostDiagnosticsResult> {
+    return this.request("host.diagnostics.query", {}, timeoutMs);
+  }
+
+  async close(): Promise<void> {
+    this.#transport.destroy();
+    await this.#transport.closed;
+  }
+
+  async #readResponses(): Promise<void> {
+    try {
+      while (true) {
+        const frame = decodeHostFrame(await this.#transport.read(0));
+        this.#resetLivenessCheck();
+        if ("kind" in frame) {
+          // The skeleton Host frame set carries no post-handshake push frames;
+          // any handshake frame here means the Host violated the frame order.
+          throw new Error("Runtime Host returned a handshake frame after acceptance");
+        }
+        this.#acceptResponse(frame);
+      }
+    } catch (error) {
+      this.#fail(asError(error));
+    }
+  }
+
+  #acceptResponse(frame: ResponseFrame): void {
+    const pending = this.#pendingRequests.get(frame.requestId);
+    if (!pending) {
+      const retired = this.#retiredRequests.get(frame.requestId);
+      if (retired?.operation === frame.operation) {
+        this.#retiredRequests.delete(frame.requestId);
+        this.#releaseDomainSlot(retired);
+        this.#scheduleLivenessCheck();
+        return;
+      }
+      this.#fail(new Error("Runtime Host returned an unmatched operation response"));
+      return;
+    }
+    if (pending.operation !== frame.operation) {
+      this.#fail(new Error("Runtime Host returned an unmatched operation response"));
+      return;
+    }
+    this.#pendingRequests.delete(frame.requestId);
+    if (pending.timer) clearTimeout(pending.timer);
+    this.#scheduleLivenessCheck();
+    if (frame.ok) {
+      try {
+        const accepted = pending.accept(frame.result);
+        this.#releaseDomainSlot(pending);
+        pending.resolve(accepted);
+      } catch (error) {
+        const failure = asError(error);
+        pending.reject(failure);
+        this.#fail(failure);
+      }
+      return;
+    }
+    this.#releaseDomainSlot(pending);
+    pending.reject(
+      new RuntimeHostOperationError(frame.operation, frame.error.code, frame.error.message),
+    );
+  }
+
+  #retireRequest(requestId: string, error: Error): void {
+    const pending = this.#pendingRequests.get(requestId);
+    if (!pending) return;
+    this.#pendingRequests.delete(requestId);
+    if (pending.domainState === "queued") {
+      const index = this.#queuedDomainFrames.findIndex((queued) => queued.requestId === requestId);
+      if (index !== -1) this.#queuedDomainFrames.splice(index, 1);
+      pending.reject(error);
+      this.#scheduleLivenessCheck();
+      return;
+    }
+    this.#retiredRequests.set(requestId, {
+      operation: pending.operation,
+      ...(pending.domainState === "in_flight" ? { domainState: pending.domainState } : {}),
+    });
+    pending.reject(error);
+    this.#scheduleLivenessCheck();
+  }
+
+  #releaseDomainSlot(request: PendingRequest | RetiredRequest): void {
+    if (request.domainState !== "in_flight") return;
+    request.domainState = undefined;
+    this.#inFlightDomainRequests -= 1;
+    this.#drainDomainRequests();
+  }
+
+  #resetLivenessCheck(): void {
+    if (this.#livenessTimer) clearTimeout(this.#livenessTimer);
+    this.#livenessTimer = undefined;
+    this.#scheduleLivenessCheck();
+  }
+
+  #scheduleLivenessCheck(): void {
+    if (
+      this.#terminalError ||
+      this.#livenessTimer ||
+      this.#livenessProbePending ||
+      !this.#hasOutstandingDomainRequest()
+    ) {
+      if (!this.#hasOutstandingDomainRequest() && this.#livenessTimer) {
+        clearTimeout(this.#livenessTimer);
+        this.#livenessTimer = undefined;
+      }
+      return;
+    }
+    this.#livenessTimer = setTimeout(() => {
+      this.#livenessTimer = undefined;
+      this.#startLivenessProbe();
+    }, this.#livenessIntervalMs);
+  }
+
+  #hasOutstandingDomainRequest(): boolean {
+    if (this.#retiredRequests.size > 0) return true;
+    for (const pending of this.#pendingRequests.values()) {
+      if (pending.operation !== "host.status") return true;
+    }
+    return false;
+  }
+
+  #startLivenessProbe(): void {
+    if (this.#terminalError || this.#livenessProbePending || !this.#hasOutstandingDomainRequest()) {
+      return;
+    }
+    this.#livenessProbePending = true;
+    void this.#requestOperation(
+      "host.status",
+      {},
+      DEFAULT_LIVENESS_TIMEOUT_MS,
+      (status) => {
+        if (status.hostEpoch !== this.hostEpoch) {
+          throw new Error("Runtime Host returned status for a different Host Epoch");
+        }
+        try {
+          this.#onLivenessProbe?.();
+        } catch {
+          // Diagnostics hook: an observer exception must never fail the
+          // connection it is watching.
+        }
+      },
+      "connection",
+    )
+      .catch((error: unknown) => this.#fail(asError(error)))
+      .finally(() => {
+        this.#livenessProbePending = false;
+        this.#scheduleLivenessCheck();
+      });
+  }
+
+  #fail(error: Error): void {
+    if (this.#terminalError) return;
+    this.#terminalError = error;
+    if (this.#livenessTimer) clearTimeout(this.#livenessTimer);
+    this.#livenessTimer = undefined;
+    this.#queuedDomainFrames.length = 0;
+    this.#inFlightDomainRequests = 0;
+    for (const pending of this.#pendingRequests.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.#pendingRequests.clear();
+    this.#retiredRequests.clear();
+    this.#transport.destroy();
+  }
+}
+
+export async function connectRuntimeHost(
+  input: ConnectRuntimeHostInput,
+): Promise<ConnectRuntimeHostResult> {
+  const normalized = normalizeConnectRuntimeHostInput(input);
+  const capability = await resolveStorageRoot({
+    path: input.rootPath,
+    kind: "interactive",
+  });
+  const { controlDirectory } = await prepareStorageRootControlDirectory(capability);
+  return finalizeConnectRuntimeHostResult(
+    await connectResolvedRuntimeHost({
+      ...input,
+      ...normalized,
+      capability,
+      controlDirectory,
+    }),
+  );
+}
+
+/** Connects only through an already published Host control plane and performs no filesystem writes. */
+export async function connectExistingRuntimeHost(
+  input: ConnectRuntimeHostInput,
+): Promise<ConnectRuntimeHostResult> {
+  const normalized = normalizeConnectRuntimeHostInput(input);
+  const discovered = await discoverMarkedStorageRoot({ path: input.rootPath });
+  if (discovered.kind !== "interactive") {
+    return { kind: "unavailable", reason: "root_mismatch" };
+  }
+  const capability = discovered;
+  const { controlDirectory } = await resolveExistingStorageRootControlDirectory(capability);
+  return finalizeConnectRuntimeHostResult(
+    await connectResolvedRuntimeHost({
+      ...input,
+      ...normalized,
+      capability,
+      controlDirectory,
+    }),
+  );
+}
+
+function normalizeConnectRuntimeHostInput(input: ConnectRuntimeHostInput): {
+  clientInstanceId: string;
+  connectTimeoutMs: number;
+  handshakeTimeoutMs: number;
+} {
+  validateProtocolRange(input.protocol);
+  return {
+    clientInstanceId: requireClientInstanceId(input.clientInstanceId ?? randomUUID()),
+    connectTimeoutMs: requireTimeout(
+      input.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+      "connectTimeoutMs",
+    ),
+    handshakeTimeoutMs: requireTimeout(
+      input.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
+      "handshakeTimeoutMs",
+    ),
+  };
+}
+
+function finalizeConnectRuntimeHostResult(
+  result: ConnectResolvedRuntimeHostResult,
+): ConnectRuntimeHostResult {
+  if (result.kind === "election_deadline_elapsed") {
+    return {
+      kind: "unavailable",
+      reason: result.endpointConnected ? "handshake_failed" : "connect_failed",
+    };
+  }
+  return result;
+}
+
+export async function connectResolvedRuntimeHost(
+  input: ConnectResolvedRuntimeHostInput,
+): Promise<ConnectResolvedRuntimeHostResult> {
+  validateProtocolRange(input.protocol);
+  requireClientInstanceId(input.clientInstanceId);
+  const connectTimeoutMs = requireTimeout(
+    input.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    "connectTimeoutMs",
+  );
+  const handshakeTimeoutMs = requireTimeout(
+    input.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
+    "handshakeTimeoutMs",
+  );
+  const livenessIntervalMs = requireTimeout(
+    input.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS,
+    "livenessIntervalMs",
+  );
+  let registration: HostRegistration | undefined;
+  try {
+    registration = await readRegistrationBeforeDeadline(
+      input.controlDirectory,
+      input.electionDeadline,
+    );
+  } catch (error) {
+    if (error instanceof ElectionDeadlineElapsedError) {
+      return { kind: "election_deadline_elapsed", endpointConnected: false };
+    }
+    if (error instanceof RuntimeHostRegistrationError && error.code === "invalid_registration") {
+      return { kind: "unavailable", reason: "invalid_registration" };
+    }
+    return { kind: "unavailable", reason: "connect_failed" };
+  }
+  if (!registration) return { kind: "unavailable", reason: "not_registered" };
+  if (registration.rootId !== input.capability.rootId) {
+    return { kind: "unavailable", reason: "root_mismatch", registration };
+  }
+
+  const connectDeadline = phaseDeadline(connectTimeoutMs, input.electionDeadline);
+  const connectBudget = remainingTimeout(connectDeadline.at);
+  if (connectBudget === undefined) {
+    if (connectDeadline.exhaustsElection) {
+      return { kind: "election_deadline_elapsed", endpointConnected: false };
+    }
+    return { kind: "unavailable", reason: "connect_failed", registration };
+  }
+  let transport: FramedTransport;
+  try {
+    transport = await openTransport(
+      registration.endpoint,
+      connectBudget,
+      connectDeadline.exhaustsElection,
+    );
+  } catch (error) {
+    if (error instanceof ElectionDeadlineElapsedError) {
+      return { kind: "election_deadline_elapsed", endpointConnected: false };
+    }
+    return { kind: "unavailable", reason: "connect_failed", registration };
+  }
+  const handshakeDeadline = phaseDeadline(handshakeTimeoutMs, input.electionDeadline);
+  const handshakeBudget = remainingTimeout(handshakeDeadline.at);
+  if (handshakeBudget === undefined) {
+    transport.destroy();
+    if (handshakeDeadline.exhaustsElection) {
+      return { kind: "election_deadline_elapsed", endpointConnected: true };
+    }
+    return { kind: "unavailable", reason: "handshake_failed", registration };
+  }
+  let handshakeTimeoutError: Error | undefined;
+  const handshakeTimer = setTimeout(() => {
+    handshakeTimeoutError = handshakeDeadline.exhaustsElection
+      ? new ElectionDeadlineElapsedError()
+      : new Error("Timed out handshaking with Runtime Host");
+    transport.destroy(handshakeTimeoutError);
+  }, handshakeBudget);
+  try {
+    const staleCompatibility = registration.compatibilityEpoch !== RUNTIME_HOST_COMPATIBILITY_EPOCH;
+    const helloProtocol = staleCompatibility
+      ? {
+          min: Math.min(Number.MAX_SAFE_INTEGER, registration.protocolMax + 1),
+          max: Math.min(Number.MAX_SAFE_INTEGER, registration.protocolMax + 1),
+        }
+      : input.protocol;
+    await transport.write({
+      kind: "hello",
+      clientInstanceId: input.clientInstanceId,
+      surface: input.surface,
+      protocolMin: helloProtocol.min,
+      protocolMax: helloProtocol.max,
+      compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+    });
+    if (remainingTimeout(handshakeDeadline.at) === undefined) {
+      throw handshakeDeadline.exhaustsElection
+        ? new ElectionDeadlineElapsedError()
+        : new Error("Runtime Host handshake deadline elapsed");
+    }
+    // The phase timer owns the full hello write/read deadline and its timeout classification.
+    const handshake = decodeHostFrame(await transport.read(0));
+    if (!("kind" in handshake))
+      throw new Error("Runtime Host returned an operation response before handshake");
+    if (
+      handshake.kind !== "accepted" &&
+      handshake.kind !== "incompatible" &&
+      handshake.kind !== "draining"
+    ) {
+      throw new Error("Runtime Host returned a non-handshake frame before acceptance");
+    }
+    if (handshake.hostEpoch !== registration.hostEpoch) {
+      transport.destroy();
+      return { kind: "unavailable", reason: "epoch_mismatch", registration };
+    }
+    if (handshake.kind === "accepted") {
+      if (staleCompatibility || handshake.compatibilityEpoch !== RUNTIME_HOST_COMPATIBILITY_EPOCH) {
+        throw new Error("Runtime Host accepted an incompatible schema epoch");
+      }
+      if (
+        handshake.selectedProtocol < input.protocol.min ||
+        handshake.selectedProtocol > input.protocol.max ||
+        handshake.selectedProtocol < registration.protocolMin ||
+        handshake.selectedProtocol > registration.protocolMax
+      ) {
+        throw new Error("Runtime Host selected a protocol outside the negotiated range");
+      }
+      return {
+        kind: "connected",
+        registration,
+        connection: new RuntimeHostConnectionImpl(transport, handshake, {
+          livenessIntervalMs,
+          onLivenessProbe: input.onLivenessProbe,
+        }),
+      };
+    }
+    transport.destroy();
+    if (handshake.kind === "incompatible") return { kind: "incompatible", handshake, registration };
+    return { kind: "draining", registration };
+  } catch (error) {
+    transport.destroy();
+    const failure = handshakeTimeoutError ?? error;
+    if (failure instanceof ElectionDeadlineElapsedError) {
+      return { kind: "election_deadline_elapsed", endpointConnected: true };
+    }
+    return { kind: "unavailable", reason: "handshake_failed", registration };
+  } finally {
+    clearTimeout(handshakeTimer);
+  }
+}
+
+function openTransport(
+  path: string,
+  timeoutMs: number,
+  exhaustsElection: boolean,
+): Promise<FramedTransport> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(path);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(
+        exhaustsElection
+          ? new ElectionDeadlineElapsedError()
+          : new Error("Timed out connecting to Runtime Host"),
+      );
+    }, timeoutMs);
+    const onConnect = () => {
+      const transport = new FramedTransport(socket);
+      cleanup();
+      resolve(transport);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("connect", onConnect);
+      socket.off("error", onError);
+    };
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
+  });
+}
+
+function requireTimeout(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 120_000) {
+    throw new RangeError(`${label} must be an integer between 1 and 120000`);
+  }
+  return value;
+}
+
+interface PhaseDeadline {
+  at: number;
+  exhaustsElection: boolean;
+}
+
+function phaseDeadline(timeoutMs: number, outerDeadline: number | undefined): PhaseDeadline {
+  const phaseTimeout = performance.now() + timeoutMs;
+  if (outerDeadline !== undefined && outerDeadline <= phaseTimeout) {
+    return { at: outerDeadline, exhaustsElection: true };
+  }
+  return { at: phaseTimeout, exhaustsElection: false };
+}
+
+function remainingTimeout(deadline: number): number | undefined {
+  const remaining = deadline - performance.now();
+  return remaining <= 0 ? undefined : Math.max(1, Math.ceil(remaining));
+}
+
+function readRegistrationBeforeDeadline(
+  controlDirectory: string,
+  deadline: number | undefined,
+): Promise<HostRegistration | undefined> {
+  if (deadline === undefined) return readHostRegistration(controlDirectory);
+  const remaining = remainingTimeout(deadline);
+  if (remaining === undefined) {
+    return Promise.reject(new ElectionDeadlineElapsedError());
+  }
+  const operation = readHostRegistration(controlDirectory);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new ElectionDeadlineElapsedError()), remaining);
+    operation.then(
+      (registration) => {
+        clearTimeout(timer);
+        resolve(registration);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function requestTimeoutError(operation: OperationKey): RuntimeHostTransportError {
+  return new RuntimeHostTransportError(
+    "read_timeout",
+    `Timed out waiting for Runtime Host ${operation} response`,
+  );
+}

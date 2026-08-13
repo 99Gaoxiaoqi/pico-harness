@@ -69,6 +69,13 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["src/tools/bash.ts", "既有：bash 执行超时 / 强杀定时器"],
   ["src/tui/system-actions.ts", "既有：进程执行超时（2 处）"],
   ["src/tui/terminal-grid.ts", "既有：grid 读取超时"],
+  // runtime-host 骨架移植（阶段 3-A）：连接机制层的退避/握手超时/idle drain，
+  // 移植自 runtime-host 模式，非业务超时原语，不收敛到 race-with-deadline。
+  ["packages/runtime-host/src/client/connect-or-spawn.ts", "骨架：选举退避 sleep（backoff 抖动）"],
+  ["packages/runtime-host/src/client/connection.ts", "骨架：握手/连接/request 超时"],
+  ["packages/runtime-host/src/control/artifact-writer-bootstrap-lock.ts", "骨架：flock 自旋 sleep"],
+  ["packages/runtime-host/src/server/host-kernel.ts", "骨架：idle drain / shutdown grace 定时器"],
+  ["packages/runtime-host/src/transport/framed-transport.ts", "骨架：帧读超时"],
 ]);
 
 function normalizeRelativePath(path, repositoryRoot = REPOSITORY_ROOT) {
