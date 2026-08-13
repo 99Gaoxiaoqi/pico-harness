@@ -7,7 +7,10 @@ const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_ROOTS = ["src", "apps", "packages"];
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 const IMPORT_DECLARATION =
-  /(?:^|[;\n])\s*(import|export)\s+(type\s+)?([\s\S]*?)(?:\s+from\s+)?["']([^"']+)["']\s*;?/g;
+  /(?:^|[;\n])\s*(import|export)\s+(type\s+)?([\s\S]*?)(\s+from\s+)?["']([^"']+)["']\s*;?/g;
+// Dynamic import() is a runtime load and must be visible to the gate:
+// `await import("../runtime/private.js")` previously slipped through entirely.
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
 
 /**
  * These are deliberately explicit, temporary exceptions. They make the gate useful before the
@@ -74,9 +77,11 @@ function isPureTypeImport(declaration) {
   return declaration.typeOnly;
 }
 
-function classifyViolation(importer, target, declaration, repositoryRoot) {
-  const from = sourceArea(importer, repositoryRoot);
-  const to = sourceArea(target, repositoryRoot);
+function classifyViolation(importer, target, declaration, repositoryRoot, fromArea, toArea) {
+  // fromArea/toArea override the raw areas for neutral files whose effective area is
+  // derived from their re-exports (see effectiveSourceArea).
+  const from = fromArea ?? sourceArea(importer, repositoryRoot);
+  const to = toArea ?? sourceArea(target, repositoryRoot);
   if (!from || !to) return undefined;
 
   if (from === "input" && to === "daemon" && isDaemonBarrel(target, repositoryRoot)) {
@@ -91,19 +96,70 @@ function classifyViolation(importer, target, declaration, repositoryRoot) {
   return undefined;
 }
 
-function parseImports(file) {
-  const source = stripComments(readFileSync(file, "utf8"));
+function parseImportsFromSource(source) {
   const imports = [];
   for (const match of source.matchAll(IMPORT_DECLARATION)) {
-    const [, kind, typeModifier, clause, specifier] = match;
+    const [, kind, typeModifier, clause, fromPart, specifier] = match;
     if (!specifier || !kind) continue;
+    // A non-empty clause without a `from` keyword is not a valid import/export-from
+    // declaration: `export const notes = "../runtime/private.js"` is a string literal,
+    // not an import. Bare `import "module"` (side-effect import, empty clause) and
+    // `export * from "..."` (has `from`) stay valid.
+    if (clause.trim() && !fromPart) continue;
     imports.push({
       specifier,
       typeOnly: typeModifier?.trim() === "type",
       clause: clause ?? "",
     });
   }
+  // Dynamic import() is always a runtime load: never type-only, never an export.
+  for (const match of source.matchAll(DYNAMIC_IMPORT)) {
+    imports.push({ specifier: match[1], typeOnly: false, clause: "", dynamic: true });
+  }
   return imports;
+}
+
+function parseImports(file) {
+  return parseImportsFromSource(stripComments(readFileSync(file, "utf8")));
+}
+
+/**
+ * Re-export statements on a file (`export * from`, `export { x } from`,
+ * `export type * from`, `export type { x } from`). A neutral file that re-exports
+ * protected content is a pass-through of that area, not a neutral wall.
+ */
+function parseReExports(source) {
+  const specifiers = [];
+  for (const match of source.matchAll(/export[\s\S]*?from\s+["']([^"']+)["']/g)) {
+    specifiers.push(match[1]);
+  }
+  return specifiers;
+}
+
+/**
+ * Effective source area of a file: its declared area, or — for files in the neutral
+ * zone (sourceArea === undefined) — the area of the first protected file they
+ * re-export from. Neutral chains are followed recursively; re-export cycles between
+ * neutral files resolve to neutral. Conservative: when several areas are re-exported,
+ * the first protected hit wins (over-reporting is preferred over blind spots).
+ */
+function effectiveSourceArea(path, repositoryRoot, cache, source, visiting = new Set()) {
+  if (cache.has(path)) return cache.get(path);
+  if (visiting.has(path)) return undefined;
+  visiting.add(path);
+  let area = sourceArea(path, repositoryRoot);
+  if (!area) {
+    const text = source ?? stripComments(readFileSync(path, "utf8"));
+    for (const specifier of parseReExports(text)) {
+      const target = resolveImportPath(path, specifier);
+      if (!target) continue;
+      area = effectiveSourceArea(target, repositoryRoot, cache, undefined, visiting);
+      if (area) break;
+    }
+  }
+  visiting.delete(path);
+  cache.set(path, area);
+  return area;
 }
 
 function loadBaseline() {
@@ -123,12 +179,23 @@ export function scanArchitectureBoundaries({ repositoryRoot = REPOSITORY_ROOT } 
   const sourceFiles = SOURCE_ROOTS.flatMap((root) =>
     listSourceFiles(resolve(repositoryRoot, root)),
   );
+  const areaCache = new Map();
   const violations = [];
   for (const importer of sourceFiles) {
-    for (const declaration of parseImports(importer)) {
+    const source = stripComments(readFileSync(importer, "utf8"));
+    const fromArea = effectiveSourceArea(importer, repositoryRoot, areaCache, source);
+    for (const declaration of parseImportsFromSource(source)) {
       const target = resolveImportPath(importer, declaration.specifier);
       if (!target) continue;
-      const rule = classifyViolation(importer, target, declaration, repositoryRoot);
+      const toArea = effectiveSourceArea(target, repositoryRoot, areaCache);
+      const rule = classifyViolation(
+        importer,
+        target,
+        declaration,
+        repositoryRoot,
+        fromArea,
+        toArea,
+      );
       if (!rule) continue;
       violations.push({
         rule,
@@ -136,6 +203,43 @@ export function scanArchitectureBoundaries({ repositoryRoot = REPOSITORY_ROOT } 
         target: normalizeRelativePath(target, repositoryRoot),
         specifier: declaration.specifier,
       });
+    }
+  }
+  return violations.sort((left, right) =>
+    `${left.rule}|${left.source}|${left.target}`.localeCompare(
+      `${right.rule}|${right.source}|${right.target}`,
+    ),
+  );
+}
+
+/**
+ * 横切原语唯一性：超时/排空原语应统一用 src/util/race-with-deadline.ts 的
+ * raceWithDeadline / raceWithDeadlineReject，不得在别处重新定义本地副本。
+ * 新增本地定义即违规（baseline 容纳过渡期存量，收敛后清空）。
+ */
+const CROSS_CUTTING_PRIMITIVES = [
+  "settleWithinDeadline",
+  "settlesWithin",
+  "settleWithin",
+  "withTimeout",
+];
+
+export function scanCrossCuttingDefinitions({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const sourceFiles = SOURCE_ROOTS.flatMap((root) =>
+    listSourceFiles(resolve(repositoryRoot, root)),
+  );
+  const violations = [];
+  for (const file of sourceFiles) {
+    const source = stripComments(readFileSync(file, "utf8"));
+    for (const name of CROSS_CUTTING_PRIMITIVES) {
+      const pattern = new RegExp(`\\b(?:async\\s+)?function\\s+${name}\\b`, "g");
+      for (const _match of source.matchAll(pattern)) {
+        violations.push({
+          rule: "cross-cutting-duplicate-definition",
+          source: normalizeRelativePath(file, repositoryRoot),
+          target: name,
+        });
+      }
     }
   }
   return violations.sort((left, right) =>
@@ -179,7 +283,10 @@ function main() {
     process.exitCode = 2;
     return;
   }
-  const violations = scanArchitectureBoundaries();
+  const violations = [
+    ...scanArchitectureBoundaries(),
+    ...scanCrossCuttingDefinitions(),
+  ];
   const { known, unexpected } = evaluateArchitectureBoundaries(violations);
   console.log(
     `[architecture-boundaries] 扫描 ${SOURCE_ROOTS.join(", ")}，发现 ${violations.length} 条受控边界记录。`,
