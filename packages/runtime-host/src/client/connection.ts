@@ -220,12 +220,15 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     input: OperationInput<K>,
     timeoutMs?: number,
   ): Promise<OperationOutput<K>> {
+    // 公共 request() 一律用 request 级超时：host.status 超时只 retire 该请求，
+    // 不应把整条连接 fail 掉（否则调用方传一个短 timeout 就会误杀连接）。
+    // connection 级失败仅保留给内部 liveness 探针（#runLivenessProbe）。
     return this.#requestOperation(
       operation,
       input,
       timeoutMs ?? (operation === "host.status" ? DEFAULT_LIVENESS_TIMEOUT_MS : undefined),
       (result) => result,
-      operation === "host.status" ? "connection" : "request",
+      "request",
     );
   }
 
@@ -413,6 +416,9 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     const retired = this.#retiredRequests.get(requestId);
     if (!retired) return;
     if (retired.slotTimer) clearTimeout(retired.slotTimer);
+    // 防御性：in-flight 槽位正常由更早的 slot TTL 释放；若尚未释放（防御隐式
+    // 时序不变量被破坏的场景），在此释放，避免槽位被永久钉死导致域通道 wedge。
+    if (!retired.slotReleased) this.#releaseDomainSlot(retired);
     // 条目绝对 TTL 到期删除；此后迟到响应按 unmatched 处理。5min 迟到的响应
     // 对账价值已低于连接健康信号，且删除条目能终止 #hasOutstandingDomainRequest
     // 因 retiredRequests 非空而产生的永久 liveness 探测。
