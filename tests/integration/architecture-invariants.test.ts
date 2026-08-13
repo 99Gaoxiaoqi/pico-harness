@@ -74,23 +74,25 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
 // 提醒开发者删除/反转本测试。这是活体追踪——修复落地时由红测试强制显式处理，
 // 而不是靠人记。修复对应债务后：删除该测试，或按注释转为正向断言。
 
-test("D7 债务追踪：DelegationManager.records 仍是不可重建的事实权威", () => {
-  // P0 调度态债（阶段 2 claim 推广）：records 当前是不可持久化的事实权威
-  // （孤儿检测依赖重启清空返回空集）。
-  // 修复方向——用 RuntimeStore.acquireLease 给 graph work 套 durable lease，
-  // records 降为非权威缓存，orphan 恢复按 lease 活性判定。
+test("D7 正向不变量：graph work 去重走 durable lease，records 已降为非权威活跃表", () => {
+  // 阶段 2 claim 推广已完成：dispatch 用 RuntimeStore.acquireLease 做执行主权去重
+  // （替代 records 扫描），settle 链 records.delete 使 records 降为非权威活跃表，
+  // orphan 恢复按 lease 活性（isWorkLeaseLive）判定。
   const manager = readSource("src/tools/delegation-manager.ts");
-  // 债务表征：
-  // 1) records 无 rebuild 路径（restore/hydrate/replaceFromAuthority 均不存在）——债务在时 pass；
-  // 2) records 核心结构还在（\brecords\b）——records 被移除/重构时此断言红。
+  // 正向：lease 回源路径与 orphan lease 判定已接入。
+  assert.match(manager, /acquireLease/, "DelegationManager 已接入 durable lease 去重");
+  assert.match(manager, /isWorkLeaseLive/, "orphan 恢复按 lease 活性判定");
+  // 负向：旧的内存负信号与 settleFinalized 标志已移除。
   assert.doesNotMatch(
     manager,
-    /\brestore\b|\bhydrate\b|replaceFromAuthority/,
-    "records 仍无 rebuild 路径（债务表征 1：不可重建的事实权威）",
+    /\bliveDelegationIds\b/,
+    "liveDelegationIds 内存负信号已移除（orphan 改 lease 判定）",
   );
-  assert.match(manager, /\brecords\b/, "records 结构仍在（债务表征 2）");
-  // 阶段 2 claim 推广修复后：删除本测试，或反转为正向断言——
-  // records 有 rebuild/lease 回源路径（如 assert.match(manager, /acquireLease/)）。
+  assert.doesNotMatch(
+    manager,
+    /\bsettleFinalized\b/,
+    "settleFinalized 标志已移除（lease + records.delete 取代）",
+  );
 });
 
 test("D9 债务追踪：多外壳连接状态/重连三套仍并存（无统一网关层）", () => {

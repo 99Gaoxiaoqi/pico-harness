@@ -1091,6 +1091,18 @@ export async function executeAgentRuntime(
       });
 
     // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
+    // headless/folder 装配不注入 taskHostRuntime：提前建 RuntimeStore，同时作为
+    // graph work lease 源（注入 DelegationManager）与 usage ledger。
+    if (dependencies.runtimeState === undefined && !ownedUsageStore) {
+      try {
+        ownedUsageStore = new RuntimeStore({ workDir, picoHome });
+      } catch (error) {
+        logger.error(
+          { workDir, error: error instanceof Error ? error.message : String(error) },
+          "[Tracker] runtime usage ledger 初始化失败",
+        );
+      }
+    }
     const runtimeState =
       dependencies.runtimeState ??
       (await createSessionRuntime({
@@ -1118,6 +1130,7 @@ export async function executeAgentRuntime(
         ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
+        ...(ownedUsageStore ? { runtimeStore: ownedUsageStore } : {}),
       }));
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
@@ -1135,7 +1148,7 @@ export async function executeAgentRuntime(
     ) {
       throw new Error("runtimeState.toolDisclosure must match dependencies.toolDisclosure");
     }
-    if (!runtimeState.taskHostRuntime) {
+    if (!runtimeState.taskHostRuntime && !ownedUsageStore) {
       try {
         ownedUsageStore = new RuntimeStore({
           workDir,
