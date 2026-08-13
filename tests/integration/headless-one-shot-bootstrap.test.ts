@@ -93,7 +93,7 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
       routeId: "fixture/model",
       modelId: "model",
       output: undefined,
-      expectedSource: "profile_default",
+      expectedSource: "provider_default",
     },
     {
       name: "configured",
@@ -108,7 +108,7 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
       modelId: "model",
       output: undefined,
       vision: false,
-      expectedSource: "profile_default",
+      expectedSource: "provider_default",
     },
     {
       name: "slash-model",
@@ -153,7 +153,9 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
       legacyModel: "unused-legacy-model",
     });
     const route = router.require(candidate.routeId);
-    assert.equal(route.capabilities.maxOutputTokens, 4_096, candidate.name);
+    // 2acfbcf2d 起：未配置 output 时 maxOutputTokens 为 undefined（不传，用
+    // provider 默认上限），配置时取配置值——直接以 candidate.output 为期望。
+    assert.equal(route.capabilities.maxOutputTokens, candidate.output, candidate.name);
     assert.equal(route.capabilities.outputSource, candidate.expectedSource, candidate.name);
     assert.equal(route.capabilities.outputTokenField, "max_tokens", candidate.name);
     assert.equal(

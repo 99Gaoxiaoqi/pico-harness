@@ -1490,9 +1490,20 @@ export async function executeAgentRuntime(
                 readSessionEvent: (sid, eid) => session.runtimeEventStore!.readSessionEvent(sid, eid),
                 readSessionEntries: (sid) => session.runtimeEventStore!.readSessionEntries(sid),
               });
-              const model = (await memoryModel()).model;
-              const engine = new MemoryProposalEngine({ store, evidenceReader, model });
-              return await engine.process(ref);
+              // lease 必须收口：默认 factory 的 dispose 关闭 CostTracker 的
+              // RuntimeStore ledger，漏放会每次调用泄漏一个打开的 ledger 句柄
+              //（worker.ts 后台提取的 sharedLease?.dispose?.() 是正确范式）。
+              const lease = await memoryModel();
+              try {
+                const engine = new MemoryProposalEngine({
+                  store,
+                  evidenceReader,
+                  model: lease.model,
+                });
+                return await engine.process(ref);
+              } finally {
+                await lease.dispose?.();
+              }
             } finally {
               repo.close();
             }
