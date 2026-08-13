@@ -528,10 +528,20 @@ export class RuntimeHostKernel {
 
   #scheduleIdleIfNeeded(): void {
     if (this.#shutdownRequested) return;
-    if (!this.#isTrueIdle() || this.#idleTimer) return;
+    if (this.#idleTimer) return;
+    this.#armIdleTimer();
+  }
+
+  #armIdleTimer(): void {
     this.#idleTimer = setTimeout(() => {
       this.#idleTimer = undefined;
-      if (!this.#isTrueIdle()) return;
+      if (!this.#isTrueIdle()) {
+        // 到期时仍非 idle（如有 transport 正在握手）：重装定时器重试。否则一旦
+        // 定时器在握手期燃尽，而握手随后失败/超时（此时无其他工作触发重查），
+        // host 会失去唯一的 idle 检查点，变成永不退出的僵尸进程（flock 泄漏）。
+        this.#armIdleTimer();
+        return;
+      }
       void this.#commitShutdown().catch(() => undefined);
     }, this.#idleGraceMs);
   }
