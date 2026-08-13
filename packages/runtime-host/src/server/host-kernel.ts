@@ -40,6 +40,9 @@ import {
 const DEFAULT_IDLE_GRACE_MS = 30_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+// recover() 启动 deadline：业务恢复钩子挂死时 fail-stop（requestDrain），
+// 避免 kernel.start() 无限挂起（此时 shutdown deadline 尚未 arm）。
+const RECOVER_STARTUP_DEADLINE_MS = 60_000;
 const SHUTDOWN_HANDSHAKE_GRACE_MS = 1_000;
 const SHUTDOWN_OPERATION_GRACE_MS = 1_000;
 const HOST_PROTOCOL = {
@@ -228,7 +231,24 @@ export class RuntimeHostKernel {
           });
           if (this.#shutdownRequested) this.#beginCompositionDrain();
           this.#operationHandlers = this.#createOperationHandlers(this.#composition.handlers);
-          await this.#composition.recover();
+          // recover() 是业务注入的恢复钩子；给它一个有界 deadline，挂死的 recover
+          // 不能让 kernel.start() 无限挂起（此时 shutdown deadline 尚未 arm）。
+          // requestDrain() 触发 #commitShutdown，其 arm 的 shutdown deadline 会在
+          // recover 仍不返回时升级为 process_termination_required。
+          await Promise.race([
+            this.#composition.recover(),
+            new Promise<never>((_, reject) => {
+              const timer = setTimeout(() => {
+                this.#requestDrain();
+                reject(
+                  new Error(
+                    "Runtime Host composition recover exceeded the startup deadline",
+                  ),
+                );
+              }, RECOVER_STARTUP_DEADLINE_MS);
+              timer.unref?.();
+            }),
+          ]);
         } finally {
           settleCompositionStartup();
         }

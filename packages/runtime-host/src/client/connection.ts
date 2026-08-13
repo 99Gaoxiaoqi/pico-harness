@@ -150,6 +150,10 @@ interface PendingRequest {
 interface RetiredRequest {
   operation: OperationKey;
   domainState?: "in_flight";
+  /** Set once the retired-slot TTL force-released the in-flight domain slot. */
+  slotReleased?: boolean;
+  /** TTL timer bounding how long a retired entry may pin state; cleared on match/fail. */
+  slotTimer?: NodeJS.Timeout;
 }
 
 interface QueuedDomainFrame {
@@ -158,6 +162,14 @@ interface QueuedDomainFrame {
 }
 
 type RequestTimeoutScope = "request" | "connection";
+
+// A timed-out domain request retires and waits for its (possibly never-arriving)
+// response. Its in-flight slot is force-released after this TTL so a hung host
+// handler cannot pin all RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS slots and
+// wedge the domain channel while liveness probes still succeed. The entry itself
+// stays until a matching response arrives, so a genuinely late response is still
+// reconciled instead of failing the connection as unmatched.
+const RETIRED_SLOT_TTL_MS = 30_000;
 
 class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   readonly hostEpoch: string;
@@ -329,7 +341,9 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       const retired = this.#retiredRequests.get(frame.requestId);
       if (retired?.operation === frame.operation) {
         this.#retiredRequests.delete(frame.requestId);
-        this.#releaseDomainSlot(retired);
+        if (retired.slotTimer) clearTimeout(retired.slotTimer);
+        // 槽位 TTL 可能已强制释放过 in-flight 槽位；仅在未释放时才释放，否则计数下溢。
+        if (!retired.slotReleased) this.#releaseDomainSlot(retired);
         this.#scheduleLivenessCheck();
         return;
       }
@@ -372,12 +386,27 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       this.#scheduleLivenessCheck();
       return;
     }
-    this.#retiredRequests.set(requestId, {
+    const retired: RetiredRequest = {
       operation: pending.operation,
       ...(pending.domainState === "in_flight" ? { domainState: pending.domainState } : {}),
-    });
+    };
+    if (retired.domainState === "in_flight") {
+      retired.slotTimer = setTimeout(() => this.#expireRetiredSlot(requestId), RETIRED_SLOT_TTL_MS);
+      retired.slotTimer.unref?.();
+    }
+    this.#retiredRequests.set(requestId, retired);
     pending.reject(error);
     this.#scheduleLivenessCheck();
+  }
+
+  #expireRetiredSlot(requestId: string): void {
+    const retired = this.#retiredRequests.get(requestId);
+    if (!retired || retired.slotReleased) return;
+    retired.slotTimer = undefined;
+    // 强制释放被占用的 in-flight 槽位；条目保留，使真正迟到的响应仍能被对账，
+    // 而不是被当作 unmatched 而 fail 连接。
+    this.#releaseDomainSlot(retired);
+    retired.slotReleased = true;
   }
 
   #releaseDomainSlot(request: PendingRequest | RetiredRequest): void {
@@ -461,6 +490,9 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       pending.reject(error);
     }
     this.#pendingRequests.clear();
+    for (const retired of this.#retiredRequests.values()) {
+      if (retired.slotTimer) clearTimeout(retired.slotTimer);
+    }
     this.#retiredRequests.clear();
     this.#transport.destroy();
   }
