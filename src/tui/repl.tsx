@@ -195,6 +195,7 @@ import { RuntimeRun } from "../runtime/runtime-run.js";
 import type { PrestartedRuntimeRun } from "../runtime/runtime-run-executor.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
+import { raceWithDeadline } from "../util/race-with-deadline.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -1734,7 +1735,13 @@ export async function startTuiRepl(
 
   type TerminalGridSession = Awaited<ReturnType<typeof createTuiTerminalGridSession>>;
   let cleanupPromise: Promise<void> | undefined;
-  const cleanupTuiResources = (terminalGrid?: TerminalGridSession): Promise<void> => {
+  // terminalGrid 提升为闭包级 ref：cleanupTuiResources 不再通过参数捕获网格，
+  // 而是在清理时从 ref 读取。这样 ??= memoization 不再耦合首次调用的实参——
+  // 无论先从哪条路径调用 cleanupTuiResources()（buildSessionBundle 失败回退、
+  // 运行期信号、启动期信号），都能读到当时已分配的 terminalGrid，不会因参数
+  // 缺省而永久泄漏网格资源（原实现靠注释维持不变量，脆弱）。
+  let terminalGridRef: TerminalGridSession | undefined;
+  const cleanupTuiResources = (): Promise<void> => {
     cleanupPromise ??= (async () => {
       shuttingDown = true;
       const failures: unknown[] = [];
@@ -1746,7 +1753,7 @@ export async function startTuiRepl(
         }
       };
       await attempt(async () => {
-        await terminalGrid?.dispose();
+        await terminalGridRef?.dispose();
       });
       activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
       const drainPending = async (): Promise<void> => {
@@ -1768,20 +1775,9 @@ export async function startTuiRepl(
       };
       // 排空给硬超时兜底：若某条后台链路不响应 abort 信号而永不 settle，
       // 不能让进程永久挂起。超时后吞下诊断并继续执行后续持久化。
-      let drainTimer: ReturnType<typeof setTimeout> | undefined;
-      let drainTimedOut = false;
-      const drainTimeout = new Promise<void>((resolve) => {
-        drainTimer = setTimeout(() => {
-          drainTimedOut = true;
-          resolve();
-        }, TUI_CLEANUP_DRAIN_MS);
-      });
-      try {
-        await Promise.race([drainPending(), drainTimeout]);
-      } finally {
-        if (drainTimer) clearTimeout(drainTimer);
-      }
-      if (drainTimedOut) {
+      // 定时器句柄清理收敛进 raceWithDeadline（范式同 retry.ts abortableSleep）。
+      const drained = await raceWithDeadline(drainPending(), TUI_CLEANUP_DRAIN_MS);
+      if (!drained) {
         // 排空超时是已兜底情形（runtime/MCP 未响应 abort），不作为 cleanup 失败上报，
         // 仅写一条诊断；未排空的后台任务在 shuttingDown 守卫下成为无害孤儿。
         process.stderr.write("TUI 排空等待超时，未响应的后台任务已被放弃\n");
@@ -1807,8 +1803,43 @@ export async function startTuiRepl(
     return cleanupPromise;
   };
 
+  // ---- 进程级信号 handler：必须在 buildSessionBundle 之前注册 ----
+  // buildSessionBundle（含 MCP 加载、file index、provider 解析）耗时 1-3s；旧实现把
+  // process.on(SIGTERM/SIGHUP/SIGINT) 放在 render 之后，导致启动期信号走 Node 默认硬退，
+  // 跳过 transcript 持久化 / MCP 子进程清理 / 终端状态恢复。提前注册后，启动期信号仅
+  // 递增 tuiSignalCount；buildSessionBundle 不中途 abort（避免已分配 bundle 孤儿泄漏），
+  // 跑完后由下方 try 块顶部的 tuiSignalCount 检查跳过 render、直接进 finally 清理。
+  // raw mode 下日常 Ctrl+C 由 Ink useInput 捕获（app:interrupt），不触发此处 SIGINT。
+  const instanceRef: { current?: Instance } = {};
+  let tuiSignalCount = 0;
+  // startupComplete 在 instance.waitUntilExit() 之前置 true，区分"启动期"与"运行期"信号：
+  // 启动期只递增计数（尚无 instance 可 unmount）；运行期 unmount 解除 waitUntilExit。
+  let startupComplete = false;
+  const onTuiSignal = (): void => {
+    tuiSignalCount += 1;
+    if (tuiSignalCount >= 2) {
+      // 第二次信号：cleanup 可能仍在进行（首信号已触发清理）或启动期尚未完成，直接强退兜底。
+      process.exit(130);
+    }
+    if (startupComplete) {
+      // 运行期：unmount 解除 waitUntilExit，走 finally 的 cleanupTuiResources；
+      // 退出码由 finally 的 process.exit(130) 决定（runCli 返回值会覆盖 process.exitCode）。
+      instanceRef.current?.unmount();
+    }
+    // 启动期（!startupComplete）：仅递增计数，不 unmount（尚无 instance）。
+    // buildSessionBundle 完成后由 try 块顶部检查 tuiSignalCount 跳过 render、进 finally 清理。
+  };
+  process.on("SIGTERM", onTuiSignal);
+  process.on("SIGHUP", onTuiSignal);
+  process.on("SIGINT", onTuiSignal);
+
   const initialBundle = await buildSessionBundle(tuiSessionSelection).catch(
     async (error: unknown) => {
+      // 信号 handler 已提前注册：buildSessionBundle 失败时必须摘除，避免泄漏到后续 CLI 流程
+      // （否则进程后续收到信号会命中已失效的 onTuiSignal）。成功路径由下方 try/finally 摘除。
+      process.off("SIGTERM", onTuiSignal);
+      process.off("SIGHUP", onTuiSignal);
+      process.off("SIGINT", onTuiSignal);
       try {
         await cleanupTuiResources();
       } catch (cleanupError) {
@@ -1824,8 +1855,6 @@ export async function startTuiRepl(
   activeBundle = initialBundle;
 
   // 包装组件:管理 entries 状态 + QueryGuard 派生 running,把 setter 暴露给外部
-  const instanceRef: { current?: Instance } = {};
-
   function ReplApp({ redrawBlank = false }: { redrawBlank?: boolean }) {
     const { exit } = useApp();
     const [bundle, setBundle] = useState(initialBundle);
@@ -2728,49 +2757,37 @@ export async function startTuiRepl(
 
   // ChatGPT.app 可能先改变 xterm 网格、后端 PTY 却仍上报旧宽度。
   // Ink 接管 alt-screen 前先查询前端光标边界，避免隐式换行让擦行记账失步。
-  let terminalGrid: TerminalGridSession | undefined;
-  // 交互式 TUI（exitOnCtrlC:false）默认不注册进程级信号：外部 kill / IDE
-  // 停止 / 终端关闭（SIGTERM/SIGHUP）原本走 Node 默认硬退，绕过 cleanup，
-  // 导致终端状态损坏、MCP 子进程孤儿、尾部 transcript 丢失。注册后：
-  // 首次信号解除 waitUntilExit 走 finally 的 cleanupTuiResources，第二次强退。
-  // raw mode 下日常 Ctrl+C 由 Ink useInput 捕获（app:interrupt），不触发此处 SIGINT。
-  let tuiSignalCount = 0;
-  const onTuiSignal = (): void => {
-    tuiSignalCount += 1;
-    if (tuiSignalCount === 1) {
-      // 不直接调 cleanup：IIFE 首次调用会捕获 terminalGrid 参数，handler 不传参会
-      // 导致网格资源泄漏。只 unmount 让 finally 接管真正的清理；退出码由 finally
-      // 的 process.exit(130) 决定（runCli 的返回值会覆盖 process.exitCode）。
-      instanceRef.current?.unmount();
-    } else {
-      process.exit(130);
-    }
-  };
   try {
-    terminalGrid = await createTuiTerminalGridSession(process.stdin, process.stdout);
-    const renderStdout = terminalGrid.stdout;
+    if (tuiSignalCount === 0) {
+      terminalGridRef = await createTuiTerminalGridSession(process.stdin, process.stdout);
+      const renderStdout = terminalGridRef.stdout;
 
-    // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
-    // 留在首屏,造成 Logo/Header 看起来重复。
-    if (renderStdout.isTTY) {
-      renderStdout.write("\x1b[2J\x1b[H");
+      // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
+      // 留在首屏,造成 Logo/Header 看起来重复。
+      if (renderStdout.isTTY) {
+        renderStdout.write("\x1b[2J\x1b[H");
+      }
+
+      // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁。
+      // 根布局保留右侧 1 列，避免中文、Emoji 和长行在右边界立即换行时失配。
+      // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
+      // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
+      const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
+      instanceRef.current = instance;
+      // 信号 handler 已在 buildSessionBundle 之前注册；此处切换到运行期语义：
+      // 之后的首个信号走 unmount 解除 waitUntilExit（而非仅递增计数）。
+      startupComplete = true;
+      await instance.waitUntilExit();
     }
-
-    // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁。
-    // 根布局保留右侧 1 列，避免中文、Emoji 和长行在右边界立即换行时失配。
-    // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
-    // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
-    const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
-    instanceRef.current = instance;
-    process.on("SIGTERM", onTuiSignal);
-    process.on("SIGHUP", onTuiSignal);
-    process.on("SIGINT", onTuiSignal);
-    await instance.waitUntilExit();
+    // 启动期（buildSessionBundle 期间）已收到进程信号时 tuiSignalCount > 0：
+    // terminalGrid 尚未创建、终端仍在正常模式无需恢复，activeBundle 已就绪，
+    // 跳过上方 render 直接落 finally——cleanupTuiResources 会刷 transcript / 关 MCP
+    // （terminalGridRef 为 undefined 时跳过终端恢复），随后以 process.exit(130) 退出。
   } finally {
     // cleanup 期间保留信号 handler，使第二次信号能命中 onTuiSignal 强制退出；
     // off 在 cleanup 之后执行。内层 finally 确保即使 cleanup 抛错也能摘除 handler。
     try {
-      await cleanupTuiResources(terminalGrid);
+      await cleanupTuiResources();
     } finally {
       process.off("SIGTERM", onTuiSignal);
       process.off("SIGHUP", onTuiSignal);

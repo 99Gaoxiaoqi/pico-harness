@@ -542,6 +542,43 @@ test("rewind after a local clear forks a new session and returns its id", async 
   assert.equal(result.inputText, "original prompt");
 });
 
+test("suppressing an assistant turn closes the reasoning stream so a retry does not concatenate (reporter-7)", () => {
+  // 推理模型(deepseek-v4-pro 等)流式先产 reasoning 再产 text。若第一次尝试仅产完
+  // 部分 reasoning 后因网络失败被抑制,修复前 currentReasoningStream 未被收口,
+  // 第二次 onReasoningDelta 会追加到同一 reasoning 条目,UI 得到 R1+R2 拼接的脏思考。
+  const reporter = new TuiReporter();
+  reporter.onReasoningDelta("第一次思考");
+  reporter.onAssistantResponseSuppressed("network-retry");
+  reporter.onReasoningDelta("第二次思考");
+
+  const events = reporter.getEvents();
+  const started = events.filter(
+    (e): e is Extract<TranscriptEvent, { type: "assistant.stream.started" }> =>
+      e.type === "assistant.stream.started" && e.entryKind === "thinking",
+  );
+  const completed = events.filter(
+    (e): e is Extract<TranscriptEvent, { type: "assistant.stream.completed" }> =>
+      e.type === "assistant.stream.completed",
+  );
+
+  // 两次 reasoning 必须各自开新条目,而非复用同一个。
+  assert.equal(started.length, 2, "两次 reasoning 应各自开启独立条目");
+  assert.notEqual(started[0]!.entryId, started[1]!.entryId);
+  // 第一次 reasoning 流必须在第二次开始前被收口(completeReasoningStream)。
+  assert.ok(
+    completed.some((e) => e.entryId === started[0]!.entryId),
+    "第一次 reasoning 流应在抑制时被收口",
+  );
+  // 第二次 reasoning 不得追加到第一次条目上(即不存在脏拼接)。
+  const firstStreamDeltas = events
+    .filter(
+      (e): e is Extract<TranscriptEvent, { type: "assistant.stream.delta" }> =>
+        e.type === "assistant.stream.delta" && e.entryId === started[0]!.entryId,
+    )
+    .map((e) => e.delta);
+  assert.deepEqual(firstStreamDeltas, [], "第二次 reasoning 不得追加到第一次条目");
+});
+
 function summarizeEntry(entry: { kind: string; uiEntryId?: string; content?: string }) {
   return { kind: entry.kind, content: entry.content, uiEntryId: entry.uiEntryId };
 }
