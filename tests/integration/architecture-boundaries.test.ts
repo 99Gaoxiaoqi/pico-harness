@@ -7,7 +7,9 @@ import test from "node:test";
 import { join, resolve } from "node:path";
 import {
   scanArchitectureBoundaries,
+  scanCanonicalPrimitiveRedefinitions,
   scanCrossCuttingDefinitions,
+  scanHandwrittenTimeoutPrimitives,
 } from "../../scripts/check-architecture-boundaries.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -188,4 +190,105 @@ test("architecture gate does not mistake string literals for imports", async (co
 
   const violations = scanArchitectureBoundaries({ repositoryRoot: fixtureRoot });
   assert.deepEqual(violations, []);
+});
+
+test("architecture gate flags handwritten new Promise + setTimeout primitives", async (context) => {
+  // 语义化横切原语规则：同文件 new Promise + setTimeout 共现 = 手写超时原语。
+  // canonical 文件（src/util/race-with-deadline.ts）白名单豁免。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-timeout-primitive-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/engine", "src/util", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  const primitive = "const p = new Promise((r) => setTimeout(r, 100));\n";
+  await writeFile(join(fixtureRoot, "src/engine/custom.ts"), primitive, "utf8");
+  await writeFile(join(fixtureRoot, "src/util/race-with-deadline.ts"), primitive, "utf8");
+
+  const violations = scanHandwrittenTimeoutPrimitives({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(violations, [
+    {
+      rule: "handwritten-timeout-primitive",
+      source: "src/engine/custom.ts",
+      target: "new Promise + setTimeout",
+    },
+  ]);
+});
+
+test("architecture gate flags canonical primitive redefinition outside the canonical file", async (context) => {
+  // canonical 原语名 raceWithDeadline 只能在 src/util/race-with-deadline.ts 定义；
+  // import 是引用不是定义，不算违规。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-canonical-redefinition-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/engine", "src/util", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  await writeFile(
+    join(fixtureRoot, "src/engine/custom.ts"),
+    "function raceWithDeadline(p: Promise<unknown>, ms: number) { return p; }\n",
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/engine/consumer.ts"),
+    'import { raceWithDeadline } from "../util/race-with-deadline.js";\n',
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/util/race-with-deadline.ts"),
+    "export async function raceWithDeadline(p: Promise<unknown>, ms: number): Promise<boolean> { return true; }\n",
+    "utf8",
+  );
+
+  const violations = scanCanonicalPrimitiveRedefinitions({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(violations, [
+    {
+      rule: "canonical-primitive-redefinition",
+      source: "src/engine/custom.ts",
+      target: "raceWithDeadline",
+    },
+  ]);
+});
+
+test("architecture gate blocks delegation-manager from importing graph/runtime, single-file only", async (context) => {
+  // 对抗审查（C）：src/tools/delegation-manager.ts 承载 graph/plan 调度职责，
+  // 不得 import src/graph/ 或 src/runtime/（value 或 type）；其它 tools 文件
+  // （如 graph-tools.ts）不受此单文件规则限制。回调解耦（onGraphWorkSettled 等）
+  // 不受影响——规则只禁 import。
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-delegation-leak-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src/tools", "src/graph", "apps", "packages"].map((path) =>
+      mkdir(join(fixtureRoot, path), { recursive: true }),
+    ),
+  );
+  await writeFile(
+    join(fixtureRoot, "src/graph/contract.ts"),
+    "export interface GraphWork { readonly id: string }\n",
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/tools/delegation-manager.ts"),
+    'import type { GraphWork } from "../graph/contract.js";\n',
+    "utf8",
+  );
+  await writeFile(
+    join(fixtureRoot, "src/tools/other.ts"),
+    'import type { GraphWork } from "../graph/contract.js";\n',
+    "utf8",
+  );
+
+  const violations = scanArchitectureBoundaries({ repositoryRoot: fixtureRoot });
+  assert.deepEqual(
+    violations.map(({ rule, source, target }) => ({ rule, source, target })),
+    [
+      {
+        rule: "delegation-manager-scheduling-leak",
+        source: "src/tools/delegation-manager.ts",
+        target: "src/graph/contract.ts",
+      },
+    ],
+  );
 });
