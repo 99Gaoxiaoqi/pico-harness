@@ -18,6 +18,18 @@ export function scanArchitectureBoundaries(
   options?: ArchitectureBoundaryScanOptions,
 ): ArchitectureBoundaryViolation[];
 
+export function scanCrossCuttingDefinitions(
+  options?: ArchitectureBoundaryScanOptions,
+): ArchitectureBoundaryViolation[];
+
+export function scanHandwrittenTimeoutPrimitives(
+  options?: ArchitectureBoundaryScanOptions,
+): ArchitectureBoundaryViolation[];
+
+export function scanCanonicalPrimitiveRedefinitions(
+  options?: ArchitectureBoundaryScanOptions,
+): ArchitectureBoundaryViolation[];
+
 export function evaluateArchitectureBoundaries(
   violations: readonly ArchitectureBoundaryViolation[],
   baseline?: ReadonlyMap<string, unknown>,

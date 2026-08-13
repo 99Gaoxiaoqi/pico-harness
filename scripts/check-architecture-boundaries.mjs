@@ -19,6 +19,58 @@ const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
  */
 const BASELINE_PATH = resolve(REPOSITORY_ROOT, "scripts/architecture-boundaries-baseline.json");
 
+/**
+ * 手写超时原语白名单（2026-08-13 全仓共现扫描基线，逐文件核验后落档）。
+ *
+ * 语义：同文件同时出现 `new Promise` 构造与 `setTimeout` 调用，即手写
+ * "Promise + 定时器"原语（race-with-deadline 的雏形），应统一收敛到
+ * src/util/race-with-deadline.ts。全仓实测共现 31 个文件，其中：
+ *
+ * - canonical（1）：race-with-deadline.ts 是统一原语本体，豁免。
+ * - 误报（3）：setTimeout 与 new Promise 无语义关联——auth 超时定时器直接
+ *   destroy socket、pending 队列 promise + worker 调度 debounce、ws close
+ *   事件 promise + 独立 auth 定时器。setTimeout 不在任何 Promise executor 内。
+ * - 既有手写原语（27）：delay/sleep helper 与请求/握手超时包装，收敛迁移候选。
+ *   规则只拦截新增文件/新增共现，既有无声豁免（与 baseline 哲学一致，避免
+ *   破坏 --strict 的"0 条受控边界记录"断言）。
+ */
+const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
+  // canonical：统一超时/排空原语本体。
+  ["src/util/race-with-deadline.ts", "canonical 原语本体"],
+  // 误报：setTimeout 不在 Promise executor 内，与 new Promise 无因果。
+  ["src/daemon/server.ts", "误报：auth 超时定时器直接 destroy socket，promise 为事件驱动"],
+  ["src/memory/worker.ts", "误报：pending 队列 promise + worker 调度 debounce 定时器"],
+  ["src/mobile-gateway/realtime-server.ts", "误报：ws close 事件 promise + 独立 auth 定时器"],
+  // 既有手写超时原语（收敛迁移候选）。
+  ["src/approval/manager.ts", "既有：审批等待超时包装（executor 内 setTimeout reject）"],
+  ["src/code-intelligence/lsp-client.ts", "既有：LSP 请求超时 / 子进程 SIGKILL 升级（2 处）"],
+  ["src/daemon/client.ts", "既有：connectWithTimeout 超时包装"],
+  ["src/daemon/instance-lock.ts", "既有：runtime.ping 超时包装"],
+  ["src/daemon/ipc-auth.ts", "既有：Windows 工具执行超时包装"],
+  ["src/hooks/executors/executor.ts", "既有：SIGKILL 升级超时"],
+  ["src/input/cron-daemon-bridge.ts", "既有：daemon 启动重试退避 sleep"],
+  ["src/input/user-config-store.ts", "既有：delay() helper"],
+  ["src/internal/headless-one-shot-runner.ts", "既有：delay() helper / cancel 超时"],
+  ["src/mcp/http-client.ts", "既有：请求超时包装"],
+  ["src/mcp/stdio-client.ts", "既有：请求超时 / waitForChildExit 包装（多处）"],
+  ["src/mcp/user-config-store.ts", "既有：delay() helper"],
+  ["src/os/process-tree.ts", "既有：waitForExit 超时包装"],
+  ["src/provider/provider-operation-journal.ts", "既有：delay() helper"],
+  ["src/provider/retry.ts", "既有：sleep/abortableSleep（canonical 注释引为 clearTimeout 范式）"],
+  ["src/runtime/agent-recoverable-task-adapter.ts", "既有：delay() helper"],
+  ["src/runtime/runtime-run.ts", "既有：事件写重试退避（3 处）"],
+  ["src/safety/background-yolo-policy.ts", "既有：hook 超时 fail-closed"],
+  ["src/storage/atomic-json.ts", "既有：sleep() helper"],
+  ["src/storage/file-history-mutation-lease.ts", "既有：租约冲突重试退避"],
+  ["src/storage/local-file-storage.ts", "既有：租约冲突重试退避"],
+  ["src/storage/owner-lease.ts", "既有：租约冲突重试退避"],
+  ["src/tasks/worktree-supervisor.ts", "既有：waitForSettlement 超时包装"],
+  ["src/tools/background-manager.ts", "既有：后台任务等待超时"],
+  ["src/tools/bash.ts", "既有：bash 执行超时 / 强杀定时器"],
+  ["src/tui/system-actions.ts", "既有：进程执行超时（2 处）"],
+  ["src/tui/terminal-grid.ts", "既有：grid 读取超时"],
+]);
+
 function normalizeRelativePath(path, repositoryRoot = REPOSITORY_ROOT) {
   return relative(repositoryRoot, path).split(sep).join("/");
 }
@@ -78,6 +130,21 @@ function isPureTypeImport(declaration) {
 }
 
 function classifyViolation(importer, target, declaration, repositoryRoot, fromArea, toArea) {
+  // 单文件精确规则（对抗审查 C）：DelegationManager 承载 graph/plan 调度职责，
+  // 但 import 级全面禁止 tools→graph 会误伤合法的 graph-tools.ts，因此只禁
+  // src/tools/delegation-manager.ts 直接 import src/graph/ 或 src/runtime/ 下
+  // 的任何模块（value 或 type）。与 graph 的耦合必须走回调（onGraphWorkSettled
+  // 等）解耦——规则只禁 import，不禁回调。
+  const importerRelative = normalizeRelativePath(importer, repositoryRoot);
+  if (importerRelative === "src/tools/delegation-manager.ts") {
+    const targetRelative = normalizeRelativePath(target, repositoryRoot);
+    if (
+      targetRelative.startsWith("src/graph/") ||
+      targetRelative.startsWith("src/runtime/")
+    ) {
+      return "delegation-manager-scheduling-leak";
+    }
+  }
   // fromArea/toArea override the raw areas for neutral files whose effective area is
   // derived from their re-exports (see effectiveSourceArea).
   const from = fromArea ?? sourceArea(importer, repositoryRoot);
@@ -249,6 +316,86 @@ export function scanCrossCuttingDefinitions({ repositoryRoot = REPOSITORY_ROOT }
   );
 }
 
+/**
+ * 手写超时原语语义化检测：同文件内同时出现 `new Promise` 构造与 `setTimeout`
+ * 调用即视为手写"Promise + 定时器"原语，应统一收敛到 race-with-deadline.ts。
+ * 对抗审查（B）的"同文件共现"签名实测：全仓 31 个文件共现，除 canonical 外
+ * 均为 pre-existing（白名单见 HANDWRITTEN_TIMEOUT_WHITELIST，含误报 3 +
+ * 既有原语 27），因此本规则当前零新增违规，只拦截新引入的共现。
+ *
+ * 精确性说明：
+ * - `new Promise` 可能以 new Promise<...> / new Promise(( 形式出现，取
+ *   \bnew\s+Promise\s*[<(] 覆盖两种形态；
+ * - `setTimeout` 以调用形态 setTimeout( 匹配，避开 ReturnType<typeof
+ *   setTimeout> 这类类型位置的误匹配；
+ * - stripComments 后字符串字面量误匹配已全仓评估：无任何文件依赖字符串
+ *   字面量判定（"new Promise"/"setTimeout" 从不只出现在字符串里）。
+ */
+const NEW_PROMISE_TOKEN = /\bnew\s+Promise\s*[<(]/;
+const SET_TIMEOUT_TOKEN = /\bsetTimeout\s*\(/;
+
+export function scanHandwrittenTimeoutPrimitives({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const sourceFiles = SOURCE_ROOTS.flatMap((root) =>
+    listSourceFiles(resolve(repositoryRoot, root)),
+  );
+  const violations = [];
+  for (const file of sourceFiles) {
+    const relative = normalizeRelativePath(file, repositoryRoot);
+    if (HANDWRITTEN_TIMEOUT_WHITELIST.has(relative)) continue;
+    const source = stripComments(readFileSync(file, "utf8"));
+    if (NEW_PROMISE_TOKEN.test(source) && SET_TIMEOUT_TOKEN.test(source)) {
+      violations.push({
+        rule: "handwritten-timeout-primitive",
+        source: relative,
+        target: "new Promise + setTimeout",
+      });
+    }
+  }
+  return violations.sort((left, right) =>
+    `${left.rule}|${left.source}|${left.target}`.localeCompare(
+      `${right.rule}|${right.source}|${right.target}`,
+    ),
+  );
+}
+
+/**
+ * canonical 原语名唯一性：raceWithDeadline / raceWithDeadlineReject 只允许在
+ * src/util/race-with-deadline.ts 内被定义。只匹配"定义形态"（function 声明 /
+ * const|let 赋值），import 与调用形态天然不匹配（import 后无 `=`，调用形态
+ * 前无 function/const/let 关键字），因此 import { raceWithDeadline } 不算违规。
+ */
+const CANONICAL_PRIMITIVE_FILE = "src/util/race-with-deadline.ts";
+const CANONICAL_PRIMITIVES = ["raceWithDeadline", "raceWithDeadlineReject"];
+
+export function scanCanonicalPrimitiveRedefinitions({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const sourceFiles = SOURCE_ROOTS.flatMap((root) =>
+    listSourceFiles(resolve(repositoryRoot, root)),
+  );
+  const violations = [];
+  for (const file of sourceFiles) {
+    const relative = normalizeRelativePath(file, repositoryRoot);
+    if (relative === CANONICAL_PRIMITIVE_FILE) continue;
+    const source = stripComments(readFileSync(file, "utf8"));
+    for (const name of CANONICAL_PRIMITIVES) {
+      const definitionPattern = new RegExp(
+        `function\\s+${name}\\b|\\b(?:const|let)\\s+${name}\\s*=`,
+      );
+      if (definitionPattern.test(source)) {
+        violations.push({
+          rule: "canonical-primitive-redefinition",
+          source: relative,
+          target: name,
+        });
+      }
+    }
+  }
+  return violations.sort((left, right) =>
+    `${left.rule}|${left.source}|${left.target}`.localeCompare(
+      `${right.rule}|${right.source}|${right.target}`,
+    ),
+  );
+}
+
 export function evaluateArchitectureBoundaries(violations, baseline = loadBaseline()) {
   const known = [];
   const unexpected = [];
@@ -263,8 +410,9 @@ function printViolations(title, violations) {
   if (violations.length === 0) return;
   console.error(`[architecture-boundaries] ${title} (${violations.length})`);
   for (const violation of violations) {
+    const specifier = violation.specifier ? ` (${violation.specifier})` : "";
     console.error(
-      `  - ${violation.rule}: ${violation.source} -> ${violation.target} (${violation.specifier})`,
+      `  - ${violation.rule}: ${violation.source} -> ${violation.target}${specifier}`,
     );
   }
 }
@@ -286,6 +434,8 @@ function main() {
   const violations = [
     ...scanArchitectureBoundaries(),
     ...scanCrossCuttingDefinitions(),
+    ...scanHandwrittenTimeoutPrimitives(),
+    ...scanCanonicalPrimitiveRedefinitions(),
   ];
   const { known, unexpected } = evaluateArchitectureBoundaries(violations);
   console.log(
