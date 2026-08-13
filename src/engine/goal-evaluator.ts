@@ -11,6 +11,7 @@
  */
 
 import type { LLMProvider } from "../provider/interface.js";
+import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 import type { Goal } from "./goal-manager.js";
 import type { Message } from "../schema/message.js";
 
@@ -79,12 +80,13 @@ export async function evaluateGoalCompletion(
   ];
 
   try {
-    const result = await Promise.race([
+    // raceWithDeadlineReject 收口了超时定时器句柄的清理（原手写 race 未保存
+    // setTimeout 返回值，generate 先 resolve 时定时器悬挂泄漏，阻碍 Node 优雅退出）。
+    const result = await raceWithDeadlineReject(
       provider.generate(messages, [], { signal, purpose: "hook" }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("评估器超时")), EVALUATOR_TIMEOUT_MS),
-      ),
-    ]);
+      EVALUATOR_TIMEOUT_MS,
+      () => new Error("评估器超时"),
+    );
     return parseEvaluationResult(result.content);
   } catch {
     // 超时或调用失败 → fail-open

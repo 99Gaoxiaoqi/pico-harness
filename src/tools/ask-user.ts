@@ -211,7 +211,6 @@ export interface AskUserToolResult {
 /** 模型工具：提交一个结构化单选问题，并异步等待 TUI 回答。 */
 export class AskUserTool implements BaseTool {
   readonly readOnly = true;
-  readonly handlesAbortSignal = true;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly handler: AskUserHandler) {}

@@ -8,6 +8,7 @@ import type {
   WorktreeTaskRunner,
   WorktreeTaskSnapshot,
 } from "../tasks/worktree-supervisor.js";
+import { raceWithDeadline } from "../util/race-with-deadline.js";
 
 export const WORKSPACE_RUN_STATUSES = [
   "running",
@@ -400,7 +401,7 @@ export class WorkspaceTaskRuntime {
     const executorDrain = Promise.allSettled(records.map((record) => record.promise)).then(
       () => undefined,
     );
-    const drained = await settleWithinDeadline([executorDrain], this.closeDrainTimeoutMs);
+    const drained = await raceWithDeadline([executorDrain], this.closeDrainTimeoutMs);
     if (!drained) {
       for (const record of records) {
         if (!isTerminalRunStatus(record.snapshot.status)) {
@@ -625,24 +626,6 @@ function normalizeCloseDrainTimeoutMs(value: number | undefined): number {
     throw new RangeError("closeDrainTimeoutMs 必须是非负有限数");
   }
   return timeoutMs;
-}
-
-async function settleWithinDeadline(
-  promises: readonly Promise<unknown>[],
-  timeoutMs: number,
-): Promise<boolean> {
-  if (promises.length === 0) return true;
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      Promise.allSettled(promises).then(() => true),
-      new Promise<false>((resolveTimeout) => {
-        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function taskVersion(task: TaskSnapshot): number {

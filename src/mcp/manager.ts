@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
+import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
 import {
   createToolRegistrationOwner,
@@ -569,8 +570,16 @@ export class McpConnectionManager {
     this.attachLifecycle(entry, client);
     this.emitSnapshot();
     try {
-      await this.withTimeout(client.connect(), timeoutMs, entry.name);
-      const discovered = await this.withTimeout(client.listTools(), timeoutMs, entry.name);
+      await raceWithDeadlineReject(
+        client.connect(),
+        timeoutMs,
+        (ms) => new Error(`server "${entry.name}" 启动超时(${ms}ms)`),
+      );
+      const discovered = await raceWithDeadlineReject(
+        client.listTools(),
+        timeoutMs,
+        (ms) => new Error(`server "${entry.name}" 启动超时(${ms}ms)`),
+      );
       if (entry.client !== client) {
         await client.close().catch(() => {});
         return;
@@ -788,25 +797,6 @@ export class McpConnectionManager {
       () => undefined,
     );
     return running;
-  }
-
-  private async withTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    serverName: string,
-  ): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await new Promise<T>((resolvePromise, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`server "${serverName}" 启动超时(${timeoutMs}ms)`)),
-          timeoutMs,
-        );
-        promise.then(resolvePromise, reject);
-      });
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
   }
 
   private validateConfig(data: unknown, source: string): McpConfig {

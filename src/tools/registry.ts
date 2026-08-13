@@ -81,8 +81,6 @@ export interface BaseTool {
   definition(): ToolDefinition;
   /** 接收大模型吐出的 JSON 参数,执行具体业务逻辑 */
   execute(args: string, context?: ToolExecutionContext): Promise<string>;
-  /** true 表示工具会在 signal abort 后终止物理操作并 settle execute Promise。 */
-  handlesAbortSignal?: boolean;
   /** 声明文件系统副作；未声明的非只读工具默认为 workspace。 */
   fileSideEffects?: ToolFileSideEffects | ((args: string) => ToolFileSideEffects);
   /**
@@ -133,8 +131,6 @@ export interface Registry {
    * 默认返回 false (保守视为写操作)。
    */
   isReadOnlyTool?(name: string): boolean;
-  /** 工具是否会在 abort 后自主收口，供调度器决定是否等待物理终止。 */
-  handlesAbortSignal?(name: string): boolean;
   /** 解析单次调用的文件副作范围。 */
   getFileSideEffects?(call: ToolCall): ToolFileSideEffects;
   /**

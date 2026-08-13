@@ -168,13 +168,6 @@ export class ToolRegistry implements Registry {
     return this.tools.get(name)?.readOnly ?? false;
   }
 
-  handlesAbortSignal(name: string): boolean {
-    // 中间件可以选择不调 next，此时不能替整条链承诺物理收口。
-    return (
-      this.executionMiddlewares.length === 0 && (this.tools.get(name)?.handlesAbortSignal ?? false)
-    );
-  }
-
   getFileSideEffects(call: ToolCall): ToolFileSideEffects {
     const tool = this.tools.get(call.name);
     if (!tool) return NO_FILE_SIDE_EFFECTS;

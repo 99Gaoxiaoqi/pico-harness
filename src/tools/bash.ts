@@ -53,7 +53,6 @@ export function resolveBashTimeoutMs(value?: unknown): number {
 }
 
 export class BashTool implements BaseTool {
-  readonly handlesAbortSignal = true;
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   private readonly timeoutMs: number;
 

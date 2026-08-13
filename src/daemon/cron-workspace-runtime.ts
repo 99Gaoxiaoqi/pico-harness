@@ -1,4 +1,5 @@
 import type { WorkspaceTaskRuntime } from "../runtime/workspace-runtime.js";
+import { raceWithDeadline } from "../util/race-with-deadline.js";
 import {
   CronRuntimeScheduler,
   type CronRuntimeSchedulerOptions,
@@ -92,7 +93,7 @@ export class CronWorkspaceRuntime {
 
   private async performClose(): Promise<void> {
     const activeTickDrain = this.scheduler.stopAndWait();
-    const drained = await settlesWithin(activeTickDrain, this.closeDrainTimeoutMs);
+    const drained = await raceWithDeadline(activeTickDrain, this.closeDrainTimeoutMs);
     const releaseOwnership = async (): Promise<void> => {
       await activeTickDrain;
       this.cronService.close();
@@ -171,18 +172,4 @@ function normalizeCloseDrainTimeoutMs(value: number | undefined): number {
     throw new RangeError("Cron closeDrainTimeoutMs 必须是非负有限数");
   }
   return timeoutMs;
-}
-
-async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise.then(() => true),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
