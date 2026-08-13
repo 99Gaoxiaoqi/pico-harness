@@ -1,6 +1,16 @@
 import type { MobileProjectId, MobileRealtimeEvent, MobileRun, SessionId } from "@pico/protocol";
-import { AppState } from "react-native";
 import { normalizeGatewayOrigin, type MobileGatewayConnection } from "./mobile-gateway-client";
+
+/** 前台状态源抽象：真机由 react-native 的 AppState 提供（见 session.tsx 注入的适配器），
+ *  集成测试注入 mock。本模块因此不直接依赖 react-native，根编译/测试加载它时
+ *  不会把 react-native 类型（进而 lib.dom）拖进程序，避免 DOM 版 setTimeout 覆盖
+ *  @types/node 的 NodeJS.Timeout 造成全仓 typecheck 污染。 */
+export interface MobileAppStateSource {
+  addEventListener(
+    type: "change",
+    handler: (state: string) => void,
+  ): { remove(): void };
+}
 
 /** 连接（TCP+WS 握手）超时：onclose 不触发时强制 close 进入重连。 */
 const CONNECT_TIMEOUT_MS = 8_000;
@@ -54,6 +64,7 @@ export class MobileGatewayRealtimeClient {
     private readonly connection: MobileGatewayConnection,
     private readonly createWebSocket: MobileWebSocketFactory = (url) =>
       new WebSocket(url) as unknown as MobileWebSocket,
+    private readonly appStateSource?: MobileAppStateSource,
   ) {
     this.origin = normalizeGatewayOrigin(connection.origin).replace(/^http:/u, "ws:");
   }
@@ -140,7 +151,9 @@ export class MobileGatewayRealtimeClient {
     };
 
     // 前台回归时若未连上，重置 backoff 立即重连（覆盖切后台/锁屏 socket 被系统挂起或杀死）。
-    const appStateSub = AppState.addEventListener("change", (nextState) => {
+    // AppState 经构造器注入：真机由 session.tsx 提供 react-native AppState 适配器（行为不变），
+    // 集成测试注入 mock，保证本模块（及根编译/测试）不加载 react-native 类型。
+    const appStateSub = this.appStateSource?.addEventListener("change", (nextState) => {
       if (disposed || nextState !== "active" || receivedReady) return;
       attempts = 0;
       clearTimeout(reconnectTimer);
@@ -155,7 +168,7 @@ export class MobileGatewayRealtimeClient {
         disposed = true;
         clearTimeout(reconnectTimer);
         clearTimeout(connectTimeoutTimer);
-        appStateSub.remove();
+        appStateSub?.remove();
         currentSocket?.close(1000, "Screen closed");
       },
     };

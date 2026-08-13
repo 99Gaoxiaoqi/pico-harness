@@ -4,6 +4,7 @@ import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
   KeyboardAvoidingView,
   type NativeScrollEvent,
   Platform,
@@ -26,12 +27,19 @@ import {
 } from "../lib/mobile-live-transcript";
 import {
   MobileGatewayRealtimeClient,
+  type MobileAppStateSource,
   type MobileRealtimeState,
 } from "../lib/mobile-gateway-realtime";
 import { mobileTheme } from "../lib/mobile-theme";
 
 const GATEWAY_ORIGIN_KEY = "pico.mobile.gatewayOrigin";
 const GATEWAY_TOKEN_KEY = "pico.mobile.gatewayToken";
+
+/** 真机前台状态源：react-native 的 AppState（经构造器注入 MobileGatewayRealtimeClient，
+ *  使 mobile-gateway-realtime.ts 不直接依赖 RN，集成测试可注入 mock 而不污染根编译）。 */
+const appStateSource: MobileAppStateSource = {
+  addEventListener: (type, handler) => AppState.addEventListener(type, handler),
+};
 
 export default function SessionScreen() {
   const params = useLocalSearchParams<{
@@ -135,7 +143,11 @@ export default function SessionScreen() {
 
   useEffect(() => {
     if (!connection || !projectId || !sessionId) return;
-    const subscription = new MobileGatewayRealtimeClient(connection).subscribe(
+    const subscription = new MobileGatewayRealtimeClient(
+      connection,
+      undefined,
+      appStateSource,
+    ).subscribe(
       projectId,
       sessionId,
       {
