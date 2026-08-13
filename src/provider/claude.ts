@@ -205,43 +205,56 @@ export class ClaudeProvider implements LLMProvider {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let reachedEof = false;
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          reachedEof = true;
+          break;
+        }
 
-      buffer += decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value, { stream: true });
 
-      // SSE 以 \n\n 分隔事件
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? ""; // 最后一个可能不完整,留到下次
+        // SSE 以 \n\n 分隔事件
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? ""; // 最后一个可能不完整,留到下次
 
-      for (const event of events) {
-        this.handleSseEvent(event, {
-          onDelta,
-          toolUseAccumulator,
-          onText: (text) => {
-            fullContent += text;
-          },
-          onInputTokens: (n) => {
-            inputTokens = n;
-            reportedFields.add("prompt");
-            reportedFields.add("input");
-          },
-          onOutputTokens: (n) => {
-            outputTokens = n;
-            reportedFields.add("completion");
-          },
-          onCacheWrite: (n) => {
-            cacheWriteTokens = n;
-            reportedFields.add("cacheWrite");
-          },
-          onCacheRead: (n) => {
-            cacheReadTokens = n;
-            reportedFields.add("cacheRead");
-          },
-        });
+        for (const event of events) {
+          this.handleSseEvent(event, {
+            onDelta,
+            toolUseAccumulator,
+            onText: (text) => {
+              fullContent += text;
+            },
+            onInputTokens: (n) => {
+              inputTokens = n;
+              reportedFields.add("prompt");
+              reportedFields.add("input");
+            },
+            onOutputTokens: (n) => {
+              outputTokens = n;
+              reportedFields.add("completion");
+            },
+            onCacheWrite: (n) => {
+              cacheWriteTokens = n;
+              reportedFields.add("cacheWrite");
+            },
+            onCacheRead: (n) => {
+              cacheReadTokens = n;
+              reportedFields.add("cacheRead");
+            },
+          });
+        }
       }
+    } finally {
+      // 与 OpenAI consumeSseDataStream 一致：异常 / abort / 超时也要 cancel reader 并释放锁，
+      // 否则底层 TCP 连接无法回收。
+      if (!reachedEof) {
+        await reader.cancel().catch(() => undefined);
+      }
+      reader.releaseLock();
     }
 
     // 4. 组装最终 Message:tool_use block 按 index 顺序还原为 ToolCall

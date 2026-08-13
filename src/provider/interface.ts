@@ -55,7 +55,16 @@ export interface LLMProviderRequestCapabilities {
   readonly preparePromptCacheSharding?: () => boolean;
 }
 
-/** 合并宿主中止与 Provider 硬超时，任一触发即取消请求。 */
+/**
+ * 合并宿主中止与 Provider 硬超时，任一触发即取消请求。
+ *
+ * 已知缺陷(A-P1.3):此处 timeoutMs 是纯 wall-clock 整体超时,从请求发出开始计。
+ * 流式场景下,长输出(推理模型长思考链、大代码生成)即使每秒都在稳定产 token,
+ * 只要累计超过 120s 就会被确定性截断。更合理的是 idle/progress timeout(每次两个
+ * chunk 之间不超过 N 秒才超时),但那需要重做 generateStream 的局部 fullContent 保留
+ * 逻辑(目前 throw 时已显示的 token 不落盘),改动较大,暂保留 wall-clock 行为。
+ * TODO: 流式应改 idle/progress timeout + 部分响应保留,避免长流式被硬墙截断。
+ */
 export function providerRequestSignal(
   signal?: AbortSignal,
   timeoutMs: number = DEFAULT_PROVIDER_TIMEOUT_MS,

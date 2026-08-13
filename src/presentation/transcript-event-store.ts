@@ -464,6 +464,7 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
         "required-delegation",
         "delegation-first-retry",
         "explore-synthesis-retry",
+        "network-retry",
       ]);
       return;
     case "tool.started":
