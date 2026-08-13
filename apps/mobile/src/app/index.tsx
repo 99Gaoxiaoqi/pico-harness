@@ -1,6 +1,6 @@
 import { Stack, useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -33,21 +33,24 @@ export default function ProjectsScreen() {
   const [phase, setPhase] = useState<ConnectionPhase>("idle");
   const [showConnection, setShowConnection] = useState(true);
   const [message, setMessage] = useState("输入 Desktop Gateway 的临时 Token 后连接。");
+  // 自动连接期间组件可能被卸载（冷启动后导航离开），用 ref 在 connect 内部统一收口，
+  // 避免 SecureStore 读取 / listProjects 返回时对已卸载组件触发 setState。
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
     void Promise.all([
       SecureStore.getItemAsync(GATEWAY_ORIGIN_KEY),
       SecureStore.getItemAsync(GATEWAY_TOKEN_KEY),
     ]).then(([storedOrigin, storedToken]) => {
-      if (!mounted) return;
+      if (!mountedRef.current) return;
       if (storedOrigin) setOrigin(storedOrigin);
       if (storedToken) setToken(storedToken);
       // 凭据已持久化则自动尝试连接；临时 token 失效时按现有错误展示，省去每次冷启动的手动点击。
       if (storedOrigin && storedToken) void connect(storedOrigin, storedToken);
     });
     return () => {
-      mounted = false;
+      mountedRef.current = false;
     };
   }, []);
 
@@ -59,10 +62,13 @@ export default function ProjectsScreen() {
     try {
       const client = new MobileGatewayClient({ origin: useOrigin, token: useToken });
       const nextProjects = await client.listProjects();
+      // 自动连接期间若组件已卸载（导航离开），不再对已卸载组件触发后续 setState。
+      if (!mountedRef.current) return;
       await Promise.all([
         SecureStore.setItemAsync(GATEWAY_ORIGIN_KEY, useOrigin.trim()),
         SecureStore.setItemAsync(GATEWAY_TOKEN_KEY, useToken),
       ]);
+      if (!mountedRef.current) return;
       setProjects(nextProjects);
       setSelectedProjectId(undefined);
       setSessions([]);
@@ -74,6 +80,7 @@ export default function ProjectsScreen() {
           : "已连接·Desktop 暂无已信任项目",
       );
     } catch (error) {
+      if (!mountedRef.current) return;
       setProjects([]);
       setPhase("error");
       setMessage(error instanceof Error ? error.message : "Gateway 连接失败");
