@@ -105,6 +105,7 @@ import {
   fileHistoryTrackEdit,
   type FileHistoryJournal,
 } from "../safety/file-history.js";
+import { raceWithDeadline } from "../util/race-with-deadline.js";
 
 const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
 const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
@@ -116,6 +117,13 @@ const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
  */
 const MID_TURN_COMPACT_TRIGGER_RATIO = 0.75;
 const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
+/**
+ * 工具批次 settle 兜底超时:仅依赖工具协作收口(settleOnAbort/Promise.allSettled)
+ * 存在死锁风险(未来工具/卡 IO 不响应 signal 时 allSettled 永远挂起,主循环卡死)。
+ * 超过此阈值强制继续,放弃等待真实收口,优先保证 run 终止。failToolProtocol 与
+ * finally 块两处复用同一常量。
+ */
+const TOOL_SETTLE_TIMEOUT_MS = 10_000;
 const engineSessionContext = new AsyncLocalStorage<string>();
 const PLAN_PROVIDER_TOOL_NAMES = new Set([
   "read_file",
@@ -1999,12 +2007,11 @@ export class AgentEngine implements AgentRunner {
           };
           const failToolProtocol = async (error: unknown): Promise<never> => {
             // loop-1 兜底:仅依赖工具协作收口存在死锁风险(未来工具/卡 IO 不响应
-            // signal 时 Promise.allSettled 永远挂起,主循环卡死)。10s 超时强制继续,
-            // 放弃等待 settleOnAbort 任务的真实收口,优先保证 run 终止。
-            await Promise.race([
-              Promise.allSettled(scheduled).then(() => undefined),
-              new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
-            ]);
+            // signal 时 Promise.allSettled 永远挂起,主循环卡死)。TOOL_SETTLE_TIMEOUT_MS
+            // 超时强制继续,放弃等待 settleOnAbort 任务的真实收口,优先保证 run 终止。
+            // loop-6:定时器句柄清理已收敛进 raceWithDeadline(范式同 retry.ts
+            // abortableSleep 的 clearTimeout),杜绝正常批次下的悬挂定时器泄漏。
+            await raceWithDeadline(scheduled, TOOL_SETTLE_TIMEOUT_MS);
             // The assistant tool-call batch is durable, but no ToolResult may
             // become canonical until its structured starts are known durable.
             // Reconciliation will later close this still-pending model batch.
@@ -2307,13 +2314,11 @@ export class AgentEngine implements AgentRunner {
                           accesses: getAccesses
                             ? getAccesses.call(this.registry, tc)
                             : ToolAccesses.all(),
-                          // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
-                          // 但只有声明了 handlesAbortSignal 的工具才会在 abort 后协作 settle,
-                          // 否则等待是无限期的(loop-1):不响应 signal 的工具立即 reject,
-                          // 由 failToolProtocol / finally 的超时兜底强制收口。
-                          settleOnAbort:
-                            fileSideEffectKinds[index] !== "none" &&
-                            (this.registry.handlesAbortSignal?.(tc.name) ?? false),
+                          // 文件事务只能在活跃写任务的 start Promise 真实收口后提交，
+                          // 故所有文件类工具在 abort 时一律等待 settle。文件写很快完成、
+                          // 不会无限挂起；即便工具不协作 signal，failToolProtocol / finally
+                          // 的 10s 超时兜底也会强制收口，防止主循环卡死（loop-1）。
+                          settleOnAbort: fileSideEffectKinds[index] !== "none",
                           start: async () => {
                             signal?.throwIfAborted();
                             return this.runtimePort
@@ -2335,12 +2340,10 @@ export class AgentEngine implements AgentRunner {
               signal?.throwIfAborted();
             } finally {
               // 异常时也要先等已启动任务收口，再提交文件 journal 和协议闭合结果。
-              // loop-1 兜底:与 failToolProtocol 一致,10s 超时强制继续,避免 settleOnAbort
-              // 任务(文件类工具)不协作 signal 时永久挂起主循环。
-              await Promise.race([
-                Promise.allSettled(scheduled).then(() => undefined),
-                new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
-              ]);
+              // loop-1 兜底:与 failToolProtocol 一致,TOOL_SETTLE_TIMEOUT_MS 超时强制继续,
+              // 避免 settleOnAbort 任务(文件类工具)不协作 signal 时永久挂起主循环。
+              // 定时器清理收敛进 raceWithDeadline。
+              await raceWithDeadline(scheduled, TOOL_SETTLE_TIMEOUT_MS);
               scheduler?.dispose();
             }
           } catch (error) {
@@ -3255,11 +3258,15 @@ export class AgentEngine implements AgentRunner {
     // ctx-2: 子代理预算闭环原本纯字符(maxChars = inputBudgetTokens * CHARS_PER_TOKEN,
     // 而 CHARS_PER_TOKEN 是英文经验值,对中文失真 4-8 倍)。首轮(budget 未指定)先用
     // BPE token 估算判断是否真的超预算(token 维度),而不是仅靠字符水位线。
-    //   - token 维度未超预算:无内存压力,不主动收紧字符预算,沿用默认 maxChars 路径;
     //   - token 维度已超预算:按实际内容密度(chars/token)反推与 token 预算匹配的
     //     自适应字符预算,而非沿用英文经验值。英文内容(chars/token≈4)自适应后与
     //     旧 maxChars(tokens*4)量级一致、行为不变;中文内容(chars/token≈0.5-1)
     //     自适应后会显著收紧,杜绝 4-8 倍超出窗口。
+    //   - token 维度未超预算:无内存压力,直接跳过 compact() 的字符水位 gate。否则
+    //     英文/代码内容(~4 chars/token,30k token ≈ 120k chars)会超过 maxChars
+    //     (≈ inputBudgetTokens*1.5 字符)而 token 还远未触顶,被提前误压(loop-9)。
+    //     这里只做与 compact() no-op 路径一致的 sanitizeToolPairs(维护 tool 配对
+    //     不变量),不经字符水位 gating。主循环的 token 维度触发逻辑不受影响。
     if (budget === undefined && contextHistory.length > 0) {
       const currentTokens = estimateModelInputTokens(contextHistory, tools);
       // maxChars 由 inputBudgetTokens * CHARS_PER_TOKEN 换算而来,反推 token 预算。
@@ -3277,6 +3284,9 @@ export class AgentEngine implements AgentRunner {
             `[Subagent] ⚠ token 维度已超预算,按内容密度自适应收紧字符预算(英文经验值 CHARS_PER_TOKEN 对中文过度宽松)`,
           );
         }
+      } else {
+        // loop-9: token 维度未超预算时显式跳过字符水位压缩,避免英文/代码内容被误压。
+        return persistSubagentContext(contextHistory, sanitizeToolPairs(contextHistory));
       }
     }
     // system prompt 不允许被 Compactor 裁剪。动态 workspace/tool 纪律可能使它大于

@@ -214,16 +214,22 @@ export class DelegationManager {
         error: `后台委派数量已达上限 ${this.maxAsyncChildren}`,
       };
     }
-    // 同一 graphWork 最多一个 running 委派：settleGraphWork 链下游派发不写 dispatched CAS，
-    // 并行 graph 分支 settle 时 computeReadyWorks 会重复返回同一 requested work，导致同一
-    // 指令被多次 spawn。按 status === "running" 去重即可覆盖——delegation settle 写入
-    // recorded CAS 是原子的，写前后 work 都不会被 computeReadyWorks 返回。切勿用
-    // settleFinalized 扩大窗口���delegation 的 .then 内 settleGraphWork 执行期间会让合法
-    // 下游 re-dispatch 被误拒，实测导致 graph 死锁。
+    // 同一 graphWork 最多一个 in-flight 委派。去重窗口必须与 liveDelegationIds 对齐——
+    // 匹配 status === "running" || !settleFinalized。
+    // 背景：delegation 进入 settle 链后，`.then` 会先把 status 写成 terminal，随后
+    // onGraphWorkSettled → settleGraphWork 才写 recorded CAS 并派发下游。这段 I/O 窗口内
+    // status 已不是 "running"，钻石/扇入图里并发 settleGraphWork 会对仍处于 "requested" 的
+    // 同一下游 work 二次派发（账本不坏因 CAS 幂等，但 worker 模式两子代理并发写同批文件有
+    // 冲突且浪费算力）。只用 status === "running" 的窄窗口会漏掉这段，留下双重派发洞。
+    // 安全性（为何宽窗口不死锁）：去重按 graphWorkId 严格相等，下游 work 的 id 与当前 settle
+    // 中的 work 不同，永远不会被这个宽窗口波及；图模型里一个 work 只声明一次（add_work 去重）、
+    // 执行一次、settle 一次，不存在"对已进入 settle 链的同一 work 的合法再派发"——那种再派发
+    // 本身就是该被拦的双重执行 bug。
     if (taskInput.graphWorkId) {
       const inflight = [...this.records.values()].find(
         (record) =>
-          record.graphWorkId === taskInput.graphWorkId && record.status === "running",
+          record.graphWorkId === taskInput.graphWorkId &&
+          (record.status === "running" || !record.settleFinalized),
       );
       if (inflight) {
         return {

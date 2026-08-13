@@ -602,6 +602,13 @@ export class TuiReporter implements Reporter {
   }
 
   private suppressCurrentTurnAssistantResponse(reason: AssistantResponseSuppressionReason): void {
+    // 推理模型(deepseek-v4-pro 等)流式先产 reasoning 再产 text;若第一次尝试仅产完
+    // 部分 reasoning 后网络失败,此时 currentTurnAssistantEntryId / currentStream 尚为
+    // null,下面的提前 return 会漏清 currentReasoningStream,导致第二次 onReasoningDelta
+    // 复用同一 reasoning 条目追加,UI 得到 R1+R2 拼接的脏思考(reporter-7)。
+    // 这里先收口 reasoning 流(与 onTextDelta/onMessage 过渡语义一致),无论 text 是否
+    // 已开始都覆盖到;同时 completeReasoningStream 自带空值守卫,对纯 text 模型无副作用。
+    this.completeReasoningStream();
     const entryId = this.currentTurnAssistantEntryId ?? this.currentStream?.entryId ?? null;
     if (entryId === null) return;
     this.eventStore.append({
