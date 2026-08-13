@@ -59,8 +59,8 @@ export interface ModelContextReport {
   remainingTokens: number;
   usedPercent: number;
   estimation: "estimated";
-  contextLimitSource: "config" | "profile_default";
-  outputLimitSource: "config" | "profile_default";
+  contextLimitSource: "config" | "profile_default" | "provider_default";
+  outputLimitSource: "config" | "profile_default" | "provider_default";
   capabilities: {
     vision: boolean | "unknown";
     reasoning: boolean | "unknown";

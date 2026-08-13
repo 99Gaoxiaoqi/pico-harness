@@ -110,7 +110,7 @@ export function splitMemoryProposalBatchResponse(
   const root = parseProposalsJson(response.content);
   if (!root) {
     // No JSON — treat as empty proposals for all evidence groups.
-    return evidenceGroups.map((_, index) => ({
+    return evidenceGroups.map(() => ({
       role: "assistant" as const,
       content: JSON.stringify({ proposals: [] }),
     }));
@@ -162,7 +162,8 @@ function parseProposalsJson(content: string | undefined): { proposals: unknown }
   } catch {
     throw new MemoryProposalParseError("malformed_json");
   }
-  return requireExactRecord(value, ["proposals"], "root_shape");
+  const record = requireExactRecord(value, ["proposals"], "root_shape");
+  return { proposals: record["proposals"] };
 }
 
 function parseCandidate(

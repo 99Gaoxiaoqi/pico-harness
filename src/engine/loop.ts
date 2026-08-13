@@ -2075,9 +2075,9 @@ export class AgentEngine implements AgentRunner {
               // settleGraphWork 在上游完成时会尽力链式派发下游 ready 工作，但 ready→dispatched
               // 之间的空隙、以及从未被 host 绑定 dispatcher 的后台运行时，都依赖这里兜底续行。
               if (this.graphReconcile) {
-                let graphSnapshot:
-                  | { readonly pending: number; readonly ready: number }
-                  | undefined;
+                let graphSnapshot: Awaited<
+                  ReturnType<NonNullable<AgentEngineOptions["graphReconcile"]>>
+                >;
                 try {
                   graphSnapshot = await this.graphReconcile();
                 } catch (error) {

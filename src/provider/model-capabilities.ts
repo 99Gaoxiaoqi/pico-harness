@@ -16,7 +16,7 @@ export interface ModelPrice {
 }
 
 export type CapabilitySupport = boolean | "unknown";
-export type CapabilityValueSource = "config" | "profile_default";
+export type CapabilityValueSource = "config" | "profile_default" | "provider_default";
 export type OpenAIOutputTokenField = "max_tokens" | "max_completion_tokens";
 export type PromptCacheMode = "implicit" | "explicit";
 export type PromptCacheTtl = "5m" | "1h" | "30m" | "24h" | `${number}s`;
