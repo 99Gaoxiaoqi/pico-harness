@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { globalSessionManager } from "../../src/engine/session.js";
+import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
 import type { Message } from "../../src/schema/message.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import {
@@ -793,6 +796,32 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
   assert.equal(enqueued, 26);
 });
 
+/**
+ * 以"遗留账本"方式播种 Runtime 事件：绕过 appendBatch（其校验拒绝
+ * legacy-only kind，如 history.rewound），直接向 session.jsonl 追加一条
+ * event-batch 行，模拟旧版本持久化的账本。manifest 为过期投影，由
+ * loadSession 的 repairManifests 在下次读取时自动修复。
+ */
+function appendLegacyRuntimeLedger(
+  root: string,
+  sessionId: string,
+  events: readonly RuntimeEvent[],
+): void {
+  const batch = {
+    type: "event-batch",
+    schemaVersion: 2,
+    txId: `legacy:${sessionId}`,
+    committedAt: events.at(-1)!.at,
+    entries: events.map((event, index) => ({
+      sequence: index + 1,
+      committedAt: event.at,
+      event,
+    })),
+  };
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  appendFileSync(join(root, "sessions", digest, "session.jsonl"), `${JSON.stringify(batch)}\n`);
+}
+
 test("startup does not recover a crash-gap terminal removed by a paged rewind", async (context) => {
   const fixture = await createFixture("terminal-job-gap-rewind");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -813,7 +842,9 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
     visibility,
   });
   await runtimeStore.initializeSession({ sessionId, workDir: fixture.workspace });
-  await runtimeStore.appendBatch([
+  // history.rewound 是 legacy-only kind，appendBatch 会拒绝；以遗留账本
+  // 方式直接写盘，模拟旧版本持久化的 session 再走恢复路径。
+  appendLegacyRuntimeLedger(paths.workspace.root, sessionId, [
     {
       ...base("retained-before-gap", "retained-run", "model"),
       kind: "message.committed",
@@ -907,7 +938,9 @@ test("compact recovery restores an active Run at a rewind target before its term
     visibility,
   });
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
-  await store.appendBatch([
+  // history.rewound 是 legacy-only kind，appendBatch 会拒绝；以遗留账本
+  // 方式直接写盘，模拟旧版本持久化的 session 再走恢复路径。
+  appendLegacyRuntimeLedger(paths.workspace.root, sessionId, [
     {
       ...base("compact-started", "internal"),
       kind: "run.started",

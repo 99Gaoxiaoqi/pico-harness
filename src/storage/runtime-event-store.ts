@@ -21,6 +21,7 @@ import type { DurableTranscriptEvent } from "../presentation/transcript-event-st
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   decodeRuntimeEvent,
+  isLegacyDecodeOnlyKind,
   type RuntimeEvent,
 } from "./runtime-event.js";
 import {
@@ -1286,8 +1287,9 @@ function cursorForEntries(
   sequence: number,
   eventId: string,
 ): SessionCursor {
-  // Rewind/branch mechanism removed: epoch is always 0 (no history.rewound is produced).
-  // The field is retained in SessionCursor for persisted-schema stability.
+  // epoch 恒为 0：rewind/branch 机制移除后无生产者。该字段是持久化 cursor
+  // schema 的一部分（fork bundle / operation journal / session cursor 均含
+  // epoch 并参与 conversationId 派生），保留字段以保证旧数据解码与结构稳定。
   void _entries;
   return {
     logId: sessionId,
@@ -1371,7 +1373,13 @@ function canonicalizeRuntimeEvent(event: RuntimeEvent): RuntimeEvent {
     );
   }
   try {
-    return decodeRuntimeEvent(JSON.parse(encoded) as unknown);
+    const canonical = decodeRuntimeEvent(JSON.parse(encoded) as unknown);
+    if (isLegacyDecodeOnlyKind(canonical.kind)) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime event kind ${canonical.kind} is legacy-only and cannot be appended`,
+      );
+    }
+    return canonical;
   } catch (error) {
     if (error instanceof RuntimeEventStoreIntegrityError) throw error;
     throw new RuntimeEventStoreIntegrityError(`Runtime event ${event.eventId} is invalid`, {
