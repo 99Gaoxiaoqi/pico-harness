@@ -10,7 +10,6 @@ import {
   MemoryRepositoryProposalStore,
 } from "../../src/memory/proposal-engine.js";
 import {
-  MemoryProposalParseError,
   parseMemoryProposalResponse,
 } from "../../src/memory/proposal-parser.js";
 import { detectStableMemorySignal } from "../../src/memory/proposal-signal.js";
