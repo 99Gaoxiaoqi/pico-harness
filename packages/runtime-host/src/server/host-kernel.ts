@@ -95,7 +95,6 @@ export class RuntimeHostKernel {
   readonly #server: Server;
   readonly #handshakingTransports = new Set<FramedTransport>();
   readonly #acceptedTransports = new Set<FramedTransport>();
-  readonly #connectionSessions = new Set<RuntimeHostConnectionSession>();
   readonly #operationDrainWaiters = new Set<() => void>();
   readonly #residencyDrainWaiters = new Set<() => void>();
   readonly #idleGraceMs: number;
@@ -248,9 +247,14 @@ export class RuntimeHostKernel {
   #accept(socket: Socket): void {
     const transport = new FramedTransport(socket);
     this.#handshakingTransports.add(transport);
-    void this.#serveConnection(transport).finally(() => {
-      this.#handshakingTransports.delete(transport);
-    });
+    void this.#serveConnection(transport)
+      .catch(() => {
+        // 清理路径（如 #releaseConnection underflow 断言）的防御性异常不应升级为
+        // unhandled rejection；正常错误已在 #serveConnection 内处理。
+      })
+      .finally(() => {
+        this.#handshakingTransports.delete(transport);
+      });
   }
 
   async #serveConnection(transport: FramedTransport): Promise<void> {
@@ -285,12 +289,7 @@ export class RuntimeHostKernel {
         beginOperation: (request) => this.#beginOperation(request),
         onTeardown: releaseTransport,
       });
-      this.#connectionSessions.add(session);
-      try {
-        await session.run();
-      } finally {
-        this.#connectionSessions.delete(session);
-      }
+      await session.run();
     } catch {
       transport.destroy();
     } finally {

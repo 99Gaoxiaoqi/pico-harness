@@ -1,5 +1,5 @@
 import { TextDecoder } from 'node:util';
-import { requireCount, requireId, requireRecord, requireString } from './codec.js';
+import { requireCount, requireId, requireRecord, requireShapedRecord, requireString } from './codec.js';
 import { invalidProtocolFrame, RuntimeHostProtocolError } from './errors.js';
 import { requireHostLifecycleState } from './host-status.js';
 import {
@@ -114,6 +114,12 @@ export function requireClientInstanceId(value: unknown): string {
 export function decodeClientFrame(value: unknown): ClientFrame {
   const frame = requireRecord(value, 'client frame');
   if (frame.kind === 'hello') {
+    requireShapedRecord(
+      frame,
+      'hello frame',
+      ['kind', 'clientInstanceId', 'surface', 'protocolMin', 'protocolMax'],
+      ['compatibilityEpoch'],
+    );
     const protocolMin = requireProtocolVersion(frame.protocolMin, 'protocolMin');
     const protocolMax = requireProtocolVersion(frame.protocolMax, 'protocolMax');
     validateProtocolRange({ min: protocolMin, max: protocolMax });
@@ -132,6 +138,12 @@ export function decodeClientFrame(value: unknown): ClientFrame {
 export function decodeHostFrame(value: unknown): HostFrame {
   const frame = requireRecord(value, 'host frame');
   if (frame.kind === 'accepted') {
+    requireShapedRecord(
+      frame,
+      'accepted frame',
+      ['kind', 'hostEpoch', 'connectionId', 'selectedProtocol', 'state'],
+      ['compatibilityEpoch'],
+    );
     return {
       kind: 'accepted',
       hostEpoch: requireId(frame.hostEpoch, 'hostEpoch'),
@@ -142,6 +154,12 @@ export function decodeHostFrame(value: unknown): HostFrame {
     } satisfies HostAccepted;
   }
   if (frame.kind === 'incompatible') {
+    requireShapedRecord(
+      frame,
+      'incompatible frame',
+      ['kind', 'hostEpoch', 'protocolMin', 'protocolMax', 'state', 'replacement'],
+      ['compatibilityEpoch'],
+    );
     const protocolMin = requireProtocolVersion(frame.protocolMin, 'protocolMin');
     const protocolMax = requireProtocolVersion(frame.protocolMax, 'protocolMax');
     validateProtocolRange({ min: protocolMin, max: protocolMax });
@@ -156,6 +174,7 @@ export function decodeHostFrame(value: unknown): HostFrame {
     } satisfies HostIncompatible;
   }
   if (frame.kind === 'draining') {
+    requireShapedRecord(frame, 'draining frame', ['kind', 'hostEpoch'], []);
     return {
       kind: 'draining',
       hostEpoch: requireId(frame.hostEpoch, 'hostEpoch'),
@@ -165,7 +184,23 @@ export function decodeHostFrame(value: unknown): HostFrame {
 }
 
 export function decodeHostRegistration(value: unknown): HostRegistration {
-  const registration = requireRecord(value, 'host registration');
+  const registration = requireShapedRecord(
+    value,
+    'host registration',
+    [
+      'kind',
+      'schemaVersion',
+      'rootId',
+      'hostEpoch',
+      'endpoint',
+      'protocolMin',
+      'protocolMax',
+      'state',
+      'pid',
+      'createdAt',
+    ],
+    ['compatibilityEpoch'],
+  );
   if (registration.kind !== RUNTIME_HOST_REGISTRATION_KIND) {
     throw invalidProtocolFrame('Invalid registration kind');
   }
