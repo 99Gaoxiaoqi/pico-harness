@@ -238,11 +238,7 @@ test("Daemon keeps singleton ownership until a timed-out executor actually settl
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-ownership-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
@@ -342,11 +338,7 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-task-runner-ownership-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
@@ -506,11 +498,7 @@ test("TaskHost fences a task admission whose pending subscriber synchronously cl
 test("Daemon retains its singleton lock when the shutdown ownership fence rejects", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-fence-reject-"));
   const picoHome = join(root, "pico-home");
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const rejectedFence = deferred();
@@ -566,11 +554,7 @@ test("Daemon retains its singleton lock when the shutdown ownership fence reject
 
 test("Daemon stop waits for an in-flight start before closing ownership", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-start-stop-"));
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const listEntered = deferred();
@@ -626,11 +610,7 @@ test("Daemon stop waits for an in-flight start before closing ownership", async 
 
 test("Daemon permanently consumes a service whose close rejects", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-service-reject-"));
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const service = new WorkspaceRuntimeService({
@@ -678,11 +658,7 @@ test("Daemon permanently consumes a service whose close rejects", async (context
 
 test("Daemon retains its lock when service close fails without an ownership fence", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-no-fence-"));
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const service: DisposableLocalRuntimeService = {
@@ -725,11 +701,7 @@ test("Daemon retains its lock when service close fails without an ownership fenc
 test("Daemon retains its lock when a Cron runtime cannot close", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-cron-failure-"));
   const workspace = join(root, "workspace");
-  const endpoint: LocalDaemonEndpoint = {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
+  const endpoint = testEndpoint(root);
   const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
@@ -1327,6 +1299,23 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
   return value;
+}
+
+function testEndpoint(root: string): LocalDaemonEndpoint {
+  // Windows 上用 named pipe：AF_UNIX bind 在部分 Windows 环境（如受限沙箱）返回
+  // EACCES，且 pipe 本就是 daemon 的 win32 正式传输。pipe 名带随机后缀防并行冲突。
+  if (process.platform === "win32") {
+    return {
+      transport: "pipe",
+      address: `\\\\.\\pipe\\pico-lifecycle-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
+      authTokenPath: join(root, "runtime.auth"),
+    };
+  }
+  return {
+    transport: "unix",
+    address: join(root, "runtime.sock"),
+    authTokenPath: join(root, "runtime.auth"),
+  };
 }
 
 async function initializeGitRepository(cwd: string): Promise<void> {

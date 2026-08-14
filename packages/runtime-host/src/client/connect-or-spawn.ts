@@ -37,6 +37,12 @@ export interface ConnectOrSpawnRuntimeHostInput {
   operationDeadlineMs?: number;
   candidateEntrypoint?: string | URL;
   legacyConfigurationRoot?: string;
+  /**
+   * Extra env merged into a spawned candidate (overrides the client's own env).
+   * Domain candidates may need it, e.g. a pico daemon candidate resolving a
+   * PICO_HOME-derived legacy endpoint guard independently of the client's env.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 interface ConnectOrSpawnRuntimeHostDependencies {
@@ -126,6 +132,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
           ...(input.legacyConfigurationRoot === undefined
             ? {}
             : { legacyConfigurationRoot: input.legacyConfigurationRoot }),
+          ...(input.env === undefined ? {} : { env: input.env }),
         });
         await settleBeforeDeadline(launch.spawned, deadline);
       } catch {

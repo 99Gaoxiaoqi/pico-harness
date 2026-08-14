@@ -268,6 +268,15 @@ test("Cron runtime automatically reconciles a workspace re-registered while its 
 });
 
 function testEndpoint(root: string): LocalDaemonEndpoint {
+  // Windows 上用 named pipe：AF_UNIX bind 在部分 Windows 环境（如受限沙箱）返回
+  // EACCES，且 pipe 本就是 daemon 的 win32 正式传输。pipe 名带随机后缀防并行冲突。
+  if (process.platform === "win32") {
+    return {
+      transport: "pipe",
+      address: `\\\\.\\pipe\\pico-ownraces-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
+      authTokenPath: join(root, "runtime.auth"),
+    };
+  }
   return {
     transport: "unix",
     address: join(root, "runtime.sock"),

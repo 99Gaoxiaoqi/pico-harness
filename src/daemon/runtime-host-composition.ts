@@ -1,8 +1,11 @@
 import type { RuntimeHostComposition, RuntimeHostCompositionFactory } from "@pico/runtime-host";
 import {
+  createRuntimeRequest,
   createTypedRuntimeRequest,
+  parseStrictRuntimeParams,
   RuntimeProtocolError,
   type JsonValue,
+  type RuntimeMethod,
   type RuntimeRequest,
 } from "./protocol.js";
 import {
@@ -12,10 +15,13 @@ import {
 } from "./runtime-host-events.js";
 import {
   mapRuntimeErrorCode,
+  RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST,
   RUNTIME_HOST_BRIDGE_USAGE_GET,
   RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS,
   type BridgeErrorCode,
   type PicoBridgeHandlerMap,
+  type RuntimeRequestBridgeInput,
+  type RuntimeRequestBridgeOutput,
   type UsageGetBridgeInput,
   type UsageGetBridgeOutput,
   type WorkspaceStatusBridgeInput,
@@ -116,11 +122,27 @@ export function createRuntimeHostComposition(
     }
   };
 
+  const runtimeRequestHandler = async (
+    input: RuntimeRequestBridgeInput,
+  ): Promise<BridgeHandlerOutcome<RuntimeRequestBridgeOutput>> => {
+    try {
+      // 单源校验：未知方法 / 未知参数键在进 service 前被 parseStrictRuntimeParams
+      // 拒绝（invalid_request），与旧 daemon 传输层行为一致。
+      const method = input.method as RuntimeMethod;
+      const params = parseStrictRuntimeParams(method, input.params ?? {}) as JsonValue;
+      const result = await service.handle(createRuntimeRequest(method, params));
+      return { ok: true, result: { result } };
+    } catch (error) {
+      return bridgeFailure(error);
+    }
+  };
+
   // 动态注册的操作不在静态 DomainOperationHandlerMap 键集中，按运行时键提供 handler。
   // satisfies PicoBridgeHandlerMap 让 handler 与 spec 的输入/输出/错误码编译期对齐。
   const handlers = {
     [RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS]: workspaceStatusHandler,
     [RUNTIME_HOST_BRIDGE_USAGE_GET]: usageGetHandler,
+    [RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST]: runtimeRequestHandler,
   } satisfies PicoBridgeHandlerMap;
 
   const eventBridge: RuntimeHostEventBridge | undefined = eventSource

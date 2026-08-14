@@ -12,6 +12,7 @@ export * from "./instance-lock.js";
 export * from "./ipc-auth.js";
 export * from "./protocol.js";
 export * from "./runtime-host.js";
+export * from "./runtime-host-candidate.js";
 export * from "./runtime-host-composition.js";
 export * from "./runtime-host-events.js";
 export * from "./runtime-host-operations.js";

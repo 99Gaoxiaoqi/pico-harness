@@ -2,7 +2,7 @@ import { encodeProtocolFrame, type HostFrame } from '../protocol/index.js';
 import type { FramedTransport } from '../transport/framed-transport.js';
 
 const MAX_QUEUED_FRAMES = 64;
-const MAX_QUEUED_BYTES = 2 * 1024 * 1024;
+const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
 
 interface QueuedFrame {
   encoded: Buffer;

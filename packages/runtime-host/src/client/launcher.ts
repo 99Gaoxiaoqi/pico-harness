@@ -74,9 +74,18 @@ export function launchDetachedRuntimeHostCandidate(
     input.entrypoint === undefined
       ? resolvedDefault.path
       : typeof input.entrypoint === 'string'
-        ? input.entrypoint
+        ? // file:// href 字符串是常见的传参形态；转换为路径而非当作字面脚本路径。
+          input.entrypoint.startsWith('file://')
+          ? fileURLToPath(input.entrypoint)
+          : input.entrypoint
         : fileURLToPath(input.entrypoint);
-  const tsxLoaderPath = usesDefaultEntrypoint ? resolvedDefault.tsxLoaderPath : undefined;
+  // 自定义 entrypoint 若是 TypeScript 源文件（如 pico daemon main.ts），同样需要
+  // tsx ESM loader——detached node 子进程没有别的 TS 装载途径。
+  const tsxLoaderPath = usesDefaultEntrypoint
+    ? resolvedDefault.tsxLoaderPath
+    : entrypointPath.endsWith('.ts')
+      ? resolveTsxLoaderPath()
+      : undefined;
   const args = [
     // 源码模式下为 detached node 子进程注册 tsx ESM loader（绝对路径，不依赖子进程 cwd）。
     ...(tsxLoaderPath ? ['--import', tsxLoaderPath] : []),

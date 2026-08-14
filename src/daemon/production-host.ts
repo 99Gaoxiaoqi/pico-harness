@@ -815,8 +815,16 @@ export function createProductionRuntimeServices(
   };
 }
 
-export function createProductionLocalDaemonHost(
-  options: ProductionLocalDaemonHostOptions = {},
+/**
+ * Shared assembly of the LocalDaemonHost lifecycle wrapper over production services.
+ * `servicesOnly` skips the legacy transport (endpoint/instance-lock/LocalRuntimeDaemon)
+ * — the 3-B-3 runtime-host candidate embeds that mode and reuses the audited cron
+ * orchestration + shutdown fence chain verbatim.
+ */
+export function assembleProductionDaemonHost(
+  services: ProductionRuntimeServices,
+  options: ProductionLocalDaemonHostOptions,
+  servicesOnly: boolean,
 ): LocalDaemonHost {
   const {
     service,
@@ -830,7 +838,7 @@ export function createProductionLocalDaemonHost(
     credentialVault,
     trustStore,
     attachHost,
-  } = createProductionRuntimeServices(options);
+  } = services;
   const cronRuntimeFactory = createCronWorkspaceRuntimeFactory({
     picoHome,
     getWorkspaceRuntime: (workspacePath) => service.getWorkspaceRuntime(workspacePath),
@@ -877,13 +885,28 @@ export function createProductionLocalDaemonHost(
     service: desktopService,
     cronRuntimeFactory,
     registrationStore,
-    endpoint: options.endpoint ?? resolveLocalDaemonEndpoint({ env }),
+    ...(servicesOnly
+      ? { servicesOnly: true }
+      : { endpoint: options.endpoint ?? resolveLocalDaemonEndpoint({ env }) }),
     onWorkspaceError: (workspacePath, error) =>
       logger.error({ workspacePath, err: error }, "Cron workspace 启动失败"),
   });
   attachHost(host);
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
   return host;
+}
+
+export function createProductionLocalDaemonHost(
+  options: ProductionLocalDaemonHostOptions = {},
+): LocalDaemonHost {
+  return assembleProductionDaemonHost(createProductionRuntimeServices(options), options, false);
+}
+
+/** 3-B-3 runtime-host candidate 用：无旧传输的 daemon 生命周期编排。 */
+export function createProductionServicesOnlyDaemonHost(
+  options: ProductionLocalDaemonHostOptions = {},
+): LocalDaemonHost {
+  return assembleProductionDaemonHost(createProductionRuntimeServices(options), options, true);
 }
 
 async function resolveDesktopAutomationRoute(
