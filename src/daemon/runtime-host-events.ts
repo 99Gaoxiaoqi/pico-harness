@@ -100,15 +100,12 @@ export function createRuntimeHostEventBridge(
         throw new Error("events.subscribe 需要带推送通道的连接上下文");
       }
       const { pushEvent, connectionId } = context;
-      // 一连接一订阅（对齐 daemon server 的 setSubscription 语义）。
-      if (subscriptions.has(connectionId)) {
-        return {
-          ok: false,
-          error: {
-            code: "operation_conflict",
-            message: "该连接已持有一个事件订阅（每连接限一个）",
-          },
-        };
+      // 每连接至多一个活跃订阅；重订阅覆盖旧的（对齐 daemon server 的 setSubscription
+      // 覆盖语义——客户端 cursor 失效重置后的重订流程依赖它，不能拒绝）。
+      const previousDispose = subscriptions.get(connectionId);
+      if (previousDispose) {
+        subscriptions.delete(connectionId);
+        previousDispose();
       }
       const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
       // subscribe-then-replay：先注册 live 监听，再取首页。期间 live 事件可能先于

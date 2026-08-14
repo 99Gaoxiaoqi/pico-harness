@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -157,19 +157,15 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
   );
   assert.ok(ping.result, "spawn 出的 daemon 应答 runtime.ping");
 
-  // 清理：daemon 是常驻进程（retainUntilProcessExit），测试结束后硬杀（Windows 无跨
-  // 进程优雅信号）；registration/flock/守卫锁均有 pid-dead 恢复语义。
+  // 清理：daemon 是常驻进程（持有 residency），测试结束后硬杀（Windows 无跨进程
+  // 优雅信号）；registration/flock/守卫锁均有 pid-dead 恢复语义。
   await connection.close().catch(() => undefined);
-  const registrationPath = await findRegistrationPath(harness.picoHome);
-  if (registrationPath) {
-    try {
-      const registration = await readHostRegistration(
-        JSON.parse(await readFile(registrationPath, "utf8")),
-      );
-      if (registration) process.kill(registration.pid);
-    } catch {
-      // 已退出或注册不可读：测试通过即达意。
-    }
+  try {
+    const controlDirectory = await findControlDirectory(harness.picoHome);
+    const registration = await readHostRegistration(controlDirectory);
+    if (registration) process.kill(registration.pid);
+  } catch {
+    // 已退出或注册不可读：测试通过即达意。
   }
 });
 
@@ -190,14 +186,9 @@ async function connectToCandidate(picoHome: string): Promise<RuntimeHostConnecti
   return connectResult.connection;
 }
 
-async function findRegistrationPath(picoHome: string): Promise<string | undefined> {
+async function findControlDirectory(picoHome: string): Promise<string> {
   const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
-  const registrationPath = join(
-    resolveRootControlNamespace(),
-    capability.rootId,
-    "registration.json",
-  );
-  return (await pathExists(registrationPath)) ? registrationPath : undefined;
+  return join(resolveRootControlNamespace(), capability.rootId);
 }
 
 async function pathExists(path: string): Promise<boolean> {

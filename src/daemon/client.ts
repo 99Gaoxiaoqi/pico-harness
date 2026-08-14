@@ -1,5 +1,14 @@
 import { realpath } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { connect, type Socket } from "node:net";
+import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import {
+  connectOrSpawnRuntimeHost,
+  RUNTIME_HOST_PROTOCOL_VERSION,
+  type RuntimeHostConnection,
+  RuntimeHostOperationError,
+} from "@pico/runtime-host";
 import {
   createRuntimeAuthRequest,
   createRuntimeRequest,
@@ -14,11 +23,16 @@ import {
   type RuntimeResponse,
   type RuntimeResult,
 } from "./protocol.js";
-import { resolveLocalDaemonEndpoint, type LocalDaemonEndpoint } from "./endpoint.js";
+import { resolveCanonicalPicoHome, type LocalDaemonEndpoint } from "./endpoint.js";
 import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
+import {
+  ensurePicoRuntimeHostEventOperationsRegistered,
+  ensurePicoRuntimeHostOperationsRegistered,
+} from "./runtime-host-operations.js";
 import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 
 const CONNECT_TIMEOUT_MS = 5_000;
+const HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 100;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 2_000;
 const MAX_REMEMBERED_EVENT_IDS = 10_000;
@@ -31,6 +45,11 @@ export interface LocalRuntimeClientOptions {
   readonly maxReconnectDelayMs?: number;
   /** Bounded replay overlap queue; injectable for constrained hosts and integration tests. */
   readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
+  /**
+   * runtime-host 交互根（默认 canonical PICO_HOME）。仅 kernel 承载模式使用；
+   * 显式传入 endpoint/authTokenStore 时走旧 socket 传输（兼容测试注入）。
+   */
+  readonly runtimeHostRootPath?: string;
 }
 
 export interface RuntimeClient {
@@ -60,36 +79,58 @@ export class RuntimeClientError extends Error {
   }
 }
 
+/** 连接级能力面：订阅环与请求路径只依赖这四个成员，传输实现可替换。 */
+interface RuntimeTransportConnection {
+  setEventListener(listener: (notification: RuntimeNotification) => void): void;
+  setDisconnectListener(listener: () => void): void;
+  open(): Promise<void>;
+  request<Method extends RuntimeMethod>(
+    method: Method,
+    params: RuntimeParams<Method>,
+  ): Promise<RuntimeResult<Method>>;
+  close(): void;
+}
+
 /**
- * Shared local Runtime transport. Requests reuse one authenticated connection;
- * every long-lived subscription owns its own connection because the daemon
- * intentionally supports one event cursor per socket.
+ * Shared local Runtime transport. Requests reuse one connection; every
+ * long-lived subscription owns its own connection（kernel 承载下一连接一订阅，
+ * 与旧 socket 语义一致）。
+ *
+ * 双模式：默认走 runtime-host kernel（connectOrSpawn 拉起 daemon candidate，
+ * runtime.request 通用桥接 + events.* 类型化桥接）；显式注入 endpoint 或
+ * authTokenStore 时走旧 socket 传输（存量集成测试的注入面）。
  */
 export class LocalRuntimeClient implements RuntimeClient {
-  private readonly authTokenStore: LocalIpcAuthTokenStore;
-  private readonly requestConnection: RuntimeConnection;
+  private readonly authTokenStore: LocalIpcAuthTokenStore | undefined;
+  private readonly requestConnection: RuntimeTransportConnection;
   private readonly subscriptions = new Set<RuntimeSubscription>();
   private readonly reconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
   private readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
+  private readonly runtimeHostRootPath?: string;
+  private readonly explicitEndpoint: DaemonEndpoint | undefined;
   private closed = false;
 
   constructor(
-    private readonly endpoint: DaemonEndpoint = resolveLocalDaemonEndpoint(),
+    endpoint?: DaemonEndpoint,
     options: LocalRuntimeClientOptions = {},
   ) {
+    this.explicitEndpoint = endpoint ?? undefined;
     this.authTokenStore =
       options.authTokenStore ??
-      createLocalIpcAuthTokenStore({
-        transport: this.endpoint.address.startsWith("\\\\.\\pipe\\") ? "pipe" : "unix",
-        ...this.endpoint,
-      });
+      (this.explicitEndpoint
+        ? createLocalIpcAuthTokenStore({
+            transport: this.explicitEndpoint.address.startsWith("\\\\.\\pipe\\") ? "pipe" : "unix",
+            ...this.explicitEndpoint,
+          })
+        : undefined);
     this.reconnectDelayMs = positiveDelay(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
     this.maxReconnectDelayMs = Math.max(
       this.reconnectDelayMs,
       positiveDelay(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS),
     );
     this.replayBufferOptions = options.replayBufferOptions;
+    this.runtimeHostRootPath = options.runtimeHostRootPath;
     this.requestConnection = this.createConnection();
   }
 
@@ -146,8 +187,11 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.subscriptions.clear();
   }
 
-  private createConnection(): RuntimeConnection {
-    return new RuntimeConnection(this.endpoint, this.authTokenStore);
+  private createConnection(): RuntimeTransportConnection {
+    if (this.explicitEndpoint && this.authTokenStore) {
+      return new RuntimeConnection(this.explicitEndpoint, this.authTokenStore);
+    }
+    return new KernelRuntimeConnection(this.runtimeHostRootPath ?? resolveCanonicalPicoHome());
   }
 
   private assertOpen(): void {
@@ -158,7 +202,7 @@ export class LocalRuntimeClient implements RuntimeClient {
 }
 
 interface RuntimeSubscriptionOptions {
-  readonly connection: RuntimeConnection;
+  readonly connection: RuntimeTransportConnection;
   readonly params: RuntimeParams<"events.subscribe">;
   readonly listener: (notification: RuntimeNotification) => void;
   readonly reconnectDelayMs: number;
@@ -636,4 +680,195 @@ function toUnavailableError(error: unknown): RuntimeClientError {
     true,
     error instanceof Error ? { cause: error } : undefined,
   );
+}
+
+/**
+ * 3-B-3 kernel 承载连接：connectOrSpawn 拉起 runtime-host daemon candidate；
+ * 请求经 runtime.request 通用桥接（events.subscribe/replay 走类型化桥接）；
+ * host 错误码反查回 daemon 码——订阅环的 INVALID_PARAMS cursor 重置语义与
+ * 所有 RuntimeClientError.code 消费方保持不变。断连经 closed promise 归一
+ * 触发 disconnectListener，订阅环的重连退避逻辑原样复用。
+ */
+class KernelRuntimeConnection implements RuntimeTransportConnection {
+  private hostConnection?: RuntimeHostConnection;
+  private connecting?: Promise<void>;
+  private eventListener?: (notification: RuntimeNotification) => void;
+  private disconnectListener?: () => void;
+  private closed = false;
+
+  constructor(private readonly rootPath: string) {}
+
+  setEventListener(listener: (notification: RuntimeNotification) => void): void {
+    this.eventListener = listener;
+  }
+
+  setDisconnectListener(listener: () => void): void {
+    this.disconnectListener = listener;
+  }
+
+  async open(): Promise<void> {
+    if (this.closed) {
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
+    const current = this.hostConnection;
+    if (current && current.terminalError === undefined) return;
+    if (current) {
+      this.hostConnection = undefined;
+      await current.close().catch(() => undefined);
+    }
+    if (!this.connecting) {
+      this.connecting = this.openKernel().finally(() => {
+        this.connecting = undefined;
+      });
+    }
+    await this.connecting;
+  }
+
+  async request<Method extends RuntimeMethod>(
+    method: Method,
+    params: RuntimeParams<Method>,
+  ): Promise<RuntimeResult<Method>> {
+    await this.open();
+    if (this.closed) {
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
+    const connection = this.hostConnection;
+    if (!connection) {
+      throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
+    }
+    try {
+      return await requestOverKernelConnection(connection, method, params);
+    } catch (error) {
+      if (error instanceof RuntimeHostOperationError || this.closed) {
+        throw translateKernelRequestError(error);
+      }
+      // 传输级失败且连接已 terminal（如 daemon 被杀后断连传播慢于本次请求的
+      // 竞态窗口）：丢弃死连接，open() 经 connectOrSpawn 重生 daemon 后重试
+      // 一次——"下一次请求拉起 daemon"的 kernel 承载语义在此兑现。
+      // terminalError 判据精确排除本地 decodeInput 失败与请求超时（二者重试
+      // 无意义甚至有害）；断连场景下请求要么未送达要么随 daemon 消亡，重试安全。
+      if (connection.terminalError === undefined) {
+        throw translateKernelRequestError(error);
+      }
+      if (this.hostConnection === connection) this.hostConnection = undefined;
+      await connection.close().catch(() => undefined);
+      try {
+        await this.open();
+      } catch {
+        throw translateKernelRequestError(error);
+      }
+      const revived = this.hostConnection;
+      if (!revived) throw translateKernelRequestError(error);
+      try {
+        return await requestOverKernelConnection(revived, method, params);
+      } catch (retryError) {
+        throw translateKernelRequestError(retryError);
+      }
+    }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const connection = this.hostConnection;
+    this.hostConnection = undefined;
+    void connection?.close().catch(() => undefined);
+  }
+
+  private async openKernel(): Promise<void> {
+    if (this.closed) {
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
+    // 动态 spec 注册表是进程级的：client 侧的 decodeInput/decodeOutput 同样要能
+    // 解析桥接操作（daemon 进程的注册不能代替本进程）。幂等。
+    ensurePicoRuntimeHostOperationsRegistered();
+    ensurePicoRuntimeHostEventOperationsRegistered();
+    const result = await connectOrSpawnRuntimeHost({
+      rootPath: this.rootPath,
+      surface: "tui",
+      protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+      clientInstanceId: `pico-client-${randomUUID()}`,
+      connectTimeoutMs: CONNECT_TIMEOUT_MS,
+      handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
+      candidateEntrypoint: resolveDaemonCandidateEntrypoint(),
+    });
+    if (result.kind !== "connected") {
+      throw new RuntimeClientError(
+        "RUNTIME_UNAVAILABLE",
+        "无法连接本机 Runtime daemon（runtime-host 选举失败）",
+        true,
+      );
+    }
+    const connection = result.connection;
+    connection.setEventListener((event) => {
+      this.eventListener?.(event as unknown as RuntimeNotification);
+    });
+    void connection.closed.then(
+      () => this.handleKernelDisconnect(connection),
+      () => this.handleKernelDisconnect(connection),
+    );
+    this.hostConnection = connection;
+  }
+
+  private handleKernelDisconnect(connection: RuntimeHostConnection): void {
+    if (this.hostConnection !== connection) return;
+    this.hostConnection = undefined;
+    this.disconnectListener?.();
+  }
+}
+
+function resolveDaemonCandidateEntrypoint(): string {
+  const sourcePath = fileURLToPath(new URL("./main.ts", import.meta.url));
+  if (existsSync(sourcePath)) return sourcePath;
+  return fileURLToPath(new URL("./main.js", import.meta.url));
+}
+
+/** 单次桥接请求：events.* 走类型化桥接，其余方法走 runtime.request 通用桥接。 */
+async function requestOverKernelConnection<Method extends RuntimeMethod>(
+  connection: RuntimeHostConnection,
+  method: Method,
+  params: RuntimeParams<Method>,
+): Promise<RuntimeResult<Method>> {
+  if (method === "events.subscribe" || method === "events.replay") {
+    return await connection.requestRegistered<RuntimeResult<Method>>(method, params);
+  }
+  const response = await connection.requestRegistered<{ result: RuntimeResult<Method> }>(
+    "runtime.request",
+    { method, params: params as Record<string, unknown> },
+  );
+  return response.result;
+}
+
+function translateKernelRequestError(error: unknown): RuntimeClientError {
+  if (!(error instanceof RuntimeHostOperationError)) {
+    // 传输/超时类失败按可重试断连处理：订阅环据此走重连退避。
+    return new RuntimeClientError(
+      "RUNTIME_DISCONNECTED",
+      "本机 Runtime daemon 连接已断开",
+      true,
+      error instanceof Error ? { cause: error } : undefined,
+    );
+  }
+  const code = mapHostOperationErrorCode(error.code);
+  return new RuntimeClientError(code, error.message, code === "RUNTIME_UNAVAILABLE");
+}
+
+/** runtime-host 操作错误码 → daemon 协议错误码（桥接映射的逆向）。 */
+function mapHostOperationErrorCode(code: string): string {
+  switch (code) {
+    case "invalid_request":
+      return "INVALID_PARAMS";
+    case "not_found":
+      return "NOT_FOUND";
+    case "operation_conflict":
+      return "CONFLICT";
+    case "capability_unavailable":
+      return "FORBIDDEN";
+    case "operation_unavailable":
+      return "METHOD_NOT_FOUND";
+    case "internal_failure":
+      return "INTERNAL_ERROR";
+    default:
+      return "RUNTIME_UNAVAILABLE";
+  }
 }

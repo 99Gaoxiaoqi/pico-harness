@@ -1,0 +1,148 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { test } from "node:test";
+import {
+  readHostRegistration,
+  resolveRootControlNamespace,
+  resolveStorageRoot,
+} from "@pico/runtime-host";
+import { LocalRuntimeClient, type RuntimeNotification } from "../../src/daemon/index.js";
+
+/**
+ * 3-B-3 kernel 承载客户端实盘验证：默认构造（不注入 endpoint）的 LocalRuntimeClient
+ * 经 connectOrSpawn 拉起 daemon candidate，请求走 runtime.request 通用桥接、订阅走
+ * events.* 类型化桥接；host 错误码反查回 daemon 码（INVALID_PARAMS cursor 自动重置）；
+ * daemon 进程被杀后下一次请求触发重生。
+ *
+ * PICO_HOME 在 harness 内改写（测试进程独立）：spawn 出的 daemon 继承本进程 env，
+ * 其升级守卫锁按 PICO_HOME 摘要派生，与其他测试文件隔离。
+ */
+
+interface KernelClientHarness {
+  picoHome: string;
+  workspacePath: string;
+  cleanup: () => Promise<void>;
+}
+
+async function startKernelClientHarness(t: {
+  after(hook: () => unknown): void;
+}): Promise<KernelClientHarness> {
+  const root = await mkdtemp(join(tmpdir(), "pico-client-kernel-"));
+  const picoHome = join(root, "pico-home");
+  const workspaceDir = join(root, "workspace");
+  await mkdir(picoHome, { recursive: true });
+  await mkdir(workspaceDir, { recursive: true });
+  process.env.PICO_HOME = picoHome;
+  t.after(async () => {
+    // 杀掉本测试拉起的常驻 daemon（按 registration pid），避免多 daemon 并存
+    // 触发子进程资源限制；root 目录最后清。
+    await killDaemonFor(picoHome);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  });
+  return { picoHome, workspacePath: await realpath(workspaceDir), cleanup: async () => undefined };
+}
+
+async function killDaemonFor(picoHome: string): Promise<void> {
+  try {
+    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
+    const registration = await readHostRegistration(
+      join(resolveRootControlNamespace(), capability.rootId),
+    );
+    if (registration) process.kill(registration.pid);
+  } catch {
+    // 无 daemon / 已退出：无需处理。
+  }
+}
+
+test("kernel client: request + subscribe + live push over the spawned daemon", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+  });
+  t.after(() => client.close());
+
+  // connect() 触发 connectOrSpawn：首次拉起 daemon candidate。
+  await client.connect();
+  const ping = await client.request("runtime.ping", {});
+  assert.ok(ping, "runtime.ping 应经 runtime.request 桥接成功");
+
+  // 订阅：首页回放 + live 推送（第二个客户端触发 durable 事件）。
+  const received: RuntimeNotification[] = [];
+  const { replay, dispose } = await client.subscribe(
+    { workspacePath: harness.workspacePath },
+    (event) => received.push(event),
+  );
+  assert.equal(replay.subscribed, true);
+
+  const trigger = new LocalRuntimeClient(undefined, { runtimeHostRootPath: harness.picoHome });
+  t.after(() => trigger.close());
+  await trigger.request("workspace.register", { workspacePath: harness.workspacePath });
+
+  const delivered = await waitForCondition(() => received.length >= 1, 10_000);
+  assert.ok(delivered, "live durable 事件应推送到订阅监听器");
+  assert.equal(received[0]?.topic, "workspace.registered");
+  dispose();
+});
+
+test("kernel client: expired cursor resets and resubscribes (INVALID_PARAMS reverse mapping)", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+  });
+  t.after(() => client.close());
+  await client.connect();
+  await client.request("workspace.register", { workspacePath: harness.workspacePath });
+
+  // 不存在的 afterEventId：daemon 侧 INVALID_PARAMS → 桥接 invalid_request →
+  // 客户端反查 INVALID_PARAMS → 订阅环自动清 cursor 全量重订。
+  const received: RuntimeNotification[] = [];
+  const { replay, dispose } = await client.subscribe(
+    {
+      workspacePath: harness.workspacePath,
+      afterEventId: "event_00000000-0000-4000-8000-000000000000",
+    },
+    (event) => received.push(event),
+  );
+  assert.equal(replay.subscribed, true, "cursor 重置后订阅应成功");
+  assert.ok(replay.events.length >= 1, "全量重订首页应包含已注册事件");
+  dispose();
+});
+
+test("kernel client: killing the daemon makes the next request respawn it", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+  });
+  t.after(() => client.close());
+  await client.connect();
+  await client.request("runtime.ping", {});
+
+  // 从 registration 读 pid，硬杀 daemon（模拟崩溃）。
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  const registration = await readHostRegistration(controlDirectory);
+  assert.ok(registration);
+  process.kill(registration.pid);
+
+  // 下一次请求：断连检测 → openKernel → connectOrSpawn 发现 host 死亡 → 重生。
+  const ping = await client.request("runtime.ping", {});
+  assert.ok(ping, "daemon 被杀后下一次请求应触发重生并成功");
+
+  // 清理重生的 daemon。
+  await killDaemonFor(harness.picoHome);
+});
+
+async function waitForCondition(
+  condition: () => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs;
+  while (!condition()) {
+    if (performance.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return true;
+}
