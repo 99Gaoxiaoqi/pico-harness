@@ -1,13 +1,14 @@
 import {
-  HOST_OPERATION_SPECS,
   type ClientSurface,
   decodeOperationOutcome,
   type HostOperationErrorCode,
+  knownOperationKeys,
   type OperationInput,
   type OperationKey,
   type OperationOutcome,
   type RequestFrame,
   type RequestFrameFor,
+  resolveOperationSpec,
   type ResponseFrame,
   type ResponseFrameFor,
 } from '../protocol/index.js';
@@ -19,6 +20,14 @@ export interface ConnectionContext {
   surface: ClientSurface;
   principal: 'local_os_user';
   acquireResidency(): OperationResidency;
+  /**
+   * Aborted when the operation exceeds its server-side deadline. Cooperative
+   * handlers may observe it to cancel gracefully; the host never blocks on a
+   * handler honoring it (a hung handler is abandoned at the deadline either
+   * way). Optional because callers without a deadline (e.g. unit harnesses)
+   * may omit it.
+   */
+  signal?: AbortSignal;
 }
 
 export interface OperationResidency {
@@ -165,10 +174,13 @@ export type ConfigurationOperationHandlerMap = Pick<OperationHandlerMap, Configu
 export function composeOperationHandlers(
   ...handlerMaps: readonly Partial<OperationHandlerMap>[]
 ): OperationHandlerMap {
+  // knownOperationKeys() 同时覆盖静态 bootstrap spec 与 test-only 动态注册的
+  // 操作，使测试组合可以为动态操作提供 handler 而无需触碰静态类型面。
+  const known = new Set(knownOperationKeys());
   const combined: Partial<OperationHandlerMap> = {};
   for (const handlers of handlerMaps) {
     for (const key of Object.keys(handlers)) {
-      if (!Object.hasOwn(HOST_OPERATION_SPECS, key)) {
+      if (!known.has(key)) {
         throw new Error(`Unknown Runtime Host operation handler: ${key}`);
       }
       if (Object.hasOwn(combined, key)) {
@@ -181,7 +193,7 @@ export function composeOperationHandlers(
       Object.assign(combined, { [key]: handler });
     }
   }
-  const missing = Object.keys(HOST_OPERATION_SPECS).filter((key) => !Object.hasOwn(combined, key));
+  const missing = [...known].filter((key) => !Object.hasOwn(combined, key));
   if (missing.length > 0) {
     throw new Error(`Missing Runtime Host operation handlers: ${missing.join(', ')}`);
   }
@@ -190,9 +202,11 @@ export function composeOperationHandlers(
 
 export function createUnavailableDomainOperationHandlers(): DomainOperationHandlerMap {
   const handlers: Partial<DomainOperationHandlerMap> = {};
-  for (const operation of Object.keys(HOST_OPERATION_SPECS) as OperationKey[]) {
+  for (const operation of knownOperationKeys()) {
     if (Object.hasOwn(HOST_BOOTSTRAP_OPERATION_SPECS, operation)) continue;
-    const errors = HOST_OPERATION_SPECS[operation].errors as readonly HostOperationErrorCode[];
+    const spec = resolveOperationSpec(operation);
+    if (!spec) throw new Error(`Unknown Runtime Host operation: ${operation}`);
+    const errors = spec.errors as readonly HostOperationErrorCode[];
     if (!errors.includes('operation_unavailable')) {
       throw new Error(`${operation} does not declare operation_unavailable`);
     }
@@ -226,8 +240,9 @@ export function operationFailureResponse(
   code: HostOperationErrorCode,
   message: string,
 ): ResponseFrame {
-  const declaredErrors = HOST_OPERATION_SPECS[request.operation]
-    .errors as readonly HostOperationErrorCode[];
+  const spec = resolveOperationSpec(request.operation);
+  if (!spec) throw new Error(`Unknown Runtime Host operation: ${request.operation}`);
+  const declaredErrors = spec.errors as readonly HostOperationErrorCode[];
   if (!declaredErrors.includes(code)) {
     throw new Error(`${request.operation} does not declare ${code}`);
   }

@@ -32,7 +32,7 @@ export interface OperationSpec<Input, Output, ErrorCode extends HostOperationErr
   assertOutputForInput?(input: Input, output: Output): void;
 }
 
-type AnyOperationSpec = OperationSpec<unknown, unknown, HostOperationErrorCode>;
+export type AnyOperationSpec = OperationSpec<unknown, unknown, HostOperationErrorCode>;
 export type OperationSpecMap = Readonly<Record<string, AnyOperationSpec>>;
 type OperationSpecMaps = readonly [OperationSpecMap, ...OperationSpecMap[]];
 type OperationSpecMapIntersection<Maps extends OperationSpecMaps> = UnionToIntersection<

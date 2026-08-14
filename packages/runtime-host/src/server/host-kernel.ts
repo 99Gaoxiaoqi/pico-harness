@@ -10,8 +10,8 @@ import { prepareRuntimeHostEndpoint, type RuntimeHostEndpoint } from "../control
 import { removeHostRegistration, writeHostRegistration } from "../control/registration.js";
 import {
   decodeClientFrame,
-  HOST_OPERATION_SPECS,
   negotiateProtocol,
+  resolveOperationSpec,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
   RUNTIME_HOST_PROTOCOL_VERSION,
   RUNTIME_HOST_REGISTRATION_KIND,
@@ -40,6 +40,11 @@ import {
 const DEFAULT_IDLE_GRACE_MS = 30_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+// Server-side operation deadline：handler 挂死（永不返回）时的兜底。到期后强制
+// finish admission（#activeOperations 递减）+ teardown 连接，使 drain 不再无界
+// 等待、idle 检查能重新成立。默认 120s：远大于正常 bootstrap 操作，对 LLM turn
+// 类长操作也留有余量；3-B 接入业务后可按需调大。
+const DEFAULT_OPERATION_DEADLINE_MS = 120_000;
 // recover() 启动 deadline：业务恢复钩子挂死时 fail-stop（requestDrain），
 // 避免 kernel.start() 无限挂起（此时 shutdown deadline 尚未 arm）。
 const RECOVER_STARTUP_DEADLINE_MS = 60_000;
@@ -87,6 +92,13 @@ export interface RuntimeHostKernelOptions {
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
   shutdownGraceMs?: number;
+  /**
+   * Server-side deadline for a single operation. A handler that hangs past
+   * this window is abandoned: its admission is force-finished (active
+   * operation counters decrement), the client receives a best-effort failure
+   * response, and the connection is torn down. Defaults to 120s.
+   */
+  operationDeadlineMs?: number;
   compositionFactory?: RuntimeHostCompositionFactory;
 }
 
@@ -103,6 +115,7 @@ export class RuntimeHostKernel {
   readonly #idleGraceMs: number;
   readonly #handshakeTimeoutMs: number;
   readonly #shutdownGraceMs: number;
+  readonly #operationDeadlineMs: number;
   #endpoint: RuntimeHostEndpoint | undefined;
   #state: HostLifecycleState = "starting";
   #activeOperations = 0;
@@ -129,9 +142,15 @@ export class RuntimeHostKernel {
       1,
     );
     assertDuration(options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS, "shutdownGraceMs", 1);
+    assertDuration(
+      options.operationDeadlineMs ?? DEFAULT_OPERATION_DEADLINE_MS,
+      "operationDeadlineMs",
+      1,
+    );
     this.#idleGraceMs = options.idleGraceMs ?? DEFAULT_IDLE_GRACE_MS;
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this.#shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+    this.#operationDeadlineMs = options.operationDeadlineMs ?? DEFAULT_OPERATION_DEADLINE_MS;
     this.#options = options;
     this.#operationHandlers = this.#createOperationHandlers(
       createUnavailableDomainOperationHandlers(),
@@ -152,6 +171,7 @@ export class RuntimeHostKernel {
         idleGraceMs: options.idleGraceMs,
         handshakeTimeoutMs: options.handshakeTimeoutMs,
         shutdownGraceMs: options.shutdownGraceMs,
+        operationDeadlineMs: options.operationDeadlineMs,
         compositionFactory: options.compositionFactory,
       });
       await host.#start();
@@ -314,6 +334,7 @@ export class RuntimeHostKernel {
         resolveHandlers: () => this.#operationHandlers,
         beginOperation: (request) => this.#beginOperation(request),
         onTeardown: releaseTransport,
+        operationDeadlineMs: this.#operationDeadlineMs,
       });
       await session.run();
     } catch {
@@ -377,14 +398,15 @@ export class RuntimeHostKernel {
     frame: RequestFrame,
   ): Promise<ConnectionOperationLease | HostOperationErrorCode> {
     if (!(await this.#readAdmissionState())) return "host_draining";
-    if (
-      HOST_OPERATION_SPECS[frame.operation].availability !== "bootstrap" &&
-      this.#state !== "ready"
-    ) {
+    // resolveOperationSpec 覆盖 test-only 动态注册的操作；frame 已通过
+    // decodeClientFrame 校验过 operation key，这里缺失即内部不变量被破坏。
+    const spec = resolveOperationSpec(frame.operation);
+    if (!spec) throw new Error(`Unknown Runtime Host operation: ${frame.operation}`);
+    if (spec.availability !== "bootstrap" && this.#state !== "ready") {
       return "host_not_ready";
     }
     this.#activeOperations += 1;
-    const command = HOST_OPERATION_SPECS[frame.operation].mode === "command";
+    const command = spec.mode === "command";
     if (command) this.#activeCommandOperations += 1;
     this.#cancelIdle();
     let sealed = false;

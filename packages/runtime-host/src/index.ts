@@ -58,6 +58,7 @@ export {
   connectExistingRuntimeHost,
   connectResolvedRuntimeHost,
   connectRuntimeHost,
+  RuntimeHostOperationError,
   type ConnectRuntimeHostResult,
   type RuntimeHostConnection,
   type RuntimeHostUnavailableReason,

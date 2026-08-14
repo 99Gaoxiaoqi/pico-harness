@@ -10,6 +10,7 @@ export interface RuntimeHostCandidateOptions {
   legacyConfigurationRoot?: string;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
+  operationDeadlineMs?: number;
 }
 
 export type RuntimeHostCandidateResult =
@@ -30,6 +31,7 @@ export async function startRuntimeHostCandidate(
     owner,
     idleGraceMs: options.idleGraceMs,
     handshakeTimeoutMs: options.handshakeTimeoutMs,
+    operationDeadlineMs: options.operationDeadlineMs,
   });
   return { kind: 'winner', host };
 }
