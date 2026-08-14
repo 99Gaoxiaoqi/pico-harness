@@ -23,7 +23,10 @@ export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // lets a new Client retire a stale same-version Host whose closed schema is no
 // longer safe to use.
 export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 1 as const;
-export const RUNTIME_HOST_MAX_FRAME_BYTES = 96 * 1024;
+// 帧上限对齐 daemon IPC 的 1MiB（3-B-3 硬切后所有 daemon 方法结果都走本协议，
+// transcript/会话历史类大结果不能被控制面级小帧卡死）。队列字节上限随之放大
+// （writer/transport 各 8MB = 8 满帧余量）。
+export const RUNTIME_HOST_MAX_FRAME_BYTES = 1024 * 1024;
 export const RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS = 64;
 
 export const RUNTIME_HOST_REGISTRATION_KIND = 'pico-runtime-host' as const;

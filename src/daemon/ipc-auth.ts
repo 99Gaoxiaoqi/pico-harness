@@ -121,15 +121,35 @@ async function assertNoGroupOrWorldAccess(path: string, label: string): Promise<
  * Microsoft for named pipes. The protected token is therefore defense in depth, not a claim that
  * the named pipe object itself has an explicit per-user DACL.
  */
+/**
+ * Windows inbox 工具用绝对路径解析：PATH 里可能有同名 GNU 工具（如 Git Bash 的
+ * usr/bin/whoami.exe 排在 System32 之前），相对名 spawn 会命中它们并以非零退出
+ * （GNU whoami 不认识 /user /fo csv），把认证加固误判为失败。
+ */
+function resolveWindowsUtility(name: string): string {
+  const systemRoot = process.env.SystemRoot ?? process.env.SystemDrive ?? "C:\\Windows";
+  return `${systemRoot}${systemRoot.endsWith("\\") ? "" : "\\"}System32\\${name}`;
+}
+
 async function protectWindowsPathForCurrentUser(
   path: string,
   kind: "directory" | "file",
 ): Promise<void> {
-  const identity = await runWindowsUtility("whoami.exe", ["/user", "/fo", "csv", "/nh"]);
+  const identity = await runWindowsUtility(resolveWindowsUtility("whoami.exe"), [
+    "/user",
+    "/fo",
+    "csv",
+    "/nh",
+  ]);
   const sid = identity.match(/"(S-\d+(?:-\d+)+)"/u)?.[1];
   if (!sid) throw new Error("无法确定当前 Windows 用户 SID，IPC 认证已拒绝");
   const permission = kind === "directory" ? `*${sid}:(OI)(CI)F` : `*${sid}:F`;
-  await runWindowsUtility("icacls.exe", [path, "/inheritance:r", "/grant:r", permission]);
+  await runWindowsUtility(resolveWindowsUtility("icacls.exe"), [
+    path,
+    "/inheritance:r",
+    "/grant:r",
+    permission,
+  ]);
 }
 
 async function runWindowsUtility(command: string, args: readonly string[]): Promise<string> {

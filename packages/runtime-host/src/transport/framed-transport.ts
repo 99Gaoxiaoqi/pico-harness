@@ -9,8 +9,8 @@ import {
 } from '../protocol/index.js';
 
 const MAX_QUEUED_FRAMES = 64;
-const MAX_QUEUED_BYTES = 2 * 1024 * 1024;
-const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 interface QueuedFrame {
   value: unknown;

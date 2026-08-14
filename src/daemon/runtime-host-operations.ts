@@ -3,6 +3,7 @@ import {
   invalidProtocolFrame,
   registerHostOperationSpecs,
   requireEncodedByteLimit,
+  RUNTIME_HOST_MAX_FRAME_BYTES,
   type AnyOperationSpec,
   type HostOperationErrorCode,
   type OperationSpec,
@@ -34,6 +35,15 @@ export const RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS = "workspace.status";
 export const RUNTIME_HOST_BRIDGE_USAGE_GET = "usage.get";
 export const RUNTIME_HOST_BRIDGE_EVENTS_SUBSCRIBE = "events.subscribe";
 export const RUNTIME_HOST_BRIDGE_EVENTS_REPLAY = "events.replay";
+/**
+ * Generic transition operation (3-B-3): carries any daemon RUNTIME_METHOD over
+ * the Runtime Host wire so clients can migrate transport wholesale before each
+ * method gets its own strictly-decoded spec. Input validation stays single-source
+ * (parseStrictRuntimeParams rejects unknown methods and unknown keys); the result
+ * passes through with a frame-budget guard — per-method strict decodeOutput is
+ * the 3-B-4+ hardening that retires this op method by method.
+ */
+export const RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST = "runtime.request";
 
 const BRIDGE_ERRORS = [
   "operation_unavailable",
@@ -45,6 +55,9 @@ const BRIDGE_ERRORS = [
 ] as const;
 
 const USAGE_RESULT_MAX_BYTES = 64 * 1024;
+
+/** runtime.request 结果预算：帧上限减响应信封预留（对齐 daemon replay 的 64KB 预留惯例）。 */
+const RUNTIME_REQUEST_RESULT_MAX_BYTES = RUNTIME_HOST_MAX_FRAME_BYTES - 64 * 1024;
 
 /** Runtime Host 桥接错误码全集（daemon 协议错误码映射的目标空间）。 */
 export type BridgeErrorCode =
@@ -152,6 +165,17 @@ export interface EventsReplayBridgeInput {
 
 export interface EventsReplayBridgeOutput extends BridgeNotificationPage {}
 
+export interface RuntimeRequestBridgeInput {
+  /** Any daemon RuntimeMethod; validated single-source via parseStrictRuntimeParams. */
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+/** Passthrough result of a daemon method call, frame-budget guarded. */
+export interface RuntimeRequestBridgeOutput {
+  result: unknown;
+}
+
 export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
   [RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS]: defineOperation({
     mode: "query",
@@ -180,6 +204,43 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
         throw invalidProtocolFrame("Invalid usage.get result");
       }
       return { usage: result.usage as Record<string, unknown> };
+    },
+  }),
+  [RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST]: defineOperation({
+    mode: "query",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value): RuntimeRequestBridgeInput => {
+      // Method-specific validation is single-sourced in the handler via
+      // parseStrictRuntimeParams (it rejects unknown methods); here only the
+      // generic envelope shape is checked.
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw invalidProtocolFrame("runtime.request input must be an object");
+      }
+      const input = value as { method?: unknown; params?: unknown };
+      if (typeof input.method !== "string" || input.method.length === 0) {
+        throw invalidProtocolFrame("runtime.request method must be a non-empty string");
+      }
+      if (
+        input.params !== undefined &&
+        (typeof input.params !== "object" || input.params === null || Array.isArray(input.params))
+      ) {
+        throw invalidProtocolFrame("runtime.request params must be an object when present");
+      }
+      return {
+        method: input.method,
+        ...(input.params === undefined ? {} : { params: input.params as Record<string, unknown> }),
+      };
+    },
+    decodeOutput: (value): RuntimeRequestBridgeOutput => {
+      // Passthrough guard: the result must fit a response frame (envelope reserve
+      // included) so framing cannot fail after the handler already committed.
+      requireEncodedByteLimit(
+        (value as { result?: unknown })?.result,
+        "runtime.request result",
+        RUNTIME_REQUEST_RESULT_MAX_BYTES,
+      );
+      return value as RuntimeRequestBridgeOutput;
     },
   }),
 } satisfies Record<string, AnyOperationSpec>;

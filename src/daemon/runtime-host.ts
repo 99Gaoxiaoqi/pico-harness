@@ -23,6 +23,13 @@ export interface LocalDaemonHostOptions {
   ownerId?: string;
   lockOptions?: Omit<LocalDaemonInstanceLockOptions, "endpoint">;
   onWorkspaceError?: (workspacePath: string, error: unknown) => void;
+  /**
+   * services-only 模式（3-B-3）：只编排 service + cron runtime 生命周期与
+   * shutdown fence 链，不持有旧传输（endpoint/instance-lock/LocalRuntimeDaemon）。
+   * runtime-host candidate 嵌入此模式复用已测试的关停语义——单例与传输由
+   * kernel 的 flock 选主与 NDJSON endpoint 承担。
+   */
+  servicesOnly?: boolean;
 }
 
 /**
@@ -30,9 +37,9 @@ export interface LocalDaemonHostOptions {
  * this host never imports or silently falls back to the foreground AgentRuntime.
  */
 export class LocalDaemonHost {
-  readonly endpoint: LocalDaemonEndpoint;
+  readonly endpoint: LocalDaemonEndpoint | undefined;
   readonly ownerId: string;
-  private readonly daemon: LocalRuntimeDaemon;
+  private readonly daemon: LocalRuntimeDaemon | undefined;
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly cronRuntimes = new Map<string, ManagedCronWorkspaceRuntime>();
   private readonly cronShutdownRuntimes = new Map<string, ManagedCronWorkspaceRuntime>();
@@ -47,10 +54,15 @@ export class LocalDaemonHost {
   private reconcileQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: LocalDaemonHostOptions) {
-    this.endpoint = options.endpoint ?? resolveLocalDaemonEndpoint();
+    if (options.servicesOnly) {
+      this.endpoint = undefined;
+      this.daemon = undefined;
+    } else {
+      this.endpoint = options.endpoint ?? resolveLocalDaemonEndpoint();
+      this.daemon = new LocalRuntimeDaemon({ endpoint: this.endpoint, service: options.service });
+    }
     this.ownerId = options.ownerId ?? `daemon:${process.pid}:${randomUUID()}`;
     this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
-    this.daemon = new LocalRuntimeDaemon({ endpoint: this.endpoint, service: options.service });
   }
 
   get status(): HostState {
@@ -85,19 +97,27 @@ export class LocalDaemonHost {
 
   private async startOnce(): Promise<void> {
     try {
-      this.instanceLock = await LocalDaemonInstanceLock.acquire({
-        endpoint: this.endpoint,
-        ...this.options.lockOptions,
-      });
-      // Safe only after the singleton lock and active protocol ping both succeeded.
-      await removeLocalDaemonEndpoint(this.endpoint);
+      if (this.daemon && this.endpoint) {
+        this.instanceLock = await LocalDaemonInstanceLock.acquire({
+          endpoint: this.endpoint,
+          ...this.options.lockOptions,
+        });
+        // Safe only after the singleton lock and active protocol ping both succeeded.
+        await removeLocalDaemonEndpoint(this.endpoint);
+      }
       await this.reconcileRegisteredWorkspaces();
-      await this.daemon.start();
+      if (this.daemon) await this.daemon.start();
       this.state = "running";
       for (const runtime of this.cronRuntimes.values()) runtime.start();
     } catch (error) {
       try {
         await this.closeResources();
+      } catch (cleanupError) {
+        // 启动失败后的清理失败不应掩盖原始启动错误（否则无法定位启动根因）。
+        logger.error(
+          { cleanupError, startupError: error },
+          "Daemon startup failed and cleanup also failed",
+        );
       } finally {
         this.state = "stopped";
       }
@@ -236,10 +256,12 @@ export class LocalDaemonHost {
   private async closeResources(): Promise<void> {
     await this.reconcileQueue;
     let daemonCloseError: unknown;
-    try {
-      await this.daemon.stop();
-    } catch (error) {
-      daemonCloseError = error;
+    if (this.daemon) {
+      try {
+        await this.daemon.stop();
+      } catch (error) {
+        daemonCloseError = error;
+      }
     }
     const runtimes = [
       ...new Set([...this.cronRuntimes.values(), ...this.cronShutdownRuntimes.values()]),

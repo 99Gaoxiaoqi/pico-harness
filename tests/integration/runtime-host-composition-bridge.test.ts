@@ -222,3 +222,59 @@ test("runtime-host bridge: malformed handler output is rejected by spec.decodeOu
 
   assert.equal(connection.terminalError, undefined, "decodeOutput 失败不应 fail 连接");
 });
+
+test("runtime-host bridge: runtime.request carries an un-specced daemon method end to end", async (t) => {
+  const { connection, workspacePath } = await startBridgeHarness(t);
+
+  // workspace.register 尚无专属 spec：经 runtime.request 通用操作走全链路
+  // （decodeInput 信封 → parseStrictRuntimeParams 单源校验 → service.handle → 预算守卫）。
+  const result = await connection.requestRegistered<{ result: { registered?: boolean } }>(
+    "runtime.request",
+    { method: "workspace.register", params: { workspacePath } },
+    10_000,
+  );
+  assert.equal(result.result.registered, true);
+  assert.equal(connection.terminalError, undefined);
+});
+
+test("runtime-host bridge: runtime.request rejects unknown methods and unknown params", async (t) => {
+  const { connection, workspacePath } = await startBridgeHarness(t);
+
+  await assert.rejects(
+    connection.requestRegistered(
+      "runtime.request",
+      { method: "no.such.method", params: {} },
+      10_000,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof RuntimeHostOperationError);
+      // 未知方法经 METHOD_NOT_FOUND 映射为 operation_unavailable（语义比
+      // invalid_request 更准：问题在方法面而非参数形状）。
+      assert.equal(error.code, "operation_unavailable", "未知方法应被单源校验拒绝");
+      return true;
+    },
+  );
+
+  // 未知参数键同样被 parseStrictRuntimeParams 拒绝。
+  await assert.rejects(
+    connection.requestRegistered(
+      "runtime.request",
+      { method: "workspace.status", params: { workspacePath, rogue: 1 } },
+      10_000,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof RuntimeHostOperationError);
+      assert.equal(error.code, "invalid_request", "未知参数键应被严格校验拒绝");
+      return true;
+    },
+  );
+
+  assert.equal(connection.terminalError, undefined, "校验失败不应 fail 连接");
+  // 连接仍健康：既有桥接操作可用。
+  const status = await connection.requestRegistered<{ workspacePath: string }>(
+    "workspace.status",
+    { workspacePath },
+    10_000,
+  );
+  assert.equal(status.workspacePath, workspacePath);
+});

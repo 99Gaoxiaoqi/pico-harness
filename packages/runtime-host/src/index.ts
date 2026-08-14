@@ -52,6 +52,8 @@ export {
   type RuntimeHostCandidateOptions,
   type RuntimeHostCandidateResult,
 } from "./server/candidate.js";
+export { runRuntimeHostProcessLifecycle } from "./server/process-lifecycle.js";
+export { parseRuntimeHostCandidateArguments } from "./candidate-cli.js";
 
 // client
 export {
