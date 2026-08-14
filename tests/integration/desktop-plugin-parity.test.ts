@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
   createRuntimeRequest,
@@ -274,7 +274,12 @@ test("Plugin snapshot registry reports disposal failures after attempting every 
       error instanceof AggregateError &&
       error.errors.some((failure) => String(failure).includes("dispose boom")),
   );
-  assert.deepEqual(disposed.sort(), ["/workspace/failing", "/workspace/succeeding"]);
+  // registry.get() 内部按 resolve() 规范化 workDir（canonical workspace path），
+  // dispose 记录的是规范化后的路径——期望值须做同样处理，否则 Windows 上失败。
+  assert.deepEqual(
+    disposed.sort(),
+    [resolve("/workspace/failing"), resolve("/workspace/succeeding")].sort(),
+  );
   assert.throws(() => registry.get("/workspace/later"), /disposed/u);
 });
 
