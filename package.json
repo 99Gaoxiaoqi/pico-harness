@@ -30,7 +30,6 @@
     "desktop:package": "npm run package --workspace @pico/desktop",
     "desktop:make": "npm run make --workspace @pico/desktop",
     "desktop:typecheck": "npm run typecheck --workspace @pico/desktop",
-    "mobile:gateway": "npm run check:storage && npm run build:protocol && tsx --env-file-if-exists=.env src/mobile-gateway/main.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:protocol": "npm run build --workspace @pico/protocol",
     "build:runtime-host": "npm run build --workspace @pico/runtime-host",

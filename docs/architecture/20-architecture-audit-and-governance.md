@@ -33,7 +33,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 **根因 B — 同一职责多套实现（补丁驱动）**
 - 超时原语：3 套 `settleWithinDeadline` + 2 套 `withTimeout` + 多处内联 `Promise.race`（→ 阶段 1 收敛为 `raceWithDeadline`/`raceWithDeadlineReject` 2 个原语）。
-- 多外壳连接状态机：Desktop（fail-stuck 无恢复路径）/ Mobile（10 次封顶）/ daemon-client（无限重连）三套不互通——daemon 重启后传输层自愈，renderer 却卡"请重启 Pico 应用"。
+- 多外壳连接状态机：Desktop（fail-stuck 无恢复路径）/ daemon-client（无限重连）两套不互通——daemon 重启后传输层自愈，renderer 却卡"请重启 Pico 应用"（移动端已于 2026-08 移除，不再计入）。
 - 去重：durable CAS 被降级为 best-effort、内存层升为 load-bearing 权威（权威倒挂）。
 
 **根因 C — Graph Mode 架构欠账**
@@ -97,7 +97,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 ## 5. 北极星：统一网关层
 
-**问题**：pico 多外壳不一致（根因 B）的根因是**缺统一接入层**。maka 的所有外壳（Desktop/TUI/CLI/bot）都经由同一个 `RuntimeHostConnection` 契约（`packages/runtime-host/src/client/connection.ts:156`）连接到同一个 `RuntimeHostKernel` 守护进程——连接状态机、重连、transcript 分页/连续性、超时全部在网关层收口，外壳只做展示。maka 全仓只有**一套**连接状态机、**一个** transcript 分页实现。pico 则是 mobile 有网关、desktop 直连 daemon IPC、TUI 进程内装配——三条不同构路径。
+**问题**：pico 多外壳不一致（根因 B）的根因是**缺统一接入层**。maka 的所有外壳（Desktop/TUI/CLI/bot）都经由同一个 `RuntimeHostConnection` 契约（`packages/runtime-host/src/client/connection.ts:156`）连接到同一个 `RuntimeHostKernel` 守护进程——连接状态机、重连、transcript 分页/连续性、超时全部在网关层收口，外壳只做展示。maka 全仓只有**一套**连接状态机、**一个** transcript 分页实现。pico 则是 desktop 直连 daemon IPC、TUI 进程内装配——两条不同构路径（移动端已于 2026-08 移除）。
 
 **目标**：引入统一 `RuntimeHostConnection` 契约，所有外壳经由它接入，状态/重连/transcript/连续性在网关层统一。
 
@@ -105,10 +105,10 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 - 契约可直接借鉴：`RuntimeHostConnection`（单一状态机：握手、pending 请求、存活检测、订阅复用）+ `ClientSurface` 枚举 + `ClientSessionSubscription.loadTranscript`（统一分页 + `snapshot_expired`）+ `SessionContinuityService`（重连状态）。
 - **决定性差异**：maka 的 TUI 是经 socket 连接的客户端（`surface: 'tui'`），**不是进程内装配**。pico 的 TUI 需同样改为客户端。
 
-**不照搬（传输）**：maka 只有本地 socket（`node:net`），无移动/远程。pico 的 mobile 是网络远程，需 WS + 重连 + 移动认证。所以 pico 的网关要支持**双传输**：本地 socket for Desktop/TUI，安全 WS for Mobile。外壳代码（及状态/transcript/连续性逻辑）传输无关。
+**不照搬（传输）**：maka 只有本地 socket（`node:net`），pico 外壳同样只走本地 socket（移动端已于 2026-08 移除，不再需要 WS/远程传输）。外壳代码（及状态/transcript/连续性逻辑）传输无关。
 
 **迁移路径**（顺序）：
-1. 把 `src/mobile-gateway/` 升级为通用网关（支持本地 socket + WS 双传输），定义 `RuntimeHostConnection` 契约 + `ClientSurface`。
+1. 由 `packages/runtime-host/` 承载通用网关契约（`RuntimeHostConnection` + `ClientSurface`），本地 socket 单传输（3-A/3-B 已落地）。
 2. 统一连接状态机、重连策略、transcript 分页（吸收 `loadGeneration`/`conversationLoadGenerationsRef` 到网关客户端）。
 3. Desktop 改为经网关客户端接入（取代直连 daemon IPC + 自维护 ConnectionState）。
 4. TUI 从进程内装配改为 socket 客户端（最大改动，最后做——部署模型变更，见下）。
@@ -120,7 +120,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 - 排序仍放最后，但**工作量不是"改一个组件"而是"重设计部署模型"**，需单独立项评估，不宜与 1-3 混在同一轮。
 
 **与 LocalDaemonHost 的关系（叠加，非替换）**：统一网关层**叠加于 `LocalDaemonHost` 之上**，不是另起炉灶：
-- 网关 = `src/mobile-gateway/` 升级（本地 socket + WS 双传输）+ 统一契约层（`RuntimeHostConnection`/`ClientSurface`/transcript 分页/连续性），复用 mobile 网关已有的实时通道与服务端。
+- 网关 = `packages/runtime-host/`（本地 socket 单传输）+ 统一契约层（`RuntimeHostConnection`/`ClientSurface`/transcript 分页/连续性），移动端已移除，无 WS 面。
 - `LocalDaemonHost`（`src/daemon/runtime-host.ts`，生产装配 `src/daemon/production-host.ts:90`，入口 `src/daemon/main.ts`）保留为 **RuntimeHostKernel 等价物**——外壳/传输层的对端，不随网关升级而消失；daemon IPC 作为网关的服务端后端之一，`connectWithTimeout` 的 socket 事件式语义由网关收口。
 - 即 maka 的 `RuntimeHostKernel` ↔ pico 的 `LocalDaemonHost`；maka 的 `RuntimeHostConnection` ↔ pico 新建的网关契约。外壳只与契约层对话，daemon 不感知外壳差异；Desktop 直连 daemon 的旧路径降级保留（`ConnectionState` 由网关客户端接管后仅作降级回退）。
 
@@ -132,7 +132,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 |---|---|---|---|---|
 | **D7** | `DelegationManager.records` 内存事实权威 + 双去重倒挂 | 调度 | P0 | 阶段 2 |
 | **D8** | 超时原语全栈散落（3+2+多处） | 机械 | P0 | 阶段 1 ✅ |
-| **D9** | 多外壳连接状态/重连三套不互通（缺网关层） | 机械 | P0 | 阶段 3 |
+| **D9** | 多外壳连接状态/重连不互通（缺网关层；移动端已移除） | 机械 | P0 | 阶段 3 |
 | **D10** | Graph 无真 DAG、无内容级熔断、DelegationManager 职责错位 | 调度 | P1 | 阶段 2/3 |
 | **D11** | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事 | P1 | 后续 |
 | **D12** | `DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现 | 机械 | P1 | 阶段 3 |

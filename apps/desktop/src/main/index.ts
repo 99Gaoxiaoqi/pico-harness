@@ -9,6 +9,7 @@ import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { raceWithDeadlineReject } from "../../../../src/util/race-with-deadline.js";
+import { sleepForRetry } from "../../../../src/provider/retry.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
@@ -171,7 +172,7 @@ async function pingUntilReady(): Promise<unknown> {
         error.retryable &&
         Date.now() + FIRST_PING_RETRY_DELAY_MS < deadline
       ) {
-        await new Promise((resolve) => setTimeout(resolve, FIRST_PING_RETRY_DELAY_MS));
+        await sleepForRetry(FIRST_PING_RETRY_DELAY_MS);
         continue;
       }
       throw error;

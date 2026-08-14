@@ -95,23 +95,18 @@ test("D7 正向不变量：graph work 去重走 durable lease，records 已降�
   );
 });
 
-test("D9 债务追踪：多外壳连接状态/重连三套仍并存（无统一网关层）", () => {
-  // P0 机械态债（阶段 3 网关层）：Desktop / Mobile / daemon-client 各维护一套
-  // 连接状态机与重连策略，互不互通——daemon 重启后传输层自愈，renderer 却卡
-  // "请重启 Pico 应用"。网关层统一后三套收敛为一套 RuntimeHostConnection。
+test("D9 债务追踪：多外壳连接状态/重连两套仍并存（无统一网关层）", () => {
+  // P0 机械态债（阶段 3 网关层）：Desktop / daemon-client 各维护一套连接状态机
+  // 与重连策略，互不互通——daemon 重启后传输层自愈，renderer 却卡"请重启 Pico
+  // 应用"。网关层统一后两套收敛为一套 RuntimeHostConnection（移动端已于 2026-08
+  // 移除，不再计入）。
   const desktopModel = readSource("apps/desktop/src/renderer/model.ts");
-  const mobileRealtime = readSource("apps/mobile/src/lib/mobile-gateway-realtime.ts");
   const daemonClient = readSource("src/daemon/client.ts");
-  // 债务表征：三套状态机定义都还在。任一外壳收敛到网关后对应断言红。
+  // 债务表征：两套状态机定义都还在。任一外壳收敛到网关后对应断言红。
   assert.match(
     desktopModel,
     /\bConnectionState\b/,
     "Desktop ConnectionState 状态机仍在（未收敛到网关）",
-  );
-  assert.match(
-    mobileRealtime,
-    /\bMobileRealtimeState\b/,
-    "Mobile 实时状态机仍在（未收敛到网关）",
   );
   assert.match(
     daemonClient,
@@ -135,22 +130,16 @@ test("D11 债务追踪：Memory rebuild 不重放 overlay mutation（复活链�
   );
 });
 
-test("D12 债务追踪：transcript 同步双实现仍并存（desktop/mobile 各一套）", () => {
-  // P1 机械态债（阶段 3 网关层）：transcript 分页/连续性两套实现——Desktop 的
-  // conversationLoadGenerationsRef 与 Mobile 的 loadGenerationRef，应统一吸收进
-  // 网关客户端（maka 式 RuntimeHostConnection.loadTranscript）。
+test("D12 债务追踪：transcript 同步实现仍并存（desktop 自持一套）", () => {
+  // P1 机械态债（阶段 3 网关层）：Desktop 的 conversationLoadGenerationsRef
+  // 应统一吸收进网关客户端（maka 式 RuntimeHostConnection.loadTranscript）。
+  // 移动端已于 2026-08 移除，不再计入双实现。
   const desktopRuntime = readSource("apps/desktop/src/renderer/runtime.ts");
-  const mobileSession = readSource("apps/mobile/src/app/session.tsx");
-  // 债务表征：两套 generation 追踪 ref 都还在。任一实现被网关吸收后对应断言红。
+  // 债务表征：desktop 的 generation 追踪 ref 还在。被网关吸收后断言红。
   assert.match(
     desktopRuntime,
     /\bconversationLoadGenerationsRef\b/,
     "Desktop transcript generation 追踪仍在（未收敛到网关）",
-  );
-  assert.match(
-    mobileSession,
-    /\bloadGenerationRef\b/,
-    "Mobile transcript generation 追踪仍在（未收敛到网关）",
   );
   // 阶段 3 网关层统一 transcript 同步后：删除本测试。
 });

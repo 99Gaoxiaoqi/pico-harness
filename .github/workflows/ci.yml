@@ -115,21 +115,16 @@ jobs:
       - name: Verify local file storage capabilities
         run: npm run check:storage
 
-      - name: Typecheck runtime, Desktop, and Mobile packages
+      - name: Typecheck runtime and Desktop packages
         run: |
           npm run typecheck
           npm run desktop:typecheck
-          npm run typecheck --workspace @pico/mobile
 
       - name: Run deterministic integration suite
         run: npm run test:integration
 
-      - name: Build distributable and Mobile bundle
-        run: |
-          npm run build
-          npm exec --workspace @pico/mobile expo export -- \
-            --platform android \
-            --output-dir /tmp/pico-mobile-node-${{ matrix.node }}
+      - name: Build distributable
+        run: npm run build
 
   windows-security:
     name: Windows security integration

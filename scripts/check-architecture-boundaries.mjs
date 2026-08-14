@@ -40,7 +40,6 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   // 误报：setTimeout 不在 Promise executor 内，与 new Promise 无因果。
   ["src/daemon/server.ts", "误报：auth 超时定时器直接 destroy socket，promise 为事件驱动"],
   ["src/memory/worker.ts", "误报：pending 队列 promise + worker 调度 debounce 定时器"],
-  ["src/mobile-gateway/realtime-server.ts", "误报：ws close 事件 promise + 独立 auth 定时器"],
   // 既有手写超时原语（收敛迁移候选）。
   ["src/approval/manager.ts", "既有：审批等待超时包装（executor 内 setTimeout reject）"],
   ["src/code-intelligence/lsp-client.ts", "既有：LSP 请求超时 / 子进程 SIGKILL 升级（2 处）"],
