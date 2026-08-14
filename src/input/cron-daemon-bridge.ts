@@ -1,13 +1,6 @@
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { type RuntimeJob, type RuntimeProviderInput } from "@pico/protocol";
 import { LocalRuntimeClient } from "../daemon/client.js";
-import { createUserDaemonInstaller } from "../daemon/user-daemon-installer.js";
-import {
-  resolveCanonicalPicoHome,
-  resolveLocalDaemonEndpoint,
-  resolveLocalDaemonServiceName,
-} from "../daemon/endpoint.js";
+import { resolveCanonicalPicoHome } from "../daemon/endpoint.js";
 
 /** The small boundary between TUI commands and the local Runtime daemon. */
 export interface CronDaemonBridge {
@@ -126,6 +119,10 @@ export interface LocalCronDaemonBridgeOptions {
  * Registers a workspace with an already-running daemon without making TUI own
  * its lifetime. `workspace.register` is durable daemon-owned registration;
  * merely listing jobs would only materialise an in-memory Runtime.
+ *
+ * 3-B-3 硬切后 daemon 是 runtime-host candidate（不再 serve 旧 socket 传输），
+ * 默认 client 走 kernel 承载：connectOrSpawn 自动拉起 detached 常驻 daemon
+ * （candidate 自持 residency 阻止 idle 自退），TUI 退出后 cron 仍持续调度。
  */
 export class LocalCronDaemonBridge implements CronDaemonBridge {
   private readonly createClient: () => Pick<LocalRuntimeClient, "request" | "close">;
@@ -134,14 +131,12 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
   constructor(options: LocalCronDaemonBridgeOptions = {}) {
     const env = options.env ?? process.env;
     const picoHome = resolveCanonicalPicoHome({ env, picoHome: options.picoHome });
-    const endpoint = resolveLocalDaemonEndpoint({ env, picoHome });
-    const serviceName = resolveLocalDaemonServiceName({ env, picoHome });
-    this.createClient = options.createClient ?? (() => new LocalRuntimeClient(endpoint));
-    this.startDaemon =
-      options.startDaemon ??
-      (options.createClient
-        ? undefined
-        : () => startOrInstallLocalDaemon({ picoHome, serviceName }));
+    this.createClient =
+      options.createClient ??
+      (() => new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome }));
+    // kernel 模式由 connectOrSpawn 自行拉起 daemon，不再需要兜底 spawn/install；
+    // 显式注入 startDaemon 的调用方（如既有装配）保留兼容。
+    this.startDaemon = options.startDaemon;
   }
 
   async registerWorkspace(workspacePath: string): Promise<CronDaemonRegistration> {
@@ -398,30 +393,6 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
       client.close();
     }
   }
-}
-
-async function startOrInstallLocalDaemon(input: {
-  picoHome: string;
-  serviceName: string;
-}): Promise<"installed" | "process"> {
-  const daemonMain = fileURLToPath(new URL("../daemon/main.js", import.meta.url));
-  const installer = createUserDaemonInstaller();
-  if (installer.install) {
-    await installer.install({
-      serviceName: input.serviceName,
-      executable: process.execPath,
-      args: [daemonMain],
-      environment: { PICO_HOME: input.picoHome },
-    });
-    return "installed";
-  }
-  const child = spawn(process.execPath, [daemonMain], {
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, PICO_HOME: input.picoHome },
-  });
-  child.unref();
-  return "process";
 }
 
 async function waitForDaemon(
