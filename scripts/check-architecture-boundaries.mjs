@@ -75,6 +75,7 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["packages/runtime-host/src/client/connection.ts", "骨架：握手/连接/request 超时"],
   ["packages/runtime-host/src/control/artifact-writer-bootstrap-lock.ts", "骨架：flock 自旋 sleep"],
   ["packages/runtime-host/src/server/host-kernel.ts", "骨架：idle drain / shutdown grace 定时器"],
+  ["packages/runtime-host/src/server/connection-session.ts", "骨架：operation server-side deadline（挂死 handler 防泄漏）"],
   ["packages/runtime-host/src/transport/framed-transport.ts", "骨架：帧读超时"],
 ]);
 

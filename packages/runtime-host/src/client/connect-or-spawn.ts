@@ -33,6 +33,8 @@ export interface ConnectOrSpawnRuntimeHostInput {
   handshakeTimeoutMs?: number;
   /** Forwarded to a spawned candidate (its idle self-exit grace). */
   idleGraceMs?: number;
+  /** Forwarded to a spawned candidate (its server-side operation deadline). */
+  operationDeadlineMs?: number;
   candidateEntrypoint?: string | URL;
   legacyConfigurationRoot?: string;
 }
@@ -69,6 +71,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
   validateProtocolRange(input.protocol);
   requireOptionalTimeout(input.connectTimeoutMs, 'connectTimeoutMs', 1);
   requireOptionalTimeout(input.handshakeTimeoutMs, 'handshakeTimeoutMs', 1);
+  requireOptionalTimeout(input.operationDeadlineMs, 'operationDeadlineMs', 1);
   const clientInstanceId = requireClientInstanceId(input.clientInstanceId ?? randomUUID());
   const capability = await resolveStorageRoot({ path: input.rootPath, kind: 'interactive' });
   const { controlDirectory } = await prepareStorageRootControlDirectory(capability);
@@ -114,6 +117,9 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
           ...(input.handshakeTimeoutMs === undefined
             ? {}
             : { handshakeTimeoutMs: input.handshakeTimeoutMs }),
+          ...(input.operationDeadlineMs === undefined
+            ? {}
+            : { operationDeadlineMs: input.operationDeadlineMs }),
           ...(input.candidateEntrypoint === undefined
             ? {}
             : { entrypoint: input.candidateEntrypoint }),

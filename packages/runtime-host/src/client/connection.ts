@@ -11,7 +11,7 @@ import {
 import { readHostRegistration, RuntimeHostRegistrationError } from "../control/registration.js";
 import {
   decodeHostFrame,
-  HOST_OPERATION_SPECS,
+  resolveOperationSpec,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
   RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS,
   requireClientInstanceId,
@@ -22,6 +22,7 @@ import {
   type HostOperationErrorCode,
   type HostRegistration,
   type HostStatusResult,
+  type KnownOperationKey,
   type OperationInput,
   type OperationKey,
   type OperationOutput,
@@ -50,6 +51,18 @@ export interface ConnectRuntimeHostInput {
    * waiting the real cadence; defaults to DEFAULT_LIVENESS_INTERVAL_MS (2s).
    */
   livenessIntervalMs?: number;
+  /**
+   * How long a retired (timed-out) domain request pins its in-flight slot
+   * before the slot is force-released. Injectable so tests can fast-forward
+   * the slot TTL without waiting the real RETIRED_SLOT_TTL_MS (30s).
+   */
+  retiredSlotTtlMs?: number;
+  /**
+   * Absolute TTL after which a retired request entry is removed entirely.
+   * Injectable so tests can fast-forward the entry TTL without waiting the
+   * real RETIRED_ENTRY_TTL_MS (5min).
+   */
+  retiredEntryTtlMs?: number;
   /**
    * Invoked after each liveness probe round-trips and validates its Host
    * Epoch. Test observability: lets a probe-crossing test prove probes
@@ -118,6 +131,33 @@ export interface RuntimeHostConnection {
     input: OperationInput<K>,
     timeoutMs?: number,
   ): Promise<OperationOutput<K>>;
+  /**
+   * Typed access to operations registered outside the static OperationKey
+   * surface (currently only test-only specs registered via
+   * registerHostOperationSpecsForTesting). Runtime behavior is identical to
+   * request(): domain keys go through slot allocation/retirement, and
+   * host.status remains the only non-domain key.
+   */
+  requestRegistered<Output = unknown>(
+    operation: string,
+    input: unknown,
+    timeoutMs?: number,
+  ): Promise<Output>;
+  /**
+   * Test observability: the number of in-flight domain request slots. Lets
+   * lifecycle tests assert slot allocation/release/force-release directly
+   * instead of saturating RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS to
+   * observe a wedge. Production callers have no use for it.
+   */
+  readonly inFlightDomainRequestCount: number;
+  /**
+   * Test observability: the number of retired request entries still pinned in
+   * the retired map. Lets lifecycle tests assert entry-TTL removal (and the
+   * liveness stop that follows) without waiting on wall-clock heuristics alone.
+   */
+  readonly retiredRequestCount: number;
+  /** Test observability: the terminal failure (undefined while healthy). */
+  readonly terminalError: Error | undefined;
   status(timeoutMs?: number): Promise<HostStatusResult>;
   queryHostDiagnostics(timeoutMs?: number): Promise<HostDiagnosticsResult>;
   close(): Promise<void>;
@@ -129,7 +169,8 @@ export type DirectRequestOperationKey = OperationKey;
 
 export class RuntimeHostOperationError extends Error {
   constructor(
-    readonly operation: OperationKey,
+    // KnownOperationKey：错误也可能来自 test-only 动态注册的操作。
+    readonly operation: KnownOperationKey,
     readonly code: HostOperationErrorCode,
     message: string,
   ) {
@@ -139,7 +180,7 @@ export class RuntimeHostOperationError extends Error {
 }
 
 interface PendingRequest {
-  operation: OperationKey;
+  operation: KnownOperationKey;
   accept(value: unknown): unknown;
   resolve(value: unknown): void;
   reject(error: Error): void;
@@ -148,7 +189,7 @@ interface PendingRequest {
 }
 
 interface RetiredRequest {
-  operation: OperationKey;
+  operation: KnownOperationKey;
   domainState?: "in_flight";
   /** Set once the retired-slot TTL force-released the in-flight domain slot. */
   slotReleased?: boolean;
@@ -192,6 +233,8 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   #inFlightDomainRequests = 0;
   #terminalError: Error | undefined;
   readonly #livenessIntervalMs: number;
+  readonly #retiredSlotTtlMs: number;
+  readonly #retiredEntryTtlMs: number;
   readonly #onLivenessProbe: (() => void) | undefined;
 
   constructor(
@@ -201,11 +244,19 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       connectionId: string;
       selectedProtocol: number;
     },
-    // livenessIntervalMs is validated by connectResolvedRuntimeHost alongside
-    // the other connect timeouts, before any transport work happens.
-    options?: { livenessIntervalMs?: number; onLivenessProbe?: () => void },
+    // livenessIntervalMs / retiredSlotTtlMs / retiredEntryTtlMs are validated
+    // by connectResolvedRuntimeHost alongside the other connect timeouts,
+    // before any transport work happens.
+    options?: {
+      livenessIntervalMs?: number;
+      retiredSlotTtlMs?: number;
+      retiredEntryTtlMs?: number;
+      onLivenessProbe?: () => void;
+    },
   ) {
     this.#livenessIntervalMs = options?.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS;
+    this.#retiredSlotTtlMs = options?.retiredSlotTtlMs ?? RETIRED_SLOT_TTL_MS;
+    this.#retiredEntryTtlMs = options?.retiredEntryTtlMs ?? RETIRED_ENTRY_TTL_MS;
     this.#onLivenessProbe = options?.onLivenessProbe;
     this.#transport = transport;
     this.hostEpoch = accepted.hostEpoch;
@@ -232,6 +283,22 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     );
   }
 
+  requestRegistered<Output = unknown>(
+    operation: string,
+    input: unknown,
+    timeoutMs?: number,
+  ): Promise<Output> {
+    // 动态注册操作的 input/output 类型不在静态 OperationKey 面内，这里按
+    // unknown 穿过；spec.decodeInput/decodeOutput 仍在运行时完整校验。
+    return this.#requestOperation(
+      operation as OperationKey,
+      input as OperationInput<OperationKey>,
+      timeoutMs,
+      (result) => result as Output,
+      "request",
+    );
+  }
+
   #requestOperation<K extends OperationKey, Result>(
     operation: K,
     input: OperationInput<K>,
@@ -242,7 +309,13 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     const boundedTimeoutMs =
       timeoutMs === undefined ? undefined : requireTimeout(timeoutMs, "timeoutMs");
     if (this.#terminalError) return Promise.reject(this.#terminalError);
-    const spec = HOST_OPERATION_SPECS[operation] as OperationSpec<
+    // resolveOperationSpec 覆盖 test-only 动态注册的操作；request() 的静态类型
+    // 已约束 operation 为已知 key，缺失即内部不变量被破坏。
+    const resolvedSpec = resolveOperationSpec(operation);
+    if (!resolvedSpec) {
+      return Promise.reject(new Error(`Unknown Runtime Host operation: ${operation}`));
+    }
+    const spec = resolvedSpec as OperationSpec<
       OperationInput<K>,
       OperationOutput<K>,
       HostOperationErrorCode
@@ -321,6 +394,19 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
 
   queryHostDiagnostics(timeoutMs?: number): Promise<HostDiagnosticsResult> {
     return this.request("host.diagnostics.query", {}, timeoutMs);
+  }
+
+  get inFlightDomainRequestCount(): number {
+    return this.#inFlightDomainRequests;
+  }
+
+  get retiredRequestCount(): number {
+    return this.#retiredRequests.size;
+  }
+
+  /** Test observability: the terminal failure (undefined while healthy). */
+  get terminalError(): Error | undefined {
+    return this.#terminalError;
   }
 
   async close(): Promise<void> {
@@ -402,10 +488,16 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       ...(pending.domainState === "in_flight" ? { domainState: pending.domainState } : {}),
     };
     if (retired.domainState === "in_flight") {
-      retired.slotTimer = setTimeout(() => this.#expireRetiredSlot(requestId), RETIRED_SLOT_TTL_MS);
+      retired.slotTimer = setTimeout(
+        () => this.#expireRetiredSlot(requestId),
+        this.#retiredSlotTtlMs,
+      );
       retired.slotTimer.unref?.();
     }
-    retired.entryTimer = setTimeout(() => this.#removeRetiredEntry(requestId), RETIRED_ENTRY_TTL_MS);
+    retired.entryTimer = setTimeout(
+      () => this.#removeRetiredEntry(requestId),
+      this.#retiredEntryTtlMs,
+    );
     retired.entryTimer.unref?.();
     this.#retiredRequests.set(requestId, retired);
     pending.reject(error);
@@ -614,6 +706,16 @@ export async function connectResolvedRuntimeHost(
     input.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS,
     "livenessIntervalMs",
   );
+  // Retired TTL 默认值（30s / 5min）超出 requireTimeout 的 120s 上限，
+  // 用更宽的 TTL 区间校验，否则默认路径直接 RangeError。
+  const retiredSlotTtlMs = requireTtl(
+    input.retiredSlotTtlMs ?? RETIRED_SLOT_TTL_MS,
+    "retiredSlotTtlMs",
+  );
+  const retiredEntryTtlMs = requireTtl(
+    input.retiredEntryTtlMs ?? RETIRED_ENTRY_TTL_MS,
+    "retiredEntryTtlMs",
+  );
   let registration: HostRegistration | undefined;
   try {
     registration = await readRegistrationBeforeDeadline(
@@ -724,6 +826,8 @@ export async function connectResolvedRuntimeHost(
         registration,
         connection: new RuntimeHostConnectionImpl(transport, handshake, {
           livenessIntervalMs,
+          retiredSlotTtlMs,
+          retiredEntryTtlMs,
           onLivenessProbe: input.onLivenessProbe,
         }),
       };
@@ -782,6 +886,14 @@ function openTransport(
 function requireTimeout(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > 120_000) {
     throw new RangeError(`${label} must be an integer between 1 and 120000`);
+  }
+  return value;
+}
+
+/** Retired-request TTL 区间：条目 TTL 默认 5min，宽于握手类超时的 120s 上限。 */
+function requireTtl(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 600_000) {
+    throw new RangeError(`${label} must be an integer between 1 and 600000`);
   }
   return value;
 }

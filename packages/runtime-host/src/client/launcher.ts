@@ -10,6 +10,7 @@ export interface DetachedCandidateInput {
   legacyConfigurationRoot?: string;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
+  operationDeadlineMs?: number;
   executable?: string;
   entrypoint?: string | URL;
   env?: NodeJS.ProcessEnv;
@@ -87,6 +88,7 @@ export function launchDetachedRuntimeHostCandidate(
   ];
   appendArgument(args, '--idle-grace-ms', input.idleGraceMs);
   appendArgument(args, '--handshake-timeout-ms', input.handshakeTimeoutMs);
+  appendArgument(args, '--operation-deadline-ms', input.operationDeadlineMs);
   appendArgument(args, '--legacy-configuration-root', input.legacyConfigurationRoot);
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.

@@ -9,6 +9,7 @@ export function parseRuntimeHostCandidateArguments(
     'expected-root-id',
     'idle-grace-ms',
     'handshake-timeout-ms',
+    'operation-deadline-ms',
     'legacy-configuration-root',
   ]);
   const values = new Map<string, string>();
@@ -40,6 +41,7 @@ export function parseRuntimeHostCandidateArguments(
       : {}),
     idleGraceMs: readOptionalInteger(values, 'idle-grace-ms'),
     handshakeTimeoutMs: readOptionalInteger(values, 'handshake-timeout-ms'),
+    operationDeadlineMs: readOptionalInteger(values, 'operation-deadline-ms'),
   };
 }
 
