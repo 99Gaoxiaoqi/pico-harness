@@ -10,9 +10,12 @@ import {
   type ResponseFrame,
 } from './operations.js';
 
-export { RuntimeHostProtocolError } from './errors.js';
+export { RuntimeHostProtocolError, invalidProtocolFrame } from './errors.js';
+export * from './codec.js';
 export * from './host-status.js';
 export * from './operations.js';
+export { defineOperation, composeOperationSpecMaps } from './operation-spec.js';
+export type { OperationSpec } from './operation-spec.js';
 
 export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;

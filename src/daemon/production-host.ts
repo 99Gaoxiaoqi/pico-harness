@@ -87,9 +87,45 @@ export interface ProductionLocalDaemonHostOptions {
  * run.start is foreground-only: it requires a trusted workspace and retains approval/
  * AskUser boundaries owned by this daemon.
  */
-export function createProductionLocalDaemonHost(
+
+/**
+ * Host lifecycle surface the assembled automations service needs. Bound late by
+ * createProductionLocalDaemonHost because the LocalDaemonHost instance is created
+ * after the services (the old single-function scope closed over it implicitly).
+ */
+export interface ProductionHostControl {
+  readonly status: "stopped" | "starting" | "running" | "stopping";
+  refreshRegisteredWorkspaces(): Promise<void>;
+  readonly registeredWorkspaces: readonly string[];
+  runCronJobNow(workspacePath: string, cronJobId: string): Promise<CronRunRecord>;
+}
+
+/** The assembled control-plane services + the closures the host lifecycle needs. */
+export interface ProductionRuntimeServices {
+  readonly service: WorkspaceRuntimeService;
+  readonly desktopService: DesktopRuntimeService;
+  readonly registrationStore: WorkspaceRegistrationStore;
+  readonly validateAutomation: (
+    job: CronJobRecord,
+  ) => Promise<{ allowed: boolean; reason?: string }>;
+  readonly picoHome: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly agentRuntime: AgentRuntime;
+  readonly effectiveConfigResolver: EffectiveConfigResolver;
+  readonly credentialVault: CredentialVault;
+  readonly trustStore: WorkspaceTrustStore;
+  /** Binds the host lifecycle once the LocalDaemonHost exists. */
+  attachHost(control: ProductionHostControl): void;
+}
+
+/**
+ * Assembles the production DesktopRuntimeService (and its WorkspaceRuntimeService
+ * substrate). Shared by createProductionLocalDaemonHost and, from 3-B-3, the
+ * runtime-host bridge composition factory so both transports serve the same services.
+ */
+export function createProductionRuntimeServices(
   options: ProductionLocalDaemonHostOptions = {},
-): LocalDaemonHost {
+): ProductionRuntimeServices {
   const suppliedEnv = options.env ?? process.env;
   // `options.env` is an overlay/test seam and may intentionally contain only model
   // credentials. Freeze one state root up front, then give every assembled service the
@@ -390,6 +426,18 @@ export function createProductionLocalDaemonHost(
       }
     },
   });
+  // Late-bound host lifecycle: automations need the LocalDaemonHost instance, which
+  // only exists after the services are assembled (see attachHost).
+  let attachedHost: ProductionHostControl | undefined;
+  const attachHost = (control: ProductionHostControl): void => {
+    attachedHost = control;
+  };
+  const requireHost = (): ProductionHostControl => {
+    if (!attachedHost) {
+      throw new Error("Production Runtime host 尚未绑定，Automation 无法访问 daemon 生命周期");
+    }
+    return attachedHost;
+  };
   const automations: DesktopAutomationService = new DesktopAutomationService({
     picoHome,
     prepareSecurity: async (workspacePath) => {
@@ -450,6 +498,7 @@ export function createProductionLocalDaemonHost(
     },
     ensureWorkspaceRuntime: async (workspacePath) => {
       const canonicalWorkspace = await registrationStore.register(workspacePath);
+      const host = requireHost();
       if (host.status !== "running") {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
@@ -465,6 +514,7 @@ export function createProductionLocalDaemonHost(
       }
     },
     runNow: async (workspacePath, jobId): Promise<CronRunRecord> => {
+      const host = requireHost();
       if (host.status !== "running") {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Runtime daemon 尚未就绪");
       }
@@ -750,6 +800,37 @@ export function createProductionLocalDaemonHost(
       },
     },
   });
+  return {
+    service,
+    desktopService,
+    registrationStore,
+    validateAutomation,
+    picoHome,
+    env,
+    agentRuntime,
+    effectiveConfigResolver,
+    credentialVault,
+    trustStore,
+    attachHost,
+  };
+}
+
+export function createProductionLocalDaemonHost(
+  options: ProductionLocalDaemonHostOptions = {},
+): LocalDaemonHost {
+  const {
+    service,
+    desktopService,
+    registrationStore,
+    validateAutomation,
+    picoHome,
+    env,
+    agentRuntime,
+    effectiveConfigResolver,
+    credentialVault,
+    trustStore,
+    attachHost,
+  } = createProductionRuntimeServices(options);
   const cronRuntimeFactory = createCronWorkspaceRuntimeFactory({
     picoHome,
     getWorkspaceRuntime: (workspacePath) => service.getWorkspaceRuntime(workspacePath),
@@ -800,6 +881,7 @@ export function createProductionLocalDaemonHost(
     onWorkspaceError: (workspacePath, error) =>
       logger.error({ workspacePath, err: error }, "Cron workspace 启动失败"),
   });
+  attachHost(host);
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
   return host;
 }

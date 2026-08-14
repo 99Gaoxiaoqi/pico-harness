@@ -26,16 +26,21 @@ export type {
 // 领域 operation spec（turn/session/plan/goal 等）在 3-B 接入 pico 业务时补齐。
 export const HOST_OPERATION_SPECS = composeOperationSpecMaps(HOST_BOOTSTRAP_OPERATION_SPECS);
 
-// Test-only 动态 spec 注册表：让 integration 测试在运行时注册测试 domain 操作，
-// 以实盘驱动 request 生命周期机制（槽位分配/退休/TTL/liveness），而不必加宽静态
-// OperationKey 类型——生产组合路径看到的仍只有静态 bootstrap spec。帧编解码、
-// handler 组合与分发一律通过 resolveOperationSpec/knownOperationKeys 解析，
-// 因此注册后的测试操作对 client 与 server 两侧同时生效。
+// 动态 spec 注册表：领域 operation spec 在运行时注册，而不必加宽静态 OperationKey
+// 类型——静态面保持只有 bootstrap spec，机制层对业务零感知。3-B 起 pico 桥接的
+// daemon 方法（workspace.status/usage.get 等）由 pico 侧经 registerHostOperationSpecs
+// 注册；integration 测试同样用它注册测试 domain 操作。帧编解码、handler 组合与分发
+// 一律通过 resolveOperationSpec/knownOperationKeys 解析，因此注册后的操作对 client
+// 与 server 两侧同时生效。
 const DYNAMIC_OPERATION_SPECS: Record<string, AnyOperationSpec> = {};
 
-export function registerHostOperationSpecsForTesting(
-  specs: Record<string, AnyOperationSpec>,
-): void {
+/**
+ * Registers domain operation specs into the dynamic registry. Throws on a key that
+ * collides with a static bootstrap spec or an already-registered spec. Registration
+ * is process-global: call it once at process startup before starting a kernel or
+ * connecting a client (both resolve specs through the same registry).
+ */
+export function registerHostOperationSpecs(specs: Record<string, AnyOperationSpec>): void {
   for (const [key, spec] of Object.entries(specs)) {
     if (isKnownOperationKey(key)) {
       throw new Error(`Duplicate Runtime Host operation key: ${key}`);
@@ -43,6 +48,9 @@ export function registerHostOperationSpecsForTesting(
     DYNAMIC_OPERATION_SPECS[key] = spec;
   }
 }
+
+/** Backward-compatible alias kept for existing integration tests. */
+export const registerHostOperationSpecsForTesting = registerHostOperationSpecs;
 
 export function knownOperationKeys(): readonly string[] {
   return [...Object.keys(HOST_OPERATION_SPECS), ...Object.keys(DYNAMIC_OPERATION_SPECS)];
