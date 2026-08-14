@@ -33,6 +33,13 @@ import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
+/** 杀 daemon 重生路径的重试时间预算（吸收冷启动环境波动与将死残留竞态）。 */
+const KERNEL_RETRY_WINDOW_MS = 30_000;
+const KERNEL_RETRY_BACKOFF_MS = 200;
+
+function sleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 const DEFAULT_RECONNECT_DELAY_MS = 100;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 2_000;
 const MAX_REMEMBERED_EVENT_IDS = 10_000;
@@ -743,27 +750,40 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
         throw translateKernelRequestError(error);
       }
       // 传输级失败且连接已 terminal（如 daemon 被杀后断连传播慢于本次请求的
-      // 竞态窗口）：丢弃死连接，open() 经 connectOrSpawn 重生 daemon 后重试
-      // 一次——"下一次请求拉起 daemon"的 kernel 承载语义在此兑现。
-      // terminalError 判据精确排除本地 decodeInput 失败与请求超时（二者重试
-      // 无意义甚至有害）；断连场景下请求要么未送达要么随 daemon 消亡，重试安全。
+      // 竞态窗口）：丢弃死连接，open() 经 connectOrSpawn 重生 daemon 后重试。
+      // 重生过程可能连到将死进程的残留 socket（handshake 成功但进程随即死
+      // 透），且冷启动受环境波动影响可达数十秒——按时间预算循环而非固定次数，
+      // 兑现"下一次请求拉起 daemon"的 kernel 承载语义。操作级错误
+      // （host_not_ready 等）与本地 decodeInput 失败不在此循环内（无意义且
+      // 写方法有双执行风险，幂等收敛见 3-B-4 遗留）。
       if (connection.terminalError === undefined) {
         throw translateKernelRequestError(error);
       }
-      if (this.hostConnection === connection) this.hostConnection = undefined;
-      await connection.close().catch(() => undefined);
-      try {
-        await this.open();
-      } catch {
-        throw translateKernelRequestError(error);
+      const retryDeadline = performance.now() + KERNEL_RETRY_WINDOW_MS;
+      let lastError: unknown = error;
+      while (performance.now() < retryDeadline) {
+        if (this.closed) break;
+        if (this.hostConnection === connection) this.hostConnection = undefined;
+        await connection.close().catch(() => undefined);
+        try {
+          await this.open();
+        } catch {
+          break;
+        }
+        const revived = this.hostConnection;
+        if (!revived) break;
+        try {
+          return await requestOverKernelConnection(revived, method, params);
+        } catch (retryError) {
+          if (retryError instanceof RuntimeHostOperationError || this.closed) {
+            throw translateKernelRequestError(retryError);
+          }
+          lastError = retryError;
+          // 给断连传播与新 daemon 注册留出稳定窗口，避免在同一竞态上空转。
+          await sleep(Math.min(KERNEL_RETRY_BACKOFF_MS, retryDeadline - performance.now()));
+        }
       }
-      const revived = this.hostConnection;
-      if (!revived) throw translateKernelRequestError(error);
-      try {
-        return await requestOverKernelConnection(revived, method, params);
-      } catch (retryError) {
-        throw translateKernelRequestError(retryError);
-      }
+      throw translateKernelRequestError(lastError);
     }
   }
 
