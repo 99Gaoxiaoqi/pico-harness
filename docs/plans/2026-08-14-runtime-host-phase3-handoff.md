@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3-A（runtime-host 骨架）已完整交付并经四轮对抗审查 + 集成 + e2e 全绿验证；3-B-1（桥接 composition）已完成——workspace.status / usage.get 已走 runtime-host 全链路（dispatch/decode 实盘验证 5/5）。下一步是 3-B-2（事件协议）。**
+**阶段 3-A（runtime-host 骨架）已完整交付并经四轮对抗审查 + 集成 + e2e 全绿验证；3-B-1（桥接 composition）已完成——workspace.status / usage.get 已走 runtime-host 全链路（dispatch/decode 实盘验证 5/5）；3-B-2（事件协议）已完成——Host→Client event 推送帧 + events.subscribe/replay 全语义桥接（29/29 实盘）。下一步是 3-B-3（选主迁移）。**
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -82,16 +82,25 @@
 
 **剩余（3-B-3 前置项）**：错误码映射语义（FORBIDDEN→capability_unavailable 失真，3-B-2 统一）、客户端注册调用点（3-B-4）、其余 89 个方法 spec 化（现在每个方法样板已缩到 ~10 行）。
 
-## 3-B-2 起步建议（事件协议，下一个 session 从这里开始）
+## 3-B-2 已完成（事件协议，后续 session 追加）
 
-**目标**：kernel 补 Host→Client 帧与出站推送通道，把 daemon 的 events.subscribe / events.replay 语义（cursor / high-watermark / fence-on-error）移植到 runtime-host 承载。
+**交付**：
+- **kernel 机制层**（`packages/runtime-host/src/`）：`HostFrame` union 新增 `HostEventFrame {kind:"event", event: <不透明 JSON 对象>}` + `decodeHostFrame` 分支；`RuntimeHostConnectionSession.pushEvent`——串行推送链（promise 链同一时刻至多一个 enqueue+flush，与 response 经同一 writer 有序交错），任何失败 fence teardown 连接；`ConnectionContext` 新增可选 `pushEvent`（session 注入，handler 捕获闭包可在请求结束后继续推送）；client `#readResponses` 路由 event 帧到 `setEventListener(listener)`，未知 kind 仍 fail（严格）。
+- **桥接层**（`src/daemon/`）：`runtime-host-events.ts`（事件桥接协调器——一连接一订阅、subscribe-then-replay 顺序、live 裁剪、replay 重打包、releaseConnection/beginDrain 清理）+ operations.ts 增 events.subscribe/replay spec（独立 map `PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS` + `ensurePicoRuntimeHostEventOperationsRegistered` 两步注册）+ composition 接 `eventSource?` 可选注入；`workspace-runtime-service.ts` 导出 `transportSafeRuntimeNotificationWithin`（通用字节预算裁剪）。
+- **测试**：`runtime-host-event-push.test.ts`（机制层 3 条：wire 顺序 / 捕获 sink 请求后推送 / 超限 fence）+ `runtime-host-events-bridge.test.ts`（桥接 4 条：首页+live 推送 / high-watermark 固定分页 / cursor 失效 invalid_request / 断连退订无泄漏）。
 
-1. **读 kernel 现状**：`packages/runtime-host/src/protocol/index.ts` 的 `HostFrame`（目前只有 handshake | response，无推送帧）、`server/connection-session.ts`（串行出站写入 `serial-outbound-writer.ts` 是推送的落点）、`server/host-kernel.ts` 的连接生命周期。
-2. **读 daemon 事件语义（要移植的东西）**：`src/daemon/service.ts` 的 `replayEvents`/`subscribe` 接口、`src/daemon/workspace-runtime-service.ts` 的 durable ledger 回放（cursor、high-watermark、`MAX_REPLAY_*` 分页常量、96KB 帧预算）、客户端侧去重参考 `packages/protocol/src/runtime-buffer.ts`（RuntimeNotificationBuffer）。
-3. **参考 maka-agent 对应实现**（参考架构，D:\work\maka-agent）：`packages/runtime-host/src/protocol/` 的订阅/事件帧设计 + `server/execution-composition.ts` 的 `SessionContinuityService`（subscription.open/close 操作与推送通道的装配方式）。pico 裁剪版 operation-dispatcher.ts 已保留 `SessionContinuityOperationKey`（subscription.open/subscription.close/session.transcript.query）类型面作占位。
-4. **设计要点**：Host→Client 帧（event/订阅确认/背压）加进 HostFrame union；composition 需要新增事件源注入点（当前 RuntimeHostComposition 只有 handlers，可能要加 `subscribePush`/`replay` 能力面）；96KB 帧限制下 replay 分页粒度重设计（daemon 现按字节预算打包，见 workspace-runtime-service.ts 的 MAX_REPLAY_EVENTS_BYTES）。
-5. **每步对抗审查 + 集成测试 + e2e**；改 runtime-host src 后必须 `npm run build:runtime-host`（pretest 已自动带）。
-6. 顺手项：错误码映射语义在此统一（见上"剩余"）。
+**保留的 daemon 语义**（见 runtime-host-events.ts 头注释）：排他 eventId cursor；首页捕获固定 high-watermark（hasMore=cursor 未达上界，重打包后重算）；INVALID_PARAMS→invalid_request 兼作客户端"cursor 失效重置"信号；ephemeral（run.live）只走 live 不入 ledger 不推 cursor；fence-on-error（推送不可投递即 teardown，客户端重连 replay）；commit-before-notify。
+
+**关键决策**：
+1. **只加一种帧**（`{kind:"event", event}`，形状对齐 daemon 现有 event 帧）：订阅确认走 events.subscribe 普通 response；无订阅管理帧。不采用 maka 的 activate-after-enqueue（daemon 客户端容忍 event-before-response，靠 eventId 去重）与 sequence/gap 检测（eventId cursor 更强，支持续传）。
+2. **帧载荷不透明**（kernel 只校验 plain object）：延续"机制层业务零感知"决策，RuntimeNotification 形状由桥接层 @pico/protocol 校验。
+3. **96KB vs 1MiB 偏差处理**（maka 对齐）：live 推送按 92KB 预算分级裁剪（`transportSafeRuntimeNotificationWithin` 复用 daemon 同款 tiers，只裁 payload 不动 eventId/topic/scope）；replay 页贪心装箱重打包（hasMore 重算，截断页下次 replay 续传）。**已知限制**：单 durable 事件序列化超 ~92KB 无法承载，replay 显式报错（绝不静默跳过——那会让 cursor 越过丢失事实）；将来有真实消费方再立 maka 式分页 query。
+4. **events spec 独立 map + 两步注册**：`composeOperationHandlers` 要求注册表内每个 key 有 handler，故 events.* 注册必须与 composition 提供 eventSource 成对（无 eventSource 的 composition 不注册 events spec）。
+5. **`mapRuntimeErrorCode` 上移 operations.ts**：query 桥与事件桥共用错误映射（避免 composition↔events 循环依赖）；composition.ts 保留 re-export。
+
+**验证**：runtime-host 全套 29/29（22 旧 + 3 机制 + 4 桥接）、composition-bridge 6/6、desktop-runtime-close 3/3、根 typecheck 0、架构门禁 0。注意机制测试从 src 导入、桥接测试从 dist 导入（模块身份规则不变）。
+
+**3-B-2 未做**：客户端完整订阅抽象（RuntimeSubscription 断线重连/去重环——3-B-4 客户端迁移时移植 `src/daemon/client.ts` 逻辑）、daemon main.ts 改动（3-B-3）、FORBIDDEN→capability_unavailable 失真仍维持（评估结论：kernel 错误码集是机制层公开面，无消费方需要区分前不扩，mobile gateway 3-B-4 迁移时按需重评）。
 
 ## 验证命令（基线）
 

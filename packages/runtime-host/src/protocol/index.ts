@@ -73,9 +73,21 @@ export interface HostDraining {
 
 export type HostHandshakeResult = HostAccepted | HostIncompatible | HostDraining;
 
-// 3-A 骨架：不含订阅 / 客户端能力 / 配置变更 / 会话目录变更帧（3-B/C 接入业务时补齐）。
+/**
+ * Host-initiated push frame (3-B-2): the only post-handshake frame the Host may emit
+ * outside a request/response exchange. The payload is an opaque JSON record — the
+ * mechanism layer deliberately does not model domain event shapes; the bridging
+ * composition validates them before pushing and the consuming client after decoding.
+ */
+export interface HostEventFrame {
+  kind: 'event';
+  event: Record<string, unknown>;
+}
+
+// 3-A 骨架 + 3-B-2 事件推送：订阅确认走订阅操作的普通 response；客户端能力 /
+// 配置变更 / 会话目录变更帧（3-C 接入业务时）仍缺。
 export type ClientFrame = ClientHello | RequestFrame;
-export type HostFrame = HostHandshakeResult | ResponseFrame;
+export type HostFrame = HostHandshakeResult | ResponseFrame | HostEventFrame;
 
 export interface HostRegistration {
   kind: typeof RUNTIME_HOST_REGISTRATION_KIND;
@@ -181,6 +193,13 @@ export function decodeHostFrame(value: unknown): HostFrame {
     return {
       kind: 'draining',
       hostEpoch: requireId(frame.hostEpoch, 'hostEpoch'),
+    };
+  }
+  if (frame.kind === 'event') {
+    requireShapedRecord(frame, 'event frame', ['kind', 'event'], []);
+    return {
+      kind: 'event',
+      event: requireRecord(frame.event, 'event frame payload'),
     };
   }
   return decodeResponseFrame(frame);

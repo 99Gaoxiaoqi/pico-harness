@@ -144,6 +144,14 @@ export interface RuntimeHostConnection {
     timeoutMs?: number,
   ): Promise<Output>;
   /**
+   * Sets the listener for Host-initiated event frames (`kind: "event"`). At most
+   * one listener per connection: the last call wins. The payload is an opaque
+   * JSON record — callers validate the domain shape themselves. Event frames may
+   * interleave with responses in either order; they never carry a requestId and
+   * never fail the connection on their own.
+   */
+  setEventListener(listener: ((event: Record<string, unknown>) => void) | undefined): void;
+  /**
    * Test observability: the number of in-flight domain request slots. Lets
    * lifecycle tests assert slot allocation/release/force-release directly
    * instead of saturating RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS to
@@ -232,6 +240,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   #livenessProbePending = false;
   #inFlightDomainRequests = 0;
   #terminalError: Error | undefined;
+  #eventListener: ((event: Record<string, unknown>) => void) | undefined;
   readonly #livenessIntervalMs: number;
   readonly #retiredSlotTtlMs: number;
   readonly #retiredEntryTtlMs: number;
@@ -396,6 +405,10 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     return this.request("host.diagnostics.query", {}, timeoutMs);
   }
 
+  setEventListener(listener: ((event: Record<string, unknown>) => void) | undefined): void {
+    this.#eventListener = listener;
+  }
+
   get inFlightDomainRequestCount(): number {
     return this.#inFlightDomainRequests;
   }
@@ -420,8 +433,15 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
         const frame = decodeHostFrame(await this.#transport.read(0));
         this.#resetLivenessCheck();
         if ("kind" in frame) {
-          // The skeleton Host frame set carries no post-handshake push frames;
-          // any handshake frame here means the Host violated the frame order.
+          if (frame.kind === "event") {
+            // Host-initiated push: opaque payload, no requestId, listener-side
+            // domain validation. Delivered synchronously in wire order so the
+            // caller observes events interleaved with responses exactly as sent.
+            this.#eventListener?.(frame.event);
+            continue;
+          }
+          // Remaining kinds are handshake frames; after acceptance they mean
+          // the Host violated the frame order.
           throw new Error("Runtime Host returned a handshake frame after acceptance");
         }
         this.#acceptResponse(frame);

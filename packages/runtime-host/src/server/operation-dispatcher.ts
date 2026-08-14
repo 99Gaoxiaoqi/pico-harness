@@ -28,6 +28,14 @@ export interface ConnectionContext {
    * may omit it.
    */
   signal?: AbortSignal;
+  /**
+   * Pushes a Host→Client event frame on the requesting connection. Present on
+   * real connections; omitted by unit harnesses. The mechanism layer treats the
+   * payload as an opaque JSON record. A push failure fences the connection
+   * (teardown + reconnect + replay), so callers should treat a rejection as
+   * "this connection is gone", not retry on it.
+   */
+  pushEvent?(event: Record<string, unknown>): Promise<void>;
 }
 
 export interface OperationResidency {
