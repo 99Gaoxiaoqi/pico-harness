@@ -1,15 +1,20 @@
 import type { RuntimeHostComposition, RuntimeHostCompositionFactory } from "@pico/runtime-host";
 import {
   createTypedRuntimeRequest,
-  RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonValue,
-  type RuntimeErrorCode,
   type RuntimeRequest,
 } from "./protocol.js";
 import {
+  createRuntimeHostEventBridge,
+  type RuntimeHostEventBridge,
+  type RuntimeHostEventSource,
+} from "./runtime-host-events.js";
+import {
+  mapRuntimeErrorCode,
   RUNTIME_HOST_BRIDGE_USAGE_GET,
   RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS,
+  type BridgeErrorCode,
   type PicoBridgeHandlerMap,
   type UsageGetBridgeInput,
   type UsageGetBridgeOutput,
@@ -17,13 +22,18 @@ import {
   type WorkspaceStatusBridgeOutput,
 } from "./runtime-host-operations.js";
 
+export { mapRuntimeErrorCode } from "./runtime-host-operations.js";
+export type { BridgeErrorCode } from "./runtime-host-operations.js";
+
 /**
- * 3-B-1 bridge composition: adapts a first slice of pico daemon query methods
- * (workspace.status / usage.get) to daemon RuntimeRequests and back over the Runtime
- * Host protocol. The bridged operations are registered dynamically in the runtime-host
- * spec registry (see runtime-host-operations.ts), so their keys are not part of the
- * static OperationKey surface — the handler map is widened through the composition's
- * DomainOperationHandlerMap via a cast, mirroring the integration tests.
+ * 3-B-1/3-B-2 bridge composition: adapts pico daemon query methods
+ * (workspace.status / usage.get) and, when an event source is provided, the
+ * events.subscribe / events.replay protocol over the Runtime Host wire. The
+ * bridged operations are registered dynamically in the runtime-host spec
+ * registry (see runtime-host-operations.ts), so their keys are not part of the
+ * static OperationKey surface — the handler map is widened through the
+ * composition's DomainOperationHandlerMap via a cast, mirroring the
+ * integration tests.
  */
 
 /**
@@ -39,36 +49,12 @@ export interface RuntimeHostBridgeService {
 export interface RuntimeHostCompositionOptions {
   /** Assembled production control-plane service (DesktopRuntimeService). */
   readonly service: RuntimeHostBridgeService;
-}
-
-type BridgeErrorCode =
-  | "operation_unavailable"
-  | "invalid_request"
-  | "not_found"
-  | "operation_conflict"
-  | "capability_unavailable"
-  | "internal_failure";
-
-/** Maps daemon protocol error codes onto the Runtime Host operation error space. */
-export function mapRuntimeErrorCode(code: RuntimeErrorCode): BridgeErrorCode {
-  switch (code) {
-    case RUNTIME_ERROR_CODES.INVALID_PARAMS:
-    case RUNTIME_ERROR_CODES.INVALID_REQUEST:
-    case RUNTIME_ERROR_CODES.INVALID_JSON:
-    case RUNTIME_ERROR_CODES.LEGACY_INVALID_MESSAGE:
-    case RUNTIME_ERROR_CODES.LEGACY_INVALID_REQUEST:
-      return "invalid_request";
-    case RUNTIME_ERROR_CODES.NOT_FOUND:
-      return "not_found";
-    case RUNTIME_ERROR_CODES.CONFLICT:
-      return "operation_conflict";
-    case RUNTIME_ERROR_CODES.FORBIDDEN:
-      return "capability_unavailable";
-    case RUNTIME_ERROR_CODES.METHOD_NOT_FOUND:
-      return "operation_unavailable";
-    default:
-      return "internal_failure";
-  }
+  /**
+   * Event source enabling the events.* bridge (3-B-2). When present the caller
+   * must also register the events specs
+   * (ensurePicoRuntimeHostEventOperationsRegistered) before starting a kernel.
+   */
+  readonly eventSource?: RuntimeHostEventSource;
 }
 
 function bridgeFailure(error: unknown): {
@@ -97,7 +83,7 @@ type BridgeHandlerOutcome<Output> =
 export function createRuntimeHostComposition(
   options: RuntimeHostCompositionOptions,
 ): RuntimeHostComposition {
-  const { service } = options;
+  const { service, eventSource } = options;
 
   const workspaceStatusHandler = async (
     input: WorkspaceStatusBridgeInput,
@@ -137,11 +123,29 @@ export function createRuntimeHostComposition(
     [RUNTIME_HOST_BRIDGE_USAGE_GET]: usageGetHandler,
   } satisfies PicoBridgeHandlerMap;
 
+  const eventBridge: RuntimeHostEventBridge | undefined = eventSource
+    ? createRuntimeHostEventBridge(eventSource)
+    : undefined;
+
+  const mergedHandlers = eventBridge
+    ? {
+        ...handlers,
+        ...eventBridge.handlers,
+      }
+    : handlers;
+
   return {
-    handlers: handlers as unknown as RuntimeHostComposition["handlers"],
-    beginDrain() {},
+    handlers: mergedHandlers as unknown as RuntimeHostComposition["handlers"],
+    releaseConnection(connectionId: string): void {
+      eventBridge?.releaseConnection(connectionId);
+    },
+    beginDrain() {
+      // drain 期间不再推送事件：退订所有 live 监听（既有请求照常排空）。
+      eventBridge?.unsubscribeAll();
+    },
     async recover() {},
     async close() {
+      eventBridge?.unsubscribeAll();
       await service.close?.();
     },
   };

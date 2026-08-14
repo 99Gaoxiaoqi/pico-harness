@@ -763,6 +763,38 @@ function runtimeNotificationFitsFrame(notification: RuntimeNotification): boolea
   }
 }
 
+/**
+ * Generalized transport-safe trimming: bounds a notification so its JSON
+ * serialization fits maxSerializedBytes (callers on transports with a smaller
+ * frame limit than the daemon IPC 1MiB — e.g. the 3-B-2 runtime-host bridge
+ * with its 96KB frames — reuse the same tiered payload trimming). eventId,
+ * topic, and scope are never trimmed, so cursor and dedup semantics survive.
+ */
+export function transportSafeRuntimeNotificationWithin(
+  notification: RuntimeNotification,
+  maxSerializedBytes: number,
+): RuntimeNotification {
+  const fits = (candidate: RuntimeNotification): boolean =>
+    Buffer.byteLength(JSON.stringify(candidate), "utf8") <= maxSerializedBytes;
+  if (fits(notification)) return notification;
+  for (const budget of [
+    { maxString: 64 * 1024, maxArray: 256, maxKeys: 256 },
+    { maxString: 16 * 1024, maxArray: 128, maxKeys: 128 },
+    { maxString: 4 * 1024, maxArray: 64, maxKeys: 64 },
+    { maxString: 512, maxArray: 16, maxKeys: 32 },
+  ]) {
+    const candidate = {
+      ...notification,
+      payload: boundedNotificationValue(notification.payload as JsonValue, budget, 0),
+    } as RuntimeNotification;
+    if (fits(candidate)) return candidate;
+  }
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+    `Runtime notification ${notification.eventId} cannot be represented within ${maxSerializedBytes} bytes`,
+  );
+}
+
 function boundedNotificationValue(
   value: JsonValue,
   budget: { readonly maxString: number; readonly maxArray: number; readonly maxKeys: number },

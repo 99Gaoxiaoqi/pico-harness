@@ -1,6 +1,7 @@
 import {
   decodeClientFrame,
   RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS,
+  type HostEventFrame,
   type HostOperationErrorCode,
   type RequestFrame,
   type ResponseFrame,
@@ -50,6 +51,8 @@ export class RuntimeHostConnectionSession {
   readonly #requests = new Map<string, Promise<void>>();
   #inFlightStatusRequests = 0;
   #closed = false;
+  /** Serializes event pushes: at most one enqueue+flush in flight at a time. */
+  #eventPushChain: Promise<void> = Promise.resolve();
 
   constructor(options: RuntimeHostConnectionSessionOptions) {
     this.#options = options;
@@ -149,6 +152,7 @@ export class RuntimeHostConnectionSession {
     const dispatchTask = dispatchOperation(frame, this.#options.resolveHandlers(), {
       ...this.#options.connection,
       acquireResidency: () => admission.acquireResidency(),
+      pushEvent: (event) => this.pushEvent(event),
       signal: controller.signal,
     });
     let deadlineExpired = false;
@@ -216,6 +220,25 @@ export class RuntimeHostConnectionSession {
     this.#writer.close();
     this.#options.transport.destroy();
     this.#options.onTeardown();
+  }
+
+  /**
+   * Pushes a Host→Client event frame on this connection. Pushes are serialized
+   * through one chain so they interleave with request responses in enqueue order
+   * via the single outbound writer and never outrun the flush loop. Any failure —
+   * frame too large, queue overrun, transport write error, closed connection —
+   * fences the connection (teardown): a client that cannot receive events must
+   * reconnect and replay from its durable cursor, never silently skip them.
+   */
+  pushEvent(event: Record<string, unknown>): Promise<void> {
+    const push = this.#eventPushChain.then(() =>
+      this.#writer.enqueue({ kind: "event", event } satisfies HostEventFrame).flushed,
+    );
+    // The chain itself must never reject (a rejected head would poison every
+    // later push); failures fence the connection instead. Attaching this catch
+    // also keeps a fire-and-forget caller from surfacing an unhandled rejection.
+    this.#eventPushChain = push.catch(() => this.#teardown());
+    return push;
   }
 }
 
