@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
@@ -1130,6 +1130,19 @@ test("Hook reloader keeps the previous snapshot when synchronous swap throws", a
 });
 
 test("Hook reloader replaces watcher path sets after a same-directory script change", async (context) => {
+  // Hook 静态信任按进程环境绑定（command 可执行文件须在 PATH 中解析），且
+  // PATH 含相对/未展开条目时 fail-closed 拒绝绑定（脚本引用进不了 watcher
+  // exactPaths）。本机安全 agent 在 PATH 首项注入未展开字面量 %AccessAgentLibs%，
+  // 导致本例在脏 PATH 下必然失败——测试进程内临时过滤为非绝对 PATH，测后恢复。
+  const originalPath = process.env.PATH;
+  process.env.PATH = (originalPath ?? "")
+    .split(delimiter)
+    .filter((entry) => isAbsolute(entry))
+    .join(delimiter);
+  context.after(() => {
+    process.env.PATH = originalPath;
+  });
+
   const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-watch-paths-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
