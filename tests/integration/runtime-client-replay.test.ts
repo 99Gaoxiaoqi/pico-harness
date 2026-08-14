@@ -76,8 +76,13 @@ test("Runtime client keeps a recovery fence after replay overflow", async (conte
   const workspacePath = join(root, "workspace");
   await mkdir(workspacePath, { recursive: true });
   const endpoint = {
-    transport: "unix" as const,
-    address: join(root, "runtime.sock"),
+    // Windows 上用 named pipe：AF_UNIX bind 在部分 Windows 环境（如受限沙箱）EACCES。
+    ...(process.platform === "win32"
+      ? {
+          transport: "pipe" as const,
+          address: `\\\\.\\pipe\\pico-replay-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
+        }
+      : { transport: "unix" as const, address: join(root, "runtime.sock") }),
     authTokenPath: join(root, "runtime.auth"),
   };
   const token = "x".repeat(43);

@@ -173,6 +173,12 @@ export function resolveGitBranch(workspacePath: string): Promise<string | undefi
             resolveResult(undefined);
             return;
           }
+          // 与 resolveGitTopLevel 相同的环境拦截降级：git 启动被挂起时按
+          // 分支不可知处理，不阻塞 workspace 注册。
+          if (error.killed || error.code === "ETIMEDOUT" || error.code === "EACCES" || error.code === "EPERM") {
+            resolveResult(undefined);
+            return;
+          }
           reject(new Error(`Pico 无法解析 Git 分支 ${workspacePath}：${detail}`, { cause: error }));
           return;
         }
@@ -200,6 +206,15 @@ function resolveGitTopLevel(workspacePath: string): Promise<string | undefined> 
           const detail = stderr.trim() || error.message;
           if (error.code === "ENOENT" || /not a git repository/iu.test(detail)) {
             // Folder mode remains available when Git is absent or this is not a worktree.
+            resolveResult(undefined);
+            return;
+          }
+          // git 启动被环境拦截（安全 agent/沙箱挂起 CreateProcess、被杀软超时
+          // 强杀）时，rev-parse 给不出任何答案——此时按物理目录降级为 folder
+          // mode：workspace 注册/订阅是 daemon 可用性关键路径，不能因 git
+          // 进程起不来而整体不可用（实测 git.exe 启动可被环境间歇挂起数秒）。
+          // 快速非零退出（git 可执行但确定性失败）仍 fail-loud，不掩盖真问题。
+          if (error.killed || error.code === "ETIMEDOUT" || error.code === "EACCES" || error.code === "EPERM") {
             resolveResult(undefined);
             return;
           }
