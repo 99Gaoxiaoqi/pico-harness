@@ -3,6 +3,10 @@ import { createMobileProjectAuthorityPort, MobileProjectAuthority } from "./proj
 import { startMobileGateway } from "./server.js";
 import { MobileGatewayService } from "./service.js";
 
+// 3-B-3 状态标注：默认构造已是 kernel 承载（connectOrSpawn 拉起常驻 daemon，
+// workspace./session.* 请求经 runtime.request 通用桥接、事件订阅经 events.* 类型化
+// 桥接），代码层面可用；3-B-4 前未做 apps/mobile ↔ gateway ↔ daemon 全链路端到端
+// 验证，3-C（Desktop+Mobile 迁移）时补测。
 const client = new LocalRuntimeClient();
 await client.connect();
 

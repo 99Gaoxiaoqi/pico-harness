@@ -1,70 +1,12 @@
-import {
-  createProductionLocalDaemonHost,
-  LocalDaemonAlreadyRunningError,
-  type LocalDaemonHost,
-} from "../../../../src/daemon/index.js";
-
-/** Owns a daemon started by this app while leaving an existing user daemon untouched. */
-export class DesktopDaemonController {
-  private host: LocalDaemonHost | undefined;
-  private owned = false;
-  private startingPromise: Promise<void> | undefined;
-  private stoppingPromise: Promise<void> | undefined;
-
-  get ownsProcess(): boolean {
-    // Fence quit while ownership is still being resolved. stop() will wait for
-    // the candidate and leave it untouched if another process owns the daemon.
-    return this.owned || this.startingPromise !== undefined;
-  }
-
-  async start(): Promise<void> {
-    if (this.startingPromise) return this.startingPromise;
-    if (this.host) return;
-    const candidate = createProductionLocalDaemonHost();
-    this.host = candidate;
-    const startingPromise = this.startCandidate(candidate);
-    this.startingPromise = startingPromise;
-    try {
-      await startingPromise;
-    } finally {
-      if (this.startingPromise === startingPromise) this.startingPromise = undefined;
-    }
-  }
-
-  async stop(): Promise<void> {
-    if (this.stoppingPromise) return this.stoppingPromise;
-    const stoppingPromise = this.stopOwnedHost().finally(() => {
-      if (this.stoppingPromise === stoppingPromise) this.stoppingPromise = undefined;
-    });
-    this.stoppingPromise = stoppingPromise;
-    return stoppingPromise;
-  }
-
-  private async startCandidate(candidate: LocalDaemonHost): Promise<void> {
-    try {
-      await candidate.start();
-      if (this.host === candidate) this.owned = true;
-    } catch (error) {
-      if (this.host === candidate) this.host = undefined;
-      this.owned = false;
-      if (error instanceof LocalDaemonAlreadyRunningError) return;
-      throw error;
-    }
-  }
-
-  private async stopOwnedHost(): Promise<void> {
-    const startingPromise = this.startingPromise;
-    if (startingPromise) await startingPromise.catch(() => undefined);
-    const host = this.host;
-    if (!host || !this.owned) return;
-    try {
-      await host.stop();
-    } finally {
-      if (this.host === host) this.host = undefined;
-      this.owned = false;
-    }
-  }
-}
+/**
+ * 3-B-3 硬切后 Desktop 不再内嵌 daemon：默认构造的 LocalRuntimeClient 走 kernel
+ * 承载（connectOrSpawn 自动拉起 detached 常驻 daemon candidate，candidate 自持
+ * residency 阻止 idle 自退），Electron 主进程只做瘦客户端。quit 时 daemon 保持
+ * 常驻（cron 调度依赖），不再需要"own 进程 + 优雅关停"的控制器。
+ *
+ * 保留 shutdown fence 纯函数：它仍被 lifecycle-races 集成测试覆盖其语义
+ * （before-quit 期间阻止重复退出直到 daemon 停完）。
+ */
 
 export interface DesktopBeforeQuitEvent {
   preventDefault(): void;
@@ -80,7 +22,7 @@ export interface DesktopDaemonShutdownFenceOptions {
 
 /** Keeps every repeated before-quit event fenced until the owned daemon finishes draining. */
 export function createDesktopDaemonShutdownFence(
-  daemon: Pick<DesktopDaemonController, "ownsProcess" | "stop">,
+  daemon: { ownsProcess: boolean; stop(): Promise<void> },
   quit: () => void,
   onStopError: (error: unknown) => void,
   options: DesktopDaemonShutdownFenceOptions = {},

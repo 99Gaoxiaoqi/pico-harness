@@ -8,14 +8,15 @@ import { LocalDaemonRuntimeClientAdapter } from "./runtime-client-adapter.js";
 import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
-import { createDesktopDaemonShutdownFence, DesktopDaemonController } from "./daemon-controller.js";
 import { raceWithDeadlineReject } from "../../../../src/util/race-with-deadline.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
 let disposeUpdater: (() => void) | undefined;
+// 3-B-3 硬切后默认构造走 kernel 承载：首次请求（下方 runtime.ping）经
+// connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
+// 不随本 app 退出；cron 调度依赖其常驻）。Electron 主进程只做瘦客户端。
 const runtime = new LocalDaemonRuntimeClientAdapter();
-const daemon = new DesktopDaemonController();
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
 const requestDesktopShutdown = (exitCode?: number): void => {
   if (exitCode !== undefined) process.exitCode = exitCode;
@@ -76,19 +77,14 @@ function startRuntimeProbe(): () => void {
     clearInterval(timer);
   };
 }
-const stopOwnedDaemonBeforeQuit = createDesktopDaemonShutdownFence(
-  daemon,
-  () => requestDesktopShutdown(),
-  (error) => console.error("Pico desktop daemon failed to stop cleanly", error),
-);
-
 if (!app.requestSingleInstanceLock()) {
   requestDesktopShutdown();
 } else {
   app.on("second-instance", () => lifecycle.showWindow());
-  app.on("before-quit", (event) => {
+  app.on("before-quit", () => {
+    // daemon 由 kernel 承载独立常驻（cron 调度依赖），本 app 不拥有其生命周期，
+    // quit 无需等待 daemon 关停——直接放行。
     lifecycle.markQuitting();
-    stopOwnedDaemonBeforeQuit(event);
   });
   app.on("will-quit", () => {
     stopRuntimeProbe?.();
@@ -109,8 +105,7 @@ if (!app.requestSingleInstanceLock()) {
     .then(async () => {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
       installApplicationMenu(() => mainWindow);
-      await daemon.start();
-      if (lifecycle.isQuitting()) return;
+      // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。
       parseDesktopRuntimeResult("runtime.ping", await runtime.request("runtime.ping", {}));
       if (lifecycle.isQuitting()) return;
       const platform = createPlatformServices();
