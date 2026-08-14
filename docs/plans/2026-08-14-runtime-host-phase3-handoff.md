@@ -102,6 +102,34 @@
 
 **3-B-2 未做**：客户端完整订阅抽象（RuntimeSubscription 断线重连/去重环——3-B-4 客户端迁移时移植 `src/daemon/client.ts` 逻辑）、daemon main.ts 改动（3-B-3）、FORBIDDEN→capability_unavailable 失真仍维持（评估结论：kernel 错误码集是机制层公开面，无消费方需要区分前不扩，mobile gateway 3-B-4 迁移时按需重评）。
 
+## 3-B-3 已完成（选主迁移·硬切，2026-08-15 追加）
+
+**用户拍板硬切**（不留旧传输并存；mobile-gateway 在 3-B-3→3-B-4 间未做端到端验证）。3 个 commit：
+
+| commit | 内容 |
+|---|---|
+| `f7c7e52b` | 前半：daemon main → candidate 模式（`runtime-host-candidate.ts`：升级守卫旧 instance-lock+ping → flock 选主 → kernel + production composition）；`runtime.request` 通用桥接（91 方法经单帧 `{method, params}` 透传 service.handle，spec 化留 3-B-4+ 渐进退役）；帧上限 96KB→1MiB + 队列 8MB；launcher .ts entrypoint（tsx loader 绝对路径）+ file:// href；connectOrSpawn env 透传；LocalDaemonHost services-only 模式；whoami/icacls 绝对路径修复 |
+| `9b764d5e` | 后半：`client.ts` kernel 承载（`KernelRuntimeConnection`——connectOrSpawn 拉起 + runtime.request/events.* 桥接 + host 错误码反查 daemon 码保订阅环 INVALID_PARAMS cursor 重置语义；**双模式**=显式 endpoint/authTokenStore 走旧 socket 保注入测试）；传输级失败（terminalError）丢弃死连接重生重试一次；events.subscribe 桥接改**覆盖语义**（重订阅 dispose 旧的，原拒绝式会卡死 cursor 重置重订）；workspace-registry git 环境降级；kernel 客户端实盘测试 3 条 |
+| `eff5ea11` | 收尾：cron-bridge 默认 client kernel 化（删旧 socket endpoint + spawn/install 兜底）；Desktop 删 in-process daemon host（旧传输 host 与 kernel client 脱节）瘦客户端化；mobile-gateway 状态标注 |
+
+**关键决策**：
+1. **常驻用可释放 residency 而非 retainUntilProcessExit**：后者是不可逆闩，会让 kernel `#waitForResidencies` 永等、优雅关停退化为 deadline 强杀。candidate 持一个长驻 residency 阻止 idle 自退（cron 调度依赖 daemon 常驻），close() 尾部释放——"常驻 + SIGTERM 可优雅关停"兼得。TUI/Desktop 退出后 daemon 继续常驻，cron 持续调度。
+2. **client 双模式**：默认构造走 kernel（connectOrSpawn 自动拉起/连上常驻 daemon）；显式注入 endpoint 时走旧 socket（存量注入测试兼容）。旧 socket 传输的生产调用点已清零，只剩测试注入面。
+3. **events 订阅覆盖语义**：daemon server 的 setSubscription 本就是覆盖式；桥接层原拒绝式 operation_conflict 会卡死客户端 cursor 失效后的重订流程。
+4. **git 环境降级**（workspace-registry.ts）：本机安全 agent（PATH 见 `%AccessAgentLibs%`）可间歇挂起 git.exe 启动数秒（实测 ~50% 概率，裸 shell 正常、daemon 进程内挂起，`git --version` 同样挂——execFile 5s 超时强杀，空 stderr + "Command failed" 形态）。killed/ETIMEDOUT/EACCES/EPERM 按 folder mode 降级（物理路径 canonical），快速非零退出仍 fail-loud。**根因在环境层不可代码根治**，此为可用性优先取舍。
+5. **Desktop 瘦客户端化**：in-process host（createProductionLocalDaemonHost servicesOnly:false = 旧传输）与 kernel client 脱节且输掉 flock 会连累宿主进程；删除后 Electron 首次 ping 经 connectOrSpawn 拉起常驻 daemon，quit 不等 daemon 关停。shutdown fence 纯函数保留（lifecycle-races 覆盖）。
+
+**验证**：四文件（kernel/replay/candidate/close）两轮 11/11；lifecycle-races 31/32（1 个 hook reloader watcher 既有失败，stash 验证与本次无关）；根 typecheck 0 + desktop main tsconfig 0；对抗审查（P0 无）。
+
+**对抗审查遗留（3-B-4 处理）**：
+- **P1-2 terminalError 重试可双执行**：连�� terminal 后单次重试不区分"daemon 死"与"daemon 活着但连接被杀"——后者重发写方法（session.send 等）可能双执行（双 LLM turn/双提交）。窗口窄（deadline 失败响应未达客户端时）。3-B-4 按方法幂等性白名单或幂等键收敛。
+- **P1-3 960KB–1MiB 结果硬失败**：runtime.request 帧预算 1MiB-64KB，超限结果客户端 decode 失败且杀连接；旧 socket 合法的大 transcript 页成死区。3-B-4 分块 query 时一并解决。
+- P1-1（冷启动 recover 窗口首个 ping 失败致 Desktop 误报启动失败）已修：首次 ping 带 30s/500ms 退避重试（RUNTIME_UNAVAILABLE retryable）。
+- P2 已评估接受：cron-bridge 冷启动 45s 选举等待 UX、SIGTERM 关停 10s shutdownGrace 硬上限、常驻 daemon 无退出路径（升级须手动 kill，3-B-4+ 立 daemon stop 命令）、覆盖订阅旧 dispose 的 pushEvent 失败回调误杀新订阅（自愈）、FRAME_TOO_LARGE→internal_failure 映射失真（无消费方）。
+
+**3-B-3 未做**：mobile-gateway 端到端验证（代码已 kernel 化，apps/mobile↔gateway↔daemon 全链路 3-C 补测）、91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）、host.diagnostics.query.logs 仍恒空。
+
+
 ## 验证命令（基线）
 
 ```bash

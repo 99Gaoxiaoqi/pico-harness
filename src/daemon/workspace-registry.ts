@@ -209,11 +209,12 @@ function resolveGitTopLevel(workspacePath: string): Promise<string | undefined> 
             resolveResult(undefined);
             return;
           }
-          // git 启动被环境拦截（安全 agent/沙箱挂起 CreateProcess、被杀软超时
-          // 强杀）时，rev-parse 给不出任何答案——此时按物理目录降级为 folder
-          // mode：workspace 注册/订阅是 daemon 可用性关键路径，不能因 git
-          // 进程起不来而整体不可用（实测 git.exe 启动可被环境间歇挂起数秒）。
-          // 快速非零退出（git 可执行但确定性失败）仍 fail-loud，不掩盖真问题。
+          // git 无法给出答案时按物理目录降级为 folder mode：workspace 注册/订阅
+          // 是 daemon 可用性关键路径，不能因 git 环境异常而整体不可用。覆盖三类：
+          // 启动被环境挂起后超时强杀（killed，实测安全 agent 可间歇挂起 git.exe
+          // 启动数秒）、spawn 被拦截（EACCES/EPERM）、显式超时。注意 EACCES/
+          // EPERM 是快速确定性失败，归入降级是可���性优先的取舍（fail-loud 会把
+          // 整个 daemon 打挂）；快速非零退出（git 可执行但确定性失败）仍 fail-loud。
           if (error.killed || error.code === "ETIMEDOUT" || error.code === "EACCES" || error.code === "EPERM") {
             resolveResult(undefined);
             return;

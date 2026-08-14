@@ -4,7 +4,7 @@ import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
 import { createPlatformServices } from "../platform/index.js";
 import { registerDesktopIpcHandlers } from "./ipc.js";
 import { DesktopLifecycleController } from "./lifecycle.js";
-import { LocalDaemonRuntimeClientAdapter } from "./runtime-client-adapter.js";
+import { LocalDaemonRuntimeClientAdapter, RuntimeClientError } from "./runtime-client-adapter.js";
 import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
@@ -105,8 +105,11 @@ if (!app.requestSingleInstanceLock()) {
     .then(async () => {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
       installApplicationMenu(() => mainWindow);
-      // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。
-      parseDesktopRuntimeResult("runtime.ping", await runtime.request("runtime.ping", {}));
+      // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。冷启动时
+      // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内
+      // 操作会被 host 以 host_not_ready 拒绝（RUNTIME_UNAVAILABLE，可重试）——
+      // 有限退避重试覆盖该窗口，避免把正常的冷启动误报成启动失败。
+      parseDesktopRuntimeResult("runtime.ping", await pingUntilReady());
       if (lifecycle.isQuitting()) return;
       const platform = createPlatformServices();
       disposeIpc = registerDesktopIpcHandlers({
@@ -153,4 +156,25 @@ async function openMainWindow(): Promise<void> {
       mainWindow = undefined;
     },
   });
+}
+
+const FIRST_PING_DEADLINE_MS = 30_000;
+const FIRST_PING_RETRY_DELAY_MS = 500;
+async function pingUntilReady(): Promise<unknown> {
+  const deadline = Date.now() + FIRST_PING_DEADLINE_MS;
+  for (;;) {
+    try {
+      return await runtime.request("runtime.ping", {});
+    } catch (error) {
+      if (
+        error instanceof RuntimeClientError &&
+        error.retryable &&
+        Date.now() + FIRST_PING_RETRY_DELAY_MS < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, FIRST_PING_RETRY_DELAY_MS));
+        continue;
+      }
+      throw error;
+    }
+  }
 }

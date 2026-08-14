@@ -72,7 +72,7 @@ test("daemon candidate: in-process winner serves the full chain and releases the
   t.after(async () => {
     await connection.close().catch(() => undefined);
   });
-  const status = await connection.status(5000);
+  const status = await waitForReadyStatus(connection, 15_000);
   assert.equal(status.state, "ready");
 
   // 通用桥接操作经 production services 实盘应答。
@@ -147,7 +147,7 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
   if (result.kind !== "connected") return;
   const connection = result.connection;
 
-  const status = await connection.status(5_000);
+  const status = await waitForReadyStatus(connection, 15_000);
   assert.equal(status.state, "ready");
 
   const ping = await connection.requestRegistered<{ result: unknown }>(
@@ -184,6 +184,21 @@ async function connectToCandidate(picoHome: string): Promise<RuntimeHostConnecti
   assert.equal(connectResult.kind, "connected");
   if (connectResult.kind !== "connected") throw new Error("unreachable");
   return connectResult.connection;
+}
+
+/** recover 窗口（reconcile + cron 启动，环境慢时可达数秒）内轮询直到 ready。 */
+async function waitForReadyStatus(
+  connection: RuntimeHostConnection,
+  deadlineMs: number,
+): Promise<{ state: string }> {
+  const deadline = performance.now() + deadlineMs;
+  let lastStatus: { state: string } = { state: "unknown" };
+  while (performance.now() < deadline) {
+    lastStatus = await connection.status(Math.min(5_000, deadline - performance.now()));
+    if (lastStatus.state === "ready") return lastStatus;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return lastStatus;
 }
 
 async function findControlDirectory(picoHome: string): Promise<string> {
