@@ -64,12 +64,6 @@ Desktop 用图形化的 Session、Composer、Transcript、Changes、Automations 
 RuntimeEvent 和后台 Job 的事实仍由共享 Runtime 与 daemon 所有，Desktop 不建立第二套业务
 状态。
 
-仓库还有一个 Expo Mobile 客户端，但它目前只是本机 iOS / Android 模拟器的开发预览。
-显式运行 `npm run mobile:gateway` 后，独立 Gateway 仅在 `127.0.0.1` 上提供有界 HTTP /
-WebSocket 接口：HTTP 使用 Bearer Token，WebSocket 首个 JSON 帧使用同一临时 Token。
-Gateway 再通过本机 IPC 连接 daemon，并且只访问已注册且仍受信的工作区。这条桥接不是公开
-远程 API，也不把 Mobile 定义成第三个正式产品入口。
-
 历史上的 REST、WebSocket、ACP、飞书和 Docker 外壳都不属于当前产品边界。仓库内
 Headless One-shot Runner 只服务 benchmark，同样不是公开 API。
 
@@ -273,7 +267,7 @@ MCP 不再只是一个无状态工具列表，而是有明确信任和释放边�
 
 当前项目不是多租户 Agent 服务，不提供公开 REST、WebSocket、ACP 或远程 Runtime API，也
 不提供 Docker 部署和 Linux Desktop 发布入口。仓库内 one-shot/headless runner 只服务
-benchmark，不构成公开兼容性承诺；Mobile Gateway 只服务本机模拟器开发预览。
+benchmark，不构成公开兼容性承诺。
 
 Cron 已经是当前能力：用户可以从 TUI `/cron` 或 Desktop Automations 创建持久 Job，由本机
 daemon 在当前 OS 用户边界内调度。它是本地控制面，不是远程托管服务。Plugin 也已经能以
@@ -282,20 +276,19 @@ daemon 在当前 OS 用户边界内调度。它是本地控制面，不是远程
 
 当前仍保持几条保守边界：worker Bash 在 macOS 使用 `sandbox-exec`，缺少等价后端时可写
 worker 会 fail-closed；每个前台 Session 只选择一个匹配的 Language Server，不宣称已经具备
-混合语言 server pool；Mobile 也没有越过回环网络、临时 Token 和受信工作区限制。
+混合语言 server pool。
 
 这些取舍让项目集中解决一件事：在本地工程里，让 TUI 与 Desktop 驱动的编码 Agent 执行得
 足够可靠。
 
 ## 九、最后再看一次整体结构
 
-从目录上看，项目可以分成八组：
+从目录上看，项目可以分成七组：
 
 | 区域                                                        | 主要职责                                                  |
 | ----------------------------------------------------------- | --------------------------------------------------------- |
 | `src/cli/`、`src/tui/`、`src/input/`                        | TUI 产品入口、交互、命令与附件                            |
 | `apps/desktop/`、`src/daemon/`、`packages/protocol/`        | Desktop、认证本机 IPC、Runtime 控制面和共享协议           |
-| `apps/mobile/`、`src/mobile-gateway/`                       | 仅本机模拟器使用的 Mobile 开发预览与回环桥接              |
 | `src/runtime/`、`src/engine/`、`src/tasks/`、`src/storage/` | Runtime 装配、ReAct、Session、可恢复任务、Cron 与事实账本 |
 | `src/provider/`                                             | 模型协议、能力预检、路由、计费和凭证                      |
 | `src/code-intelligence/`、`src/tools/`、`src/mcp/`          | 代码导航、工具注册、调度、子代理和外部扩展                |

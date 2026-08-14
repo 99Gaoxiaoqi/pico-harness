@@ -196,8 +196,7 @@ Graph Mode **复用同一套 CAS**：`appendGraphOperation`（`runtime-event-sto
 
 ```text
    TUI ────────────────►  AgentRuntime（进程内直接装配）
-   Desktop(Electron) ──┐  默认在 Electron Main 进程内托管 daemon（LocalDaemonHost）；
-   Mobile Gateway ─────┤  若已存在用户 daemon（实例锁）则降级为纯认证客户端
+   Desktop(Electron) ──┐  默认经 LocalRuntimeClient 连接本机 daemon（candidate）；
                         └──► LocalDaemonHost ──► 真正跑 AgentRuntime 的地方
                                                    (DesktopRuntimeService)
 ```

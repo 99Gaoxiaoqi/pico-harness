@@ -27,14 +27,14 @@
 
 ## 接下来要做：3-B（daemon 接入 runtime-host）
 
-**目标**：`LocalDaemonHost` → `RuntimeHostKernel`，compositionFactory 接 pico 业务 handler，最终 Desktop/TUI/Mobile 经统一 `RuntimeHostConnection` 接入。
+**目标**：`LocalDaemonHost` → `RuntimeHostKernel`，compositionFactory 接 pico 业务 handler，最终 Desktop/TUI 经统一 `RuntimeHostConnection` 接入。
 
 ### 渐进路线（来自北极星方案 + daemon 探索）
 
 1. **3-B-1 桥接 composition**（第一步）：写 `RuntimeHostCompositionFactory`，内部实例化现有 production-host 装配（`createProductionLocalDaemonHost` 的 DesktopRuntimeService + WorkspaceRuntimeService），handler 层做 `operation ↔ RuntimeRequest` 适配。先挑少数 query 方法（workspace.status / usage.get）走 runtime-host，验证 dispatch/decode 链路。不动事件、不动客户端。
 2. **3-B-2 事件协议**：补 subscription/event 帧（kernel 3-A 无 Host→Client 帧，**最大难点**）+ 出站推送通道；把 events.subscribe/replay 语义（cursor/high-watermark/fence-on-error）移植；解决 96KB 帧限制下的 replay 分页。
 3. **3-B-3 选主迁移**：daemon main.ts 改 candidate 模式（flock 选主 + 注册发现），保留 instance-lock 作升级期兼容探测；cron-daemon-bridge/Desktop 控制器改 connectOrSpawn。
-4. **3-B-4 客户端迁移**：Mobile gateway → Desktop → TUI（TUI 最后，部署模型变化最大，建议单独立项）。
+4. **3-B-4 客户端迁移**：Desktop → TUI（TUI 最后，部署模型变化最大，建议单独立项；移动端已移除，不再是迁移项）。
 
 ### 关键难点 / 注意
 
@@ -100,17 +100,17 @@
 
 **验证**：runtime-host 全套 29/29（22 旧 + 3 机制 + 4 桥接）、composition-bridge 6/6、desktop-runtime-close 3/3、根 typecheck 0、架构门禁 0。注意机制测试从 src 导入、桥接测试从 dist 导入（模块身份规则不变）。
 
-**3-B-2 未做**：客户端完整订阅抽象（RuntimeSubscription 断线重连/去重环——3-B-4 客户端迁移时移植 `src/daemon/client.ts` 逻辑）、daemon main.ts 改动（3-B-3）、FORBIDDEN→capability_unavailable 失真仍维持（评估结论：kernel 错误码集是机制层公开面，无消费方需要区分前不扩，mobile gateway 3-B-4 迁移时按需重评）。
+**3-B-2 未做**：客户端完整订阅抽象（RuntimeSubscription 断线重连/去重环——3-B-4 客户端迁移时移植 `src/daemon/client.ts` 逻辑）、daemon main.ts 改动（3-B-3）、FORBIDDEN→capability_unavailable 失真仍维持（评估结论：kernel 错误码集是机制层公开面，无消费方需要区分前不扩，Desktop 迁移时按需重评）。
 
 ## 3-B-3 已完成（选主迁移·硬切，2026-08-15 追加）
 
-**用户拍板硬切**（不留旧传输并存；mobile-gateway 在 3-B-3→3-B-4 间未做端到端验证）。3 个 commit：
+**用户拍板硬切**（不留旧传输并存）。**移动端（mobile-gateway/apps/mobile/protocol mobile 定义）已于 2026-08-15 移除**，3-B-4 不再有 mobile 迁移项。3 个 commit：
 
 | commit | 内容 |
 |---|---|
 | `f7c7e52b` | 前半：daemon main → candidate 模式（`runtime-host-candidate.ts`：升级守卫旧 instance-lock+ping → flock 选主 → kernel + production composition）；`runtime.request` 通用桥接（91 方法经单帧 `{method, params}` 透传 service.handle，spec 化留 3-B-4+ 渐进退役）；帧上限 96KB→1MiB + 队列 8MB；launcher .ts entrypoint（tsx loader 绝对路径）+ file:// href；connectOrSpawn env 透传；LocalDaemonHost services-only 模式；whoami/icacls 绝对路径修复 |
 | `9b764d5e` | 后半：`client.ts` kernel 承载（`KernelRuntimeConnection`——connectOrSpawn 拉起 + runtime.request/events.* 桥接 + host 错误码反查 daemon 码保订阅环 INVALID_PARAMS cursor 重置语义；**双模式**=显式 endpoint/authTokenStore 走旧 socket 保注入测试）；传输级失败（terminalError）丢弃死连接重生重试一次；events.subscribe 桥接改**覆盖语义**（重订阅 dispose 旧的，原拒绝式会卡死 cursor 重置重订）；workspace-registry git 环境降级；kernel 客户端实盘测试 3 条 |
-| `eff5ea11` | 收尾：cron-bridge 默认 client kernel 化（删旧 socket endpoint + spawn/install 兜底）；Desktop 删 in-process daemon host（旧传输 host 与 kernel client 脱节）瘦客户端化；mobile-gateway 状态标注 |
+| `eff5ea11` | 收尾：cron-bridge 默认 client kernel 化（删旧 socket endpoint + spawn/install 兜底）；Desktop 删 in-process daemon host（旧传输 host 与 kernel client 脱节）瘦客户端化；mobile-gateway 状态标注（其后被整体移除） |
 
 **关键决策**：
 1. **常驻用可释放 residency 而非 retainUntilProcessExit**：后者是不可逆闩，会让 kernel `#waitForResidencies` 永等、优雅关停退化为 deadline 强杀。candidate 持一个长驻 residency 阻止 idle 自退（cron 调度依赖 daemon 常驻），close() 尾部释放——"常驻 + SIGTERM 可优雅关停"兼得。TUI/Desktop 退出后 daemon 继续常驻，cron 持续调度。
@@ -127,7 +127,7 @@
 - P1-1（冷启动 recover 窗口首个 ping 失败致 Desktop 误报启动失败）已修：首次 ping 带 30s/500ms 退避重试（RUNTIME_UNAVAILABLE retryable）。
 - P2 已评估接受：cron-bridge 冷启动 45s 选举等待 UX、SIGTERM 关停 10s shutdownGrace 硬上限、常驻 daemon 无退出路径（升级须手动 kill，3-B-4+ 立 daemon stop 命令）、覆盖订阅旧 dispose 的 pushEvent 失败回调误杀新订阅（自愈）、FRAME_TOO_LARGE→internal_failure 映射失真（无消费方）。
 
-**3-B-3 未做**：mobile-gateway 端到端验证（代码已 kernel 化，apps/mobile↔gateway↔daemon 全链路 3-C 补测）、91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）、host.diagnostics.query.logs 仍恒空。
+**3-B-3 未做**：91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）、host.diagnostics.query.logs 仍恒空。
 
 
 ## 验证命令（基线）

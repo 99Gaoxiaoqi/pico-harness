@@ -17,12 +17,6 @@ Desktop
          └─ Electron Main
               └─ LocalRuntimeClient
 
-Mobile 开发预览（仅本机模拟器）
-  Expo client
-    └─ loopback HTTP Bearer / WebSocket 首帧 Token
-         └─ MobileGateway
-              └─ LocalRuntimeClient
-
 LocalRuntimeClient
   └─ authenticated local daemon
        ├─ DesktopRuntimeService
@@ -41,11 +35,6 @@ TUI 和 Desktop 是当前两种产品外壳。TUI 在当前进程装配 `AgentRu
 Renderer 不直接访问 Node.js 或 Runtime，而是经类型化 Preload、Electron Main 和本机
 daemon 调用同一个 Runtime。daemon 只提供当前用户本机 IPC，不开放网络传输。
 
-`apps/mobile` 是本机 iOS / Android 模拟器的开发预览，不是第三个公开产品入口。显式启动的
-`src/mobile-gateway` 独立进程只监听 `127.0.0.1`；HTTP 请求使用 Bearer Token，WebSocket
-连接后的首个 JSON 帧使用同一临时 Token。Gateway 再通过 `LocalRuntimeClient` 连接 daemon；
-它只投影已注册且仍受信的工作区，不把 workspace 路径或 daemon 协议直接暴露给 Mobile。
-
 `packages/protocol` 定义 daemon 方法、参数、结果、事件和 Desktop 可访问方法白名单。
 Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge` 类型。
 
@@ -54,7 +43,6 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
 | 层次         | 主要模块                                                                                 | 所有权                                                     |
 | ------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | 产品外壳     | `src/cli/`、`src/tui/`、`apps/desktop/`                                                  | 输入、展示、生命周期和宿主交互                             |
-| 开发预览适配 | `apps/mobile/`、`src/mobile-gateway/`、`packages/protocol/src/mobile.ts`                 | 模拟器 UI、回环鉴权和对 daemon 能力的窄投影                |
 | 本机 Runtime | `src/daemon/`、`packages/protocol/`                                                      | 本机 IPC、认证、Workspace 注册、Desktop/Cron 控制面        |
 | 应用装配     | `src/runtime/agent-runtime.ts`                                                           | 固定一次 Run 的 Session、Provider、工具、环境和路径依赖    |
 | 执行内核     | `src/engine/`                                                                            | ReAct 循环、Session 串行化、预算、压缩触发和 Reporter 事件 |
@@ -206,8 +194,6 @@ $PICO_HOME/
   [多 Agent 共享工作区并发规范](./docs/architecture/08-multi-agent-concurrency.md)。
 - Desktop BrowserWindow 开启 context isolation、关闭 Node integration；daemon token、socket
   权限和方法白名单共同构成本机信任边界。
-- Mobile Gateway 强制绑定回环地址，使用高熵临时 Token、严格请求 schema 和工作区信任复核；
-  它是显式启动的模拟器开发桥接，不把 daemon 变成远程 API。
 
 ## 关键模块索引
 
@@ -221,6 +207,5 @@ $PICO_HOME/
 | 核心数据流          | [06-data-flow.md](./docs/architecture/06-data-flow.md)             |
 | Hooks               | [07-hooks.md](./docs/architecture/07-hooks.md)                     |
 | 本机 IPC 安全       | [local-ipc-security.md](./docs/architecture/local-ipc-security.md) |
-| Mobile 开发预览     | [apps/mobile/README.md](./apps/mobile/README.md)                   |
 
 架构判断以源码的实际依赖和事实源为准；历史课程章节只解释演进背景，不定义当前产品边界。
