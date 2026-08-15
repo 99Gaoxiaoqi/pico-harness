@@ -45,6 +45,10 @@ export interface ClientReplOptions {
   readonly model?: string;
   /** BYOK 思考强度覆盖（--thinking，经 session.settings.update 应用）。 */
   readonly thinkingEffort?: string;
+  /** 启动 fork（--fork <id>）：连接后经 session.fork RPC 切到新会话。 */
+  readonly forkFrom?: string;
+  /** Graph Mode 启动覆盖（--graph，经 session.settings.update 应用）。 */
+  readonly graphMode?: boolean;
 }
 
 export async function startClientRepl(options: ClientReplOptions): Promise<void> {
@@ -69,6 +73,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     reporter,
     ...(options.model ? { modelOverride: options.model } : {}),
     ...(options.thinkingEffort ? { thinkingOverride: options.thinkingEffort } : {}),
+    ...(options.graphMode ? { orchestrationModeOverride: "graph" } : {}),
     onRunStateChanged: (running) => runningSink.current?.(running),
     onSettingsSnapshot: (settings) => {
       currentSettings.current = settings;
@@ -284,10 +289,22 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   const instance = render(<ClientReplApp />, { ...TUI_RENDER_OPTIONS });
   instanceRef = instance;
   try {
+    // 冷启动预算（Phase 4 复核）：慢环境 connectOrSpawn 选举首连可达 24s——
+    // UI 先渲染并给出连接提示，避免"敲完命令黑屏数十秒"。
+    reporter.pushSystemMessage("正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…");
     await runtime.start();
     reporter.pushSystemMessage(
       `已连接本地 Runtime（客户端模式）。工作区：${options.workDir}`,
     );
+    // 启动 fork（--fork <id>）：连接后从源会话 fork 新会话并切换（原会话不动）。
+    if (options.forkFrom) {
+      const forked = await runtime.request("session.fork", {
+        workspacePath: options.workDir,
+        sessionId: options.forkFrom,
+      });
+      await runtime.switchSession(forked.session.sessionId);
+      reporter.pushSystemMessage(`已从 ${options.forkFrom} fork 到新会话 ${forked.session.sessionId}。`);
+    }
     await instance.waitUntilExit();
   } finally {
     runtime.dispose();

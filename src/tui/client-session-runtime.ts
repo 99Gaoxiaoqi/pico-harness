@@ -81,6 +81,8 @@ export interface ClientSessionRuntimeOptions {
    */
   readonly modelOverride?: string;
   readonly thinkingOverride?: string;
+  /** --graph 启动覆盖（Phase 4）：sessionId 确立后 orchestrationMode=graph 一次。 */
+  readonly orchestrationModeOverride?: "graph";
 }
 
 export class ClientSessionRuntime {
@@ -428,12 +430,13 @@ export class ClientSessionRuntime {
     }
   }
 
-  /** sessionId 确立后应用一次 BYOK 覆盖（modelRouteId/thinkingEffort → session.settings.update）。 */
+  /** sessionId 确立后应用一次 BYOK 覆盖（modelRouteId/thinkingEffort/orchestrationMode → session.settings.update）。 */
   private async applyStartupOverrides(): Promise<void> {
     if (this.settingsOverrideApplied || this.settingsOverrideInFlight || this.disposed) return;
     const routeId = this.pendingModelRouteId;
     const thinking = this.options.thinkingOverride;
-    if (!routeId && !thinking) return;
+    const graph = this.options.orchestrationModeOverride;
+    if (!routeId && !thinking && !graph) return;
     if (!this.sessionId) return;
     // in-flight 同步置位防并发双发；applied 只在成功后置（对抗评审 P2：失败
     // 前置会让一次瞬时错误永久吞掉 --model），失败留给下一入口自然重试。
@@ -444,10 +447,11 @@ export class ClientSessionRuntime {
         sessionId: this.sessionId,
         ...(routeId ? { modelRouteId: routeId } : {}),
         ...(thinking ? { thinkingEffort: thinking } : {}),
+        ...(graph ? { orchestrationMode: graph } : {}),
       });
       this.settingsOverrideApplied = true;
       this.reporter.pushSystemMessage(
-        `客户端覆盖已应用：${[routeId ? `模型路由 ${routeId}` : undefined, thinking ? `思考强度 ${thinking}` : undefined].filter(Boolean).join("，")}。`,
+        `客户端覆盖已应用：${[routeId ? `模型路由 ${routeId}` : undefined, thinking ? `思考强度 ${thinking}` : undefined, graph ? "Graph Mode" : undefined].filter(Boolean).join("，")}。`,
       );
     } catch (error) {
       this.reporter.pushError(
