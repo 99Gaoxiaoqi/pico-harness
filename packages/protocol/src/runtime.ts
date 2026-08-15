@@ -1537,6 +1537,8 @@ export type RuntimeNotificationMap = {
           readonly toolCallId: string;
           readonly toolName: string;
           readonly operation: "started" | "append" | "completed" | "failed";
+          /** started 携带的有界调用参数（仅展示用途；canonical 真值在 transcript）。 */
+          readonly args?: string;
           /** output 增量的流标识（append 专用）：`tool:live:{runId}:{toolCallId}:{stream}`。 */
           readonly streamId?: string;
           readonly turnId?: string;
@@ -2135,6 +2137,7 @@ function isRunLiveToolItem(item: Record<string, unknown>): boolean {
   if (item.stream !== undefined && item.stream !== "stdout" && item.stream !== "stderr") {
     return false;
   }
+  if (!optionalStringField(item, "args")) return false;
   if (item.streamId !== undefined && typeof item.streamId !== "string") return false;
   if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
   if (item.delta !== undefined && typeof item.delta !== "string") return false;
