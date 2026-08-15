@@ -52,7 +52,7 @@
 |---|---|---|
 | **1 ✅（08833ce0 + 2eadb002）** | **run.live 扩展 tool/subagent 实时事件**：协议新 kind + production-host 路由 + tool output ~50ms daemon 侧合流 + 分级裁剪兼容 + 未知 kind 前向兼容（旧客户端忽略不报错）；后续补齐 started 项 args（4KB 展示上限） | 桥接集成测试（形状/合流/裁剪/容忍）+ runtime-host 全套回归；Desktop 立即受益于"可选消费" |
 | **2 ✅（8b01dd81）** | **TUI 客户端 tracer**：`--client` 旗标；四件套——transcript-item-hydration（RPC items→TranscriptEvent[]）/ daemon-event-reporter（通知→TuiReporter 适配，append-only+reload 对账）/ client-session-runtime（无 Ink 可测核心）/ client-repl（复用 `<App>` 的 Ink 薄壳）；审批走 approval.requested+approval.respond（approval-dialogs 共享模块提取） | 假 client 集成测试驱动客户端环（tui-client-tracer 5/5）；真实 daemon 冒烟延后 Phase 4 |
-| 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，a20bd320 固化）；~~BYOK 旗标合并~~ ✅（0f10f65f）；~~slash 命令 RPC 化~~ ✅ tier1 29 命令（e79db76a + d7b019ec：客户端注册表 + 可测宿主 + 建议源；前置修复跨会话事件泄漏 eb0f2eb5）。剩余：rewind/changes（both-mode 适配器）、自由文本 prompt、共享 session driver 提取、/provider /cron /memory（协议/边界缺口） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言（预置） |
+| 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，a20bd320 固化）；~~BYOK 旗标合并~~ ✅（0f10f65f）；~~slash 命令 RPC 化~~ ✅ tier1 29 命令（e79db76a + d7b019ec：客户端注册表 + 可测宿主 + 建议源；前置修复跨会话事件泄漏 eb0f2eb5）。~~剩余三项~~ ✅（Phase 3 收口，2026-08-15）：wire 归一化共享模块（bd308097——终态/审批/activeRun 判定三处收敛，修正 Desktop 非法值 "completed"）、rewind/changes 客户端镜像（5424d72e——rewind.apply mode 参数 + 31 命令）、自由文本 prompt 全链路（d8c708d1——options 可选 0-6 + freeText 声明 + prompt.cancel + 客户端 prompt 事件接入）+ driver 提取按现状证据收口（D14 断言随收口 commit 落地）。**明确不做**（tier2/BLOCKED，Phase 4 不依赖）：provider/cron/mcp/model-usage/agents-usage 镜像；memory（协议缺 memory.create）；/changes 单文件恢复（fileHistoryRestoreFile 无 RPC 对应，查看型 + /rewind 引导） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言 ✅（D14：客户端四件套零引擎装配 + 连接唯一经共享 client） |
 | 4 | **默认切换**：`pico` 默认走客户端路径 | e2e 真实模型冒烟（tests/e2e）+ 慢环境冷启动预算复核 + 真机 TUI 冒烟 |
 | 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | D9 类正向断言转正：交互外壳零引擎装配；typecheck/测试/门禁全绿 |
 
@@ -70,6 +70,15 @@
 - **宿主**：`client-command-host.ts` 纯函数（message/clear/exit 信号/选择器对话框数据/会话切换），client-repl 接建议源（与 in-process 同语义：disabled 灰显不滤除）。
 - **测试加厚（用户要求）**：命令矩阵 6 组（三态/逐 RPC/门/坏值）+ 宿主 5 组 + 真机 slash 链（/status /rename 持久化 /sessions isCurrent /new→resume 水化 /interrupt）+ **e2e 真实模型**（RUN_LLM_E2E 门，用户真实路由完整回合含流式断言 + slash 真实链路 + interrupt；实跑 3 次 2 过，首败疑环境）。
 - **已知坑**：真机 idle-only 命令须等 run 终态（死端点引擎重试有窗口）；e2e 重定向往日志会把日志文件卷进 node --test 发现。
+
+### Phase 3 剩余收口实施记录（2026-08-15，bd308097 + 5424d72e + d8c708d1）
+
+- **现状修正**（侦察纠偏，立项时两处过期认知）：① "driver 叶子提取"大部分已达成——applyLiveAssistantUpdate/applyLiveReasoningUpdate（apps/desktop/src/renderer/conversation/items.ts）与 applyTimelineNotification（timeline.ts）**已是独立纯函数且有专测**，困在 hook 的只剩调用 glue；TUI 侧走 TuiReporter 回调、策略刻意"同构不同码"（append-only+reload 对账 vs liveTerminal+水化覆盖），强统一属过度工程——按证据关闭，交付物改为 D14 架构断言。② parity 豁免清单的 discovery 注释过期（协议方法已被 daemon 下线 METHOD_NOT_FOUND 且 in-process 无此命令）——已修正。
+- **wire 归一化共享模块**（bd308097）：`packages/protocol/src/runtime-normalize.ts` 唯一来源——isTerminalRunStatus/isActiveRunStatus（水化对账口径，含 paused/cancelling）/isStreamingRunStatus（相位灯口径）/isInterruptedRunStatus + parseApprovalRequestedPayload（approval.requested 开放 JsonObject 的结构化读取）。此前终态判定四套实现两处分叉（Desktop 含非枚举值 "completed"）；TUI 修正的 planId 不回退 approvalId 语义经共享解析回流 Desktop。activeRun 对账只统一谓词不合并流程（两侧视图架构不同）。
+- **rewind/changes 客户端镜像**（5424d72e）：协议 rewind.apply 加 mode 参数（daemon 透传 forkFromCheckpoint，此前硬编码 both）；客户端 31 命令（+ /rewind /checkpoint /changes）；`rewind-client-bridge.ts` 逆向映射（checkpointId→messageId 等）；local-ui-dialog-host rewind 分支升级 RewindCommandDialog 交互三相版；client-repl 接 preview 指纹缓存 + apply 后回填原 prompt（App.inputReplacement 桥）+ switchSession 切 fork。/changes 为查看型（单文件恢复无协议对应，提示走 /rewind）。
+- **自由文本 prompt 全链路**（d8c708d1，统一方案=用户选项）：options 改可选 0-6 + freeText?: boolean 声明（纯开放问题免编凑选项）；AskUserAnswer 加 {kind:"text"}；handler.submitText（仅声明请求接受）；broker 选项优先、freeText 未命中按文本提交；新增 **prompt.cancel** 协议方法（Esc 取消链路此前无 RPC 对应，幂等入 KERNEL_RETRY_SAFE_METHODS）；客户端四件套此前 prompt.* 全忽略→接 onPrompt/onPromptResolved（resolved 前置不受 scope 过滤）+ respondPrompt；AskUserDialog 共享组件加文本输入态（t 进入/纯文本直达/Enter 提交/Esc 回列表），createAskUserDialogRequest 泛化 AskUserDialogActions（同步 handler 与异步 RPC 统一）——in-process bindAskUserDialogs 零改动受益。Desktop 不动（字段向后兼容）。
+- **D14 架构断言**（收口 commit）：客户端四件套零引擎装配（负向：无 engine value import/globalSessionManager；type 契约除外）+ 连接唯一经 LocalRuntimeClient（正向）——北极星"全仓连接状态机实现数=1"验收经此固化；Phase 5 退役 in-process 后扩展到整个 src/tui。
+- **验证基线**：typecheck 0 + invariants 9/9 + 客户端层 33/33 + 门禁 0 + e2e 真实模型 1/1。
 
 ## 四、风险与对策
 
