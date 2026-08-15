@@ -38,8 +38,12 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(configured.snapshot.config.mcpServers.docs?.command, "node");
-  assert.equal((await stat(picoHome)).mode & 0o777, 0o700);
-  assert.equal((await stat(join(picoHome, "mcp.json"))).mode & 0o777, 0o600);
+  // POSIX 权限位在 NTFS 上不可观测（stat 恒报 0o666），win32 跳过位断言
+  //（先例：task-run-file-store.test.ts；产品代码仍按 0o700/0o600 设置）。
+  if (process.platform !== "win32") {
+    assert.equal((await stat(picoHome)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(picoHome, "mcp.json"))).mode & 0o777, 0o600);
+  }
 
   const replayedAfterRestart = await new UserMcpConfigStore({ picoHome }).upsert(
     { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },

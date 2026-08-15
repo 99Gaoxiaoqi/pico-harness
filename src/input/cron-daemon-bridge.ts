@@ -1,6 +1,6 @@
 import { type RuntimeJob, type RuntimeProviderInput } from "@pico/protocol";
 import { LocalRuntimeClient } from "../daemon/client.js";
-import { resolveCanonicalPicoHome } from "../daemon/endpoint.js";
+import { resolveCanonicalPicoHome, resolveLocalDaemonEndpoint } from "../daemon/endpoint.js";
 
 /** The small boundary between TUI commands and the local Runtime daemon. */
 export interface CronDaemonBridge {
@@ -131,6 +131,10 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
   constructor(options: LocalCronDaemonBridgeOptions = {}) {
     const env = options.env ?? process.env;
     const picoHome = resolveCanonicalPicoHome({ env, picoHome: options.picoHome });
+    // 构造期预检（结果弃用）：宿主资源获取前快速失败非法 socket/存储路径——
+    // repl.tsx 的启动预检不变量依赖此构造先于 loadPluginSnapshot 执行（POSIX 上
+    // 校验 Unix Socket 路径长度；win32 命名管道路径构造无失败路径，无副作用）。
+    resolveLocalDaemonEndpoint({ env, picoHome });
     this.createClient =
       options.createClient ??
       (() => new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome }));

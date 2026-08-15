@@ -60,6 +60,15 @@ test("singleton ping never probes a pre-authentication daemon", async (context) 
 });
 
 function testEndpoint(root: string): LocalDaemonEndpoint {
+  // Windows 上用 named pipe：受限环境 AF_UNIX bind EACCES，pipe 是 daemon 的
+  // win32 正式传输（先例：daemon-ownership-races.test.ts）；随机后缀防并行碰撞。
+  if (process.platform === "win32") {
+    return {
+      transport: "pipe",
+      address: `\\\\.\\pipe\\pico-daemon-ping-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
+      authTokenPath: join(root, "runtime.auth"),
+    };
+  }
   return {
     transport: "unix",
     address: join(root, "runtime.sock"),

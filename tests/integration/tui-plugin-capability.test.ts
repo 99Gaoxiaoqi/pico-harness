@@ -211,7 +211,10 @@ test("TUI validates Runtime storage before acquiring host resources", async (con
   assert.equal(snapshotLoads, 0);
 });
 
-test("TUI validates the daemon endpoint before acquiring host resources", async (context) => {
+test(
+  "TUI validates the daemon endpoint before acquiring host resources",
+  { skip: process.platform === "win32" ? "win32 命名管道路径构造无 Unix Socket 长度校验可注入" : false },
+  async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tui-endpoint-preflight-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
