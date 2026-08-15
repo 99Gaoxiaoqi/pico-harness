@@ -26,6 +26,11 @@ export interface DaemonEventReporterOptions {
     payload: RuntimeNotificationMap["approval.requested"],
     scope: { workspacePath: string; runId?: string; sessionId?: string },
   ) => void;
+  /** ask-user 问题到达（payload.prompt 含 question/options/freeText；对话框由宿主开）。 */
+  readonly onPromptRequested?: (
+    payload: RuntimeNotificationMap["prompt.requested"],
+    scope: { workspacePath: string; runId?: string; sessionId?: string },
+  ) => void;
   /** 运行相位变化（run.started/finished）透传，驱动 running 状态与中断可用性。 */
   readonly onRunStateChanged?: (running: boolean) => void;
 }
@@ -33,6 +38,7 @@ export interface DaemonEventReporterOptions {
 export class DaemonEventReporter {
   private readonly reporter: TuiReporter;
   private readonly onApprovalRequested: DaemonEventReporterOptions["onApprovalRequested"];
+  private readonly onPromptRequested: DaemonEventReporterOptions["onPromptRequested"];
   private readonly onRunStateChanged: DaemonEventReporterOptions["onRunStateChanged"];
   private active = false;
   private currentRunId: string | undefined;
@@ -40,6 +46,7 @@ export class DaemonEventReporter {
   constructor(options: DaemonEventReporterOptions) {
     this.reporter = options.reporter;
     this.onApprovalRequested = options.onApprovalRequested;
+    this.onPromptRequested = options.onPromptRequested;
     this.onRunStateChanged = options.onRunStateChanged;
   }
 
@@ -105,6 +112,16 @@ export class DaemonEventReporter {
       case "approval.requested":
         this.onApprovalRequested?.(
           payload as RuntimeNotificationMap["approval.requested"],
+          {
+            workspacePath: event.scope.workspacePath,
+            ...(event.scope.runId ? { runId: event.scope.runId } : {}),
+            ...(event.scope.sessionId ? { sessionId: event.scope.sessionId } : {}),
+          },
+        );
+        return;
+      case "prompt.requested":
+        this.onPromptRequested?.(
+          payload as RuntimeNotificationMap["prompt.requested"],
           {
             workspacePath: event.scope.workspacePath,
             ...(event.scope.runId ? { runId: event.scope.runId } : {}),

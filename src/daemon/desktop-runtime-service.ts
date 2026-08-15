@@ -262,6 +262,13 @@ export interface DesktopRuntimeInteractions {
   }):
     | { readonly accepted: boolean; readonly alreadyResolved: boolean }
     | Promise<{ readonly accepted: boolean; readonly alreadyResolved: boolean }>;
+  cancelPrompt(input: {
+    readonly workspacePath: string;
+    readonly promptId: string;
+    readonly runId?: string;
+    readonly sessionId?: string;
+    readonly reason?: string;
+  }): { readonly cancelled: boolean } | Promise<{ readonly cancelled: boolean }>;
 }
 
 /**
@@ -551,6 +558,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
         return this.options.interactions.respondPrompt(request.params);
+      },
+      "prompt.cancel": (request) => {
+        if (!this.options.interactions) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+            `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
+          );
+        }
+        return this.options.interactions.cancelPrompt(request.params);
       },
       ...createDesktopProviderRequestHandlers({
         getUserConfig: this.getUserConfig.bind(this),

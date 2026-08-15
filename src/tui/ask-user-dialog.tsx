@@ -6,12 +6,13 @@ import { truncateTerminalText, wrappedVisualRows } from "./terminal-width.js";
 
 const ASK_USER_DIALOG_PREFIX = "ask-user:pending:";
 export const ASK_USER_DIALOG_PRIORITY = 60;
+const MAX_TEXT_ANSWER_LENGTH = 2_000;
 
 export interface AskUserDialogState {
   readonly selectedIndex: number;
 }
 
-export type AskUserDialogAction = "move-up" | "move-down" | "select" | "cancel";
+export type AskUserDialogAction = "move-up" | "move-down" | "select" | "cancel" | "free-text";
 
 export interface AskUserDialogProps {
   readonly request: AskUserRequest;
@@ -22,6 +23,8 @@ export interface AskUserDialogProps {
   readonly renderWidth?: number;
   readonly showOverflowHint?: boolean;
   readonly onSelect: (optionId: string) => void;
+  /** 自由文本提交（请求声明 freeText 时宿主提供；空 trim 拒绝）。 */
+  readonly onSubmitText?: (text: string) => void;
   readonly onCancel: () => void;
 }
 
@@ -35,7 +38,7 @@ export interface AskUserDialogHost {
   readonly closeDialog: (dialogId: string) => void;
 }
 
-export function askUserDialogId(requestId: AskUserRequestId): string {
+export function askUserDialogId(requestId: string): string {
   return `${ASK_USER_DIALOG_PREFIX}${requestId}`;
 }
 
@@ -43,19 +46,32 @@ export function isAskUserDialogId(id: string): boolean {
   return id.startsWith(ASK_USER_DIALOG_PREFIX);
 }
 
+/** 对话框 settle 动作（in-process=同步 handler；客户端=RPC 异步——统一 boolean|Promise）。 */
+export interface AskUserDialogActions {
+  select(promptId: string, optionId: string): boolean | Promise<boolean>;
+  submitText?(promptId: string, text: string): boolean | Promise<boolean>;
+  cancel(promptId: string): boolean | Promise<boolean>;
+}
+
 /**
- * 把 handler 的 pending request 转成 DialogArbiter 请求。
- * 宿主通常在 handler pending 事件中调用本函数，settled 事件中移除 dialog。
+ * 把 pending request 转成 DialogArbiter 请求。
+ * 宿主通常在 pending 事件中调用本函数，settled 事件中移除 dialog。
+ * 请求声明 freeText 且 actions 提供 submitText 时装配自由文本提交
+ * （3-D Phase 3——in-process 走 handler.submitText，客户端走 prompt.respond RPC）。
  */
 export function createAskUserDialogRequest(
   request: AskUserRequest,
-  handler: Pick<AskUserHandler, "select" | "cancel">,
+  actions: AskUserDialogActions,
   options: AskUserDialogRequestOptions = {},
 ): DialogRequest {
   const id = askUserDialogId(request.requestId);
   const selectionState = { selectedIndex: 0 };
-  const closeIfSettled = (settled: boolean): void => {
-    if (settled) options.onClose?.(id);
+  const settle = (outcome: boolean | Promise<boolean>): void => {
+    void Promise.resolve(outcome)
+      .catch(() => false)
+      .then((settled) => {
+        if (settled) options.onClose?.(id);
+      });
   };
   return {
     id,
@@ -65,12 +81,14 @@ export function createAskUserDialogRequest(
       <AskUserDialog
         request={request}
         selectionState={selectionState}
-        onSelect={(optionId) => {
-          closeIfSettled(handler.select(request.requestId, optionId));
-        }}
-        onCancel={() => {
-          closeIfSettled(handler.cancel(request.requestId));
-        }}
+        onSelect={(optionId) => settle(actions.select(request.requestId, optionId))}
+        {...(request.freeText === true && actions.submitText
+          ? {
+              onSubmitText: (text: string) =>
+                settle(actions.submitText?.(request.requestId, text) ?? false),
+            }
+          : {})}
+        onCancel={() => settle(actions.cancel(request.requestId))}
       />
     ),
   };
@@ -116,11 +134,17 @@ export function AskUserDialog({
   renderWidth = 80,
   showOverflowHint = true,
   onSelect,
+  onSubmitText,
   onCancel,
 }: AskUserDialogProps): React.ReactNode {
   const [internalState, setInternalState] = useState<AskUserDialogState>(() => ({
     selectedIndex: selectionState?.selectedIndex ?? 0,
   }));
+  // 自由文本输入态（3-D Phase 3）：列表态按 t 进入；纯文本问题（无选项）
+  // 直接进入。Enter 提交 / Esc 回��表（纯文本问题 Esc=取消问题）。
+  const allowText = request.freeText === true && onSubmitText !== undefined;
+  const [textDraft, setTextDraft] = useState("");
+  const [textMode, setTextMode] = useState(request.options.length === 0 && allowText);
   const submittedRequestId = useRef<AskUserRequestId | null>(null);
   const effectiveIndex = clampIndex(
     selectedIndex ?? selectionState?.selectedIndex ?? internalState.selectedIndex,
@@ -129,19 +153,55 @@ export function AskUserDialog({
 
   useEffect(() => {
     submittedRequestId.current = null;
+    setTextDraft("");
+    setTextMode(request.options.length === 0 && allowText);
     const restoredIndex = selectionState?.selectedIndex ?? 0;
     setInternalState({ selectedIndex: restoredIndex });
-  }, [request.requestId, selectionState]);
+  }, [request.requestId, selectionState, allowText]);
 
   useInput((input, key) => {
+    if (textMode) {
+      if (submittedRequestId.current === request.requestId) return;
+      if (key.return && !key.ctrl && !key.meta) {
+        const text = textDraft.trim();
+        if (text === "") return;
+        submittedRequestId.current = request.requestId;
+        onSubmitText?.(text);
+        return;
+      }
+      if (key.escape) {
+        if (request.options.length === 0) {
+          submittedRequestId.current = request.requestId;
+          onCancel();
+        } else {
+          setTextMode(false);
+        }
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setTextDraft((current) => current.slice(0, -1));
+        return;
+      }
+      if (key.ctrl || key.meta) return;
+      if (input === "") return;
+      setTextDraft((current) =>
+        current.length + input.length > MAX_TEXT_ANSWER_LENGTH ? current : current + input,
+      );
+      return;
+    }
+
     const numberedIndex = resolveNumberedOption(input, request.options.length);
     if (numberedIndex !== null) {
       submitOption(numberedIndex);
       return;
     }
 
-    const action = resolveAskUserDialogKey(input, key);
+    const action = resolveAskUserDialogKey(input, key, { freeText: allowText });
     if (!action) return;
+    if (action === "free-text") {
+      setTextMode(true);
+      return;
+    }
     if (action === "move-up" || action === "move-down") {
       if (selectedIndex === undefined) {
         if (selectionState) {
@@ -166,6 +226,11 @@ export function AskUserDialog({
       onCancel();
       return;
     }
+    if (request.options.length === 0) {
+      // 无选项纯文本问题：Enter 无选项可选，切输入态。
+      if (allowText) setTextMode(true);
+      return;
+    }
     submitOption(effectiveIndex);
   });
 
@@ -177,20 +242,48 @@ export function AskUserDialog({
     onSelect(option.optionId);
   }
 
-  return (
-    <Box flexDirection="column">
-      {formatAskUserDialogViewport(request, effectiveIndex, {
+  const viewport = textMode
+    ? formatAskUserTextInputViewport(request, textDraft, {
+        maxQuestionLines,
+        renderWidth,
+      })
+    : formatAskUserDialogViewport(request, effectiveIndex, {
         maxVisibleOptions,
         maxQuestionLines,
         renderWidth,
         showOverflowHint,
-      })
+        freeText: allowText,
+      });
+  return (
+    <Box flexDirection="column">
+      {viewport
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
         ))}
     </Box>
   );
+}
+
+function formatAskUserTextInputViewport(
+  request: AskUserRequest,
+  draft: string,
+  options: { maxQuestionLines: number; renderWidth: number },
+): string {
+  const width = Math.max(1, Math.floor(options.renderWidth));
+  const questionRows = wrappedVisualRows(request.question, width);
+  const visibleQuestionRows = questionRows.slice(0, Math.max(1, options.maxQuestionLines));
+  if (visibleQuestionRows.length < questionRows.length) {
+    const last = visibleQuestionRows.length - 1;
+    visibleQuestionRows[last] = truncateTerminalText(`${visibleQuestionRows[last] ?? ""}…`, width);
+  }
+  const lines = [
+    truncateTerminalText(request.header ? `? ${request.header}` : "? Question", width),
+    ...visibleQuestionRows,
+    truncateTerminalText(`✎ ${draft}▌`, width),
+    truncateTerminalText("Enter 提交 · Esc 返回 · 直接打字输入", width),
+  ];
+  return lines.join("\n");
 }
 
 function formatAskUserDialogViewport(
@@ -201,6 +294,7 @@ function formatAskUserDialogViewport(
     maxQuestionLines: number;
     renderWidth: number;
     showOverflowHint: boolean;
+    freeText?: boolean;
   },
 ): string {
   const width = Math.max(1, Math.floor(options.renderWidth));
@@ -233,7 +327,14 @@ function formatAskUserDialogViewport(
   if (options.showOverflowHint && windowSize < optionCount) {
     lines.push(truncateTerminalText(`… ${optionCount - windowSize} option(s) outside view`, width));
   }
-  lines.push(truncateTerminalText("↑/↓ move · Enter/number select · Esc cancel", width));
+  lines.push(
+    truncateTerminalText(
+      options.freeText
+        ? "↑/↓ move · Enter/number select · t 自由输入 · Esc cancel"
+        : "↑/↓ move · Enter/number select · Esc cancel",
+      width,
+    ),
+  );
   return lines.join("\n");
 }
 
@@ -265,9 +366,11 @@ export function resolveAskUserDialogKey(
     readonly ctrl?: boolean;
     readonly meta?: boolean;
   },
+  options: { readonly freeText?: boolean } = {},
 ): AskUserDialogAction | null {
   if (key.escape) return "cancel";
   if (key.return && !key.ctrl && !key.meta) return "select";
+  if (options.freeText && input === "t" && !key.ctrl && !key.meta) return "free-text";
   if (key.upArrow || (input.toLocaleLowerCase() === "k" && !key.ctrl && !key.meta)) {
     return "move-up";
   }

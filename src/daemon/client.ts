@@ -61,6 +61,8 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "changes.diff",
   "rewind.list",
   "rewind.preview",
+  // 幂等取消：重发已解析的 prompt 返回 cancelled=false，不产生第二次副作用。
+  "prompt.cancel",
   "memory.list",
   "memory.get",
   "memory.review.list",

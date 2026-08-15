@@ -774,14 +774,14 @@ export function createProductionRuntimeServices(
           if (typeof input.answer !== "string" || !input.answer.trim()) {
             throw new RuntimeProtocolError(
               RUNTIME_ERROR_CODES.INVALID_PARAMS,
-              "prompt.respond answer 必须是非空选项 ID 或标签",
+              "prompt.respond answer 必须是非空选项 ID、标签或自由文本",
             );
           }
           const accepted = pending.broker.answerPrompt(input.promptId, input.answer.trim());
           if (!accepted) {
             throw new RuntimeProtocolError(
               RUNTIME_ERROR_CODES.INVALID_PARAMS,
-              `Prompt ${input.promptId} 的 answer 不是服务端提供的选项`,
+              `Prompt ${input.promptId} 的 answer 不是有效选项，且该问题未声明 freeText`,
             );
           }
           return { accepted, alreadyResolved: false };
@@ -803,6 +803,21 @@ export function createProductionRuntimeServices(
           () => ({ result: respond() }),
         );
         return outcome.result;
+      },
+      cancelPrompt: async (input) => {
+        const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
+        const key = interactionKey(workspacePath, input.promptId);
+        const pending = pendingPrompts.get(key);
+        if (!pending) {
+          // 已解析/不存在都视为非 pending：幂等返回 cancelled=false（Esc 重按不报错）。
+          return { cancelled: false };
+        }
+        assertInteractionScope(pending, input, "Prompt", input.promptId, workspacePath);
+        const cancelled = pending.broker.cancelPrompt(
+          input.promptId,
+          input.reason?.trim() || "用户在客户端取消了问题。",
+        );
+        return { cancelled };
       },
     },
   });
@@ -1802,6 +1817,7 @@ function publishInteractionEvent(
               label: option.label,
               ...(option.description ? { description: option.description } : {}),
             })),
+            ...(event.request.freeText === true ? { freeText: true } : {}),
           }),
         },
       }),
