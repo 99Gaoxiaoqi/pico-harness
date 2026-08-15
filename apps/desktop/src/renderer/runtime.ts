@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   isJsonValue,
+  isTerminalRunStatus,
+  parseApprovalRequestedPayload,
   type DesktopRuntimeMethod,
   type RuntimeProviderInput,
   type RuntimeParams,
@@ -541,9 +543,8 @@ function discoverySessionSequence(value: unknown): number {
   return sequence;
 }
 
-function isTerminalRunStatus(status: string): boolean {
-  return ["cancelled", "failed", "succeeded", "completed"].includes(status);
-}
+// 终态判定经 @pico/protocol isTerminalRunStatus（wire 归一化唯一来源；本地
+// 版曾含非枚举值 "completed"——拷贝漂移）。
 
 function interactionSessionId(
   data: AppData,
@@ -2064,45 +2065,34 @@ export function useRuntimeStore(): RuntimeStore {
       if (isMemoryNotificationTopic(topic)) {
         scheduleMemoryRefresh();
       } else if (topic === "approval.requested") {
-        const request = isRecord(payload.request) ? payload.request : {};
-        const plan = isRecord(request.plan) ? request.plan : {};
-        const planSteps = recordArray(plan.steps).map((step) =>
-          stringValue(step.title ?? step.description),
-        );
-        setData((current) => ({
-          ...current,
-          approvals: [
-            ...current.approvals.filter((item) => item.id !== stringValue(payload.approvalId)),
-            {
-              id: stringValue(payload.approvalId),
-              runId: stringValue(payload.runId ?? scope.runId),
-              sessionId: stringValue(scope.sessionId) || undefined,
-              title: stringValue(request.title, "需要你的批准"),
-              detail: stringValue(
-                request.detail ?? request.description,
-                "Runtime 请求执行受保护操作。",
-              ),
-              command: stringValue(request.command) || undefined,
-              risk: request.risk === "high" || request.risk === "medium" ? request.risk : "low",
-              kind: request.kind === "plan" ? "plan" : "tool",
-              planControlMode: request.kind === "plan" ? "review" : undefined,
-              planId: stringValue(request.planId ?? plan.planId) || undefined,
-              expectedRevision:
-                typeof request.expectedRevision === "number"
-                  ? request.expectedRevision
-                  : typeof plan.revision === "number"
-                    ? plan.revision
-                    : undefined,
-              expectedSessionSequence:
-                typeof request.expectedSessionSequence === "number"
-                  ? request.expectedSessionSequence
-                  : undefined,
-              planTitle: stringValue(plan.title) || undefined,
-              planOverview: stringValue(plan.overview) || undefined,
-              planSteps: planSteps.length > 0 ? planSteps : undefined,
-            },
-          ],
-        }));
+        // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 TUI
+        // 客户端同源；planId 不回退 approvalId 的兜底语义由此回流）。
+        const approval = parseApprovalRequestedPayload(payload);
+        if (approval) {
+          setData((current) => ({
+            ...current,
+            approvals: [
+              ...current.approvals.filter((item) => item.id !== approval.approvalId),
+              {
+                id: approval.approvalId,
+                runId: approval.runId ?? stringValue(scope.runId),
+                sessionId: stringValue(scope.sessionId) || undefined,
+                title: approval.title ?? "需要你的批准",
+                detail: approval.detail ?? "Runtime 请求执行受保护操作。",
+                command: approval.command,
+                risk: approval.risk,
+                kind: approval.kind,
+                planControlMode: approval.kind === "plan" ? "review" : undefined,
+                planId: approval.planId,
+                expectedRevision: approval.expectedRevision,
+                expectedSessionSequence: approval.expectedSessionSequence,
+                planTitle: approval.planTitle,
+                planOverview: approval.planOverview,
+                planSteps: approval.planSteps,
+              },
+            ],
+          }));
+        }
       } else if (topic === "prompt.requested") {
         const prompt = isRecord(payload.prompt) ? payload.prompt : {};
         const options = Array.isArray(prompt.options)

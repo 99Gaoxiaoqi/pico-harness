@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type {
-  RuntimeMethod,
-  RuntimeNotification,
-  RuntimeNotificationMap,
-  RuntimeParams,
-  RuntimeResult,
-  RuntimeUserInput,
+import {
+  isActiveRunStatus,
+  parseApprovalRequestedPayload,
+  type RuntimeMethod,
+  type RuntimeNotification,
+  type RuntimeNotificationMap,
+  type RuntimeParams,
+  type RuntimeResult,
+  type RuntimeUserInput,
 } from "@pico/protocol";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type { PlanApprovalControl } from "./approval-dialogs.js";
@@ -328,16 +330,13 @@ export class ClientSessionRuntime {
       transcriptEventsFromRuntimeItems(page.items, sessionId),
     );
     // 恢复活跃 run 相位（对抗评审 P1：/resume 进运行中会话须点亮 running、
-    // /interrupt 才有目标）——双向对账：无活跃 run 时清掉误亮的相位。
+    // /interrupt 才有目标）——双向对账：无活跃 run 时清掉误亮的相位。活跃口径
+    // 经 isActiveRunStatus（水化对账口径，含 paused/cancelling）。
     const activeRun = page.activeRun as { runId?: unknown; status?: unknown } | undefined;
     const activeRunLive =
       activeRun !== undefined &&
       typeof activeRun.runId === "string" &&
-      (activeRun.status === "queued" ||
-        activeRun.status === "running" ||
-        activeRun.status === "pause_requested" ||
-        activeRun.status === "paused" ||
-        activeRun.status === "cancelling");
+      isActiveRunStatus(typeof activeRun.status === "string" ? activeRun.status : "");
     if (activeRunLive && typeof activeRun.runId === "string") {
       this.eventReporter.seedActiveRun(activeRun.runId);
     } else if (this.eventReporter.running) {
@@ -440,35 +439,23 @@ export class ClientSessionRuntime {
   private handleApprovalRequested(
     payload: RuntimeNotificationMap["approval.requested"],
   ): void {
-    const request = payload.request as Record<string, unknown>;
-    // plan 类审批（kind:"plan"）：wire 携带 planId/expectedRevision/
-    // expectedSessionSequence——approval-dialogs 的 resolvePlanApprovalAction
-    // 按这些元数据走 plan.respond（Desktop renderer 同款读取方式）。
-    const isPlan = request["kind"] === "plan";
+    // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 Desktop
+    // renderer 同源：planId 不回退 approvalId 的兜底语义一处收口）。
+    const approval = parseApprovalRequestedPayload(payload);
+    if (!approval) return;
     const notice = {
-      taskId: payload.approvalId,
-      toolName: typeof request["toolName"] === "string" ? request["toolName"] : "",
-      args: typeof request["args"] === "string" ? request["args"] : "",
+      taskId: approval.approvalId,
+      toolName: approval.toolName ?? "",
+      args: approval.args ?? "",
       // wire 无 providerCallId（Phase 3 协议补齐）：onToolAwaitingApproval 的精确
       // 工具卡匹配暂缺，对话框经 taskId 独立工作。
       providerCallId: "",
-      message:
-        typeof request["title"] === "string"
-          ? request["title"]
-          : typeof request["detail"] === "string"
-            ? (request["detail"] as string)
-            : "daemon 请求审批",
-      ...(isPlan
+      message: approval.title ?? approval.detail ?? "daemon 请求审批",
+      ...(approval.kind === "plan"
         ? {
-            // planId 兜底对齐 Desktop 语义（对抗评审二轮）：wire 未带 planId 时
-            // 不回退 approvalId——那会构造出 bogus planId 的 plan.respond。
-            ...(typeof request["planId"] === "string" ? { planId: request["planId"] } : {}),
-            expectedRevision:
-              typeof request["expectedRevision"] === "number" ? request["expectedRevision"] : 0,
-            expectedSessionSequence:
-              typeof request["expectedSessionSequence"] === "number"
-                ? request["expectedSessionSequence"]
-                : 0,
+            planId: approval.planId,
+            expectedRevision: approval.expectedRevision ?? 0,
+            expectedSessionSequence: approval.expectedSessionSequence ?? 0,
           }
         : {}),
     };
