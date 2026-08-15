@@ -243,7 +243,11 @@ export class ClientSessionRuntime {
     payload: RuntimeNotificationMap["approval.requested"],
   ): void {
     const request = payload.request as Record<string, unknown>;
-    const notice: ApprovalNotice = {
+    // plan 类审批（kind:"plan"）：wire 携带 planId/expectedRevision/
+    // expectedSessionSequence——approval-dialogs 的 resolvePlanApprovalAction
+    // 按这些元数据走 plan.respond（Desktop renderer 同款读取方式）。
+    const isPlan = request["kind"] === "plan";
+    const notice = {
       taskId: payload.approvalId,
       toolName: typeof request["toolName"] === "string" ? request["toolName"] : "",
       args: typeof request["args"] === "string" ? request["args"] : "",
@@ -256,6 +260,17 @@ export class ClientSessionRuntime {
           : typeof request["detail"] === "string"
             ? (request["detail"] as string)
             : "daemon 请求审批",
+      ...(isPlan
+        ? {
+            planId: typeof request["planId"] === "string" ? request["planId"] : payload.approvalId,
+            expectedRevision:
+              typeof request["expectedRevision"] === "number" ? request["expectedRevision"] : 0,
+            expectedSessionSequence:
+              typeof request["expectedSessionSequence"] === "number"
+                ? request["expectedSessionSequence"]
+                : 0,
+          }
+        : {}),
     };
     this.onApproval?.(notice);
   }
