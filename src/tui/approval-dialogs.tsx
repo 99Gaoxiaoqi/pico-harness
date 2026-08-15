@@ -50,8 +50,18 @@ export interface PlanApprovalControl {
 export interface ApprovalDialogDeps {
   readonly reporter: Pick<TuiReporter, "pushSystemMessage">;
   readonly closeDialog?: ((id: string) => void) | undefined;
-  readonly sessionId: string | undefined;
-  readonly planControl: PlanApprovalControl | undefined;
+  readonly sessionId?: string | undefined;
+  readonly planControl?: PlanApprovalControl | undefined;
+  /**
+   * 覆盖普通审批动作解析（client 模式注入：approval.respond RPC，异步）。
+   * 缺省走进程内 globalApprovalManager（跨进程不可达）。
+   */
+  readonly resolvePlain?:
+    | ((
+        action: "approve" | "approve-session" | "reject",
+        taskId: string,
+      ) => boolean | Promise<boolean>)
+    | undefined;
 }
 
 export function isPlanApprovalAction(action: ApprovalPanelAction): action is PlanApprovalAction {
@@ -79,6 +89,10 @@ export function createApprovalDialogRequest(
         onAction={(action, feedback) => {
           if (isPlanApprovalAction(action)) {
             void resolvePlanApprovalAction(notice, action, feedback, deps);
+            return;
+          }
+          if (deps.resolvePlain) {
+            resolveApprovalActionVia(deps.resolvePlain, action, notice.taskId, deps);
             return;
           }
           resolveApprovalAction({ action, taskId: notice.taskId }, deps);
@@ -160,6 +174,26 @@ export function planReviewOperationId(
     )
     .digest("hex");
   return `tui-plan:${digest}`;
+}
+
+/** 注入式普通审批解析（client 模式：approval.respond RPC 映射；允许异步）。 */
+export function resolveApprovalActionVia(
+  resolve: (
+    action: "approve" | "approve-session" | "reject",
+    taskId: string,
+  ) => boolean | Promise<boolean>,
+  action: PlainApprovalAction,
+  taskId: string,
+  deps: Pick<ApprovalDialogDeps, "reporter" | "closeDialog">,
+): boolean {
+  const outcome = resolve(action, taskId);
+  deps.closeDialog?.(approvalDialogId(taskId));
+  if (outcome instanceof Promise) {
+    void outcome.then((ok) => deps.reporter.pushSystemMessage(approvalResolutionMessage(action, ok)));
+    return true;
+  }
+  deps.reporter.pushSystemMessage(approvalResolutionMessage(action, outcome));
+  return outcome;
 }
 
 /**

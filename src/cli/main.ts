@@ -23,6 +23,7 @@ import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
 import { startTuiRepl, type ReplOptions } from "../tui/repl.js";
+import { startClientRepl, type ClientReplOptions } from "../tui/client-repl.js";
 import {
   resolveCliStartupSession,
   resolveCliWorkDir,
@@ -67,6 +68,7 @@ Options:
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
       --daemon-stop                  Stop the resident local daemon gracefully
+      --client                       Run the TUI as a daemon thin client (3-D tracer)
   -h, --help                         Show this help without starting the TUI
   -V, --version                      Show the installed version
 `;
@@ -84,6 +86,7 @@ export interface CliRuntime {
     options?: ResolveCliStartupSessionOptions,
   ): Promise<CliStartupSession>;
   startTuiRepl(options: ReplOptions): Promise<void>;
+  startClientRepl(options: ClientReplOptions): Promise<void>;
 }
 
 interface ParsedCliOptions {
@@ -97,6 +100,7 @@ interface ParsedCliOptions {
   help: boolean;
   version: boolean;
   daemonStop: boolean;
+  client: boolean;
 }
 
 interface ParsedCliValues {
@@ -113,6 +117,7 @@ interface ParsedCliValues {
   fork?: string;
   "fork-session"?: string;
   "daemon-stop"?: boolean;
+  client?: boolean;
   help?: boolean;
   version?: boolean;
 }
@@ -143,6 +148,30 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       trustedWorkDir: workDir,
     });
     const model = options.model ?? runtime.env.LLM_MODEL ?? defaultModelForKind(options.provider);
+
+    // 3-D Phase 2 客户端 tracer：TUI 走 daemon 瘦客户端（connectOrSpawn 拉起/
+    // 连上常驻 daemon），本进程零引擎装配。模型路由归 daemon（BYOK 旗标合并是
+    // Phase 3）；会话选择 v1 仅支持 -S 显式 sessionId。
+    if (options.client) {
+      if (sessionSelection && sessionSelection.mode !== "new" && sessionSelection.mode !== "resume") {
+        runtime.writeStderr(
+          "提示：客户端模式暂只支持新会话与 -S/--resume 显式恢复；--continue/--fork 请用进程内模式（3-D Phase 3 补全）。\n",
+        );
+      }
+      const clientSessionId =
+        sessionSelection?.mode === "resume" ? sessionSelection.sessionId : undefined;
+      if (options.model !== undefined || options.thinkingEffort !== undefined) {
+        runtime.writeStderr(
+          "提示：客户端模式下 --model/--thinking 由 daemon 配置决定，本旗标暂被忽略（3-D Phase 3 合并）。\n",
+        );
+      }
+      await runtime.startClientRepl({
+        workDir,
+        ...(clientSessionId ? { sessionId: clientSessionId } : {}),
+        model,
+      });
+      return 0;
+    }
 
     await runtime.startTuiRepl({
       workDir,
@@ -188,6 +217,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         fork: { type: "string" },
         "fork-session": { type: "string" },
         "daemon-stop": { type: "boolean" },
+        client: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "V" },
       },
@@ -216,6 +246,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     help: values.help === true,
     version: values.version === true,
     daemonStop: values["daemon-stop"] === true,
+    client: values.client === true,
   };
 }
 
@@ -355,6 +386,7 @@ async function executeEntrypoint(): Promise<void> {
     },
     resolveCliStartupSession,
     startTuiRepl,
+    startClientRepl,
   };
   process.exitCode = await runCli(process.argv.slice(2), runtime);
 }

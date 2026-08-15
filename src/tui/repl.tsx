@@ -137,7 +137,6 @@ import {
   type RewindCommandDialogState,
 } from "./rewind-command-dialog.js";
 import { applyTuiRewind, rewindInputReplacement } from "./rewind-runtime.js";
-import { type ApprovalNotice, globalApprovalManager } from "../approval/manager.js";
 import { approvalDialogId, isApprovalDialogId } from "./approval-panel.js";
 import {
   createApprovalDialogRequest,
