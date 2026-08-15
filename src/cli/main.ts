@@ -160,15 +160,16 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       }
       const clientSessionId =
         sessionSelection?.mode === "resume" ? sessionSelection.sessionId : undefined;
-      if (options.model !== undefined || options.thinkingEffort !== undefined) {
+      if (options.provider !== "openai" && options.model === undefined) {
         runtime.writeStderr(
-          "提示：客户端模式下 --model/--thinking 由 daemon 配置决定，本旗标暂被忽略（3-D Phase 3 合并）。\n",
+          "提示：客户端模式下 --provider 由模型路由隐含决定（裸旗标无 daemon 等价物），请用 --model <provider/model> 指定路由。\n",
         );
       }
       await runtime.startClientRepl({
         workDir,
         ...(clientSessionId ? { sessionId: clientSessionId } : {}),
-        model,
+        ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
       });
       return 0;
     }

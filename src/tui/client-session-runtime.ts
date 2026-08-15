@@ -50,6 +50,13 @@ export interface ClientSessionRuntimeOptions {
   /** 审批被解析（含对端/超时解析）——宿主清理残留对话框。 */
   readonly onApprovalResolved?: (approvalId: string) => void;
   readonly onRunStateChanged?: (running: boolean) => void;
+  /**
+   * BYOK 旗标合并（Phase 3 首批）：--model 经 config.effective.get 解析为
+   * modelRouteId（路由 id `provider/model` 或裸模型名），sessionId 确立后经
+   * session.settings.update 应用一次；解析失败提示指引并放弃（不阻断）。
+   */
+  readonly modelOverride?: string;
+  readonly thinkingOverride?: string;
 }
 
 export class ClientSessionRuntime {
@@ -63,6 +70,8 @@ export class ClientSessionRuntime {
   private hydrating = false;
   private hydrateAgain = false;
   private disposed = false;
+  private pendingModelRouteId: string | undefined;
+  private settingsOverrideApplied = false;
 
   constructor(private readonly options: ClientSessionRuntimeOptions) {
     this.client = options.client;
@@ -87,7 +96,11 @@ export class ClientSessionRuntime {
 
   async start(): Promise<void> {
     await this.client.connect?.();
-    if (this.sessionId) await this.hydrate();
+    await this.resolveModelOverride();
+    if (this.sessionId) {
+      await this.hydrate();
+      await this.applyStartupOverrides();
+    }
     const subscription = await this.client.subscribe(
       { workspacePath: this.workspacePath },
       (notification) => this.handleNotification(notification),
@@ -115,7 +128,10 @@ export class ClientSessionRuntime {
         behavior: "auto",
         idempotencyKey: randomUUID(),
       });
-      this.sessionId ??= result.session.sessionId;
+      if (this.sessionId === undefined) {
+        this.sessionId = result.session.sessionId;
+        await this.applyStartupOverrides();
+      }
       return true;
     } catch (error) {
       this.reporter.pushError(error instanceof Error ? error.message : String(error), {
@@ -196,7 +212,10 @@ export class ClientSessionRuntime {
         "reload"
     ) {
       // 新会话首条事件可能先于 session.send 返回到达：从事件 scope 采纳 sessionId。
-      this.sessionId ??= notification.scope.sessionId;
+      if (this.sessionId === undefined && notification.scope.sessionId) {
+        this.sessionId = notification.scope.sessionId;
+        void this.applyStartupOverrides();
+      }
       const scoped = notification.scope.sessionId;
       if (!this.sessionId || scoped === this.sessionId) void this.scheduleHydrate();
     }
@@ -237,6 +256,72 @@ export class ClientSessionRuntime {
     this.reporter.replaceTranscriptEvents(
       transcriptEventsFromRuntimeItems(page.items, this.sessionId),
     );
+  }
+
+  /** --model → modelRouteId（config.effective.get 枚举路由；约定 id 为 `provider/model`）。 */
+  private async resolveModelOverride(): Promise<void> {
+    const override = this.options.modelOverride;
+    if (!override) return;
+    try {
+      const config = await this.client.request("config.effective.get", {
+        workspacePath: this.workspacePath,
+      });
+      const defaultRoute =
+        typeof config.defaultModelRouteId === "string" ? config.defaultModelRouteId : undefined;
+      if (override === defaultRoute) {
+        this.pendingModelRouteId = override;
+        return;
+      }
+      const providers = Array.isArray(config.providers) ? config.providers : [];
+      for (const provider of providers) {
+        const record = provider as Record<string, unknown>;
+        const providerId = typeof record["id"] === "string" ? record["id"] : undefined;
+        const models = Array.isArray(record["models"]) ? record["models"] : [];
+        if (!providerId) continue;
+        for (const model of models) {
+          if (typeof model !== "string") continue;
+          if (override === `${providerId}/${model}` || override === model) {
+            this.pendingModelRouteId = `${providerId}/${model}`;
+            return;
+          }
+        }
+      }
+      this.reporter.pushError(
+        `--model ${override} 未匹配任何已配置路由（config.effective.get）。请在 daemon 配置（.pico/config.json 或 LLM_* env）中配置后重试，或去掉 --model 使用默认路由。`,
+        { retryable: false, action: "--model" },
+      );
+    } catch (error) {
+      this.reporter.pushError(
+        `解析 --model 失败：${error instanceof Error ? error.message : String(error)}（本次忽略覆盖）`,
+        { retryable: true, action: "config.effective.get" },
+      );
+    }
+  }
+
+  /** sessionId 确立后应用一次 BYOK 覆盖（modelRouteId/thinkingEffort → session.settings.update）。 */
+  private async applyStartupOverrides(): Promise<void> {
+    if (this.settingsOverrideApplied || this.disposed) return;
+    const routeId = this.pendingModelRouteId;
+    const thinking = this.options.thinkingOverride;
+    if (!routeId && !thinking) return;
+    if (!this.sessionId) return;
+    this.settingsOverrideApplied = true;
+    try {
+      await this.client.request("session.settings.update", {
+        workspacePath: this.workspacePath,
+        sessionId: this.sessionId,
+        ...(routeId ? { modelRouteId: routeId } : {}),
+        ...(thinking ? { thinkingEffort: thinking } : {}),
+      });
+      this.reporter.pushSystemMessage(
+        `客户端覆盖已应用：${[routeId ? `模型路由 ${routeId}` : undefined, thinking ? `思考强度 ${thinking}` : undefined].filter(Boolean).join("，")}。`,
+      );
+    } catch (error) {
+      this.reporter.pushError(
+        `应用启动覆盖失败：${error instanceof Error ? error.message : String(error)}`,
+        { retryable: true, action: "session.settings.update" },
+      );
+    }
   }
 
   private handleApprovalRequested(

@@ -27,6 +27,8 @@ export interface ClientReplOptions {
   readonly workDir: string;
   readonly sessionId?: string;
   readonly model?: string;
+  /** BYOK 思考强度覆盖（--thinking，经 session.settings.update 应用）。 */
+  readonly thinkingEffort?: string;
 }
 
 export async function startClientRepl(options: ClientReplOptions): Promise<void> {
@@ -49,6 +51,8 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     workspacePath: options.workDir,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     reporter,
+    ...(options.model ? { modelOverride: options.model } : {}),
+    ...(options.thinkingEffort ? { thinkingOverride: options.thinkingEffort } : {}),
     onRunStateChanged: (running) => runningSink.current?.(running),
     onApproval: (notice) => {
       setDialogRequests?.((items) => [
