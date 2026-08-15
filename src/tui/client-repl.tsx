@@ -5,7 +5,10 @@ import {
   projectTranscriptEntriesForRendering,
   type TranscriptProjection,
 } from "../presentation/transcript-event-store.js";
+import { loadPicoConfig } from "../input/pico-config.js";
+import { FileIndex } from "../input/file-index.js";
 import { App } from "./app.js";
+import type { UserKeybindingConfig } from "./keybindings/resolver.js";
 import { approvalDialogId } from "./approval-panel.js";
 import { createApprovalDialogRequest } from "./approval-dialogs.js";
 import {
@@ -25,7 +28,11 @@ import {
 } from "./client-command-host.js";
 import { TuiReporter } from "./tui-reporter.js";
 import { createTuiUpdateScheduler, TUI_RENDER_OPTIONS } from "./update-scheduler.js";
-import { diffStatFromRewindPreview } from "./rewind-client-bridge.js";
+import {
+  changesModelFromRewindChanges,
+  diffStatFromRewindPreview,
+} from "./rewind-client-bridge.js";
+import type { ChangesJumpToRewindAction, ChangesRestoreFileAction } from "./changes-panel.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
 import type { FileHistoryDiffStat } from "../safety/file-history.js";
@@ -66,6 +73,9 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   const reporter = new TuiReporter({ onProjectionUpdate: scheduleProjection });
 
   let setDialogRequests: ((update: (items: DialogRequest[]) => DialogRequest[]) => void) | undefined;
+  // @ 文件补全（tier2 收口）：FileIndex 纯本地（git ls-files + 目录扫描 + TTL
+  // 缓存），run 终态与 rewind 应用后 markDirty 失效缓存。
+  const fileIndex = FileIndex.create({ cwd: options.workDir });
   const runtime = new ClientSessionRuntime({
     client,
     workspacePath: options.workDir,
@@ -74,7 +84,10 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     ...(options.model ? { modelOverride: options.model } : {}),
     ...(options.thinkingEffort ? { thinkingOverride: options.thinkingEffort } : {}),
     ...(options.graphMode ? { orchestrationModeOverride: "graph" } : {}),
-    onRunStateChanged: (running) => runningSink.current?.(running),
+    onRunStateChanged: (running) => {
+      runningSink.current?.(running);
+      if (!running) fileIndex.markDirty();
+    },
     onSettingsSnapshot: (settings) => {
       currentSettings.current = settings;
       settingsSink.current?.(settings);
@@ -186,6 +199,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     if (result.sessionId && result.sessionId !== sessionId) {
       await runtime.switchSession(result.sessionId);
     }
+    if (result.applied) fileIndex.markDirty();
   };
   const requestExit = (): void => {
     if (exitRequested) return;
@@ -195,6 +209,35 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
 
   const closeDialogById = (id: string): void => {
     setDialogRequests?.((items) => items.filter((item) => item.id !== id));
+  };
+
+  // /changes 单文件恢复（tier2 收口）：rewind.changes/restoreFile RPC 桥。
+  const getRewindChanges = async (messageId: string) => {
+    const sessionId = runtime.activeSessionId;
+    if (!sessionId) throw new Error("当前没有活跃会话。");
+    const result = await runtime.request("rewind.changes", {
+      workspacePath: options.workDir,
+      sessionId,
+      checkpointId: messageId,
+    });
+    return changesModelFromRewindChanges(result);
+  };
+  const onRestoreRewindFile = async (action: ChangesRestoreFileAction): Promise<void> => {
+    const sessionId = runtime.activeSessionId;
+    if (!sessionId) throw new Error("当前没有活跃会话。");
+    const result = await runtime.request("rewind.restoreFile", {
+      workspacePath: options.workDir,
+      sessionId,
+      checkpointId: action.messageId,
+      path: action.filePath,
+      expectedFingerprint: action.expectedCurrentFingerprint,
+    });
+    fileIndex.markDirty();
+    reporter.pushSystemMessage(`已单文件恢复 ${result.path}（${result.status}）。`);
+  };
+  const onJumpToRewindFromChanges = async (action: ChangesJumpToRewindAction): Promise<void> => {
+    closeDialogById("local-ui:changes");
+    await handleSubmittedText(`/rewind ${action.messageId}`);
   };
 
   const applyLocalCommand = (result: Parameters<typeof handleClientLocalCommand>[0]): void => {
@@ -209,6 +252,9 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       switchSession: (sessionId: string | undefined) => runtime.switchSession(sessionId),
       getRewindDiffStat,
       onRewindApply,
+      getRewindChanges,
+      onRestoreRewindFile,
+      onJumpToRewind: onJumpToRewindFromChanges,
     });
     const dialog = effect.dialog;
     if (dialog) {
@@ -236,12 +282,18 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     const [inputReplacement, setInputReplacement] = useState<
       { sequence: number; text: string } | undefined
     >(undefined);
+    // 用户自定义键位（tier2 收口）：settings.json 的 keybindings 覆盖——加载
+    // 前空表（resolver 用 DEFAULT_KEYBINDINGS 兜底）。加载失败静默用默认。
+    const [keybindings, setKeybindings] = useState<UserKeybindingConfig>({});
     useEffect(() => {
       projectionSink.current = setProjection;
       setDialogRequests = setDialogs;
       runningSink.current = setRunning;
       settingsSink.current = setSettings;
       inputReplacementSink.current = setInputReplacement;
+      void loadPicoConfig(options.workDir)
+        .then((config) => setKeybindings(config.keybindings))
+        .catch(() => undefined);
       return () => {
         projectionSink.current = undefined;
         runningSink.current = undefined;
@@ -282,6 +334,10 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         slashArgumentSuggestions={(command: string, query: string) =>
           commandRegistry.resolve(command)?.argumentCompleter?.(query) ?? []
         }
+        fileMentionSuggestions={(query: string) =>
+          fileIndex.query(query).then((files) => files.map((value) => ({ value })))
+        }
+        keybindings={keybindings}
       />
     );
   }

@@ -6,7 +6,7 @@ import type {
 } from "../input/types.js";
 
 const LOCAL_UI_PANELS = new Set<LocalUiPanel>(["help", "model", "sessions", "rewind", "hooks"]);
-const LOCAL_UI_SELECTORS = new Set<LocalUiSelector>(["model", "session", "rewind"]);
+const LOCAL_UI_SELECTORS = new Set<LocalUiSelector>(["model", "session", "rewind", "changes"]);
 
 export function hasLocalUiCommandAction(
   result: LocalCommandResult,

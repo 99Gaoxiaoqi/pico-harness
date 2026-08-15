@@ -297,6 +297,77 @@ export function createChangesDialogRequest(
   };
 }
 
+/**
+ * 异步数据宿主（3-D 客户端 /changes）：按 messageId 拉模型（rewind.changes
+ * RPC 桥），加载/错误态自渲染；单文件恢复成功后自动重载（指纹与 diff 都已
+ * 变化，旧模型继续操作必被守卫拒绝）。
+ */
+export interface ChangesDialogHostProps {
+  messageId: string;
+  loadModel: (messageId: string) => Promise<ChangesPanelModel>;
+  onRestoreFile: (action: ChangesRestoreFileAction) => void | Promise<void>;
+  onJumpToRewind: (action: ChangesJumpToRewindAction) => void | Promise<void>;
+  onClose: () => void;
+}
+
+export function ChangesDialogHost({
+  messageId,
+  loadModel,
+  onRestoreFile,
+  onJumpToRewind,
+  onClose,
+}: ChangesDialogHostProps): React.ReactNode {
+  const [model, setModel] = useState<ChangesPanelModel>();
+  const [error, setError] = useState<string>();
+  const [reloadKey, setReloadKey] = useState(0);
+  useInput((input, key) => {
+    if (error && (key.escape || input === "\u001b")) onClose();
+  });
+  useEffect(() => {
+    let mounted = true;
+    setError(undefined);
+    loadModel(messageId).then(
+      (loaded) => {
+        if (mounted) setModel(loaded);
+      },
+      (loadError: unknown) => {
+        if (mounted) setError(toErrorMessage(loadError));
+      },
+    );
+    return () => {
+      mounted = false;
+    };
+  }, [messageId, reloadKey]);
+  if (error) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>Changes</Text>
+        <Text color="red">{truncateTerminalText(error, 80)}</Text>
+        <Text dimColor>Esc close</Text>
+      </Box>
+    );
+  }
+  if (model === undefined) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>Changes</Text>
+        <Text dimColor>Loading changes…</Text>
+      </Box>
+    );
+  }
+  return (
+    <ChangesDialogContent
+      model={model}
+      onRestoreFile={async (action) => {
+        await onRestoreFile(action);
+        setReloadKey((current) => current + 1);
+      }}
+      onJumpToRewind={onJumpToRewind}
+      onClose={onClose}
+    />
+  );
+}
+
 export function createChangesPanelModel(changes: FileHistoryChanges): ChangesPanelModel {
   return {
     messageId: changes.messageId,

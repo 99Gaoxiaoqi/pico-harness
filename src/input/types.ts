@@ -7,7 +7,7 @@ export interface ParsedSlashInput {
 
 export type LocalUiPanel = "help" | "model" | "sessions" | "rewind" | "hooks";
 
-export type LocalUiSelector = "model" | "session" | "rewind";
+export type LocalUiSelector = "model" | "session" | "rewind" | "changes";
 
 export type LocalUiCommandAction =
   | {

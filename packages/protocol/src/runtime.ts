@@ -931,6 +931,44 @@ export type RuntimeMethodMap = {
     };
     readonly result: { readonly applied: boolean; readonly sessionId: SessionId };
   };
+  /** 单文件恢复（/changes）：checkpoint 维度的逐文件 diff + 当前指纹（preview）。 */
+  readonly "rewind.changes": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly checkpointId: CheckpointId;
+    };
+    readonly result: {
+      readonly checkpointId: CheckpointId;
+      readonly files: readonly (JsonObject & {
+        readonly path: string;
+        readonly status: "created" | "deleted" | "modified";
+        readonly additions: number;
+        readonly deletions: number;
+        /** 文件当前内容指纹——restoreFile 的一致性守卫。 */
+        readonly fingerprint: string;
+        readonly patch: string;
+        readonly truncated: boolean;
+      })[];
+      readonly addedLines: number;
+      readonly removedLines: number;
+      readonly partial?: boolean;
+      readonly warnings?: readonly string[];
+    };
+  };
+  /** 单文件恢复（/changes）：把一个文件还原到 checkpoint 之前（其余不动）。 */
+  readonly "rewind.restoreFile": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly checkpointId: CheckpointId;
+      readonly path: string;
+      readonly expectedFingerprint: string;
+    };
+    readonly result: {
+      readonly restored: boolean;
+      readonly path: string;
+      readonly status: "created" | "deleted" | "modified";
+    };
+  };
   readonly "memory.list": {
     readonly params: WorkspaceParams & {
       readonly states?: readonly RuntimeMemoryFactState[];
@@ -1353,6 +1391,8 @@ export const RUNTIME_METHODS = [
   "rewind.list",
   "rewind.preview",
   "rewind.apply",
+  "rewind.changes",
+  "rewind.restoreFile",
   "memory.list",
   "memory.get",
   "memory.update",
@@ -1460,6 +1500,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "rewind.list",
   "rewind.preview",
   "rewind.apply",
+  "rewind.changes",
+  "rewind.restoreFile",
   "memory.list",
   "memory.get",
   "memory.update",
@@ -2713,6 +2755,18 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     },
     { mode: oneOfParam(["code", "conversation", "both"]) },
   ),
+  "rewind.changes": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    checkpointId: stringParam,
+  }),
+  "rewind.restoreFile": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    checkpointId: stringParam,
+    path: stringParam,
+    expectedFingerprint: stringParam,
+  }),
   "memory.list": exactParamShape(
     { workspacePath: stringParam },
     {

@@ -6,6 +6,11 @@ import type { FileHistoryDiffStat } from "../safety/file-history.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import type { LocalCommandResult } from "../input/types.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
+import type {
+  ChangesJumpToRewindAction,
+  ChangesPanelModel,
+  ChangesRestoreFileAction,
+} from "./changes-panel.js";
 import {
   createLocalUiDialogRequest,
   type LocalUiDialogHostContext,
@@ -37,6 +42,13 @@ export interface ClientCommandHostDeps {
     snapshot: FileHistorySnapshotSummary,
     mode: RewindMode,
   ) => void | Promise<void>;
+  /** /changes 单文件恢复（tier2 收口）：模型数据源（rewind.changes RPC 桥）。
+   * 缺省时 /changes 降级为提示（不打开对话框）。 */
+  readonly getRewindChanges?: (messageId: string) => Promise<ChangesPanelModel>;
+  /** 单文件恢复执行（rewind.restoreFile RPC 桥）。 */
+  readonly onRestoreRewindFile?: (action: ChangesRestoreFileAction) => void | Promise<void>;
+  /** Changes 面板 → 完整回滚跳转（默认派发 /rewind <id>）。 */
+  readonly onJumpToRewind?: (action: ChangesJumpToRewindAction) => void | Promise<void>;
 }
 
 export interface ClientLocalCommandEffect {
@@ -55,6 +67,8 @@ export function handleClientLocalCommand(
   let dialog: DialogRequest | null = null;
   let exit = false;
   let switchedSession: string | undefined;
+  let suppressDialog = false;
+  let messageOverride: string | undefined;
 
   if (result.ui) {
     const context: LocalUiDialogHostContext = {
@@ -109,6 +123,27 @@ export function handleClientLocalCommand(
         if (data?.selectedMessageId) context.rewindSelectedMessageId = data.selectedMessageId;
       }
     }
+    if (result.ui.kind === "open-selector" && result.ui.selector === "changes") {
+      const data = result.data as { sessionId?: string; checkpointId?: string } | undefined;
+      // 有模型数据源才打开单文件恢复对话框（rewind.changes RPC 桥）；缺省时
+      // 命令层已降级为提示，此处兜底不再打开。
+      if (deps.getRewindChanges && data?.checkpointId) {
+        context.changesMessageId = data.checkpointId;
+        context.changesLoadModel = deps.getRewindChanges;
+        if (deps.onRestoreRewindFile) {
+          context.changesOnRestoreFile = deps.onRestoreRewindFile;
+        }
+        context.changesOnJumpToRewind =
+          deps.onJumpToRewind ??
+          ((action) => {
+            deps.closeDialog("local-ui:changes");
+            void deps.dispatchInput(`/rewind ${action.messageId}`);
+          });
+      } else {
+        suppressDialog = true;
+        messageOverride = "Changes 面板不可用（宿主未接入 rewind.changes 数据源）。";
+      }
+    }
     if (result.ui.kind === "open-panel" && result.ui.panel === "help") {
       context.commands = deps.registry
         .list({ includeHidden: false })
@@ -121,7 +156,7 @@ export function handleClientLocalCommand(
           aliases: command.aliases ?? [],
         }));
     }
-    dialog = createLocalUiDialogRequest(result.ui, context);
+    dialog = suppressDialog ? null : createLocalUiDialogRequest(result.ui, context);
   }
 
   switch (result.action) {
@@ -143,7 +178,8 @@ export function handleClientLocalCommand(
       break;
   }
 
-  if (result.message) deps.reporter.pushSystemMessage(result.message);
+  if (messageOverride) deps.reporter.pushSystemMessage(messageOverride);
+  else if (result.message) deps.reporter.pushSystemMessage(result.message);
   return { dialog, exit, switchedSession };
 }
 
