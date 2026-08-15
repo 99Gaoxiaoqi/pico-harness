@@ -12,6 +12,8 @@ import {
   decodeClientFrame,
   negotiateProtocol,
   resolveOperationSpec,
+  HOST_DIAGNOSTIC_LOG_MAX_ENTRIES,
+  HOST_DIAGNOSTIC_LOG_MAX_ENTRY_BYTES,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
   RUNTIME_HOST_PROTOCOL_VERSION,
   RUNTIME_HOST_REGISTRATION_KIND,
@@ -118,6 +120,10 @@ export class RuntimeHostKernel {
   readonly #operationDeadlineMs: number;
   #endpoint: RuntimeHostEndpoint | undefined;
   #state: HostLifecycleState = "starting";
+  // 机制层诊断日志（3-B-4 / M4）：有界环形缓冲，记录 kernel 生命周期关键转移，
+  // 供 host.diagnostics.query 拉取。只覆盖 kernel 自身事实（状态转移/关停路径/
+  // 所有者丢失），不含领域 handler 事件——那是桥接层的事。
+  #diagnosticLogs: string[] = [];
   #activeOperations = 0;
   #activeCommandOperations = 0;
   #activeResidencies = 0;
@@ -216,6 +222,7 @@ export class RuntimeHostKernel {
   #requestDrain(): void {
     if (!this.#shutdownRequested) {
       this.#shutdownRequested = true;
+      this.#appendDiagnosticLog("drain requested");
       this.#cancelIdle();
       this.#armShutdownDeadline();
       this.#beginCompositionDrain();
@@ -264,6 +271,9 @@ export class RuntimeHostKernel {
               new Promise<never>((_, reject) => {
                 recoverDeadlineTimer = setTimeout(() => {
                   this.#requestDrain();
+                  this.#appendDiagnosticLog(
+                    "composition recover exceeded the startup deadline",
+                  );
                   reject(
                     new Error(
                       "Runtime Host composition recover exceeded the startup deadline",
@@ -286,6 +296,9 @@ export class RuntimeHostKernel {
       return;
     }
     this.#state = "ready";
+    this.#appendDiagnosticLog(
+      compositionFactory ? "state=ready (composition recovered)" : "state=ready",
+    );
     await this.#publishRegistration();
     this.#scheduleIdleIfNeeded();
   }
@@ -442,6 +455,7 @@ export class RuntimeHostKernel {
     try {
       await assertInteractiveRootOwner(this.#options.owner);
     } catch {
+      this.#appendDiagnosticLog("interactive root owner lost; committing shutdown");
       void this.#commitShutdown().catch(() => undefined);
       return false;
     }
@@ -514,7 +528,7 @@ export class RuntimeHostKernel {
             platform: process.platform,
             arch: osArch(),
             osRelease: osRelease(),
-            logs: [],
+            logs: [...this.#diagnosticLogs],
           },
         }),
       },
@@ -530,6 +544,17 @@ export class RuntimeHostKernel {
       activeOperations: this.#activeOperations,
       activeResidencies: this.#activeResidencies,
     };
+  }
+
+  #appendDiagnosticLog(message: string): void {
+    const entry = `${new Date().toISOString()} [${this.hostEpoch.slice(0, 8)}] ${message}`.slice(
+      0,
+      HOST_DIAGNOSTIC_LOG_MAX_ENTRY_BYTES,
+    );
+    this.#diagnosticLogs.push(entry);
+    if (this.#diagnosticLogs.length > HOST_DIAGNOSTIC_LOG_MAX_ENTRIES) {
+      this.#diagnosticLogs.splice(0, this.#diagnosticLogs.length - HOST_DIAGNOSTIC_LOG_MAX_ENTRIES);
+    }
   }
 
   #beginCompositionDrain(): void {
@@ -564,6 +589,7 @@ export class RuntimeHostKernel {
         this.#armIdleTimer();
         return;
       }
+      this.#appendDiagnosticLog("idle grace elapsed with no work; committing shutdown");
       void this.#commitShutdown().catch(() => undefined);
     }, this.#idleGraceMs);
   }
@@ -608,6 +634,7 @@ export class RuntimeHostKernel {
         this.#beginCompositionDrain();
       }
       this.#state = "draining";
+      this.#appendDiagnosticLog("state=draining");
       this.#cancelIdle();
       this.#shutdownTask = this.#closeResources();
       void this.#shutdownTask.then(
@@ -628,6 +655,9 @@ export class RuntimeHostKernel {
     if (this.#shutdownDeadlineTimer || this.#terminationRequired) return;
     this.#shutdownDeadlineTimer = setTimeout(() => {
       this.#shutdownDeadlineTimer = undefined;
+      this.#appendDiagnosticLog(
+        `shutdown deadline (${this.#shutdownGraceMs}ms) exceeded; termination required`,
+      );
       const error = new RuntimeHostProcessTerminationRequiredError(this.#shutdownGraceMs);
       this.#terminationRequired = error;
       this.#rejectClosed(error);

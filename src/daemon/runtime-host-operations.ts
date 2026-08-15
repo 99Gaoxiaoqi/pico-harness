@@ -66,8 +66,13 @@ const BRIDGE_ERRORS = [
 
 const USAGE_RESULT_MAX_BYTES = 64 * 1024;
 
-/** runtime.request 结果预算：帧上限减响应信封预留（对齐 daemon replay 的 64KB 预留惯例）。 */
-const RUNTIME_REQUEST_RESULT_MAX_BYTES = RUNTIME_HOST_MAX_FRAME_BYTES - 64 * 1024;
+/**
+ * runtime.request 结果预算：帧上限减响应信封预留（对齐 daemon replay 的 64KB 预留惯例）。
+ * 导出供 daemon 侧大结果生产者（如 session.transcript 分页）对齐同一预算——
+ * 结果必须装入 kernel 桥的 decodeOutput 字节闸门，否则 960KB–1MiB 区间成死区
+ * （旧 socket 1MiB 合法的结果在 kernel 传输上硬失败，P1-3）。
+ */
+export const RUNTIME_REQUEST_RESULT_MAX_BYTES = RUNTIME_HOST_MAX_FRAME_BYTES - 64 * 1024;
 
 /** Runtime Host 桥接错误码全集（daemon 协议错误码映射的目标空间）。 */
 export type BridgeErrorCode =

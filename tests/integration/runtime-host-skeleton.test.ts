@@ -75,6 +75,11 @@ test("runtime-host skeleton: kernel start → connect → host.status full round
   assert.equal(diagnostics.state, "ready");
   assert.equal(diagnostics.compatibilityEpoch, RUNTIME_HOST_COMPATIBILITY_EPOCH);
   assert.equal(diagnostics.pid, process.pid);
+  // 3-B-4 / M4：机制层诊断日志不再恒空——kernel 生命周期转移落环形缓冲。
+  assert.ok(
+    diagnostics.logs.some((entry) => entry.includes("state=ready")),
+    `diagnostics.logs 应包含 state=ready 条目，实际 ${JSON.stringify(diagnostics.logs)}`,
+  );
 
   await connection.close();
 });

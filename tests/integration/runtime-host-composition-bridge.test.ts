@@ -237,6 +237,27 @@ test("runtime-host bridge: runtime.request carries an un-specced daemon method e
   assert.equal(connection.terminalError, undefined);
 });
 
+test("runtime-host bridge: a 950KB result rides the kernel wire — former dead zone is gone (P1-3)", async (t) => {
+  // 旧 socket 1MiB 合法、kernel 闸门（帧上限-64KB 信封预留）以内的结果必须可
+  // 传输：daemon 侧 transcript 分页预算已改为从 RUNTIME_REQUEST_RESULT_MAX_BYTES
+  // 派生（desktop-runtime-service），这里在传输边界证明 960KB 以下结果不再硬失败。
+  const bigPayload = "x".repeat(950 * 1024);
+  const bigResultService: RuntimeHostBridgeService = {
+    handle: async () => ({ note: bigPayload }) as JsonValue,
+  };
+  const { connection, workspacePath } = await startBridgeHarness(t, {
+    service: bigResultService,
+  });
+
+  const result = await connection.requestRegistered<{ result: { note: string } }>(
+    "runtime.request",
+    { method: "workspace.status", params: { workspacePath } },
+    10_000,
+  );
+  assert.equal(result.result.note.length, bigPayload.length, "950KB 结果应完整过 kernel 线");
+  assert.equal(connection.terminalError, undefined);
+});
+
 test("runtime-host bridge: runtime.request rejects unknown methods and unknown params", async (t) => {
   const { connection, workspacePath } = await startBridgeHarness(t);
 

@@ -67,6 +67,7 @@ export {
 } from "./client/connection.js";
 export {
   connectOrSpawnRuntimeHost,
+  connectOrSpawnRuntimeHostWithDependencies,
   type ConnectOrSpawnRuntimeHostInput,
   type ConnectOrSpawnRuntimeHostResult,
 } from "./client/connect-or-spawn.js";

@@ -9,7 +9,11 @@ import {
   resolveRootControlNamespace,
   resolveStorageRoot,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient, type RuntimeNotification } from "../../src/daemon/index.js";
+import {
+  LocalRuntimeClient,
+  RuntimeClientError,
+  type RuntimeNotification,
+} from "../../src/daemon/index.js";
 
 /**
  * 3-B-3 kernel 承载客户端实盘验证：默认构造（不注入 endpoint）的 LocalRuntimeClient
@@ -133,6 +137,51 @@ test("kernel client: killing the daemon makes the next request respawn it", asyn
 
   // 清理重生的 daemon。
   await killDaemonFor(harness.picoHome);
+});
+
+test("kernel client: non-idempotent write does not auto-retry after daemon death (P1-2)", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+  });
+  t.after(() => client.close());
+  await client.connect();
+  await client.request("workspace.register", { workspacePath: harness.workspacePath });
+
+  // 杀前备好 registration 信息：kill 与发请求之间不允许有任何 await——
+  // 断连传播是宏任务，中间让步会让 open() 走 connectOrSpawn 重生路径，
+  // 就测不到"重试循环跳过非幂等方法"这条分支了。
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  const registration = await readHostRegistration(controlDirectory);
+  assert.ok(registration);
+  const killedPid = registration.pid;
+  process.kill(killedPid);
+  // 非幂等写（workspace.unregister）：传输级失败 + 连接 terminal 后必须立即上抛，
+  // 不得丢弃死连接重生重发（双执行风险）。
+  const attempt = client.request("workspace.unregister", {
+    workspacePath: harness.workspacePath,
+  });
+  await assert.rejects(attempt, (error: unknown) => {
+    assert.ok(error instanceof RuntimeClientError);
+    assert.equal(error.code, "RUNTIME_DISCONNECTED");
+    return true;
+  });
+
+  // 未重生：registration 仍指向被杀 pid（重生路径会拉起新 daemon 并改写它）。
+  const after = await readHostRegistration(controlDirectory);
+  if (after) {
+    assert.equal(after.pid, killedPid, "非幂等失败不应触发 daemon 重生");
+  }
+  const pidDead = await waitForCondition(() => {
+    try {
+      process.kill(killedPid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, 2000);
+  assert.ok(pidDead, "被杀 daemon 应仍处于死亡状态（无重生实例顶替）");
 });
 
 async function waitForCondition(

@@ -22,6 +22,13 @@ const DEFAULT_ELECTION_DEADLINE_MS = 45_000;
 const DEFAULT_BACKOFF_MIN_MS = 20;
 const DEFAULT_BACKOFF_MAX_MS = 250;
 const MIN_CANDIDATE_INTERVAL_MS = 250;
+// 单次选举窗口内候选 launch 总数上限（A6）：候选冷启动慢的环境（实测 19-31s）
+// 下，"每 250ms 补一个候选"会在 45s 窗口内堆积几十个在途候选——晚到的候选
+// 可能在 winner 落定甚至优雅关停之后才接手注册写锁/守卫锁，把关停确定性打穿。
+// 封顶后选举循环仍持续轮询直到 deadline：无论哪个候选先就绪都能连上，损失的
+// 只是"同一窗口内第 4 个及以后的冗余候选"。真正的候选失败由后续调用的全新
+// 选举窗口兜底（connectOrSpawn 每次调用重置计数）。
+const DEFAULT_MAX_CANDIDATE_LAUNCHES = 3;
 
 export interface ConnectOrSpawnRuntimeHostInput {
   rootPath: string;
@@ -29,6 +36,12 @@ export interface ConnectOrSpawnRuntimeHostInput {
   protocol: ProtocolRange;
   clientInstanceId?: string;
   electionDeadlineMs?: number;
+  /**
+   * Cap on candidate launches within a single election window (default 3).
+   * Slow-candidate environments must not turn the election loop into a spawn
+   * storm; polling continues until the deadline regardless of the cap.
+   */
+  maxCandidateLaunches?: number;
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
   /** Forwarded to a spawned candidate (its idle self-exit grace). */
@@ -74,6 +87,14 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > 120_000) {
     throw new RangeError('electionDeadlineMs must be an integer between 1 and 120000');
   }
+  const maxCandidateLaunches = input.maxCandidateLaunches ?? DEFAULT_MAX_CANDIDATE_LAUNCHES;
+  if (
+    !Number.isSafeInteger(maxCandidateLaunches) ||
+    maxCandidateLaunches < 1 ||
+    maxCandidateLaunches > 16
+  ) {
+    throw new RangeError('maxCandidateLaunches must be an integer between 1 and 16');
+  }
   validateProtocolRange(input.protocol);
   requireOptionalTimeout(input.connectTimeoutMs, 'connectTimeoutMs', 1);
   requireOptionalTimeout(input.handshakeTimeoutMs, 'handshakeTimeoutMs', 1);
@@ -85,6 +106,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
   const startedAt = performance.now();
   const deadline = startedAt + deadlineMs;
   let nextCandidateAt = startedAt;
+  let candidateLaunches = 0;
   let backoffMs = DEFAULT_BACKOFF_MIN_MS;
   let sawUnresponsiveEndpoint = false;
 
@@ -112,7 +134,11 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
     }
 
     const now = performance.now();
-    if (shouldLaunchCandidate(result) && now >= nextCandidateAt) {
+    if (
+      shouldLaunchCandidate(result) &&
+      now >= nextCandidateAt &&
+      candidateLaunches < maxCandidateLaunches
+    ) {
       try {
         const remaining = deadline - performance.now();
         if (remaining <= 0) break;
@@ -139,6 +165,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
         // A failed Candidate attempt is ordinary election evidence; discovery continues.
       }
       nextCandidateAt = now + MIN_CANDIDATE_INTERVAL_MS;
+      candidateLaunches += 1;
     }
 
     const remaining = deadline - performance.now();

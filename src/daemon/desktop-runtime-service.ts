@@ -107,7 +107,6 @@ import {
   createRuntimeNotification,
   createRuntimeRequest,
   isJsonValue,
-  MAX_RUNTIME_FRAME_BYTES,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonValue,
@@ -138,6 +137,7 @@ import {
 } from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
+import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "./runtime-host-operations.js";
 import {
   WorkspaceRuntimeService,
   workspaceStatusResult,
@@ -1512,7 +1512,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       JSON.stringify({ session, ...(activeRun ? { activeRun } : {}), queuedInputs }),
       "utf8",
     );
-    const transcriptBudget = MAX_RUNTIME_FRAME_BYTES - fixedBytes - 1024;
+    // 预算对齐 kernel 桥的 runtime.request 结果闸门（P1-3）：transcript 结果必须
+    // 装入 RUNTIME_REQUEST_RESULT_MAX_BYTES（帧上限减 64KB 信封预留），否则
+    // 960KB–1MiB 区间的合法大页会在 kernel decodeOutput 硬失败（旧 socket 死区）。
+    const transcriptBudget = RUNTIME_REQUEST_RESULT_MAX_BYTES - fixedBytes - 1024;
     if (transcriptBudget < 1024) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
@@ -1549,7 +1552,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
       revision: page.revision,
     };
-    if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_RUNTIME_FRAME_BYTES) {
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > RUNTIME_REQUEST_RESULT_MAX_BYTES) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
         "会话 Transcript 无法安全装入单个 IPC 帧",

@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3-A（runtime-host 骨架）已完整交付并经四轮对抗审查 + 集成 + e2e 全绿验证；3-B-1（桥接 composition）已完成——workspace.status / usage.get 已走 runtime-host 全链路（dispatch/decode 实盘验证 5/5）；3-B-2（事件协议）已完成——Host→Client event 推送帧 + events.subscribe/replay 全语义桥接（29/29 实盘）。下一步是 3-B-3（选主迁移）。**
+**阶段 3-A（runtime-host 骨架）已完整交付并经四轮对抗审查 + 集成 + e2e 全绿验证；3-B-1（桥接 composition）已完成——workspace.status / usage.get 已走 runtime-host 全链路（dispatch/decode 实盘验证 5/5）；3-B-2（事件协议）已完成——Host→Client event 推送帧 + events.subscribe/replay 全语义桥接（29/29 实盘）；3-B-3（选主迁移硬切）+ daemon stop + 3-B-4 收尾（P1-2/P1-3/A6/logs）已完成。下一步是 3-C Desktop（fail-stuck + D9/D12 反转）与 3-D TUI（单独立项）。**
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -123,17 +123,36 @@
 
 **验证**：四文件（kernel/replay/candidate/close）两轮 11/11；lifecycle-races 31/32（1 个 hook reloader watcher 既有失败，stash 验证与本次无关）；根 typecheck 0 + desktop main tsconfig 0；对抗审查（P0 无）。
 
-**对抗审查遗留（3-B-4 处理）**：
-- **P1-2 terminalError 重试可双执行**：连�� terminal 后单次重试不区分"daemon 死"与"daemon 活着但连接被杀"——后者重发写方法（session.send 等）可能双执行（双 LLM turn/双提交）。窗口窄（deadline 失败响应未达客户端时）。3-B-4 按方法幂等性白名单或幂等键收敛。
-- **P1-3 960KB–1MiB 结果硬失败**：runtime.request 帧预算 1MiB-64KB，超限结果客户端 decode 失败且杀连接；旧 socket 合法的大 transcript 页成死区。3-B-4 分块 query 时一并解决。
+**对抗审查遗留（3-B-4 处理；P1-2/P1-3 已收尾，见下方 3-B-4 章节）**：
+- ~~P1-2 terminalError 重试可双执行~~（已修：`KERNEL_RETRY_SAFE_METHODS` 幂等白名单，非幂等写不自动重发）。原文：连接 terminal 后单次重试不区分"daemon 死"与"daemon 活着但连接被杀"——后者重发写方法（session.send 等）可能双执行（双 LLM turn/双提交）。窗口窄（deadline 失败响应未达客户端时）。
+- ~~P1-3 960KB–1MiB 结果硬失败~~（已修：transcript 预算改从 `RUNTIME_REQUEST_RESULT_MAX_BYTES` 派生）。原文：runtime.request 帧预算 1MiB-64KB，超限结果客户端 decode 失败且杀连接；旧 socket 合法的大 transcript 页成死区。
 - P1-1（冷启动 recover 窗口首个 ping 失败致 Desktop 误报启动失败）已修：首次 ping 带 30s/500ms 退避重试（RUNTIME_UNAVAILABLE retryable）。
 - P2 已评估：**daemon stop 已落地**（`02d4e058`：`pico --daemon-stop` + runtime.shutdown kernel 操作，常驻 daemon 现在有优雅退出路径）；cron-bridge 冷启动 45s 选举等待 UX、SIGTERM 关停 10s shutdownGrace 硬上限、覆盖订阅旧 dispose 的 pushEvent 失败回调误杀新订阅（自愈）、FRAME_TOO_LARGE→internal_failure 映射失真（无消费方）仍接受。
 
-**3-B-3 未做**：91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）、host.diagnostics.query.logs 仍恒空。
+**3-B-3 未做**：91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）——两项均为渐进路径，见下方 3-B-4 章节。
+
+## 3-B-4 已完成（遗留项收尾，2026-08-15 追加）
+
+3-B-3 对抗审查遗留 + 后续发现的 6 项，4 项落地、2 项评估后维持渐进：
+
+| 项 | 处置 |
+|---|---|
+| **P1-2 重试双执行** | ✅ `src/daemon/client.ts`：`KERNEL_RETRY_SAFE_METHODS` 幂等白名单（41 个读方法 + events.*，覆盖语义重订等价）。传输级失败（连接 terminal）后仅白名单方法走"丢弃死连接 → 重生 → 重发"循环；非幂等写方法立即上抛 `RUNTIME_DISCONNECTED`（retryable=true，调用方决策）。有意排除 `diagnostics.run`（doctor 副作用未证伪）。 |
+| **P1-3 960KB–1MiB 死区** | ✅ 根因：transcript 分页预算从 `MAX_RUNTIME_FRAME_BYTES`（旧 socket 1MiB）派生，超出 kernel 桥闸门（`RUNTIME_REQUEST_RESULT_MAX_BYTES` = 帧上限 - 64KB 信封预留）。修复：`runtime-host-operations.ts` 导出该常量，`desktop-runtime-service.ts` transcript 预算与终检改用它——daemon 侧结果永远装得进 kernel 帧，死区消失。events.replay 预留本就是 64KB，无需改。 |
+| **A6 候选池 spawn 风暴** | ✅ `connect-or-spawn.ts`：单次选举窗口候选 launch 总数封顶（`DEFAULT_MAX_CANDIDATE_LAUNCHES=3`，输入可覆盖 1-16）。封顶不牺牲活性——选举循环仍轮询到 deadline，无论哪个候选先就绪都能连上；真正的候选失败由下一次调用的全新窗口兜底。慢环境（候选 19-31s）不再每 250ms 堆一个在途候选，关停后锁被晚到候选接走的不确定性大幅收窄。 |
+| **host.diagnostics.query.logs 恒空**（M4） | ✅ kernel 最小环形日志（256 条 × 10KB/条，进程内）：`state=ready`、drain requested、`state=draining`、recover 超时、shutdown deadline 超时、owner 丢失、idle 退出。只记 kernel 自身生命周期事实，不含领域事件（那是桥接层的事）。 |
+| 91 方法 spec 化 | ⏸ 维持渐进退役：每个方法 ~10 行样板，无阻塞消费方；随 3-C Desktop 接入按需补。 |
+| 旧 socket server 清理 | ⏸ 维持：LocalRuntimeDaemon 仅剩注入测试面（client 双模式的显式 endpoint 注入路径），等测试面迁移后一并删。 |
+
+**测试**：`runtime-client-kernel.test.ts` +1（P1-2：杀 daemon 后非幂等写立即上抛且不重生，registration pid 不变 + 死亡探针）；`runtime-host-composition-bridge.test.ts` +1（P1-3：950KB 结果完整过 kernel 线）；`runtime-host-spawn.test.ts` +1（A6：假 launcher 断言 launch 数封顶在 3）；`runtime-host-skeleton.test.ts` 扩展（logs 含 state=ready）。`connectOrSpawnRuntimeHostWithDependencies` 补导出（测试 DI 面）。
+
+**验证**：runtime-host 全套 10 文件 38/38（--test-concurrency=1）+ 包/根 typecheck 0 + 架构门禁 0；dist 已重建。
+
+**注**：`FRAME_TOO_LARGE→internal_failure` 映射失真维持接受（无消费方）；P1-2 的白名单语义边界=传输层不静默重发，上层（订阅环/Desktop）的重试决策不受影响。
 
 ## 后续发现（2026-08-15 会话补充）
 
-- **connectOrSpawn 候选池**（A6）：候选启动慢的环境下选举循环每 250ms spawn 一个候选（`MIN_CANDIDATE_INTERVAL_MS`），shutdown 期间池中在途候选可能接手注册写锁/守卫锁，把"优雅关停后锁应释放"变成不确定（测试已改手动 spawn 绕过；机制层限制 in-flight 候选待立项）。慢环境实测：候选启动 19-31s、connectOrSpawn 首次连接可达 24s。
+- ~~**connectOrSpawn 候选池**（A6）~~（已修：单次选举窗口候选 launch 封顶 3，见 3-B-4 章节）。原文：候选启动慢的环境下选举循环每 250ms spawn 一个候选（`MIN_CANDIDATE_INTERVAL_MS`），shutdown 期间池中在途候选可能接手注册写锁/守卫锁，把"优雅关停后锁应释放"变成不确定。慢环境实测：候选启动 19-31s、connectOrSpawn 首次连接可达 24s。
 - **daemon stop 测试注意**：shutdown 用例用手动 spawn + connectResolvedRuntimeHost 直连（避开候选池干扰）；shutdown 机制本身经手动 spawn 验证正确（exit 0 + 锁释放 + registration 移除）。
 - **本机环境**：PATH 首项 `%AccessAgentLibs%` 未展开字面量（安全 agent 注入）——hook 静态信任 fail-closed 拒绝绑定 + git 启动间歇挂起；已代码降级，根治需清理系统 PATH。
 
@@ -150,7 +169,7 @@ RUN_LLM_E2E=1 node --import tsx --import ./src/tui/preload-env.ts --test tests/e
 
 ## 遗留 / 已知限制
 
-- `host.diagnostics.query.logs` 恒空（log capture 未移植，四轮审查 M4，3-B 立项）。
+- ~~`host.diagnostics.query.logs` 恒空~~（已落地：kernel 生命周期环形日志，见 3-B-4 章节）。
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。
 - `packages/runtime-host/dist/` 是 gitignore 本地构建产物；改 src 后记得 `npm run build --workspace=@pico/runtime-host`（四轮审查教训：dist 滞后会静默失效）。
