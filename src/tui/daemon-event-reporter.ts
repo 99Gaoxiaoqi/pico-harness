@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import type { RuntimeNotification, RuntimeNotificationMap } from "@pico/protocol";
+import {
+  isInterruptedRunStatus,
+  isStreamingRunStatus,
+  isTerminalRunStatus,
+  type RuntimeNotification,
+  type RuntimeNotificationMap,
+} from "@pico/protocol";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import type { TuiReporter } from "./tui-reporter.js";
 
@@ -71,7 +77,7 @@ export class DaemonEventReporter {
         const run = payload["run"] as { runId?: unknown; status?: unknown } | undefined;
         const runId = typeof run?.runId === "string" ? run.runId : undefined;
         const status = typeof run?.status === "string" ? run.status : "";
-        const running = status === "queued" || status === "running" || status === "pause_requested";
+        const running = isStreamingRunStatus(status);
         if (event.topic === "run.started" && running) {
           // 重叠 run（排队链：A 活跃中 B 已 started）跟踪最新 runId——/interrupt
           // 才打对目标（对抗评审 P2：此前忽略导致 B 全程失跟踪）。
@@ -81,7 +87,7 @@ export class DaemonEventReporter {
             this.onRunStateChanged?.(true);
           }
           this.currentRunId = runId;
-        } else if (this.active && !running && this.isTerminalStatus(status)) {
+        } else if (this.active && !running && isTerminalRunStatus(status)) {
           this.finishRun(status);
         }
         // paused/cancelling：非终态非运行——保持 active（run 仍占用，spinner 继续
@@ -114,19 +120,12 @@ export class DaemonEventReporter {
   private finishRun(status: string): void {
     this.active = false;
     this.currentRunId = undefined;
-    if (status === "cancelled" || status === "failed") {
+    if (isInterruptedRunStatus(status)) {
       this.reporter.onInterrupted();
     } else {
       this.reporter.onFinish();
     }
     this.onRunStateChanged?.(false);
-  }
-
-  private isTerminalStatus(status: string): boolean {
-    // 枚举校真（对抗评审二轮）：RuntimeRunStatus = queued|running|pause_requested|
-    // paused|cancelling|cancelled|failed|succeeded——终态三值，此前的
-    // "interrupted"/"completed" 不是枚举值（拷贝漂移）。
-    return status === "succeeded" || status === "failed" || status === "cancelled";
   }
 
   private handleLiveItem(payload: Record<string, unknown>): void {
