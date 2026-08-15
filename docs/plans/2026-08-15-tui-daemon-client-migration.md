@@ -50,11 +50,18 @@
 
 | Phase | 内容 | 验收标准 |
 |---|---|---|
-| **1（本 session）** | **run.live 扩展 tool/subagent 实时事件**：协议新 kind + production-host 路由（DesktopReporter 回调已有数据）+ tool output ~50ms daemon 侧合流 + 分级裁剪兼容 + 未知 kind 前向兼容（旧客户端忽略不报错） | 桥接集成测试（形状/合流/裁剪/容忍）+ runtime-host 全套回归；Desktop 立即受益于"可选消费" |
-| 2 | **TUI 客户端 tracer**：`--client` 旗标进 CLI；TuiReporter 事件适配器（run.live → TranscriptEventStore、transcript 页回填替代 hydrateTuiReporter）；send/流式/审批最小闭环；line-mode 暂留进程内 | 假 daemon service（RuntimeHostBridgeService fake）集成测试驱动客户端环；真实 daemon 冒烟 |
+| **1 ✅（08833ce0 + 2eadb002）** | **run.live 扩展 tool/subagent 实时事件**：协议新 kind + production-host 路由 + tool output ~50ms daemon 侧合流 + 分级裁剪兼容 + 未知 kind 前向兼容（旧客户端忽略不报错）；后续补齐 started 项 args（4KB 展示上限） | 桥接集成测试（形状/合流/裁剪/容忍）+ runtime-host 全套回归；Desktop 立即受益于"可选消费" |
+| **2 ✅（8b01dd81）** | **TUI 客户端 tracer**：`--client` 旗标；四件套——transcript-item-hydration（RPC items→TranscriptEvent[]）/ daemon-event-reporter（通知→TuiReporter 适配，append-only+reload 对账）/ client-session-runtime（无 Ink 可测核心）/ client-repl（复用 `<App>` 的 Ink 薄壳）；审批走 approval.requested+approval.respond（approval-dialogs 共享模块提取） | 假 client 集成测试驱动客户端环（tui-client-tracer 5/5）；真实 daemon 冒烟延后 Phase 4 |
 | 3 | **parity 补齐**：slash 命令 RPC 化（config.*/session.settings.*/mcp.*/skills.*）、plan.respond 接线、rewind/changes、wake 订阅渲染（run.started 事件驱动，不再本地 re-enter runAgent）、BYOK 旗标合并（--model/--provider → config.effective.get 客户端合并）、自由文本 prompt 扩展、**共享 session driver 提取**（Desktop 纯 reducer 上提到共享模块，消除第 4 套状态机风险） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言（预置） |
-| 4 | **默认切换**：`pico` 默认走客户端路径 | e2e 真实模型冒烟（tests/e2e）+ 慢环境冷启动预算复核 |
+| 4 | **默认切换**：`pico` 默认走客户端路径 | e2e 真实模型冒烟（tests/e2e）+ 慢环境冷启动预算复核 + 真机 TUI 冒烟 |
 | 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | D9 类正向断言转正：交互外壳零引擎装配；typecheck/测试/门禁全绿 |
+
+### Phase 2 实施记录（2026-08-15）
+
+- **架构**：TuiReporter 零改动整体复用（省略 durable sink 即客户端模式）；渲染复用导出的 `<App>`（绕过闭包私有的 ReplApp）；进程内审批对话框工厂提取为 `src/tui/approval-dialogs.tsx` 共享（repl 与 client-repl 双消费，plan 动作经 PlanApprovalControl 结构接口适配 plan.respond）。
+- **对账策略**（与 Desktop 同构）：run.live 只消费 append 增量，complete/clear 不落定；`session.transcriptUpdated{reload}` → transcript 重取 → replaceTranscriptEvents 全量重建；重连丢流同理修复。
+- **已实现边界**：会话选择支持新会话 + `-S/--resume`（--continue/--fork 提示走进程内）；斜杠命令本地拦截提示；attachments 忽略；审批 wire 缺 providerCallId/diff/sessionScope（2 选项面板降级）。
+- **测试**：tui-client-tracer 5/5（适配器投影/转换器/客户端环含 send 参数形状、中断、审批映射、scope 采纳、reload 对账）；tui-plugin-capability 的 "daemon endpoint 校验" 失败经 stash 基线验证为既有环境问题。
 
 ## 四、风险与对策
 
