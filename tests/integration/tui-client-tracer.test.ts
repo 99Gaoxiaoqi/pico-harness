@@ -28,7 +28,7 @@ function notification(
     scope: { workspacePath: "C:\\ws", runId, ...scope },
     resourceVersion: 1,
     at: 1,
-    payload,
+    payload: payload as Parameters<typeof createRuntimeNotification>[0]["payload"],
   }) as RuntimeNotification;
 }
 
@@ -169,9 +169,11 @@ test("daemon event reporter: wake-style back-to-back runs each drive onStart; mi
     notification("run.finished", {}, { run: { runId, status: "succeeded" } }, runId);
 
   adapter.handleNotification(started("run_a"));
-  adapter.handleNotification(started("run_a-repeat")); // active 期间重复：忽略
+  // 重叠 started（排队链 B 先于 A 终态启���）：跟踪最新 runId——/interrupt 打对
+  // 目标（对抗评审 P2 修复后的新语义，此前忽略导致 B 全程失跟踪）。
+  adapter.handleNotification(started("run_a-repeat"));
   assert.equal(adapter.running, true);
-  assert.equal(adapter.activeRunId, "run_a", "重复 started 不得顶替当前 run");
+  assert.equal(adapter.activeRunId, "run_a-repeat", "重叠 started 应跟踪最新 run");
 
   adapter.handleNotification(finished("run_a"));
   assert.equal(adapter.running, false);
@@ -261,20 +263,23 @@ function createFakeClient(): FakeClientHarness {
         return { accepted: true };
       }
       if (method === "config.effective.get") {
+        // 真实 wire 形状：config 才是 RuntimeEffectiveConfig（嵌套，对抗评审 P0）。
         return {
-          defaultModelRouteId: "p1/m1",
-          providers: [
-            {
-              id: "p1",
-              protocol: "openai",
-              baseURL: "http://x",
-              apiKeyEnv: "K",
-              models: ["m1", "m2"],
-              discoverModels: false,
-            },
-          ],
-          sources: {},
-          revisions: { user: "1", project: "1" },
+          config: {
+            defaultModelRouteId: "p1/m1",
+            providers: [
+              {
+                id: "p1",
+                protocol: "openai",
+                baseURL: "http://x",
+                apiKeyEnv: "K",
+                models: ["m1", "m2"],
+                discoverModels: false,
+              },
+            ],
+            sources: {},
+            revisions: { user: "1", project: "1" },
+          },
         };
       }
       if (method === "session.settings.update") {
@@ -327,22 +332,23 @@ test("client session runtime: start hydrates, send maps to session.send, live ev
     "历史消息应入投影",
   );
 
-  // 斜杠命令本地拦截。
-  assert.equal(await runtime.sendText("/help"), false, "斜杠命令 v1 本地拦截");
+  // 斜杠分派归 processClientInput（对抗评审 P2：sendText 的核心层守卫已删——
+  // 命令语法知识只在命令层）；直接调用 sendText 时按普通文本上送。
+  assert.equal(await runtime.sendText("/help"), true, "sendText 不再拦截斜杠（分派在上层）");
   assert.ok(
-    !harness.requests.some((entry) => entry.method === "session.send"),
-    "拦截不应上送",
+    harness.requests.some((entry) => entry.method === "session.send"),
+    "直接 sendText 按文本上送",
   );
 
-  // 正常文本 → session.send 参数形状。
+  // 正常文本 → session.send 参数形状（取最后一条——前一步的 /help 直发也在记录里）。
   assert.equal(await runtime.sendText("跑一下构建"), true);
-  const send = harness.requests.find((entry) => entry.method === "session.send");
+  const send = harness.requests
+    .filter((entry) => entry.method === "session.send")
+    .at(-1);
   assert.ok(send, "应发出 session.send");
-  assert.equal(send?.params.input.kind, "text");
-  assert.deepEqual(
-    { ...(send?.params.input as Record<string, unknown>) }.text,
-    "跑一下构建",
-  );
+  const sendInput = send?.params.input as Record<string, unknown>;
+  assert.equal(sendInput.kind, "text");
+  assert.deepEqual({ ...sendInput }.text, "跑一下构建");
   assert.equal(typeof send?.params.idempotencyKey, "string");
   assert.equal(send?.params.behavior, "auto");
   assert.equal(runtime.activeSessionId, "s1");

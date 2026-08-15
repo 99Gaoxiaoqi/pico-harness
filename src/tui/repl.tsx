@@ -3722,7 +3722,8 @@ function extractSessionSummaries(data: unknown): CliSessionBrowserSummary[] {
 function toSessionSummary(value: unknown): CliSessionBrowserSummary | null {
   if (!isRecord(value)) return null;
   if (typeof value.id !== "string" || typeof value.cwd !== "string") return null;
-  if (typeof value.messageCount !== "number") return null;
+  // messageCount 可缺省（daemon 会话列表无来源）——不再因此丢行（对抗评审 P1）。
+  const messageCount = typeof value.messageCount === "number" ? value.messageCount : undefined;
 
   const createdAt = toDate(value.createdAt);
   const updatedAt = toDate(value.updatedAt);
@@ -3733,7 +3734,7 @@ function toSessionSummary(value: unknown): CliSessionBrowserSummary | null {
     cwd: value.cwd,
     createdAt,
     updatedAt,
-    messageCount: value.messageCount,
+    ...(messageCount !== undefined ? { messageCount } : {}),
     ...(typeof value.title === "string" ? { title: value.title } : {}),
     ...(typeof value.firstMessage === "string" ? { firstMessage: value.firstMessage } : {}),
     ...(typeof value.lastMessage === "string" ? { lastMessage: value.lastMessage } : {}),

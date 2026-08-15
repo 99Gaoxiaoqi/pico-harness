@@ -20,7 +20,7 @@ export interface ClientCommandHostDeps {
   readonly registry: CommandRegistry;
   /** 当前模型路由 id（model 选择器高亮）。 */
   readonly currentModelId?: () => string | undefined;
-  /** 会话选择确认 → /resume 派发（宿主注入，通常转发到 processClientInput）。 */
+  /** 选择器确认派发：会话选择 → "/resume <id>"；模型选择 → "/model <route>"。 */
   readonly dispatchInput: (text: string) => void | Promise<void>;
   readonly switchSession: (sessionId: string | undefined) => void | Promise<void>;
 }
@@ -38,11 +38,21 @@ export function handleClientLocalCommand(
   result: LocalCommandResult,
   deps: ClientCommandHostDeps,
 ): ClientLocalCommandEffect {
-  const effect: ClientLocalCommandEffect = { dialog: null, exit: false, switchedSession: undefined };
+  let dialog: DialogRequest | null = null;
+  let exit = false;
+  let switchedSession: string | undefined;
 
   if (result.ui) {
-    const context: LocalUiDialogHostContext = {};
-    if (result.ui.selector === "model" || result.ui.panel === "model") {
+    const context: LocalUiDialogHostContext = {
+      // 选择器确认（对抗评审 P1：此前 view-only，选中无动作）。
+      onModelConfirm: (model) => {
+        void deps.dispatchInput(`/model ${model.id}`);
+      },
+      onSessionConfirm: (session) => {
+        void deps.dispatchInput(sessionSelectionToClientInput(session));
+      },
+    };
+    if (result.ui.kind === "open-selector" && result.ui.selector === "model") {
       const routes = (result.data as { modelRoutes?: { id: string; name: string }[] } | undefined)
         ?.modelRoutes;
       context.models = (routes ?? []).map<ModelOption>((route) => ({
@@ -51,10 +61,13 @@ export function handleClientLocalCommand(
       }));
       context.currentModelId = deps.currentModelId?.();
     }
-    if (result.ui.selector === "session" || result.ui.panel === "sessions") {
+    if (
+      (result.ui.kind === "open-selector" && result.ui.selector === "session") ||
+      (result.ui.kind === "open-panel" && result.ui.panel === "sessions")
+    ) {
       context.sessions = (result.data as SessionBrowserSession[] | undefined) ?? [];
     }
-    if (result.ui.panel === "help") {
+    if (result.ui.kind === "open-panel" && result.ui.panel === "help") {
       context.commands = deps.registry
         .list({ includeHidden: false })
         .map((command) => ({
@@ -66,7 +79,7 @@ export function handleClientLocalCommand(
           aliases: command.aliases ?? [],
         }));
     }
-    effect.dialog = createLocalUiDialogRequest(result.ui, context);
+    dialog = createLocalUiDialogRequest(result.ui, context);
   }
 
   switch (result.action) {
@@ -74,13 +87,13 @@ export function handleClientLocalCommand(
       deps.reporter.clear();
       break;
     case "exit":
-      effect.exit = true;
+      exit = true;
       break;
     case "resume": {
       const data = result.data as { mode?: string; sessionId?: string } | undefined;
       if (data?.mode === "resume" && typeof data.sessionId === "string") {
         void deps.switchSession(data.sessionId);
-        effect.switchedSession = data.sessionId;
+        switchedSession = data.sessionId;
       }
       break;
     }
@@ -89,7 +102,7 @@ export function handleClientLocalCommand(
   }
 
   if (result.message) deps.reporter.pushSystemMessage(result.message);
-  return effect;
+  return { dialog, exit, switchedSession };
 }
 
 /** 会话选择确认（SessionBrowser 行选中）→ /resume 派发。 */
@@ -98,8 +111,8 @@ export function sessionSelectionToClientInput(session: SessionBrowserSession): s
 }
 
 /**
- * 输入框建议源（镜像 in-process 的 commandSuggestions/commandArgumentSuggestions，
- * 两者是 CommandRegistry 上的纯函数；availabilityState 由宿主按 running 派生）。
+ * 输入框建议源：CommandRegistry.commandSuggestions 的薄适配（autocomplete 模式
+ * + availability 标注灰显不滤除）——共享实现消除两份漂移（对抗评审 P2）。
  */
 export function clientSlashSuggestions(
   registry: CommandRegistry,
@@ -107,7 +120,7 @@ export function clientSlashSuggestions(
   availabilityState: "idle" | "running",
 ): { value: string; description?: string; argumentHint?: string; usage?: string; category?: string; disabled?: boolean; disabledReason?: string }[] {
   return registry
-    .detailedSuggestions(query, { availabilityState, matchMode: "autocomplete" })
+    .commandSuggestions(query, { availabilityState, matchMode: "autocomplete" })
     .map((command) => ({
       value: command.insertText,
       description: command.description,

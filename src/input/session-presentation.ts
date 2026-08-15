@@ -2,7 +2,8 @@
 export interface SessionPresentationInput {
   id: string;
   updatedAt: Date;
-  messageCount: number;
+  /** daemon 会话列表无消息计数来源时可缺省（渲染为 —，与 tui 侧孪生一致）。 */
+  messageCount?: number;
   title?: string;
   firstMessage?: string;
   lastMessage?: string;
@@ -35,7 +36,9 @@ export function formatSessionCandidateDetails(session: SessionPresentationInput)
       : "Forked conversation"
     : undefined;
   return [
-    `${Math.max(0, Math.trunc(session.messageCount))} ${session.messageCount === 1 ? "message" : "messages"}`,
+    session.messageCount === undefined
+      ? "—"
+      : `${Math.max(0, Math.trunc(session.messageCount))} ${session.messageCount === 1 ? "message" : "messages"}`,
     updated,
     title,
     session.isCurrent ? "Current" : undefined,

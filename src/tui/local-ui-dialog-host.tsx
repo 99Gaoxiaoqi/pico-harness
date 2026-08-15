@@ -12,7 +12,11 @@ export interface LocalUiDialogHostContext {
   commands?: readonly HelpPanelCommand[];
   models?: readonly ModelOption[];
   currentModelId?: string;
+  /** 模型选择确认（3-D 客户端接线；in-process 选择器由 repl 自管）。 */
+  onModelConfirm?: (model: ModelOption) => void;
   sessions?: readonly SessionBrowserSession[];
+  /** 会话选择确认 → 宿主派发（如 /resume <id>）。 */
+  onSessionConfirm?: (session: SessionBrowserSession) => void;
   rewindSessionId?: string;
   rewindSnapshots?: readonly FileHistorySnapshotSummary[];
   onClose?: (id: string) => void;
@@ -55,10 +59,19 @@ export function createLocalUiDialogContent(
       );
     case "model":
       return (
-        <ModelSelector currentModelId={context.currentModelId} models={context.models ?? []} />
+        <ModelSelector
+          currentModelId={context.currentModelId}
+          models={context.models ?? []}
+          callbacks={context.onModelConfirm ? { onConfirm: context.onModelConfirm } : undefined}
+        />
       );
     case "session":
-      return <SessionBrowser sessions={context.sessions ?? []} />;
+      return (
+        <SessionBrowser
+          sessions={context.sessions ?? []}
+          callbacks={context.onSessionConfirm ? { onConfirm: context.onSessionConfirm } : undefined}
+        />
+      );
     case "rewind":
       return (
         <RewindSelector

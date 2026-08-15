@@ -52,6 +52,17 @@ export class DaemonEventReporter {
     this.currentRunId = undefined;
   }
 
+  /**
+   * 从 transcript.activeRun 恢复运行相位（水化后调用——/resume 进运行中会话
+   * 时 run.started 已错过，事件流不会再补）。幂等：已活跃时不重复触发回调。
+   */
+  seedActiveRun(runId: string): void {
+    const wasActive = this.active;
+    this.active = true;
+    this.currentRunId = runId;
+    if (!wasActive) this.onRunStateChanged?.(true);
+  }
+
   handleNotification(event: RuntimeNotification): void {
     const payload = event.payload as Record<string, unknown>;
     switch (event.topic) {
@@ -61,14 +72,20 @@ export class DaemonEventReporter {
         const runId = typeof run?.runId === "string" ? run.runId : undefined;
         const status = typeof run?.status === "string" ? run.status : "";
         const running = status === "queued" || status === "running" || status === "pause_requested";
-        if (event.topic === "run.started" && running && !this.active) {
-          this.active = true;
+        if (event.topic === "run.started" && running) {
+          // 重叠 run（排队链：A 活跃中 B 已 started）跟踪最新 runId——/interrupt
+          // 才打对目标（对抗评审 P2：此前忽略导致 B 全程失跟踪）。
+          if (!this.active) {
+            this.active = true;
+            this.reporter.onStart(event.scope.workspacePath);
+            this.onRunStateChanged?.(true);
+          }
           this.currentRunId = runId;
-          this.reporter.onStart(event.scope.workspacePath);
-          this.onRunStateChanged?.(true);
         } else if (this.active && !running && this.isTerminalStatus(status)) {
           this.finishRun(status);
         }
+        // paused/cancelling：非终态非运行——保持 active（run 仍占用，spinner 继续
+        // 是可接受近似；终态由 run.finished 收口）。
         return;
       }
       case "run.finished": {
@@ -117,6 +134,16 @@ export class DaemonEventReporter {
   private handleLiveItem(payload: Record<string, unknown>): void {
     const item = payload["item"] as Record<string, unknown> | undefined;
     if (!item) return;
+    // scope-less live 防混流（对抗评审 P2）：无 session 归属的 live 事件只有
+    // 属于当前跟踪的 run 才入投影（当前无跟踪时放行——首流先于 run.started）。
+    const payloadRunId = typeof payload["runId"] === "string" ? payload["runId"] : undefined;
+    if (
+      payloadRunId !== undefined &&
+      this.currentRunId !== undefined &&
+      payloadRunId !== this.currentRunId
+    ) {
+      return;
+    }
     const kind = item["kind"];
     const operation = item["operation"];
     const delta = typeof item["delta"] === "string" ? item["delta"] : "";

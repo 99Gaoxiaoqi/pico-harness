@@ -61,7 +61,10 @@ realModelTest(
     const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
     await runtime.start();
 
-    // 完整回合：真实模型流式 + 终态 + 对账。
+    // 完整回合：真实模型流式 + 终态 + 对账。resend 可能在 P1-2 窗口留下双回合
+    // （首 send 已达 daemon、响应丢失、重发被排队为第二回合）——所有 idle-only
+    // 断言前必须排水到 idle（对抗评审 P0：丢弃 waitForCondition 布尔曾让 141s
+    // 首败不可见）。
     let accepted = await runtime.sendText("请只回复两个字符：ok");
     if (!accepted) accepted = await runtime.sendText("请只回复两个字符：ok");
     assert.ok(accepted, "session.send 应被接受（容忍一次残留 socket 竞态重试）");
@@ -80,8 +83,10 @@ realModelTest(
     );
     assert.ok(answered, "transcript 对账后投影应含真实模型回复（含 ok）");
 
-    // slash 真实链路：/rename 持久化 + /status 往返。
-    await waitForCondition(() => !runtime.running, 30_000);
+    // slash 真实链路：/rename 持久化 + /status 往返。排水等待必须断言（resend
+    // 排队的第二回合可能仍在跑，否则 /rename 被 availability 门拦下）。
+    const idleBeforeSlash = await waitForCondition(() => !runtime.running, 180_000);
+    assert.ok(idleBeforeSlash, "slash 前 run 应回到 idle（含 resend 双回合排水）");
     const rename = await processClientInput("/rename e2e-真实回合", registry, runtime);
     assert.match(String(rename.result?.message), /e2e-真实回合/);
     const renamed = await client.request("session.get", {
@@ -94,13 +99,18 @@ realModelTest(
     assert.equal(status.kind, "local");
     assert.match(String(status.result?.message), /模型路由/);
 
-    // interrupt 路径：发起第二回合，观察 running 后中断（真实模型可能抢先完成
-    // ——竞态容忍，断言命令不抛错且最终回到 idle）。
+    // interrupt 路径：发起第二回合，观察 running 后中断。断言消息方向（对抗评审
+    // P0：kind==="local" 三种结局都满足，无法区分门拦/执行/失败）。
     const second = await runtime.sendText("请从 1 数到 50，每个数一行");
     assert.ok(second);
-    await waitForCondition(() => runtime.running, 60_000).catch(() => undefined);
+    const sawRunning = await waitForCondition(() => runtime.running, 60_000);
     const interrupt = await processClientInput("/interrupt", registry, runtime);
     assert.equal(interrupt.kind, "local");
+    assert.match(
+      String(interrupt.result?.message),
+      sawRunning ? /已请求中断/ : /only available while running/,
+      "interrupt 应真实执行（running 时）或被门拦（run 抢先结束），二者之一",
+    );
     const backIdle = await waitForCondition(() => !runtime.running, 180_000);
     assert.ok(backIdle, "中断或自然完成后应回到 idle");
 
