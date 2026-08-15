@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3-A（runtime-host 骨架）已完整交付并经四轮对抗审查 + 集成 + e2e 全绿验证；3-B-1（桥接 composition）已完成——workspace.status / usage.get 已走 runtime-host 全链路（dispatch/decode 实盘验证 5/5）；3-B-2（事件协议）已完成——Host→Client event 推送帧 + events.subscribe/replay 全语义桥接（29/29 实盘）；3-B-3（选主迁移硬切）+ daemon stop + 3-B-4 收尾（P1-2/P1-3/A6/logs）已完成。下一步是 3-C Desktop（fail-stuck + D9/D12 反转）与 3-D TUI（单独立项）。**
+**阶段 3 全链推进至 3-D Phase 3：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer + 真机冒烟 / plan·BYOK·wake / slash tier1 29 命令）均完成，并经两轮对抗性评审闭环（d6c15c4c + ea13ec10）。下一步：3-D 剩余（rewind / driver 叶子提取 / 自由文本 prompt / DEFERRED 命令）→ Phase 4 默认切换 → Phase 5 退役进程内交互路径。**
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -167,6 +167,53 @@
 
 **3-C 未做**：D10（DelegationManager 职责错位等，阶段 2/3 交叉）、91 spec 化渐进、旧 socket 清理渐进。**下一步：3-D TUI 单独立项**（部署模型变更，北极星方案 3.4 已评估）。
 
+## 3-D TUI 已完成 Phase 1-3（daemon 客户端迁移，2026-08-15 追加）
+
+**详细立项与逐阶段记录见 `docs/plans/2026-08-15-tui-daemon-client-migration.md`（单一来源）**。终态：交互 TUI = daemon 瘦客户端（`pico --client`）；交互进程内路径**最终退役**（用户拍板）；headless 永久直连。
+
+### Phase 进度总览（截至今）
+
+| Phase | 内容 | 状态 |
+|---|---|---|
+| 1 | run.live 扩展 tool/subagent 实时事件（协议 union + ToolLiveCoalescer 50ms + 前向兼容契约） | ✅ 08833ce0 + 2eadb002（补 args） |
+| 2 | TUI 客户端 tracer：`pico --client` 四件套（transcript-item-hydration / daemon-event-reporter / client-session-runtime / client-repl Ink 壳，TuiReporter 零改动复用）+ 真机冒烟 | ✅ 8b01dd81 + aeda783a（冒烟逮到 daemon 双规范化 bug → b875b390 修） |
+| 3 首批 | plan 审批字段映射（plan.respond 闭环）/ BYOK 合并（--model/--thinking 生效）/ wake 回归 | ✅ 95b479d2 + 0f10f65f + a20bd320 |
+| 3 主体 | **slash tier1 29 命令**：前置跨会话泄漏修复 + client-commands 注册表（四类，复用 in-process 解析/建议管线）+ 可测宿主 + 建议源 + 真机 slash 链 + e2e 真实模型 | ✅ eb0f2eb5 + e79db76a + d7b019ec + 68623ff2 |
+| 对抗评审两轮 | 一轮 P0×5/P1×6/P2×8 + 二轮 P0×1/P1×6/P2 若干，全分级修复 | ✅ d6c15c4c + ea13ec10 |
+| 3 剩余 | rewind（both-mode 适配器）/ 共享 session driver 叶子提取 / 自由文本 prompt / DEFERRED 命令镜像（provider/rewind/changes/discovery/mcp 列表） | ⏳ |
+| 4 | 默认切换（`pico` 默认客户端路径） | ⏳ |
+| 5 | 退役交互进程内路径（删 repl.tsx 装配链） | ⏳ |
+
+### 对抗评审要点（两轮沉淀，方法论入记忆）
+
+- **一轮 P0×2 同根**：`config.effective.get` wire 是嵌套 `{config:{...}}`——客户端 flat 读取致 /model 与 BYOK 在真 daemon 恒空，而 fake 双编码同错形状使矩阵全绿（**fake 是镜子不是证据**，wire 形状必须读协议源）；root typecheck 实际 30 错——`| head && echo OK` 管道吞退出码（**与 8876dd2c dist 钩子叠加成完整教训链：typecheck 退出码必须独立判定**）。
+- **二轮 P0**：一轮的"选择器 onConfirm"修复是死代码——纯渲染组件收到 callbacks 即丢弃，键盘交互层只在 repl.tsx 的 Interactive* 包装里（**接线修复必须追到事件源，prop 传到位 ≠ 可达**）。真修复：InteractiveModelSelector/InteractiveSessionBrowser 提取到组件模块 + host 交互版渲染 + closeDialog 闭合链。
+- **parity 漂移门**（e79db76a 起，两轮扩展）：双注册表断言 name/aliases/usage/argumentHint/category/availability 相等 + builtin 覆盖清单（BLOCKED=协议缺口/DEFERRED=tier2 两类，单一来源在测试）；元数据漂移在落地日已实际发生（6 别名 + /mode 语义分叉），此门将其永久转红。
+- **枚举校真**：三套终态判定各自臆造非枚举值（interrupted/completed）——读 protocol 类型定义是唯一真相源。
+- **App contract**：client 传 props 缺失会静默劣化（permissionMode 默认 "yolo" 误显）——已建 settings 快照桥（settings.get + settingsUpdated → App props）。
+
+### 当前客户端架构（Phase 3 后）
+
+```
+pico --client → client-repl.tsx（Ink 壳：App props 桥/对话框桥/建议源）
+  ├─ client-session-runtime.ts（无 Ink 核心：sendInput/request 透传/switchSession
+  │   + hydrateSerial 串行对账 + scope 过滤 + BYOK + settings 快照）
+  ├─ daemon-event-reporter.ts（通知→TuiReporter：run.live append-only/工具卡/
+  │   子代理/双向 activeRun 对账/重叠 run 跟踪最新）
+  ├─ client-commands.ts（29 命令注册表，processClientInput 分派 + availability 门）
+  └─ client-command-host.ts（无 Ink 宿主：对话框数据/闭合链/切换/退出信号）
+```
+
+### 测试资产（3-D 累计）
+
+- `tui-client-tracer.test.ts`（fake 全链路：适配器/转换器/客户端环/scope 隔离/BYOK）
+- `tui-client-commands.test.ts`（全命令矩阵 + **parity 漂移门**）
+- `tui-client-command-host.test.ts`（宿主分支 + 建议源）
+- `tui-client-tracer-real-daemon.test.ts`（真 daemon 冒烟 + slash 全链路，死端点模型）
+- `tests/e2e/tui-client-tracer.real-llm.test.ts`（真实模型完整回合 + 清理，RUN_LLM_E2E 门）
+
+**注意**：e2e 不在任何 CI 门内（RUN_LLM_E2E 手动）——评审建议加定时 workflow，待用户拍板。
+
 ## 后续发现（2026-08-15 会话补充）
 
 - ~~**connectOrSpawn 候选池**（A6）~~（已修：单次选举窗口候选 launch 封顶 3，见 3-B-4 章节）。原文：候选启动慢的环境下选举循环每 250ms spawn 一个候选（`MIN_CANDIDATE_INTERVAL_MS`），shutdown 期间池中在途候选可能接手注册写锁/守卫锁，把"优雅关停后锁应释放"变成不确定。慢环境实测：候选启动 19-31s、connectOrSpawn 首次连接可达 24s。
@@ -178,15 +225,19 @@
 
 ```bash
 npx tsc -p packages/runtime-host/tsconfig.json --noEmit   # 包 typecheck（直读 src，快）
-npm run typecheck                                            # 根 typecheck——必须走 npm 脚本：
-                                                             # pretypecheck 钩子会先重建两个包的 dist，
-                                                             # 否则 tsc 消费陈旧 dist 类型报假错
-node --import tsx --import ./src/tui/preload-env.ts --test tests/integration/runtime-host-*.test.ts
+npm run typecheck > tc.log 2>&1                            # 根 typecheck——必须走 npm 脚本（钩子重建
+                                                             # 两包 dist）且**退出码独立判定**：
+                                                             # `| head && echo OK` 会绑 head 的退出码
+                                                             # 恒 0（对抗评审教训：30 错漏检）
+node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/runtime-host-*.test.ts
+node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/tui-client-*.test.ts   # 3-D 客户端层
 node scripts/check-architecture-boundaries.mjs              # 架构门禁
-RUN_LLM_E2E=1 node --import tsx --import ./src/tui/preload-env.ts --test tests/e2e/graph-mode-multiround.real-llm.test.ts
+RUN_LLM_E2E=1 node --env-file-if-exists=.env --import tsx --import ./src/tui/preload-env.ts --test tests/e2e/tui-client-tracer.real-llm.test.ts   # 3-D e2e（真实模型）
 ```
 
 **dist 陷阱（两份真相）**：`@pico/protocol` / `@pico/runtime-host` 的 types/exports 指向 dist——root 的 tsc 与运行时都经 node_modules 解析到 dist 而非 src。改包 src 后：`npm run typecheck`（钩子自动重建）或手动 `npm run build --workspace=<pkg>`；直连 `npx tsc --noEmit` 会用旧类型报假错，直连测试会静默跑旧代码（3-B-1 教训）。运行时走 dist 是有意的模块身份设计（动态 spec 注册表进程级单例），勿用 paths 映射回 src（会把包源码内化进 root 程序，build 产物被污染）。
+
+**测试注意（3-D 沉淀）**：spawn 型测试必须 `--test-concurrency=1`；waitForCondition 的布尔不许丢（`assert.ok` 包住）；断言要枚举全部结局（`kind==="local"` 三种结局都满足即 can't-fail）；e2e 重定向往日志会把日志文件卷进 node --test 发现；CMD 的 `set VAR=1 &&` 带尾空格（用 `set "VAR=1" &&`）。
 
 ## 遗留 / 已知限制
 
@@ -194,3 +245,4 @@ RUN_LLM_E2E=1 node --import tsx --import ./src/tui/preload-env.ts --test tests/e
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。
 - `packages/runtime-host/dist/` 是 gitignore 本地构建产物；改 src 后记得 `npm run build --workspace=@pico/runtime-host`（四轮审查教训：dist 滞后会静默失效）。
+- **3-D 客户端已知边界（评审二轮后仍接受项）**：/Desktop 归一化层三处重复（审批映射/终态判定/activeRun 对账——共享 wire-normalize 模块已列为 Phase 3 剩余首选项）；keybindings 与 @文件补全未接（tier2）；argumentCompleter 的异步补全（session-id/skill 候选）客户端未接（tier2）；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合，driver 提取时一并迁）。
