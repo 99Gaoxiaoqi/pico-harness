@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { unwatchFile, watchFile } from "node:fs";
+import { existsSync, unwatchFile, watchFile } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
@@ -158,6 +158,7 @@ import {
   workspaceStatusResult,
   type DaemonRunExecution,
 } from "./workspace-runtime-service.js";
+import type { WorkspaceStatusResult } from "./protocol.js";
 import {
   createTrustedDesktopAutomation,
   DesktopAutomationService,
@@ -709,6 +710,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async listWorkspaces(): Promise<JsonValue> {
     const workspaces = await Promise.all(
       (await this.registrationStore.list()).map(async (workspacePath) => {
+        // 注册项可能指向已删除的目录（崩溃的���试/客户端残留；注册表 list() 会
+        // 过滤缺失目录，这里是过滤与物化之间的竞态护栏）。真机事故
+        // （2026-08-16）：真 home 累积 54 个存活的 %TEMP% e2e 工作区，单次
+        // workspace.list 物化全部 runtime 推过 kernel 操作 deadline，连接被
+        // 整条拆断——根治在 e2e 隔离 daemon root，这里保证残留永不致命。
+        if (!existsSync(workspacePath)) {
+          return {
+            workspacePath,
+            registered: true,
+            schedulerStatus: "unknown",
+            mode: "folder",
+            branch: "",
+            capabilities: {
+              foregroundRuns: false,
+              fileHistory: false,
+              isolatedWorktrees: false,
+              branchMerge: false,
+            },
+          } satisfies WorkspaceStatusResult;
+        }
         const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
         return workspaceStatusResult(
           runtime,

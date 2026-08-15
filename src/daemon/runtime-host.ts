@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { logger } from "../observability/logger.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
 import { removeLocalDaemonEndpoint, resolveLocalDaemonEndpoint } from "./endpoint.js";
@@ -196,6 +197,12 @@ export class LocalDaemonHost {
     for (const workspacePath of registered) {
       if (this.cronRuntimes.has(workspacePath)) continue;
       if (this.cronShutdownRuntimes.has(workspacePath)) continue;
+      // 目录已不存在的注册项不物化 cron runtime（注册表 list() 已过滤缺失
+      // 目录，这里是过滤与物化之间的竞态护栏）。真机事故（2026-08-16）：真
+      // home 累积 54 个存活 %TEMP% e2e 工作区，reconcile 全量物化把常驻
+      // daemon 拖进 ~30% CPU 定时器风暴——根治在 e2e 隔离 daemon root。
+      // 不自动 unregister（网络盘暂时不可达时会误删），仅跳过。
+      if (!existsSync(workspacePath)) continue;
       try {
         const runtime = await this.options.cronRuntimeFactory.create({
           workspacePath,

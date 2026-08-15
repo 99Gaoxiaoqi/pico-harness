@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, open, readFile, rename, unlink } from 'node:fs/promises';
+import { chmod, lstat, open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decodeHostRegistration, type HostRegistration } from '../protocol/index.js';
+import { renameWithRetry } from './rename-with-retry.js';
 
 export const RUNTIME_HOST_REGISTRATION_FILE = 'registration.json';
 const MAX_REGISTRATION_BYTES = 16 * 1024;
@@ -70,7 +71,7 @@ export async function writeHostRegistration(
     } finally {
       await handle.close();
     }
-    await rename(tempPath, path);
+    await renameWithRetry(tempPath, path);
     replaced = true;
     await chmod(path, 0o600).catch(() => undefined);
     await syncDirectory(controlDirectory);
