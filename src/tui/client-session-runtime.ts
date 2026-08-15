@@ -10,10 +10,23 @@ import {
   type RuntimeUserInput,
 } from "@pico/protocol";
 import type { ApprovalNotice } from "../approval/manager.js";
+import type { AskUserOption } from "../tools/ask-user.js";
 import type { PlanApprovalControl } from "./approval-dialogs.js";
 import { DaemonEventReporter } from "./daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "./transcript-item-hydration.js";
 import type { TuiReporter } from "./tui-reporter.js";
+
+/**
+ * 客户端侧 ask-user 请求（wire prompt 的结构化投影——AskUserRequest 的
+ * 纯数据子集，requestId 复用 wire promptId）。
+ */
+export interface ClientPromptRequest {
+  readonly requestId: string;
+  readonly question: string;
+  readonly header?: string;
+  readonly options: readonly AskUserOption[];
+  readonly freeText?: boolean;
+}
 
 /**
  * TUI 客户端会话核心（3-D Phase 2，无 Ink——集成测试用 fake client 驱动）。
@@ -52,6 +65,10 @@ export interface ClientSessionRuntimeOptions {
   readonly onApproval?: (notice: ApprovalNotice) => void;
   /** 审批被解析（含对端/超时解析）——宿主清理残留对话框。 */
   readonly onApprovalResolved?: (approvalId: string) => void;
+  /** ask-user 问题到达（已从 wire prompt 映射为 AskUserRequest 形状；宿主开对话框）。 */
+  readonly onPrompt?: (request: ClientPromptRequest) => void;
+  /** 问题被解析（含对端取消/answered）——宿主清理残留对话框。 */
+  readonly onPromptResolved?: (promptId: string) => void;
   readonly onRunStateChanged?: (running: boolean) => void;
   /** 会话设置快照（启动/切换/settingsUpdated 后推送——宿主喂状态栏）。 */
   readonly onSettingsSnapshot?: (
@@ -91,6 +108,7 @@ export class ClientSessionRuntime {
     this.eventReporter = new DaemonEventReporter({
       reporter: this.reporter,
       onApprovalRequested: (payload) => this.handleApprovalRequested(payload),
+      onPromptRequested: (payload) => this.handlePromptRequested(payload),
       onRunStateChanged: options.onRunStateChanged,
     });
   }
@@ -234,9 +252,14 @@ export class ClientSessionRuntime {
     if (this.disposed) return;
     // 审批解析（含外会话/超时解析）先行清理残留对话框：不受 scope 过滤影响
     // （对抗评审 P1——过滤在先会让跨会话采纳窗口打开的对话框永远悬空）。
+    // prompt 解析同款前置（对端回答/取消后本端对话框必须收口）。
     if (notification.topic === "approval.resolved") {
       const payload = notification.payload as RuntimeNotificationMap["approval.resolved"];
       this.options.onApprovalResolved?.(payload.approvalId);
+    }
+    if (notification.topic === "prompt.resolved") {
+      const payload = notification.payload as RuntimeNotificationMap["prompt.resolved"];
+      this.options.onPromptResolved?.(payload.promptId);
     }
     // 会话 scope 过滤：订阅是工作区级的，同工作区其他会话（wake/cron/另一
     // 客户端）的 run/live/审批事件不得流入本会话投影；sessionId 未知时（新会话
@@ -460,5 +483,54 @@ export class ClientSessionRuntime {
         : {}),
     };
     this.onApproval?.(notice);
+  }
+
+  /** ask-user 对话框动作 → prompt.respond RPC（幂等键新生成；answer=optionId/label/自由文本）。 */
+  readonly respondPrompt = async (
+    promptId: string,
+    answer: string,
+  ): Promise<boolean> => {
+    try {
+      await this.client.request("prompt.respond", {
+        workspacePath: this.workspacePath,
+        promptId,
+        ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+        answer,
+        idempotencyKey: randomUUID(),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  private handlePromptRequested(
+    payload: RuntimeNotificationMap["prompt.requested"],
+  ): void {
+    const prompt =
+      typeof payload.prompt === "object" && payload.prompt !== null
+        ? (payload.prompt as Record<string, unknown>)
+        : {};
+    const question = typeof prompt["question"] === "string" ? prompt["question"] : "";
+    const rawOptions = Array.isArray(prompt["options"]) ? prompt["options"] : [];
+    const options: AskUserOption[] = [];
+    for (const raw of rawOptions) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const entry = raw as Record<string, unknown>;
+      if (typeof entry["optionId"] !== "string" || typeof entry["label"] !== "string") continue;
+      options.push({
+        optionId: entry["optionId"],
+        label: entry["label"],
+        ...(typeof entry["description"] === "string" ? { description: entry["description"] } : {}),
+      });
+    }
+    if (!question) return;
+    this.options.onPrompt?.({
+      requestId: payload.promptId,
+      question,
+      ...(typeof prompt["header"] === "string" ? { header: prompt["header"] } : {}),
+      options,
+      ...(prompt["freeText"] === true ? { freeText: true } : {}),
+    });
   }
 }

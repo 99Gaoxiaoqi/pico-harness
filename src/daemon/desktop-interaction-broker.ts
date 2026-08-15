@@ -114,12 +114,19 @@ export class DesktopInteractionBroker {
     const request = this.askUserHandler
       .getPendingRequests()
       .find((candidate) => candidate.requestId === requestId);
-    const option = request?.options.find(
+    if (!request) return false;
+    // 选项优先（optionId 或 label 匹配）；声明了 freeText 的请求未命中选项时
+    // 按自由文本提交（3-D Phase 3——engine 侧 submitText 再校验声明与 trim）。
+    const option = request.options.find(
       (candidate) => candidate.optionId === answer || candidate.label === answer,
     );
-    return option
-      ? this.askUserHandler.select(requestId as AskUserRequestId, option.optionId)
-      : false;
+    if (option) {
+      return this.askUserHandler.select(requestId as AskUserRequestId, option.optionId);
+    }
+    if (request.freeText === true) {
+      return this.askUserHandler.submitText(requestId as AskUserRequestId, answer);
+    }
+    return false;
   }
 
   cancelPrompt(requestId: string, reason?: string): boolean {

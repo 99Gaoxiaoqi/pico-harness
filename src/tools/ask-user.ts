@@ -27,7 +27,10 @@ export interface AskUserRequest {
   readonly requestId: AskUserRequestId;
   readonly question: string;
   readonly header?: string;
+  /** 空数组合法（纯自由文本问题）；此时 freeText 必须为 true。 */
   readonly options: readonly AskUserOption[];
+  /** 声明允许自由文本回答（选项外/无选项输入模式）。 */
+  readonly freeText?: boolean;
 }
 
 export type AskUserAnswer =
@@ -36,6 +39,11 @@ export type AskUserAnswer =
       readonly requestId: AskUserRequestId;
       readonly optionId: string;
       readonly label: string;
+    }
+  | {
+      readonly kind: "text";
+      readonly requestId: AskUserRequestId;
+      readonly text: string;
     }
   | {
       readonly kind: "cancelled";
@@ -140,6 +148,25 @@ export class AskUserHandler {
     return true;
   }
 
+  /**
+   * 提交自由文本答案（3-D Phase 3 自由文本链路）。仅当请求声明 freeText 时
+   * 接受——未声明的请求只认选项（select 的"不信任回传文本"约束对等适用：
+   * 文本经宿主 trim 后上送，此处只做非空与声明校验）。
+   */
+  submitText(requestId: AskUserRequestId, text: string): boolean {
+    const pending = this.pending.get(requestId);
+    if (!pending || pending.request.freeText !== true) return false;
+    const trimmed = text.trim();
+    if (trimmed === "") return false;
+
+    const taken = this.take(requestId);
+    if (!taken) return false;
+    const answer: AskUserAnswer = { kind: "text", requestId, text: trimmed };
+    this.emit({ kind: "settled", request: taken.request, outcome: "answered", answer });
+    taken.resolve(answer);
+    return true;
+  }
+
   /** Esc 等交互取消会返回结构化 cancelled，让模型知道用户未选择。 */
   cancel(requestId: AskUserRequestId, reason = "用户取消了问题。"): boolean {
     const pending = this.take(requestId);
@@ -199,12 +226,14 @@ interface AskUserToolInput {
     readonly label: string;
     readonly description?: string;
   }[];
+  readonly freeText?: boolean;
 }
 
 export interface AskUserToolResult {
   readonly requestId: AskUserRequestId;
   readonly status: "answered" | "cancelled";
   readonly selectedOption?: { readonly optionId: string; readonly label: string };
+  readonly textAnswer?: string;
   readonly reason?: string;
 }
 
@@ -223,7 +252,7 @@ export class AskUserTool implements BaseTool {
     return {
       name: this.name(),
       description:
-        "向用户提出一个需要明确选择的结构化问题。仅在缺少的选择会显著改变结果时使用；提交后工具会等待用户回答。",
+        "向用户提出一个需要明确回答的结构化问题。仅在缺少的回答会显著改变结果时使用；提交后工具会等待用户回答。默认渲染为 2-6 个单选项；设 freeText=true 时用户还可在选项外自由输入文本（开放性问题请省略 options 并设 freeText=true）。",
       inputSchema: {
         type: "object",
         properties: {
@@ -241,6 +270,7 @@ export class AskUserTool implements BaseTool {
             type: "array",
             minItems: MIN_OPTIONS,
             maxItems: MAX_OPTIONS,
+            description: "预设单选项；纯开放性问题可省略（此时须 freeText=true）。",
             items: {
               type: "object",
               properties: {
@@ -251,8 +281,12 @@ export class AskUserTool implements BaseTool {
               additionalProperties: false,
             },
           },
+          freeText: {
+            type: "boolean",
+            description: "允许用户在选项外自由输入文本回答；options 省略时必须为 true。",
+          },
         },
-        required: ["question", "options"],
+        required: ["question"],
         additionalProperties: false,
       },
     };
@@ -275,6 +309,7 @@ export class AskUserTool implements BaseTool {
         label: option.label,
         ...(option.description ? { description: option.description } : {}),
       })),
+      ...(input.freeText ? { freeText: true } : {}),
     };
     const answer = await this.handler.waitForAnswer(request, context?.signal);
     context?.signal?.throwIfAborted();
@@ -286,7 +321,9 @@ export class AskUserTool implements BaseTool {
             status: "answered",
             selectedOption: { optionId: answer.optionId, label: answer.label },
           }
-        : { requestId, status: "cancelled", reason: answer.reason };
+        : answer.kind === "text"
+          ? { requestId, status: "answered", textAnswer: answer.text }
+          : { requestId, status: "cancelled", reason: answer.reason };
     return JSON.stringify(result);
   }
 }
@@ -318,13 +355,25 @@ function parseAskUserToolInput(args: string): AskUserToolInput {
 
   const question = requiredText(value["question"], "question", MAX_QUESTION_LENGTH);
   const header = optionalText(value["header"], "header", MAX_HEADER_LENGTH);
+  const freeTextRaw = value["freeText"];
+  if (freeTextRaw !== undefined && typeof freeTextRaw !== "boolean") {
+    throw new Error("ask_user 参数无效：freeText 必须是布尔值。");
+  }
+  const freeText = freeTextRaw === true;
   const rawOptions = value["options"];
+  if (rawOptions === undefined) {
+    // 纯开放性问题：无选项必须声明自由文本，否则用户无从回答。
+    if (!freeText) {
+      throw new Error("ask_user 参数无效：省略 options 时必须设 freeText=true。");
+    }
+    return { question, ...(header ? { header } : {}), options: [], freeText: true };
+  }
   if (
     !Array.isArray(rawOptions) ||
     rawOptions.length < MIN_OPTIONS ||
     rawOptions.length > MAX_OPTIONS
   ) {
-    throw new Error(`ask_user 参数无效：options 必须包含 ${MIN_OPTIONS}-${MAX_OPTIONS} 项。`);
+    throw new Error(`ask_user 参数无效：options 必须包含 ${MIN_OPTIONS}-${MAX_OPTIONS} 项或省略。`);
   }
 
   const seenLabels = new Set<string>();
@@ -350,7 +399,12 @@ function parseAskUserToolInput(args: string): AskUserToolInput {
     return { label, ...(description ? { description } : {}) };
   });
 
-  return { question, ...(header ? { header } : {}), options };
+  return {
+    question,
+    ...(header ? { header } : {}),
+    options,
+    ...(freeText ? { freeText: true } : {}),
+  };
 }
 
 function requiredText(value: unknown, field: string, maxLength: number): string {

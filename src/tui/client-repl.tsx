@@ -8,6 +8,11 @@ import {
 import { App } from "./app.js";
 import { approvalDialogId } from "./approval-panel.js";
 import { createApprovalDialogRequest } from "./approval-dialogs.js";
+import {
+  askUserDialogId,
+  createAskUserDialogRequest,
+} from "./ask-user-dialog.js";
+import type { AskUserRequest } from "../tools/ask-user.js";
 import type { InputBoxSubmission } from "./input-box.js";
 import { ClientSessionRuntime } from "./client-session-runtime.js";
 import {
@@ -84,6 +89,38 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     },
     onApprovalResolved: (approvalId) => {
       setDialogRequests?.((items) => items.filter((item) => item.id !== approvalDialogId(approvalId)));
+    },
+    // ask-user：daemon prompt.requested → AskUserDialog（选项 + freeText 文本
+    // 输入态）；settle 动作走 prompt.respond RPC（幂等键在 runtime.respondPrompt）。
+    onPrompt: (prompt) => {
+      const request = prompt as unknown as AskUserRequest;
+      setDialogRequests?.((items) => [
+        ...items.filter((item) => item.id !== askUserDialogId(request.requestId)),
+        createAskUserDialogRequest(
+          request,
+          {
+            select: (promptId, optionId) => runtime.respondPrompt(promptId, optionId),
+            submitText: (promptId, text) => runtime.respondPrompt(promptId, text),
+            cancel: (promptId) =>
+              runtime
+                .request("prompt.cancel", {
+                  workspacePath: options.workDir,
+                  promptId,
+                })
+                .then(
+                  (result) => result.cancelled,
+                  () => false,
+                ),
+          },
+          {
+            onClose: (id) =>
+              setDialogRequests?.((items) => items.filter((item) => item.id !== id)),
+          },
+        ),
+      ]);
+    },
+    onPromptResolved: (promptId) => {
+      setDialogRequests?.((items) => items.filter((item) => item.id !== askUserDialogId(promptId)));
     },
   });
   const planControl = runtime.createPlanControl();

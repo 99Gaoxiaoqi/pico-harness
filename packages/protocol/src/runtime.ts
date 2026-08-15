@@ -862,6 +862,15 @@ export type RuntimeMethodMap = {
     };
     readonly result: { readonly accepted: boolean; readonly alreadyResolved: boolean };
   };
+  readonly "prompt.cancel": {
+    readonly params: WorkspaceParams & {
+      readonly promptId: PromptId;
+      readonly runId?: RunId;
+      readonly sessionId?: SessionId;
+      readonly reason?: string;
+    };
+    readonly result: { readonly cancelled: boolean };
+  };
   readonly "changes.list": {
     readonly params: WorkspaceParams & { readonly runId: RunId };
     readonly result: { readonly changes: readonly RuntimeChange[]; readonly fingerprint: string };
@@ -1336,6 +1345,7 @@ export const RUNTIME_METHODS = [
   "approval.respond",
   "plan.respond",
   "prompt.respond",
+  "prompt.cancel",
   "changes.list",
   "changes.diff",
   "changes.review",
@@ -1442,6 +1452,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "approval.respond",
   "plan.respond",
   "prompt.respond",
+  "prompt.cancel",
   "changes.list",
   "changes.diff",
   "changes.review",
@@ -2662,6 +2673,10 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "prompt.respond": exactParamShape(
     { workspacePath: stringParam, promptId: stringParam, answer: jsonValueParam },
     { runId: stringParam, sessionId: stringParam, idempotencyKey: stringParam },
+  ),
+  "prompt.cancel": exactParamShape(
+    { workspacePath: stringParam, promptId: stringParam },
+    { runId: stringParam, sessionId: stringParam, reason: stringParam },
   ),
   "changes.list": workspaceRunParams,
   "changes.diff": exactParamShape({
