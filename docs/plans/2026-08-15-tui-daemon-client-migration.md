@@ -54,7 +54,7 @@
 | **2 ✅（8b01dd81）** | **TUI 客户端 tracer**：`--client` 旗标；四件套——transcript-item-hydration（RPC items→TranscriptEvent[]）/ daemon-event-reporter（通知→TuiReporter 适配，append-only+reload 对账）/ client-session-runtime（无 Ink 可测核心）/ client-repl（复用 `<App>` 的 Ink 薄壳）；审批走 approval.requested+approval.respond（approval-dialogs 共享模块提取） | 假 client 集成测试驱动客户端环（tui-client-tracer 5/5）；真实 daemon 冒烟延后 Phase 4 |
 | 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，a20bd320 固化）；~~BYOK 旗标合并~~ ✅（0f10f65f）；~~slash 命令 RPC 化~~ ✅ tier1 29 命令（e79db76a + d7b019ec：客户端注册表 + 可测宿主 + 建议源；前置修复跨会话事件泄漏 eb0f2eb5）。~~剩余三项~~ ✅（Phase 3 收口，2026-08-15）：wire 归一化共享模块（bd308097——终态/审批/activeRun 判定三处收敛，修正 Desktop 非法值 "completed"）、rewind/changes 客户端镜像（5424d72e——rewind.apply mode 参数 + 31 命令）、自由文本 prompt 全链路（d8c708d1——options 可选 0-6 + freeText 声明 + prompt.cancel + 客户端 prompt 事件接入）+ driver 提取按现状证据收口（D14 断言随收口 commit 落地）。**明确不做**（tier2/BLOCKED，Phase 4 不依赖）：provider/cron/mcp/model-usage/agents-usage 镜像；memory（协议缺 memory.create）；/changes 单文件恢复（fileHistoryRestoreFile 无 RPC 对应，查看型 + /rewind 引导） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言 ✅（D14：客户端四件套零引擎装配 + 连接唯一经共享 client） |
 | 4 | **默认切换**：`pico` 默认走客户端路径 | ✅ 4ffc3cbb（入口反转 + --local 过渡逃生门 + 会话旗标三式补齐（-S/--continue/--fork）+ --graph 启动覆盖 + 缺口旗标显式提示 + 冷启动连接提示；e2e 真实模型 1/1 + 真机 --help） |
-| 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | ⏳ |
+| 5 | **退役进程内交互路径**：删 repl.tsx 装配链（3,592 行）+ 8 个孤儿模块（hooks-panel / mcp-elicitation-dialog / model-options / query-guard / running-input-queue / schedule-draft-dialog / schedule-draft-review，scheduler+渲染选项提取到 update-scheduler.ts）；--local 入 RETIRED_OPTIONS；line-mode 随路径删除（Phase 4 起默认路径本就无 line-mode，TERM=dumb 环境自 Phase 4 已不覆盖）；headless 不动 | ✅ 2026-08-16（见下方实施记录） |
 
 ### Phase 2 实施记录（2026-08-15）
 
@@ -106,6 +106,17 @@
 **验证**：全矩阵单轮 4/4 + 客户端/ask-user/kernel/invariants 回归 34/34 + 门禁 0 + typecheck 0。
 
 **实测暴露的遗留（高优先）**：多轮高频 e2e 下 daemon 间歇死锁——连接 terminal（RUNTIME_DISCONNECTED）、稍后 ping 可恢复但窗口不定；当前 launcher 不落盘 daemon stderr，崩溃零证据——**先做 stderr 落盘基础设施再定位**。本机另有 3 个 temp-root 孤儿 daemon 进程（runtime-host 测试遗留）待清理。
+
+**（2026-08-16 补记）死锁已根因定位并修复**，实为三连击（详见 phase3 handoff 同日章节）：① e2e 用默认 `LocalRuntimeClient()` 打**用户真 home daemon**，失败轮次的清理链同样失败 → 真 home 注册表累积 118 条 e2e 工作区（54 个 %TEMP% 目录真实存活）→ reconcile 全量物化 cron runtime（~30% CPU 忙循环）+ workspace.list 物化全部 runtime 超操作 deadline → 连接拆断；② 安全 agent 环境下 registration 发布 rename 间歇 EPERM 直接崩候选（修复：renameWithRetry 有界重试）；③ 首候选崩溃后兄弟候选被其残留 legacy 锁拒绝，3 个选举名额烧光（修复：活满 5s 后死亡的候选不占名额）。**e2e 已改每场景独立 pico-home + 专属 daemon + 结束优雅关停**（不再碰真 home），修复后全矩阵单轮 4/4（127s）。
+
+### Phase 5 实施记录（2026-08-16）
+
+- **删除**：`repl.tsx`（3,592 行装配链）+ 7 个零引用孤儿模块（hooks-panel / mcp-elicitation-dialog / model-options / query-guard / running-input-queue / schedule-draft-dialog / schedule-draft-review，共 ~745 行）。依赖图机械验证（全仓 import 扫描）后删除；`session-hydration.ts` 与 `rewind-runtime.ts` 保留（仍有测试覆盖活语义、engine 侧仅 type import，D14 兼容）。
+- **提取**：`createTuiUpdateScheduler` + `TUI_RENDER_OPTIONS` → `src/tui/update-scheduler.ts`（client-repl 唯一消费者）。
+- **入口**：`--local` 入 RETIRED_OPTIONS（明确报错），cli/main 删 startTuiRepl 分支与 defaultModelForKind；HELP_TEXT 同步。line-mode（TERM=dumb 逃生）随 in-process 路径删除——Phase 4 默认切换时默认路径已无 line-mode，如需要可后续针对客户端壳重建。
+- **测试处置**：cli-entry-dispatch 改断言 "--local 退役报错 + help 不再列出"；plan-mode-host-admission 删 TUI admission 用例（daemon 侧同语义用例保留）；tui-plugin-capability 删 5 个 in-process 生命周期用例、保留 2 个纯 plugins 模块用例（fixture 收敛）。
+- **D14 扩展**：architecture-invariants 的 D14 从"客户端四件套"扩到**整个 src/tui 目录**（目录枚举 + 逐文件断言：engine/runtime value import 禁止，唯一豁免 `engine/tool-result-contract.js` wire 契约工厂；globalSessionManager 全目录禁止；正向 client-repl 经 LocalRuntimeClient）。
+- **验证**：typecheck 0 + invariants/cli-dispatch/plan-admission/plugin-capability/tui-transcript 30/30 + tui-client-* 24/24 + runtime-host 39/39（含 stderr 落盘新用例）+ 门禁 0 + 真机 `pico --help`。session-fork-runtime-port 3 个失败经 stash 基线验证为**预存**（与本次无关）。
 
 ## 四、风险与对策
 

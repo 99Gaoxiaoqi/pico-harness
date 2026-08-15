@@ -24,7 +24,7 @@ import {
   handleClientLocalCommand,
 } from "./client-command-host.js";
 import { TuiReporter } from "./tui-reporter.js";
-import { createTuiUpdateScheduler, TUI_RENDER_OPTIONS } from "./repl.js";
+import { createTuiUpdateScheduler, TUI_RENDER_OPTIONS } from "./update-scheduler.js";
 import { diffStatFromRewindPreview } from "./rewind-client-bridge.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";

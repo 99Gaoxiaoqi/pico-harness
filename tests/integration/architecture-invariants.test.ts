@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -12,7 +12,7 @@ import test from "node:test";
  */
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const readSource = (relativePath: string): string =>
-  readFileSync(resolve(repositoryRoot, relativePath), "utf8");
+  readFileSync(join(repositoryRoot, relativePath), "utf8");
 
 test("事件账本无事件级 GC（append-only 不变量）", () => {
   // 19 文档 1.8：事件账本内没有事件级 GC，无 prune/trim/prune。
@@ -150,32 +150,31 @@ test("D12 正向不变量：transcript 分页算法只在 daemon 服务层，ren
   assert.match(daemonTranscript, /\bselectPage\b/, "transcript 分页/游标算法在 daemon 服务层唯一实现");
 });
 
-test("D14 正向不变量：TUI 客户端路径零引擎装配，连接唯一经共享 client（3-D）", () => {
-  // 3-D 终态架构（2026-08-15）：交互 TUI = daemon 瘦客户端——`pico --client` 的
-  // 客户端四件套（client-repl / client-session-runtime / daemon-event-reporter /
-  // client-commands）不 import 引擎装配面（engine session 构建、globalSessionManager、
-  // bundle 装配），引擎执行唯一在 daemon 侧；连接/重连/重生唯一经 LocalRuntimeClient
-  // （与 Desktop/cron 同一实现，全仓连接状态机数 = 1）。Phase 5 退役 in-process
-  // 路径后本断言扩展到整个 src/tui。
-  const clientRepl = readSource("src/tui/client-repl.tsx");
-  const clientRuntime = readSource("src/tui/client-session-runtime.ts");
-  const clientCommands = readSource("src/tui/client-commands.ts");
-  const eventReporter = readSource("src/tui/daemon-event-reporter.ts");
-  for (const [name, source] of [
-    ["client-repl.tsx", clientRepl],
-    ["client-session-runtime.ts", clientRuntime],
-    ["client-commands.ts", clientCommands],
-    ["daemon-event-reporter.ts", eventReporter],
-  ] as const) {
-    // type-only import（如 ToolResultEnvelope 契约）不算装配面——只剥掉后断言
-    // value import。
-    const valueImports = source.replace(/import type\s+[\s\S]*?from\s+[^;]+;\s*/g, "");
-    // 负向：不 import 引擎装配面（engine 构建/全局会话管理器）。
-    assert.doesNotMatch(
-      valueImports,
-      /from "\.\.\/(?:engine|runtime)\//,
-      `${name} 不得 import 引擎装配面（引擎执行唯一在 daemon 侧；type 契约除外）`,
-    );
+test("D14 正向不变量：src/tui 零引擎装配，连接���一经共享 client（3-D Phase 5）", () => {
+  // 3-D 终态架构（2026-08-15，Phase 5 扩展到整个 src/tui）：交互 TUI =
+  // daemon 瘦客户端——in-process repl 装配链已删除，src/tui 全目录不得
+  // import 引擎装配面（engine session 构建、globalSessionManager、bundle
+  // 装配），引擎执行唯一在 daemon 侧；连接/重连/重生唯一经 LocalRuntimeClient
+  // （与 Desktop/cron 同一实现，全仓连接状态机数 = 1）。
+  const tuiDir = join(repositoryRoot, "src", "tui");
+  const tuiSources = readdirSync(tuiDir).filter((name) => /\.(ts|tsx)$/.test(name));
+  assert.ok(tuiSources.length > 40, `src/tui 应有大量模块（实际 ${tuiSources.length}），扫描疑似失效`);
+  // 引擎 wire 契约例外：tool-result-contract 是 transcript 数据形状工厂
+  // （投影层合法消费），不是引擎装配。
+  const ALLOWED_ENGINE_VALUE_IMPORTS = new Set(["../engine/tool-result-contract.js"]);
+  for (const name of tuiSources) {
+    const source = readSource(`src/tui/${name}`);
+    // 引擎/运行时装配面 import：只允许 type 契约或白名单数据形状。
+    for (const match of source.matchAll(
+      /import\s+(type\s+)?(?:\{[^}]*\}|[\w$]+|\*\s+as\s+[\w$]+)\s+from\s+"(\.\.\/(?:engine|runtime)\/[^"]+)";/g,
+    )) {
+      const isTypeOnly = Boolean(match[1]);
+      const importedFrom = match[2] ?? "(unknown)";
+      if (isTypeOnly || ALLOWED_ENGINE_VALUE_IMPORTS.has(importedFrom)) continue;
+      assert.fail(
+        `${name} 不得 value import 引擎装配面（${importedFrom}）；引擎执行唯一在 daemon 侧，type 契约与 tool-result-contract 数据形状除外`,
+      );
+    }
     assert.doesNotMatch(
       source,
       /\bglobalSessionManager\b/,
@@ -183,5 +182,6 @@ test("D14 正向不变量：TUI 客户端路径零引擎装配，连接唯一经
     );
   }
   // 正向：客户端经共享连接入口（LocalRuntimeClient）接入 kernel。
+  const clientRepl = readSource("src/tui/client-repl.tsx");
   assert.match(clientRepl, /\bLocalRuntimeClient\b/, "客户端壳经共享 LocalRuntimeClient 连接（连接状态机唯一）");
 });

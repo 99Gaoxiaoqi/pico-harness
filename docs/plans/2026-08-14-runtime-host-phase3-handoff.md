@@ -6,7 +6,18 @@
 
 ## 一句话现状
 
-**阶段 3 推进至 3-D Phase 4 完成（含全矩阵真机实测闭环）：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer / slash 31 命令 / 自由文本 prompt 全链路）+ 两轮对抗性评审 + Phase 3 剩余收口（bd308097 + 5424d72e + d8c708d1 + bffcb7c8）+ Phase 4 默认切换（4ffc3cbb：`pico` 无旗标默认走 daemon 瘦客户端；--local 过渡逃生门；--continue/--fork/--graph 客户端补齐）+ **全矩阵真机实测（aa617504：4 场景 e2e 逮到并修复 fork ALS 重入 / 启动覆盖 CONFLICT 竞态 / 冷启动窗口 3 个真 bug）**。下一步：**遗留高优先=daemon 间歇死锁（先做 launcher stderr 落盘）**；Phase 5 退役进程内交互路径（删 repl.tsx 装配链 ≈4k 行 + --local 旗标 + D14 断言扩展到整个 src/tui）→ 北极星阶段 3 收口。**
+**阶段 3 全部完成（2026-08-16）：3-A 骨架 + 3-B 全部 + 3-C Desktop + 3-D Phase 1-4 + Phase 5 退役进程内交互路径（删 repl.tsx 3,592 行 + 7 孤儿模块 + --local；D14 扩展到整个 src/tui）→ 北极星阶段 3 收口。遗留高优先"daemon 间歇死锁"已闭环（2026-08-16）：根因= e2e 打真 home 累积 118 条工作区注册（54 个 %TEMP% 目录存活）→ cron 忙循环 + workspace.list 超 deadline，叠加 registration 发布 rename EPERM 崩候选与选举名额烧光；修复= e2e 隔离 daemon root + renameWithRetry + 选举名额折扣 + launcher stderr 落盘（candidate-logs 常驻取证）；真 home 已清理并验证健康；全矩阵 e2e 隔离版 4/4（127s）。**
+
+## 本 session 完成的事（2026-08-16：死锁闭环 + Phase 5 退役）
+
+| 交付 | 内容 |
+|---|---|
+| **stderr 落盘基础设施** | `packages/runtime-host` launcher：候选 spawn 的 stdout/stderr 重定向到 `<control>/candidate-logs/candidate-*.log`（唯一文件名 + 头部元数据 + 保留最新 20 份 + 失败降级 ignore 不破坏选举）；connectOrSpawn 默认派生目录（`candidateLogDirectory` 可覆盖）。机制测试 3/3（含双流取证断言）。 |
+| **死锁根因三连修复** | ① e2e（full-matrix + tracer）改每场景独立 pico-home + 专属 daemon + 结束 `shutdownDaemon` 优雅关停（不再打真 home，不泄漏进程）；② `renameWithRetry`（packages/runtime-host control 层，registration + marker-file 共用，EPERM/EACCES/EBUSY/ENOTEMPTY 有界重试，node:timers/promises 不触手写原语门禁）；③ connectOrSpawn 选举名额折扣（活满 5s 后死亡的候选一次性不占 `maxCandidateLaunches`，秒退守卫拒绝仍全额计数——A6 风暴防护不变）。daemon 侧：listWorkspaces 对缺失目录降级为全能力关闭条目（协议闭合形状）、reconcile 跳过缺失目录不物化 cron runtime（竞态护栏；根治在 e2e 隔离）。 |
+| **环境清理** | 优雅关停 26h 龄劣化 daemon（runtime.shutdown 实测可用）+ 清真 home 注册表 118 条/信任库 99 条垃圾（真工作区保留）+ 删 %TEMP% 424 个 pico-* 目录 + 上午清 9 个孤儿 daemon 进程。新 daemon 验证：ping 26ms、workspace.list 即回、无客户端 75s+ 常驻、CPU 空闲。 |
+| **Phase 5 退役** | 详见 `docs/plans/2026-08-15-tui-daemon-client-migration.md` Phase 5 实施记录。 |
+
+**死锁取证方法论（stderr 基础设施的直接回报）**：真 home 的 candidate-logs 在 e2e 失败窗口抓到 4 个候选全被"旧版本 daemon 在运行"拒绝（实为劣化 daemon 持锁 + 重生被阻断）；测试 root 的 candidate-logs 抓到 `EPERM rename registration.json` 崩溃栈——两处都是零改动收益（候选输出自动落盘）。诊断脚本保留 `scripts/stress-daemon-diag.ts`（死端点高频压测 + pid 时间线 + 证据倒出）与 `scripts/probe-daemon.ts`（kernel/业务双层探针）。
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -267,7 +278,8 @@ RUN_LLM_E2E=1 node --env-file-if-exists=.env --import tsx --import ./src/tui/pre
 
 ## 遗留 / 已知限制
 
-- **daemon 间歇死锁（2026-08-15 真机实测暴露，高优先）**：多轮高频 e2e 下 daemon 连接 terminal（RUNTIME_DISCONNECTED），稍后 ping 可恢复但窗口不定；launcher 当前不落盘 daemon stderr——崩溃零证据，**下一步先做 stderr 落盘基础设施再定位**。本机另有 3 个 temp-root 孤儿 daemon 进程（runtime-host 测试遗留，wmic 可查）待 taskkill 清理。
+- ~~**daemon 间歇死锁（高优先）**~~（已闭环 2026-08-16，见上方"本 session 完成的事"。注：注册表对**缺失目录**本就过滤（list() dropMissing），事故主体是**存活的 %TEMP% 残留工作区**堆积——existsSync 分支与 reconcile 跳过是竞态护栏，根治在 e2e 隔离。`activeResidencies` 显示口径与常驻 residency 的对应关系未深究（实测 daemon 无客户端 75s+ 常驻正常））。
+- 冷启动形态（stderr 取证确认）：首候选持 legacy 锁慢装配（13-16s）期间，兄弟候选被升级守卫按"旧版本 daemon 在运行"拒绝——消息有误导性但无害（winner 最终就绪；真旧 daemon 场景该守卫是正确的 fail-closed）。候选首连就绪慢（19-31s）维持既有预算评估。
 - ~~`host.diagnostics.query.logs` 恒空~~（已落地：kernel 生命周期环形日志，见 3-B-4 章节）。
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。

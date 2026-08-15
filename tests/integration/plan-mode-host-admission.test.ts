@@ -5,9 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
 import { RuntimeProtocolError } from "../../src/daemon/protocol.js";
-import { ensureTuiPlanRevisionRunAdmission } from "../../src/tui/repl.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 
 test("Plan review Run admission replays one durable run for the same operation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-host-"));
@@ -55,34 +52,6 @@ test("Plan review Run admission replays one durable run for the same operation",
   );
 });
 
-test("TUI Plan revision admission is durable and reuses one RuntimeRun", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-plan-tui-admission-"));
-  const workspace = join(root, "workspace");
-  const picoHome = join(root, "state");
-  await mkdir(workspace);
-  t.after(() => rm(root, { recursive: true, force: true }));
-
-  const request = {
-    sessionId: "session-1",
-    workDir: workspace,
-    picoHome,
-    operationId: "revision-operation-1",
-    requestedAt: "2026-08-05T00:00:00.000Z",
-  };
-  const [first, concurrentReplay] = await Promise.all([
-    ensureTuiPlanRevisionRunAdmission(request),
-    ensureTuiPlanRevisionRunAdmission(request),
-  ]);
-  const replay = await ensureTuiPlanRevisionRunAdmission(request);
-  assert.deepEqual(concurrentReplay, first);
-  assert.deepEqual(replay, first);
-  assert.ok(first);
-
-  const store = new RuntimeEventStore({
-    storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
-  });
-  const events = await store.readRun(request.sessionId, first.runId);
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.kind, "run.started");
-  assert.equal(events[0]?.eventId, first.runStartedEventId);
-});
+// 注：原"TUI Plan revision admission"用例随 in-process TUI 路径退役删除
+// （Phase 5，2026-08-16）：plan 审批 Run 的持久 admission 语义由上方
+// daemon 侧 WorkspaceRuntimeService 用例覆盖（同一 operationId 重放同一 Run）。
