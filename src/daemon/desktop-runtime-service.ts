@@ -3236,6 +3236,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly sessionId: string;
     readonly checkpointId: string;
     readonly expectedFingerprint: string;
+    /** 回滚范围（fork mode）；缺省 both（协议默认，向后兼容）。 */
+    readonly mode?: "code" | "conversation" | "both";
   }): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(
       params.workspacePath,
@@ -3256,7 +3258,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
         const fork = await session.forkFromCheckpoint(
           params.checkpointId,
-          "both",
+          params.mode ?? "both",
           createSessionForkRuntimePort(),
           () => targetSessionId,
           expectedFingerprints,

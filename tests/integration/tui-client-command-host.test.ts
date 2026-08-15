@@ -124,6 +124,81 @@ test("command host: help panel uses client registry list", () => {
   assert.equal(help.dialog?.layer, "overlay");
 });
 
+test("command host: rewind selector dialog carries snapshots (3-D /rewind /changes)", async () => {
+  const harness = createHostHarness();
+  const snapshots = [
+    {
+      messageId: "msg_1",
+      timestamp: new Date(1_000).toISOString(),
+      userPrompt: "第一条",
+      trackedFileCount: 0,
+      backedUpFileCount: 0,
+      deletedFileCount: 0,
+      messageIndex: 0,
+      changedFileCount: 2,
+      addedLines: 10,
+      removedLines: 4,
+    },
+  ];
+  const applied: { messageId: string; mode: string }[] = [];
+  harness.deps = {
+    ...harness.deps,
+    getRewindDiffStat: async () => ({
+      messageId: "msg_1",
+      changedFileCount: 2,
+      addedLines: 10,
+      removedLines: 4,
+      files: [
+        { filePath: "src/a.ts", status: "created" as const, addedLines: 10, removedLines: 0 },
+      ],
+    }),
+    onRewindApply: (snapshot, mode) => {
+      applied.push({ messageId: snapshot.messageId, mode });
+    },
+  };
+
+  // /rewind：选择器 + 快照数据 → rewind-selector 对话框（交互版经
+  // getRewindDiffStat 通道装配 RewindCommandDialog）。
+  const rewind = handleClientLocalCommand(
+    {
+      type: "local",
+      action: "message",
+      message: "Rewind：1 个 checkpoint 可选。",
+      ui: { kind: "open-selector", selector: "rewind" },
+      data: { sessionId: "s1", snapshots },
+    },
+    harness.deps,
+  );
+  assert.equal(rewind.dialog?.id, "local-ui:rewind-selector");
+  assert.equal(rewind.dialog?.layer, "modal");
+
+  // /changes：viewOnly + 预选——对话框相同，apply 回调不装配（查看型）。
+  const changes = handleClientLocalCommand(
+    {
+      type: "local",
+      action: "message",
+      message: "Opening partial rewind preview.",
+      ui: { kind: "open-selector", selector: "rewind" },
+      data: { sessionId: "s1", snapshots, viewOnly: true, selectedMessageId: "msg_1" },
+    },
+    harness.deps,
+  );
+  assert.equal(changes.dialog?.id, "local-ui:rewind-selector");
+
+  // 无 preview 数据源的调用方（纯浏览路径）仍可打开（兼容既有行为）。
+  const browse = handleClientLocalCommand(
+    {
+      type: "local",
+      action: "message",
+      ui: { kind: "open-selector", selector: "rewind" },
+      data: { sessionId: "s1", snapshots },
+    },
+    { ...harness.deps, getRewindDiffStat: undefined, onRewindApply: undefined },
+  );
+  assert.equal(browse.dialog?.id, "local-ui:rewind-selector");
+  assert.deepEqual(applied, [], "宿主层不主动触发 apply（对话框回调驱动）");
+});
+
 test("command host: resume data switches session; new mode is no-op (executor已处理)", () => {
   const harness = createHostHarness();
   const resumed = handleClientLocalCommand(

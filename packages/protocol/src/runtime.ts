@@ -125,6 +125,7 @@ export type RuntimeRunStatus =
   | "failed"
   | "succeeded";
 export type RuntimeSessionStatus = "active" | "archived";
+export type RuntimeRewindMode = "code" | "conversation" | "both";
 export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
@@ -916,6 +917,8 @@ export type RuntimeMethodMap = {
       readonly sessionId: SessionId;
       readonly checkpointId: CheckpointId;
       readonly expectedFingerprint: string;
+      /** 回滚范围（fork mode）；缺省 both（向后兼容旧客户端）。 */
+      readonly mode?: RuntimeRewindMode;
     };
     readonly result: { readonly applied: boolean; readonly sessionId: SessionId };
   };
@@ -2686,12 +2689,15 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     sessionId: stringParam,
     checkpointId: stringParam,
   }),
-  "rewind.apply": exactParamShape({
-    workspacePath: stringParam,
-    sessionId: stringParam,
-    checkpointId: stringParam,
-    expectedFingerprint: stringParam,
-  }),
+  "rewind.apply": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      checkpointId: stringParam,
+      expectedFingerprint: stringParam,
+    },
+    { mode: oneOfParam(["code", "conversation", "both"]) },
+  ),
   "memory.list": exactParamShape(
     { workspacePath: stringParam },
     {
