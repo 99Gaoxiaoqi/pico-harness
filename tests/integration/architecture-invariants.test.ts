@@ -149,3 +149,39 @@ test("D12 正向不变量：transcript 分页算法只在 daemon 服务层，ren
   assert.match(tracker, /\bisCurrent\b/, "ConversationLoadTracker 提供过期加载判定");
   assert.match(daemonTranscript, /\bselectPage\b/, "transcript 分页/游标算法在 daemon 服务层唯一实现");
 });
+
+test("D14 正向不变量：TUI 客户端路径零引擎装配，连接唯一经共享 client（3-D）", () => {
+  // 3-D 终态架构（2026-08-15）：交互 TUI = daemon 瘦客户端——`pico --client` 的
+  // 客户端四件套（client-repl / client-session-runtime / daemon-event-reporter /
+  // client-commands）不 import 引擎装配面（engine session 构建、globalSessionManager、
+  // bundle 装配），引擎执行唯一在 daemon 侧；连接/重连/重生唯一经 LocalRuntimeClient
+  // （与 Desktop/cron 同一实现，全仓连接状态机数 = 1）。Phase 5 退役 in-process
+  // 路径后本断言扩展到整个 src/tui。
+  const clientRepl = readSource("src/tui/client-repl.tsx");
+  const clientRuntime = readSource("src/tui/client-session-runtime.ts");
+  const clientCommands = readSource("src/tui/client-commands.ts");
+  const eventReporter = readSource("src/tui/daemon-event-reporter.ts");
+  for (const [name, source] of [
+    ["client-repl.tsx", clientRepl],
+    ["client-session-runtime.ts", clientRuntime],
+    ["client-commands.ts", clientCommands],
+    ["daemon-event-reporter.ts", eventReporter],
+  ] as const) {
+    // type-only import（如 ToolResultEnvelope 契约）不算装配面——只剥掉后断言
+    // value import。
+    const valueImports = source.replace(/import type\s+[\s\S]*?from\s+[^;]+;\s*/g, "");
+    // 负向：不 import 引擎装配面（engine 构建/全局会话管理器）。
+    assert.doesNotMatch(
+      valueImports,
+      /from "\.\.\/(?:engine|runtime)\//,
+      `${name} 不得 import 引擎装配面（引擎执行唯一在 daemon 侧；type 契约除外）`,
+    );
+    assert.doesNotMatch(
+      source,
+      /\bglobalSessionManager\b/,
+      `${name} 不得触碰进程内会话管理器（会话独占在 daemon 侧持有）`,
+    );
+  }
+  // 正向：客户端经共享连接入口（LocalRuntimeClient）接入 kernel。
+  assert.match(clientRepl, /\bLocalRuntimeClient\b/, "客户端壳经共享 LocalRuntimeClient 连接（连接状态机唯一）");
+});

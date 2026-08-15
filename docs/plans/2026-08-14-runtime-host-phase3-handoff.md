@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3 全链推进至 3-D Phase 3：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer + 真机冒烟 / plan·BYOK·wake / slash tier1 29 命令）均完成，并经两轮对抗性评审闭环（d6c15c4c + ea13ec10）。下一步：3-D 剩余（rewind / driver 叶子提取 / 自由文本 prompt / DEFERRED 命令）→ Phase 4 默认切换 → Phase 5 退役进程内交互路径。**
+**阶段 3 全链推进至 3-D Phase 3 完成（含剩余收口）：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer + 真机冒烟 / plan·BYOK·wake / slash tier1 29 命令）+ 两轮对抗性评审闭环（d6c15c4c + ea13ec10）+ Phase 3 剩余收口（bd308097 wire 归一化共享模块 / 5424d72e rewind·changes 客户端镜像+mode 参数 / d8c708d1 自由文本 prompt 全链路+prompt.cancel + D14 断言）。下一步：Phase 4 默认切换（`pico` 默认客户端路径）→ Phase 5 退役进程内交互路径。**
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -180,9 +180,22 @@
 | 3 首批 | plan 审批字段映射（plan.respond 闭环）/ BYOK 合并（--model/--thinking 生效）/ wake 回归 | ✅ 95b479d2 + 0f10f65f + a20bd320 |
 | 3 主体 | **slash tier1 29 命令**：前置跨会话泄漏修复 + client-commands 注册表（四类，复用 in-process 解析/建议管线）+ 可测宿主 + 建议源 + 真机 slash 链 + e2e 真实模型 | ✅ eb0f2eb5 + e79db76a + d7b019ec + 68623ff2 |
 | 对抗评审两轮 | 一轮 P0×5/P1×6/P2×8 + 二轮 P0×1/P1×6/P2 若干，全分级修复 | ✅ d6c15c4c + ea13ec10 |
-| 3 剩余 | rewind（both-mode 适配器）/ 共享 session driver 叶子提取 / 自由文本 prompt / DEFERRED 命令镜像（provider/rewind/changes/discovery/mcp 列表） | ⏳ |
+| 3 剩余收口 | wire 归一化共享模块（终态/审批/activeRun 三处收敛）/ rewind·changes 客户端镜像（协议 mode 参数）/ 自由文本 prompt 全链路（options 可选+freeText+prompt.cancel+客户端接入）/ driver 提取按证据收口为 D14 断言 | ✅ bd308097 + 5424d72e + d8c708d1 |
 | 4 | 默认切换（`pico` 默认客户端路径） | ⏳ |
-| 5 | 退役交互进程内路径（删 repl.tsx 装配链） | ⏳ |
+| 5 | 退役交互进程内路径（删 repl.tsx 装配链；D14 断言扩展到整个 src/tui） | ⏳ |
+
+### Phase 3 剩余收口（2026-08-15 追加，bd308097 + 5424d72e + d8c708d1）
+
+**详细记录单一来源：`docs/plans/2026-08-15-tui-daemon-client-migration.md` 的"Phase 3 剩余收口实施记录"段。** 要点：
+
+- **现状纠偏（侦察）**：driver 叶子纯函数早已提取（items.ts/timeline.ts + 专测），立项描述过期——按证据关闭，交付物改为 D14 架构断言；discovery 豁免注释过期已修正（协议已下线）。
+- **wire 归一化**（bd308097）：`packages/protocol/src/runtime-normalize.ts`——终态四套实现收敛一处（修 Desktop 非法值 "completed"）、审批 payload 结构化读取（TUI 的 planId 兜底语义回流 Desktop）、两口径谓词分离沉淀（isActiveRunStatus 水化对账 vs isStreamingRunStatus 相位灯）。
+- **rewind/changes**（5424d72e）：协议 mode 参数（daemon 透传，此前硬编码 both）+ 客户端 31 命令 + RewindCommandDialog 交互三相复用 + preview 指纹缓存 + fork 后 prompt 回填/会话切换。/changes 查看型（单文件恢复协议缺口，/rewind 引导）。
+- **自由文本 prompt**（d8c708d1，统一方案）：options 可选 0-6 + freeText 声明（纯开放问题免编凑选项）；submitText/broker 放行/payload 声明；**新增 prompt.cancel 协议方法**（Esc 链路此前无 RPC 对应）；客户端四件套 prompt 事件从零接入（scope 过滤同 approval + resolved 前置收口）；AskUserDialog 加文本输入态（in-process 同组件零改动受益）。
+- **D14 断言**（收口 commit）：客户端四件套零引擎装配 + 连接唯一经 LocalRuntimeClient——北极星"连接状态机数=1"固化；Phase 5 扩展到整个 src/tui。
+- **明确不做**（Phase 4 不依赖）：provider/cron/mcp/model-usage/agents-usage 镜像（tier2）、memory（协议缺 memory.create，BLOCKED）、/changes 单文件恢复（协议缺口）。
+
+**验证**：typecheck 0 + invariants 9/9（D14 后）+ 客户端层 33/33 + 门禁 0 + e2e 真实模型 1/1。
 
 ### 对抗评审要点（两轮沉淀，方法论入记忆）
 
@@ -200,7 +213,7 @@ pico --client → client-repl.tsx（Ink 壳：App props 桥/对话框桥/建议�
   │   + hydrateSerial 串行对账 + scope 过滤 + BYOK + settings 快照）
   ├─ daemon-event-reporter.ts（通知→TuiReporter：run.live append-only/工具卡/
   │   子代理/双向 activeRun 对账/重叠 run 跟踪最新）
-  ├─ client-commands.ts（29 命令注册表，processClientInput 分派 + availability 门）
+  ├─ client-commands.ts（31 命令注册表，processClientInput 分派 + availability 门）
   └─ client-command-host.ts（无 Ink 宿主：对话框数据/闭合链/切换/退出信号）
 ```
 
@@ -245,4 +258,4 @@ RUN_LLM_E2E=1 node --env-file-if-exists=.env --import tsx --import ./src/tui/pre
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。
 - `packages/runtime-host/dist/` 是 gitignore 本地构建产物；改 src 后记得 `npm run build --workspace=@pico/runtime-host`（四轮审查教训：dist 滞后会静默失效）。
-- **3-D 客户端已知边界（评审二轮后仍接受项）**：/Desktop 归一化层三处重复（审批映射/终态判定/activeRun 对账——共享 wire-normalize 模块已列为 Phase 3 剩余首选项）；keybindings 与 @文件补全未接（tier2）；argumentCompleter 的异步补全（session-id/skill 候选）客户端未接（tier2）；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合，driver 提取时一并迁）。
+- **3-D 客户端已知边界（Phase 3 收口后仍接受项）**：~~/Desktop 归一化层三处重复~~（已收敛：@pico/protocol runtime-normalize 共享模块，bd308097）；keybindings 与 @文件补全未接（tier2）；argumentCompleter 的异步补全（session-id/skill 候选）客户端未接（tier2）；/changes 单文件恢复无协议对应（查看型 + /rewind 引导，tier2）；provider/cron/mcp/model-usage/agents-usage 镜像与 memory remember（tier2/BLOCKED，Phase 4 不依赖）；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合，Phase 5 退役时一并迁）。
