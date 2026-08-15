@@ -223,6 +223,26 @@ function createFakeClient(): FakeClientHarness {
       if (method === "plan.respond") {
         return { accepted: true };
       }
+      if (method === "config.effective.get") {
+        return {
+          defaultModelRouteId: "p1/m1",
+          providers: [
+            {
+              id: "p1",
+              protocol: "openai",
+              baseURL: "http://x",
+              apiKeyEnv: "K",
+              models: ["m1", "m2"],
+              discoverModels: false,
+            },
+          ],
+          sources: {},
+          revisions: { user: "1", project: "1" },
+        };
+      }
+      if (method === "session.settings.update") {
+        return { settings: {} };
+      }
       return {};
     },
     subscribe: async (
@@ -418,4 +438,66 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   );
 
   runtime.dispose();
+});
+
+test("client session runtime: BYOK overrides apply once via session.settings.update", async () => {
+  // 用例 1：--model m2（裸模型名）→ 解析为路由 p1/m2，sessionId 确立后应用一次。
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    reporter,
+    modelOverride: "m2",
+    thinkingOverride: "high",
+  });
+  await runtime.start();
+  harness.setTranscriptItems([]);
+  await runtime.sendText("跑起来");
+  const update = harness.requests.find((entry) => entry.method === "session.settings.update");
+  assert.ok(update, "覆盖应在 sessionId 确立后发出 session.settings.update");
+  assert.equal(update.params.modelRouteId, "p1/m2");
+  assert.equal(update.params.thinkingEffort, "high");
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "session.settings.update").length,
+    1,
+    "覆盖只应用一次（sendText 与事件采纳双入口不重复）",
+  );
+  runtime.dispose();
+
+  // 用例 2：无覆盖 → 零调用。
+  const bare = createFakeClient();
+  const bareRuntime = new ClientSessionRuntime({
+    client: bare.client,
+    workspacePath: "C:\\ws",
+    reporter: new TuiReporter(),
+  });
+  await bareRuntime.start();
+  await bareRuntime.sendText("hi");
+  assert.ok(
+    !bare.requests.some((entry) => entry.method === "session.settings.update"),
+    "无覆盖不应发 settings.update",
+  );
+  bareRuntime.dispose();
+
+  // 用例 3：模型不存在 → 错误提示 + 不发 update + 不阻断。
+  const missing = createFakeClient();
+  const missingReporter = new TuiReporter();
+  const missingRuntime = new ClientSessionRuntime({
+    client: missing.client,
+    workspacePath: "C:\\ws",
+    reporter: missingReporter,
+    modelOverride: "no-such-model",
+  });
+  await missingRuntime.start();
+  assert.ok(
+    missingReporter.getProjection().entries.some(({ entry }) => entry.kind === "error"),
+    "解析失败应以错误条目提示",
+  );
+  await missingRuntime.sendText("仍可发送");
+  assert.ok(
+    !missing.requests.some((entry) => entry.method === "session.settings.update"),
+    "解析失败不应发 settings.update",
+  );
+  missingRuntime.dispose();
 });
