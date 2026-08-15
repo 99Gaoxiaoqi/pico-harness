@@ -28,7 +28,8 @@ export interface CliSessionSummary {
   cwd: string;
   createdAt: Date;
   updatedAt: Date;
-  messageCount: number;
+  /** daemon 会话列表（session.list）无消息计数来源——客户端映射时可缺省。 */
+  messageCount?: number;
   title?: string;
   firstMessage?: string;
   lastMessage?: string;

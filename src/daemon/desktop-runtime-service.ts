@@ -3739,7 +3739,7 @@ function sessionPayload(
     pinned: metadata?.pinnedAt !== undefined,
     createdAt: summary.createdAt.getTime(),
     updatedAt: Math.max(summary.updatedAt.getTime(), metadata?.updatedAt ?? 0),
-    messageCount: summary.messageCount,
+    ...(summary.messageCount !== undefined ? { messageCount: summary.messageCount } : {}),
     ...(summary.lastMessage ? { lastMessage: summary.lastMessage } : {}),
     ...(summary.forkFrom ? { forkFrom: summary.forkFrom } : {}),
   };

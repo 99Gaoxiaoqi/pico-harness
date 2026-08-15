@@ -8,7 +8,8 @@
 export interface SessionPresentationInput {
   id: string;
   updatedAt: Date;
-  messageCount: number;
+  /** daemon 会话列表无消息计数来源时可缺省（渲染为 —）。 */
+  messageCount?: number;
   title?: string;
   firstMessage?: string;
   lastMessage?: string;
@@ -73,7 +74,8 @@ export function presentSession(
 ): SessionPresentation {
   const title = truncateInline(sessionDisplayTitle(session), options.maxTitleLength);
   const relativeUpdatedAt = formatRelativeTime(session.updatedAt, options.now);
-  const messageLabel = formatMessageCount(session.messageCount);
+  const messageLabel =
+    session.messageCount === undefined ? "—" : formatMessageCount(session.messageCount);
   const forkParentTitle = cleanText(session.forkParentTitle);
   const forkLabel = session.forkFrom
     ? forkParentTitle
