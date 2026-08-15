@@ -212,6 +212,12 @@ export class ClientSessionRuntime {
     this.hydrating = true;
     try {
       await this.hydrate();
+    } catch (error) {
+      // 对账是尽力而为：失败留给下一次 reload 重试，不得变成 unhandled rejection。
+      this.reporter.pushError(error instanceof Error ? error.message : String(error), {
+        retryable: true,
+        action: "session.transcript",
+      });
     } finally {
       this.hydrating = false;
       if (this.hydrateAgain) {
