@@ -53,8 +53,8 @@
 | **1 ✅（08833ce0 + 2eadb002）** | **run.live 扩展 tool/subagent 实时事件**：协议新 kind + production-host 路由 + tool output ~50ms daemon 侧合流 + 分级裁剪兼容 + 未知 kind 前向兼容（旧客户端忽略不报错）；后续补齐 started 项 args（4KB 展示上限） | 桥接集成测试（形状/合流/裁剪/容忍）+ runtime-host 全套回归；Desktop 立即受益于"可选消费" |
 | **2 ✅（8b01dd81）** | **TUI 客户端 tracer**：`--client` 旗标；四件套——transcript-item-hydration（RPC items→TranscriptEvent[]）/ daemon-event-reporter（通知→TuiReporter 适配，append-only+reload 对账）/ client-session-runtime（无 Ink 可测核心）/ client-repl（复用 `<App>` 的 Ink 薄壳）；审批走 approval.requested+approval.respond（approval-dialogs 共享模块提取） | 假 client 集成测试驱动客户端环（tui-client-tracer 5/5）；真实 daemon 冒烟延后 Phase 4 |
 | 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，a20bd320 固化）；~~BYOK 旗标合并~~ ✅（0f10f65f）；~~slash 命令 RPC 化~~ ✅ tier1 29 命令（e79db76a + d7b019ec：客户端注册表 + 可测宿主 + 建议源；前置修复跨会话事件泄漏 eb0f2eb5）。~~剩余三项~~ ✅（Phase 3 收口，2026-08-15）：wire 归一化共享模块（bd308097——终态/审批/activeRun 判定三处收敛，修正 Desktop 非法值 "completed"）、rewind/changes 客户端镜像（5424d72e——rewind.apply mode 参数 + 31 命令）、自由文本 prompt 全链路（d8c708d1——options 可选 0-6 + freeText 声明 + prompt.cancel + 客户端 prompt 事件接入）+ driver 提取按现状证据收口（D14 断言随收口 commit 落地）。**明确不做**（tier2/BLOCKED，Phase 4 不依赖）：provider/cron/mcp/model-usage/agents-usage 镜像；memory（协议缺 memory.create）；/changes 单文件恢复（fileHistoryRestoreFile 无 RPC 对应，查看型 + /rewind 引导） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言 ✅（D14：客户端四件套零引擎装配 + 连接唯一经共享 client） |
-| 4 | **默认切换**：`pico` 默认走客户端路径 | e2e 真实模型冒烟（tests/e2e）+ 慢环境冷启动预算复核 + 真机 TUI 冒烟 |
-| 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | D9 类正向断言转正：交互外壳零引擎装配；typecheck/测试/门禁全绿 |
+| 4 | **默认切换**：`pico` 默认走客户端路径 | ✅ 4ffc3cbb（入口反转 + --local 过渡逃生门 + 会话旗标三式补齐（-S/--continue/--fork）+ --graph 启动覆盖 + 缺口旗标显式提示 + 冷启动连接提示；e2e 真实模型 1/1 + 真机 --help） |
+| 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | ⏳ |
 
 ### Phase 2 实施记录（2026-08-15）
 
@@ -79,6 +79,15 @@
 - **自由文本 prompt 全链路**（d8c708d1，统一方案=用户选项）：options 改可选 0-6 + freeText?: boolean 声明（纯开放问题免编凑选项）；AskUserAnswer 加 {kind:"text"}；handler.submitText（仅声明请求接受）；broker 选项优先、freeText 未命中按文本提交；新增 **prompt.cancel** 协议方法（Esc 取消链路此前无 RPC 对应，幂等入 KERNEL_RETRY_SAFE_METHODS）；客户端四件套此前 prompt.* 全忽略→接 onPrompt/onPromptResolved（resolved 前置不受 scope 过滤）+ respondPrompt；AskUserDialog 共享组件加文本输入态（t 进入/纯文本直达/Enter 提交/Esc 回列表），createAskUserDialogRequest 泛化 AskUserDialogActions（同步 handler 与异步 RPC 统一）——in-process bindAskUserDialogs 零改动受益。Desktop 不动（字段向后兼容）。
 - **D14 架构断言**（收口 commit）：客户端四件套零引擎装配（负向：无 engine value import/globalSessionManager；type 契约除外）+ 连接唯一经 LocalRuntimeClient（正向）——北极星"全仓连接状态机实现数=1"验收经此固化；Phase 5 退役 in-process 后扩展到整个 src/tui。
 - **验证基线**：typecheck 0 + invariants 9/9 + 客户端层 33/33 + 门禁 0 + e2e 真实模型 1/1。
+
+### Phase 4 默认切换实施记录（2026-08-15，4ffc3cbb）
+
+- **入口反转**：无旗标 `pico` → startClientRepl（客户端瘦 TUI）；`--local` 过渡逃生门走进程内（Phase 5 删除，终态不留）；`--client` 兼容保留 no-op（已是默认）。HELP_TEXT 同步。
+- **会话旗标三式补齐**（默认切换后体验不降级）：`--continue` 采纳 resolveCliSession 解析出的具体 sessionId（等价 resume——mode "continue" 本就带 latest id）；`--fork <id>` 经 ClientReplOptions.forkFrom——runtime.start() 连接后 `session.fork` RPC 切新会话（原会话不动）；`-S/--resume` 照旧。
+- **--graph**：ClientSessionRuntimeOptions.orchestrationModeOverride 并入 BYOK 启动覆盖桥（与 model/thinking 共用单次闩 + 重试触发点，session.settings.update 一次应用）。
+- **缺口旗标显式提示**：--mcp-config/--add-dir（MCP 归 daemon 侧装配）与裸 --provider 提示用 --model——不静默丢弃。
+- **冷启动预算复核**：render 先于 runtime.start()（UI 立即出现）+ 连接前系统消息"正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…"——慢环境 connectOrSpawn 选举首连可达 24s 不再黑屏。选举预算本身维持既有（45s 窗口 + 3-B-4 候选封顶）。
+- **验证**：cli-entry-dispatch 5 条（fake CliRuntime 断言分派/旗标传递/快速路径）+ 相关回归 41/41 + typecheck 0 + 门禁 0 + e2e 真实模型 1/1 + 真机 `pico --help`。真机交互冒烟（默认 pico 跑完整回合）待用户实跑。
 
 ## 四、风险与对策
 
