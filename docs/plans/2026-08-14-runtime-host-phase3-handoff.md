@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3 全链推进至 3-D Phase 3 完成（含剩余收口）：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer + 真机冒烟 / plan·BYOK·wake / slash tier1 29 命令）+ 两轮对抗性评审闭环（d6c15c4c + ea13ec10）+ Phase 3 剩余收口（bd308097 wire 归一化共享模块 / 5424d72e rewind·changes 客户端镜像+mode 参数 / d8c708d1 自由文本 prompt 全链路+prompt.cancel + D14 断言）。下一步：Phase 4 默认切换（`pico` 默认客户端路径）→ Phase 5 退役进程内交互路径。**
+**阶段 3 推进至 3-D Phase 4 完成：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer / slash 31 命令 / 自由文本 prompt 全链路）+ 两轮对抗性评审 + Phase 3 剩余收口（bd308097 + 5424d72e + d8c708d1 + bffcb7c8）+ **Phase 4 默认切换（4ffc3cbb：`pico` 无旗标默认走 daemon 瘦客户端；--local 过渡逃生门；--continue/--fork/--graph 客户端补齐）**。下一步：Phase 5 退役进程内交互路径（删 repl.tsx 装配链 ≈4k 行 + --local 旗标 + D14 断言扩展到整个 src/tui）→ 北极星阶段 3 收口。**
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -181,8 +181,8 @@
 | 3 主体 | **slash tier1 29 命令**：前置跨会话泄漏修复 + client-commands 注册表（四类，复用 in-process 解析/建议管线）+ 可测宿主 + 建议源 + 真机 slash 链 + e2e 真实模型 | ✅ eb0f2eb5 + e79db76a + d7b019ec + 68623ff2 |
 | 对抗评审两轮 | 一轮 P0×5/P1×6/P2×8 + 二轮 P0×1/P1×6/P2 若干，全分级修复 | ✅ d6c15c4c + ea13ec10 |
 | 3 剩余收口 | wire 归一化共享模块（终态/审批/activeRun 三处收敛）/ rewind·changes 客户端镜像（协议 mode 参数）/ 自由文本 prompt 全链路（options 可选+freeText+prompt.cancel+客户端接入）/ driver 提取按证据收口为 D14 断言 | ✅ bd308097 + 5424d72e + d8c708d1 |
-| 4 | 默认切换（`pico` 默认客户端路径） | ⏳ |
-| 5 | 退役交互进程内路径（删 repl.tsx 装配链；D14 断言扩展到整个 src/tui） | ⏳ |
+| 4 | 默认切换（`pico` 默认客户端路径；--local 逃生门；--continue/--fork/--graph 补齐；冷启动连接提示） | ✅ 4ffc3cbb |
+| 5 | 退役交互进程内路径（删 repl.tsx 装配链 + --local 旗标；D14 断言扩展到整个 src/tui） | ⏳ 下一步 |
 
 ### Phase 3 剩余收口（2026-08-15 追加，bd308097 + 5424d72e + d8c708d1）
 
