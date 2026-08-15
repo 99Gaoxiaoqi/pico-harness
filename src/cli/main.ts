@@ -22,7 +22,6 @@ import { primeTokenizer } from "../context/token-counter.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
-import { startTuiRepl, type ReplOptions } from "../tui/repl.js";
 import { startClientRepl, type ClientReplOptions } from "../tui/client-repl.js";
 import {
   resolveCliStartupSession,
@@ -48,6 +47,7 @@ const RETIRED_OPTIONS = new Set([
   "--rewind-mode",
   "--rollback",
   "--steer",
+  "--local",
 ]);
 
 const HELP_TEXT = `Usage: pico [options]
@@ -68,7 +68,6 @@ Options:
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
       --daemon-stop                  Stop the resident local daemon gracefully
-      --local                        Run the in-process TUI (Phase 5 前的过渡逃生门)
       --client                       Compatibility no-op: client mode is the default (Phase 4)
   -h, --help                         Show this help without starting the TUI
   -V, --version                      Show the installed version
@@ -86,7 +85,6 @@ export interface CliRuntime {
     args: readonly string[],
     options?: ResolveCliStartupSessionOptions,
   ): Promise<CliStartupSession>;
-  startTuiRepl(options: ReplOptions): Promise<void>;
   startClientRepl(options: ClientReplOptions): Promise<void>;
 }
 
@@ -101,8 +99,6 @@ interface ParsedCliOptions {
   help: boolean;
   version: boolean;
   daemonStop: boolean;
-  /** 过渡逃生门：进程内 TUI（Phase 5 退役）。 */
-  local: boolean;
   client: boolean;
 }
 
@@ -120,7 +116,6 @@ interface ParsedCliValues {
   fork?: string;
   "fork-session"?: string;
   "daemon-stop"?: boolean;
-  local?: boolean;
   client?: boolean;
   help?: boolean;
   version?: boolean;
@@ -151,51 +146,34 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     const { sessionSelection } = await runtime.resolveCliStartupSession(args, {
       trustedWorkDir: workDir,
     });
-    const model = options.model ?? runtime.env.LLM_MODEL ?? defaultModelForKind(options.provider);
 
-    // 3-D Phase 4 默认切换：TUI 默认走 daemon 瘦客户端（connectOrSpawn 拉起/
-    // 连上常驻 daemon），本进程零引擎装配。模型路由归 daemon（BYOK 旗标经
-    // --model/--thinking 合并）；--continue/--fork/-S 启动会话三式全支持；
-    // --graph 经 session.settings.update 应用。--local 是 Phase 5 前的过渡
-    // 逃生门（进程内装配，Phase 5 删除）；--client 兼容保留（已是默认）。
-    if (!options.local) {
-      const clientSessionId =
-        sessionSelection && (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
-          ? sessionSelection.sessionId
-          : undefined;
-      const forkFrom =
-        sessionSelection?.mode === "fork" ? sessionSelection.sessionId : undefined;
-      if (options.provider !== "openai" && options.model === undefined) {
-        runtime.writeStderr(
-          "提示：客户端模式下 --provider 由模型路由隐含决定（裸旗标无 daemon 等价物），请用 --model <provider/model> 指定路由。\n",
-        );
-      }
-      if (options.mcpConfigPath !== undefined || options.addDirs !== undefined) {
-        runtime.writeStderr(
-          "提示：客户端模式下 --mcp-config/--add-dir 暂不支持（MCP 归 daemon 侧装配）；需要时用 --local 过渡。\n",
-        );
-      }
-      await runtime.startClientRepl({
-        workDir,
-        ...(clientSessionId ? { sessionId: clientSessionId } : {}),
-        ...(forkFrom ? { forkFrom } : {}),
-        ...(options.model !== undefined ? { model: options.model } : {}),
-        ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-        ...(options.graph ? { graphMode: true } : {}),
-      });
-      return 0;
+    // 3-D Phase 5（2026-08-16）：交互进程内路径退役——TUI 唯一形态是 daemon
+    // 瘦客户端（connectOrSpawn 拉起/连上常驻 daemon），本进程零引擎装配。
+    // 模型路由归 daemon（BYOK 旗标经 --model/--thinking 合并）；
+    // --continue/--fork/-S 启动会话三式全支持；--graph 经
+    // session.settings.update 应用；--client 兼容保留（已是默认）。
+    const clientSessionId =
+      sessionSelection && (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
+        ? sessionSelection.sessionId
+        : undefined;
+    const forkFrom = sessionSelection?.mode === "fork" ? sessionSelection.sessionId : undefined;
+    if (options.provider !== "openai" && options.model === undefined) {
+      runtime.writeStderr(
+        "提示：--provider 由模型路由隐含决定（裸旗标无 daemon 等价物），请用 --model <provider/model> 指定路由。\n",
+      );
     }
-
-    await runtime.startTuiRepl({
+    if (options.mcpConfigPath !== undefined || options.addDirs !== undefined) {
+      runtime.writeStderr(
+        "提示：--mcp-config/--add-dir 暂不支持（MCP 归 daemon 侧装配）。\n",
+      );
+    }
+    await runtime.startClientRepl({
       workDir,
-      provider: options.provider,
-      model,
-      modelExplicit: options.model !== undefined,
+      ...(clientSessionId ? { sessionId: clientSessionId } : {}),
+      ...(forkFrom ? { forkFrom } : {}),
+      ...(options.model !== undefined ? { model: options.model } : {}),
       ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-      sessionSelection,
-      ...(options.mcpConfigPath ? { mcpConfigPath: options.mcpConfigPath } : {}),
-      ...(options.addDirs ? { addDirs: options.addDirs } : {}),
-      ...(options.graph ? { orchestrationMode: "graph" as const } : {}),
+      ...(options.graph ? { graphMode: true } : {}),
     });
     return 0;
   } catch (error) {
@@ -230,7 +208,6 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         fork: { type: "string" },
         "fork-session": { type: "string" },
         "daemon-stop": { type: "boolean" },
-        local: { type: "boolean" },
         client: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "V" },
@@ -260,7 +237,6 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     help: values.help === true,
     version: values.version === true,
     daemonStop: values["daemon-stop"] === true,
-    local: values.local === true,
     client: values.client === true,
   };
 }
@@ -297,15 +273,6 @@ function formatCliError(error: unknown): string {
 
 function isProviderKind(value: unknown): value is ProviderKind {
   return value === "openai" || value === "claude";
-}
-
-function defaultModelForKind(kind: ProviderKind): string {
-  switch (kind) {
-    case "openai":
-      return "glm-5.2";
-    case "claude":
-      return "claude-3-5-sonnet";
-  }
 }
 
 async function loadPackageVersion(): Promise<string> {
@@ -400,7 +367,6 @@ async function executeEntrypoint(): Promise<void> {
       await ensureWorkspaceTrusted(workDir, { ...(prompt ? { prompt } : {}) });
     },
     resolveCliStartupSession,
-    startTuiRepl,
     startClientRepl,
   };
   process.exitCode = await runCli(process.argv.slice(2), runtime);
