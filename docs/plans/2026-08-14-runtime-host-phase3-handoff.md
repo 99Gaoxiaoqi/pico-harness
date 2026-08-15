@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3 推进至 3-D Phase 4 完成：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer / slash 31 命令 / 自由文本 prompt 全链路）+ 两轮对抗性评审 + Phase 3 剩余收口（bd308097 + 5424d72e + d8c708d1 + bffcb7c8）+ **Phase 4 默认切换（4ffc3cbb：`pico` 无旗标默认走 daemon 瘦客户端；--local 过渡逃生门；--continue/--fork/--graph 客户端补齐）**。下一步：Phase 5 退役进程内交互路径（删 repl.tsx 装配链 ≈4k 行 + --local 旗标 + D14 断言扩展到整个 src/tui）→ 北极星阶段 3 收口。**
+**阶段 3 推进至 3-D Phase 4 完成（含全矩阵真机实测闭环）：3-A 骨架 + 3-B 全部（选主硬切/daemon stop/收尾）+ 3-C Desktop（fail-stuck 恢复 + D9/D12 反转）+ 3-D Phase 1-3（run.live 工具事件 / `pico --client` tracer / slash 31 命令 / 自由文本 prompt 全链路）+ 两轮对抗性评审 + Phase 3 剩余收口（bd308097 + 5424d72e + d8c708d1 + bffcb7c8）+ Phase 4 默认切换（4ffc3cbb：`pico` 无旗标默认走 daemon 瘦客户端；--local 过渡逃生门；--continue/--fork/--graph 客户端补齐）+ **全矩阵真机实测（aa617504：4 场景 e2e 逮到并修复 fork ALS 重入 / 启动覆盖 CONFLICT 竞态 / 冷启动窗口 3 个真 bug）**。下一步：**遗留高优先=daemon 间歇死锁（先做 launcher stderr 落盘）**；Phase 5 退役进程内交互路径（删 repl.tsx 装配链 ≈4k 行 + --local 旗标 + D14 断言扩展到整个 src/tui）→ 北极星阶段 3 收口。**
 
 ## 本 session 完成的事（6 commit，均在 main）
 
@@ -182,6 +182,7 @@
 | 对抗评审两轮 | 一轮 P0×5/P1×6/P2×8 + 二轮 P0×1/P1×6/P2 若干，全分级修复 | ✅ d6c15c4c + ea13ec10 |
 | 3 剩余收口 | wire 归一化共享模块（终态/审批/activeRun 三处收敛）/ rewind·changes 客户端镜像（协议 mode 参数）/ 自由文本 prompt 全链路（options 可选+freeText+prompt.cancel+客户端接入）/ driver 提取按证据收口为 D14 断言 | ✅ bd308097 + 5424d72e + d8c708d1 |
 | 4 | 默认切换（`pico` 默认客户端路径；--local 逃生门；--continue/--fork/--graph 补齐；冷启动连接提示） | ✅ 4ffc3cbb |
+| 4 实测 | 全矩阵真机 e2e（4 场景真实模型）+ 3 真 bug 修复（fork 重入/覆盖竞态/冷启动白名单） | ✅ aa617504 |
 | 5 | 退役交互进程内路径（删 repl.tsx 装配链 + --local 旗标；D14 断言扩展到整个 src/tui） | ⏳ 下一步 |
 
 ### Phase 3 剩余收口（2026-08-15 追加，bd308097 + 5424d72e + d8c708d1）
@@ -196,6 +197,14 @@
 - **明确不做**（Phase 4 不依赖）：provider/cron/mcp/model-usage/agents-usage 镜像（tier2）、memory（协议缺 memory.create，BLOCKED）、/changes 单文件恢复（协议缺口）。
 
 **验证**：typecheck 0 + invariants 9/9（D14 后）+ 客户端层 33/33 + 门禁 0 + e2e 真实模型 1/1。
+
+### Phase 4 全矩阵真机实测闭环（2026-08-15 追加，aa617504）
+
+**详细记录单一来源：`docs/plans/2026-08-15-tui-daemon-client-migration.md` 的"Phase 4 全矩阵真机实测闭环"段。** 要点：
+
+- 新增 `tests/e2e/tui-client-full-matrix.real-llm.test.ts` 四场景（BYOK/--graph 落地、--continue/--fork 水化、/rewind 全链路 conversation fork、ask_user 自由文本模型真实调用+cancel），每场景独立临时工作区 + 完整清理链（session.delete + trust(false) + unregister）。**单轮 4/4**。
+- **3 个真 bug 修复**：①P0 fork ALS 重入——SessionForkService.fork 直调 serialize，daemon rewind.apply 在 withSession task 内必抛（in-process 不暴露；改 withSerializedExecution）；②P1 启动覆盖 CONFLICT 竞态——sendText 返回后 run 注册窗口内 settings.update 间歇失败且单 send 场景永久丢覆盖（修：onRunStateChanged(false) 终态重试）；③P1 冷启动窗口——轮次间 daemon idle 自退拉起慢（修：register/trust 入幂等重试白名单 + harness ping 排水）。
+- **方法论（已入记忆）**：常驻 daemon 是旧代码——改引擎侧后必须 --daemon-stop 重启再测（模型亲口答旧 schema 才暴露）；断言别锁模型字面输出（"请只回复 ok"会回"好的。"），确定性锚点=user 发送文本/RPC 字段/事件到达；runtime.ping 是 EmptyParams；排水要 assistant+idle 双信号。
 
 ### 对抗评审要点（两轮沉淀，方法论入记忆）
 
@@ -221,9 +230,13 @@ pico --client → client-repl.tsx（Ink 壳：App props 桥/对话框桥/建议�
 
 - `tui-client-tracer.test.ts`（fake 全链路：适配器/转换器/客户端环/scope 隔离/BYOK）
 - `tui-client-commands.test.ts`（全命令矩阵 + **parity 漂移门**）
-- `tui-client-command-host.test.ts`（宿主分支 + 建议源）
+- `tui-client-command-host.test.ts`（宿主分支 + 建议源 + rewind 对话框分支）
 - `tui-client-tracer-real-daemon.test.ts`（真 daemon 冒烟 + slash 全链路，死端点模型）
+- `cli-entry-dispatch.test.ts`（Phase 4 入口分派：默认客户端/--local/会话三式/缺口提示）
+- `protocol-runtime-normalize.test.ts`（wire 归一化枚举校真 + payload 解析）
+- `ask-user-free-text.test.ts`（自由文本引擎/broker/客户端链路）
 - `tests/e2e/tui-client-tracer.real-llm.test.ts`（真实模型完整回合 + 清理，RUN_LLM_E2E 门）
+- `tests/e2e/tui-client-full-matrix.real-llm.test.ts`（**全矩阵真机 4 场景**，RUN_LLM_E2E 门）
 
 **注意**：e2e 不在任何 CI 门内（RUN_LLM_E2E 手动）——评审建议加定时 workflow，待用户拍板。
 
@@ -254,6 +267,7 @@ RUN_LLM_E2E=1 node --env-file-if-exists=.env --import tsx --import ./src/tui/pre
 
 ## 遗留 / 已知限制
 
+- **daemon 间歇死锁（2026-08-15 真机实测暴露，高优先）**：多轮高频 e2e 下 daemon 连接 terminal（RUNTIME_DISCONNECTED），稍后 ping 可恢复但窗口不定；launcher 当前不落盘 daemon stderr——崩溃零证据，**下一步先做 stderr 落盘基础设施再定位**。本机另有 3 个 temp-root 孤儿 daemon 进程（runtime-host 测试遗留，wmic 可查）待 taskkill 清理。
 - ~~`host.diagnostics.query.logs` 恒空~~（已落地：kernel 生命周期环形日志，见 3-B-4 章节）。
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。

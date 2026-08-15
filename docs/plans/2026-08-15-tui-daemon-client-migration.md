@@ -89,6 +89,24 @@
 - **冷启动预算复核**：render 先于 runtime.start()（UI 立即出现）+ 连接前系统消息"正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…"——慢环境 connectOrSpawn 选举首连可达 24s 不再黑屏。选举预算本身维持既有（45s 窗口 + 3-B-4 候选封顶）。
 - **验证**：cli-entry-dispatch 5 条（fake CliRuntime 断言分派/旗标传递/快速路径）+ 相关回归 41/41 + typecheck 0 + 门禁 0 + e2e 真实模型 1/1 + 真机 `pico --help`。真机交互冒烟（默认 pico 跑完整回合）待用户实跑。
 
+### Phase 4 全矩阵真机实测闭环（2026-08-15，aa617504）
+
+用户要求"全方位真实大模型实测"。新增 `tests/e2e/tui-client-full-matrix.real-llm.test.ts` 四场景（每场景独立临时工作区 + 完整清理链）：①BYOK --model/--graph 真实落地；②--continue 水化与 --fork 保源（内容一致断言）；③/rewind 全链路（list → preview 指纹 → conversation fork → switchSession 水化，user 消息边界断言"一号在二号不在"）；④ask_user 自由文本（模型真实调用工具 → respondPrompt 文本回流 → prompt.cancel）。**单轮 4/4 验证**。
+
+**逮到并修复 3 个真 bug（fake 层永远看不到）**：
+1. **P0 fork ALS 重入**：SessionForkService.fork 直调 `source.serialize()`——daemon rewind.apply 在 withSession serialize task 内调 forkFromCheckpoint→fork 必抛 "re-entrant serialized execution"；in-process repl 不包 withSession 从未暴露。修复=改 `withSerializedExecution`（嵌套安全设计用途，外部调用行为不变）。
+2. **P1 启动覆盖 CONFLICT 竞态**：sendText 返回后 run 注册存在窗口，BYOK/--graph 的 session.settings.update 间歇撞"仍有活动 Run"，单 send 场景覆盖**永久丢失**。修复=onRunStateChanged(false)（回合终态）重试 pending 覆盖（applied 单次闩防重复）。
+3. **P1 冷启动窗口**：e2e 轮次间 daemon idle 自退后 connectOrSpawn 拉起慢（19-31s），非幂等 register/trust 直接失败。修复=workspace.register/trust 入 KERNEL_RETRY_SAFE_METHODS（幂等写；unregister 重复执行形态未证伪保守不入）+ e2e harness 首动作 ping 排水（ping 在白名单内 30s 时间预算自动重试）。
+
+**真机实测方法论沉淀**（已入记忆）：
+- **常驻 daemon 是旧代码**——改引擎侧后单测全绿 ≠ daemon 生效，必须 `--daemon-stop` 重启再测（ask_user 新 schema 那次模型亲口答"工具要求至少 2 个选项"才暴露）。
+- **断言别锁模型字面输出**——"请只回复 ok"模型会回"好的。"；确定性锚点=发送的 user 文本/RPC result 字段/事件到达。分诊警惕 `JSON.stringify(item).includes()` 假阳性（匹配到 userMessage 的 prompt）。
+- e2e 排水条件别用 `!running && sessionId 存在`（send 返回瞬间两者都满足=假 idle）；等投影 assistant + idle 双信号。runtime.ping 是 EmptyParams。
+
+**验证**：全矩阵单轮 4/4 + 客户端/ask-user/kernel/invariants 回归 34/34 + 门禁 0 + typecheck 0。
+
+**实测暴露的遗留（高优先）**：多轮高频 e2e 下 daemon 间歇死锁——连接 terminal（RUNTIME_DISCONNECTED）、稍后 ping 可恢复但窗口不定；当前 launcher 不落盘 daemon stderr，崩溃零证据——**先做 stderr 落盘基础设施再定位**。本机另有 3 个 temp-root 孤儿 daemon 进程（runtime-host 测试遗留）待清理。
+
 ## 四、风险与对策
 
 | 风险 | 等级 | 对策 |
