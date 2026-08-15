@@ -52,7 +52,7 @@
 |---|---|---|
 | **1 ✅（08833ce0 + 2eadb002）** | **run.live 扩展 tool/subagent 实时事件**：协议新 kind + production-host 路由 + tool output ~50ms daemon 侧合流 + 分级裁剪兼容 + 未知 kind 前向兼容（旧客户端忽略不报错）；后续补齐 started 项 args（4KB 展示上限） | 桥接集成测试（形状/合流/裁剪/容忍）+ runtime-host 全套回归；Desktop 立即受益于"可选消费" |
 | **2 ✅（8b01dd81）** | **TUI 客户端 tracer**：`--client` 旗标；四件套——transcript-item-hydration（RPC items→TranscriptEvent[]）/ daemon-event-reporter（通知→TuiReporter 适配，append-only+reload 对账）/ client-session-runtime（无 Ink 可测核心）/ client-repl（复用 `<App>` 的 Ink 薄壳）；审批走 approval.requested+approval.respond（approval-dialogs 共享模块提取） | 假 client 集成测试驱动客户端环（tui-client-tracer 5/5）；真实 daemon 冒烟延后 Phase 4 |
-| 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2：wire 元数据映射，plan 审批闭环）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，背靠背回归测试固化）；~~BYOK 旗标合并~~ ✅（0f10f65f：--model/--thinking 经 config.effective.get + session.settings.update 生效）。剩余：slash 命令 RPC 化、rewind/changes、自由文本 prompt、共享 session driver 提取（Desktop 纯 reducer 上提） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言（预置） |
+| 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，a20bd320 固化）；~~BYOK 旗标合并~~ ✅（0f10f65f）；~~slash 命令 RPC 化~~ ✅ tier1 29 命令（e79db76a + d7b019ec：客户端注册表 + 可测宿主 + 建议源；前置修复跨会话事件泄漏 eb0f2eb5）。剩余：rewind/changes（both-mode 适配器）、自由文本 prompt、共享 session driver 提取、/provider /cron /memory（协议/边界缺口） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言（预置） |
 | 4 | **默认切换**：`pico` 默认走客户端路径 | e2e 真实模型冒烟（tests/e2e）+ 慢环境冷启动预算复核 + 真机 TUI 冒烟 |
 | 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | D9 类正向断言转正：交互外壳零引擎装配；typecheck/测试/门禁全绿 |
 
@@ -62,6 +62,14 @@
 - **对账策略**（与 Desktop 同构）：run.live 只消费 append 增量，complete/clear 不落定；`session.transcriptUpdated{reload}` → transcript 重取 → replaceTranscriptEvents 全量重建；重连丢流同理修复。
 - **已实现边界**：会话选择支持新会话 + `-S/--resume`（--continue/--fork 提示走进程内）；斜杠命令本地拦截提示；attachments 忽略；审批 wire 缺 providerCallId/diff/sessionScope（2 选项面板降级）。
 - **测试**：tui-client-tracer 5/5（适配器投影/转换器/客户端环含 send 参数形状、中断、审批映射、scope 采纳、reload 对账）；tui-plugin-capability 的 "daemon endpoint 校验" 失败经 stash 基线验证为既有环境问题。
+
+### Phase 3 slash tier1 实施记录（2026-08-15，eb0f2eb5 + e79db76a + d7b019ec + 68623ff2）
+
+- **前置修复**：DaemonEventReporter 无 scope.sessionId 过滤——同工作区其他会话（wake/cron/另一客户端）的 run/live/审批事件会流入本会话（隐性 bug）；handleNotification 顶部过滤 + switchSession API（订阅不动重定向水化）+ clearTransientState。
+- **注册表**：`client-commands.ts` 复用 in-process 解析/建议管线（parseSlashInput + CommandRegistry + processUserInput 全部引擎解耦），29 命令四类（本地/settings/查询/会话/运行时/输入），执行体换 daemon RPC；availability 门在 processClientInput 对等实现（in-process 在 repl.processTuiInput）；builtin /skill 兜底被客户端原生版覆盖（session.send input kind:skill）。
+- **宿主**：`client-command-host.ts` 纯函数（message/clear/exit 信号/选择器对话框数据/会话切换），client-repl 接建议源（与 in-process 同语义：disabled 灰显不滤除）。
+- **测试加厚（用户要求）**：命令矩阵 6 组（三态/逐 RPC/门/坏值）+ 宿主 5 组 + 真机 slash 链（/status /rename 持久化 /sessions isCurrent /new→resume 水化 /interrupt）+ **e2e 真实模型**（RUN_LLM_E2E 门，用户真实路由完整回合含流式断言 + slash 真实链路 + interrupt；实跑 3 次 2 过，首败疑环境）。
+- **已知坑**：真机 idle-only 命令须等 run 终态（死端点引擎重试有窗口）；e2e 重定向往日志会把日志文件卷进 node --test 发现。
 
 ## 四、风险与对策
 
