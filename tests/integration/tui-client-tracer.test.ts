@@ -477,6 +477,82 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   runtime.dispose();
 });
 
+test("client session runtime: session scope filtering isolates foreign-session events", async () => {
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const runningStates: boolean[] = [];
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    sessionId: "s_mine",
+    reporter,
+    onRunStateChanged: (running) => runningStates.push(running),
+  });
+  harness.setTranscriptItems([{ id: "m1", kind: "userMessage", content: "我的会话" }]);
+  await runtime.start();
+
+  // 他会话（wake/cron/另一客户端）的 run 事件不得驱动本会话。
+  harness.emit(
+    notification("run.started", { sessionId: "s_other" }, { run: { runId: "r_other", status: "running" } }),
+  );
+  harness.emit(
+    notification(
+      "run.live",
+      { sessionId: "s_other" },
+      {
+        runId: "r_other",
+        item: { kind: "assistantMessage", operation: "append", streamId: "x", turnId: "t", delta: "他会的流" },
+      },
+      "r_other",
+    ),
+  );
+  assert.equal(runtime.running, false, "他会话 run.started 不得驱动 running");
+  assert.ok(
+    !reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
+    "他会话 run.live 不得进投影",
+  );
+
+  // 本会话事件照常。
+  harness.emit(
+    notification("run.started", { sessionId: "s_mine" }, { run: { runId: "r_mine", status: "running" } }),
+  );
+  assert.equal(runtime.running, true);
+
+  // 切换：run 跟踪复位 + 水化替换 + 切换后旧会话事件被过滤。
+  harness.setTranscriptItems([{ id: "m2", kind: "userMessage", content: "切换后的历史" }]);
+  await runtime.switchSession("s_new");
+  assert.equal(runtime.running, false, "切换应复位 run 跟踪");
+  assert.ok(
+    !reporter
+      .getProjection()
+      .entries.some(({ entry }) => entry.kind === "user" && entry.content === "我的会话"),
+    "切换后投影应被新会话水化替换",
+  );
+  harness.emit(
+    notification("run.started", { sessionId: "s_mine" }, { run: { runId: "r_mine2", status: "running" } }),
+  );
+  assert.equal(runtime.running, false, "切换后旧会话事件应被过滤");
+
+  // 新会话事件照常进入。
+  harness.emit(
+    notification("run.started", { sessionId: "s_new" }, { run: { runId: "r_new", status: "running" } }),
+  );
+  assert.equal(runtime.running, true);
+
+  // /new（sessionId=undefined）：放行采纳新会话首事件。
+  await runtime.switchSession(undefined);
+  harness.emit(
+    notification(
+      "session.transcriptUpdated",
+      { sessionId: "s_fresh" },
+      { sessionId: "s_fresh", operation: "reload" },
+    ),
+  );
+  assert.equal(runtime.activeSessionId, "s_fresh", "无会话态应重新采纳事件 scope");
+
+  runtime.dispose();
+});
+
 test("client session runtime: BYOK overrides apply once via session.settings.update", async () => {
   // 用例 1：--model m2（裸模型名）→ 解析为路由 p1/m2，sessionId 确立后应用一次。
   const harness = createFakeClient();
