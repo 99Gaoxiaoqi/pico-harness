@@ -76,9 +76,13 @@ test("RuntimeEventStore persists hashed Session JSONL and rebuilds its manifest 
   const batch = JSON.parse(lines[1]!) as Record<string, unknown>;
   assert.equal(batch["type"], "event-batch");
   assert.equal((batch["entries"] as unknown[]).length, 2);
-  assert.equal((await stat(sessionDirectory)).mode & 0o777, 0o700);
-  assert.equal((await stat(logPath)).mode & 0o777, 0o600);
-  assert.equal((await stat(join(root, ".storage"))).mode & 0o777, 0o700);
+  // POSIX 权限位在 NTFS 上不可观测（stat 恒报 0o666），win32 跳过位断言
+  //（产品代码仍按 0o700/0o600 设置；先例：task-run-file-store.test.ts）。
+  if (process.platform !== "win32") {
+    assert.equal((await stat(sessionDirectory)).mode & 0o777, 0o700);
+    assert.equal((await stat(logPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(join(root, ".storage"))).mode & 0o777, 0o700);
+  }
   await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
 
   await unlink(manifestPath);
@@ -376,6 +380,9 @@ test("RuntimeEventStore serializes independent process writers without losing se
 });
 
 test("RuntimeEventStore repairs an incomplete tail and rejects complete malformed records", async (context) => {
+  if (!fileFsyncPermitted) {
+    return context.skip("本环境拒绝文件 fsync（受限沙箱限制，真 NTFS 可用）——修复路径的 syncFileSync 无法验证");
+  }
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-corrupt-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -457,6 +464,9 @@ test("RuntimeEventStore readOnly mode neither repairs nor accepts mutations", as
 });
 
 test("RuntimeEventStore rejects a post-construction Session root symlink without touching its target", async (context) => {
+  if (process.platform === "win32") {
+    return context.skip("POSIX symlink fixture（Windows 建符号链接需特权，先例 hook-execution-trust.test.ts）");
+  }
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-session-root-symlink-"));
   const storageRoot = join(root, "state");
   const workspace = join(root, "workspace");
@@ -496,6 +506,25 @@ test("RuntimeEventStore rejects a post-construction Session root symlink without
   assert.deepEqual(await readFile(externalManifestPath), invalidManifestBytes);
   assert.notDeepEqual(invalidManifestBytes, manifestBytes);
 });
+
+/** 一次性探测本环境是否允许文件 fsync（受限沙箱会 EPERM，真 NTFS/POSIX 允许）。 */
+const fileFsyncPermitted = (() => {
+  try {
+    const { closeSync, fsyncSync, openSync, rmSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+    const probePath = join(tmpdir(), `pico-fsync-probe-${process.pid}`);
+    writeFileSync(probePath, "probe");
+    const descriptor = openSync(probePath, "r");
+    try {
+      fsyncSync(descriptor);
+      return true;
+    } finally {
+      closeSync(descriptor);
+      rmSync(probePath, { force: true });
+    }
+  } catch {
+    return false;
+  }
+})();
 
 function sessionLogPath(store: RuntimeEventStore, sessionId: string): string {
   const digest = createHash("sha256").update(sessionId).digest("hex");
