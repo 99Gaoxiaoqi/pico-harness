@@ -102,6 +102,7 @@ test("run.live tool events: started/output/completed route with correct shapes, 
   assert.equal(started["operation"], "started");
   assert.equal(started["toolCallId"], "call_1");
   assert.equal(started["toolName"], "bash");
+  assert.equal(started["args"], "npm test", "started 应携带有界调用参数（live 卡片展示）");
   assert.equal(started["turnId"], "turn:run_test:2");
 
   route(

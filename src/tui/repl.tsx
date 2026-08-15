@@ -137,13 +137,12 @@ import {
   type RewindCommandDialogState,
 } from "./rewind-command-dialog.js";
 import { applyTuiRewind, rewindInputReplacement } from "./rewind-runtime.js";
-import { globalApprovalManager, type ApprovalNotice } from "../approval/manager.js";
+import { type ApprovalNotice, globalApprovalManager } from "../approval/manager.js";
+import { approvalDialogId, isApprovalDialogId } from "./approval-panel.js";
 import {
-  approvalDialogId,
-  InteractiveApprovalPanel,
-  isApprovalDialogId,
-  type ApprovalPanelAction,
-} from "./approval-panel.js";
+  createApprovalDialogRequest,
+  resolveApprovalAction,
+} from "./approval-dialogs.js";
 import {
   createSessionRuntime as createTuiRuntimeState,
   DelegationWakeCoordinator,
@@ -323,7 +322,6 @@ export function resolveTuiPromptModelRoute(
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
 const HISTORY_PREPARING_DIALOG_ID = "local-ui:history-preparing";
 const SELECTOR_DIALOG_PRIORITY = 40;
-const APPROVAL_DIALOG_PRIORITY = 80;
 
 export const TUI_RENDER_OPTIONS = {
   alternateScreen: true,
@@ -3525,123 +3523,6 @@ export function formatTuiMcpSummary(snapshot: McpStatusSnapshot | undefined): st
   return parts.join(" ");
 }
 
-function createApprovalDialogRequest(
-  notice: ApprovalNotice,
-  deps: Pick<
-    HandleTuiInputSubmissionDeps,
-    "reporter" | "closeDialog" | "sessionId" | "planControl"
-  >,
-): DialogRequest {
-  return {
-    id: approvalDialogId(notice.taskId),
-    layer: "modal",
-    priority: APPROVAL_DIALOG_PRIORITY,
-    content: (
-      <InteractiveApprovalPanel
-        {...notice}
-        onAction={(action, feedback) => {
-          if (
-            action === "execute" ||
-            action === "continue-editing" ||
-            action === "reject-exit" ||
-            action === "resume-execution" ||
-            action === "cancel-execution" ||
-            action === "replan-execution"
-          ) {
-            void resolvePlanApprovalAction(notice, action, feedback, deps);
-            return;
-          }
-          resolveApprovalAction({ action, taskId: notice.taskId }, deps);
-        }}
-      />
-    ),
-  };
-}
-
-async function resolvePlanApprovalAction(
-  notice: ApprovalNotice,
-  action:
-    | "execute"
-    | "continue-editing"
-    | "reject-exit"
-    | "resume-execution"
-    | "cancel-execution"
-    | "replan-execution",
-  feedback: string | undefined,
-  deps: Pick<
-    HandleTuiInputSubmissionDeps,
-    "reporter" | "closeDialog" | "sessionId" | "planControl"
-  >,
-): Promise<void> {
-  const metadata = notice as ApprovalNotice & {
-    readonly planId?: string;
-    readonly expectedRevision?: number;
-    readonly expectedSessionSequence?: number;
-  };
-  if (!deps.planControl || !deps.sessionId) {
-    deps.reporter.pushSystemMessage(
-      "Plan review is unavailable until the Runtime PlanControl port is connected.",
-    );
-    return;
-  }
-  try {
-    await deps.planControl.respond({
-      sessionId: deps.sessionId,
-      planId: metadata.planId ?? notice.taskId,
-      action:
-        action === "continue-editing"
-          ? "continue_editing"
-          : action === "resume-execution"
-            ? "resume_execution"
-            : action === "cancel-execution"
-              ? "cancel_execution"
-              : action === "replan-execution"
-                ? "replan_execution"
-                : action === "reject-exit"
-                  ? "reject_exit"
-                  : "execute",
-      expectedRevision: metadata.expectedRevision ?? 0,
-      expectedSessionSequence: metadata.expectedSessionSequence ?? 0,
-      operationId: planReviewOperationId(metadata, action, feedback),
-      ...(feedback ? { feedback } : {}),
-    });
-    deps.closeDialog?.(approvalDialogId(notice.taskId));
-  } catch (error) {
-    deps.reporter.pushSystemMessage(
-      `Plan changed while reviewing; refresh the proposal and retry. ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-function planReviewOperationId(
-  metadata: {
-    readonly planId?: string;
-    readonly expectedRevision?: number;
-    readonly expectedSessionSequence?: number;
-  },
-  action:
-    | "execute"
-    | "continue-editing"
-    | "reject-exit"
-    | "resume-execution"
-    | "cancel-execution"
-    | "replan-execution",
-  feedback: string | undefined,
-): string {
-  const digest = createHash("sha256")
-    .update(
-      JSON.stringify({
-        planId: metadata.planId ?? "unknown",
-        revision: metadata.expectedRevision ?? 0,
-        sessionSequence: metadata.expectedSessionSequence ?? 0,
-        action,
-        feedback: feedback?.trim() ?? "",
-      }),
-    )
-    .digest("hex");
-  return `tui-plan:${digest}`;
-}
-
 function handleApprovalCommand(
   text: string,
   deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
@@ -3651,41 +3532,6 @@ function handleApprovalCommand(
 
   resolveApprovalAction(parsed, deps);
   return true;
-}
-
-function resolveApprovalAction(
-  parsed:
-    | {
-        action: Exclude<ApprovalPanelAction, "execute" | "continue-editing" | "reject-exit">;
-        taskId: string;
-      }
-    | { action: "modify"; taskId: string; content: string },
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
-): boolean {
-  const ok =
-    parsed.action === "modify"
-      ? globalApprovalManager.resolveApprovalWithModify(parsed.taskId, "TUI modify", parsed.content)
-      : parsed.action === "approve-session"
-        ? globalApprovalManager.resolveApprovalForSession(parsed.taskId, "TUI approve-session")
-        : globalApprovalManager.resolveApproval(
-            parsed.taskId,
-            parsed.action === "approve",
-            `TUI ${parsed.action}`,
-          );
-
-  deps.closeDialog?.(approvalDialogId(parsed.taskId));
-  deps.reporter.pushSystemMessage(
-    ok
-      ? parsed.action === "approve-session"
-        ? "本会话内允许。"
-        : parsed.action === "approve"
-          ? "已允许一次。"
-          : parsed.action === "reject"
-            ? "已拒绝。"
-            : "已带修改批准。"
-      : "审批请求已失效。",
-  );
-  return ok;
 }
 
 type ParsedApprovalCommand =

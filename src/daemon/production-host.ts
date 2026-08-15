@@ -1413,6 +1413,9 @@ export function publishDesktopReporterEvent(
     const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
     if (providerCallId && toolName) {
       const turn = numberOrUndefined(event.payload["turn"]);
+      // args 仅供 live 卡片展示（4KB 上限）；canonical 真值在 durable transcript。
+      const rawArgs = typeof event.payload["args"] === "string" ? event.payload["args"] : "";
+      const args = rawArgs.length > 4096 ? `${rawArgs.slice(0, 4096)}…` : rawArgs;
       service.publishEphemeralNotification(
         createRuntimeNotification({
           topic: "run.live",
@@ -1430,6 +1433,7 @@ export function publishDesktopReporterEvent(
               toolCallId: providerCallId,
               toolName,
               operation: "started",
+              ...(args ? { args } : {}),
               ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
             },
           },
