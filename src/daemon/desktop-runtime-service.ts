@@ -86,7 +86,11 @@ import {
   ProviderOperationJournal,
   type ProviderOperationRecord,
 } from "../provider/provider-operation-journal.js";
-import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
+import {
+  canonicalizeWorkspacePath as canonicalizeManifestWorkspaceForm,
+  resolvePicoHome,
+  resolvePicoPaths,
+} from "../paths/pico-paths.js";
 import {
   readExistingRuntimeSessionProjection,
   RuntimeEventStoreIntegrityError,
@@ -136,6 +140,17 @@ import {
   TranscriptRevisionConflict,
 } from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
+
+/**
+ * manifest.workDir 的写入侧（engine 经 pico-paths 的 canonicalizeWorkspacePath）
+ * 与本服务读取校验侧（workspace-registry 的同名函数）是两套规范化：前者在
+ * win32 上小写化物理路径，后者保留大小写并解析 git 顶��——两者在 Windows
+ * 上凡路径含大写即分叉，会话归属校验必然误判（3-D 冒烟首次触发的既有 bug）。
+ * 归属比较必须用写入侧的规范化形态复现：registry canonical → pico-paths 形态。
+ */
+function manifestWorkspaceForm(registryCanonical: string): string {
+  return canonicalizeManifestWorkspaceForm(registryCanonical);
+}
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "./runtime-host-operations.js";
 import {
@@ -1494,7 +1509,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `Session ${params.sessionId} 不存在于工作区 ${canonical}`,
       );
     }
-    if (projection.manifest.workDir !== canonical) {
+    if (projection.manifest.workDir !== manifestWorkspaceForm(canonical)) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime session ${params.sessionId} belongs to another workspace`,
       );
@@ -1570,7 +1585,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
       sessionId: params.sessionId,
     });
-    if (!projection || projection.manifest.workDir !== canonical) {
+    if (!projection || projection.manifest.workDir !== manifestWorkspaceForm(canonical)) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${params.sessionId} 不属于工作区 ${canonical}`,
