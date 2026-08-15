@@ -28,13 +28,17 @@ export interface SessionBrowserProps {
   sessions: readonly SessionBrowserSession[];
   state?: SessionBrowserState;
   maxItems?: number;
+  /** 选择确认回调（3-D 客户端接线；缺省为纯浏览）。 */
+  callbacks?: SessionBrowserCallbacks;
 }
 
 export function SessionBrowser({
   sessions,
   state = createSessionBrowserState(),
   maxItems,
+  callbacks: _callbacks,
 }: SessionBrowserProps): React.ReactNode {
+  void _callbacks;
   return (
     <Box flexDirection="column">
       {formatSessionBrowser(sessions, { state, maxItems })

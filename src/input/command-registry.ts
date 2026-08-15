@@ -120,6 +120,17 @@ export class CommandRegistry {
     );
   }
 
+  /**
+   * 输入框命令建议源（纯函数，任何宿主可复用——in-process repl 与 3-D 客户端
+   * 共用同一语义；对抗评审 P2：此前两份近似实现已漂移）。
+   */
+  commandSuggestions(
+    query: string,
+    options: Pick<CommandSuggestionOptions, "availabilityState" | "matchMode"> = {},
+  ): readonly CommandSuggestion[] {
+    return this.detailedSuggestions(query, options);
+  }
+
   detailedSuggestions(
     name: string,
     options: CommandSuggestionOptions = {},

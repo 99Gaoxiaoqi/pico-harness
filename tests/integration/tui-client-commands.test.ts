@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { RuntimeNotification } from "@pico/protocol";
+import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import {
   createClientCommandRegistry,
   processClientInput,
@@ -81,7 +85,13 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
         case "goal.get":
           return { goal: { stateVersion: 1, sequence: 1, activeGoalId: "g1", goals: [{ id: "g1", title: "目标一", description: "d", status: "active", createdAt: 1 }] } };
         case "usage.get":
-          return { usage: { inputTokens: 100, outputTokens: 50, cost: 0.1 } };
+          return {
+            usage: {
+              workspacePath: "C:\\ws",
+              providerCallCount: 2,
+              total: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+            },
+          };
         case "diagnostics.run":
           return { output: ["诊断行 1", "诊断行 2"] };
         case "diagnostics.resources":
@@ -93,11 +103,14 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
         case "skills.effective.list":
           return { skills: [{ name: "commit" }, { name: "review" }], revisions: { user: "1", project: "1" } };
         case "config.effective.get":
+          // 真实 wire 形状：config 才是 RuntimeEffectiveConfig（嵌套，对抗评审 P0）。
           return {
-            defaultModelRouteId: "p1/m1",
-            providers: [{ id: "p1", protocol: "openai", baseURL: "http://x", apiKeyEnv: "K", models: ["m1", "m2"], discoverModels: false }],
-            sources: {},
-            revisions: { user: "1", project: "1" },
+            config: {
+              defaultModelRouteId: "p1/m1",
+              providers: [{ id: "p1", protocol: "openai", baseURL: "http://x", apiKeyEnv: "K", models: ["m1", "m2"], discoverModels: false }],
+              sources: {},
+              revisions: { user: "1", project: "1" },
+            },
           };
         case "run.cancel":
           return { run: { runId: "run_1", status: "cancelling" } };
@@ -181,6 +194,7 @@ test("client commands: settings-class commands map to session.settings.update", 
   const thinkingStatus = await run(harness, "/thinking");
   assert.match(String(thinkingStatus.result?.message), /medium/);
   const thinkingSet = await run(harness, "/thinking high");
+  void thinkingSet;
   assert.equal(
     harness.requests.find((entry) => entry.method === "session.settings.update")?.params.thinkingEffort,
     "high",
@@ -193,10 +207,11 @@ test("client commands: settings-class commands map to session.settings.update", 
     "非法思考强度不应发 settings.update（settings.get 是校验数据源，合法）",
   );
 
-  // /mode /permissions /graph /plan：合法值设置 + 非法 usage。
+  // /mode /permissions /graph /plan：合法值设置 + 非法 usage。/mode 走 SessionMode
+  // 语义（deprecated mode param，对抗评审对齐）。
   await run(harness, "/mode plan");
   assert.equal(
-    harness.requests.find((entry) => entry.method === "session.settings.update")?.params.collaborationMode,
+    harness.requests.find((entry) => entry.method === "session.settings.update")?.params.mode,
     "plan",
   );
   await run(harness, "/permissions yolo");
@@ -205,6 +220,14 @@ test("client commands: settings-class commands map to session.settings.update", 
       .filter((entry) => entry.method === "session.settings.update")
       .at(-1)?.params.permissionMode,
     "yolo",
+  );
+  // plan 走 deprecated permissions 别名（permissionMode 枚举无 plan——对抗评审 P0）。
+  await run(harness, "/permissions plan");
+  assert.equal(
+    harness.requests
+      .filter((entry) => entry.method === "session.settings.update")
+      .at(-1)?.params.permissions,
+    "plan",
   );
   await run(harness, "/graph on");
   assert.equal(
@@ -360,6 +383,7 @@ test("client commands: skill/agent inputs use native session.send kinds", async 
   });
 
   const agent = await run(harness, "/agent explore 扫描引擎模块");
+  void agent;
   const agentSend = harness.requests
     .filter((entry) => entry.method === "session.send")
     .at(-1);
@@ -381,16 +405,108 @@ test("client commands: skill/agent inputs use native session.send kinds", async 
   assert.match(String(agents.result?.message), /explore、review/);
 });
 
+test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
+  // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
+  // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
+  // in-process 一致，有意分歧按豁免表声明（含理由）。
+  const root = await mkdtemp(join(tmpdir(), "pico-cmd-parity-"));
+  const workspaceSeed = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspaceSeed, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const inProcess = await createPicoCommandRegistry({
+    workDir: workspaceSeed,
+    picoHome,
+    provider: "openai",
+    model: "test-model",
+    tools: [],
+  });
+  const harness = createHarness({ sessionId: "s1" });
+  const client = harness.registry;
+
+  // 有意分歧豁免（availability）：/skill /agent 经 session.send 排队，运行中合法。
+  const availabilityExemptions = new Set(["skill", "agent"]);
+  const mirrored = [
+    "status",
+    "model",
+    "thinking",
+    "mode",
+    "plan",
+    "permissions",
+    "graph",
+    "goal",
+    "rename",
+    "compact",
+    "init",
+    "doctor",
+    "usage",
+    "sessions",
+    "resume",
+    "fork",
+    "new",
+    "steer",
+    "queue",
+    "replace",
+    "interrupt",
+    "skill",
+    "agent",
+    "skills",
+    "agents",
+    "explore",
+    "help",
+    "clear",
+    "exit",
+  ];
+  for (const name of mirrored) {
+    const mine = client.resolve(name);
+    const reference = inProcess.resolve(name);
+    assert.ok(reference, `in-process 应有 /${name}（镜像集清单过期？）`);
+    assert.ok(mine, `客户端应有 /${name}`);
+    assert.deepEqual(
+      [...(mine.aliases ?? [])].sort(),
+      [...(reference.aliases ?? [])].sort(),
+      `/${name} 别名应与 in-process 一致`,
+    );
+    assert.equal(mine.usage, reference.usage, `/${name} usage 应与 in-process 一致`);
+    if (!availabilityExemptions.has(name)) {
+      assert.equal(
+        mine.availability ?? "always",
+        reference.availability ?? "always",
+        `/${name} availability 应与 in-process 一致（分歧须进豁免表并给理由）`,
+      );
+    }
+  }
+
+  // 覆盖清单：in-process 核心命令（builtin 源）要么被镜像，要么在文档化延后
+  // 清单里（用户技能/插件注入的命令不在此列——客户端经 /skills 列表另有入口）。
+  const deferred = new Set(["provider", "cron", "memory", "mcp", "context", "operations", "rewind", "changes", "snapshots", "discovery", "add-dir", "model-usage", "plugin", "hooks", "resume-plan", "agents-usage"]);
+  const coreInProcess = inProcess
+    .list({ includeHidden: false })
+    .filter((command) => (command.source ?? "builtin") === "builtin")
+    .map((command) => command.name)
+    .filter((name) => !deferred.has(name));
+  for (const name of coreInProcess) {
+    assert.ok(
+      client.resolve(name) !== undefined || deferred.has(name),
+      `in-process 核心命令 /${name} 应被客户端镜像或列入延后清单`,
+    );
+  }
+
+  harness.runtime.dispose();
+});
+
 test("client commands: local/unknown/prompt routing", async () => {
   const harness = createHarness({ sessionId: "s1" });
 
   // 非 slash → prompt → sendText。
   const sent = await run(harness, "普通消息");
   assert.equal(sent.kind, "sent");
-  assert.equal(
-    harness.requests.find((entry) => entry.method === "session.send")?.params.input.kind,
-    "text",
-  );
+  const plainInput = harness.requests.find(
+    (entry) => entry.method === "session.send",
+  )?.params.input as Record<string, unknown>;
+  assert.equal(plainInput.kind, "text");
 
   // 未知命令 → suggestions。
   const unknown = await run(harness, "/nosuch");

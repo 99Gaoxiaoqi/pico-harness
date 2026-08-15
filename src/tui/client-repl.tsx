@@ -131,6 +131,8 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       return () => {
         projectionSink.current = undefined;
         runningSink.current = undefined;
+        // 卸载后清桥（对抗评审 P2：退出窗口内的迟到审批不再打已卸载组件）。
+        setDialogRequests = undefined;
       };
     }, []);
 

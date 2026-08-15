@@ -24,6 +24,8 @@ export interface ModelSelectorProps {
   currentModelId?: string;
   state?: ModelSelectorState;
   maxItems?: number;
+  /** 选择确认回调（3-D 客户端接线；缺省为纯浏览）。 */
+  callbacks?: ModelSelectorCallbacks;
 }
 
 export interface ModelSelectorCallbacks {
@@ -46,7 +48,9 @@ export function ModelSelector({
   currentModelId,
   state = createModelSelectorState(models, currentModelId),
   maxItems,
+  callbacks: _callbacks,
 }: ModelSelectorProps): React.ReactNode {
+  void _callbacks;
   return (
     <Box flexDirection="column">
       {formatModelSelector(models, { currentModelId, state, maxItems })

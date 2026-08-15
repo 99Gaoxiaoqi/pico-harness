@@ -1,4 +1,4 @@
-import type { RuntimeMethod, RuntimeParams, RuntimeResult } from "@pico/protocol";
+import type { RuntimeEffectiveConfig } from "@pico/protocol";
 import { CommandRegistry, type RegistrySlashCommand } from "../input/command-registry.js";
 import { createBuiltinCommands } from "../input/builtin-commands.js";
 import { processUserInput } from "../input/process-user-input.js";
@@ -48,17 +48,23 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
 
   const commands: readonly SlashCommand[] = [
     // builtin 的 /skill 是"生成提示语"兜底——客户端版走 session.send 原生
-    // skill input kind（daemon 解析），此处过滤让客户端版生效。
+    // skill input kind（daemon 解析），此处过滤让客户端版生效（保留 use-skill
+    // 别名与 in-process 对齐）。
     ...createBuiltinCommands().filter((command) => command.name !== "skill"),
     rpcCommand({
       name: "model",
+      aliases: ["models"],
       description: "查看或切换模型路由",
-      usage: "/model [route]",
-      argumentHint: "<provider/model|model>",
+      usage: "/model [name]",
+      argumentHint: "[name]",
       category: "model",
       availability: "idle",
       execute: async (input) => {
-        const configured = await runtime.request("config.effective.get", { workspacePath });
+        // 注意 wire 形状：result.config 才是 RuntimeEffectiveConfig（对抗评审
+        // P0：flat 读取导致 /model 在真 daemon 上恒空——fake 必须编码同一嵌套）。
+        const { config: configured } = await runtime.request("config.effective.get", {
+          workspacePath,
+        });
         const routes = modelRoutesFromConfig(configured);
         const target = input.argv[0];
         if (target === undefined) {
@@ -96,8 +102,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     }),
     rpcCommand({
       name: "thinking",
+      aliases: ["effort"],
       description: "查看或设置思考强度",
-      usage: "/thinking [off|low|medium|high]",
+      usage: "/thinking [level]",
       category: "model",
       availability: "idle",
       execute: async (input) => {
@@ -135,10 +142,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     rpcCommand({
       name: "mode",
       description: "查看或切换协作模式",
-      usage: "/mode [agent|plan]",
-      category: "permissions",
+      usage: "/mode <default|plan|auto|yolo>",
+      category: "session",
       availability: "idle",
-      argumentCompleter: staticCompleter(["agent", "plan"]),
+      argumentCompleter: staticCompleter(["default", "plan", "auto", "yolo"]),
       execute: async (input) => {
         const sid = needSession();
         if (typeof sid === "object") return sid;
@@ -148,16 +155,19 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           return {
             type: "local",
             action: "message",
-            message: `协作模式：${current.settings.collaborationMode ?? "agent"}`,
+            message: `协作模式：${current.settings.collaborationMode ?? "agent"} · 权限：${current.settings.permissionMode ?? "default"}`,
           };
         }
-        if (target !== "agent" && target !== "plan") {
-          return { type: "local", action: "message", message: "Usage: /mode [agent|plan]" };
+        if (!["default", "plan", "auto", "yolo"].includes(target)) {
+          return { type: "local", action: "message", message: "Usage: /mode <default|plan|auto|yolo>" };
         }
+        // 与 in-process 语义对齐（对抗评审 P1：此前 agent|plan 分叉）：SessionMode
+        // 走 deprecated mode param（RuntimeInteractionMode = default|auto|yolo|plan）
+        // ——daemon 侧 "plan" 进规划、其余更新权限。
         await runtime.request("session.settings.update", {
           workspacePath,
           sessionId: sid,
-          collaborationMode: target,
+          mode: target as "default" | "plan" | "auto" | "yolo",
         });
         return { type: "local", action: "message", message: `协作模式已切换：${target}` };
       },
@@ -192,6 +202,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     }),
     rpcCommand({
       name: "permissions",
+      aliases: ["permission"],
       description: "查看或设置权限模式",
       usage: "/permissions [default|auto|yolo|plan]",
       category: "permissions",
@@ -216,10 +227,20 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             message: "Usage: /permissions [default|auto|yolo|plan]",
           };
         }
+        // permissionMode 枚举无 "plan"（协议 :695）；plan 走 deprecated permissions
+        // 别名（协议 :699 支持 "plan" → 进入规划）——与 in-process 语义对齐。
+        if (target === "plan") {
+          await runtime.request("session.settings.update", {
+            workspacePath,
+            sessionId: sid,
+            permissions: "plan",
+          });
+          return { type: "local", action: "message", message: "权限模式已设置：plan（进入规划）" };
+        }
         await runtime.request("session.settings.update", {
           workspacePath,
           sessionId: sid,
-          permissionMode: target as "default" | "auto" | "yolo" | "plan",
+          permissionMode: target as "default" | "auto" | "yolo",
         });
         return { type: "local", action: "message", message: `权限模式已设置：${target}` };
       },
@@ -260,9 +281,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     }),
     rpcCommand({
       name: "status",
+      aliases: ["st"],
       description: "查看会话与配置状态",
       usage: "/status",
-      category: "help",
+      category: "session",
       availability: "always",
       execute: async () => {
         const sid = needSession();
@@ -397,6 +419,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     }),
     rpcCommand({
       name: "sessions",
+      aliases: ["session-list"],
       description: "列出工作区会话",
       usage: "/sessions",
       category: "session",
@@ -481,9 +504,12 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     ...createRunningInputCommands(deps),
     rpcCommand({
       name: "skill",
+      aliases: ["use-skill"],
       description: "请求 agent 使用指定技能（daemon 侧解析）",
-      usage: "/skill <name> [args]",
+      usage: "/skill <name> [arguments]",
       category: "skill",
+      // 有意分歧：in-process 为 idle；客户端经 session.send 排队（daemon 决策
+      // queued/steered），运行中提交合法。parity 测试按此豁免。
       availability: "always",
       execute: async (input) => {
         const skillName = input.argv[0];
@@ -502,6 +528,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       description: "派发命名 agent 任务（daemon 侧解析）",
       usage: "/agent <name> <task>",
       category: "agent",
+      // 有意分歧：同 /skill——经 session.send 排队，运行中提交合法。
       availability: "always",
       execute: async (input) => {
         const agentName = input.argv[0];
@@ -517,10 +544,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
     }),
     rpcCommand({
       name: "skills",
+      aliases: ["skill-list"],
       description: "列出可用技能",
       usage: "/skills",
       category: "skill",
-      availability: "always",
+      availability: "idle",
       execute: async () => {
         const result = await runtime.request("skills.effective.list", { workspacePath });
         const names = (result.skills as readonly { name?: string }[])
@@ -538,7 +566,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       description: "列出可用 agent",
       usage: "/agents",
       category: "agent",
-      availability: "always",
+      availability: "idle",
       execute: async () => {
         const result = await runtime.request("catalog.agents", { workspacePath });
         const names = result.agents.map((agent) => agent.name).join("、");
@@ -554,7 +582,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       description: "（已弃用）仓库探索已内建",
       usage: "/explore",
       category: "workspace",
-      availability: "always",
+      availability: "idle",
       execute: async () => ({
         type: "local",
         action: "message",
@@ -569,7 +597,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
 function createRunningInputCommands(
   deps: ClientCommandRegistryDeps,
 ): readonly SlashCommand[] {
-  const { runtime, workspacePath } = deps;
+  const { runtime } = deps;
   const behaviorCommand = (
     name: "steer" | "queue" | "replace",
     description: string,
@@ -596,7 +624,6 @@ function createRunningInputCommands(
     behaviorCommand("replace", "替换当前 run", "/replace <prompt>"),
     rpcCommand({
       name: "interrupt",
-      aliases: ["stop"],
       description: "中断当前 run",
       usage: "/interrupt",
       category: "session",
@@ -631,7 +658,23 @@ export async function processClientInput(
       }
     }
   }
-  const processed: InputProcessResult = await processUserInput(input, { registry });
+  const processed: InputProcessResult = await (async () => {
+    try {
+      return await processUserInput(input, { registry });
+    } catch (error) {
+      // 任何命令执行器内的 RPC/解析错误都不得变成 unhandled rejection 崩掉
+      // TUI（对抗评审 P0）：统一降级为错误消息。
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        type: "local-command" as const,
+        raw: input,
+        command: parsed?.name ?? "",
+        args: parsed?.args ?? "",
+        argv: parsed?.argv ?? [],
+        result: { type: "local" as const, action: "message" as const, message: `命令执行失败：${detail}` },
+      };
+    }
+  })();
   switch (processed.type) {
     case "empty":
       return { kind: "rejected" };
@@ -652,12 +695,6 @@ export async function processClientInput(
   }
 }
 
-export interface ClientInputOutcome {
-  readonly kind: "local" | "unknown" | "sent" | "rejected";
-  readonly result?: LocalCommandResult;
-  readonly message?: string;
-}
-
 function rpcCommand(spec: SlashCommand): SlashCommand {
   return { ...spec, kind: spec.kind ?? "local" };
 }
@@ -669,16 +706,21 @@ function staticCompleter(values: readonly string[]) {
       .map((value) => ({ value }));
 }
 
-function modelRoutesFromConfig(config: RuntimeResult<"config.effective.get">): {
+function modelRoutesFromConfig(config: RuntimeEffectiveConfig): {
   id: string;
   name: string;
 }[] {
   const routes: { id: string; name: string }[] = [];
-  for (const provider of config.providers ?? []) {
-    const record = provider as Record<string, unknown>;
-    const providerId = typeof record["id"] === "string" ? record["id"] : undefined;
-    for (const model of record["models"] ?? []) {
-      if (typeof model === "string" && providerId) {
+  const providers = (Array.isArray(config.providers) ? config.providers : []) as readonly Record<
+    string,
+    unknown
+  >[];
+  for (const provider of providers) {
+    const providerId = typeof provider["id"] === "string" ? provider["id"] : undefined;
+    const models = Array.isArray(provider["models"]) ? provider["models"] : [];
+    if (!providerId) continue;
+    for (const model of models) {
+      if (typeof model === "string") {
         routes.push({ id: `${providerId}/${model}`, name: model });
       }
     }
@@ -691,10 +733,14 @@ function renderReportOutput(output: unknown): string {
 }
 
 function formatUsage(usage: unknown): string {
+  // 真实形状：usage.total.{inputTokens,outputTokens,...}（对抗评审 P1——flat 读
+  // 取恒打印"无用量数据"；fake 同步编码嵌套）。
   if (usage === null || typeof usage !== "object") return "(无用量数据)";
-  const record = usage as Record<string, unknown>;
+  const total = (usage as Record<string, unknown>)["total"];
+  if (total === null || typeof total !== "object") return "(无用量数据)";
+  const record = total as Record<string, unknown>;
   const parts: string[] = [];
-  for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "cost"]) {
+  for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "totalTokens"]) {
     const value = record[key];
     if (typeof value === "number") parts.push(`${key}=${value}`);
   }

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { LocalCommandResult } from "../../src/input/types.js";
 import { CommandRegistry } from "../../src/input/command-registry.js";
 import {
   clientSlashSuggestions,
@@ -19,7 +18,7 @@ interface HostHarness {
   readonly messages: string[];
   readonly dialogs: { id: string; content: unknown }[];
   readonly switches: (string | undefined)[];
-  readonly deps: ClientCommandHostDeps;
+  deps: ClientCommandHostDeps;
   readonly registry: CommandRegistry;
 }
 
@@ -59,7 +58,7 @@ function createHostHarness(): HostHarness {
     reporter,
     registry: harness.registry,
     dispatchInput: () => undefined,
-    switchSession: (sessionId) => {
+    switchSession: (sessionId: string | undefined) => {
       switches.push(sessionId);
     },
   };

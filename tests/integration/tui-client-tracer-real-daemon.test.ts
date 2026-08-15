@@ -81,16 +81,21 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   assert.ok(runtime.activeSessionId, "send 结果应带回 sessionId");
 
   // 等生命周期流动 + 对账：run 启动（running=true）→ 死端点模型调用失败 →
-  // run 终态（running=false）→ transcript reload 对账使投影越过本地 user 条目。
+  // run 终态（running=false）→ transcript reload 对账。对账按内容断言（只有
+  // transcript 能供给的 runBoundary 终态条目），不按计数（对抗评审 P1：本地
+  // pushUserMessage/pushError 也能撑起计数）。
   const started = await waitForCondition(() => runningStates.includes(true), 90_000);
   assert.ok(started, "run.started 应驱动 running=true（live 事件流经真实传输）");
   const settled = await waitForCondition(() => runningStates.includes(false), 90_000);
   assert.ok(settled, "run 终态（死端点快速失败）应驱动 running=false");
-  const grew = await waitForCondition(
-    () => reporter.getProjection().entries.length > 1,
+  const reconciled = await waitForCondition(
+    () =>
+      reporter.getProjection().entries.some(
+        ({ entry }) => entry.kind === "run-boundary" && entry.status !== "running",
+      ),
     90_000,
   );
-  assert.ok(grew, "transcript reload 对账应使投影增长（runBoundary/error 等条目入投影）");
+  assert.ok(reconciled, "transcript reload 对账应带回终态 runBoundary（内容性断言）");
 
   runtime.dispose();
 });
@@ -126,17 +131,20 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
   await runtime.start();
 
-  // 物化会话；等 run 终态（死端点快速失败，但引擎重试有窗口）——投影越过本地
-  // user 条目即 transcript 已对账，idle-only 命令可执行。
+  // 物化会话；等 run 终态（死端点快速失败，但引擎重试有窗口）——投影出现终态
+  // runBoundary（transcript 对账内容性信号）即 idle，idle-only 命令可执行。
   let accepted = await runtime.sendText("slash 链路冒烟");
   if (!accepted) accepted = await runtime.sendText("slash 链路冒烟");
   assert.ok(accepted);
   assert.ok(runtime.activeSessionId);
   const runSettled = await waitForCondition(
-    () => reporter.getProjection().entries.length > 1,
+    () =>
+      reporter.getProjection().entries.some(
+        ({ entry }) => entry.kind === "run-boundary" && entry.status !== "running",
+      ),
     90_000,
   );
-  assert.ok(runSettled, "死端点 run 终态后 transcript 对账应使投影增长");
+  assert.ok(runSettled, "死端点 run 终态后 transcript 对账应带回终态 runBoundary");
   const settledIdle = await waitForCondition(() => !runtime.running, 30_000);
   assert.ok(settledIdle, "run 应已终态（供 idle-only 命令执行）");
 
@@ -168,8 +176,11 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   assert.ok(second);
   const secondSessionId = runtime.activeSessionId;
   assert.notEqual(secondSessionId, firstSessionId);
-  // 第二个死端点 run 终态后再 /resume（idle-only）。
-  await waitForCondition(() => !runtime.running, 90_000);
+  // 第二个死端点 run 终态后再 /resume（idle-only；丢弃布尔必须断言——对抗评审）。
+  assert.ok(
+    await waitForCondition(() => !runtime.running, 90_000),
+    "第二会话 run 应终态（供 /resume 执行）",
+  );
   const resume = await processClientInput(`/resume ${firstSessionId}`, registry, runtime);
   assert.match(String(resume.result?.message), /已切换/);
   assert.equal(runtime.activeSessionId, firstSessionId);
@@ -180,12 +191,18 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
     "切回应水化出第一会话历史",
   );
 
-  // /interrupt：死端点 run 快速失败，竞态容忍——命令不抛错即可（run 可能已终态）。
+  // /interrupt：死端点 run 快速失败，竞态容忍——断言消息方向（已执行或被门拦，
+  // 对抗评审 P0：kind==="local" 三种结局都满足）。run 可能已终态。
   const third = await runtime.sendInput({ kind: "text", text: "中断目标" });
   assert.ok(third);
-  await waitForCondition(() => runtime.running, 30_000).catch(() => undefined);
+  const sawRunning = await waitForCondition(() => runtime.running, 30_000);
   const interrupt = await processClientInput("/interrupt", registry, runtime);
   assert.equal(interrupt.kind, "local");
+  assert.match(
+    String(interrupt.result?.message),
+    sawRunning ? /已请求中断/ : /only available while running/,
+    "interrupt 应真实执行或被门拦，二者之一",
+  );
 
   runtime.dispose();
 });
