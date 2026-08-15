@@ -355,6 +355,47 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   );
   assert.deepEqual(resolved, ["ap_1"], "对端解析应回调清理对话框");
 
+  // plan 类审批：wire 元数据映射 + plan.respond 适配器参数形状（Phase 3 首批）。
+  harness.emit(
+    notification("approval.requested", {}, {
+      approvalId: "ap_plan",
+      runId: "run_1",
+      request: {
+        kind: "plan",
+        toolName: "exit_plan_mode",
+        title: "计划待审",
+        planId: "plan_42",
+        expectedRevision: 3,
+        expectedSessionSequence: 7,
+      },
+    }),
+  );
+  const planNotice = approvals.at(-1) as ApprovalNotice & {
+    planId?: string;
+    expectedRevision?: number;
+    expectedSessionSequence?: number;
+  };
+  assert.equal(planNotice.taskId, "ap_plan");
+  assert.equal(planNotice.toolName, "exit_plan_mode");
+  assert.equal(planNotice.planId, "plan_42");
+  assert.equal(planNotice.expectedRevision, 3);
+  assert.equal(planNotice.expectedSessionSequence, 7);
+
+  const planControl = runtime.createPlanControl();
+  await planControl.respond({
+    sessionId: "s1",
+    planId: "plan_42",
+    action: "execute",
+    expectedRevision: 3,
+    expectedSessionSequence: 7,
+    operationId: "op-test",
+  });
+  const planRespond = harness.requests.find((entry) => entry.method === "plan.respond");
+  assert.ok(planRespond, "应发出 plan.respond");
+  assert.equal(planRespond?.params.planId, "plan_42");
+  assert.equal(planRespond?.params.action, "execute");
+  assert.equal(planRespond?.params.expectedRevision, 3);
+
   // transcriptUpdated reload 触发重取（对账）——本用例无初始 sessionId，
   // 首次水化被跳过，reload 是唯一的 transcript 请求来源（顺带验证 scope 采纳）。
   harness.setTranscriptItems([
