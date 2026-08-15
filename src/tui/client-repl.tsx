@@ -10,6 +10,14 @@ import { approvalDialogId } from "./approval-panel.js";
 import { createApprovalDialogRequest } from "./approval-dialogs.js";
 import type { InputBoxSubmission } from "./input-box.js";
 import { ClientSessionRuntime } from "./client-session-runtime.js";
+import {
+  createClientCommandRegistry,
+  processClientInput,
+} from "./client-commands.js";
+import {
+  clientSlashSuggestions,
+  handleClientLocalCommand,
+} from "./client-command-host.js";
 import { TuiReporter } from "./tui-reporter.js";
 import { createTuiUpdateScheduler, TUI_RENDER_OPTIONS } from "./repl.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
@@ -72,6 +80,43 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     },
   });
   const planControl = runtime.createPlanControl();
+  const commandRegistry = createClientCommandRegistry({
+    runtime,
+    workspacePath: options.workDir,
+  });
+
+  let exitRequested = false;
+  let instanceRef: ReturnType<typeof render> | undefined;
+  const requestExit = (): void => {
+    if (exitRequested) return;
+    exitRequested = true;
+    instanceRef?.unmount();
+  };
+
+  const applyLocalCommand = (result: Parameters<typeof handleClientLocalCommand>[0]): void => {
+    const effect = handleClientLocalCommand(result, {
+      reporter,
+      registry: commandRegistry,
+      dispatchInput: (text: string) => {
+        void handleSubmittedText(text);
+      },
+      switchSession: (sessionId: string | undefined) => runtime.switchSession(sessionId),
+    });
+    const dialog = effect.dialog;
+    if (dialog) {
+      setDialogRequests?.((items) => [...items.filter((item) => item.id !== dialog.id), dialog]);
+    }
+    if (effect.exit) requestExit();
+  };
+
+  const handleSubmittedText = async (text: string): Promise<void> => {
+    const outcome = await processClientInput(text, commandRegistry, runtime);
+    if (outcome.kind === "local" && outcome.result) {
+      applyLocalCommand(outcome.result);
+    } else if (outcome.kind === "unknown" && outcome.message) {
+      reporter.pushSystemMessage(outcome.message);
+    }
+  };
 
   function ClientReplApp() {
     const [projection, setProjection] = useState<TranscriptProjection>(() =>
@@ -90,8 +135,8 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     }, []);
 
     const handleSubmit = useCallback((submission: InputBoxSubmission) => {
-      // v1 忽略 attachments（Phase 3 输入扩展），只上送文本。
-      void runtime.sendText(submission.text);
+      // v1 忽略 attachments（Phase 3 输入扩展）；slash 经客户端命令表分派。
+      void handleSubmittedText(submission.text);
     }, []);
     const handleInterrupt = useCallback(() => {
       void runtime.interrupt();
@@ -105,12 +150,20 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         running={running}
         onSubmit={handleSubmit}
         onInterrupt={handleInterrupt}
+        onExit={() => requestExit()}
         dialogRequests={dialogRequests}
+        slashCommandSuggestions={(query: string) =>
+          clientSlashSuggestions(commandRegistry, query, running ? "running" : "idle")
+        }
+        slashArgumentSuggestions={(command: string, query: string) =>
+          commandRegistry.resolve(command)?.argumentCompleter?.(query) ?? []
+        }
       />
     );
   }
 
   const instance = render(<ClientReplApp />, { ...TUI_RENDER_OPTIONS });
+  instanceRef = instance;
   try {
     await runtime.start();
     reporter.pushSystemMessage(
