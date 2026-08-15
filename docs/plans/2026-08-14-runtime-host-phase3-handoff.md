@@ -177,12 +177,16 @@
 ## 验证命令（基线）
 
 ```bash
-npx tsc -p packages/runtime-host/tsconfig.json --noEmit   # 包 typecheck
-npx tsc --noEmit                                            # 根 typecheck
+npx tsc -p packages/runtime-host/tsconfig.json --noEmit   # 包 typecheck（直读 src，快）
+npm run typecheck                                            # 根 typecheck——必须走 npm 脚本：
+                                                             # pretypecheck 钩子会先重建两个包的 dist，
+                                                             # 否则 tsc 消费陈旧 dist 类型报假错
 node --import tsx --import ./src/tui/preload-env.ts --test tests/integration/runtime-host-*.test.ts
 node scripts/check-architecture-boundaries.mjs              # 架构门禁
 RUN_LLM_E2E=1 node --import tsx --import ./src/tui/preload-env.ts --test tests/e2e/graph-mode-multiround.real-llm.test.ts
 ```
+
+**dist 陷阱（两份真相）**：`@pico/protocol` / `@pico/runtime-host` 的 types/exports 指向 dist——root 的 tsc 与运行时都经 node_modules 解析到 dist 而非 src。改包 src 后：`npm run typecheck`（钩子自动重建）或手动 `npm run build --workspace=<pkg>`；直连 `npx tsc --noEmit` 会用旧类型报假错，直连测试会静默跑旧代码（3-B-1 教训）。运行时走 dist 是有意的模块身份设计（动态 spec 注册表进程级单例），勿用 paths 映射回 src（会把包源码内化进 root 程序，build 产物被污染）。
 
 ## 遗留 / 已知限制
 

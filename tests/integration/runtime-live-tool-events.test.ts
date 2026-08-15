@@ -5,11 +5,10 @@ import {
   createRuntimeNotification,
   isRunLiveRuntimeNotification,
   RuntimeNotificationBuffer,
+  type RuntimeNotification,
 } from "@pico/protocol";
-import {
-  publishDesktopReporterEvent,
-  type DesktopReporterEvent,
-} from "../../src/daemon/production-host.js";
+import { publishDesktopReporterEvent } from "../../src/daemon/production-host.js";
+import type { DesktopReporterEvent } from "../../src/daemon/desktop-reporter.js";
 import { ToolLiveCoalescer } from "../../src/daemon/tool-live-coalescer.js";
 import {
   transportSafeRuntimeNotificationWithin,
@@ -41,13 +40,13 @@ function createRecordingService(): {
     durable,
     // publishDesktopReporterEvent 只调用这两个发布面；fake 只做记录。
     service: {
-      publishEphemeralNotification: (notification) => {
+      publishEphemeralNotification: (notification: RuntimeNotification<"run.live">) => {
         ephemeral.push({
           topic: notification.topic,
           payload: notification.payload as Record<string, unknown>,
         });
       },
-      publishDesktopNotification: (notification) => {
+      publishDesktopNotification: (notification: RuntimeNotification) => {
         durable.push({
           topic: notification.topic,
           payload: notification.payload as Record<string, unknown>,
@@ -366,7 +365,13 @@ test("wire forward compatibility: unknown live item kinds are ignored downstream
     at: 1,
     payload: {
       runId: "r1",
-      item: { kind: "hyperspace", operation: "append", streamId: "x", delta: "?" },
+      item: {
+        // @ts-expect-error 测试故意构造未知 kind（wire 前向兼容语义）
+        kind: "hyperspace",
+        operation: "append",
+        streamId: "x",
+        delta: "?",
+      },
     },
   });
   assert.ok(!isRunLiveRuntimeNotification(future), "未知 kind 不应通过校验器");
