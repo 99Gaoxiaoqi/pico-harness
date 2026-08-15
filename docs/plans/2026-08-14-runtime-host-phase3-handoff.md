@@ -150,6 +150,23 @@
 
 **注**：`FRAME_TOO_LARGE→internal_failure` 映射失真维持接受（无消费方）；P1-2 的白名单语义边界=传输层不静默重发，上层（订阅环/Desktop）的重试决策不受影响。
 
+## 3-C Desktop 已完成（fail-stuck 自动恢复 + D9/D12 反转，2026-08-15 追加）
+
+北极星方案 3-C 步骤 4+6 落地（方案写于 mobile 移除前，实际范围经重评收窄：mobile-gateway 网关层已被 runtime-host kernel + 共享 client 取代，Desktop 在 3-B-3 已瘦客户端化）。两个用户决策：断连 UI=**全屏恢复屏**；D12=**重评后反转**。
+
+**交付**：
+1. **runtime supervisor**（`apps/desktop/src/main/runtime-supervisor.ts`）：从 index.ts 探活提取的纯 DI 双相位监督器（healthy⇄degraded）——连续 3 次探活失败（5s 假死超时随迁）广播 `unavailable`（保留不去重策略），降级后探活成功广播 `recovered`；不自动重启 daemon（幂等 ping 的重试窗口本身会尝试重生）。新 IPC 通道 `pico:runtime:recovered`（contract+bridge）。
+2. **渲染层自动恢复**：`onUnavailable`/`onRecovered` 效应常驻 armed；recovered → `bootstrap()` → `loadWorkspace(当前)`，会话 transcript 由路由树重挂载（error 相位整体卸载 Routes，回 ready 重挂 → ConversationPage 的 loadSession 效应）自然重取；订阅环经 connection.kind 重订 + high-watermark 重取，dedup 无重复。fail-stuck 消除：ConnectionScreen 从终态错误页改为"正在自动恢复"恢复屏（保留"立即重试"）。
+3. **AppRuntimePhase 重构（D9 实质）**：renderer `ConnectionState` 四态自维护状态机删除（"unavailable" 并入 error.detail），改为事件驱动展示相位 `AppRuntimePhase`（loading/ready/error）——连接决策全部在 main supervisor + 共享 client（RuntimeSubscription 重连环 + KERNEL_RETRY_SAFE_METHODS），渲染层只消费推送事件。
+4. **ConversationLoadTracker（D12 重评收编）**：`conversationLoadGenerationsRef` 裸 ref 收编为单一职责类（`apps/desktop/src/renderer/conversation-load-tracker.ts`，begin/isCurrent 代数判定）。重评结论：D12"双实现"实质=Desktop/移动端各持同步状态机，移动端移除后消解；剩余护栏是视图竞态职责（与 workspaceLoadGenerationRef 同类），不下沉传输层；分页/游标算法保持只在 `src/daemon/desktop-transcript.ts`（selectPage）一处。
+5. **追踪器反转**（architecture-invariants.test.ts）：D9 → 负向 model.ts 无 ConnectionState + 正向 supervisor 双相位广播 + daemon client 是唯一重连状态机；D12 → 负向 runtime.ts 无裸 ref + 正向 tracker 存在 + daemon 层 selectPage 唯一。均为正向不变量（对齐 D7 反转模式）。
+
+**验证**：desktop-runtime-supervisor 4/4（降级/恢复广播、健康静默、stop 停播、假死超时）+ invariants 8/8（D9/D12 反转后）+ desktop-runtime-close 3/3 + preload-bridge 2/2 + runtime-client-kernel 4/4 + lifecycle-races 22/22 + 三 desktop tsconfig + 根 typecheck 0 + 门禁 0。
+
+**边界**：recovered 后 bootstrap 又失败 → 留在恢复屏等下一轮（收敛）；在途写失败不自动重发（P1-2 语义，toast）；preview 模式桥接补齐 onRecovered no-op。
+
+**3-C 未做**：D10（DelegationManager 职责错位等，阶段 2/3 交叉）、91 spec 化渐进、旧 socket 清理渐进。**下一步：3-D TUI 单独立项**（部署模型变更，北极星方案 3.4 已评估）。
+
 ## 后续发现（2026-08-15 会话补充）
 
 - ~~**connectOrSpawn 候选池**（A6）~~（已修：单次选举窗口候选 launch 封顶 3，见 3-B-4 章节）。原文：候选启动慢的环境下选举循环每 250ms spawn 一个候选（`MIN_CANDIDATE_INTERVAL_MS`），shutdown 期间池中在途候选可能接手注册写锁/守卫锁，把"优雅关停后锁应释放"变成不确定。慢环境实测：候选启动 19-31s、connectOrSpawn 首次连接可达 24s。

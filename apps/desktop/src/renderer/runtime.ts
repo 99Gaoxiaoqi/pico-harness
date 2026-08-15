@@ -23,12 +23,12 @@ import {
   folderWorkspaceCapabilities,
   type AppData,
   type ApprovalView,
+  type AppRuntimePhase,
   type CatalogAgentView,
   type CatalogSkillView,
   type CapabilitySourceView,
   type CapabilityView,
   type ChangeView,
-  type ConnectionState,
   type ConversationView,
   type JsonRecord,
   type ModelRouteView,
@@ -70,6 +70,7 @@ import {
   mergeHydratedConversationItems,
 } from "./conversation/items.js";
 import { applyTimelineNotification } from "./timeline.js";
+import { ConversationLoadTracker } from "./conversation-load-tracker.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
@@ -983,7 +984,7 @@ function errorMessage(error: unknown): string {
  */
 function friendlyRuntimeMessage(raw: string, code?: string): string {
   if (code === "RUNTIME_UNAVAILABLE" || code === "RUNTIME_DISCONNECTED") {
-    return "无法连接本地 Runtime，请确认 Pico 桌面应用正在运行（必要时重启）。";
+    return "无法连接本地 Runtime，连接恢复后会自动重试；若持续失败可重启 Pico 桌面应用。";
   }
   if (code === "RUNTIME_AUTH_FAILED") {
     return "本地 Runtime 认证失败，请重启 Pico 桌面应用。";
@@ -1350,7 +1351,7 @@ export interface ToolEvidencePage {
 
 export interface RuntimeStore {
   readonly preview: boolean;
-  readonly connection: ConnectionState;
+  readonly connection: AppRuntimePhase;
   readonly data: AppData;
   readonly busy: string | undefined;
   readonly message: string | undefined;
@@ -1359,7 +1360,7 @@ export interface RuntimeStore {
 
 export function useRuntimeStore(): RuntimeStore {
   const preview = useMemo(isPreviewMode, []);
-  const [connection, setConnection] = useState<ConnectionState>(
+  const [connection, setConnection] = useState<AppRuntimePhase>(
     preview ? { kind: "ready" } : { kind: "loading" },
   );
   const [data, setData] = useState<AppData>(preview ? previewData : emptyData);
@@ -1381,7 +1382,7 @@ export function useRuntimeStore(): RuntimeStore {
   const workspaceLoadGenerationRef = useRef(0);
   const providerConfigLoadGenerationRef = useRef(0);
   const memoryLoadGenerationRef = useRef(0);
-  const conversationLoadGenerationsRef = useRef(new Map<string, number>());
+  const conversationLoadTracker = useRef(new ConversationLoadTracker());
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -1781,11 +1782,10 @@ export function useRuntimeStore(): RuntimeStore {
     async (bridge: DesktopBridge, workspacePath: string, sessionId: string) => {
       if (preview) return;
       const conversationKey = workspaceSessionKey({ workspacePath, sessionId });
-      const loadKey = conversationKey;
-      const generation = (conversationLoadGenerationsRef.current.get(loadKey) ?? 0) + 1;
-      conversationLoadGenerationsRef.current.set(loadKey, generation);
-      const isCurrentLoad = () =>
-        conversationLoadGenerationsRef.current.get(loadKey) === generation;
+      // D12 收编：过期响应护栏在 ConversationLoadTracker（分页/游标算法只在
+      // daemon 服务层一处，本层仅丢弃迟到的旧加载）。
+      const load = conversationLoadTracker.current.begin(conversationKey);
+      const isCurrentLoad = () => conversationLoadTracker.current.isCurrent(load);
       let value: unknown;
       try {
         value = await invoke(bridge, "session.transcript", {
@@ -1919,8 +1919,9 @@ export function useRuntimeStore(): RuntimeStore {
     const bridge = getBridge();
     if (!bridge) {
       setConnection({
-        kind: "unavailable",
+        kind: "error",
         detail: "安全桥接未加载。请从 Pico 桌面应用启动，而不是直接打开页面。",
+        retryable: false,
       });
       return;
     }
@@ -1944,20 +1945,45 @@ export function useRuntimeStore(): RuntimeStore {
     void bootstrap();
   }, [bootstrap]);
 
-  // 主进程探活判定 Runtime 永久不可达（连续 ping 失败）时经 IPC 通知渲染进程，
-  // 把连接降级到错误页，避免停在"看似就绪但所有操作都失败"的界面。
+  // 主进程监督器判定 Runtime 不可达（连续探活失败）时降级到恢复屏；降级后重新
+  // 探活成功则广播 recovered，自动 re-bootstrap 回到就绪（3-C：消除 fail-stuck，
+  // 渲染层只消费推送相位，不自建重试循环）。
   useEffect(() => {
-    if (preview || connection.kind !== "ready") return;
+    if (preview) return;
     const bridge = getBridge();
     if (!bridge) return;
     return bridge.onUnavailable(() => {
-      setConnection({
-        kind: "error",
-        detail: "本地 Runtime 已断开，请重启 Pico 应用后重试",
-        retryable: true,
-      });
+      setConnection((current) =>
+        current.kind === "error"
+          ? current
+          : {
+              kind: "error",
+              detail: "本地 Runtime 已断开，正在自动恢复连接…",
+              retryable: true,
+            },
+      );
     });
-  }, [connection.kind, preview]);
+  }, [preview]);
+
+  useEffect(() => {
+    if (preview) return;
+    const bridge = getBridge();
+    if (!bridge) return;
+    return bridge.onRecovered(() => {
+      // 恢复路径与手动"立即重试"同源：重新引导（能力/工作区索引/配置）后重载
+      // 当前工作区数据；会话 transcript 由路由树重挂载时的 loadSession 效应
+      // 重取（error 相位下路由整体卸载，回 ready 后自然重挂）。失败则留在
+      // 恢复屏等待下一轮 recovered。
+      void bootstrap()
+        .then(async () => {
+          const workspacePath = dataRef.current.workspacePath;
+          const recoveredBridge = getBridge();
+          if (!workspacePath || !recoveredBridge) return;
+          await loadWorkspace(recoveredBridge, workspacePath);
+        })
+        .catch(() => undefined);
+    });
+  }, [bootstrap, loadWorkspace, preview]);
 
   useEffect(() => {
     if (preview || connection.kind !== "ready") return;
@@ -3717,6 +3743,7 @@ function createPreviewBridge(): DesktopBridge {
       }),
     },
     onUnavailable: () => () => undefined,
+    onRecovered: () => () => undefined,
     platform: {
       chooseWorkspace: () => success(previewData.workspacePath),
       showNotification: () => success(undefined),

@@ -132,10 +132,10 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 |---|---|---|---|---|
 | **D7** | `DelegationManager.records` 内存事实权威 + 双去重倒挂 | 调度 | P0 | 阶段 2 |
 | **D8** | 超时原语全栈散落（3+2+多处） | 机械 | P0 | 阶段 1 ✅ |
-| **D9** | 多外壳连接状态/重连不互通（缺网关层；移动端已移除） | 机械 | P0 | 阶段 3 |
+| **D9** | ~~多外壳连接状态/重连不互通（缺网关层；移动端已移除）~~ 已消除（3-C，2026-08-15）：连接决策收口在 main runtime-supervisor + 共享 client，renderer 只渲染推送相位；追踪器已反转 | 机械 | P0 | 阶段 3 ✅ |
 | **D10** | Graph 无真 DAG、无内容级熔断、DelegationManager 职责错位 | 调度 | P1 | 阶段 2/3 |
 | **D11** | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事 | P1 | 后续 |
-| **D12** | `DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现 | 机械 | P1 | 阶段 3 |
+| **D12** | ~~`DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现~~ 双实现实质随移动端移除消解；护栏收编 ConversationLoadTracker，分页算法只在 daemon 服务层；追踪器已反转（3-C，2026-08-15） | 机械 | P1 | 阶段 3 ✅ |
 | **D13** | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移 | 叙事/调度 | P2 | 清理 |
 
 ## 7. 积极面

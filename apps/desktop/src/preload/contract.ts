@@ -14,6 +14,7 @@ export const DESKTOP_IPC_CHANNELS = {
   runtimeUnsubscribe: "pico:runtime:unsubscribe",
   runtimeEvent: "pico:runtime:event",
   runtimeUnavailable: "pico:runtime:unavailable",
+  runtimeRecovered: "pico:runtime:recovered",
   chooseWorkspace: "pico:platform:choose-workspace",
   showNotification: "pico:platform:show-notification",
   openDirectory: "pico:platform:open-directory",
@@ -54,6 +55,11 @@ export interface DesktopBridge {
   };
   /** 主进程探活判定 Runtime 永久不可达时通过此通道通知渲染进程。 */
   onUnavailable(listener: () => void): () => void;
+  /**
+   * 主进程监督器在降级后重新探活成功时通知渲染进程（3-C 自动恢复）：
+   * 渲染层据此自动 re-bootstrap，不再永久停在错误页。
+   */
+  onRecovered(listener: () => void): () => void;
   readonly platform: {
     chooseWorkspace(): Promise<DesktopResult<string | undefined>>;
     showNotification(input: {
