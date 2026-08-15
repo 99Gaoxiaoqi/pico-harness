@@ -3,6 +3,7 @@ import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import {
@@ -19,6 +20,7 @@ import {
 } from "@pico/runtime-host";
 import {
   LocalDaemonInstanceLock,
+  ensurePicoRuntimeHostShutdownOperationRegistered,
   resolveLocalDaemonEndpoint,
   resolveLocalDaemonLockPath,
   startPicoDaemonRuntimeHostCandidate,
@@ -168,6 +170,94 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
     // 已退出或注册不可读：测试通过即达意。
   }
 });
+
+test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", async (t) => {
+  const harness = await startCandidateHarness(t);
+  const mainPath = fileURLToPath(new URL("../../src/daemon/main.ts", import.meta.url));
+  // client 侧也要能解码 runtime.shutdown（进程级动态注册表）。
+  ensurePicoRuntimeHostShutdownOperationRegistered();
+
+  // 手动 spawn 候选（无参自举）而非 connectOrSpawn spawn：connectOrSpawn 的选举
+  // 在候选启动慢的环境下会连续 spawn 多个候选（候选池），shutdown 期间池中候选
+  // 可能接手注册写锁/守卫锁，干扰"关停后锁应释放"的断言。手动 spawn + 直连把
+  // 被测对象限定为单个 daemon 的优雅关停路径。
+  const { spawn } = await import("node:child_process");
+  const { createRequire } = await import("node:module");
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  const child = spawn(process.execPath, ["--import", tsxLoader, mainPath], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...harness.env },
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+  t.after(async () => {
+    // 若关停失败（断言已红），兜底硬杀避免残留 daemon。
+    const registration = await readHostRegistration(await findControlDirectory(harness.picoHome));
+    if (registration && (await processAlive(registration.pid))) {
+      process.kill(registration.pid);
+    }
+  });
+
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  // 等 registration 发布（候选启动完成）。
+  for (let i = 0; i < 60; i++) {
+    if (await readHostRegistration(controlDirectory).catch(() => undefined)) break;
+    await delay(500);
+  }
+  const result = await connectResolvedRuntimeHost({
+    capability,
+    controlDirectory,
+    surface: "tui",
+    protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+    clientInstanceId: "candidate-shutdown-test-client",
+    connectTimeoutMs: 5_000,
+    handshakeTimeoutMs: 5_000,
+  });
+  assert.equal(result.kind, "connected", `期望 connected，实际 ${JSON.stringify(result)}`);
+  if (result.kind !== "connected") return;
+  const connection = result.connection;
+
+  const registration = await readHostRegistration(controlDirectory);
+  assert.ok(registration, "daemon 应有 registration");
+  const pid = registration!.pid;
+
+  // 请求优雅关停：handler 触发 kernel requestDrain → 排空 → composition.close
+  // （守卫锁释放）→ residency 归零 → 连接被 destroy → 进程退出。
+  const shutdown = await connection.requestRegistered("runtime.shutdown", {}, 10_000);
+  assert.deepEqual(shutdown, {}, "runtime.shutdown 应答空对象");
+
+  // 连接被 kernel destroy（关停路径最后一步）。
+  await assert.doesNotReject(Promise.race([connection.closed, delay(10_000)]));
+  // 注册消失 + 守卫锁释放 + 进程退出（有界轮询）。
+  const deadline = performance.now() + 15_000;
+  let registrationGone = false;
+  while (performance.now() < deadline) {
+    try {
+      registrationGone =
+        (await readHostRegistration(await findControlDirectory(harness.picoHome))) === undefined;
+    } catch {
+      registrationGone = true;
+    }
+    const lockReleased = !(await pathExists(harness.lockPath));
+    const processExited = !(await processAlive(pid));
+    if (registrationGone && lockReleased && processExited) break;
+    await delay(200);
+  }
+  assert.equal(await pathExists(harness.lockPath), false, "优雅关停后守卫锁应释放");
+  assert.equal(await processAlive(pid), false, "优雅关停后 daemon 进程应退出");
+  assert.equal(registrationGone, true, "优雅关停后 registration 应移除");
+});
+
+async function processAlive(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function connectToCandidate(picoHome: string): Promise<RuntimeHostConnection> {
   const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });

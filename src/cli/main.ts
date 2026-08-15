@@ -7,8 +7,17 @@
 // 必须在其他依赖图执行前预加载,避免 Pino 先以 stderr transport 初始化。
 import "../tui/preload-env.js";
 import { readFile, realpath } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import {
+  readHostRegistration,
+  resolveRootControlNamespace,
+  resolveStorageRoot,
+} from "@pico/runtime-host";
+import { LocalRuntimeClient, RuntimeClientError } from "../daemon/client.js";
+import { resolveCanonicalPicoHome } from "../daemon/endpoint.js";
+import { sleepForRetry } from "../provider/retry.js";
 import { primeTokenizer } from "../context/token-counter.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
@@ -57,6 +66,7 @@ Options:
   --resume <id>                      Resume a session by id
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
+      --daemon-stop                  Stop the resident local daemon gracefully
   -h, --help                         Show this help without starting the TUI
   -V, --version                      Show the installed version
 `;
@@ -86,6 +96,7 @@ interface ParsedCliOptions {
   graph: boolean;
   help: boolean;
   version: boolean;
+  daemonStop: boolean;
 }
 
 interface ParsedCliValues {
@@ -101,6 +112,7 @@ interface ParsedCliValues {
   resume?: string;
   fork?: string;
   "fork-session"?: string;
+  "daemon-stop"?: boolean;
   help?: boolean;
   version?: boolean;
 }
@@ -117,6 +129,9 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     if (options.version) {
       runtime.writeStdout(`${runtime.version}\n`);
       return 0;
+    }
+    if (options.daemonStop) {
+      return await stopLocalDaemon(runtime);
     }
 
     // 只先解析真实路径；信任门通过前不读项目 session / config / Skills，
@@ -172,6 +187,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         resume: { type: "string" },
         fork: { type: "string" },
         "fork-session": { type: "string" },
+        "daemon-stop": { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "V" },
       },
@@ -199,6 +215,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     graph: values.graph === true,
     help: values.help === true,
     version: values.version === true,
+    daemonStop: values["daemon-stop"] === true,
   };
 }
 
@@ -252,6 +269,59 @@ async function loadPackageVersion(): Promise<string> {
     throw new Error(`package.json 缺少有效 version: ${fileURLToPath(packagePath)}`);
   }
   return parsed.version;
+}
+
+/**
+ * `pico --daemon-stop`：请求常驻 daemon 优雅关停（3-B-4）。先按 registration
+ * 探测是否真有 daemon 在跑——没有就报"未在运行"直接返回，绝不借 connectOrSpawn
+ * 拉起一个新 daemon 再停掉（那会把"停 daemon"变成"启动一次完整装配"的副作用）。
+ * 请求返回后 daemon 仍在收尾（composition.close → 守卫锁释放 → residency 归零），
+ * 这里轮询 registration 消失/进程退出作有界确认。
+ */
+async function stopLocalDaemon(runtime: CliRuntime): Promise<number> {
+  const picoHome = resolveCanonicalPicoHome({ env: runtime.env });
+  const registration = await readLocalDaemonRegistration(picoHome);
+  if (!registration) {
+    runtime.writeStdout("本机 Runtime daemon 未在运行。\n");
+    return 0;
+  }
+  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  try {
+    await client.shutdownDaemon();
+  } catch (error) {
+    if (!(error instanceof RuntimeClientError)) throw error;
+    // daemon 可能在请求到达前自行退出（如 idle 自退竞态）：按"已停止"处理。
+    runtime.writeStdout(`本机 Runtime daemon 已停止。\n`);
+    return 0;
+  }
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const current = await readLocalDaemonRegistration(picoHome);
+    if (!current || !(await isProcessAlive(current.pid))) {
+      runtime.writeStdout("本机 Runtime daemon 已优雅停止。\n");
+      return 0;
+    }
+    await sleepForRetry(200);
+  }
+  throw new Error("Runtime daemon 关停超时（15s 内未退出），请检查进程状态");
+}
+
+async function readLocalDaemonRegistration(picoHome: string): Promise<{ pid: number } | undefined> {
+  try {
+    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
+    return await readHostRegistration(join(resolveRootControlNamespace(), capability.rootId));
+  } catch {
+    return undefined;
+  }
+}
+
+async function isProcessAlive(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function isEntrypoint(): Promise<boolean> {

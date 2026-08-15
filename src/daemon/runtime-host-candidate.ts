@@ -23,6 +23,8 @@ import { createRuntimeHostComposition } from "./runtime-host-composition.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
+  ensurePicoRuntimeHostShutdownOperationRegistered,
+  RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
 } from "./runtime-host-operations.js";
 
 /**
@@ -90,6 +92,7 @@ export async function startPicoDaemonRuntimeHostCandidate(
 ): Promise<PicoDaemonCandidateResult> {
   ensurePicoRuntimeHostOperationsRegistered();
   ensurePicoRuntimeHostEventOperationsRegistered();
+  ensurePicoRuntimeHostShutdownOperationRegistered();
 
   // 1) 升级守卫：旧单例锁 + ping。
   const env = options.env ?? (process.env as Record<string, string | undefined>);
@@ -169,7 +172,17 @@ async function createPicoDaemonComposition(
   });
 
   return {
-    handlers: bridge.handlers,
+    // runtime.shutdown：常驻 daemon 的优雅关停入口（等效 SIGTERM 路径——
+    // 触发 kernel requestDrain → 排空 → composition.close → 守卫锁释放 →
+    // residency 释放 → 进程退出）。handler 返回后 kernel 会等本操作排空并
+    // 把响应写出，再 destroy 连接，客户端无需额外确认握手。
+    handlers: {
+      ...bridge.handlers,
+      [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: async () => {
+        context.requestDrain();
+        return { ok: true, result: {} };
+      },
+    },
     releaseConnection: bridge.releaseConnection,
     beginDrain() {
       // drain 期间停事件推送；cron 停止由 close() 统一收口（与旧 daemon 停机序一致）。

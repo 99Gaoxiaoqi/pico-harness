@@ -28,6 +28,7 @@ import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
+  ensurePicoRuntimeHostShutdownOperationRegistered,
 } from "./runtime-host-operations.js";
 import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 
@@ -95,6 +96,8 @@ interface RuntimeTransportConnection {
     method: Method,
     params: RuntimeParams<Method>,
   ): Promise<RuntimeResult<Method>>;
+  /** 请求常驻 daemon 优雅关停（仅 kernel 承载传输支持；旧 socket 注入面不提供）。 */
+  shutdownHost?(): Promise<void>;
   close(): void;
 }
 
@@ -184,6 +187,21 @@ export class LocalRuntimeClient implements RuntimeClient {
       subscription.dispose();
       throw error;
     }
+  }
+
+  /** 请求常驻 daemon 优雅关停（3-B-4）。仅在 kernel 承载模式可用；旧 socket
+   *  注入面不提供（对应 daemon 没有 kernel 生命周期可关）。 */
+  async shutdownDaemon(): Promise<void> {
+    this.assertOpen();
+    if (!this.requestConnection.shutdownHost) {
+      throw new RuntimeClientError(
+        "RUNTIME_UNAVAILABLE",
+        "当前连接模式不支持 daemon 关停（kernel 承载专属）",
+        false,
+      );
+    }
+    await this.requestConnection.open();
+    await this.requestConnection.shutdownHost();
   }
 
   close(): void {
@@ -713,6 +731,16 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     this.disconnectListener = listener;
   }
 
+  async shutdownHost(): Promise<void> {
+    await this.open();
+    const connection = this.hostConnection;
+    if (!connection) {
+      throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
+    }
+    // daemon 收到请求后进入排空：kernel 等本操作响应写出后 destroy 连接并退出。
+    await connection.requestRegistered("runtime.shutdown", {});
+  }
+
   async open(): Promise<void> {
     if (this.closed) {
       throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
@@ -803,6 +831,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     // 解析桥接操作（daemon 进程的注册不能代替本进程）。幂等。
     ensurePicoRuntimeHostOperationsRegistered();
     ensurePicoRuntimeHostEventOperationsRegistered();
+    ensurePicoRuntimeHostShutdownOperationRegistered();
     const result = await connectOrSpawnRuntimeHost({
       rootPath: this.rootPath,
       surface: "tui",

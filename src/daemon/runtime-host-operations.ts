@@ -45,6 +45,16 @@ export const RUNTIME_HOST_BRIDGE_EVENTS_REPLAY = "events.replay";
  */
 export const RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST = "runtime.request";
 
+/**
+ * Kernel-level daemon shutdown (3-B-4): lets a local client ask the resident
+ * daemon candidate to drain and close gracefully (composition.close → cron
+ * fence chain → guard-lock release → residency release). Not a daemon
+ * RuntimeMethod — the daemon cannot stop itself through its own control plane;
+ * the handler runs in the candidate composition and triggers the kernel's
+ * requestDrain() (the same path SIGTERM takes).
+ */
+export const RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN = "runtime.shutdown";
+
 const BRIDGE_ERRORS = [
   "operation_unavailable",
   "invalid_request",
@@ -273,6 +283,26 @@ export const PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS = {
   }),
 } satisfies Record<string, AnyOperationSpec>;
 
+export const PICO_RUNTIME_HOST_SHUTDOWN_OPERATION_SPEC = {
+  [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: defineOperation({
+    mode: "query",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value): Record<string, never> => {
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 0) {
+        throw invalidProtocolFrame("runtime.shutdown input must be an empty object");
+      }
+      return {};
+    },
+    decodeOutput: (value): Record<string, never> => {
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 0) {
+        throw invalidProtocolFrame("runtime.shutdown result must be an empty object");
+      }
+      return {};
+    },
+  }),
+} satisfies Record<string, AnyOperationSpec>;
+
 // 以 AnyOperationSpec（而非具体 spec map 的键联合）为推断基类：Base 与 Events
 // 两组 spec map 的具体 Input/Output 各不相同，统一的泛型基类让同一组 Infer*
 // 条件类型可复用于两个 map。
@@ -358,4 +388,19 @@ export function ensurePicoRuntimeHostEventOperationsRegistered(): void {
   if (picoRuntimeHostEventOperationsRegistered) return;
   picoRuntimeHostEventOperationsRegistered = true;
   registerHostOperationSpecs(PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS);
+}
+
+let picoRuntimeHostShutdownOperationRegistered = false;
+
+/**
+ * Idempotently registers the runtime.shutdown spec. Only call this when the
+ * composition actually provides the shutdown handler (the pico daemon candidate
+ * does; plain bridge compositions do not): a registered key without a handler
+ * fails kernel start (composeOperationHandlers completeness). The client side
+ * registers it too so requestRegistered can decode the request locally.
+ */
+export function ensurePicoRuntimeHostShutdownOperationRegistered(): void {
+  if (picoRuntimeHostShutdownOperationRegistered) return;
+  picoRuntimeHostShutdownOperationRegistered = true;
+  registerHostOperationSpecs(PICO_RUNTIME_HOST_SHUTDOWN_OPERATION_SPEC);
 }
