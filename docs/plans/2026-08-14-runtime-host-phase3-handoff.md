@@ -111,6 +111,8 @@
 | `f7c7e52b` | 前半：daemon main → candidate 模式（`runtime-host-candidate.ts`：升级守卫旧 instance-lock+ping → flock 选主 → kernel + production composition）；`runtime.request` 通用桥接（91 方法经单帧 `{method, params}` 透传 service.handle，spec 化留 3-B-4+ 渐进退役）；帧上限 96KB→1MiB + 队列 8MB；launcher .ts entrypoint（tsx loader 绝对路径）+ file:// href；connectOrSpawn env 透传；LocalDaemonHost services-only 模式；whoami/icacls 绝对路径修复 |
 | `9b764d5e` | 后半：`client.ts` kernel 承载（`KernelRuntimeConnection`——connectOrSpawn 拉起 + runtime.request/events.* 桥接 + host 错误码反查 daemon 码保订阅环 INVALID_PARAMS cursor 重置语义；**双模式**=显式 endpoint/authTokenStore 走旧 socket 保注入测试）；传输级失败（terminalError）丢弃死连接重生重试一次；events.subscribe 桥接改**覆盖语义**（重订阅 dispose 旧的，原拒绝式会卡死 cursor 重置重订）；workspace-registry git 环境降级；kernel 客户端实盘测试 3 条 |
 | `eff5ea11` | 收尾：cron-bridge 默认 client kernel 化（删旧 socket endpoint + spawn/install 兜底）；Desktop 删 in-process daemon host（旧传输 host 与 kernel client 脱节）瘦客户端化；mobile-gateway 状态标注（其后被整体移除） |
+| `d1e3eaa4` | 审查闭环：重生重试固定次数改 **30s 时间预算**（`KERNEL_RETRY_WINDOW_MS`，慢环境每次 connectOrSpawn 选举 10-24s，固定 3 次不够）；candidate 测试 status 断言改轮询等 ready（15s）；Desktop 首次 ping 30s/500ms 退避重试（P1-1）；workspace-registry 降级注释修正 |
+| `02d4e058` | **daemon stop**：`runtime.shutdown` kernel 操作（独立 spec + candidate composition handler 触发 requestDrain，与 SIGTERM 同路径）+ `LocalRuntimeClient.shutdownDaemon()` + `pico --daemon-stop`（先 registration 探测，无 daemon 不拉起） |
 
 **关键决策**：
 1. **常驻用可释放 residency 而非 retainUntilProcessExit**：后者是不可逆闩，会让 kernel `#waitForResidencies` 永等、优雅关停退化为 deadline 强杀。candidate 持一个长驻 residency 阻止 idle 自退（cron 调度依赖 daemon 常驻），close() 尾部释放——"常驻 + SIGTERM 可优雅关停"兼得。TUI/Desktop 退出后 daemon 继续常驻，cron 持续调度。
@@ -125,9 +127,15 @@
 - **P1-2 terminalError 重试可双执行**：连�� terminal 后单次重试不区分"daemon 死"与"daemon 活着但连接被杀"——后者重发写方法（session.send 等）可能双执行（双 LLM turn/双提交）。窗口窄（deadline 失败响应未达客户端时）。3-B-4 按方法幂等性白名单或幂等键收敛。
 - **P1-3 960KB–1MiB 结果硬失败**：runtime.request 帧预算 1MiB-64KB，超限结果客户端 decode 失败且杀连接；旧 socket 合法的大 transcript 页成死区。3-B-4 分块 query 时一并解决。
 - P1-1（冷启动 recover 窗口首个 ping 失败致 Desktop 误报启动失败）已修：首次 ping 带 30s/500ms 退避重试（RUNTIME_UNAVAILABLE retryable）。
-- P2 已评估接受：cron-bridge 冷启动 45s 选举等待 UX、SIGTERM 关停 10s shutdownGrace 硬上限、常驻 daemon 无退出路径（升级须手动 kill，3-B-4+ 立 daemon stop 命令）、覆盖订阅旧 dispose 的 pushEvent 失败回调误杀新订阅（自愈）、FRAME_TOO_LARGE→internal_failure 映射失真（无消费方）。
+- P2 已评估：**daemon stop 已落地**（`02d4e058`：`pico --daemon-stop` + runtime.shutdown kernel 操作，常驻 daemon 现在有优雅退出路径）；cron-bridge 冷启动 45s 选举等待 UX、SIGTERM 关停 10s shutdownGrace 硬上限、覆盖订阅旧 dispose 的 pushEvent 失败回调误杀新订阅（自愈）、FRAME_TOO_LARGE→internal_failure 映射失真（无消费方）仍接受。
 
 **3-B-3 未做**：91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）、host.diagnostics.query.logs 仍恒空。
+
+## 后续发现（2026-08-15 会话补充）
+
+- **connectOrSpawn 候选池**（A6）：候选启动慢的环境下选举循环每 250ms spawn 一个候选（`MIN_CANDIDATE_INTERVAL_MS`），shutdown 期间池中在途候选可能接手注册写锁/守卫锁，把"优雅关停后锁应释放"变成不确定（测试已改手动 spawn 绕过；机制层限制 in-flight 候选待立项）。慢环境实测：候选启动 19-31s、connectOrSpawn 首次连接可达 24s。
+- **daemon stop 测试注意**：shutdown 用例用手动 spawn + connectResolvedRuntimeHost 直连（避开候选池干扰）；shutdown 机制本身经手动 spawn 验证正确（exit 0 + 锁释放 + registration 移除）。
+- **本机环境**：PATH 首项 `%AccessAgentLibs%` 未展开字面量（安全 agent 注入）——hook 静态信任 fail-closed 拒绝绑定 + git 启动间歇挂起；已代码降级，根治需清理系统 PATH。
 
 
 ## 验证命令（基线）
