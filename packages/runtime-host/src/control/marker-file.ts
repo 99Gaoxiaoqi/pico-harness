@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, type BigIntStats } from 'node:fs';
-import { link, lstat, open, rename, unlink } from 'node:fs/promises';
+import { link, lstat, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { renameWithRetry } from './rename-with-retry.js';
 
 export interface MarkerFileHandle {
   stat(options: { bigint: true }): Promise<BigIntStats>;
@@ -96,7 +97,7 @@ export async function publishMarkerFile(
         return 'already_exists';
       }
     } else {
-      await rename(tempPath, markerPath);
+      await renameWithRetry(tempPath, markerPath);
       tempCreated = false;
     }
     await syncDirectory(input.root, deps);

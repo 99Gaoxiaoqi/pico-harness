@@ -1,7 +1,17 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { dirname, isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export interface DetachedCandidateInput {
@@ -14,15 +24,28 @@ export interface DetachedCandidateInput {
   executable?: string;
   entrypoint?: string | URL;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Directory receiving the candidate's combined stdout/stderr log. Candidates
+   * are detached with no controlling terminal, so without this their crash
+   * evidence (unhandled rejection stacks, V8 fatal output) vanishes. Log setup
+   * is best-effort: any failure falls back to a silent stdio and never fails
+   * the launch itself.
+   */
+  logDirectory?: string;
 }
 
 export interface DetachedCandidateAttempt {
   pid: number;
+  /** Log file the candidate's output was redirected to, when logging was set up. */
+  logFile?: string;
 }
 
 export interface DetachedCandidateLaunch {
   spawned: Promise<DetachedCandidateAttempt>;
 }
+
+const CANDIDATE_LOG_KEEP_COUNT = 20;
+const CANDIDATE_LOG_PREFIX = 'candidate-';
 
 export type CandidateLauncher = (input: DetachedCandidateInput) => DetachedCandidateLaunch;
 
@@ -101,19 +124,36 @@ export function launchDetachedRuntimeHostCandidate(
   appendArgument(args, '--legacy-configuration-root', input.legacyConfigurationRoot);
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.
-  const child = spawn(executable, args, {
-    cwd: tsxLoaderPath
-      ? process.cwd()
-      : dirname(isAbsolute(executable) ? executable : process.execPath),
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: {
-      ...process.env,
-      ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-      ...input.env,
-    },
-  });
+  const logSink = prepareCandidateLogSink(input);
+  let stdio: 'ignore' | ['ignore', number, number] = 'ignore';
+  if (logSink) {
+    // Header precedes any child output: an empty log still proves a launch happened
+    // and records what was launched.
+    writeSync(logSink.fd, logSink.header);
+    stdio = ['ignore', logSink.fd, logSink.fd];
+  }
+  const child = (() => {
+    try {
+      return spawn(executable, args, {
+        cwd: tsxLoaderPath
+          ? process.cwd()
+          : dirname(isAbsolute(executable) ? executable : process.execPath),
+        detached: true,
+        stdio,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+          ...input.env,
+        },
+      });
+    } finally {
+      // uv_spawn duplicates the stdio handles into the child synchronously; the
+      // parent's copy is redundant from here on regardless of the spawn outcome.
+      if (logSink) closeSync(logSink.fd);
+    }
+  })();
+  const logFile = logSink?.path;
   const spawned = new Promise<DetachedCandidateAttempt>((resolve, reject) => {
     const onSpawn = () => {
       child.off('error', onError);
@@ -123,7 +163,7 @@ export function launchDetachedRuntimeHostCandidate(
         return;
       }
       child.unref();
-      resolve({ pid });
+      resolve(logFile === undefined ? { pid } : { pid, logFile });
     };
     const onError = (error: Error) => {
       child.off('spawn', onSpawn);
@@ -132,7 +172,59 @@ export function launchDetachedRuntimeHostCandidate(
     child.once('spawn', onSpawn);
     child.once('error', onError);
   });
+  if (logSink) void pruneCandidateLogs(logSink.directory);
   return { spawned };
+}
+
+interface CandidateLogSink {
+  fd: number;
+  path: string;
+  directory: string;
+  header: string;
+}
+
+/**
+ * Best-effort log sink for one candidate launch. Never throws: a candidate that
+ * cannot be logged must still be launched (an election lost to logging would be
+ * strictly worse than one lost silently).
+ */
+function prepareCandidateLogSink(input: DetachedCandidateInput): CandidateLogSink | undefined {
+  if (!input.logDirectory) return undefined;
+  try {
+    mkdirSync(input.logDirectory, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23);
+    const path = join(
+      input.logDirectory,
+      `${CANDIDATE_LOG_PREFIX}${stamp}-${randomBytes(3).toString('hex')}.log`,
+    );
+    const fd = openSync(path, 'a', 0o600);
+    const header =
+      `# candidate launch ${new Date().toISOString()}\n` +
+      `# root=${input.rootPath}\n` +
+      `# entrypoint=${typeof input.entrypoint === 'string' ? input.entrypoint : 'default'}\n`;
+    return { fd, path, directory: input.logDirectory, header };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keep only the newest candidate logs; older ones are stale crash evidence at best. */
+async function pruneCandidateLogs(directory: string): Promise<void> {
+  try {
+    const entries = readdirSync(directory)
+      .filter((name) => name.startsWith(CANDIDATE_LOG_PREFIX) && name.endsWith('.log'))
+      .map((name) => ({ name, mtime: statSync(join(directory, name)).mtimeMs }))
+      .sort((left, right) => right.mtime - left.mtime);
+    for (const stale of entries.slice(CANDIDATE_LOG_KEEP_COUNT)) {
+      try {
+        unlinkSync(join(directory, stale.name));
+      } catch {
+        // Racing a concurrent prune or a locked file is fine; the next pass retries.
+      }
+    }
+  } catch {
+    // Retention is opportunistic; nothing here may disturb the caller.
+  }
 }
 
 function appendArgument(args: string[], key: string, value: string | number | undefined): void {

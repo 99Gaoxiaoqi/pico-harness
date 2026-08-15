@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
+import {
+  readHostRegistration,
+  resolveRootControlNamespace,
+  resolveStorageRoot,
+} from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
@@ -12,14 +17,16 @@ import { TuiReporter } from "../../src/tui/tui-reporter.js";
 /**
  * 3-D Phase 3 E2E：TUI 客户端 tracer 挂真实 daemon + 真实模型完整回合。
  *
- * 与集成冒烟的区别：不覆盖 PICO_HOME——daemon（connectOrSpawn 拉起或连接既有
- * 常驻实例）按用户真实配置解析模型路由（defaults.modelRouteId），走一次真实的
- * session.send → run.live 流式 → run.finished → transcript 对账闭环，再验证
- * /rename /status 的 slash 真实链路与 interrupt。
+ * 模型路由：专属 daemon 从继承的进程 env（--env-file 的 .env）解析真实配置
+ * （defaults.modelRouteId），走一次真实的 session.send → run.live 流式 →
+ * run.finished → transcript 对账闭环，再验证 /rename /status 的 slash 真实
+ * 链路与 interrupt。
  *
- * 隔离边界：临时工作区经 workspace.register/trust 注册（信任项落在用户信任库，
- * 指向临时目录，清理后为无害残留），结束时 unregister。不杀 daemon——常驻
- * daemon 属用户环境（pico --daemon-stop 归用户管理）。
+ * 隔离边界（2026-08-16 修订）：独立临时 pico-home + 专属 daemon，不再共用
+ * 用户常驻 daemon——失败轮次的 unregister 清理同样失败会在真 home 注册表累积
+ * 死条目（实测 118 条），把常驻 daemon 拖进 cron 忙循环并让 workspace.list 超
+ * 操作 deadline（"间歇死锁"根因）。结束 session.delete + trust(false) +
+ * unregister + 优雅关停专属 daemon。
  */
 
 const TEST_TIMEOUT_MS = 10 * 60_000;
@@ -31,15 +38,27 @@ realModelTest(
   { timeout: TEST_TIMEOUT_MS },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "pico-client-e2e-"));
+    const picoHome = join(root, "pico-home");
     const workspaceSeed = join(root, "workspace");
+    await mkdir(picoHome, { recursive: true });
     await mkdir(workspaceSeed, { recursive: true });
     const workspaceDir = await realpath(workspaceSeed);
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = picoHome;
     t.after(async () => {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
       await rm(root, { recursive: true, force: true }).catch(() => undefined);
     });
 
-    const client = new LocalRuntimeClient();
+    const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+    // 关停专属 daemon（candidate 持常驻 residency 不 idle 自退）。注册顺序保证
+    // 在 RPC 清理之后、client.close 之前执行（t.after LIFO）。
+    t.after(() => stopScenarioDaemon(client, picoHome));
     t.after(() => client.close());
+    // 冷启动排水：专属 daemon 冷启动（慢环境 19-31s），ping 在幂等重试白名单内
+    // （30s 时间预算自动重试）。
+    await client.request("runtime.ping", {});
     await client.request("workspace.register", { workspacePath: workspaceDir });
     await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
     // 清理（对抗评审二轮 P1）：删除测试会话 + 撤销信任 + 注销——不留残留
@@ -137,4 +156,30 @@ async function waitForCondition(
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return true;
+}
+
+/** 优雅关停场景专属 daemon；无注册（从未拉起）时直接跳过，绝不反向拉起。 */
+async function stopScenarioDaemon(client: LocalRuntimeClient, picoHome: string): Promise<void> {
+  let pid: number | undefined;
+  try {
+    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
+    const registration = await readHostRegistration(
+      join(resolveRootControlNamespace(), capability.rootId),
+    );
+    pid = registration?.pid;
+  } catch {
+    // 控制目录不可读 = daemon 未运行。
+  }
+  if (pid === undefined) return;
+  try {
+    await client.shutdownDaemon();
+    return;
+  } catch {
+    // 优雅路径失败（连接已死等）退回硬杀。
+  }
+  try {
+    process.kill(pid);
+  } catch {
+    // 已退出。
+  }
 }
