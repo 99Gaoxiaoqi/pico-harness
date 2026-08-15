@@ -11,6 +11,7 @@ import {
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
+import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 
 /**
@@ -90,6 +91,101 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
     90_000,
   );
   assert.ok(grew, "transcript reload 对账应使投影增长（runBoundary/error 等条目入投影）");
+
+  runtime.dispose();
+});
+
+test("client commands over a real spawned daemon: slash chains (dead-endpoint model)", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-client-slash-"));
+  const picoHome = join(root, "pico-home");
+  const workspaceSeed = join(root, "workspace");
+  await mkdir(picoHome, { recursive: true });
+  await mkdir(workspaceSeed, { recursive: true });
+  const workspaceDir = await realpath(workspaceSeed);
+  process.env.PICO_HOME = picoHome;
+  process.env.LLM_BASE_URL = DEAD_ENDPOINT;
+  process.env.LLM_API_KEY = "smoke-test-key";
+  process.env.LLM_MODEL = "smoke-test-model";
+  t.after(() => {
+    delete process.env.LLM_BASE_URL;
+    delete process.env.LLM_API_KEY;
+    delete process.env.LLM_MODEL;
+  });
+  t.after(async () => {
+    await killDaemonFor(picoHome);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  t.after(() => client.close());
+  await client.request("workspace.register", { workspacePath: workspaceDir });
+  await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
+
+  const reporter = new TuiReporter();
+  const runtime = new ClientSessionRuntime({ client, workspacePath: workspaceDir, reporter });
+  const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
+  await runtime.start();
+
+  // 物化会话；等 run 终态（死端点快速失败，但引擎重试有窗口）——投影越过本地
+  // user 条目即 transcript 已对账，idle-only 命令可执行。
+  let accepted = await runtime.sendText("slash 链路冒烟");
+  if (!accepted) accepted = await runtime.sendText("slash 链路冒烟");
+  assert.ok(accepted);
+  assert.ok(runtime.activeSessionId);
+  const runSettled = await waitForCondition(
+    () => reporter.getProjection().entries.length > 1,
+    90_000,
+  );
+  assert.ok(runSettled, "死端点 run 终态后 transcript 对账应使投影增长");
+  const settledIdle = await waitForCondition(() => !runtime.running, 30_000);
+  assert.ok(settledIdle, "run 应已终态（供 idle-only 命令执行）");
+
+  // /status：真实往返（session.get + settings.get），消息含路由字段。
+  const status = await processClientInput("/status", registry, runtime);
+  assert.equal(status.kind, "local");
+  assert.match(String(status.result?.message), /模型路由/);
+
+  // /rename → daemon 持久化，session.get 验证。
+  const rename = await processClientInput("/rename slash-链路-新标题", registry, runtime);
+  assert.match(String(rename.result?.message), /slash-链路-新标题/);
+  const renamed = await client.request("session.get", {
+    workspacePath: workspaceDir,
+    sessionId: runtime.activeSessionId ?? "",
+  });
+  assert.equal(renamed.session.title, "slash-链路-新标题");
+
+  // /sessions：真实列表含当前会话且 isCurrent 标注。
+  const sessions = await processClientInput("/sessions", registry, runtime);
+  const data = sessions.result?.data as { id: string; isCurrent?: boolean }[];
+  assert.ok(data.some((entry) => entry.id === runtime.activeSessionId && entry.isCurrent === true));
+
+  // /new → 无会话态；再发消息物化新会话；/resume 切回并水化。
+  const firstSessionId = runtime.activeSessionId;
+  await processClientInput("/new", registry, runtime);
+  assert.equal(runtime.activeSessionId, undefined);
+  let second = await runtime.sendText("第二个会话");
+  if (!second) second = await runtime.sendText("第二个会话");
+  assert.ok(second);
+  const secondSessionId = runtime.activeSessionId;
+  assert.notEqual(secondSessionId, firstSessionId);
+  // 第二个死端点 run 终态后再 /resume（idle-only）。
+  await waitForCondition(() => !runtime.running, 90_000);
+  const resume = await processClientInput(`/resume ${firstSessionId}`, registry, runtime);
+  assert.match(String(resume.result?.message), /已切换/);
+  assert.equal(runtime.activeSessionId, firstSessionId);
+  assert.ok(
+    reporter
+      .getProjection()
+      .entries.some(({ entry }) => entry.kind === "user" && entry.content === "slash 链路冒烟"),
+    "切回应水化出第一会话历史",
+  );
+
+  // /interrupt：死端点 run 快速失败，竞态容忍——命令不抛错即可（run 可能已终态）。
+  const third = await runtime.sendInput({ kind: "text", text: "中断目标" });
+  assert.ok(third);
+  await waitForCondition(() => runtime.running, 30_000).catch(() => undefined);
+  const interrupt = await processClientInput("/interrupt", registry, runtime);
+  assert.equal(interrupt.kind, "local");
 
   runtime.dispose();
 });
