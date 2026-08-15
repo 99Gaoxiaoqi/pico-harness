@@ -20,9 +20,9 @@ import type { ClientSessionRuntime } from "./client-session-runtime.js";
  * ClientSessionRuntime.request 透传）。选择器结果沿用 LocalCommandResult 的
  * ui.open-selector/data 词汇，宿主（client-command-host）用数据化组件渲染。
  *
- * 延后（协议/边界缺口，下批）：/provider（import-env 凭据流）、/cron（add 应走
- * automation.create 而非 jobs.create + yolo 门）、/memory remember（协议无
- * memory.create）。/rewind /changes /context /operations 不在本批。
+ * 延后（清单单一来源=tests/integration/tui-client-commands.test.ts 的 parity
+ * 测试，分 BLOCKED=协议缺口 / DEFERRED=tier2 镜像两类；勿在此重复维护名单）。
+ * /rewind /changes /context /operations 不在本批。
  */
 
 export interface ClientCommandRegistryDeps {
@@ -105,6 +105,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       aliases: ["effort"],
       description: "查看或设置思考强度",
       usage: "/thinking [level]",
+      argumentHint: "[model level]",
       category: "model",
       availability: "idle",
       execute: async (input) => {
@@ -143,6 +144,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "mode",
       description: "查看或切换协作模式",
       usage: "/mode <default|plan|auto|yolo>",
+      argumentHint: "<default|plan|auto|yolo>",
       category: "session",
       availability: "idle",
       argumentCompleter: staticCompleter(["default", "plan", "auto", "yolo"]),
@@ -176,7 +178,8 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "plan",
       description: "进入或退出计划模式",
       usage: "/plan [on|off]",
-      category: "permissions",
+      argumentHint: "[on|off]",
+      category: "session",
       availability: "idle",
       argumentCompleter: staticCompleter(["on", "off"]),
       execute: async (input) => {
@@ -205,6 +208,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       aliases: ["permission"],
       description: "查看或设置权限模式",
       usage: "/permissions [default|auto|yolo|plan]",
+      argumentHint: "[default|auto|yolo|plan]",
       category: "permissions",
       availability: "idle",
       argumentCompleter: staticCompleter(["default", "auto", "yolo", "plan"]),
@@ -249,6 +253,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "graph",
       description: "查看或切换 Graph Mode",
       usage: "/graph [on|off]",
+      argumentHint: "[on|off]",
       category: "session",
       availability: "idle",
       argumentCompleter: staticCompleter(["on", "off"]),
@@ -334,6 +339,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "rename",
       description: "重命名当前会话",
       usage: "/rename <title>",
+      argumentHint: "<title>",
       category: "session",
       availability: "idle",
       execute: async (input) => {
@@ -376,7 +382,6 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "init",
       description: "生成项目上下文文件（daemon 侧执行）",
       usage: "/init",
-      category: "workspace",
       availability: "idle",
       execute: async () => {
         const result = await runtime.request("workspace.init", { workspacePath });
@@ -391,7 +396,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "doctor",
       description: "运行诊断",
       usage: "/doctor [resources]",
-      category: "workspace",
+      argumentHint: "[resources]",
       availability: "idle",
       execute: async (input) => {
         if (input.argv[0] === "resources") {
@@ -406,7 +411,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "usage",
       description: "查看用量",
       usage: "/usage",
-      category: "help",
+      category: "model",
       availability: "always",
       execute: async () => {
         const sid = session();
@@ -446,6 +451,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "resume",
       description: "恢复指定会话",
       usage: "/resume <session-id>",
+      argumentHint: "<session-id>",
       category: "session",
       availability: "idle",
       execute: async (input) => {
@@ -464,6 +470,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "fork",
       description: "分叉指定会话",
       usage: "/fork <session-id>",
+      argumentHint: "<session-id>",
       category: "session",
       availability: "idle",
       execute: async (input) => {
@@ -507,6 +514,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       aliases: ["use-skill"],
       description: "请求 agent 使用指定技能（daemon 侧解析）",
       usage: "/skill <name> [arguments]",
+      argumentHint: "<name> [arguments]",
       category: "skill",
       // 有意分歧：in-process 为 idle；客户端经 session.send 排队（daemon 决策
       // queued/steered），运行中提交合法。parity 测试按此豁免。
@@ -527,6 +535,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "agent",
       description: "派发命名 agent 任务（daemon 侧解析）",
       usage: "/agent <name> <task>",
+      argumentHint: "<name> <task>",
       category: "agent",
       // 有意分歧：同 /skill——经 session.send 排队，运行中提交合法。
       availability: "always",
@@ -565,7 +574,6 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       name: "agents",
       description: "列出可用 agent",
       usage: "/agents",
-      category: "agent",
       availability: "idle",
       execute: async () => {
         const result = await runtime.request("catalog.agents", { workspacePath });
@@ -607,6 +615,7 @@ function createRunningInputCommands(
       name,
       description,
       usage,
+      argumentHint: "<text>",
       category: "session",
       availability: "running",
       execute: async (input) => {

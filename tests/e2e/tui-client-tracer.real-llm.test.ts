@@ -42,7 +42,16 @@ realModelTest(
     t.after(() => client.close());
     await client.request("workspace.register", { workspacePath: workspaceDir });
     await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
+    // 清理（对抗评审二轮 P1）：删除测试会话 + 撤销信任 + 注销——不留残留
+    // （unregister 不清信任，trust(false) 才清；session.delete 删真实模型回合）。
     t.after(async () => {
+      const sessionId = runtime.activeSessionId;
+      if (sessionId) {
+        await client.request("session.delete", { workspacePath: workspaceDir, sessionId }).catch(() => undefined);
+      }
+      await client
+        .request("workspace.trust", { workspacePath: workspaceDir, trusted: false })
+        .catch(() => undefined);
       await client
         .request("workspace.unregister", { workspacePath: workspaceDir })
         .catch(() => undefined);

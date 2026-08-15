@@ -20,8 +20,10 @@ export interface ClientCommandHostDeps {
   readonly registry: CommandRegistry;
   /** 当前模型路由 id（model 选择器高亮）。 */
   readonly currentModelId?: () => string | undefined;
-  /** 选择器确认派发：会话选择 → "/resume <id>"；模型选择 → "/model <route>"。 */
+  /** 选择器确认派发：会话选择 → "/resume|/fork <id>"；模型选择 → "/model <route>"。 */
   readonly dispatchInput: (text: string) => void | Promise<void>;
+  /** 关闭指定对话框（Esc 取消/选择后闭合）。 */
+  readonly closeDialog: (id: string) => void;
   readonly switchSession: (sessionId: string | undefined) => void | Promise<void>;
 }
 
@@ -44,12 +46,16 @@ export function handleClientLocalCommand(
 
   if (result.ui) {
     const context: LocalUiDialogHostContext = {
-      // 选择器确认（对抗评审 P1：此前 view-only，选中无动作）。
+      // 选择器确认（对抗评审二轮 P0）：先关对话框再派发——与 in-process 闭合
+      // 顺序一致，避免对话框叠留。Esc 取消走 onClose 同一闭合口。
+      onClose: (id) => deps.closeDialog(id),
       onModelConfirm: (model) => {
+        deps.closeDialog("local-ui:model-selector");
         void deps.dispatchInput(`/model ${model.id}`);
       },
-      onSessionConfirm: (session) => {
-        void deps.dispatchInput(sessionSelectionToClientInput(session));
+      onSessionConfirm: (session, mode) => {
+        deps.closeDialog("local-ui:session-selector");
+        void deps.dispatchInput(mode === "fork" ? `/fork ${session.id}` : `/resume ${session.id}`);
       },
     };
     if (result.ui.kind === "open-selector" && result.ui.selector === "model") {
@@ -106,6 +112,7 @@ export function handleClientLocalCommand(
 }
 
 /** 会话选择确认（SessionBrowser 行选中）→ /resume 派发。 */
+/** 会话选择确认 → 命令文本（resume 模式；fork 由调用方拼 /fork）。 */
 export function sessionSelectionToClientInput(session: SessionBrowserSession): string {
   return `/resume ${session.id}`;
 }

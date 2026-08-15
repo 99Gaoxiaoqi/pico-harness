@@ -58,6 +58,7 @@ function createHostHarness(): HostHarness {
     reporter,
     registry: harness.registry,
     dispatchInput: () => undefined,
+    closeDialog: () => undefined,
     switchSession: (sessionId: string | undefined) => {
       switches.push(sessionId);
     },
