@@ -52,7 +52,7 @@
 |---|---|---|
 | **1 ✅（08833ce0 + 2eadb002）** | **run.live 扩展 tool/subagent 实时事件**：协议新 kind + production-host 路由 + tool output ~50ms daemon 侧合流 + 分级裁剪兼容 + 未知 kind 前向兼容（旧客户端忽略不报错）；后续补齐 started 项 args（4KB 展示上限） | 桥接集成测试（形状/合流/裁剪/容忍）+ runtime-host 全套回归；Desktop 立即受益于"可选消费" |
 | **2 ✅（8b01dd81）** | **TUI 客户端 tracer**：`--client` 旗标；四件套——transcript-item-hydration（RPC items→TranscriptEvent[]）/ daemon-event-reporter（通知→TuiReporter 适配，append-only+reload 对账）/ client-session-runtime（无 Ink 可测核心）/ client-repl（复用 `<App>` 的 Ink 薄壳）；审批走 approval.requested+approval.respond（approval-dialogs 共享模块提取） | 假 client 集成测试驱动客户端环（tui-client-tracer 5/5）；真实 daemon 冒烟延后 Phase 4 |
-| 3 | **parity 补齐**：slash 命令 RPC 化（config.*/session.settings.*/mcp.*/skills.*）、plan.respond 接线、rewind/changes、wake 订阅渲染（run.started 事件驱动，不再本地 re-enter runAgent）、BYOK 旗标合并（--model/--provider → config.effective.get 客户端合并）、自由文本 prompt 扩展、**共享 session driver 提取**（Desktop 纯 reducer 上提到共享模块，消除第 4 套状态机风险） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言（预置） |
+| 3 | **parity 补齐**：~~plan.respond 接线~~ ✅（95b479d2：wire 元数据映射，plan 审批闭环）；~~wake 订阅渲染~~ ✅（Phase 2 已交付，背靠背回归测试固化）；~~BYOK 旗标合并~~ ✅（0f10f65f：--model/--thinking 经 config.effective.get + session.settings.update 生效）。剩余：slash 命令 RPC 化、rewind/changes、自由文本 prompt、共享 session driver 提取（Desktop 纯 reducer 上提） | 与进程内 TUI 并排功能对齐；架构 invariants 加"运行时编排唯一在 daemon"的 D9 类正向断言（预置） |
 | 4 | **默认切换**：`pico` 默认走客户端路径 | e2e 真实模型冒烟（tests/e2e）+ 慢环境冷启动预算复核 + 真机 TUI 冒烟 |
 | 5 | **退役进程内交互路径**：删 repl.tsx 装配链（≈4k 行）；line-mode 迁客户端或删；headless 不动 | D9 类正向断言转正：交互外壳零引擎装配；typecheck/测试/门禁全绿 |
 
