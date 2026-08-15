@@ -88,6 +88,11 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "workspace.status",
   "workspace.list",
   "workspace.trustStatus",
+  // 幂等写（重复执行同态）：工作区注册/信任——重复 register/trust 返回同态
+  // 结果，冷启动窗口（connectOrSpawn 拉起慢）内可安全自动重试。unregister
+  // 重复执行的返回形态未证伪，保守不入（P1-2 测试以其为非幂等代表）。
+  "workspace.register",
+  "workspace.trust",
   "events.subscribe",
   "events.replay",
 ]);

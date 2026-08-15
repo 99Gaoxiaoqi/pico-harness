@@ -111,7 +111,13 @@ export class ClientSessionRuntime {
       reporter: this.reporter,
       onApprovalRequested: (payload) => this.handleApprovalRequested(payload),
       onPromptRequested: (payload) => this.handlePromptRequested(payload),
-      onRunStateChanged: options.onRunStateChanged,
+      onRunStateChanged: (running) => {
+        // 回合终态重试启动覆盖（真机实测逮到的竞态）：sendText 返回后 run 注册
+        // 存在窗口，update 的 idle 校验间歇 CONFLICT；回合结束=必然 idle，是
+        // 覆盖应用的最可靠触发点（applied 单次闩防重复）。
+        if (!running) void this.applyStartupOverrides();
+        this.options.onRunStateChanged?.(running);
+      },
     });
   }
 

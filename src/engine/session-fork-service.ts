@@ -206,7 +206,11 @@ export class SessionForkService {
         `Fork Runtime store does not match source Session store: ${input.sourceSessionId}`,
       );
     }
-    return source.serialize(async () => {
+    // withSerializedExecution 而非裸 serialize：daemon 侧 rewind.apply 在
+    // withSession 的 serialize task 内调用本方法（forkFromCheckpoint → fork），
+    // 裸 serialize 会触发 ALS 重入守卫直接抛错；外部调用者（in-process repl）
+    // 不在 serialize 内时行为不变（排队执行）。
+    return source.withSerializedExecution(async () => {
       await assertTargetNotPublished(this.runtimeStore, input.targetSessionId);
       const runtimeCapability = source.runtimeEventCapability;
       if (!runtimeCapability) {
