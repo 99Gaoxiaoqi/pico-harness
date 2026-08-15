@@ -101,6 +101,11 @@ import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
+import {
+  fileHistoryChanges,
+  fileHistoryRestoreFile,
+  type FileHistoryChanges,
+} from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
 import type {
   ProviderCallRecord,
@@ -476,6 +481,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.checkpointId,
         ),
       "rewind.apply": (request) => this.applyRewind(request.params),
+      "rewind.changes": (request) =>
+        this.listRewindFileChanges(
+          request.params.workspacePath,
+          request.params.sessionId,
+          request.params.checkpointId,
+        ),
+      "rewind.restoreFile": (request) => this.restoreRewindFile(request.params),
       "jobs.list": (request) => this.listJobs(request.params.workspacePath),
       "jobs.create": (request) =>
         this.withProviderDependencyLock(() => this.createJob(request.params)),
@@ -3320,6 +3332,77 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }),
     );
     return { applied: true, sessionId: forkedSessionId, sourceSessionId: params.sessionId };
+  }
+
+  /** /changes 单文件恢复（3-D tier2 收口）：checkpoint 维度逐文件 diff + 当前指纹。 */
+  private async listRewindFileChanges(
+    workspacePath: string,
+    sessionId: string,
+    checkpointId: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const changes = await fileHistoryChanges(
+        session.fileHistory,
+        checkpointId,
+        sessionId,
+        session.fileHistoryBaseDir,
+      );
+      const meta = changes as FileHistoryChanges & {
+        incomplete?: boolean;
+        warnings?: readonly string[];
+      };
+      return {
+        checkpointId,
+        files: changes.files.map((file) => {
+          const truncated = truncateUtf8(file.patch ?? "", MAX_DESKTOP_PATCH_BYTES);
+          return {
+            path: displayChangePath(file.filePath, canonical),
+            status: file.status,
+            additions: file.addedLines,
+            deletions: file.removedLines,
+            fingerprint: file.currentFingerprint,
+            patch: truncated.value,
+            truncated: truncated.truncated,
+          };
+        }),
+        addedLines: changes.addedLines,
+        removedLines: changes.removedLines,
+        ...(meta.incomplete ? { partial: true } : {}),
+        ...(meta.warnings && meta.warnings.length > 0 ? { warnings: meta.warnings } : {}),
+      };
+    });
+  }
+
+  /** /changes 单文件恢复：只还原一个文件到 checkpoint 之前（指纹守卫 + idle 门）。 */
+  private async restoreRewindFile(params: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly checkpointId: string;
+    readonly path: string;
+    readonly expectedFingerprint: string;
+  }): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(
+      params.workspacePath,
+      params.sessionId,
+      "单文件恢复",
+    );
+    // wire 的 path 是 displayChangePath 的产物（工作区内正斜杠相对路径，或绝对
+    // 路径）；恢复侧必须还原成快照记录的绝对路径。
+    const absolute = isAbsolute(params.path)
+      ? params.path
+      : resolve(canonical, params.path);
+    return this.withSession(canonical, params.sessionId, async (session) => {
+      const result = await fileHistoryRestoreFile(
+        session.fileHistory,
+        params.checkpointId,
+        absolute,
+        params.expectedFingerprint,
+        params.sessionId,
+        session.fileHistoryBaseDir,
+      );
+      return { restored: true, path: params.path, status: result.status };
+    });
   }
 
   private async projectRunChanges(

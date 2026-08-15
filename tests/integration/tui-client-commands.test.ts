@@ -445,27 +445,37 @@ test("client commands: /rewind and /changes map to rewind.* RPC with selector da
   );
   assert.equal(data.viewOnly, undefined, "/rewind 非查看型");
 
-  // /changes 无参 → 同列表，viewOnly + 预选最新 checkpoint。
+  // /changes 无参 → changes 对话框（checkpointId = 最新 checkpoint）。
   harness.requests.length = 0;
   const changes = await run(harness, "/changes");
-  assert.equal(changes.result?.ui?.selector, "rewind");
+  assert.equal(changes.result?.ui?.selector, "changes");
   const changesData = changes.result?.data as {
-    viewOnly?: boolean;
-    selectedMessageId?: string;
+    sessionId?: string;
+    checkpointId?: string;
   };
-  assert.equal(changesData.viewOnly, true);
-  assert.equal(changesData.selectedMessageId, "msg_2");
+  assert.equal(changesData.checkpointId, "msg_2", "无参默认最新 checkpoint");
 
-  // /changes <id> → 预选该 checkpoint；未知 id → 错误提示不发选择器。
+  // /changes <id> → 指定 checkpoint；未知 id → 错误提示不发对话框。
   harness.requests.length = 0;
   const changesArg = await run(harness, "/changes msg_1");
   assert.equal(
-    (changesArg.result?.data as { selectedMessageId?: string }).selectedMessageId,
+    (changesArg.result?.data as { checkpointId?: string }).checkpointId,
     "msg_1",
   );
   const changesBad = await run(harness, "/changes nope");
   assert.match(String(changesBad.result?.message), /was not found/);
   assert.equal(changesBad.result?.ui, undefined);
+
+  // /rewind <id> → 预选该 checkpoint（changes 面板 w 跳转目标）；未知 id 报错。
+  harness.requests.length = 0;
+  const rewindArg = await run(harness, "/rewind msg_1");
+  assert.equal(
+    (rewindArg.result?.data as { selectedMessageId?: string }).selectedMessageId,
+    "msg_1",
+  );
+  const rewindBad = await run(harness, "/rewind nope");
+  assert.match(String(rewindBad.result?.message), /was not found/);
+  assert.equal(rewindBad.result?.ui, undefined);
 
   // 别名 /checkpoint 与 availability 门（idle-only）。
   const alias = await run(harness, "/checkpoint");
@@ -473,6 +483,36 @@ test("client commands: /rewind and /changes map to rewind.* RPC with selector da
   harness.emit(runEvent("run.started", "s1", "run_1", "running"));
   const busy = await run(harness, "/rewind");
   assert.match(String(busy.result?.message ?? busy.message), /当前不可用|only available/i);
+});
+
+test("client commands: dynamic argument completers ride RPCs with TTL cache", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  harness.setSessions([
+    { sessionId: "s-alpha", workspacePath: "C:\\ws", title: "甲会话", status: "active", pinned: false, createdAt: 1, updatedAt: 1 },
+    { sessionId: "s-beta", workspacePath: "C:\\ws", title: "乙会话", status: "active", pinned: false, createdAt: 1, updatedAt: 2 },
+  ]);
+  const resume = harness.registry.resolve("resume");
+  assert.ok(resume?.argumentCompleter, "/resume 应有动态补全（session-id 候选）");
+  const narrowed = await resume.argumentCompleter!("s-al");
+  assert.equal(narrowed.length, 1);
+  assert.equal(narrowed[0]!.value, "s-alpha");
+  // 包含式匹配也命中 label（旧 in-process 语义）。
+  assert.equal((await resume.argumentCompleter!("乙")).length, 1);
+  // TTL 内第二次调用走缓存——不再发 session.list。
+  harness.requests.length = 0;
+  await resume.argumentCompleter!("");
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "session.list").length,
+    0,
+    "5s TTL 内应走缓存，不因每次按键打 RPC",
+  );
+  // /fork 与 /resume 共用会话候选源；/skill /agent 各自映射。
+  const fork = harness.registry.resolve("fork");
+  assert.equal((await fork?.argumentCompleter?.("beta"))?.[0]?.value, "s-beta");
+  const skill = await harness.registry.resolve("skill")?.argumentCompleter?.("comm");
+  assert.equal(skill?.[0]?.value, "commit");
+  const agent = await harness.registry.resolve("agent")?.argumentCompleter?.("rev");
+  assert.equal(agent?.[0]?.value, "review");
 });
 
 test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {

@@ -3,6 +3,12 @@ import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history
 import type { FileHistoryDiffStat } from "../safety/file-history.js";
 import type { LocalUiCommandAction } from "../input/types.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
+import {
+  ChangesDialogHost,
+  type ChangesJumpToRewindAction,
+  type ChangesPanelModel,
+  type ChangesRestoreFileAction,
+} from "./changes-panel.js";
 import { InteractiveHelpPanel, type HelpPanelCommand } from "./help-panel.js";
 import { isLocalUiCommandAction } from "./local-ui-command.js";
 import {
@@ -37,11 +43,16 @@ export interface LocalUiDialogHostContext {
   rewindViewOnly?: boolean;
   /** 预选 checkpoint（/changes <message-id>）。 */
   rewindSelectedMessageId?: string;
+  /** /changes 单文件恢复（tier2 收口）：checkpoint id + 模型数据源 + 动作回调。 */
+  changesMessageId?: string;
+  changesLoadModel?: (messageId: string) => Promise<ChangesPanelModel>;
+  changesOnRestoreFile?: (action: ChangesRestoreFileAction) => void | Promise<void>;
+  changesOnJumpToRewind?: (action: ChangesJumpToRewindAction) => void | Promise<void>;
   onClose?: (id: string) => void;
   maxHelpItems?: number;
 }
 
-type LocalUiDialogKind = "help" | "model" | "session" | "rewind";
+type LocalUiDialogKind = "help" | "model" | "session" | "rewind" | "changes";
 
 const HELP_DIALOG_PRIORITY = 30;
 const SELECTOR_DIALOG_PRIORITY = 40;
@@ -137,6 +148,22 @@ export function createLocalUiDialogContent(
         />
       );
     }
+    case "changes": {
+      // 单文件恢复对话框（/changes）：宿主必须提供模型数据源（rewind.changes
+      // RPC 桥）；缺失是接线错误（对齐 hooks panel 的防御先例）。
+      if (!context.changesLoadModel || !context.changesMessageId) {
+        throw new Error("Changes dialog requires a model data source and checkpoint id");
+      }
+      return (
+        <ChangesDialogHost
+          messageId={context.changesMessageId}
+          loadModel={context.changesLoadModel}
+          onRestoreFile={(action) => context.changesOnRestoreFile?.(action)}
+          onJumpToRewind={(action) => context.changesOnJumpToRewind?.(action)}
+          onClose={() => context.onClose?.(localUiDialogId("changes"))}
+        />
+      );
+    }
   }
 }
 
@@ -171,5 +198,7 @@ function localUiDialogId(kind: LocalUiDialogKind): string {
       return "local-ui:session-selector";
     case "rewind":
       return "local-ui:rewind-selector";
+    case "changes":
+      return "local-ui:changes";
   }
 }

@@ -199,6 +199,70 @@ test("command host: rewind selector dialog carries snapshots (3-D /rewind /chang
   assert.deepEqual(applied, [], "宿主层不主动触发 apply（对话框回调驱动）");
 });
 
+test("command host: changes dialog carries checkpoint + restore bridge (单文件恢复)", async () => {
+  const harness = createHostHarness();
+  const restored: { messageId: string; filePath: string }[] = [];
+  const dispatched: string[] = [];
+  harness.deps = {
+    ...harness.deps,
+    dispatchInput: (text) => {
+      dispatched.push(text);
+    },
+    getRewindChanges: async () => ({
+      messageId: "msg_1",
+      files: [],
+      fullPatch: "",
+      addedLines: 0,
+      removedLines: 0,
+      partial: false,
+      warnings: [],
+      rewindAction: {
+        kind: "jump-to-rewind",
+        messageId: "msg_1",
+        label: "Open Rewind",
+        description: "",
+      },
+    }),
+    onRestoreRewindFile: (action) => {
+      restored.push({ messageId: action.messageId, filePath: action.filePath });
+    },
+  };
+
+  // /changes：checkpointId → changes 对话框（ChangesDialogHost 数据源装配）。
+  const changes = handleClientLocalCommand(
+    {
+      type: "local",
+      action: "message",
+      message: "Opening changes.",
+      ui: { kind: "open-selector", selector: "changes" },
+      data: { sessionId: "s1", checkpointId: "msg_1" },
+    },
+    harness.deps,
+  );
+  assert.equal(changes.dialog?.id, "local-ui:changes");
+  assert.equal(changes.dialog?.layer, "modal");
+
+  // 缺数据源的宿主：不打开对话框 + 降级提示（不困死 UI）。
+  const bare = createHostHarness();
+  const degraded = handleClientLocalCommand(
+    {
+      type: "local",
+      action: "message",
+      message: "Opening changes.",
+      ui: { kind: "open-selector", selector: "changes" },
+      data: { sessionId: "s1", checkpointId: "msg_1" },
+    },
+    bare.deps,
+  );
+  assert.equal(degraded.dialog, null);
+  assert.ok(
+    bare.messages.some((message) => message.includes("不可用")),
+    "缺数据源应有降级提示",
+  );
+  assert.deepEqual(restored, []);
+  assert.deepEqual(dispatched, []);
+});
+
 test("command host: resume data switches session; new mode is no-op (executor已处理)", () => {
   const harness = createHostHarness();
   const resumed = handleClientLocalCommand(

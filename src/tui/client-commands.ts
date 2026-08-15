@@ -7,6 +7,8 @@ import { getCommandAvailability } from "../input/command-availability.js";
 import type {
   InputProcessResult,
   LocalCommandResult,
+  SlashArgumentCandidate,
+  SlashArgumentCompleter,
   SlashCommand,
 } from "../input/types.js";
 import type { ClientSessionRuntime } from "./client-session-runtime.js";
@@ -46,6 +48,31 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       ? { type: "local", action: "message", message: "当前没有活跃会话；先发送一条消息或 /resume。" }
       : id;
   };
+
+  // 动态参���补全（tier2 收口）：RPC 拉候选 + 短 TTL 缓存（避免每次按键打
+  // RPC），失败静默降级为空候选（连接中/daemon 未就绪不打扰输入）。匹配语义
+  // 对齐 in-process 的包含式过滤（value/label/description）。
+  const sessionCompleter = cachedArgumentCompleter(
+    async () => runtime.request("session.list", { workspacePath }),
+    (result) =>
+      result.sessions.map((entry) => ({
+        value: entry.sessionId,
+        label: entry.title || entry.sessionId,
+        description: new Date(entry.updatedAt).toLocaleString(),
+      })),
+  );
+  const skillCompleter = cachedArgumentCompleter(
+    async () => runtime.request("skills.effective.list", { workspacePath }),
+    (result) =>
+      (result.skills as readonly { name?: string }[]).map((skill) => ({
+        value: skill.name ?? "",
+        label: skill.name ?? "(unnamed)",
+      })),
+  );
+  const agentCompleter = cachedArgumentCompleter(
+    async () => runtime.request("catalog.agents", { workspacePath }),
+    (result) => result.agents.map((agent) => ({ value: agent.name })),
+  );
 
   const commands: readonly SlashCommand[] = [
     // builtin 的 /skill 是"生成提示语"兜底——客户端版走 session.send 原生
@@ -386,7 +413,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       usage: "/rewind",
       category: "session",
       availability: "idle",
-      execute: async () => {
+      execute: async (input) => {
         const sid = needSession();
         if (typeof sid === "object") return sid;
         const result = await runtime.request("rewind.list", { workspacePath, sessionId: sid });
@@ -398,12 +425,28 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             message: "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
           };
         }
+        // 可选 message-id：预选进选择器（/changes 面板的 w 跳转用）。
+        const requested = input.argv[0];
+        const selected = requested
+          ? snapshots.find((snapshot) => snapshot.messageId === requested)
+          : undefined;
+        if (requested && !selected) {
+          return {
+            type: "local",
+            action: "message",
+            message: `Cannot open Rewind: checkpoint ${requested} was not found.`,
+          };
+        }
         return {
           type: "local",
           action: "message",
           message: `Rewind：${snapshots.length} 个 checkpoint 可选。`,
           ui: { kind: "open-selector", selector: "rewind" },
-          data: { sessionId: sid, snapshots },
+          data: {
+            sessionId: sid,
+            snapshots,
+            ...(selected ? { selectedMessageId: selected.messageId } : {}),
+          },
         };
       },
     }),
@@ -437,14 +480,14 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             message: `Cannot open Changes: checkpoint ${requested} was not found.`,
           };
         }
-        // 客户端 /changes = rewind 选择器查看型（预选目标进 preview）；单文件
-        // 恢复无协议对应（fileHistoryRestoreFile 是引擎 API），提示走 /rewind。
+        // 单文件恢复（tier2 收口）：rewind.changes 逐文件 diff + 当前指纹 →
+        // ChangesDialogHost（↑/↓ 选文件，Enter 双击确认恢复，w 跳转完整回滚）。
         return {
           type: "local",
           action: "message",
-          message: `Opening partial rewind preview for ${target.messageId}.（查看模式；确认回滚请用 /rewind）`,
-          ui: { kind: "open-selector", selector: "rewind" },
-          data: { sessionId: sid, snapshots, viewOnly: true, selectedMessageId: target.messageId },
+          message: `Opening changes for ${target.messageId}.（↑/↓ 选择 · Enter 恢复选中文件 · w 完整回滚 · Esc 关闭）`,
+          ui: { kind: "open-selector", selector: "changes" },
+          data: { sessionId: sid, checkpointId: target.messageId },
         };
       },
     }),
@@ -524,6 +567,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       argumentHint: "<session-id>",
       category: "session",
       availability: "idle",
+      argumentCompleter: sessionCompleter,
       execute: async (input) => {
         const target = input.argv[0];
         if (!target) return { type: "local", action: "message", message: "Usage: /resume <session-id>" };
@@ -543,6 +587,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       argumentHint: "<session-id>",
       category: "session",
       availability: "idle",
+      argumentCompleter: sessionCompleter,
       execute: async (input) => {
         const target = input.argv[0];
         if (!target) return { type: "local", action: "message", message: "Usage: /fork <session-id>" };
@@ -589,6 +634,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       // 有意分歧：in-process 为 idle；客户端经 session.send 排队（daemon 决策
       // queued/steered），运行中提交合法。parity 测试按此豁免。
       availability: "always",
+      argumentCompleter: skillCompleter,
       execute: async (input) => {
         const skillName = input.argv[0];
         if (skillName === undefined) {
@@ -609,6 +655,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "agent",
       // 有意分歧：同 /skill——经 session.send 排队，运行中提交合法。
       availability: "always",
+      argumentCompleter: agentCompleter,
       execute: async (input) => {
         const agentName = input.argv[0];
         const task = input.argv.slice(1).join(" ");
@@ -783,6 +830,36 @@ function staticCompleter(values: readonly string[]) {
     values
       .filter((value) => value.startsWith(query.toLowerCase()))
       .map((value) => ({ value }));
+}
+
+const ARGUMENT_COMPLETER_CACHE_TTL_MS = 5_000;
+
+/**
+ * 动态参数补全源：load 拉 RPC 数据、project 投影为候选，短 TTL 缓存避免
+ * 每次按键打 RPC；load 失败静默返回空候选（补全是尽力而为的 UI 增强，
+ * 不把连接问题暴露到输入路径）。过滤为包含式（value/label/description）。
+ */
+function cachedArgumentCompleter<T>(
+  load: () => Promise<T>,
+  project: (loaded: T) => readonly SlashArgumentCandidate[],
+): SlashArgumentCompleter {
+  let cache: { at: number; candidates: readonly SlashArgumentCandidate[] } | undefined;
+  return async (query) => {
+    if (cache === undefined || Date.now() - cache.at > ARGUMENT_COMPLETER_CACHE_TTL_MS) {
+      try {
+        cache = { at: Date.now(), candidates: project(await load()) };
+      } catch {
+        return [];
+      }
+    }
+    const lowered = query.toLowerCase();
+    if (!lowered) return cache.candidates;
+    return cache.candidates.filter((candidate) =>
+      `${candidate.value} ${candidate.label ?? ""} ${candidate.description ?? ""}`
+        .toLowerCase()
+        .includes(lowered),
+    );
+  };
 }
 
 function modelRoutesFromConfig(config: RuntimeEffectiveConfig): {

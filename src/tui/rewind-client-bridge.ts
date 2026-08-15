@@ -1,5 +1,10 @@
 import type { FileHistorySnapshotSummary } from "../cli/file-history.js";
-import type { FileHistoryDiffStat, FileHistoryDiffFileStat } from "../safety/file-history.js";
+import type {
+  FileHistoryChanges,
+  FileHistoryDiffStat,
+  FileHistoryDiffFileStat,
+} from "../safety/file-history.js";
+import { createChangesPanelModel, type ChangesPanelModel } from "./changes-panel.js";
 
 /**
  * rewind.* RPC 结果 → TUI 复用形状（3-D Phase 3：/rewind /changes 客户端镜像）。
@@ -89,6 +94,47 @@ export function diffStatFromRewindPreview(
     },
     fingerprint: readString(record["fingerprint"]) ?? "",
   };
+}
+
+/**
+ * rewind.changes RPC 结果 → ChangesPanelModel（3-D tier2：/changes 单文件恢复）。
+ *
+ * wire 的 path 是 displayChangePath 形态（工作区内正斜杠相对路径）——保持原样
+ * 作为模型 filePath：展示与 restoreAction 回传（rewind.restoreFile.path）都用
+ * 同一形态，daemon 侧再还原为快照绝对路径。fingerprint 即文件当前内容指纹
+ * （restoreFile 的 expectedFingerprint 守卫）。
+ */
+export function changesModelFromRewindChanges(result: unknown): ChangesPanelModel {
+  const record = typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+  const wireFiles = Array.isArray(record["files"]) ? record["files"] : [];
+  const files = wireFiles
+    .filter((file): file is Record<string, unknown> => typeof file === "object" && file !== null)
+    .map((file) => ({
+      filePath: readString(file["path"]) ?? "(unknown)",
+      status: readStatus(file["status"]),
+      addedLines: readNumber(file["additions"]) ?? 0,
+      removedLines: readNumber(file["deletions"]) ?? 0,
+      currentFingerprint: readString(file["fingerprint"]) ?? "",
+      patch: readString(file["patch"]) ?? "",
+    }));
+  const warnings = Array.isArray(record["warnings"])
+    ? record["warnings"].filter((entry): entry is string => typeof entry === "string")
+    : [];
+  const changes = {
+    messageId: readString(record["checkpointId"]) ?? "",
+    changedFileCount: files.length,
+    addedLines: readNumber(record["addedLines"]) ?? 0,
+    removedLines: readNumber(record["removedLines"]) ?? 0,
+    files,
+    patch: files.map((file) => file.patch).filter(Boolean).join("\n\n"),
+    ...(record["partial"] === true ? { incomplete: true } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  } as FileHistoryChanges;
+  return createChangesPanelModel(changes);
+}
+
+function readStatus(value: unknown): "created" | "deleted" | "modified" {
+  return value === "deleted" ? "deleted" : value === "created" ? "created" : "modified";
 }
 
 function readString(value: unknown): string | undefined {
