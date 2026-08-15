@@ -1513,18 +1513,52 @@ export type RuntimeNotificationMap = {
   readonly "run.started": { readonly run: RuntimeRun };
   readonly "run.updated": { readonly run: RuntimeRun };
   readonly "run.finished": { readonly run: RuntimeRun };
-  /** Best-effort live projection. It is never stored or returned by events.replay. */
+  /**
+   * Best-effort live projection. It is never stored or returned by events.replay.
+   * Item kinds: streaming text (thinking/assistantMessage), live tool cards (3-D
+   * Phase 1: started/output/completed snapshots keyed by toolCallId), and subagent
+   * activity snapshots (keyed by activityId). Clients must ignore unknown kinds —
+   * the union grows with new live surfaces.
+   */
   readonly "run.live": {
     readonly runId: RunId;
-    readonly item: {
-      readonly kind: "thinking" | "assistantMessage";
-      readonly operation: "append" | "complete" | "clear";
-      readonly streamId?: string;
-      readonly turnId?: string;
-      readonly delta?: string;
-      /** True when an intermediary retained only a bounded prefix of the live stream. */
-      readonly truncated?: boolean;
-    };
+    readonly item:
+      | {
+          readonly kind: "thinking" | "assistantMessage";
+          readonly operation: "append" | "complete" | "clear";
+          readonly streamId?: string;
+          readonly turnId?: string;
+          readonly delta?: string;
+          /** True when an intermediary retained only a bounded prefix of the live stream. */
+          readonly truncated?: boolean;
+        }
+      | {
+          readonly kind: "tool";
+          readonly toolCallId: string;
+          readonly toolName: string;
+          readonly operation: "started" | "append" | "completed" | "failed";
+          /** output 增量的流标识（append 专用）：`tool:live:{runId}:{toolCallId}:{stream}`。 */
+          readonly streamId?: string;
+          readonly turnId?: string;
+          readonly stream?: "stdout" | "stderr";
+          readonly delta?: string;
+          /** completed/failed 携带的有界结果投影文本（envelope projection）。 */
+          readonly summary?: string;
+          readonly truncated?: boolean;
+        }
+      | {
+          readonly kind: "subagent";
+          readonly operation: "update";
+          readonly activityId: string;
+          readonly status: string;
+          readonly turnId?: string;
+          readonly task?: string;
+          readonly agentName?: string;
+          readonly mode?: "explore" | "worker";
+          readonly currentAction?: string;
+          readonly summary?: string;
+          readonly truncated?: boolean;
+        };
   };
   readonly "run.timeline": { readonly runId: RunId; readonly item: JsonObject };
   readonly "approval.requested": {
@@ -2054,7 +2088,14 @@ export function isRunLiveRuntimeNotification(
   const scope = value.scope;
   if (!isJsonObject(scope) || scope.runId !== payload.runId) return false;
   const item = payload.item;
-  if (!isJsonObject(item) || (item.kind !== "thinking" && item.kind !== "assistantMessage")) {
+  if (!isJsonObject(item)) return false;
+  if (item.kind === "tool") {
+    return isRunLiveToolItem(item);
+  }
+  if (item.kind === "subagent") {
+    return isRunLiveSubagentItem(item);
+  }
+  if (item.kind !== "thinking" && item.kind !== "assistantMessage") {
     return false;
   }
   if (item.operation !== "append" && item.operation !== "complete" && item.operation !== "clear") {
@@ -2072,6 +2113,56 @@ export function isRunLiveRuntimeNotification(
     );
   }
   return item.delta === undefined && item.truncated === undefined;
+}
+
+/**
+ * 3-D Phase 1 live tool item：append 需要 streamId+delta；started/completed/failed
+ * 不带 delta（completed 的结果投影走 summary）。streamId 约定为
+ * `tool:live:{runId}:{toolCallId}:{stream}`，与文本流同走 buffer 合流/截断机制。
+ */
+function isRunLiveToolItem(item: Record<string, unknown>): boolean {
+  if (typeof item.toolCallId !== "string" || !item.toolCallId) return false;
+  if (typeof item.toolName !== "string" || !item.toolName) return false;
+  const operation = item.operation;
+  if (
+    operation !== "started" &&
+    operation !== "append" &&
+    operation !== "completed" &&
+    operation !== "failed"
+  ) {
+    return false;
+  }
+  if (item.stream !== undefined && item.stream !== "stdout" && item.stream !== "stderr") {
+    return false;
+  }
+  if (item.streamId !== undefined && typeof item.streamId !== "string") return false;
+  if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
+  if (item.delta !== undefined && typeof item.delta !== "string") return false;
+  if (item.summary !== undefined && typeof item.summary !== "string") return false;
+  if (item.truncated !== undefined && typeof item.truncated !== "boolean") return false;
+  if (operation === "append") {
+    return (
+      typeof item.streamId === "string" &&
+      item.streamId.length > 0 &&
+      typeof item.delta === "string"
+    );
+  }
+  return item.delta === undefined;
+}
+
+/** 3-D Phase 1 live subagent item：活动卡片快照（activityId 幂等覆盖），无流语义。 */
+function isRunLiveSubagentItem(item: Record<string, unknown>): boolean {
+  if (item.operation !== "update") return false;
+  if (typeof item.activityId !== "string" || !item.activityId) return false;
+  if (typeof item.status !== "string" || !item.status) return false;
+  if (!optionalStringField(item, "task")) return false;
+  if (!optionalStringField(item, "agentName")) return false;
+  if (item.mode !== undefined && item.mode !== "explore" && item.mode !== "worker") return false;
+  if (!optionalStringField(item, "currentAction")) return false;
+  if (!optionalStringField(item, "summary")) return false;
+  if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
+  if (item.truncated !== undefined && typeof item.truncated !== "boolean") return false;
+  return item.delta === undefined && item.streamId === undefined && item.stream === undefined;
 }
 
 function optionalStringField(value: Record<string, unknown>, key: string): boolean {

@@ -43,6 +43,7 @@ import {
   type DesktopInteractionEvent,
 } from "./desktop-interaction-broker.js";
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
+import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import { resolveLocalDaemonEndpoint, type LocalDaemonEndpoint } from "./endpoint.js";
@@ -278,11 +279,15 @@ export function createProductionRuntimeServices(
             nextDesktopResourceVersion,
           );
         });
+        // 3-D Phase 1：tool.output 经 50ms 合流后进 run.live（防 per-chunk socket
+        // 洪泛）；完成/终态事件先冲刷对应缓冲再路由，输出增量永远先于完成标记。
+        const toolLive = new ToolLiveCoalescer((event) =>
+          publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion),
+        );
         const reporter = new DesktopReporter({
           runId: context.run.runId,
           sessionId: targetSessionId,
-          publish: (event) =>
-            publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion),
+          publish: (event) => toolLive.push(event),
         });
         for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
         const unsubscribeSteer = context.onSteer((message) =>
@@ -419,6 +424,7 @@ export function createProductionRuntimeServices(
           broker.close();
           removeBrokerInteractions(pendingApprovals, broker);
           removeBrokerInteractions(pendingPrompts, broker);
+          toolLive.dispose();
           await runtimeState.dispose();
         }
       } finally {
@@ -1398,6 +1404,150 @@ export function publishDesktopReporterEvent(
       }),
     );
   }
+  // --- 3-D Phase 1：工具卡片 / 子代理活动实时事件（run.live 扩展 kind）---
+  // live 是 overlay 不是第二事实源：durable timeline / canonical transcript 照旧
+  // （下方原路径不变），这里只补"实时看工具跑"的瞬时通道。
+  if (event.type === "tool.started") {
+    const providerCallId =
+      typeof event.payload["providerCallId"] === "string" ? event.payload["providerCallId"] : "";
+    const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
+    if (providerCallId && toolName) {
+      const turn = numberOrUndefined(event.payload["turn"]);
+      service.publishEphemeralNotification(
+        createRuntimeNotification({
+          topic: "run.live",
+          scope: {
+            workspacePath,
+            runId: event.runId,
+            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+          },
+          resourceVersion: nextResourceVersion(),
+          at: event.at,
+          payload: {
+            runId: event.runId,
+            item: {
+              kind: "tool",
+              toolCallId: providerCallId,
+              toolName,
+              operation: "started",
+              ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
+            },
+          },
+        }),
+      );
+    }
+  }
+  if (event.type === "tool.output") {
+    // 经 ToolLiveCoalescer 合流后到达；直接映射为 run.live append。
+    const providerCallId =
+      typeof event.payload["providerCallId"] === "string" ? event.payload["providerCallId"] : "";
+    const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
+    const chunk = typeof event.payload["chunk"] === "string" ? event.payload["chunk"] : "";
+    const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
+    if (providerCallId && toolName && chunk) {
+      service.publishEphemeralNotification(
+        createRuntimeNotification({
+          topic: "run.live",
+          scope: {
+            workspacePath,
+            runId: event.runId,
+            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+          },
+          resourceVersion: nextResourceVersion(),
+          at: event.at,
+          payload: {
+            runId: event.runId,
+            item: {
+              kind: "tool",
+              toolCallId: providerCallId,
+              toolName,
+              operation: "append",
+              streamId: liveToolStreamId(event.runId, providerCallId, stream),
+              stream,
+              delta: chunk,
+              ...(event.payload["truncated"] === true ? { truncated: true } : {}),
+            },
+          },
+        }),
+      );
+    }
+    return;
+  }
+  if (event.type === "tool.completed") {
+    const envelope = event.payload["result"] as
+      | {
+          readonly toolCallId?: unknown;
+          readonly toolName?: unknown;
+          readonly status?: unknown;
+          readonly deliveryTruncated?: unknown;
+          readonly projection?: { readonly text?: unknown };
+        }
+      | undefined;
+    const toolCallId = typeof envelope?.toolCallId === "string" ? envelope.toolCallId : "";
+    const toolName = typeof envelope?.toolName === "string" ? envelope.toolName : "";
+    if (toolCallId && toolName) {
+      const status = typeof envelope?.status === "string" ? envelope.status : "";
+      const summary = typeof envelope?.projection?.text === "string" ? envelope.projection.text : "";
+      service.publishEphemeralNotification(
+        createRuntimeNotification({
+          topic: "run.live",
+          scope: {
+            workspacePath,
+            runId: event.runId,
+            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+          },
+          resourceVersion: nextResourceVersion(),
+          at: event.at,
+          payload: {
+            runId: event.runId,
+            item: {
+              kind: "tool",
+              toolCallId,
+              toolName,
+              operation: status === "succeeded" ? "completed" : "failed",
+              ...(summary ? { summary } : {}),
+              ...(envelope?.deliveryTruncated === true ? { truncated: true } : {}),
+            },
+          },
+        }),
+      );
+    }
+  }
+  if (event.type === "subagent.activity") {
+    const activity = event.payload as Readonly<Record<string, unknown>>;
+    const activityId = typeof activity["activityId"] === "string" ? activity["activityId"] : "";
+    const status = typeof activity["status"] === "string" ? activity["status"] : "";
+    if (activityId && status) {
+      service.publishEphemeralNotification(
+        createRuntimeNotification({
+          topic: "run.live",
+          scope: {
+            workspacePath,
+            runId: event.runId,
+            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+          },
+          resourceVersion: nextResourceVersion(),
+          at: event.at,
+          payload: {
+            runId: event.runId,
+            item: {
+              kind: "subagent",
+              operation: "update",
+              activityId,
+              status,
+              ...optionalLiveString(activity["task"], "task"),
+              ...optionalLiveString(activity["agentName"], "agentName"),
+              ...(activity["mode"] === "explore" || activity["mode"] === "worker"
+                ? { mode: activity["mode"] }
+                : {}),
+              ...optionalLiveString(activity["currentAction"], "currentAction"),
+              ...optionalLiveString(activity["summary"], "summary"),
+            },
+          },
+        }),
+      );
+    }
+  }
   // WorkspaceRuntime is the sole lifecycle authority. Stream chunks and final assistant/tool
   // bodies already belong to the canonical transcript; without a separate bounded live channel,
   // duplicating them into the durable timeline only creates an unbounded second event stream.
@@ -1439,8 +1589,24 @@ function liveAssistantStreamId(runId: string, turn: number): string {
   return `assistant:live:${runId}:${turn}`;
 }
 
+/** 3-D Phase 1：工具输出流的 live 标识（与文本流同走 buffer 合流/截断机制）。 */
+function liveToolStreamId(runId: string, providerCallId: string, stream: "stdout" | "stderr"): string {
+  return `tool:live:${runId}:${providerCallId}:${stream}`;
+}
+
 function runtimeTurnId(runId: string, turn: number): string {
   return `turn:${runId}:${turn}`;
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function optionalLiveString(
+  value: unknown,
+  key: string,
+): Readonly<Record<string, string>> {
+  return typeof value === "string" && value ? { [key]: value } : {};
 }
 
 function timelineItem(event: DesktopReporterEvent): JsonObject {

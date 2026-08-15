@@ -516,7 +516,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     const item = notification.payload.item;
-    const streamKey = liveStreamKey(notification, item.streamId);
+    // 3-D Phase 1：subagent 快照无 streamId（无流语义），窄化访问。
+    const streamKey = liveStreamKey(notification, "streamId" in item ? item.streamId : undefined);
     const runKey = liveStreamKey(notification);
     if (
       item.operation === "append" &&

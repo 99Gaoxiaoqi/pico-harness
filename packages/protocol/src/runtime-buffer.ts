@@ -10,6 +10,13 @@ export const DEFAULT_PENDING_RUNTIME_BYTES_LIMIT = 2 * 1024 * 1024;
 export const DEFAULT_PENDING_LIVE_REASONING_CHARS = 64 * 1024;
 const MAX_REMEMBERED_LIVE_TERMINALS = 10_000;
 
+type RunLiveItem = RuntimeNotificationMap["run.live"]["item"];
+
+/** 3-D Phase 1：subagent 快照无 streamId，统一经窄化助手访问（其余 kind 有）。 */
+function liveItemStreamId(item: RunLiveItem): string | undefined {
+  return "streamId" in item ? item.streamId : undefined;
+}
+
 export interface RuntimeNotificationBufferOptions {
   readonly maxEvents?: number;
   readonly maxBytes?: number;
@@ -40,7 +47,7 @@ export class RuntimeNotificationBuffer {
     if (event.topic === "run.live" && !isRunLiveRuntimeNotification(event)) return true;
     if (event.topic === "run.live") {
       const payload = event.payload as RuntimeNotificationMap["run.live"];
-      const key = this.liveStreamKey(event, payload.item.streamId);
+      const key = this.liveStreamKey(event, liveItemStreamId(payload.item));
       const runKey = this.liveStreamKey(event);
       if (
         payload.item.operation === "append" &&
@@ -50,7 +57,7 @@ export class RuntimeNotificationBuffer {
       }
       if (payload.item.operation === "complete" || payload.item.operation === "clear") {
         this.terminalLiveStreams.add(key);
-        this.forgetLiveTruncation(event, payload.item.streamId);
+        this.forgetLiveTruncation(event, liveItemStreamId(payload.item));
         if (this.terminalLiveStreams.size > MAX_REMEMBERED_LIVE_TERMINALS) {
           const oldest = this.terminalLiveStreams.values().next().value;
           if (oldest !== undefined) this.terminalLiveStreams.delete(oldest);
@@ -93,7 +100,9 @@ export class RuntimeNotificationBuffer {
     if (!isRunLiveRuntimeNotification(event)) return false;
     const payload = event.payload as RuntimeNotificationMap["run.live"];
     const item = payload.item;
-    if (item.operation !== "append" || !item.streamId) return false;
+    // 仅流式 item（文本/工具输出）参与合流；subagent 快照无流语义，原样入队。
+    if (item.kind === "subagent") return false;
+    if (item.operation !== "append" || item.streamId === undefined) return false;
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       const candidate = this.events[index];
       // Never move a later append ahead of a durable event or another live stream.
@@ -106,6 +115,7 @@ export class RuntimeNotificationBuffer {
       if (differentRun) return false;
       const candidateItem = candidatePayload.item;
       if (candidateItem.operation === "clear") return false;
+      if (candidateItem.kind === "subagent") return false;
       if (candidateItem.streamId !== item.streamId) return false;
       if (candidateItem.operation !== "append") return false;
       const combined = `${candidateItem.delta ?? ""}${item.delta ?? ""}`;
@@ -164,7 +174,8 @@ export class RuntimeNotificationBuffer {
   private rememberLiveGap(event: RuntimeNotification): void {
     if (!isRunLiveRuntimeNotification(event)) return;
     const payload = event.payload as RuntimeNotificationMap["run.live"];
-    if (payload.item.operation !== "append" || !payload.item.streamId) return;
+    if (payload.item.kind === "subagent") return;
+    if (payload.item.operation !== "append" || payload.item.streamId === undefined) return;
     const key = this.liveStreamKey(event, payload.item.streamId);
     const runKey = this.liveStreamKey(event);
     if (this.terminalLiveStreams.has(key) || this.terminalLiveStreams.has(runKey)) return;
@@ -173,6 +184,7 @@ export class RuntimeNotificationBuffer {
       if (!isRunLiveRuntimeNotification(candidate)) continue;
       const candidatePayload = candidate.payload as RuntimeNotificationMap["run.live"];
       if (
+        candidatePayload.item.kind !== "subagent" &&
         candidatePayload.item.operation === "append" &&
         candidatePayload.item.streamId &&
         this.liveStreamKey(candidate, candidatePayload.item.streamId) === key
