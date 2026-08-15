@@ -10,10 +10,15 @@ import type {
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
 
-export type ConnectionState =
+/**
+ * 应用运行相位（3-C 事件驱动）：渲染层不自维护连接状态机——探活/降级/恢复
+ * 判定在主进程 runtime-supervisor 与共享 client（src/daemon/client.ts 的重连
+ * 环）里；本类型只是它们的推送事件（unavailable/recovered）与本地引导结果在
+ * 视图上的展示词汇。
+ */
+export type AppRuntimePhase =
   | { readonly kind: "loading" }
   | { readonly kind: "ready" }
-  | { readonly kind: "unavailable"; readonly detail: string }
   | { readonly kind: "error"; readonly detail: string; readonly retryable: boolean };
 
 export interface SessionView {

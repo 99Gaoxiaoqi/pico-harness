@@ -95,25 +95,25 @@ test("D7 正向不变量：graph work 去重走 durable lease，records 已降�
   );
 });
 
-test("D9 债务追踪：多外壳连接状态/重连两套仍并存（无统一网关层）", () => {
-  // P0 机械态债（阶段 3 网关层）：Desktop / daemon-client 各维护一套连接状态机
-  // 与重连策略，互不互通——daemon 重启后传输层自愈，renderer 却卡"请重启 Pico
-  // 应用"。网关层统一后两套收敛为一套 RuntimeHostConnection（移动端已于 2026-08
-  // 移除，不再计入）。
+test("D9 正向不变量：连接决策在监督器与共享 client，外壳只渲染推送相位", () => {
+  // P0 机械态债已消除（3-C，2026-08-15）：连接探活/降级/恢复广播收口在主进程
+  // runtime-supervisor，重连/重生/重试在共享 client（src/daemon/client.ts 的
+  // RuntimeSubscription 重连环 + KERNEL_RETRY_SAFE_METHODS 幂等重试）——全仓
+  // 唯一的连接状态机。渲染层不再自维护 ConnectionState，只消费 unavailable/
+  // recovered 推送事件展示 AppRuntimePhase（fail-stuck 随 recovered 自动
+  // re-bootstrap 消除）。
   const desktopModel = readSource("apps/desktop/src/renderer/model.ts");
+  const supervisor = readSource("apps/desktop/src/main/runtime-supervisor.ts");
   const daemonClient = readSource("src/daemon/client.ts");
-  // 债务表征：两套状态机定义都还在。任一外壳收敛到网关后对应断言红。
-  assert.match(
+  // 负向：外壳自维护状态机定义已移除。
+  assert.doesNotMatch(
     desktopModel,
     /\bConnectionState\b/,
-    "Desktop ConnectionState 状态机仍在（未收敛到网关）",
+    "渲染层不得自维护 ConnectionState（决策在监督器与共享 client，展示相位为 AppRuntimePhase）",
   );
-  assert.match(
-    daemonClient,
-    /\breconnectAttempt\b/,
-    "daemon client 自维护无限重连（reconnectAttempt 无重试上限）仍在",
-  );
-  // 阶段 3 网关层统一后：删除本测试（外壳只保留展示层，无自有状态机）。
+  // 正向：监督器提供降级/恢复双相位广播；共享 client 保有唯一重连状态机。
+  assert.match(supervisor, /"unavailable" \| "recovered"/, "监督器应广播 unavailable/recovered 双相位");
+  assert.match(daemonClient, /\breconnectAttempt\b/, "共享 client 是全仓唯一重连状态机");
 });
 
 test("D11 债务追踪：Memory rebuild 不重放 overlay mutation（复活链仍在）", () => {
@@ -130,16 +130,22 @@ test("D11 债务追踪：Memory rebuild 不重放 overlay mutation（复活链�
   );
 });
 
-test("D12 债务追踪：transcript 同步实现仍并存（desktop 自持一套）", () => {
-  // P1 机械态债（阶段 3 网关层）：Desktop 的 conversationLoadGenerationsRef
-  // 应统一吸收进网关客户端（maka 式 RuntimeHostConnection.loadTranscript）。
-  // 移动端已于 2026-08 移除，不再计入双实现。
+test("D12 正向不变量：transcript 分页算法只在 daemon 服务层，renderer 仅持视图竞态护栏", () => {
+  // P1 机械态债已消除（3-C 重评后反转，2026-08-15）：“transcript 同步双实现”的
+  // 实质是 Desktop 与移动端各自维护一套同步状态机，移动端移除（bc9efbd3）后已
+  // 消解。剩余的过期响应护栏是视图层竞态职责（与 workspaceLoadGenerationRef 同
+  // 类），不应下沉传输层——收编为单一职责模块 ConversationLoadTracker，分页/
+  // 游标算法保持只在 daemon 服务层一处。
   const desktopRuntime = readSource("apps/desktop/src/renderer/runtime.ts");
-  // 债务表征：desktop 的 generation 追踪 ref 还在。被网关吸收后断言红。
-  assert.match(
+  const tracker = readSource("apps/desktop/src/renderer/conversation-load-tracker.ts");
+  const daemonTranscript = readSource("src/daemon/desktop-transcript.ts");
+  // 负向：renderer 裸 ref 形态的 generation 追踪已收编。
+  assert.doesNotMatch(
     desktopRuntime,
     /\bconversationLoadGenerationsRef\b/,
-    "Desktop transcript generation 追踪仍在（未收敛到网关）",
+    "transcript 加载护栏应收编在 ConversationLoadTracker（分页算法不得进 renderer）",
   );
-  // 阶段 3 网关层统一 transcript 同步后：删除本测试。
+  // 正向：护栏模块存在且只做代数判定；分页/游标算法在 daemon 服务层唯一所在。
+  assert.match(tracker, /\bisCurrent\b/, "ConversationLoadTracker 提供过期加载判定");
+  assert.match(daemonTranscript, /\bselectPage\b/, "transcript 分页/游标算法在 daemon 服务层唯一实现");
 });

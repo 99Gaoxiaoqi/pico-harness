@@ -160,9 +160,7 @@ export function DesktopApp() {
 function AppStateRouter() {
   const { connection } = useRuntime();
   if (connection.kind === "loading") return <LoadingScreen />;
-  if (connection.kind === "unavailable" || connection.kind === "error") {
-    return <ConnectionScreen />;
-  }
+  if (connection.kind === "error") return <ConnectionScreen />;
   return (
     <Routes>
       <Route path="/onboarding" element={<Onboarding />} />
@@ -333,8 +331,7 @@ function LoadingScreen() {
 
 function ConnectionScreen() {
   const { connection, actions } = useRuntime();
-  const detail =
-    connection.kind === "loading" || connection.kind === "ready" ? "" : connection.detail;
+  const detail = connection.kind === "error" ? connection.detail : "";
   return (
     <main className="connection-screen">
       <div className="connection-card">
@@ -342,14 +339,15 @@ function ConnectionScreen() {
           P
         </span>
         <span className="eyebrow">本地 Runtime 未连接</span>
-        <h1>界面已就绪，但没有可用的数据连接</h1>
+        <h1>连接已断开，正在自动恢复</h1>
         <p>{detail}</p>
         <InlineNotice tone="warning">
-          Pico 不会使用演示数据代替真实任务。修复连接后，这里会显示你的本地会话。
+          Pico 不会使用演示数据代替真实任务。本地 Runtime
+          服务恢复后会自动重连并回到你的会话；也可立即手动重试。
         </InlineNotice>
         <Button variant="primary" onClick={() => void actions.reload()}>
           <RefreshCw aria-hidden="true" size={16} />
-          重新检测连接
+          立即重试
         </Button>
       </div>
     </main>
