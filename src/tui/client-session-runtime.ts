@@ -202,6 +202,17 @@ export class ClientSessionRuntime {
 
   private handleNotification(notification: RuntimeNotification): void {
     if (this.disposed) return;
+    // 会话 scope 过滤：订阅是工作区级的，同工作区其他会话（wake/cron/另一
+    // 客户端）的 run/live/审批事件不得流入本会话投影；sessionId 未知时（新会话
+    // 首事件先于 send 返回）仍放行，由下方 transcriptUpdated 采纳。
+    const scopedSessionId = notification.scope.sessionId;
+    if (
+      scopedSessionId !== undefined &&
+      this.sessionId !== undefined &&
+      scopedSessionId !== this.sessionId
+    ) {
+      return;
+    }
     if (notification.topic === "approval.resolved") {
       const payload = notification.payload as RuntimeNotificationMap["approval.resolved"];
       this.options.onApprovalResolved?.(payload.approvalId);
@@ -220,6 +231,23 @@ export class ClientSessionRuntime {
       if (!this.sessionId || scoped === this.sessionId) void this.scheduleHydrate();
     }
     this.eventReporter.handleNotification(notification);
+  }
+
+  /**
+   * 切换会话（/resume /fork /new 后）：订阅不动（工作区级），重定向水化目标
+   * 并清空上一会话的瞬时 run 跟踪。BYOK 启动覆盖不重放（startup-only 语义）。
+   */
+  async switchSession(sessionId: string | undefined): Promise<void> {
+    this.sessionId = sessionId;
+    this.eventReporter.clearTransientState();
+    if (sessionId) {
+      await this.hydrate().catch((error: unknown) => {
+        this.reporter.pushError(error instanceof Error ? error.message : String(error), {
+          retryable: true,
+          action: "session.transcript",
+        });
+      });
+    }
   }
 
   private async scheduleHydrate(): Promise<void> {

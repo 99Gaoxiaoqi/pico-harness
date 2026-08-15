@@ -46,6 +46,12 @@ export class DaemonEventReporter {
     return this.active ? this.currentRunId : undefined;
   }
 
+  /** 会话切换（/resume /fork /new）时清空上一会话的瞬时 run 跟踪。 */
+  clearTransientState(): void {
+    this.active = false;
+    this.currentRunId = undefined;
+  }
+
   handleNotification(event: RuntimeNotification): void {
     const payload = event.payload as Record<string, unknown>;
     switch (event.topic) {
