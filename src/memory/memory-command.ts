@@ -187,8 +187,12 @@ function memoryTitle(text: string): string {
 }
 
 function encodeUndo(payload: UndoPayload): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify(payload), "utf-8").toString("base64url");
 }
+
+/** TUI 客户端 /memory undo 共享编解码（token 只含 factId + version，无秘密）。 */
+export const encodeMemoryUndoToken = encodeUndo;
+export const decodeMemoryUndoToken = decodeUndo;
 
 function decodeUndo(value: string): UndoPayload {
   let parsed: unknown;

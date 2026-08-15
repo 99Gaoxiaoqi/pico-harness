@@ -1,26 +1,27 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
   CronWorkspaceRuntime,
-  LocalDaemonAlreadyRunningError,
   LocalDaemonHost,
   WorkspaceRegistrationStore,
   type DisposableLocalRuntimeService,
-  type LocalDaemonEndpoint,
   type ManagedCronWorkspaceRuntime,
 } from "../../src/daemon/index.js";
 import { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
+
+// 注：本文件原含旧传输单例锁（instance-lock）保留语义的断言，随 3-D Phase 5
+// 旧 socket 退役移除（LocalDaemonHost 不再持锁；单例由 kernel flock 承担）。
+// 保留的全部断言是 cron 生命周期编排语义：关闭失败传播、fence 排空、有界
+// stop、重注册对账——这些在 kernel 承载的 candidate 装配里原样生效。
 
 test("Cron unregister close failure remains owned while later refreshes stay usable", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-unregister-failure-"));
   const firstWorkspace = join(root, "first-workspace");
   const secondWorkspace = join(root, "second-workspace");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await Promise.all([
     mkdir(firstWorkspace, { recursive: true }),
@@ -31,7 +32,6 @@ test("Cron unregister close failure remains owned while later refreshes stay usa
   let firstCloseCount = 0;
   const startedWorkspaces: string[] = [];
   const host = new LocalDaemonHost({
-    endpoint,
     registrationStore,
     service: testService(),
     cronRuntimeFactory: {
@@ -45,7 +45,6 @@ test("Cron unregister close failure remains owned while later refreshes stay usa
           },
         }),
     },
-    lockOptions: testLockOptions(lockPath),
   });
   context.after(async () => {
     await Promise.allSettled([host.stop()]);
@@ -58,7 +57,6 @@ test("Cron unregister close failure remains owned while later refreshes stay usa
   await registrationStore.unregister(firstWorkspace);
   await assert.rejects(host.refreshRegisteredWorkspaces(), /unregister Cron close failed/u);
   assert.deepEqual(host.registeredWorkspaces, []);
-  assert.equal(await pathExists(lockPath), true);
 
   const secondCanonical = await registrationStore.register(secondWorkspace);
   await assert.rejects(host.refreshRegisteredWorkspaces(), /unregister Cron close failed/u);
@@ -66,44 +64,27 @@ test("Cron unregister close failure remains owned while later refreshes stay usa
   assert.equal(startedWorkspaces.includes(secondCanonical), true);
 
   await assert.rejects(host.stop(), /unregister Cron close failed/u);
-  assert.equal(firstCloseCount, 2);
-  assert.equal(await pathExists(lockPath), true);
-
-  const candidate = new LocalDaemonHost({
-    endpoint,
-    registrationStore,
-    service: testService(),
-    cronRuntimeFactory: {
-      create: async () => testCronRuntime(),
-    },
-    lockOptions: testLockOptions(lockPath),
-  });
-  await assert.rejects(
-    candidate.start(),
-    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
-  );
+  assert.equal(firstCloseCount, 2, "stop 应再次尝试关闭失败的 runtime");
 });
 
-test("Cron runtime with pending ownership but no release fence retains the daemon lock", async (context) => {
+test("Cron runtime with pending ownership but no release fence fails closes loudly", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-incomplete-fence-"));
   const workspace = join(root, "workspace");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
   await registrationStore.register(workspace);
 
   const host = new LocalDaemonHost({
-    endpoint,
     registrationStore,
     service: testService(),
     cronRuntimeFactory: {
       create: async () =>
         testCronRuntime({
           hasPendingOwnership: () => true,
+          // 显式缺失释放口：pending 无 waitForOwnershipRelease = fence 不完整。
+          waitForOwnershipRelease: undefined,
         }),
     },
-    lockOptions: testLockOptions(lockPath),
   });
   context.after(async () => {
     await Promise.allSettled([host.stop()]);
@@ -114,14 +95,11 @@ test("Cron runtime with pending ownership but no release fence retains the daemo
   await registrationStore.unregister(workspace);
   await assert.rejects(host.refreshRegisteredWorkspaces(), /ownership fence 不完整/u);
   await assert.rejects(host.stop(), /ownership fence 不完整/u);
-  assert.equal(await pathExists(lockPath), true);
 });
 
-test("Daemon stop is bounded during an active Cron tick and releases its lock after drain", async (context) => {
+test("Daemon stop is bounded during an active Cron tick and the fence releases after drain", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-active-tick-"));
   const workspace = join(root, "workspace");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const executorEntered = deferred();
   const releaseExecutor = deferred();
@@ -135,7 +113,6 @@ test("Daemon stop is bounded during an active Cron tick and releases its lock af
   let cronRuntime: CronWorkspaceRuntime | undefined;
   const workspaceErrors: unknown[] = [];
   const host = new LocalDaemonHost({
-    endpoint,
     registrationStore,
     service: testService(),
     cronRuntimeFactory: {
@@ -157,7 +134,6 @@ test("Daemon stop is bounded during an active Cron tick and releases its lock af
       },
     },
     onWorkspaceError: (_workspacePath, error) => workspaceErrors.push(error),
-    lockOptions: testLockOptions(lockPath),
   });
   context.after(async () => {
     releaseExecutor.resolve();
@@ -189,34 +165,29 @@ test("Daemon stop is bounded during an active Cron tick and releases its lock af
 
   await completesWithin(host.stop(), 500, "daemon stop waited inline for the active Cron tick");
   assert.equal(cronRuntime.hasPendingOwnership(), true);
-  assert.equal(await pathExists(lockPath), true);
 
   releaseExecutor.resolve();
   await cronRuntime.waitForOwnershipRelease();
-  await waitUntilAsync(async () => !(await pathExists(lockPath)));
   assert.equal(cronRuntime.hasPendingOwnership(), false);
 
+  // 排空后新 host 可正常编排（旧 runtime 的 fence 不阻塞接任者）。
   await registrationStore.unregister(workspace);
-  const candidate = new LocalDaemonHost({
-    endpoint,
+  const replacement = new LocalDaemonHost({
     registrationStore,
     service: testService(),
     cronRuntimeFactory: {
       create: async () => {
-        throw new Error("candidate must not create a Cron runtime");
+        throw new Error("replacement must not create a Cron runtime（已注销）");
       },
     },
-    lockOptions: testLockOptions(lockPath),
   });
-  await candidate.start();
-  await candidate.stop();
+  await replacement.start();
+  await replacement.stop();
 });
 
 test("Cron runtime automatically reconciles a workspace re-registered while its old fence drains", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-reregister-"));
   const workspace = join(root, "workspace");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const releaseOldRuntime = deferred();
   await mkdir(workspace, { recursive: true });
@@ -226,7 +197,6 @@ test("Cron runtime automatically reconciles a workspace re-registered while its 
   let createCount = 0;
   let replacementStarts = 0;
   const host = new LocalDaemonHost({
-    endpoint,
     registrationStore,
     service: testService(),
     cronRuntimeFactory: {
@@ -241,7 +211,6 @@ test("Cron runtime automatically reconciles a workspace re-registered while its 
         return testCronRuntime({ start: () => replacementStarts++ });
       },
     },
-    lockOptions: testLockOptions(lockPath),
   });
   context.after(async () => {
     oldOwnershipPending = false;
@@ -262,35 +231,10 @@ test("Cron runtime automatically reconciles a workspace re-registered while its 
 
   oldOwnershipPending = false;
   releaseOldRuntime.resolve();
-  await waitUntilAsync(async () => host.registeredWorkspaces.includes(canonical));
+  await waitUntilAsync(() => host.registeredWorkspaces.includes(canonical));
   assert.equal(createCount, 2);
   assert.equal(replacementStarts, 1);
 });
-
-function testEndpoint(root: string): LocalDaemonEndpoint {
-  // Windows 上用 named pipe：AF_UNIX bind 在部分 Windows 环境（如受限沙箱）返回
-  // EACCES，且 pipe 本就是 daemon 的 win32 正式传输。pipe 名带随机后缀防并行冲突。
-  if (process.platform === "win32") {
-    return {
-      transport: "pipe",
-      address: `\\\\.\\pipe\\pico-ownraces-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
-      authTokenPath: join(root, "runtime.auth"),
-    };
-  }
-  return {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
-}
-
-function testLockOptions(lockPath: string) {
-  return {
-    lockPath,
-    ping: async () => false,
-    isProcessAlive: () => true,
-  };
-}
 
 function testService(): DisposableLocalRuntimeService {
   return {
@@ -305,55 +249,40 @@ function testCronRuntime(
   overrides: Partial<ManagedCronWorkspaceRuntime> = {},
 ): ManagedCronWorkspaceRuntime {
   return {
-    recoverInterruptedRuns: () => [],
+    recoverInterruptedRuns: () => undefined,
     start: () => undefined,
     close: async () => undefined,
+    hasPendingOwnership: () => false,
+    waitForOwnershipRelease: async () => undefined,
     ...overrides,
-  };
+  } as ManagedCronWorkspaceRuntime;
 }
 
-interface Deferred<T = void> {
-  readonly promise: Promise<T>;
-  resolve(value: T): void;
-}
-
-function deferred<T = void>(): Deferred<T> {
-  let resolve = (_value: T): void => undefined;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settled) => {
+    resolve = settled;
   });
   return { promise, resolve };
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntilAsync(predicate: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate()) && Date.now() < deadline) await delay(10);
-  assert.equal(await predicate(), true, `condition was not met within ${timeoutMs}ms`);
-}
-
 async function completesWithin(
-  promise: Promise<unknown>,
+  operation: Promise<unknown>,
   timeoutMs: number,
-  message: string,
+  label: string,
 ): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
+  const timedOut = Symbol("timeout");
+  const outcome = await Promise.race([
+    operation.then(() => undefined),
+    delay(timeoutMs).then(() => timedOut),
+  ]);
+  if (outcome === timedOut) throw new Error(`Timeout: ${label}`);
+}
+
+async function waitUntilAsync(predicate: () => Promise<boolean> | boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error("waitUntilAsync timed out");
+    await delay(20);
   }
 }

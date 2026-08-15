@@ -1,6 +1,5 @@
 import { realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { connect, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
@@ -10,27 +9,20 @@ import {
   RuntimeHostOperationError,
 } from "@pico/runtime-host";
 import {
-  createRuntimeAuthRequest,
-  createRuntimeRequest,
-  encodeRuntimeFrame,
   isEphemeralRuntimeNotificationTopic,
   RuntimeNotificationBuffer,
   type RuntimeNotificationBufferOptions,
   type RuntimeNotification,
-  RuntimeFrameDecoder,
   type RuntimeMethod,
   type RuntimeParams,
-  type RuntimeResponse,
   type RuntimeResult,
 } from "./protocol.js";
-import { resolveCanonicalPicoHome, type LocalDaemonEndpoint } from "./endpoint.js";
-import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
+import { resolveCanonicalPicoHome } from "./endpoint.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
 } from "./runtime-host-operations.js";
-import { raceWithDeadlineReject } from "../util/race-with-deadline.js";
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -105,18 +97,16 @@ const DEFAULT_RECONNECT_DELAY_MS = 100;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 2_000;
 const MAX_REMEMBERED_EVENT_IDS = 10_000;
 
-export type DaemonEndpoint = Pick<LocalDaemonEndpoint, "address" | "authTokenPath">;
+function positiveDelay(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 export interface LocalRuntimeClientOptions {
-  readonly authTokenStore?: LocalIpcAuthTokenStore;
   readonly reconnectDelayMs?: number;
   readonly maxReconnectDelayMs?: number;
   /** Bounded replay overlap queue; injectable for constrained hosts and integration tests. */
   readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
-  /**
-   * runtime-host 交互根（默认 canonical PICO_HOME）。仅 kernel 承载模式使用；
-   * 显式传入 endpoint/authTokenStore 时走旧 socket 传输（兼容测试注入）。
-   */
+  /** runtime-host 交互根（默认 canonical PICO_HOME）。 */
   readonly runtimeHostRootPath?: string;
 }
 
@@ -163,37 +153,30 @@ interface RuntimeTransportConnection {
 
 /**
  * Shared local Runtime transport. Requests reuse one connection; every
- * long-lived subscription owns its own connection（kernel 承载下一连接一订阅，
- * 与旧 socket 语义一致）。
+ * long-lived subscription owns its own connection（kernel 承载下一连接一订阅）。
  *
- * 双模式：默认走 runtime-host kernel（connectOrSpawn 拉起 daemon candidate，
- * runtime.request 通用桥接 + events.* 类型化桥接）；显式注入 endpoint 或
- * authTokenStore 时走旧 socket 传输（存量集成测试的注入面）。
+ * 3-D Phase 5（2026-08-16）：唯一承载是 runtime-host kernel（connectOrSpawn 拉起
+ * daemon candidate，runtime.request 通用桥接 + events.* 类型化桥接）。旧 socket
+ * 传输（显式 endpoint 注入面 + LocalRuntimeDaemon）已随 in-process 路径退役。
  */
 export class LocalRuntimeClient implements RuntimeClient {
-  private readonly authTokenStore: LocalIpcAuthTokenStore | undefined;
   private readonly requestConnection: RuntimeTransportConnection;
   private readonly subscriptions = new Set<RuntimeSubscription>();
   private readonly reconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
   private readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
   private readonly runtimeHostRootPath?: string;
-  private readonly explicitEndpoint: DaemonEndpoint | undefined;
   private closed = false;
 
   constructor(
-    endpoint?: DaemonEndpoint,
+    _endpoint?: unknown,
     options: LocalRuntimeClientOptions = {},
   ) {
-    this.explicitEndpoint = endpoint ?? undefined;
-    this.authTokenStore =
-      options.authTokenStore ??
-      (this.explicitEndpoint
-        ? createLocalIpcAuthTokenStore({
-            transport: this.explicitEndpoint.address.startsWith("\\\\.\\pipe\\") ? "pipe" : "unix",
-            ...this.explicitEndpoint,
-          })
-        : undefined);
+    if (_endpoint !== undefined && _endpoint !== null) {
+      throw new Error(
+        "显式 endpoint 注入已退役（3-D Phase 5）：LocalRuntimeClient 唯一承载是 runtime-host kernel，用 options.runtimeHostRootPath 指定根路径。",
+      );
+    }
     this.reconnectDelayMs = positiveDelay(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
     this.maxReconnectDelayMs = Math.max(
       this.reconnectDelayMs,
@@ -273,9 +256,6 @@ export class LocalRuntimeClient implements RuntimeClient {
   }
 
   private createConnection(): RuntimeTransportConnection {
-    if (this.explicitEndpoint && this.authTokenStore) {
-      return new RuntimeConnection(this.explicitEndpoint, this.authTokenStore);
-    }
     return new KernelRuntimeConnection(this.runtimeHostRootPath ?? resolveCanonicalPicoHome());
   }
 
@@ -542,238 +522,6 @@ class RuntimeSubscription {
   }
 }
 
-type PendingResponse = {
-  readonly resolve: (response: RuntimeResponse) => void;
-  readonly reject: (error: RuntimeClientError) => void;
-};
-
-class RuntimeConnection {
-  private socket?: Socket;
-  private decoder = new RuntimeFrameDecoder();
-  private readonly pending = new Map<string, PendingResponse>();
-  private connecting?: Promise<void>;
-  private authentication?: {
-    readonly resolve: () => void;
-    readonly reject: (error: RuntimeClientError) => void;
-  };
-  private eventListener?: (notification: RuntimeNotification) => void;
-  private disconnectListener?: () => void;
-  private closed = false;
-
-  constructor(
-    private readonly endpoint: DaemonEndpoint,
-    private readonly authTokenStore: LocalIpcAuthTokenStore,
-  ) {}
-
-  setEventListener(listener: (notification: RuntimeNotification) => void): void {
-    this.eventListener = listener;
-  }
-
-  setDisconnectListener(listener: () => void): void {
-    this.disconnectListener = listener;
-  }
-
-  async open(): Promise<void> {
-    if (this.closed) {
-      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
-    }
-    if (this.socket && !this.socket.destroyed) return;
-    if (!this.connecting) {
-      this.connecting = this.openAuthenticated().finally(() => {
-        this.connecting = undefined;
-      });
-    }
-    await this.connecting;
-  }
-
-  async request<Method extends RuntimeMethod>(
-    method: Method,
-    params: RuntimeParams<Method>,
-  ): Promise<RuntimeResult<Method>> {
-    await this.open();
-    if (this.closed) {
-      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
-    }
-    const socket = this.socket;
-    if (!socket || socket.destroyed) {
-      throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
-    }
-    const request = createRuntimeRequest(method, params);
-    const response = await new Promise<RuntimeResponse>((resolve, reject) => {
-      const pending = { resolve, reject };
-      this.pending.set(request.requestId, pending);
-      try {
-        socket.write(encodeRuntimeFrame(request), (error) => {
-          if (!error || this.pending.get(request.requestId) !== pending) return;
-          this.pending.delete(request.requestId);
-          reject(toUnavailableError(error));
-        });
-      } catch (error) {
-        this.pending.delete(request.requestId);
-        reject(toUnavailableError(error));
-      }
-    });
-    if (!response.ok) {
-      throw new RuntimeClientError(response.error.code, response.error.message, false);
-    }
-    return response.result as RuntimeResult<Method>;
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    const socket = this.socket;
-    this.socket = undefined;
-    socket?.destroy();
-    this.rejectAll(
-      new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true),
-    );
-  }
-
-  private async openAuthenticated(): Promise<void> {
-    let token: string;
-    try {
-      token = await this.authTokenStore.read();
-    } catch (error) {
-      throw new RuntimeClientError(
-        "RUNTIME_UNAVAILABLE",
-        "本机 Runtime daemon 未运行或认证材料不可用",
-        true,
-        error instanceof Error ? { cause: error } : undefined,
-      );
-    }
-    if (this.closed) {
-      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
-    }
-    this.decoder = new RuntimeFrameDecoder();
-    const socket = await connectWithTimeout(this.endpoint.address);
-    if (this.closed) {
-      socket.destroy();
-      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
-    }
-    this.socket = socket;
-    socket.on("data", (chunk: Buffer) => this.handleData(socket, chunk));
-    socket.once("error", (error) => this.handleDisconnect(socket, toUnavailableError(error)));
-    socket.once("close", () =>
-      this.handleDisconnect(
-        socket,
-        new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true),
-      ),
-    );
-    try {
-      await raceWithDeadlineReject(
-        new Promise<void>((resolve, reject) => {
-          this.authentication = { resolve, reject };
-          socket.write(encodeRuntimeFrame(createRuntimeAuthRequest(token)));
-        }),
-        CONNECT_TIMEOUT_MS,
-        () => new RuntimeClientError("RUNTIME_TIMEOUT", "本机 Runtime IPC 认证超时", true),
-      );
-    } catch (error) {
-      socket.destroy();
-      if (this.socket === socket) this.socket = undefined;
-      throw normalizeClientError(error);
-    }
-  }
-
-  private handleData(socket: Socket, chunk: Buffer): void {
-    if (this.socket !== socket) return;
-    try {
-      for (const message of this.decoder.push(chunk)) {
-        if (message.kind === "auth_result") {
-          const authentication = this.authentication;
-          this.authentication = undefined;
-          if (!authentication) continue;
-          if (message.ok) authentication.resolve();
-          else {
-            authentication.reject(
-              new RuntimeClientError("RUNTIME_AUTH_FAILED", "本机 Runtime IPC 认证失败", false),
-            );
-          }
-        } else if (message.kind === "event") {
-          this.eventListener?.(message.event);
-        } else if (message.kind === "response") {
-          const pending = this.pending.get(message.requestId);
-          if (!pending) continue;
-          this.pending.delete(message.requestId);
-          pending.resolve(message);
-        }
-      }
-    } catch (error) {
-      this.handleDisconnect(socket, normalizeClientError(error));
-      socket.destroy();
-    }
-  }
-
-  private handleDisconnect(socket: Socket, error: RuntimeClientError): void {
-    if (this.socket !== socket) return;
-    this.socket = undefined;
-    this.rejectAll(error);
-    if (!this.closed) this.disconnectListener?.();
-  }
-
-  private rejectAll(error: RuntimeClientError): void {
-    this.authentication?.reject(error);
-    this.authentication = undefined;
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
-  }
-}
-
-async function connectWithTimeout(address: string): Promise<Socket> {
-  try {
-    return await new Promise<Socket>((resolve, reject) => {
-      const socket = connect(address);
-      const timeout = setTimeout(() => {
-        socket.destroy();
-        reject(new RuntimeClientError("RUNTIME_TIMEOUT", "连接本机 Runtime daemon 超时", true));
-      }, CONNECT_TIMEOUT_MS);
-      const onError = (error: Error) => {
-        clearTimeout(timeout);
-        reject(error);
-      };
-      socket.once("error", onError);
-      socket.once("connect", () => {
-        clearTimeout(timeout);
-        socket.off("error", onError);
-        resolve(socket);
-      });
-    });
-  } catch (error) {
-    throw toUnavailableError(error);
-  }
-}
-
-function positiveDelay(value: number | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function normalizeClientError(error: unknown): RuntimeClientError {
-  if (error instanceof RuntimeClientError) return error;
-  return new RuntimeClientError(
-    "RUNTIME_PROTOCOL_ERROR",
-    error instanceof Error ? error.message : "本机 Runtime IPC 发生未知错误",
-    false,
-    error instanceof Error ? { cause: error } : undefined,
-  );
-}
-
-function toUnavailableError(error: unknown): RuntimeClientError {
-  return new RuntimeClientError(
-    "RUNTIME_UNAVAILABLE",
-    "无法连接本机 Runtime daemon",
-    true,
-    error instanceof Error ? { cause: error } : undefined,
-  );
-}
-
-/**
- * 3-B-3 kernel 承载连接：connectOrSpawn 拉起 runtime-host daemon candidate；
- * 请求经 runtime.request 通用桥接（events.subscribe/replay 走类型化桥接）；
- * host 错误码反查回 daemon 码——订阅环的 INVALID_PARAMS cursor 重置语义与
- * 所有 RuntimeClientError.code 消费方保持不变。断连经 closed promise 归一
- * 触发 disconnectListener，订阅环的重连退避逻辑原样复用。
- */
 class KernelRuntimeConnection implements RuntimeTransportConnection {
   private hostConnection?: RuntimeHostConnection;
   private connecting?: Promise<void>;

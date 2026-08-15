@@ -113,10 +113,22 @@
 
 - **删除**：`repl.tsx`（3,592 行装配链）+ 7 个零引用孤儿模块（hooks-panel / mcp-elicitation-dialog / model-options / query-guard / running-input-queue / schedule-draft-dialog / schedule-draft-review，共 ~745 行）。依赖图机械验证（全仓 import 扫描）后删除；`session-hydration.ts` 与 `rewind-runtime.ts` 保留（仍有测试覆盖活语义、engine 侧仅 type import，D14 兼容）。
 - **提取**：`createTuiUpdateScheduler` + `TUI_RENDER_OPTIONS` → `src/tui/update-scheduler.ts`（client-repl 唯一消费者）。
-- **入口**：`--local` 入 RETIRED_OPTIONS（明确报错），cli/main 删 startTuiRepl 分支与 defaultModelForKind；HELP_TEXT 同步。line-mode（TERM=dumb 逃生）随 in-process 路径删除——Phase 4 默认切换时默认路径已无 line-mode，如需要可后续针对客户端壳重建。
+- **入口**：`--local` 入 RETIRED_OPTIONS（明确报错），cli/main 删 startTuiRepl 分支与 defaultModelForKind；HELP_TEXT 同步。line-mode（TERM=dumb 逃生）随 in-process 路径删除——Phase 4 起默认路径已无 line-mode，如需要可后续针对客户端壳重建。
 - **测试处置**：cli-entry-dispatch 改断言 "--local 退役报错 + help 不再列出"；plan-mode-host-admission 删 TUI admission 用例（daemon 侧同语义用例保留）；tui-plugin-capability 删 5 个 in-process 生命周期用例、保留 2 个纯 plugins 模块用例（fixture 收敛）。
 - **D14 扩展**：architecture-invariants 的 D14 从"客户端四件套"扩到**整个 src/tui 目录**（目录枚举 + 逐文件断言：engine/runtime value import 禁止，唯一豁免 `engine/tool-result-contract.js` wire 契约工厂；globalSessionManager 全目录禁止；正向 client-repl 经 LocalRuntimeClient）。
 - **验证**：typecheck 0 + invariants/cli-dispatch/plan-admission/plugin-capability/tui-transcript 30/30 + tui-client-* 24/24 + runtime-host 39/39（含 stderr 落盘新用例）+ 门禁 0 + 真机 `pico --help`。session-fork-runtime-port 3 个失败经 stash 基线验证为**预存**（与本次无关）。
+
+### 3-D 渐进项收口（2026-08-16 追加，3898ba42 + 后续 commit）
+
+**A 客户端 UX 三件套**（纯装配缺失，管线本就存活）：keybindings（loadPicoConfig → App.keybindings，用户自定义键位恢复）；@ 文件补全（FileIndex 本地实例 + fileMentionSuggestions，run 终态与 rewind 应用后 markDirty）；动态参数补全（/resume /fork /skill /agent 接 RPC 候选源，5s TTL 缓存 + 失败静默降级 + 包含式匹配）。
+
+**B /changes 单文件恢复**（原协议缺口闭环）：协议新增 `rewind.changes`（checkpoint 维度逐文件 diff + 当前指纹 + 512KB patch 截断）与 `rewind.restoreFile`（idle 门 + display 路径还原 + 指纹守卫）；daemon 侧 listRewindFileChanges/restoreRewindFile；客户端 ChangesDialogHost（异步模型 + 恢复后自动重载）+ changes 桥 + changes 对话框 kind + 数据源守卫降级；/rewind 支持可选 message-id 预选（changes 面板 w 跳转）。
+
+**C tier2 命令镜像**：协议新增 `memory.create`（sanitize + 幂等 createFact + 非 active 再激活，DesktopMemoryService.create + handler 链）；/memory 全镜像（remember/status/off/on/undo——undo token 客户端解码 + memory.update）；/provider 镜像（list/import-env 两阶段预览+confirm 走 provider.importEnvironment/default set 走 config.user.update/delete 带 revision）；/cron 部分镜像（list/status/runs/enable/disable/delete → jobs.*；add/credential 因 automation.create 凭据注入门明确降级提示）。豁免表清理：memory/provider/cron 移入镜像集，model-usage/agents-usage 为过期名删除，剩 BLOCKED=mcp 控制面/context/operations/snapshots/add-dir/plugin/hooks。
+
+**D 旧 socket server 退役**（-server.ts + RuntimeConnection + LocalDaemonHost 旧传输分支）：LocalRuntimeClient 唯一承载 kernel（显式 endpoint 注入面删除并报错）；LocalDaemonHost 只编排 service+cron 生命周期（endpoint/instance-lock/LocalRuntimeDaemon 字段与 releaseInstanceLockWhenSafe 删除）；assembleProductionDaemonHost 去 servicesOnly 参数；测试迁移——runtime-client-replay 重写为 kernel 承载（in-process kernel + 真实 LocalRuntimeClient + host 重启重订全链，含"动态注册表 spec/handler 必须成对"与"kernel.close 消费 owner lease 重启需重选主"两个新坑）；daemon-ownership-races/lifecycle-races 裁剪锁保留断言（保留 cron 关闭失败传播/fence 排空/有界 stop/重启语义）；local-daemon-ping-hard-cut 随 LocalRuntimeDaemon 删除。desktop-plugin-parity 的 3 个 Windows 预存失败随清理消失。
+
+**E 91 方法 spec 化——维持渐进（决策记录）**：runtime.request 通用桥已有单源严格校验（parseStrictRuntimeParams 入 service 前 + 协议类型化结果 + kernel 帧预算与 operation deadline 覆盖整个桥接操作）；spec 化的增量价值只在"某方法需要 kernel 层差异化语义"（独立 deadline/错误码精细映射/非桥接事件流）时成立，成对注册约束（spec 与 handler 必须同时在场，replay 迁移实测踩坑）使批量 spec 化的维护成本大于收益。结论：按需 spec 化，不批量。
 
 ## 四、风险与对策
 

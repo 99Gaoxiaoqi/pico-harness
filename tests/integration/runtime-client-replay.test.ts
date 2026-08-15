@@ -3,9 +3,19 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+  resolveStorageRoot,
+  RuntimeHostKernel,
+  tryAcquireInteractiveRootOwner,
+} from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/client.js";
-import { LocalRuntimeDaemon } from "../../src/daemon/server.js";
-import type { LocalIpcAuthTokenStore } from "../../src/daemon/ipc-auth.js";
+import {
+  createRuntimeHostComposition,
+  ensurePicoRuntimeHostOperationsRegistered,
+  ensurePicoRuntimeHostEventOperationsRegistered,
+  ensurePicoRuntimeHostShutdownOperationRegistered,
+  RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
+} from "../../src/daemon/index.js";
 import type { LocalRuntimeService, RuntimeNotificationCursor } from "../../src/daemon/service.js";
 import {
   createRuntimeNotification,
@@ -14,6 +24,20 @@ import {
   type RuntimeNotificationPage,
   type RuntimeRequest,
 } from "../../src/daemon/protocol.js";
+
+// 注：runtime.shutdown 的 spec 与 composition handler 必须成对（动态注册表
+// 进程级——客户端连接时也会注册；本测试的 composition 对齐 candidate 补 handler）。
+ensurePicoRuntimeHostOperationsRegistered();
+ensurePicoRuntimeHostEventOperationsRegistered();
+ensurePicoRuntimeHostShutdownOperationRegistered();
+
+/**
+ * 客户端订阅环的 replay overflow 恢复栅栏（3-D Phase 5 迁移到 kernel 承载）：
+ * in-process kernel + fake service（同 composition-bridge 测试装配），客户端走
+ * 真实 LocalRuntimeClient（kernel 模式）。host 重启对应旧测试的 daemon
+ * stop/start——连接断开后订阅环重连重订，overflow 页触发恢复栅栏，栅栏期间的
+ * durable 事件不丢（栅栏解除后重放补齐）。
+ */
 
 class ReplayOverflowService implements LocalRuntimeService {
   readonly durable: RuntimeNotification[] = [];
@@ -73,54 +97,62 @@ class ReplayOverflowService implements LocalRuntimeService {
 
 test("Runtime client keeps a recovery fence after replay overflow", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-client-replay-"));
-  const workspacePath = join(root, "workspace");
-  await mkdir(workspacePath, { recursive: true });
-  const endpoint = {
-    // Windows 上用 named pipe：AF_UNIX bind 在部分 Windows 环境（如受限沙箱）EACCES。
-    ...(process.platform === "win32"
-      ? {
-          transport: "pipe" as const,
-          address: `\\\\.\\pipe\\pico-replay-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
-        }
-      : { transport: "unix" as const, address: join(root, "runtime.sock") }),
-    authTokenPath: join(root, "runtime.auth"),
-  };
-  const token = "x".repeat(43);
-  const authTokenStore = {
-    async rotate() {
-      return token;
-    },
-    async read() {
-      return token;
-    },
-  } satisfies LocalIpcAuthTokenStore;
+  const picoHome = join(root, "pico-home");
+  const workspaceSeed = join(root, "workspace");
+  await mkdir(picoHome, { recursive: true });
+  await mkdir(workspaceSeed, { recursive: true });
+  const workspacePath = await realpath(workspaceSeed);
+
   const service = new ReplayOverflowService();
-  service.workspacePath = await realpath(workspacePath);
-  const daemon = new LocalRuntimeDaemon({ endpoint, service, authTokenStore });
-  const client = new LocalRuntimeClient(endpoint, {
-    authTokenStore,
+  service.workspacePath = workspacePath;
+
+  const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
+  let owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner, "flock 选主应成功（测试进程独占交互根）");
+  // 客户端在本���程注册过 runtime.shutdown spec（进程级动态注册表），composition
+  // 必须补对应 handler（对齐 candidate 的组装方式）。
+  const compositionFactory = async () => {
+    const bridge = createRuntimeHostComposition({ service, eventSource: service });
+    return {
+      ...bridge,
+      handlers: {
+        ...bridge.handlers,
+        [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: async () => ({ ok: true, result: {} }),
+      },
+    };
+  };
+  let kernel = await RuntimeHostKernel.start({ owner, compositionFactory });
+
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: picoHome,
     reconnectDelayMs: 50,
     maxReconnectDelayMs: 50,
     replayBufferOptions: { maxEvents: 1, maxBytes: 4096 },
   });
+  const currentOwner = () => owner;
   context.after(async () => {
     client.close();
-    await daemon.stop();
+    await kernel.close().catch(() => undefined);
+    const activeOwner = currentOwner();
+    if (activeOwner) await activeOwner.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   });
 
-  await daemon.start();
   const delivered: string[] = [];
   await client.subscribe({ workspacePath }, (event) => delivered.push(event.eventId));
 
+  // host 重启（= 旧测试的 daemon stop/start）：kernel.close 会消费 owner lease，
+  // 重启需重新选主。连接断开 → 订阅环重连重订。
   service.injectOverflow = true;
-  await daemon.stop();
-  await daemon.start();
-  await waitFor(() => service.replayCalls >= 2);
+  await kernel.close();
+  await owner.close().catch(() => undefined);
+  owner = (await tryAcquireInteractiveRootOwner(capability))!;
+  assert.ok(owner, "重启后应能重新选主");  kernel = await RuntimeHostKernel.start({ owner, compositionFactory });
+  await waitFor(() => service.replayCalls >= 2, 10_000);
   service.emitDurable("during-recovery-fence");
   await waitFor(
     () => delivered.length === 3,
-    5_000,
+    10_000,
     () => `replayCalls=${service.replayCalls}, delivered=${delivered.length}`,
   );
 

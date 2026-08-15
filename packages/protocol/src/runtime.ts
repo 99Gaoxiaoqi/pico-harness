@@ -981,6 +981,11 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & { readonly factId: string };
     readonly result: { readonly fact: RuntimeMemoryFact };
   };
+  /** /memory remember（TUI 直写）：显式记住一条 workspace fact（安全扫描 + 幂等 + 再激活）。 */
+  readonly "memory.create": {
+    readonly params: WorkspaceParams & { readonly text: string };
+    readonly result: { readonly fact: RuntimeMemoryFact };
+  };
   readonly "memory.update": {
     readonly params: WorkspaceParams & {
       readonly factId: string;
@@ -1394,7 +1399,8 @@ export const RUNTIME_METHODS = [
   "rewind.changes",
   "rewind.restoreFile",
   "memory.list",
-  "memory.get",
+"memory.get",
+    "memory.create",
   "memory.update",
   "memory.forget",
   "memory.review.list",
@@ -1503,7 +1509,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "rewind.changes",
   "rewind.restoreFile",
   "memory.list",
-  "memory.get",
+"memory.get",
+    "memory.create",
   "memory.update",
   "memory.forget",
   "memory.review.list",
@@ -2779,6 +2786,10 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     workspacePath: stringParam,
     factId: boundedNonEmptyStringParam(512),
   }),
+  "memory.create": exactParamShape({
+    workspacePath: stringParam,
+    text: boundedNonEmptyStringParam(8192),
+  }),
   "memory.update": memoryUpdateParams,
   "memory.forget": exactParamShape({
     workspacePath: stringParam,
@@ -3577,6 +3588,7 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
   }),
   "memory.list": exactResultShape({ facts: resultArray(memoryFactResult) }),
   "memory.get": exactResultShape({ fact: memoryFactResult }),
+  "memory.create": exactResultShape({ fact: memoryFactResult }),
   "memory.update": exactResultShape({ fact: memoryFactResult }),
   "memory.forget": exactResultShape({ fact: memoryFactResult }),
   "memory.review.list": exactResultShape({ proposals: resultArray(memoryProposalResult) }),

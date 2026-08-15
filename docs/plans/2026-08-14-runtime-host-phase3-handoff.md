@@ -140,7 +140,7 @@
 - P1-1（冷启动 recover 窗口首个 ping 失败致 Desktop 误报启动失败）已修：首次 ping 带 30s/500ms 退避重试（RUNTIME_UNAVAILABLE retryable）。
 - P2 已评估：**daemon stop 已落地**（`02d4e058`：`pico --daemon-stop` + runtime.shutdown kernel 操作，常驻 daemon 现在有优雅退出路径）；cron-bridge 冷启动 45s 选举等待 UX、SIGTERM 关停 10s shutdownGrace 硬上限、覆盖订阅旧 dispose 的 pushEvent 失败回调误杀新订阅（自愈）、FRAME_TOO_LARGE→internal_failure 映射失真（无消费方）仍接受。
 
-**3-B-3 未做**：91 方法 spec 化渐进退役、旧 socket server 代码清理（LocalRuntimeDaemon 仍服务注入测试面）——两项均为渐进路径，见下方 3-B-4 章节。
+**3-B-3 未做**：~~91 方法 spec 化渐进退役~~（维持渐进的决策依据见迁移计划"渐进项收口"E 段：通用桥已单源校验，spec 化只在需要 kernel 层差异化语义时按需做）、~~旧 socket server 代码清理~~（已随 3-D Phase 5 收口完成：LocalRuntimeDaemon/RuntimeConnection/LocalDaemonHost 旧传输分支删除，replay 测试迁移 kernel 承载）。
 
 ## 3-B-4 已完成（遗留项收尾，2026-08-15 追加）
 
@@ -284,4 +284,4 @@ RUN_LLM_E2E=1 node --env-file-if-exists=.env --import tsx --import ./src/tui/pre
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。
 - `packages/runtime-host/dist/` 是 gitignore 本地构建产物；改 src 后记得 `npm run build --workspace=@pico/runtime-host`（四轮审查教训：dist 滞后会静默失效）。
-- **3-D 客户端已知边界（Phase 3 收口后仍接受项）**：~~/Desktop 归一化层三处重复~~（已收敛：@pico/protocol runtime-normalize 共享模块，bd308097）；keybindings 与 @文件补全未接（tier2）；argumentCompleter 的异步补全（session-id/skill 候选）客户端未接（tier2）；/changes 单文件恢复无协议对应（查看型 + /rewind 引导，tier2）；provider/cron/mcp/model-usage/agents-usage 镜像与 memory remember（tier2/BLOCKED，Phase 4 不依赖）；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合，Phase 5 退役时一并迁）。
+- **3-D 客户端已知边界（2026-08-16 渐进项收口后仍接受项）**：~~keybindings 与 @文件补全未接~~（已接：loadPicoConfig→App.keybindings + FileIndex fileMention）；~~argumentCompleter 异步补全~~（已接：/resume /fork /skill /agent RPC 候选 + TTL 缓存）；~~/changes 单文件恢复无协议对应~~（已闭环：rewind.changes/restoreFile + ChangesDialogHost，e2e 场景 3 实测）；~~provider/cron/usage 镜像与 memory remember~~（已镜像：memory.create 新协议 + provider.* + jobs.*；cron add/credential 因 automation.create 凭据门与 provider default clear 明确降级提示）；仍 BLOCKED：mcp 控制面（reload/enable/...无 RPC）、context（本地引擎态）、operations/snapshots/add-dir/plugin/hooks；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合）。

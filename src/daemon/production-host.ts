@@ -46,7 +46,6 @@ import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.j
 import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
-import { resolveLocalDaemonEndpoint, type LocalDaemonEndpoint } from "./endpoint.js";
 import {
   createRuntimeNotification,
   isJsonObject,
@@ -66,7 +65,6 @@ import {
 } from "../plugins/plugin-capability.js";
 
 export interface ProductionLocalDaemonHostOptions {
-  endpoint?: LocalDaemonEndpoint;
   registrationStore?: WorkspaceRegistrationStore;
   trustStore?: WorkspaceTrustStore;
   agentRuntime?: AgentRuntime;
@@ -838,14 +836,13 @@ export function createProductionRuntimeServices(
 
 /**
  * Shared assembly of the LocalDaemonHost lifecycle wrapper over production services.
- * `servicesOnly` skips the legacy transport (endpoint/instance-lock/LocalRuntimeDaemon)
- * — the 3-B-3 runtime-host candidate embeds that mode and reuses the audited cron
- * orchestration + shutdown fence chain verbatim.
+ * 3-D Phase 5（2026-08-16）：旧传输（endpoint/instance-lock/LocalRuntimeDaemon）已退役，
+ * host 只编排 service + cron runtime 生命周期；单例与传输由 kernel 的 flock 选主
+ * 与 NDJSON endpoint 承担（runtime-host candidate 嵌入同一装配）。
  */
 export function assembleProductionDaemonHost(
   services: ProductionRuntimeServices,
-  options: ProductionLocalDaemonHostOptions,
-  servicesOnly: boolean,
+  _options: ProductionLocalDaemonHostOptions,
 ): LocalDaemonHost {
   const {
     service,
@@ -906,9 +903,6 @@ export function assembleProductionDaemonHost(
     service: desktopService,
     cronRuntimeFactory,
     registrationStore,
-    ...(servicesOnly
-      ? { servicesOnly: true }
-      : { endpoint: options.endpoint ?? resolveLocalDaemonEndpoint({ env }) }),
     onWorkspaceError: (workspacePath, error) =>
       logger.error({ workspacePath, err: error }, "Cron workspace 启动失败"),
   });
@@ -920,14 +914,7 @@ export function assembleProductionDaemonHost(
 export function createProductionLocalDaemonHost(
   options: ProductionLocalDaemonHostOptions = {},
 ): LocalDaemonHost {
-  return assembleProductionDaemonHost(createProductionRuntimeServices(options), options, false);
-}
-
-/** 3-B-3 runtime-host candidate 用：无旧传输的 daemon 生命周期编排。 */
-export function createProductionServicesOnlyDaemonHost(
-  options: ProductionLocalDaemonHostOptions = {},
-): LocalDaemonHost {
-  return assembleProductionDaemonHost(createProductionRuntimeServices(options), options, true);
+  return assembleProductionDaemonHost(createProductionRuntimeServices(options), options);
 }
 
 async function resolveDesktopAutomationRoute(

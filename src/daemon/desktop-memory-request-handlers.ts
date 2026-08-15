@@ -6,6 +6,7 @@ type Awaitable<T> = T | Promise<T>;
 export interface DesktopMemoryRequestContext {
   readonly list: (params: RuntimeRequest<"memory.list">["params"]) => Awaitable<JsonValue>;
   readonly get: (params: RuntimeRequest<"memory.get">["params"]) => Awaitable<JsonValue>;
+  readonly create: (params: RuntimeRequest<"memory.create">["params"]) => Awaitable<JsonValue>;
   readonly update: (params: RuntimeRequest<"memory.update">["params"]) => Awaitable<JsonValue>;
   readonly forget: (params: RuntimeRequest<"memory.forget">["params"]) => Awaitable<JsonValue>;
   readonly listReviews: (
@@ -31,6 +32,7 @@ export function createDesktopMemoryRequestHandlers(
   DesktopRequestHandlers,
   | "memory.list"
   | "memory.get"
+  | "memory.create"
   | "memory.update"
   | "memory.forget"
   | "memory.review.list"
@@ -42,6 +44,7 @@ export function createDesktopMemoryRequestHandlers(
   return {
     "memory.list": (request) => context.list(request.params),
     "memory.get": (request) => context.get(request.params),
+    "memory.create": (request) => context.create(request.params),
     "memory.update": (request) => context.update(request.params),
     "memory.forget": (request) => context.forget(request.params),
     "memory.review.list": (request) => context.listReviews(request.params),

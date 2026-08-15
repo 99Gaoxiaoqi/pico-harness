@@ -132,6 +132,52 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           };
         case "rewind.apply":
           return { applied: true, sessionId: "s_forked", sourceSessionId: String(params.sessionId ?? "s1") };
+        case "provider.list":
+          return {
+            providers: [
+              { id: "p1", protocol: "openai", origin: "user", baseURL: "http://x", apiKeyEnv: "K", models: ["m1"], discoverModels: false, fingerprint: "f1", credentialStatus: "present", credentialSource: "keychain", storedCredentialPresent: true },
+            ],
+            revision: "rev-1",
+          };
+        case "provider.delete":
+          return { deleted: true, revision: "rev-2" };
+        case "provider.importEnvironment":
+          return { provider: { id: String((params.provider as { id?: string } | undefined)?.id ?? ""), protocol: "openai", origin: "user", baseURL: "http://x", apiKeyEnv: "K", models: ["m1"], discoverModels: true, fingerprint: "f2", credentialStatus: "present", credentialSource: "keychain", storedCredentialPresent: true }, revision: "rev-3" };
+        case "config.user.get":
+          return { config: { version: 1, defaults: {}, providers: [] }, revision: "cfg-1" };
+        case "config.user.update":
+          return { config: { version: 1, defaults: { modelRouteId: String((params.defaults as { modelRouteId?: string } | undefined)?.modelRouteId ?? "") }, providers: [] }, revision: "cfg-2" };
+        case "jobs.list":
+          return {
+            jobs: [
+              { jobId: "job_1", workspacePath: "C:\\ws", name: "每日构建", prompt: "p", schedule: "0 9 * * *", enabled: true, status: "idle", updatedAt: 1 },
+              { jobId: "job_2", workspacePath: "C:\\ws", name: "报告", prompt: "p", schedule: "0 18 * * 1", enabled: false, status: "idle", updatedAt: 2 },
+            ],
+          };
+        case "jobs.setEnabled":
+          return { job: { jobId: String(params.jobId ?? ""), workspacePath: "C:\\ws", name: "n", prompt: "p", schedule: "0 9 * * *", enabled: params.enabled === true, status: "idle", updatedAt: 3 } };
+        case "jobs.delete":
+          return { deleted: true };
+        case "jobs.history":
+          return { runs: [{ runId: "run_9", status: "succeeded", startedAt: 1 } as never] };
+        case "memory.create":
+          return { fact: { factId: "manual-fact:abc", version: 1, kind: "project_fact", title: "t", content: "c", confidence: 1, state: "active", createdAt: 1, updatedAt: 1, pinned: false } as never };
+        case "memory.list":
+          return { facts: [{ factId: "manual-fact:abc" }] };
+        case "memory.review.list":
+          return { proposals: [] };
+        case "memory.settings.get":
+          return {
+            settings: { enabled: true, autoPropose: false, autoCommit: false, injectionEnabled: true, reviewMode: "balanced", version: 3, updatedAt: "t" },
+            reviewBudget: { allowed: true, budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 }, usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 } },
+          };
+        case "memory.settings.update":
+          return {
+            settings: { enabled: params.enabled === true, autoPropose: false, autoCommit: false, injectionEnabled: params.injectionEnabled === true, reviewMode: "balanced", version: 4, updatedAt: "t" },
+            reviewBudget: { allowed: true, budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 }, usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 } },
+          };
+        case "memory.update":
+          return { fact: { factId: String(params.factId ?? ""), version: 2, state: "disabled" } as never };
         default:
           return {};
       }
@@ -515,6 +561,63 @@ test("client commands: dynamic argument completers ride RPCs with TTL cache", as
   assert.equal(agent?.[0]?.value, "review");
 });
 
+test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // /memory remember → memory.create；undo token 回流 memory.update。
+  harness.requests.length = 0;
+  const remembered = await run("/memory remember 首选包管理器是 pnpm");
+  assert.match(String(remembered.result?.message), /manual-fact:/);
+  assert.equal(harness.requests.at(-1)?.method, "memory.create");
+  const token = String(remembered.result?.message).split("/memory undo ")[1] ?? "";
+  const undone = await run(`/memory undo ${token}`);
+  assert.match(String(undone.result?.message), /disabled/);
+  const undoRequest = harness.requests.at(-1);
+  assert.equal(undoRequest?.method, "memory.update");
+  assert.equal(undoRequest?.params.state, "disabled");
+
+  // /memory status → settings.get + list + review.list 聚合。
+  const status = await run("/memory status");
+  assert.match(String(status.result?.message), /Memory: on/);
+  assert.match(String(status.result?.message), /Active facts: 1/);
+
+  // /provider list → provider.list + config.effective.get；delete 带 revision。
+  harness.requests.length = 0;
+  const providers = await run("/provider list");
+  assert.match(String(providers.result?.message), /p1 · openai · user/);
+  assert.ok(harness.requests.some((entry) => entry.method === "provider.list"));
+  harness.requests.length = 0;
+  const deleted = await run("/provider delete p1");
+  assert.match(String(deleted.result?.message), /deleted: p1|Provider deleted: p1/);
+  const deleteRequest = harness.requests.at(-1);
+  assert.equal(deleteRequest?.method, "provider.delete");
+  assert.equal(deleteRequest?.params.expectedRevision, "rev-1", "delete 应携带 list 拿到的 revision");
+
+  // /cron list/enable/runs → jobs.*。
+  harness.requests.length = 0;
+  const jobs = await run("/cron list");
+  assert.match(String(jobs.result?.message), /job_1 · enabled · 0 9 \* \* \*/);
+  harness.requests.length = 0;
+  const enabled = await run("/cron disable job_2");
+  assert.match(String(enabled.result?.message), /已停用/);
+  assert.equal(harness.requests.at(-1)?.method, "jobs.setEnabled");
+  harness.requests.length = 0;
+  const runs = await run("/cron runs job_1");
+  assert.match(String(runs.result?.message), /run_9 · succeeded/);
+  assert.equal(harness.requests.at(-1)?.method, "jobs.history");
+
+  // add/credential 明确降级提示（不发 automation RPC）。
+  harness.requests.length = 0;
+  const add = await run("/cron add 0 9 * * * 提示词");
+  assert.match(String(add.result?.message), /暂未镜像/);
+  assert.equal(harness.requests.length, 0, "降级提示不发 RPC");
+});
+
 test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
   // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
   // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
@@ -567,6 +670,9 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
     "skills",
     "agents",
     "explore",
+    "memory",
+    "provider",
+    "cron",
     "help",
     "clear",
     "exit",
@@ -606,18 +712,18 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
   // BLOCKED=协议缺口（注释标缺失 RPC）；DEFERRED=优先级（RPC 已在，tier2 镜像）。
   const deferred = new Set([
     // BLOCKED：协议/边界缺口
-    "memory", // remember 需 memory.create（协议只有 update/forget）
     "context", // 模型路由上下文是本地引擎态，无 RPC
     "operations", // 存储操作恢复改共享态，须 daemon 侧
     "snapshots", // 依赖本地 fileHistory 快照语义（rewind.* 已覆盖等价能力）
     "add-dir", // session.settings 参数无此字段
     "plugin", "hooks", // 会话运行时宿主面板
-    "cron", // add 应走 automation.create（yolo/凭据门），tier2
-    // DEFERRED：RPC 已在，tier2 镜像
-    "provider", // provider.* 全套 RPC 已在（import-env 为 TUI 设计）
-    "mcp", // mcp.user/effective.list 已在（控制面缺）
-    "model-usage", "agents-usage",
+    "mcp", // mcp.user/effective.list 已在（控制面 reload/enable/... 无 RPC）
   ]);
+  // 注：/memory /provider /cron 已镜像（2026-08-16 tier2 收口——memory.create
+  // 新协议方法 + provider.*/config.user.* + jobs.*）。/cron 的 add/credential
+  // 子命令（automation.create 凭据注入门）与 /provider default clear 明确降级
+  // 为提示，属执行体边界而非命令缺失。model-usage/agents-usage 是过期豁免名
+  // （in-process 从无此命令），已删除。
   // 注：/rewind /changes 已镜像（rewind.list/preview/apply + mode 参数）；
   // discovery 不在清单——协议方法已被 daemon 下线（METHOD_NOT_FOUND）且
   // in-process 无此命令，豁免注释过期已修正（3-D Phase 3 剩余收口）。
