@@ -10,9 +10,10 @@ import type {
   SlashCommand,
 } from "../input/types.js";
 import type { ClientSessionRuntime } from "./client-session-runtime.js";
+import { snapshotSummariesFromRewindList } from "./rewind-client-bridge.js";
 
 /**
- * TUI 客户端斜杠命令注册表（3-D Phase 3 tier1，29 命令）。
+ * TUI 客户端斜杠命令注册表（3-D Phase 3 tier1，31 命令）。
  *
  * 复用 in-process 的解析/建议管线（parseSlashInput + CommandRegistry + 输入框
  * 建议源），命令元数据（name/aliases/usage/category/availability）镜像
@@ -22,7 +23,7 @@ import type { ClientSessionRuntime } from "./client-session-runtime.js";
  *
  * 延后（清单单一来源=tests/integration/tui-client-commands.test.ts 的 parity
  * 测试，分 BLOCKED=协议缺口 / DEFERRED=tier2 镜像两类；勿在此重复维护名单）。
- * /rewind /changes /context /operations 不在本批。
+ * /context /operations 不在本批。
  */
 
 export interface ClientCommandRegistryDeps {
@@ -375,6 +376,75 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           message: result.compacted
             ? `已压缩：${result.beforeMessageCount} → ${result.afterMessageCount} 条消息。`
             : "没有可压缩的内容。",
+        };
+      },
+    }),
+    rpcCommand({
+      name: "rewind",
+      aliases: ["checkpoint"],
+      description: "Open the rewind menu for code and conversation checkpoints",
+      usage: "/rewind",
+      category: "session",
+      availability: "idle",
+      execute: async () => {
+        const sid = needSession();
+        if (typeof sid === "object") return sid;
+        const result = await runtime.request("rewind.list", { workspacePath, sessionId: sid });
+        const snapshots = snapshotSummariesFromRewindList(result);
+        if (snapshots.length === 0) {
+          return {
+            type: "local",
+            action: "message",
+            message: "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
+          };
+        }
+        return {
+          type: "local",
+          action: "message",
+          message: `Rewind：${snapshots.length} 个 checkpoint 可选。`,
+          ui: { kind: "open-selector", selector: "rewind" },
+          data: { sessionId: sid, snapshots },
+        };
+      },
+    }),
+    rpcCommand({
+      name: "changes",
+      description: "Preview a message checkpoint and partially rewind one file",
+      usage: "/changes [message-id]",
+      argumentHint: "[message-id]",
+      category: "session",
+      availability: "idle",
+      execute: async (input) => {
+        const sid = needSession();
+        if (typeof sid === "object") return sid;
+        const result = await runtime.request("rewind.list", { workspacePath, sessionId: sid });
+        const snapshots = snapshotSummariesFromRewindList(result);
+        if (snapshots.length === 0) {
+          return {
+            type: "local",
+            action: "message",
+            message: "No message checkpoint is available yet.",
+          };
+        }
+        const requested = input.argv[0];
+        const target = requested
+          ? snapshots.find((snapshot) => snapshot.messageId === requested)
+          : snapshots.at(-1);
+        if (!target) {
+          return {
+            type: "local",
+            action: "message",
+            message: `Cannot open Changes: checkpoint ${requested} was not found.`,
+          };
+        }
+        // 客户端 /changes = rewind 选择器查看型（预选目标进 preview）；单文件
+        // 恢复无协议对应（fileHistoryRestoreFile 是引擎 API），提示走 /rewind。
+        return {
+          type: "local",
+          action: "message",
+          message: `Opening partial rewind preview for ${target.messageId}.（查看模式；确认回滚请用 /rewind）`,
+          ui: { kind: "open-selector", selector: "rewind" },
+          data: { sessionId: sid, snapshots, viewOnly: true, selectedMessageId: target.messageId },
         };
       },
     }),

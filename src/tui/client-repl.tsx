@@ -20,7 +20,10 @@ import {
 } from "./client-command-host.js";
 import { TuiReporter } from "./tui-reporter.js";
 import { createTuiUpdateScheduler, TUI_RENDER_OPTIONS } from "./repl.js";
+import { diffStatFromRewindPreview } from "./rewind-client-bridge.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
+import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
+import type { FileHistoryDiffStat } from "../safety/file-history.js";
 
 /**
  * TUI 客户端 tracer 入口（3-D Phase 2，`pico --client`）。
@@ -97,6 +100,51 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     current: Partial<Record<"modelRouteId" | "thinkingEffort" | "collaborationMode" | "permissionMode" | "orchestrationMode", string>> | undefined;
   } = { current: undefined };
   const settingsSink: { current: ((value: NonNullable<typeof currentSettings.current>) => void) | undefined } = { current: undefined };
+  // rewind 后输入回填桥（fork 会话携带原 prompt 供编辑——与 in-process
+  // setInputReplacement 同语义，经 App.inputReplacement 通道）。
+  const inputReplacementSink: { current: ((value: { sequence: number; text: string } | undefined) => void) | undefined } = { current: undefined };
+  let inputReplacementSeq = 0;
+  // rewind preview 的指纹缓存（preview→apply 间一致性校验；键 = sessionId/checkpointId）。
+  const rewindFingerprints = new Map<string, string>();
+  const getRewindDiffStat = async (messageId: string): Promise<FileHistoryDiffStat> => {
+    const sessionId = runtime.activeSessionId;
+    if (!sessionId) throw new Error("当前没有活跃会话。");
+    const result = await runtime.request("rewind.preview", {
+      workspacePath: options.workDir,
+      sessionId,
+      checkpointId: messageId,
+    });
+    const projection = diffStatFromRewindPreview(result, messageId);
+    rewindFingerprints.set(`${sessionId}/${messageId}`, projection.fingerprint);
+    return projection.diffStat;
+  };
+  const onRewindApply = async (
+    snapshot: FileHistorySnapshotSummary,
+    mode: RewindMode,
+  ): Promise<void> => {
+    const sessionId = runtime.activeSessionId;
+    if (!sessionId) throw new Error("当前没有活跃会话。");
+    const expectedFingerprint = rewindFingerprints.get(`${sessionId}/${snapshot.messageId}`);
+    if (expectedFingerprint === undefined) {
+      throw new Error("缺少回滚预览指纹；请重新进入 /rewind 预览后再确认。");
+    }
+    const result = await runtime.request("rewind.apply", {
+      workspacePath: options.workDir,
+      sessionId,
+      checkpointId: snapshot.messageId,
+      expectedFingerprint,
+      mode,
+    });
+    // fork 成功：回填原 prompt 并切换到 fork 会话（与 in-process applyTuiRewind
+    // 同语义——inputReplacement 先行，switchSession 水化后即可编辑）。
+    if (result.applied && typeof snapshot.userPrompt === "string" && snapshot.userPrompt !== "") {
+      inputReplacementSeq += 1;
+      inputReplacementSink.current?.({ sequence: inputReplacementSeq, text: snapshot.userPrompt });
+    }
+    if (result.sessionId && result.sessionId !== sessionId) {
+      await runtime.switchSession(result.sessionId);
+    }
+  };
   const requestExit = (): void => {
     if (exitRequested) return;
     exitRequested = true;
@@ -117,6 +165,8 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       },
       closeDialog: closeDialogById,
       switchSession: (sessionId: string | undefined) => runtime.switchSession(sessionId),
+      getRewindDiffStat,
+      onRewindApply,
     });
     const dialog = effect.dialog;
     if (dialog) {
@@ -141,15 +191,20 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     const [dialogRequests, setDialogs] = useState<DialogRequest[]>([]);
     const [running, setRunning] = useState(false);
     const [settings, setSettings] = useState<NonNullable<typeof currentSettings.current>>({});
+    const [inputReplacement, setInputReplacement] = useState<
+      { sequence: number; text: string } | undefined
+    >(undefined);
     useEffect(() => {
       projectionSink.current = setProjection;
       setDialogRequests = setDialogs;
       runningSink.current = setRunning;
       settingsSink.current = setSettings;
+      inputReplacementSink.current = setInputReplacement;
       return () => {
         projectionSink.current = undefined;
         runningSink.current = undefined;
         settingsSink.current = undefined;
+        inputReplacementSink.current = undefined;
         // 卸载后清桥（对抗评审 P2：退出窗口内的迟到审批不再打已卸载组件）。
         setDialogRequests = undefined;
       };
@@ -174,6 +229,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         onInterrupt={handleInterrupt}
         onExit={() => requestExit()}
         dialogRequests={dialogRequests}
+        inputReplacement={inputReplacement}
         collaborationMode={settings.collaborationMode}
         permissionMode={settings.permissionMode}
         graphMode={settings.orchestrationMode === "graph"}

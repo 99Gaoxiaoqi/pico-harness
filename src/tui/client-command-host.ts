@@ -1,3 +1,8 @@
+import type {
+  FileHistorySnapshotSummary,
+  RewindMode,
+} from "../cli/file-history.js";
+import type { FileHistoryDiffStat } from "../safety/file-history.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import type { LocalCommandResult } from "../input/types.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
@@ -25,6 +30,13 @@ export interface ClientCommandHostDeps {
   /** 关闭指定对话框（Esc 取消/选择后闭合）。 */
   readonly closeDialog: (id: string) => void;
   readonly switchSession: (sessionId: string | undefined) => void | Promise<void>;
+  /** rewind preview 数据源（rewind.preview RPC 桥——客户端 /rewind /changes）。 */
+  readonly getRewindDiffStat?: (messageId: string) => Promise<FileHistoryDiffStat>;
+  /** rewind 应用（rewind.apply RPC 桥；viewOnly 查看型不触发）。 */
+  readonly onRewindApply?: (
+    snapshot: FileHistorySnapshotSummary,
+    mode: RewindMode,
+  ) => void | Promise<void>;
 }
 
 export interface ClientLocalCommandEffect {
@@ -72,6 +84,30 @@ export function handleClientLocalCommand(
       (result.ui.kind === "open-panel" && result.ui.panel === "sessions")
     ) {
       context.sessions = (result.data as SessionBrowserSession[] | undefined) ?? [];
+    }
+    if (result.ui.kind === "open-selector" && result.ui.selector === "rewind") {
+      const data = result.data as
+        | {
+            sessionId?: string;
+            snapshots?: FileHistorySnapshotSummary[];
+            viewOnly?: boolean;
+            selectedMessageId?: string;
+          }
+        | undefined;
+      context.rewindSessionId = data?.sessionId ?? "";
+      context.rewindSnapshots = data?.snapshots ?? [];
+      // 有 preview 数据源才渲染交互版（纯浏览调用方不受影响）。
+      if (deps.getRewindDiffStat) {
+        context.rewindGetDiffStat = deps.getRewindDiffStat;
+        if (!data?.viewOnly && deps.onRewindApply) {
+          const onApply = deps.onRewindApply;
+          context.rewindOnApply = async (snapshot, mode) => {
+            await onApply(snapshot, mode);
+          };
+        }
+        if (data?.viewOnly) context.rewindViewOnly = true;
+        if (data?.selectedMessageId) context.rewindSelectedMessageId = data.selectedMessageId;
+      }
     }
     if (result.ui.kind === "open-panel" && result.ui.panel === "help") {
       context.commands = deps.registry

@@ -114,6 +114,24 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           };
         case "run.cancel":
           return { run: { runId: "run_1", status: "cancelling" } };
+        case "rewind.list":
+          return {
+            checkpoints: [
+              { checkpointId: "msg_1", label: "第一条 prompt", createdAt: 1_000, changedFileCount: 2, additions: 10, deletions: 4 },
+              { checkpointId: "msg_2", label: "第二条 prompt", createdAt: 2_000, changedFileCount: 0, additions: 0, deletions: 0 },
+            ],
+          };
+        case "rewind.preview":
+          return {
+            checkpointId: String(params.checkpointId ?? ""),
+            changes: [
+              { path: "src/a.ts", status: "added", additions: 10, deletions: 0 },
+              { path: "src/b.ts", status: "modified", additions: 3, deletions: 4 },
+            ],
+            fingerprint: "fp-1",
+          };
+        case "rewind.apply":
+          return { applied: true, sessionId: "s_forked", sourceSessionId: String(params.sessionId ?? "s1") };
         default:
           return {};
       }
@@ -405,6 +423,58 @@ test("client commands: skill/agent inputs use native session.send kinds", async 
   assert.match(String(agents.result?.message), /explore、review/);
 });
 
+test("client commands: /rewind and /changes map to rewind.* RPC with selector data", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  await harness.runtime.start();
+
+  // /rewind → rewind.list + 选择器数据（snapshots 映射 FileHistorySnapshotSummary）。
+  const rewind = await run(harness, "/rewind");
+  assert.equal(rewind.kind, "local");
+  assert.equal(rewind.result?.ui?.selector, "rewind");
+  const listRequest = harness.requests.find((entry) => entry.method === "rewind.list");
+  assert.equal(listRequest?.params.sessionId, "s1");
+  const data = rewind.result?.data as {
+    sessionId: string;
+    snapshots: { messageId: string; userPrompt: string; changedFileCount?: number; incomplete?: boolean }[];
+    viewOnly?: boolean;
+  };
+  assert.equal(data.sessionId, "s1");
+  assert.deepEqual(
+    data.snapshots.map((snapshot) => [snapshot.messageId, snapshot.userPrompt, snapshot.changedFileCount]),
+    [["msg_1", "第一条 prompt", 2], ["msg_2", "第二条 prompt", 0]],
+  );
+  assert.equal(data.viewOnly, undefined, "/rewind 非查看型");
+
+  // /changes 无参 → 同列表，viewOnly + 预选最新 checkpoint。
+  harness.requests.length = 0;
+  const changes = await run(harness, "/changes");
+  assert.equal(changes.result?.ui?.selector, "rewind");
+  const changesData = changes.result?.data as {
+    viewOnly?: boolean;
+    selectedMessageId?: string;
+  };
+  assert.equal(changesData.viewOnly, true);
+  assert.equal(changesData.selectedMessageId, "msg_2");
+
+  // /changes <id> → 预选该 checkpoint；未知 id → 错误提示不发选择器。
+  harness.requests.length = 0;
+  const changesArg = await run(harness, "/changes msg_1");
+  assert.equal(
+    (changesArg.result?.data as { selectedMessageId?: string }).selectedMessageId,
+    "msg_1",
+  );
+  const changesBad = await run(harness, "/changes nope");
+  assert.match(String(changesBad.result?.message), /was not found/);
+  assert.equal(changesBad.result?.ui, undefined);
+
+  // 别名 /checkpoint 与 availability 门（idle-only）。
+  const alias = await run(harness, "/checkpoint");
+  assert.equal(alias.result?.ui?.selector, "rewind");
+  harness.emit(runEvent("run.started", "s1", "run_1", "running"));
+  const busy = await run(harness, "/rewind");
+  assert.match(String(busy.result?.message ?? busy.message), /当前不可用|only available/i);
+});
+
 test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
   // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
   // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
@@ -439,6 +509,8 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
     "goal",
     "rename",
     "compact",
+    "rewind",
+    "changes",
     "init",
     "doctor",
     "usage",
@@ -497,18 +569,18 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
     "memory", // remember 需 memory.create（协议只有 update/forget）
     "context", // 模型路由上下文是本地引擎态，无 RPC
     "operations", // 存储操作恢复改共享态，须 daemon 侧
-    "snapshots", // 依赖本地 fileHistory 快照语义
+    "snapshots", // 依赖本地 fileHistory 快照语义（rewind.* 已覆盖等价能力）
     "add-dir", // session.settings 参数无此字段
     "plugin", "hooks", // 会话运行时宿主面板
     "cron", // add 应走 automation.create（yolo/凭据门），tier2
     // DEFERRED：RPC 已在，tier2 镜像
     "provider", // provider.* 全套 RPC 已在（import-env 为 TUI 设计）
-    "rewind", // rewind.list/preview/apply 已在
-    "changes", // changes.* 已在
-    "discovery", // discovery.* 已在
     "mcp", // mcp.user/effective.list 已在（控制面缺）
     "model-usage", "agents-usage",
   ]);
+  // 注：/rewind /changes 已镜像（rewind.list/preview/apply + mode 参数）；
+  // discovery 不在清单——协议方法已被 daemon 下线（METHOD_NOT_FOUND）且
+  // in-process 无此命令，豁免注释过期已修正（3-D Phase 3 剩余收口）。
   const coreInProcess = inProcess
     .list({ includeHidden: false })
     .filter((command) => (command.source ?? "builtin") === "builtin")
