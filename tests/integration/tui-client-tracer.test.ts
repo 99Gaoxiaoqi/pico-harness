@@ -122,8 +122,7 @@ test("daemon event reporter: text stream + tool card + run lifecycle drive TuiRe
   assert.ok(runningChanges >= 2, "running 状态变化应透传");
 });
 
-test("daemon event reporter: cancelled run drives onInterrupted; approval events pass through", () => {
-  const reporter = new TuiReporter();
+test("daemon event reporter: cancelled run drives onInterrupted; approval events pass through", () => {  const reporter = new TuiReporter();
   const approvals: ApprovalNotice[] = [];
   const adapter = new DaemonEventReporter({
     reporter,
@@ -151,6 +150,44 @@ test("daemon event reporter: cancelled run drives onInterrupted; approval events
     ),
   );
   assert.equal(approvals.length, 1);
+});
+
+test("daemon event reporter: wake-style back-to-back runs each drive onStart; mid-active repeats ignored", () => {
+  // wake 触发的 run 经订阅以普通 run.started 到达（daemon 侧协调器已随会话宿主），
+  // 客户端只需按生命周期渲染——背靠背 run（finished 后紧跟新 started）必须各自
+  // 生效；active 期间的重复 started 是同会话串行的噪声，忽略（文档化语义）。
+  const reporter = new TuiReporter();
+  const runningStates: boolean[] = [];
+  const adapter = new DaemonEventReporter({
+    reporter,
+    onRunStateChanged: (running) => runningStates.push(running),
+  });
+
+  const started = (runId: string): RuntimeNotification =>
+    notification("run.started", {}, { run: { runId, status: "running" } }, runId);
+  const finished = (runId: string): RuntimeNotification =>
+    notification("run.finished", {}, { run: { runId, status: "succeeded" } }, runId);
+
+  adapter.handleNotification(started("run_a"));
+  adapter.handleNotification(started("run_a-repeat")); // active 期间重复：忽略
+  assert.equal(adapter.running, true);
+  assert.equal(adapter.activeRunId, "run_a", "重复 started 不得顶替当前 run");
+
+  adapter.handleNotification(finished("run_a"));
+  assert.equal(adapter.running, false);
+
+  // wake 触发的新 run（无用户输入，daemon 侧发起）。
+  adapter.handleNotification(started("run_b"));
+  assert.equal(adapter.running, true, "背靠背新 run 应重新进入活跃态");
+  assert.equal(adapter.activeRunId, "run_b");
+  adapter.handleNotification(finished("run_b"));
+
+  // true→false→true→false 两轮完整生命周期。
+  assert.deepEqual(
+    runningStates,
+    [true, false, true, false],
+    "每个 run 的起止都应驱动 running 相位",
+  );
 });
 
 test("transcript item hydration: RPC items convert into a projectable transcript", () => {
