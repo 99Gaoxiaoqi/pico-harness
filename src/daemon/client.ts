@@ -36,6 +36,59 @@ const CONNECT_TIMEOUT_MS = 5_000;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 /** 杀 daemon 重生路径的重试时间预算（吸收冷启动环境波动与将死残留竞态）。 */
 const KERNEL_RETRY_WINDOW_MS = 30_000;
+
+/**
+ * 幂等方法白名单（3-B-4 / P1-2）：仅这些方法在传输级失败（连接已 terminal）后
+ * 走"丢弃死连接 → 重生 daemon → 重发"循环。读方法重发无副作用；events.*
+ * 走类型化桥接且 daemon 订阅是覆盖语义，重订等价。其余写方法（session.send /
+ * run.start / rewind.apply / jobs.runNow 等）的失败窗口无法区分"daemon 死亡"
+ * 与"响应在途丢失"——自动重发可能双执行（双 LLM turn / 双提交），一律立即
+ * 上抛 RUNTIME_DISCONNECTED（retryable=true），由调用方决策是否人工重试。
+ * 有意排除：diagnostics.run（doctor 执行检查，副作用未证伪）、一切状态变更方法。
+ */
+const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMethod>([
+  "runtime.ping",
+  "diagnostics.resources",
+  "session.list",
+  "session.get",
+  "session.settings.get",
+  "session.transcript",
+  "session.evidence.read",
+  "goal.get",
+  "discovery.get",
+  "runs.list",
+  "changes.list",
+  "changes.diff",
+  "rewind.list",
+  "rewind.preview",
+  "memory.list",
+  "memory.get",
+  "memory.review.list",
+  "memory.settings.get",
+  "memory.context.preview",
+  "jobs.list",
+  "jobs.history",
+  "config.get",
+  "config.providers",
+  "config.user.get",
+  "config.effective.get",
+  "provider.list",
+  "provider.credential.status",
+  "catalog.agents",
+  "catalog.skills",
+  "config.skills",
+  "config.mcpServers",
+  "skills.user.list",
+  "skills.effective.list",
+  "mcp.user.list",
+  "mcp.effective.list",
+  "usage.get",
+  "workspace.status",
+  "workspace.list",
+  "workspace.trustStatus",
+  "events.subscribe",
+  "events.replay",
+]);
 const KERNEL_RETRY_BACKOFF_MS = 200;
 
 function sleep(delayMs: number): Promise<void> {
@@ -778,13 +831,14 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
         throw translateKernelRequestError(error);
       }
       // 传输级失败且连接已 terminal（如 daemon 被杀后断连传播慢于本次请求的
-      // 竞态窗口）：丢弃死连接，open() 经 connectOrSpawn 重生 daemon 后重试。
-      // 重生过程可能连到将死进程的残留 socket（handshake 成功但进程随即死
-      // 透），且冷启动受环境波动影响可达数十秒——按时间预算循环而非固定次数，
-      // 兑现"下一次请求拉起 daemon"的 kernel 承载语义。操作级错误
-      // （host_not_ready 等）与本地 decodeInput 失败不在此循环内（无意义且
-      // 写方法有双执行风险，幂等收敛见 3-B-4 遗留）。
-      if (connection.terminalError === undefined) {
+      // 竞态窗口）：仅幂等方法（KERNEL_RETRY_SAFE_METHODS）丢弃死连接，open()
+      // 经 connectOrSpawn 重生 daemon 后重试。重生过程可能连到将死进程的残留
+      // socket（handshake 成功但进程随即死透），且冷启动受环境波动影响可达数十
+      // 秒——按时间预算循环而非固定次数，兑现"下一次请求拉起 daemon"的 kernel
+      // 承载语义。非幂等写方法不自动重发（P1-2：失败窗口无法排除响应在途丢失，
+      // 重发可能双执行），立即上抛交由调用方决策。操作级错误（host_not_ready
+      // 等）与本地 decodeInput 失败同样不在此循环内。
+      if (connection.terminalError === undefined || !KERNEL_RETRY_SAFE_METHODS.has(method)) {
         throw translateKernelRequestError(error);
       }
       const retryDeadline = performance.now() + KERNEL_RETRY_WINDOW_MS;
