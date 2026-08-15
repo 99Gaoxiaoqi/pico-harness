@@ -114,7 +114,7 @@ export class DaemonEventReporter {
   private finishRun(status: string): void {
     this.active = false;
     this.currentRunId = undefined;
-    if (status === "cancelled" || status === "interrupted") {
+    if (status === "cancelled" || status === "failed") {
       this.reporter.onInterrupted();
     } else {
       this.reporter.onFinish();
@@ -123,12 +123,10 @@ export class DaemonEventReporter {
   }
 
   private isTerminalStatus(status: string): boolean {
-    return (
-      status === "succeeded" ||
-      status === "failed" ||
-      status === "cancelled" ||
-      status === "interrupted"
-    );
+    // 枚举校真（对抗评审二轮）：RuntimeRunStatus = queued|running|pause_requested|
+    // paused|cancelling|cancelled|failed|succeeded——终态三值，此前的
+    // "interrupted"/"completed" 不是枚举值（拷贝漂移）。
+    return status === "succeeded" || status === "failed" || status === "cancelled";
   }
 
   private handleLiveItem(payload: Record<string, unknown>): void {

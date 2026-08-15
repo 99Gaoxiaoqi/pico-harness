@@ -1,7 +1,8 @@
-import React from "react";
-import { Box, Text } from "ink";
+import React, { useState } from "react";
+import { Box, Text, useInput } from "ink";
 import type { CliSessionSummary } from "../cli/session-resolver.js";
 import { presentSession } from "./session-presentation.js";
+import { searchSessionBrowserSessions } from "./session-browser-adapter.js";
 
 export const SESSION_BROWSER_TITLE_WIDTH = 56;
 export const SESSION_BROWSER_CWD_WIDTH = 48;
@@ -157,4 +158,87 @@ function truncateInline(value: string, maxLength: number): string {
   const inline = value.replace(/\s+/g, " ").trim();
   if (inline.length <= maxLength) return inline;
   return `${inline.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+export interface InteractiveSessionBrowserProps {
+  sessions: readonly SessionBrowserSession[];
+  onSelect: (session: SessionBrowserSession, mode: "resume" | "fork") => Promise<void> | void;
+  onCancel?: () => void;
+}
+
+/**
+ * 键盘交互会话浏览器（3-D 对抗评审二轮 P0 提取自 repl.tsx 的
+ * TuiSessionBrowserDialog，客户端对话框共用）：方向键移动、/ 搜索过滤、
+ * Enter 恢复、f 分叉、Esc/q 取消。
+ */
+export function InteractiveSessionBrowser({
+  sessions,
+  onSelect,
+  onCancel,
+}: InteractiveSessionBrowserProps): React.ReactNode {
+  const [state, setState] = useState<SessionBrowserState>(() => createSessionBrowserState());
+  const [search, setSearch] = useState({ active: false, query: "" });
+  const visibleSessions = searchSessionBrowserSessions(sessions, search.query);
+
+  useInput((input, key) => {
+    if (search.active) {
+      if (key.escape || key.return) {
+        setSearch((current) => ({ ...current, active: false }));
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setSearch((current) => ({ ...current, query: current.query.slice(0, -1) }));
+        setState((current) => ({ ...current, selectedIndex: 0 }));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setSearch((current) => ({ ...current, query: current.query + input }));
+        setState((current) => ({ ...current, selectedIndex: 0 }));
+      }
+      return;
+    }
+
+    if (key.upArrow) {
+      setState((current) => moveSessionBrowserSelection(current, visibleSessions, -1));
+      return;
+    }
+
+    if (key.downArrow) {
+      setState((current) => moveSessionBrowserSelection(current, visibleSessions, 1));
+      return;
+    }
+
+    if (input === "/") {
+      setSearch((current) => ({ ...current, active: true }));
+      return;
+    }
+
+    if (key.return || input === "f") {
+      const mode = input === "f" ? "fork" : "resume";
+      setState((current) =>
+        confirmSessionBrowserSelection(current, visibleSessions, {
+          onConfirm: (session) => void onSelect(session, mode),
+        }),
+      );
+      return;
+    }
+
+    if (key.escape || input === "q") {
+      onCancel?.();
+    }
+  });
+
+  return (
+    <>
+      <Text dimColor>
+        {search.active
+          ? `Search: ${search.query}▋`
+          : search.query
+            ? `Search: ${search.query}`
+            : "/ search"}
+        {" · Enter resume · f fork · current workspace"}
+      </Text>
+      <SessionBrowser sessions={visibleSessions} state={state} />
+    </>
+  );
 }

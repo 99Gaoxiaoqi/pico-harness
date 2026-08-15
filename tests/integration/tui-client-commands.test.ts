@@ -470,6 +470,16 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
       `/${name} 别名应与 in-process 一致`,
     );
     assert.equal(mine.usage, reference.usage, `/${name} usage 应与 in-process 一致`);
+    assert.equal(
+      mine.argumentHint ?? undefined,
+      reference.argumentHint ?? undefined,
+      `/${name} argumentHint 应与 in-process 一致（对抗评审二轮：补齐后入漂移门）`,
+    );
+    assert.equal(
+      mine.category ?? undefined,
+      reference.category ?? undefined,
+      `/${name} category 应与 in-process 一致`,
+    );
     if (!availabilityExemptions.has(name)) {
       assert.equal(
         mine.availability ?? "always",
@@ -479,9 +489,26 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
     }
   }
 
-  // 覆盖清单：in-process 核心命令（builtin 源）要么被镜像，要么在文档化延后
-  // 清单里（用户技能/插件注入的命令不在此列——客户端经 /skills 列表另有入口）。
-  const deferred = new Set(["provider", "cron", "memory", "mcp", "context", "operations", "rewind", "changes", "snapshots", "discovery", "add-dir", "model-usage", "plugin", "hooks", "resume-plan", "agents-usage"]);
+  // 覆盖清单：in-process 核心命令（builtin 源）要么被镜像，要么在延后清单里
+  //（用户技能/插件注入的命令不在此列）。延后分两类（对抗评审二轮重划）：
+  // BLOCKED=协议缺口（注释标缺失 RPC）；DEFERRED=优先级（RPC 已在，tier2 镜像）。
+  const deferred = new Set([
+    // BLOCKED：协议/边界缺口
+    "memory", // remember 需 memory.create（协议只有 update/forget）
+    "context", // 模型路由上下文是本地引擎态，无 RPC
+    "operations", // 存储操作恢复改共享态，须 daemon 侧
+    "snapshots", // 依赖本地 fileHistory 快照语义
+    "add-dir", // session.settings 参数无此字段
+    "plugin", "hooks", // 会话运行时宿主面板
+    "cron", // add 应走 automation.create（yolo/凭据门），tier2
+    // DEFERRED：RPC 已在，tier2 镜像
+    "provider", // provider.* 全套 RPC 已在（import-env 为 TUI 设计）
+    "rewind", // rewind.list/preview/apply 已在
+    "changes", // changes.* 已在
+    "discovery", // discovery.* 已在
+    "mcp", // mcp.user/effective.list 已在（控制面缺）
+    "model-usage", "agents-usage",
+  ]);
   const coreInProcess = inProcess
     .list({ includeHidden: false })
     .filter((command) => (command.source ?? "builtin") === "builtin")

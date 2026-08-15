@@ -1,5 +1,5 @@
-import React from "react";
-import { Box, Text } from "ink";
+import React, { useState } from "react";
+import { Box, Text, useInput } from "ink";
 
 export const MODEL_NAME_DISPLAY_WIDTH = 28;
 export const MODEL_DESCRIPTION_DISPLAY_WIDTH = 44;
@@ -188,4 +188,41 @@ function visibleWindowStart(selectedIndex: number, itemCount: number, maxItems: 
   const visibleCount = Math.max(1, maxItems);
   if (itemCount <= visibleCount) return 0;
   return Math.min(Math.max(0, selectedIndex - visibleCount + 1), itemCount - visibleCount);
+}
+
+export interface InteractiveModelSelectorProps {
+  models: readonly ModelOption[];
+  currentModelId?: string;
+  onSelect: (modelId: string) => void;
+  onCancel: () => void;
+}
+
+/**
+ * 键盘交互模型选择器（3-D 对抗评审二轮 P0 提取自 repl.tsx，客户端对话框共用）：
+ * 方向键移动、Enter 确认 onSelect、Esc 取消 onCancel。
+ */
+export function InteractiveModelSelector({
+  models,
+  currentModelId,
+  onSelect,
+  onCancel,
+}: InteractiveModelSelectorProps): React.ReactNode {
+  const [state, setState] = useState<ModelSelectorState>(() =>
+    createModelSelectorState(models, currentModelId),
+  );
+
+  useInput((input, key) => {
+    const next = resolveModelSelectorKey(
+      state,
+      models,
+      { input, key },
+      {
+        onConfirm: (model) => onSelect(model.id),
+        onCancel,
+      },
+    );
+    if (next.status === "selecting") setState(next);
+  });
+
+  return <ModelSelector models={models} currentModelId={currentModelId} state={state} />;
 }

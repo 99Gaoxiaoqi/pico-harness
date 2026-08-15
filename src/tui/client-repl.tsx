@@ -62,6 +62,10 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     ...(options.model ? { modelOverride: options.model } : {}),
     ...(options.thinkingEffort ? { thinkingOverride: options.thinkingEffort } : {}),
     onRunStateChanged: (running) => runningSink.current?.(running),
+    onSettingsSnapshot: (settings) => {
+      currentSettings.current = settings;
+      settingsSink.current?.(settings);
+    },
     onApproval: (notice) => {
       setDialogRequests?.((items) => [
         ...items.filter((item) => item.id !== approvalDialogId(notice.taskId)),
@@ -87,19 +91,31 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
 
   let exitRequested = false;
   let instanceRef: ReturnType<typeof render> | undefined;
+  // 会话设置快照桥（对抗评审二轮 P1：App 的 permissionMode 默认 "yolo" 会误显；
+  // runtime 推快照 → sink → 组件 state，与 projectionSink 同款桥接）。
+  const currentSettings: {
+    current: Partial<Record<"modelRouteId" | "thinkingEffort" | "collaborationMode" | "permissionMode" | "orchestrationMode", string>> | undefined;
+  } = { current: undefined };
+  const settingsSink: { current: ((value: NonNullable<typeof currentSettings.current>) => void) | undefined } = { current: undefined };
   const requestExit = (): void => {
     if (exitRequested) return;
     exitRequested = true;
     instanceRef?.unmount();
   };
 
+  const closeDialogById = (id: string): void => {
+    setDialogRequests?.((items) => items.filter((item) => item.id !== id));
+  };
+
   const applyLocalCommand = (result: Parameters<typeof handleClientLocalCommand>[0]): void => {
     const effect = handleClientLocalCommand(result, {
       reporter,
       registry: commandRegistry,
+      currentModelId: () => currentSettings.current?.modelRouteId,
       dispatchInput: (text: string) => {
         void handleSubmittedText(text);
       },
+      closeDialog: closeDialogById,
       switchSession: (sessionId: string | undefined) => runtime.switchSession(sessionId),
     });
     const dialog = effect.dialog;
@@ -124,13 +140,16 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     );
     const [dialogRequests, setDialogs] = useState<DialogRequest[]>([]);
     const [running, setRunning] = useState(false);
+    const [settings, setSettings] = useState<NonNullable<typeof currentSettings.current>>({});
     useEffect(() => {
       projectionSink.current = setProjection;
       setDialogRequests = setDialogs;
       runningSink.current = setRunning;
+      settingsSink.current = setSettings;
       return () => {
         projectionSink.current = undefined;
         runningSink.current = undefined;
+        settingsSink.current = undefined;
         // 卸载后清桥（对抗评审 P2：退出窗口内的迟到审批不再打已卸载组件）。
         setDialogRequests = undefined;
       };
@@ -146,7 +165,8 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
 
     return (
       <App
-        model={options.model ?? "daemon-managed"}
+        model={options.model ?? settings.modelRouteId ?? "daemon-managed"}
+        modelRouteId={settings.modelRouteId}
         workDir={options.workDir}
         entries={projectTranscriptEntriesForRendering(projection)}
         running={running}
@@ -154,6 +174,10 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         onInterrupt={handleInterrupt}
         onExit={() => requestExit()}
         dialogRequests={dialogRequests}
+        collaborationMode={settings.collaborationMode}
+        permissionMode={settings.permissionMode}
+        graphMode={settings.orchestrationMode === "graph"}
+        thinkingEffort={settings.thinkingEffort}
         slashCommandSuggestions={(query: string) =>
           clientSlashSuggestions(commandRegistry, query, running ? "running" : "idle")
         }

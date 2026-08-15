@@ -51,6 +51,10 @@ export interface ClientSessionRuntimeOptions {
   /** 审批被解析（含对端/超时解析）——宿主清理残留对话框。 */
   readonly onApprovalResolved?: (approvalId: string) => void;
   readonly onRunStateChanged?: (running: boolean) => void;
+  /** 会话设置快照（启动/切换/settingsUpdated 后推送——宿主喂状态栏）。 */
+  readonly onSettingsSnapshot?: (
+    settings: Partial<Record<"modelRouteId" | "thinkingEffort" | "collaborationMode" | "permissionMode" | "orchestrationMode", string>>,
+  ) => void;
   /**
    * BYOK 旗标合并（Phase 3 首批）：--model 经 config.effective.get 解析为
    * modelRouteId（路由 id `provider/model` 或裸模型名），sessionId 确立后经
@@ -138,6 +142,10 @@ export class ClientSessionRuntime {
       if (this.sessionId === undefined) {
         this.sessionId = result.session.sessionId;
         await this.applyStartupOverrides();
+      } else {
+        // BYOK 覆盖若曾失败（applied 尚未置位），此后每次成功发送都是廉价重试
+        // 触发点（对抗评审二轮 P1：否则 -S 启动失败一次即永久丢失 --model）。
+        void this.applyStartupOverrides();
       }
       return true;
     } catch (error) {
@@ -248,9 +256,13 @@ export class ClientSessionRuntime {
       if (this.sessionId === undefined && notification.scope.sessionId) {
         this.sessionId = notification.scope.sessionId;
         void this.applyStartupOverrides();
+        void this.refreshSettingsSnapshot();
       }
       const scoped = notification.scope.sessionId;
       if (!this.sessionId || scoped === this.sessionId) void this.hydrateSerial();
+    }
+    if (notification.topic === "session.settingsUpdated") {
+      void this.refreshSettingsSnapshot();
     }
     this.eventReporter.handleNotification(notification);
   }
@@ -267,6 +279,7 @@ export class ClientSessionRuntime {
       // 与 reload 对账共用串行化（对抗评审 P2：直连 hydrate 会与在途 reload
       // 竞态出乱序替换）。
       await this.hydrateSerial();
+      await this.refreshSettingsSnapshot();
     }
   }
 
@@ -301,25 +314,56 @@ export class ClientSessionRuntime {
 
   private async hydrate(): Promise<void> {
     if (!this.sessionId) return;
+    // 跨切换竞态防护（对抗评审二轮 P1）：捕获发起时的 sessionId，响应落地时
+    // 若已切换（/new 清空或 /resume 换目标）则丢弃——陈旧页不得复活旧 transcript
+    // 或重亮已死的 run。
+    const sessionId = this.sessionId;
     const page = await this.client.request("session.transcript", {
       workspacePath: this.workspacePath,
-      sessionId: this.sessionId,
+      sessionId,
       limit: 200,
     });
+    if (this.sessionId !== sessionId) return;
     this.reporter.replaceTranscriptEvents(
-      transcriptEventsFromRuntimeItems(page.items, this.sessionId),
+      transcriptEventsFromRuntimeItems(page.items, sessionId),
     );
     // 恢复活跃 run 相位（对抗评审 P1：/resume 进运行中会话须点亮 running、
-    // /interrupt 才有目标）——transcript.activeRun 是权威信号。
+    // /interrupt 才有目标）——双向对账：无活跃 run 时清掉误亮的相位。
     const activeRun = page.activeRun as { runId?: unknown; status?: unknown } | undefined;
-    if (
-      activeRun &&
+    const activeRunLive =
+      activeRun !== undefined &&
       typeof activeRun.runId === "string" &&
       (activeRun.status === "queued" ||
         activeRun.status === "running" ||
-        activeRun.status === "pause_requested")
-    ) {
+        activeRun.status === "pause_requested" ||
+        activeRun.status === "paused" ||
+        activeRun.status === "cancelling");
+    if (activeRunLive && typeof activeRun.runId === "string") {
       this.eventReporter.seedActiveRun(activeRun.runId);
+    } else if (this.eventReporter.running) {
+      // transcript 已无活跃 run：终态事件早于本次水化到达时按权威快照收口。
+      this.eventReporter.clearTransientState();
+      this.options.onRunStateChanged?.(false);
+    }
+  }
+
+  /** 拉取会话设置并推送快照（启动/切换/settingsUpdated 后调用）。 */
+  private async refreshSettingsSnapshot(): Promise<void> {
+    if (!this.sessionId) return;
+    try {
+      const { settings } = await this.client.request("session.settings.get", {
+        workspacePath: this.workspacePath,
+        sessionId: this.sessionId,
+      });
+      this.options.onSettingsSnapshot?.({
+        ...(typeof settings.modelRouteId === "string" ? { modelRouteId: settings.modelRouteId } : {}),
+        ...(typeof settings.thinkingEffort === "string" ? { thinkingEffort: settings.thinkingEffort } : {}),
+        ...(typeof settings.collaborationMode === "string" ? { collaborationMode: settings.collaborationMode } : {}),
+        ...(typeof settings.permissionMode === "string" ? { permissionMode: settings.permissionMode } : {}),
+        ...(typeof settings.orchestrationMode === "string" ? { orchestrationMode: settings.orchestrationMode } : {}),
+      });
+    } catch {
+      // 设置快照尽力而为：失败不影响主流程，下一次事件再补。
     }
   }
 
@@ -416,7 +460,9 @@ export class ClientSessionRuntime {
             : "daemon 请求审批",
       ...(isPlan
         ? {
-            planId: typeof request["planId"] === "string" ? request["planId"] : payload.approvalId,
+            // planId 兜底对齐 Desktop 语义（对抗评审二轮）：wire 未带 planId 时
+            // 不回退 approvalId——那会构造出 bogus planId 的 plan.respond。
+            ...(typeof request["planId"] === "string" ? { planId: request["planId"] } : {}),
             expectedRevision:
               typeof request["expectedRevision"] === "number" ? request["expectedRevision"] : 0,
             expectedSessionSequence:

@@ -4,9 +4,17 @@ import type { LocalUiCommandAction } from "../input/types.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { InteractiveHelpPanel, type HelpPanelCommand } from "./help-panel.js";
 import { isLocalUiCommandAction } from "./local-ui-command.js";
-import { ModelSelector, type ModelOption } from "./model-selector.js";
+import {
+  InteractiveModelSelector,
+  ModelSelector,
+  type ModelOption,
+} from "./model-selector.js";
 import { RewindSelector } from "./rewind-selector.js";
-import { SessionBrowser, type SessionBrowserSession } from "./session-browser.js";
+import {
+  InteractiveSessionBrowser,
+  SessionBrowser,
+  type SessionBrowserSession,
+} from "./session-browser.js";
 
 export interface LocalUiDialogHostContext {
   commands?: readonly HelpPanelCommand[];
@@ -15,8 +23,8 @@ export interface LocalUiDialogHostContext {
   /** 模型选择确认（3-D 客户端接线；in-process 选择器由 repl 自管）。 */
   onModelConfirm?: (model: ModelOption) => void;
   sessions?: readonly SessionBrowserSession[];
-  /** 会话选择确认 → 宿主派发（如 /resume <id>）。 */
-  onSessionConfirm?: (session: SessionBrowserSession) => void;
+  /** 会话选择确认 → 宿主派发（mode 区分 /resume 与 /fork）。 */
+  onSessionConfirm?: (session: SessionBrowserSession, mode: "resume" | "fork") => void;
   rewindSessionId?: string;
   rewindSnapshots?: readonly FileHistorySnapshotSummary[];
   onClose?: (id: string) => void;
@@ -58,19 +66,30 @@ export function createLocalUiDialogContent(
         />
       );
     case "model":
-      return (
+      // 有确认回调时渲染键盘交互版（对抗评审二轮 P0：纯渲染版无法操作，对话框
+      // 会困死 UI）；无回调保持纯浏览（兼容既有调用方）。
+      return context.onModelConfirm ? (
+        <InteractiveModelSelector
+          models={context.models ?? []}
+          currentModelId={context.currentModelId}
+          onSelect={(modelId) => context.onModelConfirm?.({ ...(context.models ?? []).find((candidate) => candidate.id === modelId) ?? { id: modelId, name: modelId } })}
+          onCancel={() => context.onClose?.(localUiDialogId("model"))}
+        />
+      ) : (
         <ModelSelector
           currentModelId={context.currentModelId}
           models={context.models ?? []}
-          callbacks={context.onModelConfirm ? { onConfirm: context.onModelConfirm } : undefined}
         />
       );
     case "session":
-      return (
-        <SessionBrowser
+      return context.onSessionConfirm ? (
+        <InteractiveSessionBrowser
           sessions={context.sessions ?? []}
-          callbacks={context.onSessionConfirm ? { onConfirm: context.onSessionConfirm } : undefined}
+          onSelect={(session, mode) => context.onSessionConfirm?.(session, mode)}
+          onCancel={() => context.onClose?.(localUiDialogId("session"))}
         />
+      ) : (
+        <SessionBrowser sessions={context.sessions ?? []} />
       );
     case "rewind":
       return (
