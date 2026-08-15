@@ -68,7 +68,8 @@ Options:
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
       --daemon-stop                  Stop the resident local daemon gracefully
-      --client                       Run the TUI as a daemon thin client (3-D tracer)
+      --local                        Run the in-process TUI (Phase 5 前的过渡逃生门)
+      --client                       Compatibility no-op: client mode is the default (Phase 4)
   -h, --help                         Show this help without starting the TUI
   -V, --version                      Show the installed version
 `;
@@ -100,6 +101,8 @@ interface ParsedCliOptions {
   help: boolean;
   version: boolean;
   daemonStop: boolean;
+  /** 过渡逃生门：进程内 TUI（Phase 5 退役）。 */
+  local: boolean;
   client: boolean;
 }
 
@@ -117,6 +120,7 @@ interface ParsedCliValues {
   fork?: string;
   "fork-session"?: string;
   "daemon-stop"?: boolean;
+  local?: boolean;
   client?: boolean;
   help?: boolean;
   version?: boolean;
@@ -149,27 +153,35 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     });
     const model = options.model ?? runtime.env.LLM_MODEL ?? defaultModelForKind(options.provider);
 
-    // 3-D Phase 2 客户端 tracer：TUI 走 daemon 瘦客户端（connectOrSpawn 拉起/
-    // 连上常驻 daemon），本进程零引擎装配。模型路由归 daemon（BYOK 旗标合并是
-    // Phase 3）；会话选择 v1 仅支持 -S 显式 sessionId。
-    if (options.client) {
-      if (sessionSelection && sessionSelection.mode !== "new" && sessionSelection.mode !== "resume") {
-        runtime.writeStderr(
-          "提示：客户端模式暂只支持新会话与 -S/--resume 显式恢复；--continue/--fork 请用进程内模式（3-D Phase 3 补全）。\n",
-        );
-      }
+    // 3-D Phase 4 默认切换：TUI 默认走 daemon 瘦客户端（connectOrSpawn 拉起/
+    // 连上常驻 daemon），本进程零引擎装配。模型路由归 daemon（BYOK 旗标经
+    // --model/--thinking 合并）；--continue/--fork/-S 启动会话三式全支持；
+    // --graph 经 session.settings.update 应用。--local 是 Phase 5 前的过渡
+    // 逃生门（进程内装配，Phase 5 删除）；--client 兼容保留（已是默认）。
+    if (!options.local) {
       const clientSessionId =
-        sessionSelection?.mode === "resume" ? sessionSelection.sessionId : undefined;
+        sessionSelection && (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
+          ? sessionSelection.sessionId
+          : undefined;
+      const forkFrom =
+        sessionSelection?.mode === "fork" ? sessionSelection.sessionId : undefined;
       if (options.provider !== "openai" && options.model === undefined) {
         runtime.writeStderr(
           "提示：客户端模式下 --provider 由模型路由隐含决定（裸旗标无 daemon 等价物），请用 --model <provider/model> 指定路由。\n",
         );
       }
+      if (options.mcpConfigPath !== undefined || options.addDirs !== undefined) {
+        runtime.writeStderr(
+          "提示：客户端模式下 --mcp-config/--add-dir 暂不支持（MCP 归 daemon 侧装配）；需要时用 --local 过渡。\n",
+        );
+      }
       await runtime.startClientRepl({
         workDir,
         ...(clientSessionId ? { sessionId: clientSessionId } : {}),
+        ...(forkFrom ? { forkFrom } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
         ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+        ...(options.graph ? { graphMode: true } : {}),
       });
       return 0;
     }
@@ -218,6 +230,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         fork: { type: "string" },
         "fork-session": { type: "string" },
         "daemon-stop": { type: "boolean" },
+        local: { type: "boolean" },
         client: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "V" },
@@ -247,6 +260,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     help: values.help === true,
     version: values.version === true,
     daemonStop: values["daemon-stop"] === true,
+    local: values.local === true,
     client: values.client === true,
   };
 }
