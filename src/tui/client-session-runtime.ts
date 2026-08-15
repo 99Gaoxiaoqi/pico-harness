@@ -5,6 +5,7 @@ import type {
   RuntimeNotificationMap,
   RuntimeParams,
   RuntimeResult,
+  RuntimeUserInput,
 } from "@pico/protocol";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type { PlanApprovalControl } from "./approval-dialogs.js";
@@ -111,21 +112,29 @@ export class ClientSessionRuntime {
     }
   }
 
-  /** 发送用户文本。返回 false = 本地拦截（斜杠命令 v1 不支持），未上送。 */
-  async sendText(text: string): Promise<boolean> {
-    if (text.trim().startsWith("/")) {
+  /** 发送用户文本。behavior 供 /steer /queue /replace 映射；返回 false = 本地拦截或发送失败。 */
+  async sendText(text: string, behavior: "auto" | "steer" | "queue" | "replace" = "auto"): Promise<boolean> {
+    if (behavior === "auto" && text.trim().startsWith("/")) {
       this.reporter.pushSystemMessage(
-        "客户端模式暂不支持斜杠命令（3-D Phase 3 将 RPC 化）。当前请直接输入文本。",
+        "斜杠命令经 /help 查看；未知命令请检查拼写（客户端命令表在 3-D Phase 3 逐批补全）。",
       );
       return false;
     }
-    this.reporter.pushUserMessage(text);
+    return this.sendInput({ kind: "text", text }, behavior);
+  }
+
+  /** 按 RuntimeUserInput 类型上送（text/skill/agent）；idempotencyKey 每次新生成。 */
+  async sendInput(
+    input: RuntimeUserInput,
+    behavior: "auto" | "steer" | "queue" | "replace" = "auto",
+  ): Promise<boolean> {
+    if (input.kind === "text") this.reporter.pushUserMessage(input.text);
     try {
       const result = await this.client.request("session.send", {
         workspacePath: this.workspacePath,
         ...(this.sessionId ? { sessionId: this.sessionId } : {}),
-        input: { kind: "text", text },
-        behavior: "auto",
+        input,
+        behavior,
         idempotencyKey: randomUUID(),
       });
       if (this.sessionId === undefined) {
@@ -140,6 +149,19 @@ export class ClientSessionRuntime {
       });
       return false;
     }
+  }
+
+  /** RPC 透传（客户端命令注册表的查询/设置类命令使用）。 */
+  request<Method extends RuntimeMethod>(
+    method: Method,
+    params: RuntimeParams<Method>,
+  ): Promise<RuntimeResult<Method>> {
+    return this.client.request(method, params);
+  }
+
+  /** 清空本地投影（/new）。 */
+  clearTranscript(): void {
+    this.reporter.clear();
   }
 
   /** 中断当前活跃 run（run.started 事件跟踪的 runId；无 run 时静默）。 */
