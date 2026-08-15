@@ -96,6 +96,57 @@ export class DesktopMemoryService {
     });
   }
 
+  /**
+   * /memory remember（TUI 直写边界）：语义与既有 in-process 命令一致——NFKC
+   * 归一化 → 安全扫描（不过即 INVALID_PARAMS）→ 幂等 createFact（同文本同
+   * factId）→ 非 active 时再激活。publish memory.changed 走既有通知口径。
+   */
+  create(workspacePath: string, text: string): RuntimeResult<"memory.create"> {
+    return this.safely(() => {
+      const normalized = text.normalize("NFKC").replaceAll(/\s+/gu, " ").trim();
+      const sanitized = sanitizeMemoryProposalCandidate({
+        kind: "project_fact",
+        title: normalized.length <= 80 ? normalized : `${normalized.slice(0, 77)}...`,
+        content: normalized,
+        reason: "User explicitly requested direct workspace memory storage.",
+        confidence: 1,
+        evidenceEventIds: ["manual-memory-command"],
+      });
+      if (sanitized.disposition !== "allow") {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          `记忆安全扫描未通过：${sanitized.safetyCodes.join(", ") || "unsafe content"}`,
+        );
+      }
+      const repository = this.repository(workspacePath);
+      const digest = createHash("sha256").update(normalized).digest("hex");
+      let fact = repository.createFact({
+        factId: `manual-fact:${digest}`,
+        kind: sanitized.kind,
+        title: sanitized.title,
+        content: sanitized.content,
+        confidence: sanitized.confidence,
+        state: "active",
+        idempotencyKey: `memory-remember:${digest}`,
+      });
+      if (fact.state !== "active") {
+        fact = repository.updateFact({
+          factId: fact.factId,
+          expectedVersion: fact.version,
+          state: "active",
+          idempotencyKey: `memory-remember-reactivate:${fact.factId}:${fact.version}`,
+        });
+      }
+      this.options.publish(workspacePath, "memory.changed", {
+        entityType: "fact",
+        entityId: fact.factId,
+        version: fact.version,
+        change: "updated",
+      });
+      return { fact: projectFact(repository, fact) };
+    });
+  }
+
   update(
     workspacePath: string,
     params: RuntimeParams<"memory.update">,

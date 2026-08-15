@@ -12,6 +12,10 @@ import type {
   SlashCommand,
 } from "../input/types.js";
 import type { ClientSessionRuntime } from "./client-session-runtime.js";
+import {
+  decodeMemoryUndoToken,
+  encodeMemoryUndoToken,
+} from "../memory/memory-command.js";
 import { snapshotSummariesFromRewindList } from "./rewind-client-bridge.js";
 
 /**
@@ -713,6 +717,273 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
         action: "message",
         message: "仓库探索已内建：直接描述目标，agent 会自行扫描代码库。",
       }),
+    }),
+    // ---- tier2 镜像（2026-08-16）：/memory /provider /cron ----
+    // 元数据与 in-process 逐字段一致（parity 漂移门比对）；执行体走 daemon RPC。
+    rpcCommand({
+      name: "memory",
+      description: "Remember a workspace fact or control workspace memory",
+      usage: "/memory remember <text>|status|off|on",
+      argumentHint: "remember <text>|status|off|on",
+      category: "workspace",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const [operation, ...rest] = input.argv;
+        try {
+          switch (operation?.toLowerCase()) {
+            case "remember": {
+              const text = rest.join(" ").trim();
+              if (!text) return msg("Usage: /memory remember <text>");
+              const { fact } = await runtime.request("memory.create", { workspacePath, text });
+              return msg(
+                `Remembered workspace fact ${fact.factId}. Undo: /memory undo ${encodeMemoryUndoToken({ factId: fact.factId, version: fact.version })}`,
+              );
+            }
+            case "status": {
+              const [settingsResult, facts, reviews] = await Promise.all([
+                runtime.request("memory.settings.get", { workspacePath }),
+                runtime.request("memory.list", { workspacePath, states: ["active"], limit: 500 }),
+                runtime.request("memory.review.list", { workspacePath, statuses: ["pending"], limit: 500 }),
+              ]);
+              return msg(
+                [
+                  `Memory: ${settingsResult.settings.enabled ? "on" : "off"}`,
+                  `Injection: ${settingsResult.settings.injectionEnabled ? "on" : "off"}`,
+                  `Review mode: ${settingsResult.settings.reviewMode}`,
+                  `Active facts: ${facts.facts.length}`,
+                  `Pending proposals: ${reviews.proposals.length}`,
+                ].join("\n"),
+              );
+            }
+            case "off":
+            case "on": {
+              const enabled = operation === "on";
+              const current = await runtime.request("memory.settings.get", { workspacePath });
+              if (
+                current.settings.enabled === enabled &&
+                current.settings.injectionEnabled === enabled
+              ) {
+                return msg(`Memory is already ${enabled ? "on" : "off"}.`);
+              }
+              await runtime.request("memory.settings.update", {
+                workspacePath,
+                expectedVersion: current.settings.version,
+                enabled,
+                injectionEnabled: enabled,
+                idempotencyKey: `memory-toggle:${enabled ? "on" : "off"}:${current.settings.version}`,
+              });
+              return msg(
+                enabled
+                  ? "Memory enabled; controlled recall is active."
+                  : "Memory disabled; recall injection and proposal extraction are off.",
+              );
+            }
+            case "undo": {
+              const token = rest[0];
+              if (!token) return msg("Usage: /memory undo <token>");
+              try {
+                const payload = decodeMemoryUndoToken(token);
+                await runtime.request("memory.update", {
+                  workspacePath,
+                  factId: payload.factId,
+                  expectedVersion: payload.version,
+                  state: "disabled",
+                  idempotencyKey: `memory-undo:${payload.factId}:${payload.version}`,
+                });
+                return msg(`Undone: workspace fact ${payload.factId} is disabled.`);
+              } catch (error) {
+                return msg(`Undo unavailable: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+            default:
+              return msg("Usage: /memory remember <text>|status|off|on");
+          }
+        } catch (error) {
+          return msg(`Memory unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
+      name: "provider",
+      description: "Manage shared user providers without exposing credentials in command arguments",
+      usage:
+        "/provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
+      argumentHint: "[list | import-env | default | delete]",
+      category: "model",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const [subcommand = "list", first, confirmation, ...rest] = input.argv;
+        if (rest.length > 0) {
+          return msg(
+            "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
+          );
+        }
+        try {
+          if (subcommand === "list" && first === undefined && confirmation === undefined) {
+            const [listed, effective] = await Promise.all([
+              runtime.request("provider.list", {}),
+              runtime.request("config.effective.get", { workspacePath }),
+            ]);
+            if (listed.providers.length === 0) {
+              return msg(
+                "No providers configured. Set complete LLM_* variables, then run /provider import-env <id> to preview an import.",
+              );
+            }
+            const defaultRoute = effective.config.defaultModelRouteId ?? "";
+            return msg(
+              listed.providers
+                .map(
+                  (provider) =>
+                    `${provider.id} · ${provider.protocol} · ${provider.origin} · credential=${provider.credentialStatus}${defaultRoute.startsWith(`${provider.id}/`) ? " · default" : ""}\n  ${provider.baseURL}\n  models: ${provider.models.join(", ") || "discovery"}`,
+                )
+                .join("\n"),
+            );
+          }
+          if (subcommand === "import-env") {
+            if (!first || (confirmation !== undefined && confirmation !== "--confirm")) {
+              return msg("Usage: /provider import-env <id> [--confirm]");
+            }
+            const baseURL = process.env.LLM_BASE_URL?.trim();
+            const defaultModel = process.env.LLM_MODEL?.trim();
+            const secret =
+              process.env.LLM_API_KEYS?.trim() || process.env.LLM_API_KEY?.trim() || "";
+            const apiKeyEnv = process.env.LLM_API_KEYS?.trim() ? "LLM_API_KEYS" : "LLM_API_KEY";
+            if (!baseURL || !defaultModel || !secret) {
+              return msg(
+                "Import unavailable: LLM_BASE_URL, LLM_MODEL and LLM_API_KEY[S] must all be set in this process.",
+              );
+            }
+            if (!/^[^/\s]+$/u.test(first)) {
+              return msg("Provider ID cannot contain whitespace or slash.");
+            }
+            const models = [
+              ...new Set(
+                [defaultModel, ...(process.env.LLM_MODELS?.split(/[\s,]+/u) ?? [])].filter(Boolean),
+              ),
+            ];
+            const normalizedEndpoint = baseURL.replace(/\/+$/u, "");
+            if (confirmation !== "--confirm") {
+              return msg(
+                [
+                  `Import preview for ${first}:`,
+                  "protocol: openai",
+                  `endpoint: ${normalizedEndpoint}`,
+                  `models: ${models.join(", ")}`,
+                  "credential: current process environment -> OS credential vault (value hidden)",
+                  `Confirm with: /provider import-env ${first} --confirm`,
+                ].join("\n"),
+              );
+            }
+            const listed = await runtime.request("provider.list", {});
+            const result = await runtime.request("provider.importEnvironment", {
+              provider: {
+                id: first,
+                protocol: "openai",
+                baseURL: normalizedEndpoint,
+                apiKeyEnv,
+                models,
+                discoverModels: true,
+              },
+              defaultModel,
+              secret,
+              expectedRevision: listed.revision,
+            });
+            return msg(`Provider imported: ${result.provider.id}（credential 已入 OS 凭据库，值不回显）。`);
+          }
+          if (subcommand === "default" && first && confirmation === undefined) {
+            if (first === "clear" || first === "none") {
+              return msg("暂不支持经客户端清除默认路由；请直接编辑 daemon 用户配置。");
+            }
+            const current = await runtime.request("config.user.get", {});
+            await runtime.request("config.user.update", {
+              defaults: { ...current.config.defaults, modelRouteId: first },
+              expectedRevision: current.revision,
+            });
+            return msg(`默认模型路由已设置：${first}。`);
+          }
+          if (subcommand === "delete" && first && confirmation === undefined) {
+            const listed = await runtime.request("provider.list", {});
+            await runtime.request("provider.delete", {
+              providerId: first,
+              expectedRevision: listed.revision,
+            });
+            return msg(`Provider deleted: ${first}。`);
+          }
+          return msg(
+            "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
+          );
+        } catch (error) {
+          return msg(`Provider command failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
+      name: "cron",
+      description: "Manage persistent YOLO cron jobs for this workspace",
+      usage:
+        "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=allow|disabled|allowlist:host1,host2] [arguments]",
+      argumentHint: "<status|list|credential|add|enable|disable|delete|runs>",
+      category: "workspace",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const [operation = "list", ...args] = input.argv;
+        try {
+          if (operation === "status") {
+            const { jobs } = await runtime.request("jobs.list", { workspacePath });
+            return msg(
+              `Cron：${jobs.length} 个 Job（${jobs.filter((job) => job.enabled).length} 个已启用），由常驻 daemon 调度。`,
+            );
+          }
+          if (operation === "list") {
+            const { jobs } = await runtime.request("jobs.list", { workspacePath });
+            if (jobs.length === 0) return msg("没有 Cron Job。");
+            return msg(
+              jobs
+                .map(
+                  (job) =>
+                    `${job.jobId} · ${job.enabled ? "enabled" : "disabled"} · ${job.schedule} · ${job.name}`,
+                )
+                .join("\n"),
+            );
+          }
+          if (operation === "runs") {
+            const jobId = args[0];
+            if (!jobId) return msg("Usage: /cron runs <job-id>");
+            const { runs } = await runtime.request("jobs.history", { workspacePath, jobId });
+            if (runs.length === 0) return msg("没有运行记录。");
+            return msg(
+              runs.map((run) => `${run.runId} · ${run.status} · ${new Date(run.startedAt ?? 0).toISOString()}`).join("\n"),
+            );
+          }
+          if (operation === "add" || operation === "credential") {
+            return msg(
+              `/${operation} 的自动化创建含凭据注入与工具网络策略门，暂未镜像到客户端（tier2 后续）；现有 Job 的管理（list/enable/disable/delete/runs）可用。`,
+            );
+          }
+          const jobId = args[0];
+          if (!jobId) return msg(`Usage: /cron ${operation} <job-id>`);
+          if (operation === "enable" || operation === "disable") {
+            const { job } = await runtime.request("jobs.setEnabled", {
+              workspacePath,
+              jobId,
+              enabled: operation === "enable",
+            });
+            return msg(`Cron job ${job.jobId} 已${operation === "enable" ? "启用" : "停用"}。`);
+          }
+          if (operation === "delete") {
+            const { deleted } = await runtime.request("jobs.delete", { workspacePath, jobId });
+            return msg(deleted ? `Cron job ${jobId} 已删除。` : `Cron job ${jobId} 不存在。`);
+          }
+          return msg(
+            "Usage: /cron <status|list|credential|add|enable|disable|delete|runs> [arguments]",
+          );
+        } catch (error) {
+          return msg(`Cron failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
     }),
   ];
   return new CommandRegistry(commands as readonly RegistrySlashCommand[]);

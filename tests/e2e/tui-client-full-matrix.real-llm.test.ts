@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -307,6 +308,48 @@ realModelTest(
       reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
       "fork 会话应保留真实模型回复",
     );
+
+    // /changes 单文件恢复真机链（tier2 收口）：fork 会话上第三回合让模型真实
+    // 写文件 → checkpoint 追踪该文件 → rewind.changes 逐文件 diff + 指纹 →
+    // restoreFile 单文件还原（created → 恢复=删除）。
+    assert.ok(
+      await sendAndDrain(
+        runtime,
+        reporter,
+        "请使用 write_file 工具在当前工作目录创建文件 matrix-changes.txt，内容为一行 hello。",
+      ),
+      "回合三（写文件）应完成",
+    );
+    const changedFile = join(workspaceDir, "matrix-changes.txt");
+    const fileCreated = await waitForCondition(() => existsSync(changedFile), 30_000);
+    assert.ok(fileCreated, "模型应已真实写入 matrix-changes.txt（确定性锚点=文件存在）");
+
+    const listAfter = await client.request("rewind.list", {
+      workspacePath: workspaceDir,
+      sessionId: applied.sessionId,
+    });
+    const checkpointsAfter = listAfter.checkpoints as unknown as { checkpointId: string }[];
+    const third = checkpointsAfter[checkpointsAfter.length - 1]!;
+    const changesResult = await client.request("rewind.changes", {
+      workspacePath: workspaceDir,
+      sessionId: applied.sessionId,
+      checkpointId: third.checkpointId,
+    });
+    const entry = (
+      changesResult.files as unknown as { path: string; fingerprint: string }[]
+    ).find((file) => file.path.endsWith("matrix-changes.txt"));
+    assert.ok(entry, `rewind.changes 应列出该文件（实际 ${JSON.stringify(changesResult.files)}）`);
+    const restored = await client.request("rewind.restoreFile", {
+      workspacePath: workspaceDir,
+      sessionId: applied.sessionId,
+      checkpointId: third.checkpointId,
+      path: entry!.path,
+      expectedFingerprint: entry!.fingerprint,
+    });
+    assert.equal(restored.restored, true, "单文件恢复应成功");
+    const fileGone = await waitForCondition(() => !existsSync(changedFile), 30_000);
+    assert.ok(fileGone, "created 文件的恢复语义 = 还原到消息之前（文件消失）");
+
     runtime.dispose();
   },
 );

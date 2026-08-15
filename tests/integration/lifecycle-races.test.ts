@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
@@ -11,13 +11,11 @@ import {
 } from "../../apps/desktop/src/main/daemon-controller.js";
 import {
   installLocalDaemonShutdownHandlers,
-  LocalDaemonAlreadyRunningError,
   LocalDaemonHost,
   WorkspaceRegistrationStore,
   WorkspaceRuntimeRegistry,
   WorkspaceRuntimeService,
   type DisposableLocalRuntimeService,
-  type LocalDaemonEndpoint,
 } from "../../src/daemon/index.js";
 import { loadHookSnapshot } from "../../src/hooks/config.js";
 import { HookConfigReloader } from "../../src/hooks/config/reloader.js";
@@ -234,12 +232,10 @@ test("Workspace close is stable when abort listeners synchronously close again",
   await runtime.waitForOwnershipRelease();
 });
 
-test("Daemon keeps singleton ownership until a timed-out executor actually settles", async (context) => {
+test("Daemon keeps service ownership until a timed-out executor actually settles", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-ownership-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
   await mkdir(picoHome, { recursive: true });
@@ -267,8 +263,6 @@ test("Daemon keeps singleton ownership until a timed-out executor actually settl
     },
   });
   const host = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service,
   });
@@ -287,26 +281,8 @@ test("Daemon keeps singleton ownership until a timed-out executor actually settl
   await entered.promise;
 
   await completesWithin(host.stop(), 500, "daemon stop exceeded its bounded drain");
-  assert.equal(await pathExists(lockPath), true);
   const beforeSettle = await service.replayEvents({ workspacePath: workspace });
   assert.equal(beforeSettle.events.filter((event) => event.topic === "run.finished").length, 1);
-
-  const earlyService = new WorkspaceRuntimeService({
-    env: { PICO_HOME: join(root, "early-pico-home") },
-    registrationStore,
-    execute: async () => undefined,
-  });
-  const earlyHost = createLifecycleTestHost({
-    endpoint,
-    lockPath,
-    registrationStore,
-    service: earlyService,
-  });
-  candidates.push(earlyHost);
-  await assert.rejects(
-    earlyHost.start(),
-    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
-  );
 
   release.resolve();
   await executorReturned.promise;
@@ -315,7 +291,6 @@ test("Daemon keeps singleton ownership until a timed-out executor actually settl
   assert.equal(runtime.getRun(runId)?.status, "cancelled");
   assert.equal(runtime.getRun(runId)?.result, undefined);
   await assert.rejects(service.replayEvents({ workspacePath: workspace }), /已关闭/u);
-  await waitUntilAsync(async () => !(await pathExists(lockPath)));
 
   const restartedService = new WorkspaceRuntimeService({
     env: { PICO_HOME: join(root, "restarted-pico-home") },
@@ -323,8 +298,6 @@ test("Daemon keeps singleton ownership until a timed-out executor actually settl
     execute: async () => undefined,
   });
   const restartedHost = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service: restartedService,
   });
@@ -338,8 +311,6 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-task-runner-ownership-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
   await mkdir(picoHome, { recursive: true });
@@ -362,8 +333,6 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
     execute: async () => undefined,
   });
   const host = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service,
   });
@@ -392,26 +361,8 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
   await entered.promise;
 
   await completesWithin(host.stop(), 500, "daemon stop waited forever for a worktree runner");
-  assert.equal(await pathExists(lockPath), true);
   assert.equal(runtime.hasPendingOwnership(), true);
   assert.equal(taskHost.jobService.get(task.taskId)?.job.status, "running");
-
-  const earlyService = new WorkspaceRuntimeService({
-    env: { PICO_HOME: join(root, "early-pico-home") },
-    registrationStore,
-    execute: async () => undefined,
-  });
-  const earlyHost = createLifecycleTestHost({
-    endpoint,
-    lockPath,
-    registrationStore,
-    service: earlyService,
-  });
-  candidates.push(earlyHost);
-  await assert.rejects(
-    earlyHost.start(),
-    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
-  );
 
   release.resolve();
   await runnerReturned.promise;
@@ -427,7 +378,6 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
   } finally {
     probe.close();
   }
-  await waitUntilAsync(async () => !(await pathExists(lockPath)));
 
   const restartedService = new WorkspaceRuntimeService({
     env: { PICO_HOME: join(root, "restarted-pico-home") },
@@ -435,8 +385,6 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
     execute: async () => undefined,
   });
   const restartedHost = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service: restartedService,
   });
@@ -495,67 +443,8 @@ test("TaskHost fences a task admission whose pending subscriber synchronously cl
   }
 });
 
-test("Daemon retains its singleton lock when the shutdown ownership fence rejects", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-fence-reject-"));
-  const picoHome = join(root, "pico-home");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
-  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
-  const rejectedFence = deferred();
-  const unhandledRejections: unknown[] = [];
-  const onUnhandledRejection = (reason: unknown): void => {
-    unhandledRejections.push(reason);
-  };
-  process.on("unhandledRejection", onUnhandledRejection);
-  context.after(async () => {
-    process.off("unhandledRejection", onUnhandledRejection);
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const service = new WorkspaceRuntimeService({
-    env: { PICO_HOME: picoHome },
-    registrationStore,
-    execute: async () => undefined,
-  });
-  service.shutdownOwnershipFence = () => ({
-    pending: true,
-    released: rejectedFence.promise,
-  });
-  const host = createLifecycleTestHost({
-    endpoint,
-    lockPath,
-    registrationStore,
-    service,
-  });
-  await host.start();
-  await completesWithin(host.stop(), 500, "daemon stop waited for a rejecting ownership fence");
-
-  rejectedFence.reject(new Error("ownership release failed"));
-  await waitForImmediate();
-  assert.deepEqual(unhandledRejections, []);
-  assert.equal(await pathExists(lockPath), true);
-
-  const candidateService = new WorkspaceRuntimeService({
-    env: { PICO_HOME: join(root, "candidate-pico-home") },
-    registrationStore,
-    execute: async () => undefined,
-  });
-  const candidate = createLifecycleTestHost({
-    endpoint,
-    lockPath,
-    registrationStore,
-    service: candidateService,
-  });
-  await assert.rejects(
-    candidate.start(),
-    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
-  );
-});
-
 test("Daemon stop waits for an in-flight start before closing ownership", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-start-stop-"));
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const listEntered = deferred();
   const releaseList = deferred();
@@ -581,8 +470,6 @@ test("Daemon stop waits for an in-flight start before closing ownership", async 
     return originalClose();
   };
   const host = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service,
   });
@@ -597,21 +484,17 @@ test("Daemon stop waits for an in-flight start before closing ownership", async 
   const stopping = host.stop();
   assert.strictEqual(host.stop(), stopping);
   await waitForImmediate();
-  assert.equal(serviceCloseCount, 0);
-  assert.equal(await pathExists(lockPath), true);
+  assert.equal(serviceCloseCount, 0, "start 未完成前不得关 service");
 
   releaseList.resolve();
   await starting;
   await stopping;
   assert.equal(host.status, "stopped");
   assert.equal(serviceCloseCount, 1);
-  assert.equal(await pathExists(lockPath), false);
 });
 
 test("Daemon permanently consumes a service whose close rejects", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-service-reject-"));
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const service = new WorkspaceRuntimeService({
     env: { PICO_HOME: join(root, "pico-home") },
@@ -623,8 +506,6 @@ test("Daemon permanently consumes a service whose close rejects", async (context
   };
   service.shutdownOwnershipFence = () => ({ pending: false, released: Promise.resolve() });
   const host = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service,
   });
@@ -638,7 +519,6 @@ test("Daemon permanently consumes a service whose close rejects", async (context
   await assert.rejects(host.stop(), /service close failed/u);
   assert.equal(host.status, "stopped");
   await assert.rejects(host.start(), /host 已关闭/u);
-  assert.equal(await pathExists(lockPath), false);
 
   const restartedService = new WorkspaceRuntimeService({
     env: { PICO_HOME: join(root, "restarted-pico-home") },
@@ -646,8 +526,6 @@ test("Daemon permanently consumes a service whose close rejects", async (context
     execute: async () => undefined,
   });
   const restartedHost = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service: restartedService,
   });
@@ -656,10 +534,8 @@ test("Daemon permanently consumes a service whose close rejects", async (context
   await restartedHost.stop();
 });
 
-test("Daemon retains its lock when service close fails without an ownership fence", async (context) => {
+test("Daemon stop fails loudly when service close fails without an ownership fence", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-no-fence-"));
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   const service: DisposableLocalRuntimeService = {
     handle: async () => ({}),
@@ -670,8 +546,6 @@ test("Daemon retains its lock when service close fails without an ownership fenc
     },
   };
   const host = createLifecycleTestHost({
-    endpoint,
-    lockPath,
     registrationStore,
     service,
   });
@@ -679,30 +553,11 @@ test("Daemon retains its lock when service close fails without an ownership fenc
 
   await host.start();
   await assert.rejects(host.stop(), /unfenced service close failed/u);
-  assert.equal(await pathExists(lockPath), true);
-
-  const candidateService = new WorkspaceRuntimeService({
-    env: { PICO_HOME: join(root, "candidate-pico-home") },
-    registrationStore,
-    execute: async () => undefined,
-  });
-  const candidate = createLifecycleTestHost({
-    endpoint,
-    lockPath,
-    registrationStore,
-    service: candidateService,
-  });
-  await assert.rejects(
-    candidate.start(),
-    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
-  );
 });
 
-test("Daemon retains its lock when a Cron runtime cannot close", async (context) => {
+test("Daemon stop fails loudly when a Cron runtime cannot close", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-cron-failure-"));
   const workspace = join(root, "workspace");
-  const endpoint = testEndpoint(root);
-  const lockPath = join(root, "runtime.lock");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
   await registrationStore.register(workspace);
@@ -711,8 +566,8 @@ test("Daemon retains its lock when a Cron runtime cannot close", async (context)
     registrationStore,
     execute: async () => undefined,
   });
+  // 注：旧传输单例锁保留断言随 Phase 5 旧 socket 退役移除；保留关闭失败传播。
   const host = new LocalDaemonHost({
-    endpoint,
     registrationStore,
     service,
     cronRuntimeFactory: {
@@ -724,30 +579,12 @@ test("Daemon retains its lock when a Cron runtime cannot close", async (context)
         },
       }),
     },
-    lockOptions: lifecycleLockOptions(lockPath),
   });
   context.after(() => rm(root, { recursive: true, force: true }));
 
   await host.start();
   assert.equal(host.registeredWorkspaces.length, 1);
   await assert.rejects(host.stop(), /cron runtime close failed/u);
-  assert.equal(await pathExists(lockPath), true);
-
-  const candidateService = new WorkspaceRuntimeService({
-    env: { PICO_HOME: join(root, "candidate-pico-home") },
-    registrationStore,
-    execute: async () => undefined,
-  });
-  const candidate = createLifecycleTestHost({
-    endpoint,
-    lockPath,
-    registrationStore,
-    service: candidateService,
-  });
-  await assert.rejects(
-    candidate.start(),
-    (error: unknown) => error instanceof LocalDaemonAlreadyRunningError,
-  );
 });
 
 test("Daemon signal handlers consume a rejecting stop promise", async (context) => {
@@ -1199,8 +1036,6 @@ function deferred<T = void>(): Deferred<T> {
 }
 
 function createLifecycleTestHost(options: {
-  endpoint: LocalDaemonEndpoint;
-  lockPath: string;
   registrationStore: WorkspaceRegistrationStore;
   service: DisposableLocalRuntimeService;
 }): LocalDaemonHost {
@@ -1211,16 +1046,7 @@ function createLifecycleTestHost(options: {
         throw new Error("lifecycle test must not create a Cron runtime");
       },
     },
-    lockOptions: lifecycleLockOptions(options.lockPath),
   });
-}
-
-function lifecycleLockOptions(lockPath: string) {
-  return {
-    lockPath,
-    ping: async () => false,
-    isProcessAlive: () => true,
-  };
 }
 
 async function writeCommandHook(path: string, command: string): Promise<void> {
@@ -1234,21 +1060,6 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await delay(10);
   assert.equal(predicate(), true, `condition was not met within ${timeoutMs}ms`);
-}
-
-async function waitUntilAsync(predicate: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate()) && Date.now() < deadline) await delay(10);
-  assert.equal(await predicate(), true, `condition was not met within ${timeoutMs}ms`);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function completesWithin(
@@ -1312,23 +1123,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
   return value;
-}
-
-function testEndpoint(root: string): LocalDaemonEndpoint {
-  // Windows 上用 named pipe：AF_UNIX bind 在部分 Windows 环境（如受限沙箱）返回
-  // EACCES，且 pipe 本就是 daemon 的 win32 正式传输。pipe 名带随机后缀防并行冲突。
-  if (process.platform === "win32") {
-    return {
-      transport: "pipe",
-      address: `\\\\.\\pipe\\pico-lifecycle-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
-      authTokenPath: join(root, "runtime.auth"),
-    };
-  }
-  return {
-    transport: "unix",
-    address: join(root, "runtime.sock"),
-    authTokenPath: join(root, "runtime.auth"),
-  };
 }
 
 async function initializeGitRepository(cwd: string): Promise<void> {

@@ -16,7 +16,6 @@ export * from "./runtime-host-candidate.js";
 export * from "./runtime-host-composition.js";
 export * from "./runtime-host-events.js";
 export * from "./runtime-host-operations.js";
-export * from "./server.js";
 export * from "./service.js";
 export * from "./user-daemon-installer.js";
 export * from "./workspace-registry.js";

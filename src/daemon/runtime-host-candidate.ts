@@ -163,7 +163,7 @@ async function createPicoDaemonComposition(
   const residency = context.acquireResidency();
 
   const services = createProductionRuntimeServices(options);
-  const daemonHost = assembleProductionDaemonHost(services, options, true);
+  const daemonHost = assembleProductionDaemonHost(services, options);
   const bridge = createRuntimeHostComposition({
     // service.close 由 daemonHost.stop() 的 closeService 单次性持有；桥接层拿
     // 不带 close 的视图，避免双重 close。

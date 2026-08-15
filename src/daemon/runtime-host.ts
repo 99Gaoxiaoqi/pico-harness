@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { logger } from "../observability/logger.js";
-import type { LocalDaemonEndpoint } from "./endpoint.js";
-import { removeLocalDaemonEndpoint, resolveLocalDaemonEndpoint } from "./endpoint.js";
-import { LocalDaemonInstanceLock, type LocalDaemonInstanceLockOptions } from "./instance-lock.js";
-import { LocalRuntimeDaemon } from "./server.js";
 import type { DisposableLocalRuntimeService, ShutdownOwnershipFence } from "./service.js";
 import type {
   CronWorkspaceRuntimeFactory,
@@ -19,49 +15,33 @@ type HostState = "stopped" | "starting" | "running" | "stopping";
 export interface LocalDaemonHostOptions {
   service: DisposableLocalRuntimeService;
   cronRuntimeFactory: CronWorkspaceRuntimeFactory;
-  endpoint?: LocalDaemonEndpoint;
   registrationStore?: WorkspaceRegistrationStore;
   ownerId?: string;
-  lockOptions?: Omit<LocalDaemonInstanceLockOptions, "endpoint">;
   onWorkspaceError?: (workspacePath: string, error: unknown) => void;
-  /**
-   * services-only 模式（3-B-3）：只编排 service + cron runtime 生命周期与
-   * shutdown fence 链，不持有旧传输（endpoint/instance-lock/LocalRuntimeDaemon）。
-   * runtime-host candidate 嵌入此模式复用已测试的关停语义——单例与传输由
-   * kernel 的 flock 选主与 NDJSON endpoint 承担。
-   */
-  servicesOnly?: boolean;
 }
 
 /**
  * Internal production lifetime owner. The executor remains dependency-injected;
  * this host never imports or silently falls back to the foreground AgentRuntime.
+ *
+ * 3-D Phase 5（2026-08-16）：旧传输（endpoint/instance-lock/LocalRuntimeDaemon）
+ * 已退役——本类只编排 service + cron runtime 生命周期与 shutdown fence 链，
+ * 单例与传输由 kernel 的 flock 选主与 NDJSON endpoint 承担。
  */
 export class LocalDaemonHost {
-  readonly endpoint: LocalDaemonEndpoint | undefined;
   readonly ownerId: string;
-  private readonly daemon: LocalRuntimeDaemon | undefined;
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly cronRuntimes = new Map<string, ManagedCronWorkspaceRuntime>();
   private readonly cronShutdownRuntimes = new Map<string, ManagedCronWorkspaceRuntime>();
   private readonly cronShutdownFailures = new Map<string, unknown>();
-  private instanceLock?: LocalDaemonInstanceLock;
   private state: HostState = "stopped";
   private serviceClosed = false;
-  private serviceCloseSucceeded = false;
   private serviceClosePromise?: Promise<void>;
   private startPromise?: Promise<void>;
   private stopPromise?: Promise<void>;
   private reconcileQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: LocalDaemonHostOptions) {
-    if (options.servicesOnly) {
-      this.endpoint = undefined;
-      this.daemon = undefined;
-    } else {
-      this.endpoint = options.endpoint ?? resolveLocalDaemonEndpoint();
-      this.daemon = new LocalRuntimeDaemon({ endpoint: this.endpoint, service: options.service });
-    }
     this.ownerId = options.ownerId ?? `daemon:${process.pid}:${randomUUID()}`;
     this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
   }
@@ -98,16 +78,7 @@ export class LocalDaemonHost {
 
   private async startOnce(): Promise<void> {
     try {
-      if (this.daemon && this.endpoint) {
-        this.instanceLock = await LocalDaemonInstanceLock.acquire({
-          endpoint: this.endpoint,
-          ...this.options.lockOptions,
-        });
-        // Safe only after the singleton lock and active protocol ping both succeeded.
-        await removeLocalDaemonEndpoint(this.endpoint);
-      }
       await this.reconcileRegisteredWorkspaces();
-      if (this.daemon) await this.daemon.start();
       this.state = "running";
       for (const runtime of this.cronRuntimes.values()) runtime.start();
     } catch (error) {
@@ -262,14 +233,6 @@ export class LocalDaemonHost {
 
   private async closeResources(): Promise<void> {
     await this.reconcileQueue;
-    let daemonCloseError: unknown;
-    if (this.daemon) {
-      try {
-        await this.daemon.stop();
-      } catch (error) {
-        daemonCloseError = error;
-      }
-    }
     const runtimes = [
       ...new Set([...this.cronRuntimes.values(), ...this.cronShutdownRuntimes.values()]),
     ];
@@ -291,34 +254,7 @@ export class LocalDaemonHost {
     const cronOwnershipFailure = cronOwnership.find(
       (ownership) => ownership.error !== undefined,
     )?.error;
-    const cronOwnershipFences = cronOwnership.flatMap((ownership) =>
-      ownership.fence ? [ownership.fence] : [],
-    );
-    const cronOwnershipFence: ShutdownOwnershipFence | undefined =
-      cronOwnershipFences.length > 0
-        ? {
-            pending: cronOwnershipFences.some((fence) => fence.pending),
-            released: Promise.all(cronOwnershipFences.map((fence) => fence.released)).then(
-              () => undefined,
-            ),
-          }
-        : undefined;
-    void cronOwnershipFence?.released.catch(() => undefined);
-    try {
-      await this.releaseInstanceLockWhenSafe({
-        unfencedResourcesClosed:
-          daemonCloseError === undefined &&
-          runtimeCloseFailure === undefined &&
-          priorRuntimeCloseFailure.done === true &&
-          cronOwnershipFailure === undefined,
-        serviceCloseSucceeded: this.serviceCloseSucceeded,
-        additionalFences: cronOwnershipFence ? [cronOwnershipFence] : [],
-      });
-    } catch (error) {
-      if (serviceCloseError === undefined) serviceCloseError = error;
-    }
     if (serviceCloseError !== undefined) throw serviceCloseError;
-    if (daemonCloseError !== undefined) throw daemonCloseError;
     if (runtimeCloseFailure?.status === "rejected") throw runtimeCloseFailure.reason;
     if (priorRuntimeCloseFailure.done !== true) throw priorRuntimeCloseFailure.value;
     if (cronOwnershipFailure !== undefined) throw cronOwnershipFailure;
@@ -336,54 +272,11 @@ export class LocalDaemonHost {
     });
     this.serviceClosePromise = closePromise;
     try {
-      Promise.resolve(this.options.service.close?.()).then(() => {
-        this.serviceCloseSucceeded = true;
-        resolveClose();
-      }, rejectClose);
+      Promise.resolve(this.options.service.close?.()).then(resolveClose, rejectClose);
     } catch (error) {
       rejectClose(error);
     }
     return closePromise;
-  }
-
-  private async releaseInstanceLockWhenSafe(options: {
-    unfencedResourcesClosed: boolean;
-    serviceCloseSucceeded: boolean;
-    additionalFences?: readonly ShutdownOwnershipFence[];
-  }): Promise<void> {
-    const instanceLock = this.instanceLock;
-    if (!instanceLock) return;
-    const serviceFence = this.options.service.shutdownOwnershipFence?.();
-    if (!options.unfencedResourcesClosed || (!options.serviceCloseSucceeded && !serviceFence)) {
-      logger.error(
-        { lockPath: instanceLock.lockPath },
-        "Daemon shutdown could not prove ownership release; retaining singleton lock",
-      );
-      return;
-    }
-    const fences = [serviceFence, ...(options.additionalFences ?? [])].filter(
-      (fence): fence is ShutdownOwnershipFence => fence !== undefined,
-    );
-    const ownershipRelease = Promise.all(fences.map((fence) => fence.released)).then(
-      () => undefined,
-    );
-    if (!fences.some((fence) => fence.pending)) {
-      await ownershipRelease;
-      await instanceLock.release();
-      if (this.instanceLock === instanceLock) this.instanceLock = undefined;
-      return;
-    }
-
-    const deferredRelease = ownershipRelease.then(async () => {
-      await instanceLock.release();
-      if (this.instanceLock === instanceLock) this.instanceLock = undefined;
-    });
-    void deferredRelease.catch((error: unknown) => {
-      logger.error(
-        { error, lockPath: instanceLock.lockPath },
-        "Daemon shutdown ownership fence failed; retaining singleton lock",
-      );
-    });
   }
 }
 

@@ -627,6 +627,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           this.withTrustedMemory(params.workspacePath, (canonical) =>
             this.memoryService.get(canonical, params.factId),
           ),
+        create: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.create(canonical, params.text),
+          ),
         update: (params) =>
           this.withTrustedMemory(params.workspacePath, (canonical) =>
             this.memoryService.update(canonical, params),
