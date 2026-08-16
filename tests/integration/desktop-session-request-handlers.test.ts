@@ -25,6 +25,8 @@ test("desktop session handlers keep protocol mapping separate from the service o
     forkSession: async () => ({ session: {}, sourceSessionId: "source" }),
     compactSession: async () => ({ session: {}, compacted: true }),
     getRuntimeSessionSettings: async () => ({ settings: {} }),
+    getSessionContextReport: async () => ({ context: {} }),
+    addSessionDirectory: async () => ({ directories: [], added: true }),
     updateRuntimeSessionSettings: async () => ({ settings: {} }),
     getGoal: async () => ({ goal: null }),
     sendSession: async (params) => {

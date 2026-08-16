@@ -41,6 +41,15 @@ export interface DesktopSessionRequestContext {
     workspacePath: string,
     sessionId: string,
   ) => Awaitable<JsonValue>;
+  readonly getSessionContextReport: (
+    workspacePath: string,
+    sessionId: string,
+  ) => Awaitable<JsonValue>;
+  readonly addSessionDirectory: (
+    workspacePath: string,
+    sessionId: string,
+    path: string,
+  ) => Awaitable<JsonValue>;
   readonly updateRuntimeSessionSettings: (
     params: RuntimeRequest<"session.settings.update">["params"],
   ) => Awaitable<JsonValue>;
@@ -83,7 +92,9 @@ export function createDesktopSessionRequestHandlers(
   | "session.fork"
   | "session.compact"
   | "session.settings.get"
+  | "session.context.get"
   | "session.settings.update"
+  | "session.directories.add"
   | "goal.get"
   | "session.send"
   | "session.transcript"
@@ -129,6 +140,14 @@ export function createDesktopSessionRequestHandlers(
       context.compactSession(request.params.workspacePath, request.params.sessionId),
     "session.settings.get": (request) =>
       context.getRuntimeSessionSettings(request.params.workspacePath, request.params.sessionId),
+    "session.context.get": (request) =>
+      context.getSessionContextReport(request.params.workspacePath, request.params.sessionId),
+    "session.directories.add": (request) =>
+      context.addSessionDirectory(
+        request.params.workspacePath,
+        request.params.sessionId,
+        request.params.path,
+      ),
     "session.settings.update": (request) => context.updateRuntimeSessionSettings(request.params),
     "goal.get": (request) =>
       context.getGoal(request.params.workspacePath, request.params.sessionId),

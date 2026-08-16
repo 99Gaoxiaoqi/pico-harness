@@ -69,6 +69,47 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           return { session: sessionRecord(String(params.sessionId ?? "s1")) };
         case "session.settings.get":
           return { settings };
+        case "session.context.get":
+          return {
+            context: {
+              routeId: "p1/m1",
+              estimatedInputTokens: 1_200,
+              contextWindowTokens: 200_000,
+              reservedOutputTokens: 4_096,
+              safetyMarginTokens: 512,
+              inputBudgetTokens: 195_392,
+              remainingTokens: 194_192,
+              usedPercent: 0.6,
+              estimation: "estimated",
+              contextLimitSource: "provider_default",
+              outputLimitSource: "provider_default",
+              capabilities: { vision: true, reasoning: true, toolCall: true, cache: false },
+            },
+          };
+        case "session.directories.add":
+          return { directories: ["C:\\ext", "C:\\more"], added: true };
+        case "hooks.manage":
+          if (params.action === "list") {
+            return {
+              result: {
+                items: [
+                  {
+                    id: "hook_1",
+                    event: "UserPromptSubmit",
+                    type: "command",
+                    source: { kind: "extension", path: "C:\\ws\\.pico\\hooks" },
+                    status: "active",
+                    order: 1,
+                  },
+                ],
+              },
+            };
+          }
+          if (params.action === "review") {
+            return { result: { review: { id: "hook_1", event: "UserPromptSubmit", handler: { command: "echo hi" } } } };
+          }
+          if (params.action === "reload") return { result: { reloaded: true } };
+          return { result: { ok: true } };
         case "session.settings.update":
           return { settings: { ...settings, ...(params as Record<string, unknown>) } };
         case "session.rename":
@@ -725,6 +766,109 @@ test("client commands: /mcp status/enable/disable map to mcp.* RPCs with explici
   assert.match(String(usage.result?.message), /Usage: \/mcp/);
 });
 
+test("client commands: /context and /snapshots map to session.context.get / rewind.list", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // /context：session.context.get（BLOCKED 收口——daemon 复用 createModelContextReport）。
+  harness.requests.length = 0;
+  const ctx = await run("/context");
+  const ctxText = String(ctx.result?.message);
+  assert.match(ctxText, /Context \(p1\/m1\)/);
+  assert.match(ctxText, /used=0.6%/);
+  assert.match(ctxText, /capabilities: vision,reasoning,tool-call/);
+  const contextRequest = harness.requests.at(-1);
+  assert.equal(contextRequest?.method, "session.context.get");
+  assert.deepEqual(contextRequest?.params, { workspacePath: "C:\\ws", sessionId: "s1" });
+  const argRejected = await run("/context extra");
+  assert.match(String(argRejected.result?.message), /Usage: \/context/);
+
+  // /snapshots：rewind.* 等价能力纯镜像（含 alias）。
+  harness.requests.length = 0;
+  const snaps = await run("/snapshots");
+  assert.match(String(snaps.result?.message), /Rewind/);
+  assert.match(String(snaps.result?.message), /第一条 prompt/);
+  assert.equal(harness.requests.at(-1)?.method, "rewind.list");
+  assert.equal((snaps.result?.data as unknown[])?.length, 2);
+  await run("/snapshot");
+  assert.equal(harness.requests.at(-1)?.method, "rewind.list", "alias /snapshot 同链路");
+});
+
+test("client commands: /add-dir maps to session.directories.add / settings list", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // 无参：settings.get 的 additionalDirectories 列表（fake 未配置 → 空提示）。
+  harness.requests.length = 0;
+  const empty = await run("/add-dir");
+  assert.match(String(empty.result?.message), /No workspace roots/);
+  assert.equal(harness.requests.at(-1)?.method, "session.settings.get");
+
+  // 有参：session.directories.add（BLOCKED 收口——daemon 校验+持久化）。
+  harness.requests.length = 0;
+  const added = await run("/add-dir C:\\ext");
+  assert.match(String(added.result?.message), /Workspace directory added: C:\\ext/);
+  const addRequest = harness.requests.at(-1);
+  assert.equal(addRequest?.method, "session.directories.add");
+  assert.deepEqual(addRequest?.params, {
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    path: "C:\\ext",
+  });
+});
+
+test("client commands: /hooks maps to hooks.manage six actions", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // list（无参）→ hooks.manage list；review → 结构化输出。
+  harness.requests.length = 0;
+  const listed = await run("/hooks");
+  assert.match(String(listed.result?.message), /hook_1\s+UserPromptSubmit\s+command\s+active/);
+  const listRequest = harness.requests.at(-1);
+  assert.equal(listRequest?.method, "hooks.manage");
+  assert.deepEqual(listRequest?.params, { workspacePath: "C:\\ws", action: "list" });
+  harness.requests.length = 0;
+  const reviewed = await run("/hooks review hook_1");
+  assert.match(String(reviewed.result?.message), /echo hi/);
+  assert.equal(harness.requests.at(-1)?.params.handlerId, "hook_1");
+
+  // trust/enable/disable → 同一方法不同 action；reload → reloaded 文案。
+  for (const action of ["trust", "enable", "disable"]) {
+    harness.requests.length = 0;
+    const outcome = await run(`/hooks ${action} hook_1`);
+    assert.match(
+      String(outcome.result?.message),
+      /Trusted|Enabled|Disabled Hook hook_1/,
+      `${action} 应回显动作`,
+    );
+    assert.equal(harness.requests.at(-1)?.params.action, action);
+    assert.equal(harness.requests.at(-1)?.params.handlerId, "hook_1");
+  }
+  harness.requests.length = 0;
+  const reloaded = await run("/hooks reload");
+  assert.match(String(reloaded.result?.message), /Hooks reloaded/);
+  assert.equal(harness.requests.at(-1)?.params.action, "reload");
+
+  // 未知动作 → usage（不发 RPC）。
+  harness.requests.length = 0;
+  const bogus = await run("/hooks bogus");
+  assert.match(String(bogus.result?.message), /Usage: \/hooks/);
+  assert.equal(harness.requests.length, 0, "未知动作不发 RPC");
+});
+
 test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
   // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
   // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
@@ -819,15 +963,16 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
   // BLOCKED=协议缺口（注释标缺失 RPC）；DEFERRED=优先级（RPC 已在，tier2 镜像）。
   const deferred = new Set([
     // BLOCKED：协议/边界缺口
-    "context", // 模型路由上下文是本地引擎态，无 RPC
     "operations", // 存储操作恢复改共享态，须 daemon 侧
-    "snapshots", // 依赖本地 fileHistory 快照语义（rewind.* 已覆盖等价能力）
-    "add-dir", // session.settings 参数无此字段
-    "plugin", "hooks", // 会话运行时宿主面板
+    "plugin", // 信任流服务端化未镜像
   ]);
   // 注：/mcp 已镜像（2026-08-16 BLOCKED 收口——状态=effective.list+config.mcpServers
   // 拼合、enable/disable=mcp.user.setEnabled 新协议方法；reload/活连接类子命令
   // 明确降级提示，执行体边界而非命令缺失）。
+  // 注：/context 已镜像（session.context.get 新协议方法，daemon 复用
+  // createModelContextReport）；/snapshots 已镜像（rewind.* 等价能力，纯客户端）；
+  // /add-dir 已镜像（session.directories.add 新协议方法，daemon 校验+持久化）；
+  // /hooks 已镜像（hooks.manage 单方法六动作，daemon 每请求装配管理面）。
   // 注：/memory /provider /cron 已镜像（2026-08-16 tier2 收口——memory.create
   // 新协议方法 + provider.*/config.user.* + jobs.*）。/cron 的 add/credential
   // 子命令（automation.create 凭据注入门）与 /provider default clear 明确降级

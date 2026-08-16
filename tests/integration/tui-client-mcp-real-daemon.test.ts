@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseStrictRuntimeParams } from "@pico/protocol";
+import {
+  readHostRegistration,
+  resolveRootControlNamespace,
+  resolveStorageRoot,
+} from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
@@ -78,7 +83,8 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
   t.after(() => client.close());
   t.after(async () => {
-    await client.shutdownDaemon().catch(() => undefined);
+    // 优雅关停失败时硬杀兜底（t.after LIFO：先关停再删 root）。
+    await stopScenarioDaemon(client, picoHome);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -126,5 +132,96 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   // 不存在的服务器：明确 NOT_FOUND 路径（客户端先查 user.list 提示）。
   const missing = await run("/mcp disable ghost-server");
   assert.match(String(missing.result?.message), /未在用户级配置中找到/);
+
+  // /context 真 daemon：session.context.get 需要真实会话——死端点 send 建会话
+  // （run 快速失败但会话与 settings 物化），再取上下文预算报告。
+  const sent = await runtime.sendText("冒烟：请回复 ok");
+  assert.ok(sent, "死端点 send 应被接受（会话物化）");
+  const sessionId = runtime.activeSessionId;
+  assert.ok(sessionId, "send 应带回 sessionId");
+  // 死端点 run 快速失败——等终态再执行 idle 命令（/add-dir availability 门，
+  // 竞态下会拒"仅 idle"命令，造成假阴性）。
+  const settled = await waitForCondition(() => !runtime.running, 60_000);
+  assert.ok(settled, "死端点 run 应快速终态");
+
+  const context = await client.request("session.context.get", {
+    workspacePath: workspaceDir,
+    sessionId,
+  });
+  const report = context.context as Record<string, unknown>;
+  assert.ok(report["routeId"], "上下文报告应携带活跃路由");
+  assert.equal(typeof report["estimatedInputTokens"], "number");
+  assert.equal(typeof report["contextWindowTokens"], "number");
+  assert.equal(typeof report["usedPercent"], "number");
+
+  // /add-dir 真 daemon：真实目录校验 + 持久化到会话 settings。
+  const extraDir = join(root, "extra");
+  await mkdir(extraDir, { recursive: true });
+  const added = await run(`/add-dir ${extraDir}`);
+  assert.match(String(added.result?.message), /Workspace directory added/);
+  const settings = await client.request("session.settings.get", {
+    workspacePath: workspaceDir,
+    sessionId,
+  });
+  const canonicalExtra = await realpath(extraDir);
+  console.log(
+    "[diag] settings after add:",
+    JSON.stringify(settings.settings),
+    "canonical:",
+    canonicalExtra,
+    "extraDir:",
+    extraDir,
+  );
+  assert.ok(
+    settings.settings.additionalDirectories?.includes(canonicalExtra),
+    `附加目录应持久化到会话 settings（daemon 存 realpath 形式，${canonicalExtra}）`,
+  );
+  const missingAddDir = await run("/add-dir C:\\definitely\\missing-dir");
+  assert.match(String(missingAddDir.result?.message), /Add directory failed|目录/);
+
+  // /hooks 真 daemon：管理面装配（配置/信任加载）不报错，空工作区无 handler。
+  const hooks = await run("/hooks");
+  assert.match(String(hooks.result?.message), /No Hooks configured/);
+  const reviewMissing = await run("/hooks review missing-handler");
+  assert.match(String(reviewMissing.result?.message), /不存在|failed/i);
+
   runtime.dispose();
 });
+
+async function waitForCondition(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await condition()) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/** 优雅关停场景专属 daemon；无注册时直接跳过，绝不反向拉起。 */
+async function stopScenarioDaemon(client: LocalRuntimeClient, picoHome: string): Promise<void> {
+  let pid: number | undefined;
+  try {
+    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
+    const registration = await readHostRegistration(
+      join(resolveRootControlNamespace(), capability.rootId),
+    );
+    pid = registration?.pid;
+  } catch {
+    // 控制目录不可读 = daemon 未运行。
+  }
+  if (pid === undefined) return;
+  try {
+    await client.shutdownDaemon();
+    return;
+  } catch {
+    // 优雅路径失败（连接已死等）退回硬杀。
+  }
+  try {
+    process.kill(pid);
+  } catch {
+    // 已退出。
+  }
+}
