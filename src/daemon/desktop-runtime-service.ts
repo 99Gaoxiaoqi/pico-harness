@@ -213,6 +213,7 @@ import { DesktopMemoryService } from "./desktop-memory-service.js";
 import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";
 import { createSessionHookRuntime } from "../hooks/runtime.js";
+import { PluginManagementService } from "../plugins/plugin-management-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -498,6 +499,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         ),
       "rewind.restoreFile": (request) => this.restoreRewindFile(request.params),
       "hooks.manage": (request) => this.manageHooks(request.params),
+      "operations.manage": (request) => this.manageOperations(request.params),
+      "plugin.manage": (request) => this.managePlugins(request.params),
       "jobs.list": (request) => this.listJobs(request.params.workspacePath),
       "jobs.create": (request) =>
         this.withProviderDependencyLock(() => this.createJob(request.params)),
@@ -3694,6 +3697,152 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
     } finally {
       await runtime.dispose();
+    }
+  }
+
+  private async manageOperations(params: {
+    readonly workspacePath: string;
+    readonly action: "list" | "show" | "retry" | "abort";
+    readonly operationId?: string;
+    readonly expectedVersion?: number;
+    readonly reason?: string;
+  }): Promise<JsonValue> {
+    // /operations 处置面（BLOCKED 收口）：与 forkSession 同构装配 SessionForkService
+    // （journal 落盘在 workDir 的 storage 目录，操作即 daemon 侧产生的事实）。
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const service = new SessionForkService({
+      workDir: canonical,
+      picoHome: this.picoHome,
+      runtimePort: createSessionForkRuntimePort(),
+    });
+    switch (params.action) {
+      case "list":
+        if (params.operationId !== undefined) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "operations.manage list 不接受 operationId",
+          );
+        }
+        return toJsonValue({ result: { operations: await service.listNeedsAttention() } });
+      case "show": {
+        if (!params.operationId) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "operations.manage show 需要 operationId",
+          );
+        }
+        const operation = await service.getOperation(params.operationId);
+        if (!operation) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.NOT_FOUND,
+            `Storage operation not found: ${params.operationId}`,
+          );
+        }
+        return toJsonValue({ result: { operation } });
+      }
+      case "retry":
+      case "abort": {
+        if (!params.operationId || params.expectedVersion === undefined) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            `operations.manage ${params.action} 需要 operationId 与 expectedVersion`,
+          );
+        }
+        const input = {
+          operationId: params.operationId,
+          expectedVersion: params.expectedVersion,
+          reason: params.reason?.trim() || `requested via /operations ${params.action}`,
+        };
+        const operation =
+          params.action === "retry"
+            ? await service.retryNeedsAttention(input)
+            : await service.abortNeedsAttention(input);
+        return toJsonValue({ result: { operation } });
+      }
+    }
+  }
+
+  private async managePlugins(params: {
+    readonly workspacePath: string;
+    readonly action:
+      | "list"
+      | "inspect"
+      | "install"
+      | "trust.prepare"
+      | "trust.confirm"
+      | "enable"
+      | "disable";
+    readonly id?: string;
+    readonly scope?: "user" | "project" | "local";
+    readonly path?: string;
+    readonly confirmId?: string;
+    readonly fingerprint?: string;
+  }): Promise<JsonValue> {
+    // /plugin 管理面（BLOCKED 收口）：PluginManagementService 纯本地
+    // （安装/信任/启停落盘 + trust store），每请求装配，运行时贡献由下一
+    // Session 快照接管（与 hooks 同构）。trust 两阶段无状态化：confirm 用
+    // fresh proposal 校验 confirmId+指纹，客户端无需持有 pending 状态。
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const service = new PluginManagementService({
+      workDir: canonical,
+      picoHome: this.picoHome,
+      env: this.env,
+    });
+    const requireRef = (): { readonly id: string; readonly scope: "user" | "project" | "local" } => {
+      if (!params.id || !params.scope) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          `plugin.manage ${params.action} 需要 id 与 scope`,
+        );
+      }
+      return { id: params.id, scope: params.scope };
+    };
+    switch (params.action) {
+      case "list":
+        return toJsonValue({ result: { plugins: await service.list() } });
+      case "inspect": {
+        const reference = requireRef();
+        return toJsonValue({ result: { plugin: await service.inspect(reference) } });
+      }
+      case "install": {
+        if (!params.path || !params.scope) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "plugin.manage install 需要 path 与 scope",
+          );
+        }
+        return toJsonValue({ result: { install: await service.install(params.path, params.scope) } });
+      }
+      case "trust.prepare": {
+        const reference = requireRef();
+        return toJsonValue({ result: { proposal: await service.prepareTrust(reference) } });
+      }
+      case "trust.confirm": {
+        const reference = requireRef();
+        if (!params.confirmId || !params.fingerprint) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "plugin.manage trust.confirm 需要 confirmId 与 fingerprint",
+          );
+        }
+        const proposal = await service.prepareTrust(reference);
+        if (proposal.id !== params.confirmId || proposal.resourceDigest !== params.fingerprint) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "Plugin 内容在确认期间发生变化，请重新 /plugin trust",
+          );
+        }
+        await service.trust(proposal);
+        return toJsonValue({ result: { ok: true } });
+      }
+      case "enable":
+      case "disable": {
+        const reference = requireRef();
+        await (params.action === "enable"
+          ? service.enable(reference)
+          : service.disable(reference));
+        return toJsonValue({ result: { ok: true } });
+      }
     }
   }
 

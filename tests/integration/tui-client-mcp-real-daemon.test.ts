@@ -185,6 +185,18 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   const reviewMissing = await run("/hooks review missing-handler");
   assert.match(String(reviewMissing.result?.message), /不存在|failed/i);
 
+  // /operations 真 daemon：journal 空面 + NOT_FOUND 路径（与 forkSession 同构装配）。
+  const operations = await run("/operations");
+  assert.match(String(operations.result?.message), /No storage operations need attention/);
+  const showMissing = await run("/operations show missing-op");
+  assert.match(String(showMissing.result?.message), /not found|failed/i);
+
+  // /plugin 真 daemon：管理面装配（scope 根解析/信任存储）不报错，空工作区无插件。
+  const plugins = await run("/plugin");
+  assert.match(String(plugins.result?.message), /No plugins installed/);
+  const inspectMissing = await run("/plugin inspect ghost");
+  assert.match(String(inspectMissing.result?.message), /not installed|failed/i);
+
   runtime.dispose();
 });
 
