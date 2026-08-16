@@ -52,7 +52,7 @@ export type RuntimeMemorySourceMetadata = JsonObject & {
   readonly sourceId: string;
   readonly sessionId: string;
   readonly branchId?: string;
-  readonly availability: "available" | "unavailable" | "rewound";
+  readonly availability: "available" | "unavailable";
   readonly invalidatedAt?: string;
   readonly invalidationCode?: string;
   readonly createdAt: string;
@@ -1748,7 +1748,7 @@ export type RuntimeNotificationMap = {
     readonly entityType: "fact" | "proposal" | "settings" | "source";
     readonly entityId: string;
     readonly version: number;
-    readonly change: "updated" | "resolved" | "source_unavailable" | "source_rewound";
+    readonly change: "updated" | "resolved" | "source_unavailable";
   };
   readonly "memory.forgotten": {
     readonly factId: string;
@@ -2194,9 +2194,7 @@ export function isMemoryRuntimeNotification(
       ["fact", "proposal", "settings", "source"].includes(String(payload.entityType)) &&
       nonEmptyString(payload.entityId) &&
       nonNegativeSafeInteger(payload.version) &&
-      ["updated", "resolved", "source_unavailable", "source_rewound"].includes(
-        String(payload.change),
-      )
+      ["updated", "resolved", "source_unavailable"].includes(String(payload.change))
     );
   }
   if (value.topic === "memory.forgotten") {
@@ -3304,7 +3302,7 @@ const memoryFactResult = exactResultShape(
       {
         sourceId: resultString,
         sessionId: resultString,
-        availability: resultOneOf(["available", "unavailable", "rewound"]),
+        availability: resultOneOf(["available", "unavailable"]),
         createdAt: resultString,
         updatedAt: resultString,
       },
