@@ -178,6 +178,57 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           };
         case "memory.update":
           return { fact: { factId: String(params.factId ?? ""), version: 2, state: "disabled" } as never };
+        case "mcp.effective.list":
+          return {
+            servers: [
+              {
+                name: "git-tools",
+                transport: "stdio",
+                commandLabel: "node",
+                hasArguments: true,
+                enabled: true,
+                source: { scope: "user", sourceId: "user", sourceLabel: "用户级" },
+              },
+              {
+                name: "docs",
+                transport: "sse",
+                url: "https://docs.example.com/sse",
+                enabled: false,
+                source: { scope: "project", sourceId: "project", sourceLabel: "项目级" },
+              },
+            ],
+            revisions: { user: "1", project: "2" },
+          };
+        case "config.mcpServers":
+          return {
+            servers: [{ name: "git-tools", status: "connected", toolCount: 3, toolNames: ["git_diff"] }],
+          };
+        case "mcp.user.list":
+          return {
+            servers: [
+              {
+                name: "git-tools",
+                transport: "stdio",
+                commandLabel: "node",
+                hasArguments: true,
+                enabled: true,
+                source: { scope: "user", sourceId: "user", sourceLabel: "用户级" },
+              },
+            ],
+            revision: "mcp-rev-1",
+          };
+        case "mcp.user.setEnabled":
+          return {
+            server: {
+              name: String(params.serverName ?? ""),
+              transport: "stdio",
+              commandLabel: "node",
+              hasArguments: true,
+              enabled: params.enabled === true,
+              source: { scope: "user", sourceId: "user", sourceLabel: "用户级" },
+            },
+            revision: "mcp-rev-2",
+          };
         default:
           return {};
       }
@@ -618,6 +669,62 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async ()
   assert.equal(harness.requests.length, 0, "降级提示不发 RPC");
 });
 
+test("client commands: /mcp status/enable/disable map to mcp.* RPCs with explicit downgrades", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // status：effective.list（配置面）+ config.mcpServers（探测面）拼合。
+  harness.requests.length = 0;
+  const status = await run("/mcp");
+  const statusText = String(status.result?.message);
+  assert.match(statusText, /MCP status/);
+  assert.match(statusText, /git-tools \[stdio\] - 用户级 \[connected · 3 tools\]/);
+  assert.match(statusText, /docs \[sse\] disabled - 项目级/);
+  assert.ok(harness.requests.some((entry) => entry.method === "mcp.effective.list"));
+  assert.ok(harness.requests.some((entry) => entry.method === "config.mcpServers"));
+
+  // enable/disable：user.list 取 revision → mcp.user.setEnabled（幂等键新生成）。
+  harness.requests.length = 0;
+  const disabled = await run("/mcp disable git-tools");
+  assert.match(String(disabled.result?.message), /已停用/);
+  const disableRequest = harness.requests.at(-1);
+  assert.equal(disableRequest?.method, "mcp.user.setEnabled");
+  assert.equal(disableRequest?.params.enabled, false);
+  assert.equal(disableRequest?.params.expectedRevision, "mcp-rev-1", "enable/disable 应携带 user.list 的 revision");
+  assert.equal(typeof disableRequest?.params.idempotencyKey, "string");
+  const enabled = await run("/mcp enable git-tools");
+  assert.match(String(enabled.result?.message), /已启用/);
+  assert.equal(harness.requests.at(-1)?.params.enabled, true);
+
+  // 非用户级 server：明确提示，不发 setEnabled（user.list 查询本身合法）。
+  harness.requests.length = 0;
+  const missing = await run("/mcp disable other-server");
+  assert.match(String(missing.result?.message), /未在用户级配置中找到/);
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "mcp.user.setEnabled").length,
+    0,
+    "非用户级 server 不发 setEnabled",
+  );
+
+  // reload 与活连接类子命令：明确降级提示（不发 RPC）。
+  harness.requests.length = 0;
+  const reload = await run("/mcp reload");
+  assert.match(String(reload.result?.message), /无需 reload/);
+  const resources = await run("/mcp resources git-tools");
+  assert.match(String(resources.result?.message), /暂未镜像/);
+  const read = await run("/mcp read git-tools uri://x");
+  assert.match(String(read.result?.message), /暂未镜像/);
+  assert.equal(harness.requests.length, 0, "降级路径不发 RPC");
+
+  // 未知子命令 → usage。
+  const usage = await run("/mcp bogus");
+  assert.match(String(usage.result?.message), /Usage: \/mcp/);
+});
+
 test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
   // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
   // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
@@ -717,8 +824,10 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
     "snapshots", // 依赖本地 fileHistory 快照语义（rewind.* 已覆盖等价能力）
     "add-dir", // session.settings 参数无此字段
     "plugin", "hooks", // 会话运行时宿主面板
-    "mcp", // mcp.user/effective.list 已在（控制面 reload/enable/... 无 RPC）
   ]);
+  // 注：/mcp 已镜像（2026-08-16 BLOCKED 收口——状态=effective.list+config.mcpServers
+  // 拼合、enable/disable=mcp.user.setEnabled 新协议方法；reload/活连接类子命令
+  // 明确降级提示，执行体边界而非命令缺失）。
   // 注：/memory /provider /cron 已镜像（2026-08-16 tier2 收口——memory.create
   // 新协议方法 + provider.*/config.user.* + jobs.*）。/cron 的 add/credential
   // 子命令（automation.create 凭据注入门）与 /provider default clear 明确降级

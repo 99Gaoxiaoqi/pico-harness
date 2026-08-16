@@ -464,6 +464,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "mcp.user.list": () => this.listUserMcpServers(),
       "mcp.user.upsert": (request) => this.upsertUserMcpServer(request.params),
       "mcp.user.delete": (request) => this.deleteUserMcpServer(request.params),
+      "mcp.user.setEnabled": (request) => this.setUserMcpServerEnabled(request.params),
       "mcp.effective.list": (request) => this.listEffectiveMcpServers(request.params.workspacePath),
       "usage.get": (request) => this.getUsage(request.params),
       "changes.list": (request) =>
@@ -3043,6 +3044,41 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
       if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
       return { serverName: params.serverName, deleted: true, revision };
+    } catch (error) {
+      throw publicMcpMutationError(error);
+    }
+  }
+
+  private async setUserMcpServerEnabled(params: {
+    readonly serverName: string;
+    readonly enabled: boolean;
+    readonly expectedRevision: string;
+    readonly idempotencyKey: string;
+  }): Promise<JsonValue> {
+    const current = await this.userMcpConfigStore.read();
+    const definition = userMcpDefinitions(current).find(
+      (entry) => entry.name === params.serverName,
+    );
+    if (!definition) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `用户级 MCP 服务器不存在: ${params.serverName}`,
+      );
+    }
+    const publicCurrent = this.projectCapabilityRevision("mcp", "user", current.revision);
+    const expectedRevision =
+      params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
+    try {
+      const result = await this.userMcpConfigStore.upsert(
+        { ...definition.config, enabled: params.enabled },
+        { expectedRevision, idempotencyKey: params.idempotencyKey },
+      );
+      const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
+      if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
+      return toJsonValue({
+        server: projectPublicMcpServer({ ...definition, config: result.snapshot.config.mcpServers[params.serverName] ?? definition.config }),
+        revision,
+      });
     } catch (error) {
       throw publicMcpMutationError(error);
     }

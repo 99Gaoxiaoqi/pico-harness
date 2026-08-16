@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { RuntimeEffectiveConfig } from "@pico/protocol";
 import { CommandRegistry, type RegistrySlashCommand } from "../input/command-registry.js";
 import { createBuiltinCommands } from "../input/builtin-commands.js";
@@ -982,6 +983,87 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           );
         } catch (error) {
           return msg(`Cron failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
+      name: "mcp",
+      description: "Inspect and control MCP server connections",
+      usage: "/mcp [reload|enable|disable|reconnect|resources|read|prompts|prompt|auth]",
+      category: "mcp",
+      availability: "always",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const [action, server] = input.argv;
+        try {
+          // 无参 = 状态：effective 配置面 + config.mcpServers 瞬态探测面拼合。
+          if (!action) {
+            const [effective, probe] = await Promise.all([
+              runtime.request("mcp.effective.list", { workspacePath }),
+              runtime.request("config.mcpServers", { workspacePath }).catch(() => undefined),
+            ]);
+            if (effective.servers.length === 0) {
+              return msg("MCP status\nNo MCP servers loaded.");
+            }
+            const probeByServer = new Map<string, Record<string, unknown>>(
+              (probe?.servers ?? []).map((entry: Record<string, unknown>) => [
+                String(entry["name"] ?? ""),
+                entry,
+              ]),
+            );
+            const lines = ["MCP status"];
+            for (const server of effective.servers) {
+              const status = probeByServer.get(server.name);
+              const transport =
+                server.transport === "stdio" ? "stdio" : server.transport === "http" ? "http" : "sse";
+              const enabled = server.enabled === false ? " disabled" : "";
+              const source = server.source.scope === "user" ? "用户级" : server.source.scope === "project" ? "项目级" : "插件";
+              const probeStatus =
+                status && typeof status["status"] === "string"
+                  ? ` [${status["status"]}${typeof status["toolCount"] === "number" ? ` · ${status["toolCount"]} tools` : ""}]`
+                  : "";
+              lines.push(`- ${server.name} [${transport}]${enabled} - ${source}${probeStatus}`);
+            }
+            return msg(lines.join("\n"));
+          }
+          if (action === "enable" || action === "disable") {
+            if (!server) return msg("Usage: /mcp enable <server> | disable <server>");
+            const listed = await runtime.request("mcp.user.list", {});
+            const target = listed.servers.find((entry) => entry.name === server);
+            if (!target) {
+              return msg(
+                `未在用户级配置中找到 ${server}（项目级请编辑 .pico/mcp.json，插件级只读）。`,
+              );
+            }
+            const result = await runtime.request("mcp.user.setEnabled", {
+              serverName: server,
+              enabled: action === "enable",
+              expectedRevision: listed.revision,
+              idempotencyKey: randomUUID(),
+            });
+            return msg(`MCP server ${result.server.name} 已${action === "enable" ? "启用" : "停用"}（下次 run 生效）。`);
+          }
+          if (action === "reload") {
+            // daemon 无跨 run 常驻连接管理面：reload = 配置快照刷新（下次 run 重读配置）。
+            return msg(
+              "MCP 配置由 daemon 在每次 run 时重读，无需 reload；重新拉取状态快照请直接运行 /mcp。",
+            );
+          }
+          if (action === "reconnect" || action === "auth") {
+            return msg(
+              `/mcp ${action} 需要 daemon 侧活连接管理面（暂未镜像）：请重启 run 使新配置生效。`,
+            );
+          }
+          if (action === "resources" || action === "read" || action === "prompts" || action === "prompt") {
+            return msg(
+              `/mcp ${action} 需要连接 MCP 服务器后查询（暂未镜像）：该能力属运行期工具面，客户端不做直连。`,
+            );
+          }
+          return msg(
+            "Usage: /mcp [reload|enable|disable|reconnect|resources|read|prompts|prompt|auth]",
+          );
+        } catch (error) {
+          return msg(`MCP command failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       },
     }),
