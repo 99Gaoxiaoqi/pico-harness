@@ -413,6 +413,241 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       },
     }),
     rpcCommand({
+      name: "plugin",
+      aliases: ["plugins"],
+      description: "Install, inspect, trust, enable or disable local plugins",
+      usage:
+        "/plugin [list|install <path>|inspect <id>|trust <id>|enable <id>|disable <id>] [--scope user|project|local]",
+      category: "system",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const USAGE =
+          "/plugin [list|install <path>|inspect <id>|trust <id>|enable <id>|disable <id>] [--scope user|project|local]";
+        // --scope 解析（与 in-process parseScope 同构：默认 project）。
+        const args: string[] = [];
+        let scope: "user" | "project" | "local" = "project";
+        for (let index = 0; index < input.argv.length; index++) {
+          const value = input.argv[index]!;
+          if (value === "--scope") {
+            const next = input.argv[++index];
+            if (!next || !["user", "project", "local"].includes(next)) {
+              return msg("--scope requires user, project or local");
+            }
+            scope = next as "user" | "project" | "local";
+            continue;
+          }
+          if (value.startsWith("--scope=")) {
+            const next = value.slice("--scope=".length);
+            if (!["user", "project", "local"].includes(next)) {
+              return msg("--scope requires user, project or local");
+            }
+            scope = next as "user" | "project" | "local";
+            continue;
+          }
+          args.push(value);
+        }
+        const action = args[0]?.toLowerCase() ?? "list";
+        const rest = args.slice(1);
+        try {
+          if (action === "list") {
+            const result = await runtime.request("plugin.manage", { workspacePath, action: "list" });
+            const plugins = Array.isArray((result.result as Record<string, unknown>)["plugins"])
+              ? ((result.result as Record<string, unknown>)["plugins"] as unknown[])
+              : [];
+            const visible = plugins.filter((raw) => {
+              const installed = (raw as Record<string, unknown>)["installed"] as
+                | Record<string, unknown>
+                | undefined;
+              return installed === undefined || installed["scope"] === undefined || installed["scope"] === scope;
+            });
+            if (visible.length === 0) {
+              return msg(scope ? `No plugins installed in ${scope} scope.` : "No plugins installed.");
+            }
+            return msg(
+              ["Plugins", ...visible.map((raw) => formatPluginListItem(raw as Record<string, unknown>))].join("\n"),
+            );
+          }
+          if (action === "install") {
+            if (rest.length !== 1) return msg(`Usage: /plugin install <path> [--scope ...]`);
+            const result = await runtime.request("plugin.manage", {
+              workspacePath,
+              action: "install",
+              path: rest[0],
+              scope,
+            });
+            const install = (result.result as Record<string, unknown>)["install"] as
+              | Record<string, unknown>
+              | undefined;
+            if (install?.["success"] !== true) {
+              return msg(String(install?.["message"] ?? "Plugin install failed."));
+            }
+            return msg(
+              `${String(install["message"] ?? "Installed")}\nPlugin remains disabled. Run /plugin inspect ${String(install["pluginId"] ?? "")} --scope ${scope}, then trust and enable it.`,
+            );
+          }
+          if (action === "inspect" || action === "trust") {
+            const id = rest[0];
+            const confirmArg = rest.find((value) => value.startsWith("--confirm="));
+            const fingerprintArg = rest.find((value) => value.startsWith("--fingerprint="));
+            if (!id || rest.length > 3) return msg(`Usage: /plugin ${action} <id> [--scope ...]`);
+            if (action === "inspect") {
+              const result = await runtime.request("plugin.manage", {
+                workspacePath,
+                action: "inspect",
+                id,
+                scope,
+              });
+              const plugin = (result.result as Record<string, unknown>)["plugin"] as Record<string, unknown>;
+              return msg(JSON.stringify(plugin, null, 2));
+            }
+            // trust 两阶段：prepare 输出确认指引；confirm 校验 fresh proposal 指纹
+            //（无状态化——daemon 侧以 fresh proposal 对 confirmId+指纹，客户端不持有 pending）。
+            if (!confirmArg && !fingerprintArg) {
+              const result = await runtime.request("plugin.manage", {
+                workspacePath,
+                action: "trust.prepare",
+                id,
+                scope,
+              });
+              const proposal = (result.result as Record<string, unknown>)["proposal"] as
+                | Record<string, unknown>
+                | undefined;
+              if (!proposal) return msg("Plugin trust proposal unavailable.");
+              return msg(
+                [
+                  `Trust proposal for ${String(proposal["pluginId"] ?? id)} [${String(proposal["scope"] ?? scope)}]`,
+                  `Root: ${String(proposal["pluginRoot"] ?? "?")}`,
+                  `Fingerprint: ${String(proposal["resourceDigest"] ?? "?")}`,
+                  "Review the plugin contents before confirming.",
+                  `Confirm: /plugin trust ${String(proposal["pluginId"] ?? id)} --scope ${String(proposal["scope"] ?? scope)} --confirm=${String(proposal["id"] ?? "")} --fingerprint=${String(proposal["resourceDigest"] ?? "")}`,
+                ].join("\n"),
+              );
+            }
+            if (!confirmArg || !fingerprintArg) {
+              return msg(
+                "Trust confirmation requires both --confirm=<proposal-id> and --fingerprint=<sha256>",
+              );
+            }
+            await runtime.request("plugin.manage", {
+              workspacePath,
+              action: "trust.confirm",
+              id,
+              scope,
+              confirmId: confirmArg.slice("--confirm=".length),
+              fingerprint: fingerprintArg.slice("--fingerprint=".length),
+            });
+            return msg(`Plugin ${id} [${scope}] trusted.`);
+          }
+          if (action === "enable" || action === "disable") {
+            const id = rest[0];
+            if (!id || rest.length > 1) return msg(`Usage: /plugin ${action} <id> [--scope ...]`);
+            await runtime.request("plugin.manage", {
+              workspacePath,
+              action,
+              id,
+              scope,
+            });
+            return msg(
+              `Plugin ${id} [${scope}] ${action === "enable" ? "enabled" : "disabled"}. Restart or refresh the host to apply the immutable Plugin snapshot.`,
+            );
+          }
+          return msg(`Unknown Plugin action: ${action}\nUsage: ${USAGE}`);
+        } catch (error) {
+          return msg(`Plugin command failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
+      name: "operations",
+      aliases: ["ops"],
+      description: "Inspect and dispose storage operations needing attention",
+      usage: [
+        "Usage:",
+        "  /operations list",
+        "  /operations show <operation-id>",
+        "  /operations retry <operation-id> <expected-version> [reason]",
+        "  /operations abort <operation-id> <expected-version> [reason]",
+      ].join("\n"),
+      argumentHint: "[list|show|retry|abort]",
+      category: "system",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const [action = "list", operationId, rawVersion, ...rest] = input.argv;
+        const known = ["list", "show", "retry", "abort"];
+        if (!known.includes(action)) {
+          return msg([
+          "Usage:",
+          "  /operations list",
+          "  /operations show <operation-id>",
+          "  /operations retry <operation-id> <expected-version> [reason]",
+          "  /operations abort <operation-id> <expected-version> [reason]",
+        ].join("\n"));
+        }
+        try {
+          if (action === "list") {
+            if (operationId !== undefined) {
+              return msg([
+          "Usage:",
+          "  /operations list",
+          "  /operations show <operation-id>",
+          "  /operations retry <operation-id> <expected-version> [reason]",
+          "  /operations abort <operation-id> <expected-version> [reason]",
+        ].join("\n"));
+            }
+            const result = await runtime.request("operations.manage", {
+              workspacePath,
+              action: "list",
+            });
+            const operations = Array.isArray((result.result as Record<string, unknown>)["operations"])
+              ? ((result.result as Record<string, unknown>)["operations"] as unknown[])
+              : [];
+            if (operations.length === 0) return msg("No storage operations need attention.");
+            return msg(
+              operations
+                .map((raw) => {
+                  const item = raw as Record<string, unknown>;
+                  return `${String(item["operationId"] ?? "")} · ${String(item["kind"] ?? "")} · ${String(item["state"] ?? "")} · session ${String(item["sessionId"] ?? "")} · ${String(item["updatedAt"] ?? "")}`;
+                })
+                .join("\n"),
+            );
+          }
+          if (action === "show") {
+            if (!operationId) {
+              return msg("Usage: /operations show <id>");
+            }
+            const result = await runtime.request("operations.manage", {
+              workspacePath,
+              action: "show",
+              operationId,
+            });
+            return msg(JSON.stringify((result.result as Record<string, unknown>)["operation"] ?? {}, null, 2));
+          }
+          const version = Number(rawVersion);
+          if (!operationId || !Number.isInteger(version) || version <= 0) {
+            return msg(`Usage: /operations ${action} <id> <version> [reason]`);
+          }
+          const result = await runtime.request("operations.manage", {
+            workspacePath,
+            action: action as "retry" | "abort",
+            operationId,
+            expectedVersion: version,
+            ...(rest.length > 0 ? { reason: rest.join(" ") } : {}),
+          });
+          const operation = (result.result as Record<string, unknown>)["operation"] as
+            | Record<string, unknown>
+            | undefined;
+          const state = String(operation?.["state"] ?? "?");
+          return msg(
+            `Operation ${operationId} ${action === "retry" ? "已重试" : "已中止"}（state=${state}）。`,
+          );
+        } catch (error) {
+          return msg(`Operations failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
       name: "hooks",
       description: "List, review, trust, enable, disable, or reload Hooks",
       usage: "/hooks [list|review|trust|enable|disable|reload] [handler-id]",
@@ -1388,6 +1623,17 @@ function formatUsage(usage: unknown): string {
     if (typeof value === "number") parts.push(`${key}=${value}`);
   }
   return parts.length > 0 ? `用量：${parts.join(" · ")}` : "(无用量数据)";
+}
+
+/** /plugin list 的单行格式（对齐 in-process formatPluginListItem 文案）。 */
+function formatPluginListItem(inspection: Record<string, unknown>): string {
+  const installed = (inspection["installed"] ?? {}) as Record<string, unknown>;
+  const contributions = (inspection["contributions"] ?? {}) as Record<string, unknown>;
+  const active = inspection["active"] === true;
+  const enabled = installed["enabled"] === true;
+  const state = active ? "active" : enabled ? "inactive" : "disabled";
+  const changed = inspection["changedSinceInstall"] === true ? " · changed" : "";
+  return `- ${String(installed["id"] ?? "")} [${String(installed["scope"] ?? "")}] · ${state} · trust ${String(inspection["trust"] ?? "")} · ${String(contributions["compatibility"] ?? "")}${changed}`;
 }
 
 /** /context 的 wire 报告本地格式化（字段语义同 provider/model-runtime-report）。 */

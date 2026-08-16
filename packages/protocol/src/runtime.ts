@@ -1346,6 +1346,28 @@ export type RuntimeMethodMap = {
     };
     readonly result: { readonly result: JsonObject };
   };
+  /** 存储操作处置面（3-D BLOCKED 收口：/operations 镜像——list/show/retry/abort）。 */
+  readonly "operations.manage": {
+    readonly params: WorkspaceParams & {
+      readonly action: "list" | "show" | "retry" | "abort";
+      readonly operationId?: string;
+      readonly expectedVersion?: number;
+      readonly reason?: string;
+    };
+    readonly result: { readonly result: JsonObject };
+  };
+  /** 插件管理面（BLOCKED 收口：/plugin 镜像——list/inspect/install/trust 两阶段/enable/disable）。 */
+  readonly "plugin.manage": {
+    readonly params: WorkspaceParams & {
+      readonly action: "list" | "inspect" | "install" | "trust.prepare" | "trust.confirm" | "enable" | "disable";
+      readonly id?: string;
+      readonly scope?: "user" | "project" | "local";
+      readonly path?: string;
+      readonly confirmId?: string;
+      readonly fingerprint?: string;
+    };
+    readonly result: { readonly result: JsonObject };
+  };
   readonly "mcp.effective.list": {
     readonly params: WorkspaceParams;
     readonly result: {
@@ -1422,6 +1444,8 @@ export const RUNTIME_METHODS = [
   "session.settings.update",
   "session.directories.add",
   "hooks.manage",
+  "operations.manage",
+  "plugin.manage",
   "goal.get",
   "session.send",
   "session.transcript",
@@ -1536,6 +1560,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.settings.update",
   "session.directories.add",
   "hooks.manage",
+  "operations.manage",
+  "plugin.manage",
   "goal.get",
   "session.send",
   "session.transcript",
@@ -2698,6 +2724,30 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       action: oneOfParam(["list", "review", "trust", "enable", "disable", "reload"] as const),
     },
     { handlerId: boundedNonEmptyStringParam(256) },
+  ),
+  "operations.manage": exactParamShape(
+    {
+      workspacePath: stringParam,
+      action: oneOfParam(["list", "show", "retry", "abort"] as const),
+    },
+    {
+      operationId: boundedNonEmptyStringParam(256),
+      expectedVersion: positiveIntegerParam,
+      reason: boundedNonEmptyStringParam(4_096),
+    },
+  ),
+  "plugin.manage": exactParamShape(
+    {
+      workspacePath: stringParam,
+      action: oneOfParam(["list", "inspect", "install", "trust.prepare", "trust.confirm", "enable", "disable"] as const),
+    },
+    {
+      id: boundedNonEmptyStringParam(256),
+      scope: oneOfParam(["user", "project", "local"] as const),
+      path: boundedNonEmptyStringParam(4_096),
+      confirmId: boundedNonEmptyStringParam(256),
+      fingerprint: boundedNonEmptyStringParam(512),
+    },
   ),
   "session.settings.update": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },

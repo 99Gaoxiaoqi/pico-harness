@@ -110,6 +110,103 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           }
           if (params.action === "reload") return { result: { reloaded: true } };
           return { result: { ok: true } };
+        case "operations.manage":
+          if (params.action === "list") {
+            return {
+              result: {
+                operations: [
+                  {
+                    operationId: "op_1",
+                    kind: "fork",
+                    state: "needs_attention",
+                    sessionId: "s1",
+                    createdAt: "2026-08-16T00:00:00.000Z",
+                    updatedAt: "2026-08-16T00:00:01.000Z",
+                    error: { phase: "workspace_applied", message: "revision conflict" },
+                  },
+                ],
+              },
+            };
+          }
+          if (params.action === "show") {
+            return {
+              result: {
+                operation: {
+                  operationId: String(params.operationId ?? ""),
+                  kind: "fork",
+                  state: "needs_attention",
+                  sessionId: "s1",
+                  createdAt: "t",
+                  updatedAt: "t",
+                  error: { phase: "workspace_applied", message: "revision conflict" },
+                },
+              },
+            };
+          }
+          return {
+            result: {
+              operation: {
+                operationId: String(params.operationId ?? ""),
+                kind: "fork",
+                state: params.action === "retry" ? "prepared" : "aborted",
+                sessionId: "s1",
+                createdAt: "t",
+                updatedAt: "t",
+              },
+            },
+          };
+        case "plugin.manage":
+          if (params.action === "list") {
+            return {
+              result: {
+                plugins: [
+                  {
+                    installed: {
+                      id: "reviewer",
+                      scope: "project",
+                      enabled: true,
+                    },
+                    contributions: { compatibility: "compatible" },
+                    trust: "active",
+                    changedSinceInstall: false,
+                    active: true,
+                  },
+                ],
+              },
+            };
+          }
+          if (params.action === "inspect") {
+            return {
+              result: {
+                plugin: {
+                  installed: { id: String(params.id ?? ""), scope: params.scope ?? "project" },
+                  contributions: { compatibility: "compatible" },
+                  trust: "pending",
+                  changedSinceInstall: false,
+                  active: false,
+                },
+              },
+            };
+          }
+          if (params.action === "trust.prepare") {
+            return {
+              result: {
+                proposal: {
+                  id: "prop_1",
+                  pluginId: String(params.id ?? ""),
+                  scope: params.scope ?? "project",
+                  workspaceId: "ws",
+                  workspacePath: "C:\\ws",
+                  pluginRoot: "C:\\plugins\\reviewer",
+                  resourceDigest: "sha-123",
+                },
+              },
+            };
+          }
+          if (params.action === "install") {
+            return { result: { install: { success: true, message: "Installed reviewer", pluginId: "reviewer" } } };
+          }
+          return { result: { ok: true } };
         case "session.settings.update":
           return { settings: { ...settings, ...(params as Record<string, unknown>) } };
         case "session.rename":
@@ -869,6 +966,108 @@ test("client commands: /hooks maps to hooks.manage six actions", async () => {
   assert.equal(harness.requests.length, 0, "未知动作不发 RPC");
 });
 
+test("client commands: /operations maps to operations.manage four actions", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // list（无参）→ operations.manage list；show → 结构化输出。
+  harness.requests.length = 0;
+  const listed = await run("/operations");
+  assert.match(String(listed.result?.message), /op_1 · fork · needs_attention/);
+  const listRequest = harness.requests.at(-1);
+  assert.equal(listRequest?.method, "operations.manage");
+  assert.deepEqual(listRequest?.params, { workspacePath: "C:\\ws", action: "list" });
+  harness.requests.length = 0;
+  const shown = await run("/operations show op_1");
+  assert.match(String(shown.result?.message), /revision conflict/);
+  assert.equal(harness.requests.at(-1)?.params.operationId, "op_1");
+  const alias = await run("/ops");
+  assert.match(String(alias.result?.message), /op_1/, "alias /ops 同链路");
+
+  // retry/abort → expectedVersion + reason 形状。
+  harness.requests.length = 0;
+  const retried = await run("/operations retry op_1 2 手动重试");
+  assert.match(String(retried.result?.message), /已重试/);
+  const retryRequest = harness.requests.at(-1);
+  assert.equal(retryRequest?.method, "operations.manage");
+  assert.deepEqual(retryRequest?.params, {
+    workspacePath: "C:\\ws",
+    action: "retry",
+    operationId: "op_1",
+    expectedVersion: 2,
+    reason: "手动重试",
+  });
+  harness.requests.length = 0;
+  const aborted = await run("/operations abort op_1 2");
+  assert.match(String(aborted.result?.message), /已中止/);
+  assert.equal(harness.requests.at(-1)?.params.action, "abort");
+  assert.equal(harness.requests.at(-1)?.params.reason, undefined, "无 reason 时不携带字段");
+
+  // 非法参数 → usage（不发 RPC）。
+  harness.requests.length = 0;
+  const badVersion = await run("/operations retry op_1 abc");
+  assert.match(String(badVersion.result?.message), /Usage: \/operations retry/);
+  assert.equal(harness.requests.length, 0, "非法版本不发 RPC");
+});
+
+test("client commands: /plugin maps to plugin.manage incl. two-phase trust", async () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const run = async (text: string) => {
+    const outcome = await processClientInput(text, harness.registry, harness.runtime);
+    assert.equal(outcome.kind, "local", `${text} 应本地执行`);
+    return outcome;
+  };
+
+  // list → plugin.manage list（scope 过滤默认 project）。
+  harness.requests.length = 0;
+  const listed = await run("/plugin");
+  assert.match(String(listed.result?.message), /reviewer \[project\] · active/);
+  assert.equal(harness.requests.at(-1)?.method, "plugin.manage");
+  assert.deepEqual(harness.requests.at(-1)?.params, { workspacePath: "C:\\ws", action: "list" });
+
+  // inspect → 结构化输出 + scope 透传。
+  harness.requests.length = 0;
+  const inspected = await run("/plugin inspect reviewer --scope project");
+  assert.match(String(inspected.result?.message), /reviewer/);
+  assert.deepEqual(harness.requests.at(-1)?.params, {
+    workspacePath: "C:\\ws",
+    action: "inspect",
+    id: "reviewer",
+    scope: "project",
+  });
+
+  // trust 两阶段：prepare 输出确认指引 → confirm 校验指纹回传。
+  harness.requests.length = 0;
+  const prepared = await run("/plugin trust reviewer");
+  assert.match(String(prepared.result?.message), /Trust proposal for reviewer/);
+  assert.match(String(prepared.result?.message), /--confirm=prop_1 --fingerprint=sha-123/);
+  const prepareRequest = harness.requests.at(-1);
+  assert.equal(prepareRequest?.params.action, "trust.prepare");
+  harness.requests.length = 0;
+  const confirmed = await run(
+    "/plugin trust reviewer --confirm=prop_1 --fingerprint=sha-123",
+  );
+  assert.match(String(confirmed.result?.message), /trusted/);
+  const confirmRequest = harness.requests.at(-1);
+  assert.equal(confirmRequest?.params.action, "trust.confirm");
+  assert.equal(confirmRequest?.params.confirmId, "prop_1");
+  assert.equal(confirmRequest?.params.fingerprint, "sha-123");
+
+  // enable/disable → 同一方法不同 action。
+  harness.requests.length = 0;
+  const enabled = await run("/plugin enable reviewer");
+  assert.match(String(enabled.result?.message), /enabled/);
+  assert.equal(harness.requests.at(-1)?.params.action, "enable");
+
+  // 未知动作 → usage。
+  const bogus = await run("/plugin bogus");
+  assert.match(String(bogus.result?.message), /Unknown Plugin action/);
+});
+
 test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
   // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
   // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
@@ -961,18 +1160,19 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
   // 覆盖清单：in-process 核心命令（builtin 源）要么被镜像，要么在延后清单里
   //（用户技能/插件注入的命令不在此列）。延后分两类（对抗评审二轮重划）：
   // BLOCKED=协议缺口（注释标缺失 RPC）；DEFERRED=优先级（RPC 已在，tier2 镜像）。
-  const deferred = new Set([
-    // BLOCKED：协议/边界缺口
-    "operations", // 存储操作恢复改共享态，须 daemon 侧
-    "plugin", // 信任流服务端化未镜像
-  ]);
+  const deferred = new Set<string>([]);
   // 注：/mcp 已镜像（2026-08-16 BLOCKED 收口——状态=effective.list+config.mcpServers
   // 拼合、enable/disable=mcp.user.setEnabled 新协议方法；reload/活连接类子命令
   // 明确降级提示，执行体边界而非命令缺失）。
   // 注：/context 已镜像（session.context.get 新协议方法，daemon 复用
   // createModelContextReport）；/snapshots 已镜像（rewind.* 等价能力，纯客户端）；
   // /add-dir 已镜像（session.directories.add 新协议方法，daemon 校验+持久化）；
-  // /hooks 已镜像（hooks.manage 单方法六动作，daemon 每请求装配管理面）。
+  // /hooks 已镜像（hooks.manage 单方法六动作，daemon 每请求装配管理面）；
+  // /operations 已镜像（operations.manage 单方法四动作，daemon 复用
+  // SessionForkService——与 forkSession 同构装配）；
+  // /plugin 已镜像（plugin.manage 单方法七动作，trust 两阶段无状态化——
+  // confirm 以 fresh proposal 校验 confirmId+指纹，客户端不持有 pending）。
+  // BLOCKED 豁免表已清空（2026-08-16 全部收口）。
   // 注：/memory /provider /cron 已镜像（2026-08-16 tier2 收口——memory.create
   // 新协议方法 + provider.*/config.user.* + jobs.*）。/cron 的 add/credential
   // 子命令（automation.create 凭据注入门）与 /provider default clear 明确降级
