@@ -130,13 +130,13 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 | 编号 | 债务 | 态 | 级别 | 阶段 |
 |---|---|---|---|---|
-| **D7** | `DelegationManager.records` 内存事实权威 + 双去重倒挂 | 调度 | P0 | 阶段 2 |
+| **D7** | ~~`DelegationManager.records` 内存事实权威 + 双去重倒挂~~ 已消除（2026-08-13，`8a2fb41c`）：graph work 执行主权去重改 durable lease（`graph-work:id`，RuntimeStore.acquireLease，TTL/心跳协议单一实现于 `src/graph/work-lease.ts`），settle 链 `records.delete` 使 records 降为非权威活跃表，orphan 恢复按 lease 活性（isWorkLeaseLive）判定，liveDelegationIds/settleFinalized 双去重倒挂删除；D7 正向追踪器已反转（architecture-invariants） | 调度 | P0 | 阶段 2 ✅ |
 | **D8** | 超时原语全栈散落（3+2+多处） | 机械 | P0 | 阶段 1 ✅ |
 | **D9** | ~~多外壳连接状态/重连不互通（缺网关层；移动端已移除）~~ 已消除（3-C，2026-08-15）：连接决策收口在 main runtime-supervisor + 共享 client，renderer 只渲染推送相位；追踪器已反转 | 机械 | P0 | 阶段 3 ✅ |
-| **D10** | ~~Graph 无真 DAG、无内容级熔断、DelegationManager 职责错位~~ 已收口（2026-08-16，拆分处置）：①"无真 DAG"经 18-graph-mode 判定为有意设计（record 驱动依赖，无需 DAG 拓扑校验），撤销子债；②lease 协议（TTL/资源键/acquire/heartbeat/release/活性判定）从 tools 层提取到 `src/graph/work-lease.ts` 唯一实现点，DelegationManager 只消费不定义（D10 正向追踪器已反转）；③settle 回调扇出按 §3.2 判定为语义级耦合，维持宿主侧 settle 协调器不引入（扩大 settle 窗口有 graph 死锁教训，session-runtime:864）；④内容级熔断转独立 P2 行为债（治"自报 completed 掩盖失败"） | 调度 | P1 | 阶段 2/3 ✅ |
-| **D11** | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事 | P1 | 后续 |
+| **D10** | ~~Graph 无真 DAG、无内容级熔断、DelegationManager 职责错位~~ 已收口（2026-08-16，拆分处置）：①"无真 DAG"经 18-graph-mode 判定为有意设计（record 驱动依赖，无需 DAG 拓扑校验），撤销子债；②lease 协议（TTL/资源键/acquire/heartbeat/release/活性判定）从 tools 层提取到 `src/graph/work-lease.ts` 唯一实现点，DelegationManager 只消费不定义（D10 正向追踪器已反转）；③settle 回调扇出按 §3.2 判定为语义级耦合，维持宿主侧 settle 协调器不引入（扩大 settle 窗口有 graph 死锁教训，session-runtime:864）；④~~内容级熔断转独立 P2 行为债~~（已落地 2026-08-17：runSub 完成出口内容级判定——总结开篇失败宣言（剥引导标签、保守锚定防误伤）把自报 completed 降级 error，SubagentResult 拓宽 error 态，settleGraphWork 铸 graph.work.failed 而非 recorded；FINALIZE 提示词同步要求失败时以「无法完成：原因」开篇。测试 subagent-content-circuit-breaker 3 条） | 调度 | P1 | 阶段 2/3 ✅ |
+| **D11** | ~~Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition）~~ 已收口（2026-08-17，Source 提取抑制）：forgetFact 在同一事务为 Fact 的 Source 落 `extractionSuppressedAt`（sourceId 由证据内容确定性哈希，同证据恒同 Source）；提取链路双重拦截——engine 在模型调用前查抑制即取消 Job（`memory_source_suppressed`，零模型调用），commitExtraction 事务内权威兜底（并发 forget 竞态窗）。隐私优先取舍：同 Source 其余 Fact 也停止从该证据更新；仅抑制同证据——用户后续对话重新陈述属正常再学习（新 Source）。边界：overlay 整体丢失（state.json 无备份）时抑制标记随之丢失——与其他用户意图（manual fact）同边界，从备份恢复。测试 memory-forget-suppression（版本升级复活路径实盘断言） | 叙事 | P1 | ✅ |
 | **D12** | ~~`DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现~~ 双实现实质随移动端移除消解；护栏收编 ConversationLoadTracker，分页算法只在 daemon 服务层；追踪器已反转（3-C，2026-08-15） | 机械 | P1 | 阶段 3 ✅ |
-| **D13** | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移 | 叙事/调度 | P2 | 清理 |
+| **D13** | ~~`history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移~~ 已收口：主体 `f45053dd`（2026-08-13）——fork 语料落账前 reducer 预校验（防御性兜底转 staging_corrupt）、graph-reducer 注释对齐 inputIds 实现、`history.rewound` 转正式 `LEGACY_DECODE_ONLY_KINDS` 守卫（decode-only 有意保留解旧账本，生产被拒）；memory domain availability 已收敛 available/unavailable（守卫测试 memory-rebuild:481）；尾巴清理（2026-08-17）——wire 层死值摘除：`RuntimeMemorySourceMetadata.availability` 的 `"rewound"` 与 `memory.changed.change` 的 `"source_rewound"`（daemon 只产 updated/resolved/source_unavailable，渲染层零消费；source_unavailable 为 deleteSession 失效通知活值，保留）+ Desktop fixture/MemoryPage 死分支；`branchId` 作为历史溯源字段有意保留（旧 memory 文件磁盘解码容忍，无新生产者） | 叙事/调度 | P2 | 清理 ✅ |
 
 ## 7. 积极面
 
