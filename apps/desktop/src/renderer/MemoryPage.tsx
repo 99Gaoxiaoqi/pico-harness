@@ -705,12 +705,7 @@ function SourceDetails({
     return <p className="memory-source">来源 ID：{sourceId}（详情未提供）</p>;
   }
   const availability = source?.availability;
-  const label =
-    availability === "available"
-      ? "来源可用"
-      : availability === "rewound"
-        ? "来源已回退"
-        : "来源不可用";
+  const label = availability === "available" ? "来源可用" : "来源不可用";
   return (
     <details className="memory-source">
       <summary>{label}</summary>

@@ -103,7 +103,7 @@ export const previewData: AppData = {
         source: {
           sourceId: "memory-source-3",
           sessionId: "session-export",
-          availability: "rewound",
+          availability: "unavailable",
           invalidatedAt: new Date(now - 172_800_000).toISOString(),
           invalidationCode: "checkpoint_rewound",
           createdAt: new Date(now - 604_800_000).toISOString(),
