@@ -147,6 +147,9 @@ function formatRememberResult(result: MemoryProposalProcessResult): string {
     return `已记住 ${proposals.length} 条信息：\n${lines.join("\n")}`;
   }
   if (result.status === "disabled") return "记忆功能已禁用。";
+  if (result.status === "suppressed") {
+    return "该对话来源此前有内容被遗忘，为防止已遗忘信息回流，本次跳过提取。";
+  }
   if (result.status === "in_progress") return "记忆提取正在进行中，请稍候。";
   if (result.status === "attempts_exhausted") return "记忆提取多次失败，请稍后重试。";
   if (result.status === "retryable_failure") {

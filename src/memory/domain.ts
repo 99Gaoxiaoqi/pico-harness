@@ -83,6 +83,15 @@ export interface Source {
    */
   readonly evidenceRef?: EvidenceRef;
   readonly availability: SourceAvailability;
+  /**
+   * 提取抑制标记（D11 forget 复活链收口）：该 Source 派生过的 Fact 被 forgetFact 后，
+   * 账本仍保留原始证据（append-only），同证据重提取（extractor 版本升级 / 派生层重建
+   * 补 Job）会绕过 forget postcondition 生成新 Fact。标记后提取链路对此 Source 一律
+   * 抑制（取消 Job、不建提案）。隐私优先：与该 Source 关联的其余 Fact 也停止从同一
+   * 证据更新——已遗忘内容绝不回流。仅抑制同证据（sourceId 由证据内容哈希决定）；
+   * 用户在后续对话中重新陈述的信息走新 Source，属正常再学习。
+   */
+  readonly extractionSuppressedAt?: string;
   readonly invalidatedAt?: string;
   readonly invalidationCode?: string;
   readonly version: number;

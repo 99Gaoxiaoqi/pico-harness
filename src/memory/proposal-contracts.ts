@@ -138,6 +138,13 @@ export interface MemoryProposalStorePort {
   createOrGetJob(input: CreateMemoryProposalJobInput): Job;
   markJobRunning(job: Job): Job;
   markJobFailed(job: Job, errorCode: string, metrics: MemoryProposalJobMetrics): Job;
+  /**
+   * D11 forget 复活链：该 Source 派生过的 Fact 已被遗忘（Source.extractionSuppressedAt），
+   * 同证据提取必须在调用模型前取消，防止已遗忘内容以新 Fact 回流。
+   */
+  isSourceExtractionSuppressed(sourceId: string): boolean;
+  /** 取消 Job（终态，携带 errorCode）；用于提取抑制路径。 */
+  cancelJob(job: Job, errorCode: string): Job;
   listActiveFacts(): readonly Fact[];
   listPendingProposals(): readonly Proposal[];
   commitExtraction(
@@ -172,6 +179,13 @@ export type MemoryProposalProcessResult =
     }
   | {
       readonly status: "retryable_failure";
+      readonly job: Job;
+      readonly proposals: readonly Proposal[];
+      readonly errorCode: string;
+    }
+  | {
+      /** 证据来源被遗忘（Source.extractionSuppressedAt）：Job 已取消，无提案、无模型调用。 */
+      readonly status: "suppressed";
       readonly job: Job;
       readonly proposals: readonly Proposal[];
       readonly errorCode: string;
