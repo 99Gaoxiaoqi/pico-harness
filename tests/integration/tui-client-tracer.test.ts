@@ -353,6 +353,27 @@ test("client session runtime: start hydrates, send maps to session.send, live ev
   assert.equal(send?.params.behavior, "auto");
   assert.equal(runtime.activeSessionId, "s1");
 
+  // 图片附件（3-D 漏账补齐）：sendText 第三参 → input.attachments 原样上送；
+  // 无附件时不携带字段。
+  const attachment = { type: "image_base64" as const, mimeType: "image/png", data: "aGl=" };
+  assert.equal(await runtime.sendText("看这张图", "auto", [attachment]), true);
+  const sendWithImage = harness.requests
+    .filter((entry) => entry.method === "session.send")
+    .at(-1);
+  assert.deepEqual(
+    (sendWithImage?.params.input as Record<string, unknown>).attachments,
+    [attachment],
+    "附件应随 input 上送",
+  );
+  assert.equal(await runtime.sendText("纯文本"), true);
+  const sendPlain = harness.requests
+    .filter((entry) => entry.method === "session.send")
+    .at(-1);
+  assert.ok(
+    !("attachments" in (sendPlain?.params.input as object)),
+    "无附件时不应携带 attachments 字段",
+  );
+
   // 事件流：run.live 文本增量直投投影。
   harness.emit(liveItem({ kind: "assistantMessage", operation: "append", streamId: "a1", turnId: "turn1", delta: "开始" }));
   assert.ok(

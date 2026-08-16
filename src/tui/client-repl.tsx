@@ -304,10 +304,37 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       };
     }, []);
 
-    const handleSubmit = useCallback((submission: InputBoxSubmission) => {
-      // v1 忽略 attachments（Phase 3 输入扩展）；slash 经客户端命令表分派。
-      void handleSubmittedText(submission.text);
-    }, []);
+    const handleSubmit = useCallback(
+      (submission: InputBoxSubmission) => {
+        // slash 经客户端命令表分派；图片附件（3-D 漏账补齐）仅 idle 发送——
+        // running 态本地拒绝（复刻旧进程内语义），不占协议 queue/steer 通道。
+        const wireAttachments = submission.attachments.flatMap((attachment) =>
+          attachment.image.type === "image_base64"
+            ? [
+                {
+                  type: "image_base64" as const,
+                  mimeType: attachment.image.mimeType,
+                  data: attachment.image.data,
+                },
+              ]
+            : [],
+        );
+        if (submission.attachments.length > 0) {
+          if (running) {
+            reporter.pushSystemMessage("图片附件请在当前运行结束后提交。");
+            return;
+          }
+          if (wireAttachments.length !== submission.attachments.length) {
+            reporter.pushSystemMessage("仅支持内联图片附件（base64），本次发送已取消。");
+            return;
+          }
+          void runtime.sendText(submission.text, "auto", wireAttachments);
+          return;
+        }
+        void handleSubmittedText(submission.text);
+      },
+      [running],
+    );
     const handleInterrupt = useCallback(() => {
       void runtime.interrupt();
     }, []);

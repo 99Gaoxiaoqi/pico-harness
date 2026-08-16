@@ -289,9 +289,18 @@ export type RuntimeGoalSnapshot = {
   readonly goals: readonly RuntimeGoal[];
 };
 
+/** text 输入的内联图片附件（仅 base64；数量/大小上限在参数校验层强制）。 */
+export type RuntimeInputAttachment = JsonObject & {
+  readonly type: "image_base64";
+  readonly mimeType: string;
+  readonly data: string;
+};
+
 export type RuntimeTextUserInput = JsonObject & {
   readonly kind: "text";
   readonly text: string;
+  /** 图片附件（3-D 漏账补齐；无附件时省略字段，空数组非法）。 */
+  readonly attachments?: readonly RuntimeInputAttachment[];
 };
 
 export type RuntimeSkillUserInput = JsonObject & {
@@ -2406,10 +2415,40 @@ const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
     });
     return;
   }
-  assertNestedShape(value, path, {
-    kind: oneOfParam(["text"]),
-    text: stringParam,
-  });
+  assertNestedShape(
+    value,
+    path,
+    {
+      kind: oneOfParam(["text"]),
+      text: stringParam,
+    },
+    { attachments: runtimeInputAttachmentsParam },
+  );
+};
+
+/** 图片附件上限对齐 headless-one-shot-runner（4 张 / 总 256KB 解码后字节）。 */
+const MAX_INPUT_ATTACHMENTS = 4;
+const MAX_INPUT_ATTACHMENTS_TOTAL_BASE64_CHARS = Math.floor((256 * 1024 * 4) / 3);
+
+const runtimeInputAttachmentsParam: RuntimeParamRule = (value, path) => {
+  if (!Array.isArray(value)) throw invalidParams(`${path} 必须是附件数组`);
+  if (value.length === 0) throw invalidParams(`${path} 不能为空数组（无附件时省略字段）`);
+  if (value.length > MAX_INPUT_ATTACHMENTS) {
+    throw invalidParams(`${path} 最多 ${MAX_INPUT_ATTACHMENTS} 张图片`);
+  }
+  let totalChars = 0;
+  for (const [index, item] of value.entries()) {
+    assertNestedShape(item, `${path}[${index}]`, {
+      type: oneOfParam(["image_base64"]),
+      mimeType: boundedNonEmptyStringParam(128),
+      data: stringParam,
+    });
+    const data = isJsonObject(item) && typeof item["data"] === "string" ? item["data"] : "";
+    totalChars += data.length;
+    if (totalChars > MAX_INPUT_ATTACHMENTS_TOTAL_BASE64_CHARS) {
+      throw invalidParams(`${path} 解码后总大小超过 256KB 上限`);
+    }
+  }
 };
 
 const runtimeProviderParam: RuntimeParamRule = (value, path) => {
