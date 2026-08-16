@@ -87,6 +87,13 @@ export class MemoryProposalEngine {
       input.signal?.throwIfAborted();
       const evidence = input.evidence ?? (await this.options.evidenceReader.read(input));
 
+      // D11 forget 复活链：证据来源被遗忘时在模型调用前取消——同证据重提取
+      // （extractor 版本升级 / 派生层重建补 Job）不允许让已遗忘内容以新 Fact 回流。
+      if (this.options.store.isSourceExtractionSuppressed(evidence.sourceId)) {
+        const cancelled = this.options.store.cancelJob(job, "memory_source_suppressed");
+        return { status: "suppressed", job: cancelled, proposals: [], errorCode: "memory_source_suppressed" };
+      }
+
       const activeFacts = this.options.store.listActiveFacts();
       // 记忆候选始终由模型生成（对标 maka-agent，不再用正则确定性提取）。
       if (input.skipModelReview) {
@@ -237,6 +244,19 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
     return this.repository.listFacts({ states: ["active"], limit: 500 });
   }
 
+  isSourceExtractionSuppressed(sourceId: string): boolean {
+    return this.repository.getSource(sourceId)?.extractionSuppressedAt !== undefined;
+  }
+
+  cancelJob(job: Job, errorCode: string): Job {
+    return this.repository.updateJob({
+      jobId: job.jobId,
+      expectedVersion: job.version,
+      status: "cancelled",
+      errorCode,
+    });
+  }
+
   listPendingProposals(): readonly Proposal[] {
     return this.repository.listProposals({ statuses: ["pending"], limit: 500 });
   }
@@ -273,6 +293,23 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
                 : {}),
               idempotencyKey: `proposal-source:${input.job.jobId}`,
             });
+      // D11 权威兜底：engine 前置检查（模型调用前）与 commit 之间的窗口内 Source
+      // 可能刚被遗忘（并发 forget），createSource 幂等返回带抑制标记的既有 Source。
+      // 此处必须拒绝建提案并取消 Job，事务内不落任何提案事实。
+      if (source?.extractionSuppressedAt) {
+        const cancelled = repository.updateJob({
+          jobId: input.job.jobId,
+          expectedVersion: input.job.version,
+          status: "cancelled",
+          sourceId: source.sourceId,
+          errorCode: "memory_source_suppressed",
+          modelCalls: input.job.modelCalls + input.metrics.modelCalls,
+          inputTokens: input.job.inputTokens + input.metrics.inputTokens,
+          outputTokens: input.job.outputTokens + input.metrics.outputTokens,
+          costUsd: input.job.costUsd + input.metrics.costUsd,
+        });
+        return { job: cancelled, proposals: [] };
+      }
       const proposals = input.candidates.map((candidate) => {
         const identity = proposalIdentity(input.job, candidate);
         const proposal = repository.createProposal({

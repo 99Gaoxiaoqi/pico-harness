@@ -230,6 +230,7 @@ function assertSource(value: Record<string, unknown>, field: string): void {
   requireOptionalPositiveInteger(value["endSequence"], `${field}.endSequence`);
   requireString(value["digest"], `${field}.digest`);
   requireEnum(value["availability"], SOURCE_AVAILABILITIES, `${field}.availability`);
+  requireOptionalTimestamp(value["extractionSuppressedAt"], `${field}.extractionSuppressedAt`);
   requireOptionalTimestamp(value["invalidatedAt"], `${field}.invalidatedAt`);
   requireOptionalString(value["invalidationCode"], `${field}.invalidationCode`);
   // evidenceRef overlay：校验失败时 soft 降级（剥离字段），不 throw 整个 memory。

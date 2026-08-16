@@ -801,6 +801,31 @@ export class MemoryRepository {
           input.idempotencyKey,
           at,
         );
+        // D11 forget 复活链收口：账本 append-only 保留原始证据，同证据重提取
+        // （extractor 版本升级 / 派生层重建补 Job）会重新派生同内容 Fact，绕过
+        // forget postcondition。在 Source 上打提取抑制标记（��� domain.ts Source
+        // 注释），提取链路见标记即取消 Job 不建提案。
+        if (current.sourceId) {
+          const source = this.state().sources[current.sourceId];
+          if (source && !source.extractionSuppressedAt) {
+            const suppressed: Source = compact({
+              ...source,
+              extractionSuppressedAt: at,
+              version: source.version + 1,
+              updatedAt: at,
+            });
+            this.state().sources[current.sourceId] = suppressed;
+            this.recordMutation(
+              "source",
+              source.sourceId,
+              "source.updated",
+              source.version,
+              suppressed.version,
+              input.idempotencyKey,
+              at,
+            );
+          }
+        }
         this.enqueueForgottenNotification(forgotten, input.idempotencyKey, at);
         return { value: forgotten, marker: { factId } };
       },
