@@ -46,13 +46,15 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
     delete process.env.LLM_API_KEY;
     delete process.env.LLM_MODEL;
   });
-  t.after(async () => {
-    await killDaemonFor(picoHome);
-    await rm(root, { recursive: true, force: true }).catch(() => undefined);
-  });
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
   t.after(() => client.close());
+  // 关停在 client.close 之前执行（t.after LIFO：后注册先跑）——优雅关停依赖
+  // 存活连接，先 close 会退化到注册表硬杀。
+  t.after(async () => {
+    await killDaemonFor(picoHome, client);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  });
 
   // 注册 + 信任工作区（daemon 拒绝未信任工作区的前台 run；客户端信任门在
   // main.ts，测试直接走 RPC 等价路径）。
@@ -116,13 +118,15 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
     delete process.env.LLM_API_KEY;
     delete process.env.LLM_MODEL;
   });
-  t.after(async () => {
-    await killDaemonFor(picoHome);
-    await rm(root, { recursive: true, force: true }).catch(() => undefined);
-  });
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
   t.after(() => client.close());
+  // 关停在 client.close 之前执行（t.after LIFO：后注册先跑）——优雅关停依赖
+  // 存活连接，先 close 会退化到注册表硬杀。
+  t.after(async () => {
+    await killDaemonFor(picoHome, client);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  });
   await client.request("workspace.register", { workspacePath: workspaceDir });
   await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
 
@@ -207,7 +211,14 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   runtime.dispose();
 });
 
-async function killDaemonFor(picoHome: string): Promise<void> {
+async function killDaemonFor(picoHome: string, client: LocalRuntimeClient): Promise<void> {
+  // 优雅关停优先（runtime.shutdown 与 SIGTERM 同路径）；失败退回注册表 pid 硬杀。
+  try {
+    await client.shutdownDaemon();
+    return;
+  } catch {
+    // 优雅路径失败（连接已死等）。
+  }
   try {
     const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
     const registration = await readHostRegistration(

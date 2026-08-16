@@ -18,6 +18,7 @@ import {
   encodeMemoryUndoToken,
 } from "../memory/memory-command.js";
 import { snapshotSummariesFromRewindList } from "./rewind-client-bridge.js";
+import { formatRewindSelector } from "../input/rewind-presentation.js";
 
 /**
  * TUI 客户端斜杠命令注册表（3-D Phase 3 tier1，31 命令）。
@@ -408,6 +409,139 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           message: result.compacted
             ? `已压缩：${result.beforeMessageCount} → ${result.afterMessageCount} 条消息。`
             : "没有可压缩的内容。",
+        };
+      },
+    }),
+    rpcCommand({
+      name: "hooks",
+      description: "List, review, trust, enable, disable, or reload Hooks",
+      usage: "/hooks [list|review|trust|enable|disable|reload] [handler-id]",
+      category: "system",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const action = input.argv[0] ?? "list";
+        const handlerId = input.argv[1];
+        const known = ["list", "review", "trust", "enable", "disable", "reload"];
+        if (!known.includes(action)) {
+          return msg("Usage: /hooks [list|review|trust|enable|disable|reload] [handler-id]");
+        }
+        try {
+          const result = await runtime.request("hooks.manage", {
+            workspacePath,
+            action: action as "list" | "review" | "trust" | "enable" | "disable" | "reload",
+            ...(handlerId ? { handlerId } : {}),
+          });
+          const outcome = result.result as Record<string, unknown>;
+          if (action === "list") {
+            const items = Array.isArray(outcome["items"]) ? outcome["items"] : [];
+            if (items.length === 0) return msg("No Hooks configured.");
+            return msg(
+              items
+                .map((raw) => {
+                  const item = raw as Record<string, unknown>;
+                  const source = item["source"] as Record<string, unknown> | undefined;
+                  return `${String(item["id"] ?? "")}  ${String(item["event"] ?? "")}  ${String(item["type"] ?? "")}  ${String(item["status"] ?? "")}  ${String(source?.["kind"] ?? "")}:${String(source?.["path"] ?? "")}`;
+                })
+                .join("\n"),
+            );
+          }
+          if (action === "review") {
+            return msg(JSON.stringify(outcome["review"] ?? {}, null, 2));
+          }
+          if (action === "reload") {
+            return msg(outcome["reloaded"] === true ? "Hooks reloaded." : "Hook reload rejected.");
+          }
+          return msg(
+            outcome["ok"] === true
+              ? `${action === "trust" ? "Trusted" : action === "enable" ? "Enabled" : "Disabled"} Hook ${handlerId}.`
+              : "Hook operation failed.",
+          );
+        } catch (error) {
+          return msg(`Hooks command failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
+      name: "add-dir",
+      description: "Add a directory to the current session workspace",
+      usage: "/add-dir [directory]",
+      argumentHint: "[directory]",
+      category: "workspace",
+      availability: "idle",
+      execute: async (input) => {
+        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const sid = needSession();
+        if (typeof sid === "object") return sid;
+        try {
+          if (input.args.length === 0) {
+            // 无参 = 列表：工作区本身 + 会话持久化的附加授权目录。
+            const settings = await runtime.request("session.settings.get", {
+              workspacePath,
+              sessionId: sid,
+            });
+            const additional = settings.settings.additionalDirectories ?? [];
+            if (additional.length === 0) {
+              return msg("No workspace roots are currently authorized.");
+            }
+            return msg(["Authorized workspace roots:", ...additional.map((root) => `- ${root}`)].join("\n"));
+          }
+          const result = await runtime.request("session.directories.add", {
+            workspacePath,
+            sessionId: sid,
+            path: input.args,
+          });
+          return result.added
+            ? msg(`Workspace directory added: ${input.args}`)
+            : msg("Directory already authorized.");
+        } catch (error) {
+          return msg(`Add directory failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    }),
+    rpcCommand({
+      name: "context",
+      description: "Show the active route context budget and capabilities",
+      usage: "/context",
+      category: "model",
+      availability: "always",
+      execute: async (input) => {
+        if (input.args.trim()) {
+          return { type: "local", action: "message", message: "Usage: /context" };
+        }
+        const sid = needSession();
+        if (typeof sid === "object") return sid;
+        const result = await runtime.request("session.context.get", {
+          workspacePath,
+          sessionId: sid,
+        });
+        return {
+          type: "local",
+          action: "message",
+          message: formatContextReport(result.context),
+          data: result.context,
+        };
+      },
+    }),
+    rpcCommand({
+      name: "snapshots",
+      aliases: ["snapshot"],
+      description: "List current session rewind points",
+      usage: "/snapshots",
+      category: "session",
+      availability: "idle",
+      execute: async () => {
+        // BLOCKED 收口（2026-08-16）：rewind.* 已覆盖等价能力——纯客户端镜像，
+        // 展示复用 in-process 同款纯函数（rewind.list → 快照摘要 → 文本列表）。
+        const sid = needSession();
+        if (typeof sid === "object") return sid;
+        const result = await runtime.request("rewind.list", { workspacePath, sessionId: sid });
+        const snapshots = snapshotSummariesFromRewindList(result);
+        return {
+          type: "local",
+          action: "message",
+          message: formatRewindSelector(sid, snapshots),
+          data: snapshots,
         };
       },
     }),
@@ -1254,4 +1388,32 @@ function formatUsage(usage: unknown): string {
     if (typeof value === "number") parts.push(`${key}=${value}`);
   }
   return parts.length > 0 ? `用量：${parts.join(" · ")}` : "(无用量数据)";
+}
+
+/** /context 的 wire 报告本地格式化（字段语义同 provider/model-runtime-report）。 */
+function formatContextReport(context: unknown): string {
+  if (context === null || typeof context !== "object") return "(无上下文数据)";
+  const record = context as Record<string, unknown>;
+  const capabilities = record["capabilities"];
+  const capabilityText =
+    capabilities !== null && typeof capabilities === "object"
+      ? [
+          (capabilities as Record<string, unknown>)["vision"] === true ? "vision" : undefined,
+          (capabilities as Record<string, unknown>)["reasoning"] === true ? "reasoning" : undefined,
+          (capabilities as Record<string, unknown>)["toolCall"] === true ? "tool-call" : undefined,
+          (capabilities as Record<string, unknown>)["cache"] === true ? "cache" : undefined,
+        ]
+          .filter(Boolean)
+          .join(",")
+      : "";
+  const numberField = (key: string): string => {
+    const value = record[key];
+    return typeof value === "number" ? String(value) : "?";
+  };
+  return [
+    `Context (${String(record["routeId"] ?? "?")})`,
+    `  estimated=${numberField("estimatedInputTokens")} · budget=${numberField("inputBudgetTokens")} · remaining=${numberField("remainingTokens")}`,
+    `  window=${numberField("contextWindowTokens")} · reserved=${numberField("reservedOutputTokens")} · used=${numberField("usedPercent")}%`,
+    ...(capabilityText ? [`  capabilities: ${capabilityText}`] : []),
+  ].join("\n");
 }

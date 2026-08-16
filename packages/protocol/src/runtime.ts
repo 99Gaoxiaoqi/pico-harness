@@ -200,6 +200,8 @@ export type RuntimeSessionSettings = {
   readonly thinkingEffort: string;
   readonly thinkingEffortExplicit: boolean;
   readonly reasoningLevels: readonly string[];
+  /** 会话附加授权目录（/add-dir 镜像；缺省=未配置）。 */
+  readonly additionalDirectories?: readonly string[];
 };
 
 export type RuntimePlanStep = JsonObject & {
@@ -695,6 +697,11 @@ export type RuntimeMethodMap = {
   readonly "session.settings.get": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly settings: RuntimeSessionSettings };
+  };
+  /** 活跃路由的上下文预算与能力报告（BLOCKED 收口：/context 镜像）。 */
+  readonly "session.context.get": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly context: JsonObject };
   };
   readonly "session.settings.update": {
     readonly params: WorkspaceParams & {
@@ -1320,6 +1327,25 @@ export type RuntimeMethodMap = {
       readonly revision: string;
     };
   };
+  /** 会话附加授权目录（3-D BLOCKED 收口：/add-dir 镜像；daemon 侧校验+持久化）。 */
+  readonly "session.directories.add": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly path: string;
+    };
+    readonly result: {
+      readonly directories: readonly string[];
+      readonly added: boolean;
+    };
+  };
+  /** Hook 管理面（3-D BLOCKED 收口：/hooks 镜像——list/review/trust/enable/disable/reload）。 */
+  readonly "hooks.manage": {
+    readonly params: WorkspaceParams & {
+      readonly action: "list" | "review" | "trust" | "enable" | "disable" | "reload";
+      readonly handlerId?: string;
+    };
+    readonly result: { readonly result: JsonObject };
+  };
   readonly "mcp.effective.list": {
     readonly params: WorkspaceParams;
     readonly result: {
@@ -1392,7 +1418,10 @@ export const RUNTIME_METHODS = [
   "session.fork",
   "session.compact",
   "session.settings.get",
+  "session.context.get",
   "session.settings.update",
+  "session.directories.add",
+  "hooks.manage",
   "goal.get",
   "session.send",
   "session.transcript",
@@ -1503,7 +1532,10 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.fork",
   "session.compact",
   "session.settings.get",
+  "session.context.get",
   "session.settings.update",
+  "session.directories.add",
+  "hooks.manage",
   "goal.get",
   "session.send",
   "session.transcript",
@@ -2654,6 +2686,19 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "session.fork": workspaceSessionParams,
   "session.compact": workspaceSessionParams,
   "session.settings.get": workspaceSessionParams,
+  "session.context.get": workspaceSessionParams,
+  "session.directories.add": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    path: boundedNonEmptyStringParam(4_096),
+  }),
+  "hooks.manage": exactParamShape(
+    {
+      workspacePath: stringParam,
+      action: oneOfParam(["list", "review", "trust", "enable", "disable", "reload"] as const),
+    },
+    { handlerId: boundedNonEmptyStringParam(256) },
+  ),
   "session.settings.update": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
     {

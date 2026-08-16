@@ -1,6 +1,6 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, unwatchFile, watchFile } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
@@ -30,6 +30,7 @@ import {
   setSessionPermissionMode,
   setSessionThinkingEffort,
   setSessionTitle,
+  addSessionAdditionalDirectory,
   type SessionSettings,
 } from "../input/session-settings.js";
 import {
@@ -210,6 +211,8 @@ import { createDesktopSessionRequestHandlers } from "./desktop-session-request-h
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
 import { DesktopMemoryService } from "./desktop-memory-service.js";
 import type { ImagePart } from "../schema/message.js";
+import { createModelContextReport } from "../provider/model-runtime-report.js";
+import { createSessionHookRuntime } from "../hooks/runtime.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -494,6 +497,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.checkpointId,
         ),
       "rewind.restoreFile": (request) => this.restoreRewindFile(request.params),
+      "hooks.manage": (request) => this.manageHooks(request.params),
       "jobs.list": (request) => this.listJobs(request.params.workspacePath),
       "jobs.create": (request) =>
         this.withProviderDependencyLock(() => this.createJob(request.params)),
@@ -615,6 +619,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         forkSession: this.forkSession.bind(this),
         compactSession: this.compactSession.bind(this),
         getRuntimeSessionSettings: this.getRuntimeSessionSettings.bind(this),
+        getSessionContextReport: this.getSessionContextReport.bind(this),
+        addSessionDirectory: this.addSessionDirectory.bind(this),
         updateRuntimeSessionSettings: this.updateRuntimeSessionSettings.bind(this),
         getGoal: this.getGoal.bind(this),
         sendSession: this.sendSession.bind(this),
@@ -1177,6 +1183,57 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }),
     );
     return { settings };
+  }
+
+  private async addSessionDirectory(
+    workspacePath: string,
+    sessionId: string,
+    path: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    // 校验与规范化对齐旧 in-process AdditionalDirectoryManager：绝对化 →
+    // 存在且为目录 → realpath 归一。
+    const absolute = resolve(path);
+    let real: string;
+    try {
+      const stats = await stat(absolute);
+      if (!stats.isDirectory()) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          `目录不存在或不是文件夹: ${path}`,
+        );
+      }
+      real = await realpath(absolute);
+    } catch (error) {
+      if (error instanceof RuntimeProtocolError) throw error;
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `目录不可访问: ${path}（${error instanceof Error ? error.message : String(error)}）`,
+      );
+    }
+    const result = await this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const before = settings.additionalDirectories.length;
+      const directories = addSessionAdditionalDirectory(settings, real);
+      await session.flushPersistence();
+      return { directories, added: directories.length > before };
+    });
+    return toJsonValue(result);
+  }
+
+  private async getSessionContextReport(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const runtime = await this.loadSessionModelRuntime(canonical, settings);
+      const route = runtime.router.require(settings.modelRouteId);
+      return toJsonValue({
+        context: createModelContextReport(route, session.getHistory()),
+      });
+    });
   }
 
   private async getGoal(workspacePath: string, sessionId: string): Promise<JsonValue> {
@@ -3585,6 +3642,61 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
+  private async manageHooks(params: {
+    readonly workspacePath: string;
+    readonly action: "list" | "review" | "trust" | "enable" | "disable" | "reload";
+    readonly handlerId?: string;
+  }): Promise<JsonValue> {
+    // /hooks 管理面（BLOCKED 收口）：每请求临时装配会话级 hook runtime——
+    // 配置/信任/状态加载是无进程操作，reload 语义=下次 run 生效（与插件快照同构）。
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
+    const runtime = await createSessionHookRuntime({
+      workDir: canonical,
+      picoHome: this.picoHome,
+      env: this.env,
+      ...(pluginSnapshot.hookSources.length > 0
+        ? { extensionSources: pluginSnapshot.hookSources }
+        : {}),
+      sessionId: `hooks-manage:${randomUUID()}`,
+    });
+    try {
+      const management = runtime.management;
+      const handlerId = params.handlerId;
+      switch (params.action) {
+        case "list":
+          return toJsonValue({ result: { items: management.list() } });
+        case "review":
+          if (!handlerId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "hooks.manage review 需要 handler-id",
+            );
+          }
+          return toJsonValue({ result: { review: await management.review(handlerId) } });
+        case "trust":
+        case "enable":
+        case "disable":
+          if (!handlerId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              `hooks.manage ${params.action} 需要 handler-id`,
+            );
+          }
+          await (params.action === "trust"
+            ? management.trust(handlerId)
+            : params.action === "enable"
+              ? management.enable(handlerId)
+              : management.disable(handlerId));
+          return toJsonValue({ result: { ok: true } });
+        case "reload":
+          return toJsonValue({ result: { reloaded: await management.reload() } });
+      }
+    } finally {
+      await runtime.dispose();
+    }
+  }
+
   private async listJobs(workspacePath: string): Promise<JsonValue> {
     const [canonical, automations] = await Promise.all([
       this.requireTrustedWorkspace(workspacePath),
@@ -4330,6 +4442,9 @@ function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter):
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
     reasoningLevels: [...sessionReasoningCandidates(settings, router)],
+    ...(settings.additionalDirectories.length > 0
+      ? { additionalDirectories: settings.additionalDirectories }
+      : {}),
   };
 }
 
