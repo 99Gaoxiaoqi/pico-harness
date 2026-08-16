@@ -3,6 +3,7 @@ import {
   isActiveRunStatus,
   parseApprovalRequestedPayload,
   type RuntimeMethod,
+  type RuntimeInputAttachment,
   type RuntimeNotification,
   type RuntimeNotificationMap,
   type RuntimeParams,
@@ -146,11 +147,23 @@ export class ClientSessionRuntime {
     }
   }
 
-  /** 发送用户文本。behavior 供 /steer /queue /replace 映射。 */
-  async sendText(text: string, behavior: "auto" | "steer" | "queue" | "replace" = "auto"): Promise<boolean> {
+  /** 发送用户文本。behavior 供 /steer /queue /replace 映射；attachments 为
+   * 图片附件（3-D 漏账补齐：仅 idle 发送，running 态由宿主本地拒绝）。 */
+  async sendText(
+    text: string,
+    behavior: "auto" | "steer" | "queue" | "replace" = "auto",
+    attachments?: readonly RuntimeInputAttachment[],
+  ): Promise<boolean> {
     // 斜杠分派归 processClientInput（对抗评审 P2：核心层不再自带命令语法知识，
     // 且 process-user-input 保证 prompt 永不以 "/" 开头，此守卫本就不可达）。
-    return this.sendInput({ kind: "text", text }, behavior);
+    return this.sendInput(
+      {
+        kind: "text",
+        text,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      },
+      behavior,
+    );
   }
 
   /** 按 RuntimeUserInput 类型上送（text/skill/agent）；idempotencyKey 每次新生成。 */

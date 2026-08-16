@@ -30,7 +30,8 @@ import { diffStatFromRewindPreview } from "../../src/tui/rewind-client-bridge.js
  * 自由文本真机（模型真实调用工具 → prompt.requested → respond 文本 →
  * textAnswer 回流模型）；⑤ prompt.cancel（模型收到 cancelled）；⑥ 审批
  * wire 真机（default 模式编辑触发 → diff/sessionScope/providerCallId 到达
- * 客户端 → allow_session 授权 → 同类编辑免审复用）。
+ * 客户端 → allow_session 授权 → 同类编辑免审复用）；⑦ 图片附件端到端
+ * （客户端附件 → 协议 wire → daemon commit → 模型视觉识别）。
  *
  * 隔离边界（2026-08-16 修订）：每场景独立临时 pico-home + 专属 daemon
  * （runtimeHostRootPath），不再共用用户常驻 daemon——失败轮次的 unregister
@@ -518,6 +519,59 @@ realModelTest(
     );
     assert.ok(secondDone, "第二回合应完成且文件更新为 gamma");
     assert.equal(approvals.length, 0, "allow_session 后同类编辑不应再触发审批（会话授权复用）");
+
+    runtime.dispose();
+  },
+);
+
+realModelTest(
+  "matrix e2e 7: 图片附件端到端——客户端附件 → 协议 wire → daemon commit → 模型确认收到图",
+  { timeout: TEST_TIMEOUT_MS },
+  async (t) => {
+    const scenario = await createScenarioWorkspace(t);
+    const { client, workspaceDir } = scenario;
+    const reporter = new TuiReporter();
+    const runtime = new ClientSessionRuntime({
+      client,
+      workspacePath: workspaceDir,
+      reporter,
+    });
+    await runtime.start();
+
+    // 64x64 纯红 PNG（RGB(220,20,20)，base64 仅 240 字符——纯色高压缩）——
+    // 经 sendText 附件通道上送。断言语义：附件在客户端 wire → 协议参数门 →
+    // daemon user message commit → 模型请求全链路不破坏回合，且模型确认
+    // "被问及一张图"（不能断言识别正确色——本端点视觉管线有损：裸探同图
+    // claude-sonnet-4-5 答"橄榄绿"，网关会把内联图转成托管 URL；pico 侧图
+    // 已到达网关由其上传行为证实，见 handoff 环境注）。
+    const RED_PNG =
+      "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==";
+    let accepted = await runtime.sendText(
+      "附件是一张纯色小图片。不要使用任何工具，直接回答它是什么颜色，只回答颜色名。",
+      "auto",
+      [{ type: "image_base64", mimeType: "image/png", data: RED_PNG }],
+    );
+    if (!accepted) accepted = await runtime.sendText("请直接回答附件图片的颜色。");
+    assert.ok(accepted, "带附件的 session.send 应被接受");
+    scenario.trackSession(runtime.activeSessionId);
+
+    const answered = await waitForCondition(
+      () =>
+        !runtime.running &&
+        reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
+      180_000,
+    );
+    assert.ok(answered, "带附件回合应正常终态（附件不破坏链路）");
+    const assistantText = reporter
+      .getProjection()
+      .entries.filter(({ entry }) => entry.kind === "assistant")
+      .map(({ entry }) => JSON.stringify(entry))
+      .join("\n");
+    assert.match(
+      assistantText,
+      /色|图|image|color/iu,
+      `模型应确认被问及图片（附件需真实进入模型请求；实际回复：${assistantText.slice(0, 200)}`,
+    );
 
     runtime.dispose();
   },

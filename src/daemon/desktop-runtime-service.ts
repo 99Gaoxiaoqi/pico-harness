@@ -124,6 +124,7 @@ import {
   type RuntimeNotificationMap,
   type RuntimeNotificationPage,
   type RuntimeNotificationTopic,
+  type RuntimeInputAttachment,
   type RuntimeMcpServerInput,
   type RuntimeRequest,
   type RuntimeProviderInput,
@@ -208,6 +209,7 @@ import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-req
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
 import { DesktopMemoryService } from "./desktop-memory-service.js";
+import type { ImagePart } from "../schema/message.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -218,6 +220,9 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
 interface ResolvedRuntimeUserInput {
   readonly prompt: string;
   readonly execution?: DaemonRunExecution;
+  /** text 输入的图片附件（3-D 漏账补齐）：daemon 走 resumeExistingSession，
+   * 用户消息由本层 commit——附件必须挂在本层而非 engine executor。 */
+  readonly images?: ImagePart[];
 }
 
 export interface DesktopRuntimeServiceOptions {
@@ -1772,6 +1777,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         runtimeInputDisplay(input),
         input,
         identity.inputKey,
+        resolved.images,
       );
       return requireJsonRecord(
         await this.options.runtimeService.startForegroundRun({
@@ -1799,6 +1805,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     displayText: string,
     input: RuntimeUserInput,
     idempotencyKey: string,
+    images?: ImagePart[],
   ): Promise<void> {
     const digest = createHash("sha256")
       .update(`${workspacePath}\0${sessionId}\0${idempotencyKey}`)
@@ -1823,6 +1830,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             picoDesktopInputId: messageId,
             displayText,
           },
+          ...(images && images.length > 0 ? { images } : {}),
         });
         await session.bindRewindPointSource(messageId, receipt);
       }
@@ -1861,7 +1869,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     input: RuntimeUserInput,
   ): Promise<ResolvedRuntimeUserInput> {
-    if (input.kind === "text") return { prompt: input.text };
+    if (input.kind === "text") {
+      const images = inputAttachmentsToImages(input.attachments);
+      return { prompt: input.text, ...(images ? { images } : {}) };
+    }
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
     const config = await loadPicoConfig(canonical);
@@ -4632,9 +4643,11 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
   }
   const kind = value["kind"];
   if (kind === "text") {
+    const attachments = normalizeInputAttachments(value["attachments"]);
     return {
       kind,
       text: requireText(value["text"], "input.text"),
+      ...(attachments ? { attachments } : {}),
     };
   }
   if (kind === "skill") {
@@ -4659,6 +4672,67 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
     `input.kind 不支持: ${String(kind)}`,
   );
+}
+
+/**
+ * text 输入附件的 daemon 侧再校验（协议参数门已是第一道；本函数兜住内部
+ * 调用方如队列重放）。合法形状原样保留，缺省返回 undefined，malformed 抛
+ * INVALID_PARAMS——上限与协议层一致（4 张 / 总 256KB 解码后）。
+ */
+function normalizeInputAttachments(
+  value: unknown,
+): readonly RuntimeInputAttachment[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "input.attachments 必须是非空数组（无附件时省略字段）",
+    );
+  }
+  if (value.length > 4) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "input.attachments 最多 4 张图片",
+    );
+  }
+  let totalChars = 0;
+  const attachments = value.map((item, index) => {
+    if (!isJsonRecord(item) || item["type"] !== "image_base64") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `input.attachments[${index}] 必须是 image_base64 附件对象`,
+      );
+    }
+    const mimeType = typeof item["mimeType"] === "string" ? item["mimeType"] : "";
+    const data = typeof item["data"] === "string" ? item["data"] : "";
+    if (!mimeType || !data) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `input.attachments[${index}] 缺少 mimeType/data`,
+      );
+    }
+    totalChars += data.length;
+    return { type: "image_base64" as const, mimeType, data };
+  });
+  if (totalChars > Math.floor((256 * 1024 * 4) / 3)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "input.attachments 解码后总大小超过 256KB 上限",
+    );
+  }
+  return attachments;
+}
+
+/** 协议 wire 附件 → 引擎 ImagePart（形状同一，独立类型面保持协议/引擎解耦）。 */
+function inputAttachmentsToImages(
+  attachments: readonly RuntimeInputAttachment[] | undefined,
+): ImagePart[] | undefined {
+  if (!attachments || attachments.length === 0) return undefined;
+  return attachments.map((attachment) => ({
+    type: "image_base64",
+    mimeType: attachment.mimeType,
+    data: attachment.data,
+  }));
 }
 
 function runtimeInputTitle(input: RuntimeUserInput): string {
