@@ -1307,6 +1307,19 @@ export type RuntimeMethodMap = {
       readonly revision: string;
     };
   };
+  /** 用户级 MCP 服务器启用开关（3-D BLOCKED 收口：/mcp enable/disable 镜像）。 */
+  readonly "mcp.user.setEnabled": {
+    readonly params: {
+      readonly serverName: string;
+      readonly enabled: boolean;
+      readonly expectedRevision: string;
+      readonly idempotencyKey: string;
+    };
+    readonly result: {
+      readonly server: RuntimeScopedMcpServer;
+      readonly revision: string;
+    };
+  };
   readonly "mcp.effective.list": {
     readonly params: WorkspaceParams;
     readonly result: {
@@ -1447,6 +1460,7 @@ export const RUNTIME_METHODS = [
   "skills.effective.list",
   "mcp.user.list",
   "mcp.user.upsert",
+  "mcp.user.setEnabled",
   "mcp.user.delete",
   "mcp.effective.list",
   "usage.get",
@@ -1553,6 +1567,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "skills.effective.list",
   "mcp.user.list",
   "mcp.user.upsert",
+  "mcp.user.setEnabled",
   "mcp.user.delete",
   "mcp.effective.list",
   "usage.get",
@@ -2950,6 +2965,12 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     expectedRevision: boundedNonEmptyStringParam(512),
     idempotencyKey: boundedNonEmptyStringParam(512),
   }),
+  "mcp.user.setEnabled": exactParamShape({
+    serverName: boundedNonEmptyStringParam(256),
+    enabled: booleanParam,
+    expectedRevision: boundedNonEmptyStringParam(512),
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
   "mcp.effective.list": workspaceParams,
   "usage.get": exactParamShape(
     { workspacePath: stringParam },
@@ -3672,6 +3693,10 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
   "mcp.user.delete": exactResultShape({
     serverName: resultString,
     deleted: resultOneOf([true]),
+    revision: resultString,
+  }),
+  "mcp.user.setEnabled": exactResultShape({
+    server: runtimeScopedMcpServerResult,
     revision: resultString,
   }),
   "mcp.effective.list": exactResultShape({
