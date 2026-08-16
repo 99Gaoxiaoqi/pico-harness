@@ -176,7 +176,7 @@
 
 **边界**：recovered 后 bootstrap 又失败 → 留在恢复屏等下一轮（收敛）；在途写失败不自动重发（P1-2 语义，toast）；preview 模式桥接补齐 onRecovered no-op。
 
-**3-C 未做**：D10（DelegationManager 职责错位等，阶段 2/3 交叉）、91 spec 化渐进、旧 socket 清理渐进。**下一步：3-D TUI 单独立项**（部署模型变更，北极星方案 3.4 已评估）。
+**3-C 未做**：D10（DelegationManager 职责错位等，阶段 2/3 交叉）——**阶段 3 收口后唯一挂账的架构债编号**。~~91 spec 化渐进~~（已决策维持渐进：迁移计划"渐进项收口"E 段）；~~旧 socket 清理渐进~~（已完成：渐进项收口 D 段删除 LocalRuntimeDaemon/RuntimeConnection/LocalDaemonHost 旧传输分支）。~~**下一步：3-D TUI 单独立项**~~（已完成并收口，见 `docs/plans/2026-08-15-tui-daemon-client-migration.md`）。
 
 ## 3-D TUI 已完成 Phase 1-3（daemon 客户端迁移，2026-08-15 追加）
 
@@ -194,7 +194,8 @@
 | 3 剩余收口 | wire 归一化共享模块（终态/审批/activeRun 三处收敛）/ rewind·changes 客户端镜像（协议 mode 参数）/ 自由文本 prompt 全链路（options 可选+freeText+prompt.cancel+客户端接入）/ driver 提取按证据收口为 D14 断言 | ✅ bd308097 + 5424d72e + d8c708d1 |
 | 4 | 默认切换（`pico` 默认客户端路径；--local 逃生门；--continue/--fork/--graph 补齐；冷启动连接提示） | ✅ 4ffc3cbb |
 | 4 实测 | 全矩阵真机 e2e（4 场景真实模型）+ 3 真 bug 修复（fork 重入/覆盖竞态/冷启动白名单） | ✅ aa617504 |
-| 5 | 退役交互进程内路径（删 repl.tsx 装配链 + --local 旗标；D14 断言扩展到整个 src/tui） | ⏳ 下一步 |
+| 5 | 退役交互进程内路径（删 repl.tsx 装配链 + --local 旗标；D14 断言扩展到整个 src/tui） | ✅ 836e07e2（2026-08-16，见迁移计划 Phase 5 实施记录） |
+| 渐进项收口 | tier2：UX 三件套（keybindings/@文件补全/参数补全）+ /changes 单文件恢复全链路（A+B）；memory.create/provider/cron 镜像 + 旧 socket 退役 + 91 spec 化维持渐进决策（C+D+E） | ✅ 3898ba42 + 583b4f90（2026-08-16，见迁移计划"3-D 渐进项收口"段） |
 
 ### Phase 3 剩余收口（2026-08-15 追加，bd308097 + 5424d72e + d8c708d1）
 
@@ -284,4 +285,4 @@ RUN_LLM_E2E=1 node --env-file-if-exists=.env --import tsx --import ./src/tui/pre
 - Windows named pipe + 控制文件无显式 DACL 加固（依赖目录 ACL，四轮审查 L1）。
 - T5 e2e 偶发 `EBUSY rmdir session-owners`（pico 现有 Windows flock 清理竞态，与 runtime-host 无关，重跑通过）。
 - `packages/runtime-host/dist/` 是 gitignore 本地构建产物；改 src 后记得 `npm run build --workspace=@pico/runtime-host`（四轮审查教训：dist 滞后会静默失效）。
-- **3-D 客户端已知边界（2026-08-16 渐进项收口后仍接受项）**：~~keybindings 与 @文件补全未接~~（已接：loadPicoConfig→App.keybindings + FileIndex fileMention）；~~argumentCompleter 异步补全~~（已接：/resume /fork /skill /agent RPC 候选 + TTL 缓存）；~~/changes 单文件恢复无协议对应~~（已闭环：rewind.changes/restoreFile + ChangesDialogHost，e2e 场景 3 实测）；~~provider/cron/usage 镜像与 memory remember~~（已镜像：memory.create 新协议 + provider.* + jobs.*；cron add/credential 因 automation.create 凭据门与 provider default clear 明确降级提示）；仍 BLOCKED：mcp 控制面（reload/enable/...无 RPC）、context（本地引擎态）、operations/snapshots/add-dir/plugin/hooks；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合）。
+- **3-D 客户端已知边界（2026-08-16 渐进项收口后仍接受项）**：~~keybindings 与 @文件补全未接~~（已接：loadPicoConfig→App.keybindings + FileIndex fileMention）；~~argumentCompleter 异步补全~~（已接：/resume /fork /skill /agent RPC 候选 + TTL 缓存）；~~/changes 单文件恢复无协议对应~~（已闭环：rewind.changes/restoreFile + ChangesDialogHost，e2e 场景 3 实测）；~~provider/cron/usage 镜像与 memory remember~~（已镜像：memory.create 新协议 + provider.* + jobs.*；cron add/credential 因 automation.create 凭据门与 provider default clear 明确降级提示）；仍 BLOCKED：mcp 控制面（reload/enable/...无 RPC）、context（本地引擎态）、operations/snapshots/add-dir/plugin/hooks；**仍开放漏账两项（2026-08-16 盘点定性，未做也未正式接受）**：attachments 输入仍忽略（client-repl v1 边界，Phase 3 收口未覆盖——既没做也没进接受清单）、审批 wire 缺 diff/sessionScope（providerCallId 已随 bd308097 wire 归一化补齐，diff 预览与 sessionScope 面板仍降级）；e2e 无 CI 定时门（RUN_LLM_E2E 手动，待用户拍板）；client-session-runtime 位置在 src/tui 接受（TuiReporter 端口耦合）。
