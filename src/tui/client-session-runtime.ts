@@ -480,10 +480,10 @@ export class ClientSessionRuntime {
       taskId: approval.approvalId,
       toolName: approval.toolName ?? "",
       args: approval.args ?? "",
-      // wire 无 providerCallId（Phase 3 协议补齐）：onToolAwaitingApproval 的精确
-      // 工具卡匹配暂缺，对话框经 taskId 独立工作。
-      providerCallId: "",
+      providerCallId: approval.providerCallId ?? "",
       message: approval.title ?? approval.detail ?? "daemon 请求审批",
+      ...(approval.diff ? { diff: approval.diff } : {}),
+      ...(approval.sessionScope ? { sessionScope: approval.sessionScope } : {}),
       ...(approval.kind === "plan"
         ? {
             planId: approval.planId,

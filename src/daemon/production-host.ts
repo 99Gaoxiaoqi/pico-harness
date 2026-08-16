@@ -46,6 +46,7 @@ import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.j
 import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
+import { buildApprovalRequestedPayload } from "./approval-wire.js";
 import {
   createRuntimeNotification,
   isJsonObject,
@@ -1712,15 +1713,11 @@ function publishInteractionEvent(
   if (event.kind === "approval.pending") {
     const planNotice = event.notice as typeof event.notice & {
       readonly kind?: string;
-      readonly planId?: string;
-      readonly expectedRevision?: number;
-      readonly expectedSessionSequence?: number;
-      readonly plan?: unknown;
     };
     const isPlan =
       planNotice.kind === "plan" ||
-      planNotice.toolName === "exit_plan_mode" ||
-      planNotice.toolName === "submit_plan";
+      event.notice.toolName === "exit_plan_mode" ||
+      event.notice.toolName === "submit_plan";
     if (!isPlan) {
       pendingApprovals.set(
         interactionKey(interaction.workspacePath, event.notice.taskId),
@@ -1733,28 +1730,8 @@ function publishInteractionEvent(
         scope,
         resourceVersion: nextResourceVersion(),
         at: event.at,
-        payload: {
-          approvalId: event.notice.taskId,
-          runId: interaction.runId,
-          request: jsonObject({
-            title: "需要你的批准",
-            detail: event.notice.preview?.summary ?? event.notice.message,
-            toolName: event.notice.toolName,
-            args: event.notice.args,
-            ...(event.notice.preview?.target ? { command: event.notice.preview.target } : {}),
-            risk: "high",
-            ...(isPlan
-              ? {
-                  kind: "plan",
-                  planId: planNotice.planId ?? event.notice.taskId,
-                  expectedRevision: planNotice.expectedRevision ?? 0,
-                  expectedSessionSequence: planNotice.expectedSessionSequence ?? 0,
-                  ...(planNotice.plan !== undefined ? { plan: planNotice.plan } : {}),
-                  actions: ["execute", "continue_editing", "reject_exit"],
-                }
-              : {}),
-          }),
-        },
+        // providerCallId/diff/sessionScope 透传见 approval-wire.ts（3-D 漏账补齐）。
+        payload: buildApprovalRequestedPayload(event.notice, interaction.runId),
       }),
     );
     return;
