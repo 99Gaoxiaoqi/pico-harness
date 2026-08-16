@@ -393,13 +393,49 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     notification("approval.requested", {}, {
       approvalId: "ap_1",
       runId: "run_1",
-      request: { toolName: "bash", args: "rm -rf /tmp/x", title: "高危命令审批" },
+      request: {
+        toolName: "bash",
+        args: "rm -rf /tmp/x",
+        title: "高危命令审批",
+        providerCallId: "call_1",
+        sessionScope: { type: "bash-command", command: "rm -rf /tmp/", match: "prefix" },
+      },
     }),
   );
   assert.equal(approvals.length, 1);
   assert.equal(approvals[0]?.taskId, "ap_1");
   assert.equal(approvals[0]?.toolName, "bash");
   assert.equal(approvals[0]?.message, "高危命令审批");
+  // 3-D 漏账补齐：providerCallId/diff/sessionScope 透传（面板据此渲染 diff
+  // 预览与"本会话内允许"第三选项）。
+  assert.equal(approvals[0]?.providerCallId, "call_1");
+  assert.equal(approvals[0]?.diff, undefined);
+  assert.deepEqual(approvals[0]?.sessionScope, {
+    type: "bash-command",
+    command: "rm -rf /tmp/",
+    match: "prefix",
+  });
+
+  // 编辑类审批带 diff：notice 原样携带（面板 formatDiffPreview 消费）。
+  harness.emit(
+    notification("approval.requested", {}, {
+      approvalId: "ap_diff",
+      runId: "run_1",
+      request: {
+        toolName: "edit_file",
+        args: JSON.stringify({ path: "a.txt" }),
+        title: "修改 a.txt",
+        providerCallId: "call_2",
+        diff: "--- a.txt\n+++ a.txt\n@@\n-a\n+b",
+        sessionScope: { type: "file", path: "a.txt", access: "edit" },
+      },
+    }),
+  );
+  const editNotice = approvals.at(-1);
+  assert.equal(editNotice?.taskId, "ap_diff");
+  assert.equal(editNotice?.providerCallId, "call_2");
+  assert.equal(editNotice?.diff, "--- a.txt\n+++ a.txt\n@@\n-a\n+b");
+  assert.deepEqual(editNotice?.sessionScope, { type: "file", path: "a.txt", access: "edit" });
 
   assert.equal(await runtime.resolvePlain("approve", "ap_1"), true);
   const respond = harness.requests.find((entry) => entry.method === "approval.respond");

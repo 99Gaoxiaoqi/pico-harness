@@ -56,6 +56,10 @@ export interface ApprovalRequestedView {
   readonly toolName?: string;
   readonly args?: string;
   readonly providerCallId?: string;
+  /** request.diff——引擎 computeApprovalDiff 的 before/after 预览（bash 等无 diff 工具为 undefined）。 */
+  readonly diff?: string;
+  /** request.sessionScope——"本会话内允许"的结构化授权形状；缺失=审批面板只渲染 2 选项。 */
+  readonly sessionScope?: ApprovalSessionScopeView;
   /** request.planId ?? request.plan.planId——都未带则 undefined（不回退 approvalId，回退会构造 bogus plan.respond）。 */
   readonly planId?: string;
   /** request.expectedRevision ?? request.plan.revision。 */
@@ -65,6 +69,32 @@ export interface ApprovalRequestedView {
   readonly planOverview?: string;
   readonly planSteps?: readonly string[];
 }
+
+/**
+ * PermissionSessionScope 的 wire 投影（结构对齐 src/approval/session-permissions.ts；
+ * 协议包不 import 引擎源码，两侧字段语义由 parseApprovalRequestedPayload 测试锚定）。
+ */
+export type ApprovalSessionScopeView =
+  | { readonly type: "all-edits" }
+  | {
+      readonly type: "directories";
+      readonly directories: readonly string[];
+      readonly access: "read" | "edit";
+      readonly enableAutoEdits: boolean;
+    }
+  | {
+      readonly type: "file";
+      readonly path: string;
+      readonly access: "read" | "edit";
+      readonly safety?: boolean;
+    }
+  | {
+      readonly type: "bash-command";
+      readonly command: string;
+      readonly match: "prefix" | "exact";
+      readonly safety?: boolean;
+    }
+  | { readonly type: "tool"; readonly toolName: string };
 
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
@@ -114,6 +144,8 @@ export function parseApprovalRequestedPayload(payload: unknown): ApprovalRequest
     toolName: stringOrUndefined(request["toolName"]),
     args: stringOrUndefined(request["args"]),
     providerCallId: stringOrUndefined(request["providerCallId"]),
+    diff: stringOrUndefined(request["diff"]),
+    sessionScope: parseApprovalSessionScope(request["sessionScope"]),
     planId: stringOrUndefined(request["planId"]) ?? stringOrUndefined(plan["planId"]),
     expectedRevision:
       numberOrUndefined(request["expectedRevision"]) ?? numberOrUndefined(plan["revision"]),
@@ -122,4 +154,46 @@ export function parseApprovalRequestedPayload(payload: unknown): ApprovalRequest
     planOverview: stringOrUndefined(plan["overview"]),
     ...(steps && steps.length > 0 ? { planSteps: steps } : {}),
   };
+}
+
+/**
+ * request.sessionScope 的严格解析：形状不完整/未知 type 一律 undefined
+ * （调用方降级为 2 选项面板，绝不猜形状构造授权描述）。
+ */
+export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeView | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const access = record["access"] === "edit" ? "edit" : record["access"] === "read" ? "read" : undefined;
+  const safety = record["safety"] === true ? true : undefined;
+  switch (record["type"]) {
+    case "all-edits":
+      return { type: "all-edits" };
+    case "directories": {
+      if (!access) return undefined;
+      const directories = Array.isArray(record["directories"])
+        ? record["directories"].filter((item): item is string => typeof item === "string" && item !== "")
+        : undefined;
+      if (!directories || directories.length === 0) return undefined;
+      if (typeof record["enableAutoEdits"] !== "boolean") return undefined;
+      return { type: "directories", directories, access, enableAutoEdits: record["enableAutoEdits"] };
+    }
+    case "file": {
+      const path = stringOrUndefined(record["path"]);
+      if (!path || !access) return undefined;
+      return safety ? { type: "file", path, access, safety } : { type: "file", path, access };
+    }
+    case "bash-command": {
+      const command = stringOrUndefined(record["command"]);
+      const match = record["match"] === "prefix" || record["match"] === "exact" ? record["match"] : undefined;
+      if (!command || !match) return undefined;
+      return safety ? { type: "bash-command", command, match, safety } : { type: "bash-command", command, match };
+    }
+    case "tool": {
+      const toolName = stringOrUndefined(record["toolName"]);
+      if (!toolName) return undefined;
+      return { type: "tool", toolName };
+    }
+    default:
+      return undefined;
+  }
 }

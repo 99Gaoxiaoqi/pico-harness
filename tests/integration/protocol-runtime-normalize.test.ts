@@ -132,3 +132,63 @@ test("parseApprovalRequestedPayload：malformed 输入返回 undefined / risk �
   assert.equal(view.risk, "low");
   assert.equal(view.expectedRevision, undefined);
 });
+
+test("parseApprovalRequestedPayload：diff/sessionScope 直读（3-D 漏账补齐）", () => {
+  const view = parseApprovalRequestedPayload({
+    approvalId: "apr5",
+    runId: "run5",
+    request: {
+      toolName: "edit_file",
+      providerCallId: "call_5",
+      diff: "--- a\n+++ b\n@@\n-a\n+b",
+      sessionScope: { type: "file", path: "a.txt", access: "edit", safety: true },
+    },
+  });
+  assert.ok(view);
+  assert.equal(view.providerCallId, "call_5");
+  assert.equal(view.diff, "--- a\n+++ b\n@@\n-a\n+b");
+  assert.deepEqual(view.sessionScope, { type: "file", path: "a.txt", access: "edit", safety: true });
+
+  // 其余 scope 形状逐一过（all-edits / directories / bash-command / tool）。
+  const shapes: readonly unknown[] = [
+    { type: "all-edits" },
+    { type: "directories", directories: ["C:\\ws"], access: "read", enableAutoEdits: false },
+    { type: "bash-command", command: "npm ", match: "prefix" },
+    { type: "tool", toolName: "bash" },
+  ];
+  for (const sessionScope of shapes) {
+    const scoped = parseApprovalRequestedPayload({
+      approvalId: "apr6",
+      request: { sessionScope },
+    });
+    assert.ok(scoped, `sessionScope 应解析：${JSON.stringify(sessionScope)}`);
+    assert.deepEqual(scoped.sessionScope, sessionScope);
+  }
+});
+
+test("parseApprovalRequestedPayload：sessionScope 形状不完整降级为 undefined（绝不猜形状）", () => {
+  const malformed: readonly unknown[] = [
+    "not-an-object",
+    { type: "unknown-kind" },
+    { type: "file", path: "a.txt" }, // 缺 access
+    { type: "file", path: "", access: "edit" }, // 空 path
+    { type: "directories", directories: [], access: "edit", enableAutoEdits: true }, // 空目录
+    { type: "directories", directories: ["d"], access: "readwrite", enableAutoEdits: true }, // 非法 access
+    { type: "directories", directories: ["d"], access: "read" }, // 缺 enableAutoEdits
+    { type: "bash-command", command: "npm" }, // 缺 match
+    { type: "bash-command", command: "npm", match: "glob" }, // 非法 match
+    { type: "tool" }, // 缺 toolName
+  ];
+  for (const sessionScope of malformed) {
+    const view = parseApprovalRequestedPayload({
+      approvalId: "apr7",
+      request: { sessionScope },
+    });
+    assert.ok(view, `外层 payload 应照常解析：${JSON.stringify(sessionScope)}`);
+    assert.equal(
+      view.sessionScope,
+      undefined,
+      `malformed sessionScope 必须降级 undefined：${JSON.stringify(sessionScope)}`,
+    );
+  }
+});

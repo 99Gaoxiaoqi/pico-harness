@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
+import type { ApprovalNotice } from "../../src/approval/manager.js";
 import {
   readHostRegistration,
   resolveRootControlNamespace,
@@ -27,7 +28,9 @@ import { diffStatFromRewindPreview } from "../../src/tui/rewind-client-bridge.js
  * ② --continue/--fork 会话水化（fork 保原会话）；③ /rewind 真机链路
  * （list → preview 指纹 → apply conversation 模式 → fork 切换）；④ ask_user
  * 自由文本真机（模型真实调用工具 → prompt.requested → respond 文本 →
- * textAnswer 回流模型）；⑤ prompt.cancel（模型收到 cancelled）。
+ * textAnswer 回流模型）；⑤ prompt.cancel（模型收到 cancelled）；⑥ 审批
+ * wire 真机（default 模式编辑触发 → diff/sessionScope/providerCallId 到达
+ * 客户端 → allow_session 授权 → 同类编辑免审复用）。
  *
  * 隔离边界（2026-08-16 修订）：每场景独立临时 pico-home + 专属 daemon
  * （runtimeHostRootPath），不再共用用户常驻 daemon——失败轮次的 unregister
@@ -421,6 +424,101 @@ realModelTest(
     assert.equal(cancelled.cancelled, true, "prompt.cancel 应取消 pending 问题");
     const cancelSettled = await waitForCondition(() => !runtime.running, 180_000);
     assert.ok(cancelSettled, "取消后回合应终态");
+    runtime.dispose();
+  },
+);
+
+realModelTest(
+  "matrix e2e 6: 审批 wire diff/sessionScope 真机 + allow_session 会话授权复用",
+  { timeout: TEST_TIMEOUT_MS },
+  async (t) => {
+    const scenario = await createScenarioWorkspace(t);
+    const { client, workspaceDir } = scenario;
+    const targetFile = join(workspaceDir, "approval-e2e.txt");
+    await writeFile(targetFile, "alpha\n", "utf8");
+
+    const reporter = new TuiReporter();
+    const approvals: ApprovalNotice[] = [];
+    const approvalsResolved: string[] = [];
+    const runtime = new ClientSessionRuntime({
+      client,
+      workspacePath: workspaceDir,
+      reporter,
+      onApproval: (notice) => approvals.push(notice),
+      onApprovalResolved: (approvalId) => approvalsResolved.push(approvalId),
+    });
+    await runtime.start();
+
+    // 建会话回合（不锁模型字面输出，等 assistant + idle 双信号排水）。
+    let accepted = await runtime.sendText("请只回复两个字符：ok");
+    if (!accepted) accepted = await runtime.sendText("请只回复两个字符：ok");
+    assert.ok(accepted, "建会话 session.send 应被接受");
+    scenario.trackSession(runtime.activeSessionId);
+    const drained = await waitForCondition(
+      () =>
+        !runtime.running &&
+        reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
+      180_000,
+    );
+    assert.ok(drained, "建会话回合应完成");
+    const sessionId = runtime.activeSessionId;
+    assert.ok(sessionId, "建会话回合应确立 sessionId");
+    // 收紧权限模式：default 下 write/edit 一律审批（引擎 isAgentOpsDangerousCommand）。
+    await client.request("session.settings.update", {
+      workspacePath: workspaceDir,
+      sessionId,
+      permissionMode: "default",
+    });
+
+    // 第一回合：模型编辑文件 → approval.requested 到达客户端，wire 应带
+    // providerCallId/diff/sessionScope（3-D 漏账补齐的端到端验证）。
+    approvals.length = 0;
+    let sent = await runtime.sendText(
+      "请用 edit_file 工具把 approval-e2e.txt 中的 alpha 改为 beta（不要用 bash），完成后只回复：done",
+    );
+    if (!sent) sent = await runtime.sendText("请按上一条指示用 edit_file 修改 approval-e2e.txt。");
+    assert.ok(sent, "编辑回合 session.send 应被接受");
+    const approvalArrived = await waitForCondition(() => approvals.length > 0, 180_000);
+    assert.ok(approvalArrived, "default 模式下文件编辑应触发审批");
+    const notice = approvals[0]!;
+    assert.ok(
+      notice.toolName === "edit_file" || notice.toolName === "write_file",
+      `应为文件编辑工具（实际 ${notice.toolName}）`,
+    );
+    assert.ok(notice.providerCallId, "wire 应携带 providerCallId（漏账补齐：工具卡精确匹配）");
+    assert.ok(notice.diff?.includes("beta"), `wire 应携带含新内容的 diff（实际：${notice.diff}`);
+    assert.ok(notice.sessionScope, "wire 应携带 sessionScope（第三选项渲染依据）");
+    const scope = notice.sessionScope as Record<string, unknown>;
+    assert.ok(
+      scope["type"] === "all-edits" ||
+        scope["type"] === "file" ||
+        scope["type"] === "directories",
+      `编辑类 sessionScope 形状（实际 ${String(scope["type"])}）`,
+    );
+
+    // allow_session：结构化授权入会话 → 本回合放行 → 文件落地 → resolved 事件。
+    assert.equal(await runtime.resolvePlain("approve-session", notice.taskId), true);
+    const firstDone = await waitForCondition(() => !runtime.running, 180_000);
+    assert.ok(firstDone, "批准后回合应终态");
+    const content1 = await readFile(targetFile, "utf8");
+    assert.ok(content1.includes("beta"), `文件应完成第一次修改（实际 ${content1}）`);
+    assert.ok(approvalsResolved.includes(notice.taskId), "approval.resolved 应到达客户端");
+
+    // 第二回合：同类编辑不再触发审批——session grant 复用是 sessionScope 语义闭环。
+    approvals.length = 0;
+    approvalsResolved.length = 0;
+    let second = await runtime.sendText(
+      "再用 edit_file 把 approval-e2e.txt 中的 beta 改为 gamma（不要用 bash），完成后只回复：done",
+    );
+    if (!second) second = await runtime.sendText("请按上一条指示继续修改 approval-e2e.txt。");
+    assert.ok(second, "第二回合 session.send 应被接受");
+    const secondDone = await waitForCondition(
+      async () => !runtime.running && (await readFile(targetFile, "utf8")).includes("gamma"),
+      180_000,
+    );
+    assert.ok(secondDone, "第二回合应完成且文件更新为 gamma");
+    assert.equal(approvals.length, 0, "allow_session 后同类编辑不应再触发审批（会话授权复用）");
+
     runtime.dispose();
   },
 );
