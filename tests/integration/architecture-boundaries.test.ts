@@ -256,7 +256,8 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
   // 对抗审查（C）：src/tools/delegation-manager.ts 承载 graph/plan 调度职责，
   // 不得 import src/graph/ 或 src/runtime/（value 或 type）；其它 tools 文件
   // （如 graph-tools.ts）不受此单文件规则限制。回调解耦（onGraphWorkSettled 等）
-  // 不受影响——规则只禁 import。
+  // 不受影响——规则只禁 import。唯一豁免：src/graph/work-lease.ts（D10 归位后
+  // lease 协议单一实现点，DelegationManager 只消费协议不定义协议）。
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-delegation-leak-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   await Promise.all(
@@ -270,8 +271,17 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
     "utf8",
   );
   await writeFile(
+    join(fixtureRoot, "src/graph/work-lease.ts"),
+    "export const GRAPH_WORK_LEASE_TTL_MS = 300_000;\n",
+    "utf8",
+  );
+  await writeFile(
     join(fixtureRoot, "src/tools/delegation-manager.ts"),
-    'import type { GraphWork } from "../graph/contract.js";\n',
+    [
+      'import type { GraphWork } from "../graph/contract.js";',
+      'import { GRAPH_WORK_LEASE_TTL_MS } from "../graph/work-lease.js";',
+      "",
+    ].join("\n"),
     "utf8",
   );
   await writeFile(
@@ -290,5 +300,6 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
         target: "src/graph/contract.ts",
       },
     ],
+    "work-lease.ts 是 D10 归位的唯一豁免——只有 contract.ts 应报违规",
   );
 });

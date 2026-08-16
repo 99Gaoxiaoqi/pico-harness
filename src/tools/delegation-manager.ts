@@ -3,15 +3,14 @@ import type { ToolDefinition } from "../schema/message.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import type { RuntimeStore } from "../tasks/runtime-store.js";
-
-/** graph work 执行主权 lease 的 TTL：覆盖 delegation 运行期，崩溃后 ≤TTL 才标孤儿。 */
-const GRAPH_WORK_LEASE_TTL_MS = 5 * 60_000;
-/** lease 心跳间隔（TTL/5，留 4min 余量防 I/O 抖动误过期）。 */
-const GRAPH_WORK_HEARTBEAT_MS = 60_000;
-
-function graphWorkLeaseKey(workId: string): string {
-  return `graph-work:${workId}`;
-}
+import {
+  acquireGraphWorkLease,
+  graphWorkLeaseKey,
+  GRAPH_WORK_HEARTBEAT_MS,
+  heartbeatGraphWorkLease,
+  isGraphWorkLeaseLive as isWorkLeaseLiveForGraph,
+  releaseGraphWorkLease,
+} from "../graph/work-lease.js";
 
 export type DelegationResultStatus = "completed" | "partial" | "error" | "timed_out" | "cancelled";
 
@@ -253,11 +252,7 @@ export class DelegationManager {
     if (taskInput.graphWorkId && this.runtimeStore) {
       leaseResourceKey = graphWorkLeaseKey(taskInput.graphWorkId);
       try {
-        const lease = this.runtimeStore.acquireLease(
-          leaseResourceKey,
-          id,
-          GRAPH_WORK_LEASE_TTL_MS,
-        );
+        const lease = acquireGraphWorkLease(this.runtimeStore, taskInput.graphWorkId, id);
         leaseEpoch = lease.leaseEpoch;
       } catch {
         // lease 已被另一个 in-flight delegation 持有（TTL 未过）→ 幂等拒绝，返回持有者。
@@ -410,11 +405,12 @@ export class DelegationManager {
     if (!record.leaseResourceKey || record.leaseEpoch === undefined || !this.runtimeStore) {
       return;
     }
-    const resourceKey = record.leaseResourceKey;
+    const workId = record.graphWorkId;
     const epoch = record.leaseEpoch;
+    if (!workId) return;
     record.heartbeatTimer = setInterval(() => {
       try {
-        this.runtimeStore!.heartbeatLease(resourceKey, record.id, epoch, GRAPH_WORK_LEASE_TTL_MS);
+        heartbeatGraphWorkLease(this.runtimeStore!, workId, record.id, epoch);
       } catch {
         // 单进程下 lease 不会被他人抢，heartbeat 失败多为暂时 I/O；best-effort 不 abort，
         // 避免误杀长任务。若 lease 真过期，settle 时 release 会失败（best-effort catch）。
@@ -426,9 +422,14 @@ export class DelegationManager {
   /** settle 链完成时释放 graph work 执行主权 lease（best-effort）。 */
   private releaseGraphWorkLease(record: DelegationRecord): void {
     if (record.heartbeatTimer) clearInterval(record.heartbeatTimer);
-    if (record.leaseResourceKey && record.leaseEpoch !== undefined && this.runtimeStore) {
+    if (
+      record.leaseResourceKey &&
+      record.leaseEpoch !== undefined &&
+      this.runtimeStore &&
+      record.graphWorkId
+    ) {
       try {
-        this.runtimeStore.releaseLease(record.leaseResourceKey, record.id, record.leaseEpoch);
+        releaseGraphWorkLease(this.runtimeStore, record.graphWorkId, record.id, record.leaseEpoch);
       } catch {
         // lease 可能已被 TTL 回收（崩溃后过期或被新派发接管），release 失败属正常，best-effort。
       }
@@ -442,8 +443,7 @@ export class DelegationManager {
    */
   isWorkLeaseLive(workId: string): boolean {
     if (!this.runtimeStore) return true;
-    const lease = this.runtimeStore.getLease(graphWorkLeaseKey(workId));
-    return lease ? lease.expiresAt > Date.now() : false;
+    return isWorkLeaseLiveForGraph(this.runtimeStore, workId);
   }
 
   private toSnapshot(record: DelegationRecord): DelegationTaskSnapshot {

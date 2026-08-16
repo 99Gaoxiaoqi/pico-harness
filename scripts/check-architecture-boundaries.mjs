@@ -137,16 +137,17 @@ function isPureTypeImport(declaration) {
 }
 
 function classifyViolation(importer, target, declaration, repositoryRoot, fromArea, toArea) {
-  // 单文件精确规则（对抗审查 C）：DelegationManager 承载 graph/plan 调度职责，
-  // 但 import 级全面禁止 tools→graph 会误伤合法的 graph-tools.ts，因此只禁
-  // src/tools/delegation-manager.ts 直接 import src/graph/ 或 src/runtime/ 下
-  // 的任何模块（value 或 type）。与 graph 的耦合必须走回调（onGraphWorkSettled
-  // 等）解耦——规则只禁 import，不禁回调。
+  // 单文件精确规则（对抗审查 C + D10 收口）：DelegationManager 承载 graph/plan
+  // 调度职责，import 级全面禁止 tools→graph 会误伤合法的 graph-tools.ts，因此只禁
+  // src/tools/delegation-manager.ts 直接 import src/graph/ 或 src/runtime/ 下的
+  // 模块（value 或 type）。与 graph 的调度耦合必须走回调（onGraphWorkSettled 等）
+  // 解耦。唯一豁免：src/graph/work-lease.js——D10 归位（2026-08-16）把 lease
+  // 协议单一实现点落在 graph 层，DelegationManager 只消费协议不定义协议。
   const importerRelative = normalizeRelativePath(importer, repositoryRoot);
   if (importerRelative === "src/tools/delegation-manager.ts") {
     const targetRelative = normalizeRelativePath(target, repositoryRoot);
     if (
-      targetRelative.startsWith("src/graph/") ||
+      (targetRelative.startsWith("src/graph/") && targetRelative !== "src/graph/work-lease.ts") ||
       targetRelative.startsWith("src/runtime/")
     ) {
       return "delegation-manager-scheduling-leak";

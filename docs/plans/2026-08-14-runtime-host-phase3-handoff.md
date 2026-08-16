@@ -176,7 +176,7 @@
 
 **边界**：recovered 后 bootstrap 又失败 → 留在恢复屏等下一轮（收敛）；在途写失败不自动重发（P1-2 语义，toast）；preview 模式桥接补齐 onRecovered no-op。
 
-**3-C 未做**：D10（DelegationManager 职责错位等，阶段 2/3 交叉）——**阶段 3 收口后唯一挂账的架构债编号**。~~91 spec 化渐进~~（已决策维持渐进：迁移计划"渐进项收口"E 段）；~~旧 socket 清理渐进~~（已完成：渐进项收口 D 段删除 LocalRuntimeDaemon/RuntimeConnection/LocalDaemonHost 旧传输分支）。~~**下一步：3-D TUI 单独立项**~~（已完成并收口，见 `docs/plans/2026-08-15-tui-daemon-client-migration.md`）。
+**3-C 未做**：~~D10（DelegationManager 职责错位等，阶段 2/3 交叉）~~（已收口 2026-08-16：拆分处置——"无真 DAG"按 18-graph-mode 判定为有意设计撤销；lease 协议提取到 `src/graph/work-lease.ts` 唯一实现点（D10 正向追踪器反转）；settle 扇出按 20 文档 §3.2 维持宿主协调器不引入；内容级熔断转独立 P2 行为债。详见 20 文档 D10 行）。~~91 spec 化渐进~~（已决策维持渐进：迁移计划"渐进项收口"E 段）；~~旧 socket 清理渐进~~（已完成：渐进项收口 D 段删除 LocalRuntimeDaemon/RuntimeConnection/LocalDaemonHost 旧传输分支）。~~**下一步：3-D TUI 单独立项**~~（已完成并收口，见 `docs/plans/2026-08-15-tui-daemon-client-migration.md`）。
 
 ## 3-D TUI 已完成 Phase 1-3（daemon 客户端迁移，2026-08-15 追加）
 

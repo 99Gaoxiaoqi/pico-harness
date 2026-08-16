@@ -133,7 +133,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 | **D7** | `DelegationManager.records` 内存事实权威 + 双去重倒挂 | 调度 | P0 | 阶段 2 |
 | **D8** | 超时原语全栈散落（3+2+多处） | 机械 | P0 | 阶段 1 ✅ |
 | **D9** | ~~多外壳连接状态/重连不互通（缺网关层；移动端已移除）~~ 已消除（3-C，2026-08-15）：连接决策收口在 main runtime-supervisor + 共享 client，renderer 只渲染推送相位；追踪器已反转 | 机械 | P0 | 阶段 3 ✅ |
-| **D10** | Graph 无真 DAG、无内容级熔断、DelegationManager 职责错位 | 调度 | P1 | 阶段 2/3 |
+| **D10** | ~~Graph 无真 DAG、无内容级熔断、DelegationManager 职责错位~~ 已收口（2026-08-16，拆分处置）：①"无真 DAG"经 18-graph-mode 判定为有意设计（record 驱动依赖，无需 DAG 拓扑校验），撤销子债；②lease 协议（TTL/资源键/acquire/heartbeat/release/活性判定）从 tools 层提取到 `src/graph/work-lease.ts` 唯一实现点，DelegationManager 只消费不定义（D10 正向追踪器已反转）；③settle 回调扇出按 §3.2 判定为语义级耦合，维持宿主侧 settle 协调器不引入（扩大 settle 窗口有 graph 死锁教训，session-runtime:864）；④内容级熔断转独立 P2 行为债（治"自报 completed 掩盖失败"） | 调度 | P1 | 阶段 2/3 ✅ |
 | **D11** | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事 | P1 | 后续 |
 | **D12** | ~~`DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现~~ 双实现实质随移动端移除消解；护栏收编 ConversationLoadTracker，分页算法只在 daemon 服务层；追踪器已反转（3-C，2026-08-15） | 机械 | P1 | 阶段 3 ✅ |
 | **D13** | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移 | 叙事/调度 | P2 | 清理 |
