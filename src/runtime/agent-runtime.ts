@@ -1844,6 +1844,7 @@ export async function executeAgentRuntime(
                 taskIndex: 0,
                 status: subResult.status,
                 ...(subResult.summary ? { summary: subResult.summary } : {}),
+                ...(subResult.error !== undefined ? { error: subResult.error } : {}),
                 ...(subResult.evidenceRefs.length > 0
                   ? { evidenceRefs: [...subResult.evidenceRefs] }
                   : {}),

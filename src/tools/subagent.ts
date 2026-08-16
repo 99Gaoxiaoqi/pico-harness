@@ -59,10 +59,16 @@ export type { SubagentMode, SubagentRole } from "./delegation-contract.js";
  * - evidenceRefs: 完整报告的受校验 pico://evidence 引用。
  */
 export interface SubagentResult {
-  /** partial 表示保留了轮次耗尽前的有效证据。 */
-  status: "completed" | "partial";
+  /**
+   * partial 表示保留了轮次耗尽前的有效证据；error 表示内容级熔断降级
+   * （D10④：子代理流程上自报完成，但最终总结开篇明确声明任务失败——
+   * 宿主不得把它当成功记录，graph settle 铸 graph.work.failed）。
+   */
+  status: "completed" | "partial" | "error";
   summary: string;
   evidenceRefs: string[];
+  /** status=error 时的熔断原因（非子代理崩溃栈）。 */
+  error?: string;
 }
 
 export interface SubagentReportEvidenceInput {
@@ -832,6 +838,7 @@ export class DelegateTaskTool implements BaseTool {
         taskIndex,
         status: subResult.status,
         summary: subResult.summary,
+        ...(subResult.error !== undefined ? { error: subResult.error } : {}),
         ...(subResult.evidenceRefs.length > 0 ? { evidenceRefs: subResult.evidenceRefs } : {}),
         ...(task.maxToolCalls !== undefined
           ? {

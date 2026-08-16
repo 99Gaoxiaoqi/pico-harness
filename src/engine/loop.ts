@@ -180,9 +180,51 @@ const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
   "你上一轮的总结过于简短,主架构师无法据此决策。请直接重写为结构化纯文本：先给结论，再列关键证据(文件:行号)、未验证风险和下一步。不要重放原始日志，不要调用任何工具。";
 const SUBAGENT_FINALIZE_PROMPT =
   "[FINALIZE] 已进入预留的最终收口轮。立即停止探索和工具调用，只基于当前上下文中已收集的证据输出纯文本汇报：" +
-  "1) 结论；2) 已确认的事实与文件:行号证据；3) 未完成或未验证风险；4) 主 Agent 可直接采取的下一步。通常控制在 1000–2000 字符，简单任务可更短，不要重放原始日志。";
+  "1) 结论；2) 已确认的事实与文件:行号证据；3) 未完成或未验证风险；4) 主 Agent 可直接采取的下一步。通常控制在 1000–2000 字符，简单任务可更短，不要重放原始日志。" +
+  "若任务整体无法完成，结论必须以「无法完成：原因」开头如实声明，不要用完成口吻收场。";
 const SUBAGENT_EMPTY_SUMMARY_FALLBACK =
   "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据和 Evidence 继续收口。";
+
+/** 子代理总结开篇的引导性标签（"总结：" / "- 结论：" / "1. Report:" 等），判定失败宣言前剥离。 */
+const SUBAGENT_SUMMARY_LEAD_RE =
+  /^(?:[#*\->\s]*|\d+[.、)]\s*)*(?:总结|汇报|报告|结论|任务状态|summary|report|result|status)\s*[:：\-—]*\s*/i;
+/** 失败宣言锚点：总结首行（剥标签后）以下列词开头才判定失败——保守锚定，正文中段的"修复了失败测试"等不误伤。 */
+const SUBAGENT_FAILURE_LEADS = [
+  "无法完成",
+  "未能完成",
+  "无法实现",
+  "无法达成",
+  "无法执行",
+  "任务失败",
+  "执行失败",
+  "我无法完成",
+  "我无法做到",
+  "未完成任务",
+  "unable to complete",
+  "failed to complete",
+  "could not complete",
+  "cannot complete",
+  "did not complete",
+  "task failed",
+  "did not finish",
+] as const;
+
+/**
+ * D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 总结可用），
+ * 流程状态无法区分"真做完"与"做完样子但任务失败"。宿主若按 completed 记账
+ * （graph.work.recorded / plan step completed），失败就被自报完成掩盖。
+ * 本函数只认总结开篇的明确失败宣言——保守换取零误伤：模糊表述交由宿主
+ * 模型读 summary 自行判断，这里只兜底"模型亲口说失败"的下界。
+ */
+function subagentDeclaresFailure(summary: string): boolean {
+  const firstLine = summary
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) return false;
+  const head = firstLine.replace(SUBAGENT_SUMMARY_LEAD_RE, "").toLowerCase();
+  return SUBAGENT_FAILURE_LEADS.some((lead) => head.startsWith(lead));
+}
 
 const EXPLORE_SYNTHESIS_PROMPT =
   "[DELEGATION SYNTHESIS] 本批 required 委派的实际任务均为 explore，子代理已全部收口。" +
@@ -3697,11 +3739,26 @@ export class AgentEngine implements AgentRunner {
           { turns: turnCount, status: completed ? "completed" : "partial" },
           `[Subagent] ✅ 探路者完成收口,返回总结。`,
         );
-        return this.finalizeSubagentResult(
+        const finalized = await this.finalizeSubagentResult(
           completed ? "completed" : "partial",
           summary,
           taskPrompt,
         );
+        // D10④ 内容级熔断：自报 completed 但总结开篇明确声明失败 → 降级 error，
+        // 宿主按失败结算（graph.work.failed / plan step 不落 completed）。
+        // 放在 finalize 之后：Evidence 归档与 summary 截断照常，只改终态。
+        if (finalized.status === "completed" && subagentDeclaresFailure(finalized.summary)) {
+          logger.warn(
+            { turns: turnCount, summaryHead: finalized.summary.slice(0, 80) },
+            `[Subagent] 🔌 内容级熔断：自报完成但总结开篇为失败宣言，降级 error。`,
+          );
+          return {
+            ...finalized,
+            status: "error",
+            error: "子代理自报任务失败（总结开篇失败宣言，内容级熔断降级）",
+          };
+        }
+        return finalized;
       }
 
       // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
