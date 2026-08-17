@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
@@ -966,30 +966,15 @@ test("Hook reloader keeps the previous snapshot when synchronous swap throws", a
   assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
 });
 
-test("Hook reloader replaces watcher path sets after a same-directory script change", async (context) => {
-  // Hook 静态信任按进程环境绑定（command 可执行文件须在 PATH 中解析），且
-  // PATH 含相对/未展开条目时 fail-closed 拒绝绑定（脚本引用进不了 watcher
-  // exactPaths）。本机安全 agent 在 PATH 首项注入未展开字面量 %AccessAgentLibs%，
-  // 导致本例在脏 PATH 下必然失败——测试进程内临时过滤为非绝对 PATH，测后恢复。
-  const originalPath = process.env.PATH;
-  process.env.PATH = (originalPath ?? "")
-    .split(delimiter)
-    .filter((entry) => isAbsolute(entry))
-    .join(delimiter);
-  context.after(() => {
-    process.env.PATH = originalPath;
-  });
-
+test("Hook reloader swaps snapshot when the config file changes on disk", async (context) => {
+  // shell 化后 command hooks 不再监视脚本文件（命令是配置字节，无文件可钉）；
+  // 监视面剩配置文件与信任库本身。本例验证配置文件变更经 watcher 触发快照交换。
   const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-watch-paths-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   const configPath = join(workspace, ".pico", "hooks.json");
-  const safeScript = join(workspace, "safe.js");
-  const changedScript = join(workspace, "changed.js");
   await mkdir(join(workspace, ".pico"), { recursive: true });
   await mkdir(picoHome, { recursive: true });
-  await writeFile(safeScript, "export const value = 'safe';\n");
-  await writeFile(changedScript, "export const value = 'initial';\n");
   await writeCommandHook(configPath, "node safe.js");
   context.after(() => rm(root, { recursive: true, force: true }));
 
@@ -1004,19 +989,20 @@ test("Hook reloader replaces watcher path sets after a same-directory script cha
       swaps++;
     },
   });
-  // 先让磁盘配置与 initial snapshot 分叉，再启动旧路径 watcher。若在 watcher
-  // 启动后写配置又手动 reload，会把同一变更同时排入 debounce 队列，掩盖本例
-  // 真正要验证的“swap 后 callback 闭包必须改用 changed.js exactPaths”。
-  await writeCommandHook(configPath, "node changed.js");
   context.after(async () => await reloader.stop());
   await reloader.start();
 
-  assert.equal(await reloader.reload([configPath]), true);
+  await writeCommandHook(configPath, "node changed.js");
+  await waitUntil(() => swaps >= 1);
   assert.equal(swaps, 1);
-
-  await writeFile(changedScript, "export const value = 'changed';\n");
-  await waitUntil(() => swaps >= 2);
-  assert.equal(swaps, 2);
+  const swapped = reloader.currentResult()?.snapshot.handlers.PreToolUse ?? [];
+  assert.equal(
+    swapped.some(
+      (entry) => entry.handler.type === "command" && entry.handler.command === "node changed.js",
+    ),
+    true,
+    "swap 后快照必须反映新配置",
+  );
 });
 
 interface Deferred<T = void> {

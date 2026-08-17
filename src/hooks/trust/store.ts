@@ -7,7 +7,7 @@ import {
   resolveReferencedScripts,
   type ReferencedScriptResolution,
   type ResolvedCommandHookInvocation,
-} from "../config/referenced-scripts.js";
+} from "../config/command-shell.js";
 import type { HookHandler, HookSource, ResolvedHookHandler } from "../types.js";
 import {
   assertRegularNonSymlink,
@@ -152,7 +152,9 @@ export class HookTrustStore {
       subject.handler.type === "command"
         ? await resolveCommandHookExecution(subject.handler, workspace, this.environment)
         : undefined;
-    const scriptHashes = await hashReferencedScripts(subject.handler, commandExecution);
+    // shell 化后命令是配置字节（definitionHash 已覆盖），无文件可钉死——
+    // scriptHashes 恒空。旧记录（含 scriptHashes）指纹失配回 pending，属一次性迁移。
+    const scriptHashes: Readonly<Record<string, string>> = {};
     const source = {
       kind: subject.source.kind,
       path: sourcePath,
@@ -181,28 +183,6 @@ export class HookTrustStore {
     const body: HookTrustFile = { version: STORE_VERSION, records };
     await writePrivateFileAtomic(this.filePath, `${JSON.stringify(body, null, 2)}\n`);
   }
-}
-
-async function hashReferencedScripts(
-  handler: HookHandler,
-  commandExecution: ResolvedCommandHookInvocation | undefined,
-): Promise<Readonly<Record<string, string>>> {
-  if (handler.type !== "command") return {};
-  if (!commandExecution) throw new Error("command Hook 缺少已解析的执行绑定");
-  const hashes: Record<string, string> = {};
-  for (const executable of commandExecution.executablePaths) {
-    const identity = commandExecution.executableIdentities[executable];
-    if (!identity) throw new Error(`Hook 可执行文件缺少身份绑定: ${executable}`);
-    hashes[`executable:${executable}`] = hash(stableStringify(identity));
-  }
-  for (const candidate of commandExecution.referencedPaths) {
-    const digest = commandExecution.referencedFileHashes[candidate];
-    if (!digest) throw new Error(`Hook 引用文件缺少已解析哈希: ${candidate}`);
-    hashes[candidate] = digest;
-  }
-  return Object.fromEntries(
-    Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)),
-  );
 }
 
 function parseRecord(input: unknown): HookTrustRecord {

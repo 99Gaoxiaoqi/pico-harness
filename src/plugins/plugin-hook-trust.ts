@@ -3,7 +3,7 @@ import { relative, resolve, sep } from "node:path";
 import {
   resolveCommandHookExecution,
   type ResolvedCommandHookInvocation,
-} from "../hooks/config/referenced-scripts.js";
+} from "../hooks/config/command-shell.js";
 import type { HookTrustAuthority, HookTrustSubject } from "../hooks/trust/store.js";
 
 export interface PluginHookTrustAuthorityOptions {
@@ -25,8 +25,9 @@ export interface RevocablePluginHookTrustAuthority {
  *
  * PluginTrustStore authenticates the installed tree before materialization. This authority is the
  * second half of that contract: it never trusts an arbitrary `plugin` source, only a source under
- * the verified runtime root, and it is revoked before that root is removed. Command execution is
- * still resolved and revalidated through the normal Hook command safety layer.
+ * the verified runtime root, and it is revoked before that root is removed. Command hooks execute
+ * as shell strings (2026-08-17 shell 化)——树内约束由 matches() 的来源门承担，
+ * 不再做可执行文件路径钉死。
  */
 export function createPluginHookTrustAuthority(
   options: PluginHookTrustAuthorityOptions,
@@ -59,25 +60,11 @@ export function createPluginHookTrustAuthority(
   ): Promise<ResolvedCommandHookInvocation | undefined> => {
     if (subject.handler.type !== "command" || !(await matches(subject))) return undefined;
     try {
-      const invocation = await resolveCommandHookExecution(
+      return await resolveCommandHookExecution(
         subject.handler,
         subject.workspace,
         options.env ?? process.env,
       );
-      // A plugin may use the host interpreter (node/python/etc.), but every explicit code/data
-      // file resolved from the handler must remain in the verified plugin tree. The resolver has
-      // already rejected unsupported shell/package-manager indirection.
-      if (
-        invocation.referencedPaths.some((path) => !isWithin(runtimeRoot, path)) ||
-        invocation.pathBindings.some(
-          (binding) =>
-            !isWithin(runtimeRoot, binding.logicalPath) &&
-            !isTrustedRuntimeInterpreter(binding.canonicalPath),
-        )
-      ) {
-        return undefined;
-      }
-      return invocation;
     } catch {
       return undefined;
     }
@@ -114,15 +101,6 @@ export function pluginHookTrustIdentity(
   options: Pick<PluginHookTrustAuthorityOptions, "pluginId" | "resourceDigest">,
 ): string {
   return `${options.pluginId}@${options.resourceDigest}`;
-}
-
-function isTrustedRuntimeInterpreter(path: string): boolean {
-  const name = path
-    .split(/[\\/]/u)
-    .at(-1)
-    ?.toLowerCase()
-    .replace(/\.(?:exe|cmd|bat)$/u, "");
-  return name === "node" || name === "nodejs" || name === "python" || name === "python3";
 }
 
 function isWithin(root: string, target: string): boolean {

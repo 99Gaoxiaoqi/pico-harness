@@ -41,6 +41,7 @@ import {
 } from "../hooks/runtime.js";
 import type { SlashCommand } from "../input/types.js";
 import type { HookConfigSourceSpec } from "../hooks/config.js";
+import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { HookManagementService } from "../hooks/management/service.js";
 import type {
   HookEvent,
@@ -80,6 +81,11 @@ export interface SessionRuntimeOptions {
   hookUserHome?: string;
   /** 已由 Plugin 信任层冻结的扩展 Hook 来源。 */
   hookExtensionSources?: readonly HookConfigSourceSpec[];
+  /**
+   * workspace trust 锚：注入后 executable hooks 在每次 dispatch 边界复验工作区
+   * 信任（撤销信任即失效）。daemon 装配链注入宿主共享实例。
+   */
+  workspaceTrustStore?: WorkspaceTrustStore;
 }
 
 /**
@@ -576,6 +582,9 @@ async function createPinnedSessionRuntime(
           ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
           ...(options.hookExtensionSources
             ? { extensionSources: options.hookExtensionSources }
+            : {}),
+          ...(options.workspaceTrustStore
+            ? { workspaceTrustStore: options.workspaceTrustStore }
             : {}),
         }).catch((error) => {
           logger.warn(

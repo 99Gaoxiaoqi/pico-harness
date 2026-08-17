@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import {
-  resolveCommandHookExecution,
-  sanitizeCommandHookEnvironment,
-} from "../../../src/hooks/config/referenced-scripts.js";
+import { sanitizeCommandHookEnvironment, resolveHookShell } from "../../../src/hooks/config/command-shell.js";
 import { DefaultHookExecutor } from "../../../src/hooks/executors/executor.js";
 import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
 
@@ -15,7 +12,7 @@ const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";
 
 test(
-  "Windows command Hooks execute direct .exe entries and reject shell-owned extensions",
+  "Windows command Hooks execute .exe entries and accept shell-owned extensions (.cmd)",
   { skip: WINDOWS_ONLY },
   async (context) => {
     const fixture = await createFixture(context, "direct-exe");
@@ -30,38 +27,44 @@ test(
       args: ["./entry.cjs"],
     } as const satisfies CommandHookHandler;
 
-    const invocation = await resolveCommandHookExecution(handler, fixture.workspace);
-    assert.match(invocation.command, /\.exe$/iu);
-
     const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-direct-exe");
     assert.equal(output.additionalContext, "windows-exe");
 
-    const blockedCommand = join(fixture.workspace, "blocked.cmd");
-    await writeFile(blockedCommand, "@exit /b 0\r\n");
-    await assert.rejects(
-      resolveCommandHookExecution(
-        { type: "command", command: blockedCommand, args: [] },
-        fixture.workspace,
-      ),
-      /Windows command Hook 仅允许.*\.exe/u,
+    // shell 化后 .cmd 不再被拒绝——命令交给 shell 解释。raw 命令按所选 shell
+    // 方言书写（本机无可用 Git Bash 时落 PowerShell，调用运算符为 &）。
+    const cmdPath = join(fixture.workspace, "greet.cmd");
+    await writeFile(
+      cmdPath,
+      '@echo {"additionalContext":"windows-cmd"}\r\n',
     );
+    const shellKind = resolveHookShell().kind;
+    const cmdHandler = {
+      type: "command",
+      command:
+        shellKind === "pwsh" || shellKind === "powershell"
+          ? `& "${cmdPath}"`
+          : `"${cmdPath}"`,
+    } as const satisfies CommandHookHandler;
+    const cmdOutput = await executeStopHook(executor, fixture, cmdHandler, "windows-cmd");
+    assert.equal(cmdOutput.additionalContext, "windows-cmd", JSON.stringify(cmdOutput));
   },
 );
 
 test(
-  "Windows resolves and spawns bare .exe commands with mixed-case Path and PathExt keys",
+  "Windows resolves bare command names through the shell at runtime (mixed-case Path keys)",
   { skip: WINDOWS_ONLY },
   async (context) => {
     const fixture = await createFixture(context, "mixed-case-path");
     const entryPath = join(fixture.workspace, "entry.cjs");
     await writeFile(
       entryPath,
-      "process.stdout.write(JSON.stringify({ additionalContext: `${process.env.PATH}|${process.env.PATHEXT}` }));\n",
+      "process.stdout.write(JSON.stringify({ additionalContext: `${process.env.pAtH ?? process.env.PATH}` }));\n",
     );
     const environment = withoutExecutionPath(process.env);
-    environment.pAtH = dirname(process.execPath);
+    environment.pAtH = `${join(process.execPath, "..")};${environment.pAtH ?? ""}`;
+    // PowerShell 解析裸命令名依赖 PATHEXT（真实 Windows 恒有；测试受控环境需显式补回）。
     environment.pAtHeXt = ".CMD;.EXE";
     const handler = {
       type: "command",
@@ -69,27 +72,18 @@ test(
       args: ["./entry.cjs"],
     } as const satisfies CommandHookHandler;
 
-    const invocation = await resolveCommandHookExecution(handler, fixture.workspace, environment);
-    assert.match(invocation.command, /\.exe$/iu);
-    assert.equal(await realpath(invocation.command), await realpath(process.execPath));
-    assert.equal(invocation.env.pAtH, environment.pAtH);
-    assert.equal(invocation.env.pAtHeXt, environment.pAtHeXt);
-
-    for (const name of ["path", "PaThExT"] as const) {
-      assert.throws(
-        () =>
-          sanitizeCommandHookEnvironment(
-            { type: "command", command: process.execPath, args: [], env: { [name]: "injected" } },
-            environment,
-          ),
-        new RegExp(`不允许覆盖 ${name}`, "u"),
-      );
-    }
+    // handler.env 覆盖 PATH 放行（shell 化语义：配置即用户意图）。
+    const overridden = sanitizeCommandHookEnvironment(
+      { type: "command", command: "node", args: [], env: { PATH: "custom" } },
+      environment,
+    );
+    assert.equal(overridden.PATH, "custom");
 
     const executor = new DefaultHookExecutor({ workDir: fixture.workspace, env: environment });
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-mixed-case-path");
-    assert.equal(output.additionalContext, `${environment.pAtH}|${environment.pAtHeXt}`);
+    // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir 前缀 + 尾随分号）。
+    assert.equal(output.additionalContext, `${join(process.execPath, "..")};`);
   },
 );
 
@@ -110,12 +104,6 @@ test(
       command: process.execPath,
       args: [entryPath],
     } as const satisfies CommandHookHandler;
-
-    const invocation = await resolveCommandHookExecution(handler, fixture.workspace);
-    assert.equal(
-      invocation.pathBindings.some((binding) => binding.logicalPath === entryPath),
-      true,
-    );
 
     const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
     context.after(async () => await executor.dispose());
