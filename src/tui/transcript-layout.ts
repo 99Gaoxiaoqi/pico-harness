@@ -121,7 +121,12 @@ function entryRows(
   if (entry.kind === "approval" || entry.kind === "prompt" || entry.kind === "changes") {
     return visualRows([entry.title, entry.detail].filter(Boolean).join("\n"), wrapWidth).length + 1;
   }
-  if (entry.kind === "run-boundary") return 1;
+  if (entry.kind === "run-boundary") {
+    if (entry.status === "failed" && entry.error) {
+      return buildErrorEntryRows({ kind: "error", message: entry.error, retryable: true }, wrapWidth).length + 1;
+    }
+    return 1;
+  }
   if (entry.kind === "assistant") {
     return new TerminalMarkdownModel(entry.content).measure(wrapWidth) + 1;
   }
