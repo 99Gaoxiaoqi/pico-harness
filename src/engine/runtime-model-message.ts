@@ -35,6 +35,7 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "run.started": "control",
   "message.committed": "message",
   "tool.started": "control",
+  "tool.group.loaded": "control",
   "tool.result.recorded": "message",
   "approval.requested": "control",
   "approval.settled": "control",
