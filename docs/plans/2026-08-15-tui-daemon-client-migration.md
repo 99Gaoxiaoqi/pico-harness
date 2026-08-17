@@ -86,7 +86,7 @@
 - **会话旗标三式补齐**（默认切换后体验不降级）：`--continue` 采纳 resolveCliSession 解析出的具体 sessionId（等价 resume——mode "continue" 本就带 latest id）；`--fork <id>` 经 ClientReplOptions.forkFrom——runtime.start() 连接后 `session.fork` RPC 切新会话（原会话不动）；`-S/--resume` 照旧。
 - **--graph**：ClientSessionRuntimeOptions.orchestrationModeOverride 并入 BYOK 启动覆盖桥（与 model/thinking 共用单次闩 + 重试触发点，session.settings.update 一次应用）。
 - **缺口旗标显式提示**：--mcp-config/--add-dir（MCP 归 daemon 侧装配）与裸 --provider 提示用 --model——不静默丢弃。
-- **冷启动预算复核**：render 先于 runtime.start()（UI 立即出现）+ 连接前系统消息"正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…"——慢环境 connectOrSpawn 选举首连可达 24s 不再黑屏。选举预算本身维持既有（45s 窗口 + 3-B-4 候选封顶）。
+- **冷启动预算复核**：render 先于 runtime.start()（UI 立即出现）+ 连接前系统消息"正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…"——慢环境 connectOrSpawn 选举��连可达 24s 不再黑屏。选举预算本身维持既有（45s 窗口 + 3-B-4 候选封顶）。（2026-08-17 注：候选封顶已退役，对齐 maka 无上限形态，仅保留 250ms 节流。）
 - **验证**：cli-entry-dispatch 5 条（fake CliRuntime 断言分派/旗标传递/快速路径）+ 相关回归 41/41 + typecheck 0 + 门禁 0 + e2e 真实模型 1/1 + 真机 `pico --help`。真机交互冒烟（默认 pico 跑完整回合）待用户实跑。
 
 ### Phase 4 全矩阵真机实测闭环（2026-08-15，aa617504）
@@ -107,7 +107,7 @@
 
 **实测暴露的遗留（高优先）**：多轮高频 e2e 下 daemon 间歇死锁——连接 terminal（RUNTIME_DISCONNECTED）、稍后 ping 可恢复但窗口不定；当前 launcher 不落盘 daemon stderr，崩溃零证据——**先做 stderr 落盘基础设施再定位**。本机另有 3 个 temp-root 孤儿 daemon 进程（runtime-host 测试遗留）待清理。
 
-**（2026-08-16 补记）死锁已根因定位并修复**，实为三连击（详见 phase3 handoff 同日章节）：① e2e 用默认 `LocalRuntimeClient()` 打**用户真 home daemon**，失败轮次的清理链同样失败 → 真 home 注册表累积 118 条 e2e 工作区（54 个 %TEMP% 目录真实存活）→ reconcile 全量物化 cron runtime（~30% CPU 忙循环）+ workspace.list 物化全部 runtime 超操作 deadline → 连接拆断；② 安全 agent 环境下 registration 发布 rename 间歇 EPERM 直接崩候选（修复：renameWithRetry 有界重试）；③ 首候选崩溃后兄弟候选被其残留 legacy 锁拒绝，3 个选举名额烧光（修复：活满 5s 后死亡的候选不占名额）。**e2e 已改每场景独立 pico-home + 专属 daemon + 结束优雅关停**（不再碰真 home），修复后全矩阵单轮 4/4（127s）。
+**（2026-08-16 补记）死锁已根因定位并修复**，实为三连击（详见 phase3 handoff 同日章节）：① e2e 用默认 `LocalRuntimeClient()` 打**用户真 home daemon**，失败轮次的清理链同样失败 → 真 home 注册表累积 118 条 e2e 工作区（54 个 %TEMP% 目录真实存活）→ reconcile 全量物化 cron runtime（~30% CPU 忙循环）+ workspace.list 物化全部 runtime 超操作 deadline → 连接拆断；② 安全 agent 环境下 registration 发布 rename 间歇 EPERM 直接崩候选（修复：renameWithRetry 有界重试）；③ 首候选崩溃后兄弟候选被其残留 legacy 锁拒绝，3 个选举名额烧光（修复：活满 5s 后死亡的候选不占名额；2026-08-17 注：名额机制已随无上限化整体退役）。**e2e 已改每场景独立 pico-home + 专属 daemon + 结束优雅关停**（不再碰真 home），修复后全矩阵单轮 4/4（127s）。
 
 ### Phase 5 实施记录（2026-08-16）
 
@@ -141,7 +141,7 @@
 | prompt 自由文本缺失（TUI ask-user 有文本输入） | 中 | Phase 3 协议扩展（prompt.requested 加输入模式 + respond 放行文本） |
 | BYOK 旗标（--model/--provider）与 daemon 配置所有权冲突 | 中 | Phase 3 客户端合并（config.effective.get + 本地覆盖），不改 daemon 权威 |
 | CLI 部署模型认知（用户习惯单进程） | 低 | Phase 4 默认切换前保持 `--client` 可选；常驻 daemon 语义与 Desktop/cron 一致 |
-| 慢环境冷启动（候选 19-31s） | 低 | 已有 45s 选举窗口 + 3-B-4 封顶；Phase 4 复核首请求预算 |
+| 慢环境冷启动（候选 19-31s） | 低 | 已有 45s 选举窗口 + 3-B-4 封顶；Phase 4 复核首请求预算（2026-08-17 注：封顶已退役，仅余 250ms 节流 + 45s 窗口，慢环境窗口内可积数十在途候选为已知接受代价） |
 
 ## 五、与北极星方案验收标准的对齐
 

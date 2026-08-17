@@ -40,38 +40,43 @@ test("runtime-host spawn: connectOrSpawnRuntimeHost launches a detached candidat
   await connection.close();
 });
 
-test("runtime-host spawn: election window caps candidate launches (A6)", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-spawncap-"));
+test("runtime-host spawn: candidate launches are throttled by the minimum interval", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-throttle-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   // 预创建 storage root marker，稳定 rootId。
   await resolveStorageRoot({ path: root, kind: "interactive" });
 
-  // 假 launcher：spawn 立即"成功"，但没有任何真实 host 会落定——选举循环只能
-  // 持续轮询到 deadline。慢冷启动环境（候选 19-31s 才就绪）此前会按 250ms 间隔
-  // 在整个窗口内堆积几十个在途候选；封顶后同窗口最多 3 个。
-  let launches = 0;
+  // 假 launcher：spawn 立即"成功"但无真实 host 落定，选举循环只能轮询到
+  // deadline。250ms 最小间隔是无数量上限形态下唯一的 launch 节流闸门——
+  // 直接断言相邻 launch 的时间间隔，防止节流被误删后退化为逐轮补发。
+  const launchTimes: number[] = [];
   const result = await connectOrSpawnRuntimeHostWithDependencies(
     {
       rootPath: root,
       surface: "tui",
       protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
-      clientInstanceId: "spawn-cap-test-client",
+      clientInstanceId: "spawn-throttle-test-client",
       electionDeadlineMs: 1500,
-      maxCandidateLaunches: 3,
     },
     {
       launchCandidate: () => {
-        launches += 1;
-        return { spawned: Promise.resolve({ pid: 40_000 + launches }) };
+        launchTimes.push(performance.now());
+        return { spawned: Promise.resolve({ pid: 40_000 + launchTimes.length }) };
       },
       random: () => 0.5,
     },
   );
 
   assert.equal(result.kind, "failed", "无真实候选时选举应失败");
-  assert.equal(result.reason, "startup_timeout");
-  assert.equal(launches, 3, `候选 launch 数应封顶在 3，实际 ${launches}`);
+  assert.ok(launchTimes.length >= 3, `1.5s 窗口内应多次补发候选，实际 ${launchTimes.length} 次`);
+  const minObservedGap = launchTimes
+    .slice(1)
+    .reduce((min, time, i) => Math.min(min, time - launchTimes[i]!), Number.POSITIVE_INFINITY);
+  assert.ok(
+    minObservedGap >= 240,
+    `相邻候选 launch 间隔应保持 250ms 最小节流（观测最小 ${minObservedGap.toFixed(1)}ms）`,
+  );
 });
 
 test("runtime-host spawn: candidate stdout/stderr is persisted to the log directory", async (t) => {

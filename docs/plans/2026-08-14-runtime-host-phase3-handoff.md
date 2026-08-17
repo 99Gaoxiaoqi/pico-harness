@@ -6,7 +6,7 @@
 
 ## 一句话现状
 
-**阶段 3 全部完成（2026-08-16）：3-A 骨架 + 3-B 全部 + 3-C Desktop + 3-D Phase 1-4 + Phase 5 退役进程内交互路径（删 repl.tsx 3,592 行 + 7 孤儿模块 + --local；D14 扩展到整个 src/tui）→ 北极星阶段 3 收口。遗留高优先"daemon 间歇死锁"已闭环（2026-08-16）：根因= e2e 打真 home 累积 118 条工作区注册（54 个 %TEMP% 目录存活）→ cron 忙循环 + workspace.list 超 deadline，叠加 registration 发布 rename EPERM 崩候选与选举名额烧光；修复= e2e 隔离 daemon root + renameWithRetry + 选举名额折扣 + launcher stderr 落盘（candidate-logs 常驻取证）；真 home 已清理并验证健康；全矩阵 e2e 隔离版 4/4（127s）。**
+**阶段 3 全部完成（2026-08-16）：3-A 骨架 + 3-B 全部 + 3-C Desktop + 3-D Phase 1-4 + Phase 5 退役进程内交互路径（删 repl.tsx 3,592 行 + 7 孤儿模块 + --local；D14 扩展到整个 src/tui）→ 北极星阶段 3 收口。遗留高优先"daemon 间歇死锁"已闭环（2026-08-16）：根因= e2e 打真 home 累积 118 条工作区注册（54 个 %TEMP% 目录存活）→ cron 忙循环 + workspace.list 超 deadline，叠加 registration 发布 rename EPERM 崩候选与选举名额烧光；修复= e2e 隔离 daemon root + renameWithRetry + 选举名额折扣 + launcher stderr 落盘（candidate-logs 常驻取证）；真 home 已清理并验证健康；全矩阵 e2e 隔离版 4/4（127s）。**（2026-08-17 注：A6 候选封顶与选举名额折扣已整体退役，对齐 maka ���上限形态，仅保留 250ms 最小间隔 + 45s 窗口 + flock 淘汰。）
 
 ## 本 session 完成的事（2026-08-16：死锁闭环 + Phase 5 退役）
 
@@ -150,7 +150,7 @@
 |---|---|
 | **P1-2 重试双执行** | ✅ `src/daemon/client.ts`：`KERNEL_RETRY_SAFE_METHODS` 幂等白名单（41 个读方法 + events.*，覆盖语义重订等价）。传输级失败（连接 terminal）后仅白名单方法走"丢弃死连接 → 重生 → 重发"循环；非幂等写方法立即上抛 `RUNTIME_DISCONNECTED`（retryable=true，调用方决策）。有意排除 `diagnostics.run`（doctor 副作用未证伪）。 |
 | **P1-3 960KB–1MiB 死区** | ✅ 根因：transcript 分页预算从 `MAX_RUNTIME_FRAME_BYTES`（旧 socket 1MiB）派生，超出 kernel 桥闸门（`RUNTIME_REQUEST_RESULT_MAX_BYTES` = 帧上限 - 64KB 信封预留）。修复：`runtime-host-operations.ts` 导出该常量，`desktop-runtime-service.ts` transcript 预算与终检改用它——daemon 侧结果永远装得进 kernel 帧，死区消失。events.replay 预留本就是 64KB，无需改。 |
-| **A6 候选池 spawn 风暴** | ✅ `connect-or-spawn.ts`：单次选举窗口候选 launch 总数封顶（`DEFAULT_MAX_CANDIDATE_LAUNCHES=3`，输入可覆盖 1-16）。封顶不牺牲活性——选举循环仍轮询到 deadline，无论哪个候选先就绪都能连上；真正的候选失败由下一次调用的全新窗口兜底。慢环境（候选 19-31s）不再每 250ms 堆一个在途候选，关停后锁被晚到候选接走的不确定性大幅收窄。 |
+| **A6 候选池 spawn 风暴** | ~~✅~~（2026-08-17 已回滚）`connect-or-spawn.ts`：单次选举窗口候选 launch 总数封顶（`DEFAULT_MAX_CANDIDATE_LAUNCHES=3`，输入可覆盖 1-16）。封顶不牺牲活性——选举循环仍轮询到 deadline，无论哪个候选先就绪都能连上；真正的候选失败由下一次调用的全新窗口兜底。慢环境（候选 19-31s）不再每 250ms 堆一个在途候选，关停后锁被晚到候选接走的不确定性大幅收窄。**回滚后仅保留 250ms 最小间隔节流（有专项间隔回归测试）+ 45s 窗口 + flock 淘汰，对齐 maka 无上限形态。** |
 | **host.diagnostics.query.logs 恒空**（M4） | ✅ kernel 最小环形日志（256 条 × 10KB/条，进程内）：`state=ready`、drain requested、`state=draining`、recover 超时、shutdown deadline 超时、owner 丢失、idle 退出。只记 kernel 自身生命周期事实，不含领域事件（那是桥接层的事）。 |
 | 91 方法 spec 化 | ⏸ 维持渐进退役：每个方法 ~10 行样板，无阻塞消费方；随 3-C Desktop 接入按需补。 |
 | 旧 socket server 清理 | ⏸ 维持：LocalRuntimeDaemon 仅剩注入测试面（client 双模式的显式 endpoint 注入路径），等测试面迁移后一并删。 |
