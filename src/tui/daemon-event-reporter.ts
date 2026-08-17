@@ -96,14 +96,26 @@ export class DaemonEventReporter {
           this.currentRunId = runId;
         } else if (this.active && !running && isTerminalRunStatus(status)) {
           this.finishRun(status);
+          this.surfaceRunFailure(run);
         }
         // paused/cancelling：非终态非运行——保持 active（run 仍占用，spinner 继续
         // 是可接受近似；终态由 run.finished 收口）。
         return;
       }
       case "run.finished": {
-        const run = payload["run"] as { status?: unknown } | undefined;
-        if (this.active) this.finishRun(typeof run?.status === "string" ? run.status : "succeeded");
+        const run = payload["run"] as { status?: unknown; error?: unknown } | undefined;
+        if (this.active) {
+          this.finishRun(typeof run?.status === "string" ? run.status : "succeeded");
+          this.surfaceRunFailure(run);
+        }
+        return;
+      }
+      case "runtime.error": {
+        // daemon 级运行时错误（会话装配/资源失败）——此前无消费者，界面静默。
+        const message = typeof payload["message"] === "string" ? payload["message"] : "";
+        if (message) {
+          this.reporter.pushError(message, { retryable: payload["recoverable"] === true });
+        }
         return;
       }
       case "run.live":
@@ -143,6 +155,19 @@ export class DaemonEventReporter {
       this.reporter.onFinish();
     }
     this.onRunStateChanged?.(false);
+  }
+
+  /**
+   * run 以 failed 收口时把错误文本推成可见条目（错误可见性收口，2026-08-17）。
+   * 此前 failed 归入 onInterrupted，payload.run.error 被丢弃——provider 失败
+   * （端点不可达/key 缺失/模型报错）在界面上静默无显示。水化重取后该 live
+   * 条目由持久 run-boundary(failed) 渲染接替（message-row），不重复。
+   */
+  private surfaceRunFailure(run: { status?: unknown; error?: unknown } | undefined): void {
+    const error = typeof run?.error === "string" ? run.error : "";
+    if (run?.status === "failed" && error) {
+      this.reporter.pushError(error, { retryable: true });
+    }
   }
 
   private handleLiveItem(payload: Record<string, unknown>): void {

@@ -120,6 +120,22 @@ function MessageRowImpl({
         clipRows(buildErrorFrameRows(entry, wrapWidth), toolStartOffsetRows, toolVisibleRows),
       );
 
+    case "run-boundary": {
+      // failed run 边界渲染为错误框（错误可见性收口，2026-08-17）：水化/resume/
+      // 重连后 provider 失败依然可见；非 failed 边界保持不可见占位（现状）。
+      if (entry.status !== "failed" || !entry.error) return null;
+      return renderErrorRows(
+        clipRows(
+          buildErrorFrameRows(
+            { kind: "error", message: entry.error, retryable: true },
+            wrapWidth,
+          ),
+          toolStartOffsetRows,
+          toolVisibleRows,
+        ),
+      );
+    }
+
     case "system":
       return (
         <MessageFrame marker="•" markerColor="gray">
