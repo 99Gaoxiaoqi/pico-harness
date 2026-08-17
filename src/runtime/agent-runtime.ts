@@ -1109,6 +1109,7 @@ export async function executeAgentRuntime(
         session,
         sessionLease,
         env: runtimeEnv,
+        workspaceTrustStore: memoryTrustStore,
         ...(dependencies.toolDisclosure !== undefined
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),

@@ -8,7 +8,7 @@ import {
   type LoadHookSnapshotOptions,
   type LoadHookSnapshotResult,
 } from "../config.js";
-import { resolveReferencedScripts } from "./referenced-scripts.js";
+import { resolveReferencedScripts } from "./command-shell.js";
 import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
 import { raceWithDeadline } from "../../util/race-with-deadline.js";
 

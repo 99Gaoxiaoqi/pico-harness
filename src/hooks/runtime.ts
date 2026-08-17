@@ -22,6 +22,7 @@ import { HookManagementService } from "./management/service.js";
 import { HookLocalStateStore } from "./management/state.js";
 import { HookService, type HookDecisionProvider } from "./service.js";
 import { HookTrustStore } from "./trust/store.js";
+import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 
 export interface SessionHookRuntimeOptions extends Pick<
   LoadHookSnapshotOptions,
@@ -32,6 +33,12 @@ export interface SessionHookRuntimeOptions extends Pick<
   env?: Readonly<NodeJS.ProcessEnv>;
   /** Host/test seam for sharing the exact trust authority used by loading and execution. */
   trustStore?: HookTrustStore;
+  /**
+   * workspace trust 锚（2026-08-17 威胁模型对齐）：executable hooks 在每次 dispatch
+   * 边界复验工作区信任，撤销信任后自然失效（memory 同款每边界复验）。未注入时维持
+   * 现状（测试/headless 兼容）。
+   */
+  workspaceTrustStore?: WorkspaceTrustStore;
 }
 
 export interface SessionHookRuntime {
@@ -98,12 +105,18 @@ export async function createSessionHookRuntime(
     sessionId: options.sessionId,
     executor,
     snapshot: initial.snapshot,
-    revalidateExecutableTrust: async (entry) =>
-      (await (entry.source.trustAuthority ?? trustStore).status({
-        workspace: options.workDir,
-        source: entry.source,
-        handler: entry.handler,
-      })) === "active",
+    revalidateExecutableTrust: async (entry) => {
+      const fingerprintActive =
+        (await (entry.source.trustAuthority ?? trustStore).status({
+          workspace: options.workDir,
+          source: entry.source,
+          handler: entry.handler,
+        })) === "active";
+      if (!fingerprintActive) return false;
+      if (!options.workspaceTrustStore) return true;
+      const canonical = await options.workspaceTrustStore.canonicalize(options.workDir);
+      return await options.workspaceTrustStore.isTrusted(canonical);
+    },
     decisionProviders: [decisionProvider],
   });
   const reloader = new HookConfigReloader({

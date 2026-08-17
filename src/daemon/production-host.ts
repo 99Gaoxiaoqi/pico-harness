@@ -251,6 +251,7 @@ export function createProductionRuntimeServices(
           session,
           sessionLease,
           env,
+          workspaceTrustStore: trustStore,
           ...(workspaceRuntime.taskHostRuntime
             ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
             : {}),

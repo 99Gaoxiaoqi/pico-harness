@@ -18,10 +18,11 @@ import type {
 } from "../types.js";
 import type { HookExecutor } from "../service.js";
 import {
-  revalidateResolvedCommandHookExecution,
   resolveCommandHookExecution,
+  resolveHookShell,
+  type HookShell,
   type ResolvedCommandHookInvocation,
-} from "../config/referenced-scripts.js";
+} from "../config/command-shell.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -130,6 +131,14 @@ export class DefaultHookExecutor implements HookExecutor {
     await Promise.allSettled([...this.asyncCommands]);
   }
 
+  private cachedShell: HookShell | undefined;
+
+  /** shell 选择一次解析，全 executor 复用（win32 Git Bash 优先，回落 PowerShell）。 */
+  private hookShell(): HookShell {
+    this.cachedShell ??= resolveHookShell(this.options.env ?? process.env);
+    return this.cachedShell;
+  }
+
   private async executeCommand(
     resolved: ResolvedHookHandler,
     handler: CommandHookHandler,
@@ -143,9 +152,9 @@ export class DefaultHookExecutor implements HookExecutor {
           handler,
           this.options.workDir,
           this.options.env ?? process.env,
+          this.hookShell(),
         );
     if (!invocation) throw new Error("command Hook 执行前信任已失效");
-    await revalidateResolvedCommandHookExecution(invocation);
     const running = startCommand(resolved, invocation, input, this.options.workDir, signal);
     const runsInBackground = handler.async || handler.asyncRewake;
     if (runsInBackground) {
@@ -336,7 +345,13 @@ function startCommand(
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     };
-    child = spawn(invocation.command, [...invocation.args], spawnOptions);
+    // shell 化执行：显式 spawn 选定的 shell 二进制（不用 node shell:true 选项，
+    // 避免 win32 默认 cmd.exe 的语义漂移），命令串整体作为 -c 参数交给 shell。
+    child = spawn(
+      invocation.shell.path,
+      [...invocation.shell.argsPrefix, invocation.commandString],
+      spawnOptions,
+    );
   } catch (err) {
     const rejected = Promise.reject(err);
     rejected.catch(() => undefined);

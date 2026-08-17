@@ -141,3 +141,24 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 ## 7. 积极面
 
 叙事态（代码核心）确实干净：账本 append-only 无 GC、两层 CAS 完整、投影无第二事实源、Memory 派生层可重建、压缩边界与文档吻合、owner-lease 是 fence 非事实源。**地基是稳的，乱的是上层两层的"贯彻纪律"**。治理机制（不变量测试 + 门禁）的目的就是冻结地基、强制上层回到原则。
+
+## 8. Hook 威胁模型对齐 Claude Code（2026-08-17）
+
+command hook 执行模型从"静态信任钉死"彻底转向"shell 化 + 配置字节审批"，一次三方对比驱动的哲学重构：
+
+| | 命令形态 | 解析时机 | 威胁假设 | 脏 PATH 容忍 |
+|---|---|---|---|---|
+| Claude Code | 任意 shell 字符串 | 运行时 shell 内 | 命令可信，防"hook 干坏事"（网络沙箱） | 完全容忍 |
+| maka-agent | 无 hooks 功能 | — | — | — |
+| pico 旧 | exec-form 单命令 | 绑定时钉死 | 环境不可信，防"hook 变成别的文件" | 零容忍（脏 PATH 静默杀死 hook） |
+| pico 新 | 任意 shell 字符串 | 运行时 shell 内 | 命令=用户意图，信任锚=配置字节指纹 + workspace trust | 完全容忍 |
+
+**删除**：PATH 钉死、可执行文件 canonical 身份、shebang 解释器链、引用文件哈希、执行前 TOCTOU revalidate、package-manager/转发器禁令、Windows .exe-only 规则。审计粒度从文件字节降为配置字节（已确认取舍）。
+
+**保留**：环境消毒（剥离 base env 的 loader 注入变量，防第三方篡改用户意图）、handler.env 覆盖全放行（配置即意图）、指纹审批机制、Git Bash 可用性探测（残缺安装的转发 stub 会被拒并回落 PowerShell）。
+
+**新增**：workspace trust 成为 dispatch 信任锚（每次 dispatch 边界复验，撤销信任后 executable hooks 自然失效——memory 同款每边界复验模式；daemon 装配链注入宿主共享实例）。
+
+**代价**：现存 command hooks 的 trusted-hooks.json 记录一次性失配需重新 `/hooks trust`；批准后 npm/git 本体被掉包不再被抓（运行时 PATH 说什么就是什么）；Windows POSIX 风格 hook 依赖 Git Bash（缺失时落 PowerShell，`&&` 需 pwsh 7+）。
+
+实现：`src/hooks/config/command-shell.ts`（取代 referenced-scripts.ts）+ executor shell spawn + 信任库指纹收缩 + workspace trust 锚。测试：hook-command-shell 套件（含原始 `%AccessAgentLibs%` 脏 PATH 场景）。
