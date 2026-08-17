@@ -2,7 +2,11 @@
 
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { runRuntimeHostProcessLifecycle } from "@pico/runtime-host";
+import {
+  candidateStartupFailureExitCode,
+  classifyCandidateStartupFailure,
+  runRuntimeHostProcessLifecycle,
+} from "@pico/runtime-host";
 import {
   parsePicoDaemonCandidateArguments,
   startPicoDaemonRuntimeHostCandidate,
@@ -13,7 +17,8 @@ import {
  *   升级守卫（旧 instance-lock）→ flock 选主 → kernel + production composition。
  * 无参启动（旧 LaunchAgent / 手动 spawn）以 canonical PICO_HOME 自举交互根；
  * connectOrSpawn spawn 路径传 kernel CLI 参数（--root/--expected-root-id）。
- * 退出码：0 正常关停 / 1 启动失败或关停超时 / 2 flock loser / 3 旧 daemon 仍在运行。
+ * 退出码：0 正常关停 / 2 flock loser / 3 旧 daemon 仍在运行 / 65 存储根不兼容
+ * （永久，客户端 fast-fail）/ 70 其他启动失败（非永久）/ 1 关停超时。
  */
 export async function runLocalDaemon(): Promise<void> {
   const options = parsePicoDaemonCandidateArguments(process.argv.slice(2));
@@ -39,9 +44,12 @@ async function isEntrypoint(): Promise<boolean> {
 
 if (await isEntrypoint()) {
   await runLocalDaemon().catch((error: unknown) => {
+    // 启动失败按退出码协议分类退出：客户端 connectOrSpawn 据此 fast-fail（65）
+    // 或携带诊断收场（70），不再对确定性失败空转整个选举窗口。
+    const failure = classifyCandidateStartupFailure(error);
     process.stderr.write(
       `Pico daemon 启动失败: ${error instanceof Error ? error.message : String(error)}\n`,
     );
-    process.exitCode = 1;
+    process.exit(candidateStartupFailureExitCode(failure));
   });
 }

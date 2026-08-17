@@ -18,6 +18,11 @@ import {
   type RuntimeHostConnection,
 } from './connection.js';
 import { launchDetachedRuntimeHostCandidate, type CandidateLauncher } from './launcher.js';
+import {
+  isPermanentCandidateStartupFailure,
+  type CandidateStartupFailure,
+  type CandidateStartupFailureReason,
+} from '../candidate-startup-failure.js';
 
 const DEFAULT_ELECTION_DEADLINE_MS = 45_000;
 const DEFAULT_BACKOFF_MIN_MS = 20;
@@ -69,7 +74,10 @@ const defaultDependencies: ConnectOrSpawnRuntimeHostDependencies = {
 export type ConnectOrSpawnRuntimeHostResult =
   | { kind: 'connected'; connection: RuntimeHostConnection }
   | { kind: 'incompatible'; handshake: HostIncompatible }
-  | { kind: 'failed'; reason: 'startup_timeout' | 'host_unresponsive' };
+  | {
+      kind: 'failed';
+      reason: 'startup_timeout' | 'host_unresponsive' | CandidateStartupFailureReason;
+    };
 
 export async function connectOrSpawnRuntimeHost(
   input: ConnectOrSpawnRuntimeHostInput,
@@ -98,6 +106,13 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
   let nextCandidateAt = startedAt;
   let backoffMs = DEFAULT_BACKOFF_MIN_MS;
   let sawUnresponsiveEndpoint = false;
+  // 退出码协议的消费端：候选 startupFailure 报告异步到达（exit 事件），记账
+  // 在途报告数；只保留"最永久"的一条（永久类可覆盖非永久类，反之不可——
+  // 偶发内部失败不能抹掉已确认的永久失败）。刹车条件=已有永久失败且所有在
+  // 途报告收齐（pending===0），避免并发候选中另一个正走在成功路上时用局部
+  // 信息提前放弃。
+  let startupFailure: CandidateStartupFailure | undefined;
+  let pendingCandidateReports = 0;
 
   while (performance.now() < deadline) {
     const result = await connectResolvedRuntimeHost({
@@ -120,6 +135,9 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
     }
     if (isBlockingIncompatibility(result)) {
       return { kind: 'incompatible', handshake: result.handshake };
+    }
+    if (isPermanentCandidateStartupFailure(startupFailure) && pendingCandidateReports === 0) {
+      return { kind: 'failed', reason: startupFailure.reason };
     }
 
     const now = performance.now();
@@ -147,7 +165,27 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
           logDirectory:
             input.candidateLogDirectory ?? join(controlDirectory, 'candidate-logs'),
         });
-        await settleBeforeDeadline(launch.spawned, deadline);
+        const attempt = await settleBeforeDeadline(launch.spawned, deadline);
+        if (attempt.startupFailure) {
+          pendingCandidateReports += 1;
+          void attempt.startupFailure
+            .then(
+              (failure) => {
+                if (
+                  failure &&
+                  (!startupFailure ||
+                    (!isPermanentCandidateStartupFailure(startupFailure) &&
+                      isPermanentCandidateStartupFailure(failure)))
+                ) {
+                  startupFailure = failure;
+                }
+              },
+              () => undefined,
+            )
+            .finally(() => {
+              pendingCandidateReports -= 1;
+            });
+        }
       } catch {
         // A failed Candidate attempt is ordinary election evidence; discovery continues.
       }
@@ -161,6 +199,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
     await sleep(Math.min(remaining, Math.max(1, Math.round(backoffMs * jitter))));
     backoffMs = Math.min(DEFAULT_BACKOFF_MAX_MS, backoffMs * 2);
   }
+  if (startupFailure) return { kind: 'failed', reason: startupFailure.reason };
   return {
     kind: 'failed',
     reason: sawUnresponsiveEndpoint ? 'host_unresponsive' : 'startup_timeout',
