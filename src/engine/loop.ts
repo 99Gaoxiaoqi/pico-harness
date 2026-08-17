@@ -2571,7 +2571,9 @@ export class AgentEngine implements AgentRunner {
     await this.onRunComplete?.();
 
     // 返回本轮新增的消息序列(从用户输入起到最终答案止)
-    return session.getHistory().slice(beforeLen);
+    const runMessages = session.getHistory().slice(beforeLen);
+    assertRunProducedModelOutput(runMessages);
+    return runMessages;
   }
 
   private async commitRejectedToolBatch(
@@ -4119,4 +4121,23 @@ function recordTraceError(span: Span | undefined, error: unknown): void {
     isError: true,
     outputPreview: truncate(error instanceof Error ? error.message : String(error), 500),
   });
+}
+
+/**
+ * 空 run 防线：主循环正常走完但本轮没有任何带内容/工具调用的 assistant 消息，
+ * 几乎必是 provider 端点返回了空流（网关 200 + 0 字节 SSE 的实测形态，会话层
+ * 表现为 run "succeeded" 但零 assistantMessage，TUI 无任何显示）。此处
+ * fail-loud 抛错，复用既有 run 失败可见性链路，把静默空回合变成可诊断错误。
+ */
+function assertRunProducedModelOutput(messages: readonly Message[]): void {
+  const produced = messages.some(
+    (message) =>
+      message.role === "assistant" &&
+      (message.content.trim() !== "" || (message.toolCalls?.length ?? 0) > 0),
+  );
+  if (!produced) {
+    throw new Error(
+      "模型本轮零输出（无回复内容、无工具调用）：疑似 provider 端点返回空流（HTTP 200 + 0 字节）。请检查模型路由或端点状态后重试。",
+    );
+  }
 }
