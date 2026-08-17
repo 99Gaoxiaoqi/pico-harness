@@ -1,7 +1,7 @@
 {
   "version": 1,
   "commandsDir": ".pico/commands",
-  "model": "codex-oauth/gpt-5.4",
+  "model": "lez/qwen3.8-max",
   "permissions": {
     "additionalDirectories": []
   },
