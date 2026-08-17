@@ -89,11 +89,9 @@ export class EffectiveConfigResolver {
     for (const [id, provider] of Object.entries(user.config.providers)) {
       mergeProvider(providers, providerSources, id, provider, "user");
     }
-    if (project !== undefined) {
-      for (const [id, provider] of Object.entries(project.providers)) {
-        mergeProvider(providers, providerSources, id, provider, "project-legacy");
-      }
-    }
+    // 项目侧 providers 已退役（2026-08-17）：provider 凭据只支持用户侧，
+    // 项目配置里的 providers 段是 legacy 残留，解析保留但不再并入有效配置
+    // （同 ID 不同端点的合并冲突即源于此 legacy 路径）。project.model 仍参与默认路由。
 
     const sources: Record<string, ConfigSource> = {};
     for (const [id, source] of Object.entries(providerSources)) {
