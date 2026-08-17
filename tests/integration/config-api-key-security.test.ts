@@ -26,6 +26,7 @@ import {
   type CredentialVault,
 } from "../../src/provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../../src/provider/effective-model-runtime.js";
+import { assertPrivatePermissions } from "./helpers/private-file-mode.js";
 
 const PROVIDER_ID = "config-key-fixture";
 const MODEL_ID = "fixture-model";
@@ -61,7 +62,7 @@ test("Desktop credential API persists a user-config API key without projecting p
   const persisted = asRecord(JSON.parse(raw));
   const persistedProvider = asRecord(asRecord(persisted["providers"])[PROVIDER_ID]);
   assertSecretMatches("persisted user config", persistedProvider["apiKey"], secret);
-  assert.equal((await stat(fixture.userConfig.filePath)).mode & 0o777, 0o600);
+  await assertPrivatePermissions(fixture.userConfig.filePath, "file");
 
   const listed = await fixture.desktop.handle(createRuntimeRequest("provider.list", {}));
   const status = await fixture.desktop.handle(
@@ -139,7 +140,7 @@ test("credential delete is CAS protected and removes only the persisted API key"
   const provider = asRecord(asRecord(asRecord(JSON.parse(raw))["providers"])[PROVIDER_ID]);
   assert.equal(Object.hasOwn(provider, "apiKey"), false);
   assert.equal(provider["baseURL"], "https://example.test/v1");
-  assert.equal((await stat(fixture.userConfig.filePath)).mode & 0o777, 0o600);
+  await assertPrivatePermissions(fixture.userConfig.filePath, "file");
   assertSecretAbsent("credential delete result", deleted, secret);
   assert.equal(fixture.vaultCalls(), 0, "ordinary config-key deletion must not require Keychain");
 });
