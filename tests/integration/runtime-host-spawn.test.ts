@@ -79,6 +79,136 @@ test("runtime-host spawn: candidate launches are throttled by the minimum interv
   );
 });
 
+test("runtime-host spawn: permanent candidate startup failure fast-fails the election", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-fastfail-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  // 预创建 storage root marker，稳定 rootId。
+  await resolveStorageRoot({ path: root, kind: "interactive" });
+
+  // 假 launcher：候选"成功 spawn"但立即上报永久性启动失败（退出码 65 形态）。
+  // fast-fail 语义：第一个报告收齐后立即刹车返回，不再按 250ms 节流补发
+  // 烧完整个选举窗口——确定性失败从"45s 空转"变成"一次上报即收场"。
+  let launches = 0;
+  const result = await connectOrSpawnRuntimeHostWithDependencies(
+    {
+      rootPath: root,
+      surface: "tui",
+      protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+      clientInstanceId: "spawn-fastfail-test-client",
+      electionDeadlineMs: 2000,
+    },
+    {
+      launchCandidate: () => {
+        launches += 1;
+        return {
+          spawned: Promise.resolve({
+            pid: 41_000 + launches,
+            startupFailure: Promise.resolve({ reason: "storage_root_incompatible" as const }),
+          }),
+        };
+      },
+      random: () => 0.5,
+    },
+  );
+
+  assert.equal(result.kind, "failed", "永久失败应使选举失败返回");
+  if (result.kind === "failed") {
+    assert.equal(result.reason, "storage_root_incompatible");
+  }
+  assert.equal(launches, 1, `永久失败应在首个报告后刹车（实际拉起 ${launches} 个）`);
+});
+
+test("runtime-host spawn: non-permanent startup failure does not brake, reason carries to result", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-softfail-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  // 预创建 storage root marker，稳定 rootId。
+  await resolveStorageRoot({ path: root, kind: "interactive" });
+
+  // 非永久失败（legacy 守卫拒绝/内部启动失败）不刹车——循环继续按节流补发
+  // 到 deadline；收场时 failed.reason 携带上报的失败类，区分"候选在失败"
+  // 与"什么都没出现"。
+  let launches = 0;
+  const result = await connectOrSpawnRuntimeHostWithDependencies(
+    {
+      rootPath: root,
+      surface: "tui",
+      protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+      clientInstanceId: "spawn-softfail-test-client",
+      electionDeadlineMs: 1500,
+    },
+    {
+      launchCandidate: () => {
+        launches += 1;
+        return {
+          spawned: Promise.resolve({
+            pid: 42_000 + launches,
+            startupFailure: Promise.resolve({ reason: "legacy_daemon_running" as const }),
+          }),
+        };
+      },
+      random: () => 0.5,
+    },
+  );
+
+  assert.equal(result.kind, "failed");
+  if (result.kind === "failed") {
+    assert.equal(result.reason, "legacy_daemon_running");
+  }
+  assert.ok(launches >= 2, `非永久失败不应刹车，窗口内应多次补发（实际 ${launches} 个）`);
+});
+
+test("runtime-host spawn: launcher decodes protocol exit codes into startup failure reports", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-exitcode-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  // 真 launcher + 真进程退出码：协议内退出码（65）必须反查回失败报告，
+  // 协议外退出码（flock loser 的 2）必须解析为 undefined——这座桥是 candidate
+  // 侧退出码与 connectOrSpawn 消费端之间的唯一信道。
+  // 注意：unref 的 child 不维持本进程事件循环，裸 await 报告 promise 会在循环
+  // 撤空后被判 dangling——真实消费方（选举循环）总有退避计时器保活，这里用
+  // ref'd 计时器竞速模拟同样的保活条件。
+  const awaitReport = <T>(promise: Promise<T>, timeoutMs = 5000): Promise<T | "timeout"> => {
+    let timer: NodeJS.Timeout | undefined;
+    return Promise.race([
+      promise,
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  };
+  const launchScript = (name: string, exitCode: number): string => {
+    const scriptPath = join(root, name);
+    writeFileSync(scriptPath, `process.exit(${exitCode});\n`);
+    return scriptPath;
+  };
+  const launchWith = (entrypoint: string) =>
+    launchDetachedRuntimeHostCandidate({
+      rootPath: root,
+      expectedRootId: "0".repeat(64),
+      executable: process.execPath,
+      entrypoint,
+      logDirectory: join(root, "candidate-logs"),
+    });
+
+  const permanent = await (await launchWith(launchScript("exit-65.mjs", 65))).spawned;
+  assert.ok(permanent.startupFailure, "协议内退出码应暴露 startupFailure 报告");
+  const permanentReport = await awaitReport(permanent.startupFailure);
+  assert.notEqual(permanentReport, "timeout", "退出事件应在保活窗口内到达");
+  assert.equal(
+    permanentReport && permanentReport !== "timeout" ? permanentReport.reason : undefined,
+    "storage_root_incompatible",
+    "退出码 65 应反查为存储根不兼容（永久）",
+  );
+
+  const loser = await (await launchWith(launchScript("exit-2.mjs", 2))).spawned;
+  assert.ok(loser.startupFailure, "attempt 应携带 startupFailure promise");
+  const loserReport = await awaitReport(loser.startupFailure);
+  assert.notEqual(loserReport, "timeout", "退出事件应在保活窗口内到达");
+  assert.equal(loserReport, undefined, "协议外退出码（flock loser 2）应解析为无报告");
+});
+
 test("runtime-host spawn: candidate stdout/stderr is persisted to the log directory", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-spawnlog-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

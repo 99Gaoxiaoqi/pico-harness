@@ -653,7 +653,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     if (result.kind !== "connected") {
       throw new RuntimeClientError(
         "RUNTIME_UNAVAILABLE",
-        "无法连接本机 Runtime daemon（runtime-host 选举失败）",
+        `无法连接本机 Runtime daemon（${describeElectionFailure(result)}）`,
         true,
       );
     }
@@ -679,6 +679,26 @@ function resolveDaemonCandidateEntrypoint(): string {
   const sourcePath = fileURLToPath(new URL("./main.ts", import.meta.url));
   if (existsSync(sourcePath)) return sourcePath;
   return fileURLToPath(new URL("./main.js", import.meta.url));
+}
+
+/** 选举失败的人类可读归因——退出码协议上报的失败原因优先于笼统超时。 */
+function describeElectionFailure(
+  result: Awaited<ReturnType<typeof connectOrSpawnRuntimeHost>>,
+): string {
+  if (result.kind === "incompatible") return "协议不兼容";
+  if (result.kind !== "failed") return "runtime-host 选举失败";
+  switch (result.reason) {
+    case "storage_root_incompatible":
+      return "存储根身份不兼容——候选 daemon 无法启动，请检查 PICO_HOME / .pico-storage-root.json 后重试";
+    case "legacy_daemon_running":
+      return "旧版本 Runtime daemon 仍在运行，请先执行 pico --daemon-stop";
+    case "internal_startup_failure":
+      return "候选 daemon 启动失败（详见 candidate-logs）";
+    case "host_unresponsive":
+      return "daemon 无响应";
+    default:
+      return "选举窗口超时";
+  }
 }
 
 /** 单次桥接请求：events.* 走类型化桥接，其余方法走 runtime.request 通用桥接。 */

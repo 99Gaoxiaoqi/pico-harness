@@ -71,3 +71,11 @@ export {
   type ConnectOrSpawnRuntimeHostInput,
   type ConnectOrSpawnRuntimeHostResult,
 } from "./client/connect-or-spawn.js";
+export {
+  classifyCandidateStartupFailure,
+  isPermanentCandidateStartupFailure,
+  candidateStartupFailureExitCode,
+  candidateStartupFailureForExitCode,
+  type CandidateStartupFailure,
+  type CandidateStartupFailureReason,
+} from "./candidate-startup-failure.js";

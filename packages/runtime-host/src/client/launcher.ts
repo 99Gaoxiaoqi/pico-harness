@@ -13,6 +13,10 @@ import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  candidateStartupFailureForExitCode,
+  type CandidateStartupFailure,
+} from '../candidate-startup-failure.js';
 
 export interface DetachedCandidateInput {
   rootPath: string;
@@ -38,6 +42,13 @@ export interface DetachedCandidateAttempt {
   pid: number;
   /** Log file the candidate's output was redirected to, when logging was set up. */
   logFile?: string;
+  /**
+   * Startup-failure report decoded from the candidate's exit code (fast-fail
+   * protocol). Resolves undefined for protocol-external exits (flock loser,
+   * V8 crash codes, signals) and when spawn itself errors. detached child 句柄
+   * 在本进程 event loop 存续期间仍能收到 exit 事件，unref 不影响。
+   */
+  startupFailure?: Promise<CandidateStartupFailure | undefined>;
 }
 
 export interface DetachedCandidateLaunch {
@@ -154,6 +165,7 @@ export function launchDetachedRuntimeHostCandidate(
     }
   })();
   const logFile = logSink?.path;
+  const startupFailure = readStartupFailure(child);
   const spawned = new Promise<DetachedCandidateAttempt>((resolve, reject) => {
     const onSpawn = () => {
       child.off('error', onError);
@@ -163,7 +175,9 @@ export function launchDetachedRuntimeHostCandidate(
         return;
       }
       child.unref();
-      resolve(logFile === undefined ? { pid } : { pid, logFile });
+      resolve(
+        logFile === undefined ? { pid, startupFailure } : { pid, logFile, startupFailure },
+      );
     };
     const onError = (error: Error) => {
       child.off('spawn', onSpawn);
@@ -174,6 +188,20 @@ export function launchDetachedRuntimeHostCandidate(
   });
   if (logSink) void pruneCandidateLogs(logSink.directory);
   return { spawned };
+}
+
+/**
+ * 退出码协议的桥：监听 detached child 的 exit，把协议内退出码���查回失败对象。
+ * 协议外退出码（loser 2、崩溃随机码、信号 null）与 spawn error 一律 undefined
+ * ——选举循环对它们维持既有轮询语义。
+ */
+function readStartupFailure(
+  child: ReturnType<typeof spawn>,
+): Promise<CandidateStartupFailure | undefined> {
+  return new Promise((resolve) => {
+    child.once('exit', (code) => resolve(candidateStartupFailureForExitCode(code)));
+    child.once('error', () => resolve(undefined));
+  });
 }
 
 interface CandidateLogSink {
