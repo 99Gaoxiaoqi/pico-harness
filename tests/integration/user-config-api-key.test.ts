@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { UserConfigStore } from "../../src/input/user-config-store.js";
 import type { CredentialVault } from "../../src/provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../../src/provider/effective-model-runtime.js";
 import { createProvider } from "../../src/provider/factory.js";
+import { assertPrivatePermissions } from "./helpers/private-file-mode.js";
 
 test("user config apiKey stays private and powers the effective model runtime without env", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-user-config-api-key-"));
@@ -45,8 +46,8 @@ test("user config apiKey stays private and powers the effective model runtime wi
   );
 
   assert.equal(written.config.providers.configured?.apiKey, secret);
-  assert.equal((await stat(picoHome)).mode & 0o777, 0o700);
-  assert.equal((await stat(store.filePath)).mode & 0o777, 0o600);
+  await assertPrivatePermissions(picoHome, "directory");
+  await assertPrivatePermissions(store.filePath, "file");
 
   const resolver = new EffectiveConfigResolver({ userConfigStore: store });
   const effective = await resolver.resolve({
