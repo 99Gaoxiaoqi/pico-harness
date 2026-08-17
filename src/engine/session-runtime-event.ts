@@ -61,6 +61,15 @@ export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   readonly data: { readonly toolName: string; readonly argumentsHash: string };
 }
 
+/** load_tools 组级激活的 durable 事实：披露状态经 ledger 重播恢复。 */
+export interface RuntimeToolGroupLoadedEvent extends RuntimeEventBase {
+  readonly kind: "tool.group.loaded";
+  readonly data: {
+    readonly groupId: string;
+    readonly toolNames: readonly string[];
+  };
+}
+
 export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
   readonly kind: "tool.result.recorded";
   readonly refs: RuntimeEventRefs & {
@@ -327,6 +336,7 @@ export type RuntimeEvent =
   | RuntimeRunStartedEvent
   | RuntimeMessageCommittedEvent
   | RuntimeToolStartedEvent
+  | RuntimeToolGroupLoadedEvent
   | RuntimeToolResultRecordedEvent
   | RuntimeApprovalRequestedEvent
   | RuntimeApprovalSettledEvent

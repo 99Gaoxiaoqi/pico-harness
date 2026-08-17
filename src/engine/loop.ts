@@ -125,25 +125,14 @@ const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
  */
 const TOOL_SETTLE_TIMEOUT_MS = 10_000;
 const engineSessionContext = new AsyncLocalStorage<string>();
-const PLAN_PROVIDER_TOOL_NAMES = new Set([
-  "read_file",
-  "read_evidence",
-  "glob",
-  "grep",
-  "skill_view",
-  "repo_map",
-  "code_definition",
-  "code_references",
-  "code_symbols",
-  "code_diagnostics",
-  "code_call_hierarchy",
-  "ask_user",
-  "submit_plan",
-]);
+// Plan 模式工具面单源迁移至 tool-surface.ts 的 PLAN_MODE_TOOL_NAMES
+// （只读侦察 + ask_user/submit_plan 协议闭环），此处仅保留消费接口。
+import { isPlanModeTool } from "../tools/tool-surface.js";
 
-export function isPlanProviderTool(name: string): boolean {
-  return PLAN_PROVIDER_TOOL_NAMES.has(name);
+function isPlanProviderTool(name: string): boolean {
+  return isPlanModeTool(name);
 }
+export { isPlanProviderTool };
 
 function normalizeToolResultRedactionSecrets(
   secrets: readonly string[] | undefined,
@@ -1004,13 +993,13 @@ export class AgentEngine implements AgentRunner {
   }
 
   /**
-   * 从全量工具里挑出 search_tools 的 schema(若已注册)。
-   * disclosure 启用时,search_tools 元工具必须始终暴露给 LLM,否则模型无法激活扩展工具。
-   * 未注册 search_tools(用户未注入 disclosure 到 registry)则返回空数组。
+   * 从全量工具里挑出披露连接器的 schema(load_tools / search_tools,若已注册)。
+   * disclosure 启用时,连接器元工具必须始终暴露给 LLM,否则模型无法激活扩展工具。
+   * load_tools 组级激活是主路径;search_tools 兜底检索动态工具。
    */
   private searchToolSchema(allTools: ToolDefinition[]): ToolDefinition[] {
-    const search = allTools.find((t) => t.name === "search_tools");
-    return search ? [search] : [];
+    const names = new Set(["load_tools", "search_tools"]);
+    return allTools.filter((t) => names.has(t.name));
   }
 
   /**
@@ -2965,7 +2954,7 @@ export class AgentEngine implements AgentRunner {
         evidence = archived;
         // Evidence 预览会明确要求下一轮调用 read_evidence；同步披露其 schema，
         // 避免渐进式工具列表让模型只能看到引用却无法执行回读。
-        this.toolDisclosure?.disclose(["read_evidence"]);
+        this.toolDisclosure?.discloseTools(["read_evidence"]);
         body = {
           storage: "evidence",
           sha256: built.rawSha256,

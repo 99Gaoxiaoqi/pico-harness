@@ -22,7 +22,10 @@ import {
 import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
-import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import { ToolDisclosure, type ToolGroupLoadedEventLike } from "../tools/tool-disclosure.js";
+import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
+import { createRuntimeEventId } from "../storage/runtime-event-store.js";
 import {
   createProvider,
   createRawProvider,
@@ -268,6 +271,12 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   /** 前台宿主持有的完整可信模型目录；子代理不得自行读取 endpoint 或凭证。 */
   modelRouter?: ModelRouter;
   toolDisclosure?: ToolDisclosure;
+  /**
+   * 宿主类型（surface 亲和性 + economy 组过滤用）。
+   * desktop=daemon 前台交互宿主（TUI 与 Desktop 共享 execute 闭包）；
+   * background=Cron/Automation；headless=one-shot 程序化运行；cli=默认兜底。
+   */
+  hostKind?: ToolHostKind;
   /** Session-scoped services owned by the caller and reused across prompts. */
   runtimeState?: SessionRuntime;
   /** 仅由可展示结构化问题的 TUI bundle 提供。 */
@@ -1411,8 +1420,45 @@ export async function executeAgentRuntime(
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
     if (options.approvedPlan) {
-      toolDisclosure.disclose(["update_plan", "cancel_plan"]);
+      toolDisclosure.discloseTools(["update_plan", "cancel_plan"]);
     }
+    // durable 披露恢复：从本 session 的 ledger 重播 tool.group.loaded 事实，
+    // run 切换 / crash recovery 后已加载组自动恢复，模型无需重新 load_tools。
+    if (session.runtimeEventStore) {
+      try {
+        const priorEntries = await session.runtimeEventStore.readSessionEntries(session.id);
+        toolDisclosure.seedFromEvents(
+          priorEntries.map((entry) => entry.event as ToolGroupLoadedEventLike),
+        );
+      } catch {
+        // 恢复失败不阻塞 run：最坏情况是模型需重新 load_tools。
+      }
+    }
+    // load_tools 组级激活的 durable 写入：ledger 事实是 crash 恢复的唯一来源。
+    // 写失败不阻塞激活（内存态已生效），只损失恢复能力。
+    const onToolGroupLoaded: ((groupId: string, toolNames: readonly string[]) => void) | undefined =
+      session.runtimeEventStore && !backgroundPolicy
+        ? (groupId, toolNames) => {
+            const store = session.runtimeEventStore;
+            if (!store) return;
+            const run = currentRuntimeRun();
+            void store
+              .append({
+                schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+                eventId: createRuntimeEventId("tool-group"),
+                sessionId: session.id,
+                invocationId: run?.invocationId ?? `tool-group:${session.id}`,
+                runId: run?.runId ?? "tool-group",
+                turnId: run ? `turn:${run.runId}` : "tool-group",
+                at: new Date().toISOString(),
+                partial: false,
+                visibility: "internal",
+                kind: "tool.group.loaded",
+                data: { groupId, toolNames: [...toolNames] },
+              })
+              .catch(() => undefined);
+          }
+        : undefined;
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const planHandoff = new PlanHandoffController();
     const planRegistryOptions: DefaultToolRegistryOptions["plan"] = {
@@ -1434,6 +1480,14 @@ export async function executeAgentRuntime(
         });
       },
     };
+    // 宿主类型推导：background 由 execution.kind 决定，headless 由
+    // isolatedHeadless 决定，其余前台交互（TUI/Desktop 共享 execute 闭包）
+    // 统一为 desktop；dependencies.hostKind 允许宿主显式覆���。
+    const hostKind: ToolHostKind = backgroundPolicy
+      ? "background"
+      : dependencies.isolatedHeadless
+        ? "headless"
+        : (dependencies.hostKind ?? "desktop");
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -1474,6 +1528,8 @@ export async function executeAgentRuntime(
       runtimeEnv,
       dependencies.bashTimeoutMs,
       collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
+      hostKind,
+      onToolGroupLoaded,
     );
     registerPluginCapabilityTools(
       registry,
@@ -1786,6 +1842,7 @@ export async function executeAgentRuntime(
       options.approvedPlan
         ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
         : undefined,
+      hostKind,
     );
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -1872,7 +1929,7 @@ export async function executeAgentRuntime(
       registry.register(new AddWorkTool(resolveGraphContext(), graphDispatcher));
       registry.register(new ViewGraphTool(resolveGraphContext()));
       registry.register(new CloseGraphTool(resolveGraphContext()));
-      toolDisclosure.disclose(["add_work", "view_graph", "close_graph"]);
+      toolDisclosure.discloseTools(["add_work", "view_graph", "close_graph"]);
     } else {
       runtimeState.setGraphWorkDispatcher(undefined);
     }
@@ -2208,6 +2265,8 @@ function buildRegistry(
   env?: NodeJS.ProcessEnv,
   bashTimeoutMs?: number,
   plan?: DefaultToolRegistryOptions["plan"],
+  hostKind?: ToolHostKind,
+  onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -2226,6 +2285,8 @@ function buildRegistry(
     ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
+    ...(hostKind !== undefined ? { hostKind } : {}),
+    ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
   });
 }
 
@@ -2402,6 +2463,7 @@ function registerDelegationTools(
   codeIntelligence?: SessionRuntime["codeIntelligence"],
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
   planStepCoordinator?: DelegatePlanStepCoordinator,
+  hostKind: ToolHostKind = "desktop",
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -2433,14 +2495,22 @@ function registerDelegationTools(
     ...(modelCatalog ? { modelCatalog } : {}),
     ...(planStepCoordinator ? { planStepCoordinator } : {}),
   };
-  registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
-  registry.register(new DelegateStatusTool(manager));
-  registry.register(
-    new SpawnSubagentTool(
-      engine,
-      registryFactory({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 1 }),
-    ),
-  );
+  // 委派工具走 surface 亲和性声明：background/headless 宿主不注册
+  // （原 UNSAFE_BACKGROUND_TOOLS / HEADLESS_TOOL_NAMES 的注册侧防线）。
+  if (isToolSupportedForHost("delegate_task", hostKind)) {
+    registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
+  }
+  if (isToolSupportedForHost("delegate_status", hostKind)) {
+    registry.register(new DelegateStatusTool(manager));
+  }
+  if (isToolSupportedForHost("spawn_subagent", hostKind)) {
+    registry.register(
+      new SpawnSubagentTool(
+        engine,
+        registryFactory({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 1 }),
+      ),
+    );
+  }
 }
 
 function buildContextRuntime(

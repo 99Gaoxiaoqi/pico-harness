@@ -16,6 +16,7 @@ import type { ToolCall } from "../schema/message.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import type { RequestMiddleware, RequestMiddlewareResult } from "../tools/registry.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
+import { isToolSupportedForHost } from "../tools/tool-surface.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import { verifyBackgroundMcpConfig } from "./background-mcp-policy.js";
 import {
@@ -36,18 +37,14 @@ export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
 
 const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
 const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
-const UNSAFE_BACKGROUND_TOOLS = new Set([
-  "ask_user",
-  "delegate_task",
-  "delegate_status",
-  "spawn_subagent",
-  "schedule_task",
-]);
 
 export type BackgroundYoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
 
+/** background 宿主亲和性单源在 tool-surface.ts（原硬编码 UNSAFE_BACKGROUND_TOOLS 已收编）。 */
 export function filterBackgroundEligibleTools(tools: readonly string[]): string[] {
-  return [...new Set(tools.filter((tool) => tool && !UNSAFE_BACKGROUND_TOOLS.has(tool)))].sort();
+  return [
+    ...new Set(tools.filter((tool) => tool && isToolSupportedForHost(tool, "background"))),
+  ].sort();
 }
 
 export interface BackgroundWorkspaceTrustVerifier {
@@ -240,7 +237,7 @@ function validateBackgroundToolCall(
       reason: `[background:tool_denied] 工具 ${call.name} 不在 Job 的 allowedTools 中。`,
     };
   }
-  if (UNSAFE_BACKGROUND_TOOLS.has(call.name)) {
+  if (!isToolSupportedForHost(call.name, "background")) {
     return {
       allowed: false,
       reason: `[background:tool_denied] 工具 ${call.name} 尚未支持继承后台安全策略。`,

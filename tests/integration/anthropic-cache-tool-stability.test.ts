@@ -81,7 +81,7 @@ test("provider-visible tools stay name-sorted after registration and disclosure"
     disclosure.pickForLLM(firstDefinitions).map((tool) => tool.name),
     ["bash", "read_file"],
   );
-  disclosure.disclose(["zeta_extension", "alpha_extension"]);
+  disclosure.discloseTools(["zeta_extension", "alpha_extension"]);
   assert.deepEqual(
     disclosure.pickForLLM(firstDefinitions).map((tool) => tool.name),
     ["alpha_extension", "bash", "read_file", "zeta_extension"],

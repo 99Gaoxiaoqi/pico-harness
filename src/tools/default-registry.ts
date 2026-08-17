@@ -25,7 +25,9 @@ import { TodoTool } from "./todo.js";
 import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
+import { LoadToolsTool } from "./load-tools.js";
 import { SearchToolsTool } from "./search-tools.js";
+import { getAvailableDeferredGroups, type ToolHostKind } from "./tool-surface.js";
 import { registerAskUserTool } from "./ask-user.js";
 import type { AskUserHandler } from "./ask-user.js";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
@@ -60,11 +62,22 @@ export interface DefaultToolRegistryOptions {
   todoStore?: TodoStore;
   /**
    * 工具渐进披露状态机(ROADMAP 5.4)。
-   * 注入后:额外注册 search_tools 元工具,模型用它按需激活扩展工具。
+   * 注入后:额外注册 load_tools + search_tools 元工具。
+   * load_tools 组级激活（枚举选择），search_tools 兜底检索动态工具。
    * 必须与 AgentEngine 传入的是同一实例,确保 registry 的 disclose 与 loop 的 pickForLLM 同步。
    * 未提供则不启用渐进披露(全量工具喂给 LLM,行为不变)。
    */
   toolDisclosure?: ToolDisclosure;
+  /**
+   * 宿主类型（surface 亲和性过滤用）。默认 "cli"。
+   * background/headless 宿主下部分工具不注册；deferred 组列表按宿主过滤。
+   */
+  hostKind?: ToolHostKind;
+  /**
+   * load_tools 组级激活成功的 durable 回调（写入 RuntimeEvent ledger，
+   * crash/重开后由 seedFromEvents 重播恢复披露状态）。
+   */
+  onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void;
   /** 仅在宿主提供结构化交互 UI 时注册 ask_user，避免无 UI 的运行永久等待。 */
   askUserHandler?: AskUserHandler;
   /** Plan/只读子代理可动态隐藏凭据文件；YOLO 主会话保持完整读权。 */
@@ -113,6 +126,8 @@ export function buildDefaultToolRegistry(
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
+    hostKind = "cli",
+    onToolGroupLoaded,
   } = options;
   const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
   const registry = new ToolRegistry();
@@ -180,10 +195,18 @@ export function buildDefaultToolRegistry(
     }
     registry.register(new ExploreRepoTool(workDir, codeIntelligence));
   }
-  // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
-  // search_tools 持有 registry 的实时定义数据源,execute 时才筛选扩展工具。
-  // 因此 host 后续注册的委派/MCP 工具也会立即可检索。
+  // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 load_tools + search_tools。
+  // load_tools 组级激活（枚举选择当前宿主可用的 deferred 组，零歧义）；
+  // search_tools 兜底检索动态工具（MCP/Plugin，实时数据源保证后续注册可检索）。
   if (toolDisclosure) {
+    const deferredGroups = getAvailableDeferredGroups(hostKind);
+    if (deferredGroups.length > 0) {
+      registry.register(
+        new LoadToolsTool(deferredGroups, toolDisclosure, {
+          ...(onToolGroupLoaded ? { onGroupLoaded: onToolGroupLoaded } : {}),
+        }),
+      );
+    }
     registry.register(new SearchToolsTool(() => registry.getAvailableTools(), toolDisclosure));
   }
   return registry;

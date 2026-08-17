@@ -41,6 +41,7 @@ import {
 } from "../runtime/agent-runtime.js";
 import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
+import { getSupportedToolNames } from "../tools/tool-surface.js";
 import type { ImagePart } from "../schema/message.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { RuntimeEventStore } from "../storage/runtime-event-store.js";
@@ -72,21 +73,9 @@ const CONTROLLED_PROXY_ENV_NAMES = [
 ] as const;
 const CONTROLLED_PROXY_URL_PATTERN = /^http:\/\/pico:([0-9a-f]{64})@pico-egress:8081$/u;
 const CONTROLLED_PROXY_NO_PROXY = "pico-gateway,main,localhost,127.0.0.1,::1";
-const HEADLESS_TOOL_NAMES = new Set([
-  "bash",
-  "edit_file",
-  "fetch_url",
-  "glob",
-  "grep",
-  "read_evidence",
-  "read_file",
-  "task_list",
-  "task_output",
-  "task_stop",
-  "todo",
-  "web_search",
-  "write_file",
-]);
+// headless 最小工具面单源在 tool-surface.ts 的宿主亲和性声明
+// （原 13 工具硬编码白名单收编为 getSupportedToolNames("headless") 派生）。
+const HEADLESS_TOOL_NAMES = getSupportedToolNames("headless");
 const pendingLockReleases = new Map<
   ExclusiveCaseLocks,
   { attempt: number; timer?: NodeJS.Timeout }
