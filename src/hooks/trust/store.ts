@@ -176,7 +176,14 @@ export class HookTrustStore {
     if (!isRecord(parsed) || parsed.version !== STORE_VERSION || !Array.isArray(parsed.records)) {
       throw new Error("trusted-hooks.json schema 无效");
     }
-    return parsed.records.map(parseRecord);
+    const records = parsed.records.map(parseRecord);
+    // 一次性迁移（shell 化）：旧静态信任记录带非空 scriptHashes（可执行文件身份
+    // + 引用文件哈希），新指纹恒为空对象，旧 id 永远失配——属死数据，直接剪除。
+    const live = records.filter((record) => Object.keys(record.scriptHashes).length === 0);
+    if (live.length !== records.length) {
+      await this.writeRecords(live);
+    }
+    return live;
   }
 
   private async writeRecords(records: readonly HookTrustRecord[]): Promise<void> {

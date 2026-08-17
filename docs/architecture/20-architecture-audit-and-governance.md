@@ -159,6 +159,6 @@ command hook 执行模型从"静态信任钉死"彻底转向"shell 化 + 配置�
 
 **新增**：workspace trust 成为 dispatch 信任锚（每次 dispatch 边界复验，撤销信任后 executable hooks 自然失效——memory 同款每边界复验模式；daemon 装配链注入宿主共享实例）。
 
-**代价**：现存 command hooks 的 trusted-hooks.json 记录一次性失配需重新 `/hooks trust`；批准后 npm/git 本体被掉包不再被抓（运行时 PATH 说什么就是什么）；Windows POSIX 风格 hook 依赖 Git Bash（缺失时落 PowerShell，`&&` 需 pwsh 7+）。
+**代价**：现存 command hooks 的 trusted-hooks.json 记录一次性失配需重新 `/hooks trust`（旧死记录自动迁移剪除，`d4f38f1d`：判据=scriptHashes 非空，读取即剪除落盘）；批准后 npm/git 本体被掉包不再被抓（运行时 PATH 说什么就是什么）；Windows POSIX 风格 hook 依赖 Git Bash（缺失时落 PowerShell，`&&` 需 pwsh 7+）。
 
 实现：`src/hooks/config/command-shell.ts`（取代 referenced-scripts.ts）+ executor shell spawn + 信任库指纹收缩 + workspace trust 锚。测试：hook-command-shell 套件（含原始 `%AccessAgentLibs%` 脏 PATH 场景）。
