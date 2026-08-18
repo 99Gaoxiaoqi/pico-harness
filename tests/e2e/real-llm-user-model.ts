@@ -55,8 +55,10 @@ export async function loadUserDefaultRealModel(
   const configResolver = new EffectiveConfigResolver({ userConfigStore });
   const runtime = await loadEffectiveModelRuntime({
     workDir: options.workDir ?? picoHome,
-    // Real-model tests intentionally select the user default. Repository project.model must not
-    // participate even when the business workspace itself is trusted by the behavior under test.
+    // Real-model tests intentionally select the user default. projectTrusted:false
+    // keeps the run hermetic——本仓库项目配置（permissions/sandbox/MCP 等）一律
+    // 不参与。项目侧 model 默认路由已退役（2026-08-17），此处不再是绕开手段，
+    // 只是纯粹的测试隔离。
     projectTrusted: false,
     legacyProvider: "openai",
     legacyModel: "unused-real-model-e2e-legacy-route",
