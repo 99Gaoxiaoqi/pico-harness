@@ -699,6 +699,11 @@ export interface AgentEngineOptions {
   /** Host pause gate. The engine awaits it only at boundaries where no tool is in flight. */
   waitAtSafeBoundary?: () => Promise<void>;
   /**
+   * turn 边界通知（每个模型 turn 开始时同步调用）。宿主用于按轮重置的
+   * 配套状态，如子代理执行容量闸（DelegationManager.resetTurnState）。
+   */
+  onTurnBoundary?: () => void;
+  /**
    * 非工具停止后,host 可决定是否续接(ROADMAP 3.7)。
    * 模型跑完一轮没调工具(toolCalls.length === 0)时,正常是 onFinish + break 退出。
    * host 可借此回调让 Agent 继续(如"任务还没完,接着干"):
@@ -828,6 +833,7 @@ export class AgentEngine implements AgentRunner {
    */
   private steerQueue?: SteerQueue;
   private readonly waitAtSafeBoundary?: () => Promise<void>;
+  private readonly onTurnBoundary?: () => void;
   /** 非工具停止后续接回调(ROADMAP 3.7):host 可决定让 Agent 接着跑 */
   private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
@@ -884,6 +890,7 @@ export class AgentEngine implements AgentRunner {
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
     this.waitAtSafeBoundary = opts.waitAtSafeBoundary;
+    this.onTurnBoundary = opts.onTurnBoundary;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
@@ -1619,6 +1626,9 @@ export class AgentEngine implements AgentRunner {
         await this.waitAtSafeBoundary?.();
         signal?.throwIfAborted();
         turnCount++;
+        // turn 边界通知（如子代理执行容量闸的按轮换新）：新 turn 满血配速，
+        // 上一 turn 仍在排队的容量等待者被拒绝（饱和背压）。
+        this.onTurnBoundary?.();
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
           exhaustedReason = turnBudget.reason ?? `已达到最大轮次 ${this.maxTurns}`;

@@ -33,6 +33,7 @@ import {
 } from "./subagent-activity-reporter.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import type { EphemeralAgentSpec } from "./subagent-spec.js";
+import type { ChildRunLimiter } from "./child-run-limiter.js";
 import type { HookService } from "../hooks/service.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
 import {
@@ -163,6 +164,27 @@ export interface SubagentRegistryRequest {
 
 export type SubagentRegistryFactory = (request: SubagentRegistryRequest) => Registry;
 
+/**
+ * 子代理真实执行的容量闸：准入（在飞委派数）只防调用数失控，真实 child 的
+ * 执行容量由 turn 域 FIFO 信号量配速（DelegationManager 按换新实例，跨 turn
+ * 在跑 child 不占新预算）。limiter 参数接受实例（测试注入）或 provider
+ * （生产按调用时取 manager 当前实例——turn 重置会换实例，构造期捕获会失效）。
+ */
+async function runGatedChild(
+  limiter: ChildRunLimiter | (() => ChildRunLimiter) | undefined,
+  signal: AbortSignal | undefined,
+  run: () => Promise<SubagentResult>,
+): Promise<SubagentResult> {
+  if (limiter === undefined) return await run();
+  const resolved = typeof limiter === "function" ? limiter() : limiter;
+  const permit = await resolved.acquire(signal);
+  try {
+    return await run();
+  } finally {
+    permit.release();
+  }
+}
+
 /** spawn_subagent 工具的参数 */
 interface SubagentArgs {
   task_prompt: string;
@@ -185,7 +207,9 @@ export class SpawnSubagentTool implements BaseTool {
   constructor(
     private readonly runner: AgentRunner,
     private readonly readOnlyRegistry: Registry,
-    private readonly options: SubagentRunOptions = {},
+    private readonly options: SubagentRunOptions & {
+      childRunLimiter?: ChildRunLimiter | (() => ChildRunLimiter);
+    } = {},
   ) {}
 
   name(): string {
@@ -237,19 +261,21 @@ export class SpawnSubagentTool implements BaseTool {
 
     let result: SubagentResult;
     try {
-      result = await this.runner.runSub(input.task_prompt, this.readOnlyRegistry, undefined, {
-        depth: depth + 1,
-        maxSpawnDepth,
-        role: "leaf",
-        ...(context?.signal ? { signal: context.signal } : {}),
-        // 透传调用方注入的自定义参数(程序化扩展点,非 LLM 可控)
-        ...pickDefined({
-          maxTurns: this.options.maxTurns,
-          systemPrompt: this.options.systemPrompt,
-          systemPromptOverride: this.options.systemPromptOverride,
-          workDir: this.options.workDir,
+      result = await runGatedChild(this.options.childRunLimiter, context?.signal, () =>
+        this.runner.runSub(input.task_prompt, this.readOnlyRegistry, undefined, {
+          depth: depth + 1,
+          maxSpawnDepth,
+          role: "leaf",
+          ...(context?.signal ? { signal: context.signal } : {}),
+          // 透传调用方注入的自定义参数(程序化扩展点,非 LLM 可控)
+          ...pickDefined({
+            maxTurns: this.options.maxTurns,
+            systemPrompt: this.options.systemPrompt,
+            systemPromptOverride: this.options.systemPromptOverride,
+            workDir: this.options.workDir,
+          }),
         }),
-      });
+      );
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       return `子智能体执行失败: ${errMsg}`;
@@ -295,6 +321,8 @@ export class DelegateTaskTool implements BaseTool {
       hookService?: HookService;
       modelCatalog?: SubagentModelCatalog;
       planStepCoordinator?: DelegatePlanStepCoordinator;
+      /** 测试注入面：覆盖默认的 manager 当前 turn 实例。 */
+      childRunLimiter?: ChildRunLimiter | (() => ChildRunLimiter);
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -519,15 +547,19 @@ export class DelegateTaskTool implements BaseTool {
     signal?: AbortSignal,
   ): Promise<DelegationBatchResult> {
     const startedAt = Date.now();
-    const results = await mapLimit(
-      tasks,
-      this.manager.maxConcurrentChildren,
-      (task, index) => this.runOne(task, activities[index]!, index, depth, maxSpawnDepth, signal),
-      (error, index) => {
-        const result = delegationResultFromError(index, error, 0, signal);
-        this.emitResultActivity(activities[index]!, result);
-        return result;
-      },
+    // 批内不再限并发（对齐参考宿主漏斗语义）：准入层管在飞委派调用数
+    // （DelegationManager），真实执行容量由 turn 域 ChildRunLimiter 统一
+    // FIFO 配速——批内 children 全部同时入闸排队，结果按 index 保序。
+    const results = await Promise.all(
+      tasks.map((task, index) =>
+        this.runOne(task, activities[index]!, index, depth, maxSpawnDepth, signal).catch(
+          (error: unknown) => {
+            const result = delegationResultFromError(index, error, 0, signal);
+            this.emitResultActivity(activities[index]!, result);
+            return result;
+          },
+        ),
+      ),
     );
     return {
       status: aggregateDelegationStatus(results),
@@ -822,17 +854,21 @@ export class DelegateTaskTool implements BaseTool {
           ...modelSelectionOptions(task.ephemeralAgent, profile),
           ...customization,
         });
-      const subResult =
-        profile?.sourcePath && this.options.hookService
-          ? await this.options.hookService.runInAgentComponentScope(
-              {
-                kind: "agent",
-                componentId: profile.name,
-                path: profile.sourcePath,
-              },
-              runSub,
-            )
-          : await runSub();
+      const subResult = await runGatedChild(
+        this.options.childRunLimiter ?? (() => this.manager.childRunLimiter),
+        signal,
+        async () =>
+          profile?.sourcePath && this.options.hookService
+            ? await this.options.hookService.runInAgentComponentScope(
+                {
+                  kind: "agent",
+                  componentId: profile.name,
+                  path: profile.sourcePath,
+                },
+                runSub,
+              )
+            : await runSub(),
+      );
       signal?.throwIfAborted();
       return {
         taskIndex,
@@ -1494,31 +1530,4 @@ function pickDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
     if (value !== undefined) result[key] = value;
   }
   return result as Partial<T>;
-}
-
-async function mapLimit<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>,
-  onRejected: (error: unknown, index: number) => R,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  const workerCount = Math.min(Math.max(1, limit), items.length);
-
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (cursor < items.length) {
-        const index = cursor;
-        cursor++;
-        try {
-          results[index] = await worker(items[index]!, index);
-        } catch (error) {
-          results[index] = onRejected(error, index);
-        }
-      }
-    }),
-  );
-
-  return results;
 }

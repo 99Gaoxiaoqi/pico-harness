@@ -1685,6 +1685,9 @@ export async function executeAgentRuntime(
       runtimePort: createEngineRuntimePort(),
       workspaceRoots,
       usageSession: session,
+      // turn 边界通知：子代理执行容量闸按轮换新——每 turn 满血配速，跨 turn
+      // 在跑 child 不占新预算，多轮委派的会话不会被累积在飞子代理堵死。
+      onTurnBoundary: () => delegationManager.resetTurnState(),
       ...(effectiveOptions.thinkingEffort !== undefined
         ? { thinkingEffort: effectiveOptions.thinkingEffort }
         : {}),
@@ -1905,29 +1908,36 @@ export async function executeAgentRuntime(
         })({ mode: task.mode, role: task.role, depth: 0, maxSpawnDepth: 0 });
         const dispatch = delegationManager.dispatch(
           async (signal) => {
-            const subResult = await engine.runSub(task.goal, childRegistry, undefined, {
-              depth: 0,
-              maxSpawnDepth: 0,
-              role: task.role,
-              ...(signal ? { signal } : {}),
-            });
-            const results = [
-              {
-                taskIndex: 0,
-                status: subResult.status,
-                ...(subResult.summary ? { summary: subResult.summary } : {}),
-                ...(subResult.error !== undefined ? { error: subResult.error } : {}),
-                ...(subResult.evidenceRefs.length > 0
-                  ? { evidenceRefs: [...subResult.evidenceRefs] }
-                  : {}),
-                durationMs: 0,
-              },
-            ];
-            return {
-              results,
-              status: aggregateDelegationStatus(results),
-              totalDurationMs: 0,
-            };
+            // graph work 的 child 同样过 turn 域容量闸：此处直接调 engine.runSub
+            // （不经 delegate_task 工具路径），需自挂闸，与工具路径共享同一执行预算。
+            const permit = await delegationManager.childRunLimiter.acquire(signal);
+            try {
+              const subResult = await engine.runSub(task.goal, childRegistry, undefined, {
+                depth: 0,
+                maxSpawnDepth: 0,
+                role: task.role,
+                ...(signal ? { signal } : {}),
+              });
+              const results = [
+                {
+                  taskIndex: 0,
+                  status: subResult.status,
+                  ...(subResult.summary ? { summary: subResult.summary } : {}),
+                  ...(subResult.error !== undefined ? { error: subResult.error } : {}),
+                  ...(subResult.evidenceRefs.length > 0
+                    ? { evidenceRefs: [...subResult.evidenceRefs] }
+                    : {}),
+                  durationMs: 0,
+                },
+              ];
+              return {
+                results,
+                status: aggregateDelegationStatus(results),
+                totalDurationMs: 0,
+              };
+            } finally {
+              permit.release();
+            }
           },
           {
             completionPolicy: "optional",
@@ -2529,6 +2539,8 @@ function registerDelegationTools(
       new SpawnSubagentTool(
         engine,
         registryFactory({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 1 }),
+        // 按调用时取 manager 当前 turn 实例（turn 重置会换实例，构造期捕获会失效）。
+        { childRunLimiter: () => manager.childRunLimiter },
       ),
     );
   }

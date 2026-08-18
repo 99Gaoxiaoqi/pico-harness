@@ -2,6 +2,7 @@ import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
+import { ChildRunLimiter, resolveChildRunCapacity } from "./child-run-limiter.js";
 import type { RuntimeStore } from "../tasks/runtime-store.js";
 import {
   acquireGraphWorkLease,
@@ -53,7 +54,11 @@ export type DelegationTaskStatus =
   | "cancelled";
 
 export interface DelegationManagerOptions {
-  maxConcurrentChildren?: number;
+  /**
+   * 准入层上限：session 内同时在飞的委派（= 模型发起的 delegate_task 调用）
+   * 数量，满则拒绝。对齐参考宿主的漏斗语义——准入管"调用数"，批内 children
+   * 的真实执行容量由 turn 域 ChildRunLimiter 统一 FIFO（见 child-run-limiter.ts）。
+   */
   maxAsyncChildren?: number;
   maxOutputSummaryChars?: number;
   taskRegistry?: TaskRegistry;
@@ -192,8 +197,13 @@ export class DelegationManager {
   private disposed = false;
   private disposePromise?: Promise<void>;
 
-  readonly maxConcurrentChildren: number;
   private readonly maxAsyncChildren: number;
+  /**
+   * turn 域的子代理真实执行容量闸（对齐参考宿主 resetTurnState 语义）：
+   * 主循环每个 turn 换新实例——新 turn 满血容量，跨 turn 在跑 child 的
+   * permit 归还到旧实例（不占新预算），turn 结束仍在排队的等待者被拒绝。
+   */
+  private currentChildRunLimiter: ChildRunLimiter;
   private readonly maxOutputSummaryChars: number;
   private readonly onCompletion?: DelegationManagerOptions["onCompletion"];
   private readonly onPlanStepSettled?: DelegationManagerOptions["onPlanStepSettled"];
@@ -203,8 +213,8 @@ export class DelegationManager {
   readonly taskRegistry?: TaskRegistry;
 
   constructor(options: DelegationManagerOptions = {}) {
-    this.maxConcurrentChildren = options.maxConcurrentChildren ?? 3;
-    this.maxAsyncChildren = options.maxAsyncChildren ?? 3;
+    this.maxAsyncChildren = options.maxAsyncChildren ?? 5;
+    this.currentChildRunLimiter = new ChildRunLimiter(resolveChildRunCapacity());
     this.maxOutputSummaryChars =
       options.maxOutputSummaryChars ?? SUBAGENT_OUTPUT_BUDGET.batch.hardMax;
     this.taskRegistry = options.taskRegistry;
@@ -376,10 +386,27 @@ export class DelegationManager {
     await this.records.get(id)?.promise;
   }
 
+  /** 当前 turn 的执行容量闸；工具在每次子代理启动时取当前实例（turn 会换新）。 */
+  get childRunLimiter(): ChildRunLimiter {
+    return this.currentChildRunLimiter;
+  }
+
+  /**
+   * turn 边界重置（对齐参考宿主 resetTurnState）：换新满血实例；旧实例
+   * close——仍在排队的等待者被拒绝（饱和背压），在跑 child 的 permit 归还到
+   * 旧实例、不占新 turn 预算。
+   */
+  resetTurnState(): void {
+    const prior = this.currentChildRunLimiter;
+    this.currentChildRunLimiter = new ChildRunLimiter(prior.capacity);
+    prior.close(new Error("turn ended before child run capacity became available"));
+  }
+
   /** 禁止新委派，取消并等待所有已派发子任务真正收口。 */
   dispose(reason = "delegation runtime disposed"): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
+    this.currentChildRunLimiter.close(new Error(reason));
     const running = [...this.records.values()].filter((record) => record.status === "running");
     for (const record of running) {
       record.controller.abort(new DOMException(reason, "AbortError"));
