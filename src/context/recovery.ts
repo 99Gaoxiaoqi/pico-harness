@@ -16,6 +16,8 @@
 // 或领域错误码(ERR_FILE_NOT_FOUND 等)做 switch-case。本讲仅演示
 // Harness 在架构层如何做劫持与注入。
 
+import { hostShellDialect } from "../os/shell.js";
+
 /**
  * RecoveryManager:工具执行失败时,根据报错特征分析并注入恢复建议。
  *
@@ -64,38 +66,45 @@ export class RecoveryManager {
       case "write_file":
         // 匹配 Node.js fs 抛出的 POSIX 标准错误(极其稳定)
         if (lower.includes("no such file or directory") || lower.includes("enoent")) {
-          return (
-            "路径似乎不正确。请不要凭空猜测,先使用 `bash` 工具执行 `ls -la` 或 `find . -name '文件名'` " +
-            "确认文件的真实路径,然后再重试。"
-          );
+          return isPowerShellHost()
+            ? "路径似乎不正确。请不要凭空猜测,先使用 `bash` 工具执行 `Get-ChildItem` 或 `Get-ChildItem -Recurse -Filter '文件名'` 确认文件的真实路径,然后再重试。"
+            : "路径似乎不正确。请不要凭空猜测,先使用 `bash` 工具执行 `ls -la` 或 `find . -name '文件名'` " +
+                "确认文件的真实路径,然后再重试。";
         }
         if (lower.includes("permission denied") || lower.includes("eacces")) {
           return "你没有权限操作该文件。请检查工作区限制,或者思考是否需要修改其他文件。";
         }
         if (lower.includes("eisdir") || lower.includes("is a directory")) {
-          return "你提供的路径是一个目录而非文件。请使用 `bash` 的 `ls` 查看目录内容,定位到具体文件后再操作。";
+          return isPowerShellHost()
+            ? "你提供的路径是一个目录而非文件。请使用 `bash` 的 `Get-ChildItem` 查看目录内容,定位到具体文件后再操作。"
+            : "你提供的路径是一个目录而非文件。请使用 `bash` 的 `ls` 查看目录内容,定位到具体文件后再操作。";
         }
         break;
 
       case "bash":
         if (lower.includes("command not found") || lower.includes("not found")) {
-          return (
-            "系统中未安装该命令。请先思考:是否有替代命令?或者你需要先编写脚本进行安装?" +
-            "可先用 `bash` 执行 `which <命令>` 或 `command -v <命令>` 确认命令是否存在。"
-          );
+          return isPowerShellHost()
+            ? "系统中未安装该命令。请先思考:是否有替代命令?或者你需要先编写脚本进行安装?" +
+                "可先用 `bash` 执行 `Get-Command <命令>` 确认命令是否存在。"
+            : "系统中未安装该命令。请先思考:是否有替代命令?或者你需要先编写脚本进行安装?" +
+                "可先用 `bash` 执行 `which <命令>` 或 `command -v <命令>` 确认命令是否存在。";
         }
         // 匹配我们手写的 30s 超时报错
         if (rawError.includes("超时") || lower.includes("timeout") || lower.includes("timed out")) {
           return (
-            "该命令执行被超时强杀。如果它是一个常驻服务(如 server 或 watch),请将其改为后台运行(如 `命令 &`)," +
-            "或者拆分为非阻塞的子任务。不要反复重试同一个会卡住的命令。"
+            "该命令执行被超时强杀。如果它是一个常驻服务(如 server 或 watch),请改用 bash 工具的 background 参数后台运行," +
+              "或者拆分为非阻塞的子任务。不要反复重试同一个会卡住的命令。"
           );
         }
         if (lower.includes("syntax error") || lower.includes("unexpected token")) {
-          return "Bash 语法错误。请检查引号转义或特殊字符,确保命令在终端中可直接运行。";
+          return isPowerShellHost()
+            ? "PowerShell 语法错误。请检查引号转义或特殊字符,确保命令在终端中可直接运行。"
+            : "Bash 语法错误。请检查引号转义或特殊字符,确保命令在终端中可直接运行。";
         }
         if (lower.includes("permission denied")) {
-          return "执行权限不足。可尝试用 `bash` 执行 `chmod +x <文件>` 添加可执行权限后再重试。";
+          return isPowerShellHost()
+            ? "执行权限不足。请检查文件 ACL 授权(Get-Acl)或换用其他执行方式后再重试。"
+            : "执行权限不足。可尝试用 `bash` 执行 `chmod +x <文件>` 添加可执行权限后再重试。";
         }
         if (lower.includes("exit code") || lower.includes("exited with")) {
           return (
@@ -107,5 +116,14 @@ export class RecoveryManager {
     }
 
     return "";
+  }
+}
+
+/** 宿主是否 PowerShell 方言(解析失败保守回落 bash 习语)。 */
+function isPowerShellHost(): boolean {
+  try {
+    return hostShellDialect() === "powershell";
+  } catch {
+    return false;
   }
 }
