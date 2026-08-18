@@ -1436,6 +1436,10 @@ export async function executeAgentRuntime(
     }
     // load_tools 组级激活的 durable 写入：ledger 事实是 crash 恢复的唯一来源。
     // 写失败不阻塞激活（内存态已生效），只损失恢复能力。
+    // background 宿主刻意不写：YOLO allowlist 语义下披露状态属于单次 Job
+    // 生命周期，且 fire-and-forget append 会绕过 executor 的 run 事件序列
+    // （可打断 recoverable-task 的 high-water CAS），不值得为不可恢复的
+    // 场景引入该窗口。
     const onToolGroupLoaded: ((groupId: string, toolNames: readonly string[]) => void) | undefined =
       session.runtimeEventStore && !backgroundPolicy
         ? (groupId, toolNames) => {
@@ -1456,7 +1460,14 @@ export async function executeAgentRuntime(
                 kind: "tool.group.loaded",
                 data: { groupId, toolNames: [...toolNames] },
               })
-              .catch(() => undefined);
+              .catch((error) => {
+                // durable 写失败不阻塞激活（内存态已生效），但必须可见——
+                // 静默吞错曾让 assert 层拒绝完全不可发现。
+                logger.warn(
+                  { error: String(error), groupId },
+                  "[ToolDisclosure] tool.group.loaded durable 写入失败",
+                );
+              });
           }
         : undefined;
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
@@ -1480,9 +1491,10 @@ export async function executeAgentRuntime(
         });
       },
     };
-    // 宿主类型推导：background 由 execution.kind 决定，headless 由
-    // isolatedHeadless 决定，其余前台交互（TUI/Desktop 共享 execute 闭包）
-    // 统一为 desktop；dependencies.hostKind 允许宿主显式覆���。
+    // 宿主类型推导（优先级从高到低）：background 由 execution.kind 决定，
+    // headless 由 isolatedHeadless 决定——这两个安全敏感身份不可被宿主
+    // 参数覆盖；其余前台交互（TUI/Desktop 共享 execute 闭包）统一为
+    // desktop，dependencies.hostKind 仅作为前台身份的显式声明。
     const hostKind: ToolHostKind = backgroundPolicy
       ? "background"
       : dependencies.isolatedHeadless
@@ -2027,10 +2039,12 @@ export async function executeAgentRuntime(
         ...(collaborationMode() === "plan" ? ["submit_plan"] : []),
         ...(options.approvedPlan ? ["update_plan", "cancel_plan"] : []),
       ];
-      pruneRegistryToCommandAllowlist(registry, [
-        ...effectiveOptions.allowedTools,
-        ...requiredControlTools,
-      ]);
+      const commandAllowlist = [...effectiveOptions.allowedTools, ...requiredControlTools];
+      pruneRegistryToCommandAllowlist(registry, commandAllowlist);
+      // 命令级 allowlist 是宿主/请求方的显式选择——存活工具必须对模型可见，
+      // 不能被渐进披露层藏掉（否则 headless/skill 激活场景下白名单里的
+      // deferred 工具无激活路径，连接器又可能已被剪掉）。
+      toolDisclosure.discloseTools(commandAllowlist);
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
 

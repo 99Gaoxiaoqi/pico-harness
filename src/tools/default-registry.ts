@@ -202,9 +202,14 @@ export function buildDefaultToolRegistry(
     const deferredGroups = getAvailableDeferredGroups(hostKind);
     if (deferredGroups.length > 0) {
       registry.register(
-        new LoadToolsTool(deferredGroups, toolDisclosure, {
-          ...(onToolGroupLoaded ? { onGroupLoaded: onToolGroupLoaded } : {}),
-        }),
+        new LoadToolsTool(
+          deferredGroups,
+          toolDisclosure,
+          () => registry.getAvailableTools().map((tool) => tool.name),
+          {
+            ...(onToolGroupLoaded ? { onGroupLoaded: onToolGroupLoaded } : {}),
+          },
+        ),
       );
     }
     registry.register(new SearchToolsTool(() => registry.getAvailableTools(), toolDisclosure));

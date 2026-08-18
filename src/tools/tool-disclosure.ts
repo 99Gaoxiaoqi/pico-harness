@@ -11,7 +11,7 @@
 // registry 仍按全集路由（由 Main Loop 注入全部工具给 registry）。
 
 import type { ToolDefinition } from "../schema/message.js";
-import { findGroupForTool } from "./tool-surface.js";
+import { findGroupForTool, PICO_TOOL_GROUPS } from "./tool-surface.js";
 
 export interface ToolDisclosureItem {
   name: string;
@@ -60,6 +60,12 @@ export class ToolDisclosure {
       if (event.kind !== "tool.group.loaded") continue;
       const { groupId, toolNames } = event.data ?? {};
       if (typeof groupId !== "string" || !Array.isArray(toolNames)) continue;
+      // 目录演化防御：组被改名/删除后，旧事件里的 stale groupId 不重播——
+      // 其 toolNames 快照可能与当前目录不等价；失效成员由 pickForLLM 自然过滤。
+      const stillDeferred = PICO_TOOL_GROUPS.some(
+        (g) => g.id === groupId && g.economy === "deferred",
+      );
+      if (!stillDeferred) continue;
       this.discloseGroup(
         groupId,
         toolNames.filter((n): n is string => typeof n === "string"),

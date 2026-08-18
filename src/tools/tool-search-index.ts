@@ -65,7 +65,11 @@ export function searchTools(
     const tfidf = tfidfScore(doc.tokens, queryTokens, docFreq, totalDocs);
     const keyword = keywordScore(doc.tool, queryTokens);
     const nameHit = nameTokenHit(doc.tool, queryTokens);
-    const score = nameHit ? 0.8 : tfidf * TFIDF_WEIGHT + keyword * KEYWORD_WEIGHT;
+    // 名称命中保底 0.8，再用 tf-idf 作 0.2 区间的 tiebreaker——
+    // 同前缀家族（mcp__git__*）按内容相关度排序，不再是注册顺序。
+    const score = nameHit
+      ? 0.8 + 0.2 * tfidf
+      : tfidf * TFIDF_WEIGHT + keyword * KEYWORD_WEIGHT;
     return { tool: doc.tool, score };
   });
 
@@ -77,7 +81,8 @@ export function searchTools(
 
 /**
  * 分词：CJK 字符两两组成 bigram；连续的非 CJK 字符（含数字、下划线）
- * 作为整体 lowercase token；其余按空白分隔。
+ * 作为整体 lowercase token；长度 1 的非 CJK token（标点残留）丢弃——
+ * 它会稀释 tf 分母并让 keywordScore 对所有含同标点的描述无差别加分。
  */
 function tokenize(text: string): string[] {
   const tokens: string[] = [];
@@ -96,14 +101,15 @@ function tokenize(text: string): string[] {
       }
     } else {
       for (const word of segment.split(/\s+/)) {
-        if (word) tokens.push(word);
+        // 非字母数字开头的单字符 token 是标点噪音；CJK 单字已在上一分支处理。
+        if (word.length >= 2 || /[\u4e00-\u9fff]/.test(word)) tokens.push(word);
       }
     }
   }
   return tokens;
 }
 
-/** TF-IDF 得分：query token 在文档中的 tf * idf 加和，归一到 0-1。 */
+/** TF-IDF 得分：query token 在文档中的 tf * idf 加和，按 query token 数归一。 */
 function tfidfScore(
   docTokens: string[],
   queryTokens: string[],
@@ -114,8 +120,9 @@ function tfidfScore(
   for (const token of docTokens) {
     tf.set(token, (tf.get(token) ?? 0) + 1);
   }
+  const uniqueQuery = new Set(queryTokens);
   let score = 0;
-  for (const token of new Set(queryTokens)) {
+  for (const token of uniqueQuery) {
     const termFreq = tf.get(token);
     if (!termFreq) continue;
     const df = docFreq.get(token) ?? 0;
@@ -123,8 +130,9 @@ function tfidfScore(
     const idf = Math.log((totalDocs + 1) / (df + 1)) + 1;
     score += (termFreq / docTokens.length) * idf;
   }
-  // 归一：经验上限，防止长 description 淹没信号。
-  return Math.min(1, score * 10);
+  // 归一到 0-1：按 query token 数取平均后放大 8 倍——单 token 命中有足够
+  // 信号（≈0.8），多 token 部分命中按比例衰减，小语料下不饱和成二值门。
+  return Math.min(1, (score / Math.max(1, uniqueQuery.size)) * 8);
 }
 
 /** 关键词得分：query token 是工具名或 description 的子串即部分命中。 */
@@ -132,10 +140,13 @@ function keywordScore(tool: ToolDefinition, queryTokens: string[]): number {
   const name = tool.name.toLowerCase();
   const description = tool.description.toLowerCase();
   let hits = 0;
+  let counted = 0;
   for (const token of new Set(queryTokens)) {
+    if (token.length < 2 && !/[\u4e00-\u9fff]/.test(token)) continue;
+    counted++;
     if (name.includes(token) || description.includes(token)) hits++;
   }
-  return queryTokens.length === 0 ? 0 : hits / new Set(queryTokens).size;
+  return counted === 0 ? 0 : hits / counted;
 }
 
 /** 工具名直接命中 query token（如搜 "web_search" 或 "web" 命中 web_search）。 */

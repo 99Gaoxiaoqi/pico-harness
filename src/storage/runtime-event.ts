@@ -212,6 +212,15 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertString(value["data"]["toolName"], "tool.started.toolName");
       assertString(value["data"]["argumentsHash"], "tool.started.argumentsHash");
       return;
+    case "tool.group.loaded":
+      assertString(value["data"]["groupId"], "tool.group.loaded.groupId");
+      if (
+        !Array.isArray(value["data"]["toolNames"]) ||
+        value["data"]["toolNames"].some((name) => typeof name !== "string")
+      ) {
+        throw new RuntimeEventIntegrityError("Runtime tool.group.loaded toolNames is invalid");
+      }
+      return;
     case "tool.result.recorded":
       assertToolResultRecordedEvent(value);
       return;

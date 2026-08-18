@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../src/engine/session-runtime-event.js";
+import {
+  RuntimeEventStore,
+  createRuntimeEventId,
+} from "../../src/storage/runtime-event-store.js";
 import { LoadToolsTool, renderGroupCatalog } from "../../src/tools/load-tools.js";
 import { SearchToolsTool } from "../../src/tools/search-tools.js";
 import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
@@ -124,7 +132,7 @@ test("LoadToolsTool 枚举激活：命中即 discloseGroup + 回调", async () =
   const disclosure = new ToolDisclosure();
   const groups = getAvailableDeferredGroups("desktop");
   const loaded: Array<[string, string[]]> = [];
-  const tool = new LoadToolsTool(groups, disclosure, {
+  const tool = new LoadToolsTool(groups, disclosure, undefined, {
     onGroupLoaded: (id, names) => loaded.push([id, [...names]]),
   });
   const result = await tool.execute(JSON.stringify({ group: "web" }));
@@ -204,4 +212,114 @@ test("Plan 模式工具面从 surface 单源导出", () => {
   assert.equal(isPlanModeTool("write_file"), false);
   assert.equal(isPlanModeTool("bash"), false);
   assert.equal(isPlanModeTool("edit_file"), false);
+});
+
+// ============ 对抗性审查修复验证 ============
+
+test("durable 往返：store append tool.group.loaded → readSessionEntries → seedFromEvents 恢复", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-tool-surface-durable-"));
+  try {
+    const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+    await store.initializeSession({ sessionId: "sess-durable", workDir: root });
+    await store.append({
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: createRuntimeEventId("tool-group"),
+      sessionId: "sess-durable",
+      invocationId: "inv-1",
+      runId: "run-1",
+      turnId: "turn-1",
+      at: new Date().toISOString(),
+      partial: false,
+      visibility: "internal",
+      kind: "tool.group.loaded",
+      data: { groupId: "web", toolNames: ["fetch_url", "web_search"] },
+    });
+    const entries = await store.readSessionEntries("sess-durable");
+    const loaded = entries.filter((entry) => entry.event.kind === "tool.group.loaded");
+    assert.equal(loaded.length, 1, "事件必须真实落盘（审查 C1：曾被 assert 层硬拒）");
+    const disclosure = new ToolDisclosure();
+    disclosure.seedFromEvents(entries.map((entry) => entry.event as { kind: string }));
+    assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
+    assert.deepEqual(
+      disclosure.pickForLLM([def("fetch_url"), def("web_search"), def("read_file")]).map(
+        (t) => t.name,
+      ),
+      ["fetch_url", "web_search", "read_file"],
+    );
+    store.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("幻影组防御：组成员未注册时 load_tools 拒绝假承诺（审查 C2）", async () => {
+  const disclosure = new ToolDisclosure();
+  const groups = getAvailableDeferredGroups("desktop");
+  // registry 里只有 web 组成员，graph 组工具未注册（非 graph 模式会话的现实）
+  const registered = () => ["fetch_url", "web_search", "read_file"];
+  const tool = new LoadToolsTool(groups, disclosure, registered);
+  await assert.rejects(
+    () => tool.execute(JSON.stringify({ group: "graph" })),
+    /在当前环境不可用/,
+  );
+  assert.deepEqual(disclosure.getLoadedGroups(), [], "拒绝后不得留下任何加载状态");
+  // 部分注册：只披露真实存在的成员
+  const partial = new LoadToolsTool(groups, disclosure, () => ["fetch_url", "read_file"]);
+  const result = await partial.execute(JSON.stringify({ group: "web" }));
+  assert.match(result, /fetch_url/);
+  assert.doesNotMatch(result, /web_search/);
+});
+
+test("重复 schema 防御：search_tools 候选排除连接器与协议工具（审查 H1）", async () => {
+  const disclosure = new ToolDisclosure();
+  const allTools = [
+    def("read_file"),
+    def("load_tools", "Load tool groups on demand"),
+    def("search_tools", "Search and activate dynamic tools"),
+    def("submit_plan"),
+    def("mcp__db__query", "Query the database"),
+  ];
+  const tool = new SearchToolsTool(() => allTools, disclosure);
+  // 搜 "load"/"tools"/"plan" 都不得把连接器或协议工具披露进集合
+  for (const query of ["load", "tools 工具", "plan 计划", "select:load_tools"]) {
+    await tool.execute(JSON.stringify({ query }));
+  }
+  const disclosed = disclosure.getDisclosedTools();
+  assert.equal(disclosed.includes("load_tools"), false);
+  assert.equal(disclosed.includes("search_tools"), false);
+  assert.equal(disclosed.includes("submit_plan"), false);
+});
+
+test("headless fail-closed：新工具入组但未显式声明 headless supported 即被拒（审查 H1）", () => {
+  // 模拟未来新工具加入 web 组但忘记声明 headless 亲和性
+  assert.equal(isToolSupportedForHost("web_search", "headless"), true, "显式声明的仍可用");
+  // 未在 affinity 表声明的工具（如假设的新工具）对 headless 一律拒绝
+  assert.equal(isToolSupportedForHost("hypothetical_new_tool", "headless"), false);
+  assert.equal(isToolSupportedForHost("code_definition", "headless"), false);
+  // background 保持 fail-open 姿势：未声明 = supported
+  assert.equal(isToolSupportedForHost("hypothetical_new_tool", "background"), true);
+});
+
+test("seedFromEvents 的 stale groupId 防御：组被删除后旧事件不重播", () => {
+  const disclosure = new ToolDisclosure();
+  disclosure.seedFromEvents([
+    { kind: "tool.group.loaded", data: { groupId: "web", toolNames: ["fetch_url"] } },
+    // "legacy-group" 不在当前目录
+    { kind: "tool.group.loaded", data: { groupId: "legacy-group", toolNames: ["old_tool"] } },
+  ]);
+  assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
+});
+
+test("检索质量：标点 token 不污染 + 名称命中按内容排序（审查 M1/M3/M4）", () => {
+  const candidates = [
+    def("mcp__git__status", "Show git working tree status 状态"),
+    def("mcp__git__diff", "Show git diff between commits"),
+    def("mcp__db__query", "Query the postgres database"),
+  ];
+  // 中文标点残留（冒号/顿号）不产生噪音 token
+  const hits = searchTools(candidates, "查看：状态");
+  assert.equal(hits.length > 0 && hits[0]!.tool.name, "mcp__git__status");
+  // 同前缀家族按 tf-idf tiebreaker 排序：查 "diff" 时 diff 工具排最前
+  const diffHits = searchTools(candidates, "diff commits");
+  assert.equal(diffHits[0]!.tool.name, "mcp__git__diff");
 });
