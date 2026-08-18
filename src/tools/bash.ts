@@ -10,8 +10,9 @@ import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import { WORKSPACE_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
-// 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
+// 跨平台 shell:POSIX 用 /bin/bash,Windows 用 PowerShell(宿主方言见 os/shell.ts)。
 import {
+  hostShellDialect,
   isWindows,
   resolveShell,
   sanitizeShellProcessEnvironment,
@@ -89,14 +90,23 @@ export class BashTool implements BaseTool {
   }
 
   definition(): ToolDefinition {
+    // Windows 宿主是 PowerShell:工具描述必须告诉模型写 PowerShell 语法,
+    // 否则模型按 bash 语法产出,执行语义错乱(工具名保留 bash 以稳定工具集)。
+    const windows = isWindows;
     return {
       name: "bash",
-      description:
-        "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)、管道和环境变量。返回标准输出与错误的合并结果。",
+      description: windows
+        ? "在当前工作区执行任意 PowerShell 命令。支持分号链接多命令与管道;注意 && 与 || 仅 PowerShell 7+ 可用。返回标准输出与错误的合并结果。"
+        : "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)、管道和环境变量。返回标准输出与错误的合并结果。",
       inputSchema: {
         type: "object",
         properties: {
-          command: { type: "string", description: "要执行的 bash 命令,例如: ls -la 或 npm test" },
+          command: {
+            type: "string",
+            description: windows
+              ? "要执行的 PowerShell 命令,例如: Get-ChildItem 或 npm test"
+              : "要执行的 bash 命令,例如: ls -la 或 npm test",
+          },
           background: {
             type: "boolean",
             description: "为 true 时后台启动命令并立即返回 taskId/pid/status,不等待命令结束。",
@@ -188,7 +198,8 @@ export class BashTool implements BaseTool {
   }
 
   private buildSandboxPlan(command: string): SandboxSpawnPlan | undefined {
-    if (isHardlineBashCommand(command, this.workDir)) {
+    // bash-hardline 只建模 bash 语法;PowerShell 宿主跳过(审批层把关,maka 对齐)。
+    if (hostShellDialect() === "bash" && isHardlineBashCommand(command, this.workDir)) {
       throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
     }
     const sandbox = this.options.sandbox;

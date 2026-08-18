@@ -1,34 +1,117 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { isHardlineCommand } from "../../../src/approval/manager.js";
-import { resetShellCache, resolveShell, SHELL_PATH_ENV } from "../../../src/os/shell.js";
-import { buildForegroundSafetyMiddleware } from "../../../src/runtime/agent-runtime.js";
+import { classifyHardlineCommand } from "../../../src/approval/manager.js";
+import { classifyPowerShellCommand } from "../../../src/approval/powershell-safety.js";
+import {
+  hasSupportedHostShell,
+  hostShellDialect,
+  resetShellCache,
+  resolveShell,
+  SHELL_PATH_ENV,
+  shellCommandArgs,
+} from "../../../src/os/shell.js";
+
+// Windows 宿主方言为 PowerShell(对齐 maka):本文件锁定 PowerShell 宿主的
+// 解析、argv、无静态红线与只读分类契约。bash hardline 语义回归在 POSIX
+// 侧由 tests/integration/yolo-safety.integration.test.ts 覆盖。
 
 test(
-  "Windows 非 Bash override 在 YOLO 安全门与 resolver 双重 fail closed",
+  "Windows 宿主解析为 PowerShell 且 argv 按方言生成",
   { skip: process.platform !== "win32" },
-  async () => {
+  () => {
+    resetShellCache();
+    const shell = resolveShell();
+    assert.match(shell.toLowerCase(), /(?:pwsh|powershell)\.exe$/u);
+    assert.equal(hostShellDialect(), "powershell");
+    assert.equal(hasSupportedHostShell(), true);
+    assert.deepEqual(shellCommandArgs(shell, "Get-ChildItem"), [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Get-ChildItem",
+    ]);
+
+    // 真跑一次验证 argv 形状在真实 PowerShell 下可执行
+    const execution = spawnSync(shell, shellCommandArgs(shell, "Write-Output pico-ok"), {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(execution.error, undefined);
+    assert.equal(execution.status, 0, execution.stderr);
+    assert.match(execution.stdout, /pico-ok/u);
+  },
+);
+
+test(
+  "PowerShell 宿主无 bash 静态红线,危险命令交由审批层把关",
+  { skip: process.platform !== "win32" },
+  () => {
+    resetShellCache();
+    const dangerous = [
+      "Remove-Item -Recurse -Force C:\\Windows\\System32",
+      "Format-Volume -DriveLetter C",
+      "Stop-Process -Name wininit -Force",
+      "rm -rf /",
+    ];
+    for (const command of dangerous) {
+      assert.equal(
+        classifyHardlineCommand("bash", JSON.stringify({ command }), process.cwd()),
+        undefined,
+        command,
+      );
+    }
+  },
+);
+
+test("PowerShell 只读分类:白名单 cmdlet 放行,写操作与动态语法需审批", () => {
+  const readOnly = [
+    "Get-ChildItem",
+    "Get-ChildItem | Measure-Object",
+    "ls; cat package.json",
+    "Get-Content README.md -Tail 20",
+    "Test-Path C:\\work",
+    "Get-Process | Sort-Object CPU | Select-Object -First 5",
+    "git rev-parse HEAD",
+    "git ls-files",
+    "Write-Output done",
+    "pwd",
+  ];
+  for (const command of readOnly) {
+    assert.equal(classifyPowerShellCommand(command).kind, "read-only", command);
+  }
+
+  const requiresApproval = [
+    "Remove-Item -Recurse -Force .\\dist",
+    "Set-Content notes.txt 'x'",
+    "New-Item -ItemType File log.txt",
+    "npm install",
+    "$x = Get-Date",
+    "Get-Content (Get-ChildItem)",
+    "Get-ChildItem > out.txt",
+    "Invoke-Expression 'Remove-Item C:\\'",
+    "echo `typo",
+    "git push --force origin main",
+    "& 'C:\\tools\\payload.exe'",
+    "Get-Content {$a}",
+  ];
+  for (const command of requiresApproval) {
+    assert.equal(classifyPowerShellCommand(command).kind, "requires-approval", command);
+  }
+});
+
+test(
+  "PICO_SHELL_PATH 指向不支持的 shell 时 fail closed",
+  { skip: process.platform !== "win32" },
+  () => {
     const previousOverride = process.env[SHELL_PATH_ENV];
     const commandShell = process.env.ComSpec;
-    assert.ok(commandShell, "Windows 必须提供 ComSpec 以验证非 Bash override");
+    assert.ok(commandShell, "Windows 必须提供 ComSpec 以验证不支持的 override");
 
     try {
       process.env[SHELL_PATH_ENV] = commandShell;
       resetShellCache();
-
-      const safety = buildForegroundSafetyMiddleware(process.cwd(), { mode: "yolo" });
-      const dangerousCommands = [
-        "del /f /s C:\\Windows\\System32\\config\\SAM",
-        "format C:",
-        "rd /s /q C:\\Windows\\System32",
-        "Remove-Item -Recurse -Force C:\\Windows\\System32",
-      ];
-      for (const command of dangerousCommands) {
-        const dangerousCall = toolCall(command);
-        assert.equal(isHardlineCommand(dangerousCall.name, dangerousCall.arguments), true, command);
-        assert.equal((await safety(dangerousCall)).allowed, false, command);
-      }
-      assert.throws(() => resolveShell(), new RegExp(`${SHELL_PATH_ENV} 必须指向 bash`, "u"));
+      assert.throws(() => resolveShell(), /必须指向 bash\/sh 或 pwsh\/powershell/u);
     } finally {
       if (previousOverride === undefined) {
         delete process.env[SHELL_PATH_ENV];
@@ -39,11 +122,3 @@ test(
     }
   },
 );
-
-function toolCall(command: string) {
-  return {
-    id: command,
-    name: "bash",
-    arguments: JSON.stringify({ command }),
-  };
-}

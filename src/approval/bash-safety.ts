@@ -170,7 +170,8 @@ function classifySimpleCommand(tokens: readonly string[]): BashSafetyClassificat
   return { kind: "requires-approval", reason: `命令 ${executable} 不在只读白名单中` };
 }
 
-function classifyGitCommand(args: readonly string[]): BashSafetyClassification {
+/** git 子命令只读判定,与宿主方言无关,PowerShell 侧分类复用。 */
+export function classifyGitCommand(args: readonly string[]): BashSafetyClassification {
   let subcommandIndex = 0;
   while (args[subcommandIndex] === "--no-pager" || args[subcommandIndex] === "--paginate") {
     subcommandIndex++;

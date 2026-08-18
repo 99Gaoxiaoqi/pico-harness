@@ -15,7 +15,7 @@
 // 清理内存资源,防止挂死泄漏。
 
 import { logger } from "../observability/logger.js";
-import { hasSupportedHostShell } from "../os/shell.js";
+import { hostShellDialect, type HostShellDialect } from "../os/shell.js";
 import { classifyHardlineBashCommand, type HardlineBashReasonKind } from "./bash-hardline.js";
 import type { PermissionSessionScope } from "./session-permissions.js";
 
@@ -369,9 +369,17 @@ export function classifyHardlineCommand(
   workDir?: string,
 ): HardlineReasonKind | undefined {
   if (toolName !== "bash") return undefined;
-  // hardline 的语法模型只覆盖 Bash。实际 host 无法解析为 Bash 时，必须在
+  // hardline 的语法模型只覆盖 Bash。宿主 shell 无法解析时必须在
   // YOLO/审批/后台策略之前 fail closed，不能让其他 shell 解释同一段文本。
-  if (!hasSupportedHostShell()) return "unknown_hardline";
+  let dialect: HostShellDialect;
+  try {
+    dialect = hostShellDialect();
+  } catch {
+    return "unknown_hardline";
+  }
+  // PowerShell 宿主没有静态红线(对齐 maka:进程内命令文本分析不是安全边界,
+  // 承重边界是 OS 沙箱),由审批层把关;沙箱落地后重新评估。
+  if (dialect === "powershell") return undefined;
   const command = parseBashCommand(args);
   // Bash 参数无法确定解析时不得继续到 shell。
   return command === undefined ? "unknown_hardline" : classifyHardlineBashCommand(command, workDir);

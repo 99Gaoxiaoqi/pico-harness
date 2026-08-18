@@ -18,28 +18,40 @@ import {
   shellCommandArgs,
 } from "../../src/os/shell.js";
 
-test("host shell argv 只接受受 Bash hardline 保护的解释器", () => {
+test("host shell argv 按方言生成且拒绝不支持的 shell", () => {
   const command = "printf safe";
   const expected = ["--noprofile", "--norc", "-c", command];
   assert.deepEqual(shellCommandArgs("/bin/bash", command), expected);
   assert.deepEqual(shellCommandArgs("C:\\Program Files\\Git\\bin\\bash.exe", command), expected);
+  assert.deepEqual(shellCommandArgs("sh", command), expected);
 
-  const unsupportedShells = [
-    "C:\\Windows\\System32\\cmd.exe",
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-    "/bin/zsh",
-  ];
+  const powershellCommand = "Get-ChildItem";
+  const powershellExpected = ["-NoProfile", "-NonInteractive", "-Command", powershellCommand];
+  assert.deepEqual(
+    shellCommandArgs("C:\\Program Files\\PowerShell\\7\\pwsh.exe", powershellCommand),
+    powershellExpected,
+  );
+  assert.deepEqual(
+    shellCommandArgs("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", powershellCommand),
+    powershellExpected,
+  );
+
+  const unsupportedShells = ["C:\\Windows\\System32\\cmd.exe", "/bin/zsh", "C:\\tools\\fish.exe"];
   for (const shell of unsupportedShells) {
     assert.throws(
       () => shellCommandArgs(shell, "rd /s /q C:\\Windows\\System32"),
-      /拒绝使用不受 Bash hardline 保护的 shell/u,
+      /不支持的宿主 shell/u,
       shell,
     );
   }
 });
 
-test("hardline reasonKind 使用固定脱敏分类且不改变拒绝语义", () => {
+// 以下 bash hardline 语义回归依赖宿主为 bash 方言,仅在 POSIX 运行;
+// Windows(PowerShell 宿主)的对应行为由 tests/integration/windows/yolo-shell-hardline.test.ts 覆盖。
+test(
+  "hardline reasonKind 使用固定脱敏分类且不改变拒绝语义",
+  { skip: process.platform === "win32" },
+  () => {
   const cases = [
     ["source ./setup.sh", "source_or_dot"],
     ["powershell -Command Get-ChildItem", "opaque_shell"],
@@ -62,9 +74,13 @@ test("hardline reasonKind 使用固定脱敏分类且不改变拒绝语义", () 
   }
   assert.equal(classifyHardlineBashCommand("printf safe", process.cwd()), undefined);
   assert.equal(isHardlineBashCommand("printf safe", process.cwd()), false);
-});
+  },
+);
 
-test("hardline 拒绝按 reasonKind 返回固定脱敏替代提示且不放宽语义", async () => {
+test(
+  "hardline 拒绝按 reasonKind 返回固定脱敏替代提示且不放宽语义",
+  { skip: process.platform === "win32" },
+  async () => {
   const workDir = process.cwd();
   const roots = WorkspaceRoots.createSync(workDir);
   const safety = buildForegroundSafetyMiddleware(workDir, { mode: "yolo" }, roots);
@@ -107,9 +123,13 @@ test("hardline 拒绝按 reasonKind 返回固定脱敏替代提示且不放宽�
   const safeCall = toolCall("printf safe > ./pico-safe-output");
   assert.equal(classifyHardlineCommand("bash", safeCall.arguments, workDir), undefined);
   assert.equal((await safety(safeCall)).allowed, true);
-});
+  },
+);
 
-test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径", () => {
+test(
+  "YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径",
+  { skip: process.platform === "win32" },
+  () => {
   const workDir = process.cwd();
   const dangerous = [
     "rm -rf /etc{,}",
@@ -449,9 +469,13 @@ test("YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径
   assert.equal(isHardlineBashCommand("rm -f etc/passwd", "/"), true);
   assert.equal(isHardlineBashCommand("rm -f Windows/System32/config/system", "C:/"), true);
   assert.equal(isHardlineBashCommand("rm -f ./generated.txt"), true);
-});
+  },
+);
 
-test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", async () => {
+test(
+  "YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合",
+  { skip: process.platform === "win32" },
+  async () => {
   const workDir = process.cwd();
   const dangerous = [
     "rm -rf -- /",
@@ -633,7 +657,8 @@ test("YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合", asyn
   assert.equal((await foregroundSafety(ordinaryCall)).allowed, true);
   const rootForegroundSafety = buildForegroundSafetyMiddleware("/", { mode: "yolo" }, roots);
   assert.equal((await rootForegroundSafety(relativeSystemCall)).allowed, false);
-});
+  },
+);
 
 test(
   "YOLO hardline 对真实 POSIX Shell stdin 执行入口 fail-closed",
