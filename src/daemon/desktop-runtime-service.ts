@@ -4666,7 +4666,6 @@ function effectiveSessionSettingDefaults(runtime: EffectiveModelRuntime): {
 function safeConfig(config: PicoProjectConfig): JsonValue {
   return toJsonValue({
     schemaVersion: config.version,
-    ...(config.model ? { model: config.model } : {}),
     commandsDir: config.commandsDir,
     additionalDirectories: config.additionalDirectories,
     keybindings: config.keybindings,

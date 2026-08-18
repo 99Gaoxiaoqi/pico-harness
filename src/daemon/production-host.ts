@@ -1205,7 +1205,8 @@ function resolveDesktopRequestedModel(
   requestedModel?: string,
 ): string | undefined {
   const requested = requestedModel?.trim();
-  if (!requested || requested === "inherit") return config.model;
+  // "inherit" = 不显式指定 → 回落调用方的 effective 默认路由（用户级）。
+  if (!requested || requested === "inherit") return undefined;
   const aliased = config.compatibility.claude.enabled
     ? (config.compatibility.claude.modelAliases[requested] ?? requested)
     : requested;

@@ -32,8 +32,8 @@ export interface PicoProjectConfig {
   commandsDir: string;
   additionalDirectories: string[];
   keybindings: KeybindingMap;
-  /** Default model route in providerID/modelID form. */
-  model?: string;
+  // model 字段已退役（2026-08-17）：模型路由与用户凭据强耦合，只支持用户级。
+  // parser 按字段提取、忽略未知键，旧仓库 config.json 里的 model 残值静默失效。
   providers: Record<string, ModelProviderConfig>;
   sandbox: YoloSandboxConfig;
   lspServers: LspServerConfig[];
@@ -71,13 +71,11 @@ export async function loadPicoProjectConfig(workDir: string): Promise<PicoProjec
     throw configError(configPath, "root", "must be an object");
   }
 
-  const model = parseModelRouteId(parsed["model"], configPath);
   return {
     version: parseVersion(parsed["version"], configPath),
     commandsDir: parseCommandsDir(parsed["commandsDir"], workDir, configPath),
     additionalDirectories: parseAdditionalDirectories(parsed["permissions"], configPath),
     keybindings: parseKeybindings(parsed["keybindings"], configPath),
-    ...(model !== undefined ? { model } : {}),
     providers: parseModelProviderConfigs(parsed["providers"], configPath),
     sandbox: parseSandbox(parsed["sandbox"], configPath),
     lspServers: parseLspServers(parsed["lsp"], configPath),

@@ -1,7 +1,6 @@
 {
   "version": 1,
   "commandsDir": ".pico/commands",
-  "model": "lez/qwen3.8-max",
   "permissions": {
     "additionalDirectories": []
   },

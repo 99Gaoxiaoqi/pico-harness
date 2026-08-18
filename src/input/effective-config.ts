@@ -9,13 +9,7 @@ import {
   type PicoUserConfigDefaults,
 } from "./user-config-store.js";
 
-export type ConfigSource =
-  | "user"
-  | "project"
-  | "project-legacy"
-  | "environment"
-  | "session"
-  | "cli";
+export type ConfigSource = "user" | "project-legacy" | "environment" | "session" | "cli";
 
 export interface EffectiveConfigDefaults {
   readonly modelRouteId?: string;
@@ -91,13 +85,17 @@ export class EffectiveConfigResolver {
     }
     // 项目侧 providers 已退役（2026-08-17）：provider 凭据只支持用户侧，
     // 项目配置里的 providers 段是 legacy 残留，解析保留但不再并入有效配置
-    // （同 ID 不同端点的合并冲突即源于此 legacy 路径）。project.model 仍参与默认路由。
+    // （同 ID 不同端点的合并冲突即源于此 legacy 路径）。
+    // 项目侧 model 默认路由同步退役（同日）：模型路由与用户凭据强耦合，
+    // 项目侧只能引用无法保证存在的路由 ID（实测：项目钉死已删除的 provider
+    // 会挡死整个工作区的新会话）。字段连同解析整体移除——parser 忽略未知键，
+    // 旧仓库的 model 残值静默失效，格式非法也不再阻断配置加载。
 
     const sources: Record<string, ConfigSource> = {};
     for (const [id, source] of Object.entries(providerSources)) {
       sources[`providers.${id}`] = source;
     }
-    const defaults = resolveDefaults(user.config.defaults, project, environment, sources);
+    const defaults = resolveDefaults(user.config.defaults, environment, sources);
     const defaultModelRouteId = defaults.modelRouteId;
     const frozenProviders = Object.freeze(
       Object.fromEntries(
@@ -120,7 +118,6 @@ export class EffectiveConfigResolver {
 
 function resolveDefaults(
   userDefaults: PicoUserConfigDefaults | undefined,
-  project: PicoProjectConfig | undefined,
   environment: LegacyEnvironmentProvider | undefined,
   sources: Record<string, ConfigSource>,
 ): EffectiveConfigDefaults {
@@ -143,10 +140,6 @@ function resolveDefaults(
   if (userDefaults?.thinkingEffort !== undefined) {
     defaults.thinkingEffort = userDefaults.thinkingEffort;
     sources["defaults.thinkingEffort"] = "user";
-  }
-  if (project?.model !== undefined) {
-    defaults.modelRouteId = project.model;
-    sources["defaults.modelRouteId"] = "project";
   }
   return defaults;
 }
