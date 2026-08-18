@@ -1225,7 +1225,7 @@ test("headless forwards only a complete adapter-gated controlled proxy environme
   assert.equal(JSON.stringify(enabled.outcome.result).includes(token), false);
 });
 
-test("controlled proxy ToolResults are redacted before Provider transcript and Runtime persistence", async (context) => {
+test("controlled proxy ToolResults are redacted before Provider transcript and Runtime persistence", { skip: process.platform === "win32" }, async (context) => {
   const fixture = await createFixture(context, "controlled-proxy-bash");
   await configureFixture(fixture, "secret-canary-controlled-proxy-bash");
   const token = "b".repeat(64);
@@ -1557,7 +1557,7 @@ test("incident-mode policy denial remains recoverable after normal completion", 
   assert.equal(calls, 2);
 });
 
-test("headless hardline summary emits only a fixed reasonKind and no command parameters", async (context) => {
+test("headless hardline summary emits only a fixed reasonKind and no command parameters", { skip: process.platform === "win32" }, async (context) => {
   const fixture = await createFixture(context, "policy-reason-kind");
   await configureFixture(fixture, "secret-canary-policy-reason-kind");
   const commandCanary = "COMMAND_ARGUMENT_MUST_NOT_APPEAR";

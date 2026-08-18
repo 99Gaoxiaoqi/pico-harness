@@ -26,7 +26,12 @@ import { FetchURLTool, WebSearchTool } from "./web.js";
 import { buildWorkspaceBoundaryMiddleware, WorkspaceRoots } from "./workspace-roots.js";
 import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
-import { classifyBashCommand } from "../approval/bash-safety.js";
+import { classifyBashCommand, type BashSafetyClassification } from "../approval/bash-safety.js";
+import {
+  classifyPowerShellCommand,
+  type PowerShellSafetyClassification,
+} from "../approval/powershell-safety.js";
+import { hostShellDialect } from "../os/shell.js";
 import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
@@ -458,7 +463,18 @@ function buildSubagentSafetyMiddleware(
     }
     if (mode === "explore" && call.name === "bash") {
       const command = bashCommandFromArgs(call.arguments);
-      const classification = command ? classifyBashCommand(command) : undefined;
+      // 只读判定按宿主方言分派;方言无法解析时拒绝 fail-closed
+      let classification: PowerShellSafetyClassification | BashSafetyClassification | undefined;
+      if (command !== undefined) {
+        try {
+          classification =
+            hostShellDialect() === "powershell"
+              ? classifyPowerShellCommand(command)
+              : classifyBashCommand(command);
+        } catch {
+          classification = undefined;
+        }
+      }
       if (classification?.kind !== "read-only") {
         return {
           allowed: false,

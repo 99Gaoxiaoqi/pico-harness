@@ -12,6 +12,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { logger } from "../observability/logger.js";
+import { hostShellDialect } from "../os/shell.js";
 import { SkillLoader } from "./skill.js";
 import { TodoStore } from "./todo-store.js";
 // GoalManager 用 import type:只取类型签名,避免 context → engine 的循环依赖
@@ -101,6 +102,7 @@ export class PromptComposer {
 <env>
   Working directory: ${this.workDir}
   Platform: ${process.platform}
+  Shell: ${shellDialectLabel()}
   Today's date: ${new Date().toISOString().slice(0, 10)}
 </env>`);
 
@@ -110,7 +112,7 @@ export class PromptComposer {
 你具备极简主义哲学,拒绝废话。你能通过系统提供的内置工具,创建、读取、修改和执行工作区中的代码。
 
 # 核心纪律 (CRITICAL)
-1. 如需检查文件是否存在,请使用 bash 的 ls 或 test -f,而不是对目录使用 read_file。
+1. 如需检查文件是否存在,请使用 bash 工具执行 ${isPowerShellHost() ? "Get-ChildItem 或 Test-Path" : "ls 或 test -f"},而不是对目录使用 read_file。
 2. 创建新文件时,务必使用 write_file,并同时提供 path 和 content 参数。
 3. 编辑文件前务必先读取现有文件,以理解上下文。
 4. 遇到工具执行报错时,仔细阅读 stderr,尝试自己修正命令并重试。
@@ -239,3 +241,17 @@ const GRAPH_TOOLS_SPEC = `# Graph Mode 工作调度
 4. 所有工作完成后调用 close_graph。
 
 当任务可以并行或有明确依赖关系时，优先使用 add_work 而非手动 delegate_task。`;
+
+/** 宿主是否 PowerShell 方言(解析失败按非 PowerShell 处理,提示词保守回落 bash 习语)。 */
+function isPowerShellHost(): boolean {
+  try {
+    return hostShellDialect() === "powershell";
+  } catch {
+    return false;
+  }
+}
+
+/** env 块的宿主 shell 标签,告诉模型当前该写什么方言。 */
+function shellDialectLabel(): string {
+  return isPowerShellHost() ? "PowerShell" : "bash";
+}
