@@ -116,7 +116,7 @@ export async function findCliSessionSummary(
   try {
     const row = runtimeEventStore.readSessionCatalog()?.rows.get(sessionId);
     if (row && runtimeEventStore.sessionLedgerSizeMatches(sessionId, row.ledgerByteLength)) {
-      return isPublishedSession(sessionId, row, forkTargets) ? row.summary : undefined;
+      return isPublishedSession(sessionId, row.fold, forkTargets) ? row.summary : undefined;
     }
   } catch (error) {
     if (!(error instanceof SessionCatalogIntegrityError)) throw error;
@@ -151,10 +151,10 @@ export async function listCliSessionSummaries(
   }
 
   const published = rows
-    .filter((row) => isPublishedSession(row.summary.id, row, forkTargets))
+    .filter((row) => isPublishedSession(row.summary.id, row.fold, forkTargets))
     .map((row): SequencedCliSessionSummary => ({
       summary: row.summary,
-      headSequence: row.headSequence,
+      headSequence: row.fold.headSequence,
     }));
 
   published.sort(

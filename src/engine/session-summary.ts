@@ -1,12 +1,17 @@
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import type { RuntimeEventStoreEntry, RuntimeSessionManifest } from "../storage/runtime-event-store.js";
 import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../runtime/runtime-run.js";
-import { projectRuntimeSessionMessages, projectRuntimeSessionState } from "./session-runtime-projection.js";
+import { projectRuntimeSessionState } from "./session-runtime-projection.js";
+import type { RuntimeEvent } from "./session-runtime-event.js";
 
 /**
  * 会话摘要的引擎层实现：cli 的 session-resolver 与 storage 的会话目录
  * （session-catalog）共用同一套口径，保证"读时现算 / 写时维护 /
  * 全量重建"三条路径构造性一致。
+ *
+ * 摘要被建模为事件折叠器（fold）：全量口径 = 对全部事件按序折叠；
+ * 会话目录的增量维护 = 只把新增事件折叠进持久化的折叠状态。两条路径
+ * 使用同一组折叠规则，等价性由构造保证（测试锁定）。
  */
 
 export type CliSessionHistorySource = RuntimeSessionManifest["historySource"];
@@ -35,45 +40,137 @@ export interface SequencedCliSessionSummary {
   readonly headSequence: number;
 }
 
-export function summaryFromRuntimeSession(
-  manifest: RuntimeSessionManifest,
-  entries: readonly RuntimeEventStoreEntry[],
-): SequencedCliSessionSummary {
-  const events = entries.map(({ event }) => event);
-  const messages = projectRuntimeSessionMessages(events);
-  const runtimeState = projectRuntimeSessionState(events);
-  const visibleUserMessages = messages.filter(
-    (message) =>
+/** 折叠状态：会话目录行持久化它以支撑增量维护。 */
+export interface SessionSummaryFold {
+  /** projectRuntimeSessionMessages 口径的消息计数（含 assistant/tool 消息）。 */
+  messageCount: number;
+  /** 首条可见用户消息（已压缩）。 */
+  firstMessage?: string;
+  /** 末条可见用户消息（已压缩）。 */
+  lastMessage?: string;
+  /** 最后一份 settings 对象的 title（整体替换语义：字段缺省即清除）。 */
+  settingsTitle?: string;
+  settingsForkFrom?: string;
+  /** 最后一条 session.forked 事件。 */
+  forkEventParent?: string;
+  forkEventId?: string;
+  /** 纯事件侧的发布 flags；journal 部分读时补查。 */
+  hasForkFacts: boolean;
+  completedBootstrap: boolean;
+  /** 已出现 session.forked 但尚未等到同 runId completed terminal 的 runId。 */
+  pendingForkRuns: readonly string[];
+  /** 最后一条事件的 at（ISO）。 */
+  lastEventAt?: string;
+  headSequence: number;
+}
+
+export function createInitialSessionSummaryFold(): SessionSummaryFold {
+  return {
+    messageCount: 0,
+    hasForkFacts: false,
+    completedBootstrap: false,
+    pendingForkRuns: [],
+    headSequence: 0,
+  };
+}
+
+/** 单事件折叠。事件必须按 sequence 顺序进入。 */
+export function foldSessionSummaryEvent(fold: SessionSummaryFold, event: RuntimeEvent): SessionSummaryFold {
+  const next: SessionSummaryFold = {
+    ...fold,
+    pendingForkRuns: [...fold.pendingForkRuns],
+  };
+
+  if (
+    (event.kind === "message.committed" || event.kind === "tool.result.recorded") &&
+    event.visibility === "model" &&
+    !event.partial
+  ) {
+    next.messageCount += 1;
+  }
+  if (event.kind === "message.committed" && event.visibility === "model" && !event.partial) {
+    const message = event.data.message;
+    if (message.toolCallId !== undefined) {
+      throw new Error("Projected model message cannot carry toolCallId");
+    }
+    if (
       message.role === "user" &&
       message.toolCallId === undefined &&
       !isMessageHiddenFromTranscript(message) &&
-      message.content.trim().length > 0,
-  );
-  const firstMessage = compactSessionText(visibleUserMessages[0]?.content);
-  const lastMessage = compactSessionText(visibleUserMessages.at(-1)?.content);
-  const title = runtimeState.settings?.title ?? firstMessage;
-  const forkEvent = events.findLast((event) => event.kind === "session.forked");
-  const forkFrom = forkEvent?.data.parentSessionId ?? runtimeState.settings?.forkFrom;
-  const head = entries.at(-1);
+      message.content.trim().length > 0
+    ) {
+      const compacted = compactSessionText(message.content);
+      if (compacted) {
+        if (next.firstMessage === undefined) next.firstMessage = compacted;
+        next.lastMessage = compacted;
+      }
+    }
+  }
+  if (event.kind === "session.state.committed") {
+    const state = projectRuntimeSessionState([event]);
+    const settings = state.settings;
+    // settings 是整体替换：最后一份对象决定 title/forkFrom，缺省字段即清除。
+    next.settingsTitle = settings?.title;
+    next.settingsForkFrom = settings?.forkFrom;
+  }
+  if (event.kind === "session.forked") {
+    next.hasForkFacts = true;
+    next.forkEventParent = event.data.parentSessionId;
+    next.forkEventId = event.eventId;
+    next.pendingForkRuns = [...next.pendingForkRuns, event.runId];
+  } else if (event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)) {
+    next.hasForkFacts = true;
+  }
+  if (
+    event.kind === "run.terminal" &&
+    event.data.status === "completed" &&
+    next.pendingForkRuns.includes(event.runId)
+  ) {
+    next.completedBootstrap = true;
+  }
 
+  next.lastEventAt = event.at;
+  next.headSequence += 1;
+  return next;
+}
+
+/** 折叠状态 → 摘要。title/forkFrom 的回退链与整体替换语义在此落定。 */
+export function finalizeSessionSummary(
+  manifest: RuntimeSessionManifest,
+  fold: SessionSummaryFold,
+): SequencedCliSessionSummary {
+  const title = fold.settingsTitle ?? fold.firstMessage;
+  const forkFrom = fold.forkEventParent ?? fold.settingsForkFrom;
+  const updatedAt = fold.lastEventAt ?? manifest.createdAt;
   return {
     summary: {
       id: manifest.sessionId,
       cwd: manifest.workDir,
       createdAt: new Date(manifest.createdAt),
-      updatedAt: new Date(head?.event.at ?? manifest.createdAt),
-      messageCount: messages.length,
+      updatedAt: new Date(updatedAt),
+      messageCount: fold.messageCount,
       ...(title ? { title } : {}),
-      ...(firstMessage ? { firstMessage } : {}),
-      ...(lastMessage ? { lastMessage } : {}),
+      ...(fold.firstMessage ? { firstMessage: fold.firstMessage } : {}),
+      ...(fold.lastMessage ? { lastMessage: fold.lastMessage } : {}),
       ...(forkFrom ? { forkFrom } : {}),
       historySource: manifest.historySource,
       logId: manifest.sessionId,
-      ...(forkEvent ? { parentLogId: forkEvent.data.parentSessionId } : {}),
-      ...(forkEvent ? { forkEventId: forkEvent.eventId } : {}),
+      ...(fold.forkEventParent ? { parentLogId: fold.forkEventParent } : {}),
+      ...(fold.forkEventId ? { forkEventId: fold.forkEventId } : {}),
     },
-    headSequence: head?.sequence ?? 0,
+    headSequence: fold.headSequence,
   };
+}
+
+export function summaryFromRuntimeSession(
+  manifest: RuntimeSessionManifest,
+  entries: readonly RuntimeEventStoreEntry[],
+): SequencedCliSessionSummary {
+  let fold = createInitialSessionSummaryFold();
+  for (const { event } of entries) {
+    fold = foldSessionSummaryEvent(fold, event);
+  }
+  return finalizeSessionSummary(manifest, fold);
 }
 
 export function compactSessionText(value: string | undefined): string | undefined {
@@ -92,24 +189,11 @@ export interface SessionPublicationFlags {
 export function computeSessionPublicationFlags(
   entries: readonly RuntimeEventStoreEntry[],
 ): SessionPublicationFlags {
-  const hasForkFacts = entries.some(
-    ({ event }) =>
-      event.kind === "session.forked" || event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
-  );
-  const completedBootstrap =
-    hasForkFacts &&
-    entries.some(
-      ({ sequence: markerSequence, event: marker }) =>
-        marker.kind === "session.forked" &&
-        entries.some(
-          ({ sequence: terminalSequence, event: terminal }) =>
-            terminalSequence > markerSequence &&
-            terminal.kind === "run.terminal" &&
-            terminal.runId === marker.runId &&
-            terminal.data.status === "completed",
-        ),
-    );
-  return { hasForkFacts, completedBootstrap };
+  let fold = createInitialSessionSummaryFold();
+  for (const { event } of entries) {
+    fold = foldSessionSummaryEvent(fold, event);
+  }
+  return { hasForkFacts: fold.hasForkFacts, completedBootstrap: fold.completedBootstrap };
 }
 
 export interface ForkTargetOperations {
