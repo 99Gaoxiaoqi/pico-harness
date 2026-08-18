@@ -1,45 +1,31 @@
 import { randomUUID } from "node:crypto";
-import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   RuntimeEventStore,
   type RuntimeEventStoreEntry,
-  type RuntimeSessionManifest,
 } from "../storage/runtime-event-store.js";
 import {
-  projectRuntimeSessionMessages,
-  projectRuntimeSessionState,
-} from "../engine/session-runtime-projection.js";
-import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../runtime/runtime-run.js";
+  SessionCatalogIntegrityError,
+  type SessionCatalogRow,
+} from "../storage/session-catalog.js";
+import {
+  computeSessionPublicationFlags,
+  isPublishedSession,
+  summaryFromRuntimeSession,
+  type CliSessionSummary,
+  type ForkTargetOperations,
+  type SequencedCliSessionSummary,
+} from "../engine/session-summary.js";
 import { StorageOperationJournal } from "../storage/operation-journal.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
-export type CliSessionHistorySource = RuntimeSessionManifest["historySource"];
+export type { CliSessionSummary, CliSessionHistorySource } from "../engine/session-summary.js";
 
 export interface CliSessionSelection {
   mode: CliSessionMode;
   sessionId: string;
   sourceSessionId?: string;
-}
-
-export interface CliSessionSummary {
-  id: string;
-  cwd: string;
-  createdAt: Date;
-  updatedAt: Date;
-  /** daemon 会话列表（session.list）无消息计数来源——客户端映射时可缺省。 */
-  messageCount?: number;
-  title?: string;
-  firstMessage?: string;
-  lastMessage?: string;
-  historySource?: CliSessionHistorySource;
-  /** Source session ID persisted with a forked conversation. */
-  forkFrom?: string;
-  /** Durable journal identity; sessionId remains the human-facing compatibility key. */
-  logId?: string;
-  parentLogId?: string;
-  forkEventId?: string;
 }
 
 export interface ListCliSessionSummariesOptions {
@@ -53,15 +39,6 @@ export interface ResolveCliSessionOptions {
   continueSession?: boolean;
   resumeSession?: string;
   forkSession?: string;
-}
-
-interface SequencedCliSessionSummary {
-  readonly summary: CliSessionSummary;
-  readonly headSequence: number;
-}
-
-interface ForkTargetOperations {
-  readonly hasCompleted: boolean;
 }
 
 export async function resolveCliSession(
@@ -125,9 +102,9 @@ export function createCliSessionId(): string {
 }
 
 /**
- * 单会话版本的 {@link listCliSessionSummaries}：只读目标会话的 ledger，
- * 供"已知 sessionId 只需确认存在与摘要"的调用方（daemon requireSession 等）
- * 使用，避免为找一个会话扫全工作区。
+ * 单会话点查：优先读会话目录（catalog）行并做 statSync 水位校验；
+ * catalog 缺行、损坏或水位不符（deleteSession 崩溃窗口、手工篡改）时
+ * 回落单会话 ledger 直读——该回落也是水位漂移的自愈路径。
  */
 export async function findCliSessionSummary(
   workDir: string,
@@ -135,31 +112,50 @@ export async function findCliSessionSummary(
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary | undefined> {
   const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
+  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
+  try {
+    const row = runtimeEventStore.readSessionCatalog()?.rows.get(sessionId);
+    if (row && runtimeEventStore.sessionLedgerSizeMatches(sessionId, row.ledgerByteLength)) {
+      return isPublishedSession(sessionId, row, forkTargets) ? row.summary : undefined;
+    }
+  } catch (error) {
+    if (!(error instanceof SessionCatalogIntegrityError)) throw error;
+  }
   const manifest = await runtimeEventStore.readSessionManifest(sessionId);
   if (!manifest) return undefined;
   const entries = await runtimeEventStore.readSessionEntries(sessionId);
-  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
   if (!isPublishedRuntimeSession(sessionId, entries, forkTargets)) return undefined;
   return summaryFromRuntimeSession(manifest, entries).summary;
 }
 
+/**
+ * 会话列表：读会话目录（catalog）单文件 + fork journal 发布过滤。
+ * catalog 缺失/损坏/版本不符时锁内从 ledger 全量重建（可写 store 顺手落盘，
+ * readOnly 只重建内存态）。发布判定的 journal 部分永远读时补查。
+ */
 export async function listCliSessionSummaries(
   workDir: string,
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary[]> {
   const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
   const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
-  // 批量单锁周期读取：逐会话 readSessionEntries 会各付一次锁仪式（~40ms fsync），
-  // 会话多时列表被线性放大。
-  const snapshots = await runtimeEventStore.readWorkspaceSessions();
-  const published = snapshots
-    .map(({ manifest, entries }) => {
-      if (!isPublishedRuntimeSession(manifest.sessionId, entries, forkTargets)) {
-        return undefined;
-      }
-      return summaryFromRuntimeSession(manifest, entries);
-    })
-    .filter((entry): entry is SequencedCliSessionSummary => entry !== undefined);
+  let rows: readonly SessionCatalogRow[] | undefined;
+  try {
+    const catalog = runtimeEventStore.readSessionCatalogForListing();
+    rows = catalog ? [...catalog.rows.values()] : undefined;
+  } catch (error) {
+    if (!(error instanceof SessionCatalogIntegrityError)) throw error;
+  }
+  if (!rows) {
+    rows = [...(await runtimeEventStore.rebuildSessionCatalog()).rows.values()];
+  }
+
+  const published = rows
+    .filter((row) => isPublishedSession(row.summary.id, row, forkTargets))
+    .map((row): SequencedCliSessionSummary => ({
+      summary: row.summary,
+      headSequence: row.headSequence,
+    }));
 
   published.sort(
     (a, b) =>
@@ -169,47 +165,6 @@ export async function listCliSessionSummaries(
       b.summary.id.localeCompare(a.summary.id),
   );
   return published.map(({ summary }) => summary);
-}
-
-function summaryFromRuntimeSession(
-  manifest: RuntimeSessionManifest,
-  entries: readonly RuntimeEventStoreEntry[],
-): SequencedCliSessionSummary {
-  const events = entries.map(({ event }) => event);
-  const messages = projectRuntimeSessionMessages(events);
-  const runtimeState = projectRuntimeSessionState(events);
-  const visibleUserMessages = messages.filter(
-    (message) =>
-      message.role === "user" &&
-      message.toolCallId === undefined &&
-      !isMessageHiddenFromTranscript(message) &&
-      message.content.trim().length > 0,
-  );
-  const firstMessage = compactSessionText(visibleUserMessages[0]?.content);
-  const lastMessage = compactSessionText(visibleUserMessages.at(-1)?.content);
-  const title = runtimeState.settings?.title ?? firstMessage;
-  const forkEvent = events.findLast((event) => event.kind === "session.forked");
-  const forkFrom = forkEvent?.data.parentSessionId ?? runtimeState.settings?.forkFrom;
-  const head = entries.at(-1);
-
-  return {
-    summary: {
-      id: manifest.sessionId,
-      cwd: manifest.workDir,
-      createdAt: new Date(manifest.createdAt),
-      updatedAt: new Date(head?.event.at ?? manifest.createdAt),
-      messageCount: messages.length,
-      ...(title ? { title } : {}),
-      ...(firstMessage ? { firstMessage } : {}),
-      ...(lastMessage ? { lastMessage } : {}),
-      ...(forkFrom ? { forkFrom } : {}),
-      historySource: manifest.historySource,
-      logId: manifest.sessionId,
-      ...(forkEvent ? { parentLogId: forkEvent.data.parentSessionId } : {}),
-      ...(forkEvent ? { forkEventId: forkEvent.eventId } : {}),
-    },
-    headSequence: head?.sequence ?? 0,
-  };
 }
 
 function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
@@ -230,12 +185,6 @@ async function findLatestSessionId(
   picoHome?: string,
 ): Promise<string | undefined> {
   return (await listCliSessionSummaries(workDir, { picoHome }))[0]?.id;
-}
-
-function compactSessionText(value: string | undefined): string | undefined {
-  const compacted = value?.replace(/\s+/gu, " ").trim();
-  if (!compacted) return undefined;
-  return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
 }
 
 async function assertRuntimeSessionExists(
@@ -277,26 +226,7 @@ function isPublishedRuntimeSession(
   entries: readonly RuntimeEventStoreEntry[],
   forkTargets: ReadonlyMap<string, ForkTargetOperations>,
 ): boolean {
-  const targetOperations = forkTargets.get(sessionId);
-  const hasForkFacts = entries.some(
-    ({ event }) =>
-      event.kind === "session.forked" || event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
-  );
-  if (!hasForkFacts) return targetOperations === undefined;
-
-  const completedBootstrap = entries.some(
-    ({ sequence: markerSequence, event: marker }) =>
-      marker.kind === "session.forked" &&
-      entries.some(
-        ({ sequence: terminalSequence, event: terminal }) =>
-          terminalSequence > markerSequence &&
-          terminal.kind === "run.terminal" &&
-          terminal.runId === marker.runId &&
-          terminal.data.status === "completed",
-      ),
-  );
-  if (!completedBootstrap) return false;
-  return targetOperations?.hasCompleted ?? true;
+  return isPublishedSession(sessionId, computeSessionPublicationFlags(entries), forkTargets);
 }
 
 /** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */
