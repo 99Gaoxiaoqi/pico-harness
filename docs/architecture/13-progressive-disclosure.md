@@ -1,5 +1,10 @@
 # pico-harness 渐进式披露：让上下文窗口只装此刻需要的东西
 
+> **[历史文档]** 工具披露部分已于 2026-08-18 被重构取代（surface 组级激活 +
+> durable 重播 + TF-IDF），现状与动机见 `23-decision-tool-disclosure-surface.md`。
+> 本文其余披露机制（Skill 二段式 / ToolResult 预览与 Evidence 回取 / Repo Map
+> 渐进索引 / explore_repo 侦察）的描述仍然有效。
+
 > 本文梳理 pico-harness 里所有"渐进式披露"(progressive disclosure)机制的统一设计与协作。核心不是"分了几套披露",而是同一个设计哲学的五种落地：**先给轻量摘要或入口,确有需要时再按需支付成本回取完整内容。**
 
 ---
