@@ -16,6 +16,21 @@ import { searchTools } from "./tool-search-index.js";
 
 export type ToolDefinitionSource = readonly ToolDefinition[] | (() => readonly ToolDefinition[]);
 
+/**
+ * 候选排除名单：
+ * - 披露连接器自身（search_tools / load_tools）——披露 load_tools 会造成
+ *   pickForLLM 与 searchToolSchema 重复提供同一 schema；
+ * - Plan 协议工具——planning 走 provider 白名单全量供给，execution 已预披露，
+ *   经 search_tools 再披露没有意义且语义误导。
+ */
+const CANDIDATE_EXCLUDED_NAMES = new Set([
+  "search_tools",
+  "load_tools",
+  "submit_plan",
+  "update_plan",
+  "cancel_plan",
+]);
+
 export function findMatchingTools(
   candidates: readonly ToolDefinition[],
   query: string,
@@ -80,15 +95,20 @@ export class SearchToolsTool implements BaseTool {
       throw new Error("参数解析失败:query 必须是非空字符串");
     }
 
-    // 2. 每次执行都取实时工具列表,只检索无预定义组的动态工具
-    //    （组内工具经 load_tools 激活;search_tools 本身排除避免自激活）。
+    // 2. 每次执行都取实时工具列表,只检索���预定义组的动态工具
+    //    （组内工具经 load_tools 激活;连接器与协议工具排除,见排除名单注释）。
     const candidates = this.resolveTools().filter(
-      (tool) => tool.name !== this.name() && findGroupForTool(tool.name) === undefined,
+      (tool) =>
+        !CANDIDATE_EXCLUDED_NAMES.has(tool.name) && findGroupForTool(tool.name) === undefined,
     );
     const hits = findMatchingTools(candidates, query);
 
-    // 3. 无命中提示
+    // 3. 无命中提示（精确选择失败与关键词未命中区分开，帮模型闭环）
     if (hits.length === 0) {
+      if (query.startsWith("select:")) {
+        const wanted = query.slice("select:".length).trim();
+        return `工具 "${wanted}" 不存在。候选: ${candidates.map((t) => t.name).join(", ")}`;
+      }
       return "未找到匹配工具,试试其他关键词;已知分组的工具请用 load_tools。";
     }
 

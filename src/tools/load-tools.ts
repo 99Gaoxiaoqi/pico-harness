@@ -19,6 +19,9 @@ export interface LoadToolsOptions {
   onGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void;
 }
 
+/** 实时已注册工具名数据源——execute 时校验组成员是否真的存在于 registry。 */
+export type RegisteredToolNamesSource = () => readonly string[];
+
 /** 渲染组目录为 load_tools 的 description（模型通过阅读它选择 group id）。 */
 export function renderGroupCatalog(groups: readonly ToolGroupDef[]): string {
   const lines = groups.map((g) => `- ${g.id}: ${g.description}`);
@@ -34,8 +37,10 @@ export function renderGroupCatalog(groups: readonly ToolGroupDef[]): string {
 /**
  * 元工具：模型用它按组激活 deferred 工具。
  *
- * 构造时注入当前宿主可用的 deferred 组列表（宿主亲和性已在列表阶段过滤）。
- * execute 时校验 group id，命中即 discloseGroup，下一轮生效。
+ * 构造时注入当前宿主可用的 deferred 组列表（宿主亲和性已在列表阶段过滤），
+ * 以及 registry 实时注册名数据源。execute 时以注册集为准过滤组成员——
+ * 目录是静态声明，注册是运行现实（graph/memory 等组有条件注册），
+ * 两者脱节时宁可报"组当前不可用"，不做"已加载"的假承诺。
  */
 export class LoadToolsTool implements BaseTool {
   /** 纯只读：只更新内存集合与可选事件写入，不触碰文件/网络资源。 */
@@ -44,6 +49,7 @@ export class LoadToolsTool implements BaseTool {
   constructor(
     private readonly groups: readonly ToolGroupDef[],
     private readonly disclosure: ToolDisclosure,
+    private readonly registeredToolNames?: RegisteredToolNamesSource,
     private readonly options: LoadToolsOptions = {},
   ) {}
 
@@ -78,11 +84,11 @@ export class LoadToolsTool implements BaseTool {
     let group: string;
     try {
       const input = JSON.parse(args) as { group?: string };
-      group = input.group ?? "";
+      group = (input.group ?? "").trim();
     } catch {
       throw new Error("参数解析失败:期望 JSON 含 group 字段");
     }
-    if (typeof group !== "string" || group.trim() === "") {
+    if (typeof group !== "string" || group === "") {
       throw new Error("参数解析失败:group 必须是非空字符串");
     }
 
@@ -92,9 +98,25 @@ export class LoadToolsTool implements BaseTool {
       throw new Error(`未知工具组 "${group}"。可用组: ${available}`);
     }
 
-    this.disclosure.discloseGroup(found.id, found.toolNames);
-    this.options.onGroupLoaded?.(found.id, found.toolNames);
-    return `已加载 ${found.label} 组 ${found.toolNames.length} 个工具，下一轮可直接调用:\n${found.toolNames
+    // 以 registry 实时注册集为准：条件注册未触发（graph 未启用、memory eco
+    // 模式等）的成员不披露，避免"已加载"的假承诺被模型下一轮撞 unknown tool。
+    const registered = this.registeredToolNames
+      ? new Set(this.registeredToolNames())
+      : undefined;
+    const loadable = registered
+      ? found.toolNames.filter((name) => registered.has(name))
+      : [...found.toolNames];
+    if (loadable.length === 0) {
+      throw new Error(
+        `工具组 "${group}" 在当前环境不可用（其工具均未注册）。可尝试其他组: ${this.groups
+          .map((g) => g.id)
+          .join(", ")}`,
+      );
+    }
+
+    this.disclosure.discloseGroup(found.id, loadable);
+    this.options.onGroupLoaded?.(found.id, loadable);
+    return `已加载 ${found.label} 组 ${loadable.length} 个工具，下一轮可直接调用:\n${loadable
       .map((n) => `- ${n}`)
       .join("\n")}`;
   }

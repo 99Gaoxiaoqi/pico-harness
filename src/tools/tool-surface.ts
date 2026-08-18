@@ -12,6 +12,17 @@
 //
 // 不属于任何组的工具（如 MCP/Plugin 动态工具）视为 extended 兜底层，
 // 经 search_tools 按 TF-IDF 检索单工具激活。
+//
+// 宿主失败模式对照（维护者必读）：
+// | 宿主        | 边界类型 | 误调不可用/未披露工具的结果       |
+// |-------------|----------|-----------------------------------|
+// | desktop/cli | 软边界   | registry 全集路由，调用仍成功     |
+// |             |          | （渐进披露只是认知过滤，非权限）  |
+// | background  | 硬边界   | unknown tool（注册期剪枝）或      |
+// |             |          | middleware 拒绝（三层防线）       |
+// | headless    | 硬边界   | 请求校验拒绝 + 注册期剪枝         |
+// 同一工具在 desktop 误调会静默成功、在 background/headless 报 unknown tool
+// ——能力边界用硬边界、认知面用软边界是有意分层，不是 bug。
 
 /** 宿主类型——当前连接/执行环境的身份标识。 */
 export type ToolHostKind = "desktop" | "cli" | "background" | "headless";
@@ -103,7 +114,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   {
     id: "memory",
     label: "Memory",
-    description: "记忆触发器：前台同步提取、后台异步提取",
+    description: "记忆触发器：显式记住（前台同步）与自动提取（turn 后异步）",
     toolNames: ["memory_remember", "memory_extract"],
     economy: "deferred",
   },
@@ -133,39 +144,44 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
 /**
  * 宿主亲和性声明（per-tool，与 economy 组正交）。
  *
- * 未列出的工具默认所有宿主 supported。
- * 收编原 UNSAFE_BACKGROUND_TOOLS（background-yolo-policy）与
- * HEADLESS_TOOL_NAMES（headless-runner）的语义：
- * - background：交互/委派/记忆工具不可用（无人应答、无编排宿主依赖）。
- * - headless：隔离 one-shot 运行只提供最小工具面（无 LSP 服务、无 Goal
- *   manager、无 Skill catalog、无 Graph 存储）。
+ * 宿主默认姿势刻意不对称（对齐收编前的原始语义）：
+ * - background：默认 supported，显式 unsupported 才禁（原 UNSAFE 集合姿势）。
+ * - headless：默认 unsupported，显式 supported 才可用（原 13 工具白名单的
+ *   fail-closed 姿势）——入组 ≠ headless 资格，新工具必须显式声明才能
+ *   进入隔离 one-shot 环境。
  */
 const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, ToolHostSupport>>>> = {
-  ask_user: { background: "unsupported", headless: "unsupported" },
-  schedule_task: { background: "unsupported", headless: "unsupported" },
-  delegate_task: { background: "unsupported", headless: "unsupported" },
-  delegate_status: { background: "unsupported", headless: "unsupported" },
-  spawn_subagent: { background: "unsupported", headless: "unsupported" },
-  memory_remember: { background: "unsupported", headless: "unsupported" },
-  memory_extract: { background: "unsupported", headless: "unsupported" },
-  code_definition: { headless: "unsupported" },
-  code_references: { headless: "unsupported" },
-  code_symbols: { headless: "unsupported" },
-  code_diagnostics: { headless: "unsupported" },
-  code_call_hierarchy: { headless: "unsupported" },
-  repo_map: { headless: "unsupported" },
-  explore_repo: { headless: "unsupported" },
-  create_goal: { headless: "unsupported" },
-  get_goal: { headless: "unsupported" },
-  update_goal: { headless: "unsupported" },
-  skill_view: { headless: "unsupported" },
-  add_work: { headless: "unsupported" },
-  view_graph: { headless: "unsupported" },
-  close_graph: { headless: "unsupported" },
+  ask_user: { background: "unsupported" },
+  schedule_task: { background: "unsupported" },
+  delegate_task: { background: "unsupported" },
+  delegate_status: { background: "unsupported" },
+  spawn_subagent: { background: "unsupported" },
+  memory_remember: { background: "unsupported" },
+  memory_extract: { background: "unsupported" },
+  // headless 显式白名单（fail-closed，与原 HEADLESS_TOOL_NAMES 13 工具一致）。
+  // code_*/goal/skill/graph 等未列工具对 headless 默认 unsupported。
+  read_file: { headless: "supported" },
+  write_file: { headless: "supported" },
+  edit_file: { headless: "supported" },
+  bash: { headless: "supported" },
+  glob: { headless: "supported" },
+  grep: { headless: "supported" },
+  todo: { headless: "supported" },
+  task_list: { headless: "supported" },
+  task_output: { headless: "supported" },
+  task_stop: { headless: "supported" },
+  fetch_url: { headless: "supported" },
+  web_search: { headless: "supported" },
+  read_evidence: { headless: "supported" },
 };
 
 const TOOL_TO_GROUP = new Map<string, ToolGroupDef>();
+const GROUP_IDS = new Set<string>();
 for (const group of PICO_TOOL_GROUPS) {
+  if (GROUP_IDS.has(group.id)) {
+    throw new Error(`Tool group id "${group.id}" declared twice`);
+  }
+  GROUP_IDS.add(group.id);
   for (const name of group.toolNames) {
     if (TOOL_TO_GROUP.has(name)) {
       throw new Error(
@@ -175,14 +191,29 @@ for (const group of PICO_TOOL_GROUPS) {
     TOOL_TO_GROUP.set(name, group);
   }
 }
+// affinity 键必须是目录内工具：typo 会让声明静默失效（fail-open）。
+for (const key of Object.keys(TOOL_HOST_AFFINITY)) {
+  if (!TOOL_TO_GROUP.has(key)) {
+    throw new Error(
+      `TOOL_HOST_AFFINITY key "${key}" is not a member of any PICO_TOOL_GROUPS group (typo?)`,
+    );
+  }
+}
 
 /** 查找工具所属的组。不属于任何组返回 undefined（视为 extended 兜底层）。 */
 export function findGroupForTool(toolName: string): ToolGroupDef | undefined {
   return TOOL_TO_GROUP.get(toolName);
 }
 
-/** 判断工具在指定宿主上是否可用。未声明亲和性的工具对所有宿主可用。 */
+/**
+ * 判断工具在指定宿主上是否可用。
+ * headless 是 fail-closed：显式 supported 才可用（未分组/未声明一律拒绝）。
+ * 其余宿主是 fail-open：显式 unsupported 才禁用。
+ */
 export function isToolSupportedForHost(toolName: string, host: ToolHostKind): boolean {
+  if (host === "headless") {
+    return TOOL_HOST_AFFINITY[toolName]?.headless === "supported";
+  }
   return TOOL_HOST_AFFINITY[toolName]?.[host] !== "unsupported";
 }
 

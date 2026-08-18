@@ -659,7 +659,8 @@ export interface AgentEngineOptions {
   /**
    * 工具渐进披露状态机(ROADMAP 5.4)。
    * 注入后:每轮只把核心组 + 已披露的扩展组工具喂给大模型,而非全量。
-   * 模型用 search_tools 元工具检索激活扩展工具。registry.execute 仍按全集路由(安全网)。
+   * 主激活路径是 load_tools 组级激活（枚举选择），search_tools 兜底检索
+   * MCP/Plugin 动态工具。registry.execute 仍按全集路由(软安全网)。
    * 未提供则行为不变(全量工具喂给 LLM)。
    */
   toolDisclosure?: ToolDisclosure;
@@ -996,10 +997,14 @@ export class AgentEngine implements AgentRunner {
    * 从全量工具里挑出披露连接器的 schema(load_tools / search_tools,若已注册)。
    * disclosure 启用时,连接器元工具必须始终暴露给 LLM,否则模型无法激活扩展工具。
    * load_tools 组级激活是主路径;search_tools 兜底检索动态工具。
+   * 去重 + name 排序:防止异常路径把同一连接器拼两次,并保持
+   * provider-visible tools name-sorted 不变量(见 anthropic-cache-tool-stability 测试)。
    */
-  private searchToolSchema(allTools: ToolDefinition[]): ToolDefinition[] {
+  private searchToolSchema(allTools: ToolDefinition[], alreadyPicked: ReadonlySet<string>): ToolDefinition[] {
     const names = new Set(["load_tools", "search_tools"]);
-    return allTools.filter((t) => names.has(t.name));
+    return allTools
+      .filter((t) => names.has(t.name) && !alreadyPicked.has(t.name))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /**
@@ -1678,10 +1683,15 @@ export class AgentEngine implements AgentRunner {
             runToolSnapshot ??
             (runToolSnapshot = snapshotToolDefinitions(this.registry.getAvailableTools()));
           // 渐进披露(ROADMAP 5.4):启用时只把核心组+已披露扩展组喂给 LLM,
-          // 模型用 search_tools 元工具按需激活扩展工具。registry.execute 仍按全集路由(安全网)。
+          // 主路径 load_tools 组级激活,search_tools 兜底检索动态工具。
+          // registry.execute 仍按全集路由(软安全网)。
           // 未启用 disclosure 时 availableTools = allTools,行为不变。
           const availableTools = this.toolDisclosure
-            ? [...this.toolDisclosure.pickForLLM(allTools), ...this.searchToolSchema(allTools)]
+            ? (() => {
+                const picked = this.toolDisclosure.pickForLLM(allTools);
+                const pickedNames = new Set(picked.map((t) => t.name));
+                return [...picked, ...this.searchToolSchema(allTools, pickedNames)];
+              })()
             : allTools;
           const requiredFirstDelegationActive =
             requiredFirstDelegationPending &&
