@@ -217,7 +217,14 @@ export function isToolSupportedForHost(toolName: string, host: ToolHostKind): bo
   return TOOL_HOST_AFFINITY[toolName]?.[host] !== "unsupported";
 }
 
-/** 获取指定宿主上所有可用的 deferred 组（供 load_tools 渲染与校验）。 */
+/**
+ * 获取指定宿主上所有可用的 deferred 组（供 load_tools 渲染与校验）。
+ *
+ * 维护约定：some() 只要求组内任一成员对宿主可用。当前所有组对每个宿主
+ * 都是满支持或整组排除，无半支持组；若未来引入部分亲和声明，必须同时
+ * 在 LoadToolsTool.execute 层复查每个成员的宿主亲和（当前只查注册集），
+ * 否则 unsupported 成员会被连带披露。
+ */
 export function getAvailableDeferredGroups(host: ToolHostKind): ToolGroupDef[] {
   return PICO_TOOL_GROUPS.filter(
     (g) =>
