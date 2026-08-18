@@ -5,6 +5,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
+  findCliSessionSummary,
   listCliSessionSummaries,
   removeCliSessionFile,
 } from "../cli/session-resolver.js";
@@ -2022,10 +2023,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async requireSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
-    const summaries = await listCliSessionSummaries(workspacePath, {
+    const summary = await findCliSessionSummary(workspacePath, sessionId, {
       picoHome: this.picoHome,
     });
-    const summary = summaries.find((candidate) => candidate.id === sessionId);
     if (!summary) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,

@@ -124,22 +124,42 @@ export function createCliSessionId(): string {
   return `cli-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * 单会话版本的 {@link listCliSessionSummaries}：只读目标会话的 ledger，
+ * 供"已知 sessionId 只需确认存在与摘要"的调用方（daemon requireSession 等）
+ * 使用，避免为找一个会话扫全工作区。
+ */
+export async function findCliSessionSummary(
+  workDir: string,
+  sessionId: string,
+  options: ListCliSessionSummariesOptions = {},
+): Promise<CliSessionSummary | undefined> {
+  const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
+  const manifest = await runtimeEventStore.readSessionManifest(sessionId);
+  if (!manifest) return undefined;
+  const entries = await runtimeEventStore.readSessionEntries(sessionId);
+  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
+  if (!isPublishedRuntimeSession(sessionId, entries, forkTargets)) return undefined;
+  return summaryFromRuntimeSession(manifest, entries).summary;
+}
+
 export async function listCliSessionSummaries(
   workDir: string,
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary[]> {
   const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
   const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
-  const sequenced = await Promise.all(
-    (await runtimeEventStore.listSessionManifests()).map(async (manifest) => {
-      const entries = await runtimeEventStore.readSessionEntries(manifest.sessionId);
-      if (!isPublishedRuntimeSession(manifest.sessionId, entries, forkTargets)) return undefined;
+  // 批量单锁周期读取：逐会话 readSessionEntries 会各付一次锁仪式（~40ms fsync），
+  // 会话多时列表被线性放大。
+  const snapshots = await runtimeEventStore.readWorkspaceSessions();
+  const published = snapshots
+    .map(({ manifest, entries }) => {
+      if (!isPublishedRuntimeSession(manifest.sessionId, entries, forkTargets)) {
+        return undefined;
+      }
       return summaryFromRuntimeSession(manifest, entries);
-    }),
-  );
-  const published = sequenced.filter(
-    (entry): entry is SequencedCliSessionSummary => entry !== undefined,
-  );
+    })
+    .filter((entry): entry is SequencedCliSessionSummary => entry !== undefined);
 
   published.sort(
     (a, b) =>
