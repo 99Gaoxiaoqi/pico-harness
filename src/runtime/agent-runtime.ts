@@ -91,6 +91,8 @@ import {
 } from "../approval/session-permissions.js";
 import { computeApprovalDiff } from "../approval/diff.js";
 import { classifyBashCommand } from "../approval/bash-safety.js";
+import { classifyPowerShellCommand } from "../approval/powershell-safety.js";
+import { hostShellDialect } from "../os/shell.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 import {
   buildSubagentModelCatalog,
@@ -2968,7 +2970,15 @@ async function planModeDenialReason(
 function bashNeedsApproval(call: { name: string; arguments: string }): boolean {
   if (call.name !== "bash") return false;
   const command = parseJsonStringField(call.arguments, "command");
-  return command === undefined || classifyBashCommand(command).kind !== "read-only";
+  if (command === undefined) return true;
+  // 只读判定按宿主方言分派;方言无法解析时按需审批 fail-closed
+  try {
+    return hostShellDialect() === "powershell"
+      ? classifyPowerShellCommand(command).kind !== "read-only"
+      : classifyBashCommand(command).kind !== "read-only";
+  } catch {
+    return true;
+  }
 }
 
 function parseJsonStringField(args: string, field: string): string | undefined {

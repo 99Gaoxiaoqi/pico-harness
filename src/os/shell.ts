@@ -1,19 +1,17 @@
 // 跨平台 Shell 抽象层:统一 Windows/macOS/Linux 的命令执行语义。
 //
-// 痛点:Node 的 child_process.exec 在 Windows 默认走 cmd.exe(Comspec),
-// 不识别 POSIX 转义(`\n`)、管道语义、`$()`、`printf`/`test` 等,
-// 导致模型生成的 `echo 'a\nb' | grep b` 在 Windows 下语义错乱。
-//
-// 策略(借鉴 kimi-code 的 kaos 层):始终优先 POSIX bash。
-// - macOS/Linux:直接用 /bin/bash
-// - Windows:探测 Git Bash(git.exe 推断 + 硬编码候选 + 环境变量覆盖),
-//           探测不到时明确失败，绝不把 Bash 命令交给其他语法的 shell。
+// 策略:POSIX 用 /bin/bash;Windows 用 PowerShell(pwsh 优先,回退 Windows
+// PowerShell),不再探测 Git Bash——对齐 maka 的宿主选择(企业安全软件常删
+// bash.exe 造成残缺安装,而 PowerShell 是 Windows 必装组件)。
+// shell 方言(hostShellDialect)作为安全分派的依据:bash 宿主沿用 bash-hardline
+// 静态红线;PowerShell 宿主没有静态红线,由审批层把关(maka 立场:进程内命令
+// 文本分析不是安全边界,承重边界是 OS 沙箱,沙箱落地后再复评)。
 //
 // 探测结果在进程内缓存,避免每次 exec 都走一遍文件系统。
 
-import { exec } from "node:child_process";
+import { exec, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import type { ExecOptions } from "node:child_process";
 
@@ -24,7 +22,10 @@ import type { ExecOptions } from "node:child_process";
  */
 export type Utf8ExecOptions = ExecOptions & { encoding: BufferEncoding };
 
-/** 环境变量名:用户可显式指定 bash.exe 路径覆盖自动探测。 */
+/** 当前宿主 shell 的方言,安全分类与模型提示按此分派。 */
+export type HostShellDialect = "bash" | "powershell";
+
+/** 环境变量名:用户可显式指定 shell 可执行文件路径覆盖自动探测。 */
 export const SHELL_PATH_ENV = "PICO_SHELL_PATH";
 
 /** Windows 平台标志(模块加载时计算一次)。 */
@@ -38,7 +39,7 @@ let cachedShell: string | undefined;
 /**
  * 解析当前平台应使用的 shell 路径。
  * - POSIX:返回 /bin/bash
- * - Windows:返回探测到的 Git Bash 路径；探测失败或 override 不是 Bash 时 fail closed。
+ * - Windows:返回探测到的 PowerShell 路径；探测失败或 override 不可用时 fail closed。
  */
 export function resolveShell(): string {
   if (cachedShell !== undefined) {
@@ -54,52 +55,66 @@ export function resetShellCache(): void {
 }
 
 function resolveWindowsShell(): string {
-  // 1) 环境变量显式覆盖
+  // 1) 环境变量显式覆盖(接受 bash 系与 PowerShell;须真跑可用)
   const override = process.env[SHELL_PATH_ENV]?.trim();
   if (override && existsSync(override)) {
-    if (!isBashShell(override)) {
+    if (!isBashShell(override) && !isPowerShell(override)) {
       throw new Error(
-        `${SHELL_PATH_ENV} 必须指向 bash 或 bash.exe，拒绝使用不受 Bash hardline 保护的 shell: ${override}`,
+        `${SHELL_PATH_ENV} 必须指向 bash/sh 或 pwsh/powershell 可执行文件: ${override}`,
       );
+    }
+    if (!isUsableShellCandidate(override)) {
+      throw new Error(`${SHELL_PATH_ENV} 指向的 shell 无法执行: ${override}`);
     }
     return override;
   }
 
-  // 2) 遍历 PATH 找 git.exe,推断同根目录下的 bash.exe
-  for (const gitExe of findExecutablesOnWindowsPath("git.exe")) {
-    const inferred = bashCandidatesFromGitExe(gitExe);
-    for (const candidate of inferred) {
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
+  // 2) pwsh(PowerShell 7+)优先:PATH → 固定安装位置
+  const pwsh = findFirstExisting([
+    ...findExecutablesOnWindowsPath("pwsh.exe"),
+    join(process.env.ProgramFiles ?? "", "PowerShell", "7", "pwsh.exe"),
+  ]);
+  if (pwsh) return pwsh;
 
-  // 3) 硬编码常见安装路径兜底
-  const localAppData = process.env.LOCALAPPDATA?.trim();
-  const hardCoded = [
-    "C:\\Program Files\\Git\\bin\\bash.exe",
-    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-    "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
-    "C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe",
-    ...(localAppData
-      ? [
-          `${localAppData}\\Programs\\Git\\bin\\bash.exe`,
-          `${localAppData}\\Programs\\Git\\usr\\bin\\bash.exe`,
-        ]
-      : []),
-  ];
-  for (const candidate of hardCoded) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
+  // 3) Windows PowerShell 5.1 回退:PATH → System32 固定位置
+  const powershell = findFirstExisting([
+    ...findExecutablesOnWindowsPath("powershell.exe"),
+    join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+  ]);
+  if (powershell) return powershell;
 
-  // 4) 当前安全分类器只建模 Bash；回退到 cmd/PowerShell 会让分类语义与
-  //    实际执行语义分裂，因此缺少 Git Bash 时必须在 spawn 前失败。
+  // PowerShell 是 Windows 必装组件,到这里说明系统本身残缺,fail closed。
   throw new Error(
-    `未找到 Git Bash。请安装 Git for Windows，或将 ${SHELL_PATH_ENV} 指向 bash.exe。`,
+    `未找到可用的 PowerShell(pwsh/powershell.exe)。或将 ${SHELL_PATH_ENV} 指向 pwsh.exe/powershell.exe。`,
   );
+}
+
+/**
+ * 探测候选 shell 真正可用:实际跑一次最小命令。
+ * 仅用于用户显式 override——候选链用 existsSync 即可(PowerShell 无 Git Bash
+ * 那种坏转发 stub 问题,且省一次 PowerShell 冷启动)。
+ */
+function isUsableShellCandidate(candidate: string): boolean {
+  if (!existsSync(candidate)) return false;
+  const args = isPowerShell(candidate)
+    ? ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]
+    : ["--noprofile", "--norc", "-c", "exit 0"];
+  try {
+    execFileSync(candidate, args, { timeout: 3_000, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findFirstExisting(candidates: readonly string[]): string | undefined {
+  return candidates.find((candidate) => candidate !== "" && existsSync(candidate));
 }
 
 /**
@@ -123,24 +138,6 @@ function findExecutablesOnWindowsPath(target: string): string[] {
 }
 
 /**
- * 从 git.exe 路径推断同根目录下可能的 bash.exe 位置。
- * Git for Windows 通常把 git.exe 放在 <root>\cmd\ 或 <root>\bin\,
- * bash.exe 在 <root>\bin\bash.exe 或 <root>\usr\bin\bash.exe。
- */
-function bashCandidatesFromGitExe(gitExe: string): string[] {
-  // 统一成反斜杠再做 win32 路径运算
-  const normalized = gitExe.replaceAll("/", "\\");
-  const gitDir = dirname(normalized);
-  const dirName = gitDir.split("\\").pop()?.toLowerCase();
-  // 只在 git.exe 处于 cmd/ 或 bin/ 时推断,避免包管理器 shim 误判
-  if (dirName !== "cmd" && dirName !== "bin") {
-    return [];
-  }
-  const root = dirname(gitDir);
-  return [join(root, "bin", "bash.exe"), join(root, "usr", "bin", "bash.exe")];
-}
-
-/**
  * 构造跨平台友好的 exec 选项。
  * 合并调用方传入的 cwd/maxBuffer/timeout 等,强制注入统一 shell 与 windowsHide,
  * 并锁定 utf8 编码使 stdout 类型收窄为 string。
@@ -159,19 +156,43 @@ export function shellCommandArgs(shell: string, command: string): string[] {
   if (isBashShell(shell)) {
     return ["--noprofile", "--norc", "-c", command];
   }
-  throw new Error(`拒绝使用不受 Bash hardline 保护的 shell: ${shell}`);
+  if (isPowerShell(shell)) {
+    return ["-NoProfile", "-NonInteractive", "-Command", command];
+  }
+  throw new Error(`不支持的宿主 shell: ${shell}`);
 }
 
-/** 当前 hardline 分类器能够安全绑定的 host shell。 */
+/** bash 系宿主(bash/sh,POSIX 主体场景)。 */
 export function isBashShell(shell: string): boolean {
   const name = basename(shell.replaceAll("\\", "/")).toLowerCase();
-  return name === "bash" || name === "bash.exe";
+  return name === "bash" || name === "bash.exe" || name === "sh" || name === "sh.exe";
 }
 
-/** 安全门使用：解析失败或不是 Bash 时一律视为不可执行。 */
+/** PowerShell 系宿主(Windows 默认)。 */
+export function isPowerShell(shell: string): boolean {
+  const name = basename(shell.replaceAll("\\", "/")).toLowerCase();
+  return (
+    name === "pwsh" ||
+    name === "pwsh.exe" ||
+    name === "powershell" ||
+    name === "powershell.exe"
+  );
+}
+
+/**
+ * 当前宿主 shell 方言。安全分类(hardline/只读判定)与模型提示按此分派。
+ * shell 无法解析时 throw,调用方按 fail-closed 处理。
+ */
+export function hostShellDialect(): HostShellDialect {
+  const shell = resolveShell();
+  return isPowerShell(shell) ? "powershell" : "bash";
+}
+
+/** 安全门使用：宿主 shell 无法解析时一律视为不可执行。 */
 export function hasSupportedHostShell(): boolean {
   try {
-    return isBashShell(resolveShell());
+    hostShellDialect();
+    return true;
   } catch {
     return false;
   }
