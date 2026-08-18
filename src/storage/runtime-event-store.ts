@@ -3,6 +3,7 @@ import {
   existsSync,
   lstatSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -10,6 +11,10 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import {
+  computeSessionPublicationFlags,
+  summaryFromRuntimeSession,
+} from "../engine/session-summary.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStateWritePatch,
@@ -26,14 +31,26 @@ import {
 } from "./runtime-event.js";
 import {
   FileStorageIntegrityError,
+  assertPrivateDataFileSync,
   commitFileTransactionSync,
   readFirstJsonLineSync,
   readLastJsonLineSync,
   readJsonFileSync,
   readJsonLinesSync,
   syncDirectorySync,
+  writeFileAtomicSync,
   writeJsonAtomicSync,
 } from "./local-file-storage.js";
+import {
+  SESSION_CATALOG_RELATIVE_PATH,
+  SESSION_CATALOG_SCHEMA_VERSION,
+  SessionCatalogIntegrityError,
+  decodeSessionCatalog,
+  encodeSessionCatalog,
+  type MutableSessionCatalog,
+  type SessionCatalog,
+  type SessionCatalogRow,
+} from "./session-catalog.js";
 import {
   assertWorkspaceStorageRootIdentitySync,
   ensurePrivateWorkspaceStorageDirectorySync,
@@ -306,6 +323,14 @@ export class RuntimeEventStore {
       };
       const manifest = manifestFromHeader(header);
       const headerLine = encodeJsonLine(header);
+      const catalog = this.loadSessionCatalogForWrite();
+      catalog.rows.set(options.sessionId, {
+        summary: summaryFromRuntimeSession(manifest, []).summary,
+        headSequence: 0,
+        ledgerByteLength: Buffer.byteLength(headerLine),
+        hasForkFacts: false,
+        completedBootstrap: false,
+      });
       commitFileTransactionSync(
         this.storageRoot,
         {
@@ -319,6 +344,10 @@ export class RuntimeEventStore {
               content: encodeJsonDocument(
                 createManifestProjection(manifest, Buffer.byteLength(headerLine), 0),
               ),
+            },
+            {
+              relativePath: SESSION_CATALOG_RELATIVE_PATH,
+              content: encodeSessionCatalog(catalog),
             },
           ],
         },
@@ -530,12 +559,14 @@ export class RuntimeEventStore {
           content,
         };
       });
+      const catalogRows: SessionCatalogRow[] = [];
       const replacements = appendedSessions.map(([sessionId, session]) => {
         this.assertSessionDigestBoundary(sessionDigest(sessionId));
         const manifest = session.loaded.manifest;
         const ledgerByteLength =
           statSync(this.sessionFilePath(sessionId)).size +
           Buffer.byteLength(batchLines.get(sessionId)!);
+        catalogRows.push(catalogRowFromSession(manifest, session.entries, ledgerByteLength));
         return {
           relativePath: this.sessionRelativePath(sessionId, MANIFEST_FILE_NAME),
           content: encodeJsonDocument(
@@ -550,9 +581,22 @@ export class RuntimeEventStore {
       });
 
       if (appends.length > 0) {
+        const catalog = this.loadSessionCatalogForWrite();
+        for (const row of catalogRows) {
+          catalog.rows.set(row.summary.id, row);
+        }
         commitFileTransactionSync(
           this.storageRoot,
-          { appends, replacements },
+          {
+            appends,
+            replacements: [
+              ...replacements,
+              {
+                relativePath: SESSION_CATALOG_RELATIVE_PATH,
+                content: encodeSessionCatalog(catalog),
+              },
+            ],
+          },
           {
             ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
             transactionId,
@@ -687,32 +731,53 @@ export class RuntimeEventStore {
    * manifest.json + 头行 + 尾行，而本方法本来就要全量读 ledger）。
    */
   async readWorkspaceSessions(): Promise<WorkspaceRuntimeSessionSnapshot[]> {
-    return this.withStoreLock(() => {
-      if (!existsSync(this.sessionsRoot)) return [];
-      this.assertSessionsBoundary();
-      const snapshots: WorkspaceRuntimeSessionSnapshot[] = [];
-      for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
-        if (!SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
-        this.assertSessionDigestBoundary(entry.name);
-        const logPath = join(this.sessionsRoot, entry.name, SESSION_FILE_NAME);
-        if (!existsSync(logPath)) {
-          throw new RuntimeEventStoreIntegrityError(
-            `Runtime session directory ${entry.name} has no ledger`,
-          );
-        }
-        const header = readSessionHeaderSync(logPath);
-        if (sessionDigest(header.sessionId) !== entry.name) {
-          throw new RuntimeEventStoreIntegrityError(
-            `Runtime session directory ${entry.name} does not match its ledger header`,
-          );
-        }
-        const loaded = this.loadSession(header.sessionId);
-        if (loaded) {
-          snapshots.push({ manifest: loaded.manifest, entries: [...loaded.entries] });
-        }
+    return this.withStoreLock(() => this.loadWorkspaceSessionsLocked());
+  }
+
+  /**
+   * 无锁读取会话目录：缺文件返回 undefined；结构损坏抛
+   * {@link SessionCatalogIntegrityError}（调用方以此触发重建）。catalog 由
+   * 原子 rename 发布，跨进程读到的要么是旧版要么是新版，不会撕裂。
+   */
+  readSessionCatalog(): SessionCatalog | undefined {
+    const path = join(this.storageRoot, SESSION_CATALOG_RELATIVE_PATH);
+    if (!existsSync(path)) return undefined;
+    assertPrivateDataFileSync(path);
+    return decodeSessionCatalog(readFileSync(path, "utf8"), path);
+  }
+
+  /** 锁内从 ledger 全量重建会话目录并落盘（readOnly store 只重建不落盘）。 */
+  async rebuildSessionCatalog(): Promise<SessionCatalog> {
+    return this.withStoreLock(() => this.rebuildSessionCatalogLocked());
+  }
+
+  /** 水位校验（无锁 stat）：catalog 行记录的 ledger 字节长度是否与当前文件一致。 */
+  sessionLedgerSizeMatches(sessionId: string, expectedByteLength: number): boolean {
+    const path = this.sessionFilePath(sessionId);
+    if (!existsSync(path)) return false;
+    return statSync(path).size === expectedByteLength;
+  }
+
+  /**
+   * 列表专用：读 catalog 并剔除会话目录已不存在的行（deleteSession 崩溃窗口
+   * 的幽灵行兜底）。代价是一次 readdir，不逐会话 stat。
+   */
+  readSessionCatalogForListing(): SessionCatalog | undefined {
+    const catalog = this.readSessionCatalog();
+    if (!catalog) return undefined;
+    if (!existsSync(this.sessionsRoot)) return { schemaVersion: catalog.schemaVersion, rows: new Map() };
+    this.assertSessionsBoundary();
+    const liveDigests = new Set<string>();
+    for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && SESSION_DIRECTORY_PATTERN.test(entry.name)) {
+        liveDigests.add(entry.name);
       }
-      return snapshots.sort((a, b) => compareManifestsDescending(a.manifest, b.manifest));
-    });
+    }
+    const rows = new Map<string, SessionCatalogRow>();
+    for (const [sessionId, row] of catalog.rows) {
+      if (liveDigests.has(sessionDigest(sessionId))) rows.set(sessionId, row);
+    }
+    return { schemaVersion: catalog.schemaVersion, rows };
   }
 
   /** Bounded sequence page for cooperative background scans. */
@@ -827,6 +892,21 @@ export class RuntimeEventStore {
       rmSync(tombstone, { recursive: true, force: true });
       this.assertSessionsBoundary();
       syncDirectorySync(this.sessionsRoot);
+      // 删除不经过文件事务（rename+rm），catalog 行的清理是锁内独立原子写；
+      // 这一步与目录删除之间的崩溃窗口由读取侧水位校验兜底。
+      try {
+        const catalog = this.readSessionCatalog();
+        if (catalog?.rows.has(sessionId)) {
+          mutableCatalogRows(catalog.rows).delete(sessionId);
+          writeFileAtomicSync(
+            join(this.storageRoot, SESSION_CATALOG_RELATIVE_PATH),
+            encodeSessionCatalog(catalog),
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof SessionCatalogIntegrityError)) throw error;
+        // catalog 损坏：留给下一次重建，不阻塞删除。
+      }
       return true;
     });
   }
@@ -885,6 +965,64 @@ export class RuntimeEventStore {
       );
     }
     return loaded;
+  }
+
+  /** 写路径专用：读当前 catalog 供行级更新；缺失/损坏时锁内全量重建。 */
+  private loadSessionCatalogForWrite(): MutableSessionCatalog {
+    try {
+      const current = this.readSessionCatalog();
+      if (current) {
+        return { schemaVersion: current.schemaVersion, rows: mutableCatalogRows(current.rows) };
+      }
+    } catch (error) {
+      if (!(error instanceof SessionCatalogIntegrityError)) throw error;
+    }
+    return this.rebuildSessionCatalogLocked();
+  }
+
+  private rebuildSessionCatalogLocked(): MutableSessionCatalog {
+    const rows = new Map<string, SessionCatalogRow>();
+    for (const { manifest, entries } of this.loadWorkspaceSessionsLocked()) {
+      rows.set(
+        manifest.sessionId,
+        catalogRowFromSession(manifest, entries, statSync(this.sessionFilePath(manifest.sessionId)).size),
+      );
+    }
+    const catalog: MutableSessionCatalog = { schemaVersion: SESSION_CATALOG_SCHEMA_VERSION, rows };
+    if (!this.readOnly) {
+      writeFileAtomicSync(
+        join(this.storageRoot, SESSION_CATALOG_RELATIVE_PATH),
+        encodeSessionCatalog(catalog),
+      );
+    }
+    return catalog;
+  }
+
+  private loadWorkspaceSessionsLocked(): WorkspaceRuntimeSessionSnapshot[] {
+    if (!existsSync(this.sessionsRoot)) return [];
+    this.assertSessionsBoundary();
+    const snapshots: WorkspaceRuntimeSessionSnapshot[] = [];
+    for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
+      if (!SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
+      this.assertSessionDigestBoundary(entry.name);
+      const logPath = join(this.sessionsRoot, entry.name, SESSION_FILE_NAME);
+      if (!existsSync(logPath)) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session directory ${entry.name} has no ledger`,
+        );
+      }
+      const header = readSessionHeaderSync(logPath);
+      if (sessionDigest(header.sessionId) !== entry.name) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session directory ${entry.name} does not match its ledger header`,
+        );
+      }
+      const loaded = this.loadSession(header.sessionId);
+      if (loaded) {
+        snapshots.push({ manifest: loaded.manifest, entries: [...loaded.entries] });
+      }
+    }
+    return snapshots.sort((a, b) => compareManifestsDescending(a.manifest, b.manifest));
   }
 
   private loadSession(sessionId: string): LoadedRuntimeSession | undefined {
@@ -1343,6 +1481,29 @@ function cursorForEntries(
 
 function sessionDigest(sessionId: string): string {
   return createHash("sha256").update(sessionId).digest("hex");
+}
+
+function catalogRowFromSession(
+  manifest: RuntimeSessionManifest,
+  entries: readonly RuntimeEventStoreEntry[],
+  ledgerByteLength: number,
+): SessionCatalogRow {
+  const { summary, headSequence } = summaryFromRuntimeSession(manifest, entries);
+  const flags = computeSessionPublicationFlags(entries);
+  return {
+    summary,
+    headSequence,
+    ledgerByteLength,
+    hasForkFacts: flags.hasForkFacts,
+    completedBootstrap: flags.completedBootstrap,
+  };
+}
+
+/** decode/rebuild 构造的都是真 Map；此转换只发生在单线程的写路径内部。 */
+function mutableCatalogRows(
+  rows: ReadonlyMap<string, SessionCatalogRow>,
+): Map<string, SessionCatalogRow> {
+  return rows as Map<string, SessionCatalogRow>;
 }
 
 function compareManifestsDescending(
