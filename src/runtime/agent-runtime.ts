@@ -2033,6 +2033,11 @@ export async function executeAgentRuntime(
           `后台工具不可用: ${missingTools.join(", ")}`,
         );
       }
+      // 与命令级 allowlist 对称：Job 显式授权的存活工具必须对模型可见——
+      // 否则 deferred 组成员（web_search/task_list/read_evidence 等）会被
+      // 渐进披露层藏掉，而 background 下 load_tools/search_tools 可能已被
+      // 剪枝，模型没有激活路径，永远看不到它已授权的工具。
+      toolDisclosure.discloseTools([...backgroundPolicy.allowedTools]);
     }
     if (effectiveOptions.allowedTools !== undefined) {
       const requiredControlTools = [

@@ -997,14 +997,14 @@ export class AgentEngine implements AgentRunner {
    * 从全量工具里挑出披露连接器的 schema(load_tools / search_tools,若已注册)。
    * disclosure 启用时,连接器元工具必须始终暴露给 LLM,否则模型无法激活扩展工具。
    * load_tools 组级激活是主路径;search_tools 兜底检索动态工具。
-   * 去重 + name 排序:防止异常路径把同一连接器拼两次,并保持
+   * 去重 + 全局 name 排序:防止异常路径把同一连接器拼两次,并保持
    * provider-visible tools name-sorted 不变量(见 anthropic-cache-tool-stability 测试)。
+   * 注意:全局排序在调用方合并处完成(见下方 availableTools 拼接),本方法
+   * 只负责候选筛选 + 去重。
    */
   private searchToolSchema(allTools: ToolDefinition[], alreadyPicked: ReadonlySet<string>): ToolDefinition[] {
     const names = new Set(["load_tools", "search_tools"]);
-    return allTools
-      .filter((t) => names.has(t.name) && !alreadyPicked.has(t.name))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    return allTools.filter((t) => names.has(t.name) && !alreadyPicked.has(t.name));
   }
 
   /**
@@ -1690,7 +1690,11 @@ export class AgentEngine implements AgentRunner {
             ? (() => {
                 const picked = this.toolDisclosure.pickForLLM(allTools);
                 const pickedNames = new Set(picked.map((t) => t.name));
-                return [...picked, ...this.searchToolSchema(allTools, pickedNames)];
+                // 合并后全局 name 排序:保持 provider-visible tools name-sorted 不变量,
+                // 避免 load_tools/search_tools 追加在末尾破坏字典序。
+                return [...picked, ...this.searchToolSchema(allTools, pickedNames)].sort((a, b) =>
+                  a.name.localeCompare(b.name),
+                );
               })()
             : allTools;
           const requiredFirstDelegationActive =
