@@ -134,6 +134,12 @@ export interface RuntimeEventStoreEntry {
   readonly event: RuntimeEvent;
 }
 
+/** One workspace session read in a batched {@link RuntimeEventStore.readWorkspaceSessions} pass. */
+export interface WorkspaceRuntimeSessionSnapshot {
+  readonly manifest: RuntimeSessionManifest;
+  readonly entries: readonly RuntimeEventStoreEntry[];
+}
+
 export interface RuntimeSessionProjectionSnapshot {
   readonly manifest: RuntimeSessionManifest;
   readonly entries: readonly RuntimeEventStoreEntry[];
@@ -671,6 +677,42 @@ export class RuntimeEventStore {
 
   async readSessionEntries(sessionId: string): Promise<RuntimeEventStoreEntry[]> {
     return this.withStoreLock(() => [...(this.loadSession(sessionId)?.entries ?? [])]);
+  }
+
+  /**
+   * 单次锁周期内读取工作区全部会话的 manifest + ledger entries。逐会话调用
+   * readSessionEntries 会为每个会话各付一次锁获取/释放仪式（含多次 fsync），
+   * 会话列表类调用方应改走这里。批量路径直接从 ledger 头推导 manifest，
+   * 不走 loadAllSessionManifests 的快路径校验（那会为每个会话多读一遍
+   * manifest.json + 头行 + 尾行，而本方法本来就要全量读 ledger）。
+   */
+  async readWorkspaceSessions(): Promise<WorkspaceRuntimeSessionSnapshot[]> {
+    return this.withStoreLock(() => {
+      if (!existsSync(this.sessionsRoot)) return [];
+      this.assertSessionsBoundary();
+      const snapshots: WorkspaceRuntimeSessionSnapshot[] = [];
+      for (const entry of readdirSync(this.sessionsRoot, { withFileTypes: true })) {
+        if (!SESSION_DIRECTORY_PATTERN.test(entry.name)) continue;
+        this.assertSessionDigestBoundary(entry.name);
+        const logPath = join(this.sessionsRoot, entry.name, SESSION_FILE_NAME);
+        if (!existsSync(logPath)) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime session directory ${entry.name} has no ledger`,
+          );
+        }
+        const header = readSessionHeaderSync(logPath);
+        if (sessionDigest(header.sessionId) !== entry.name) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime session directory ${entry.name} does not match its ledger header`,
+          );
+        }
+        const loaded = this.loadSession(header.sessionId);
+        if (loaded) {
+          snapshots.push({ manifest: loaded.manifest, entries: [...loaded.entries] });
+        }
+      }
+      return snapshots.sort((a, b) => compareManifestsDescending(a.manifest, b.manifest));
+    });
   }
 
   /** Bounded sequence page for cooperative background scans. */
