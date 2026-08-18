@@ -1,4 +1,4 @@
-import type { CliSessionSummary, SessionPublicationFlags } from "../engine/session-summary.js";
+import type { CliSessionSummary, SessionSummaryFold } from "../engine/session-summary.js";
 
 /**
  * 会话目录（session catalog）：工作区级、每会话一行的预计算摘要清单。
@@ -9,21 +9,21 @@ import type { CliSessionSummary, SessionPublicationFlags } from "../engine/sessi
  * - 写入与 ledger 追加同一个 commitFileTransactionSync，正常路径下不可能
  *   滞后于 ledger；残余漂移（deleteSession 崩溃窗口、手工篡改）由读取侧
  *   的 statSync 水位校验兜底。
- * - 发布判定的 journal 部分不落 catalog（StorageOperationJournal 的状态可
+ * - 发布���定的 journal 部分不落 catalog（StorageOperationJournal 的状态可
  *   在无新事件时变化），读取时补查。
+ * - 行内持久化折叠状态（fold）：写路径增量维护只折叠新增事件，全量口径
+ *   与增量口径共用同一折叠器（构造性等价）。
  */
 
-export const SESSION_CATALOG_SCHEMA_VERSION = 1;
+export const SESSION_CATALOG_SCHEMA_VERSION = 2;
 export const SESSION_CATALOG_RELATIVE_PATH = "control/session-catalog.json";
 
 export interface SessionCatalogRow {
   readonly summary: CliSessionSummary;
-  readonly headSequence: number;
   /** Watermark: ledger byte length at the time this row was written. */
   readonly ledgerByteLength: number;
-  /** Pure-event publication facts; see {@link SessionPublicationFlags}. */
-  readonly hasForkFacts: boolean;
-  readonly completedBootstrap: boolean;
+  /** 增量维护的折叠状态：继续折叠后续事件的起点。 */
+  readonly fold: SessionSummaryFold;
 }
 
 export interface SessionCatalog {
@@ -49,10 +49,8 @@ export function encodeSessionCatalog(catalog: SessionCatalog): string {
   for (const [sessionId, row] of catalog.rows) {
     sessions[sessionId] = {
       summary: serializeSummary(row.summary),
-      headSequence: row.headSequence,
       ledgerByteLength: row.ledgerByteLength,
-      hasForkFacts: row.hasForkFacts,
-      completedBootstrap: row.completedBootstrap,
+      fold: serializeFold(row.fold),
     };
   }
   return `${JSON.stringify({ schemaVersion: SESSION_CATALOG_SCHEMA_VERSION, sessions }, null, 2)}\n`;
@@ -97,8 +95,21 @@ function decodeRow(row: Record<string, unknown>, sessionId: string, source: stri
   if (!isRecord(summary)) {
     throw new SessionCatalogIntegrityError(`Session catalog ${source} row ${sessionId} has no summary`);
   }
+  const fold = row["fold"];
+  if (!isRecord(fold)) {
+    throw new SessionCatalogIntegrityError(`Session catalog ${source} row ${sessionId} has no fold`);
+  }
   const createdAt = decodeDate(summary["createdAt"], `${source} row ${sessionId} createdAt`);
   const updatedAt = decodeDate(summary["updatedAt"], `${source} row ${sessionId} updatedAt`);
+  const pendingForkRuns = fold["pendingForkRuns"];
+  if (
+    !Array.isArray(pendingForkRuns) ||
+    !pendingForkRuns.every((runId) => typeof runId === "string" && runId)
+  ) {
+    throw new SessionCatalogIntegrityError(
+      `Session catalog ${source} row ${sessionId} pendingForkRuns is invalid`,
+    );
+  }
   return {
     summary: {
       id: requireString(summary["id"], `${source} row ${sessionId} id`),
@@ -115,16 +126,50 @@ function decodeRow(row: Record<string, unknown>, sessionId: string, source: stri
       ...optionalString(summary["parentLogId"], "parentLogId"),
       ...optionalString(summary["forkEventId"], "forkEventId"),
     },
-    headSequence: requireNonNegativeInteger(row["headSequence"], `${source} row ${sessionId} headSequence`),
     ledgerByteLength: requireNonNegativeInteger(
       row["ledgerByteLength"],
       `${source} row ${sessionId} ledgerByteLength`,
     ),
-    hasForkFacts: requireBoolean(row["hasForkFacts"], `${source} row ${sessionId} hasForkFacts`),
-    completedBootstrap: requireBoolean(
-      row["completedBootstrap"],
-      `${source} row ${sessionId} completedBootstrap`,
-    ),
+    fold: {
+      messageCount: requireNonNegativeInteger(
+        fold["messageCount"],
+        `${source} row ${sessionId} fold.messageCount`,
+      ),
+      ...optionalString(fold["firstMessage"], "firstMessage"),
+      ...optionalString(fold["lastMessage"], "lastMessage"),
+      ...optionalString(fold["settingsTitle"], "settingsTitle"),
+      ...optionalString(fold["settingsForkFrom"], "settingsForkFrom"),
+      ...optionalString(fold["forkEventParent"], "forkEventParent"),
+      ...optionalString(fold["forkEventId"], "forkEventId"),
+      hasForkFacts: requireBoolean(fold["hasForkFacts"], `${source} row ${sessionId} fold.hasForkFacts`),
+      completedBootstrap: requireBoolean(
+        fold["completedBootstrap"],
+        `${source} row ${sessionId} fold.completedBootstrap`,
+      ),
+      pendingForkRuns: pendingForkRuns as readonly string[],
+      ...optionalString(fold["lastEventAt"], "lastEventAt"),
+      headSequence: requireNonNegativeInteger(
+        fold["headSequence"],
+        `${source} row ${sessionId} fold.headSequence`,
+      ),
+    },
+  };
+}
+
+function serializeFold(fold: SessionSummaryFold): Record<string, unknown> {
+  return {
+    messageCount: fold.messageCount,
+    ...(fold.firstMessage !== undefined ? { firstMessage: fold.firstMessage } : {}),
+    ...(fold.lastMessage !== undefined ? { lastMessage: fold.lastMessage } : {}),
+    ...(fold.settingsTitle !== undefined ? { settingsTitle: fold.settingsTitle } : {}),
+    ...(fold.settingsForkFrom !== undefined ? { settingsForkFrom: fold.settingsForkFrom } : {}),
+    ...(fold.forkEventParent !== undefined ? { forkEventParent: fold.forkEventParent } : {}),
+    ...(fold.forkEventId !== undefined ? { forkEventId: fold.forkEventId } : {}),
+    hasForkFacts: fold.hasForkFacts,
+    completedBootstrap: fold.completedBootstrap,
+    pendingForkRuns: fold.pendingForkRuns,
+    ...(fold.lastEventAt !== undefined ? { lastEventAt: fold.lastEventAt } : {}),
+    headSequence: fold.headSequence,
   };
 }
 

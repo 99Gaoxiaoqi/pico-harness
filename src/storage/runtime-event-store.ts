@@ -12,8 +12,19 @@ import {
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-  computeSessionPublicationFlags,
-  summaryFromRuntimeSession,
+  SESSION_EVENT_INDEX_FILE_NAME,
+  SessionEventIndexEntry,
+  SessionEventIndexIntegrityError,
+  decodeSessionEventIndexBatch,
+  encodeSessionEventIndexBatch,
+  eventPayloadHash,
+  sessionEventIndexEntryFromEvent,
+} from "./session-event-index.js";
+import {
+  createInitialSessionSummaryFold,
+  finalizeSessionSummary,
+  foldSessionSummaryEvent,
+  type SessionSummaryFold,
 } from "../engine/session-summary.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
@@ -206,11 +217,26 @@ interface LoadedRuntimeSession {
   readonly entries: readonly RuntimeEventStoreEntry[];
 }
 
+/** appendBatch 的每会话工作集：水位上下文 + 索引 + 本批新插入事实。 */
+interface SessionAppendContext {
+  readonly manifest: RuntimeSessionManifest;
+  /** 追加前 ledger 的末条 sequence（CAS 与新 sequence 分配的锚）。 */
+  readonly lastSequence: number;
+  /** 追加前 ledger 字节数（manifest/catalog 投影的锚）。 */
+  readonly ledgerByteLength: number;
+  /** 事件索引（含历史与本批插入），去重与 planOperation 查重共用。 */
+  readonly eventById: Map<string, SessionEventIndexEntry>;
+}
+
 interface MutableRuntimeSession {
-  readonly loaded: LoadedRuntimeSession;
-  readonly entries: RuntimeEventStoreEntry[];
-  readonly eventById: Map<string, RuntimeEventStoreEntry>;
+  readonly context: SessionAppendContext;
+  /** 下一条事件的 sequence（lastSequence + 已插入数）。 */
+  nextSequence: number;
   readonly appended: RuntimeEventBatchEntry[];
+  /** 本批新插入事件的索引条目（按插入顺序，直接进索引行）。 */
+  readonly appendedIndex: SessionEventIndexEntry[];
+  /** 会话目录行的折叠状态：从 catalog 行（或全量重建）起折。 */
+  fold: SessionSummaryFold;
 }
 
 export class RuntimeEventStoreIntegrityError extends Error {
@@ -323,13 +349,12 @@ export class RuntimeEventStore {
       };
       const manifest = manifestFromHeader(header);
       const headerLine = encodeJsonLine(header);
+      const initialFold = createInitialSessionSummaryFold();
       const catalog = this.loadSessionCatalogForWrite();
       catalog.rows.set(options.sessionId, {
-        summary: summaryFromRuntimeSession(manifest, []).summary,
-        headSequence: 0,
+        summary: finalizeSessionSummary(manifest, initialFold).summary,
         ledgerByteLength: Buffer.byteLength(headerLine),
-        hasForkFacts: false,
-        completedBootstrap: false,
+        fold: initialFold,
       });
       commitFileTransactionSync(
         this.storageRoot,
@@ -404,15 +429,29 @@ export class RuntimeEventStore {
     if (canonicalEvents.length === 0) return [];
 
     return this.withStoreLock(() => {
+      const hashedEvents = canonicalEvents.map((event) => ({ event, hash: eventPayloadHash(event) }));
+      // catalog 预载：折叠状态来自行内；行缺失或水位不符时全量重建该行（罕见路径）。
+      const catalog = this.loadSessionCatalogForWrite();
       const sessions = new Map<string, MutableRuntimeSession>();
-      for (const event of canonicalEvents) {
+      for (const { event } of hashedEvents) {
         if (sessions.has(event.sessionId)) continue;
-        const loaded = this.requireSession(event.sessionId);
+        const context = this.requireSessionAppendContext(event.sessionId);
+        const row = catalog.rows.get(event.sessionId);
+        const foldRow =
+          row && row.fold.headSequence === context.lastSequence &&
+          row.ledgerByteLength === context.ledgerByteLength
+            ? row
+            : catalogRowFromSession(
+                context.manifest,
+                this.requireSession(event.sessionId).entries,
+                context.ledgerByteLength,
+              );
         sessions.set(event.sessionId, {
-          loaded,
-          entries: [...loaded.entries],
-          eventById: new Map(loaded.entries.map((entry) => [entry.event.eventId, entry])),
+          context,
+          nextSequence: context.lastSequence + 1,
           appended: [],
+          appendedIndex: [],
+          fold: foldRow.fold,
         });
       }
       for (const [sessionId, expectedHighWater] of Object.entries(
@@ -433,34 +472,32 @@ export class RuntimeEventStore {
           throw new Error("Plan operation identity is invalid");
         }
         const existingOperation = [...sessions.values()]
-          .flatMap((session) => session.entries)
-          .find(
-            ({ event }) =>
-              (event.kind.startsWith("plan.") || event.kind.startsWith("graph.")) &&
-              "operationId" in event.data &&
-              event.data.operationId === operationId,
-          );
+          .flatMap((session) => [...session.context.eventById.values()])
+          .find((indexed) => indexed.operationId === operationId);
         if (existingOperation) {
-          if (
-            !("fingerprint" in existingOperation.event.data) ||
-            existingOperation.event.data.fingerprint !== fingerprint
-          ) {
+          if (existingOperation.fingerprint !== fingerprint) {
             throw new RuntimeEventStorePlanOperationConflictError(operationId);
           }
           return canonicalEvents.map((event) => {
             const session = sessions.get(event.sessionId)!;
-            const existing = session.eventById.get(event.eventId);
+            const existing = session.context.eventById.get(event.eventId);
             if (!existing)
               throw new RuntimeEventStoreIntegrityError(
                 `Plan operation ${operationId} replay batch is incomplete`,
               );
-            return this.appendResult(session.entries, existing, false);
+            return this.appendResultFor(
+              event.sessionId,
+              existing.sequence,
+              existing.eventId,
+              existing.eventAt,
+              false,
+            );
           });
         }
       }
       let hasNewEvent = false;
       const requestedEventBySession = new Map<string, Map<string, RuntimeEvent>>();
-      for (const event of canonicalEvents) {
+      for (const { event, hash } of hashedEvents) {
         const session = sessions.get(event.sessionId)!;
         const requestedEvents =
           requestedEventBySession.get(event.sessionId) ?? new Map<string, RuntimeEvent>();
@@ -474,18 +511,18 @@ export class RuntimeEventStore {
         if (!requested) requestedEvents.set(event.eventId, event);
         if (
           event.kind === "run.started" &&
-          canonicalizeWorkspacePath(event.data.workDir) !== session.loaded.manifest.workDir
+          canonicalizeWorkspacePath(event.data.workDir) !== session.context.manifest.workDir
         ) {
           throw new RuntimeEventStoreIntegrityError(
             `Runtime event workspace does not match session ${event.sessionId}`,
           );
         }
-        const existing = session.eventById.get(event.eventId);
+        const existing = session.context.eventById.get(event.eventId);
         if (!existing) {
           hasNewEvent = true;
           continue;
         }
-        if (!isDeepStrictEqual(existing.event, event)) {
+        if (existing.hash !== hash) {
           throw new RuntimeEventStoreIntegrityError(
             `Runtime event ID ${event.eventId} is already bound to another payload`,
           );
@@ -494,57 +531,75 @@ export class RuntimeEventStore {
       if (!hasNewEvent) {
         return canonicalEvents.map((event) => {
           const session = sessions.get(event.sessionId)!;
-          return this.appendResult(session.entries, session.eventById.get(event.eventId)!, false);
+          const existing = session.context.eventById.get(event.eventId)!;
+          return this.appendResultFor(
+            event.sessionId,
+            existing.sequence,
+            existing.eventId,
+            existing.eventAt,
+            false,
+          );
         });
       }
       for (const [sessionId, expectedHighWater] of Object.entries(
         options.expectedSessionHighWater ?? {},
       )) {
         const session = sessions.get(sessionId)!;
-        if (session.entries.length !== expectedHighWater) {
+        if (session.context.lastSequence !== expectedHighWater) {
           throw new RuntimeEventStoreHighWaterConflictError(
             sessionId,
             expectedHighWater,
-            session.entries.length,
+            session.context.lastSequence,
           );
         }
       }
 
       const results: RuntimeEventStoreAppendResult[] = [];
-      for (const event of canonicalEvents) {
+      for (const { event, hash } of hashedEvents) {
         const session = sessions.get(event.sessionId)!;
-        const existing = session.eventById.get(event.eventId);
+        const existing = session.context.eventById.get(event.eventId);
         if (existing) {
-          if (!isDeepStrictEqual(existing.event, event)) {
+          if (existing.hash !== hash) {
             throw new RuntimeEventStoreIntegrityError(
               `Runtime event ID ${event.eventId} is already bound to another payload`,
             );
           }
-          results.push(this.appendResult(session.entries, existing, false));
+          results.push(
+            this.appendResultFor(
+              event.sessionId,
+              existing.sequence,
+              existing.eventId,
+              existing.eventAt,
+              false,
+            ),
+          );
           continue;
         }
 
-        const entry: RuntimeEventStoreEntry = {
-          sequence: session.entries.length + 1,
-          event,
-        };
-        session.entries.push(entry);
-        session.eventById.set(event.eventId, entry);
+        const sequence = session.nextSequence;
+        session.nextSequence += 1;
+        const indexEntry = sessionEventIndexEntryFromEvent(sequence, event, hash);
+        session.context.eventById.set(event.eventId, indexEntry);
         session.appended.push({
-          sequence: entry.sequence,
+          sequence,
           committedAt: event.at,
           event,
         });
-        results.push(this.appendResult(session.entries, entry, true));
+        session.appendedIndex.push(indexEntry);
+        session.fold = foldSessionSummaryEvent(session.fold, event);
+        results.push(this.appendResultFor(event.sessionId, sequence, event.eventId, event.at, true));
       }
 
       const transactionId = randomUUID();
       const transactionCommittedAt = new Date().toISOString();
+      const batchLinesForManifest = new Map<
+        string,
+        { ledgerByteLength: number; lastSequence: number }
+      >();
       const appendedSessions = [...sessions.entries()].filter(
         ([, session]) => session.appended.length > 0,
       );
-      const batchLines = new Map<string, string>();
-      const appends = appendedSessions.map(([sessionId, session]) => {
+      const appends = appendedSessions.flatMap(([sessionId, session]) => {
         const batch: RuntimeEventBatch = {
           type: "event-batch",
           schemaVersion: RUNTIME_SESSION_FILE_VERSION,
@@ -552,28 +607,35 @@ export class RuntimeEventStore {
           committedAt: transactionCommittedAt,
           entries: session.appended,
         };
-        const content = encodeJsonLine(batch);
-        batchLines.set(sessionId, content);
-        return {
-          relativePath: this.sessionRelativePath(sessionId, SESSION_FILE_NAME),
-          content,
-        };
+        const ledgerLine = encodeJsonLine(batch);
+        batchLinesForManifest.set(sessionId, {
+          ledgerByteLength: session.context.ledgerByteLength + Buffer.byteLength(ledgerLine),
+          lastSequence: session.nextSequence - 1,
+        });
+        return [
+          {
+            relativePath: this.sessionRelativePath(sessionId, SESSION_FILE_NAME),
+            content: ledgerLine,
+          },
+          {
+            relativePath: this.sessionRelativePath(sessionId, SESSION_EVENT_INDEX_FILE_NAME),
+            content: encodeSessionEventIndexBatch({
+              txId: transactionId,
+              entries: session.appendedIndex,
+            }),
+          },
+        ];
       });
-      const catalogRows: SessionCatalogRow[] = [];
       const replacements = appendedSessions.map(([sessionId, session]) => {
         this.assertSessionDigestBoundary(sessionDigest(sessionId));
-        const manifest = session.loaded.manifest;
-        const ledgerByteLength =
-          statSync(this.sessionFilePath(sessionId)).size +
-          Buffer.byteLength(batchLines.get(sessionId)!);
-        catalogRows.push(catalogRowFromSession(manifest, session.entries, ledgerByteLength));
+        const watermark = batchLinesForManifest.get(sessionId)!;
         return {
           relativePath: this.sessionRelativePath(sessionId, MANIFEST_FILE_NAME),
           content: encodeJsonDocument(
             createManifestProjection(
-              manifest,
-              ledgerByteLength,
-              session.entries.length,
+              session.context.manifest,
+              watermark.ledgerByteLength,
+              watermark.lastSequence,
               transactionId,
             ),
           ),
@@ -581,9 +643,13 @@ export class RuntimeEventStore {
       });
 
       if (appends.length > 0) {
-        const catalog = this.loadSessionCatalogForWrite();
-        for (const row of catalogRows) {
-          catalog.rows.set(row.summary.id, row);
+        for (const [sessionId, session] of appendedSessions) {
+          const watermark = batchLinesForManifest.get(sessionId)!;
+          catalog.rows.set(sessionId, {
+            summary: finalizeSessionSummary(session.context.manifest, session.fold).summary,
+            ledgerByteLength: watermark.ledgerByteLength,
+            fold: session.fold,
+          });
         }
         commitFileTransactionSync(
           this.storageRoot,
@@ -945,16 +1011,146 @@ export class RuntimeEventStore {
     );
   }
 
-  private appendResult(
-    entries: readonly RuntimeEventStoreEntry[],
-    entry: RuntimeEventStoreEntry,
+  private appendResultFor(
+    sessionId: string,
+    sequence: number,
+    eventId: string,
+    committedAt: string,
     inserted: boolean,
   ): RuntimeEventStoreAppendResult {
     return {
       inserted,
-      cursor: cursorForEntries(entry.event.sessionId, entries, entry.sequence, entry.event.eventId),
-      committedAt: entry.event.at,
+      cursor: cursorForEntries(sessionId, [], sequence, eventId),
+      committedAt,
     };
+  }
+
+  /**
+   * appendBatch 专用会话加载：manifest 快路径水位（头行+尾行+投影一致性
+   * 校验）+ 事件索引，替代全量 loadSession。追加不再顺带全量校验 ledger
+   * 中段完整性（W5 语义位移，读路径仍全量校验兜底）。
+   */
+  private requireSessionAppendContext(sessionId: string): SessionAppendContext {
+    const watermark = this.loadSessionWatermark(sessionId);
+    if (!watermark) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${sessionId} must be initialized before appending events`,
+      );
+    }
+    return {
+      manifest: watermark.manifest,
+      lastSequence: watermark.lastSequence,
+      ledgerByteLength: watermark.ledgerByteLength,
+      eventById: this.loadSessionEventIndex(sessionId, watermark.lastSequence),
+    };
+  }
+
+  private loadSessionWatermark(
+    sessionId: string,
+  ): { manifest: RuntimeSessionManifest; lastSequence: number; ledgerByteLength: number } | undefined {
+    const digest = sessionDigest(sessionId);
+    this.assertSessionDigestBoundary(digest);
+    const logPath = this.sessionFilePath(sessionId);
+    if (!existsSync(logPath)) return undefined;
+    const manifestPath = this.manifestFilePath(sessionId);
+    if (existsSync(manifestPath)) {
+      const projection = decodeRuntimeSessionManifestProjection(
+        readJsonFileSync(manifestPath),
+        manifestPath,
+      );
+      if (
+        sessionDigest(projection.manifest.sessionId) === digest &&
+        statSync(logPath).size === projection.ledger.byteLength
+      ) {
+        const header = readSessionHeaderSync(logPath);
+        if (isDeepStrictEqual(manifestFromHeader(header), projection.manifest)) {
+          const lastRecord = readLastJsonLineSync(logPath);
+          if (projection.ledger.lastSequence === 0) {
+            if (
+              isDeepStrictEqual(lastRecord, readFirstJsonLineSync(logPath)) &&
+              projection.ledger.lastTxId === undefined
+            ) {
+              return {
+                manifest: projection.manifest,
+                lastSequence: 0,
+                ledgerByteLength: projection.ledger.byteLength,
+              };
+            }
+          } else {
+            const lastBatch = decodeEventBatch(lastRecord, logPath, -1);
+            if (
+              lastBatch.txId === projection.ledger.lastTxId &&
+              lastBatch.entries.at(-1)?.sequence === projection.ledger.lastSequence
+            ) {
+              return {
+                manifest: projection.manifest,
+                lastSequence: projection.ledger.lastSequence,
+                ledgerByteLength: projection.ledger.byteLength,
+              };
+            }
+          }
+        }
+      }
+    }
+    // 快路径失配（manifest 过期/缺失/损坏）→ 全量加载兜底，保���正确性。
+    const loaded = this.loadSession(sessionId);
+    if (!loaded) return undefined;
+    return {
+      manifest: loaded.manifest,
+      lastSequence: loaded.entries.at(-1)?.sequence ?? 0,
+      ledgerByteLength: statSync(logPath).size,
+    };
+  }
+
+  /** 事件索引加载：缺失/损坏/水位失配时从 ledger 全量重建（可丢弃投影）。 */
+  private loadSessionEventIndex(
+    sessionId: string,
+    expectedLastSequence: number,
+  ): Map<string, SessionEventIndexEntry> {
+    const indexPath = join(this.sessionsRoot, sessionDigest(sessionId), SESSION_EVENT_INDEX_FILE_NAME);
+    const byId = new Map<string, SessionEventIndexEntry>();
+    let lastSequence = 0;
+    if (existsSync(indexPath)) {
+      try {
+        // 不做撕裂尾修复：appends 目标的完整性由事务重放负责；索引是可丢弃
+        // 投影，任何结构问题（含撕裂尾）一律重建。
+        const records = readJsonLinesSync(indexPath, false);
+        for (const [index, record] of records.entries()) {
+          const batch = decodeSessionEventIndexBatch(record, indexPath, index + 1);
+          for (const entry of batch.entries) {
+            byId.set(entry.eventId, entry);
+            lastSequence = entry.sequence;
+          }
+        }
+        if (lastSequence === expectedLastSequence) return byId;
+      } catch (error) {
+        if (
+          !(error instanceof SessionEventIndexIntegrityError) &&
+          !(error instanceof FileStorageIntegrityError)
+        ) {
+          throw error;
+        }
+      }
+    }
+    return this.rebuildEventIndexLocked(sessionId);
+  }
+
+  private rebuildEventIndexLocked(sessionId: string): Map<string, SessionEventIndexEntry> {
+    const loaded = this.requireSession(sessionId);
+    const byId = new Map<string, SessionEventIndexEntry>();
+    const entries: SessionEventIndexEntry[] = [];
+    for (const { sequence, event } of loaded.entries) {
+      const entry = sessionEventIndexEntryFromEvent(sequence, event, eventPayloadHash(event));
+      byId.set(entry.eventId, entry);
+      entries.push(entry);
+    }
+    if (!this.readOnly && entries.length > 0) {
+      writeFileAtomicSync(
+        join(this.sessionsRoot, sessionDigest(sessionId), SESSION_EVENT_INDEX_FILE_NAME),
+        encodeSessionEventIndexBatch({ txId: `rebuild-${randomUUID()}`, entries }),
+      );
+    }
+    return byId;
   }
 
   private requireSession(sessionId: string): LoadedRuntimeSession {
@@ -1488,14 +1684,14 @@ function catalogRowFromSession(
   entries: readonly RuntimeEventStoreEntry[],
   ledgerByteLength: number,
 ): SessionCatalogRow {
-  const { summary, headSequence } = summaryFromRuntimeSession(manifest, entries);
-  const flags = computeSessionPublicationFlags(entries);
+  let fold = createInitialSessionSummaryFold();
+  for (const { event } of entries) {
+    fold = foldSessionSummaryEvent(fold, event);
+  }
   return {
-    summary,
-    headSequence,
+    summary: finalizeSessionSummary(manifest, fold).summary,
     ledgerByteLength,
-    hasForkFacts: flags.hasForkFacts,
-    completedBootstrap: flags.completedBootstrap,
+    fold,
   };
 }
 
