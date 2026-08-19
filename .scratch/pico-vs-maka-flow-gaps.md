@@ -3,8 +3,9 @@
 来源：三个只读子代理调研（maka 全链路 / pico 全链路 / maka 文档考古）+ Crossref 文献检索，全部基于 2026-08-19 的两仓代码实况（pico = 19cca177 SQLite 迁移后；maka = main 工作区）。
 定位：scratch 调研记录，供后续实施会话直接引用；不是 ADR。若某项立项实施，须另写 ADR（模板见 §6）。
 
-> **决策状态（2026-08-19 用户拍板）**：P0+P1 立项实施；P2/P3 暂缓，待 P0/P1 落地后复评。
-> 实施顺序建议：**ADR（一份合并覆盖 P0+P1，同属"写路径故障恢复协议"）→ P1（小而独立，先行交付）→ P0（主菜）**。
+> **决策状态（2026-08-19）**：P0-P3 四项全部实施完成（用户指令扩围至 P2/P3）。
+> 落地顺序：ADR 27/28/29（53a3961a）→ P1（2c7f4477）+ P2（69bb4bdc）并行 → P0（ec58298e）→ P3（914da1c6）→ seal 收窄修订（8c29c6c5）。
+> 各项落地记录见 §2 对应小节。全量集成回归：166 文件扫跑 + 基座 19cca177 对照，27 预存/2 回归，回归已由 8c29c6c5 清零。
 
 ---
 
@@ -64,26 +65,34 @@ session.send（idempotencyKey）→ DesktopRuntimeService.sendSession
 
 ## 2. pico 缺失清单（全部集中在故障路径）+ 优先级
 
-### P0 工具半执行的诚实恢复（indeterminate 状态机）【已立项】
+### P0 工具半执行的诚实恢复（indeterminate 状态机）【已完成 ec58298e】
+
+> **落地记录（2026-08-19）**：轻量方案（无新表），悬空 tool call 按 tool.started 派发事实分类 indeterminate/not_dispatched，data.recovery 标记 + 如实模型文案；schema 最小扩展（storage/runtime-event.ts）。测试 tests/integration/tool-recovery-classification.test.ts（I1-I5，6 条）。偏差：I1 以账本零派发断言替代 spy registry；F1 仍合成 transcript 配对事件（UI 机制非执行声明）。
 
 - **现状**：`RuntimeRun.reconcileIncompleteRuns`（src/runtime/runtime-run.ts:362）对悬空 tool call 直接**合成 tool.result**——把 unknown 定形为失败。副作用可能实际已发生（文件已写/请求已发），合成结果会从账本上抹掉这一点。graph 多轮实测"子代理失败被自报完成掩盖"是同类问题的变体。
 - **maka 对应**：`tool_journal_events`（append-only 状态迁移日志）+ `tool_operations`（当前状态表，T1/T2 各更新一次）+ 恢复决策表：call+dispatch+response=completed；call+dispatch 无 response=**indeterminate（reconcile or park，绝不自动重跑）**；仅 call=definitely_not_dispatched；orphan/冲突=corruption fail-closed。决策表实现在 `packages/core/src/tool-ledger-scanner.ts`（ToolLedgerIssueCode）+ `recovery-resolver.ts`。
 - **实施提示**：pico 已有 tool.started/tool.result.recorded 事件形状（等价 T1/T2 的信息含量），缺的是 journal/operations 两张表 + 恢复时的状态判定。最小改动可在 reconcileIncompleteRuns 里区分"有 started 无 result"→ 标记 indeterminate（如引入 run 级 pending 标记或事件 kind），而非无条件合成失败。需要新事件 kind 时记得同步 assertRuntimeEvent（surface 重构教训）。
 - **契约文档模板**：maka `docs/architecture/runtime-resume-phase0-crash-contract.md`（P0–P11 failpoint 表：每个崩溃位置→最后完整提交前缀→恢复动作）。
 
-### P1 写失败的读回仲裁【已立项】
+### P1 写失败的读回仲裁【已完成 2c7f4477】
+
+> **落地记录（2026-08-19）**：仲裁包装在 append 调用边界（等价"插在 markWriteUncertain 之前"，session 链路零改动）；三类确定性契约拒绝（Integrity/PlanOperationConflict/HighWater）不仲裁原样重抛。测试 tests/integration/write-recovery-arbitration.test.ts（A1-A3，4 条）。未接入面（保守维持）：fork 发布路径、恢复 claim append（自带高水位校验）。ADR 27。
 
 - **现状**：任何 durable 写失败或 owner lease 丢失 → `markWriteUncertain`（src/engine/session.ts:1614）→ write_uncertain 生命周期，**封会话停写**。保守正确（绝不双写），但一次瞬时失败废掉整个会话。
 - **maka 对应**：`requireDurableWrite` 失败后 `eventLandedInLedger(id)` **读回账本**判"已落地/未落地"——已落地则继续，未落地才判失败（packages/runtime/src/agent-run.ts:988-1007）。
 - **实施提示**：pico 的 event_id 是库级主键且幂等（同 id 同 payload 返回原 seq），读回仲裁有现成基础。可在 markWriteUncertain 之前加一步"回读该批 event_id"，全部落地则恢复可写。
 
-### P2 conversation-state.json 收进 SQLite【暂缓】
+### P2 conversation-state.json 收进 SQLite【已完成 69bb4bdc】
+
+> **落地记录（2026-08-19）**：control scope migration 2 三表（desktop_idempotency/desktop_input_queue/desktop_first_send_claims）；DesktopConversationStateStore 契约抽取，装配默认切 SQLite 实现；legacy JSON 按 workspace 分片各自单事务导入，双层防双导入。测试 tests/integration/conversation-state-sqlite.test.ts（B1-B3，6 条）。偏差：PK 为 (workspace_path, key) 复合键；removeQueued 加 workspacePath 参数（唯一调用方）。ADR 28。
 
 - **现状**：请求级幂等 key、首条消息 claim、steer/queue 消息队列全在 `$PICO_HOME/desktop/conversation-state.json`（JSON 文件 + writeJsonAtomic），src/daemon/desktop-conversation-state.ts。与"事实全部进 SQLite"的迁移方向矛盾：原子性靠 rename 不靠 WAL，daemon 崩溃窗口无事务保护。
 - **maka 对应**：`core_message_receipts`（submit/retract/interrupt 幂等 receipt）+ `core_root_source_message_proofs`（一条 messageId 只能绑一个 turn）+ `admitRootTurn` 持久准入（防双 root turn），全部库内事务。
 - **实施提示**：pico 七 scope 里 control scope 是自然归置点；需考虑与现有 desktop-conversation-state.ts 的迁移/兼容（旧 JSON 读取一次性导入）。
 
-### P3 continuation claim 协议（跨 run 续跑）【暂缓】
+### P3 continuation claim 协议（跨 run 续跑）【已完成 914da1c6 + 8c29c6c5】
+
+> **落地记录（2026-08-19）**：sessions scope migration 3 runtime_continuation_claims；claimContinuation 单事务（interrupted 校验+前缀 digest sha256）；run.started data.continuationOf；run seal 防线为本次新增，**全量回归后收窄为 claim-scoped**（8c29c6c5：全量终态封口误拦 fork 工作流/记忆仓储的合法终态后写入，且 digest 覆盖前缀不受终态后追加影响——ADR 29 §4 已修订）。测试 tests/integration/continuation-claim.test.ts（C1-C4，4 条，digest 手工对账；C4 为 claim-scoped 口径）。偏差：UNIQUE 组合键 (session, run)；调度接入（goal/cron）为预留（executor continuationOf 入参尚无生产调用方）。
 
 - **现状**：run 中断只补 `run.terminal(interrupted)`，无"从安全边界续跑"协议；长任务中断=上层重来。
 - **maka 对应**：`runtime_continuation_claims`（claim 事务内重读 boundary + high_water + prefix_digest 校验；claim 成功 seal source ledger）+ continuation-start 事件缝合 target run。设计文档 `docs/architecture/runtime-resume-phase3-phase4-workspace-checkpoint-design.zh-CN.md`。
