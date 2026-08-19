@@ -17,6 +17,9 @@ import {
 import type { RuntimeSessionManifest } from "./runtime-event-store-contracts.js";
 import { SqliteTaskRunStore } from "./sqlite/sqlite-task-run-store.js";
 import { operationalDatabasePath, openOperationalDatabaseReadOnly } from "./sqlite/sqlite-database.js";
+import { assertCurrentOperationalTargetSchemaSync } from "./sqlite/sqlite-schema.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "./sqlite/workspace-scopes.js";
+import { withWorkspaceBindingScope } from "./sqlite/sqlite-workspace-storage.js";
 import { listFileHistorySessionIds } from "./sqlite/file-history-manifest-store.js";
 import { readWorkspaceSqliteStorageRootIdentitySync } from "./sqlite/sqlite-workspace-storage.js";
 import type { WorkspaceStorageRootIdentity } from "./sqlite/sqlite-workspace-storage.js";
@@ -253,6 +256,26 @@ export class StorageDoctor {
     let database: ReturnType<typeof openOperationalDatabaseReadOnly> | undefined;
     try {
       database = openOperationalDatabaseReadOnly(this.runtimeStorageRoot);
+      // 形状断言的家在 doctor:连接重开不再逐次校验(性能),手工改库的
+      // 结构漂移在此处检出。
+      try {
+        assertCurrentOperationalTargetSchemaSync(
+          database,
+          withWorkspaceBindingScope(ALL_WORKSPACE_SQLITE_SCOPES),
+        );
+      } catch (error) {
+        findings.push(
+          finding(
+            "runtime_schema_drift",
+            "critical",
+            "runtime",
+            databasePath,
+            errorMessage(error),
+            "Preserve pico.sqlite unchanged; restore from a verified backup or rebuild the workspace",
+            "authoritative",
+          ),
+        );
+      }
       const integrity = database.prepare("PRAGMA integrity_check").all() as unknown[];
       const integrityMessages = integrity
         .map((row) => Object.values(row as Record<string, unknown>)[0])

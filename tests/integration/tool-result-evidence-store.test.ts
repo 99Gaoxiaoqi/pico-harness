@@ -26,11 +26,15 @@ import {
   type RuntimeToolResultEvidenceManifestV2,
   type SubagentReportEvidenceManifestV2,
 } from "../../src/context/evidence-archive.js";
+import { EvidenceBlobStore } from "../../src/context/evidence-blob-store.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
-import { ReadEvidenceTool } from "../../src/tools/evidence-read.js";
 import type { AgentRunner } from "../../src/tools/subagent.js";
+import {
+  seedRuntimeToolExchange,
+  seedSubagentReportEvidence,
+} from "./helpers/legacy-evidence-fixture.js";
 
 interface EvidenceFixture {
   readonly root: string;
@@ -41,7 +45,8 @@ interface EvidenceFixture {
 test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-v2-");
   const canary = `canary-${"raw-body-".repeat(2_000)}`;
-  const first = await fixture.archive.archiveRuntimeToolResult({
+  const first = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "session/one",
     toolCallId: "call-1",
     toolName: "bash",
@@ -49,7 +54,8 @@ test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", asy
     rawOutput: canary,
     isError: false,
   });
-  const second = await fixture.archive.archiveRuntimeToolResult({
+  const second = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "session/one",
     toolCallId: "call-2",
     toolName: "grep",
@@ -111,7 +117,8 @@ test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", asy
 test("Subagent reports use the same Evidence URI reader and immutable blob CAS", async (context) => {
   const fixture = await evidenceFixture(context, "pico-subagent-evidence-");
   const report = `完整报告\n${"证据行\n".repeat(2_000)}`;
-  const reference = await fixture.archive.archiveSubagentReport({
+  const reference = await seedSubagentReportEvidence({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "subagent/session",
     taskPrompt: "核验 Evidence 硬切换",
     report,
@@ -146,7 +153,8 @@ test("Subagent reports use the same Evidence URI reader and immutable blob CAS",
 
 test("Runtime Evidence rejects rows whose kind column disagrees with the content", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-kind-mismatch-");
-  const reference = await fixture.archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "kind-mismatch-session",
     toolCallId: "call-1",
     toolName: "bash",
@@ -172,7 +180,8 @@ test("Runtime Evidence rejects rows whose kind column disagrees with the content
 
 test("Runtime Evidence rejects manifest and blob tampering", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-tamper-");
-  const reference = await fixture.archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "tamper-session",
     toolCallId: "call-1",
     toolName: "bash",
@@ -189,7 +198,8 @@ test("Runtime Evidence rejects manifest and blob tampering", async (context) => 
     /failed integrity validation/u,
   );
 
-  const second = await fixture.archive.archiveRuntimeToolResult({
+  const second = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "tamper-session",
     toolCallId: "call-2",
     toolName: "grep",
@@ -219,7 +229,8 @@ test(
   { skip: process.platform === "win32" },
   async (context) => {
     const fixture = await evidenceFixture(context, "pico-evidence-symlink-");
-    const blobReference = await fixture.archive.archiveRuntimeToolResult({
+    const blobReference = await seedRuntimeToolExchange({
+      evidenceRoot: fixture.evidenceRoot,
       sessionId: "blob-link-session",
       toolCallId: "blob-call",
       toolName: "bash",
@@ -306,16 +317,9 @@ test(
         const outsideMode = (await stat(outside)).mode & 0o777;
         const markerMode = (await stat(markerPath)).mode & 0o777;
         const outsideEntries = await readdir(outside);
-        const archive = new EvidenceArchive({ baseDir: evidenceRoot });
+        const blobs = new EvidenceBlobStore(evidenceRoot);
         await assert.rejects(
-          archive.archiveRuntimeToolResult({
-            sessionId: "ancestor-session",
-            toolCallId: "call-1",
-            toolName: "bash",
-            rawArguments: "{}",
-            rawOutput,
-            isError: false,
-          }),
+          blobs.putUtf8(rawOutput),
           /regular non-symlink directory|changed/u,
         );
 
@@ -331,7 +335,8 @@ test(
 test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-utf8-boundary-");
   const rawOutput = "🙂a开";
-  const reference = await fixture.archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "utf8-session",
     toolCallId: "call-1",
     toolName: "bash",
@@ -340,13 +345,14 @@ test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (conte
     isError: false,
   });
 
-  await assert.rejects(
-    fixture.archive.readEvidencePage(reference, {
-      offsetBytes: 1,
-      limitBytes: 4,
-    }),
-    /not a UTF-8 code point boundary/u,
-  );
+  // 宽容起点对齐:offsetBytes 落在多字节字符中间时回退到该字符起点而不是报错,
+  // 返回的 offsetBytes 报告对齐后的真实起点(内容零丢失、续读自洽)。
+  const aligned = await fixture.archive.readEvidencePage(reference, {
+    offsetBytes: 1,
+    limitBytes: 4,
+  });
+  assert.equal(aligned.offsetBytes, 0);
+  assert.equal(aligned.content, "🙂");
   for (const limitBytes of [1, 2, 3]) {
     await assert.rejects(
       fixture.archive.readEvidencePage(reference, { limitBytes }),
@@ -374,7 +380,8 @@ test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (conte
 test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates cache", async (context) => {
   const fixture = await evidenceFixture(context, "pico-evidence-page-cache-");
   const rawOutput = "a".repeat(2 * 1024 * 1024);
-  const reference = await fixture.archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "page-cache-session",
     toolCallId: "call-1",
     toolName: "read_file",
@@ -418,10 +425,11 @@ test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates c
   assert.equal(tracker.bytesRead - beforeTamper, rawOutput.length);
 });
 
-test("read_evidence validates opaque refs and paginates UTF-8 without loss", async (context) => {
+test("legacy evidence refs paginate UTF-8 without loss; read_evidence is retired", async (context) => {
   const fixture = await evidenceFixture(context, "pico-read-evidence-");
   const rawOutput = "开头🙂middle-数据-终点";
-  const reference = await fixture.archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
     sessionId: "source/session with space",
     toolCallId: "call-1",
     toolName: "bash",
@@ -452,12 +460,6 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
   }
   assert.equal(recovered, rawOutput);
 
-  const tool = new ReadEvidenceTool(fixture.root, fixture.evidenceRoot);
-  const output = await tool.execute(JSON.stringify({ ref, offsetBytes: 0, limitBytes: 7 }));
-  assert.match(output, /^开头/u);
-  assert.match(output, /\[Evidence tool-exchange bytes 0-/u);
-  assert.match(output, /"offsetBytes":/u);
-
   const hash = reference.contentHash;
   for (const invalid of [
     "file:///etc/passwd",
@@ -469,36 +471,30 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
     assert.throws(() => parseEvidenceUri(invalid), /Evidence ref/u);
   }
   await assert.rejects(
-    tool.execute(
-      JSON.stringify({
-        ref,
-        limitBytes: MAX_EVIDENCE_PAGE_LIMIT_BYTES + 1,
-      }),
-    ),
-    /limitBytes/u,
+    fixture.archive.readEvidencePage(reference, {
+      limitBytes: MAX_EVIDENCE_PAGE_LIMIT_BYTES + 1,
+    }),
+    /limitBytes must be an integer between/u,
   );
   await assert.rejects(
-    tool.execute(
-      JSON.stringify({
-        ref: formatEvidenceUri({ ...reference, sessionId: "wrong-session" }),
-      }),
+    fixture.archive.readEvidencePage(
+      { ...reference, sessionId: "wrong-session" },
+      { limitBytes: 7 },
     ),
     { code: "ENOENT" },
   );
   await assert.rejects(
-    tool.execute(
-      JSON.stringify({
-        ref: formatEvidenceUri({ ...reference, contentHash: "0".repeat(64) }),
-      }),
+    fixture.archive.readEvidencePage(
+      { ...reference, contentHash: "0".repeat(64) },
+      { limitBytes: 7 },
     ),
     { code: "ENOENT" },
   );
 
-  const registry = buildDefaultToolRegistry(fixture.root, {
-    evidenceBaseDir: fixture.evidenceRoot,
-  });
+  // 票 E3:read_evidence 工具退役——默认注册表与子代理注册表都不再注册。
+  const registry = buildDefaultToolRegistry(fixture.root);
   const names = registry.getAvailableTools().map((definition) => definition.name);
-  assert.ok(names.includes("read_evidence"));
+  assert.equal(names.includes("read_evidence"), false);
   assert.equal(names.includes("read_artifact"), false);
 
   const workerDir = join(fixture.root, "worker");
@@ -512,7 +508,6 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
     workDir: fixture.root,
     runner,
     manager: new DelegationManager(),
-    evidenceBaseDir: fixture.evidenceRoot,
   })({
     mode: "explore",
     role: "leaf",
@@ -520,16 +515,10 @@ test("read_evidence validates opaque refs and paginates UTF-8 without loss", asy
     maxSpawnDepth: 0,
     workDir: workerDir,
   });
-  assert.ok(
+  assert.equal(
     subagentRegistry.getAvailableTools().some((definition) => definition.name === "read_evidence"),
+    false,
   );
-  const subagentRead = await subagentRegistry.execute({
-    id: "call:read-shared-evidence",
-    name: "read_evidence",
-    arguments: JSON.stringify({ ref, offsetBytes: 0, limitBytes: 7 }),
-  });
-  assert.equal(subagentRead.isError, false);
-  assert.match(subagentRead.output, /^开头/u);
 });
 
 async function evidenceFixture(context: TestContext, prefix: string): Promise<EvidenceFixture> {
@@ -539,10 +528,7 @@ async function evidenceFixture(context: TestContext, prefix: string): Promise<Ev
   return {
     root,
     evidenceRoot,
-    archive: new EvidenceArchive({
-      baseDir: evidenceRoot,
-      now: () => new Date("2026-07-28T00:00:00.000Z"),
-    }),
+    archive: new EvidenceArchive({ baseDir: evidenceRoot }),
   };
 }
 

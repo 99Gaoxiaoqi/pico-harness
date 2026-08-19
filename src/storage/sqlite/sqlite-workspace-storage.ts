@@ -108,12 +108,15 @@ export function prepareWorkspaceSqliteStorageSync(
   const allScopes = withWorkspaceBindingScope(scopes);
   const lease = acquireOperationalDatabase(root, {
     migrate: (database) => {
-      migrateOperationalDatabaseSync(database, allScopes);
-      assertCurrentOperationalTargetSchemaSync(database, allScopes);
+      // 形状断言只在版本推进(建库/升级)时跑:每次连接重开都重放全套 DDL
+      // 要 ~25ms,高频操作级 lease 不可承受;常规漂移检测由 doctor 承担。
+      if (migrateOperationalDatabaseSync(database, allScopes)) {
+        assertCurrentOperationalTargetSchemaSync(database, allScopes);
+      }
     },
   });
   try {
-    const rootIdentity = lease.transaction("write", () => ensureBindingSync(lease.database, root));
+    const rootIdentity = ensureBindingSync(lease.database, root);
     return { rootIdentity, lease };
   } catch (error) {
     lease.release();
@@ -189,8 +192,11 @@ export function adoptWorkspaceSqliteStorageRootSync(
   const allScopes = withWorkspaceBindingScope(scopes);
   const lease = acquireOperationalDatabase(root, {
     migrate: (database) => {
-      migrateOperationalDatabaseSync(database, allScopes);
-      assertCurrentOperationalTargetSchemaSync(database, allScopes);
+      // 形状断言只在版本推进(建库/升级)时跑:每次连接重开都重放全套 DDL
+      // 要 ~25ms,高频操作级 lease 不可承受;常规漂移检测由 doctor 承担。
+      if (migrateOperationalDatabaseSync(database, allScopes)) {
+        assertCurrentOperationalTargetSchemaSync(database, allScopes);
+      }
     },
   });
   try {
@@ -223,32 +229,27 @@ export function adoptWorkspaceSqliteStorageRootSync(
 }
 
 /**
- * Establishes the storage binding inside a caller-owned write transaction:
- * first initialization inserts a fresh storageRootId bound to the current
- * physical identity; subsequent opens verify the identity and require explicit
- * adoption after the root was copied to a different physical directory.
+ * Establishes the storage binding: the read path is transaction-free (a write
+ * transaction per reopen would cost an fsync for nothing on hot paths); first
+ * initialization opens one write transaction and re-reads under the write lock
+ * so concurrent first opens converge on the winner. Must not be called inside
+ * another transaction.
  */
 function ensureBindingSync(database: DatabaseSync, root: string): WorkspaceStorageRootIdentity {
   const existing = readBindingSync(database);
   if (existing) {
-    const identity = identityFromBinding(existing);
-    const actual = currentPhysicalIdentity(root);
-    if (
-      identity.canonicalPath !== actual.canonicalPath ||
-      identity.device !== actual.device ||
-      identity.inode !== actual.inode
-    ) {
-      throw new FileStorageIntegrityError(
-        `Workspace storage root requires explicit adoption: ${operationalDatabasePath(
-          root,
-        )}; recorded ${formatIdentity(identity)}, received ${formatIdentity(actual)}`,
-      );
-    }
-    return identity;
+    return verifyBindingIdentity(existing, root);
   }
   const physical = currentPhysicalIdentity(root);
   const storageRootId = randomUUID();
+  database.exec("BEGIN IMMEDIATE");
   try {
+    const raced = readBindingSync(database);
+    if (raced) {
+      const identity = verifyBindingIdentity(raced, root);
+      database.exec("COMMIT");
+      return identity;
+    }
     database
       .prepare(
         `INSERT INTO workspace_storage_binding
@@ -263,26 +264,36 @@ function ensureBindingSync(database: DatabaseSync, root: string): WorkspaceStora
         physical.inode,
         new Date().toISOString(),
       );
+    database.exec("COMMIT");
   } catch (error) {
-    // 跨进程并发初始化:另一进程已插入 binding——重读并对齐到胜者。
-    const concurrent = readBindingSync(database);
-    if (!concurrent) throw error;
-    const identity = identityFromBinding(concurrent);
-    const actual = currentPhysicalIdentity(root);
-    if (
-      identity.canonicalPath !== actual.canonicalPath ||
-      identity.device !== actual.device ||
-      identity.inode !== actual.inode
-    ) {
-      throw new FileStorageIntegrityError(
-        `Workspace storage root requires explicit adoption: ${operationalDatabasePath(
-          root,
-        )}; recorded ${formatIdentity(identity)}, received ${formatIdentity(actual)}`,
-      );
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // 保留原始错误
     }
-    return identity;
+    throw error;
   }
   return { storageRootId, ...physical };
+}
+
+function verifyBindingIdentity(
+  binding: WorkspaceStorageBindingRow,
+  root: string,
+): WorkspaceStorageRootIdentity {
+  const identity = identityFromBinding(binding);
+  const actual = currentPhysicalIdentity(root);
+  if (
+    identity.canonicalPath !== actual.canonicalPath ||
+    identity.device !== actual.device ||
+    identity.inode !== actual.inode
+  ) {
+    throw new FileStorageIntegrityError(
+      `Workspace storage root requires explicit adoption: ${operationalDatabasePath(
+        root,
+      )}; recorded ${formatIdentity(identity)}, received ${formatIdentity(actual)}`,
+    );
+  }
+  return identity;
 }
 
 function assertNoLegacyStorageSync(root: string): void {
